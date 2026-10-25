@@ -5,8 +5,9 @@ from datetime import UTC, datetime, timedelta
 
 from .agent import Agent, CopilotAgent, DemoAgent
 from .files import apply_files, prepare_files
-from .models import AgentReply, Feedback
+from .models import AgentReply, AgentText, Feedback
 from .store import Store, identifier, now, today
+from .tools import ToolBroker, ToolLease
 
 logger = logging.getLogger(__name__)
 TERMINAL = {"completed", "failed", "cancelled", "interrupted", "ignored"}
@@ -23,6 +24,8 @@ class Engine:
         self.github = None
         self.approval_lock = asyncio.Lock()
         self.stopping = False
+        self.progress = asyncio.Event()
+        self.tools = ToolBroker(self)
 
     async def start(self):
         self.store.recover()
@@ -49,10 +52,12 @@ class Engine:
 
     async def tick(self):
         self.active = {key: value for key, value in self.active.items() if not value.done()}
-        for parent in self.store.all("SELECT id FROM tasks WHERE status='waiting_workers'"):
+        for parent in self.store.all("SELECT * FROM tasks WHERE status='waiting_workers'"):
             children = self.store.children(parent["id"])
             if children and all(child["status"] in TERMINAL for child in children):
-                if any(child["status"] != "completed" for child in children):
+                if not parent["tool_driven"] and any(
+                    child["status"] != "completed" for child in children
+                ):
                     self.store.update_task(
                         parent["id"],
                         status="failed",
@@ -98,9 +103,32 @@ class Engine:
             (task["id"],),
         )
         children = [
-            {"title": child["title"], "status": child["status"], "result": child["result"][:16000]}
+            {
+                "id": child["id"],
+                "title": child["title"],
+                "status": child["status"],
+                "result": child["result"][:4000],
+                "error": child["error"],
+            }
             for child in self.store.children(task["id"])
         ]
+        actions = []
+        for row in self.store.all(
+            """SELECT id FROM approvals WHERE task_id=? AND kind!='decision'
+            ORDER BY created_at DESC LIMIT 20""",
+            (task["id"],),
+        ):
+            item = self.store.approval(row["id"])
+            payload = item["payload"]
+            if item["kind"] == "files":
+                payload = {
+                    "project_path": payload["project_path"],
+                    "files": [file["path"] for file in payload["files"]],
+                }
+            actions.append(
+                {key: item[key] for key in ("id", "kind", "question", "status", "choice", "reason")}
+                | {"payload": payload}
+            )
         return {
             "profile": self.store.settings().profile,
             "memories": memories,
@@ -115,11 +143,7 @@ class Engine:
                 ORDER BY created_at DESC LIMIT 20""",
                 (task["project_path"], task["id"]),
             ),
-            "previous_actions": self.store.all(
-                """SELECT kind,question,status,choice FROM approvals
-                WHERE task_id=? AND kind!='decision' ORDER BY created_at""",
-                (task["id"],),
-            ),
+            "previous_actions": list(reversed(actions)),
             "feedback": self.store.all(
                 "SELECT text FROM feedback WHERE task_id=? ORDER BY created_at", (task["id"],)
             ),
@@ -127,6 +151,8 @@ class Engine:
 
     async def run_task(self, task_id: str):
         task = self.store.task(task_id)
+        token = None
+        lease = None
         try:
             if task["rounds"] >= 8:
                 raise ValueError(
@@ -137,14 +163,30 @@ class Engine:
             if task["parent_id"]:
                 context["parent_goal"] = self.store.task(task["parent_id"])["instructions"]
             selected = self.demo if task["backend"] == "demo" else self.agent
-            reply = await selected.run(
-                task,
-                context,
-                self.store.settings(),
-                lambda message: self.store.event("progress", message, task_id),
-            )
+
+            def report(message: str):
+                self.store.event("progress", message, task_id)
+
+            if isinstance(selected, CopilotAgent):
+                if not self.tools.endpoint:
+                    raise RuntimeError("Start Work Buddy's local service to connect agent tools.")
+                self.store.update_task(task_id, tool_driven=1, needs_resume=0)
+                token, lease = self.tools.grant(task_id)
+                reply = await selected.run(
+                    task,
+                    context,
+                    self.store.settings(),
+                    report,
+                    tool_endpoint=self.tools.endpoint,
+                    tool_token=token,
+                )
+            else:
+                reply = await selected.run(task, context, self.store.settings(), report)
             self.store.save_artifact(task_id, task["rounds"] + 1, reply.model_dump())
-            await self.handle_reply(task, reply)
+            if isinstance(reply, AgentText):
+                await self.finish_tool_run(task_id, reply, lease)
+            else:
+                await self.handle_reply(task, reply)
         except asyncio.CancelledError:
             if self.store.task(task_id)["status"] == "running":
                 self.store.update_task(
@@ -155,8 +197,46 @@ class Engine:
             logger.exception("Task %s failed", task_id)
             self.store.update_task(task_id, status="failed", error=str(exc)[:3000])
             self.store.event("error", str(exc)[:3000], task_id)
+        finally:
+            if token:
+                self.tools.revoke(token)
+            self.progress.set()
+
+    async def finish_tool_run(self, task_id: str, reply: AgentText, lease: ToolLease | None):
+        self.store.update_task(task_id, result=reply.message)
+        task = self.store.task(task_id)
+        if task["status"] in TERMINAL:
+            return
+        pending = self.store.one(
+            "SELECT id FROM approvals WHERE task_id=? AND status IN ('pending','executing')",
+            (task_id,),
+        )
+        children = self.store.children(task_id)
+        seen = lease.seen_agents if lease else set()
+        if pending:
+            status = "waiting_approval"
+        elif lease and lease.failures:
+            raise RuntimeError(
+                "Unresolved agent tool errors: " + "; ".join(lease.failures.values())
+            )
+        elif task["needs_resume"]:
+            status = "queued"
+        elif any(child["status"] not in TERMINAL for child in children):
+            status = "waiting_workers"
+        elif any(child["id"] not in seen for child in children):
+            status = "queued"
+        else:
+            status = "completed"
+        self.store.update_task(task_id, status=status)
+        if lease and lease.learned and self.slack:
+            await self.slack.notify_profile(task_id, lease.learned)
+        if status == "completed":
+            self.store.event("completed", reply.message[:1000], task_id)
+            if self.slack and task["role"] == "lead":
+                await self.slack.notify_result(task_id)
 
     async def handle_reply(self, task: dict, reply: AgentReply):
+        """Structured simulator/test adapter; real CLI agents act through MCP tools."""
         task_id = task["id"]
         if task["kind"] in {"distill", "learn"} and (
             reply.action != "complete" or reply.files or reply.slack_reply or reply.github_review
@@ -288,7 +368,9 @@ class Engine:
             if approval["status"] != "pending":
                 raise ValueError("This approval is no longer pending.")
             task = self.store.task(approval["task_id"])
-            if task["status"] != "waiting_approval":
+            if task["status"] != "waiting_approval" and not (
+                task["tool_driven"] and task["status"] in {"running", "waiting_workers", "queued"}
+            ):
                 raise ValueError("The task is not waiting for this approval.")
             if choice not in approval["options"]:
                 raise ValueError("Choose one of the displayed options.")
@@ -354,7 +436,27 @@ class Engine:
             self.store.event(
                 "decision", json.dumps({"choice": choice, "reason": reason}), task["id"]
             )
-            if approval["kind"] == "decision":
+            if task["tool_driven"]:
+                if approval["kind"] != "memory":
+                    self.store.update_task(task["id"], needs_resume=1)
+                remaining = self.store.one(
+                    "SELECT id FROM approvals WHERE task_id=? AND status='pending'", (task["id"],)
+                )
+                job = self.active.get(task["id"])
+                if not job or job.done():
+                    current = self.store.task(task["id"])
+                    children = self.store.children(task["id"])
+                    status = (
+                        "waiting_approval"
+                        if remaining
+                        else "queued"
+                        if current["needs_resume"]
+                        else "waiting_workers"
+                        if any(child["status"] not in TERMINAL for child in children)
+                        else "completed"
+                    )
+                    self.store.update_task(task["id"], status=status)
+            elif approval["kind"] == "decision":
                 self.store.update_task(task["id"], status="queued")
             elif not self.store.one(
                 "SELECT id FROM approvals WHERE task_id=? AND status='pending'", (task["id"],)
@@ -384,6 +486,7 @@ class Engine:
                     "original_task": task["instructions"],
                     "agent_result": task["result"][:20000],
                     "human_feedback": feedback,
+                    "reviewed_actions": self.context(task)["previous_actions"],
                 },
                 ensure_ascii=False,
             ),
@@ -432,10 +535,12 @@ class Engine:
             job.cancel()
             await asyncio.gather(job, return_exceptions=True)
         self.store.event("cancelled", "Cancelled by owner.", task_id)
+        self.progress.set()
 
     def retry(self, task_id: str):
         task = self.store.task(task_id)
-        if task["status"] not in {"failed", "interrupted"} or task_id in self.active:
+        active = self.active.get(task_id)
+        if task["status"] not in {"failed", "interrupted"} or (active and not active.done()):
             raise ValueError("Only stopped failed/interrupted tasks may be retried.")
         if self.store.one(
             "SELECT id FROM approvals WHERE task_id=? AND status='uncertain'", (task_id,)
@@ -450,7 +555,11 @@ class Engine:
             (task_id,),
         )
         children = self.store.children(task_id)
-        if children and any(child["status"] != "completed" for child in children):
+        if (
+            not task["tool_driven"]
+            and children
+            and any(child["status"] != "completed" for child in children)
+        ):
             raise ValueError("Retry or resolve failed workers first.")
         self.store.update_task(task_id, status="queued", error="")
         if task["parent_id"]:

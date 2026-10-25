@@ -5,6 +5,11 @@ note: a few tasks and whatever context matters. Lead organizes the main work,
 picks up relevant Slack messages and PR review requests, and learns from your
 decisions and feedback. You see updates and important choices, not an agent dashboard.
 
+**Lead is the coding CLI itself.** It uses native MCP tools to operate Slack and
+assemble a team of additional CLI agents. Python is a thin control layer for
+events, processes, persistence, and approval boundaries, not a prewritten business
+workflow. The real agent returns normal text, not a JSON plan for Python to execute.
+
 **This is a working prototype, not an autonomous employee or a production security
 sandbox.** Copilot invocations are read-only. File changes, Slack replies, and PR comments
 are executed by the application only after approval of the exact payload.
@@ -124,6 +129,8 @@ Application data is outside the checkout by default:
   The SQLite database is authoritative; edit memories through the UI, not this export.
 - **`artifacts/<task-id>-<round>.json`** holds validated Lead/Worker outputs, including
   distillation results and memory candidates.
+- **`artifacts/<task-id>/<name>`** holds drafts saved by agent tools. Open an update's
+  **Drafts and files** section to download its own and its workers' artifacts.
 
 Removing a memory excludes it from future invocations and exports, not from
 historical tasks/feedback or an already-running model call. This is not a
@@ -197,6 +204,35 @@ that the PR is still open and the head has not changed, then posts a **COMMENT**
 review against that commit. It never automatically approves, requests changes,
 or merges a PR. A timeout or uncertain write is not retried automatically.
 
+## Lead's native tools
+
+The application connects a task-scoped `work-buddy` MCP server to each Copilot
+invocation. No manual MCP configuration is required.
+
+| Tools | Purpose |
+| --- | --- |
+| `spawn_agent`, `get_agent`, `wait_for_agents`, `retry_agent`, `cancel_agent` | Assemble and manage a team, including further batches when new work appears |
+| `slack_recent_messages`, `slack_read_thread`, `slack_reply` | Read actual authorized conversations and prepare an exact reply for approval |
+| `write_artifact`, `read_artifact` | Exchange code/document drafts and research between Lead and workers |
+| `request_decision`, `propose_files`, `github_review` | Request owner decisions and approval of side effects |
+| `memory_candidate` | Persist initial distillation and feedback learning with evidence |
+| `buddy_status`, `ignore_task`, `report_blocker` | Inspect state, filter irrelevant inbox events, and explicitly report blockers |
+
+Lead chooses the tools and order. It can create up to 32 agents for a task, with
+the configured concurrent-worker limit (two by default). Workers cannot spawn
+their own armies or send messages. Finished workers exit; there is no pool of
+idle terminals consuming model usage.
+
+If Lead yields while workers run, the service delivers their results on its next
+invocation. A human decision or approved action similarly wakes Lead to continue.
+Exact repeated assignments and approval requests reuse their existing records.
+Worker failures are delivered to Lead so it can decide how to recover.
+
+Slack reads are scoped to connected channels and the task's assigned conversation.
+History and thread tools support bounded pages/cursors; this is **not global Slack
+search** and does not expose other users' DMs. Sending is still a human-approved
+action, even though Lead initiates it through its own tool.
+
 ## Architecture and limits
 
 - FastAPI + static HTML/CSS/JS; no frontend build or external CDN.
@@ -207,12 +243,13 @@ or merges a PR. A timeout or uncertain write is not retried automatically.
 - Each invocation is a fresh CLI session with explicit task context, confirmed
   memories, today's priorities, prior decisions, and child outputs. Task state, not an infinite chat,
   is the continuity mechanism.
-- Lead delegates at most once per work task. Workers cannot delegate. Maximum
-  eight invocations per task, with a configurable invocation timeout.
-- CLI tool allowlist: `view`, `glob`, `rg`; shell and write permissions denied.
-  Built-in MCPs and custom instructions are disabled. The application never requests
-  remote control or session sharing.
-  Existing arbitrary MCP tools are not exposed. Internal documents must currently
+- Lead can delegate dynamically across multiple batches. Workers cannot delegate.
+  Maximum 32 child agents per task, eight invocations per task, and 100 MCP calls
+  per invocation, with a configurable invocation timeout.
+- CLI tool allowlist: `view`, `glob`, `rg`, plus role-scoped Work Buddy MCP tools.
+  Native shell and write permissions are denied. Built-in MCPs and custom
+  instructions are disabled. The application never requests remote control or sharing.
+  Unrelated configured MCP tools are not exposed. Internal documents must currently
   be in the authorized local project; hosted document connectors are not included.
 - Code/document changes are full-file proposals. Approval checks the original
   content hash and rejects stale previews, path traversal, symlinks, and changes
@@ -231,6 +268,11 @@ The server binds only to loopback, validates Host and mutating request Origin,
 uses a launch-token-authenticated HttpOnly/SameSite cookie, and does not enable
 CORS. Output is rendered as text, not executable HTML. Secrets live in the OS
 keyring. Data files are private to the local OS user on normal installations.
+The internal tool endpoint rejects browser requests and uses separate, expiring,
+task-scoped capabilities rather than the owner's launch token. CLI workers never
+receive Slack credentials. A capability is revoked when its invocation exits;
+role, task ownership, channel scope, and budgets are checked by the application,
+not merely described in the prompt.
 
 **This is not an OS-level sandbox.** CLI read boundaries depend on CLI permission
 enforcement and the selected project. Do not authorize directories containing
@@ -260,6 +302,17 @@ uv run --with playwright python -m playwright install chromium
 uv run --with playwright python scripts/browser_smoke.py
 # Or use installed Chrome: WORK_BUDDY_BROWSER_CHANNEL=chrome <the command above>
 ```
+
+To exercise real CLI tool calls end-to-end (consumes Copilot model usage):
+
+```bash
+uv run python scripts/copilot_smoke.py
+```
+
+This uses an authenticated Copilot CLI, a real local HTTP/MCP connection and
+child CLI processes, but **synthetic Slack**. No actual Slack messages are sent.
+It verifies spawning, conversation reads, approval-before-send, continuation,
+and native memory-candidate persistence.
 
 Tests use explicit fakes/demo backends and temporary data, never real Slack
 credentials. Real Copilot smoke checks require an installed authenticated CLI

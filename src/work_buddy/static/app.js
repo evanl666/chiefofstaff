@@ -251,6 +251,15 @@ async function renderDetail() {
   $("#detail-result").textContent = task.result || "I'm working on this. I'll share an update here.";
   $("#detail-error").textContent = task.error;
   $("#detail-error").hidden = !task.error;
+  $("#detail-artifacts").hidden = !task.artifacts.length;
+  $("#artifact-links").replaceChildren(...task.artifacts.map((artifact) => {
+    const row = node("p");
+    const link = node("a", `${artifact.name} (${artifact.task_title})`);
+    link.href = `/api/tasks/${artifact.task_id}/artifacts/${encodeURIComponent(artifact.name)}`;
+    link.download = artifact.name;
+    row.append(link);
+    return row;
+  }));
   const actions = $("#detail-actions");
   actions.replaceChildren();
   if (["failed", "interrupted"].includes(task.status)) {

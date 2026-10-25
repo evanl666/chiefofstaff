@@ -70,6 +70,13 @@ class Store:
             created_at TEXT NOT NULL
         );
         """)
+        columns = {row["name"] for row in self.db.execute("PRAGMA table_info(tasks)")}
+        for name, definition in {
+            "tool_driven": "INTEGER NOT NULL DEFAULT 0",
+            "needs_resume": "INTEGER NOT NULL DEFAULT 0",
+        }.items():
+            if name not in columns:
+                self.db.execute(f"ALTER TABLE tasks ADD COLUMN {name} {definition}")
         self.db.commit()
         (directory / "work-buddy.db").chmod(0o600)
 
@@ -172,7 +179,7 @@ class Store:
         return task
 
     def update_task(self, task_id: str, **values):
-        allowed = {"status", "result", "error", "rounds"}
+        allowed = {"status", "result", "error", "rounds", "tool_driven", "needs_resume"}
         if not values or not values.keys() <= allowed:
             raise ValueError("Invalid task update.")
         values["updated_at"] = now()

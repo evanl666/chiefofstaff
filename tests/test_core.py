@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from pydantic import ValidationError
 
-from work_buddy.agent import CopilotAgent, DemoAgent, parse_reply
+from work_buddy.agent import CopilotAgent, DemoAgent
 from work_buddy.engine import Engine
 from work_buddy.files import apply_files, prepare_files, safe_path
 from work_buddy.models import AgentReply, ProposedFile, Settings
@@ -35,9 +35,9 @@ def test_file_content_is_not_stripped():
 
 
 def test_reply_validation():
-    assert parse_reply('```json\n{"action":"complete","message":"ok"}\n```').message == "ok"
+    assert AgentReply.model_validate_json('{"action":"complete","message":"ok"}').message == "ok"
     with pytest.raises(ValidationError):
-        parse_reply('{"action":"delegate","message":"go"}')
+        AgentReply.model_validate_json('{"action":"delegate","message":"go"}')
     with pytest.raises(ValidationError):
         AgentReply(action="decision", message="Choose", options=["same", "same"])
     with pytest.raises(ValidationError):
@@ -309,9 +309,9 @@ async def test_cli_jsonl_stdin_and_environment(tmp_path, monkeypatch):
         "prompt = sys.stdin.read()\n"
         "assert 'WORK_BUDDY_SLACK_BOT_TOKEN' not in os.environ\n"
         "assert 'COPILOT_ALLOW_ALL' not in os.environ\n"
-        "assert 'schema' in prompt\n"
+        "assert 'normal user-facing answer' in prompt\n"
         "print(json.dumps({'type':'assistant.message','data':{'content':"
-        "json.dumps({'action':'complete','message':'Read the prompt successfully.'})}}))\n"
+        "'Read the prompt successfully.'}}))\n"
         "print(json.dumps({'type':'result','exitCode':0}))\n"
     )
     executable.chmod(0o700)

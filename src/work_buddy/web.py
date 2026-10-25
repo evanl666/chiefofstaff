@@ -25,8 +25,9 @@ from .models import (
     Settings,
     SlackCredentials,
 )
-from .slack import SlackBridge
+from .slack import NETWORK_ERRORS, SlackBridge
 from .store import Store
+from .tools import ReadArtifact
 
 logger = logging.getLogger(__name__)
 STATIC = Path(__file__).parent / "static"
@@ -34,6 +35,11 @@ STATIC = Path(__file__).parent / "static"
 
 class Login(BaseModel):
     token: str
+
+
+class ToolRequest(BaseModel):
+    name: str
+    arguments: dict
 
 
 def create_app(
@@ -50,6 +56,7 @@ def create_app(
     engine.slack = bridge
     github = GitHubInbox(store)
     engine.github = github
+    engine.tools.endpoint = f"http://127.0.0.1:{port}/internal/tools"
     cookie_name = f"work_buddy_{port}"
     origins = {f"http://127.0.0.1:{port}", f"http://localhost:{port}"}
 
@@ -74,7 +81,15 @@ def create_app(
     @app.middleware("http")
     async def protect(request: Request, call_next):
         path = request.url.path
-        if request.method not in {"GET", "HEAD", "OPTIONS"}:
+        if path == "/internal/tools":
+            if request.headers.get("origin"):
+                return JSONResponse({"detail": "Agent tools are not a browser API."}, 403)
+            capability = request.headers.get("authorization", "").removeprefix("Bearer ")
+            try:
+                engine.tools.authorize(capability)
+            except PermissionError as exc:
+                return JSONResponse({"detail": str(exc)}, 403)
+        elif request.method not in {"GET", "HEAD", "OPTIONS"}:
             if request.headers.get("origin") not in origins:
                 return JSONResponse({"detail": "Untrusted request origin."}, status_code=403)
         if path.startswith("/api/") and path not in {"/api/auth", "/api/health"}:
@@ -125,6 +140,16 @@ def create_app(
     @app.get("/api/health")
     async def health():
         return {"status": "ready"}
+
+    @app.post("/internal/tools")
+    async def agent_tool(payload: ToolRequest, request: Request):
+        capability = request.headers.get("authorization", "").removeprefix("Bearer ")
+        try:
+            return await engine.tools.call(capability, payload.name, payload.arguments)
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except NETWORK_ERRORS as exc:
+            raise RuntimeError(str(exc)) from exc
 
     @app.get("/api/state")
     async def state():
@@ -216,7 +241,24 @@ def create_app(
                 "SELECT text,created_at FROM feedback WHERE task_id=? ORDER BY created_at",
                 (task_id,),
             ),
+            "artifacts": [
+                {"task_id": owner["id"], "task_title": owner["title"], "name": name}
+                for owner in [store.task(task_id), *store.children(task_id)]
+                for name in engine.tools.artifact_names(owner["id"])
+            ],
         }
+
+    @app.get("/api/tasks/{task_id}/artifacts/{name}")
+    async def download_artifact(task_id: str, name: str):
+        item = ReadArtifact(agent_id=task_id, name=name)
+        store.task(task_id)
+        if item.name not in engine.tools.artifact_names(task_id):
+            raise LookupError("Artifact not found.")
+        return FileResponse(
+            engine.tools.artifact_folder(task_id) / item.name,
+            media_type="application/octet-stream",
+            filename=item.name,
+        )
 
     @app.post("/api/tasks/{task_id}/cancel")
     async def cancel(task_id: str):

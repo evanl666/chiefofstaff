@@ -48,6 +48,10 @@ class NewTask(StrictModel):
     instructions: str = Field(min_length=1, max_length=20000)
 
 
+class AgentText(StrictModel):
+    message: str = Field(min_length=1, max_length=50000)
+
+
 class DailyBrief(StrictModel):
     text: str = Field(min_length=1, max_length=20000)
 
