@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "work-buddy-local"
+version = "0.1.0"
+description = "A local-first work agent with Copilot workers, Slack decisions, and human feedback."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "uvicorn>=0.34,<1",
+  "pydantic>=2.10,<3",
+  "platformdirs>=4,<5",
+  "keyring>=25,<26",
+  "slack-bolt>=1.23,<2",
+  "aiohttp>=3.11,<4",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10", "pytest-asyncio>=0.25,<2", "httpx>=0.28,<1", "ruff>=0.11,<1"]
+
+[project.scripts]
+work-buddy = "work_buddy.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/work_buddy"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]

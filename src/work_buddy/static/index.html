@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Work Buddy | Local workbench</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand"><span class="logo">W</span><div>Work Buddy<small>YOUR LOCAL WORK PARTNER</small></div></div>
+    <nav aria-label="Main navigation">
+      <button class="nav active" data-page="work">Workbench <span>01</span></button>
+      <button class="nav" data-page="profile">Profile &amp; learning <span>02</span></button>
+      <button class="nav" data-page="settings">Connections &amp; settings <span>03</span></button>
+    </nav>
+    <div class="sidebar-note"><span class="dot"></span> LOCAL FIRST
+      <p>Your tasks and confirmed memories stay in your local data directory. Agent context may be sent to your model provider.</p>
+    </div>
+  </aside>
+  <main>
+    <header>
+      <div class="eyebrow">LESS BUSYWORK. MORE ROOM TO THINK.</div>
+      <div class="header-row"><h1>Your work, moving forward.</h1><button id="pause" class="secondary">Pause new work</button></div>
+      <div id="connection-status" class="muted">Connecting to the local service...</div>
+    </header>
+    <div id="notice" role="status" hidden></div>
+    <section id="login" class="panel" hidden>
+      <h2>Open your private workbench</h2>
+      <p>Use the private launch URL printed in your terminal, or paste its token below. Never share it.</p>
+      <form id="login-form"><label>Launch token<input name="token" type="password" required autocomplete="off"></label><button>Unlock</button></form>
+    </section>
+    <div id="application" hidden>
+      <section id="page-work" class="page">
+        <div class="metrics">
+          <div><span id="metric-running">0</span><small>IN PROGRESS</small></div>
+          <div><span id="metric-pending">0</span><small>NEED YOUR DECISION</small></div>
+          <div><span id="metric-done">0</span><small>COMPLETED</small></div>
+        </div>
+        <section class="panel">
+          <div class="section-heading"><h2>What should we move forward today?</h2><span class="tag">LEAD AGENT</span></div>
+          <form id="task-form">
+            <label>Goal<input name="title" required maxlength="200" placeholder="Prepare the caching improvement proposal"></label>
+            <label>Context and definition of done<textarea name="instructions" required maxlength="20000" rows="3" placeholder="Investigate the project, cite relevant files, and draft an approach. Ask me before making a significant tradeoff."></textarea></label>
+            <div class="form-footer"><small>Read-only investigation. File changes and Slack replies always need approval.</small><button>Start task <span aria-hidden="true">&rarr;</span></button></div>
+          </form>
+        </section>
+        <section class="panel" id="decision-panel"><div class="section-heading"><h2>Decisions, not interruptions</h2><span class="tag">YOU ARE IN CONTROL</span></div><div id="approvals"></div></section>
+        <div class="work-grid">
+          <section class="panel"><div class="section-heading"><h2>Task activity</h2><span class="muted">Latest 200</span></div><div id="tasks"></div></section>
+          <section class="panel detail">
+            <div id="task-empty" class="empty">Select a task to see its result, feedback, and history.</div>
+            <div id="task-detail" hidden>
+              <div class="eyebrow" id="detail-kind"></div><h2 id="detail-title"></h2>
+              <p id="detail-status" class="muted"></p>
+              <pre id="detail-error" class="error-text" hidden></pre>
+              <details><summary>Original instructions</summary><pre id="detail-instructions"></pre></details>
+              <pre id="detail-result"></pre>
+              <div id="detail-actions" class="button-row"></div>
+              <div id="detail-approvals"></div>
+              <form id="feedback-form">
+                <h3>Teach your buddy</h3>
+                <label>What would you change, and why?<textarea name="text" required maxlength="5000" rows="3" placeholder="Separate confirmed evidence from assumptions. The previous draft sounded too certain."></textarea></label>
+                <p class="muted">Lead will analyze this feedback and propose memories for your confirmation.</p>
+                <button class="secondary">Send feedback &amp; learn</button>
+              </form>
+            </div>
+          </section>
+        </div>
+        <section class="panel"><h2>Recent events</h2><div id="events"></div></section>
+      </section>
+
+      <section id="page-profile" class="page" hidden>
+        <section class="panel">
+          <div class="section-heading"><h2>Start with your way of working</h2><span class="tag">INITIAL DISTILLATION</span></div>
+          <p>Give Lead a few representative examples: responsibilities, current goals, replies you like, and how you make decisions. No need to upload your whole history.</p>
+          <form id="distill-form">
+            <label>Your material<textarea name="material" required minlength="10" maxlength="30000" rows="7" placeholder="I work on...&#10;My current priorities are...&#10;Here are examples of replies and reviews I prefer...&#10;Ask me before..."></textarea></label>
+            <label>Optional source files (one path per line, relative to the configured project)<textarea name="source_files" rows="2" placeholder="docs/team-working-agreement.md"></textarea></label>
+            <div class="form-footer"><small>Candidates are inactive until you confirm them in the workbench.</small><button>Distill with Lead</button></div>
+          </form>
+        </section>
+        <section class="panel"><h2>Confirmed memory</h2>
+          <p>Only confirmed memories enter future agent calls. Learning never grants new permissions.</p>
+          <div id="memory-location" class="path"></div>
+          <div id="memories"></div>
+          <form id="memory-form">
+            <h3>Add an explicit working preference</h3>
+            <label>Memory<textarea name="text" required maxlength="5000" rows="2"></textarea></label>
+            <label>Scope<select name="scope"><option value="project">Current project only</option><option value="general">General working preference</option></select></label>
+            <button class="secondary">Save confirmed memory</button>
+          </form>
+        </section>
+      </section>
+
+      <section id="page-settings" class="page" hidden>
+        <section class="panel">
+          <h2>Agent and workspace</h2>
+          <form id="settings-form">
+            <div class="field-grid">
+              <label>Backend<select name="backend"><option value="copilot">Copilot CLI (real agent)</option><option value="demo">Demo simulator (no AI)</option></select></label>
+              <label>CLI executable<input name="copilot_command" value="copilot" required></label>
+              <label>Model<input name="model" value="auto" required></label>
+              <label>Concurrent workers<input name="max_workers" type="number" min="1" max="4" value="2" required></label>
+              <label>Invocation timeout (seconds)<input name="timeout_seconds" type="number" min="30" max="1800" value="300" required></label>
+            </div>
+            <label>Authorized project directory<input name="project_path" placeholder="/absolute/path/to/project"></label>
+            <p class="muted">Agents may read files in this project. Choose a narrow directory without secrets. Shell, writing tools, and MCP tools are unavailable to CLI workers.</p>
+            <label>Standing work context<textarea name="profile" maxlength="12000" rows="4" placeholder="Your role, projects, and goals. You can also generate a profile in Profile &amp; learning."></textarea></label>
+            <h3>Slack inbox</h3>
+            <label class="check"><input name="slack_enabled" type="checkbox">Enable Slack Socket Mode</label>
+            <label>Your Slack member ID<input name="slack_owner" placeholder="U0123456789"></label>
+            <label>Allowed channel IDs (comma-separated)<input name="slack_channels" placeholder="C0123456789, C9876543210"></label>
+            <label>Channel trigger keyword (optional)<input name="slack_keyword" maxlength="100" placeholder="Empty = only messages mentioning you or the bot"></label>
+            <p class="muted">Only your direct messages to the bot and configured channel triggers create tasks. This does not expose your other private messages.</p>
+            <div class="button-row"><button>Save settings</button><button type="button" id="check-agent" class="secondary">Check CLI</button><button type="button" id="reconnect-slack" class="secondary">Reconnect Slack</button></div>
+          </form>
+        </section>
+        <section class="panel">
+          <h2>Slack credentials</h2>
+          <p>For this private prototype, create your own Slack app using the manifest in the repository. Credentials are stored in the OS keyring, never in the repository or browser storage.</p>
+          <form id="credentials-form">
+            <label>Bot token<input type="password" name="bot_token" required placeholder="xoxb-..." autocomplete="off"></label>
+            <label>App-level token (connections:write)<input type="password" name="app_token" required placeholder="xapp-..." autocomplete="off"></label>
+            <button class="secondary">Store in OS keyring</button>
+          </form>
+        </section>
+        <section class="panel"><h2>Local runtime</h2><div id="data-location" class="path"></div><p>Keep this Python process running. Sleep and offline time interrupt local work. Pause stops new invocations; cancel individual tasks to stop active workers. The prototype does not run tests, push, merge, deploy, or execute arbitrary shell commands.</p></section>
+      </section>
+    </div>
+  </main>
+</body>
+</html>

@@ -1,0 +1,33 @@
+{
+  "display_information": {
+    "name": "Work Buddy",
+    "description": "Local personal work assistant with explicit human decisions",
+    "background_color": "#152c27"
+  },
+  "features": {
+    "bot_user": {"display_name": "Work Buddy", "always_online": false},
+    "app_home": {
+      "home_tab_enabled": false,
+      "messages_tab_enabled": true,
+      "messages_tab_read_only_enabled": false
+    }
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "chat:write",
+        "im:history",
+        "im:write",
+        "channels:history",
+        "groups:history"
+      ]
+    }
+  },
+  "settings": {
+    "socket_mode_enabled": true,
+    "interactivity": {"is_enabled": true},
+    "event_subscriptions": {
+      "bot_events": ["message.im", "message.channels", "message.groups"]
+    }
+  }
+}
