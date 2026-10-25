@@ -5,11 +5,11 @@ from datetime import UTC, datetime, timedelta
 
 from .agent import Agent, CopilotAgent, DemoAgent
 from .files import apply_files, prepare_files
-from .models import AgentReply
-from .store import Store, now
+from .models import AgentReply, Feedback
+from .store import Store, identifier, now, today
 
 logger = logging.getLogger(__name__)
-TERMINAL = {"completed", "failed", "cancelled", "interrupted"}
+TERMINAL = {"completed", "failed", "cancelled", "interrupted", "ignored"}
 
 
 class Engine:
@@ -20,6 +20,7 @@ class Engine:
         self.active: dict[str, asyncio.Task] = {}
         self.loop_task: asyncio.Task | None = None
         self.slack = None
+        self.github = None
         self.approval_lock = asyncio.Lock()
         self.stopping = False
 
@@ -62,7 +63,8 @@ class Engine:
         if self.store.settings().paused:
             return
         queued = self.store.all(
-            "SELECT * FROM tasks WHERE status='queued' ORDER BY created_at LIMIT 100"
+            """SELECT * FROM tasks WHERE status='queued'
+            ORDER BY CASE WHEN kind='learn' THEN 1 ELSE 0 END,created_at LIMIT 100"""
         )
         active_tasks = [self.store.task(task_id) for task_id in self.active]
         lead_busy = any(task["role"] == "lead" for task in active_tasks)
@@ -104,6 +106,15 @@ class Engine:
             "memories": memories,
             "decisions": decisions,
             "children": children,
+            "today": today(),
+            "daily_briefs": self.store.daily_briefs(task["project_path"]),
+            "ongoing_work": self.store.all(
+                """SELECT id,title,kind,status FROM tasks WHERE project_path=? AND id!=?
+                AND parent_id IS NULL AND kind NOT IN ('distill','learn')
+                AND status IN ('running','queued','waiting_workers','waiting_approval')
+                ORDER BY created_at DESC LIMIT 20""",
+                (task["project_path"], task["id"]),
+            ),
             "previous_actions": self.store.all(
                 """SELECT kind,question,status,choice FROM approvals
                 WHERE task_id=? AND kind!='decision' ORDER BY created_at""",
@@ -148,7 +159,7 @@ class Engine:
     async def handle_reply(self, task: dict, reply: AgentReply):
         task_id = task["id"]
         if task["kind"] in {"distill", "learn"} and (
-            reply.action != "complete" or reply.files or reply.slack_reply
+            reply.action != "complete" or reply.files or reply.slack_reply or reply.github_review
         ):
             raise ValueError(
                 "Profile learning can only propose memories, not work or side effects."
@@ -166,8 +177,14 @@ class Engine:
                     parent_id=task_id,
                     project_path=task["project_path"],
                     backend=task["backend"],
+                    source={"read_project": task["source"].get("read_project", True)},
                 )
             self.store.update_task(task_id, status="waiting_workers")
+        elif reply.action == "ignore":
+            if task["kind"] != "inbox":
+                raise ValueError("Only discovered inbox work can be ignored by Lead.")
+            self.store.update_task(task_id, status="ignored")
+            self.store.event("triage", reply.message, task_id)
         elif reply.action == "decision":
             approval_id = self.store.create_approval(
                 task_id,
@@ -180,13 +197,22 @@ class Engine:
             await self.notify_approval(approval_id)
         else:
             approvals = []
+            if reply.files and task["source"].get("read_project") is False:
+                raise ValueError("Remote review tasks cannot propose changes to the local project.")
             file_payload = prepare_files(task["project_path"], reply.files) if reply.files else None
-            if task["backend"] == "demo" and (reply.files or reply.slack_reply):
+            if task["backend"] == "demo" and (
+                reply.files or reply.slack_reply or reply.github_review
+            ):
                 raise ValueError("Demo tasks cannot propose real side effects.")
             if reply.slack_reply and (
                 not task["source"].get("channel") or not task["source"].get("thread_ts")
             ):
                 raise ValueError("This task has no authorized Slack reply target.")
+            if reply.github_review and (
+                task["source"].get("type") != "github"
+                or not all(task["source"].get(key) for key in ("repo", "number", "head_sha"))
+            ):
+                raise ValueError("This task has no authorized GitHub review target.")
             for memory in reply.memories:
                 approvals.append(
                     self.store.create_approval(
@@ -222,12 +248,31 @@ class Engine:
                         },
                     )
                 )
+            if reply.github_review:
+                source = task["source"]
+                approvals.append(
+                    self.store.create_approval(
+                        task_id,
+                        "review",
+                        "Publish this exact PR review comment?",
+                        ["Approve", "Reject"],
+                        {
+                            "repo": source["repo"],
+                            "number": source["number"],
+                            "head_sha": source["head_sha"],
+                            "body": reply.github_review,
+                        },
+                    )
+                )
             self.store.update_task(
                 task_id,
                 status="waiting_approval" if approvals else "completed",
             )
             for approval_id in approvals:
-                await self.notify_approval(approval_id)
+                if self.store.approval(approval_id)["kind"] != "memory":
+                    await self.notify_approval(approval_id)
+            if reply.memories and self.slack:
+                await self.slack.notify_profile(task_id, len(reply.memories))
             if not approvals:
                 self.store.event("completed", reply.message[:1000], task_id)
                 if self.slack and task["role"] == "lead":
@@ -275,6 +320,10 @@ class Engine:
                         if not self.slack:
                             raise RuntimeError("Slack is not connected; no message was sent.")
                         await self.slack.send_reply(approval["payload"], approval_id)
+                    elif approval["kind"] == "review":
+                        if not self.github:
+                            raise RuntimeError("GitHub review integration is unavailable.")
+                        await self.github.publish_review(approval["payload"])
                     elif approval["kind"] == "memory":
                         payload = approval["payload"]
                         self.store.remember(
@@ -316,8 +365,12 @@ class Engine:
                 )
                 if self.slack and task["role"] == "lead":
                     await self.slack.notify_result(task["id"])
-            if reason and approval["kind"] != "memory" and task["kind"] == "work":
-                self.learn(task["id"], f"Decision: {choice}\nOwner's reason: {reason}")
+            if approval["kind"] != "memory" and task["kind"] in {"work", "daily", "inbox"}:
+                self.learn(
+                    task["id"],
+                    f"Decision about: {approval['question']}\nChoice: {choice}\n"
+                    f"Owner's reason: {reason or '(not provided; do not invent one)'}",
+                )
 
     def learn(self, task_id: str, feedback: str) -> str:
         task = self.store.task(task_id)
@@ -338,6 +391,32 @@ class Engine:
             backend=task["backend"],
             kind="learn",
         )
+
+    def record_feedback(
+        self,
+        task_id: str,
+        text: str,
+        *,
+        remember: bool = False,
+        scope: str = "project",
+    ) -> str:
+        feedback = Feedback(text=text, remember=remember, scope=scope)
+        task = self.store.task(task_id)
+        self.store.execute(
+            "INSERT INTO feedback VALUES(?,?,?,?)",
+            (identifier(), task_id, feedback.text, now()),
+        )
+        if remember:
+            self.store.remember(
+                feedback.text,
+                scope,
+                task["project_path"],
+                task_id,
+                evidence="Owner explicitly confirmed this feedback as memory.",
+            )
+        learning_id = self.learn(task_id, feedback.text)
+        self.store.event("feedback", "Owner feedback recorded for Lead learning.", task_id)
+        return learning_id
 
     async def cancel(self, task_id: str):
         self.store.task(task_id)
@@ -398,4 +477,25 @@ class Engine:
             "slack": self.slack.status if self.slack else {"connected": False, "error": ""},
             "active_count": len(self.active),
             "timestamp": now(),
+            "today": today(),
+            "daily_briefs": self.store.daily_briefs(self.store.settings().project_path),
+            "updates": self.store.all(
+                """SELECT id,title,kind,status,error,created_at,updated_at,
+                substr(result,1,1800) AS preview FROM tasks
+                WHERE parent_id IS NULL AND kind IN ('daily','work','inbox')
+                AND status!='ignored' ORDER BY created_at DESC LIMIT 50"""
+            ),
+            "initial_profile": self.store.one(
+                """SELECT id,status,result,error FROM tasks
+                WHERE kind='distill' AND project_path=? AND backend=?
+                ORDER BY created_at DESC LIMIT 1""",
+                (self.store.settings().project_path, self.store.settings().backend),
+            ),
+            "profile_tasks": self.store.all(
+                """SELECT id,kind,status,result,error,created_at FROM tasks
+                WHERE kind IN ('distill','learn') AND project_path=? AND backend=?
+                ORDER BY created_at DESC LIMIT 20""",
+                (self.store.settings().project_path, self.store.settings().backend),
+            ),
+            "github": self.github.status if self.github else {"connected": False, "error": ""},
         }

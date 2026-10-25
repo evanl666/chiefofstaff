@@ -4,10 +4,17 @@ const $ = (selector) => document.querySelector(selector);
 let state = null;
 let selectedTask = null;
 let settingsLoaded = false;
-let approvalSignature = "";
-let memorySignature = "";
 let refreshing = false;
 let authenticated = false;
+let desiredProfile = location.hash === "#profile";
+const signatures = new Map();
+const approvalReasons = new Map();
+const statuses = {
+  queued: "On it shortly", running: "Working on it", receiving: "Reading the context",
+  waiting_workers: "Making progress", waiting_approval: "Waiting for you",
+  completed: "Ready", failed: "Needs attention", interrupted: "Paused unexpectedly",
+  cancelled: "Stopped", ignored: "No action needed",
+};
 
 function node(tag, text = "", className = "") {
   const element = document.createElement(tag);
@@ -17,10 +24,12 @@ function node(tag, text = "", className = "") {
 }
 
 function notice(message, error = false) {
-  const box = $("#notice");
-  box.textContent = message;
-  box.className = error ? "error" : "";
-  box.hidden = false;
+  const boxes = [$("#notice"), ...document.querySelectorAll("dialog[open] .dialog-notice")];
+  for (const box of boxes) {
+    box.textContent = message;
+    box.classList.toggle("error", error);
+    box.hidden = false;
+  }
 }
 
 async function api(path, method = "GET", data) {
@@ -36,10 +45,10 @@ async function api(path, method = "GET", data) {
       authenticated = false;
       $("#login").hidden = false;
       $("#application").hidden = true;
+      document.querySelectorAll("dialog[open]").forEach((dialog) => dialog.close());
     }
     const detail = Array.isArray(payload.detail)
-      ? payload.detail.map((item) => item.msg).join("; ")
-      : payload.detail;
+      ? payload.detail.map((item) => item.msg).join("; ") : payload.detail;
     throw new Error(detail || `Request failed (${response.status})`);
   }
   return payload;
@@ -50,29 +59,23 @@ function button(text, callback, className = "secondary") {
   element.type = "button";
   element.addEventListener("click", async () => {
     element.disabled = true;
-    try {
-      await callback();
-      await refresh();
-    } catch (error) {
-      notice(error.message, true);
-    } finally {
-      element.disabled = false;
-    }
+    try { await callback(); await refresh(); }
+    catch (error) { notice(error.message, true); }
+    finally { element.disabled = false; }
   });
   return element;
 }
 
-function page(name) {
-  document.querySelectorAll(".page").forEach((element) => {
-    element.hidden = element.id !== `page-${name}`;
-  });
-  document.querySelectorAll(".nav").forEach((element) => {
-    element.classList.toggle("active", element.dataset.page === name);
-  });
+function openDialog(id) {
+  if (!authenticated) return;
+  const dialog = document.getElementById(id);
+  if (!dialog.open) dialog.showModal();
 }
-
-document.querySelectorAll(".nav").forEach((element) => {
-  element.addEventListener("click", () => page(element.dataset.page));
+document.querySelectorAll("[data-open]").forEach((element) => {
+  element.addEventListener("click", () => openDialog(element.dataset.open));
+});
+document.querySelectorAll("[data-close]").forEach((element) => {
+  element.addEventListener("click", () => element.closest("dialog").close());
 });
 
 function bindForm(id, handler) {
@@ -81,14 +84,9 @@ function bindForm(id, handler) {
     const form = event.target;
     const submit = form.querySelector("button:not([type=button])");
     submit.disabled = true;
-    try {
-      await handler(form, new FormData(form));
-      await refresh();
-    } catch (error) {
-      notice(error.message, true);
-    } finally {
-      submit.disabled = false;
-    }
+    try { await handler(form, new FormData(form)); await refresh(); }
+    catch (error) { notice(error.message, true); }
+    finally { submit.disabled = false; }
   });
 }
 
@@ -98,30 +96,29 @@ async function unlock(token) {
   $("#login").hidden = true;
   $("#application").hidden = false;
 }
+bindForm("#login-form", async (form, data) => { await unlock(data.get("token")); form.reset(); });
 
-bindForm("#login-form", async (form, data) => {
-  await unlock(data.get("token"));
+bindForm("#daily-form", async (form, data) => {
+  await api("/daily", "POST", { text: data.get("text") });
   form.reset();
-});
-
-bindForm("#task-form", async (form, data) => {
-  const result = await api("/tasks", "POST", Object.fromEntries(data));
-  selectedTask = result.id;
-  form.reset();
-  notice("Task queued. Your Lead will pick it up.");
+  notice("Got it. I'll organize these priorities and keep an eye on the work coming in.");
 });
 
 bindForm("#settings-form", async (form, data) => {
+  const list = (name) => data.get(name).split(",").map((value) => value.trim()).filter(Boolean);
   const settings = {
     ...Object.fromEntries(data),
     max_workers: Number(data.get("max_workers")),
     timeout_seconds: Number(data.get("timeout_seconds")),
     slack_enabled: data.has("slack_enabled"),
+    github_enabled: data.has("github_enabled"),
     paused: state.settings.paused,
-    slack_channels: data.get("slack_channels").split(",").map((value) => value.trim()).filter(Boolean),
+    slack_channels: list("slack_channels"),
+    github_repos: list("github_repos"),
   };
   const result = await api("/settings", "POST", settings);
-  notice(result.slack.error || "Settings saved.", Boolean(result.slack.error));
+  if (!result.slack.error) $("#settings-dialog").close();
+  notice(result.slack.error || "Settings saved. You're ready to hand over your day.", Boolean(result.slack.error));
 });
 
 bindForm("#credentials-form", async (form, data) => {
@@ -131,26 +128,18 @@ bindForm("#credentials-form", async (form, data) => {
 });
 
 bindForm("#distill-form", async (form, data) => {
-  const result = await api("/distill", "POST", {
+  await api("/distill", "POST", {
     material: data.get("material"),
     source_files: data.get("source_files").split("\n").map((value) => value.trim()).filter(Boolean),
   });
-  selectedTask = result.id;
-  page("work");
-  notice("Lead is building an initial profile. Confirm useful candidates before they become memory.");
+  notice("I'll build and save your initial profile. Review the observations here when they're ready.");
 });
 
 bindForm("#feedback-form", async (form, data) => {
-  if (!selectedTask) throw new Error("Select a task first.");
+  if (!selectedTask) throw new Error("Choose an update to reply to.");
   await api(`/tasks/${selectedTask}/feedback`, "POST", { text: data.get("text") });
   form.reset();
-  notice("Feedback recorded. A learning task will propose evidence-backed memories.");
-});
-
-bindForm("#memory-form", async (form, data) => {
-  await api("/memories", "POST", Object.fromEntries(data));
-  form.reset();
-  notice("Confirmed memory saved locally.");
+  notice("Thanks. I'll learn from this in the background; new observations appear in What Buddy knows.");
 });
 
 $("#pause").addEventListener("click", async () => {
@@ -160,14 +149,12 @@ $("#pause").addEventListener("click", async () => {
     await refresh();
   } catch (error) { notice(error.message, true); }
 });
-
 $("#check-agent").addEventListener("click", async () => {
   try {
     const result = await api("/agent/check", "POST");
-    notice(result.version + " " + (result.note || ""));
+    notice(`${result.version} ${result.note || ""}`);
   } catch (error) { notice(error.message, true); }
 });
-
 $("#reconnect-slack").addEventListener("click", async () => {
   try {
     const result = await api("/slack/reconnect", "POST");
@@ -176,46 +163,49 @@ $("#reconnect-slack").addEventListener("click", async () => {
   } catch (error) { notice(error.message, true); }
 });
 
-function renderApprovals(approvals) {
+function renderApprovals(selector, approvals) {
+  const container = $(selector);
+  if (container.contains(document.activeElement) && document.activeElement.matches("textarea")) return;
   const signature = JSON.stringify(approvals);
-  if (signature === approvalSignature) return;
-  approvalSignature = signature;
-  const container = $("#approvals");
+  if (signatures.get(selector) === signature) return;
+  signatures.set(selector, signature);
   container.replaceChildren();
-  if (!approvals.length) {
-    container.append(node("div", "Nothing waiting on you. Your buddy will ask when it needs a decision.", "empty"));
-  }
   for (const approval of approvals) {
     const card = node("div", "", "approval");
     const task = state.tasks.find((item) => item.id === approval.task_id);
-    card.append(node("div", `${approval.kind.toUpperCase()} · ${task?.title || approval.task_id}`, "eyebrow"));
+    card.append(node("div", task?.title || "A note from Buddy", "eyebrow"));
     card.append(node("p", approval.question));
     const payload = approval.payload;
     if (approval.kind === "files") {
-      card.append(node("div", payload.project_path, "path"));
       for (const file of payload.files) {
         card.append(node("strong", file.path));
         card.append(node("pre", file.diff || "(No text difference)"));
       }
     } else if (approval.kind === "slack") {
-      card.append(node("div", `To ${payload.channel} · thread ${payload.thread_ts}`, "path"));
+      card.append(node("div", `Reply to ${payload.channel}, thread ${payload.thread_ts}`, "hint"));
       card.append(node("pre", payload.text));
+    } else if (approval.kind === "review") {
+      card.append(node("div", `${payload.repo}#${payload.number} at ${payload.head_sha.slice(0, 8)}`, "hint"));
+      card.append(node("pre", payload.body));
     } else if (approval.kind === "memory") {
       card.append(node("p", payload.text));
-      card.append(node("p", `${payload.category} · ${payload.scope} · ${payload.project_path || "No project"}`, "muted"));
-      card.append(node("p", `Evidence: ${payload.evidence}`, "muted"));
+      card.append(node("p", `Evidence: ${payload.evidence}`, "hint"));
+      card.append(node("p", payload.scope === "general" ? "General working preference" : "This project only", "hint"));
     }
     const reason = node("textarea");
     reason.rows = 2;
     reason.maxLength = 5000;
-    reason.placeholder = "Optional: explain your choice so Lead can learn.";
+    reason.value = approvalReasons.get(approval.id) || "";
+    reason.placeholder = "Anything I should understand about your choice? Optional.";
     reason.setAttribute("aria-label", `Reason for ${approval.question}`);
-    card.append(reason);
+    reason.addEventListener("input", () => approvalReasons.set(approval.id, reason.value));
+    if (approval.kind !== "memory") card.append(reason);
     const buttons = node("div", "", "button-row");
     for (const option of approval.options) {
       buttons.append(button(option, async () => {
         await api(`/approvals/${approval.id}`, "POST", { choice: option, reason: reason.value });
-        notice("Decision recorded. Any learning will appear as a candidate, not an automatic rule.");
+        approvalReasons.delete(approval.id);
+        notice(approval.kind === "memory" ? "Remembered locally for future work." : "Understood. I'll take it from here.");
       }, option === "Reject" ? "secondary" : ""));
     }
     card.append(buttons);
@@ -223,21 +213,29 @@ function renderApprovals(approvals) {
   }
 }
 
-function renderTasks(tasks) {
-  const container = $("#tasks");
+function renderUpdates() {
+  const updates = state.updates || [];
+  const signature = JSON.stringify(updates);
+  if (signatures.get("updates") === signature) return;
+  signatures.set("updates", signature);
+  const container = $("#updates");
   container.replaceChildren();
-  if (!tasks.length) container.append(node("div", "Give your buddy a goal to start.", "empty"));
-  for (const task of tasks) {
-    const item = button("", async () => {
+  if (!updates.length) container.append(node("p", "Your day starts with a little direction. Updates will appear here.", "empty"));
+  for (const task of updates.slice(0, 15)) {
+    const card = node("article", "", "update");
+    const top = node("div", "", "update-top");
+    top.append(node("span", task.kind === "inbox" ? "Picked up for you" : "Your priorities"));
+    top.append(node("span", statuses[task.status] || task.status, `status ${task.status}`));
+    card.append(top, node("h3", task.title));
+    const preview = task.error || task.preview;
+    if (preview) card.append(node("p", preview.length > 360 ? `${preview.slice(0, 360)}...` : preview));
+    card.append(button("Read update / give feedback", async () => {
+      if (selectedTask !== task.id) $("#feedback-form").reset();
       selectedTask = task.id;
       await renderDetail();
-    }, `task ${task.parent_id ? "worker" : ""} ${selectedTask === task.id ? "selected" : ""}`);
-    item.append(node("strong", task.title));
-    const meta = node("div", "", "task-meta");
-    meta.append(node("span", task.status.replaceAll("_", " "), `badge ${task.status}`));
-    meta.append(node("span", `${task.role} · ${task.kind} · ${task.backend}`));
-    item.append(meta);
-    container.append(item);
+      openDialog("task-dialog");
+    }, "quiet"));
+    container.append(card);
   }
 }
 
@@ -246,28 +244,28 @@ async function renderDetail() {
   const requested = selectedTask;
   const task = await api(`/tasks/${requested}`);
   if (selectedTask !== requested) return;
-  $("#task-empty").hidden = true;
-  $("#task-detail").hidden = false;
-  $("#detail-kind").textContent = `${task.role.toUpperCase()} / ${task.kind.toUpperCase()} / ${task.backend.toUpperCase()}`;
+  $("#detail-kind").textContent = task.kind === "inbox" ? "PICKED UP FOR YOU" : "FROM YOUR LEAD";
   $("#detail-title").textContent = task.title;
-  $("#detail-status").textContent = `${task.status.replaceAll("_", " ")} · ${task.rounds}/8 invocations`;
+  $("#detail-status").textContent = statuses[task.status] || task.status;
   $("#detail-instructions").textContent = task.instructions;
-  $("#detail-result").textContent = task.result || "No result yet.";
+  $("#detail-result").textContent = task.result || "I'm working on this. I'll share an update here.";
   $("#detail-error").textContent = task.error;
   $("#detail-error").hidden = !task.error;
   const actions = $("#detail-actions");
   actions.replaceChildren();
   if (["failed", "interrupted"].includes(task.status)) {
-    actions.append(button("Retry explicitly", () => api(`/tasks/${task.id}/retry`, "POST")));
+    actions.append(button("Try again", () => api(`/tasks/${task.id}/retry`, "POST")));
   }
-  if (!["completed", "cancelled", "failed", "interrupted"].includes(task.status)) {
-    actions.append(button("Cancel task", () => api(`/tasks/${task.id}/cancel`, "POST"), "danger"));
+  if (!["completed", "cancelled", "failed", "interrupted", "ignored"].includes(task.status)) {
+    actions.append(button("Stop this task", () => api(`/tasks/${task.id}/cancel`, "POST"), "danger"));
   }
+  $("#detail-workers").replaceChildren(...state.tasks.filter((item) => item.parent_id === task.id)
+    .map((item) => node("p", `${item.title}: ${statuses[item.status] || item.status}`, "hint")));
   const outcomes = $("#detail-approvals");
   outcomes.replaceChildren();
   for (const approval of task.approvals) {
     const history = node("details");
-    history.append(node("summary", `${approval.kind}: ${approval.status}${approval.choice ? ` · ${approval.choice}` : ""}`));
+    history.append(node("summary", `${approval.kind}: ${approval.status}`));
     history.append(node("pre", JSON.stringify({
       question: approval.question, payload: approval.payload, reason: approval.reason,
     }, null, 2)));
@@ -275,24 +273,47 @@ async function renderDetail() {
   }
 }
 
-function renderMemories(memories) {
-  const signature = JSON.stringify(memories);
-  if (signature === memorySignature) return;
-  memorySignature = signature;
-  const container = $("#memories");
-  container.replaceChildren();
-  if (!memories.length) container.append(node("div", "No confirmed memories yet. Start with distillation or add one explicitly.", "empty"));
-  for (const memory of memories) {
-    const card = node("div", "", "memory");
-    card.append(node("p", memory.text));
-    card.append(node("div", `${memory.category} · ${memory.scope} · ${memory.project_path || "No project"}`, "muted"));
-    card.append(node("p", `Evidence: ${memory.evidence}`, "muted"));
-    card.append(button("Remove from future context", async () => {
-      await api(`/memories/${memory.id}`, "DELETE");
-      notice("Removed from confirmed memory. Historical tasks and feedback remain in the local database.");
-    }, "danger"));
-    container.append(card);
+function renderProfile() {
+  const pending = state.approvals.filter((item) => item.kind === "memory");
+  $("#memory-badge").textContent = pending.length || "";
+  $("#memory-review-section").hidden = !pending.length;
+  renderApprovals("#memory-approvals", pending);
+  const profile = state.initial_profile;
+  $("#onboarding").hidden = Boolean(profile && !["failed", "interrupted", "cancelled"].includes(profile.status));
+  $("#profile-status").textContent = profile
+    ? profile.error || (profile.status === "running" || profile.status === "queued"
+      ? "Lead is reading the context and building your initial profile."
+      : profile.result || "Your profile is saved locally.")
+    : "Lead builds an initial profile from your connected project. Add background if you like; you don't need to write the profile.";
+  const active = state.profile_tasks.filter((task) => ["running", "queued"].includes(task.status));
+  $("#learning-status").textContent = active.length
+    ? "Learning from your context and feedback in the background."
+    : pending.length ? `${pending.length} observations to review in What Buddy knows.` : "";
+  const signature = JSON.stringify(state.memories);
+  if (signatures.get("memories") !== signature) {
+    signatures.set("memories", signature);
+    const container = $("#memories");
+    container.replaceChildren();
+    if (!state.memories.length) container.append(node("p", "Nothing confirmed yet. Your profile will grow as we work together.", "hint"));
+    for (const memory of state.memories) {
+      const card = node("div", "", "memory");
+      card.append(node("p", memory.text));
+      const evidence = node("details");
+      evidence.append(node("summary", memory.scope === "general" ? "Why I remember this" : "For this project"));
+      evidence.append(node("p", memory.evidence, "hint"));
+      evidence.append(button("Forget this observation", async () => {
+        await api(`/memories/${memory.id}`, "DELETE");
+        notice("Removed from future memory. Historical tasks and feedback remain on this computer.");
+      }, "quiet"));
+      card.append(evidence);
+      container.append(card);
+    }
   }
+  $("#profile-history").replaceChildren(...state.profile_tasks.map((task) => {
+    const row = node("p", `${task.kind === "distill" ? "Initial profile" : "Feedback learning"}: ${statuses[task.status] || task.status}`, "hint");
+    if (task.error) row.append(node("span", ` - ${task.error}`, "error-text"));
+    return row;
+  }));
 }
 
 async function refresh() {
@@ -303,12 +324,17 @@ async function refresh() {
     authenticated = true;
     $("#login").hidden = true;
     $("#application").hidden = false;
-    const mode = state.settings.backend === "demo" ? "DEMO — simulated outputs" : "Copilot CLI";
-    $("#connection-status").textContent = `${mode} · ${state.active_count} active · Slack ${state.slack.connected ? "connected" : "disconnected"}${state.slack.error ? `: ${state.slack.error}` : ""}`;
+    $("#day-label").textContent = new Date(`${state.today}T12:00:00`).toLocaleDateString(undefined, {
+      weekday: "long", month: "long", day: "numeric",
+    }).toUpperCase();
+    const prefix = state.settings.backend === "demo" ? "Demo mode. " : "";
+    $("#lead-status").textContent = prefix + (state.settings.paused
+      ? "New work is paused." : state.active_count ? "I'm moving things forward." : "Ready when you are.");
+    const slack = state.settings.slack_enabled ? (state.slack.connected ? "Watching Slack" : "Slack needs attention") : "Slack not connected";
+    const github = state.settings.github_enabled ? (state.github.error ? "GitHub needs attention" : state.github.connected ? "Watching review requests" : "Connecting GitHub reviews") : "PR requests not connected";
+    $("#watch-status").textContent = `${slack} / ${github}`;
+    $("#connection-status").textContent = `${state.settings.backend} / Slack: ${state.slack.error || (state.slack.connected ? "connected" : "off")} / GitHub: ${state.github.error || (state.github.connected ? "connected" : "off")}`;
     $("#pause").textContent = state.settings.paused ? "Resume new work" : "Pause new work";
-    $("#metric-running").textContent = state.tasks.filter((task) => task.status === "running").length;
-    $("#metric-pending").textContent = state.approvals.length;
-    $("#metric-done").textContent = state.tasks.filter((task) => task.status === "completed").length;
     $("#data-location").textContent = state.data_directory;
     $("#memory-location").textContent = `${state.data_directory}/memory/confirmed.json`;
     if (!settingsLoaded) {
@@ -321,32 +347,29 @@ async function refresh() {
       }
       settingsLoaded = true;
     }
-    renderApprovals(state.approvals);
-    renderTasks(state.tasks);
-    renderMemories(state.memories);
-    const events = $("#events");
-    events.replaceChildren();
-    for (const event of state.events.slice(0, 30)) {
+    $("#brief-history").hidden = !state.daily_briefs.length;
+    $("#briefs").replaceChildren(...state.daily_briefs.map((brief) => node("pre", brief.text)));
+    const decisions = state.approvals.filter((item) => item.kind !== "memory");
+    $("#decision-panel").hidden = !decisions.length;
+    renderApprovals("#approvals", decisions);
+    renderUpdates();
+    renderProfile();
+    $("#events").replaceChildren(...state.events.slice(0, 20).map((event) => {
       const line = node("div", "", "event");
-      const timestamp = node("time", new Date(event.created_at).toLocaleTimeString());
-      timestamp.dateTime = event.created_at;
-      line.append(timestamp, node("span", `${event.kind}: ${event.message}`));
-      events.append(line);
-    }
-    await renderDetail();
-  } catch (error) {
-    notice(error.message, true);
-  } finally {
-    refreshing = false;
-  }
+      line.append(node("time", new Date(event.created_at).toLocaleTimeString()), node("span", `${event.kind}: ${event.message}`));
+      return line;
+    }));
+    if ($("#task-dialog").open) await renderDetail();
+    if (desiredProfile) { desiredProfile = false; openDialog("profile-dialog"); }
+  } catch (error) { notice(error.message, true); }
+  finally { refreshing = false; }
 }
 
 async function start() {
   const token = new URLSearchParams(location.hash.slice(1)).get("token");
   if (token) {
     history.replaceState(null, "", location.pathname);
-    try { await unlock(token); }
-    catch (error) { notice(error.message, true); return; }
+    try { await unlock(token); } catch (error) { notice(error.message, true); }
   }
   await refresh();
   setInterval(() => { if (authenticated) refresh(); }, 2500);

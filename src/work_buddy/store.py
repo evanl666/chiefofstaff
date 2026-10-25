@@ -14,6 +14,10 @@ def now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def today() -> str:
+    return datetime.now().astimezone().date().isoformat()
+
+
 def identifier() -> str:
     return uuid4().hex
 
@@ -60,6 +64,11 @@ class Store:
         CREATE TABLE IF NOT EXISTS inbox (
             event_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS daily_briefs (
+            task_id TEXT PRIMARY KEY REFERENCES tasks(id),
+            day TEXT NOT NULL, text TEXT NOT NULL, project_path TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
         """)
         self.db.commit()
         (directory / "work-buddy.db").chmod(0o600)
@@ -84,6 +93,34 @@ class Store:
 
     def save_settings(self, settings: Settings):
         self.execute("INSERT OR REPLACE INTO settings VALUES (1, ?)", (settings.model_dump_json(),))
+
+    def create_daily_brief(self, text: str) -> str:
+        day = today()
+        task_id = self.create_task(
+            f"Your priorities for {day}",
+            text,
+            kind="daily",
+            source={"type": "daily", "day": day},
+        )
+        self.execute(
+            "INSERT INTO daily_briefs VALUES(?,?,?,?,?)",
+            (task_id, day, text, self.task(task_id)["project_path"], now()),
+        )
+        return task_id
+
+    def daily_briefs(self, project_path: str) -> list[dict]:
+        return self.all(
+            """SELECT b.*,t.status FROM daily_briefs b JOIN tasks t ON t.id=b.task_id
+            WHERE b.day=? AND b.project_path=? AND t.status!='cancelled'
+            ORDER BY b.created_at DESC LIMIT 10""",
+            (today(), project_path),
+        )
+
+    def backlog_count(self) -> int:
+        return self.one(
+            """SELECT count(*) AS n FROM tasks
+            WHERE status NOT IN ('completed','failed','cancelled','interrupted','ignored')"""
+        )["n"]
 
     def event(self, kind: str, message: str, task_id: str | None = None):
         self.execute(

@@ -14,7 +14,9 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from .agent import Agent, CopilotAgent
 from .engine import Engine
 from .files import safe_path
+from .github import GitHubInbox
 from .models import (
+    DailyBrief,
     Distillation,
     Feedback,
     MemoryInput,
@@ -24,7 +26,7 @@ from .models import (
     SlackCredentials,
 )
 from .slack import SlackBridge
-from .store import Store, identifier, now
+from .store import Store
 
 logger = logging.getLogger(__name__)
 STATIC = Path(__file__).parent / "static"
@@ -46,6 +48,8 @@ def create_app(
     engine = Engine(store, agent)
     bridge = SlackBridge(store, engine, f"http://127.0.0.1:{port}")
     engine.slack = bridge
+    github = GitHubInbox(store)
+    engine.github = github
     cookie_name = f"work_buddy_{port}"
     origins = {f"http://127.0.0.1:{port}", f"http://localhost:{port}"}
 
@@ -53,11 +57,13 @@ def create_app(
     async def lifespan(app):
         await engine.start()
         await bridge.start()
+        await github.start()
         try:
             yield
         finally:
-            await engine.stop()
+            await github.stop()
             await bridge.stop()
+            await engine.stop()
             store.close()
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
@@ -130,6 +136,7 @@ def create_app(
             raise ValueError("The project must not contain Work Buddy's private data directory.")
         old = store.settings()
         store.save_settings(settings)
+        github.wake()
         store.event("settings", "Settings updated by owner.")
         if (old.slack_enabled, old.slack_owner) != (settings.slack_enabled, settings.slack_owner):
             await bridge.start()
@@ -181,12 +188,13 @@ def create_app(
         }
 
     def capacity():
-        count = store.one(
-            """SELECT count(*) AS n FROM tasks
-            WHERE status NOT IN ('completed','failed','cancelled','interrupted')"""
-        )["n"]
-        if count >= 100:
+        if store.backlog_count() >= 100:
             raise HTTPException(429, "Task backlog is full. Finish or cancel existing tasks.")
+
+    @app.post("/api/daily")
+    async def daily_brief(brief: DailyBrief):
+        capacity()
+        return {"id": store.create_daily_brief(brief.text)}
 
     @app.post("/api/tasks")
     async def new_task(task: NewTask):
@@ -230,6 +238,8 @@ def create_app(
     async def distill(payload: Distillation):
         capacity()
         settings = store.settings()
+        if not (payload.material or settings.project_path or settings.profile):
+            raise ValueError("Connect a project or share a little context so Lead has evidence.")
         for file in payload.source_files:
             if (
                 not settings.project_path
@@ -238,11 +248,17 @@ def create_app(
                 raise ValueError("Each source file must exist inside the configured project.")
         task_id = store.create_task(
             "Distill initial work profile",
-            "Extract an evidence-backed initial work profile. Material explicitly supplied "
-            "by the owner:\n"
+            "Build an initial work profile yourself, using only evidence. Owner-provided "
+            "background (optional):\n"
             + payload.material
-            + "\nOnly these selected files should be read for distillation:\n"
-            + "\n".join(payload.source_files),
+            + (
+                "\nRead only these selected project files:\n" + "\n".join(payload.source_files)
+                if payload.source_files
+                else "\nThe owner authorizes project discovery for this distillation. "
+                "Select a few relevant README/docs/conventions from the connected project. "
+                "Distinguish repository conventions from this person's preferences. "
+                "Do not scan secrets or infer personal traits."
+            ),
             kind="distill",
         )
         return {"id": task_id}
@@ -250,21 +266,12 @@ def create_app(
     @app.post("/api/tasks/{task_id}/feedback")
     async def feedback(task_id: str, payload: Feedback):
         capacity()
-        task = store.task(task_id)
-        store.execute(
-            "INSERT INTO feedback VALUES(?,?,?,?)",
-            (identifier(), task_id, payload.text, now()),
+        learning_id = engine.record_feedback(
+            task_id,
+            payload.text,
+            remember=payload.remember,
+            scope=payload.scope,
         )
-        if payload.remember:
-            store.remember(
-                payload.text,
-                payload.scope,
-                task["project_path"],
-                task_id,
-                evidence="Owner explicitly confirmed this feedback as memory.",
-            )
-        learning_id = engine.learn(task_id, payload.text)
-        store.event("feedback", "Feedback recorded; Lead will propose lessons.", task_id)
         return {"learning_task_id": learning_id}
 
     @app.post("/api/memories")

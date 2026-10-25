@@ -266,3 +266,39 @@ async def test_slack_feedback_enters_learning_loop(slack):
     assert "Overconfident initial reply" in learned["instructions"]
     assert "Say when evidence is missing." in learned["instructions"]
     assert not slack.store.all("SELECT * FROM memories")
+
+
+async def test_owner_reply_in_tracked_thread_is_behavior_feedback_not_new_work(slack):
+    incoming = {
+        "user": "UTEAM",
+        "channel": "CALLOWED",
+        "channel_type": "channel",
+        "text": "<@UOWNER> is the rollout ready?",
+        "ts": "500",
+    }
+    await slack.on_message(incoming, {"event_id": "incoming"})
+    original = slack.store.one("SELECT id FROM tasks WHERE kind='inbox'")["id"]
+    approval = slack.store.create_approval(
+        original,
+        "decision",
+        "Ship?",
+        ["Yes", "No"],
+        {},
+    )
+    reply = {
+        "user": "UOWNER",
+        "channel": "CALLOWED",
+        "channel_type": "channel",
+        "text": "Not yet; we still need evidence from the compatibility tests.",
+        "ts": "501",
+        "thread_ts": "500",
+    }
+    await slack.on_message(reply, {"event_id": "owner-reply"})
+    await slack.on_message(reply, {"event_id": "owner-reply"})
+    assert len(slack.store.all("SELECT id FROM tasks WHERE kind='inbox'")) == 1
+    assert len(slack.store.all("SELECT id FROM tasks WHERE kind='learn'")) == 1
+    feedback = slack.store.one("SELECT text FROM feedback WHERE task_id=?", (original,))
+    assert "compatibility tests" in feedback["text"]
+    assert "not approval" in feedback["text"]
+    assert slack.store.approval(approval)["status"] == "pending"
+    assert slack.store.all("SELECT * FROM memories") == []

@@ -3,132 +3,121 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Work Buddy | Local workbench</title>
+  <title>Work Buddy | Your day</title>
   <link rel="stylesheet" href="/static/style.css">
   <script src="/static/app.js" defer></script>
 </head>
 <body>
-  <aside class="sidebar">
-    <div class="brand"><span class="logo">W</span><div>Work Buddy<small>YOUR LOCAL WORK PARTNER</small></div></div>
-    <nav aria-label="Main navigation">
-      <button class="nav active" data-page="work">Workbench <span>01</span></button>
-      <button class="nav" data-page="profile">Profile &amp; learning <span>02</span></button>
-      <button class="nav" data-page="settings">Connections &amp; settings <span>03</span></button>
-    </nav>
-    <div class="sidebar-note"><span class="dot"></span> LOCAL FIRST
-      <p>Your tasks and confirmed memories stay in your local data directory. Agent context may be sent to your model provider.</p>
+  <header class="topbar">
+    <a class="brand" href="/"><span class="logo">w.</span> Work Buddy</a>
+    <div class="top-actions">
+      <button type="button" class="quiet" data-open="profile-dialog">What Buddy knows <span id="memory-badge"></span></button>
+      <button type="button" class="quiet" data-open="settings-dialog">Settings</button>
     </div>
-  </aside>
+  </header>
   <main>
-    <header>
-      <div class="eyebrow">LESS BUSYWORK. MORE ROOM TO THINK.</div>
-      <div class="header-row"><h1>Your work, moving forward.</h1><button id="pause" class="secondary">Pause new work</button></div>
-      <div id="connection-status" class="muted">Connecting to the local service...</div>
-    </header>
     <div id="notice" role="status" hidden></div>
-    <section id="login" class="panel" hidden>
-      <h2>Open your private workbench</h2>
-      <p>Use the private launch URL printed in your terminal, or paste its token below. Never share it.</p>
-      <form id="login-form"><label>Launch token<input name="token" type="password" required autocomplete="off"></label><button>Unlock</button></form>
+    <section id="login" class="card" hidden>
+      <h2>Welcome back.</h2>
+      <p>Open the private launch URL in your terminal, or paste its token here.</p>
+      <form id="login-form"><label>Launch token<input name="token" type="password" required autocomplete="off"></label><button>Open my day</button></form>
     </section>
     <div id="application" hidden>
-      <section id="page-work" class="page">
-        <div class="metrics">
-          <div><span id="metric-running">0</span><small>IN PROGRESS</small></div>
-          <div><span id="metric-pending">0</span><small>NEED YOUR DECISION</small></div>
-          <div><span id="metric-done">0</span><small>COMPLETED</small></div>
-        </div>
-        <section class="panel">
-          <div class="section-heading"><h2>What should we move forward today?</h2><span class="tag">LEAD AGENT</span></div>
-          <form id="task-form">
-            <label>Goal<input name="title" required maxlength="200" placeholder="Prepare the caching improvement proposal"></label>
-            <label>Context and definition of done<textarea name="instructions" required maxlength="20000" rows="3" placeholder="Investigate the project, cite relevant files, and draft an approach. Ask me before making a significant tradeoff."></textarea></label>
-            <div class="form-footer"><small>Read-only investigation. File changes and Slack replies always need approval.</small><button>Start task <span aria-hidden="true">&rarr;</span></button></div>
-          </form>
-        </section>
-        <section class="panel" id="decision-panel"><div class="section-heading"><h2>Decisions, not interruptions</h2><span class="tag">YOU ARE IN CONTROL</span></div><div id="approvals"></div></section>
-        <div class="work-grid">
-          <section class="panel"><div class="section-heading"><h2>Task activity</h2><span class="muted">Latest 200</span></div><div id="tasks"></div></section>
-          <section class="panel detail">
-            <div id="task-empty" class="empty">Select a task to see its result, feedback, and history.</div>
-            <div id="task-detail" hidden>
-              <div class="eyebrow" id="detail-kind"></div><h2 id="detail-title"></h2>
-              <p id="detail-status" class="muted"></p>
-              <pre id="detail-error" class="error-text" hidden></pre>
-              <details><summary>Original instructions</summary><pre id="detail-instructions"></pre></details>
-              <pre id="detail-result"></pre>
-              <div id="detail-actions" class="button-row"></div>
-              <div id="detail-approvals"></div>
-              <form id="feedback-form">
-                <h3>Teach your buddy</h3>
-                <label>What would you change, and why?<textarea name="text" required maxlength="5000" rows="3" placeholder="Separate confirmed evidence from assumptions. The previous draft sounded too certain."></textarea></label>
-                <p class="muted">Lead will analyze this feedback and propose memories for your confirmation.</p>
-                <button class="secondary">Send feedback &amp; learn</button>
-              </form>
-            </div>
-          </section>
-        </div>
-        <section class="panel"><h2>Recent events</h2><div id="events"></div></section>
+      <section class="intro">
+        <div id="day-label" class="eyebrow"></div>
+        <h1>What matters today?</h1>
+        <p>A few tasks, whatever context matters.<br>Let Buddy organize the work and pick up the rest.</p>
       </section>
-
-      <section id="page-profile" class="page" hidden>
-        <section class="panel">
-          <div class="section-heading"><h2>Start with your way of working</h2><span class="tag">INITIAL DISTILLATION</span></div>
-          <p>Give Lead a few representative examples: responsibilities, current goals, replies you like, and how you make decisions. No need to upload your whole history.</p>
-          <form id="distill-form">
-            <label>Your material<textarea name="material" required minlength="10" maxlength="30000" rows="7" placeholder="I work on...&#10;My current priorities are...&#10;Here are examples of replies and reviews I prefer...&#10;Ask me before..."></textarea></label>
-            <label>Optional source files (one path per line, relative to the configured project)<textarea name="source_files" rows="2" placeholder="docs/team-working-agreement.md"></textarea></label>
-            <div class="form-footer"><small>Candidates are inactive until you confirm them in the workbench.</small><button>Distill with Lead</button></div>
-          </form>
-        </section>
-        <section class="panel"><h2>Confirmed memory</h2>
-          <p>Only confirmed memories enter future agent calls. Learning never grants new permissions.</p>
-          <div id="memory-location" class="path"></div>
-          <div id="memories"></div>
-          <form id="memory-form">
-            <h3>Add an explicit working preference</h3>
-            <label>Memory<textarea name="text" required maxlength="5000" rows="2"></textarea></label>
-            <label>Scope<select name="scope"><option value="project">Current project only</option><option value="general">General working preference</option></select></label>
-            <button class="secondary">Save confirmed memory</button>
-          </form>
-        </section>
+      <section id="onboarding" class="onboarding" hidden>
+        <div><strong>First, let me get to know your work.</strong><p>Lead builds your initial profile and saves it locally. You don't have to write it yourself.</p></div>
+        <button type="button" class="secondary" data-open="profile-dialog">Get to know me</button>
       </section>
-
-      <section id="page-settings" class="page" hidden>
-        <section class="panel">
-          <h2>Agent and workspace</h2>
-          <form id="settings-form">
-            <div class="field-grid">
-              <label>Backend<select name="backend"><option value="copilot">Copilot CLI (real agent)</option><option value="demo">Demo simulator (no AI)</option></select></label>
-              <label>CLI executable<input name="copilot_command" value="copilot" required></label>
-              <label>Model<input name="model" value="auto" required></label>
-              <label>Concurrent workers<input name="max_workers" type="number" min="1" max="4" value="2" required></label>
-              <label>Invocation timeout (seconds)<input name="timeout_seconds" type="number" min="30" max="1800" value="300" required></label>
-            </div>
-            <label>Authorized project directory<input name="project_path" placeholder="/absolute/path/to/project"></label>
-            <p class="muted">Agents may read files in this project. Choose a narrow directory without secrets. Shell, writing tools, and MCP tools are unavailable to CLI workers.</p>
-            <label>Standing work context<textarea name="profile" maxlength="12000" rows="4" placeholder="Your role, projects, and goals. You can also generate a profile in Profile &amp; learning."></textarea></label>
-            <h3>Slack inbox</h3>
-            <label class="check"><input name="slack_enabled" type="checkbox">Enable Slack Socket Mode</label>
-            <label>Your Slack member ID<input name="slack_owner" placeholder="U0123456789"></label>
-            <label>Allowed channel IDs (comma-separated)<input name="slack_channels" placeholder="C0123456789, C9876543210"></label>
-            <label>Channel trigger keyword (optional)<input name="slack_keyword" maxlength="100" placeholder="Empty = only messages mentioning you or the bot"></label>
-            <p class="muted">Only your direct messages to the bot and configured channel triggers create tasks. This does not expose your other private messages.</p>
-            <div class="button-row"><button>Save settings</button><button type="button" id="check-agent" class="secondary">Check CLI</button><button type="button" id="reconnect-slack" class="secondary">Reconnect Slack</button></div>
-          </form>
-        </section>
-        <section class="panel">
-          <h2>Slack credentials</h2>
-          <p>For this private prototype, create your own Slack app using the manifest in the repository. Credentials are stored in the OS keyring, never in the repository or browser storage.</p>
-          <form id="credentials-form">
-            <label>Bot token<input type="password" name="bot_token" required placeholder="xoxb-..." autocomplete="off"></label>
-            <label>App-level token (connections:write)<input type="password" name="app_token" required placeholder="xapp-..." autocomplete="off"></label>
-            <button class="secondary">Store in OS keyring</button>
-          </form>
-        </section>
-        <section class="panel"><h2>Local runtime</h2><div id="data-location" class="path"></div><p>Keep this Python process running. Sleep and offline time interrupt local work. Pause stops new invocations; cancel individual tasks to stop active workers. The prototype does not run tests, push, merge, deploy, or execute arbitrary shell commands.</p></section>
+      <form id="daily-form" class="daily-composer">
+        <label class="sr-only" for="daily-text">Today's tasks and context</label>
+        <textarea id="daily-text" name="text" required maxlength="20000" rows="7" placeholder="Today I'd like to:&#10;&#10;- Finish the caching proposal. Keep compatibility with old clients.&#10;- Prepare notes for the design discussion.&#10;&#10;Context: the rollout is next week; the draft is in docs/."></textarea>
+        <div class="composer-footer"><span>No task forms. Just tell me what needs doing.</span><button>Hand over my day <span aria-hidden="true">&rarr;</span></button></div>
+      </form>
+      <details id="brief-history" hidden><summary>Your notes for today</summary><div id="briefs"></div></details>
+      <div class="buddy-presence"><span class="dot"></span><div><span id="lead-status">Ready when you are.</span><small id="watch-status"></small><small id="learning-status"></small></div></div>
+      <section id="decision-panel" class="section" hidden>
+        <div class="section-title"><h2>A decision for you</h2><span>I'll handle the follow-through.</span></div>
+        <div id="approvals"></div>
       </section>
+      <section class="section">
+        <div class="section-title"><h2>From Buddy</h2><span>Progress and things picked up for you.</span></div>
+        <div id="updates"><p class="empty">Your day starts with a little direction. Updates will appear here.</p></div>
+      </section>
+      <footer>Local-first. I'll ask before changing files or speaking for you.</footer>
     </div>
   </main>
+
+  <dialog id="profile-dialog" aria-labelledby="profile-heading">
+    <div class="dialog-heading"><div><div class="eyebrow">LEARNING YOUR WAY OF WORKING</div><h2 id="profile-heading">What Buddy knows</h2></div><button class="quiet" data-close type="button">Close</button></div>
+    <p class="dialog-notice" role="status" hidden></p>
+    <p id="profile-status">Lead can build an initial profile from your connected project and any context you share.</p>
+    <form id="distill-form">
+      <label>Anything you'd like me to know? <span class="optional">Optional</span><textarea name="material" maxlength="30000" rows="3" placeholder="What you work on, an example of a good reply, or how you approach a review..."></textarea></label>
+      <details><summary>Choose specific source files instead</summary><label>One path per line, relative to your project<textarea name="source_files" rows="2" placeholder="docs/working-agreement.md"></textarea></label></details>
+      <p class="hint">Lead will read relevant documents in your connected project. It proposes evidence-backed observations, not guesses about you.</p>
+      <button>Build my profile</button>
+    </form>
+    <section class="section" id="memory-review-section" hidden><h3>A few things to confirm</h3><p class="hint">Saved locally as candidates. Only confirmed observations guide future work.</p><div id="memory-approvals"></div></section>
+    <section class="section"><h3>Remembered for next time</h3><div id="memories"></div></section>
+    <details class="technical"><summary>Local storage and learning history</summary><div id="memory-location" class="path"></div><div id="profile-history"></div></details>
+  </dialog>
+
+  <dialog id="task-dialog" aria-labelledby="detail-title">
+    <div class="dialog-heading"><div><div id="detail-kind" class="eyebrow"></div><h2 id="detail-title">An update from Buddy</h2></div><button class="quiet" data-close type="button">Close</button></div>
+    <p class="dialog-notice" role="status" hidden></p>
+    <p id="detail-status" class="muted"></p><pre id="detail-error" class="error-text" hidden></pre>
+    <pre id="detail-result"></pre><div id="detail-actions" class="button-row"></div>
+    <form id="feedback-form">
+      <label>What should I do differently?<textarea name="text" required maxlength="5000" rows="3" placeholder="Give me a correction or explain your preference. I'll learn from it."></textarea></label>
+      <button class="secondary">Tell Buddy</button>
+    </form>
+    <details class="technical"><summary>Context and execution details</summary><pre id="detail-instructions"></pre><div id="detail-workers"></div><div id="detail-approvals"></div></details>
+  </dialog>
+
+  <dialog id="settings-dialog" aria-labelledby="settings-heading">
+    <div class="dialog-heading"><div><div class="eyebrow">CONNECT ONCE, WORK EVERY DAY</div><h2 id="settings-heading">Your workspace</h2></div><button class="quiet" data-close type="button">Close</button></div>
+    <p class="dialog-notice" role="status" hidden></p>
+    <form id="settings-form">
+      <label>Project directory<input name="project_path" placeholder="/absolute/path/to/project"></label>
+      <p class="hint">Choose a narrow folder without secrets. Lead uses it for your work and initial profile.</p>
+      <details><summary>Connect Slack</summary>
+        <label class="check"><input name="slack_enabled" type="checkbox">Watch Slack for work that needs me</label>
+        <label>Your Slack member ID<input name="slack_owner" placeholder="U0123456789"></label>
+        <label>Channel IDs to watch, comma-separated<input name="slack_channels" placeholder="C0123456789"></label>
+        <label>Trigger keyword <span class="optional">Optional</span><input name="slack_keyword" maxlength="100" placeholder="Otherwise, mentions of you or the bot"></label>
+        <p class="hint">Lead triages messages against your daily priorities and learns from your replies in tracked threads. Other private conversations are not accessible.</p>
+      </details>
+      <details><summary>Connect GitHub reviews</summary>
+        <label class="check"><input name="github_enabled" type="checkbox">Pick up PRs requesting my review</label>
+        <label>Repositories to watch, comma-separated<input name="github_repos" placeholder="your-org/your-repo"></label>
+        <p class="hint">Uses your existing gh login on GitHub.com. Checks every two minutes. Lead drafts reviews; publishing always needs your approval.</p>
+      </details>
+      <details id="advanced-settings"><summary>Advanced agent settings</summary>
+        <div class="field-grid">
+          <label>Backend<select name="backend"><option value="copilot">Copilot CLI</option><option value="demo">Demo simulator (no AI)</option></select></label>
+          <label>CLI executable<input name="copilot_command" value="copilot" required></label>
+          <label>Model<input name="model" value="auto" required></label>
+          <label>Worker limit<input name="max_workers" type="number" min="1" max="4" value="2" required></label>
+          <label>Timeout, seconds<input name="timeout_seconds" type="number" min="30" max="1800" value="300" required></label>
+        </div>
+        <label>Additional standing context<textarea name="profile" maxlength="12000" rows="3"></textarea></label>
+        <div class="button-row"><button type="button" id="check-agent" class="secondary">Check CLI</button><button type="button" id="reconnect-slack" class="secondary">Reconnect Slack</button><button type="button" id="pause" class="secondary">Pause new work</button></div>
+      </details>
+      <button>Save settings</button>
+    </form>
+    <details><summary>Slack credentials</summary>
+      <p class="hint">Use the repository's Slack app manifest. Tokens are stored in the OS keyring, never in browser storage or source code.</p>
+      <form id="credentials-form">
+        <label>Bot token<input type="password" name="bot_token" required placeholder="xoxb-..." autocomplete="off"></label>
+        <label>App-level token<input type="password" name="app_token" required placeholder="xapp-..." autocomplete="off"></label>
+        <button class="secondary">Store credentials</button>
+      </form>
+    </details>
+    <details class="technical"><summary>Runtime and recent events</summary><div id="connection-status" class="muted"></div><div id="data-location" class="path"></div><p class="hint">Keep the Python process running. Pause stops new invocations; cancellation stops an active task. Sleep or offline time interrupts local work.</p><div id="events"></div></details>
+  </dialog>
 </body>
 </html>

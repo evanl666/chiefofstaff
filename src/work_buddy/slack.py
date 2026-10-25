@@ -12,7 +12,7 @@ from slack_bolt.async_app import AsyncApp
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 
-from .store import Store, identifier, now
+from .store import Store, now
 
 logger = logging.getLogger(__name__)
 NETWORK_ERRORS = (SlackApiError, aiohttp.ClientError, TimeoutError, OSError)
@@ -90,6 +90,35 @@ class SlackBridge:
         channel, text = event.get("channel", ""), event.get("text", "").strip()
         if not text:
             return
+        event_id = body.get("event_id") or f"{channel}:{event.get('ts')}"
+        if self.store.one("SELECT event_id FROM inbox WHERE event_id=?", (event_id,)):
+            return
+        if (
+            user == settings.slack_owner
+            and channel in settings.slack_channels
+            and event.get("thread_ts")
+        ):
+            tracked = self.store.one(
+                """SELECT id FROM tasks WHERE json_extract(source,'$.channel')=?
+                AND json_extract(source,'$.thread_ts')=? ORDER BY created_at DESC LIMIT 1""",
+                (channel, event["thread_ts"]),
+            )
+            if tracked:
+                if self.store.backlog_count() >= 100:
+                    self.store.event("error", "Feedback backlog is full; reply was not queued.")
+                    return
+                sample = text[:4500] + ("\n[Reply truncated]" if len(text) > 4500 else "")
+                self.engine.record_feedback(
+                    tracked["id"],
+                    "Observed owner reply in the tracked Slack thread. Treat this as a behavior "
+                    "example, not approval of the draft or any extra authorization:"
+                    "\n" + sample,
+                )
+                self.store.execute(
+                    "INSERT INTO inbox VALUES(?,?,?)",
+                    (event_id, tracked["id"], now()),
+                )
+                return
         direct = event.get("channel_type") == "im"
         if direct:
             if user != settings.slack_owner:
@@ -104,16 +133,11 @@ class SlackBridge:
                 f"<@{member}>" in text for member in (self.bot_id, settings.slack_owner) if member
             ):
                 return
-        event_id = body.get("event_id") or f"{channel}:{event.get('ts')}"
-        if self.store.one("SELECT event_id FROM inbox WHERE event_id=?", (event_id,)):
-            return
-        queued = self.store.one(
-            "SELECT count(*) AS n FROM tasks WHERE status IN ('queued','waiting_workers')"
-        )["n"]
-        if queued >= 100:
+        if self.store.backlog_count() >= 100:
             self.store.event("error", "Slack inbox backlog reached 100 tasks; event not accepted.")
             return
         source = {
+            "type": "slack",
             "channel": channel,
             "thread_ts": event.get("thread_ts") or event["ts"],
             "user": user,
@@ -130,6 +154,7 @@ class SlackBridge:
             text[:160],
             instruction,
             source=source,
+            kind="work" if direct else "inbox",
         )
         self.store.execute("INSERT INTO inbox VALUES(?,?,?)", (event_id, task_id, now()))
         self.store.update_task(task_id, status="receiving")
@@ -166,6 +191,8 @@ class SlackBridge:
             preview += "\nFiles: " + ", ".join(file["path"] for file in payload["files"])
         elif approval["kind"] == "memory":
             preview += f"\n{payload['text']}\nEvidence: {payload['evidence'][:500]}"
+        elif approval["kind"] == "review":
+            preview += f"\n{payload['repo']}#{payload['number']}\n" + payload["body"][:800]
         blocks = [
             {"type": "section", "text": {"type": "plain_text", "text": preview[:2900]}},
             {
@@ -235,6 +262,13 @@ class SlackBridge:
             )
         except NETWORK_ERRORS as exc:
             self.store.event("error", f"Slack result notification failed: {exc}", task_id)
+
+    async def notify_profile(self, task_id: str, count: int):
+        await self.tell_owner(
+            f"Work Buddy has {count} candidate memories from your work or feedback. "
+            f"Review them when convenient: {self.base_url}/#profile\n"
+            "They are saved locally but do not affect future work until confirmed."
+        )
 
     async def send_reply(self, payload: dict, approval_id: str):
         if not self.client:
@@ -360,13 +394,7 @@ class SlackBridge:
             self.store.event("error", "Rejected empty or oversized Slack feedback.")
             return
         try:
-            self.store.task(task_id)
-            self.store.execute(
-                "INSERT INTO feedback VALUES(?,?,?,?)",
-                (identifier(), task_id, text, now()),
-            )
-            self.engine.learn(task_id, text)
-            self.store.event("feedback", "Slack feedback queued for Lead learning.", task_id)
+            self.engine.record_feedback(task_id, text)
             await self.tell_owner(
                 "Feedback saved. Lead will propose memories; they need your confirmation."
             )

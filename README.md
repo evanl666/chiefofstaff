@@ -1,11 +1,12 @@
 # Work Buddy
 
-A **local-first prototype** of a personal work agent: give a Lead your daily goal,
-let it delegate independent investigations to Copilot CLI workers, and make the
-important decisions from a localhost workbench or Slack.
+A **local-first prototype** of a personal work agent. Your daily input is just one
+note: a few tasks and whatever context matters. Lead organizes the main work,
+picks up relevant Slack messages and PR review requests, and learns from your
+decisions and feedback. You see updates and important choices, not an agent dashboard.
 
 **This is a working prototype, not an autonomous employee or a production security
-sandbox.** Copilot invocations are read-only. Proposed file changes and Slack replies
+sandbox.** Copilot invocations are read-only. File changes, Slack replies, and PR comments
 are executed by the application only after approval of the exact payload.
 
 ## Quick start
@@ -48,36 +49,50 @@ to an unrelated service.
 
 ## First run
 
-1. In **Connections & settings**, choose an existing project directory, a narrow
-   folder without credentials. Check the Copilot executable and save settings.
-   A version check confirms the executable; your first real task verifies login.
-2. In **Profile & learning**, paste your responsibilities, goals, and representative
-   replies/reviews. Optionally select project-relative source files. Click
-   **Distill with Lead**.
-3. Review each candidate memory in **Workbench**. Confirm useful candidates;
-   reject unsupported inferences. Nothing is activated automatically.
-4. Give Lead a goal and a definition of done. Independent work can become up to
-   four child tasks, with a configurable maximum of 1-4 concurrent workers
-   (default two), plus one Lead invocation.
-5. Review decisions, exact file diffs, or Slack reply drafts. Add a reason when
-   deciding so the feedback loop can propose lessons.
-6. Use **Teach your buddy** on a task to explain corrections. Lead analyzes the
-   original task, result, and feedback, and proposes new memories for confirmation.
+1. Open **Settings** once. Connect an existing project directory and, optionally,
+   Slack and GitHub reviews. Model, executable, and worker controls are under
+   **Advanced agent settings**; they are not part of your daily input.
+2. Click **Get to know me** and **Build my profile**. Lead chooses relevant
+   documents in the connected project and builds an initial profile itself.
+   Background, examples, or selected files are optional. Without a connected
+   project, provide some background so it has evidence rather than guessing.
+3. Confirm useful observations in **What Buddy knows**. The generated profile
+   and candidates are saved locally immediately; confirmed memories guide future work.
+4. Each morning, write a single note in **What matters today?** and click
+   **Hand over my day**. No separate title, task forms, or manual worker setup.
+5. Read **From Buddy** and resolve **A decision for you** when needed. Use
+   **Read update / give feedback**, then **Tell Buddy**, to explain a correction.
+
+Example daily note:
+
+```text
+Today:
+- Finish the caching proposal; keep old clients compatible.
+- Prepare notes for the design discussion.
+
+Context: rollout is next week. The current draft is in docs/.
+```
+
+Daily notes are stored with the computer's local calendar date and project.
+Lead receives those notes when triaging connected Slack messages and review
+requests, without needing you to create the side tasks. It can ignore noise;
+ignored events, workers, and learning jobs do not clutter the daily feed.
+Detailed execution state remains available inside an update's disclosure.
 
 ### Try the workflow without spending model credits
 
-Select **Demo simulator** in Settings. Submit any goal: the simulator creates two
+Select **Demo simulator** under Settings / Advanced. Submit a daily note: the simulator creates two
 workers, requests a decision, then finishes. Try distillation and feedback to see
 explicitly synthetic memory candidates. Demo is never silently substituted for
-a failed Copilot call, and it cannot propose real file writes or Slack replies.
+a failed Copilot call, and it cannot propose real file writes, Slack replies, or PR comments.
 Confirmed demo memories are excluded from real Copilot task context.
 
 ## Local distillation and feedback loop
 
 ```text
-Initial material / selected files -> Lead distillation -> candidate memories
+Connected project / optional context -> Lead distillation -> candidate memories
                                               -> owner confirmation
-Task -> result -> human correction / decision reason -> Lead learning
+Task -> result -> human correction / decision -> background Lead learning
                                               -> candidate memories
                                               -> owner confirmation
                                               -> context for future work
@@ -88,13 +103,23 @@ Memories carry **category** (`fact`, `preference`, `workflow`), **scope**
 confirmed memories are included in each invocation. Pending candidates are not.
 Learning never modifies permissions, and one approved action never becomes
 standing authorization. Correct contradictions by removing an old memory and
-confirming or explicitly adding its replacement.
+confirming its replacement. Choices are recorded even without a written reason,
+but they are weak evidence: Lead may correctly propose no reusable memory.
+Explicit feedback, actual decisions, and your replies in already-tracked Slack
+threads enter the learning loop. An observed reply is a behavior example, not
+approval of the agent's draft. Silence and the agent's own output never count
+as human feedback or authorization.
+
+Learning happens in the background. Candidate memories live in **What Buddy
+knows**, not the main decisions list, and Slack sends a grouped profile notice
+instead of interrupting you once for every observation. They still require
+confirmation before changing future behavior.
 
 Application data is outside the checkout by default:
 
 - macOS: `~/Library/Application Support/work-buddy/`
 - Linux: `~/.local/share/work-buddy/` (or the configured XDG data location)
-- SQLite: `work-buddy.db` holds tasks, results, candidate approvals, feedback, and events.
+- SQLite: `work-buddy.db` holds daily notes, tasks, results, approvals, feedback, and events.
 - **`memory/confirmed.json`** is a human-readable export regenerated on memory changes.
   The SQLite database is authoritative; edit memories through the UI, not this export.
 - **`artifacts/<task-id>-<round>.json`** holds validated Lead/Worker outputs, including
@@ -131,10 +156,14 @@ These variables are not forwarded to Copilot subprocesses.
 
 The bridge uses Socket Mode: no public endpoint or cloud backend is required.
 The bot receives your DMs **to the bot**, not all your private messages. In allowed
-channels, it reacts to the configured keyword, or (when no keyword is configured)
-mentions of you or the bot. Bot messages and retries are deduplicated. Access to
+channels, it captures the configured keyword, or (when no keyword is configured)
+mentions of you or the bot. Lead then decides whether the message deserves work
+in the context of your daily priorities. Bot messages and retries are deduplicated. Access to
 thread history depends on Slack token scopes; failures appear in the event log.
 Old history is not automatically backfilled.
+When you reply in an already-tracked thread in an allowed channel, Lead records
+that example and learns from it in the background. It does not create another
+work task for the same reply or resolve pending approvals on your behalf.
 
 Decisions arrive in the owner's Slack DM with a confirmation modal and optional
 reason. Only the configured owner may resolve them. Actual replies are posted
@@ -146,14 +175,37 @@ corrections are analyzed by Lead and returned as confirmable memory candidates.
 Public distribution / Marketplace onboarding and centralized OAuth are outside
 this prototype. Do not distribute a shared app-level token to other users.
 
+## Automatic PR review requests (optional)
+
+Install and authenticate the [GitHub CLI](https://cli.github.com/), then open
+**Settings / Connect GitHub reviews** and explicitly choose up to five repositories
+(`owner/repo`). This prototype supports GitHub.com, using the existing `gh` login.
+Nothing is fetched while this connection is disabled.
+
+Every two minutes, the inbox checks open PRs **requesting your review** in those
+repositories (the 100 most recently updated requests). A new head commit becomes
+a discovered side task; the same PR/head is not repeatedly queued. Lead gets the
+description and captured diff, triages it against the day, and prepares a review.
+It does not need a manually entered task or a local checkout of the PR.
+
+Remote reviews and their workers cannot read or modify the unrelated local project.
+The diff context is capped at 120,000 characters and truncation is explicitly
+reported to Lead. These are review drafts, not claims of running PR tests.
+
+Publishing requires approval of the exact body and commit. The application checks
+that the PR is still open and the head has not changed, then posts a **COMMENT**
+review against that commit. It never automatically approves, requests changes,
+or merges a PR. A timeout or uncertain write is not retried automatically.
+
 ## Architecture and limits
 
 - FastAPI + static HTML/CSS/JS; no frontend build or external CDN.
-- SQLite task state survives restarts. One Lead slot + bounded Worker slots.
+- SQLite task state and daily notes survive restarts. One Lead slot + bounded
+  Worker slots (default two). Existing databases/settings are preserved on upgrade.
 - Copilot runs through supported non-interactive JSONL output using stdin prompts.
   No terminal scraping, SDK runtime download, or custom model training.
 - Each invocation is a fresh CLI session with explicit task context, confirmed
-  memories, prior decisions, and child outputs. Task state, not an infinite chat,
+  memories, today's priorities, prior decisions, and child outputs. Task state, not an infinite chat,
   is the continuity mechanism.
 - Lead delegates at most once per work task. Workers cannot delegate. Maximum
   eight invocations per task, with a configurable invocation timeout.
@@ -166,7 +218,7 @@ this prototype. Do not distribute a shared app-level token to other users.
   content hash and rejects stale previews, path traversal, symlinks, and changes
   to credential/repository metadata. Files are replaced atomically individually,
   **not as a multi-file transaction**. No deletion or automatic shell/test execution.
-- Slack writes and file changes are explicit approval actions. Approvals expire
+- Slack writes, PR comments, and file changes are explicit approval actions. Approvals expire
   after 24 hours. Executing actions interrupted by a crash become **uncertain**:
   verify externally before creating a new task. They are never auto-replayed.
 - Pause prevents new invocations; it does not cancel active ones. Cancel tasks to

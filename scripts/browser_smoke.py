@@ -43,22 +43,25 @@ async def main():
                     page.on("pageerror", lambda error: errors.append(str(error)))
                     await page.goto(launch_url)
                     await expect(page.locator("#application")).to_be_visible()
-                    await page.get_by_role("button", name="Connections & settings").click()
+                    await expect(page.locator("#daily-form textarea")).to_have_count(1)
+                    await expect(page.locator("#daily-form input")).to_have_count(0)
+                    await page.get_by_role("button", name="Settings", exact=True).click()
+                    await page.locator("#advanced-settings > summary").click()
                     await page.locator("select[name=backend]").select_option("demo")
                     await page.get_by_role("button", name="Save settings", exact=True).click()
                     await expect(page.locator("#notice")).to_contain_text("Settings saved")
 
-                    await page.get_by_role("button", name="Profile & learning").click()
+                    await page.get_by_role("button", name="Get to know me", exact=True).click()
                     await page.locator("textarea[name=material]").fill(
                         "I prefer concise replies that separate evidence from assumptions."
                     )
-                    await page.get_by_role("button", name="Distill with Lead").click()
-                    await expect(page.locator("#approvals")).to_contain_text(
+                    await page.get_by_role("button", name="Build my profile").click()
+                    await expect(page.locator("#memory-approvals")).to_contain_text(
                         "Synthetic example",
                         timeout=15000,
                     )
                     await (
-                        page.locator("#approvals")
+                        page.locator("#memory-approvals")
                         .get_by_role(
                             "button",
                             name="Approve",
@@ -66,18 +69,36 @@ async def main():
                         )
                         .click()
                     )
-                    await expect(page.locator("#detail-status")).to_contain_text("completed")
-
-                    await page.locator("input[name=title]").fill("Browser workflow")
-                    await page.locator("textarea[name=instructions]").fill(
-                        "Investigate two independent aspects and ask for the final format."
+                    await expect(page.locator("#memories .memory")).to_have_count(1)
+                    await (
+                        page.locator("#profile-dialog")
+                        .get_by_role("button", name="Close", exact=True)
+                        .click()
                     )
-                    await page.get_by_role("button", name="Start task").click()
+                    await expect(page.locator("#onboarding")).to_be_hidden()
+
+                    await page.locator("#daily-form textarea").fill(
+                        "Today: investigate caching and prepare design notes. "
+                        "Context: preserve compatibility; ask about the final format."
+                    )
+                    await page.get_by_role("button", name="Hand over my day").click()
                     await expect(page.locator("#approvals")).to_contain_text(
                         "Which deliverable",
                         timeout=15000,
                     )
                     await page.get_by_role("button", name="Short summary", exact=True).click()
+                    await expect(page.locator("#updates")).to_contain_text(
+                        "Completed the simulated workflow",
+                        timeout=15000,
+                    )
+                    await (
+                        page.locator("#updates")
+                        .get_by_role(
+                            "button",
+                            name="Read update / give feedback",
+                        )
+                        .first.click()
+                    )
                     await expect(page.locator("#detail-result")).to_contain_text(
                         "Completed the simulated workflow",
                         timeout=15000,
@@ -85,13 +106,24 @@ async def main():
                     await page.locator("#feedback-form textarea").fill(
                         "Include a concrete source rather than vague claims."
                     )
-                    await page.get_by_role("button", name="Send feedback & learn").click()
-                    await expect(page.locator("#approvals")).to_contain_text(
+                    await page.get_by_role("button", name="Tell Buddy").click()
+                    await (
+                        page.locator("#task-dialog")
+                        .get_by_role(
+                            "button",
+                            name="Close",
+                            exact=True,
+                        )
+                        .click()
+                    )
+                    await expect(page.locator("#decision-panel")).to_be_hidden()
+                    await page.get_by_role("button", name="What Buddy knows").click()
+                    await expect(page.locator("#memory-approvals")).to_contain_text(
                         "Confirm this candidate memory",
                         timeout=15000,
                     )
                     await (
-                        page.locator("#approvals")
+                        page.locator("#memory-approvals")
                         .get_by_role(
                             "button",
                             name="Approve",
@@ -99,17 +131,25 @@ async def main():
                         )
                         .click()
                     )
-                    await page.get_by_role("button", name="Profile & learning").click()
                     await expect(page.locator("#memories .memory")).to_have_count(2)
+                    await (
+                        page.locator("#profile-dialog")
+                        .get_by_role(
+                            "button",
+                            name="Close",
+                            exact=True,
+                        )
+                        .click()
+                    )
+                    await expect(page.locator("#updates article")).to_have_count(1)
                     if screenshot := os.environ.get("WORK_BUDDY_SCREENSHOT"):
+                        await page.evaluate("window.scrollTo(0, 0)")
                         await page.screenshot(path=screenshot, full_page=True)
                     assert not errors, errors
                     exported = Path(directory) / "memory/confirmed.json"
                     assert exported.exists()
                     assert not urlsplit(page.url).fragment, "Launch token remained in URL."
-                    print(
-                        "Browser flow passed: setup, distillation, delegation, decision, feedback."
-                    )
+                    print("Daily browser flow passed: brief, profile, decisions, quiet learning.")
                 finally:
                     await browser.close()
         finally:
