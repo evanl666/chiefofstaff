@@ -5,7 +5,7 @@ at once if you like. It hands each task to its own Copilot session, sends follow
 session that already knows the subject, drafts your Slack replies and PR reviews for you to
 approve, and keeps quiet until something needs you.
 
-![The inbox: results ready to review, with what was observed](docs/images/inbox-review.png)
+![The inbox: results ready to review, with what was observed](https://raw.githubusercontent.com/evanl666/chiefofstaff/main/docs/images/inbox-review.png)
 
 ```bash
 uvx chiefofstaff --demo     # try it now: scripted sessions, no account needed
@@ -41,7 +41,7 @@ track of which session knew what. Chief of Staff gives you **one inbox** instead
 - **Runs on the Copilot you already have**: your company's Copilot plan, models, MCP servers
   and policies. No new AI vendor to approve.
 
-![Approving a Slack reply drafted in your voice](docs/images/approve-dark.png)
+![Approving a Slack reply drafted in your voice](https://raw.githubusercontent.com/evanl666/chiefofstaff/main/docs/images/approve-dark.png)
 
 ## Get started
 
@@ -56,8 +56,8 @@ Your browser opens a private local page. Add a project folder when it asks, then
 chief of staff what you need. Closing the page does not stop your sessions; they resume after a
 restart.
 
-Optional: [connect Slack](docs/guide.md#slack) to have DMs and mentions answered, and
-[GitHub review requests](docs/guide.md#github-reviews).
+Optional: [connect Slack](https://github.com/evanl666/chiefofstaff/blob/main/docs/guide.md#slack) to have DMs and mentions answered, and
+[GitHub review requests](https://github.com/evanl666/chiefofstaff/blob/main/docs/guide.md#github-reviews).
 
 ## How it works
 
@@ -77,9 +77,9 @@ coordinates them: it stores every message before delivering it, wraps it in an e
 says who sent it (so a Slack message cannot pose as you), checks what was observed against what
 was reported, and keeps the owner's attention for what matters.
 
-- [Guide](docs/guide.md): the inbox, tasks, workspaces, Slack, focus, settings.
-- [Architecture](docs/ARCHITECTURE.md): how it is built.
-- [Security](SECURITY.md): what the OS enforces, what Chief of Staff enforces, and what only the
+- [Guide](https://github.com/evanl666/chiefofstaff/blob/main/docs/guide.md): the inbox, tasks, workspaces, Slack, focus, settings.
+- [Architecture](https://github.com/evanl666/chiefofstaff/blob/main/docs/ARCHITECTURE.md): how it is built.
+- [Security](https://github.com/evanl666/chiefofstaff/blob/main/SECURITY.md): what the OS enforces, what Chief of Staff enforces, and what only the
   model's instructions do.
 
 ## Status
@@ -89,10 +89,10 @@ Copilot session; the inbox shows credits per task.
 
 ## Contributing
 
-Start with the demo and [CONTRIBUTING.md](CONTRIBUTING.md); [good first issues](docs/good-first-issues.md)
+Start with the demo and [CONTRIBUTING.md](https://github.com/evanl666/chiefofstaff/blob/main/CONTRIBUTING.md); [good first issues](https://github.com/evanl666/chiefofstaff/blob/main/docs/good-first-issues.md)
 are listed there. Ideas and bug reports are welcome as issues.
 
 ## License
 
-[MIT](LICENSE). Chief of Staff is an independent project, not affiliated with GitHub.
+[MIT](https://github.com/evanl666/chiefofstaff/blob/main/LICENSE). Chief of Staff is an independent project, not affiliated with GitHub.
 "GitHub Copilot" is a trademark of GitHub, Inc.
