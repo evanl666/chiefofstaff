@@ -65,14 +65,9 @@
       <form id="settings-form" method="dialog">
         <h2>Settings</h2>
         <label>
-          <span>Projects</span>
-          <textarea name="projects" rows="3" placeholder="/Users/you/code/app — one directory per line"></textarea>
-          <small>Workers may work in these directories. The Router picks one per task and asks you when it is not sure; a folder you choose there is added here.</small>
-        </label>
-        <label>
-          <span>Workspaces folder</span>
-          <input name="scratch_directory" placeholder="" autocomplete="off" />
-          <small>Each worker gets its own folder here, with its checkouts of your projects and anything it clones.</small>
+          <span>Code folder</span>
+          <input name="code_folder" placeholder="/Users/you/workspace" autocomplete="off" />
+          <small>Where your repositories live. Each one is a project; a repository a task needs that is not here is cloned into it. Every worker works in its own folder in .chief inside it, with a git worktree of each repository it changes, so your own checkouts are never touched.</small>
         </label>
         <div class="row">
           <label><span>Parallel workers</span><input name="max_workers" type="number" min="1" max="12" /></label>
@@ -158,6 +153,16 @@
             <label><span>Slack check (s)</span><input name="slack_poll_seconds" type="number" min="20" max="900" /></label>
           </div>
           <label class="check"><input name="paused" type="checkbox" /> Pause Slack and GitHub watchers</label>
+          <label>
+            <span>Other project folders</span>
+            <textarea name="projects" rows="2" placeholder="/Users/you/elsewhere/app — one per line"></textarea>
+            <small>Folders outside the code folder that workers may also work in. A folder you pick when the Router asks is added here.</small>
+          </label>
+          <label>
+            <span>Task folders</span>
+            <input name="scratch_directory" autocomplete="off" />
+            <small>Where each worker's own folder goes. Empty: .chief in the code folder.</small>
+          </label>
           <small id="data-directory"></small>
         </details>
 

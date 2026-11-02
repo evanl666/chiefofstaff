@@ -87,8 +87,9 @@ export function fillSettings() {
   const form = $("#settings-form");
   const settings = state.snapshot.settings;
   form.projects.value = settings.projects.join("\n");
+  form.code_folder.value = settings.code_folder;
   form.scratch_directory.value = settings.scratch_directory;
-  form.scratch_directory.placeholder = `${state.snapshot.data_directory}/work/workspaces`;
+  form.scratch_directory.placeholder = settings.code_folder ? `${settings.code_folder}/.chief` : `${state.snapshot.data_directory}/work/workspaces`;
   form.max_workers.value = settings.max_workers;
   form.worker_yolo.checked = settings.worker_yolo;
   form.worker_sandbox.checked = settings.worker_sandbox;
@@ -149,6 +150,7 @@ export async function saveSettings(event) {
   const form = $("#settings-form");
   const body = {
     projects: lines(form.projects.value),
+    code_folder: form.code_folder.value.trim(),
     scratch_directory: form.scratch_directory.value.trim(),
     max_workers: Number(form.max_workers.value),
     worker_yolo: form.worker_yolo.checked,

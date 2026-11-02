@@ -39,8 +39,8 @@ The dot next to each session shows its state (hover it for the words): pulsing b
 amber, waiting for your answer; green, done; red, failed; hollow grey, queued; grey, idle; a
 blue ring, open in a terminal right now.
 
-Project folders are the repositories workers may change (see [Where workers work](#where-workers-work)).
-Until you add one, the inbox offers to; *Not now* hides that card, and Settings still has them.
+Until you set your code folder (see [Where workers work](#where-workers-work)), the inbox asks
+for it; *Not now* hides that card, and Settings still has it.
 
 ## Giving work
 
@@ -92,15 +92,33 @@ programs writing to one session would mix up its history.
 
 ## Where workers work
 
-**Projects** (Settings) are the folders workers may work on. The Router matches a task to a
-project by its name, git remote and README headline. When it is not sure, or you name a folder
-that is not a project yet, it asks you on a card; a folder you pick there becomes a project.
+You set one **code folder**: where your repositories live, like `~/workspace`.
 
-Every worker gets its own **workspace** folder. A code change gets a **git worktree** of each
-project inside it, on branch `chief/<task>`, started from the latest default branch of
-`origin` (fetched first) and not tracking it. Your own checkout is never touched, and parallel
-workers never share one. A worker can add repositories later with `add_repo`, including ones
-that are not on this machine (cloned into its workspace). A worker's header opens its folder in
+```
+~/workspace/                 your code folder
+  aven/                      your repositories, one copy each; workers never touch them
+  racer/
+  .chief/                    Chief of Staff's task folders (hidden)
+    fix-login-a1b2/          one folder per task
+      aven/                  a git worktree of aven on branch chief/fix-login-a1b2
+    research-flags-e5f6/     research: an empty folder for notes
+```
+
+- Every git repository in the code folder (up to two levels down) is a project: the Router
+  matches a task to one by its name, git remote and README headline, and asks you on a card
+  when it is not sure.
+- A repository a task needs that is not there yet (a GitHub owner/name or a git URL) is cloned
+  into the code folder once and stays for later tasks.
+- Each worker works in its own task folder, with a **git worktree** of each repository it
+  changes, on branch `chief/<task>`, started from the latest default branch of `origin`. Your
+  checkouts are never touched, and parallel workers never share one: two agents in one folder
+  would overwrite each other's files and switch each other's branches.
+- Follow-ups on a task go to the same worker and folder. When a worker closes, its worktrees
+  are removed if they hold nothing uncommitted (the branches stay); reopening it brings them
+  back.
+
+Folders outside the code folder can be added under *Advanced → Other project folders*, and
+*Task folders* puts the task folders somewhere else. A worker's header opens its folder in
 Finder or VS Code.
 
 With the **sandbox** on (Settings, default), workers' shell commands can write only to their

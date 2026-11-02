@@ -263,6 +263,8 @@ class Store:
             values["projects"] = [
                 path for path in values.get("projects", []) if Path(path).is_dir()
             ]
+            if not Path(values.get("code_folder") or "/nonexistent").is_dir():
+                values["code_folder"] = ""
             return Settings.model_validate(values)
 
     def save_settings(self, settings: Settings):

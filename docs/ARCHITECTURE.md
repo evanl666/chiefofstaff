@@ -42,7 +42,7 @@ tool allowlist, permission and request callbacks, sandbox, model.
 | `focus.py` | Focus Shield. |
 | `state.py` | Per-session in-memory state (connection, turn flags) and the lock order. |
 | `receipts.py` | Observed commands, changes and PR checks next to a report. |
-| `workspaces.py` | Worker folders, worktrees, clones, change stats. |
+| `workspaces.py` | The code folder (its repositories, clones into it), each worker's task folder and worktrees (removed on close, restored on reopen), change stats. |
 | `policy.py` | Pure permission rules for actions without the sandbox. |
 | `backend.py` | The `AgentBackend`/`AgentSession` protocols, Copilot backend, sandbox policy. |
 | `scripted.py` | A backend without a model (scripts); runs `demo.py` and contract tests. |

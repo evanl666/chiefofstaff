@@ -215,6 +215,7 @@ async def scenario_reopen(app: App, worker: dict):
     router = state["router_id"]
     await app.post(f"/api/sessions/{worker['id']}/close")
     assert (await app.get(f"/api/sessions/{worker['id']}"))["closed_at"]
+    await wait_for("its worktree is removed", lambda: gone(Path(worker["cwd"])), 60)
     assert worker["id"] in [s["id"] for s in (await app.get("/api/state"))["closed"]]
     mark = (await app.get(f"/api/sessions/{router}/messages"))[-1]["id"]
     await app.post(
@@ -225,9 +226,12 @@ async def scenario_reopen(app: App, worker: dict):
         },
     )
     tree = Path(worker["cwd"])
+    # Branches live in the repository; the worktree itself is gone while the worker is closed.
+    repo = Path(worker["checkouts"][0]["repo"])
+    assert not tree.exists(), "a closed worker's clean worktree is removed"
 
     async def committed():
-        if "Add second line" not in git(tree, "log", "--format=%s", "-1", worker["branch"]):
+        if "Add second line" not in git(repo, "log", "--format=%s", "-1", worker["branch"]):
             return None
         row = await app.get(f"/api/sessions/{worker['id']}")
         return row if row["status"] == "done" else None
@@ -749,6 +753,58 @@ async def scenario_repos(app: App, root: Path):
     log(f"one worker, {len(worker['checkouts'])} checkouts on {worker['branch']}, in yolo")
 
 
+async def gone(path: Path) -> bool:
+    return not path.exists()
+
+
+async def scenario_code_folder(app: App, root: Path):
+    """The code folder: a repository the owner names that is not on this machine is cloned into
+    it; the worker changes it in its own worktree in .chief, removed when the worker closes."""
+    code = root / "code"
+    code.mkdir()
+    origin, _ = published_repo(root, "billing")
+    state = await app.get("/api/state")
+    settings = {**state["settings"], "code_folder": ""}
+    await app.post("/api/settings", settings)  # Another scenario may have set one.
+    added = await app.post("/api/projects", {"path": str(code)})
+    assert added == {"path": str(code), "kind": "code_folder", "repositories": 0}, added
+    router = state["router_id"]
+    mark = max((m["id"] for m in await app.get(f"/api/sessions/{router}/messages")), default=0)
+    await app.post(
+        f"/api/sessions/{router}/messages",
+        {
+            "text": f"In the billing repository at file://{origin} (not on this machine yet), "
+            "add a file CODE.md containing exactly `from the code folder test` and commit it "
+            "with the message 'Add code'. Use an isolated worktree."
+        },
+    )
+
+    async def done():
+        messages = await app.get(f"/api/sessions/{router}/messages?after={mark}")
+        for message in messages:
+            if message["kind"] == "notice" and message["text"].startswith("Started"):
+                worker = await app.get(f"/api/sessions/{message['meta']['session_id']}")
+                if worker["status"] == "done" and worker["checkouts"]:
+                    return worker
+        return None
+
+    worker = await wait_for("the worker commits in a repository it cloned", done, 900, app)
+    clone = code / "billing"
+    assert (clone / ".git").is_dir(), "cloned into the code folder, to stay"
+    [checkout] = [c for c in worker["checkouts"] if Path(c.get("repo", "")) == clone]
+    tree = Path(checkout["path"])
+    assert tree.is_relative_to(code / ".chief") and (tree / "CODE.md").exists()
+    assert "Add code" in git(tree, "log", "--format=%s", "-1")
+    assert not (clone / "CODE.md").exists(), "the clone in the code folder is left as it is"
+    assert (await app.get("/api/state"))["settings"]["code_folder"] == str(code)
+    assert checkout["branch"].startswith("chief/"), checkout
+    assert git(tree, "branch", "--show-current").strip() == checkout["branch"]
+    await app.post(f"/api/sessions/{worker['id']}/close")
+    await wait_for("its clean worktree is removed", lambda: gone(tree), 60)
+    assert checkout["branch"] in git(clone, "branch", "--format=%(refname:short)").split()
+    log(f"cloned into {clone}, changed in {tree} on {checkout['branch']}; worktree removed")
+
+
 async def scenario_models_usage_digest(app: App, started: float):
     state = await app.get("/api/state")
     router = state["router_id"]
@@ -911,6 +967,10 @@ async def main():
                 await scenario_delegate(app, workspace)
                 log("DELEGATE SCENARIO PASSED")
                 return
+            if sys.argv[1:] == ["code-folder"]:
+                await scenario_code_folder(app, root)
+                log("CODE FOLDER SCENARIO PASSED")
+                return
             if sys.argv[1:] == ["repos"]:
                 await scenario_repos(app, root)
                 log("REPOS SCENARIO PASSED")
@@ -928,6 +988,7 @@ async def main():
             await scenario_ask_user(app)
             await scenario_ask_session(app)
             await scenario_repos(app, root)
+            await scenario_code_folder(app, root)
             await scenario_models_usage_digest(app, started)
             await scenario_profile(app)
             router_messages = await app.get(f"/api/sessions/{router}/messages")

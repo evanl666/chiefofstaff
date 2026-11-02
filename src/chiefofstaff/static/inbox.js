@@ -232,7 +232,7 @@ const NO_PROJECTS = "cos.noProjectsCard";  // The owner chose to work without pr
 
 function setupCard() {
   const snap = state.snapshot;
-  const key = `${snap.runtime.state}:${snap.runtime.error}:${snap.settings.projects.length}`;
+  const key = `${snap.runtime.state}:${snap.runtime.error}:${snap.settings.projects.length}:${snap.settings.code_folder}`;
   let node = document.getElementById("inbox-setup");
   if (node?.dataset.key === key) return node;
   if (snap.runtime.state === "error") {
@@ -260,15 +260,19 @@ function setupCard() {
       ),
       el("div", { class: "actions" }, el("span", { class: "muted", text: "Or look around first: chiefofstaff --demo" }), retry),
     );
-  } else if (snap.runtime.state === "ready" && !snap.demo && !snap.settings.projects.length && localStorage.getItem(NO_PROJECTS) !== "1") {
-    const input = el("input", { placeholder: "~/code/my-app", autocomplete: "off" });
+  } else if (snap.runtime.state === "ready" && !snap.demo && !snap.settings.projects.length && !snap.settings.code_folder && localStorage.getItem(NO_PROJECTS) !== "1") {
+    const input = el("input", { placeholder: "~/workspace", autocomplete: "off" });
     const error = el("span", { class: "error" });
     const add = async () => {
       if (!input.value.trim()) return;
       error.textContent = "";
       try {
-        const { path } = await api("/api/projects", { method: "POST", body: { path: input.value.trim() } });
-        toast(`Added ${shortPath(path)}.`);
+        const added = await api("/api/projects", { method: "POST", body: { path: input.value.trim() } });
+        toast(
+          added.kind === "code_folder"
+            ? `Code folder: ${shortPath(added.path)}, ${added.repositories} ${added.repositories === 1 ? "repository" : "repositories"}. Others a task needs get cloned into it.`
+            : `Added ${shortPath(added.path)}.`,
+        );
         await loadState();
       } catch (failure) {
         error.textContent = failure.message;
@@ -278,8 +282,8 @@ function setupCard() {
     node = el(
       "div",
       { id: "inbox-setup", class: "card setup" },
-      el("div", { class: "head" }, el("span", { class: "label", text: "Add a project folder" })),
-      el("p", { text: "Workers change code in their own copies (git worktrees) of these folders; your own checkout stays as it is. Research and questions need no project." }),
+      el("div", { class: "head" }, el("span", { class: "label", text: "Where is your code?" })),
+      el("p", { text: "The folder your repositories live in, like ~/workspace. Repositories a task needs that are not there yet get cloned into it. Each worker works in its own copy (a git worktree in .chief inside that folder), so your own checkouts stay as they are. Research and questions need no code." }),
       el(
         "div",
         { class: "actions" },
@@ -288,7 +292,7 @@ function setupCard() {
         el("button", { type: "button", class: "text", text: "Not now", onclick: () => {
           localStorage.setItem(NO_PROJECTS, "1");
           node.remove();
-          toast("Add projects any time in Settings.");
+          toast("Set your code folder any time in Settings.");
         } }),
         el("button", { type: "button", text: "Add", onclick: add }),
       ),

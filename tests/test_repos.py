@@ -5,6 +5,7 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from conftest import Harness, call_tool, env, settle
 
 from chiefofstaff import workspaces as workspaces_module
@@ -114,8 +115,11 @@ async def test_add_repo_from_this_machine_or_a_remote(tmp_path):
     again = await call_tool(runtime, "add_repo", worker, repo=str(web))
     assert "already have" in again.text_result_for_llm
 
+    same = await call_tool(runtime, "add_repo", worker, repo=f"file://{origin}")
+    assert "already have" in same.text_result_for_llm, "the project with that origin is used"
+    lib, _ = published(tmp_path, "lib")  # Not a project: it is cloned.
     cloned = json.loads(
-        (await call_tool(runtime, "add_repo", worker, repo=f"file://{origin}")).text_result_for_llm
+        (await call_tool(runtime, "add_repo", worker, repo=f"file://{lib}")).text_result_for_llm
     )
     assert Path(cloned["path"]).parent == Path(added["path"]).parent
     assert run("git", "branch", "--show-current", cwd=cloned["path"]).strip() == info["branch"]
@@ -375,3 +379,108 @@ async def test_receipts_show_what_was_observed_next_to_the_report(tmp_path, git_
     await settle(runtime)
     flags = runtime.task_actions.view(runtime.tasks.get(claim["task_id"]))["receipts"]["flags"]
     assert flags == ["Says tests pass, but no test run was observed."]
+
+
+async def test_the_code_folder_holds_projects_task_folders_and_clones(tmp_path):
+    remote = tmp_path / "remote"
+    remote.mkdir()
+    api_origin, _ = published(remote, "api")
+    lib_origin, _ = published(remote, "lib")
+    code = tmp_path / "code"
+    run("git", "clone", "-q", str(api_origin), str(code / "group" / "api"))
+    for where in (".hidden/old", "node_modules/dep", "group/api/vendor/inner"):
+        (code / where).mkdir(parents=True)
+        run("git", "init", "-q", str(code / where))
+    (code / "notes").mkdir()
+    harness = Harness(tmp_path / "data", Settings(code_folder=str(code)))
+    runtime = await harness.connect()
+    api = str((code / "group" / "api").resolve())
+    assert runtime.workspaces.projects() == [api], "two levels deep; not hidden, deps or nested"
+
+    first = await spawn(
+        runtime, harness.router_id, title="Fix", instructions="x", project=api, isolate=True
+    )
+    assert Path(first["cwd"]).is_relative_to(code.resolve() / ".chief"), "its own task folder"
+    added = json.loads(
+        (
+            await call_tool(runtime, "add_repo", first["session_id"], repo=f"file://{lib_origin}")
+        ).text_result_for_llm
+    )
+    lib = code / "lib"
+    assert (lib / ".git").is_dir(), "a repository not on this machine is cloned into the folder"
+    assert Path(added["path"]).parent != lib and added["branch"] == first["branch"]
+    assert str(lib.resolve()) in runtime.workspaces.projects()
+
+    second = await spawn(runtime, harness.router_id, title="Docs", instructions="y")
+    await call_tool(runtime, "add_repo", second["session_id"], repo=f"file://{lib_origin}")
+    assert sorted(path.name for path in code.iterdir()) == [
+        ".chief",
+        ".hidden",
+        "group",
+        "lib",
+        "node_modules",
+        "notes",
+    ], "the second task reuses that clone"
+    projects = await call_tool(runtime, "list_sessions", harness.router_id)
+    assert str(lib.resolve()) in projects.text_result_for_llm
+
+
+def exists(path) -> bool:
+    return Path(path).exists()
+
+
+async def test_closing_a_worker_removes_its_clean_worktrees_and_reopening_restores_them(
+    tmp_path, git_repo
+):
+    code = tmp_path / "code"
+    run("git", "clone", "-q", str(git_repo), str(code / "app"))
+    harness = Harness(tmp_path / "data", Settings(code_folder=str(code)))
+    runtime = await harness.connect()
+    app = str((code / "app").resolve())
+    clean, busy = [
+        await spawn(
+            runtime, harness.router_id, title=title, instructions=title, project=app, isolate=True
+        )
+        for title in ("Clean", "Busy")
+    ]
+    await settle(runtime)
+    (Path(busy["cwd"]) / "draft.txt").write_text("not committed yet")
+    for worker in (clean, busy):
+        await runtime.workers.close(worker["session_id"])
+    await settle(runtime)
+    assert not exists(clean["cwd"]), "a clean worktree goes"
+    assert not exists(Path(clean["cwd"]).parent), "and its empty task folder"
+    assert exists(Path(busy["cwd"]) / "draft.txt"), "uncommitted work is never removed"
+    branches = run("git", "branch", "--format=%(refname:short)", cwd=app).split()
+    assert clean["branch"] in branches, "the branch stays"
+
+    await runtime.workers.reopen(clean["session_id"])
+    assert run("git", "branch", "--show-current", cwd=clean["cwd"]).strip() == clean["branch"]
+
+
+async def failure(coroutine) -> Exception | None:
+    try:
+        await coroutine
+    except Exception as exc:
+        return exc
+    return None
+
+
+async def test_the_inbox_adds_a_repository_or_a_folder_of_them(tmp_path, git_repo):
+    harness = Harness(tmp_path / "data")
+    runtime = await harness.connect()
+    folder = tmp_path / "code"
+    run("git", "clone", "-q", str(git_repo), str(folder / "app"))
+    assert "own data" in str(await failure(runtime.add_folder(str(tmp_path))))
+    added = await runtime.add_folder(str(folder))
+    assert added == {"path": str(folder.resolve()), "kind": "code_folder", "repositories": 1}
+    assert harness.store.settings().code_folder == str(folder.resolve())
+    with pytest.raises(ValueError, match="is a repository"):
+        Settings(code_folder=str(folder / "app"))
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    assert "Your code folder is" in str(await failure(runtime.add_folder(str(elsewhere))))
+    other = tmp_path / "other"
+    other.mkdir()
+    run("git", "init", "-q", str(other))
+    assert (await runtime.add_folder(str(other)))["kind"] == "project"

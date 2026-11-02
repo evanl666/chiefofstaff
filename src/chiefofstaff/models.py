@@ -28,6 +28,11 @@ class Settings(StrictModel):
     # Copied task reports end with a short "Orchestrated with Chief of Staff" line.
     report_footer: bool = True
     digest_time: str = Field(default="09:00", pattern=r"^(|([01]\d|2[0-3]):[0-5]\d)$")
+    # Where the owner's repositories live (e.g. ~/workspace). Each git repository in it is a
+    # project; one a task needs that is not on this machine is cloned into it; each worker works
+    # in its own folder in .chief/ inside it.
+    code_folder: str = Field(default="", max_length=500)
+    # Folders outside the code folder that workers may also work in.
     projects: list[str] = Field(default_factory=list, max_length=30)
     # Tasks without a project get a folder here; empty means inside the data directory.
     scratch_directory: str = Field(default="", max_length=500)
@@ -61,6 +66,19 @@ class Settings(StrictModel):
             if str(path) not in projects:
                 projects.append(str(path))
         self.projects = projects
+        if self.code_folder:
+            path = Path(self.code_folder).expanduser().resolve()
+            if not path.is_dir():
+                raise ValueError(f"The code folder does not exist: {self.code_folder}")
+            if path == Path.home() or path == Path(path.anchor):
+                raise ValueError("Choose the folder your repositories are in, like ~/workspace.")
+            if (path / ".git").exists():
+                # Its task folders would land inside the repository as untracked files.
+                raise ValueError(
+                    f"{path} is a repository. The code folder is the folder your repositories "
+                    "are in, like its parent; add a single repository under Other project folders."
+                )
+            self.code_folder = str(path)
         if self.scratch_directory:
             scratch = Path(self.scratch_directory).expanduser()
             if not scratch.is_absolute():

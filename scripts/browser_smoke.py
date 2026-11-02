@@ -32,7 +32,7 @@ async def run(page, app: App, project: Path, workspace: Workspace, errors: list[
         "Give your chief of staff some work"
     )
     setup = page.locator("#inbox-setup")
-    await expect(setup).to_contain_text("Add a project folder", timeout=60000)
+    await expect(setup).to_contain_text("Where is your code?", timeout=60000)
     await page.screenshot(path=SHOTS / "1-empty.png")
     # Working without projects for now: the card goes, and stays gone after a reload.
     await setup.get_by_role("button", name="Not now").click()
@@ -42,15 +42,15 @@ async def run(page, app: App, project: Path, workspace: Workspace, errors: list[
     await expect(page.locator("#inbox-setup")).to_have_count(0)
     await page.evaluate("localStorage.removeItem('cos.noProjectsCard')")
     await page.reload()
-    await expect(setup).to_contain_text("Add a project folder", timeout=60000)
-    await setup.locator("input").fill(str(project))
+    await expect(setup).to_contain_text("Where is your code?", timeout=60000)
+    await setup.locator("input").fill(str(project.parent))
     await setup.get_by_role("button", name="Add").click()
     await expect(page.locator("#inbox-setup")).to_have_count(0)
-    log("added the project from the first-run card")
+    log("set the code folder from the first-run card")
 
     await page.get_by_role("button", name="Settings").click()
     form = page.locator("#settings-form")
-    await expect(form.locator("textarea[name=projects]")).to_have_value(str(project))
+    await expect(form.locator("input[name=code_folder]")).to_have_value(str(project.parent))
     await form.locator("input[name=mac_notifications]").uncheck()
     await form.locator("input[name=slack_enabled]").check()
     await form.locator("input[name=slack_token]").fill("xoxb-wrong")
@@ -213,8 +213,8 @@ async def main():
     serve_in_thread(workspace, SLACK_TOKEN, SLACK_PORT)
     with tempfile.TemporaryDirectory(prefix="wb-browser-") as temporary:
         root = Path(temporary).resolve()
-        project = root / "project"
-        project.mkdir()
+        project = root / "code" / "project"  # A repository in the owner's code folder.
+        project.mkdir(parents=True)
         git(project, "init", "-q", "-b", "main")
         (project / "README.md").write_text("# Demo\n")
         git(project, "add", ".")

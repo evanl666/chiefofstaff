@@ -90,8 +90,9 @@ class AskWorkspace(BaseModel):
 
 class AddRepo(BaseModel):
     repo: str = Field(
-        description="A configured project folder (you get a worktree of it), or a repository "
-        "that is not on this machine: a git URL or GitHub owner/name (cloned into your workspace)"
+        description="A project folder (you get a worktree of it), or a git URL or GitHub "
+        "owner/name: a copy already on this machine is used, else it is cloned (into the owner's "
+        "code folder when there is one, to stay for later tasks)"
     )
 
 
@@ -232,7 +233,7 @@ class Tools:
 
     async def t_ask_workspace(self, params: AskWorkspace, caller: str):
         self.caller(caller, ROUTER)
-        projects = self.store.settings().projects
+        projects = self.workspaces.projects()
         options = []
         for raw in params.options[:5]:
             path = Path(await asyncio.to_thread(os.path.expanduser, raw.strip()))
@@ -279,8 +280,9 @@ class Tools:
             ),
             (
                 "add_repo",
-                "Add a repository to your workspace: a worktree of a configured project, or a "
-                "clone of a repository that is not on this machine.",
+                "Add a repository to your workspace, as a worktree on your branch: of a project, "
+                "or of a repository by URL or GitHub owner/name (cloned first when it is not on "
+                "this machine).",
                 AddRepo,
                 self.t_add_repo,
             ),
@@ -442,7 +444,7 @@ class Tools:
         ]
         await self.runtime.check_model(params.model)
         project = (
-            str(resolve_project(params.project, self.store.settings().projects))
+            str(resolve_project(params.project, self.workspaces.projects()))
             if (params.project)
             else ""
         )
@@ -819,7 +821,6 @@ class Tools:
 
     async def t_distill_profile(self, params: DistillProfile, caller: str):
         self.caller(caller, ROUTER)
-        settings = self.store.settings()
         try:
             recent = await self.runtime.workers.external(refresh=True)
         except Exception:
@@ -829,7 +830,9 @@ class Tools:
             lines.append(f"Focus: {params.focus}")
         if current := self.store.get("profile"):
             lines.append(f"Current profile, to update rather than replace:\n{current}")
-        lines.append("Configured projects:\n" + "\n".join(f"- {p}" for p in settings.projects))
+        lines.append(
+            "Configured projects:\n" + "\n".join(f"- {p}" for p in self.workspaces.projects()[:40])
+        )
         lines.append(
             "Recent Copilot sessions of the owner (summary · directory):\n"
             + "\n".join(f"- {item['summary']} · {item['cwd']}" for item in recent[:40])

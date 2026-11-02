@@ -54,7 +54,9 @@ copilot login
 uvx chiefofstaff            # 或者：pipx install chiefofstaff && chiefofstaff
 ```
 
-浏览器会打开 `http://127.0.0.1:8765`。先添加一个项目文件夹，然后在底部的输入框里说你要做什么。
+浏览器会打开 `http://127.0.0.1:8765`。先告诉它你的代码放在哪个文件夹（比如 `~/workspace`），然后在
+底部的输入框里说你要做什么。任务要用到、但那里还没有的仓库，会自动 clone 进去；每个 worker 在里面
+用自己的 git worktree 干活，不会动你自己的代码目录。
 
 所有东西都在你自己的电脑上跑，数据存在 `~/Library/Application Support/chiefofstaff`（macOS）
 或 `~/.local/share/chiefofstaff`（Linux）。关掉网页不会停掉任何东西，要停就在终端里按 Ctrl+C。
