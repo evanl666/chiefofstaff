@@ -237,15 +237,17 @@ async def test_the_sandbox_keeps_what_runs_code_outside_it_read_only(backend, tm
         git_dir / "modules" / "lib" / "config",
         git_dir / "worktrees" / "mine" / "HEAD",
     ]
-    attempts = "; ".join(f"echo pwned >> {target}" for target in targets)
-    commit = "git -c user.email=t@t -c user.name=t commit -q --allow-empty -m sandboxed"
-    await session.send(
-        f"Run the shell command `{attempts}; {commit}` and then reply with just: finished"
-    )
+    # A script, so the model runs one harmless-looking command; the commit shows that it ran.
+    script = "".join(f"echo marker >> {target} 2>/dev/null\n" for target in targets)
+    script += "git -c user.email=t@t -c user.name=t commit -q --allow-empty -m sandboxed\n"
+    (work / "check.sh").write_text(script)
+    await session.send("Run the shell command `sh check.sh` and then reply with just: finished")
     await turn.wait()
+    assert last_commit(work) == "sandboxed", (
+        "the script ran, and the worker commits in its worktree"
+    )
     for target in targets:
-        assert "pwned" not in contents(target), target
-    assert last_commit(work) == "sandboxed", "the worker still commits in its own worktree"
+        assert "marker" not in contents(target), target
 
 
 def contents(path) -> str:
