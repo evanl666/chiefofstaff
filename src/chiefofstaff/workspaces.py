@@ -12,6 +12,7 @@ import unicodedata
 from contextlib import suppress
 from pathlib import Path
 
+from . import receipts
 from .models import Settings
 from .policy import within
 from .roles import WORKER
@@ -152,6 +153,32 @@ def git_dirs(checkouts: list[dict]) -> list[str]:
     return found
 
 
+async def changes(checkout: dict) -> dict | None:
+    """What a worker changed in one checkout: commits on its branch and uncommitted edits."""
+    path = checkout["path"]
+    try:
+        await git("-C", path, "rev-parse", "--git-dir")
+    except ValueError:
+        return None
+    result = {"path": path, "branch": checkout.get("branch", ""), "commits": 0}
+    committed = {"files": 0, "insertions": 0, "deletions": 0}
+    if base := checkout.get("base_ref") or ("" if checkout.get("shared") else "origin/HEAD"):
+        with suppress(ValueError):
+            committed = receipts.shortstat(
+                await git("-C", path, "diff", "--shortstat", f"{base}...HEAD")
+            )
+            result["commits"] = int(await git("-C", path, "rev-list", "--count", f"{base}..HEAD"))
+    uncommitted = {"files": 0, "insertions": 0, "deletions": 0}
+    with suppress(ValueError):
+        uncommitted = receipts.shortstat(await git("-C", path, "diff", "--shortstat", "HEAD"))
+    with suppress(ValueError):
+        status = await git("-C", path, "status", "--porcelain")
+        result["uncommitted"] = len([line for line in status.splitlines() if line.strip()])
+    for key in ("files", "insertions", "deletions"):
+        result[key] = committed[key] + uncommitted[key]
+    return result
+
+
 class Workspaces:
     def __init__(self, store: Store, work_root: Path):
         self.store = store
@@ -199,7 +226,8 @@ class Workspaces:
         tree = free_child(workspace, top.name)
         branch = f"{BRANCH_PREFIX}{slug}"
         # --no-track: the branch must never push to the default branch it started from.
-        await git("-C", str(top), "worktree", "add", "--no-track", "-b", branch, str(tree), ref)
+        start = (await git("-C", str(top), "rev-parse", ref)).strip()  # Fixed, unlike ref.
+        await git("-C", str(top), "worktree", "add", "--no-track", "-b", branch, str(tree), start)
         repos.add(str(top))
         return {
             "project": str(path),
@@ -208,6 +236,7 @@ class Workspaces:
             "path": str(tree / path.relative_to(top)),
             "branch": branch,
             "base": base,
+            "base_ref": start,
             "git_dir": await common_git_dir(top) or str(top / ".git"),
         }
 
@@ -237,6 +266,7 @@ class Workspaces:
         else:
             await git("clone", "--quiet", url, str(destination), limit=900)
         default = (await git("-C", str(destination), "rev-parse", "--abbrev-ref", "HEAD")).strip()
+        start = (await git("-C", str(destination), "rev-parse", "HEAD")).strip()
         branch = f"{BRANCH_PREFIX}{slug}"
         await git("-C", str(destination), "checkout", "--quiet", "-b", branch)
         return {
@@ -245,6 +275,7 @@ class Workspaces:
             "path": str(destination),
             "branch": branch,
             "base": f"origin/{default} of a fresh clone of {repo}",
+            "base_ref": start,
             "remote": repo,
         }
 

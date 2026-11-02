@@ -5,7 +5,7 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
-from conftest import Harness, call_tool, env
+from conftest import Harness, call_tool, env, settle
 
 from chiefofstaff import workspaces as workspaces_module
 from chiefofstaff.models import Settings
@@ -280,3 +280,81 @@ async def test_workers_run_sandboxed_in_their_own_folders(tmp_path, git_repo):
     options = harness.session(loose["session_id"]).options
     assert "sandbox_config" not in options
     assert "there is no sandbox" in options["system_message"]["content"]
+
+
+async def test_receipts_show_what_was_observed_next_to_the_report(tmp_path, git_repo):
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    runtime = await harness.connect()
+    info = await spawn(
+        runtime,
+        harness.router_id,
+        title="Fix",
+        instructions="fix",
+        project=str(git_repo),
+        isolate=True,
+    )
+    worker, tree = harness.session(info["session_id"]), Path(info["cwd"])
+    (tree / "fix.py").write_text("print('fixed')\n")
+    run("git", "add", ".", cwd=tree)
+    run("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "Fix", cwd=tree)
+    for call, code in (("c1", 1), ("c2", 0)):
+        worker.emit(
+            "tool.execution_start",
+            tool_call_id=call,
+            tool_name="bash",
+            arguments={"command": "uv run pytest -q"},
+        )
+        worker.emit(
+            "tool.execution_complete",
+            tool_call_id=call,
+            success=code == 0,
+            result=SimpleNamespace(content=f"...\n<shellId: 1 completed with exit code {code}>"),
+        )
+    harness.gh_replies["pr view https://github.com/acme/app/pull/7"] = json.dumps(
+        {
+            "number": 7,
+            "url": "https://github.com/acme/app/pull/7",
+            "state": "OPEN",
+            "statusCheckRollup": [{"conclusion": "SUCCESS"}],
+            "reviewDecision": "",
+        }
+    )
+    await call_tool(
+        runtime,
+        "report",
+        info["session_id"],
+        status="done",
+        summary="Fixed it; all tests pass. https://github.com/acme/app/pull/7",
+    )
+    await asyncio.sleep(0.3)  # Evidence is collected in the background (git, gh).
+    for _ in range(50):
+        view = runtime.task_view(runtime.tasks.get(info["task_id"]))
+        if view["receipts"] and view["receipts"]["checkouts"]:
+            break
+        await asyncio.sleep(0.05)
+    found = view["receipts"]
+    assert found["tests"] == {
+        "command": "uv run pytest -q",
+        "exit_code": 0,
+        "passed": True,
+        "runs": 2,
+    }
+    assert found["changed"]["files"] == 1 and found["changed"]["commits"] == 1
+    assert found["prs"][0]["checks"] == "passing" and found["flags"] == []
+    report = runtime.task_report(info["task_id"])
+    assert "- Tests: `uv run pytest -q` passed" in report
+    assert "[acme/app#7](https://github.com/acme/app/pull/7): checks passing" in report
+    assert "Orchestrated with [Chief of Staff]" in report
+
+    claim = await spawn(runtime, harness.router_id, title="Claim", instructions="c")
+    await call_tool(
+        runtime, "report", claim["session_id"], status="done", summary="All tests pass."
+    )
+    worker = harness.session(claim["session_id"])
+    worker.emit(
+        "tool.execution_start", tool_call_id="x", tool_name="bash", arguments={"command": "ls"}
+    )
+    worker.emit("tool.execution_complete", tool_call_id="x", success=True, result=None)
+    await settle(runtime)
+    flags = runtime.task_view(runtime.tasks.get(claim["task_id"]))["receipts"]["flags"]
+    assert flags == ["Says tests pass, but no test run was observed."]

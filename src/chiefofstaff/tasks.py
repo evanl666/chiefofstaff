@@ -91,6 +91,15 @@ class TaskBook:
             (session_id,),
         )
 
+    def latest_run(self, session_id: str) -> dict | None:
+        """The last run of the task a session is on, finished or not."""
+        task = self.current(session_id)
+        if not task:
+            return None
+        return self.store.one(
+            "SELECT * FROM runs WHERE task_id=? ORDER BY started_at DESC LIMIT 1", (task["id"],)
+        )
+
     def runs(self, task_id: str) -> list[dict]:
         return self.store.all("SELECT * FROM runs WHERE task_id=? ORDER BY started_at", (task_id,))
 

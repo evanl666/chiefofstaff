@@ -25,6 +25,8 @@ class Settings(StrictModel):
     worker_yolo: bool = False
     # Workers' shell commands run in an OS sandbox: they write only to their own folders.
     worker_sandbox: bool = True
+    # Copied task reports end with a short "Orchestrated with Chief of Staff" line.
+    report_footer: bool = True
     digest_time: str = Field(default="09:00", pattern=r"^(|([01]\d|2[0-3]):[0-5]\d)$")
     projects: list[str] = Field(default_factory=list, max_length=30)
     # Tasks without a project get a folder here; empty means inside the data directory.

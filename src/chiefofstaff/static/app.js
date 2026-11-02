@@ -14,7 +14,8 @@ const STATUS_TEXT = {
 
 const state = {
   snapshot: null,
-  selected: localStorage.getItem("wb.selected"),
+  selected: localStorage.getItem("cos.selected") || "inbox",
+  chief: null,
   external: [],
   lastId: 0,
   connectedOnce: false,
@@ -303,13 +304,14 @@ function draftsFor(sessionId) {
 async function loadState() {
   const data = await api("/api/state");
   state.snapshot = data;
-  const known = current() || state.external.some((item) => item.id === state.selected);
+  const known = state.selected === INBOX || current() || state.external.some((item) => item.id === state.selected);
   if (!known) {
-    state.selected = data.router_id;
+    state.selected = INBOX;
   }
   renderSidebar();
   renderHeader();
   renderDrafts();
+  scheduleInbox();
 }
 
 async function loadModels() {
@@ -334,6 +336,7 @@ function connectEvents() {
 
 async function resync() {
   await loadState();
+  if (state.selected === INBOX) return;
   const session = byId(state.selected);
   if (!session) return;
   const messages = await api(`/api/sessions/${session.id}/messages?after=${state.lastId}`);
@@ -346,6 +349,13 @@ function handleEvent({ type, data }) {
     state.connectedOnce = true;
   } else if (type === "message") {
     if (data.session_id === state.selected) appendMessages([data]);
+    const meta = data.meta || {};
+    if (state.chief && data.session_id === routerId() && ((data.kind === "assistant" && !meta.internal) || data.kind === "update")) {
+      state.chief.replies.push(data.text);
+      scheduleInbox();
+    }
+  } else if (type === "task") {
+    upsertTask(data);
   } else if (type === "session") {
     upsertSession(data);
     // Credits change as sessions work: refresh today's total at most every 5 seconds.
@@ -357,12 +367,16 @@ function handleEvent({ type, data }) {
     const drafts = pendingDrafts().filter((draft) => draft.id !== data.id);
     if (data.status === "pending") drafts.push(data);
     state.snapshot.drafts = drafts;
+    const uncertain = uncertainDrafts().filter((draft) => draft.id !== data.id);
+    if (data.status === "uncertain") uncertain.push(data);
+    state.snapshot.uncertain = uncertain;
     renderDrafts();
     renderSidebar();
     updateDraftRecords();
+    scheduleInbox();
   } else if (type === "toast") {
     // The Router view already shows updates and every pending draft.
-    const visible = document.hasFocus() && [data.session_id, routerId()].includes(state.selected);
+    const visible = document.hasFocus() && [data.session_id, routerId(), INBOX].includes(state.selected);
     if (!visible) toast(data.text, data.needs_action ? "attention" : "", data.session_id);
   } else if (type === "state") {
     scheduleReload();
@@ -379,6 +393,7 @@ function upsertSession(session) {
   if (session.closed_at && session.role === "worker") closed.unshift(session);
   state.snapshot.closed = closed.slice(0, 20);
   renderSidebar();
+  scheduleInbox();
   if (session.id !== state.selected) return;
   if (session.closed_at) state.viewing = session;
   renderHeader();
@@ -423,8 +438,8 @@ function renderSidebar() {
   const workers = all
     .filter((session) => session.role === "worker")
     .sort((a, b) => (STATUS_ORDER[a.status] ?? 9) - (STATUS_ORDER[b.status] ?? 9) || b.created_at.localeCompare(a.created_at));
-  const nodes = [];
-  if (router) nodes.push(sessionItem(router, "Router"));
+  const nodes = [inboxItem()];
+  if (router) nodes.push(sessionItem(router, "Chat"));
   if (slack && state.snapshot.settings.slack_enabled) nodes.push(sessionItem(slack, "Slack"));
   if (watchdog && state.snapshot.settings.watchdog_enabled) nodes.push(sessionItem(watchdog, "Watchdog"));
   if (workers.length) {
@@ -470,6 +485,7 @@ function renderStatusLine() {
       el("button", { type: "button", class: "link", text: "Retry", onclick: reconnect }),
     );
   }
+  if (snap.demo) nodes.push(el("div", { class: "demo", text: "Demo mode: scripted sessions, nothing leaves this machine" }));
   if (snap.runtime.warning) nodes.push(el("div", { class: "bad", text: snap.runtime.warning }));
   if (snap.settings.slack_enabled && snap.slack.error) nodes.push(el("div", { class: "bad", text: `Slack: ${snap.slack.error}` }));
   if (snap.settings.github_enabled && snap.github.error) nodes.push(el("div", { class: "bad", text: `GitHub: ${snap.github.error}` }));
@@ -520,6 +536,10 @@ async function loadExternal(refresh = false) {
 // Main pane
 
 function renderHeader() {
+  if (state.selected === INBOX) {
+    renderInboxHeader();
+    return;
+  }
   const session = current();
   const actions = $("#session-actions");
   if (!session) return;
@@ -541,7 +561,7 @@ function renderHeader() {
   if (session.credits >= 0.05) meta.push(`${session.credits.toFixed(1)} credits`);
   const follows = session.follows || [];
   if (follows.length && !session.closed_at) meta.push(`following ${follows.length}`);
-  const titles = { router: "Router", slack: "Slack", watchdog: "Watchdog" };
+  const titles = { router: "Chat with your chief of staff", slack: "Slack", watchdog: "Watchdog" };
   $("#session-title").textContent = titles[session.role] || session.title;
   $("#session-meta").textContent = meta.filter(Boolean).join(" · ");
   const where = session.role === "worker" ? (session.checkouts?.length ? session.checkouts.map((checkout) => `${checkout.path}${checkout.branch ? ` (${checkout.branch})` : ""}`) : [session.cwd]) : [];
@@ -695,6 +715,14 @@ async function post(path) {
 
 async function select(sessionId) {
   if (!sessionId) return;
+  if (sessionId === INBOX) {
+    showInbox();
+    return;
+  }
+  $("#inbox").hidden = true;
+  $("#timeline").hidden = false;
+  $("#drafts").hidden = false;
+  $("#composer-input").placeholder = "";
   if (!byId(sessionId)) {
     try {
       state.viewing = await api(`/api/sessions/${sessionId}`);
@@ -704,7 +732,7 @@ async function select(sessionId) {
     }
   }
   state.selected = sessionId;
-  localStorage.setItem("wb.selected", sessionId);
+  localStorage.setItem("cos.selected", sessionId);
   renderSidebar();
   renderHeader();
   renderDrafts();
@@ -1108,6 +1136,381 @@ function draftCard(draft) {
   return node;
 }
 
+// Inbox: what needs the owner, what is running, and results ready to review.
+
+const INBOX = "inbox";
+const tasks = () => state.snapshot?.tasks || [];
+const uncertainDrafts = () => state.snapshot?.uncertain || [];
+const TASK_LABEL = { queued: "Queued", running: "Running", waiting: "Needs you", review: "Ready to review", done: "Done", failed: "Failed", cancelled: "Cancelled" };
+const TASK_CHIP = { queued: "", running: "progress", waiting: "waiting", review: "done", done: "done", failed: "failed", cancelled: "" };
+
+function needsYou() {
+  const waiting = tasks().filter((task) => task.status === "waiting" || task.status === "failed" || task.blocked);
+  return { drafts: pendingDrafts(), uncertain: uncertainDrafts(), tasks: waiting };
+}
+
+function needsYouCount() {
+  const items = needsYou();
+  return items.drafts.length + items.uncertain.length + items.tasks.length;
+}
+
+function inboxCounts() {
+  const running = tasks().filter((task) => (task.status === "running" || task.status === "queued") && !task.blocked).length;
+  const review = tasks().filter((task) => task.status === "review").length;
+  return { needs: needsYouCount(), running, review };
+}
+
+function inboxItem() {
+  const count = needsYouCount();
+  return el(
+    "button",
+    { type: "button", class: `item inbox-item${state.selected === INBOX ? " selected" : ""}`, onclick: () => select(INBOX) },
+    el("span", { class: `dot${count ? " waiting" : ""}` }),
+    el("span", { class: "label", text: "Inbox" }),
+    count ? el("span", { class: "badge amber", text: String(count), title: "Needs you" }) : null,
+  );
+}
+
+function showInbox() {
+  state.selected = INBOX;
+  localStorage.setItem("cos.selected", INBOX);
+  $("#inbox").hidden = false;
+  $("#timeline").hidden = true;
+  $("#drafts").hidden = true;
+  $("#session-tuning").hidden = true;
+  $("#composer").hidden = false;
+  $("#composer-input").placeholder = "Ask your chief of staff…";
+  renderSidebar();
+  renderInboxHeader();
+  renderInbox();
+  $("#scroller").scrollTop = 0;
+  $("#composer-input").focus();
+}
+
+function renderInboxHeader() {
+  const { needs, running, review } = inboxCounts();
+  $("#session-title").textContent = "Inbox";
+  const parts = [needs ? `${needs} need${needs === 1 ? "s" : ""} you` : "Nothing needs you", running ? `${running} running` : "", review ? `${review} to review` : ""];
+  $("#session-meta").textContent = parts.filter(Boolean).join(" · ");
+  $("#session-meta").title = "";
+  $("#session-meta").classList.remove("yolo");
+  $("#session-actions").replaceChildren();
+}
+
+let inboxFrame = 0;
+function scheduleInbox() {
+  if (state.selected !== INBOX || inboxFrame) return;
+  inboxFrame = requestAnimationFrame(() => {
+    inboxFrame = 0;
+    renderInboxHeader();
+    renderInbox();
+  });
+}
+
+// Keeps nodes whose key did not change, so a half-typed follow-up survives an update.
+function reconcile(container, items) {
+  const existing = new Map([...container.children].map((node) => [node.dataset.key, node]));
+  const nodes = items.map(({ key, build }) => {
+    const node = existing.get(key) || build();
+    node.dataset.key = key;
+    return node;
+  });
+  if (nodes.length !== container.children.length || nodes.some((node, index) => container.children[index] !== node)) {
+    container.replaceChildren(...nodes);
+  }
+}
+
+function section(id, title, count, hint) {
+  let node = document.getElementById(id);
+  if (!node) {
+    node = el("section", { id, class: "inbox-section" }, el("h2", {}, el("span", { class: "title" }), el("span", { class: "count" })), el("div", { class: "items" }), el("p", { class: "empty-hint" }));
+  }
+  node.querySelector(".title").textContent = title;
+  node.querySelector(".count").textContent = count ? String(count) : "";
+  node.querySelector(".empty-hint").textContent = count ? "" : hint;
+  return node;
+}
+
+function renderInbox() {
+  const box = $("#inbox");
+  if (state.selected !== INBOX || !state.snapshot) return;
+  const items = needsYou();
+  // A worker waiting on a card for the owner shows as that card, under Needs you.
+  const asking = new Set(items.drafts.map((draft) => draft.session_id));
+  const running = tasks()
+    .filter((task) => (task.status === "running" || task.status === "queued") && !task.blocked && !asking.has(task.session_id))
+    .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+  const review = tasks().filter((task) => task.status === "review").sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+  const finished = tasks().filter((task) => task.status === "done" || task.status === "cancelled").sort((a, b) => (b.ended_at || "").localeCompare(a.ended_at || ""));
+
+  const needs = section("inbox-needs", "Needs you", items.drafts.length + items.uncertain.length + items.tasks.length, "Nothing needs you right now.");
+  reconcile(needs.querySelector(".items"), [
+    ...items.drafts.map((draft) => ({ key: `draft:${draft.id}`, build: () => draftCard(draft) })),
+    ...items.uncertain.map((draft) => ({ key: `uncertain:${draft.id}:${draft.outcome}`, build: () => uncertainCard(draft) })),
+    ...items.tasks.map((task) => ({ key: taskKey(task), build: () => taskCard(task) })),
+  ]);
+  const runningSection = section("inbox-running", "Running", running.length, "");
+  runningSection.hidden = !running.length;
+  reconcile(runningSection.querySelector(".items"), running.map((task) => ({ key: taskKey(task), build: () => taskCard(task) })));
+  const reviewSection = section("inbox-review", "Ready to review", review.length, "Finished work shows up here with what was observed: tests, changes and pull requests.");
+  reconcile(reviewSection.querySelector(".items"), review.map((task) => ({ key: taskKey(task), build: () => taskCard(task) })));
+
+  let recent = document.getElementById("inbox-recent");
+  if (!recent) {
+    recent = el("details", { id: "inbox-recent", class: "inbox-section recent" }, el("summary"), el("div", { class: "items" }));
+  }
+  recent.hidden = !finished.length;
+  recent.querySelector("summary").textContent = `Recently finished · ${finished.length}`;
+  reconcile(recent.querySelector(".items"), finished.slice(0, 30).map((task) => ({ key: taskKey(task), build: () => taskCard(task) })));
+
+  const first = !tasks().length && !items.drafts.length && !items.uncertain.length;
+  const welcome = first ? document.getElementById("inbox-welcome") || welcomeCard() : null;
+  const order = [chiefStrip(), welcome, needs, runningSection, reviewSection, recent].filter(Boolean);
+  if (order.some((node, index) => box.children[index] !== node) || box.children.length !== order.length) box.replaceChildren(...order);
+}
+
+function taskKey(task) {
+  const worker = byId(task.session_id);
+  return `task:${task.id}:${task.status}:${task.updated_at}:${task.blocked ? 1 : 0}:${worker?.status || ""}:${worker?.activity || ""}:${JSON.stringify(task.receipts || null)}`;
+}
+
+function welcomeCard() {
+  const examples = [
+    "Fix the flaky login test in the api repo and open a PR",
+    "Research how other teams use feature flags and summarize the options",
+    "Watch for review requests on my repos and draft reviews for me",
+  ];
+  return el(
+    "div",
+    { id: "inbox-welcome", class: "welcome" },
+    el("h2", { text: "Give your chief of staff some work" }),
+    el("p", { text: "Say what you need below, several things at once if you like. Each task gets its own worker in its own folder; you approve anything sent in your name, and finished work waits here for your review." }),
+    el("div", { class: "examples" }, ...examples.map((text) => el("button", { type: "button", class: "secondary", text, onclick: () => { $("#composer-input").value = text; $("#composer-input").focus(); } }))),
+  );
+}
+
+// The latest exchange with the Router, so a request from the inbox gets its answer here too.
+function chiefStrip() {
+  const chief = state.chief;
+  if (!chief) return null;
+  let node = document.getElementById("chief-strip");
+  if (!node) node = el("div", { id: "chief-strip", class: "card chief" });
+  const router = byId(routerId());
+  const replies = chief.replies.slice(-2);
+  node.replaceChildren(
+    el(
+      "div",
+      { class: "head" },
+      el("span", { class: "label", text: "You asked" }),
+      el("span", { class: "spacer" }),
+      el("button", { type: "button", class: "open", text: "Open chat", onclick: () => select(routerId()) }),
+      el("button", { type: "button", class: "text", text: "×", title: "Hide", onclick: () => { state.chief = null; node.remove(); } }),
+    ),
+    el("div", { class: "asked", text: chief.asked }),
+    ...replies.map((reply) => el("div", { class: "reply markdown", html: markdown(reply) })),
+    !replies.length || router?.status === "working" ? el("div", { class: "working-line", text: router?.status === "working" ? "Working on it…" : "Sent." }) : null,
+  );
+  return node;
+}
+
+function taskCard(task) {
+  const worker = byId(task.session_id);
+  const error = el("span", { class: "error" });
+  const actions = el("div", { class: "actions" });
+  const finishedAt = ["review", "done", "failed", "cancelled"].includes(task.status) ? task.ended_at || task.updated_at : "";
+  const meta = [task.worker && task.worker !== task.title ? task.worker : "", finishedAt ? `finished ${since(finishedAt)}` : `started ${since(task.created_at)}`, task.credits >= 0.05 ? `${task.credits.toFixed(1)} credits` : "", task.runs > 1 ? `${task.runs} runs` : ""].filter(Boolean).join(" · ");
+  const node = el(
+    "div",
+    { class: `card task ${task.status}${task.blocked ? " blocked" : ""}` },
+    el(
+      "div",
+      { class: "head" },
+      el("span", { class: "label title", text: task.title, title: task.goal }),
+      el("span", { class: `chip ${task.blocked ? "blocked" : TASK_CHIP[task.status]}`, text: task.blocked ? "Blocked" : TASK_LABEL[task.status] }),
+      el("span", { class: "spacer" }),
+      el("span", { class: "meta", text: meta }),
+      task.session_id ? el("button", { type: "button", class: "open", text: "Open", onclick: () => select(task.session_id) }) : null,
+    ),
+  );
+  const body = taskBody(task, worker);
+  if (body) node.append(body);
+  if (task.receipts && (task.status === "review" || task.status === "done")) node.append(receiptsView(task.receipts));
+
+  async function act(path, body, done) {
+    for (const button of actions.querySelectorAll("button")) button.disabled = true;
+    error.textContent = "";
+    try {
+      const view = await api(path, { method: "POST", body: body || {} });
+      upsertTask(view);
+      if (done) toast(done);
+    } catch (failure) {
+      error.textContent = failure.message;
+      for (const button of actions.querySelectorAll("button")) button.disabled = false;
+    }
+  }
+  function reply(label, placeholder) {
+    const input = el("textarea", { rows: 2, placeholder });
+    const send = () => input.value.trim() && act(`/api/tasks/${task.id}/follow-up`, { text: input.value.trim() }, "Sent to the worker.");
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        send();
+      }
+    });
+    actions.replaceChildren(input, el("button", { type: "button", class: "text", text: "Cancel", onclick: showActions }), el("button", { type: "button", text: label, onclick: send }));
+    input.focus();
+  }
+  function confirmCancel() {
+    const reason = el("input", { placeholder: "Why? (optional)" });
+    actions.replaceChildren(reason, el("button", { type: "button", class: "text", text: "Keep it", onclick: showActions }), el("button", { type: "button", class: "danger", text: "Cancel task", onclick: () => act(`/api/tasks/${task.id}/cancel`, { text: reason.value.trim() }, "Task cancelled.") }));
+    reason.focus();
+  }
+  function showActions() {
+    const buttons = [];
+    if (task.status === "review") {
+      buttons.push(
+        el("button", { type: "button", class: "text", text: "Copy report", onclick: () => copyReport(task) }),
+        el("button", { type: "button", class: "secondary", text: "Follow up", onclick: () => reply("Send", "What else should it do?") }),
+        el("button", { type: "button", text: "Accept", onclick: () => act(`/api/tasks/${task.id}/accept`) }),
+      );
+    } else if (task.status === "waiting") {
+      buttons.push(
+        el("button", { type: "button", class: "text", text: "Cancel task", onclick: confirmCancel }),
+        el("button", { type: "button", text: "Reply", onclick: () => reply("Send", "Your answer") }),
+      );
+    } else if (task.status === "failed") {
+      buttons.push(
+        el("button", { type: "button", class: "text", text: "Cancel task", onclick: confirmCancel }),
+        el("button", { type: "button", class: "secondary", text: "Retry with a note", onclick: () => retryWithNote() }),
+        el("button", { type: "button", text: "Retry", onclick: () => act(`/api/tasks/${task.id}/retry`, {}, "Retrying.") }),
+      );
+    } else if (task.status === "running" || task.status === "queued") {
+      buttons.push(
+        el("button", { type: "button", class: "text", text: "Cancel", onclick: confirmCancel }),
+        el("button", { type: "button", class: "text", text: "Add a note", onclick: () => reply("Send", "Tell the worker now (it reads it within its current turn)") }),
+      );
+    } else if (task.status === "done") {
+      buttons.push(el("button", { type: "button", class: "text", text: "Copy report", onclick: () => copyReport(task) }));
+    }
+    actions.replaceChildren(error, ...buttons);
+  }
+  function retryWithNote() {
+    const input = el("textarea", { rows: 2, placeholder: "What should it do differently?" });
+    actions.replaceChildren(input, el("button", { type: "button", class: "text", text: "Cancel", onclick: showActions }), el("button", { type: "button", text: "Retry", onclick: () => act(`/api/tasks/${task.id}/retry`, { text: input.value.trim() }, "Retrying.") }));
+    input.focus();
+  }
+  showActions();
+  if (actions.children.length > 1) node.append(actions);
+  return node;
+}
+
+function taskBody(task, worker) {
+  if (task.status === "running" || task.status === "queued") {
+    const line = task.status === "queued" ? worker?.activity || "Waiting for a free worker slot" : worker?.activity || (worker?.status === "working" ? "Working…" : "Between turns");
+    const command = line.replace(/^(bash|shell|powershell) /, "$ ");
+    const nodes = [el("div", { class: "activity", text: compactPaths(command, worker?.cwd) })];
+    if (task.progress) nodes.push(el("div", { class: "progress markdown", html: markdown(task.progress) }));
+    return el("div", { class: "task-body" }, ...nodes);
+  }
+  const text = task.status === "review" || task.status === "done" ? task.result || task.progress : task.progress || (task.blocked ? "It waits for a task that ended without finishing." : "");
+  if (!text) return null;
+  const content = el("div", { class: "body markdown", html: markdown(text) });
+  if (text.length > 700 || text.split("\n").length > 10) content.classList.add("folded");
+  const wrapper = el("div", { class: "task-body" }, content);
+  if (content.classList.contains("folded")) {
+    const toggle = el("button", { type: "button", class: "more", text: "Show more" });
+    toggle.addEventListener("click", () => {
+      const folded = content.classList.toggle("folded");
+      toggle.textContent = folded ? "Show more" : "Show less";
+    });
+    wrapper.append(toggle);
+  }
+  return wrapper;
+}
+
+function since(iso) {
+  const passed = ago(iso);
+  return passed === "now" ? "just now" : `${passed} ago`;
+}
+
+function plural(count, word) {
+  return `${count} ${word}${count === 1 ? "" : "s"}`;
+}
+
+// What was observed, next to what the worker reported.
+function receiptsView(receipts) {
+  const items = [];
+  const result = (label, item) => {
+    if (!item) return;
+    items.push(el("span", { class: `receipt ${item.passed ? "pass" : "fail"}`, title: `${item.command}\n(${plural(item.runs, "run")})`, text: `${item.passed ? "✓" : "✗"} ${label}` }));
+  };
+  result("tests", receipts.tests);
+  result("checks", receipts.checks);
+  result("build", receipts.build);
+  const changed = receipts.changed || {};
+  if (changed.files) items.push(el("span", { class: "receipt", text: `+${changed.insertions} −${changed.deletions} in ${plural(changed.files, "file")}` }));
+  if (changed.commits) items.push(el("span", { class: "receipt", text: plural(changed.commits, "commit") }));
+  if (changed.uncommitted) items.push(el("span", { class: "receipt warn", text: `${changed.uncommitted} uncommitted` }));
+  for (const pr of receipts.prs || []) {
+    const checks = { passing: "✓", failing: "✗", pending: "…" }[pr.checks] || "";
+    items.push(el("a", { class: `receipt pr ${pr.checks}`, href: pr.url, target: "_blank", rel: "noreferrer", text: `${pr.label}${pr.state && pr.state !== "OPEN" ? ` (${pr.state.toLowerCase()})` : ""} ${checks}`.trim() }));
+  }
+  if (!items.length) items.push(el("span", { class: "receipt none", text: receipts.observed ? `${plural(receipts.observed, "command")}, no tests or changes observed` : "Nothing observed" }));
+  const view = el("div", { class: "receipts" }, el("span", { class: "observed", text: "Observed" }), ...items);
+  const flags = (receipts.flags || []).map((flag) => el("div", { class: "flag", text: flag }));
+  return el("div", { class: "evidence" }, view, ...flags);
+}
+
+async function copyReport(task) {
+  try {
+    const { markdown: text } = await api(`/api/tasks/${task.id}/report`);
+    await navigator.clipboard.writeText(text);
+    toast("Report copied: paste it into a PR description or a message.");
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+// A draft whose sending a stop interrupted, and that could not be confirmed.
+function uncertainCard(draft) {
+  const target = draft.target;
+  const where = draft.kind === "slack" ? `Slack reply to ${target.to || target.channel_id}` : `PR review on ${target.repo}#${target.number}`;
+  const error = el("span", { class: "error" });
+  const actions = el("div", { class: "actions" });
+  async function decide(body) {
+    for (const button of actions.querySelectorAll("button")) button.disabled = true;
+    try {
+      await api(`/api/drafts/${draft.id}`, { method: "POST", body });
+    } catch (failure) {
+      error.textContent = failure.message;
+      for (const button of actions.querySelectorAll("button")) button.disabled = false;
+    }
+  }
+  actions.append(
+    error,
+    el("button", { type: "button", class: "text", text: "Drop it", onclick: () => decide({ action: "reject" }) }),
+    el("button", { type: "button", class: "secondary", text: "It was sent", onclick: () => decide({ action: "mark_sent" }) }),
+    el("button", { type: "button", text: "Send again", onclick: () => decide({ action: "send", text: draft.final_text || draft.text }) }),
+  );
+  return el(
+    "div",
+    { class: "card draft uncertain" },
+    el("div", { class: "head" }, el("span", { class: "label", text: where }), el("span", { class: "chip waiting", text: "Sent?" })),
+    el("div", { class: "note", text: draft.outcome || "Chief of Staff stopped while sending this. Check whether it arrived." }),
+    el("div", { class: "body quoted", text: draft.final_text || draft.text }),
+    actions,
+  );
+}
+
+function upsertTask(task) {
+  if (!state.snapshot) return;
+  const list = tasks().filter((item) => item.id !== task.id);
+  list.push(task);
+  state.snapshot.tasks = list;
+  scheduleInbox();
+  renderSidebar();
+}
+
 // External sessions
 
 function showExternal(item) {
@@ -1396,10 +1799,16 @@ function bindUi() {
     event.preventDefault();
     const text = input.value.trim();
     const sessionId = state.selected;
-    if (!text || !current()) return;
+    if (!text || (sessionId !== INBOX && !current())) return;
     input.value = "";
     autosize();
     try {
+      if (sessionId === INBOX) {
+        await api(`/api/sessions/${routerId()}/messages`, { method: "POST", body: { text } });
+        state.chief = { asked: text, replies: [] };
+        scheduleInbox();
+        return;
+      }
       appendMessages([await api(`/api/sessions/${sessionId}/messages`, { method: "POST", body: { text } })]);
     } catch (error) {
       input.value = text;
@@ -1497,7 +1906,7 @@ async function boot() {
   connectEvents();
   loadModels();
   refreshUsageLink();
-  await select(state.selected || routerId());
+  await select(state.selected || INBOX);
 }
 
 boot();

@@ -169,6 +169,9 @@ class CopilotBackend:
             enabled=True,
             allow_bypass=False,
             allow_dev_tool_access=True,
+            # MCP servers are what the owner or their company configured, not what an agent
+            # wrote: they run as they do in Copilot, with their own sign-ins and network.
+            sandbox_mcp_servers=False,
             # git and gh get the owner's GitHub credentials through Copilot's local proxy;
             # commands only ever see stand-in values.
             auth=SandboxConfigAuth(gh=True, git=True),
@@ -229,6 +232,7 @@ def older(version: str, than: str) -> bool:
         return tuple(int(part) for part in text.split("-")[0].split(".") if part.isdigit())
 
     try:
-        return parts(version) < parts(than)
+        mine = parts(version)
+        return bool(mine) and mine < parts(than)
     except ValueError:
         return False

@@ -26,7 +26,7 @@ from copilot import ToolResult, define_tool
 from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
 from pydantic import BaseModel, Field
 
-from . import catalog, prompts, threads
+from . import catalog, prompts, receipts, threads
 from .asks import REQUEST_KINDS, AnswerSession, AskSession, OwnerAsks, RecordSetup
 from .backend import (
     OLDEST_CLI,
@@ -51,7 +51,7 @@ from .store import Store, hours_ago, now
 from .tasks import ENDED, OPEN, TaskBook
 from .tasks import migrate as migrate_tasks
 from .watchdog import WatchConfig, flags, review_packet, timestamp
-from .workspaces import BRANCH_PREFIX, Workspaces, git_dirs, resolve_project
+from .workspaces import BRANCH_PREFIX, Workspaces, changes, git_dirs, resolve_project
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +89,16 @@ GITHUB_HOSTS = (
     "codeload.github.com",
     "objects.githubusercontent.com",
 )
+PROJECT_URL = "https://github.com/evanl666/chiefofstaff"
+STATUS_WORDS = {
+    "queued": "Queued",
+    "running": "In progress",
+    "waiting": "Waiting for an answer",
+    "review": "Done, ready for review",
+    "done": "Done",
+    "failed": "Failed",
+    "cancelled": "Cancelled",
+}
 # Copilot's own bookkeeping tools; they say nothing about the work.
 PLUMBING_TOOLS = {"tool_search_tool", "report_intent"}
 
@@ -1039,6 +1049,136 @@ class Runtime(OwnerAsks):
 
     # Events from sessions
 
+    def record_command(self, session_id: str, call_id: str, arguments: dict):
+        command = str(arguments.get("command") or "").strip()
+        if not command:
+            return
+        # A worker may go on after reporting (a final push): that still belongs to its task.
+        run = self.tasks.run(session_id) or self.tasks.latest_run(session_id)
+        self.store.execute(
+            """INSERT INTO commands(session_id, run_id, call_id, command, kind, started_at)
+            VALUES (?,?,?,?,?,?)""",
+            (
+                session_id,
+                run["id"] if run else "",
+                call_id or "",
+                command[:2000],
+                receipts.kind(command),
+                now(),
+            ),
+        )
+
+    def finish_command(self, session_id: str, data: Any, output: str):
+        call_id = getattr(data, "tool_call_id", "") or ""
+        if not call_id:
+            return
+        code = receipts.exit_code(output, getattr(data, "success", None))
+        self.store.execute(
+            """UPDATE commands SET exit_code=?, output=?, ended_at=?
+            WHERE session_id=? AND call_id=? AND ended_at IS NULL""",
+            (code, output[-600:], now(), session_id, call_id),
+        )
+
+    def task_receipts(self, task: dict) -> dict | None:
+        """Observed commands, changes and PRs for a task, beside its report."""
+        commands = self.store.all(
+            """SELECT c.command, c.kind, c.exit_code FROM commands c JOIN runs r ON r.id=c.run_id
+            WHERE r.task_id=? ORDER BY c.id""",
+            (task["id"],),
+        )
+        latest = self.store.one(
+            "SELECT evidence FROM runs WHERE task_id=? AND evidence!='' ORDER BY started_at DESC",
+            (task["id"],),
+        )
+        evidence = json.loads(latest["evidence"]) if latest else None
+        if not commands and not evidence:
+            return None
+        return receipts.summarize(commands, evidence, task["result"] or task["progress"])
+
+    async def collect_evidence(self, task_id: str):
+        """After a task is reported done: its checkouts' changes and its PRs' state."""
+        task = self.tasks.get(task_id)
+        row = self.store.find_session(task["session_id"])
+        if not row:
+            return
+        checkouts = []
+        for checkout in self.workspaces.checkouts(row):
+            with suppress(Exception):
+                if found := await changes(checkout):
+                    checkouts.append(found)
+        prs = []
+        for repo, number in list(dict.fromkeys(threads.PR_URL.findall(task["result"])))[:5]:
+            try:
+                view = json.loads(
+                    await self.github.gh(
+                        "pr",
+                        "view",
+                        f"https://github.com/{repo}/pull/{number}",
+                        "--json",
+                        "number,url,state,statusCheckRollup,reviewDecision",
+                    )
+                )
+            except Exception:
+                logger.info("Could not read %s#%s for receipts.", repo, number, exc_info=True)
+                continue
+            prs.append(
+                {
+                    "label": f"{repo}#{number}",
+                    "url": view.get("url") or f"https://github.com/{repo}/pull/{number}",
+                    "state": view.get("state", ""),
+                    "checks": receipts.checks_state(view.get("statusCheckRollup") or []),
+                    "review": view.get("reviewDecision") or "",
+                }
+            )
+        run = self.store.one(
+            "SELECT id FROM runs WHERE task_id=? ORDER BY started_at DESC LIMIT 1", (task_id,)
+        )
+        if run:
+            evidence = {"checkouts": checkouts, "prs": prs, "at": now()}
+            self.store.execute(
+                "UPDATE runs SET evidence=? WHERE id=?", (json.dumps(evidence), run["id"])
+            )
+            self.publish_task(self.tasks.get(task_id))
+
+    def task_report(self, task_id: str) -> str:
+        """A task as markdown to paste into a PR description or a message."""
+        task = self.task_view(self.tasks.get(task_id))
+        found = task["receipts"] or {}
+        lines = [f"## {task['title']}", ""]
+        facts = [STATUS_WORDS.get(task["status"], task["status"])]
+        if task["runs"] > 1:
+            facts.append(f"{task['runs']} runs")
+        if task["credits"] >= 0.05:
+            facts.append(f"{task['credits']:.1f} Copilot credits")
+        lines += [" · ".join(facts), ""]
+        if task["goal"]:
+            lines += ["**Goal**", "", task["goal"].strip(), ""]
+        if text := task["result"] or task["progress"]:
+            lines += ["**Result** (as reported)", "", text.strip(), ""]
+        observed = []
+        for label, key in (("Tests", "tests"), ("Checks", "checks"), ("Build", "build")):
+            if item := found.get(key):
+                mark = "passed" if item["passed"] else f"failed (exit {item['exit_code']})"
+                observed.append(f"- {label}: `{item['command']}` {mark}")
+        changed = found.get("changed") or {}
+        if changed.get("files"):
+            observed.append(
+                f"- Changes: +{changed['insertions']} −{changed['deletions']} in "
+                f"{changed['files']} file{'s' if changed['files'] != 1 else ''}"
+                + (f", {changed['commits']} commit(s)" if changed.get("commits") else "")
+            )
+        for checkout in found.get("checkouts", []):
+            if checkout.get("branch"):
+                observed.append(f"- Branch `{checkout['branch']}`")
+        for pr in found.get("prs", []):
+            observed.append(f"- [{pr['label']}]({pr['url']}): checks {pr['checks']}")
+        observed += [f"- ⚠ {flag}" for flag in found.get("flags", [])]
+        if observed:
+            lines += ["**Observed**", "", *observed, ""]
+        if self.store.settings().report_footer:
+            lines.append(f"<sub>Orchestrated with [Chief of Staff]({PROJECT_URL})</sub>")
+        return "\n".join(lines).strip() + "\n"
+
     def on_event(self, session_id: str, event: Any, source: Any = None):
         if source is not None and self.states.handle(session_id) is not source:
             # A Copilot session we let go of (replaced, refreshed or closed): its late events
@@ -1084,11 +1224,21 @@ class Runtime(OwnerAsks):
             summary = describe_tool(name, getattr(data, "arguments", None))
             self.add_message(session_id, "tool", summary)
             self.update_session(session_id, activity=summary)
+            arguments = getattr(data, "arguments", None)
+            if (
+                row["role"] == WORKER
+                and name in receipts.SHELL_TOOLS
+                and isinstance(arguments, dict)
+            ):
+                self.record_command(session_id, getattr(data, "tool_call_id", ""), arguments)
         elif kind == "tool.execution_complete":
             result = getattr(data, "result", None)
-            if row["role"] == WORKER and result and not getattr(data, "parent_tool_call_id", None):
+            if row["role"] == WORKER and not getattr(data, "parent_tool_call_id", None):
+                output = (getattr(result, "content", "") or "") if result else ""
                 # Kept for the watchdog: the tail of the latest output shows hangs and errors.
-                self.states[session_id].last_output = (getattr(result, "content", "") or "")[-1500:]
+                if output:
+                    self.states[session_id].last_output = output[-1500:]
+                self.finish_command(session_id, data, output)
         elif kind == "assistant.usage":
             usage = getattr(data, "copilot_usage", None)
             model = getattr(data, "model", "")
@@ -2369,6 +2519,7 @@ class Runtime(OwnerAsks):
         if task:
             if params.status == "done":
                 task = self.tasks.move(task["id"], "review", result=params.summary[:4000])
+                self.background(self.collect_evidence(task["id"]))
             elif params.status in {"question", "blocked"}:
                 task = self.tasks.move(task["id"], "waiting", progress=params.summary[:1000])
             elif task["status"] != "running":
@@ -2757,8 +2908,13 @@ class Runtime(OwnerAsks):
             if action == "interrupt":
                 await self.interrupt(row["id"], by="the watchdog")
             text = params.message or params.reason
+            # Into the current turn: a worker stuck in a long turn would never see a queued one.
             await self.delivery.deliver(
-                row["id"], wrap("watchdog", "nudge", text), kind="watchdog", display=text
+                row["id"],
+                wrap("watchdog", "nudge", text),
+                kind="watchdog",
+                display=text,
+                steer=True,
             )
             self.save_watch(row["id"], nudges=nudges + 1)
         elif action == "escalate":
@@ -2821,6 +2977,8 @@ class Runtime(OwnerAsks):
             "after": [dep["id"] for dep in self.tasks.deps(task["id"])],
             "runs": len(self.tasks.runs(task["id"])),
             "credits": self.tasks.credits(task["id"]),
+            "blocked": task["status"] == "queued" and bool(self.tasks.broken(task)),
+            "receipts": self.task_receipts(task),
         }
 
     def publish_task(self, task: dict):
@@ -2835,9 +2993,11 @@ class Runtime(OwnerAsks):
     def snapshot(self) -> dict:
         return {
             "runtime": self.status,
+            "demo": getattr(self, "demo", False),
             "router_id": self.store.get("router_id"),
             "sessions": [self.view(row) for row in self.store.open_sessions()],
             "drafts": self.store.drafts(),
+            "uncertain": self.store.drafts("uncertain"),
             "tasks": [
                 self.task_view(task)
                 for task in self.tasks.listed(include_ended_since=hours_ago(TASKS_SHOWN_HOURS))

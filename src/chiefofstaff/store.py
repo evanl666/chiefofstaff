@@ -136,6 +136,14 @@ class Store:
         );
         CREATE INDEX IF NOT EXISTS runs_by_task ON runs(task_id);
         CREATE INDEX IF NOT EXISTS runs_by_session ON runs(session_id, ended_at);
+        CREATE TABLE IF NOT EXISTS commands (
+            id INTEGER PRIMARY KEY, session_id TEXT NOT NULL, run_id TEXT NOT NULL DEFAULT '',
+            call_id TEXT NOT NULL, command TEXT NOT NULL, kind TEXT NOT NULL DEFAULT '',
+            exit_code INTEGER, output TEXT NOT NULL DEFAULT '',
+            started_at TEXT NOT NULL, ended_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS commands_by_run ON commands(run_id, id);
+        CREATE INDEX IF NOT EXISTS commands_by_call ON commands(session_id, call_id);
         CREATE TABLE IF NOT EXISTS task_deps (
             task_id TEXT NOT NULL, depends_on TEXT NOT NULL, PRIMARY KEY (task_id, depends_on)
         );
@@ -168,6 +176,9 @@ class Store:
             """)
         if "task_id" not in columns:
             self.db.execute("ALTER TABLE sessions ADD COLUMN task_id TEXT NOT NULL DEFAULT ''")
+        run_columns = {row["name"] for row in self.db.execute("PRAGMA table_info(runs)")}
+        if "evidence" not in run_columns:
+            self.db.execute("ALTER TABLE runs ADD COLUMN evidence TEXT NOT NULL DEFAULT ''")
         usage_columns = {row["name"] for row in self.db.execute("PRAGMA table_info(usage)")}
         if "run_id" not in usage_columns:
             self.db.execute("ALTER TABLE usage ADD COLUMN run_id TEXT NOT NULL DEFAULT ''")

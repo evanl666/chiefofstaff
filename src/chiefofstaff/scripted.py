@@ -48,6 +48,8 @@ class Shell:
     output: str = ""
     exit_code: int = 0
     seconds: float = 0.4
+    # Run the command for real in the session's folder (the demo commits in its own repo).
+    run: bool = False
 
 
 @dataclass
@@ -196,13 +198,18 @@ class ScriptedSession:
         )
 
     async def do(self, step: Step) -> Any:
+        await asyncio.sleep(0)  # Earlier events are handled first, as with a real backend.
         if isinstance(step, Say):
             self.usage(step.text)
             self.history.append(("assistant", step.text))
             self.emit("assistant.message", content=step.text, tool_requests=None)
             return None
         if isinstance(step, Wait):
-            await asyncio.sleep(step.seconds)
+            # A message steered into the turn ends the wait, as it would interrupt a model.
+            waited = 0.0
+            while waited < step.seconds and not self.steering:
+                await asyncio.sleep(0.2)
+                waited += 0.2
             return None
         if isinstance(step, CallTool):
             return await self.call_tool(step)
@@ -270,10 +277,20 @@ class ScriptedSession:
         if denied := await self.permitted(request):
             return f"Permission denied: {denied}"
         call_id = self.start_tool("bash", {"command": step.command})
+        output, code = step.output, step.exit_code
+        if step.run:
+            process = await asyncio.create_subprocess_shell(
+                step.command,
+                cwd=self.cwd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            raw, _ = await process.communicate()
+            output, code = raw.decode(errors="replace").strip(), process.returncode or 0
         await asyncio.sleep(step.seconds)
-        text = f"{step.output}\n<exited with exit code {step.exit_code}>".lstrip()
-        self.end_tool(call_id, text, step.exit_code == 0)
-        return step.output
+        text = f"{output}\n<shellId: {next(self.calls)} completed with exit code {code}>".lstrip()
+        self.end_tool(call_id, text, code == 0)
+        return output
 
     async def write(self, step: WriteFile) -> str:
         target = (self.cwd / step.path).resolve()

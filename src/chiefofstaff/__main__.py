@@ -5,6 +5,7 @@ import os
 import secrets
 import socket
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -42,10 +43,24 @@ def main():
     parser = argparse.ArgumentParser(
         description="Run Chief of Staff: a Router that coordinates your Copilot sessions."
     )
-    parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--data-dir", type=Path, default=default_data_dir())
+    parser.add_argument("--port", type=int, default=None, help="default 8765 (8799 for --demo)")
+    parser.add_argument("--data-dir", type=Path, default=None)
     parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument(
+        "--demo",
+        action="store_true",
+        help="try it without Copilot or Slack: scripted sessions in a temporary folder",
+    )
     args = parser.parse_args()
+    args.port = args.port or (8799 if args.demo else 8765)
+    extra = {}
+    if args.demo:
+        from . import demo
+
+        args.data_dir = args.data_dir or Path(tempfile.mkdtemp(prefix="chiefofstaff-demo-"))
+        project = demo.make_project(args.data_dir.expanduser().resolve() / "projects")
+        extra["runtime_factory"] = demo.factory(project)
+    args.data_dir = args.data_dir or default_data_dir()
     if sys.platform == "win32":
         parser.error("This prototype currently supports macOS and Linux process management.")
     if not 1024 <= args.port <= 65535:
@@ -71,13 +86,15 @@ def main():
     except OSError:
         listener.close()
         parser.error(f"Port {args.port} is unavailable. Choose another --port.")
-    app = create_app(directory, token, args.port)
+    app = create_app(directory, token, args.port, **extra)
     print(
         f"Chief of Staff\nPrivate launch URL (do not share): {url}\nData: {directory}", flush=True
     )
     print(
         "Closing the browser does not stop your sessions. Ctrl+C stops Chief of Staff.", flush=True
     )
+    if args.demo:
+        print("Demo mode: scripted sessions, no account needed. The scenario plays by itself.")
     if not args.no_browser:
         threading.Thread(target=open_when_ready, args=(args.port, url), daemon=True).start()
     config = uvicorn.Config(

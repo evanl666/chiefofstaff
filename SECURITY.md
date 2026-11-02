@@ -77,5 +77,7 @@ no telemetry. GitHub Copilot itself works under GitHub's terms and settings.
   (Copilot applies the same policy on a best-effort basis); Chief of Staff's permission check
   covers them while yolo is off.
 - A worker in a shared project folder (not isolated) writes to that folder itself.
+- MCP servers are not sandboxed: they are what you or your company configured for Copilot, and
+  run as they do there. A worker can use any MCP server Copilot offers it.
 - Agents can be persuaded. Approve drafts with care, and keep yolo off for workers that read
   untrusted content.

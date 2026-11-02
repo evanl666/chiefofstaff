@@ -191,6 +191,10 @@ def create_app(
     async def task(task_id: str):
         return runtime.task_view(runtime.tasks.get(task_id))
 
+    @app.get("/api/tasks/{task_id}/report")
+    async def task_report(task_id: str):
+        return {"markdown": runtime.task_report(task_id)}
+
     @app.post("/api/tasks/{task_id}/accept")
     async def accept_task(task_id: str):
         return runtime.task_view(runtime.accept_task(task_id))

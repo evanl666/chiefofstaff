@@ -260,7 +260,8 @@ async def scenario_reopen(app: App, worker: dict):
     started = [m for m in messages if m["kind"] == "notice" and m["text"].startswith("Started")]
     assert not started, f"related question started a new worker: {transcript(messages)}"
     assert any(m["text"].startswith("Reopened") for m in messages), transcript(messages)
-    assert any(m["text"].startswith("Continued in") for m in messages), transcript(messages)
+    reused = ("Continued in", "New task")  # Continued its task, or gave it a new one.
+    assert any(m["text"].startswith(reused) for m in messages), transcript(messages)
     log("a related question went to the worker that already knew the project")
 
 

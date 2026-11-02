@@ -180,6 +180,7 @@ a:hover { text-decoration: underline; }
   gap: 2px;
 }
 #status-line .bad { color: var(--red); }
+#status-line .demo { color: var(--accent); }
 #status-line button { padding: 0; font-size: 12px; }
 
 /* Main */
@@ -570,3 +571,117 @@ dialog footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 
 .usage-tables tr.link { cursor: pointer; }
 .usage-tables tr.link:hover td { color: var(--text); }
 .draft-banner { margin: 0; font-size: 13px; color: var(--soft); background: var(--amber-soft); padding: 6px 10px; border-radius: 8px; }
+
+/* Inbox */
+
+#inbox { max-width: 820px; margin: 0 auto; display: grid; gap: 24px; padding-bottom: 16px; }
+.inbox-item .label { font-weight: 600; }
+.inbox-section h2 {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0 0 8px;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.inbox-section h2 .count { color: var(--soft); font-variant-numeric: tabular-nums; }
+.inbox-section .items { display: grid; gap: 8px; }
+.inbox-section .empty-hint { margin: 0; font-size: 12.5px; color: var(--muted); }
+.inbox-section .empty-hint:empty { display: none; }
+details.recent summary {
+  list-style: none;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+details.recent summary::-webkit-details-marker { display: none; }
+details.recent summary::before { content: "▸ "; }
+details.recent[open] summary::before { content: "▾ "; }
+details.recent summary:hover { color: var(--text); }
+
+.card.task .head { gap: 8px; }
+.card.task .title { font-size: 13.5px; font-weight: 600; color: var(--text); }
+.card.task .meta { font-size: 11.5px; color: var(--muted); white-space: nowrap; flex: none; }
+.card.task.running, .card.task.queued { border-left: 3px solid var(--accent); }
+.card.task.queued { border-left-style: dashed; }
+.card.task.review { border-left: 3px solid var(--green); }
+.card.task.waiting, .card.task.blocked { border-left: 3px solid var(--amber); }
+.card.task.failed { border-left: 3px solid var(--red); }
+.card.task.done, .card.task.cancelled { opacity: 0.72; }
+.card.task .activity {
+  font: 12px/1.6 var(--mono);
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.card.task .progress { color: var(--soft); font-size: 13px; margin-top: 2px; }
+.card.task .task-body .body { color: var(--soft); }
+.card .actions { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; align-items: center; margin-top: 8px; }
+.card .actions .error { flex: 1; }
+.card .actions textarea, .card .actions input {
+  flex: 1 1 260px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 9px;
+  background: var(--bg);
+  resize: vertical;
+}
+button.danger { background: var(--red); color: #fff; }
+
+.evidence { margin-top: 8px; display: grid; gap: 4px; }
+.receipts { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; font-size: 12px; }
+.receipts .observed {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-right: 3px;
+}
+.receipt { padding: 0 8px; line-height: 20px; border-radius: 10px; background: var(--hover); color: var(--soft); text-decoration: none; }
+.receipt.pass, .receipt.pr.passing { background: var(--green-soft); color: var(--green); }
+.receipt.fail, .receipt.pr.failing { background: var(--red-soft); color: var(--red); }
+.receipt.warn, .receipt.pr.pending { background: var(--amber-soft); color: var(--amber); }
+.receipt.none { background: none; color: var(--muted); padding-left: 0; }
+a.receipt:hover { text-decoration: underline; }
+.flag { font-size: 12.5px; color: var(--amber); }
+.flag::before { content: "⚠ "; }
+
+.card.chief { border-left: 3px solid var(--accent); }
+.card.chief .asked { color: var(--soft); font-size: 13px; white-space: pre-wrap; margin-bottom: 4px; }
+.card.chief .reply { margin-top: 4px; }
+.card.uncertain .quoted {
+  white-space: pre-wrap;
+  color: var(--soft);
+  border-left: 2px solid var(--line);
+  padding-left: 9px;
+  margin: 6px 0 2px;
+  font-size: 13px;
+}
+
+.welcome { text-align: center; padding: 34px 12px 4px; }
+.welcome h2 { font-size: 18px; font-weight: 600; margin: 0 0 8px; }
+.welcome p { color: var(--soft); max-width: 540px; margin: 0 auto 16px; }
+.welcome .examples { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+.welcome .examples button { font-size: 12.5px; border-radius: 16px; padding: 6px 13px; }
+
+.card.task { position: relative; }
+@media (hover: hover) {
+  /* Running tasks stay two lines: their buttons float over the activity line on hover. */
+  .card.task:is(.running, .queued):not(:focus-within) .actions {
+    position: absolute;
+    right: 12px;
+    bottom: 7px;
+    margin: 0;
+    padding-left: 16px;
+    background: linear-gradient(to right, transparent, var(--card) 14px);
+    opacity: 0;
+    transition: opacity 0.12s;
+  }
+  .card.task:is(.running, .queued):hover .actions { opacity: 1; }
+}
