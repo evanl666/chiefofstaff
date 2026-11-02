@@ -67,9 +67,11 @@ def create_app(
     @app.middleware("http")
     async def protect(request: Request, call_next):
         path = request.url.path
-        if request.method not in {"GET", "HEAD", "OPTIONS"}:
-            if request.headers.get("origin") not in origins:
-                return JSONResponse({"detail": "Untrusted request origin."}, status_code=403)
+        if (
+            request.method not in {"GET", "HEAD", "OPTIONS"}
+            and request.headers.get("origin") not in origins
+        ):
+            return JSONResponse({"detail": "Untrusted request origin."}, status_code=403)
         if path.startswith("/api/") and path not in {"/api/auth", "/api/health"}:
             candidate = request.cookies.get(cookie_name, "")
             if not secrets.compare_digest(candidate, token):

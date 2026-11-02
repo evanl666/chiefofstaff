@@ -116,7 +116,7 @@ class Workers:
         session_id = row["id"]
         task = self.tasks.current(session_id)
         done = self.tasks.deps(task["id"]) if task else []
-        if done and not self.store.get(f"handed:{task['id']}"):
+        if task and done and not self.store.get(f"handed:{task['id']}"):
             results = "\n".join(
                 f"- Task {d['id']} “{d['title']}” ({d['status']}): {d['result'] or 'no report'}"
                 for d in done
@@ -281,8 +281,8 @@ class Workers:
             raise ValueError("That worker never started; start a new one instead.")
         if row["cwd"] and not await asyncio.to_thread(os.path.isdir, row["cwd"]):
             raise ValueError("That worker's directory is gone; start a new one instead.")
-        self.runtime.require_ready()
-        if not await self.runtime.backend.get_session_metadata(session_id):
+        backend = self.runtime.require_ready()
+        if not await backend.get_session_metadata(session_id):
             raise ValueError("Copilot no longer has that conversation; start a new one instead.")
         status = row["status"] if row["status"] in {"done", "failed", "waiting"} else "idle"
         row = self.runtime.update_session(session_id, closed_at=None, status=status, activity="")
@@ -322,9 +322,8 @@ class Workers:
             for row in self.store.all("SELECT key FROM kv WHERE key LIKE 'alias:%'")
         }
         items = []
-        for meta in sorted(
-            await self.runtime.backend.list_sessions(), key=lambda m: m.modified_time, reverse=True
-        ):
+        listed = await self.runtime.require_ready().list_sessions()
+        for meta in sorted(listed, key=lambda m: m.modified_time, reverse=True):
             if meta.session_id in managed or meta.is_remote:
                 continue
             context = meta.context
@@ -344,10 +343,10 @@ class Workers:
         return items
 
     async def adopt(self, session_id: str) -> dict:
-        self.runtime.require_ready()
+        backend = self.runtime.require_ready()
         if self.store.find_session(session_id):
             raise ValueError("Chief of Staff already manages that session.")
-        meta = await self.runtime.backend.get_session_metadata(session_id)
+        meta = await backend.get_session_metadata(session_id)
         if not meta:
             raise LookupError("Session not found.")
         cwd = meta.context.working_directory if meta.context else ""

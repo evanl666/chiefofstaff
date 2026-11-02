@@ -239,12 +239,13 @@ class Runtime:
 
     async def version_warning(self) -> str:
         """A note for the owner when the agent CLI is older than the versions we tested."""
+        backend = self.connected()
         try:
-            version = await self.backend.version()
+            version = await backend.version()
         except Exception:
             return ""
         if older(version, OLDEST_CLI):
-            name = self.backend.capabilities.name
+            name = backend.capabilities.name
             return f"{name} CLI {version} is older than {OLDEST_CLI}. Update it: copilot update"
         return ""
 
@@ -263,12 +264,20 @@ class Runtime:
     def ready(self) -> bool:
         return self.status["state"] == "ready" and self.backend is not None
 
-    def require_ready(self):
-        if not self.ready():
+    def require_ready(self) -> AgentBackend:
+        """The connected backend; raises when Copilot is not connected."""
+        if not self.ready() or self.backend is None:
             raise RuntimeError(
                 "Copilot is not connected"
                 + (f": {self.status['error']}" if self.status["error"] else ".")
             )
+        return self.backend
+
+    def connected(self) -> AgentBackend:
+        """The backend, also while connecting (before the runtime is ready)."""
+        if self.backend is None:
+            return self.require_ready()
+        return self.backend
 
     def background(self, coroutine: Awaitable):
         task = asyncio.ensure_future(coroutine)
@@ -426,8 +435,8 @@ class Runtime:
     def options(self, row: dict) -> dict:
         settings = self.store.settings()
         prompt = PROMPTS[row["role"]]
+        sandbox = self.sandbox_policy(row)
         if row["role"] == WORKER:
-            sandbox = self.sandbox_policy(row)
             prompt += "\n" + prompts.worker_context(
                 row["cwd"],
                 str(self.workspaces.workspace(row)),
@@ -451,7 +460,7 @@ class Runtime:
             "on_mcp_auth_request": self.asks.on_mcp_auth,
         }
         if row["role"] == WORKER and sandbox:
-            options["sandbox_config"] = self.backend.sandbox(sandbox)
+            options["sandbox_config"] = self.connected().sandbox(sandbox)
         if row["role"] == WORKER:
             # Workers ask the owner directly: Copilot's ask_user, MCP forms and links.
             options["on_user_input_request"] = self.asks.on_user_input
@@ -553,11 +562,9 @@ class Runtime:
         cached_at, models = self.models_cache
         if models and time.monotonic() - cached_at < 600:
             return models
-        if not self.backend:
-            self.require_ready()
         models = [
             describe_model(model)
-            for model in await self.backend.list_models()
+            for model in await self.connected().list_models()
             if not model.policy or model.policy.state != "disabled"
         ]
         self.models_cache = (time.monotonic(), models)
@@ -601,19 +608,20 @@ class Runtime:
         options = self.options(row)
         if create:
             name = "Chief of Staff · " + clean_title(row["title"])
-            session = await self.backend.create_session(
+            session = await self.connected().create_session(
                 session_id=copilot or self.copilot_id(row["id"]), name=name[:100], **options
             )
             self.store.set(f"created:{row['id']}", "1")
         else:
-            session = await self.backend.resume_session(self.copilot_id(row["id"]), **options)
+            session = await self.connected().resume_session(self.copilot_id(row["id"]), **options)
         session_id = row["id"]
-        loop = self.loop
-        session.on(
-            lambda event: loop.call_soon_threadsafe(
-                self.events.on_event, session_id, event, session
-            )
-        )
+        loop = self.loop or asyncio.get_running_loop()
+
+        def forward(event: Any):
+            # The SDK calls this from its reader thread; events are handled on the loop.
+            loop.call_soon_threadsafe(self.events.on_event, session_id, event, session)
+
+        session.on(forward)
         self.states[session_id].handle = session
         self.publish_session(self.store.session(session_id))
         return session
@@ -962,13 +970,12 @@ class Runtime:
         for session_id in followers:
             row = self.store.session(session_id)
             self.publish_session(row)
-            if finished and row["role"] == WORKER:
-                if not self.store.follows(session_id):
-                    # Its PR is merged or closed: the task is over once this news is handled.
-                    if self.states[session_id].busy or row["status"] == "working":
-                        self.states[session_id].close_after_turn = True
-                    else:
-                        self.background(self.workers.close(session_id))
+            if finished and row["role"] == WORKER and not self.store.follows(session_id):
+                # Its PR is merged or closed: the task is over once this news is handled.
+                if self.states[session_id].busy or row["status"] == "working":
+                    self.states[session_id].close_after_turn = True
+                else:
+                    self.background(self.workers.close(session_id))
 
     async def on_thread(
         self, source: str, thread: str, keys: list[str], text: str, display: str | None = None
@@ -1086,9 +1093,9 @@ class Runtime:
             "yolo": self.yolo(row),
             "yolo_choice": row["yolo"],
             "checkouts": self.workspaces.checkouts(row),
-            "credits": self.store.one(
+            "credits": self.store.value(
                 "SELECT coalesce(sum(credits), 0) AS c FROM usage WHERE session_id=?", (row["id"],)
-            )["c"],
+            ),
             "task": self.toolset.task_brief(self.tasks.current(row["id"])),
         }
 

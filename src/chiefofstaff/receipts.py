@@ -52,8 +52,8 @@ SEPARATORS = {"&&", "||", ";", "|", "&", "(", ")"}
 PREFIXES = {"env", "time", "sudo", "nice", "nohup", "command", "exec", "xvfb-run"}
 # `npm run test` runs a script, which KINDS knows by name; `npm exec jest` runs a program.
 RUNNERS = {
-    **dict.fromkeys(("uv", "poetry", "pipenv", "hatch", "pdm", "rye"), {"run"}),
-    **dict.fromkeys(("bundle", "npm", "pnpm", "yarn"), {"exec", "dlx"}),
+    **{key: {"run"} for key in ("uv", "poetry", "pipenv", "hatch", "pdm", "rye")},
+    **{key: {"exec", "dlx"} for key in ("bundle", "npm", "pnpm", "yarn")},
 }
 LAUNCHERS = {"npx", "bunx", "pnpx"}
 VALUE_OPTIONS = {

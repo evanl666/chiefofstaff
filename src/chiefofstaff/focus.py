@@ -73,25 +73,22 @@ class Focus:
         since = datetime.fromtimestamp(started, UTC).isoformat()
         minutes = max(1, round((time.time() - started) / 60))
         length = f"{minutes // 60}h {minutes % 60}m" if minutes >= 60 else f"{minutes} min"
-        handled = self.store.one(
+        handled = self.store.value(
             """SELECT count(*) AS n FROM messages WHERE kind='inbound' AND created_at>=?
             AND (json_extract(meta, '$.source') IS NOT NULL)""",
             (since,),
-        )["n"]
-        drafted = self.store.one(
+        )
+        drafted = self.store.value(
             "SELECT count(*) AS n FROM drafts WHERE kind IN ('slack','github') AND created_at>=?",
             (since,),
-        )["n"]
-        finished = self.store.one(
+        )
+        finished = self.store.value(
             """SELECT count(DISTINCT task_id) AS n FROM runs WHERE status='succeeded'
             AND ended_at>=?""",
             (since,),
-        )["n"]
-        needs = (
-            len(self.store.drafts())
-            + self.store.one(
-                "SELECT count(*) AS n FROM tasks WHERE status IN ('waiting','failed')"
-            )["n"]
+        )
+        needs = len(self.store.drafts()) + self.store.value(
+            "SELECT count(*) AS n FROM tasks WHERE status IN ('waiting','failed')"
         )
         parts = [
             f"{handled} message{'s' if handled != 1 else ''} handled" if handled else "",
@@ -105,7 +102,7 @@ class Focus:
     def state(self) -> dict:
         if not self.active():
             return {"until": None}
-        until = float(self.store.get("focus_until"))
+        until = float(self.store.get("focus_until", "0"))
         return {"until": datetime.fromtimestamp(until, UTC).isoformat()}
 
     async def check(self, moment: float | None = None):

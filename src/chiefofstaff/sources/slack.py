@@ -15,14 +15,16 @@ import os
 import re
 import time
 from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
+from typing import Protocol
 
 import httpx
 import keyring
 from keyring.errors import KeyringError
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
+from mcp.types import TextContent
 
 from .. import threads
 from ..store import Store, now
@@ -79,6 +81,22 @@ def message_keys(text: str) -> list[str]:
     return [f"slack:{stamp}" for stamp in dict.fromkeys(stamps)]
 
 
+class TokenStore(Protocol):
+    def get(self) -> str: ...
+
+    def save(self, token: str) -> None: ...
+
+    def delete(self) -> None: ...
+
+
+class SlackClient(Protocol):
+    url: str
+
+    async def list_tools(self) -> list: ...
+
+    async def call(self, name: str, arguments: dict) -> str: ...
+
+
 class SlackTokens:
     ENV = "CHIEFOFSTAFF_SLACK_USER_TOKEN"
 
@@ -109,10 +127,8 @@ class SlackTokens:
             raise RuntimeError(f"OS keyring unavailable. Set {self.ENV} instead.") from exc
 
     def delete(self):
-        try:
+        with suppress(KeyringError):
             keyring.delete_password(self.service, "slack-user")
-        except KeyringError:
-            pass
 
 
 class SlackMcp:
@@ -125,14 +141,16 @@ class SlackMcp:
         token = self.token()
         if not token:
             raise SlackError("Slack is not connected. Add your Slack user token in Settings.")
-        async with httpx.AsyncClient(
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=httpx.Timeout(30, read=60),
-        ) as http:
-            async with streamable_http_client(self.url, http_client=http) as (read, write, _):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
-                    yield session
+        async with (
+            httpx.AsyncClient(
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=httpx.Timeout(30, read=60),
+            ) as http,
+            streamable_http_client(self.url, http_client=http) as (read, write, _),
+            ClientSession(read, write) as session,
+        ):
+            await session.initialize()
+            yield session
 
     async def list_tools(self) -> list:
         try:
@@ -151,7 +169,7 @@ class SlackMcp:
             raise
         except Exception as exc:
             raise SlackError(f"Slack MCP call {name} failed: {describe(exc)}"[:500]) from exc
-        text = "\n".join(item.text for item in result.content if getattr(item, "text", None))
+        text = "\n".join(item.text for item in result.content if isinstance(item, TextContent))
         if result.isError:
             raise SlackError(f"Slack rejected {name}: {text[:400]}")
         return text
@@ -165,13 +183,13 @@ class SlackSource:
         store: Store,
         host: SourceHost,
         *,
-        tokens: SlackTokens | None = None,
-        mcp: SlackMcp | None = None,
+        tokens: TokenStore | None = None,
+        mcp: SlackClient | None = None,
     ):
         self.store = store
         self.host = host
-        self.tokens = tokens or SlackTokens(store.directory)
-        self.mcp = mcp or SlackMcp(self.tokens.get)
+        self.tokens: TokenStore = tokens or SlackTokens(store.directory)
+        self.mcp: SlackClient = mcp or SlackMcp(self.tokens.get)
         self.read_tools: list[str] = []
         self.can_send = False
         self.fingerprint = ""
@@ -223,12 +241,10 @@ class SlackSource:
                 if self.status["error"] != message:
                     logger.warning("Slack watcher failed: %s", message)
                 self.status.update(connected=False, error=message)
-            try:
+            with suppress(TimeoutError):
                 await asyncio.wait_for(
                     self.changed.wait(), timeout=self.store.settings().slack_poll_seconds
                 )
-            except TimeoutError:
-                pass
 
     async def discover(self):
         tools = await self.mcp.list_tools()

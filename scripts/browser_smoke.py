@@ -16,8 +16,8 @@ from pathlib import Path
 from playwright.async_api import async_playwright, expect
 
 sys.path.insert(0, str(Path(__file__).parent))
-from fake_slack_mcp import Workspace, serve_in_thread  # noqa: E402
-from live_e2e import BASE, DASHBOARD, SLACK_PORT, SLACK_TOKEN, App, cleanup, git, log  # noqa: E402
+from fake_slack_mcp import Workspace, serve_in_thread
+from live_e2e import BASE, DASHBOARD, SLACK_PORT, SLACK_TOKEN, App, cleanup, git, log
 
 SHOTS = Path("browser-shots")
 

@@ -23,28 +23,28 @@ def digest(store: Store, since: float, until: float) -> str:
         WHERE r.status='succeeded' AND r.ended_at>=? AND r.ended_at<? ORDER BY r.ended_at""",
         window,
     )
-    review = store.one("SELECT count(*) AS n FROM tasks WHERE status='review'")["n"]
+    review = store.value("SELECT count(*) AS n FROM tasks WHERE status='review'")
     waiting = store.all("SELECT title FROM tasks WHERE status='waiting' ORDER BY updated_at")
     failed = store.all("SELECT title FROM tasks WHERE status='failed' ORDER BY updated_at")
-    drafts = store.one("SELECT count(*) AS n FROM drafts WHERE status='pending'")["n"]
-    sent = store.one(
+    drafts = store.value("SELECT count(*) AS n FROM drafts WHERE status='pending'")
+    sent = store.value(
         "SELECT count(*) AS n FROM drafts WHERE status='sent' AND resolved_at>=? AND resolved_at<?",
         window,
-    )["n"]
-    follow_ups = store.one(
+    )
+    follow_ups = store.value(
         """SELECT count(*) AS n FROM messages WHERE kind='inbound'
         AND json_extract(meta, '$.thread') IS NOT NULL AND created_at>=? AND created_at<?""",
         window,
-    )["n"]
+    )
     if not (finished or review or waiting or failed or drafts or sent or follow_ups):
         return ""
-    running = store.one(
+    running = store.value(
         """SELECT count(*) AS n FROM sessions WHERE role='worker' AND closed_at IS NULL
         AND status IN ('working', 'queued', 'starting')"""
-    )["n"]
-    credits = store.one(
+    )
+    credits = store.value(
         "SELECT coalesce(sum(credits), 0) AS c FROM usage WHERE at>=? AND at<?", (since, until)
-    )["c"]
+    )
     lines = ["Daily summary"]
     if finished:
         lines.append(f"• Finished: {names(finished)}")

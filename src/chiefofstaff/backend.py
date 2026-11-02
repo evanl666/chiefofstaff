@@ -14,7 +14,7 @@ import shutil
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from copilot import CopilotClient, RuntimeConnection
 from copilot.generated.rpc import (
@@ -42,25 +42,35 @@ class Capabilities:
     sandbox: bool
 
 
+SendMode = Literal["enqueue", "immediate"]
+
+
 class AgentSession(Protocol):
     session_id: str
 
-    async def send(self, prompt: str, mode: str = "enqueue") -> Any:
+    async def send(self, prompt: str, *, mode: SendMode = "enqueue") -> Any:
         """Queue a message and return at once; the turn's progress arrives as events."""
+        ...
 
     async def abort(self) -> None:
         """Stop the turn in progress."""
+        ...
 
     async def disconnect(self) -> None:
         """Stop receiving events; the session stays resumable."""
+        ...
 
-    async def set_model(self, model: str, **tuning: Any) -> None: ...
+    async def set_model(
+        self, model: str, *, reasoning_effort: str | None = None, context_tier: Any = None
+    ) -> None: ...
 
     async def get_events(self) -> list[Any]:
         """The session's history; its user.message events show what it received."""
+        ...
 
     def on(self, handler: Callable[[Any], None]) -> Any:
         """Receive every event: `event.type.value` names it, `event.data` holds its fields."""
+        ...
 
 
 class AgentBackend(Protocol):
@@ -74,6 +84,7 @@ class AgentBackend(Protocol):
 
     async def get_auth_status(self) -> Any:
         """Has `isAuthenticated`."""
+        ...
 
     async def list_models(self) -> list[Any]: ...
 
@@ -85,17 +96,21 @@ class AgentBackend(Protocol):
         """Options: system_message, tools, available_tools, working_directory, model and the
         callbacks on_permission_request, on_user_input_request, on_elicitation_request and
         on_mcp_auth_request (see Runtime.options)."""
+        ...
 
     async def resume_session(self, session_id: str, **options: Any) -> AgentSession: ...
 
     async def mcp_sign_in_url(self, session: AgentSession, server: str) -> str:
         """Where the owner signs in to an MCP server; "" when the backend has credentials."""
+        ...
 
     def sandbox(self, policy: SandboxPolicy) -> Any:
         """The session option (sandbox_config) that applies this policy."""
+        ...
 
     async def gh_works_in_sandbox(self) -> bool | None:
         """Whether gh can reach GitHub from sandboxed commands; None when not applicable."""
+        ...
 
 
 @dataclass(frozen=True)

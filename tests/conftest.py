@@ -233,10 +233,9 @@ async def settle(runtime: Runtime):
 
 
 async def call_tool(runtime: Runtime, name: str, caller: str, **arguments):
-    result = await runtime.tools[name].handler(
+    return await runtime.tools[name].handler(
         ToolInvocation(session_id=caller, tool_call_id="t1", tool_name=name, arguments=arguments)
     )
-    return result
 
 
 class Harness:

@@ -212,7 +212,7 @@ async def test_followed_threads_go_to_their_followers_not_the_router(source):
         "oldest": "1712345680",
         "limit": 50,
     }
-    [(name, keys, text, display)] = source.calls
+    [(_name, keys, text, _display)] = source.calls
     assert keys == ["slack:1712345700.000400"], "thread replies never reach the Router"
     assert "Thread keys: slack:D0ALICE01:1712345700.000400, slack:D0ALICE01" in text
 

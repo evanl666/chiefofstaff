@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import itertools
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -72,7 +72,7 @@ class Wait:
 
 
 Step = Say | CallTool | Shell | WriteFile | AskOwner | Wait
-Brain = Callable[["ScriptedSession", str], AsyncIterator[Step]]
+Brain = Callable[["ScriptedSession", str], AsyncGenerator[Step, Any]]
 
 SCRIPTED = Capabilities(
     name="Scripted demo",
@@ -121,7 +121,7 @@ class ScriptedSession:
         for handler in list(self.handlers):
             handler(event(kind, **data))
 
-    async def send(self, prompt: str, mode: str = "enqueue") -> str:
+    async def send(self, prompt: str, *, mode: str | None = "enqueue") -> str:
         if self.closed:
             raise RuntimeError("The session is disconnected.")
         if mode == "immediate" and self.turn and not self.turn.done():
@@ -146,7 +146,9 @@ class ScriptedSession:
             await asyncio.gather(self.turn, return_exceptions=True)
         self.closed = True
 
-    async def set_model(self, model: str, **tuning: Any):
+    async def set_model(
+        self, model: str, *, reasoning_effort: str | None = None, context_tier: Any = None
+    ):
         self.model = model
 
     async def get_events(self) -> list[Any]:
@@ -169,7 +171,7 @@ class ScriptedSession:
         await self.take_steering()
         self.emit("assistant.turn_end")
 
-    async def follow(self, script: AsyncIterator[Step]):
+    async def follow(self, script: AsyncGenerator[Step, Any]):
         result: Any = None
         try:
             step = await anext(script)
@@ -308,7 +310,7 @@ class ScriptedSession:
         return str(target)
 
 
-async def nothing(session: ScriptedSession, prompt: str) -> AsyncIterator[Step]:
+async def nothing(session: ScriptedSession, prompt: str) -> AsyncGenerator[Step, Any]:
     yield Say("OK")
 
 

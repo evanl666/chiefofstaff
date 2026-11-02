@@ -126,11 +126,11 @@ class TaskBook:
         return [dep for dep in self.deps(task["id"]) if dep["status"] in {"failed", "cancelled"}]
 
     def credits(self, task_id: str) -> float:
-        return self.store.one(
+        return self.store.value(
             """SELECT coalesce(sum(u.credits), 0) AS c FROM usage u JOIN runs r ON r.id=u.run_id
             WHERE r.task_id=?""",
             (task_id,),
-        )["c"]
+        )
 
     # Writing
 
@@ -142,7 +142,7 @@ class TaskBook:
         *,
         status: str = "queued",
         why_new: str = "",
-        after: list[str] = (),
+        after: tuple[str, ...] | list[str] = (),
     ) -> dict:
         assert status in STATUSES
         identifier, stamp = task_id(), now()
@@ -187,7 +187,7 @@ class TaskBook:
             VALUES (?,?,?,?,?,?)""",
             (identifier, task_id, task["session_id"], "running", reason, now()),
         )
-        return self.store.one("SELECT * FROM runs WHERE id=?", (identifier,))
+        return self.store.row("SELECT * FROM runs WHERE id=?", (identifier,))
 
     def end_runs(self, task_id: str, status: str):
         self.store.execute(
