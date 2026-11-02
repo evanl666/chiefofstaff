@@ -57,6 +57,7 @@ TIMESTAMP = re.compile(r"(?<![\d.])(\d{10}\.\d{6})(?![\d])")
 THREAD_TS = re.compile(r"thread_ts\W{0,4}\d{10}\.\d{6}")
 USER_ID = re.compile(r"user_id is (U[A-Z0-9]{6,})")
 DELEGATED = "slack-delegated:"
+CLOCK_SKEW = 120  # Seconds Slack's clock may be behind this machine's.
 
 
 class SlackError(RuntimeError):
@@ -455,7 +456,8 @@ class SlackSource:
                 self.store.set(f"slackhw:{thread}", str(newest))
 
     async def find_sent(self, target: dict, text: str, since: float) -> str:
-        """A permalink to the owner's message with this text in the target conversation, or ""."""
+        """A permalink to the owner's message with this text in the target conversation, sent
+        after `since` (when the draft was written), or "". An older "Thanks!" is not this one."""
         words = " ".join(text.replace('"', " ").split()[:12])
         if not words:
             return ""
@@ -471,6 +473,8 @@ class SlackSource:
             },
         )
         for stamp, keys in threads.slack_messages(result).items():
+            if float(stamp) < since - CLOCK_SKEW:
+                continue
             if any(key.split(":")[1] == target["channel_id"] for key in keys):
                 return next(
                     (

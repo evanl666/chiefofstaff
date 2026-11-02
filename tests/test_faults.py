@@ -4,7 +4,9 @@ Each test is one failure the runtime must survive without losing, duplicating or
 work. See also test_backend_contract.py (abort stops a running command, with real Copilot).
 """
 
+import asyncio
 import json
+import time
 
 from conftest import Harness, call_tool, settle, task_of
 
@@ -162,8 +164,13 @@ async def test_drafts_interrupted_while_sending_are_checked_before_anything_is_r
         harness.router_id, "slack", {"channel_id": "C2", "thread_ts": "", "to": "Bo"}, "Later"
     )
     harness.store.execute("UPDATE drafts SET status='uncertain'")
+    stamp = f"{time.time():.6f}".replace(".", "")
     harness.mcp.results['"On it!" from:me'] = (
-        "From you in #general: On it!\nhttps://acme.slack.com/archives/C1/p1712345678000200"
+        f"From you in #general: On it!\nhttps://acme.slack.com/archives/C1/p{stamp}"
+    )
+    # An "On it!" from before the draft was written is another message.
+    harness.mcp.results['"Later" from:me'] = (
+        "From you in #random: Later\nhttps://acme.slack.com/archives/C2/p1712345678000200"
     )
     harness.gh_replies["api repos/acme/app/pulls/7/reviews"] = json.dumps(
         [{"body": "Something else", "html_url": "https://github.com/acme/app/pull/7#r1"}]
@@ -174,6 +181,33 @@ async def test_drafts_interrupted_while_sending_are_checked_before_anything_is_r
     assert harness.store.draft(lost["id"])["status"] == "uncertain", "Slack search may lag"
     assert "Send it again" in harness.store.draft(lost["id"])["outcome"]
     assert not [call for call in harness.mcp.calls if call[0] == "slack_send_message"]
+
+
+async def test_the_owner_can_settle_a_draft_while_it_is_being_checked(tmp_path):
+    harness = Harness(tmp_path / "data", Settings(slack_enabled=True))
+    runtime = await harness.connect()
+    review = harness.store.create_draft(
+        harness.router_id,
+        "github",
+        {"repo": "acme/app", "number": 7, "head_sha": "abc"},
+        "Looks good.",
+    )
+    harness.store.execute("UPDATE drafts SET status='uncertain'")
+    looking = asyncio.Event()
+    answer = asyncio.Event()
+
+    async def slow(target, text):
+        looking.set()
+        await answer.wait()
+        return ""
+
+    runtime.github.find_review = slow
+    check = asyncio.create_task(runtime.check_uncertain_drafts())
+    await looking.wait()
+    await runtime.resolve_draft(review["id"], DraftDecision(action="reject"))
+    answer.set()
+    await check
+    assert harness.store.draft(review["id"])["status"] == "rejected", "dropped stays dropped"
 
 
 async def test_the_owner_settles_an_interrupted_draft(tmp_path):

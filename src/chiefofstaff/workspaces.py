@@ -153,6 +153,32 @@ def git_dirs(checkouts: list[dict]) -> list[str]:
     return found
 
 
+def protected_git_paths(git_dir: str, checkouts: list[dict]) -> list[str]:
+    """Parts of a repository's .git that a worker must not change, though it commits there.
+
+    Hooks and config run code when the owner uses the repository; so do the configs of its
+    submodules (modules/) and of the owner's other worktrees, whose private folders also hold
+    their HEAD and index. The worker's own worktrees stay writable.
+    """
+    root = Path(git_dir)
+    own = set()
+    for checkout in checkouts:
+        pointer = Path(checkout.get("path", "")) / ".git"
+        with suppress(OSError, ValueError):
+            if pointer.is_file() and (text := pointer.read_text()).startswith("gitdir:"):
+                own.add(Path(text.removeprefix("gitdir:").strip()).resolve())
+    paths = [root / "hooks", root / "config"]
+    if (root / "modules").is_dir():
+        paths.append(root / "modules")
+    if (root / "worktrees").is_dir():
+        paths += sorted(
+            path
+            for path in (root / "worktrees").iterdir()
+            if path.is_dir() and path.resolve() not in own
+        )
+    return [str(path) for path in paths]
+
+
 async def changes(checkout: dict) -> dict | None:
     """What a worker changed in one checkout: commits on its branch and uncommitted edits."""
     path = checkout["path"]

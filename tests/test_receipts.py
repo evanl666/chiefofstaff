@@ -19,6 +19,23 @@ def test_commands_are_recognized_by_what_they_do():
     assert receipts.kind("git push origin HEAD") == "push"
     assert receipts.kind("gh pr create --fill") == "pr"
     assert receipts.kind("ls -la") == ""
+    assert receipts.kind("python3 -m pytest -x && git commit -am 'Fix'") == "test"
+    assert receipts.kind("FOO=1 npx --yes jest --ci") == "test"
+    assert receipts.kind("./gradlew --offline test") == "test"
+    assert receipts.kind("uv run --extra dev pytest -q") == "test"
+
+
+def test_mentioning_a_tool_is_not_running_it():
+    for text in [
+        "pip install pytest",
+        "npm install --save-dev jest",
+        "grep -rn pytest .",
+        "cat jest.config.js",
+        "echo 'run pytest later'",
+    ]:
+        assert receipts.kind(text) == "", text
+    assert receipts.kind('git commit -m "fix pytest flake"') == "commit"
+    assert receipts.kind("git log --grep push | head") == ""
 
 
 def test_exit_codes_come_from_copilots_output():

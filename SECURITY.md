@@ -26,7 +26,7 @@ makes a mistake.
 | Boundary | Enforced by | Holds when |
 |---|---|---|
 | A worker's shell commands write only to its workspace, its checkouts and temporary folders | **OS sandbox** (Copilot's, Seatbelt on macOS, bubblewrap on Linux) | Sandbox is on (Settings, default) and the machine supports it |
-| A worker cannot change a repository's hooks or config (which would run code outside the sandbox) | **OS sandbox** | Sandbox is on |
+| A worker cannot change a repository's hooks or config, its submodules' config, or your other worktrees (all of which can run code when you use git there) | **OS sandbox** | Sandbox is on. Treat the worker's own folder like a stranger's pull request: running anything there, git included, runs what the worker wrote |
 | Workers never see your GitHub token; `git` and `gh` authenticate through Copilot's local proxy | **OS sandbox** + Copilot's credential proxy | Sandbox is on |
 | Workers cannot read `~/.ssh` keys or other files outside their folders' read rules | **OS sandbox** | Sandbox is on |
 | Workers that read Slack reach only GitHub hosts over the network | **OS sandbox** | Sandbox is on |
