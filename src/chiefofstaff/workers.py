@@ -6,12 +6,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import time
 from contextlib import suppress
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from . import catalog
 from .envelope import clean_title, short, wrap
@@ -23,6 +24,11 @@ from .watchdog import timestamp
 
 if TYPE_CHECKING:
     from .runtime import Runtime
+
+logger = logging.getLogger(__name__)
+
+# An adopted session shows at most this much of its earlier conversation.
+HISTORY_SHOWN = 60
 
 
 class Workers:
@@ -322,8 +328,14 @@ class Workers:
             for row in self.store.all("SELECT key FROM kv WHERE key LIKE 'alias:%'")
         }
         items = []
-        listed = await self.runtime.require_ready().list_sessions()
-        for meta in sorted(listed, key=lambda m: m.modified_time, reverse=True):
+        backend = self.runtime.require_ready()
+        listed = await backend.list_sessions()
+        await self.refresh_elsewhere()
+        elsewhere = self.runtime.elsewhere
+        # Sessions open in a terminal right now first, then the most recent.
+        for meta in sorted(
+            listed, key=lambda m: (m.session_id in elsewhere, m.modified_time), reverse=True
+        ):
             if meta.session_id in managed or meta.is_remote:
                 continue
             context = meta.context
@@ -335,6 +347,7 @@ class Workers:
                     "repository": (context.repository if context else "") or "",
                     "branch": (context.branch if context else "") or "",
                     "modified": meta.modified_time.isoformat(),
+                    "open": meta.session_id in elsewhere,
                 }
             )
             if len(items) >= 40:
@@ -349,6 +362,11 @@ class Workers:
         meta = await backend.get_session_metadata(session_id)
         if not meta:
             raise LookupError("Session not found.")
+        if pid := (await backend.open_elsewhere()).get(session_id):
+            raise ValueError(
+                f"That session is open in another Copilot window (process {pid}). Exit it there "
+                "(/exit), then let the Router manage it."
+            )
         cwd = meta.context.working_directory if meta.context else ""
         row = self.store.create_session(
             session_id,
@@ -364,9 +382,9 @@ class Workers:
             self.bus.publish("state")
             raise RuntimeError(f"Could not adopt the session: {describe(exc)}") from exc
         self.store.set(f"created:{session_id}", "1")
-        self.tasks.create(
-            session_id, row["title"], "(an existing Copilot session)", status="review"
-        )
+        # Its work so far is not a task to review; the owner's next request starts one.
+        task = self.tasks.create(session_id, row["title"], "(an existing Copilot session)")
+        self.tasks.move(task["id"], "done", result="Adopted from Copilot.")
         self.external_cache = (0.0, [])
         self.runtime.add_message(
             self.runtime.router_id(),
@@ -375,6 +393,52 @@ class Workers:
             {"session_id": session_id},
         )
         return self.store.session(session_id)
+
+    async def import_history(self, row: dict, session: Any):
+        """An adopted session's conversation so far, into its empty timeline.
+
+        Imported messages carry no prompt: they are never sent again, and the Watchdog does not
+        take them for instructions.
+        """
+        if self.store.one("SELECT id FROM messages WHERE session_id=? LIMIT 1", (row["id"],)):
+            return
+        try:
+            events = await session.get_events()
+        except Exception:
+            logger.warning("Could not read the history of %s.", row["id"], exc_info=True)
+            return
+        said = []
+        for event in events:
+            kind = {"user.message": "owner", "assistant.message": "assistant"}.get(
+                getattr(event.type, "value", str(event.type))
+            )
+            text = (getattr(event.data, "content", "") or "").strip()
+            if kind and text and not getattr(event.data, "parent_tool_call_id", None):
+                said.append((kind, text))
+        if not said:
+            return
+        shown = said[-HISTORY_SHOWN:]
+        earlier = f"the last {len(shown)} of {len(said)} messages" if len(shown) < len(said) else ""
+        self.runtime.add_message(
+            row["id"],
+            "notice",
+            "Its conversation in Copilot before Chief of Staff managed it"
+            + (f" ({earlier})" if earlier else ""),
+            {"imported": True},
+        )
+        for kind, text in shown:
+            self.runtime.add_message(row["id"], kind, text[:20000], {"imported": True})
+
+    async def refresh_elsewhere(self):
+        """Which sessions are open in a terminal now; the UI marks the managed ones."""
+        if not self.runtime.backend:
+            return
+        before = self.runtime.elsewhere
+        self.runtime.elsewhere = await self.runtime.connected().open_elsewhere()
+        changed = set(before) ^ set(self.runtime.elsewhere)
+        for row in self.store.open_sessions(WORKER):
+            if self.runtime.copilot_id(row["id"]) in changed:
+                self.runtime.publish_session(row)
 
     async def tidy(self, moment: float | None = None) -> list[str]:
         """Close finished workers that follow nothing and have been quiet for a day."""

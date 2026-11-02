@@ -91,6 +91,7 @@ class FakeClient:
         self.resumed: list[str] = []
         self.names: dict[str, str] = {}
         self.metas: list = []
+        self.in_use: dict[str, int] = {}  # Sessions open in a terminal: id -> pid.
         self.cli_version = TESTED_CLI
 
     async def start(self):
@@ -110,6 +111,9 @@ class FakeClient:
 
     async def gh_works_in_sandbox(self):
         return True
+
+    async def open_elsewhere(self):
+        return dict(self.in_use)
 
     async def mcp_sign_in_url(self, session, server):
         login = await session.rpc.mcp.oauth.login(SimpleNamespace(server_name=server))

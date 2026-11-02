@@ -74,6 +74,15 @@ closed worker, or open it and press *Reopen*, to continue with its conversation 
 
 At most *Parallel workers* run at once; the rest queue.
 
+### Your other Copilot sessions
+
+*Other Copilot sessions* in the sidebar lists the sessions Chief of Staff does not manage, the
+ones you started in a terminal. Those open in a terminal right now come first, marked *open*.
+*Let the Router manage it* turns one into a worker, with its conversation so far in its
+timeline. A session that is open in a terminal cannot be handed over until you exit it there
+(`/exit`), and Chief of Staff never resumes a session another Copilot window has open: two
+programs writing to one session would mix up its history.
+
 ## Where workers work
 
 **Projects** (Settings) are the folders workers may work on. The Router matches a task to a

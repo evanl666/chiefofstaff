@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -9,6 +10,7 @@ import pytest
 from conftest import FakeSession, Harness, call_tool, env, settle, task_of
 
 from chiefofstaff import delivery as delivery_module
+from chiefofstaff.backend import sessions_in_use
 from chiefofstaff.models import DraftDecision, Settings
 from chiefofstaff.policy import permission_denial
 from chiefofstaff.runtime import ROUTER_TOOLS
@@ -474,6 +476,68 @@ async def test_external_sessions_can_be_adopted(harness, tmp_path):
     assert row["role"] == "worker" and row["title"] == "Refactor parser"
     assert "ext-1" in harness.client.resumed
     assert await runtime.workers.external(refresh=True) == []
+
+
+def event(kind, text, parent=None):
+    return SimpleNamespace(
+        type=SimpleNamespace(value=kind),
+        data=SimpleNamespace(content=text, parent_tool_call_id=parent),
+    )
+
+
+async def test_sessions_open_in_a_terminal_are_shown_and_left_alone(harness, tmp_path, monkeypatch):
+    runtime = await harness.connect()
+    context = SimpleNamespace(working_directory=str(tmp_path), repository="", branch="")
+    harness.client.metas = [
+        SimpleNamespace(
+            session_id=identifier,
+            summary=summary,
+            is_remote=False,
+            modified_time=datetime(2026, 10, day),
+            context=context,
+        )
+        for identifier, summary, day in [("old", "Old work", 3), ("open", "Slow query", 1)]
+    ]
+    harness.client.in_use = {"open": 4242}
+    items = await runtime.workers.external(refresh=True)
+    assert [(item["id"], item["open"]) for item in items] == [("open", True), ("old", False)]
+    harness.client.sessions["open"] = FakeSession("open", {})
+    with pytest.raises(ValueError, match="open in another Copilot window"):
+        await runtime.workers.adopt("open")
+    assert not harness.store.find_session("open")
+
+    # Exited in the terminal: adopting it brings its conversation along.
+    harness.client.in_use = {}
+
+    async def history(session):
+        return [
+            event("user.message", "Find the slow query"),
+            event("assistant.message", "Checking the orders join.", parent="sub-agent"),
+            event("assistant.message", "It is the orders join."),
+        ]
+
+    monkeypatch.setattr(FakeSession, "get_events", history)
+    row = await runtime.workers.adopt("open")
+    shown = [(m["kind"], m["text"]) for m in harness.store.messages(row["id"])]
+    assert shown[1:] == [("owner", "Find the slow query"), ("assistant", "It is the orders join.")]
+    assert runtime.tasks.current(row["id"])["status"] == "done", "nothing runs there"
+
+    # Opened in a terminal again after a restart: Chief of Staff does not write to it too.
+    await runtime.detach(row["id"])
+    harness.client.in_use = {"open": 4242}
+    await runtime.workers.refresh_elsewhere()
+    assert runtime.view(harness.store.session(row["id"]))["elsewhere"] is True
+    with pytest.raises(RuntimeError, match="open in another Copilot window"):
+        await runtime.owner_send(row["id"], "Any news?")
+    assert harness.client.resumed.count("open") == 1
+
+
+def test_sessions_in_use_come_from_copilots_locks(tmp_path):
+    state = tmp_path / "session-state"
+    for name, pid in [("terminal", 1), ("gone", 999_999), ("ours", os.getpid())]:
+        (state / name).mkdir(parents=True)
+        (state / name / f"inuse.{pid}.lock").write_text(str(pid))
+    assert sessions_in_use(tmp_path) == {"terminal": 1}
 
 
 @pytest.mark.parametrize(
