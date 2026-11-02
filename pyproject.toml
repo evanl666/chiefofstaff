@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "chiefofstaff"
 version = "0.1.0"
-description = "An AI chief of staff for your GitHub Copilot agents: it routes work to the right session, handles Slack and GitHub pings, and asks you only when it matters."
+description = "One inbox for all your GitHub Copilot sessions: tasks and follow-ups go to the right session, Slack replies wait for your approval, and finished work waits for your review."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
