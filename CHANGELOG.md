@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.3 (2026-11-02)
+
+- Starting Chief of Staff while it is already running opens the running one, instead of an
+  error.
+- Ctrl+C stops it at once, without a traceback, even with the page open.
+
 ## 0.1.2 (2026-11-02)
 
 - Sessions open in a terminal get their own mark, a blue ring, instead of the green of finished

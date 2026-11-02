@@ -19,6 +19,9 @@ from platformdirs import user_data_path
 
 from .web import create_app
 
+# The running instance's private URL, so starting Chief of Staff again opens it.
+LAUNCH_FILE = "launch-url"
+
 
 def open_when_ready(port: int, url: str):
     for _ in range(100):
@@ -32,6 +35,30 @@ def open_when_ready(port: int, url: str):
         except (urllib.error.URLError, TimeoutError):
             time.sleep(0.1)
     logging.getLogger(__name__).warning("Browser not opened: server did not become ready.")
+
+
+class Server(uvicorn.Server):
+    def __init__(self, config: uvicorn.Config, bus):
+        super().__init__(config)
+        self.bus = bus
+
+    def handle_exit(self, sig, frame):
+        # Open browser tabs keep an event stream open; ending them now lets the server stop at
+        # once instead of cancelling them after a timeout.
+        if self.bus.loop and not self.bus.loop.is_closed():
+            self.bus.loop.call_soon_threadsafe(self.bus.close)
+        super().handle_exit(sig, frame)
+
+
+def running_instance(directory: Path) -> str:
+    """The private URL of the Chief of Staff already serving this data directory, if it answers."""
+    try:
+        url = (directory / LAUNCH_FILE).read_text().strip()
+        port = int(url.split(":")[2].split("/")[0])
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=2) as reply:
+            return url if reply.status == 200 else ""
+    except (OSError, ValueError, IndexError):
+        return ""
 
 
 def version() -> str:
@@ -82,7 +109,15 @@ def main():
         fcntl.flock(data_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         data_lock.close()
-        parser.error("Another Chief of Staff process is already using this data directory.")
+        if url := running_instance(directory):
+            print(f"Chief of Staff is already running: {url}", flush=True)
+            if not args.no_browser:
+                webbrowser.open(url)
+            return
+        parser.error(
+            "Another Chief of Staff process is using this data directory and is not answering. "
+            "Stop it (Ctrl+C in its terminal), or choose another --data-dir."
+        )
     token = secrets.token_urlsafe(32)
     url = f"http://127.0.0.1:{args.port}/#token={token}"
     # Bind before opening the browser so an unrelated listener cannot receive the launch token.
@@ -96,6 +131,8 @@ def main():
         listener.close()
         parser.error(f"Port {args.port} is unavailable. Choose another --port.")
     app = create_app(directory, token, args.port, **extra)
+    launch = directory / LAUNCH_FILE
+    launch.write_text(url)  # Readable only by the owner (umask 077, like the data directory).
     print(
         f"Chief of Staff\nPrivate launch URL (do not share): {url}\nData: {directory}", flush=True
     )
@@ -110,10 +147,11 @@ def main():
         app, host="127.0.0.1", port=args.port, access_log=False, timeout_graceful_shutdown=3
     )
     try:
-        uvicorn.Server(config).run(sockets=[listener])
+        Server(config, app.state.bus).run(sockets=[listener])
     except KeyboardInterrupt:
         pass
     finally:
+        launch.unlink(missing_ok=True)
         listener.close()
         data_lock.close()
 
