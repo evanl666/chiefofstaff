@@ -641,7 +641,7 @@ function renderHeader() {
   renderTuning(session);
   const input = $("#composer-input");
   const placeholders = {
-    router: "Tell the Router what you need…",
+    router: "Ask your chief of staff…",
     slack: "Message the Slack session…",
     watchdog: "Message the Watchdog…",
   };
@@ -888,7 +888,7 @@ function appendMessages(messages) {
         "div",
         { class: "empty" },
         el("strong", { text: "What should we work on?" }),
-        "Tell the Router. It starts workers, watches Slack, and only interrupts you when something is ready.",
+        "Tell your chief of staff what you need. It starts workers, watches Slack, and only interrupts you when something is ready.",
       ),
     );
   }

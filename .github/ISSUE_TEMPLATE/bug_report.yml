@@ -1,0 +1,28 @@
+name: Bug report
+description: Something does not work as described.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: How to reproduce
+      description: Ideally in demo mode (chiefofstaff --demo), so anyone can try it.
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: "chiefofstaff --version, copilot --version, and your OS"
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Logs or the session timeline
+      description: Remove anything private (tokens, Slack messages, company code) first.
+      render: text
