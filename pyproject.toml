@@ -1,13 +1,13 @@
 [build-system]
-requires = ["hatchling>=1.26"]
+requires = ["hatchling>=1.26", "hatch-fancy-pypi-readme>=24.1"]
 build-backend = "hatchling.build"
 
 [project]
 name = "chiefofstaff"
 version = "0.1.0"
 description = "One inbox for all your GitHub Copilot sessions: tasks and follow-ups go to the right session, Slack replies wait for your approval, and finished work waits for your review."
-readme = "README.md"
 license = "MIT"
+dynamic = ["readme"]
 license-files = ["LICENSE"]
 authors = [{ name = "evanl666" }]
 requires-python = ">=3.11"
@@ -50,6 +50,22 @@ dev = [
 
 [project.scripts]
 chiefofstaff = "chiefofstaff.__main__:main"
+
+# The README links images and docs relatively, which works on GitHub (private or public); PyPI
+# gets absolute links.
+[tool.hatch.metadata.hooks.fancy-pypi-readme]
+content-type = "text/markdown"
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.fragments]]
+path = "README.md"
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '\]\((docs/images/[^)]+)\)'
+replacement = '](https://raw.githubusercontent.com/evanl666/chiefofstaff/main/\1)'
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '\]\((?!https?://|#)([^)]+)\)'
+replacement = '](https://github.com/evanl666/chiefofstaff/blob/main/\1)'
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/chiefofstaff"]

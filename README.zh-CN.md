@@ -1,12 +1,12 @@
 # Chief of Staff
 
-[English](https://github.com/evanl666/chiefofstaff/blob/main/README.md) · **简体中文**
+[English](README.md) · **简体中文**
 
 用一个收件箱管理你所有的 GitHub Copilot session。你说要做什么，它把每个任务交给一个单独的
 Copilot session；后续的追问会发给已经了解情况的那个 session；Slack 消息它帮你起草回复；
 事情做完了，再提醒你来检查。
 
-![收件箱：做完的任务在等你检查](https://raw.githubusercontent.com/evanl666/chiefofstaff/main/docs/images/inbox-review.png)
+![收件箱：做完的任务在等你检查](docs/images/inbox-review.png)
 
 可以先用脚本模拟的 session 体验一下，不需要登录任何账号：
 
@@ -41,7 +41,7 @@ uvx chiefofstaff --demo
 它用的就是你现有的 Copilot：你的订阅、模型、MCP server 和公司的策略，不需要额外的 AI 服务
 或 API key。
 
-![批准一条 Slack 回复](https://raw.githubusercontent.com/evanl666/chiefofstaff/main/docs/images/approve-dark.png)
+![批准一条 Slack 回复](docs/images/approve-dark.png)
 
 ## 安装
 
@@ -74,7 +74,7 @@ uvx chiefofstaff            # 或者：pipx install chiefofstaff && chiefofstaff
 3. **GitHub**：如果要让它帮你 review 别人请你看的 PR，需要 `gh auth login`。开着沙箱的话，还要
    运行一次 `copilot sandbox ca create && copilot sandbox ca trust`，这样沙箱里的 `gh` 才能用。
 4. **Slack 和其他服务**：在 Settings 里粘贴 Slack user token
-   （[怎么获取](https://github.com/evanl666/chiefofstaff/blob/main/docs/guide.md#slack)，英文）。
+   （[怎么获取](docs/guide.md#slack)，英文）。
    worker 需要用到别的服务时，比如公司文档或 issue 系统，收件箱里会出现一张登录卡片。
 
 ## 工作原理
@@ -95,9 +95,9 @@ Chief of Staff 负责传话。每条消息发出去之前都会先存下来，�
 
 更多文档（英文）：
 
-- [使用指南](https://github.com/evanl666/chiefofstaff/blob/main/docs/guide.md)
-- [架构](https://github.com/evanl666/chiefofstaff/blob/main/docs/ARCHITECTURE.md)
-- [安全说明](https://github.com/evanl666/chiefofstaff/blob/main/SECURITY.md)：哪些限制由系统沙箱
+- [使用指南](docs/guide.md)
+- [架构](docs/ARCHITECTURE.md)
+- [安全说明](SECURITY.md)：哪些限制由系统沙箱
   保证，哪些由 Chief of Staff 保证，哪些要靠模型遵守指令。
 
 ## 当前状态
@@ -106,8 +106,8 @@ Chief of Staff 负责传话。每条消息发出去之前都会先存下来，�
 每个任务用了多少 credits。
 
 欢迎在 issue 里提 bug 和想法。想参与开发的话，可以先看
-[CONTRIBUTING.md](https://github.com/evanl666/chiefofstaff/blob/main/CONTRIBUTING.md) 和
-[适合新手的任务](https://github.com/evanl666/chiefofstaff/blob/main/docs/good-first-issues.md)。
+[CONTRIBUTING.md](CONTRIBUTING.md) 和
+[适合新手的任务](docs/good-first-issues.md)。
 
 ## 许可证
 
