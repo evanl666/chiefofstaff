@@ -16,6 +16,17 @@ export const STATUS_TEXT = {
   done: "Done",
   failed: "Failed",
 };
+// What each sidebar dot means, shown when hovering it.
+export const DOT_HELP = {
+  working: "Working",
+  starting: "Starting",
+  queued: "Queued: waits for a free worker slot, or for another task",
+  idle: "Idle: between tasks",
+  waiting: "Waiting for your answer",
+  done: "Done: finished, nothing running",
+  failed: "Failed",
+  open: "Open in a terminal right now",
+};
 export const state = {
   snapshot: null,
   selected: localStorage.getItem("cos.selected") || "inbox",

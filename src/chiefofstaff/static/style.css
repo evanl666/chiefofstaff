@@ -153,7 +153,8 @@ a:hover { text-decoration: underline; }
 .dot.waiting { background: var(--amber); opacity: 1; }
 .dot.done { background: var(--green); opacity: 1; }
 .dot.failed { background: var(--red); opacity: 1; }
-.dot.open { background: var(--green); opacity: 1; }
+/* Active, but in a terminal: a ring, unlike the filled dot of a session working here. */
+.dot.open { background: none; border: 1.5px solid var(--accent); opacity: 1; }
 @keyframes pulse { 50% { opacity: 0.35; } }
 
 #external, #closed { margin: 10px 8px 0; flex: none; }

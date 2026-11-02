@@ -35,6 +35,13 @@ Finished and cancelled tasks stay under *Recently finished* for three days. **Ch
 conversation with your Router; the session list below it opens any worker's full timeline
 (every step, report and message), where you can also talk to it directly.
 
+The dot next to each session shows its state (hover it for the words): pulsing blue, working;
+amber, waiting for your answer; green, done; red, failed; hollow grey, queued; grey, idle; a
+blue ring, open in a terminal right now.
+
+Project folders are the repositories workers may change (see [Where workers work](#where-workers-work)).
+Until you add one, the inbox offers to; *Not now* hides that card, and Settings still has them.
+
 ## Giving work
 
 Type into the inbox or Chat. Several things at once is fine: the Router splits them into
