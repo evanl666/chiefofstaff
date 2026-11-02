@@ -68,6 +68,7 @@ from .workers import Workers
 from .workspaces import (
     BRANCH_PREFIX,
     Workspaces,
+    common_git_dir,
     git_dirs,
     protected_git_paths,
 )
@@ -361,30 +362,65 @@ class Runtime:
         slug = row["branch"].removeprefix(BRANCH_PREFIX) if row["branch"] else workspace.name
         checkouts = self.workspaces.checkouts(row)
         if repo.startswith(("/", "~")):
-            have = {checkout.get("repo", checkout["path"]) for checkout in checkouts}
-            checkout = await self.workspaces.make_checkout(workspace, slug, repo, True, have)
-            if not checkout:
-                return "You already have a checkout of that repository: " + ", ".join(
-                    checkout["path"] for checkout in checkouts
-                )
+            local: Path | None = Path(repo)
         else:
             if row["slack"] and not self.yolo(row):
                 # A clone URL can carry data out; Slack content must not steer that.
                 raise ValueError("Workers that read Slack can only add configured projects.")
-            checkout = await self.workspaces.clone_checkout(workspace, slug, repo)
             self.store.record(caller, "links", [repo])
+            # A copy on this machine (a project, or a fresh clone into a code folder) gets a
+            # worktree like any project; without one the clone goes into the worker's folder.
+            local = await self.workspaces.local_copy(repo)
+        if local:
+            have = {checkout.get("repo", checkout["path"]) for checkout in checkouts}
+            found = await self.workspaces.make_checkout(workspace, slug, str(local), True, have)
+            if not found:
+                return "You already have a checkout of that repository: " + ", ".join(
+                    checkout["path"] for checkout in checkouts
+                )
+            checkout = found
+        else:
+            checkout = await self.workspaces.clone_checkout(workspace, slug, repo)
         self.update_session(caller, repos=json.dumps([*checkouts, checkout]))
         self.add_message(caller, "notice", f"Added {checkout['path']} ({checkout['branch']})")
         return {key: checkout[key] for key in ("path", "branch", "base")}
 
-    async def add_project(self, raw: str) -> str:
-        """Make a folder the owner chose a configured project (the owner's choice approves it)."""
+    async def add_folder(self, raw: str) -> dict:
+        """A folder the owner added from the inbox: a repository becomes a project; a folder
+        that is not one (like ~/workspace) becomes a code folder, whose repositories count."""
+        path = await self.owner_path(raw)
+        if await common_git_dir(path):
+            return {"path": await self.add_project(str(path)), "kind": "project"}
+        old = self.store.settings()
+        if self.store.directory.is_relative_to(path):
+            raise ValueError("Choose a folder that does not contain Chief of Staff's own data.")
+        if old.code_folder and old.code_folder != str(path):
+            raise ValueError(f"Your code folder is {old.code_folder}; change it in Settings.")
+        if old.code_folder != str(path):
+            new = Settings(**{**old.model_dump(), "code_folder": str(path)})
+            self.store.save_settings(new)
+            await self.settings_changed(old, new)
+        repositories = [
+            repo
+            for repo in await asyncio.to_thread(self.workspaces.projects)
+            if within(repo, str(path))
+        ]
+        return {"path": str(path), "kind": "code_folder", "repositories": len(repositories)}
+
+    async def owner_path(self, raw: str) -> Path:
         path = Path(await asyncio.to_thread(os.path.expanduser, raw.strip()))
         if not path.is_absolute():
             raise ValueError("Give the folder as an absolute path, e.g. ~/code/app.")
         path = await asyncio.to_thread(path.resolve)
+        if not await asyncio.to_thread(path.is_dir):
+            raise ValueError(f"Not an existing folder: {raw}")
+        return path
+
+    async def add_project(self, raw: str) -> str:
+        """Make a folder the owner chose a configured project (the owner's choice approves it)."""
+        path = await self.owner_path(raw)
         old = self.store.settings()
-        if any(within(str(path), project) for project in old.projects):
+        if any(within(str(path), project) for project in self.workspaces.projects()):
             return str(path)
         if self.store.directory.is_relative_to(path):
             raise ValueError("A project must not contain Chief of Staff's private data directory.")
@@ -397,7 +433,11 @@ class Runtime:
         row = self.store.session(session_id)
         folder = row["cwd"]
         if not folder or not await asyncio.to_thread(os.path.isdir, folder):
-            raise ValueError("This session's folder does not exist.")
+            raise ValueError(
+                "Its worktree was removed when it closed; reopen it to bring it back."
+                if row["closed_at"]
+                else "This session's folder does not exist."
+            )
         if app == "vscode":
             command = ["code", folder] if shutil.which("code") else None
             if not command and sys.platform == "darwin":
@@ -903,14 +943,14 @@ class Runtime:
 
     def projects_note(self) -> str:
         """Tell the Router when the configured projects changed since it last heard."""
-        projects = self.store.settings().projects
+        projects = self.workspaces.projects()
         heard = self.store.get("router_projects")
         if heard == json.dumps(projects):
             return ""
         self.store.set("router_projects", json.dumps(projects))
         if heard is None:
             return ""  # The Router's first look at projects is through list_sessions.
-        listed = "\n".join(f"- {project}" for project in projects) or "- (none)"
+        listed = "\n".join(f"- {project}" for project in projects[:40]) or "- (none)"
         return f"The configured projects are now:\n{listed}"
 
     async def tell_router(self, row: dict, status: str, summary: str, task: dict | None = None):

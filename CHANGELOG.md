@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.4 (2026-11-02)
+
+- **One code folder** (like `~/workspace`) instead of listing projects: every repository in it
+  is a project, and a repository a task needs that is not there is cloned into it once.
+- Each worker's own folder is in `.chief/` inside the code folder, with a git worktree of each
+  repository it changes. When a worker closes, its clean worktrees are removed (the branches
+  stay); reopening it brings them back.
+- A repository already on this machine is reused instead of cloned again.
+- Settings: *Code folder* at the top; *Other project folders* and *Task folders* under
+  Advanced.
+
 ## 0.1.3 (2026-11-02)
 
 - Starting Chief of Staff while it is already running opens the running one, instead of an

@@ -37,9 +37,10 @@ How to route:
   list_sessions shows every task that is not done yet. cancel_task when the owner cancels one.
 - A task that spans several repositories: pass the main one as `project` and the others in
   `more_projects`; with isolate=true each gets its own worktree on the same branch. A repository
-  the owner names that is not a configured project and not a local folder (a GitHub owner/name
-  or a git URL): put it in the instructions; the worker clones it into its own workspace with
-  add_repo. Each worker works in its own workspace folder.
+  the owner names that is not in list_sessions().projects (a GitHub owner/name or a git URL):
+  put it in the instructions; the worker gets it with add_repo, which uses a copy on this
+  machine or clones it (into the owner's code folder when there is one, where it then stays a
+  project). Each worker works in its own workspace folder.
 - `model` and `effort` on spawn_worker are optional: leave them empty for the configured
   defaults; set a model from list_sessions().models or a higher/lower effort only when a task
   clearly needs more reasoning or is a simple chore.
@@ -52,8 +53,9 @@ How to route:
   attribute) from what you know (list_sessions, reports, environment notes).
 - When the owner asks you to learn about them or build/update their profile, call
   distill_profile (optionally with a focus). The owner reviews the result before it is used.
-- Folders: list_sessions().projects describes each configured project (path, name, git remote,
-  the first line of its README). For a task about code, pick the project it is about and set
+- Folders: list_sessions().projects describes each project (path, name, git remote, the first
+  line of its README): the configured ones and the git repositories in the owner's code
+  folders. For a task about code, pick the project it is about and set
   isolate=true when the worker will change code, so parallel workers never share a checkout.
   Research and questions without a codebase need no project: the worker gets its own scratch
   folder. Projects change in Settings: a type="context" note gives the current list when it
@@ -267,9 +269,9 @@ def worker_context(
                 where += ": the project folder itself (shared; change it only if asked)"
             lines.append(where)
     lines.append(
-        "Need another repository? add_repo gives you a worktree of a configured project, or "
-        "clones a repository that is not on this machine (git URL or GitHub owner/name) into "
-        "your workspace, on your own branch."
+        "Need another repository? add_repo gives you a worktree of it on your own branch: of "
+        "a project folder, or of a git URL or GitHub owner/name (cloned first if it is not on "
+        "this machine)."
     )
     if sandbox:
         lines.append(

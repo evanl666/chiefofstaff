@@ -189,6 +189,15 @@ class Workers:
                 {"session_id": session_id},
             )
         self.runtime.background(self.pump())
+        if row["role"] == WORKER:
+            self.runtime.background(self.release(session_id))
+
+    async def release(self, session_id: str):
+        """A closed worker's clean worktrees go; its branches stay (see Workspaces.release)."""
+        async with self.states[session_id].checkouts:
+            row = self.store.session(session_id)
+            if row["closed_at"]:
+                await self.workspaces.release(row)
 
     def recently_closed(self, limit: int) -> list[dict]:
         return self.store.all(
@@ -285,6 +294,9 @@ class Workers:
             return self.runtime.view(row)
         if not self.store.get(f"created:{session_id}"):
             raise ValueError("That worker never started; start a new one instead.")
+        async with self.states[session_id].checkouts:
+            with suppress(ValueError, OSError):
+                await self.workspaces.restore(row)
         if row["cwd"] and not await asyncio.to_thread(os.path.isdir, row["cwd"]):
             raise ValueError("That worker's directory is gone; start a new one instead.")
         backend = self.runtime.require_ready()

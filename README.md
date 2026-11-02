@@ -58,8 +58,10 @@ copilot login
 uvx chiefofstaff            # or: pipx install chiefofstaff && chiefofstaff
 ```
 
-Your browser opens `http://127.0.0.1:8765`. Add a project folder, then type what you need in
-the box at the bottom.
+Your browser opens `http://127.0.0.1:8765`. Tell it where your code lives (like `~/workspace`),
+then type what you need in the box at the bottom. Repositories a task needs that aren't there
+yet get cloned into that folder, and each worker works in its own git worktree inside it, so
+your own checkouts are never touched.
 
 Everything runs on your machine, and your data stays in `~/Library/Application Support/chiefofstaff`
 (macOS) or `~/.local/share/chiefofstaff` (Linux). Closing the tab doesn't stop anything; press

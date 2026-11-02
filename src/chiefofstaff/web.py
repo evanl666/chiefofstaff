@@ -198,7 +198,7 @@ def create_app(
 
     @app.post("/api/projects")
     async def add_project(payload: ProjectPath):
-        return {"path": await runtime.add_project(payload.path)}
+        return await runtime.add_folder(payload.path)
 
     @app.get("/api/tasks/{task_id}")
     async def task(task_id: str):

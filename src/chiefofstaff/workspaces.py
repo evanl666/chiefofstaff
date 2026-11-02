@@ -3,6 +3,7 @@
 import asyncio
 import itertools
 import json
+import logging
 import os
 import re
 import shutil
@@ -84,6 +85,69 @@ GIT_URL = re.compile(r"^(https?://|ssh://|git@|file://)\S+$")
 
 
 GITHUB_NAME = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+
+
+logger = logging.getLogger(__name__)
+
+# Workers' own folders, inside the code folder (hidden, so never taken for repositories).
+TASK_FOLDERS = ".chief"
+# Where repositories are looked for in a code folder, and what is never looked into.
+CODE_FOLDER_DEPTH = 2
+MAX_REPOSITORIES = 100
+SKIPPED = {"node_modules", "venv", "__pycache__", "dist", "build", "target", "Library"}
+
+
+def find_repositories(folder: Path, skip: set[Path]) -> list[str]:
+    """Git repositories in a code folder, and in its folders up to CODE_FOLDER_DEPTH deep.
+
+    A repository's own subfolders are not searched (worktrees and submodules belong to it);
+    hidden folders, dependencies and `skip` (Chief of Staff's own folders) are left out.
+    """
+    found: list[str] = []
+    level = [folder]
+    for depth in range(CODE_FOLDER_DEPTH + 1):
+        deeper = []
+        for path in level:
+            if (path / ".git").is_dir():
+                found.append(str(path))
+                continue
+            if depth == CODE_FOLDER_DEPTH:
+                continue
+            with suppress(OSError):
+                for entry in sorted(os.scandir(path), key=lambda entry: entry.name):
+                    child = Path(entry.path)
+                    if (
+                        entry.is_dir(follow_symlinks=False)
+                        and not entry.name.startswith(".")
+                        and entry.name not in SKIPPED
+                        and child not in skip
+                    ):
+                        deeper.append(child)
+            if len(found) >= MAX_REPOSITORIES:
+                return found
+        level = deeper
+    return found[:MAX_REPOSITORIES]
+
+
+def clone_source(repo: str) -> tuple[str, str]:
+    """The URL to clone a git URL or GitHub owner/name from, and the folder name for it."""
+    if GITHUB_NAME.fullmatch(repo):
+        url = f"https://github.com/{repo}.git"
+    elif GIT_URL.fullmatch(repo):
+        url = repo
+    else:
+        raise ValueError("Give a configured project folder, a git URL or GitHub owner/name.")
+    return url, re.split(r"[/:]", url.rstrip("/").removesuffix(".git"))[-1]
+
+
+def repository_key(url: str) -> str:
+    """One name for the different URLs of a repository (https, ssh, owner/name, a local path)."""
+    text = url.strip().rstrip("/").removesuffix(".git").lower()
+    if match := re.search(r"github\.com[:/]([^/]+/[^/]+)$", text):
+        return "github:" + match.group(1)
+    if GITHUB_NAME.fullmatch(text):
+        return "github:" + text
+    return text.removeprefix("file://")
 
 
 def free_child(parent: Path, name: str) -> Path:
@@ -210,11 +274,110 @@ class Workspaces:
         self.store = store
         self.work_root = work_root
         self.project_cache: dict[str, tuple[float, dict]] = {}
+        self.known: tuple[float, tuple, list[str]] = (0.0, (), [])
+        self.clone_lock = asyncio.Lock()
+
+    def projects(self) -> list[str]:
+        """Configured projects, then the repositories in the code folders (looked up again
+        every half minute, so repositories cloned or deleted meanwhile are noticed)."""
+        settings = self.store.settings()
+        key = (tuple(settings.projects), settings.code_folder)
+        found_at, known_key, known = self.known
+        if known_key == key and time.monotonic() - found_at < 30:
+            return known
+        found = list(settings.projects)
+        skip = {self.store.directory.resolve(), self.scratch_root().resolve()}
+        if settings.code_folder:
+            for repo in find_repositories(Path(settings.code_folder), skip):
+                if not any(within(repo, project) for project in found):
+                    found.append(repo)
+        self.known = (time.monotonic(), key, found)
+        return found
+
+    def forget_projects(self):
+        self.known = (0.0, (), [])
+
+    async def local_copy(self, repo: str) -> Path | None:
+        """The owner's copy of a repository (a git URL or GitHub owner/name): a project whose
+        origin it is, else a fresh clone in the code folder. None when there is neither."""
+        url, name = clone_source(repo)
+        wanted = repository_key(url)
+        for card in await self.project_cards():
+            if card["remote"] and repository_key(card["remote"]) == wanted:
+                return Path(card["path"])
+        folder = self.store.settings().code_folder
+        if not folder:
+            return None
+        async with self.clone_lock:  # Two workers asking for the same repository clone it once.
+            self.forget_projects()
+            for card in await self.project_cards():
+                if card["remote"] and repository_key(card["remote"]) == wanted:
+                    return Path(card["path"])
+            destination = free_child(Path(folder), name)
+            # Hidden while it downloads, so a half clone is never taken for a project.
+            partial = destination.with_name(f".{destination.name}.cloning")
+            await asyncio.to_thread(shutil.rmtree, partial, True)
+            try:
+                if GITHUB_NAME.fullmatch(repo) and shutil.which("gh"):
+                    await command("gh", "repo", "clone", repo, str(partial), limit=900)
+                else:
+                    await git("clone", "--quiet", url, str(partial), limit=900)
+                await asyncio.to_thread(partial.rename, destination)
+            finally:
+                await asyncio.to_thread(shutil.rmtree, partial, True)
+            self.forget_projects()
+            return destination
 
     def scratch_root(self) -> Path:
-        """Where each worker's own workspace folder is created."""
-        configured = self.store.settings().scratch_directory
-        return Path(configured) if configured else self.work_root / "workspaces"
+        """Where each worker's own folder is created: .chief/ in the code folder by default."""
+        settings = self.store.settings()
+        if settings.scratch_directory:
+            return Path(settings.scratch_directory)
+        if settings.code_folder:
+            return Path(settings.code_folder) / TASK_FOLDERS
+        return self.work_root / "workspaces"
+
+    async def release(self, row: dict) -> list[str]:
+        """A closed worker's worktrees, removed when they hold nothing uncommitted.
+
+        The branches stay in their repositories, and restore() brings the worktrees back when
+        the worker is reopened. git refuses to remove a worktree with changes, so nothing
+        unsaved is lost; that worktree just stays.
+        """
+        removed = []
+        for checkout in self.checkouts(row):
+            tree = checkout.get("worktree")
+            if not tree or not await asyncio.to_thread(os.path.isdir, tree):
+                continue
+            try:
+                await git("-C", checkout["repo"], "worktree", "remove", checkout["worktree"])
+                removed.append(checkout["worktree"])
+            except ValueError:
+                logger.info("Kept %s: it has uncommitted changes.", checkout["worktree"])
+        with suppress(OSError):
+            # Only when nothing else is in it, like a worker's notes.
+            await asyncio.to_thread(self.workspace(row).rmdir)
+        return removed
+
+    async def restore(self, row: dict):
+        """The task folder and worktrees release() removed, back on their branches."""
+        workspace = self.workspace(row)
+        if row["cwd"] == str(workspace):  # A worker without a repository works in it directly.
+            await asyncio.to_thread(workspace.mkdir, parents=True, exist_ok=True)
+        for checkout in self.checkouts(row):
+            tree = checkout.get("worktree")
+            if not tree or await asyncio.to_thread(os.path.exists, tree):
+                continue
+            repo = checkout["repo"]
+            await git("-C", repo, "worktree", "prune")
+            try:
+                await git("-C", repo, "worktree", "add", tree, checkout["branch"])
+            except ValueError:
+                # The branch is gone (merged and deleted): start it again where it started.
+                await git(
+                    "-C", repo, "worktree", "add", "-b", checkout["branch"], tree,
+                    checkout.get("base_ref") or "HEAD",
+                )  # fmt: skip
 
     def workspace(self, row: dict) -> Path:
         if stored := self.store.get(f"workspace:{row['id']}"):
@@ -238,7 +401,7 @@ class Workspaces:
         self, workspace: Path, slug: str, project: str, isolate: bool, repos: set[str]
     ) -> dict | None:
         """A checkout of a configured project for a worker; None if it has that repo already."""
-        path = resolve_project(project, self.store.settings().projects)
+        path = resolve_project(project, self.projects())
         if not isolate:
             checkout = {"project": str(path), "path": str(path), "branch": "", "shared": True}
             if git_dir := await common_git_dir(path):
@@ -278,13 +441,7 @@ class Workspaces:
 
     async def clone_checkout(self, workspace: Path, slug: str, repo: str) -> dict:
         """Clone a repository that is not on this machine into a worker's workspace."""
-        if GITHUB_NAME.fullmatch(repo):
-            url = f"https://github.com/{repo}.git"
-        elif GIT_URL.fullmatch(repo):
-            url = repo
-        else:
-            raise ValueError("Give a configured project folder, a git URL or GitHub owner/name.")
-        name = re.split(r"[/:]", url.rstrip("/").removesuffix(".git"))[-1]
+        url, name = clone_source(repo)
         destination = free_child(workspace, name)
         if GITHUB_NAME.fullmatch(repo) and shutil.which("gh"):
             # gh uses the owner's GitHub sign-in, so private repositories work too.
@@ -346,14 +503,15 @@ class Workspaces:
     async def project_cards(self) -> list[dict]:
         """What the Router needs to match a request to a project."""
         cards = []
-        for project in self.store.settings().projects:
+        for project in self.projects()[:60]:
             cached = self.project_cache.get(project)
             if cached and time.monotonic() - cached[0] < 600:
                 cards.append(cached[1])
                 continue
             card = {"path": project, "name": Path(project).name, "remote": "", "about": ""}
             with suppress(Exception):
-                card["remote"] = await git("-C", project, "config", "--get", "remote.origin.url")
+                remote = await git("-C", project, "config", "--get", "remote.origin.url")
+                card["remote"] = remote.strip()
             card["about"] = await asyncio.to_thread(readme_line, Path(project))
             self.project_cache[project] = (time.monotonic(), card)
             cards.append(card)
