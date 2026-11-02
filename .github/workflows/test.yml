@@ -17,6 +17,7 @@ jobs:
       - run: uv run --locked --extra dev ruff check .
       - run: uv run --locked --extra dev ruff format --check .
       - run: uv run --locked --extra dev pyright
+      - run: npx --yes eslint@10.14.0 src/chiefofstaff/static
       - run: uv run --locked --extra dev pytest -q
 
   demo-ui:
