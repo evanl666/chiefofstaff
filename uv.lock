@@ -165,6 +165,46 @@ wheels = [
 ]
 
 [[package]]
+name = "chiefofstaff"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "fastapi" },
+    { name = "github-copilot-sdk" },
+    { name = "httpx" },
+    { name = "keyring" },
+    { name = "mcp" },
+    { name = "platformdirs" },
+    { name = "pydantic" },
+    { name = "uvicorn" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "httpx" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fastapi", specifier = ">=0.115,<1" },
+    { name = "github-copilot-sdk", specifier = ">=1.0.28,<2" },
+    { name = "httpx", specifier = ">=0.28,<1" },
+    { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.28,<1" },
+    { name = "keyring", specifier = ">=25,<26" },
+    { name = "mcp", specifier = ">=1.24,<2" },
+    { name = "platformdirs", specifier = ">=4,<5" },
+    { name = "pydantic", specifier = ">=2.10,<3" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8,<10" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.25,<2" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.11,<1" },
+    { name = "uvicorn", specifier = ">=0.34,<1" },
+]
+provides-extras = ["dev"]
+
+[[package]]
 name = "click"
 version = "8.5.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1070,46 +1110,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/da/34/30e9280707135d2cf
 wheels = [
     { url = "https://files.pythonhosted.org/packages/38/0c/b54a4fdd7f90a3af8b02ebc9ce6712c2c208b7926a2f7bad95c33ebbe943/uvicorn-0.54.0-py3-none-any.whl", hash = "sha256:505bdb0f318731d45f1f712071fc781a8981f6847a31c902c9f5e652d4f67faf", size = 87427, upload-time = "2026-09-25T06:52:35.829Z" },
 ]
-
-[[package]]
-name = "work-buddy-local"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "fastapi" },
-    { name = "github-copilot-sdk" },
-    { name = "httpx" },
-    { name = "keyring" },
-    { name = "mcp" },
-    { name = "platformdirs" },
-    { name = "pydantic" },
-    { name = "uvicorn" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "httpx" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "fastapi", specifier = ">=0.115,<1" },
-    { name = "github-copilot-sdk", specifier = ">=1.0.28,<2" },
-    { name = "httpx", specifier = ">=0.28,<1" },
-    { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.28,<1" },
-    { name = "keyring", specifier = ">=25,<26" },
-    { name = "mcp", specifier = ">=1.24,<2" },
-    { name = "platformdirs", specifier = ">=4,<5" },
-    { name = "pydantic", specifier = ">=2.10,<3" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8,<10" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.25,<2" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.11,<1" },
-    { name = "uvicorn", specifier = ">=0.34,<1" },
-]
-provides-extras = ["dev"]
 
 [[package]]
 name = "zipp"

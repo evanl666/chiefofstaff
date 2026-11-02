@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from work_buddy.watchdog import WatchConfig, flags
+from chiefofstaff.watchdog import WatchConfig, flags
 
 NOW = 1_800_000_000.0
 

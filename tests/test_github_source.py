@@ -1,8 +1,8 @@
 import json
 
-from work_buddy.models import Settings
-from work_buddy.sources.github import GitHubSource
-from work_buddy.store import Store
+from chiefofstaff.models import Settings
+from chiefofstaff.sources.github import GitHubSource
+from chiefofstaff.store import Store
 
 THREAD = "github:acme/app#7"
 

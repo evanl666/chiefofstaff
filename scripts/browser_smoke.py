@@ -1,6 +1,6 @@
-"""Live browser test of the Work Buddy UI against real Copilot sessions.
+"""Live browser test of the Chief of Staff UI against real Copilot sessions.
 
-Drives the real UI with Playwright while Work Buddy talks to your signed-in Copilot and to a
+Drives the real UI with Playwright while Chief of Staff talks to your signed-in Copilot and to a
 fake Slack MCP server. Saves screenshots to ./browser-shots (light and dark).
 
     uv run --with playwright python scripts/browser_smoke.py
@@ -184,7 +184,7 @@ async def main():
         (project / "README.md").write_text("# Demo\n")
         git(project, "add", ".")
         git(project, "-c", "user.email=e2e@test", "-c", "user.name=e2e", "commit", "-qm", "init")
-        app = App(root / "data", root / "work-buddy.log")
+        app = App(root / "data", root / "chiefofstaff.log")
         await app.start()
         try:
             async with async_playwright() as playwright:
@@ -209,8 +209,8 @@ async def main():
                     await browser.close()
         finally:
             await app.stop()
-            if (root / "work-buddy.log").exists():
-                print("\n".join((root / "work-buddy.log").read_text().splitlines()[-30:]))
+            if (root / "chiefofstaff.log").exists():
+                print("\n".join((root / "chiefofstaff.log").read_text().splitlines()[-30:]))
             await cleanup(root / "data")
     subprocess.run(["ls", str(SHOTS)])
 

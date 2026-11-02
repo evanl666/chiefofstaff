@@ -44,7 +44,7 @@ def create_app(
     store = Store(directory)
     bus = Bus()
     runtime = runtime_factory(store, bus)
-    cookie_name = f"work_buddy_{port}"
+    cookie_name = f"chiefofstaff_{port}"
     origins = {f"http://127.0.0.1:{port}", f"http://localhost:{port}"}
 
     @asynccontextmanager
@@ -223,7 +223,7 @@ def create_app(
     @app.post("/api/settings")
     async def save_settings(settings: Settings):
         if any(directory.is_relative_to(Path(project)) for project in settings.projects):
-            raise ValueError("A project must not contain Work Buddy's private data directory.")
+            raise ValueError("A project must not contain Chief of Staff's private data directory.")
         await asyncio.to_thread(runtime.check_scratch, settings)
         old = store.settings()
         store.save_settings(settings)

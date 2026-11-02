@@ -2,9 +2,9 @@ import pytest
 from conftest import FakeClient, FakeSlackMcp, FakeTokens, env
 from fastapi.testclient import TestClient
 
-from work_buddy.runtime import Runtime
-from work_buddy.sources.slack import SlackSource
-from work_buddy.web import create_app
+from chiefofstaff.runtime import Runtime
+from chiefofstaff.sources.slack import SlackSource
+from chiefofstaff.web import create_app
 
 TOKEN = "launch-token"
 ORIGIN = {"origin": "http://127.0.0.1:8765"}
@@ -104,7 +104,7 @@ def test_unknown_draft_and_session_are_404(app_client):
 async def test_a_stalled_event_stream_is_closed_so_the_browser_resyncs():
     import asyncio
 
-    from work_buddy.bus import Bus
+    from chiefofstaff.bus import Bus
 
     bus = Bus()
     bus.bind(asyncio.get_running_loop())

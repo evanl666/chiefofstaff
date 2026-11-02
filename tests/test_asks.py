@@ -5,9 +5,9 @@ import time
 import pytest
 from conftest import call_tool, env, settle
 
-from work_buddy.asks import form_values
-from work_buddy.models import DraftDecision, Settings
-from work_buddy.store import Store
+from chiefofstaff.asks import form_values
+from chiefofstaff.models import DraftDecision, Settings
+from chiefofstaff.store import Store
 
 
 async def spawn(runtime, router, title, **extra):
@@ -86,14 +86,14 @@ async def test_mcp_sign_in_asks_once_and_closes_by_itself(harness):
     signing = asyncio.create_task(runtime.on_mcp_auth(request, {"sessionId": worker}))
     draft = await pending(harness, "signin")
     assert draft["target"] == {"server": "docs", "url": session.login_url}
-    assert session.sent[-1].startswith(env("work-buddy", "system", "docs needs sign-in")[:-11])
+    assert session.sent[-1].startswith(env("system", "system", "docs needs sign-in")[:-11])
     assert session.modes[-1] == "immediate", "a working worker hears it in its current turn"
     session.emit("session.mcp_server_tools_loaded", server_name="docs", tool_count=1)
     assert await signing == {"kind": "cancelled"}
     await settle(runtime)
     assert harness.store.draft(draft["id"])["status"] == "answered"
     assert session.sent[-1] == env(
-        "work-buddy", "system", "You are signed in to docs; its tools are available now."
+        "system", "system", "You are signed in to docs; its tools are available now."
     )
 
     session.login_url = ""  # Copilot kept the credentials: nothing to ask.

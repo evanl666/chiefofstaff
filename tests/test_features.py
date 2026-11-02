@@ -7,9 +7,9 @@ from types import SimpleNamespace
 
 from conftest import Harness, call_tool, env, settle
 
-from work_buddy import catalog
-from work_buddy.digest import digest
-from work_buddy.models import DraftDecision, Settings
+from chiefofstaff import catalog
+from chiefofstaff.digest import digest
+from chiefofstaff.models import DraftDecision, Settings
 
 
 async def spawn(runtime, router, title, **extra):
@@ -230,7 +230,7 @@ async def test_the_router_hears_about_related_workers(harness):
     sent = harness.session(router).sent[-1]
     assert sent.startswith(
         env("owner", "message", "你去研究一下openhands的开发历史")
-        + '\n\n<message from="work-buddy" type="context">\nEarlier workers'
+        + '\n\n<message from="system" type="context">\nEarlier workers'
     )
     card = f"“研究 OpenHands 源码” ({worker_id}, closed). Task: 研究 OpenHands 源码"
     assert f"{card} Result: 源码解读已完成。" in sent
@@ -508,9 +508,7 @@ async def test_the_owner_picks_the_folder_when_the_router_is_unsure(tmp_path):
     assert harness.store.settings().projects == [str(app.resolve()), str(notes.resolve())]
     told = harness.session(router).sent[-1]
     assert (
-        told.startswith(
-            env("work-buddy", "draft-outcome", "For “Fix search” the owner chose")[:-30]
-        )
+        told.startswith(env("system", "draft-outcome", "For “Fix search” the owner chose")[:-30])
         and str(notes.resolve()) in told
     )
     started = await spawn(runtime, router, "Fix search", project=str(notes), why_new="t")

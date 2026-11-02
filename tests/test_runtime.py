@@ -8,16 +8,16 @@ from types import SimpleNamespace
 import pytest
 from conftest import FakeSession, Harness, call_tool, env, settle
 
-from work_buddy import runtime as runtime_module
-from work_buddy.models import DraftDecision, Settings
-from work_buddy.runtime import ROUTER_TOOLS, permission_denial
+from chiefofstaff import runtime as runtime_module
+from chiefofstaff.models import DraftDecision, Settings
+from chiefofstaff.runtime import ROUTER_TOOLS, permission_denial
 
 
 async def test_router_routes_work_and_worker_reports_back(harness):
     runtime = await harness.connect()
     router = harness.session(harness.router_id)
     assert router.options["available_tools"] == ROUTER_TOOLS
-    assert "Router inside Work Buddy" in router.options["system_message"]["content"]
+    assert "Router inside Chief of Staff" in router.options["system_message"]["content"]
 
     await runtime.owner_send(harness.router_id, "Fix the flaky login test")
     assert router.sent == [env("owner", "message", "Fix the flaky login test")]
@@ -31,7 +31,7 @@ async def test_router_routes_work_and_worker_reports_back(harness):
     )
     worker_id = json.loads(result.text_result_for_llm)["session_id"]
     worker = harness.session(worker_id)
-    assert harness.client.names[worker_id] == "Work Buddy · Fix flaky login test"
+    assert harness.client.names[worker_id] == "Chief of Staff · Fix flaky login test"
     assert worker.sent == [
         env("router", "task", "Owner: fix the flaky login test.", title="Fix flaky login test")
     ]
@@ -70,7 +70,7 @@ async def test_router_routes_work_and_worker_reports_back(harness):
     assert harness.kinds(harness.router_id)[-1] == ("update", "Login test fixed: PR #7")
     assert harness.store.session(harness.router_id)["unread"] == 1
     await settle(runtime)
-    assert harness.notifications == [("Work Buddy", "Login test fixed: PR #7")]
+    assert harness.notifications == [("Chief of Staff", "Login test fixed: PR #7")]
 
     await call_tool(runtime, "close_worker", harness.router_id, session_id=worker_id)
     assert harness.store.session(worker_id)["closed_at"]
@@ -305,7 +305,7 @@ async def test_restart_resumes_router_and_working_sessions(tmp_path):
     assert (
         second.session(worker_id)
         .sent[-1]
-        .startswith('<message from="work-buddy" type="restart">\nWork Buddy restarted')
+        .startswith('<message from="system" type="restart">\nChief of Staff restarted')
     )
 
 
@@ -486,15 +486,15 @@ def test_sessions_that_read_slack_are_contained(tmp_path):
     assert permission_denial(slack, github_read), "the Slack session only gets Slack tools"
 
 
-async def test_copilot_runs_without_work_buddy_secrets(monkeypatch):
-    from work_buddy import runtime as module
+async def test_copilot_runs_without_chiefofstaff_secrets(monkeypatch):
+    from chiefofstaff import runtime as module
 
     captured = {}
-    monkeypatch.setenv("WORK_BUDDY_SLACK_USER_TOKEN", "xoxp-secret")
+    monkeypatch.setenv("CHIEFOFSTAFF_SLACK_USER_TOKEN", "xoxp-secret")
     monkeypatch.setenv("KEEP_ME", "1")
     monkeypatch.setattr(module, "CopilotClient", lambda **kwargs: captured.update(kwargs))
     module.default_client(Settings(copilot_command="git"))
-    assert "WORK_BUDDY_SLACK_USER_TOKEN" not in captured["env"]
+    assert "CHIEFOFSTAFF_SLACK_USER_TOKEN" not in captured["env"]
     assert captured["env"]["KEEP_ME"] == "1"
 
 
@@ -580,7 +580,7 @@ async def test_router_resumes_unhandled_events_after_restart(tmp_path):
     second = Harness(tmp_path / "data", client=first.client)
     await second.connect()
     replay = second.session(second.router_id).sent[-1]
-    assert replay.startswith('<message from="work-buddy" type="restart">\nWork Buddy restarted')
+    assert replay.startswith('<message from="system" type="restart">\nChief of Staff restarted')
     assert "Carol: are you around?" in replay and '&lt;message from="slack"' in replay
     assert "hello" not in replay, "handled messages are not replayed"
 
@@ -752,7 +752,7 @@ async def test_messages_during_a_rotation_reach_the_new_router(harness):
     await runtime.owner_send(router_id, "Are you there?")
     new = harness.client.sessions[harness.store.get(f"copilot:{router_id}")]
     assert old.sent == [] and len(new.sent) == 1
-    assert new.sent[0].startswith('<message from="work-buddy" type="handover">')
+    assert new.sent[0].startswith('<message from="system" type="handover">')
     assert new.sent[0].endswith(env("owner", "message", "Are you there?"))
 
 
@@ -779,7 +779,7 @@ async def test_the_router_rotates_when_its_context_grows(harness):
     assert new.sent == [], "the handover waits for the next message"
     await runtime.owner_send(router_id, "Start the docs task")
     sent = new.sent[-1]
-    assert sent.startswith('<message from="work-buddy" type="handover">')
+    assert sent.startswith('<message from="system" type="handover">')
     assert f"{worker_id[:8]} “Fix login”" in sent and "Fixed in PR #7" in sent
     assert "- owner: Thanks, what is open?" in sent and "- you: Nothing else is open." in sent
     assert sent.endswith(env("owner", "message", "Start the docs task"))

@@ -1,6 +1,6 @@
 """Slack through Slack's official MCP server (https://mcp.slack.com/mcp).
 
-Work Buddy uses the owner's Slack *user* token in two places:
+Chief of Staff uses the owner's Slack *user* token in two places:
 - the watcher searches for new DMs and mentions without involving a model, and only wakes the
   Router when something new arrived;
 - sessions that handle Slack get the MCP server with read-only tools. Sending is never exposed
@@ -29,7 +29,7 @@ from . import SourceHost
 
 logger = logging.getLogger(__name__)
 
-SLACK_MCP_URL = os.environ.get("WORK_BUDDY_SLACK_MCP_URL", "https://mcp.slack.com/mcp")
+SLACK_MCP_URL = os.environ.get("CHIEFOFSTAFF_SLACK_MCP_URL", "https://mcp.slack.com/mcp")
 SEARCH_TOOL = "slack_search_public_and_private"
 SEND_TOOL = "slack_send_message"
 KNOWN_READ_TOOLS = [
@@ -77,16 +77,24 @@ def message_keys(text: str) -> list[str]:
 
 
 class SlackTokens:
-    ENV = "WORK_BUDDY_SLACK_USER_TOKEN"
+    ENV = "CHIEFOFSTAFF_SLACK_USER_TOKEN"
 
     def __init__(self, directory: Path):
-        self.service = "work-buddy-" + hashlib.sha256(str(directory).encode()).hexdigest()[:16]
+        digest = hashlib.sha256(str(directory).encode()).hexdigest()[:16]
+        self.service = "chiefofstaff-" + digest
+        self.legacy_service = "work-buddy-" + digest  # Before the project was renamed.
 
     def get(self) -> str:
         if token := os.environ.get(self.ENV):
             return token
         try:
-            return keyring.get_password(self.service, "slack-user") or ""
+            if token := keyring.get_password(self.service, "slack-user"):
+                return token
+            if token := keyring.get_password(self.legacy_service, "slack-user"):
+                keyring.set_password(self.service, "slack-user", token)
+                keyring.delete_password(self.legacy_service, "slack-user")
+                return token
+            return ""
         except KeyringError:
             logger.warning("OS keyring unavailable; set %s instead.", self.ENV)
             return ""

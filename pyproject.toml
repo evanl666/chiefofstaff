@@ -3,11 +3,27 @@ requires = ["hatchling>=1.26"]
 build-backend = "hatchling.build"
 
 [project]
-name = "work-buddy-local"
+name = "chiefofstaff"
 version = "0.1.0"
-description = "A Router that coordinates your Copilot sessions, Slack and GitHub reviews."
+description = "An AI chief of staff for your GitHub Copilot agents: it routes work to the right session, handles Slack and GitHub pings, and asks you only when it matters."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "evanl666" }]
 requires-python = ">=3.11"
+keywords = ["github-copilot", "ai-agents", "multi-agent", "orchestration", "slack", "developer-tools"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Web Environment",
+  "Intended Audience :: Developers",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development",
+]
 dependencies = [
   "fastapi>=0.115,<1",
   "uvicorn>=0.34,<1",
@@ -19,14 +35,18 @@ dependencies = [
   "httpx>=0.28,<1",
 ]
 
+[project.urls]
+Homepage = "https://github.com/evanl666/chiefofstaff"
+Issues = "https://github.com/evanl666/chiefofstaff/issues"
+
 [project.optional-dependencies]
 dev = ["pytest>=8,<10", "pytest-asyncio>=0.25,<2", "httpx>=0.28,<1", "ruff>=0.11,<1"]
 
 [project.scripts]
-work-buddy = "work_buddy.__main__:main"
+chiefofstaff = "chiefofstaff.__main__:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/work_buddy"]
+packages = ["src/chiefofstaff"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

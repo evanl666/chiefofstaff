@@ -2,7 +2,7 @@ import asyncio
 import os
 
 # Events are batched in the app; tests deliver them at once.
-os.environ.setdefault("WORK_BUDDY_EVENT_DEBOUNCE", "0")
+os.environ.setdefault("CHIEFOFSTAFF_EVENT_DEBOUNCE", "0")
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,14 +10,14 @@ from types import SimpleNamespace
 import pytest
 from copilot.tools import ToolInvocation
 
-from work_buddy.bus import Bus
-from work_buddy.envelope import wrap as env  # noqa: F401  (tests import it)
-from work_buddy.models import Settings
-from work_buddy.runtime import Runtime
-from work_buddy.sources.github import GitHubSource
-from work_buddy.sources.slack import SlackSource
-from work_buddy.store import Store
-from work_buddy.watchdog import WatchConfig
+from chiefofstaff.bus import Bus
+from chiefofstaff.envelope import wrap as env  # noqa: F401  (tests import it)
+from chiefofstaff.models import Settings
+from chiefofstaff.runtime import Runtime
+from chiefofstaff.sources.github import GitHubSource
+from chiefofstaff.sources.slack import SlackSource
+from chiefofstaff.store import Store
+from chiefofstaff.watchdog import WatchConfig
 
 
 class FakeSession:

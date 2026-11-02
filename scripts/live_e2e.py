@@ -1,6 +1,6 @@
 """Live end-to-end test against real Copilot sessions.
 
-Starts Work Buddy as a real process with a fake Slack MCP server (same tool surface as
+Starts Chief of Staff as a real process with a fake Slack MCP server (same tool surface as
 Slack's official server) and drives it through the HTTP API, exactly like the UI does:
 
 A. owner -> Router -> isolated worker -> commit -> report -> owner update
@@ -46,17 +46,17 @@ STAGING = "https://staging.deploy.acme.dev/dashboard"
 # A company "docs" MCP server that needs sign-in, available to workers.
 DOCS_PORT = 18904
 DOCS_ENV = {
-    "WORK_BUDDY_WORKER_MCP": json.dumps(
+    "CHIEFOFSTAFF_WORKER_MCP": json.dumps(
         {"docs": {"type": "http", "url": f"http://127.0.0.1:{DOCS_PORT}/mcp", "tools": ["*"]}}
     )
 }
 # Short watchdog thresholds so a hung worker is reviewed within a minute.
 WATCHDOG_ENV = {
-    "WORK_BUDDY_WATCHDOG_INTERVAL": "5",
-    "WORK_BUDDY_WATCHDOG_STALL": "30",
-    "WORK_BUDDY_WATCHDOG_COOLDOWN": "600",
+    "CHIEFOFSTAFF_WATCHDOG_INTERVAL": "5",
+    "CHIEFOFSTAFF_WATCHDOG_STALL": "30",
+    "CHIEFOFSTAFF_WATCHDOG_COOLDOWN": "600",
     # A low limit, so the Router is rotated during the run and the scenarios after it must pass.
-    "WORK_BUDDY_ROUTER_CONTEXT": "45000",
+    "CHIEFOFSTAFF_ROUTER_CONTEXT": "45000",
 }
 
 
@@ -75,13 +75,13 @@ class App:
     async def start(self):
         env = {
             **os.environ,
-            "WORK_BUDDY_SLACK_MCP_URL": f"http://127.0.0.1:{SLACK_PORT}/mcp",
-            "WORK_BUDDY_SLACK_USER_TOKEN": SLACK_TOKEN,
+            "CHIEFOFSTAFF_SLACK_MCP_URL": f"http://127.0.0.1:{SLACK_PORT}/mcp",
+            "CHIEFOFSTAFF_SLACK_USER_TOKEN": SLACK_TOKEN,
             **WATCHDOG_ENV,
             **self.extra_env,
         }
         self.process = subprocess.Popen(
-            [sys.executable, "-m", "work_buddy", "--no-browser", "--port", str(PORT)]
+            [sys.executable, "-m", "chiefofstaff", "--no-browser", "--port", str(PORT)]
             + ["--data-dir", str(self.data)],
             stdout=subprocess.PIPE,
             stderr=self.logfile.open("a"),
@@ -98,7 +98,7 @@ class App:
             if not line and self.process.poll() is not None:
                 break
         if not token:
-            raise RuntimeError("Work Buddy did not start; see " + str(self.logfile))
+            raise RuntimeError("Chief of Staff did not start; see " + str(self.logfile))
         self.launch_token = token
         self.http = httpx.AsyncClient(base_url=BASE, headers={"origin": BASE}, timeout=60)
         for _ in range(100):
@@ -745,7 +745,7 @@ async def scenario_profile(app: App):
 
 async def scenario_restart(app: App, router_before: str):
     await app.stop()
-    log("restarted Work Buddy")
+    log("restarted Chief of Staff")
     await app.start()
 
     async def ready():
@@ -779,7 +779,7 @@ async def scenario_external(app: App):
 async def cleanup(data: Path):
     import sqlite3
 
-    database = data / "work-buddy-sessions.db"
+    database = data / "chiefofstaff.db"
     if not database.exists():
         return
     with sqlite3.connect(database) as db:
@@ -817,7 +817,7 @@ async def main():
         git(project, "add", ".")
         git(project, "-c", "user.email=e2e@test", "-c", "user.name=e2e", "commit", "-qm", "init")
         data = root / "data"
-        app = App(data, root / "work-buddy.log", DOCS_ENV)
+        app = App(data, root / "chiefofstaff.log", DOCS_ENV)
         failed = False
         started = time.time()
         try:
@@ -876,8 +876,8 @@ async def main():
                 pass
             await app.stop()
             if failed:
-                print("--- work-buddy.log (tail)")
-                print("\n".join((root / "work-buddy.log").read_text().splitlines()[-60:]))
+                print("--- chiefofstaff.log (tail)")
+                print("\n".join((root / "chiefofstaff.log").read_text().splitlines()[-60:]))
             await cleanup(data)
             log(f"removed {forget_sign_ins(DOCS_PORT, signed_in_before)} test sign-in entries")
 

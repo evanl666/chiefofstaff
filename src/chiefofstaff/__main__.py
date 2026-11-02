@@ -32,12 +32,18 @@ def open_when_ready(port: int, url: str):
     logging.getLogger(__name__).warning("Browser not opened: server did not become ready.")
 
 
+def default_data_dir() -> Path:
+    """The data directory; one from before the rename stays in use (worktree paths are absolute)."""
+    current, legacy = user_data_path("chiefofstaff"), user_data_path("work-buddy")
+    return legacy if legacy.is_dir() and not current.exists() else current
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Run Work Buddy: a Router that coordinates your Copilot sessions."
+        description="Run Chief of Staff: a Router that coordinates your Copilot sessions."
     )
     parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--data-dir", type=Path, default=user_data_path("work-buddy"))
+    parser.add_argument("--data-dir", type=Path, default=default_data_dir())
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
     if sys.platform == "win32":
@@ -52,7 +58,7 @@ def main():
         fcntl.flock(data_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         data_lock.close()
-        parser.error("Another Work Buddy process is already using this data directory.")
+        parser.error("Another Chief of Staff process is already using this data directory.")
     token = secrets.token_urlsafe(32)
     url = f"http://127.0.0.1:{args.port}/#token={token}"
     # Bind before opening the browser so an unrelated listener cannot receive the launch token.
@@ -66,8 +72,12 @@ def main():
         listener.close()
         parser.error(f"Port {args.port} is unavailable. Choose another --port.")
     app = create_app(directory, token, args.port)
-    print(f"Work Buddy\nPrivate launch URL (do not share): {url}\nData: {directory}", flush=True)
-    print("Closing the browser does not stop your sessions. Ctrl+C stops Work Buddy.", flush=True)
+    print(
+        f"Chief of Staff\nPrivate launch URL (do not share): {url}\nData: {directory}", flush=True
+    )
+    print(
+        "Closing the browser does not stop your sessions. Ctrl+C stops Chief of Staff.", flush=True
+    )
     if not args.no_browser:
         threading.Thread(target=open_when_ready, args=(args.port, url), daemon=True).start()
     config = uvicorn.Config(

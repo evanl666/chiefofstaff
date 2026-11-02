@@ -12,7 +12,10 @@ from pydantic import ValidationError
 
 from .models import Settings
 
-DB_NAME = "work-buddy-sessions.db"
+DB_NAME = "chiefofstaff.db"
+# Earlier names of the same database (the project was called Work Buddy).
+RENAMED_DB_NAMES = ("work-buddy-sessions.db",)
+# The pre-session database, whose settings are carried over once.
 LEGACY_DB_NAME = "work-buddy.db"
 SESSION_FIELDS = {
     "title",
@@ -48,10 +51,23 @@ def identifier() -> str:
     return uuid4().hex
 
 
+def rename_database(directory: Path):
+    """Give a database from before the rename its current name (with its WAL files)."""
+    if (directory / DB_NAME).exists():
+        return
+    for name in RENAMED_DB_NAMES:
+        if (directory / name).exists():
+            for suffix in ("", "-wal", "-shm"):
+                if (directory / (name + suffix)).exists():
+                    (directory / (name + suffix)).rename(directory / (DB_NAME + suffix))
+            return
+
+
 class Store:
     def __init__(self, directory: Path):
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.directory = directory
+        rename_database(directory)
         self.lock = threading.RLock()
         self.db = sqlite3.connect(directory / DB_NAME, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
@@ -149,7 +165,7 @@ class Store:
             self.migrate_legacy_settings()
 
     def migrate_legacy_settings(self):
-        """Carry over still-meaningful settings from the pre-session Work Buddy database."""
+        """Carry over still-meaningful settings from the pre-session database."""
         legacy = self.directory / LEGACY_DB_NAME
         if not legacy.exists():
             return

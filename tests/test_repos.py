@@ -7,8 +7,8 @@ from types import SimpleNamespace
 
 from conftest import Harness, call_tool, env
 
-from work_buddy import runtime as runtime_module
-from work_buddy.models import Settings
+from chiefofstaff import runtime as runtime_module
+from chiefofstaff.models import Settings
 
 
 def run(*command, cwd=None):
@@ -236,7 +236,7 @@ async def test_the_router_hears_when_projects_change(tmp_path):
     harness.store.save_settings(Settings(projects=[str(app)]))
     await runtime.owner_send(harness.router_id, "work on app")
     assert router.sent[-1].endswith(
-        env("work-buddy", "context", f"The configured projects are now:\n- {app.resolve()}")
+        env("system", "context", f"The configured projects are now:\n- {app.resolve()}")
     )
     await runtime.owner_send(harness.router_id, "again")
     assert "configured projects" not in router.sent[-1]

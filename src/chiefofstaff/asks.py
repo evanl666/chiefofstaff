@@ -28,11 +28,11 @@ logger = logging.getLogger(__name__)
 REQUEST_KINDS = {"question", "form", "link", "signin"}
 LABELS = {"question": "Question", "form": "Form", "link": "Link to open", "signin": "Sign-in"}
 # How long a session waits for the owner before it is told to go on without an answer.
-REQUEST_TIMEOUT = float(os.environ.get("WORK_BUDDY_REQUEST_TIMEOUT", "3600"))
+REQUEST_TIMEOUT = float(os.environ.get("CHIEFOFSTAFF_REQUEST_TIMEOUT", "3600"))
 MAX_NOTES = 40
 MAX_OPEN_QUESTIONS = 5
 # A question between sessions that nobody answers in this long is given up.
-QUESTION_TTL = float(os.environ.get("WORK_BUDDY_QUESTION_TTL", "7200"))
+QUESTION_TTL = float(os.environ.get("CHIEFOFSTAFF_QUESTION_TTL", "7200"))
 # What a session gets when the owner declines (or the card ends without an answer).
 DECLINED = {
     "question": {"answer": "(The owner chose not to answer.)", "wasFreeform": True},
@@ -120,7 +120,7 @@ class OwnerAsks:
 
     # Requests
 
-    def expire_requests(self, reason: str = "Work Buddy restarted before an answer."):
+    def expire_requests(self, reason: str = "Chief of Staff restarted before an answer."):
         kinds = ",".join(f"'{kind}'" for kind in sorted(REQUEST_KINDS))
         self.store.execute(
             f"UPDATE drafts SET status='expired', outcome=?, resolved_at=? "
@@ -153,7 +153,7 @@ class OwnerAsks:
             session_id, "draft", text, {"draft_id": draft["id"], "label": LABELS[kind]}
         )
         self.bus.publish("draft", draft)
-        who = "Work Buddy" if row["role"] != "worker" else row["title"]
+        who = "Chief of Staff" if row["role"] != "worker" else row["title"]
         self.alert(text, session_id=session_id, needs_action=True, title=f"{LABELS[kind]} · {who}")
         answer = self.loop.create_future()
         self.requests[draft["id"]] = answer
@@ -339,13 +339,13 @@ class OwnerAsks:
         if session and session_id in self.busy and row["status"] == "working":
             self.add_message(session_id, "notice", text)
             try:
-                await session.send(wrap("work-buddy", "system", text), mode="immediate")
+                await session.send(wrap("system", "system", text), mode="immediate")
                 return
             except Exception:
                 logger.warning("Could not steer %s; queueing the note.", session_id, exc_info=True)
         try:
             await self.deliver(
-                session_id, wrap("work-buddy", "system", text), kind="notice", display=text
+                session_id, wrap("system", "system", text), kind="notice", display=text
             )
         except Exception:
             logger.warning("Could not tell %s: %s", session_id, text, exc_info=True)

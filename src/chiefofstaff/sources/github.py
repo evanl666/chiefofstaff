@@ -32,7 +32,7 @@ async def gh(*arguments: str, payload: dict | None = None) -> str:
         raise RuntimeError(
             "GitHub CLI not found. Install gh and sign in before connecting reviews."
         )
-    env = {key: value for key, value in os.environ.items() if not key.startswith("WORK_BUDDY_")}
+    env = {key: value for key, value in os.environ.items() if not key.startswith("CHIEFOFSTAFF_")}
     env.update(GH_PROMPT_DISABLED="1", GH_PAGER="cat", NO_COLOR="1")
     process = await asyncio.create_subprocess_exec(
         executable,

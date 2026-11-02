@@ -5,8 +5,8 @@ from types import SimpleNamespace
 import pytest
 from conftest import Harness, call_tool, env, settle
 
-from work_buddy import threads
-from work_buddy.models import DraftDecision, Settings
+from chiefofstaff import threads
+from chiefofstaff.models import DraftDecision, Settings
 
 
 def test_thread_keys():
@@ -139,7 +139,7 @@ async def test_watchdog_reviews_and_intervenes(tmp_path):
     watchdog_id = harness.store.open_sessions("watchdog")[0]["id"]
     packet = harness.session(watchdog_id).sent[-1]
     assert packet.startswith(
-        f'<message from="work-buddy" type="review" worker="{worker_id[:8]}" title="Migrate">'
+        f'<message from="system" type="review" worker="{worker_id[:8]}" title="Migrate">'
     )
     assert "no activity for 17 min" in packet and "migrate db" in packet
     assert "connection refused (attempt 9)" in packet
@@ -222,7 +222,7 @@ async def test_events_without_followers_stay_unseen(harness):
 
 
 def test_quiet_slack_follows_expire_and_refollowing_refreshes(tmp_path):
-    from work_buddy.store import Store
+    from chiefofstaff.store import Store
 
     store = Store(tmp_path / "data")
     store.create_session("s1", "slack", "Slack", "idle")
@@ -307,6 +307,4 @@ async def test_a_failed_watchdog_creation_is_retried(tmp_path):
         await runtime.watch_once(now + 1000)
     assert await runtime.watch_once(now + 1001) != []
     watchdog_id = harness.store.open_sessions("watchdog")[0]["id"]
-    assert (
-        harness.session(watchdog_id).sent[-1].startswith('<message from="work-buddy" type="review"')
-    )
+    assert harness.session(watchdog_id).sent[-1].startswith('<message from="system" type="review"')

@@ -5,8 +5,8 @@ https://mcp.slack.com/mcp, backed by an in-memory workspace, and requires
 `Authorization: Bearer <token>` like the real server.
 
     uv run python scripts/fake_slack_mcp.py --port 18900 --token xoxp-demo
-    WORK_BUDDY_SLACK_MCP_URL=http://127.0.0.1:18900/mcp \\
-    WORK_BUDDY_SLACK_USER_TOKEN=xoxp-demo uv run python -m work_buddy
+    CHIEFOFSTAFF_SLACK_MCP_URL=http://127.0.0.1:18900/mcp \\
+    CHIEFOFSTAFF_SLACK_USER_TOKEN=xoxp-demo uv run python -m chiefofstaff
 """
 
 import argparse

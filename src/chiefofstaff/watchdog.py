@@ -19,7 +19,7 @@ class WatchConfig:
     def from_env(cls) -> "WatchConfig":
         config = cls()
         for name in ("interval", "stall", "long", "cooldown"):
-            if value := os.environ.get(f"WORK_BUDDY_WATCHDOG_{name.upper()}"):
+            if value := os.environ.get(f"CHIEFOFSTAFF_WATCHDOG_{name.upper()}"):
                 setattr(config, name, float(value))
         return config
 

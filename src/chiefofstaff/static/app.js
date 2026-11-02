@@ -64,7 +64,7 @@ async function api(path, { method = "GET", body } = {}) {
     throw new Error(errorText(data, 401));
   }
   // Starlette's own "Not Found": this page is newer than the server that is still running.
-  if (response.status === 404 && data.detail === "Not Found") throw new Error("Work Buddy was updated. Restart it to use this.");
+  if (response.status === 404 && data.detail === "Not Found") throw new Error("Chief of Staff was updated. Restart it to use this.");
   if (!response.ok) throw new Error(errorText(data, response.status));
   return data;
 }
@@ -1137,7 +1137,7 @@ function showExternal(item) {
     el(
       "div",
       { class: "external-detail" },
-      el("div", { text: "This Copilot session is not managed by Work Buddy. Resume it in a terminal, or let the Router manage it as a worker." }),
+      el("div", { text: "This Copilot session is not managed by Chief of Staff. Resume it in a terminal, or let the Router manage it as a worker." }),
       el("code", { text: command }),
       el(
         "div",

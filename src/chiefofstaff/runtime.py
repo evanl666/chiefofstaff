@@ -1,4 +1,4 @@
-"""Work Buddy's session runtime.
+"""Chief of Staff's session runtime.
 
 One Router, one Slack session and any number of workers, all long-lived Copilot sessions
 driven through the Copilot SDK. The Router only routes; workers do the work in their own
@@ -68,9 +68,9 @@ SLACK_TS = re.compile(r"\d{10}\.\d{6}")
 # Prompts the runtime itself sends; a Router turn that starts with one was not the owner's.
 # When the Router's context (prompt tokens of its last call) grows past this, a fresh Router
 # session takes over with a summary.
-ROUTER_CONTEXT = int(os.environ.get("WORK_BUDDY_ROUTER_CONTEXT", "150000"))
+ROUTER_CONTEXT = int(os.environ.get("CHIEFOFSTAFF_ROUTER_CONTEXT", "150000"))
 # Events for the Router and the Slack session wait this long, so a burst becomes one turn.
-EVENT_DEBOUNCE = float(os.environ.get("WORK_BUDDY_EVENT_DEBOUNCE", "2"))
+EVENT_DEBOUNCE = float(os.environ.get("CHIEFOFSTAFF_EVENT_DEBOUNCE", "2"))
 # Held messages that could not be sent are retried after this, doubling up to a minute.
 RETRY_DELAY = 2.0
 # Copilot's own bookkeeping tools; they say nothing about the work.
@@ -283,8 +283,8 @@ def default_client(settings: Settings) -> CopilotClient:
             f"Copilot CLI '{settings.copilot_command}' not found. Install it and sign in, "
             "or fix the command in Settings."
         )
-    # The CLI and every worker shell inherit this environment; keep Work Buddy's secrets out.
-    env = {key: value for key, value in os.environ.items() if not key.startswith("WORK_BUDDY_")}
+    # The CLI and every worker shell inherit this environment; keep Chief of Staff's secrets out.
+    env = {key: value for key, value in os.environ.items() if not key.startswith("CHIEFOFSTAFF_")}
     return CopilotClient(connection=RuntimeConnection.for_stdio(path=path), env=env)
 
 
@@ -584,7 +584,7 @@ class Runtime(OwnerAsks):
         self.bus.bind(self.loop)
         self.store.execute(
             "UPDATE drafts SET status='uncertain', outcome=? WHERE status='sending'",
-            ("Work Buddy stopped while sending. Check whether it was delivered.",),
+            ("Chief of Staff stopped while sending. Check whether it was delivered.",),
         )
         self.expire_requests()
         await self.connect()
@@ -840,7 +840,7 @@ class Runtime(OwnerAsks):
         if any(within(str(path), project) for project in old.projects):
             return str(path)
         if self.store.directory.is_relative_to(path):
-            raise ValueError("A project must not contain Work Buddy's private data directory.")
+            raise ValueError("A project must not contain Chief of Staff's private data directory.")
         new = Settings(**{**old.model_dump(), "projects": [*old.projects, str(path)]})
         self.store.save_settings(new)
         await self.settings_changed(old, new)
@@ -909,14 +909,14 @@ class Runtime(OwnerAsks):
             "tools": tools,
             "system_message": {"mode": "append", "content": prompt},
             "working_directory": row["cwd"] or str(self.role_dir("scratch")),
-            "client_name": "work-buddy",
+            "client_name": "chiefofstaff",
             "on_mcp_auth_request": self.on_mcp_auth,
         }
         if row["role"] == WORKER:
             # Workers ask the owner directly: Copilot's ask_user, MCP forms and links.
             options["on_user_input_request"] = self.on_user_input
             options["on_elicitation_request"] = self.on_elicitation
-            if extra := os.environ.get("WORK_BUDDY_WORKER_MCP"):
+            if extra := os.environ.get("CHIEFOFSTAFF_WORKER_MCP"):
                 options["mcp_servers"] = json.loads(extra)  # Test servers only.
         tuning = self.tuning(row)
         model = self.model_for(row)
@@ -1056,11 +1056,11 @@ class Runtime(OwnerAsks):
         return self.view(row)
 
     def copilot_id(self, row_id: str) -> str:
-        """The Copilot session behind a Work Buddy session (the Router's changes when rotated)."""
+        """The Copilot session behind one of our sessions (the Router's changes when rotated)."""
         return self.store.get(f"copilot:{row_id}") or row_id
 
     def row_id(self, copilot_id: str) -> str:
-        """The Work Buddy session a Copilot session id belongs to."""
+        """The Chief of Staff session a Copilot session id belongs to."""
         return self.store.get(f"alias:{copilot_id}") or copilot_id
 
     async def open_live(self, row: dict, *, create: bool = False, copilot: str = ""):
@@ -1068,7 +1068,7 @@ class Runtime(OwnerAsks):
             await self.available_models()  # Efforts and context tiers depend on the model.
         options = self.options(row)
         if create:
-            name = "Work Buddy · " + clean_title(row["title"])
+            name = "Chief of Staff · " + clean_title(row["title"])
             session = await self.client.create_session(
                 session_id=copilot or self.copilot_id(row["id"]), name=name[:100], **options
             )
@@ -1103,8 +1103,8 @@ class Runtime(OwnerAsks):
     async def rotate_router(self) -> bool:
         """Give the Router a fresh Copilot session when its context has grown long.
 
-        The Work Buddy session (its id, timeline and usage) stays; a new Copilot session takes
-        over and gets a handover built from Work Buddy's own records with its next message.
+        The Chief of Staff session (its id, timeline and usage) stays; a new Copilot session takes
+        over and gets a handover built from Chief of Staff's own records with its next message.
         """
         router_id = self.router_id()
         # Holding both locks, senders wait and then reach the new session: nothing goes to a
@@ -1143,7 +1143,7 @@ class Runtime(OwnerAsks):
         return True
 
     def handover(self) -> str:
-        """What a new Router session needs to know, from Work Buddy's records."""
+        """What a new Router session needs to know, from Chief of Staff's records."""
 
         def clip(text: str, size: int = 240) -> str:
             text = " ".join((text or "").split())
@@ -1190,7 +1190,7 @@ class Runtime(OwnerAsks):
             lines.append("\nRecent conversation with the owner, oldest first:")
             who = {"owner": "owner", "assistant": "you", "update": "you notified the owner"}
             lines += [f"- {who[m['kind']]}: {clip(m['text'], 400)}" for m in reversed(talk)]
-        return wrap("work-buddy", "handover", "\n".join(lines))
+        return wrap("system", "handover", "\n".join(lines))
 
     async def ensure_router(self):
         router_id = self.store.get("router_id")
@@ -1239,7 +1239,7 @@ class Runtime(OwnerAsks):
                 continue
             if row["status"] != "working":
                 if row["role"] in {ROUTER, SLACK} and self.has_unsent(row["id"]):
-                    self.schedule_flush(row["id"], 0)  # Events held when Work Buddy stopped.
+                    self.schedule_flush(row["id"], 0)  # Events held when Chief of Staff stopped.
                 continue
             mark = int(self.store.get(f"idle:{row['id']}", "0"))
             sent = int(self.store.get(f"sent:{row['id']}") or 0)
@@ -1253,19 +1253,19 @@ class Runtime(OwnerAsks):
             unhandled = [message["meta"]["prompt"] for message in since if message["id"] <= sent]
             if any(message["kind"] == "owner" for message in since):
                 self.owner_turns.add(row["id"])
-            note = "Work Buddy restarted while you were working. Continue where you left off."
+            note = "Chief of Staff restarted while you were working. Continue where you left off."
             if unhandled:
                 note += (
                     " Messages you received since you were last idle (some may already be "
                     "handled), quoted:\n\n" + "\n\n".join(text[:1500] for text in unhandled[-10:])
                 )
-            prompt = wrap("work-buddy", "restart", note)
+            prompt = wrap("system", "restart", note)
             try:
                 await self.deliver(
                     row["id"],
                     prompt,
                     kind="notice",
-                    display="Work Buddy restarted; asked the session to continue.",
+                    display="Chief of Staff restarted; asked the session to continue.",
                 )
             except Exception as exc:
                 self.owner_turns.discard(row["id"])
@@ -1556,7 +1556,7 @@ class Runtime(OwnerAsks):
         prompt = wrap("owner", "message", text)
         if row["role"] == ROUTER:
             notes = [self.projects_note(), self.related_hint(text)]
-            context = [wrap("work-buddy", "context", note) for note in notes if note]
+            context = [wrap("system", "context", note) for note in notes if note]
             prompt = "\n\n".join([prompt, *context])
         return await self.deliver(session_id, prompt, kind="owner", display=text, steer=True)
 
@@ -1676,7 +1676,9 @@ class Runtime(OwnerAsks):
             )
         return True
 
-    def alert(self, text: str, *, session_id: str, needs_action: bool, title: str = "Work Buddy"):
+    def alert(
+        self, text: str, *, session_id: str, needs_action: bool, title: str = "Chief of Staff"
+    ):
         self.bus.publish(
             "toast", {"text": text, "session_id": session_id, "needs_action": needs_action}
         )
@@ -1754,7 +1756,7 @@ class Runtime(OwnerAsks):
                 self.deliver(
                     self.router_id(),
                     wrap(
-                        "work-buddy",
+                        "system",
                         "blocked",
                         f"It waits for {names}, which ended without finishing. Message it to "
                         "start anyway, or close it.",
@@ -1979,7 +1981,7 @@ class Runtime(OwnerAsks):
     async def adopt(self, session_id: str) -> dict:
         self.require_ready()
         if self.store.find_session(session_id):
-            raise ValueError("Work Buddy already manages that session.")
+            raise ValueError("Chief of Staff already manages that session.")
         meta = await self.client.get_session_metadata(session_id)
         if not meta:
             raise LookupError("Session not found.")
@@ -2167,7 +2169,7 @@ class Runtime(OwnerAsks):
             return
         try:
             await self.deliver(
-                row["id"], wrap("work-buddy", "draft-outcome", text), kind="notice", display=text
+                row["id"], wrap("system", "draft-outcome", text), kind="notice", display=text
             )
         except Exception:
             logger.warning("Could not tell the drafting session about its draft.", exc_info=True)
@@ -2775,7 +2777,7 @@ class Runtime(OwnerAsks):
             await self.deliver(
                 await self.watchdog_id(),
                 wrap(
-                    "work-buddy",
+                    "system",
                     "review",
                     review_packet(
                         row, messages, reasons, moment, self.last_output.get(row["id"], "")

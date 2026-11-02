@@ -1,9 +1,9 @@
 import pytest
 from conftest import FakeSlackMcp, FakeTokens, slack_tool
 
-from work_buddy.models import Settings
-from work_buddy.sources.slack import SlackError, SlackSource, message_keys
-from work_buddy.store import Store
+from chiefofstaff.models import Settings
+from chiefofstaff.sources.slack import SlackError, SlackSource, message_keys
+from chiefofstaff.store import Store
 
 RESULT = """Results:
 1. From Alice in #deploys: can you check the rollout?

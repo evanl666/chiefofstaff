@@ -1,4 +1,4 @@
-# Work Buddy
+# Chief of Staff
 
 One Copilot session that runs the others.
 
@@ -28,11 +28,11 @@ Requires Python 3.11+, macOS or Linux, and a signed-in
 
 ```bash
 uv sync
-uv run python -m work_buddy
+uv run python -m chiefofstaff
 ```
 
 The browser opens `http://127.0.0.1:8765` with a private launch token; do not share that URL.
-Closing the page does not stop your sessions. Ctrl+C stops Work Buddy; sessions resume where
+Closing the page does not stop your sessions. Ctrl+C stops Chief of Staff; sessions resume where
 they left off on the next start.
 
 Open **Settings** once and add the project directories workers may use.
@@ -100,7 +100,7 @@ Open **Settings** once and add the project directories workers may use.
 
 ### How sessions talk
 
-Sessions never talk to each other directly: a session calls a tool, and Work Buddy stores the
+Sessions never talk to each other directly: a session calls a tool, and Chief of Staff stores the
 message and delivers it to the other session.
 
 - **Envelopes.** Every message a session receives is wrapped as
@@ -114,12 +114,12 @@ message and delivers it to the other session.
   turn, so "stop, wrong direction" takes effect at once (except right after you changed its
   model: then it waits for the next turn, which uses the new model).
 - **Events are batched.** Reports and events for the Router (and thread updates for the Slack
-  session) wait while it works and for two seconds after (`WORK_BUDDY_EVENT_DEBOUNCE`), so a
+  session) wait while it works and for two seconds after (`CHIEFOFSTAFF_EVENT_DEBOUNCE`), so a
   burst becomes one turn.
 - **Questions between sessions** (`ask_session`) are tracked: unanswered ones expire after two
-  hours (`WORK_BUDDY_QUESTION_TTL`) and end when the asked session closes; the asker is told.
+  hours (`CHIEFOFSTAFF_QUESTION_TTL`) and end when the asked session closes; the asker is told.
 - **Router rotation.** When the Router's context passes 150k tokens
-  (`WORK_BUDDY_ROUTER_CONTEXT`), a fresh Copilot session takes over when it is idle. Work Buddy
+  (`CHIEFOFSTAFF_ROUTER_CONTEXT`), a fresh Copilot session takes over when it is idle. Chief of Staff
   writes the handover from its own records (open and recent workers, waiting cards and
   questions, the recent conversation with you), so no model turn is spent on it; the Router
   keeps one timeline in the UI.
@@ -156,10 +156,10 @@ the session's view), with a desktop notification, and the session shows amber wh
   a link and confirm.
 - **Sign-ins** – an MCP server your Copilot uses (company integrations such as docs or tickets)
   needs OAuth: click *Sign in*, finish in the browser tab, and the card closes by itself.
-  Copilot keeps the credentials, so every session uses that sign-in; Work Buddy itself stores
+  Copilot keeps the credentials, so every session uses that sign-in; Chief of Staff itself stores
   nothing. Only workers prompt for sign-ins.
 
-Work Buddy has no per-tool settings: it uses whatever your Copilot has (MCP servers, CLIs such
+Chief of Staff has no per-tool settings: it uses whatever your Copilot has (MCP servers, CLIs such
 as `gh`). When you ask for a new ability ("read our company docs"), the Router starts a setup
 worker that finds what is available, asks you to sign in or grant access, checks that it works
 and records how in **environment notes** (`record_setup`). The Router and later workers get
@@ -191,7 +191,7 @@ ended without a report. A flagged worker is reviewed by the Watchdog session (at
 minutes per worker), which sees the task, the reason and recent activity, and decides: on track,
 nudge, interrupt the hung step and nudge, or escalate to the Router. After two nudges without a
 new report the problem always goes to the Router. Turn it off in Settings. Thresholds can be
-changed with `WORK_BUDDY_WATCHDOG_INTERVAL`, `_STALL`, `_LONG` and `_COOLDOWN` (seconds).
+changed with `CHIEFOFSTAFF_WATCHDOG_INTERVAL`, `_STALL`, `_LONG` and `_COOLDOWN` (seconds).
 
 ### What runs without asking
 
@@ -203,8 +203,8 @@ write tools, piping downloads into a shell, and system-level destructive command
 
 Sessions that read Slack are contained further, because Slack text is untrusted: the Slack
 session gets only its own tools and Slack's read tools; workers with Slack access cannot fetch
-URLs or run commands that contact URLs; neither may store Copilot memories. Work Buddy's own
-secrets (`WORK_BUDDY_*`) are removed from the environment Copilot and its shells run in.
+URLs or run commands that contact URLs; neither may store Copilot memories. Chief of Staff's own
+secrets (`CHIEFOFSTAFF_*`) are removed from the environment Copilot and its shells run in.
 
 Nothing is sent as you without approval: Slack messages and PR reviews are drafts until you
 press **Send**. The Slack MCP tools given to sessions are read-only; sending is done by Work
@@ -220,7 +220,7 @@ Treat everything as a prototype, not a security sandbox: workers run commands as
 
 ## Slack (official Slack MCP server)
 
-Work Buddy uses Slack's [official MCP server](https://docs.slack.dev/ai/slack-mcp-server/)
+Chief of Staff uses Slack's [official MCP server](https://docs.slack.dev/ai/slack-mcp-server/)
 with your **user** token. A watcher searches for new DMs and mentions every minute without
 using a model and wakes the Router only when something new arrived.
 
@@ -230,15 +230,15 @@ using a model and wakes the Router only when something new arrived.
    `https://api.slack.com/apps/<APP_ID>/app-assistant`).
 3. Install the app to your workspace and copy the **User OAuth Token** (`xoxp-…`) from
    *OAuth & Permissions*.
-4. In Work Buddy **Settings**, paste the token, enable *Watch Slack*, and save. The token is
-   stored in your OS keyring (or set `WORK_BUDDY_SLACK_USER_TOKEN`).
+4. In Chief of Staff **Settings**, paste the token, enable *Watch Slack*, and save. The token is
+   stored in your OS keyring (or set `CHIEFOFSTAFF_SLACK_USER_TOKEN`).
 
 On first enable the watcher starts from "now"; older messages are not replayed.
-`WORK_BUDDY_SLACK_MCP_URL` points Work Buddy at another MCP endpoint (used by the tests).
+`CHIEFOFSTAFF_SLACK_MCP_URL` points Chief of Staff at another MCP endpoint (used by the tests).
 
 ## GitHub reviews
 
-Enable *Watch review requests* and list repositories (`owner/name`). Work Buddy polls
+Enable *Watch review requests* and list repositories (`owner/name`). Chief of Staff polls
 `gh search prs --review-requested=@me` every two minutes through your signed-in `gh` CLI. The
 Router starts a worker per request; its review is published as a comment only after you approve
 the draft, and only if the PR head has not changed since.
@@ -246,7 +246,7 @@ the draft, and only if the PR head has not changed since.
 ## Adding sources (Teams, email, …)
 
 A source watches something and calls the runtime's trigger sink with stable keys, so the same
-event never reaches the Router twice. See `src/work_buddy/sources/__init__.py`;
+event never reaches the Router twice. See `src/chiefofstaff/sources/__init__.py`;
 `sources/slack.py` and `sources/github.py` are complete examples.
 
 ## Data
@@ -272,6 +272,6 @@ uv run python scripts/live_e2e.py                              # API-level, ~5-1
 uv run --with playwright python scripts/browser_smoke.py       # drives the UI, saves screenshots
 ```
 
-Try the Slack flow by hand: run `uv run python scripts/fake_slack_mcp.py`, start Work Buddy
-with `WORK_BUDDY_SLACK_MCP_URL=http://127.0.0.1:18900/mcp WORK_BUDDY_SLACK_USER_TOKEN=xoxp-demo`,
+Try the Slack flow by hand: run `uv run python scripts/fake_slack_mcp.py`, start Chief of Staff
+with `CHIEFOFSTAFF_SLACK_MCP_URL=http://127.0.0.1:18900/mcp CHIEFOFSTAFF_SLACK_USER_TOKEN=xoxp-demo`,
 enable Slack in Settings, and type DMs from "Alice" into the fake server's prompt.
