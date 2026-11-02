@@ -1,0 +1,85 @@
+"""What the runtime knows about each session beyond the database.
+
+The database keeps what must survive a restart: status, messages and the delivery marks. This
+module keeps what belongs to the running process: the Copilot connection, the turn in progress
+and what to do when it ends. It is lost on restart by design.
+
+Everything runs on one asyncio loop, yet coroutines interleave at every await, so state that is
+read, awaited on and then written needs a lock. When more than one is needed they are taken in
+this order, and none is held while waiting for the owner:
+
+1. ``Runtime.rotate_lock``: Router rotation.
+2. ``SessionState.lifecycle``: connecting, resuming or replacing one session's Copilot session.
+3. ``SessionState.sending``: one send at a time per session, together with its ``sent:`` mark.
+4. ``Runtime.pump_lock``: worker slots; held only around reads and writes, never across a
+   session lock.
+"""
+
+import asyncio
+from dataclasses import dataclass, field
+from typing import Any
+
+
+@dataclass
+class SessionState:
+    # The live Copilot session, or None while disconnected.
+    handle: Any = None
+    # A worker turn is running or starting; this is what max_workers counts.
+    busy: bool = False
+    # A delayed flush of held messages is scheduled.
+    flush_scheduled: bool = False
+    # The model changed during this turn: messages wait for the next turn, which uses it.
+    retuned: bool = False
+    # Reconnect once this turn ends, so new instructions apply.
+    stale: bool = False
+    # Close once this turn ends (its pull request was merged or closed).
+    close_after_turn: bool = False
+    # The status a done or waiting worker returns to after a follow-up turn without a report.
+    resting: str = ""
+    # The Router's current turn has no message from the owner.
+    event_turn: bool = False
+    # The next turn resumes one the owner started (after a restart).
+    owner_turn: bool = False
+    # Open cards for the owner: draft id -> text.
+    asking: dict[str, str] = field(default_factory=dict)
+    # The tail of the latest tool output, for the Watchdog.
+    last_output: str = ""
+    lifecycle: asyncio.Lock = field(default_factory=asyncio.Lock)
+    sending: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # Serializes add_repo for one worker.
+    checkouts: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    def pop_resting(self, default: str) -> str:
+        status, self.resting = self.resting or default, ""
+        return status
+
+
+class SessionStates:
+    """Session id -> SessionState, created on first use."""
+
+    def __init__(self):
+        self._states: dict[str, SessionState] = {}
+
+    def __getitem__(self, session_id: str) -> SessionState:
+        return self._states.setdefault(session_id, SessionState())
+
+    def handle(self, session_id: str) -> Any:
+        state = self._states.get(session_id)
+        return state.handle if state else None
+
+    def is_live(self, session_id: str) -> bool:
+        return self.handle(session_id) is not None
+
+    def take_handle(self, session_id: str) -> Any:
+        """The live Copilot session, now detached from this state."""
+        state = self._states.get(session_id)
+        if not state:
+            return None
+        handle, state.handle = state.handle, None
+        return handle
+
+    def live_ids(self) -> list[str]:
+        return [key for key, state in self._states.items() if state.handle is not None]
+
+    def take_all_handles(self) -> list[Any]:
+        return [handle for key in self.live_ids() if (handle := self.take_handle(key))]

@@ -191,7 +191,7 @@ async def scenario_worker(app: App, project: Path) -> dict:
     after = [m for m in messages[report:] if m["kind"] == "assistant"]
     assert all(m["meta"].get("internal") for m in after), "event-turn replies must be footnotes"
     updates = [m for m in messages if m["kind"] == "update"]
-    assert worker["branch"].startswith("wb/"), worker
+    assert worker["branch"].startswith("chief/"), worker
     tree = Path(worker["cwd"])
     assert (tree / "hello.txt").read_text().strip() == "hello from a worker"
     assert "Add hello" in git(tree, "log", "--format=%s", "-1", worker["branch"])

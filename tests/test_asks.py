@@ -264,7 +264,7 @@ async def test_a_broken_scratch_folder_is_refused_and_does_not_break_the_router(
     file = tmp_path / "a-file"
     file.write_text("x")
     with pytest.raises(ValueError, match="cannot be used"):
-        runtime.check_scratch(Settings(scratch_directory=str(file)))
+        runtime.workspaces.check_scratch(Settings(scratch_directory=str(file)))
     harness.store.save_settings(Settings(scratch_directory=str(file / "inside")))
     await runtime.owner_send(harness.router_id, "What is running?")
     refused = await call_tool(

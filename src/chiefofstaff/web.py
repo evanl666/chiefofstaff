@@ -224,7 +224,7 @@ def create_app(
     async def save_settings(settings: Settings):
         if any(directory.is_relative_to(Path(project)) for project in settings.projects):
             raise ValueError("A project must not contain Chief of Staff's private data directory.")
-        await asyncio.to_thread(runtime.check_scratch, settings)
+        await asyncio.to_thread(runtime.workspaces.check_scratch, settings)
         old = store.settings()
         store.save_settings(settings)
         await runtime.settings_changed(old, settings)

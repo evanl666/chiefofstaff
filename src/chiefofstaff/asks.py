@@ -157,7 +157,7 @@ class OwnerAsks:
         self.alert(text, session_id=session_id, needs_action=True, title=f"{LABELS[kind]} · {who}")
         answer = self.loop.create_future()
         self.requests[draft["id"]] = answer
-        self.asking_owner.setdefault(session_id, {})[draft["id"]] = text
+        self.states[session_id].asking[draft["id"]] = text
         self.publish_session(self.store.session(session_id))
         finished = asyncio.ensure_future(done.wait()) if done else None
         try:
@@ -176,16 +176,13 @@ class OwnerAsks:
             self.requests.pop(draft["id"], None)
             if finished:
                 finished.cancel()
-            pending = self.asking_owner.get(session_id, {})
-            pending.pop(draft["id"], None)
-            if not pending:
-                self.asking_owner.pop(session_id, None)
+            self.states[session_id].asking.pop(draft["id"], None)
             if row := self.store.find_session(session_id):
                 self.publish_session(row)
 
     def cancel_requests(self, session_id: str, reason: str):
         """The session is closed or stopped: its open cards end and it stops waiting."""
-        for draft_id in list(self.asking_owner.get(session_id, {})):
+        for draft_id in list(self.states[session_id].asking):
             draft = self.store.draft(draft_id)
             if (answer := self.requests.get(draft_id)) and not answer.done():
                 answer.set_result(
@@ -278,7 +275,7 @@ class OwnerAsks:
             async with self.signin_locks.setdefault(server, asyncio.Lock()):
                 if server in self.signin_pending:
                     continue
-                session = self.live.get(session_id)
+                session = self.states.handle(session_id)
                 if not session:
                     return cancelled
                 try:
@@ -335,8 +332,8 @@ class OwnerAsks:
         row = self.store.find_session(session_id)
         if not row or row["closed_at"]:
             return
-        session = self.live.get(session_id)
-        if session and session_id in self.busy and row["status"] == "working":
+        session = self.states.handle(session_id)
+        if session and self.states[session_id].busy and row["status"] == "working":
             self.add_message(session_id, "notice", text)
             try:
                 await session.send(wrap("system", "system", text), mode="immediate")
@@ -344,7 +341,7 @@ class OwnerAsks:
             except Exception:
                 logger.warning("Could not steer %s; queueing the note.", session_id, exc_info=True)
         try:
-            await self.deliver(
+            await self.delivery.deliver(
                 session_id, wrap("system", "system", text), kind="notice", display=text
             )
         except Exception:
@@ -494,7 +491,7 @@ class OwnerAsks:
         try:
             if target["closed_at"]:
                 await self.reopen(target["id"])
-            await self.deliver(
+            await self.delivery.deliver(
                 target["id"],
                 wrap(
                     sender(asker),
@@ -533,7 +530,7 @@ class OwnerAsks:
         if not asker or asker["closed_at"]:
             return "The asker has closed; the answer was kept but not delivered."
         title = "the Router" if row["role"] == "router" else f"“{row['title']}”"
-        await self.deliver(
+        await self.delivery.deliver(
             asker["id"],
             wrap(
                 sender(row),

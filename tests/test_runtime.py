@@ -8,9 +8,10 @@ from types import SimpleNamespace
 import pytest
 from conftest import FakeSession, Harness, call_tool, env, settle
 
-from chiefofstaff import runtime as runtime_module
+from chiefofstaff import delivery as delivery_module
 from chiefofstaff.models import DraftDecision, Settings
-from chiefofstaff.runtime import ROUTER_TOOLS, permission_denial
+from chiefofstaff.policy import permission_denial
+from chiefofstaff.runtime import ROUTER_TOOLS
 
 
 async def test_router_routes_work_and_worker_reports_back(harness):
@@ -127,8 +128,10 @@ async def test_isolated_worker_gets_its_own_worktree(tmp_path, git_repo):
         isolate=True,
     )
     info = json.loads(result.text_result_for_llm)
-    assert info["branch"].startswith("wb/add-caching-")
-    assert info["cwd"].endswith("/workspaces/" + info["branch"].removeprefix("wb/") + "/repo/pkg")
+    assert info["branch"].startswith("chief/add-caching-")
+    assert info["cwd"].endswith(
+        "/workspaces/" + info["branch"].removeprefix("chief/") + "/repo/pkg"
+    )
     assert info["branch"] in branches(git_repo)
     options = harness.session(info["session_id"]).options
     assert options["working_directory"] == info["cwd"]
@@ -688,7 +691,7 @@ async def test_owner_messages_reach_a_working_session_in_its_turn(harness):
 async def test_events_for_the_router_are_batched(harness, monkeypatch):
     runtime = await harness.connect()
     router = harness.session(harness.router_id)
-    monkeypatch.setattr(runtime_module, "EVENT_DEBOUNCE", 0.05)
+    monkeypatch.setattr(delivery_module, "EVENT_DEBOUNCE", 0.05)
     await runtime.on_trigger("slack", ["slack:1"], "Alice: one")
     await runtime.on_trigger("github", ["github:2"], "PR review requested")
     assert router.sent == [], "held for a moment"
@@ -711,8 +714,8 @@ async def test_events_for_the_router_are_batched(harness, monkeypatch):
 async def test_held_messages_are_retried_when_sending_fails(harness, monkeypatch):
     runtime = await harness.connect()
     router = harness.session(harness.router_id)
-    monkeypatch.setattr(runtime_module, "EVENT_DEBOUNCE", 0.02)
-    monkeypatch.setattr(runtime_module, "RETRY_DELAY", 0.02)
+    monkeypatch.setattr(delivery_module, "EVENT_DEBOUNCE", 0.02)
+    monkeypatch.setattr(delivery_module, "RETRY_DELAY", 0.02)
     working, failures = router.send, []
 
     async def flaky(prompt, mode=None):

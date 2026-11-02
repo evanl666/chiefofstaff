@@ -7,15 +7,12 @@ UI, and anything that speaks publicly as the owner waits for the owner's approva
 """
 
 import asyncio
-import itertools
 import json
 import logging
 import os
 import re
 import shutil
-import signal
 import sys
-import tempfile
 import time
 import unicodedata
 from collections.abc import Awaitable, Callable
@@ -32,18 +29,22 @@ from pydantic import BaseModel, Field
 from . import catalog, prompts, threads
 from .asks import REQUEST_KINDS, AnswerSession, AskSession, OwnerAsks, RecordSetup
 from .bus import Bus
+from .delivery import Delivery
 from .digest import digest
 from .envelope import UNTRUSTED, from_owner, sender, short, wrap
 from .models import DraftDecision, Settings
 from .notify import mac_notification
+from .policy import GITHUB_MCP, permission_denial, within, written_file
+from .roles import ROUTER, SLACK, WATCHDOG, WORKER
 from .sources.github import GitHubSource
 from .sources.slack import SlackSource, describe, message_keys
+from .state import SessionStates
 from .store import Store, now
 from .watchdog import WatchConfig, flags, review_packet, timestamp
+from .workspaces import BRANCH_PREFIX, Workspaces, resolve_project
 
 logger = logging.getLogger(__name__)
 
-ROUTER, SLACK, WORKER, WATCHDOG = "router", "slack", "worker", "watchdog"
 PROMPTS = {
     ROUTER: prompts.ROUTER,
     SLACK: prompts.SLACK,
@@ -65,64 +66,11 @@ STYLE_EXAMPLES = 50
 REPORT_STATUS = {"question": "waiting", "blocked": "waiting", "done": "done"}
 SLACK_ID = re.compile(r"[CDGUW][A-Z0-9]{2,}")
 SLACK_TS = re.compile(r"\d{10}\.\d{6}")
-# Prompts the runtime itself sends; a Router turn that starts with one was not the owner's.
 # When the Router's context (prompt tokens of its last call) grows past this, a fresh Router
 # session takes over with a summary.
 ROUTER_CONTEXT = int(os.environ.get("CHIEFOFSTAFF_ROUTER_CONTEXT", "150000"))
-# Events for the Router and the Slack session wait this long, so a burst becomes one turn.
-EVENT_DEBOUNCE = float(os.environ.get("CHIEFOFSTAFF_EVENT_DEBOUNCE", "2"))
-# Held messages that could not be sent are retried after this, doubling up to a minute.
-RETRY_DELAY = 2.0
 # Copilot's own bookkeeping tools; they say nothing about the work.
 PLUMBING_TOOLS = {"tool_search_tool", "report_intent"}
-
-# Commands a worker may not run on its own; it must ask the owner through the Router.
-DANGEROUS = [
-    (re.compile(r"(^|[\s;&|(])sudo\s"), "sudo is not allowed"),
-    (
-        re.compile(
-            r"\brm\s+(-[a-zA-Z]+\s+)*-[a-zA-Z]*[rR][a-zA-Z]*\s+(-[a-zA-Z]+\s+)*(/|~|\$HOME)/?(\s|$)"
-        ),
-        "recursive delete of home or root",
-    ),
-    (re.compile(r"\bgit\s+push\b[^;&|\n]*(\s--force(-with-lease)?\b|\s-f\b|\s\+\S)"), "force push"),
-    (re.compile(r"\bgit\s+push\b[^;&|\n]*[\s:](main|master)(\s|$)"), "push to the default branch"),
-    (
-        re.compile(r"\bgh\s+pr\s+(merge|close|review|comment)\b"),
-        "merging, closing or commenting on PRs as the owner",
-    ),
-    (
-        re.compile(r"\bgh\s+issue\s+(close|comment|delete|edit)\b"),
-        "changing issues as the owner",
-    ),
-    (
-        re.compile(r"\b(curl|wget)\b[^|\n]*\|\s*(sudo\s+)?(sh|bash|zsh)\b"),
-        "piping a download into a shell",
-    ),
-    (
-        re.compile(r"\b(mkfs|diskutil\s+erase|shutdown|reboot)\b"),
-        "system-level destructive command",
-    ),
-]
-GH_API = re.compile(r"\bgh\s+api\b([^;&|\n]*)")
-GH_METHOD = re.compile(r"(?:^|\s)(?:-X|--method)[\s=]*([A-Za-z]+)")
-GH_FIELDS = re.compile(r"(?:^|\s)(?:-f|-F|--field|--raw-field|--input)(?:[\s=]|$)")
-GITHUB_MCP = "github-mcp-server"
-
-
-def gh_api_writes(command: str) -> bool:
-    """gh api defaults to POST as soon as fields or an input body are given."""
-    for match in GH_API.finditer(command):
-        arguments = match.group(1)
-        if method := GH_METHOD.search(arguments):
-            if method.group(1).upper() != "GET":
-                return True
-        elif re.search(r"\bgraphql\b", arguments):
-            if "mutation" in arguments.lower():
-                return True
-        elif GH_FIELDS.search(arguments):
-            return True
-    return False
 
 
 class SpawnWorker(BaseModel):
@@ -288,41 +236,6 @@ def default_client(settings: Settings) -> CopilotClient:
     return CopilotClient(connection=RuntimeConnection.for_stdio(path=path), env=env)
 
 
-def within(path: str, root: str) -> bool:
-    try:
-        return Path(path).expanduser().resolve().is_relative_to(Path(root).expanduser().resolve())
-    except (OSError, ValueError):
-        return False
-
-
-def resolve_project(project: str, projects: list[str]) -> Path:
-    path = Path(project.strip()).expanduser().resolve()
-    if not path.is_dir():
-        raise ValueError(f"Project directory does not exist: {project}")
-    if path == Path.home() or path == Path(path.anchor):
-        raise ValueError("Choose a project directory, not your home or filesystem root.")
-    if not any(within(str(path), item) for item in projects):
-        configured = ", ".join(projects) or "none yet"
-        raise ValueError(
-            f"{path} is not inside a configured project ({configured}). Ask the owner with "
-            "ask_workspace; their choice adds it."
-        )
-    return path
-
-
-def readme_line(project: Path) -> str:
-    """The first meaningful line of a project's README, as a hint of what the project is."""
-    for name in ("README.md", "README.rst", "README.txt", "README"):
-        path = project / name
-        if path.is_file():
-            with path.open(encoding="utf-8", errors="replace") as file:
-                for line in itertools.islice(file, 40):
-                    text = line.strip().lstrip("#").strip()
-                    if text and not text.startswith(("[!", "<", "![", "=", "-")):
-                        return text[:160]
-    return ""
-
-
 def default_effort(info: dict) -> str:
     """The model's default effort; Copilot does not always say, and medium is the usual one."""
     efforts = info["efforts"]
@@ -346,70 +259,6 @@ def describe_model(model: Any) -> dict:
         or 0,
         "long_context": (long and (long.max_prompt_tokens or long.context_max)) or 0,
     }
-
-
-def written_file(cwd: str, request: Any) -> str:
-    target = getattr(request, "resolved_path", None) or getattr(request, "file_name", "") or ""
-    if cwd and target and not Path(target).is_absolute():
-        target = str(Path(cwd) / target)
-    if cwd and target and within(target, cwd):
-        return os.path.relpath(target, cwd)
-    return target
-
-
-def permission_denial(row: dict, request: Any, writable: list[str] | None = None) -> str | None:
-    """Why a session may not do this, or None when it is allowed."""
-    kind = getattr(request, "kind", "")
-    role = row["role"]
-    reads_slack = role == SLACK or bool(row["slack"])
-    if kind == "mcp":
-        server = getattr(request, "server_name", "")
-        read_only = getattr(request, "read_only", False)
-        if server == "slack" and not read_only:
-            return "Slack writes are not available. Use draft_slack_reply; the owner approves it."
-        if server == GITHUB_MCP and not read_only:
-            return "Publishing to GitHub as the owner goes through draft_github_review."
-        if role != WORKER and server != "slack":
-            return f"The {role} session may only use Slack read tools."
-        return None
-    if kind == "custom-tool":
-        return None
-    if kind == "memory":
-        # Sessions that read untrusted text must not turn it into instructions for future ones.
-        if role != WORKER or reads_slack:
-            return "Only workers that do not read Slack may store memories."
-        return None
-    if role != WORKER:
-        return f"The {role} session cannot use {kind} tools. Delegate work to a worker."
-    if kind == "url" and reads_slack:
-        return (
-            "Workers with Slack access cannot fetch URLs, to protect Slack data. "
-            'Ask with report(status="question") if you need the web.'
-        )
-    cwd = row["cwd"]
-    if kind == "write":
-        target = getattr(request, "resolved_path", None) or getattr(request, "file_name", "")
-        if not Path(target).is_absolute():
-            target = str(Path(cwd) / target)
-        folders = [*(writable or [cwd]), tempfile.gettempdir()]
-        if not any(within(target, folder) for folder in folders if folder):
-            return (
-                f"Writing outside your working directory ({cwd}) and checkouts needs the owner. "
-                'Ask with report(status="question"), or add_repo for another repository.'
-            )
-    if kind == "shell":
-        command = getattr(request, "full_command_text", "") or ""
-        reasons = [reason for pattern, reason in DANGEROUS if pattern.search(command)]
-        if gh_api_writes(command):
-            reasons.append("writing to GitHub through gh api")
-        if reads_slack and getattr(request, "possible_urls", None):
-            reasons.append("network access from a worker that can read Slack")
-        if reasons:
-            return (
-                f"Denied: {reasons[0]}. If the task really needs it, ask the owner with "
-                'report(status="question").'
-            )
-    return None
 
 
 def describe_tool(name: str, arguments: Any) -> str:
@@ -441,82 +290,6 @@ def clean_title(title: str) -> str:
     return text.replace('"', "'")[:80] or "Task"
 
 
-def slugify(title: str) -> str:
-    ascii_text = unicodedata.normalize("NFKD", title).encode("ascii", "ignore").decode()
-    return re.sub(r"[^a-z0-9]+", "-", ascii_text.lower()).strip("-")[:30] or "task"
-
-
-async def command(*arguments: str, limit: float = 60) -> str:
-    """Run a command without a terminal (it can never wait for a password prompt)."""
-    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GH_PROMPT_DISABLED": "1"}
-    # ssh asks for passphrases and host keys on the terminal, not stdin: make it fail instead.
-    env.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
-    process = await asyncio.create_subprocess_exec(
-        *arguments,
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=env,
-        start_new_session=True,  # No controlling terminal to prompt on.
-    )
-    try:
-        async with asyncio.timeout(limit):
-            stdout, stderr = await process.communicate()
-    except TimeoutError as exc:
-        with suppress(ProcessLookupError):
-            os.killpg(process.pid, signal.SIGKILL)  # Also ssh and other children.
-        await process.wait()
-        raise ValueError(f"{arguments[0]} timed out.") from exc
-    if process.returncode:
-        error = stderr.decode(errors="replace").strip()[:500]
-        raise ValueError(f"{arguments[0]} failed: {error}")
-    return stdout.decode(errors="replace")
-
-
-async def git(*arguments: str, limit: float = 60) -> str:
-    return await command("git", *arguments, limit=limit)
-
-
-async def base_ref(top: Path) -> tuple[str, str]:
-    """Where a new worktree starts: the default branch's latest commit when there is a remote."""
-    if "origin" not in (await git("-C", str(top), "remote")).split():
-        return "HEAD", "the HEAD of the local checkout (no origin remote)"
-    note = ""
-    try:
-        await git("-C", str(top), "fetch", "--quiet", "origin", limit=180)
-    except ValueError:
-        note = " (fetch failed, so maybe not the latest)"
-    ref = ""
-    with suppress(ValueError):
-        ref = (
-            await git(
-                "-C", str(top), "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"
-            )
-        ).strip()
-    for candidate in ("origin/main", "origin/master"):
-        if ref:
-            break
-        with suppress(ValueError):
-            await git("-C", str(top), "rev-parse", "--verify", "--quiet", candidate)
-            ref = candidate
-    if not ref:
-        return "HEAD", "the HEAD of the local checkout (origin has no default branch)"
-    return ref, ref + note
-
-
-GIT_URL = re.compile(r"^(https?://|ssh://|git@|file://)\S+$")
-GITHUB_NAME = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-
-
-def free_child(parent: Path, name: str) -> Path:
-    """A path under `parent` named `name` (or name-2, name-3, …) that does not exist yet."""
-    name = re.sub(r"[^A-Za-z0-9_.-]+", "-", name).strip("-.") or "repo"
-    path, number = parent / name, 2
-    while path.exists():
-        path, number = parent / f"{name}-{number}", number + 1
-    return path
-
-
 class Runtime(OwnerAsks):
     def __init__(
         self,
@@ -538,8 +311,7 @@ class Runtime(OwnerAsks):
         self.watch = watch or WatchConfig.from_env()
         self.watch_job: asyncio.Task | None = None
         self.client: Any = None
-        self.live: dict[str, Any] = {}
-        self.session_locks: dict[str, asyncio.Lock] = {}
+        self.states = SessionStates()
         self.pump_lock = asyncio.Lock()
         self.draft_lock = asyncio.Lock()
         self.connect_lock = asyncio.Lock()
@@ -547,13 +319,6 @@ class Runtime(OwnerAsks):
         self.loop: asyncio.AbstractEventLoop | None = None
         self.status = {"state": "starting", "error": ""}
         self.external_cache: tuple[float, list[dict]] = (0.0, [])
-        self.event_turn: dict[str, bool] = {}
-        # Sessions resuming a turn the owner started (the restart note quotes the message).
-        self.owner_turns: set[str] = set()
-        # Workers whose turn is running (or starting); this is what max_workers limits.
-        self.busy: set[str] = set()
-        self.send_locks: dict[str, asyncio.Lock] = {}
-        self.last_output: dict[str, str] = {}
         self.models_cache: tuple[float, list[dict]] = (0.0, [])
         self.project_cache: dict[str, tuple[float, dict]] = {}
         # Open requests to the owner (draft id -> answer) and MCP sign-ins being completed.
@@ -562,19 +327,10 @@ class Runtime(OwnerAsks):
         self.signin_locks: dict[str, asyncio.Lock] = {}
         self.signin_pending: dict[str, asyncio.Event] = {}
         self.signin_declined: dict[str, float] = {}
-        # Sessions with open cards for the owner: session id -> {draft id: text}.
-        self.asking_owner: dict[str, dict[str, str]] = {}
-        self.flushing: set[str] = set()  # Sessions with a held flush scheduled.
         self.rotate_lock = asyncio.Lock()
-        # Sessions whose model changed during the current turn: messages wait for the next turn,
-        # which uses the new model.
-        self.retuned: set[str] = set()
-        # Workers that close themselves once their current turn ends (their PR is finished).
-        self.close_after_turn: set[str] = set()
-        self.stale: set[str] = set()
-        # Status a done/waiting worker returns to after a follow-up turn without a new report.
-        self.resting: dict[str, str] = {}
         self.work_root = store.directory / "work"
+        self.workspaces = Workspaces(store, self.work_root)
+        self.delivery = Delivery(self)
         self.tools = self.build_tools()
 
     # Lifecycle
@@ -625,8 +381,7 @@ class Runtime(OwnerAsks):
             self.background(self.pump())
 
     async def disconnect(self):
-        sessions = list(self.live.values())
-        self.live.clear()
+        sessions = self.states.take_all_handles()
         await asyncio.gather(*(s.disconnect() for s in sessions), return_exceptions=True)
         if self.client:
             with suppress(Exception):
@@ -666,29 +421,6 @@ class Runtime(OwnerAsks):
             raise RuntimeError("The Router has not started yet.")
         return router_id
 
-    def scratch_root(self) -> Path:
-        """Where each worker's own workspace folder is created."""
-        configured = self.store.settings().scratch_directory
-        return Path(configured) if configured else self.work_root / "workspaces"
-
-    def workspace(self, row: dict) -> Path:
-        if stored := self.store.get(f"workspace:{row['id']}"):
-            return Path(stored)
-        return self.scratch_root() / f"{slugify(row['title'])}-{row['id'][:6]}"
-
-    def checkouts(self, row: dict) -> list[dict]:
-        """The repositories a worker works in: worktrees, clones, or shared project folders."""
-        if repos := json.loads(row.get("repos") or "[]"):
-            return repos
-        if row["role"] == WORKER and row.get("project"):
-            return [{"project": row["project"], "path": row["cwd"], "branch": row["branch"]}]
-        return []
-
-    def writable(self, row: dict) -> list[str]:
-        if row["role"] != WORKER:
-            return [row["cwd"]]
-        return [row["cwd"], str(self.workspace(row)), *(c["path"] for c in self.checkouts(row))]
-
     def yolo(self, row: dict) -> bool:
         """Whether this worker acts without permission checks (a session choice, else Settings)."""
         if row["role"] != WORKER:
@@ -708,88 +440,25 @@ class Runtime(OwnerAsks):
     async def refresh_session(self, row: dict):
         """The session picks up new instructions from its next turn."""
         # A worker that reported "done" may still be finishing its turn.
-        if row["status"] == "working" or row["id"] in self.busy:
-            self.stale.add(row["id"])  # Refreshed once its current turn ends.
+        if row["status"] == "working" or self.states[row["id"]].busy:
+            self.states[row["id"]].stale = True  # Refreshed once its current turn ends.
         else:
             await self.detach(row["id"])
 
-    async def make_checkout(
-        self, workspace: Path, slug: str, project: str, isolate: bool, repos: set[str]
-    ) -> dict | None:
-        """A checkout of a configured project for a worker; None if it has that repo already."""
-        path = resolve_project(project, self.store.settings().projects)
-        if not isolate:
-            return {"project": str(path), "path": str(path), "branch": "", "shared": True}
-        toplevel = await git("-C", str(path), "rev-parse", "--show-toplevel")
-        top = await asyncio.to_thread(Path(toplevel.strip()).resolve)
-        if str(top) in repos:
-            return None
-        ref, base = await base_ref(top)
-        tree = free_child(workspace, top.name)
-        branch = f"wb/{slug}"
-        # --no-track: the branch must never push to the default branch it started from.
-        await git("-C", str(top), "worktree", "add", "--no-track", "-b", branch, str(tree), ref)
-        repos.add(str(top))
-        return {
-            "project": str(path),
-            "repo": str(top),
-            "worktree": str(tree),
-            "path": str(tree / path.relative_to(top)),
-            "branch": branch,
-            "base": base,
-        }
-
-    @staticmethod
-    async def remove_checkout(checkout: dict):
-        """Undo a worktree made for a worker that could not be set up."""
-        if not checkout.get("worktree"):
-            return  # A shared project folder: nothing was created.
-        with suppress(ValueError):
-            await git("-C", checkout["repo"], "worktree", "remove", "--force", checkout["worktree"])
-        with suppress(ValueError):
-            await git("-C", checkout["repo"], "branch", "-D", checkout["branch"])
-
-    async def clone_checkout(self, workspace: Path, slug: str, repo: str) -> dict:
-        """Clone a repository that is not on this machine into a worker's workspace."""
-        if GITHUB_NAME.fullmatch(repo):
-            url = f"https://github.com/{repo}.git"
-        elif GIT_URL.fullmatch(repo):
-            url = repo
-        else:
-            raise ValueError("Give a configured project folder, a git URL or GitHub owner/name.")
-        name = re.split(r"[/:]", url.rstrip("/").removesuffix(".git"))[-1]
-        destination = free_child(workspace, name)
-        if GITHUB_NAME.fullmatch(repo) and shutil.which("gh"):
-            # gh uses the owner's GitHub sign-in, so private repositories work too.
-            await command("gh", "repo", "clone", repo, str(destination), limit=900)
-        else:
-            await git("clone", "--quiet", url, str(destination), limit=900)
-        default = (await git("-C", str(destination), "rev-parse", "--abbrev-ref", "HEAD")).strip()
-        branch = f"wb/{slug}"
-        await git("-C", str(destination), "checkout", "--quiet", "-b", branch)
-        return {
-            "project": "",
-            "repo": str(destination),
-            "path": str(destination),
-            "branch": branch,
-            "base": f"origin/{default} of a fresh clone of {repo}",
-            "remote": repo,
-        }
-
     async def t_add_repo(self, params: AddRepo, caller: str):
         self.caller(caller, WORKER)
-        async with self.session_locks.setdefault(f"repos:{caller}", asyncio.Lock()):
+        async with self.states[caller].checkouts:
             return await self.add_repo(caller, params.repo.strip())
 
     async def add_repo(self, caller: str, repo: str):
         row = self.store.session(caller)
-        workspace = self.workspace(row)
+        workspace = self.workspaces.workspace(row)
         await asyncio.to_thread(workspace.mkdir, parents=True, exist_ok=True)
-        slug = row["branch"].removeprefix("wb/") if row["branch"] else workspace.name
-        checkouts = self.checkouts(row)
+        slug = row["branch"].removeprefix(BRANCH_PREFIX) if row["branch"] else workspace.name
+        checkouts = self.workspaces.checkouts(row)
         if repo.startswith(("/", "~")):
             have = {checkout.get("repo", checkout["path"]) for checkout in checkouts}
-            checkout = await self.make_checkout(workspace, slug, repo, True, have)
+            checkout = await self.workspaces.make_checkout(workspace, slug, repo, True, have)
             if not checkout:
                 return "You already have a checkout of that repository: " + ", ".join(
                     checkout["path"] for checkout in checkouts
@@ -798,37 +467,11 @@ class Runtime(OwnerAsks):
             if row["slack"] and not self.yolo(row):
                 # A clone URL can carry data out; Slack content must not steer that.
                 raise ValueError("Workers that read Slack can only add configured projects.")
-            checkout = await self.clone_checkout(workspace, slug, repo)
+            checkout = await self.workspaces.clone_checkout(workspace, slug, repo)
             self.store.record(caller, "links", [repo])
         self.update_session(caller, repos=json.dumps([*checkouts, checkout]))
         self.add_message(caller, "notice", f"Added {checkout['path']} ({checkout['branch']})")
         return {key: checkout[key] for key in ("path", "branch", "base")}
-
-    @staticmethod
-    def check_scratch(settings: Settings):
-        """A scratch folder must be usable before it is saved."""
-        if not settings.scratch_directory:
-            return
-        try:
-            Path(settings.scratch_directory).mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            raise ValueError(f"The scratch folder cannot be used: {exc.strerror or exc}") from exc
-
-    async def project_cards(self) -> list[dict]:
-        """What the Router needs to match a request to a project."""
-        cards = []
-        for project in self.store.settings().projects:
-            cached = self.project_cache.get(project)
-            if cached and time.monotonic() - cached[0] < 600:
-                cards.append(cached[1])
-                continue
-            card = {"path": project, "name": Path(project).name, "remote": "", "about": ""}
-            with suppress(Exception):
-                card["remote"] = await git("-C", project, "config", "--get", "remote.origin.url")
-            card["about"] = await asyncio.to_thread(readme_line, Path(project))
-            self.project_cache[project] = (time.monotonic(), card)
-            cards.append(card)
-        return cards
 
     async def add_project(self, raw: str) -> str:
         """Make a folder the owner chose a configured project (the owner's choice approves it)."""
@@ -895,7 +538,10 @@ class Runtime(OwnerAsks):
         prompt = PROMPTS[row["role"]]
         if row["role"] == WORKER:
             prompt += "\n" + prompts.worker_context(
-                row["cwd"], str(self.workspace(row)), self.checkouts(row), self.yolo(row)
+                row["cwd"],
+                str(self.workspaces.workspace(row)),
+                self.workspaces.checkouts(row),
+                self.yolo(row),
             )
         if (profile := self.store.get("profile", "")) and row["role"] != WATCHDOG:
             prompt += f"\n<owner_profile>\n{profile}\n</owner_profile>"
@@ -979,8 +625,8 @@ class Runtime(OwnerAsks):
 
     async def apply_model(self, row: dict):
         if row["status"] == "working":
-            self.retuned.add(row["id"])
-        if session := self.live.get(row["id"]):
+            self.states[row["id"]].retuned = True
+        if session := self.states.handle(row["id"]):
             if not self.model_for(row):
                 self.store.set(f"pinned:{row['id']}", "1")
             model = self.effective_model(row) or "auto"
@@ -1012,12 +658,19 @@ class Runtime(OwnerAsks):
                 await self.refresh_session(row)
 
     async def detach(self, session_id: str):
-        self.stale.discard(session_id)
-        if session_id in self.busy:
+        """Disconnect from Copilot; the next use reconnects with the current options."""
+        async with self.states[session_id].lifecycle:
+            await self.drop_handle(session_id)
+
+    async def drop_handle(self, session_id: str):
+        """Disconnect; the caller holds the session's lifecycle lock."""
+        state = self.states[session_id]
+        state.stale = False
+        if state.busy:
             # A disconnected session ends no turn: free its worker slot.
-            self.busy.discard(session_id)
+            state.busy = False
             self.background(self.pump())
-        if session := self.live.pop(session_id, None):
+        if session := self.states.take_handle(session_id):
             with suppress(Exception):
                 await session.disconnect()
 
@@ -1064,6 +717,10 @@ class Runtime(OwnerAsks):
         return self.store.get(f"alias:{copilot_id}") or copilot_id
 
     async def open_live(self, row: dict, *, create: bool = False, copilot: str = ""):
+        """Connect a session to Copilot: create it, or resume it from Copilot's own storage.
+
+        Callers hold the session's lifecycle lock, or the session is new and nobody else knows it.
+        """
         with suppress(Exception):
             await self.available_models()  # Efforts and context tiers depend on the model.
         options = self.options(row)
@@ -1078,17 +735,17 @@ class Runtime(OwnerAsks):
         session_id = row["id"]
         loop = self.loop
         session.on(lambda event: loop.call_soon_threadsafe(self.on_event, session_id, event))
-        self.live[session_id] = session
+        self.states[session_id].handle = session
         self.publish_session(self.store.session(session_id))
         return session
 
     async def session_for(self, session_id: str):
-        if session := self.live.get(session_id):
+        if session := self.states.handle(session_id):
             return session
         if not self.client:
             self.require_ready()
-        async with self.session_locks.setdefault(session_id, asyncio.Lock()):
-            if session := self.live.get(session_id):
+        async with self.states[session_id].lifecycle:
+            if session := self.states.handle(session_id):
                 return session
             row = self.store.session(session_id)
             try:
@@ -1111,8 +768,8 @@ class Runtime(OwnerAsks):
         # session that is gone or does not exist yet.
         async with (
             self.rotate_lock,
-            self.session_locks.setdefault(router_id, asyncio.Lock()),
-            self.send_locks.setdefault(router_id, asyncio.Lock()),
+            self.states[router_id].lifecycle,
+            self.states[router_id].sending,
         ):
             row = self.store.session(router_id)
             context = int(self.store.get(f"context:{router_id}") or 0)
@@ -1121,7 +778,7 @@ class Runtime(OwnerAsks):
             old, new = self.copilot_id(router_id), str(uuid4())
             self.store.set(f"alias:{old}", router_id)
             self.store.set(f"alias:{new}", router_id)  # Its events may arrive during creation.
-            await self.detach(router_id)
+            await self.drop_handle(router_id)
             try:
                 await self.open_live(row, create=True, copilot=new)
             except Exception:
@@ -1138,8 +795,8 @@ class Runtime(OwnerAsks):
                 f"The Router's context reached {context // 1000}k tokens: a fresh Router session "
                 "took over with a summary.",
             )
-        if self.has_unsent(router_id):
-            self.schedule_flush(router_id, 0)  # Held during the rotation.
+        if self.delivery.has_unsent(router_id):
+            self.delivery.schedule_flush(router_id, 0)  # Held during the rotation.
         return True
 
     def handover(self) -> str:
@@ -1225,9 +882,7 @@ class Runtime(OwnerAsks):
         """Reattach Slack-capable sessions so they pick up the current token and settings."""
         for row in self.store.open_sessions():
             if (row["role"] == SLACK or row["slack"]) and row["status"] != "working":
-                if session := self.live.pop(row["id"], None):
-                    with suppress(Exception):
-                        await session.disconnect()
+                await self.detach(row["id"])
         if self.ready():
             await self.ensure_slack_session()
         self.publish_state()
@@ -1238,8 +893,10 @@ class Runtime(OwnerAsks):
             if row["role"] == SLACK and not self.slack.configured():
                 continue
             if row["status"] != "working":
-                if row["role"] in {ROUTER, SLACK} and self.has_unsent(row["id"]):
-                    self.schedule_flush(row["id"], 0)  # Events held when Chief of Staff stopped.
+                if row["role"] in {ROUTER, SLACK} and self.delivery.has_unsent(row["id"]):
+                    self.delivery.schedule_flush(
+                        row["id"], 0
+                    )  # Events held when Chief of Staff stopped.
                 continue
             mark = int(self.store.get(f"idle:{row['id']}", "0"))
             sent = int(self.store.get(f"sent:{row['id']}") or 0)
@@ -1252,7 +909,7 @@ class Runtime(OwnerAsks):
             # are quoted.
             unhandled = [message["meta"]["prompt"] for message in since if message["id"] <= sent]
             if any(message["kind"] == "owner" for message in since):
-                self.owner_turns.add(row["id"])
+                self.states[row["id"]].owner_turn = True
             note = "Chief of Staff restarted while you were working. Continue where you left off."
             if unhandled:
                 note += (
@@ -1261,14 +918,14 @@ class Runtime(OwnerAsks):
                 )
             prompt = wrap("system", "restart", note)
             try:
-                await self.deliver(
+                await self.delivery.deliver(
                     row["id"],
                     prompt,
                     kind="notice",
                     display="Chief of Staff restarted; asked the session to continue.",
                 )
             except Exception as exc:
-                self.owner_turns.discard(row["id"])
+                self.states[row["id"]].owner_turn = False
                 self.fail(row, f"Could not resume after restart: {describe(exc)}")
 
     # Events from sessions
@@ -1287,16 +944,17 @@ class Runtime(OwnerAsks):
             return
         if kind == "user.message":
             content = getattr(data, "content", "") or ""
-            owner = from_owner(content) or session_id in self.owner_turns
-            self.owner_turns.discard(session_id)
-            self.event_turn[session_id] = not owner
+            state = self.states[session_id]
+            owner = from_owner(content) or state.owner_turn
+            state.owner_turn = False
+            state.event_turn = not owner
         elif kind == "assistant.message":
             content = (getattr(data, "content", "") or "").strip()
             if not content or getattr(data, "parent_tool_call_id", None):
                 return
             if row["role"] != WORKER and getattr(data, "tool_requests", None):
                 return
-            if row["role"] == ROUTER and self.event_turn.get(session_id):
+            if row["role"] == ROUTER and self.states[session_id].event_turn:
                 # Results reach the owner through notify_owner; the closing remark is a footnote.
                 self.add_message(session_id, "assistant", content, {"internal": True})
             else:
@@ -1316,7 +974,7 @@ class Runtime(OwnerAsks):
             result = getattr(data, "result", None)
             if row["role"] == WORKER and result and not getattr(data, "parent_tool_call_id", None):
                 # Kept for the watchdog: the tail of the latest output shows hangs and errors.
-                self.last_output[session_id] = (getattr(result, "content", "") or "")[-1500:]
+                self.states[session_id].last_output = (getattr(result, "content", "") or "")[-1500:]
         elif kind == "assistant.usage":
             usage = getattr(data, "copilot_usage", None)
             model = getattr(data, "model", "")
@@ -1351,34 +1009,34 @@ class Runtime(OwnerAsks):
             self.mcp_connected(session_id, data)
         elif kind == "assistant.turn_start":
             if row["role"] == WORKER:
-                self.busy.add(session_id)
+                self.states[session_id].busy = True
             if row["status"] == "idle":
                 self.update_session(session_id, status="working")
         elif kind == "session.idle":
-            self.busy.discard(session_id)
-            self.retuned.discard(session_id)
+            self.states[session_id].busy = False
+            self.states[session_id].retuned = False
             last = self.store.one(
                 "SELECT max(id) AS id FROM messages WHERE session_id=?", (session_id,)
             )
             self.store.set(f"idle:{session_id}", str(last["id"] or 0))
             status = row["status"]
             if status == "working":
-                status = self.resting.pop(session_id, "idle")
+                status = self.states[session_id].pop_resting("idle")
             self.update_session(session_id, status=status, activity="")
-            if session_id in self.close_after_turn:
+            if self.states[session_id].close_after_turn:
                 self.background(self.close_session(session_id))
-            elif session_id in self.stale:
+            elif self.states[session_id].stale:
                 self.background(self.detach(session_id))
-            if row["role"] in {ROUTER, SLACK} and self.has_unsent(session_id):
-                self.schedule_flush(session_id)  # Events that arrived during the turn.
+            if row["role"] in {ROUTER, SLACK} and self.delivery.has_unsent(session_id):
+                self.delivery.schedule_flush(session_id)  # Events that arrived during the turn.
             context = int(self.store.get(f"context:{session_id}") or 0)
             if row["role"] == ROUTER and context > ROUTER_CONTEXT:
                 self.background(self.rotate_router())
             if row["role"] == WORKER:
                 self.background(self.pump())
         elif kind == "session.error":
-            self.busy.discard(session_id)
-            self.retuned.discard(session_id)
+            self.states[session_id].busy = False
+            self.states[session_id].retuned = False
             message = (getattr(data, "message", "") or "The session failed.")[:2000]
             self.add_message(session_id, "error", message)
             if row["role"] == WORKER:
@@ -1387,14 +1045,16 @@ class Runtime(OwnerAsks):
                 self.background(self.pump())
             else:
                 self.update_session(session_id, status="idle", activity="")
-                if row["role"] in {ROUTER, SLACK} and self.has_unsent(session_id):
-                    self.schedule_flush(session_id)
+                if row["role"] in {ROUTER, SLACK} and self.delivery.has_unsent(session_id):
+                    self.delivery.schedule_flush(session_id)
 
     async def on_permission(self, request: Any, invocation: dict):
         row = self.store.find_session(self.row_id(invocation.get("session_id", "")))
         if not row:
             return PermissionDecisionReject(feedback="Unknown session.")
-        if not self.yolo(row) and (reason := permission_denial(row, request, self.writable(row))):
+        if not self.yolo(row) and (
+            reason := permission_denial(row, request, self.workspaces.writable(row))
+        ):
             self.add_message(row["id"], "notice", reason)
             return PermissionDecisionReject(feedback=reason)
         if row["role"] == WORKER and getattr(request, "kind", "") == "write":
@@ -1425,12 +1085,12 @@ class Runtime(OwnerAsks):
         return row
 
     def fail(self, row: dict, message: str):
-        self.busy.discard(row["id"])
+        self.states[row["id"]].busy = False
         self.add_message(row["id"], "error", message)
         self.update_session(row["id"], status="failed", activity="")
 
     def running_workers(self) -> int:
-        return len(self.busy & {row["id"] for row in self.store.open_sessions(WORKER)})
+        return sum(1 for row in self.store.open_sessions(WORKER) if self.states[row["id"]].busy)
 
     async def claim_slot(self, session_id: str) -> bool:
         """Reserve a worker slot for a new turn, or leave the message pending (queued)."""
@@ -1438,115 +1098,12 @@ class Runtime(OwnerAsks):
             row = self.store.session(session_id)
             if row["status"] in {"queued", "starting"}:
                 return False
-            if session_id in self.busy:
+            if self.states[session_id].busy:
                 return True
             if self.running_workers() >= self.store.settings().max_workers:
                 self.update_session(session_id, status="queued", activity="")
                 return False
-            self.busy.add(session_id)
-            return True
-
-    async def deliver(
-        self,
-        session_id: str,
-        prompt: str,
-        *,
-        kind: str,
-        display: str | None = None,
-        meta: dict | None = None,
-        steer: bool = False,
-        batch: bool = False,
-    ) -> dict:
-        """Give a session a message: stored first, then sent with what else it has not received.
-
-        `steer` (the owner's messages) reaches a session that is working within its current
-        turn. `batch` (events and reports for the Router or the Slack session) waits until
-        the session is idle and a short burst has passed, so several become one turn.
-        """
-        row = self.store.session(session_id)
-        if row["closed_at"]:
-            raise ValueError("That session is closed.")
-        # The exact prompt is kept so a queued worker or a restart can replay it.
-        message = self.add_message(
-            session_id,
-            kind,
-            prompt if display is None else display,
-            {**(meta or {}), "prompt": prompt},
-        )
-        if row["role"] == WORKER and row["status"] in {"done", "waiting"}:
-            # Unless this turn reports anew, the worker returns to this state afterwards.
-            self.resting[session_id] = row["status"]
-        if batch and row["role"] in {ROUTER, SLACK}:
-            if row["status"] == "working":
-                return message  # It gets this with the next flush, when it is idle.
-            if EVENT_DEBOUNCE > 0:
-                self.schedule_flush(session_id)
-                return message
-        if row["role"] == WORKER and not await self.claim_slot(session_id):
-            return message
-        working = row["status"] == "working" and session_id in self.live
-        mode = "immediate" if steer and working and session_id not in self.retuned else "enqueue"
-        try:
-            sent = await self.flush(session_id, await self.session_for(session_id), mode)
-        except Exception as exc:
-            self.busy.discard(session_id)
-            # Not replayed later: the caller sees the error (a watcher re-polls the event).
-            self.store.update_message_meta(message["id"], meta or {})
-            self.add_message(session_id, "error", f"Delivery failed: {describe(exc)}")
-            raise RuntimeError(f"Could not deliver the message: {describe(exc)}") from exc
-        if sent:
-            self.update_session(session_id, status="working")
-        return message
-
-    def schedule_flush(self, session_id: str, delay: float = EVENT_DEBOUNCE, attempt: int = 0):
-        """Flush once after `delay`, collecting whatever arrives meanwhile; retry on failure."""
-        if session_id in self.flushing:
-            return
-        self.flushing.add(session_id)
-
-        async def later():
-            await asyncio.sleep(delay)
-            self.flushing.discard(session_id)
-            row = self.store.find_session(session_id)
-            if not row or row["closed_at"] or row["status"] == "working":
-                return  # Closed, or busy: it gets them when idle.
-            try:
-                if await self.flush(session_id, await self.session_for(session_id)):
-                    self.update_session(session_id, status="working")
-            except Exception as exc:
-                logger.warning("Could not deliver held messages to %s.", session_id, exc_info=True)
-                if attempt == 0:
-                    self.add_message(
-                        session_id, "error", f"Delivery failed: {describe(exc)}. Retrying."
-                    )
-                self.schedule_flush(session_id, min(60, RETRY_DELAY * 2**attempt), attempt + 1)
-
-        self.background(later())
-
-    def has_unsent(self, session_id: str) -> bool:
-        mark = int(self.store.get(f"sent:{session_id}") or 0)
-        return any("prompt" in m["meta"] for m in self.store.messages(session_id, after=mark))
-
-    async def flush(self, session_id: str, session, mode: str = "enqueue") -> bool:
-        """Send every prompt this session has not received yet, as one message."""
-        async with self.send_locks.setdefault(session_id, asyncio.Lock()):
-            # The Router's Copilot session may have been replaced while this waited.
-            session = self.live.get(session_id) or session
-            mark = int(self.store.get(f"sent:{session_id}") or 0)
-            pending = [
-                message
-                for message in self.store.messages(session_id, after=mark)
-                if "prompt" in message["meta"]
-            ]
-            if not pending:
-                return False
-            prompts = [message["meta"]["prompt"] for message in pending]
-            if preamble := self.store.get(f"preamble:{session_id}"):
-                prompts.insert(0, preamble)  # A new Router's handover, before what is new.
-            await session.send("\n\n".join(prompts), mode=mode)
-            self.store.set(f"sent:{session_id}", str(pending[-1]["id"]))
-            if preamble:
-                self.store.execute("DELETE FROM kv WHERE key=?", (f"preamble:{session_id}",))
+            self.states[session_id].busy = True
             return True
 
     async def owner_send(self, session_id: str, text: str) -> dict:
@@ -1558,7 +1115,9 @@ class Runtime(OwnerAsks):
             notes = [self.projects_note(), self.related_hint(text)]
             context = [wrap("system", "context", note) for note in notes if note]
             prompt = "\n\n".join([prompt, *context])
-        return await self.deliver(session_id, prompt, kind="owner", display=text, steer=True)
+        return await self.delivery.deliver(
+            session_id, prompt, kind="owner", display=text, steer=True
+        )
 
     def projects_note(self) -> str:
         """Tell the Router when the configured projects changed since it last heard."""
@@ -1573,7 +1132,7 @@ class Runtime(OwnerAsks):
         return f"The configured projects are now:\n{listed}"
 
     async def tell_router(self, row: dict, status: str, summary: str):
-        await self.deliver(
+        await self.delivery.deliver(
             self.router_id(),
             wrap(sender(row), "report", summary, status=status, title=row["title"]),
             batch=True,
@@ -1590,7 +1149,7 @@ class Runtime(OwnerAsks):
         if not fresh:
             return False
         try:
-            await self.deliver(
+            await self.delivery.deliver(
                 self.router_id(),
                 wrap(source, "event", text, trust=UNTRUSTED),
                 batch=True,
@@ -1630,8 +1189,8 @@ class Runtime(OwnerAsks):
             if finished and row["role"] == WORKER:
                 if not self.store.follows(session_id):
                     # Its PR is merged or closed: the task is over once this news is handled.
-                    if session_id in self.busy or row["status"] == "working":
-                        self.close_after_turn.add(session_id)
+                    if self.states[session_id].busy or row["status"] == "working":
+                        self.states[session_id].close_after_turn = True
                     else:
                         self.background(self.close_session(session_id))
 
@@ -1650,7 +1209,7 @@ class Runtime(OwnerAsks):
         delivered = []
         for session_id in followers:
             try:
-                await self.deliver(
+                await self.delivery.deliver(
                     session_id,
                     wrap(source, "thread", text, thread=thread, trust=UNTRUSTED),
                     batch=True,
@@ -1687,34 +1246,6 @@ class Runtime(OwnerAsks):
 
     # Workers
 
-    async def prepare_directory(
-        self, session_id: str, title: str, projects: list[str], isolate: bool
-    ) -> tuple[Path, list[dict]]:
-        """The worker's own workspace folder, with a checkout of each project it works on."""
-        slug = f"{slugify(title)}-{session_id[:6]}"
-        projects = [project for project in projects if project]
-        if isolate and not projects:
-            raise ValueError("isolate=true needs a project that is a git repository.")
-        workspace = self.scratch_root() / slug
-        try:
-            await asyncio.to_thread(workspace.mkdir, parents=True, exist_ok=True)
-        except OSError as exc:
-            raise ValueError(
-                f"Cannot create a workspace in {workspace.parent}: {exc.strerror or exc}. "
-                "Fix the workspaces folder in Settings."
-            ) from exc
-        checkouts: list[dict] = []
-        repos: set[str] = set()
-        try:
-            for project in projects:
-                if checkout := await self.make_checkout(workspace, slug, project, isolate, repos):
-                    checkouts.append(checkout)
-        except Exception:
-            for checkout in checkouts:  # Leave nothing half made.
-                await self.remove_checkout(checkout)
-            raise
-        return workspace, checkouts
-
     async def pump(self):
         """Start queued workers while fewer than max_workers are running a turn."""
         if not self.ready():
@@ -1728,7 +1259,7 @@ class Runtime(OwnerAsks):
                 if not self.store.get(f"created:{row['id']}") and self.waiting_for(row):
                     continue
                 if self.running_workers() < limit:
-                    self.busy.add(row["id"])
+                    self.states[row["id"]].busy = True
                     starting.append(self.update_session(row["id"], status="starting"))
         for row in starting:
             await self.start_worker(row)
@@ -1753,7 +1284,7 @@ class Runtime(OwnerAsks):
             self.store.set(f"depblocked:{row['id']}", "1")
             names = ", ".join(f"“{d['title']}”" for d in broken)
             self.background(
-                self.deliver(
+                self.delivery.deliver(
                     self.router_id(),
                     wrap(
                         "system",
@@ -1792,12 +1323,14 @@ class Runtime(OwnerAsks):
             if self.store.get(f"created:{session_id}"):
                 session = await self.session_for(session_id)
             else:
-                session = await self.open_live(row, create=True)
-                self.store.set(f"created:{session_id}", "1")
+                async with self.states[session_id].lifecycle:
+                    session = self.states.handle(session_id) or await self.open_live(
+                        row, create=True
+                    )
             self.update_session(session_id, status="working")
             # Flushing now includes messages that arrived while the session was being created.
-            if not await self.flush(session_id, session):
-                self.busy.discard(session_id)
+            if not await self.delivery.flush(session_id, session):
+                self.states[session_id].busy = False
                 self.update_session(session_id, status="idle")
         except Exception as exc:
             self.fail(row, f"Could not start: {describe(exc)}")
@@ -1808,16 +1341,17 @@ class Runtime(OwnerAsks):
             raise ValueError("The Router cannot be closed.")
         if row["closed_at"]:
             return
-        if session := self.live.pop(session_id, None):
-            if row["status"] == "working":
+        async with self.states[session_id].lifecycle:
+            if session := self.states.take_handle(session_id):
+                if row["status"] == "working":
+                    with suppress(Exception):
+                        await session.abort()
                 with suppress(Exception):
-                    await session.abort()
-            with suppress(Exception):
-                await session.disconnect()
-        self.busy.discard(session_id)
+                    await session.disconnect()
+        self.states[session_id].busy = False
         self.store.unfollow_session(session_id)
-        self.last_output.pop(session_id, None)
-        self.close_after_turn.discard(session_id)
+        self.states[session_id].last_output = ""
+        self.states[session_id].close_after_turn = False
         self.cancel_requests(session_id, "The session was closed.")
         await self.cancel_questions(session_id)
         # Not "stopped without reporting": the Watchdog leaves a reopened worker alone until told.
@@ -1879,7 +1413,7 @@ class Runtime(OwnerAsks):
                     message["text"][:2000]
                 )
         # Paths in texts share these prefixes; only what follows them tells tasks apart.
-        roots = (self.scratch_root(), self.work_root, Path.home())
+        roots = (self.workspaces.scratch_root(), self.work_root, Path.home())
         shared = re.compile("|".join(re.escape(str(path)) for path in roots))
 
         def local(text: str) -> str:
@@ -1936,9 +1470,9 @@ class Runtime(OwnerAsks):
     async def interrupt(self, session_id: str, by: str = "you"):
         row = self.store.session(session_id)
         self.cancel_requests(session_id, f"Stopped by {by}.")
-        if session := self.live.get(session_id):
+        if session := self.states.handle(session_id):
             await session.abort()
-        self.busy.discard(session_id)
+        self.states[session_id].busy = False
         if row["status"] in {"working", "queued"}:
             self.update_session(session_id, status="idle", activity="")
             # A deliberate stop: the watchdog must not treat it as a silent stall.
@@ -2168,7 +1702,7 @@ class Runtime(OwnerAsks):
             self.add_message(row["id"], "notice", text)
             return
         try:
-            await self.deliver(
+            await self.delivery.deliver(
                 row["id"], wrap("system", "draft-outcome", text), kind="notice", display=text
             )
         except Exception:
@@ -2362,7 +1896,7 @@ class Runtime(OwnerAsks):
                     + json.dumps(related, ensure_ascii=False)
                 )
         session_id = str(uuid4())
-        workspace, checkouts = await self.prepare_directory(
+        workspace, checkouts = await self.workspaces.prepare_directory(
             session_id, title, [params.project, *params.more_projects], params.isolate
         )
         # It starts in its main checkout; the workspace around it is all its own.
@@ -2428,7 +1962,7 @@ class Runtime(OwnerAsks):
             self.store.set(f"released:{target['id']}", "1")  # The Router decides to go ahead.
             self.background(self.pump())
         self.follow(target["id"], params.follow)
-        await self.deliver(
+        await self.delivery.deliver(
             target["id"], wrap("router", "message", params.text), kind="router", display=params.text
         )
         if target["role"] == WORKER:
@@ -2444,7 +1978,7 @@ class Runtime(OwnerAsks):
         except Exception:
             models = []
         return {
-            "projects": await self.project_cards(),
+            "projects": await self.workspaces.project_cards(),
             "models": models,
             "default_worker_model": settings.role_models.get(WORKER) or settings.model or "auto",
             "slack_connected": self.slack.configured(),
@@ -2553,7 +2087,7 @@ class Runtime(OwnerAsks):
     async def t_report(self, params: Report, caller: str):
         row = self.caller(caller, WORKER, SLACK)
         self.add_message(caller, "report", params.summary, {"status": params.status})
-        self.resting.pop(caller, None)
+        self.states[caller].resting = ""
         if row["role"] == WORKER and params.status in {"progress", "done"}:
             # A PR it delivers is its PR: reviews, comments and CI come back to it.
             self.follow(caller, threads.pull_requests(params.summary))
@@ -2759,7 +2293,7 @@ class Runtime(OwnerAsks):
         moment = time.time() if moment is None else moment
         reviewed = []
         for row in self.store.open_sessions(WORKER):
-            if row["status"] not in {"working", "idle"} or row["id"] in self.asking_owner:
+            if row["status"] not in {"working", "idle"} or self.states[row["id"]].asking:
                 continue
             messages = self.store.messages(row["id"])
             mark = messages[-1]["id"] if messages else 0
@@ -2774,13 +2308,13 @@ class Runtime(OwnerAsks):
             reasons = flags(row, messages, moment, self.watch)
             if not reasons:
                 continue
-            await self.deliver(
+            await self.delivery.deliver(
                 await self.watchdog_id(),
                 wrap(
                     "system",
                     "review",
                     review_packet(
-                        row, messages, reasons, moment, self.last_output.get(row["id"], "")
+                        row, messages, reasons, moment, self.states[row["id"]].last_output
                     ),
                     worker=short(row["id"]),
                     title=row["title"],
@@ -2823,14 +2357,14 @@ class Runtime(OwnerAsks):
             if action == "interrupt":
                 await self.interrupt(row["id"], by="the watchdog")
             text = params.message or params.reason
-            await self.deliver(
+            await self.delivery.deliver(
                 row["id"], wrap("watchdog", "nudge", text), kind="watchdog", display=text
             )
             self.save_watch(row["id"], nudges=nudges + 1)
         elif action == "escalate":
             last = self.store.messages(row["id"])
             self.save_watch(row["id"], escalated_mark=last[-1]["id"] if last else 0)
-            await self.deliver(
+            await self.delivery.deliver(
                 self.router_id(),
                 wrap(
                     "watchdog",
@@ -2852,14 +2386,14 @@ class Runtime(OwnerAsks):
     # UI snapshot
 
     def view(self, row: dict) -> dict:
-        asking = self.asking_owner.get(row["id"])
+        asking = self.states[row["id"]].asking
         if asking and not row["closed_at"]:
             text = next(iter(asking.values()))
             row = {**row, "status": "waiting", "activity": f"Waiting for you: {text[:80]}"}
         return {
             **row,
             "slack": bool(row["slack"]),
-            "live": row["id"] in self.live,
+            "live": self.states.is_live(row["id"]),
             "follows": self.store.follows(row["id"]),
             "model": self.effective_model(row),
             "model_choice": row["model"],
@@ -2868,7 +2402,7 @@ class Runtime(OwnerAsks):
             "context": row["context"],
             "yolo": self.yolo(row),
             "yolo_choice": row["yolo"],
-            "checkouts": self.checkouts(row),
+            "checkouts": self.workspaces.checkouts(row),
             "credits": self.store.one(
                 "SELECT coalesce(sum(credits), 0) AS c FROM usage WHERE session_id=?", (row["id"],)
             )["c"],
@@ -2902,7 +2436,7 @@ class Runtime(OwnerAsks):
             await self.refresh_slack()
         defaults = ("model", "role_models", "role_efforts")
         if self.ready() and any(getattr(old, key) != getattr(new, key) for key in defaults):
-            for session_id in list(self.live):
+            for session_id in self.states.live_ids():
                 row = self.store.find_session(session_id)
                 if row and not (row["model"] and row["effort"]):
                     with suppress(Exception):

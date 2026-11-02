@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 from conftest import Harness, call_tool, env
 
-from chiefofstaff import runtime as runtime_module
+from chiefofstaff import workspaces as workspaces_module
 from chiefofstaff.models import Settings
 
 
@@ -181,7 +181,7 @@ async def test_a_failed_setup_leaves_no_worktree_or_branch(tmp_path):
         )
         assert "not inside a configured project" in result.text_result_for_llm
     assert run("git", "worktree", "list", cwd=api).count("\n") == 1, "only the owner's checkout"
-    assert "wb/" not in run("git", "branch", "--list", cwd=api)
+    assert "chief/" not in run("git", "branch", "--list", cwd=api)
 
 
 async def test_parallel_add_repo_calls_keep_every_checkout(tmp_path):
@@ -219,7 +219,7 @@ async def test_commands_never_wait_on_a_terminal(monkeypatch):
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
     monkeypatch.delenv("GIT_SSH_COMMAND", raising=False)
-    assert await runtime_module.git("fetch") == "ok"
+    assert await workspaces_module.git("fetch") == "ok"
     assert seen["start_new_session"] and seen["stdin"] == asyncio.subprocess.DEVNULL
     assert seen["env"]["GIT_SSH_COMMAND"] == "ssh -o BatchMode=yes"
     assert seen["env"]["GIT_TERMINAL_PROMPT"] == "0"
