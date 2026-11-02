@@ -44,6 +44,7 @@ from .models import DraftDecision, Settings
 from .notify import mac_notification
 from .policy import GITHUB_MCP, permission_denial, within, written_file
 from .roles import ROUTER, SLACK, WATCHDOG, WORKER
+from .sources import Source
 from .sources.github import GitHubSource
 from .sources.slack import SlackSource, describe, message_keys
 from .state import SessionStates
@@ -358,6 +359,8 @@ class Runtime(OwnerAsks):
         self.slack = slack or SlackSource(store, self)
         self.github = github or GitHubSource(store, self)
         self.watch = watch or WatchConfig.from_env()
+        # More event sources (see sources/__init__.py); Slack and GitHub are built in.
+        self.sources: list[Source] = []
         self.watch_job: asyncio.Task | None = None
         self.backend: AgentBackend | None = None
         self.states = SessionStates()
@@ -398,18 +401,21 @@ class Runtime(OwnerAsks):
         )
         self.expire_requests()
         await self.connect()
-        await self.slack.start()
-        await self.github.start()
+        for source in self.all_sources():
+            await source.start()
         self.watch_job = asyncio.create_task(self.watch_loop())
         if self.store.drafts("uncertain"):
             self.background(self.check_uncertain_drafts())
+
+    def all_sources(self) -> list[Source]:
+        return [self.slack, self.github, *self.sources]
 
     async def stop(self):
         if self.watch_job:
             self.watch_job.cancel()
             await asyncio.gather(self.watch_job, return_exceptions=True)
-        await self.slack.stop()
-        await self.github.stop()
+        for source in self.all_sources():
+            await source.stop()
         await self.disconnect()
         for task in list(self.jobs):
             task.cancel()
@@ -3147,7 +3153,7 @@ class Runtime(OwnerAsks):
         changed = ("worker_credit_limit", "worker_yolo", "worker_sandbox")
         if any(getattr(old, key) != getattr(new, key) for key in changed):
             await self.refresh(WORKER)
-        self.slack.wake()
-        self.github.wake()
+        for source in self.all_sources():
+            source.wake()
         self.background(self.pump())
         self.publish_state()

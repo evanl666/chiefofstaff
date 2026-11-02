@@ -229,7 +229,7 @@ class DemoBrain:
                         "message_session", {"session_id": slack["session_id"], "text": body}
                     )
         if not said:
-            yield Say("OK.")
+            return  # Events need no closing words; results reached the owner as updates.
 
     async def slack(self, session, prompt):
         for _attrs, body in envelopes(prompt):
