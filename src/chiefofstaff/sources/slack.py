@@ -2,7 +2,8 @@
 
 Chief of Staff uses the owner's Slack *user* token in two places:
 - the watcher searches for new DMs and mentions without involving a model, and only wakes the
-  Router when something new arrived;
+  Router when something new arrived; it also finds messages the owner reacted to with their
+  delegate emoji (Slack's `hasmy::emoji:` search), which hands them to the Router as requests;
 - sessions that handle Slack get the MCP server with read-only tools. Sending is never exposed
   to a model: drafts are approved by the owner and sent here, by the application.
 """
@@ -55,6 +56,7 @@ PERMALINK = re.compile(r"/archives/[A-Z0-9]+/p(\d{10})(\d{6})")
 TIMESTAMP = re.compile(r"(?<![\d.])(\d{10}\.\d{6})(?![\d])")
 THREAD_TS = re.compile(r"thread_ts\W{0,4}\d{10}\.\d{6}")
 USER_ID = re.compile(r"user_id is (U[A-Z0-9]{6,})")
+DELEGATED = "slack-delegated:"
 
 
 class SlackError(RuntimeError):
@@ -272,6 +274,8 @@ class SlackSource:
         cursor = self.store.get("slack_cursor")
         if cursor is None:
             # Start from now: enabling Slack must not flood the Router with old history.
+            if settings.slack_delegate_emoji:
+                await self.poll_delegated(settings.slack_delegate_emoji)
             self.store.set("slack_cursor", str(started))
             self.status.update(connected=True, error="", last_checked=now())
             return
@@ -353,12 +357,57 @@ class SlackSource:
                 + "\n\n".join(sections),
                 "\n\n".join(dict.fromkeys(shown)),
             )
+        if settings.slack_delegate_emoji:
+            await self.poll_delegated(settings.slack_delegate_emoji)
+        else:
+            self.store.delete("slack_delegate_emoji")  # Turning it back on starts from then.
         # Only advance after the Router accepted the events, so a failure is retried.
         self.store.set("slack_cursor", str(started))
         self.status.update(connected=True, error="", last_checked=now())
 
     def seen(self, key: str) -> bool:
         return bool(self.store.one("SELECT id FROM triggers WHERE key=?", (key,)))
+
+    async def poll_delegated(self, emoji: str):
+        """Messages the owner reacted to with the delegate emoji go to the Router as requests.
+
+        Reactions are not dated in search, so this looks at the latest messages with the owner's
+        reaction (by message time) and hands over the ones not handed over before.
+        """
+        text = await self.mcp.call(
+            SEARCH_TOOL,
+            {
+                "query": f"hasmy::{emoji}:",
+                "sort": "timestamp",
+                "sort_dir": "desc",
+                "include_context": False,
+                "limit": PAGE_SIZE,
+            },
+        )
+        stamps = [key.removeprefix("slack:") for key in message_keys(text)]
+        keys = [f"{DELEGATED}{stamp}" for stamp in stamps]
+        if self.store.get("slack_delegate_emoji") != emoji:
+            # Reactions from before the feature was on (or with another emoji) are history.
+            for key in keys:
+                self.store.add_trigger("slack", key, "")
+            self.store.set("slack_delegate_emoji", emoji)
+            return
+        fresh = [stamp for stamp in stamps if not self.seen(f"{DELEGATED}{stamp}")]
+        if not fresh:
+            return
+        links = threads.slack_messages(text)
+        thread_keys = list(dict.fromkeys(key for stamp in fresh for key in links.get(stamp, [])))
+        keys_line = f"Thread keys: {', '.join(thread_keys)}\n" if thread_keys else ""
+        body = text[:MAX_RESULT_CHARS]
+        await self.host.on_trigger(
+            "slack",
+            [f"{DELEGATED}{stamp}" for stamp in fresh],
+            f"The owner reacted with :{emoji}: to {len(fresh)} Slack message(s), handing them to "
+            f"you (new ts: {', '.join(fresh)}). The results may also list messages handed over "
+            "earlier; handle only the new ones.\n" + keys_line + "\n" + body,
+            body,
+            kind="delegated",
+        )
 
     async def poll_followed(self):
         """Read every followed thread and DM; new messages go straight to their followers."""

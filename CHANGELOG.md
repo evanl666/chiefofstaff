@@ -10,6 +10,8 @@ First public release.
 - **Inbox**: what needs you, what is running, and results ready to review with **receipts**
   (observed test runs, changes, commits and PR checks next to what the worker reported).
 - **Focus Shield**: notifications wait while you focus; one summary afterwards.
+- **Delegate by reaction**: react 🤖 to any Slack message to turn it into a task, answered
+  in its thread when done.
 - **Slack and GitHub**: replies and PR reviews drafted in your voice, sent only after you
   approve; followed threads and PRs go straight to their worker.
 - **Watchdog** that notices stalled or looping workers and nudges them.

@@ -29,6 +29,8 @@ track of which session knew what. Chief of Staff gives you **one inbox** instead
   and can build on earlier results.
 - **Tasks that wait for each other.** "Fix the flaky test, then add rate limiting": the second
   starts when the first is done, with its result.
+- **Delegate by reaction.** React 🤖 to any Slack message ("can someone fix the export?") and
+  it becomes a task; when it is done, the answer is drafted in that thread for you to approve.
 - **Handles your Slack.** DMs and mentions get a reply drafted in your voice; nothing is sent
   until you approve. Replies in that thread go straight to the session that owns it.
 - **Reviews PRs you are asked to review**, as drafts you approve.

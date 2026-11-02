@@ -45,9 +45,14 @@ class Workspace:
                 "user": user,
                 "text": text,
                 "thread_ts": thread_ts,
+                "reactions": {},
             }
             self.messages.append(message)
             return message
+
+    def react(self, message: dict, user: str, emoji: str):
+        with self.lock:
+            message["reactions"].setdefault(emoji, set()).add(user)
 
     @staticmethod
     def permalink(message: dict) -> str:
@@ -69,7 +74,8 @@ class Workspace:
 
 
 def matches(message: dict, query: str) -> bool:
-    """Slack-like search: every term must match; supports to:me, in:, from: and @mentions."""
+    """Slack-like search: every term must match; supports to:me, in:, from:, has::emoji:,
+    hasmy::emoji: and @mentions."""
     channel, user, text = message["channel"], message["user"], message["text"].lower()
     for term in query.split():
         term = term.strip('"')
@@ -84,6 +90,11 @@ def matches(message: dict, query: str) -> bool:
         elif lowered.startswith("from:"):
             target = term[5:].strip("<>@")
             if target != user and target.lower() not in NAMES.get(user, "").lower():
+                return False
+        elif lowered.startswith(("has::", "hasmy::")):
+            emoji = lowered.split("::", 1)[1].rstrip(":")
+            users = message.get("reactions", {}).get(emoji, set())
+            if not users or (lowered.startswith("hasmy") and OWNER not in users):
                 return False
         elif lowered.startswith(("after:", "before:", "on:", "during:", "is:", "has:")):
             continue

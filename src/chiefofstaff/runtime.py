@@ -1441,20 +1441,27 @@ class Runtime(OwnerAsks):
         )
 
     async def on_trigger(
-        self, source: str, keys: list[str], text: str, display: str | None = None
+        self,
+        source: str,
+        keys: list[str],
+        text: str,
+        display: str | None = None,
+        kind: str = "event",
     ) -> bool:
+        """A new event for the Router; kind="delegated" when the owner handed it over."""
         self.require_ready()
         fresh = [key for key in keys if self.store.add_trigger(source, key, text[:4000])]
         if not fresh:
             return False
+        meta = {"source": source, **({"delegated": True} if kind == "delegated" else {})}
         try:
             await self.delivery.deliver(
                 self.router_id(),
-                wrap(source, "event", text, trust=UNTRUSTED),
+                wrap(source, kind, text, trust=UNTRUSTED),
                 batch=True,
                 kind="inbound",
                 display=(display or text)[:2000],
-                meta={"source": source},
+                meta=meta,
             )
         except Exception:
             for key in fresh:

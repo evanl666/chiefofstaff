@@ -828,7 +828,7 @@ function renderMessage(message) {
         return card({ label: meta.title, body: message.text, className: `report ${meta.status}`, status: meta.status, time, open: () => select(meta.from) });
       }
       const source = { slack: "Slack", github: "GitHub" }[meta.source] || "Event";
-      return card({ label: source, body: message.text, className: "inbound", time });
+      return card({ label: meta.delegated ? `You handed this over from ${source}` : source, body: message.text, className: "inbound", time });
     }
     case "watchdog":
       return card({ label: "Watchdog", body: message.text, className: "update attention", time });
@@ -1826,6 +1826,7 @@ function fillSettings() {
   form.slack_enabled.checked = settings.slack_enabled;
   form.slack_token.value = "";
   form.slack_poll_seconds.value = settings.slack_poll_seconds;
+  form.slack_delegate_emoji.value = settings.slack_delegate_emoji ? `:${settings.slack_delegate_emoji}:` : "";
   form.github_enabled.checked = settings.github_enabled;
   form.github_repos.value = settings.github_repos.join("\n");
   form.copilot_command.value = settings.copilot_command;
@@ -1880,6 +1881,7 @@ async function saveSettings(event) {
     watchdog_enabled: form.watchdog_enabled.checked,
     slack_enabled: form.slack_enabled.checked,
     slack_poll_seconds: Number(form.slack_poll_seconds.value),
+    slack_delegate_emoji: form.slack_delegate_emoji.value.trim(),
     github_enabled: form.github_enabled.checked,
     github_repos: lines(form.github_repos.value),
     copilot_command: form.copilot_command.value.trim(),
