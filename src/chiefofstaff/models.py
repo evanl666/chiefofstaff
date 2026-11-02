@@ -71,7 +71,8 @@ class TaskNote(StrictModel):
 
 
 class DraftDecision(StrictModel):
-    action: Literal["send", "reject", "choose", "answer"]
+    # mark_sent: a draft whose sending was interrupted turned out to be delivered.
+    action: Literal["send", "reject", "choose", "answer", "mark_sent"]
     # For a form a session showed the owner: field name -> value.
     content: dict[str, str | int | float | bool | list[str]] = Field(default_factory=dict)
     # For a workspace question: the chosen folder, or "" for no project.

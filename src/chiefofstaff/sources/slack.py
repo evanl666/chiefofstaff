@@ -405,6 +405,34 @@ class SlackSource:
                 )
                 self.store.set(f"slackhw:{thread}", str(newest))
 
+    async def find_sent(self, target: dict, text: str, since: float) -> str:
+        """A permalink to the owner's message with this text in the target conversation, or ""."""
+        words = " ".join(text.replace('"', " ").split()[:12])
+        if not words:
+            return ""
+        result = await self.mcp.call(
+            SEARCH_TOOL,
+            {
+                "query": f'"{words}" from:me',
+                "after": str(int(since) - 86400),
+                "sort": "timestamp",
+                "sort_dir": "desc",
+                "include_context": False,
+                "limit": 20,
+            },
+        )
+        for stamp, keys in threads.slack_messages(result).items():
+            if any(key.split(":")[1] == target["channel_id"] for key in keys):
+                return next(
+                    (
+                        link
+                        for link in re.findall(r"https://\S+/archives/\S+", result)
+                        if stamp.replace(".", "") in link
+                    ),
+                    f"slack:{stamp}",
+                )
+        return ""
+
     async def send(self, target: dict, text: str) -> str:
         if self.fingerprint and not self.can_send:
             raise SlackError("This Slack token lacks chat:write; nothing was sent.")

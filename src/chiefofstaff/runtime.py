@@ -369,6 +369,8 @@ class Runtime(OwnerAsks):
         await self.slack.start()
         await self.github.start()
         self.watch_job = asyncio.create_task(self.watch_loop())
+        if self.store.drafts("uncertain"):
+            self.background(self.check_uncertain_drafts())
 
     async def stop(self):
         if self.watch_job:
@@ -393,6 +395,7 @@ class Runtime(OwnerAsks):
                     raise RuntimeError("Copilot is not signed in. Run `copilot login`.")
                 warning = await self.version_warning()
                 await self.ensure_router()
+                await self.reconcile_sends()
                 await self.resume_working()
                 await self.ensure_slack_session()
                 self.status = {"state": "ready", "error": "", "warning": warning}
@@ -768,7 +771,9 @@ class Runtime(OwnerAsks):
             session = await self.backend.resume_session(self.copilot_id(row["id"]), **options)
         session_id = row["id"]
         loop = self.loop
-        session.on(lambda event: loop.call_soon_threadsafe(self.on_event, session_id, event))
+        session.on(
+            lambda event: loop.call_soon_threadsafe(self.on_event, session_id, event, session)
+        )
         self.states[session_id].handle = session
         self.publish_session(self.store.session(session_id))
         return session
@@ -932,16 +937,27 @@ class Runtime(OwnerAsks):
             await self.ensure_slack_session()
         self.publish_state()
 
+    async def reconcile_sends(self):
+        """Sends that a stop interrupted: check whether they arrived before anything is resent."""
+        for key in self.store.keys("sending:"):
+            session_id = key.removeprefix("sending:")
+            row = self.store.find_session(session_id)
+            if not row or row["closed_at"]:
+                self.store.delete(key)
+                continue
+            arrived = await self.delivery.reconcile(session_id)
+            outcome = {True: "it arrived", False: "resending", None: "unknown, resending"}
+            logger.info("Interrupted send to %s: %s.", session_id, outcome[arrived])
+
     async def resume_working(self):
         """After a restart, sessions that were mid-turn continue, with what they had not handled."""
         for row in self.store.open_sessions():
             if row["role"] == SLACK and not self.slack.configured():
                 continue
             if row["status"] != "working":
-                if row["role"] in {ROUTER, SLACK} and self.delivery.has_unsent(row["id"]):
-                    self.delivery.schedule_flush(
-                        row["id"], 0
-                    )  # Events held when Chief of Staff stopped.
+                if self.delivery.has_unsent(row["id"]):
+                    # Events held, or a send interrupted, when Chief of Staff stopped.
+                    self.background(self.delivery.resume(row["id"]))
                 continue
             mark = int(self.store.get(f"idle:{row['id']}", "0"))
             sent = int(self.store.get(f"sent:{row['id']}") or 0)
@@ -975,7 +991,12 @@ class Runtime(OwnerAsks):
 
     # Events from sessions
 
-    def on_event(self, session_id: str, event: Any):
+    def on_event(self, session_id: str, event: Any, source: Any = None):
+        if source is not None and self.states.handle(session_id) is not source:
+            # A Copilot session we let go of (replaced, refreshed or closed): its late events
+            # belong to no live turn.
+            logger.debug("Ignoring %s from a detached session.", getattr(event.type, "value", ""))
+            return
         try:
             self.handle_event(session_id, event)
         except Exception:
@@ -1631,59 +1652,64 @@ class Runtime(OwnerAsks):
     async def resolve_draft(self, draft_id: str, decision: DraftDecision) -> dict:
         async with self.draft_lock:
             draft = self.store.draft(draft_id)
-            if draft["status"] != "pending":
-                raise ValueError("This draft was already handled.")
-            if draft["kind"] == "workspace":
-                return await self.answer_workspace(draft, decision)
-            if draft["kind"] in REQUEST_KINDS:
-                return self.answer_request(draft, decision)
-            if decision.action == "choose":
-                raise ValueError("This draft is not a question.")
-            if decision.action == "reject":
-                draft = self.store.update_draft(
-                    draft_id, status="rejected", outcome=decision.reason, resolved_at=now()
-                )
-                self.bus.publish("draft", draft)
-                if draft["kind"] == "slack":
-                    await self.learn_style(draft["text"], reason=decision.reason or "(no reason)")
-                reason = f" Reason: {decision.reason}" if decision.reason else " No reason given."
-                await self.tell_drafter(
-                    draft, f"The owner rejected draft {draft_id}.{reason} Do not send it.", True
-                )
-                return draft
-            final = decision.text.strip() or draft["text"]
-            self.store.update_draft(draft_id, status="sending", final_text=final)
-            try:
-                if draft["kind"] == "slack":
-                    outcome = await self.slack.send(draft["target"], final)
-                else:
-                    outcome = await self.github.publish_review(draft["target"], final)
-            except Exception as exc:
-                error = describe(exc)[:1000]
-                draft = self.store.update_draft(
-                    draft_id, status="failed", outcome=error, resolved_at=now()
-                )
-                self.bus.publish("draft", draft)
-                await self.tell_drafter(
-                    draft, f"Sending draft {draft_id} failed: {error[:400]}", True
-                )
-                raise RuntimeError(f"Sending failed: {error}. Check before retrying.") from exc
+            if draft["status"] == "uncertain":
+                return await self.settle_uncertain(draft, decision)
+            return await self.decide_draft(draft_id, decision)
+
+    async def decide_draft(self, draft_id: str, decision: DraftDecision) -> dict:
+        """The owner's decision on a pending draft; the caller holds draft_lock."""
+        draft = self.store.draft(draft_id)
+        if draft["status"] != "pending":
+            raise ValueError("This draft was already handled.")
+        if draft["kind"] == "workspace":
+            return await self.answer_workspace(draft, decision)
+        if draft["kind"] in REQUEST_KINDS:
+            return self.answer_request(draft, decision)
+        if decision.action == "choose":
+            raise ValueError("This draft is not a question.")
+        if decision.action == "reject":
             draft = self.store.update_draft(
-                draft_id, status="sent", outcome=(outcome or "")[:1000], resolved_at=now()
+                draft_id, status="rejected", outcome=decision.reason, resolved_at=now()
             )
             self.bus.publish("draft", draft)
-            self.after_sent(draft, outcome or "")
-            if final != draft["text"] and draft["kind"] == "slack":
-                await self.learn_style(draft["text"], sent=final)
-            if final != draft["text"]:
-                await self.tell_drafter(
-                    draft,
-                    f"The owner edited draft {draft_id} and sent this text instead:\n{final}",
-                    True,
-                )
-            else:
-                await self.tell_drafter(draft, f"The owner approved draft {draft_id}; it was sent.")
+            if draft["kind"] == "slack":
+                await self.learn_style(draft["text"], reason=decision.reason or "(no reason)")
+            reason = f" Reason: {decision.reason}" if decision.reason else " No reason given."
+            await self.tell_drafter(
+                draft, f"The owner rejected draft {draft_id}.{reason} Do not send it.", True
+            )
             return draft
+        final = decision.text.strip() or draft["text"]
+        self.store.update_draft(draft_id, status="sending", final_text=final)
+        try:
+            if draft["kind"] == "slack":
+                outcome = await self.slack.send(draft["target"], final)
+            else:
+                outcome = await self.github.publish_review(draft["target"], final)
+        except Exception as exc:
+            error = describe(exc)[:1000]
+            draft = self.store.update_draft(
+                draft_id, status="failed", outcome=error, resolved_at=now()
+            )
+            self.bus.publish("draft", draft)
+            await self.tell_drafter(draft, f"Sending draft {draft_id} failed: {error[:400]}", True)
+            raise RuntimeError(f"Sending failed: {error}. Check before retrying.") from exc
+        draft = self.store.update_draft(
+            draft_id, status="sent", outcome=(outcome or "")[:1000], resolved_at=now()
+        )
+        self.bus.publish("draft", draft)
+        self.after_sent(draft, outcome or "")
+        if final != draft["text"] and draft["kind"] == "slack":
+            await self.learn_style(draft["text"], sent=final)
+        if final != draft["text"]:
+            await self.tell_drafter(
+                draft,
+                f"The owner edited draft {draft_id} and sent this text instead:\n{final}",
+                True,
+            )
+        else:
+            await self.tell_drafter(draft, f"The owner approved draft {draft_id}; it was sent.")
+        return draft
 
     async def answer_workspace(self, draft: dict, decision: DraftDecision) -> dict:
         title = draft["target"]["title"]
@@ -1754,6 +1780,68 @@ class Runtime(OwnerAsks):
             f"Asked the owner ({draft['id']}). Their choice arrives as a [draft outcome] message; "
             "start the worker then."
         )
+
+    async def settle_uncertain(self, draft: dict, decision: DraftDecision) -> dict:
+        """The owner decides about a draft whose sending a stop interrupted."""
+        if decision.action == "mark_sent":
+            draft = self.store.update_draft(
+                draft["id"],
+                status="sent",
+                outcome="Marked as sent by the owner.",
+                resolved_at=now(),
+            )
+            self.bus.publish("draft", draft)
+            self.after_sent(draft, "")
+            return draft
+        if decision.action == "reject":
+            draft = self.store.update_draft(
+                draft["id"], status="rejected", outcome="Not sent again.", resolved_at=now()
+            )
+            self.bus.publish("draft", draft)
+            return draft
+        if decision.action != "send":
+            raise ValueError("Send it again, mark it as sent, or drop it.")
+        self.store.update_draft(draft["id"], status="pending")
+        return await self.decide_draft(draft["id"], decision)
+
+    async def check_uncertain_drafts(self):
+        """After a restart: look in Slack and GitHub whether interrupted sends went out."""
+        for draft in self.store.drafts("uncertain"):
+            text = draft["final_text"] or draft["text"]
+            created = datetime.fromisoformat(draft["created_at"]).timestamp()
+            try:
+                if draft["kind"] == "slack":
+                    found = await self.slack.find_sent(draft["target"], text, created)
+                elif draft["kind"] == "github":
+                    found = await self.github.find_review(draft["target"], text)
+                else:
+                    continue
+            except Exception:
+                logger.warning("Could not check draft %s.", draft["id"], exc_info=True)
+                continue
+            if found:
+                draft = self.store.update_draft(
+                    draft["id"],
+                    status="sent",
+                    outcome=f"Delivered (confirmed after a restart): {found}"[:1000],
+                    resolved_at=now(),
+                )
+                self.after_sent(draft, found)
+                await self.tell_drafter(draft, f"Draft {draft['id']} was sent.")
+            elif draft["kind"] == "github":
+                # GitHub lists reviews at once: it was not published, so it can be approved again.
+                draft = self.store.update_draft(
+                    draft["id"],
+                    status="pending",
+                    outcome="Not published (checked after a restart).",
+                )
+            else:
+                # Slack search can lag: the owner decides.
+                draft = self.store.update_draft(
+                    draft["id"],
+                    outcome="Not found in Slack after a restart. Send it again if it is missing.",
+                )
+            self.bus.publish("draft", draft)
 
     def after_sent(self, draft: dict, outcome: str):
         """The drafting session now owns the conversation: it follows the thread or PR."""

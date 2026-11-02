@@ -58,6 +58,14 @@ class FakeSession:
     async def abort(self):
         self.aborted = True
 
+    async def get_events(self):
+        return [
+            SimpleNamespace(
+                type=SimpleNamespace(value="user.message"), data=SimpleNamespace(content=p)
+            )
+            for p in self.sent
+        ]
+
     async def disconnect(self):
         self.disconnected = True
 

@@ -253,6 +253,15 @@ class Store:
     def set(self, key: str, value: str):
         self.execute("INSERT OR REPLACE INTO kv VALUES (?, ?)", (key, value))
 
+    def delete(self, key: str):
+        self.execute("DELETE FROM kv WHERE key=?", (key,))
+
+    def keys(self, prefix: str) -> list[str]:
+        rows = self.all(
+            "SELECT key FROM kv WHERE key >= ? AND key < ?", (prefix, prefix + "\uffff")
+        )
+        return [row["key"] for row in rows]
+
     def create_session(
         self,
         session_id: str,

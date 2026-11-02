@@ -244,6 +244,19 @@ class GitHubSource:
             raise ValueError(f"{repo}#{number} is not open.")
         return pull["head"]["sha"]
 
+    async def find_review(self, target: dict, body: str) -> str:
+        """The URL of a published review with this body on the target PR, or ""."""
+        reviews = json.loads(
+            await self.gh(
+                "api", f"repos/{target['repo']}/pulls/{int(target['number'])}/reviews", "--paginate"
+            )
+            or "[]"
+        )
+        for review in reviews:
+            if (review.get("body") or "").strip() == body.strip():
+                return review.get("html_url") or "Review published."
+        return ""
+
     async def publish_review(self, target: dict, body: str) -> str:
         settings = self.store.settings()
         repo = target["repo"]

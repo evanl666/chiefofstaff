@@ -47,6 +47,9 @@ class AgentSession(Protocol):
 
     async def set_model(self, model: str, **tuning: Any) -> None: ...
 
+    async def get_events(self) -> list[Any]:
+        """The session's history; its user.message events show what it received."""
+
     def on(self, handler: Callable[[Any], None]) -> Any:
         """Receive every event: `event.type.value` names it, `event.data` holds its fields."""
 

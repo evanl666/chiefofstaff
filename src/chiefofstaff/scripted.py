@@ -147,6 +147,9 @@ class ScriptedSession:
     async def set_model(self, model: str, **tuning: Any):
         self.model = model
 
+    async def get_events(self) -> list[Any]:
+        return [event("user.message", content=text) for who, text in self.history if who == "user"]
+
     async def run(self):
         try:
             while self.inbox and not self.closed:

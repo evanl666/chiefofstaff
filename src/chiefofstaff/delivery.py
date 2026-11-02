@@ -2,13 +2,19 @@
 
 Every message for a session is a row in `messages` whose meta holds the exact prompt. A session's
 `sent:` mark is the id of the last message it was given, so whatever comes after it is its
-outbox. Delivery is at-least-once: if Chief of Staff stops between a send and the mark, those
-messages are sent again after the restart; envelopes carry the message id so a session can tell.
+outbox.
+
+A send is bracketed by a `sending:` marker (how far it goes and a digest of the text). If
+Chief of Staff stops in between, the next start checks the session's own history: when the
+text arrived, only the mark moves; when it did not, the messages go out again. Without a
+readable history (a backend without get_events) delivery falls back to at-least-once.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import os
 from typing import TYPE_CHECKING
@@ -134,8 +140,59 @@ class Delivery:
             prompts = [message["meta"]["prompt"] for message in pending]
             if preamble := self.store.get(f"preamble:{session_id}"):
                 prompts.insert(0, preamble)  # A new Router's handover, before what is new.
-            await session.send("\n\n".join(prompts), mode=mode)
+            text = "\n\n".join(prompts)
+            marker = {"upto": pending[-1]["id"], "digest": digest(text)}
+            self.store.set(f"sending:{session_id}", json.dumps(marker))
+            try:
+                await session.send(text, mode=mode)
+            except BaseException:
+                # The caller hears of the failure and the messages count as not delivered.
+                self.store.delete(f"sending:{session_id}")
+                raise
             self.store.set(f"sent:{session_id}", str(pending[-1]["id"]))
+            self.store.delete(f"sending:{session_id}")
             if preamble:
-                self.store.execute("DELETE FROM kv WHERE key=?", (f"preamble:{session_id}",))
+                self.store.delete(f"preamble:{session_id}")
             return True
+
+    async def reconcile(self, session_id: str) -> bool | None:
+        """After a stop during a send: True if it arrived, False if not, None if unknown."""
+        marker = json.loads(self.store.get(f"sending:{session_id}") or "null")
+        if not marker:
+            return None
+        arrived = None
+        try:
+            session = await self.runtime.session_for(session_id)
+            if hasattr(session, "get_events"):
+                arrived = any(
+                    getattr(event.type, "value", "") == "user.message"
+                    and digest(getattr(event.data, "content", "") or "") == marker["digest"]
+                    for event in await session.get_events()
+                )
+        except Exception:
+            logger.warning("Could not check what %s received.", session_id, exc_info=True)
+        if arrived:
+            self.store.set(f"sent:{session_id}", str(marker["upto"]))
+        self.store.delete(f"sending:{session_id}")
+        return arrived
+
+    async def resume(self, session_id: str):
+        """Send what an idle session was given but never received (after a restart)."""
+        row = self.store.session(session_id)
+        if row["closed_at"] or row["status"] in {"queued", "starting", "working"}:
+            return
+        if row["role"] in {ROUTER, SLACK}:
+            self.schedule_flush(session_id, 0)
+        elif await self.runtime.claim_slot(session_id):
+            try:
+                if await self.flush(session_id, await self.runtime.session_for(session_id)):
+                    self.runtime.update_session(session_id, status="working")
+                else:
+                    self.states[session_id].busy = False
+            except Exception:
+                self.states[session_id].busy = False
+                logger.warning("Could not resend to %s.", session_id, exc_info=True)
+
+
+def digest(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()[:24]
