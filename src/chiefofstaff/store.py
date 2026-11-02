@@ -47,6 +47,10 @@ def now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def hours_ago(hours: float) -> str:
+    return datetime.fromtimestamp(time.time() - hours * 3600, UTC).isoformat()
+
+
 def identifier() -> str:
     return uuid4().hex
 
@@ -116,6 +120,25 @@ class Store:
             status TEXT NOT NULL DEFAULT 'open', asked REAL NOT NULL, closed REAL
         );
         CREATE INDEX IF NOT EXISTS open_questions ON questions(status, asker);
+        CREATE TABLE IF NOT EXISTS tasks (
+            id TEXT PRIMARY KEY, session_id TEXT NOT NULL, title TEXT NOT NULL,
+            goal TEXT NOT NULL DEFAULT '', acceptance TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL, result TEXT NOT NULL DEFAULT '',
+            progress TEXT NOT NULL DEFAULT '', why_new TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL, ended_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS tasks_by_session ON tasks(session_id, created_at);
+        CREATE INDEX IF NOT EXISTS tasks_by_status ON tasks(status);
+        CREATE TABLE IF NOT EXISTS runs (
+            id TEXT PRIMARY KEY, task_id TEXT NOT NULL, session_id TEXT NOT NULL,
+            status TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '',
+            started_at TEXT NOT NULL, ended_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS runs_by_task ON runs(task_id);
+        CREATE INDEX IF NOT EXISTS runs_by_session ON runs(session_id, ended_at);
+        CREATE TABLE IF NOT EXISTS task_deps (
+            task_id TEXT NOT NULL, depends_on TEXT NOT NULL, PRIMARY KEY (task_id, depends_on)
+        );
         """)
         for row in self.db.execute("SELECT key, value FROM kv WHERE key LIKE 'question:%'"):
             # Questions between sessions used to live in kv.
@@ -143,6 +166,11 @@ class Store:
             ALTER TABLE sessions ADD COLUMN repos TEXT NOT NULL DEFAULT '[]';
             ALTER TABLE sessions ADD COLUMN yolo TEXT NOT NULL DEFAULT '';
             """)
+        if "task_id" not in columns:
+            self.db.execute("ALTER TABLE sessions ADD COLUMN task_id TEXT NOT NULL DEFAULT ''")
+        usage_columns = {row["name"] for row in self.db.execute("PRAGMA table_info(usage)")}
+        if "run_id" not in usage_columns:
+            self.db.execute("ALTER TABLE usage ADD COLUMN run_id TEXT NOT NULL DEFAULT ''")
         if "project" not in columns:
             self.db.execute("ALTER TABLE sessions ADD COLUMN project TEXT NOT NULL DEFAULT ''")
         if "effort" not in columns:
@@ -437,10 +465,11 @@ class Store:
         input_tokens: int,
         output_tokens: int,
         at: float | None = None,
+        run_id: str = "",
     ):
         self.execute(
-            "INSERT INTO usage(session_id,role,model,credits,premium,input_tokens,output_tokens,at)"
-            " VALUES(?,?,?,?,?,?,?,?)",
+            "INSERT INTO usage(session_id,role,model,credits,premium,input_tokens,output_tokens,at,"
+            "run_id) VALUES(?,?,?,?,?,?,?,?,?)",
             (
                 session_id,
                 role,
@@ -450,6 +479,7 @@ class Store:
                 input_tokens,
                 output_tokens,
                 time.time() if at is None else at,
+                run_id,
             ),
         )
 

@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-from conftest import Harness, call_tool, env, settle
+from conftest import Harness, call_tool, env, settle, task_of
 
 from chiefofstaff import catalog
 from chiefofstaff.digest import digest
@@ -61,8 +61,16 @@ async def test_dependent_tasks_start_with_the_results_they_need(harness):
     await call_tool(runtime, "report", first, status="done", summary="Schema: users(id, email)")
     await settle(runtime)
     prompt = harness.session(second_id).sent[0]
-    assert prompt.startswith('<message from="router" type="task" title="Write migration">')
-    assert f"- “Design schema” ({first[:8]}, done): Schema: users(id, email)" in prompt
+    second_task = task_of(harness, second_id)
+    assert second["task_id"] == second_task
+    assert prompt.startswith(
+        f'<message from="router" type="task" title="Write migration" task="{second_task}">'
+    )
+    design = task_of(harness, first)
+    assert f"- Task {design} “Design schema” (review): Schema: users(id, email)" in prompt
+    assert harness.store.one("SELECT status FROM tasks WHERE id=?", (second_task,))["status"] == (
+        "running"
+    )
     refused = await call_tool(
         runtime, "spawn_worker", harness.router_id, title="X", instructions="x", after=["nope"]
     )
@@ -271,7 +279,7 @@ async def test_daily_digest_once_a_day_and_only_when_useful(harness):
     await call_tool(runtime, "report", asking, status="question", summary="postgres or mysql?")
     text = digest(harness.store, now - 60, time.time() + 1)
     assert "• Finished: “Ship notes”" in text
-    assert "• Waiting for you: “Pick DB” asked a question" in text
+    assert "• Waiting for you: 1 result to review · “Pick DB” asked a question" in text
 
     harness.store.save_settings(Settings(digest_time="00:00"))
     first = await runtime.digest_once(time.time() + 1)
@@ -347,8 +355,8 @@ async def test_a_broken_dependency_is_reported_and_the_router_can_release(harnes
     await settle(runtime)
     assert harness.store.session(second)["status"] == "working"
     prompt = harness.session(second).sent[0]
-    assert env("router", "message", "Go ahead anyway.") in prompt
-    assert f"- “A” ({first[:8]}, failed): no report" in prompt
+    assert env("router", "message", "Go ahead anyway.", task=task_of(harness, second)) in prompt
+    assert f"- Task {task_of(harness, first)} “A” (failed): no report" in prompt
 
 
 async def test_a_finished_dependent_is_not_blocked_again(tmp_path):
@@ -397,7 +405,9 @@ async def test_closed_workers_come_back_with_their_conversation(harness):
     assert result.result_type == "success"
     row = harness.store.session(worker_id)
     assert not row["closed_at"] and row["status"] == "working"
-    assert harness.session(worker_id).sent[-1] == env("router", "message", "Also the logout")
+    assert harness.session(worker_id).sent[-1] == env(
+        "router", "message", "Also the logout", task=task_of(harness, worker_id)
+    )
 
     await runtime.close_session(worker_id)
     await runtime.owner_send(worker_id, "One more thing")

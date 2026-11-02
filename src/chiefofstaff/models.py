@@ -66,6 +66,10 @@ class OwnerMessage(StrictModel):
     text: str = Field(min_length=1, max_length=20000)
 
 
+class TaskNote(StrictModel):
+    text: str = Field(default="", max_length=20000)
+
+
 class DraftDecision(StrictModel):
     action: Literal["send", "reject", "choose", "answer"]
     # For a form a session showed the owner: field name -> value.

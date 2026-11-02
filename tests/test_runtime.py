@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from conftest import FakeSession, Harness, call_tool, env, settle
+from conftest import FakeSession, Harness, call_tool, env, settle, task_of
 
 from chiefofstaff import delivery as delivery_module
 from chiefofstaff.models import DraftDecision, Settings
@@ -33,8 +33,15 @@ async def test_router_routes_work_and_worker_reports_back(harness):
     worker_id = json.loads(result.text_result_for_llm)["session_id"]
     worker = harness.session(worker_id)
     assert harness.client.names[worker_id] == "Chief of Staff · Fix flaky login test"
+    task = json.loads(result.text_result_for_llm)["task_id"]
     assert worker.sent == [
-        env("router", "task", "Owner: fix the flaky login test.", title="Fix flaky login test")
+        env(
+            "router",
+            "task",
+            "Owner: fix the flaky login test.",
+            title="Fix flaky login test",
+            task=task,
+        )
     ]
     assert {tool.name for tool in worker.options["tools"]} == {
         "report",
@@ -107,10 +114,11 @@ async def test_workers_queue_beyond_the_parallel_limit(tmp_path):
     harness.session(ids[0]["session_id"]).emit("session.idle")
     await settle(runtime)
 
+    task = ids[1]["task_id"]
     assert harness.session(second).sent == [
-        env("router", "task", "Second task", title="Second")
+        env("router", "task", "Second task", title="Second", task=task)
         + "\n\n"
-        + env("router", "message", "Also X")
+        + env("router", "message", "Also X", task=task)
     ]
     assert harness.store.session(second)["status"] == "working"
 
@@ -535,7 +543,7 @@ async def test_message_during_worker_startup_is_not_lost(tmp_path):
     gate.set()
     await spawn
     assert harness.session(worker_id).sent == [
-        env("router", "task", "do B", title="B")
+        env("router", "task", "do B", title="B", task=task_of(harness, worker_id))
         + "\n\n"
         + env("owner", "message", "ALSO: use the staging DB")
     ]
@@ -562,7 +570,9 @@ async def test_follow_ups_respect_the_worker_limit(tmp_path):
 
     await runtime.owner_send(first, "one more thing")
     assert harness.store.session(first)["status"] == "queued"
-    assert harness.session(first).sent == [env("router", "task", "A", title="A")]
+    assert harness.session(first).sent == [
+        env("router", "task", "A", title="A", task=task_of(harness, first))
+    ]
 
     harness.session(second).emit("session.idle")
     await settle(runtime)
@@ -654,8 +664,9 @@ async def test_tools_take_the_short_ids_sessions_see(harness):
     reply = await call_tool(
         runtime, "message_session", harness.router_id, session_id=worker_id[:8], text="More"
     )
-    assert reply.text_result_for_llm == "Delivered."
-    assert harness.session(worker_id).sent[-1] == env("router", "message", "More")
+    task = task_of(harness, worker_id)
+    assert reply.text_result_for_llm == f"Delivered (task {task})."
+    assert harness.session(worker_id).sent[-1] == env("router", "message", "More", task=task)
     missing = await call_tool(
         runtime, "message_session", harness.router_id, session_id="ffffffff", text="x"
     )

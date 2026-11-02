@@ -206,11 +206,16 @@ class FakeSlackMcp:
         return self.results.get(arguments.get("query", ""), "")
 
 
+def task_of(harness, session_id: str) -> str:
+    """The id of a worker's current task."""
+    return harness.store.one("SELECT task_id FROM sessions WHERE id=?", (session_id,))["task_id"]
+
+
 async def settle(runtime: Runtime):
     for _ in range(20):
         await asyncio.sleep(0)
-        if runtime.tasks:
-            await asyncio.gather(*list(runtime.tasks), return_exceptions=True)
+        if runtime.jobs:
+            await asyncio.gather(*list(runtime.jobs), return_exceptions=True)
 
 
 async def call_tool(runtime: Runtime, name: str, caller: str, **arguments):

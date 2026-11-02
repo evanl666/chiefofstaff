@@ -22,6 +22,7 @@ from .models import (
     Settings,
     SetupNotes,
     SlackToken,
+    TaskNote,
 )
 from .runtime import Runtime
 from .store import Store
@@ -185,6 +186,26 @@ def create_app(
             runtime.router_id(),
             "Build my profile: distill what my work says about me so my sessions can use it.",
         )
+
+    @app.get("/api/tasks/{task_id}")
+    async def task(task_id: str):
+        return runtime.task_view(runtime.tasks.get(task_id))
+
+    @app.post("/api/tasks/{task_id}/accept")
+    async def accept_task(task_id: str):
+        return runtime.task_view(runtime.accept_task(task_id))
+
+    @app.post("/api/tasks/{task_id}/cancel")
+    async def cancel_task(task_id: str, payload: TaskNote):
+        return runtime.task_view(await runtime.cancel_task(task_id, payload.text))
+
+    @app.post("/api/tasks/{task_id}/retry")
+    async def retry_task(task_id: str, payload: TaskNote):
+        return runtime.task_view(await runtime.retry_task(task_id, payload.text))
+
+    @app.post("/api/tasks/{task_id}/follow-up")
+    async def follow_up_task(task_id: str, payload: OwnerMessage):
+        return runtime.task_view(await runtime.follow_up_task(task_id, payload.text))
 
     @app.post("/api/sessions/{session_id}/stop")
     async def stop(session_id: str):

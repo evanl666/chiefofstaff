@@ -19,17 +19,13 @@ def digest(store: Store, since: float, until: float) -> str:
     """Empty when nothing happened and nothing waits: a quiet day takes no attention."""
     window = (iso(since), iso(until))
     finished = store.all(
-        """SELECT DISTINCT s.title FROM messages m JOIN sessions s ON s.id=m.session_id
-        WHERE m.kind='report' AND json_extract(m.meta, '$.status')='done'
-        AND m.created_at>=? AND m.created_at<? ORDER BY m.id""",
+        """SELECT DISTINCT t.title FROM runs r JOIN tasks t ON t.id=r.task_id
+        WHERE r.status='succeeded' AND r.ended_at>=? AND r.ended_at<? ORDER BY r.ended_at""",
         window,
     )
-    waiting = store.all(
-        "SELECT title FROM sessions WHERE role='worker' AND closed_at IS NULL AND status='waiting'"
-    )
-    failed = store.all(
-        "SELECT title FROM sessions WHERE role='worker' AND closed_at IS NULL AND status='failed'"
-    )
+    review = store.one("SELECT count(*) AS n FROM tasks WHERE status='review'")["n"]
+    waiting = store.all("SELECT title FROM tasks WHERE status='waiting' ORDER BY updated_at")
+    failed = store.all("SELECT title FROM tasks WHERE status='failed' ORDER BY updated_at")
     drafts = store.one("SELECT count(*) AS n FROM drafts WHERE status='pending'")["n"]
     sent = store.one(
         "SELECT count(*) AS n FROM drafts WHERE status='sent' AND resolved_at>=? AND resolved_at<?",
@@ -40,7 +36,7 @@ def digest(store: Store, since: float, until: float) -> str:
         AND json_extract(meta, '$.thread') IS NOT NULL AND created_at>=? AND created_at<?""",
         window,
     )["n"]
-    if not (finished or waiting or failed or drafts or sent or follow_ups):
+    if not (finished or review or waiting or failed or drafts or sent or follow_ups):
         return ""
     running = store.one(
         """SELECT count(*) AS n FROM sessions WHERE role='worker' AND closed_at IS NULL
@@ -53,6 +49,8 @@ def digest(store: Store, since: float, until: float) -> str:
     if finished:
         lines.append(f"• Finished: {names(finished)}")
     needs_you = []
+    if review:
+        needs_you.append(f"{review} result{'s' if review != 1 else ''} to review")
     if waiting:
         needs_you.append(f"{names(waiting)} asked a question")
     if drafts:

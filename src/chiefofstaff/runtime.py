@@ -40,7 +40,9 @@ from .roles import ROUTER, SLACK, WATCHDOG, WORKER
 from .sources.github import GitHubSource
 from .sources.slack import SlackSource, describe, message_keys
 from .state import SessionStates
-from .store import Store, now
+from .store import Store, hours_ago, now
+from .tasks import ENDED, OPEN, TaskBook
+from .tasks import migrate as migrate_tasks
 from .watchdog import WatchConfig, flags, review_packet, timestamp
 from .workspaces import BRANCH_PREFIX, Workspaces, resolve_project
 
@@ -62,6 +64,7 @@ ROUTER_TOOLS = [
     "close_worker",
     "distill_profile",
     "answer_session",
+    "cancel_task",
 ]
 STYLE_EXAMPLES = 50
 REPORT_STATUS = {"question": "waiting", "blocked": "waiting", "done": "done"}
@@ -70,6 +73,8 @@ SLACK_TS = re.compile(r"\d{10}\.\d{6}")
 # When the Router's context (prompt tokens of its last call) grows past this, a fresh Router
 # session takes over with a summary.
 ROUTER_CONTEXT = int(os.environ.get("CHIEFOFSTAFF_ROUTER_CONTEXT", "150000"))
+# Tasks that ended within this many hours are still shown (and can be reviewed or retried).
+TASKS_SHOWN_HOURS = 72
 # Copilot's own bookkeeping tools; they say nothing about the work.
 PLUMBING_TOOLS = {"tool_search_tool", "report_intent"}
 
@@ -98,8 +103,13 @@ class SpawnWorker(BaseModel):
     )
     after: list[str] = Field(
         default_factory=list,
-        description="Session ids of workers whose results this task needs; it starts once they "
-        "all report done and receives their reports",
+        description="Task ids (t…) whose results this task needs; it starts once they are done "
+        "and receives their results. A worker id stands for that worker's current task",
+    )
+    context_from: list[str] = Field(
+        default_factory=list,
+        description="Task ids (or worker ids) of earlier work this new worker should build on: "
+        "it gets their goals, results, folders and files, without their whole conversation",
     )
     model: str = Field(default="", description="Model id; empty for the configured default")
     effort: Literal["", "low", "medium", "high", "xhigh", "max"] = Field(
@@ -144,6 +154,13 @@ class MessageSession(BaseModel):
         "from attribute (worker:<id>)"
     )
     text: str = Field(description="The message for that session")
+    task: Literal["continue", "new"] = Field(
+        default="continue",
+        description="For a worker: continue its current task (a follow-up or more information; "
+        "a finished task reopens), or start a new task in the same session, reusing its context "
+        "(give a title)",
+    )
+    title: str = Field(default="", description="Title of the new task when task='new'")
     follow: list[str] = Field(
         default_factory=list,
         description="Thread keys from the event (slack:<channel>:<ts>, slack:<D…>, "
@@ -176,6 +193,16 @@ class CloseWorker(BaseModel):
 class Report(BaseModel):
     status: Literal["progress", "question", "blocked", "done"]
     summary: str = Field(description="What happened, or the one concrete question")
+    task_id: str = Field(
+        default="",
+        description="The task this report is about (the task attribute of its message); "
+        "empty for your current task",
+    )
+
+
+class CancelTask(BaseModel):
+    task_id: str = Field(description="Task id (t…), or a worker id for its current task")
+    reason: str = Field(default="", description="Why, in a few words (the owner sees it)")
 
 
 class DraftSlackReply(BaseModel):
@@ -308,7 +335,7 @@ class Runtime(OwnerAsks):
         self.pump_lock = asyncio.Lock()
         self.draft_lock = asyncio.Lock()
         self.connect_lock = asyncio.Lock()
-        self.tasks: set[asyncio.Task] = set()
+        self.jobs: set[asyncio.Task] = set()
         self.loop: asyncio.AbstractEventLoop | None = None
         self.status = {"state": "starting", "error": ""}
         self.external_cache: tuple[float, list[dict]] = (0.0, [])
@@ -323,6 +350,8 @@ class Runtime(OwnerAsks):
         self.rotate_lock = asyncio.Lock()
         self.work_root = store.directory / "work"
         self.workspaces = Workspaces(store, self.work_root)
+        self.tasks = TaskBook(store, on_change=self.publish_task)
+        migrate_tasks(store)
         self.delivery = Delivery(self)
         self.tools = self.build_tools()
 
@@ -348,9 +377,9 @@ class Runtime(OwnerAsks):
         await self.slack.stop()
         await self.github.stop()
         await self.disconnect()
-        for task in list(self.tasks):
+        for task in list(self.jobs):
             task.cancel()
-        await asyncio.gather(*self.tasks, return_exceptions=True)
+        await asyncio.gather(*self.jobs, return_exceptions=True)
 
     async def connect(self):
         async with self.connect_lock:
@@ -409,10 +438,10 @@ class Runtime(OwnerAsks):
 
     def background(self, coroutine: Awaitable):
         task = asyncio.ensure_future(coroutine)
-        self.tasks.add(task)
+        self.jobs.add(task)
 
         def done(finished: asyncio.Task):
-            self.tasks.discard(finished)
+            self.jobs.discard(finished)
             if not finished.cancelled() and finished.exception():
                 logger.error("Background task failed", exc_info=finished.exception())
 
@@ -824,6 +853,17 @@ class Runtime(OwnerAsks):
                 + (f" task: {clip(row['task'], 160)}" if row["task"] else "")
                 + (f" | last report: {clip(row['report'], 200)}" if row["report"] else "")
             )
+        if tasks := self.tasks.listed():
+            lines.append("\nTasks not done yet (review = finished, waiting for the owner's check):")
+            lines += [
+                f"- {t['id']} “{t['title']}” ({t['status']}, worker {short(t['session_id'])})"
+                + (
+                    f" waits for {', '.join(d['id'] for d in deps)}"
+                    if (deps := self.tasks.unmet(t))
+                    else ""
+                )
+                for t in tasks
+            ]
         if closed := self.recently_closed(8):
             lines.append("\nRecently closed workers (message_session reopens one):")
             lines += [
@@ -1001,6 +1041,7 @@ class Runtime(OwnerAsks):
                 # Copilot resolves its default model on the first turn; remember which it is.
                 # Sub-agents and sessions we pinned to a model do not show the default.
                 self.store.set("copilot_default_model", model)
+            run = self.tasks.run(session_id) if row["role"] == WORKER else None
             self.store.record_usage(
                 session_id,
                 row["role"],
@@ -1009,6 +1050,7 @@ class Runtime(OwnerAsks):
                 getattr(data, "cost", 0) or 0,
                 getattr(data, "input_tokens", 0) or 0,
                 getattr(data, "output_tokens", 0) or 0,
+                run_id=run["id"] if run else "",
             )
         elif kind in {"session.mcp_server_status_changed", "session.mcp_server_tools_loaded"}:
             self.mcp_connected(session_id, data)
@@ -1046,7 +1088,10 @@ class Runtime(OwnerAsks):
             self.add_message(session_id, "error", message)
             if row["role"] == WORKER:
                 self.update_session(session_id, status="failed", activity="")
-                self.background(self.tell_router(row, "failed", message))
+                self.fail_task(session_id, message)
+                self.background(
+                    self.tell_router(row, "failed", message, self.tasks.current(session_id))
+                )
                 self.background(self.pump())
             else:
                 self.update_session(session_id, status="idle", activity="")
@@ -1093,6 +1138,12 @@ class Runtime(OwnerAsks):
         self.states[row["id"]].busy = False
         self.add_message(row["id"], "error", message)
         self.update_session(row["id"], status="failed", activity="")
+        self.fail_task(row["id"], message)
+
+    def fail_task(self, session_id: str, message: str):
+        task = self.tasks.current(session_id)
+        if task and task["status"] in OPEN:
+            self.tasks.move(task["id"], "failed", progress=message[:500])
 
     def running_workers(self) -> int:
         return sum(1 for row in self.store.open_sessions(WORKER) if self.states[row["id"]].busy)
@@ -1136,14 +1187,27 @@ class Runtime(OwnerAsks):
         listed = "\n".join(f"- {project}" for project in projects) or "- (none)"
         return f"The configured projects are now:\n{listed}"
 
-    async def tell_router(self, row: dict, status: str, summary: str):
+    async def tell_router(self, row: dict, status: str, summary: str, task: dict | None = None):
+        title = task["title"] if task else row["title"]
         await self.delivery.deliver(
             self.router_id(),
-            wrap(sender(row), "report", summary, status=status, title=row["title"]),
+            wrap(
+                sender(row),
+                "report",
+                summary,
+                status=status,
+                task=task["id"] if task else None,
+                title=title,
+            ),
             batch=True,
             kind="inbound",
             display=summary,
-            meta={"from": row["id"], "title": row["title"], "status": status},
+            meta={
+                "from": row["id"],
+                "title": title,
+                "status": status,
+                "task_id": task["id"] if task else None,
+            },
         )
 
     async def on_trigger(
@@ -1269,48 +1333,50 @@ class Runtime(OwnerAsks):
         for row in starting:
             await self.start_worker(row)
 
-    def dependencies(self, row: dict) -> list[dict]:
-        return [
-            dependency
-            for dependency_id in json.loads(self.store.get(f"after:{row['id']}") or "[]")
-            if (dependency := self.store.find_session(dependency_id))
-        ]
-
     def waiting_for(self, row: dict) -> list[dict]:
-        """Dependencies that have not reported done yet; shown as the queued worker's activity."""
-        if self.store.get(f"released:{row['id']}"):
+        """Tasks a worker's queued task still waits for; shown as the worker's activity."""
+        task = self.tasks.current(row["id"])
+        if not task or task["status"] != "queued" or self.store.get(f"released:{task['id']}"):
             return []
-        waiting = [d for d in self.dependencies(row) if d["status"] != "done"]
+        waiting = self.tasks.unmet(task)
         activity = "waiting for " + ", ".join(f"“{d['title']}”" for d in waiting) if waiting else ""
         if row["activity"] != activity:
             self.update_session(row["id"], activity=activity)
-        broken = [d for d in waiting if d["closed_at"] or d["status"] == "failed"]
-        if broken and not self.store.get(f"depblocked:{row['id']}"):
-            self.store.set(f"depblocked:{row['id']}", "1")
-            names = ", ".join(f"“{d['title']}”" for d in broken)
+        broken = self.tasks.broken(task)
+        if broken and not self.store.get(f"depblocked:{task['id']}"):
+            self.store.set(f"depblocked:{task['id']}", "1")
+            names = ", ".join(f"“{d['title']}” ({d['id']}, {d['status']})" for d in broken)
             self.background(
                 self.delivery.deliver(
                     self.router_id(),
                     wrap(
                         "system",
                         "blocked",
-                        f"It waits for {names}, which ended without finishing. Message it to "
-                        "start anyway, or close it.",
+                        f"Task {task['id']} waits for {names}, which ended without finishing. "
+                        "Message its worker to start anyway, or cancel_task it.",
                         worker=short(row["id"]),
-                        title=row["title"],
+                        task=task["id"],
+                        title=task["title"],
                     ),
                     kind="inbound",
                     display=f"“{row['title']}” waits for {names}, which ended without finishing.",
-                    meta={"from": row["id"], "title": row["title"], "status": "blocked"},
+                    meta={
+                        "from": row["id"],
+                        "title": task["title"],
+                        "status": "blocked",
+                        "task_id": task["id"],
+                    },
                 )
             )
         return waiting
 
     async def start_worker(self, row: dict):
         session_id = row["id"]
-        if (done := self.dependencies(row)) and not self.store.get(f"handed:{session_id}"):
+        task = self.tasks.current(session_id)
+        done = self.tasks.deps(task["id"]) if task else []
+        if done and not self.store.get(f"handed:{task['id']}"):
             results = "\n".join(
-                f"- “{d['title']}” ({short(d['id'])}, {d['status']}): {d['report'] or 'no report'}"
+                f"- Task {d['id']} “{d['title']}” ({d['status']}): {d['result'] or 'no report'}"
                 for d in done
             )
             self.add_message(
@@ -1323,7 +1389,7 @@ class Runtime(OwnerAsks):
                     )
                 },
             )
-            self.store.set(f"handed:{session_id}", "1")
+            self.store.set(f"handed:{task['id']}", "1")
         try:
             if self.store.get(f"created:{session_id}"):
                 session = await self.session_for(session_id)
@@ -1333,6 +1399,8 @@ class Runtime(OwnerAsks):
                         row, create=True
                     )
             self.update_session(session_id, status="working")
+            if task and task["status"] == "queued":
+                self.tasks.move(task["id"], "running")
             # Flushing now includes messages that arrived while the session was being created.
             if not await self.delivery.flush(session_id, session):
                 self.states[session_id].busy = False
@@ -1359,6 +1427,9 @@ class Runtime(OwnerAsks):
         self.states[session_id].close_after_turn = False
         self.cancel_requests(session_id, "The session was closed.")
         await self.cancel_questions(session_id)
+        for task in self.tasks.for_session(session_id):
+            if task["status"] in OPEN:
+                self.tasks.move(task["id"], "cancelled", progress="Its worker was closed.")
         # Not "stopped without reporting": the Watchdog leaves a reopened worker alone until told.
         self.add_message(session_id, "notice", "Closed.", {"stopped": True})
         self.update_session(session_id, closed_at=now(), activity="")
@@ -1383,6 +1454,7 @@ class Runtime(OwnerAsks):
             "status": row["status"],
             "closed": bool(row["closed_at"]),
             "task": row["task"][:300],
+            "current_task": self.task_brief(self.tasks.current(row["id"])),
             "project": row["project"],
             "cwd": row["cwd"],
             "branch": row["branch"],
@@ -1417,6 +1489,9 @@ class Runtime(OwnerAsks):
                 parts["reports" if message["kind"] == "report" else "messages"].append(
                     message["text"][:2000]
                 )
+        tasks: dict[str, list[str]] = {}
+        for task in self.store.all("SELECT session_id, title, goal FROM tasks ORDER BY created_at"):
+            tasks.setdefault(task["session_id"], []).append(f"{task['title']}\n{task['goal']}")
         # Paths in texts share these prefixes; only what follows them tells tasks apart.
         roots = (self.workspaces.scratch_root(), self.work_root, Path.home())
         shared = re.compile("|".join(re.escape(str(path)) for path in roots))
@@ -1427,7 +1502,7 @@ class Runtime(OwnerAsks):
         docs = {
             key: {
                 "title": row["title"],
-                "task": local(row["task"]),
+                "task": local("\n".join(tasks.get(key, [row["task"]]))),
                 # The directory's own name only: every worker shares the rest of the path.
                 "paths": " ".join(
                     [
@@ -1482,6 +1557,9 @@ class Runtime(OwnerAsks):
             self.update_session(session_id, status="idle", activity="")
             # A deliberate stop: the watchdog must not treat it as a silent stall.
             self.add_message(session_id, "notice", f"Stopped by {by}.", {"stopped": True})
+            task = self.tasks.current(session_id)
+            if task and task["status"] in {"queued", "running"}:
+                self.tasks.move(task["id"], "waiting", progress=f"Stopped by {by}.")
         self.background(self.pump())
 
     async def external_sessions(self, refresh: bool = False) -> list[dict]:
@@ -1539,6 +1617,9 @@ class Runtime(OwnerAsks):
             self.bus.publish("state")
             raise RuntimeError(f"Could not adopt the session: {describe(exc)}") from exc
         self.store.set(f"created:{session_id}", "1")
+        self.tasks.create(
+            session_id, row["title"], "(an existing Copilot session)", status="review"
+        )
         self.external_cache = (0.0, [])
         self.add_message(
             self.router_id(), "notice", f"Adopted “{row['title']}”", {"session_id": session_id}
@@ -1786,6 +1867,13 @@ class Runtime(OwnerAsks):
                 self.t_notify_owner,
             ),
             (
+                "cancel_task",
+                "Cancel a task: its worker stops working on it (the session stays open for other "
+                "tasks). Tasks that depend on it are then blocked.",
+                CancelTask,
+                self.t_cancel_task,
+            ),
+            (
                 "close_worker",
                 "Close a worker whose task is finished or no longer needed.",
                 CloseWorker,
@@ -1875,12 +1963,8 @@ class Runtime(OwnerAsks):
         self.caller(caller, ROUTER)
         title = clean_title(params.title)
         follow = [threads.normalize(key) for key in params.follow]
-        after = []
-        for dependency in params.after:
-            row = self.store.session(dependency)
-            if row["role"] != WORKER:
-                raise ValueError(f"{dependency} is not a worker.")
-            after.append(row["id"])
+        after = [self.task_for(reference) for reference in params.after]
+        context_from = [self.task_for(reference)["id"] for reference in params.context_from]
         await self.check_model(params.model)
         project = (
             str(resolve_project(params.project, self.store.settings().projects))
@@ -1890,7 +1974,9 @@ class Runtime(OwnerAsks):
         why_new = " ".join(params.why_new.split())[:200]
         if not distill and not why_new:
             related = self.related_workers(
-                f"{params.title}\n{params.instructions}", project, exclude=after
+                f"{params.title}\n{params.instructions}",
+                project,
+                exclude=[task["session_id"] for task in after],
             )
             if related:
                 # Routing to the worker that already knows the subject matters: decide explicitly.
@@ -1924,22 +2010,28 @@ class Runtime(OwnerAsks):
             effort = ""  # Reported below; the model's default effort applies.
         if params.model or effort:
             self.store.update_session(session_id, model=params.model, effort=effort)
-        if after:
-            self.store.set(f"after:{session_id}", json.dumps(after))
+        task = self.tasks.create(
+            session_id,
+            title,
+            params.instructions[:4000],
+            why_new=why_new,
+            after=[dependency["id"] for dependency in after],
+        )
         if distill:
             self.store.set(f"distill:{session_id}", "1")
         self.follow(session_id, follow)
+        prompt = wrap("router", "task", params.instructions, title=title, task=task["id"])
+        if context_from:
+            prompt += "\n\n" + wrap("system", "context", self.tasks.briefing(context_from))
         self.add_message(
-            session_id,
-            "router",
-            params.instructions,
-            {"prompt": wrap("router", "task", params.instructions, title=title)},
+            session_id, "router", params.instructions, {"prompt": prompt, "task_id": task["id"]}
         )
         notice = f"Started “{title}”" + (f" · new because {why_new}" if why_new else "")
         self.add_message(caller, "notice", notice, {"session_id": session_id})
         await self.pump()
         row = self.store.session(session_id)
-        result = {"session_id": session_id, "status": row["status"], "cwd": cwd}
+        result = {"task_id": task["id"], "session_id": session_id, "status": row["status"]}
+        result["cwd"] = cwd
         if branch:
             result["branch"] = branch
         if len(checkouts) > 1:
@@ -1950,7 +2042,7 @@ class Runtime(OwnerAsks):
             offered = ", ".join(info["efforts"]) if info and info["efforts"] else "none"
             result["warning"] = f"Effort {params.effort} is not offered by this model ({offered})."
         if params.after:
-            result["note"] = "Starts automatically when the tasks it depends on report done."
+            result["note"] = "Starts automatically when the tasks it depends on are done."
         elif row["status"] == "queued":
             result["note"] = "Queued until a worker slot frees up."
         return result
@@ -1963,18 +2055,43 @@ class Runtime(OwnerAsks):
         if target["closed_at"]:
             await self.reopen(target["id"])  # A follow-up on an earlier task: same worker.
             target = self.store.session(target["id"])
-        if target["status"] == "queued" and self.dependencies(target):
-            self.store.set(f"released:{target['id']}", "1")  # The Router decides to go ahead.
+        task = self.tasks.current(target["id"]) if target["role"] == WORKER else None
+        if task and task["status"] == "queued" and self.tasks.deps(task["id"]):
+            self.store.set(f"released:{task['id']}", "1")  # The Router decides to go ahead.
             self.background(self.pump())
         self.follow(target["id"], params.follow)
-        await self.delivery.deliver(
-            target["id"], wrap("router", "message", params.text), kind="router", display=params.text
-        )
-        if target["role"] == WORKER:
-            self.add_message(
-                caller, "notice", f"Continued in “{target['title']}”", {"session_id": target["id"]}
+        if target["role"] != WORKER:
+            await self.delivery.deliver(
+                target["id"],
+                wrap("router", "message", params.text),
+                kind="router",
+                display=params.text,
             )
-        return "Delivered."
+            return "Delivered."
+        if params.task == "new":
+            title = clean_title(params.title or params.text.splitlines()[0][:60])
+            task = self.tasks.create(target["id"], title, params.text[:4000], status="running")
+            prompt = wrap("router", "task", params.text, title=title, task=task["id"])
+            notice = f"New task “{title}” for “{target['title']}”"
+        else:
+            if task and task["status"] == "cancelled":
+                raise ValueError(
+                    f"Its task {task['id']} was cancelled. For new work in this worker use "
+                    "task='new' with a title."
+                )
+            if task and task["status"] in {"review", "done", "failed"}:
+                task = self.tasks.move(task["id"], "running", reason="follow-up")
+            prompt = wrap("router", "message", params.text, task=task["id"] if task else None)
+            notice = f"Continued in “{target['title']}”"
+        await self.delivery.deliver(
+            target["id"],
+            prompt,
+            kind="router",
+            display=params.text,
+            meta={"task_id": task["id"]} if task else None,
+        )
+        self.add_message(caller, "notice", notice, {"session_id": target["id"]})
+        return f"Delivered (task {task['id']})." if task else "Delivered."
 
     async def t_list_sessions(self, params: ListSessions, caller: str):
         settings = self.store.settings()
@@ -1999,14 +2116,33 @@ class Runtime(OwnerAsks):
                     "slack_access": bool(row["slack"]),
                     "last_report": row["report"][:400],
                     "follows": self.store.follows(row["id"]),
-                    "after": [d["id"] for d in self.dependencies(row)],
+                    "task": self.task_brief(self.tasks.current(row["id"])),
                     "model": self.model_for(row),
                 }
                 for row in self.store.open_sessions()
                 if row["role"] != ROUTER
             ],
+            "tasks": [
+                {
+                    **self.task_brief(task),
+                    "worker": short(task["session_id"]),
+                    "after": [dep["id"] for dep in self.tasks.deps(task["id"])],
+                }
+                for task in self.tasks.listed()
+            ],
             "recently_closed": [self.card(row) for row in self.recently_closed(8)],
         }
+
+    @staticmethod
+    def task_brief(task: dict | None) -> dict | None:
+        if not task:
+            return None
+        brief = {"task_id": task["id"], "title": task["title"], "status": task["status"]}
+        if task["status"] == "review":
+            brief["result"] = task["result"][:300]
+        elif task["progress"]:
+            brief["progress"] = task["progress"][:300]
+        return brief
 
     def related_workers(self, text: str, project: str, exclude: list[str]) -> list[dict]:
         """Workers that may already own this subject: the same project, or a similar task."""
@@ -2091,7 +2227,18 @@ class Runtime(OwnerAsks):
 
     async def t_report(self, params: Report, caller: str):
         row = self.caller(caller, WORKER, SLACK)
-        self.add_message(caller, "report", params.summary, {"status": params.status})
+        task = self.report_task(caller, params.task_id) if row["role"] == WORKER else None
+        meta = {"status": params.status, "task_id": task["id"] if task else None}
+        self.add_message(caller, "report", params.summary, meta)
+        if task:
+            if params.status == "done":
+                task = self.tasks.move(task["id"], "review", result=params.summary[:4000])
+            elif params.status in {"question", "blocked"}:
+                task = self.tasks.move(task["id"], "waiting", progress=params.summary[:1000])
+            elif task["status"] != "running":
+                task = self.tasks.move(task["id"], "running", progress=params.summary[:1000])
+            else:
+                task = self.tasks.update(task["id"], progress=params.summary[:1000])
         self.states[caller].resting = ""
         if row["role"] == WORKER and params.status in {"progress", "done"}:
             # A PR it delivers is its PR: reviews, comments and CI come back to it.
@@ -2106,8 +2253,120 @@ class Runtime(OwnerAsks):
             self.background(self.pump())  # Tasks waiting for this one may start now.
         if params.status == "progress":
             return "Noted in your session. The Router is not interrupted for progress."
-        await self.tell_router(row, params.status, params.summary)
+        await self.tell_router(row, params.status, params.summary, task)
         return "Reported to the Router."
+
+    def report_task(self, caller: str, reference: str) -> dict | None:
+        if not reference:
+            return self.tasks.current(caller)
+        task = self.tasks.find(reference)
+        if not task or task["session_id"] != caller:
+            raise ValueError(f"You have no task {reference}.")
+        return task
+
+    def task_for(self, reference: str) -> dict:
+        """A task by its id, or a worker's current task by the worker's id."""
+        if task := self.tasks.find(reference):
+            return task
+        try:
+            row = self.store.session(reference)
+        except LookupError:
+            raise ValueError(f"No task or worker {reference}; list_sessions lists them.") from None
+        if row["role"] != WORKER or not (task := self.tasks.current(row["id"])):
+            raise ValueError(f"{reference} is not a worker with a task.")
+        return task
+
+    async def t_cancel_task(self, params: CancelTask, caller: str):
+        self.caller(caller, ROUTER)
+        task = await self.cancel_task(
+            self.task_for(params.task_id)["id"], params.reason, "the Router"
+        )
+        return f"Cancelled task {task['id']}."
+
+    async def cancel_task(self, task_id: str, reason: str = "", by: str = "you") -> dict:
+        """End a task for good. Its worker stops if it is on this task, and stays open."""
+        task = self.tasks.get(task_id)
+        if task["status"] in ENDED:
+            raise ValueError(f"Task {task_id} is {task['status']} already.")
+        row = self.store.find_session(task["session_id"])
+        on_it = bool(row) and row["task_id"] == task_id and task["status"] in OPEN
+        why = f"Cancelled by {by}" + (f": {reason}" if reason else ".")
+        task = self.tasks.move(task_id, "cancelled", progress=why)
+        if row and not row["closed_at"]:
+            if on_it:
+                self.cancel_requests(row["id"], why)
+                if handle := self.states.handle(row["id"]):
+                    with suppress(Exception):
+                        await handle.abort()  # Copilot also stops the running command.
+                self.states[row["id"]].busy = False
+                if row["status"] in {"working", "queued", "starting", "waiting"}:
+                    self.update_session(row["id"], status="idle", activity="")
+            note = f"Task {task_id} “{task['title']}” was cancelled. Stop work on it; no report."
+            # Pending, not sent: it reaches the worker with its next message, not as a new turn.
+            self.add_message(
+                row["id"],
+                "notice",
+                why,
+                {"prompt": wrap("system", "cancelled", note, task=task_id), "stopped": True},
+            )
+        with suppress(RuntimeError):
+            self.add_message(
+                self.router_id(),
+                "notice",
+                f"Task “{task['title']}” cancelled",
+                {"session_id": task["session_id"]},
+            )
+        self.background(self.pump())  # Tasks that depended on it are now blocked.
+        return task
+
+    def accept_task(self, task_id: str) -> dict:
+        task = self.tasks.get(task_id)
+        if task["status"] != "review":
+            raise ValueError(f"Task {task_id} is {task['status']}, not ready for review.")
+        return self.tasks.move(task_id, "done")
+
+    async def follow_up_task(self, task_id: str, text: str) -> dict:
+        """The owner adds to a task: its worker continues it (a finished task reopens)."""
+        task = self.tasks.get(task_id)
+        if task["status"] == "cancelled":
+            raise ValueError("That task was cancelled. Ask the Router for new work instead.")
+        row = self.store.session(task["session_id"])
+        if row["closed_at"]:
+            await self.reopen(row["id"])
+        if task["status"] in {"review", "done", "failed"}:
+            task = self.tasks.move(task_id, "running", reason="follow-up")
+        await self.delivery.deliver(
+            row["id"],
+            wrap("owner", "message", text, task=task_id),
+            kind="owner",
+            display=text,
+            meta={"task_id": task_id},
+            steer=True,
+        )
+        return task
+
+    async def retry_task(self, task_id: str, text: str = "") -> dict:
+        """Run a failed or cancelled task again in its worker (reopened if closed)."""
+        task = self.tasks.get(task_id)
+        if task["status"] not in {"failed", "cancelled"}:
+            raise ValueError(
+                f"Task {task_id} is {task['status']}; only failed or cancelled tasks are retried."
+            )
+        row = self.store.session(task["session_id"])
+        if row["closed_at"]:
+            await self.reopen(row["id"])
+        task = self.tasks.move(task_id, "running", reason="retry", progress="")
+        body = f"The owner asks you to try task {task_id} “{task['title']}” again."
+        if text.strip():
+            body += f"\n\n{text.strip()}"
+        await self.delivery.deliver(
+            row["id"],
+            wrap("owner", "message", body, task=task_id),
+            kind="owner",
+            display=text.strip() or "Try again.",
+            meta={"task_id": task_id},
+        )
+        return task
 
     async def t_draft_slack_reply(self, params: DraftSlackReply, caller: str):
         row = self.caller(caller, WORKER, SLACK)
@@ -2411,7 +2670,25 @@ class Runtime(OwnerAsks):
             "credits": self.store.one(
                 "SELECT coalesce(sum(credits), 0) AS c FROM usage WHERE session_id=?", (row["id"],)
             )["c"],
+            "task": self.task_brief(self.tasks.current(row["id"])),
         }
+
+    def task_view(self, task: dict) -> dict:
+        row = self.store.find_session(task["session_id"]) or {}
+        return {
+            **task,
+            "worker": row.get("title", ""),
+            "worker_status": row.get("status", ""),
+            "worker_closed": bool(row.get("closed_at")),
+            "cwd": row.get("cwd", ""),
+            "branch": row.get("branch", ""),
+            "after": [dep["id"] for dep in self.tasks.deps(task["id"])],
+            "runs": len(self.tasks.runs(task["id"])),
+            "credits": self.tasks.credits(task["id"]),
+        }
+
+    def publish_task(self, task: dict):
+        self.bus.publish("task", self.task_view(task))
 
     def publish_session(self, row: dict):
         self.bus.publish("session", self.view(row))
@@ -2425,6 +2702,10 @@ class Runtime(OwnerAsks):
             "router_id": self.store.get("router_id"),
             "sessions": [self.view(row) for row in self.store.open_sessions()],
             "drafts": self.store.drafts(),
+            "tasks": [
+                self.task_view(task)
+                for task in self.tasks.listed(include_ended_since=hours_ago(TASKS_SHOWN_HOURS))
+            ],
             "settings": self.store.settings().model_dump(),
             "slack": {**self.slack.status, "token_saved": bool(self.slack.tokens.get())},
             "github": self.github.status,

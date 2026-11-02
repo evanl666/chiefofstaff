@@ -1,5 +1,7 @@
+import json
+
 import pytest
-from conftest import FakeClient, FakeSlackMcp, FakeTokens, env
+from conftest import FakeClient, FakeSlackMcp, FakeTokens, call_tool, env
 from fastapi.testclient import TestClient
 
 from chiefofstaff.runtime import Runtime
@@ -135,3 +137,34 @@ def test_models_usage_and_profile_endpoints(app_client):
     assert saved.json()["profile"] == "- likes short replies"
     asked = app_client.post("/api/profile/distill", headers=ORIGIN)
     assert asked.json()["text"].startswith("Build my profile")
+
+
+def test_the_owner_reviews_and_follows_up_on_tasks(app_client):
+    sign_in(app_client)
+    runtime = app_client.app.state.runtime
+    router = app_client.get("/api/state").json()["router_id"]
+    result = app_client.portal.call(
+        lambda: call_tool(runtime, "spawn_worker", router, title="Docs", instructions="Write docs")
+    )
+    spawned = json.loads(result.text_result_for_llm)
+    task_id, worker = spawned["task_id"], spawned["session_id"]
+    app_client.portal.call(
+        lambda: call_tool(runtime, "report", worker, status="done", summary="Docs written")
+    )
+    listed = {task["id"]: task for task in app_client.get("/api/state").json()["tasks"]}
+    assert listed[task_id]["status"] == "review" and listed[task_id]["worker"] == "Docs"
+
+    followed = app_client.post(
+        f"/api/tasks/{task_id}/follow-up", json={"text": "Add a FAQ"}, headers=ORIGIN
+    )
+    assert followed.status_code == 200 and followed.json()["status"] == "running"
+    assert app_client.fake.sessions[worker].sent[-1] == env(
+        "owner", "message", "Add a FAQ", task=task_id
+    )
+    app_client.portal.call(
+        lambda: call_tool(runtime, "report", worker, status="done", summary="FAQ added")
+    )
+    accepted = app_client.post(f"/api/tasks/{task_id}/accept", headers=ORIGIN)
+    assert accepted.json()["status"] == "done" and accepted.json()["runs"] == 2
+    refused = app_client.post(f"/api/tasks/{task_id}/cancel", json={}, headers=ORIGIN)
+    assert refused.status_code == 400
