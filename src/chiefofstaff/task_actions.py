@@ -113,7 +113,7 @@ class TaskActions:
         task = self.view(self.tasks.get(task_id))
         found = task["receipts"] or {}
         lines = [f"## {task['title']}", ""]
-        facts = [STATUS_WORDS.get(task["status"], task["status"])]
+        facts: list[str] = [STATUS_WORDS.get(task["status"]) or task["status"]]
         if task["runs"] > 1:
             facts.append(f"{task['runs']} runs")
         if task["credits"] >= 0.05:

@@ -223,10 +223,8 @@ class Events:
         state = self.states[session_id]
         state.busy = False
         state.retuned = False
-        last = self.store.one(
-            "SELECT max(id) AS id FROM messages WHERE session_id=?", (session_id,)
-        )
-        self.store.set(f"idle:{session_id}", str(last["id"] or 0))
+        last = self.store.value("SELECT max(id) FROM messages WHERE session_id=?", (session_id,))
+        self.store.set(f"idle:{session_id}", str(last or 0))
         status = row["status"]
         if status == "working":
             status = state.pop_resting("idle")

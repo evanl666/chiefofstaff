@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import shutil
+from contextlib import suppress
 from datetime import UTC, datetime
 
 from .. import threads
@@ -87,10 +88,8 @@ class GitHubSource:
                 if self.status["error"] != str(exc):
                     logger.warning("GitHub watcher failed: %s", exc)
                 self.status.update(connected=False, error=str(exc)[:500])
-            try:
+            with suppress(TimeoutError):
                 await asyncio.wait_for(self.changed.wait(), timeout=120)
-            except TimeoutError:
-                pass
 
     async def pull(self, repo: str, number: int) -> dict:
         return json.loads(await self.gh("api", f"repos/{repo}/pulls/{int(number)}"))
@@ -167,7 +166,10 @@ class GitHubSource:
 
     async def poll_pull(self, thread: str, since: float):
         """New comments, reviews, CI results and the end of a followed PR go to its followers."""
-        repo, number = threads.GITHUB_PR.fullmatch(thread).groups()
+        match = threads.GITHUB_PR.fullmatch(thread)
+        if not match:
+            raise ValueError(f"Not a pull request thread: {thread}")
+        repo, number = match.groups()
         started = github_time(datetime.now(UTC).timestamp() - 60)
         after = self.store.get(f"ghsince:{thread}") or github_time(since)
         pull = await self.pull(repo, int(number))

@@ -265,9 +265,7 @@ async def test_unchanged_workers_are_reviewed_less_and_less(tmp_path):
     runtime = await harness.connect()
     await call_tool(runtime, "spawn_worker", harness.router_id, title="A", instructions="a")
     now = time.time()
-    reviews = [
-        bool(await runtime.watchdog.check(now + 1000 + minute * 60)) for minute in range(0, 60)
-    ]
+    reviews = [bool(await runtime.watchdog.check(now + 1000 + minute * 60)) for minute in range(60)]
     assert sum(reviews) == 3, "after 0, 10 and 30 minutes; the next would be after 70"
 
 

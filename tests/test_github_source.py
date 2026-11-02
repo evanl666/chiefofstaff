@@ -178,7 +178,7 @@ async def test_a_re_requested_review_goes_to_the_follower(tmp_path):
 
     source = GitHubSource(store, host, gh_command=with_search)
     await source.poll_once()
-    first_thread, first_keys, first_text = host.deliveries[0]
+    _first_thread, first_keys, first_text = host.deliveries[0]
     assert first_keys == ["github:acme/app#7@abc1234"]
     assert "review is requested again" in first_text
 

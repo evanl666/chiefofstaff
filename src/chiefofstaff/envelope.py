@@ -51,7 +51,7 @@ def sender(row: dict) -> str:
     """How a session is named as a sender."""
     if row["role"] == "worker":
         return f"worker:{short(row['id'])}"
-    return {"slack": "slack-session"}.get(row["role"], row["role"])
+    return "slack-session" if row["role"] == "slack" else str(row["role"])
 
 
 RULES = """\

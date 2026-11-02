@@ -134,9 +134,9 @@ def keychain_accounts() -> set[str]:
     dump = subprocess.run(["security", "dump-keychain"], capture_output=True, text=True).stdout
     accounts = set()
     for block in dump.split("keychain: "):
-        if f'"svce"<blob>="{KEYCHAIN_SERVICE}"' in block:
-            if match := re.search(r'"acct"<blob>="([^"]+)"', block):
-                accounts.add(match.group(1))
+        found = re.search(r'"acct"<blob>="([^"]+)"', block)
+        if found and f'"svce"<blob>="{KEYCHAIN_SERVICE}"' in block:
+            accounts.add(found.group(1))
     return accounts
 
 

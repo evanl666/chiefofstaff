@@ -23,6 +23,7 @@ from .roles import ROUTER, SLACK, WORKER
 from .sources.slack import describe
 
 if TYPE_CHECKING:
+    from .backend import SendMode
     from .runtime import Runtime
 
 logger = logging.getLogger(__name__)
@@ -124,7 +125,7 @@ class Delivery:
         mark = int(self.store.get(f"sent:{session_id}") or 0)
         return any("prompt" in m["meta"] for m in self.store.messages(session_id, after=mark))
 
-    async def flush(self, session_id: str, session, mode: str = "enqueue") -> bool:
+    async def flush(self, session_id: str, session, mode: SendMode = "enqueue") -> bool:
         """Send every prompt this session has not received yet, as one message."""
         async with self.states[session_id].sending:
             # The Router's Copilot session may have been replaced while this waited.

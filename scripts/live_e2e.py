@@ -33,9 +33,9 @@ import httpx
 from copilot import CopilotClient, RuntimeConnection
 
 sys.path.insert(0, str(Path(__file__).parent))
-from fake_oauth_mcp import forget_sign_ins, keychain_accounts  # noqa: E402
-from fake_oauth_mcp import serve_in_thread as serve_docs  # noqa: E402
-from fake_slack_mcp import Workspace, serve_in_thread  # noqa: E402
+from fake_oauth_mcp import forget_sign_ins, keychain_accounts
+from fake_oauth_mcp import serve_in_thread as serve_docs
+from fake_slack_mcp import Workspace, serve_in_thread
 
 PORT = 18766
 SLACK_PORT = 18901
@@ -81,8 +81,16 @@ class App:
             **self.extra_env,
         }
         self.process = subprocess.Popen(
-            [sys.executable, "-m", "chiefofstaff", "--no-browser", "--port", str(PORT)]
-            + ["--data-dir", str(self.data)],
+            [
+                sys.executable,
+                "-m",
+                "chiefofstaff",
+                "--no-browser",
+                "--port",
+                str(PORT),
+                "--data-dir",
+                str(self.data),
+            ],
             stdout=subprocess.PIPE,
             stderr=self.logfile.open("a"),
             env=env,

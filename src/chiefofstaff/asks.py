@@ -174,7 +174,7 @@ class Asks:
         self.runtime.alert(
             text, session_id=session_id, needs_action=True, title=f"{LABELS[kind]} · {who}"
         )
-        answer = self.runtime.loop.create_future()
+        answer = asyncio.get_running_loop().create_future()
         self.requests[draft["id"]] = answer
         self.states[session_id].asking[draft["id"]] = text
         self.runtime.publish_session(self.store.session(session_id))
@@ -298,7 +298,8 @@ class Asks:
                 if not session:
                     return cancelled
                 try:
-                    url = await self.runtime.backend.mcp_sign_in_url(session, server)
+                    backend = self.runtime.require_ready()
+                    url = await backend.mcp_sign_in_url(session, server)
                     url = http_url(url) if url else ""
                 except Exception:
                     logger.warning("Could not start sign-in to %s.", server, exc_info=True)

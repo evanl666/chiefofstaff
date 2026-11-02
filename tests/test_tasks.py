@@ -1,3 +1,4 @@
+import contextlib
 import json
 import sqlite3
 
@@ -198,10 +199,8 @@ async def test_a_retry_that_cannot_reach_its_worker_leaves_the_task_as_it_was(ha
         raise RuntimeError("socket closed")
 
     worker.send = broken
-    try:
+    with contextlib.suppress(RuntimeError):
         await runtime.task_actions.retry(first["task_id"])
-    except RuntimeError:
-        pass
     assert task(harness, first["task_id"])["status"] == "failed"
     assert [r["status"] for r in runtime.tasks.runs(first["task_id"])] == ["failed", "failed"]
 

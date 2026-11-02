@@ -603,7 +603,7 @@ class Tools:
             ],
             "tasks": [
                 {
-                    **self.task_brief(task),
+                    **(self.task_brief(task) or {}),
                     "worker": short(task["session_id"]),
                     "after": [dep["id"] for dep in self.tasks.deps(task["id"])],
                 }
@@ -843,7 +843,7 @@ class Tools:
                     for e in examples[-20:]
                 )
             )
-        result = await self.t_spawn_worker(
+        return await self.t_spawn_worker(
             SpawnWorker(
                 title="Distill owner profile",
                 instructions="\n\n".join(lines),
@@ -852,7 +852,6 @@ class Tools:
             caller,
             distill=True,
         )
-        return result
 
     async def t_propose_profile(self, params: ProposeProfile, caller: str):
         self.caller(caller, WORKER)

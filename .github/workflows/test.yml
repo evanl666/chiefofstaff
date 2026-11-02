@@ -16,6 +16,7 @@ jobs:
       - run: uv sync --locked --extra dev
       - run: uv run --locked --extra dev ruff check .
       - run: uv run --locked --extra dev ruff format --check .
+      - run: uv run --locked --extra dev pyright
       - run: uv run --locked --extra dev pytest -q
 
   demo-ui:

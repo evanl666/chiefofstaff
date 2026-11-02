@@ -5,7 +5,7 @@ import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, overload
 from uuid import uuid4
 
 from pydantic import ValidationError
@@ -236,6 +236,17 @@ class Store:
             row = self.db.execute(sql, params).fetchone()
         return dict(row) if row else None
 
+    def row(self, sql: str, params: tuple = ()) -> dict[str, Any]:
+        """The one row a query must find."""
+        if (found := self.one(sql, params)) is None:
+            raise LookupError(f"Not found: {sql.split()[3] if len(sql.split()) > 3 else sql}")
+        return found
+
+    def value(self, sql: str, params: tuple = ()) -> Any:
+        """The single value of a query that always returns one row (count, max, sum)."""
+        with self.lock:
+            return self.db.execute(sql, params).fetchone()[0]
+
     def execute(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
         with self.lock, self.db:
             return self.db.execute(sql, params)
@@ -257,6 +268,10 @@ class Store:
     def save_settings(self, settings: Settings):
         self.execute("INSERT OR REPLACE INTO settings VALUES (1, ?)", (settings.model_dump_json(),))
 
+    @overload
+    def get(self, key: str) -> str | None: ...
+    @overload
+    def get(self, key: str, default: str) -> str: ...
     def get(self, key: str, default: str | None = None) -> str | None:
         row = self.one("SELECT value FROM kv WHERE key=?", (key,))
         return row["value"] if row else default
@@ -345,7 +360,7 @@ class Store:
             "INSERT INTO messages(session_id,kind,text,meta,created_at) VALUES(?,?,?,?,?)",
             (session_id, kind, text, json.dumps(meta or {}, ensure_ascii=False), now()),
         )
-        return self.message(cursor.lastrowid)
+        return self.message(cursor.lastrowid or 0)
 
     def message(self, message_id: int) -> dict:
         row = self.one("SELECT * FROM messages WHERE id=?", (message_id,))
@@ -507,7 +522,7 @@ class Store:
         totals = """sum(credits) AS credits, sum(premium) AS premium, count(*) AS calls,
             sum(input_tokens) AS input_tokens, sum(output_tokens) AS output_tokens"""
         window = (since, until)
-        total = self.one(f"SELECT {totals} FROM usage WHERE at>=? AND at<?", window)
+        total = self.row(f"SELECT {totals} FROM usage WHERE at>=? AND at<?", window)
         return {
             "since": since,
             "until": until,

@@ -25,7 +25,7 @@ uv run chiefofstaff --demo          # the whole product, scripted, no accounts
 | `uv run python scripts/live_e2e.py` | Every feature end to end with real Copilot | Copilot; ~10 minutes of model use |
 | `uv run --with playwright python scripts/browser_smoke.py` | The UI with real Copilot | Copilot |
 
-Before a pull request: `uv run ruff check . && uv run ruff format --check . && uv run pytest -q`.
+Before a pull request: `uv run ruff check . && uv run ruff format --check . && uv run pyright && uv run pytest -q`.
 CI runs those, the demo browser test and a secret scan on every push.
 
 Write tests for behavior, not for implementation: a scenario through `tests/conftest.py`'s
@@ -34,7 +34,7 @@ worst moment belong in `tests/test_faults.py`.
 
 ## Style
 
-- Code: `ruff` (100 columns). Names say what things are; comments say why, not what.
+- Code: `ruff` (100 columns) and `pyright`, both clean. Names say what things are; comments say why, not what.
 - Text the owner reads (UI, notifications, prompts): short, plain, specific. No exclamation
   marks, no "successfully".
 - Keep the UI simple: plain HTML, CSS and JavaScript; no framework or build step.

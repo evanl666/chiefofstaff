@@ -40,7 +40,13 @@ Homepage = "https://github.com/evanl666/chiefofstaff"
 Issues = "https://github.com/evanl666/chiefofstaff/issues"
 
 [project.optional-dependencies]
-dev = ["pytest>=8,<10", "pytest-asyncio>=0.25,<2", "httpx>=0.28,<1", "ruff>=0.11,<1"]
+dev = [
+    "pytest>=8,<10",
+    "pytest-asyncio>=0.25,<2",
+    "httpx>=0.28,<1",
+    "ruff>=0.11,<1",
+    "pyright==1.1.414",
+]
 
 [project.scripts]
 chiefofstaff = "chiefofstaff.__main__:main"
@@ -58,8 +64,19 @@ target-version = "py311"
 line-length = 100
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "ASYNC"]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "SIM", "RUF", "PIE", "RET", "C4", "PERF"]
+# The UI shows deletions as "−12", with a real minus sign.
+allowed-confusables = ["−"]
+# Word lists read better as one string.split() than as a column of literals; a loop that
+# appends reads better than extend() with a generator, and speed does not matter there.
+ignore = ["SIM905", "PERF401"]
 
 [tool.ruff.lint.per-file-ignores]
 # Test drivers deliberately block on processes and files.
 "scripts/*" = ["ASYNC"]
+
+[tool.pyright]
+include = ["src"]
+pythonVersion = "3.11"
+venvPath = "."
+venv = ".venv"
