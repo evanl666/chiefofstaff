@@ -64,6 +64,7 @@ the box at the bottom.
 Everything runs on your machine, and your data stays in `~/Library/Application Support/chiefofstaff`
 (macOS) or `~/.local/share/chiefofstaff` (Linux). Closing the tab doesn't stop anything; press
 Ctrl+C in the terminal to stop. Sessions continue where they left off when you start it again.
+If it's already running, starting it again just opens the page.
 
 Options: `--port`, `--data-dir`, `--no-browser`, `--demo`. To update: `uvx chiefofstaff@latest`
 or `pipx upgrade chiefofstaff`.

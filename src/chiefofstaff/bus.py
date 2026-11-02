@@ -11,6 +11,7 @@ class Bus:
     def __init__(self):
         self.queues: set[asyncio.Queue] = set()
         self.loop: asyncio.AbstractEventLoop | None = None
+        self.closed = False
 
     def bind(self, loop: asyncio.AbstractEventLoop):
         self.loop = loop
@@ -38,9 +39,17 @@ class Bus:
                 continue
             queue.put_nowait(payload)
 
+    def close(self):
+        """End every event stream (None ends one), so shutting down does not wait for tabs."""
+        self.closed = True
+        for queue in list(self.queues):
+            queue.put_nowait(None)
+
     @asynccontextmanager
     async def subscribe(self) -> AsyncIterator[asyncio.Queue]:
         queue: asyncio.Queue = asyncio.Queue()
+        if self.closed:
+            queue.put_nowait(None)
         self.queues.add(queue)
         try:
             yield queue

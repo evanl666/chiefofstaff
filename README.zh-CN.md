@@ -58,7 +58,7 @@ uvx chiefofstaff            # 或者：pipx install chiefofstaff && chiefofstaff
 
 所有东西都在你自己的电脑上跑，数据存在 `~/Library/Application Support/chiefofstaff`（macOS）
 或 `~/.local/share/chiefofstaff`（Linux）。关掉网页不会停掉任何东西，要停就在终端里按 Ctrl+C。
-下次启动时，各个 session 会接着之前的进度继续。
+下次启动时，各个 session 会接着之前的进度继续。如果已经在运行，再启动一次只会打开那个页面。
 
 常用参数：`--port`、`--data-dir`、`--no-browser`、`--demo`。升级：`uvx chiefofstaff@latest`
 或 `pipx upgrade chiefofstaff`。

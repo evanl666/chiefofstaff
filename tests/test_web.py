@@ -1,9 +1,13 @@
+import asyncio
 import json
+import socket
 
 import pytest
 from conftest import FakeClient, FakeSlackMcp, FakeTokens, call_tool, env
 from fastapi.testclient import TestClient
 
+from chiefofstaff.__main__ import LAUNCH_FILE, running_instance
+from chiefofstaff.bus import Bus
 from chiefofstaff.runtime import Runtime
 from chiefofstaff.sources.slack import SlackSource
 from chiefofstaff.web import create_app
@@ -168,3 +172,22 @@ def test_the_owner_reviews_and_follows_up_on_tasks(app_client):
     assert accepted.json()["status"] == "done" and accepted.json()["runs"] == 2
     refused = app_client.post(f"/api/tasks/{task_id}/cancel", json={}, headers=ORIGIN)
     assert refused.status_code == 400
+
+
+async def test_closing_the_bus_ends_every_event_stream():
+    bus = Bus()
+    bus.bind(asyncio.get_running_loop())
+    async with bus.subscribe() as open_tab:
+        bus.close()
+        assert await open_tab.get() is None, "Ctrl+C does not wait for open tabs"
+    async with bus.subscribe() as reconnecting:
+        assert reconnecting.get_nowait() is None
+
+
+def test_a_second_start_finds_only_an_instance_that_answers(tmp_path):
+    assert running_instance(tmp_path) == ""
+    with socket.socket() as unused:
+        unused.bind(("127.0.0.1", 0))
+        port = unused.getsockname()[1]
+    (tmp_path / LAUNCH_FILE).write_text(f"http://127.0.0.1:{port}/#token=abc")
+    assert running_instance(tmp_path) == "", "a stale file from a crash is not trusted"
