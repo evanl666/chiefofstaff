@@ -22,10 +22,14 @@ class FakeHost:
         self.store = store
         self.calls = []
         self.thread_calls = []
+        self.delegated = []
         self.subscriptions = []
 
-    async def on_trigger(self, name, keys, text, display=None):
-        self.calls.append((name, keys, text, display))
+    async def on_trigger(self, name, keys, text, display=None, kind="event"):
+        if kind == "event":
+            self.calls.append((name, keys, text, display))
+        else:
+            self.delegated.append((keys, text))
         for key in keys:
             self.store.add_trigger(name, key, text)
         return True
@@ -69,11 +73,55 @@ async def test_watcher_starts_from_now_then_reports_only_new_messages(source):
     searches = [
         args for tool, args in source.mcp.calls if tool == "slack_search_public_and_private"
     ]
-    assert [args["query"] for args in searches] == ["to:me", "<@U0OWNER1>"]
-    assert searches[0]["sort"] == "timestamp" and searches[0]["include_context"] is False
+    assert [args["query"] for args in searches] == [
+        "hasmy::robot_face:",  # The first check only notes what was there before.
+        "to:me",
+        "<@U0OWNER1>",
+        "hasmy::robot_face:",
+    ]
+    assert searches[1]["sort"] == "timestamp" and searches[1]["include_context"] is False
 
     await source.poll_once()
     assert len(source.calls) == 1, "already delivered messages must not wake the Router again"
+
+
+REACTED = """1. From Alice in #support: exports time out for big accounts
+   https://acme.slack.com/archives/C0SUPPORT/p1712345600000100
+"""
+REACTED_NOW = (
+    """1. From Dan in #deploys: can someone bump the API timeout?
+   https://acme.slack.com/archives/C0DEPLOYS/p1712345700000300?thread_ts=1712345650.000200
+"""
+    + REACTED
+)
+
+
+async def test_reacting_with_the_delegate_emoji_hands_a_message_over(source):
+    # Reactions from before the watcher started are history, not requests.
+    source.mcp.results["hasmy::robot_face:"] = REACTED
+    await source.poll_once()
+    await source.poll_once()
+    assert source.host.delegated == []
+
+    source.mcp.results["hasmy::robot_face:"] = REACTED_NOW
+    await source.poll_once()
+    [(keys, text)] = source.host.delegated
+    assert keys == ["slack-delegated:1712345700.000300"]
+    assert "reacted with :robot_face:" in text and "new ts: 1712345700.000300" in text
+    assert "Thread keys: slack:C0DEPLOYS:1712345650.000200" in text
+    assert source.calls == [], "a delegation is not an ordinary event"
+    await source.poll_once()
+    assert len(source.host.delegated) == 1
+
+    # Another emoji starts from its current reactions; an empty one stops searching.
+    source.store.save_settings(Settings(slack_enabled=True, slack_delegate_emoji=":Eyes:"))
+    source.mcp.results["hasmy::eyes:"] = REACTED
+    await source.poll_once()
+    assert len(source.host.delegated) == 1
+    source.store.save_settings(Settings(slack_enabled=True, slack_delegate_emoji=""))
+    source.mcp.calls.clear()
+    await source.poll_once()
+    assert all("hasmy" not in args["query"] for _, args in source.mcp.calls)
 
 
 async def test_cursor_does_not_advance_when_the_router_cannot_take_events(source):

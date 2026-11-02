@@ -23,15 +23,25 @@ SHOTS = Path("browser-shots")
 
 
 async def run(page, app: App, project: Path, workspace: Workspace, errors: list[str]):
+    chat = page.locator("#session-list .item", has_text="Chat")
+    inbox = page.locator(".inbox-item")
     await page.goto(f"{BASE}/#token={app.launch_token}")
     await expect(page.locator("#application")).to_be_visible()
-    await expect(page.locator(".item.selected .label")).to_have_text("Router")
-    await expect(page.locator(".empty")).to_contain_text("What should we work on?")
+    await expect(page.locator(".inbox-item.selected")).to_be_visible()
+    await expect(page.locator("#inbox-welcome")).to_contain_text(
+        "Give your chief of staff some work"
+    )
+    setup = page.locator("#inbox-setup")
+    await expect(setup).to_contain_text("Add a project folder", timeout=60000)
     await page.screenshot(path=SHOTS / "1-empty.png")
+    await setup.locator("input").fill(str(project))
+    await setup.get_by_role("button", name="Add").click()
+    await expect(page.locator("#inbox-setup")).to_have_count(0)
+    log("added the project from the first-run card")
 
     await page.get_by_role("button", name="Settings").click()
     form = page.locator("#settings-form")
-    await form.locator("textarea[name=projects]").fill(str(project))
+    await expect(form.locator("textarea[name=projects]")).to_have_value(str(project))
     await form.locator("input[name=mac_notifications]").uncheck()
     await form.locator("input[name=slack_enabled]").check()
     await form.locator("input[name=slack_token]").fill("xoxb-wrong")
@@ -45,33 +55,43 @@ async def run(page, app: App, project: Path, workspace: Workspace, errors: list[
     await expect(page.locator("#settings-dialog")).to_be_hidden()
     await expect(page.locator("#session-list")).to_contain_text("Slack", timeout=30000)
 
+    # The inbox composer talks to the Router; its answer shows on the inbox.
     composer = page.locator("#composer-input")
+    await expect(composer).to_have_attribute("placeholder", "Ask your chief of staff…")
     await composer.fill(
         f"In {project}, add notes.md with the line `notes from the UI test` and commit it "
         "with message 'Add notes'. Use an isolated worktree."
     )
     await composer.press("Enter")
-    await expect(page.locator(".msg.owner")).to_contain_text("notes from the UI test")
+    await expect(page.locator("#chief-strip")).to_contain_text("notes from the UI test")
+    await expect(page.locator("#inbox .card.task").first).to_be_visible(timeout=120000)
     worker = page.locator("#session-list .item", has_text="notes")
     await expect(worker).to_be_visible(timeout=120000)
-    log("worker appeared in the sidebar")
+    log("a task card and its worker appeared")
     await page.screenshot(path=SHOTS / "3-dispatched.png")
     await worker.click()
     await expect(page.locator("#timeline .card.router")).to_be_visible()
-    await expect(page.locator("#composer-input")).to_have_attribute(
-        "placeholder", "Message this worker directly…"
-    )
+    await expect(composer).to_have_attribute("placeholder", "Message this worker directly…")
     await expect(page.locator("#timeline .card.report.done")).to_be_visible(timeout=600000)
     await expect(page.locator("#timeline .card.report.done .chip")).to_have_text("Done")
     await page.screenshot(path=SHOTS / "4-worker.png")
     await page.locator("details.steps summary").first.click()
     await expect(page.locator("details.steps .step").first).to_be_visible()
 
-    await page.locator("#session-list .item", has_text="Router").click()
+    # The finished task waits for review, with the commit the worker made.
+    await inbox.click()
+    review = page.locator("#inbox-review .card.task").first
+    await expect(review).to_be_visible(timeout=60000)
+    await expect(review.locator(".receipt", has_text="commit")).to_be_visible(timeout=60000)
+    log("the result waits for review with its commit")
+    await page.screenshot(path=SHOTS / "5-review.png")
+
+    await chat.click()
     await expect(page.locator("#timeline .card.update")).to_be_visible(timeout=300000)
     log("Router posted an update card")
     await page.screenshot(path=SHOTS / "5-update.png")
 
+    await inbox.click()
     workspace.post("C0DEPLOYS", "U0BOB001", f"Deploy dashboard lives here: {DASHBOARD} (pinned)")
     await asyncio.sleep(1)
     workspace.post(
@@ -80,37 +100,42 @@ async def run(page, app: App, project: Path, workspace: Workspace, errors: list[
         "Hey! Could you send me the deploy dashboard link? Bob posted it in #deploys.",
     )
     log("Alice sent a DM")
-    draft = page.locator("#drafts .draft")
+    draft = page.locator("#inbox-needs .card.draft:not(.request)")
     await expect(draft).to_be_visible(timeout=600000)
-    await expect(
-        page.locator("#session-list .item", has_text="Router").locator(".badge")
-    ).to_be_visible()
+    await expect(inbox.locator(".badge")).to_be_visible()
     assert DASHBOARD in await draft.locator("textarea").input_value()
     await expect(draft.locator(".label")).not_to_contain_text("D0ALICE01")
     await page.screenshot(path=SHOTS / "6-draft.png")
     edited = f"Here it is: {DASHBOARD}"
     await draft.locator("textarea").fill(edited)
     await draft.get_by_role("button", name="Send").click()
-    await expect(page.locator("#drafts .draft")).to_have_count(0, timeout=30000)
+    await expect(draft).to_have_count(0, timeout=30000)
     assert [m["text"] for m in workspace.sent] == [edited], workspace.sent
-    log("draft edited and sent from the UI")
+    log("draft edited and sent from the inbox")
 
     # A worker asks the owner directly; the owner answers on the card.
-    await page.locator("#session-list .item", has_text="Router").click()
     await composer.fill(
         "Start a worker that asks me directly (with ask_user) to pick red or blue, "
         "then reports my choice."
     )
     await composer.press("Enter")
-    question = page.locator("#drafts .request.question")
+    question = page.locator("#inbox-needs .card.request.question")
     await expect(question).to_be_visible(timeout=300000)
     await page.screenshot(path=SHOTS / "11-question.png")
     await question.get_by_role("button", name=re.compile("^blue$", re.I)).click()
-    await expect(page.locator("#drafts .request.question")).to_have_count(0)
+    await expect(question).to_have_count(0)
+    await chat.click()
     await expect(page.locator("#timeline .card.update").last).to_contain_text(
         re.compile("blue", re.I), timeout=300000
     )
     log("the owner answered a worker's question on its card")
+
+    await inbox.click()
+    accepted = page.locator("#inbox-review .card.task", has_text=re.compile("notes", re.I))
+    if await accepted.count():
+        await accepted.first.get_by_role("button", name="Accept").click()
+        await expect(accepted).to_have_count(0)
+        log("accepted the notes task")
 
     await page.locator("#session-list .item", has_text="Slack").click()
     await expect(page.locator("#timeline")).to_contain_text("edited draft", timeout=30000)
@@ -132,9 +157,7 @@ async def run(page, app: App, project: Path, workspace: Workspace, errors: list[
     await expect(page.locator("#closed")).to_be_hidden()
     await page.locator("#session-actions").get_by_role("button", name="Close").click()
     await page.locator("#closed-list .item", has_text="notes").click()
-    await expect(page.locator("#composer-input")).to_have_attribute(
-        "placeholder", "Message to reopen this worker…"
-    )
+    await expect(composer).to_have_attribute("placeholder", "Message to reopen this worker…")
     await page.screenshot(path=SHOTS / "10-closed.png")
     await composer.fill("Which file did you add? Reply with only its name, in UPPERCASE.")
     await composer.press("Enter")
@@ -142,7 +165,7 @@ async def run(page, app: App, project: Path, workspace: Workspace, errors: list[
     await expect(page.locator("#timeline")).to_contain_text("NOTES.MD", timeout=300000)
     log("a reply reopened the closed worker, which still knew its task")
 
-    await page.locator("#session-list .item", has_text="Router").click()
+    await chat.click()
     picker = page.locator("#session-model")
     await expect(picker).to_be_visible()
     await picker.select_option("claude-sonnet-5.5")
@@ -165,7 +188,10 @@ async def run(page, app: App, project: Path, workspace: Workspace, errors: list[
     await page.locator("#usage-dialog").get_by_role("button", name="Close").click()
 
     await page.emulate_media(color_scheme="dark")
-    await page.locator("#session-list .item", has_text="Router").click()
+    await inbox.click()
+    await expect(page.locator("#inbox-recent, #inbox-review").first).to_be_visible()
+    await page.screenshot(path=SHOTS / "8-dark-inbox.png")
+    await chat.click()
     await expect(page.locator("#timeline .card.update").first).to_be_visible()
     await expect(page.locator("#session-list .item", has_text="Slack")).to_be_in_viewport()
     await page.screenshot(path=SHOTS / "8-dark.png")

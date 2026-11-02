@@ -380,6 +380,52 @@ async def scenario_thread(app: App, workspace: Workspace):
     log(f"thread follow-up answered directly: {second['text']!r}")
 
 
+async def scenario_delegate(app: App, workspace: Workspace):
+    """The owner reacts with the delegate emoji to a message that was not addressed to them."""
+    router = (await app.get("/api/state"))["router_id"]
+    mark = max((m["id"] for m in await app.get(f"/api/sessions/{router}/messages")), default=0)
+    request = workspace.post(
+        "C0DEPLOYS",
+        "U0BOB001",
+        "Could someone work out 17 times 23 and write the result into answer.txt? "
+        "Tell me here when it's done.",
+    )
+    workspace.react(request, "U0OWNER1", "robot_face")
+    log(f"the owner reacted :robot_face: to Bob's request in #deploys (ts {request['ts']})")
+
+    async def answered():
+        messages = await app.get(f"/api/sessions/{router}/messages?after={mark}")
+        for message in messages:
+            if message["kind"] == "notice" and message["text"].startswith("Started"):
+                worker = await app.get(f"/api/sessions/{message['meta']['session_id']}")
+                if (Path(worker["cwd"]) / "answer.txt").exists():
+                    return messages, worker
+        return None
+
+    messages, worker = await wait_for("a worker handles the delegated request", answered, 600, app)
+    assert "391" in (Path(worker["cwd"]) / "answer.txt").read_text()
+    delegated = [m for m in messages if m["kind"] == "inbound" and m["meta"].get("delegated")]
+    assert len(delegated) == 1, messages
+
+    async def reply():
+        drafts = (await app.get("/api/state"))["drafts"]
+        return next(
+            (
+                d
+                for d in drafts
+                if d["kind"] == "slack" and d["target"]["channel_id"] == "C0DEPLOYS"
+            ),
+            None,
+        )
+
+    draft = await wait_for("a reply to Bob in his thread", reply, 600, app)
+    assert draft["target"]["thread_ts"] == request["ts"], draft["target"]
+    assert "391" in draft["text"], draft["text"]
+    await app.post(f"/api/drafts/{draft['id']}", {"action": "send"})
+    assert workspace.sent[-1]["thread_ts"] == request["ts"]
+    log(f"delegated by reaction, done and answered in the thread: {draft['text']!r}")
+
+
 async def scenario_watchdog(app: App, project: Path):
     # A long, quiet test run: the worker has to wait, so the Watchdog sees a silent worker.
     (project / "run_tests.sh").write_text(
@@ -841,6 +887,11 @@ async def main():
             if sys.argv[1:] == ["setup"]:
                 log("SETUP SCENARIO PASSED")
                 return
+            if sys.argv[1:] == ["delegate"]:
+                await asyncio.sleep(5)  # The watcher's first check starts from now.
+                await scenario_delegate(app, workspace)
+                log("DELEGATE SCENARIO PASSED")
+                return
             if sys.argv[1:] == ["repos"]:
                 await scenario_repos(app, root)
                 log("REPOS SCENARIO PASSED")
@@ -849,6 +900,7 @@ async def main():
             await scenario_reopen(app, worker)
             await scenario_slack(app, workspace)
             await scenario_thread(app, workspace)
+            await scenario_delegate(app, workspace)
             await scenario_restart(app, router)
             await scenario_external(app)
             await scenario_watchdog(app, project)

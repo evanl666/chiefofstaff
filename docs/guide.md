@@ -148,6 +148,19 @@ conversation and drafts a reply in your voice for you to approve. Messages that 
 outside Slack go to a worker with Slack access. Older messages are not replayed on first
 enable.
 
+### Delegate by reaction
+
+React with 🤖 (`:robot_face:`) to any Slack message, in any channel, yours or someone else's,
+to hand it to your chief of staff: "take care of this". The Router treats it as a request from
+you: it starts a worker (or gives it to the one that knows the subject), and when the author is
+waiting, the worker drafts a reply in that thread with the outcome for you to approve. Write a
+note to yourself and react to it to delegate from your phone.
+
+Change the emoji (or empty it to turn this off) in **Settings → Slack**. The watcher finds
+reactions with Slack's `hasmy::robot_face:` search, among the 20 most recent messages you
+reacted to; reactions from before you turned it on are ignored. The message itself is still
+someone else's text: the Router checks with you before anything risky it asks for.
+
 ## GitHub reviews
 
 Enable *Watch review requests* and list repositories (`owner/name`). Chief of Staff checks

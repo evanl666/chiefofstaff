@@ -37,8 +37,17 @@ class Settings(StrictModel):
     watchdog_enabled: bool = True
     slack_enabled: bool = False
     slack_poll_seconds: int = Field(default=60, ge=20, le=900)
+    # Reacting with this emoji to any Slack message hands it to Chief of Staff; empty turns it off.
+    slack_delegate_emoji: str = Field(
+        default="robot_face", max_length=60, pattern=r"^[a-z0-9_+'-]*$"
+    )
     github_enabled: bool = False
     github_repos: list[Repository] = Field(default_factory=list, max_length=10)
+
+    @field_validator("slack_delegate_emoji", mode="before")
+    @classmethod
+    def emoji_code(cls, value: object) -> object:
+        return value.strip().strip(":").lower() if isinstance(value, str) else value
 
     @model_validator(mode="after")
     def validate_paths(self):
@@ -55,7 +64,9 @@ class Settings(StrictModel):
         if self.scratch_directory:
             scratch = Path(self.scratch_directory).expanduser()
             if not scratch.is_absolute():
-                raise ValueError("The scratch folder must be an absolute path, e.g. ~/WorkBuddy.")
+                raise ValueError(
+                    "The scratch folder must be an absolute path, e.g. ~/ChiefOfStaff."
+                )
             scratch = scratch.resolve()
             if scratch == Path.home() or scratch == Path(scratch.anchor):
                 raise ValueError("Choose a scratch folder, not your home or filesystem root.")

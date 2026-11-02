@@ -298,6 +298,19 @@ async def test_triggers_are_delivered_once(harness):
     assert not harness.store.one("SELECT id FROM triggers WHERE key='slack:2.2'")
 
 
+async def test_delegated_messages_reach_the_router_as_delegations(harness):
+    runtime = await harness.connect()
+    router = harness.session(harness.router_id)
+    await runtime.on_trigger(
+        "slack", ["slack-delegated:1.1"], "Alice: the export is broken", kind="delegated"
+    )
+    assert router.sent == [
+        env("slack", "delegated", "Alice: the export is broken", trust="untrusted")
+    ]
+    shown = harness.store.messages(harness.router_id)[-1]
+    assert shown["meta"]["delegated"] is True
+
+
 async def test_restart_resumes_router_and_working_sessions(tmp_path):
     first = Harness(tmp_path / "data")
     runtime = await first.connect()
