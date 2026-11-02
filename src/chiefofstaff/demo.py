@@ -132,6 +132,8 @@ def make_project(root: Path) -> Path:
 class DemoBrain:
     def __init__(self, project: Path):
         self.project = str(project)
+        self.researchers: set[str] = set()  # Workers on the task that stalls on purpose.
+        self.reported: set[str] = set()
 
     def __call__(self, session: ScriptedSession, prompt: str):
         script = {
@@ -320,13 +322,15 @@ class DemoBrain:
                         },
                     )
                 elif title == "Compare feature-flag services":
+                    self.researchers.add(session.session_id)
                     yield Shell(
                         "curl -s https://example.com/feature-flags/pricing | head -40",
                         "(pricing tables for three services)",
                         seconds=1,
                     )
                     yield Wait(60)  # Stalls here until the Watchdog steps in.
-                    yield from_nudge_or_report(attrs.get("task", ""))
+                    if session.session_id not in self.reported:
+                        yield research_report(attrs.get("task", ""))
                 else:
                     yield Shell("ls -la", "README.md  app  tests", seconds=1)
                     yield Wait(3)
@@ -342,8 +346,12 @@ class DemoBrain:
                     )
                 return
             if sender == "watchdog" and kind == "nudge":
-                yield Say("Right, writing it up now.")
-                yield CallTool("report", {"status": "done", "summary": FLAGS_REPORT})
+                if session.session_id in self.researchers:
+                    self.reported.add(session.session_id)
+                    yield Say("Right, writing it up now.")
+                    yield CallTool("report", {"status": "done", "summary": FLAGS_REPORT})
+                else:
+                    yield Say("Still on it; this step takes a moment.")
                 return
             if sender == "owner" or (sender == "router" and kind == "message"):
                 yield Wait(2)
@@ -368,8 +376,8 @@ FLAGS_REPORT = (
 )
 
 
-def from_nudge_or_report(task_id: str) -> CallTool:
-    """If the Watchdog did not step in, the worker reports anyway."""
+def research_report(task_id: str) -> CallTool:
+    """The research result (reported after a nudge, or anyway when no nudge came)."""
     return CallTool("report", {"status": "done", "task_id": task_id, "summary": FLAGS_REPORT})
 
 
@@ -441,7 +449,16 @@ class DemoRuntime(Runtime):
 
     demo = True
 
-    def __init__(self, store: Store, bus: Bus, project: Path, autoplay: bool = True):
+    def __init__(
+        self,
+        store: Store,
+        bus: Bus,
+        project: Path,
+        autoplay: bool = True,
+        *,
+        watch: WatchConfig | None = None,
+        slack_delay: float = 18,
+    ):
         if not store.one("SELECT id FROM settings WHERE id=1"):
             store.save_settings(
                 Settings(
@@ -458,9 +475,9 @@ class DemoRuntime(Runtime):
             store,
             bus,
             backend_factory=lambda settings: ScriptedBackend(brain),
-            watch=WatchConfig(interval=3, stall=12, long=600, cooldown=30),
+            watch=watch or WatchConfig(interval=3, stall=12, long=600, cooldown=30),
         )
-        self.slack = SlackSource(store, self, tokens=DemoTokens(), mcp=DemoSlackMcp())
+        self.slack = SlackSource(store, self, tokens=DemoTokens(), mcp=DemoSlackMcp(slack_delay))
         self.autoplay = autoplay
 
     async def start(self):

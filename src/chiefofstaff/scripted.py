@@ -166,11 +166,7 @@ class ScriptedSession:
         self.emit("user.message", content=prompt)
         self.emit("assistant.turn_start", turn_id=str(next(self.calls)))
         await self.follow(self.backend.brain(self, prompt))
-        while self.steering:
-            steer = self.steering.pop(0)
-            self.history.append(("user", steer))
-            self.emit("user.message", content=steer)
-            await self.follow(self.backend.brain(self, steer))
+        await self.take_steering()
         self.emit("assistant.turn_end")
 
     async def follow(self, script: AsyncIterator[Step]):
@@ -179,11 +175,19 @@ class ScriptedSession:
             step = await anext(script)
             while True:
                 result = await self.do(step)
-                if self.steering and isinstance(step, (Shell, Wait)):
-                    return  # The owner steered: the rest of this script no longer applies.
+                # A message steered into the turn is read after this step; then the script
+                # goes on (it can check what it was told and stop).
+                await self.take_steering()
                 step = await script.asend(result)
         except StopAsyncIteration:
             pass
+
+    async def take_steering(self):
+        while self.steering:
+            steer = self.steering.pop(0)
+            self.history.append(("user", steer))
+            self.emit("user.message", content=steer)
+            await self.follow(self.backend.brain(self, steer))
 
     def usage(self, text: str):
         self.emit(
