@@ -218,6 +218,17 @@ async def test_messages_during_a_card_do_not_leave_the_worker_waiting(harness):
     assert await runtime.watchdog.check() is not None
 
 
+async def test_a_worker_resumed_during_startup_can_sign_in(harness):
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Read the launch doc")
+    runtime.status["state"] = "starting"  # Workers resume before the runtime is ready.
+    request = {"requestId": "r1", "serverName": "docs", "serverUrl": "https://docs.example.com"}
+    signing = asyncio.create_task(runtime.asks.on_mcp_auth(request, {"sessionId": worker}))
+    draft = await pending(harness, "signin")
+    assert draft["target"]["url"] == harness.session(worker).login_url
+    signing.cancel()
+
+
 async def test_closing_a_worker_ends_its_cards_and_frees_the_sign_in(harness):
     runtime = await harness.connect()
     first = await spawn(runtime, harness.router_id, "Read docs one")
