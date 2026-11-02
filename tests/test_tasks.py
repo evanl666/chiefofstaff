@@ -161,6 +161,51 @@ async def test_the_owner_accepts_and_retries_tasks(harness):
     assert [r["reason"] for r in runtime.tasks.runs(second["task_id"])] == ["start", "retry"]
 
 
+async def test_a_blocked_task_shows_at_once_and_can_still_be_retried(harness):
+    runtime = await harness.connect()
+    published = []
+    publish = runtime.bus.publish
+
+    def spy(kind, data=None):
+        if kind == "task":
+            published.append((data["id"], data["blocked"]))
+        publish(kind, data)
+
+    runtime.bus.publish = spy
+    first = await spawn(runtime, harness.router_id, "Migrate")
+    later = await spawn(runtime, harness.router_id, "Backfill", after=[first["task_id"]])
+    harness.session(first["session_id"]).emit("session.error", message="model overloaded")
+    await settle(runtime)
+    assert (later["task_id"], True) in published, "the inbox learns that it is blocked"
+
+    # Cancelled before its worker ever started; retrying starts that worker.
+    await runtime.cancel_task(later["task_id"])
+    assert later["session_id"] not in harness.client.sessions
+    retried = await runtime.retry_task(later["task_id"])
+    assert retried["status"] == "running"
+    sent = harness.session(later["session_id"]).sent[-1]
+    assert "Backfill" in sent and "try task" in sent
+
+
+async def test_a_retry_that_cannot_reach_its_worker_leaves_the_task_as_it_was(harness):
+    runtime = await harness.connect()
+    first = await spawn(runtime, harness.router_id, "A")
+    worker = harness.session(first["session_id"])
+    worker.emit("session.error", message="model overloaded")
+    await settle(runtime)
+
+    async def broken(prompt, mode=None):
+        raise RuntimeError("socket closed")
+
+    worker.send = broken
+    try:
+        await runtime.retry_task(first["task_id"])
+    except RuntimeError:
+        pass
+    assert task(harness, first["task_id"])["status"] == "failed"
+    assert [r["status"] for r in runtime.tasks.runs(first["task_id"])] == ["failed", "failed"]
+
+
 async def test_workers_from_before_tasks_get_one_each(tmp_path):
     data = tmp_path / "data"
     store = Store(data)

@@ -9,40 +9,57 @@ model says it is done" and "tests ran and passed, here is the diff" look differe
 from __future__ import annotations
 
 import re
+import shlex
 from collections.abc import Iterable
 
 # Copilot's shell tools (bash on macOS and Linux, powershell on Windows).
 SHELL_TOOLS = frozenset({"bash", "shell", "powershell", "run_in_terminal"})
 
+# Matched against each simple command, from the program on: `grep pytest`, `pip install jest`
+# or a commit message that mentions tests are not test runs.
 KINDS = [
     (
         "test",
         re.compile(
-            r"\b(pytest|py\.test|unittest|tox|nox|jest|vitest|mocha|rspec|phpunit|ctest|"
-            r"go test|cargo test|cargo nextest|mvn( -\S+)* (test|verify)|gradlew? (test|check)|"
-            r"(npm|pnpm|yarn|bun)( run)? test|make (test|check)|swift test|dotnet test|mix test)\b"
+            r"^(pytest|py\.test|unittest|tox|nox|jest|vitest|mocha|rspec|phpunit|ctest|"
+            r"go test|cargo (test|nextest)|mvnw?( -\S+)* (test|verify)|gradlew?( -\S+)* "
+            r"(test|check)|(npm|pnpm|yarn|bun)( run)? test|make( -\S+)* (test|check)|swift test|"
+            r"dotnet test|mix test|bazel test|deno test|playwright test)\b"
         ),
     ),
     (
         "check",
         re.compile(
-            r"\b(ruff|flake8|pylint|mypy|pyright|eslint|tsc|prettier --check|golangci-lint|"
-            r"go vet|cargo clippy|cargo fmt --check|rubocop|shellcheck|biome|(npm|pnpm|yarn)"
-            r"( run)? (lint|typecheck))\b"
+            r"^(ruff|flake8|pylint|mypy|pyright|eslint|tsc|prettier( -\S+)* --check|black --check|"
+            r"golangci-lint|go vet|cargo (clippy|fmt --check)|rubocop|shellcheck|biome|"
+            r"(npm|pnpm|yarn|bun)( run)? (lint|typecheck))\b"
         ),
     ),
     (
         "build",
         re.compile(
-            r"\b((npm|pnpm|yarn|bun)( run)? build|cargo build|go build|make\b(?! (test|check))|"
-            r"gradlew? (build|assemble)|mvn( -\S+)* (package|install)|docker build|uv build|"
-            r"python -m build|dotnet build|xcodebuild)\b"
+            r"^((npm|pnpm|yarn|bun)( run)? build|cargo build|go build|make\b(?!( -\S+)* "
+            r"(test|check))|gradlew?( -\S+)* (build|assemble)|mvnw?( -\S+)* (package|install)|"
+            r"docker build|uv build|build\b|dotnet build|xcodebuild)"
         ),
     ),
-    ("commit", re.compile(r"\bgit\b[^|;&]*\bcommit\b")),
-    ("push", re.compile(r"\bgit\b[^|;&]*\bpush\b")),
-    ("pr", re.compile(r"\bgh pr create\b")),
+    ("pr", re.compile(r"^gh pr create\b")),
+    ("push", re.compile(r"^git push\b")),
+    ("commit", re.compile(r"^git commit\b")),
 ]
+SEPARATORS = {"&&", "||", ";", "|", "&", "(", ")"}
+# Programs that run another one: `uv run pytest`, `npx jest`, `python -m pytest`, `env X=1 make`.
+PREFIXES = {"env", "time", "sudo", "nice", "nohup", "command", "exec", "xvfb-run"}
+# `npm run test` runs a script, which KINDS knows by name; `npm exec jest` runs a program.
+RUNNERS = {
+    **dict.fromkeys(("uv", "poetry", "pipenv", "hatch", "pdm", "rye"), {"run"}),
+    **dict.fromkeys(("bundle", "npm", "pnpm", "yarn"), {"exec", "dlx"}),
+}
+LAUNCHERS = {"npx", "bunx", "pnpx"}
+VALUE_OPTIONS = {
+    "--directory", "--env-file", "--extra", "--from", "--group", "--index", "--only-group",
+    "--package", "--project", "--python", "--with", "-C", "-c", "-p",
+}  # fmt: skip
 EXIT = re.compile(r"exit(?:ed with)? code (-?\d+)", re.IGNORECASE)
 SAYS_TESTS_PASS = re.compile(
     r"\b(all )?(tests?|specs?|test suite|checks?)\b[^.\n]{0,40}"
@@ -55,10 +72,66 @@ SAYS_CHANGED = re.compile(
 )
 
 
+def simple_commands(command: str) -> list[list[str]]:
+    """The simple commands in a shell command line, as words (quotes respected)."""
+    lexer = shlex.shlex(command.replace("\n", " ; "), posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        words = list(lexer)
+    except ValueError:  # Unbalanced quotes: a rough split is better than nothing.
+        words = re.sub(r"(&&|\|\||[;|&()])", r" \1 ", command).split()
+    found, current = [], []
+    for word in words:
+        if word in SEPARATORS:
+            found.append(current)
+            current = []
+        else:
+            current.append(word)
+    found.append(current)
+    return [words for words in found if words]
+
+
+def skip_options(words: list[str]) -> list[str]:
+    while words and words[0].startswith("-"):
+        option = words.pop(0)
+        if option == "--":
+            break
+        if option in VALUE_OPTIONS and words:
+            words.pop(0)
+    return words
+
+
+def program(words: list[str]) -> str:
+    """A simple command from the program it runs on, without the wrappers that run it."""
+    words = list(words)
+    while words:
+        first = words[0].rsplit("/", 1)[-1]
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0]) or first in PREFIXES:
+            words = skip_options(words[1:])
+        elif first == "timeout":
+            words = skip_options(words[1:])[1:]
+        elif len(words) > 1 and words[1] in RUNNERS.get(first, ()):
+            words = skip_options(words[2:])
+        elif first in LAUNCHERS:
+            words = skip_options(words[1:])
+        elif re.fullmatch(r"python[\d.]*|py", first) and "-m" in words[1:3]:
+            words = words[words.index("-m") + 1 :]
+        elif first == "git":
+            # git's own options come before its subcommand: git -C dir -c a=b commit.
+            words = ["git", *skip_options(words[1:])]
+            break
+        else:
+            break
+    if not words:
+        return ""
+    return " ".join([words[0].rsplit("/", 1)[-1], *words[1:]])
+
+
 def kind(command: str) -> str:
-    """test, check, build, commit, push, pr or "" for a shell command."""
+    """test, check, build, pr, push, commit or "" for a shell command line."""
+    programs = [program(words) for words in simple_commands(command)]
     for name, pattern in KINDS:
-        if pattern.search(command):
+        if any(pattern.search(text) for text in programs):
             return name
     return ""
 

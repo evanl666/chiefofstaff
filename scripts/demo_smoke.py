@@ -64,6 +64,25 @@ async def run(scheme: str):
             log("three tasks; one waits for another")
             await page.screenshot(path=SHOTS / f"demo-{scheme}-1-running.png")
 
+            # A half-typed note survives updates of its card as the worker moves on.
+            research = page.locator("#inbox .card.task", has_text="Compare feature-flag services")
+            await research.hover()
+            await research.get_by_role("button", name="Add a note").click()
+            await research.locator("textarea").press_sequentially("Include pricing")
+            state = "n => n.className + (n.querySelector('.activity')?.textContent || '')"
+            before = await research.evaluate(state)
+            for _ in range(60):
+                if await research.evaluate(state) != before:
+                    break
+                await asyncio.sleep(0.25)
+            else:
+                raise AssertionError("the card never changed; the check proves nothing")
+            await expect(research.locator("textarea")).to_have_value("Include pricing")
+            await expect(research.locator("textarea")).to_be_focused()
+            await research.get_by_role("button", name="Cancel", exact=True).click()
+            now = await research.evaluate(state)
+            log(f"a half-typed note survived an update of its card ({now[:60]})")
+
             question = page.locator(".card.request.question")
             await expect(question).to_be_visible(timeout=30000)
             await page.screenshot(path=SHOTS / f"demo-{scheme}-2-question.png")

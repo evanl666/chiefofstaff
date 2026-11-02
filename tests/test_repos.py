@@ -244,10 +244,27 @@ async def test_the_router_hears_when_projects_change(tmp_path):
     assert "configured projects" not in router.sent[-1]
 
 
+def owner_worktree_and_submodule(repo: Path, where: Path):
+    """The owner's own worktree and a submodule: their configs run code when the owner uses git."""
+    subprocess.run(
+        ["git", "-C", str(repo), "worktree", "add", "-q", "-b", "mine", str(where)], check=True
+    )
+    (repo / ".git" / "modules" / "lib").mkdir(parents=True)
+
+
+def own_git_dir(checkout: str) -> Path:
+    return Path((Path(checkout) / ".git").read_text().removeprefix("gitdir:").strip()).resolve()
+
+
+def resolved(paths) -> set[Path]:
+    return {Path(path).resolve() for path in paths}
+
+
 async def test_workers_run_sandboxed_in_their_own_folders(tmp_path, git_repo):
     harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)], slack_enabled=True))
     runtime = await harness.connect()
     assert "sandbox_config" not in harness.session(harness.router_id).options
+    owner_worktree_and_submodule(git_repo, tmp_path / "mine")
     info = await spawn(
         runtime,
         harness.router_id,
@@ -261,9 +278,9 @@ async def test_workers_run_sandboxed_in_their_own_folders(tmp_path, git_repo):
     git_dir = str(git_repo.resolve() / ".git")
     workspace = str(runtime.workspaces.workspace(harness.store.session(info["session_id"])))
     assert {info["cwd"], workspace, git_dir} <= set(policy.readwrite)
-    assert {f"{git_dir}/hooks", f"{git_dir}/config"} <= set(policy.readonly), (
-        "hooks and config run code outside the sandbox: never writable"
-    )
+    protected = {f"{git_dir}/{name}" for name in ("hooks", "config", "modules", "worktrees/mine")}
+    assert protected <= set(policy.readonly), "these run code outside the sandbox: never writable"
+    assert own_git_dir(info["cwd"]) not in resolved(policy.readonly), "its own stays writable"
     assert policy.allowed_hosts == ()
     prompt = worker.options["system_message"]["content"]
     assert "OS sandbox" in prompt and "without -u" in prompt

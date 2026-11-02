@@ -17,8 +17,9 @@ from copilot import define_tool
 from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
 from pydantic import BaseModel
 
-from chiefofstaff.backend import copilot_backend
+from chiefofstaff.backend import SandboxPolicy, copilot_backend, sandbox_supported
 from chiefofstaff.scripted import CallTool, Say, ScriptedBackend, Shell
+from chiefofstaff.workspaces import protected_git_paths
 
 REAL = os.environ.get("CHIEFOFSTAFF_TEST_COPILOT") == "1"
 MODEL = os.environ.get("CHIEFOFSTAFF_TEST_MODEL", "claude-haiku-5.5")
@@ -202,3 +203,56 @@ async def test_steering_reaches_the_turn_in_progress(backend, tmp_path):
     await turn.wait()
     assert "steered" in turn.said().lower()
     assert turn.kinds().count("session.idle") == 1, "one turn, not a new one"
+
+
+def sandboxed_repository(root):
+    """A repository with the owner's own worktree, a submodule's git dir and a worker's worktree."""
+
+    def git(*arguments, cwd=root / "repo"):
+        subprocess.run(["git", *arguments], cwd=cwd, check=True, capture_output=True)
+
+    (root / "repo").mkdir()
+    git("init", "-q", "-b", "main")
+    git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init")
+    git("worktree", "add", "-q", "-b", "mine", str(root / "mine"))
+    git("worktree", "add", "-q", "-b", "work", str(root / "work"))
+    modules = root / "repo" / ".git" / "modules" / "lib"
+    modules.mkdir(parents=True)
+    (modules / "config").write_text("[core]\n")
+    return (root / "repo" / ".git").resolve(), (root / "work").resolve()
+
+
+async def test_the_sandbox_keeps_what_runs_code_outside_it_read_only(backend, tmp_path):
+    if not (backend.capabilities.sandbox and sandbox_supported()):
+        pytest.skip("Only a backend with an OS sandbox on a supported machine enforces this.")
+    git_dir, work = sandboxed_repository(tmp_path)
+    policy = SandboxPolicy(
+        readwrite=(str(work), str(git_dir)),
+        readonly=tuple(protected_git_paths(str(git_dir), [{"path": str(work)}])),
+    )
+    session, turn = await open_session(backend, work, sandbox_config=backend.sandbox(policy))
+    targets = [
+        git_dir / "config",
+        git_dir / "hooks" / "pre-commit",
+        git_dir / "modules" / "lib" / "config",
+        git_dir / "worktrees" / "mine" / "HEAD",
+    ]
+    attempts = "; ".join(f"echo pwned >> {target}" for target in targets)
+    commit = "git -c user.email=t@t -c user.name=t commit -q --allow-empty -m sandboxed"
+    await session.send(
+        f"Run the shell command `{attempts}; {commit}` and then reply with just: finished"
+    )
+    await turn.wait()
+    for target in targets:
+        assert "pwned" not in contents(target), target
+    assert last_commit(work) == "sandboxed", "the worker still commits in its own worktree"
+
+
+def contents(path) -> str:
+    return path.read_text() if path.exists() else ""
+
+
+def last_commit(checkout) -> str:
+    return subprocess.run(
+        ["git", "log", "-1", "--format=%s"], cwd=checkout, capture_output=True, text=True
+    ).stdout.strip()

@@ -52,7 +52,14 @@ from .store import Store, hours_ago, now
 from .tasks import ENDED, OPEN, TaskBook
 from .tasks import migrate as migrate_tasks
 from .watchdog import WatchConfig, flags, review_packet, timestamp
-from .workspaces import BRANCH_PREFIX, Workspaces, changes, git_dirs, resolve_project
+from .workspaces import (
+    BRANCH_PREFIX,
+    Workspaces,
+    changes,
+    git_dirs,
+    protected_git_paths,
+    resolve_project,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -510,8 +517,9 @@ class Runtime(OwnerAsks):
         checkouts = self.workspaces.checkouts(row)
         repositories = git_dirs(checkouts)
         writable = [*self.workspaces.writable(row), *repositories]
-        # Hooks and config run code when the owner uses the repository: never writable.
-        readonly = [f"{git_dir}/{name}" for git_dir in repositories for name in ("hooks", "config")]
+        readonly = [
+            path for git_dir in repositories for path in protected_git_paths(git_dir, checkouts)
+        ]
         ssh = Path.home() / ".ssh"
         readonly += [str(ssh / name) for name in ("known_hosts", "config") if (ssh / name).exists()]
         if agent := os.environ.get("SSH_AUTH_SOCK"):
@@ -856,11 +864,15 @@ class Runtime(OwnerAsks):
             if session := self.states.handle(session_id):
                 return session
             row = self.store.session(session_id)
+            created = self.store.get(f"created:{session_id}")
+            if row["role"] == WORKER and not created:
+                # Cancelled, stopped or failed before it ever started: it starts now.
+                return await self.open_live(row, create=True)
             try:
                 return await self.open_live(row)
             except Exception:
                 # A Router/Slack/Watchdog session whose creation failed earlier: create it now.
-                if row["role"] == WORKER or self.store.get(f"created:{session_id}"):
+                if created:
                     raise
                 logger.warning("Creating %s session %s again.", row["role"], session_id)
                 return await self.open_live(row, create=True)
@@ -2121,7 +2133,11 @@ class Runtime(OwnerAsks):
         return await self.decide_draft(draft["id"], decision)
 
     async def check_uncertain_drafts(self):
-        """After a restart: look in Slack and GitHub whether interrupted sends went out."""
+        """After a restart: look in Slack and GitHub whether interrupted sends went out.
+
+        The lookups run outside draft_lock; the owner may settle a draft meanwhile, so each
+        result is applied under the lock and only to a draft that is still uncertain.
+        """
         for draft in self.store.drafts("uncertain"):
             text = draft["final_text"] or draft["text"]
             created = datetime.fromisoformat(draft["created_at"]).timestamp()
@@ -2135,29 +2151,35 @@ class Runtime(OwnerAsks):
             except Exception:
                 logger.warning("Could not check draft %s.", draft["id"], exc_info=True)
                 continue
-            if found:
-                draft = self.store.update_draft(
-                    draft["id"],
-                    status="sent",
-                    outcome=f"Delivered (confirmed after a restart): {found}"[:1000],
-                    resolved_at=now(),
-                )
-                self.after_sent(draft, found)
-                await self.tell_drafter(draft, f"Draft {draft['id']} was sent.")
-            elif draft["kind"] == "github":
-                # GitHub lists reviews at once: it was not published, so it can be approved again.
-                draft = self.store.update_draft(
-                    draft["id"],
-                    status="pending",
-                    outcome="Not published (checked after a restart).",
-                )
-            else:
-                # Slack search can lag: the owner decides.
-                draft = self.store.update_draft(
-                    draft["id"],
-                    outcome="Not found in Slack after a restart. Send it again if it is missing.",
-                )
-            self.bus.publish("draft", draft)
+            async with self.draft_lock:
+                if self.store.draft(draft["id"])["status"] == "uncertain":
+                    await self.settle_checked(draft, found)
+
+    async def settle_checked(self, draft: dict, found: str):
+        """Apply what check_uncertain_drafts found; the caller holds draft_lock."""
+        if found:
+            draft = self.store.update_draft(
+                draft["id"],
+                status="sent",
+                outcome=f"Delivered (confirmed after a restart): {found}"[:1000],
+                resolved_at=now(),
+            )
+            self.after_sent(draft, found)
+            await self.tell_drafter(draft, f"Draft {draft['id']} was sent.")
+        elif draft["kind"] == "github":
+            # GitHub lists reviews at once: it was not published, so it can be approved again.
+            draft = self.store.update_draft(
+                draft["id"],
+                status="pending",
+                outcome="Not published (checked after a restart).",
+            )
+        else:
+            # Slack search can lag: the owner decides.
+            draft = self.store.update_draft(
+                draft["id"],
+                outcome="Not found in Slack after a restart. Send it again if it is missing.",
+            )
+        self.bus.publish("draft", draft)
 
     def after_sent(self, draft: dict, outcome: str):
         """The drafting session now owns the conversation: it follows the thread or PR."""
@@ -2742,16 +2764,22 @@ class Runtime(OwnerAsks):
         row = self.store.session(task["session_id"])
         if row["closed_at"]:
             await self.reopen(row["id"])
-        if task["status"] in {"review", "done", "failed"}:
+        before = task["status"]
+        if before in {"review", "done", "failed"}:
             task = self.tasks.move(task_id, "running", reason="follow-up")
-        await self.delivery.deliver(
-            row["id"],
-            wrap("owner", "message", text, task=task_id),
-            kind="owner",
-            display=text,
-            meta={"task_id": task_id},
-            steer=True,
-        )
+        try:
+            await self.delivery.deliver(
+                row["id"],
+                wrap("owner", "message", text, task=task_id),
+                kind="owner",
+                display=text,
+                meta={"task_id": task_id},
+                steer=True,
+            )
+        except Exception:
+            if task["status"] != before:
+                self.tasks.move(task_id, before)  # The follow-up never reached its worker.
+            raise
         return task
 
     async def retry_task(self, task_id: str, text: str = "") -> dict:
@@ -2764,17 +2792,22 @@ class Runtime(OwnerAsks):
         row = self.store.session(task["session_id"])
         if row["closed_at"]:
             await self.reopen(row["id"])
+        before = task
         task = self.tasks.move(task_id, "running", reason="retry", progress="")
         body = f"The owner asks you to try task {task_id} “{task['title']}” again."
         if text.strip():
             body += f"\n\n{text.strip()}"
-        await self.delivery.deliver(
-            row["id"],
-            wrap("owner", "message", body, task=task_id),
-            kind="owner",
-            display=text.strip() or "Try again.",
-            meta={"task_id": task_id},
-        )
+        try:
+            await self.delivery.deliver(
+                row["id"],
+                wrap("owner", "message", body, task=task_id),
+                kind="owner",
+                display=text.strip() or "Try again.",
+                meta={"task_id": task_id},
+            )
+        except Exception:
+            self.tasks.move(task_id, before["status"], progress=before["progress"])
+            raise
         return task
 
     async def t_draft_slack_reply(self, params: DraftSlackReply, caller: str):
@@ -3112,6 +3145,10 @@ class Runtime(OwnerAsks):
 
     def publish_task(self, task: dict):
         self.bus.publish("task", self.task_view(task))
+        # Whether a task is blocked depends on the tasks it waits for.
+        for dependent in self.tasks.dependents(task["id"]):
+            if dependent["status"] in OPEN:
+                self.bus.publish("task", self.task_view(dependent))
 
     def publish_session(self, row: dict):
         self.bus.publish("session", self.view(row))

@@ -1252,17 +1252,48 @@ function scheduleInbox() {
   });
 }
 
-// Keeps nodes whose key did not change, so a half-typed follow-up survives an update.
-function reconcile(container, items) {
+// Keeps nodes whose key did not change; `refresh` updates their content when only their
+// `version` did, so a button under the mouse is never swapped out mid-click. A card whose key
+// changed is rebuilt, and a form the owner has open on it (a half-typed note) moves into the
+// new card, with its text and focus, even when the card moves to another section.
+function reconcile(container, items, editing = openForms()) {
   const existing = new Map([...container.children].map((node) => [node.dataset.key, node]));
-  const nodes = items.map(({ key, build }) => {
-    const node = existing.get(key) || build();
+  const nodes = items.map(({ key, id, version, build, refresh }) => {
+    let node = existing.get(key);
+    if (node && refresh && node.dataset.version !== version) refresh(node);
+    if (!node) {
+      node = build();
+      const form = id && editing.get(id);
+      if (form) {
+        const fresh = node.querySelector(":scope > .actions");
+        if (fresh) fresh.replaceWith(form);
+        else node.append(form);
+      }
+    }
     node.dataset.key = key;
+    if (id) node.dataset.id = id;
+    if (version !== undefined) node.dataset.version = version;
     return node;
   });
   if (nodes.length !== container.children.length || nodes.some((node, index) => container.children[index] !== node)) {
     container.replaceChildren(...nodes);
   }
+}
+
+// Moving a focused field in the page blurs it: put the focus and cursor back afterwards.
+function keepingFocus(change) {
+  const active = document.activeElement;
+  const selection = active && "selectionStart" in active ? [active.selectionStart, active.selectionEnd] : null;
+  change();
+  if (active?.isConnected && document.activeElement !== active) {
+    active.focus();
+    if (selection) active.setSelectionRange(...selection);
+  }
+}
+
+// Forms the owner has open on inbox cards, by task id; collected before any section changes.
+function openForms() {
+  return new Map([...document.querySelectorAll("#inbox .card > .actions[data-editing]")].map((form) => [form.parentElement.dataset.id, form]));
 }
 
 function section(id, title, count, hint) {
@@ -1277,9 +1308,14 @@ function section(id, title, count, hint) {
 }
 
 function renderInbox() {
-  const box = $("#inbox");
   if (state.selected !== INBOX || !state.snapshot) return;
+  keepingFocus(updateInbox);
+}
+
+function updateInbox() {
+  const box = $("#inbox");
   const items = needsYou();
+  const editing = openForms();
   // A worker waiting on a card for the owner shows as that card, under Needs you.
   const asking = new Set(items.drafts.map((draft) => draft.session_id));
   const running = tasks()
@@ -1292,13 +1328,13 @@ function renderInbox() {
   reconcile(needs.querySelector(".items"), [
     ...items.drafts.map((draft) => ({ key: `draft:${draft.id}`, build: () => draftCard(draft) })),
     ...items.uncertain.map((draft) => ({ key: `uncertain:${draft.id}:${draft.outcome}`, build: () => uncertainCard(draft) })),
-    ...items.tasks.map((task) => ({ key: taskKey(task), build: () => taskCard(task) })),
-  ]);
+    ...items.tasks.map((task) => taskItem(task)),
+  ], editing);
   const runningSection = section("inbox-running", "Running", running.length, "");
   runningSection.hidden = !running.length;
-  reconcile(runningSection.querySelector(".items"), running.map((task) => ({ key: taskKey(task), build: () => taskCard(task) })));
+  reconcile(runningSection.querySelector(".items"), running.map((task) => taskItem(task)), editing);
   const reviewSection = section("inbox-review", "Ready to review", review.length, "Finished work shows up here with what was observed: tests, changes and pull requests.");
-  reconcile(reviewSection.querySelector(".items"), review.map((task) => ({ key: taskKey(task), build: () => taskCard(task) })));
+  reconcile(reviewSection.querySelector(".items"), review.map((task) => taskItem(task)), editing);
 
   let recent = document.getElementById("inbox-recent");
   if (!recent) {
@@ -1306,7 +1342,7 @@ function renderInbox() {
   }
   recent.hidden = !finished.length;
   recent.querySelector("summary").textContent = `Recently finished · ${finished.length}`;
-  reconcile(recent.querySelector(".items"), finished.slice(0, 30).map((task) => ({ key: taskKey(task), build: () => taskCard(task) })));
+  reconcile(recent.querySelector(".items"), finished.slice(0, 30).map((task) => taskItem(task)), editing);
 
   const first = !tasks().length && !items.drafts.length && !items.uncertain.length;
   const welcome = first ? document.getElementById("inbox-welcome") || welcomeCard() : null;
@@ -1315,9 +1351,35 @@ function renderInbox() {
   if (order.some((node, index) => box.children[index] !== node) || box.children.length !== order.length) box.replaceChildren(...order);
 }
 
-function taskKey(task) {
+// The key covers what changes a card's actions and layout; the version, what only its text.
+function taskItem(task) {
   const worker = byId(task.session_id);
-  return `task:${task.id}:${task.status}:${task.updated_at}:${task.blocked ? 1 : 0}:${worker?.status || ""}:${worker?.activity || ""}:${JSON.stringify(task.receipts || null)}`;
+  return {
+    // Receipts show on finished cards only; a running task's grow with every command.
+    key: `task:${task.id}:${task.status}:${task.blocked ? 1 : 0}:${["review", "done"].includes(task.status) ? JSON.stringify(task.receipts || null) : ""}`,
+    id: task.id,
+    version: `${task.updated_at}:${task.title}:${worker?.status || ""}:${worker?.activity || ""}:${task.credits}:${task.runs}`,
+    build: () => taskCard(task),
+    refresh: (node) => refreshTaskCard(node, task),
+  };
+}
+
+function refreshTaskCard(node, task) {
+  const worker = byId(task.session_id);
+  const title = node.querySelector(".head .title");
+  title.textContent = task.title;
+  title.title = task.goal;
+  node.querySelector(".head .meta").textContent = taskMeta(task);
+  const body = taskBody(task, worker);
+  const old = node.querySelector(":scope > .task-body");
+  if (old && body) old.replaceWith(body);
+  else if (old) old.remove();
+  else if (body) node.querySelector(":scope > .head").after(body);
+}
+
+function taskMeta(task) {
+  const finishedAt = ["review", "done", "failed", "cancelled"].includes(task.status) ? task.ended_at || task.updated_at : "";
+  return [task.worker && task.worker !== task.title ? task.worker : "", finishedAt ? `finished ${since(finishedAt)}` : `started ${since(task.created_at)}`, task.credits >= 0.05 ? `${task.credits.toFixed(1)} credits` : "", task.runs > 1 ? `${task.runs} runs` : ""].filter(Boolean).join(" · ");
 }
 
 // First run: what is missing before work can start.
@@ -1437,8 +1499,7 @@ function taskCard(task) {
   const worker = byId(task.session_id);
   const error = el("span", { class: "error" });
   const actions = el("div", { class: "actions" });
-  const finishedAt = ["review", "done", "failed", "cancelled"].includes(task.status) ? task.ended_at || task.updated_at : "";
-  const meta = [task.worker && task.worker !== task.title ? task.worker : "", finishedAt ? `finished ${since(finishedAt)}` : `started ${since(task.created_at)}`, task.credits >= 0.05 ? `${task.credits.toFixed(1)} credits` : "", task.runs > 1 ? `${task.runs} runs` : ""].filter(Boolean).join(" · ");
+  const meta = taskMeta(task);
   const node = el(
     "div",
     { class: `card task ${task.status}${task.blocked ? " blocked" : ""}` },
@@ -1461,6 +1522,7 @@ function taskCard(task) {
     error.textContent = "";
     try {
       const view = await api(path, { method: "POST", body: body || {} });
+      showActions();  // The form is done: the card may be rebuilt from now on.
       upsertTask(view);
       if (done) toast(done);
     } catch (failure) {
@@ -1478,14 +1540,25 @@ function taskCard(task) {
       }
     });
     actions.replaceChildren(input, el("button", { type: "button", class: "text", text: "Cancel", onclick: showActions }), el("button", { type: "button", text: label, onclick: send }));
+    actions.dataset.editing = "1";
     input.focus();
   }
   function confirmCancel() {
     const reason = el("input", { placeholder: "Why? (optional)" });
     actions.replaceChildren(reason, el("button", { type: "button", class: "text", text: "Keep it", onclick: showActions }), el("button", { type: "button", class: "danger", text: "Cancel task", onclick: () => act(`/api/tasks/${task.id}/cancel`, { text: reason.value.trim() }, "Task cancelled.") }));
+    actions.dataset.editing = "1";
     reason.focus();
   }
   function showActions() {
+    delete actions.dataset.editing;
+    const host = actions.parentElement;
+    if (host && host !== node) {
+      // This form moved into a newer card for the task: that card shows its own actions.
+      actions.remove();
+      delete host.dataset.key;
+      scheduleInbox();
+      return;
+    }
     const buttons = [];
     if (task.status === "review") {
       buttons.push(
@@ -1517,6 +1590,7 @@ function taskCard(task) {
   function retryWithNote() {
     const input = el("textarea", { rows: 2, placeholder: "What should it do differently?" });
     actions.replaceChildren(input, el("button", { type: "button", class: "text", text: "Cancel", onclick: showActions }), el("button", { type: "button", text: "Retry", onclick: () => act(`/api/tasks/${task.id}/retry`, { text: input.value.trim() }, "Retrying.") }));
+    actions.dataset.editing = "1";
     input.focus();
   }
   showActions();

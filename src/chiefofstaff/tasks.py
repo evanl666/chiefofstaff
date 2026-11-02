@@ -110,6 +110,14 @@ class TaskBook:
             (task_id,),
         )
 
+    def dependents(self, task_id: str) -> list[dict]:
+        """Tasks that wait for this one."""
+        return self.store.all(
+            """SELECT t.* FROM task_deps d JOIN tasks t ON t.id=d.task_id
+            WHERE d.depends_on=? ORDER BY t.created_at""",
+            (task_id,),
+        )
+
     def unmet(self, task: dict) -> list[dict]:
         return [dep for dep in self.deps(task["id"]) if dep["status"] not in FINISHED]
 

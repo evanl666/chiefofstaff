@@ -672,8 +672,10 @@ a.receipt:hover { text-decoration: underline; }
 
 .card.task { position: relative; }
 @media (hover: hover) {
-  /* Running tasks stay two lines: their buttons float over the activity line on hover. */
-  .card.task:is(.running, .queued):not(:focus-within) .actions {
+  /* Running tasks stay two lines: their buttons float over the activity line on hover. An
+     open form takes its own line. (Not :focus-within: focusing a button on mousedown would
+     move it from under the pointer, and the click would be lost.) */
+  .card.task:is(.running, .queued) .actions:not([data-editing]) {
     position: absolute;
     right: 12px;
     bottom: 7px;
@@ -683,7 +685,7 @@ a.receipt:hover { text-decoration: underline; }
     opacity: 0;
     transition: opacity 0.12s;
   }
-  .card.task:is(.running, .queued):hover .actions { opacity: 1; }
+  .card.task:is(.running, .queued):is(:hover, :focus-within) .actions { opacity: 1; }
 }
 
 .card.setup { border-left: 3px solid var(--accent); }
