@@ -298,7 +298,7 @@ class Asks:
                 if not session:
                     return cancelled
                 try:
-                    backend = self.runtime.require_ready()
+                    backend = self.runtime.connected()  # Also while still connecting.
                     url = await backend.mcp_sign_in_url(session, server)
                     url = http_url(url) if url else ""
                 except Exception:
