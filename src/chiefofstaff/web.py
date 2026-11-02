@@ -14,9 +14,11 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from .bus import Bus
 from .models import (
     DraftDecision,
+    FocusRequest,
     OpenFolder,
     OwnerMessage,
     ProfileText,
+    ProjectPath,
     SessionModel,
     SessionYolo,
     Settings,
@@ -186,6 +188,14 @@ def create_app(
             runtime.router_id(),
             "Build my profile: distill what my work says about me so my sessions can use it.",
         )
+
+    @app.post("/api/focus")
+    async def focus(payload: FocusRequest):
+        return await runtime.start_focus(payload.minutes)
+
+    @app.post("/api/projects")
+    async def add_project(payload: ProjectPath):
+        return {"path": await runtime.add_project(payload.path)}
 
     @app.get("/api/tasks/{task_id}")
     async def task(task_id: str):

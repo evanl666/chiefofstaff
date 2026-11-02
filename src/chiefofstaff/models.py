@@ -70,6 +70,15 @@ class OwnerMessage(StrictModel):
     text: str = Field(min_length=1, max_length=20000)
 
 
+class FocusRequest(StrictModel):
+    # 0 ends focus now.
+    minutes: int = Field(ge=0, le=600)
+
+
+class ProjectPath(StrictModel):
+    path: str = Field(min_length=1, max_length=1000)
+
+
 class TaskNote(StrictModel):
     text: str = Field(default="", max_length=20000)
 

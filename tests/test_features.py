@@ -568,3 +568,28 @@ async def test_scratch_folder_and_opening_a_workers_folder(tmp_path, monkeypatch
     monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
     await runtime.open_folder(worker["session_id"], "vscode")
     assert calls == [("code", worker["cwd"])]
+
+
+async def test_focus_holds_notifications_and_ends_with_one_summary(harness):
+    runtime = await harness.connect()
+    toasts = []
+    runtime.bus.publish = lambda kind, data=None: toasts.append(data) if kind == "toast" else None
+    state = await runtime.start_focus(60)
+    assert state["until"] and runtime.focusing()
+    assert 'type="focus"' in harness.session(harness.router_id).sent[-1]
+
+    await call_tool(runtime, "notify_owner", harness.router_id, text="PR #3 merged")
+    worker = (await spawn(runtime, harness.router_id, "Docs"))["session_id"]
+    await call_tool(runtime, "report", worker, status="done", summary="Docs written")
+    assert toasts == [] and harness.notifications == [], "held back while focusing"
+    await call_tool(
+        runtime, "notify_owner", harness.router_id, text="Production is down", urgent=True
+    )
+    assert [t["text"] for t in toasts] == ["Production is down"], "urgent breaks through"
+
+    await runtime.focus_once(time.time() + 3601)
+    assert not runtime.focusing()
+    summary = harness.store.messages(harness.router_id)[-1]
+    assert summary["meta"].get("focus_summary")
+    assert summary["text"].startswith("While you focused (")
+    assert "1 task ready to review" in summary["text"]

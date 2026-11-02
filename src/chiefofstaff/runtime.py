@@ -17,7 +17,7 @@ import time
 import unicodedata
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
@@ -207,6 +207,11 @@ class NotifyOwner(BaseModel):
     text: str = Field(description="The update for the owner, at most three short lines")
     needs_action: bool = Field(
         default=False, description="True when the owner must decide or answer something"
+    )
+    urgent: bool = Field(
+        default=False,
+        description="Interrupts an owner who is focusing: only for what cannot wait (an "
+        "outage, someone blocked on them today)",
     )
 
 
@@ -1524,13 +1529,113 @@ class Runtime(OwnerAsks):
         return True
 
     def alert(
-        self, text: str, *, session_id: str, needs_action: bool, title: str = "Chief of Staff"
+        self,
+        text: str,
+        *,
+        session_id: str,
+        needs_action: bool,
+        title: str = "Chief of Staff",
+        urgent: bool = False,
     ):
+        """A toast and a desktop notification; held back while the owner focuses."""
+        if self.focusing() and not urgent:
+            return  # It waits in the inbox; the focus summary counts it.
         self.bus.publish(
             "toast", {"text": text, "session_id": session_id, "needs_action": needs_action}
         )
         if self.store.settings().mac_notifications:
             self.background(self.notifier(title, text))
+
+    # Focus
+
+    def focusing(self) -> bool:
+        return time.time() < float(self.store.get("focus_until") or 0)
+
+    async def start_focus(self, minutes: int) -> dict:
+        """Hold back notifications for a while; the Router handles what it can meanwhile."""
+        if minutes <= 0:
+            return await self.end_focus()
+        started = float(self.store.get("focus_started") or 0) if self.focusing() else time.time()
+        until = time.time() + minutes * 60
+        self.store.set("focus_started", str(started))
+        self.store.set("focus_until", str(until))
+        clock = datetime.fromtimestamp(until).astimezone().strftime("%H:%M")
+        note = (
+            f"The owner is focusing until {clock}. Handle what you can without them: forward "
+            "Slack messages that need a reply to the Slack session (drafts wait for their "
+            "approval), give code work to workers, ignore noise. Use notify_owner(urgent=true) "
+            "only for what cannot wait until then."
+        )
+        with suppress(RuntimeError):
+            await self.delivery.deliver(
+                self.router_id(),
+                wrap("system", "focus", note),
+                batch=True,
+                kind="notice",
+                display=f"Focusing until {clock}",
+            )
+        self.publish_state()
+        return self.focus_state()
+
+    async def end_focus(self) -> dict:
+        """Focus is over: one summary of what happened instead of the notifications."""
+        started = float(self.store.get("focus_started") or 0)
+        self.store.delete("focus_until")
+        self.store.delete("focus_started")
+        if started:
+            text = self.focus_summary(started)
+            with suppress(RuntimeError):
+                self.add_message(
+                    self.router_id(), "update", text, {"focus_summary": True}, unread=True
+                )
+                self.alert(text, session_id=self.router_id(), needs_action=False)
+            self.bus.publish("focus_summary", {"text": text})
+        self.publish_state()
+        return self.focus_state()
+
+    def focus_summary(self, started: float) -> str:
+        since = datetime.fromtimestamp(started, UTC).isoformat()
+        minutes = max(1, round((time.time() - started) / 60))
+        length = f"{minutes // 60}h {minutes % 60}m" if minutes >= 60 else f"{minutes} min"
+        handled = self.store.one(
+            """SELECT count(*) AS n FROM messages WHERE kind='inbound' AND created_at>=?
+            AND (json_extract(meta, '$.source') IS NOT NULL)""",
+            (since,),
+        )["n"]
+        drafted = self.store.one(
+            "SELECT count(*) AS n FROM drafts WHERE kind IN ('slack','github') AND created_at>=?",
+            (since,),
+        )["n"]
+        finished = self.store.one(
+            """SELECT count(DISTINCT task_id) AS n FROM runs WHERE status='succeeded'
+            AND ended_at>=?""",
+            (since,),
+        )["n"]
+        needs = (
+            len(self.store.drafts())
+            + self.store.one(
+                "SELECT count(*) AS n FROM tasks WHERE status IN ('waiting','failed')"
+            )["n"]
+        )
+        parts = [
+            f"{handled} message{'s' if handled != 1 else ''} handled" if handled else "",
+            f"{drafted} repl{'ies' if drafted != 1 else 'y'} drafted for you" if drafted else "",
+            f"{finished} task{'s' if finished != 1 else ''} ready to review" if finished else "",
+            f"{needs} need{'s' if needs == 1 else ''} you" if needs else "",
+        ]
+        done = " · ".join(part for part in parts if part) or "nothing came up"
+        return f"While you focused ({length}): {done}."
+
+    def focus_state(self) -> dict:
+        if not self.focusing():
+            return {"until": None}
+        until = float(self.store.get("focus_until"))
+        return {"until": datetime.fromtimestamp(until, UTC).isoformat()}
+
+    async def focus_once(self, moment: float | None = None):
+        until = float(self.store.get("focus_until") or 0)
+        if until and (time.time() if moment is None else moment) >= until:
+            await self.end_focus()
 
     # Workers
 
@@ -2497,10 +2602,14 @@ class Runtime(OwnerAsks):
 
     async def t_notify_owner(self, params: NotifyOwner, caller: str):
         self.caller(caller, ROUTER)
-        self.add_message(
-            caller, "update", params.text, {"needs_action": params.needs_action}, unread=True
+        meta = {"needs_action": params.needs_action, "urgent": params.urgent}
+        self.add_message(caller, "update", params.text, meta, unread=True)
+        self.alert(
+            params.text,
+            session_id=caller,
+            needs_action=params.needs_action,
+            urgent=params.urgent,
         )
-        self.alert(params.text, session_id=caller, needs_action=params.needs_action)
         return "Shown to the owner."
 
     async def t_close_worker(self, params: CloseWorker, caller: str):
@@ -2800,7 +2909,14 @@ class Runtime(OwnerAsks):
     async def watch_loop(self):
         while True:
             await asyncio.sleep(self.watch.interval)
-            for job in (self.watch_once, self.tidy_once, self.digest_once, self.expire_questions):
+            jobs = (
+                self.watch_once,
+                self.tidy_once,
+                self.digest_once,
+                self.expire_questions,
+                self.focus_once,
+            )
+            for job in jobs:
                 try:
                     await job()
                 except Exception:
@@ -2994,6 +3110,7 @@ class Runtime(OwnerAsks):
         return {
             "runtime": self.status,
             "demo": getattr(self, "demo", False),
+            "focus": self.focus_state(),
             "router_id": self.store.get("router_id"),
             "sessions": [self.view(row) for row in self.store.open_sessions()],
             "drafts": self.store.drafts(),

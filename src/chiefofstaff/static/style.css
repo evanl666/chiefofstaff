@@ -685,3 +685,11 @@ a.receipt:hover { text-decoration: underline; }
   }
   .card.task:is(.running, .queued):hover .actions { opacity: 1; }
 }
+
+.card.setup { border-left: 3px solid var(--accent); }
+.card.setup p { margin: 4px 0; color: var(--soft); }
+.card.setup .muted, .card .muted { color: var(--muted); font-size: 12.5px; }
+.card.setup ol { margin: 6px 0; padding-left: 20px; color: var(--soft); }
+.card.setup code { font: 12px var(--mono); background: var(--hover); padding: 1px 5px; border-radius: 5px; }
+.card.setup .actions .muted { flex: 1; }
+#session-actions .focus-on { background: var(--accent-soft); color: var(--accent); font-size: 12px; padding: 4px 10px; }

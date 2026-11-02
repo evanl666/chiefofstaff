@@ -356,6 +356,9 @@ function handleEvent({ type, data }) {
     }
   } else if (type === "task") {
     upsertTask(data);
+  } else if (type === "focus_summary") {
+    state.focusSummary = data.text;
+    scheduleInbox();
   } else if (type === "session") {
     upsertSession(data);
     // Credits change as sessions work: refresh today's total at most every 5 seconds.
@@ -486,6 +489,8 @@ function renderStatusLine() {
     );
   }
   if (snap.demo) nodes.push(el("div", { class: "demo", text: "Demo mode: scripted sessions, nothing leaves this machine" }));
+  const until = snap.focus?.until && new Date(snap.focus.until) > new Date() ? new Date(snap.focus.until) : null;
+  if (until) nodes.push(el("div", { class: "demo", text: `Focusing until ${until.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}: notifications wait` }));
   if (snap.runtime.warning) nodes.push(el("div", { class: "bad", text: snap.runtime.warning }));
   if (snap.settings.slack_enabled && snap.slack.error) nodes.push(el("div", { class: "bad", text: `Slack: ${snap.slack.error}` }));
   if (snap.settings.github_enabled && snap.github.error) nodes.push(el("div", { class: "bad", text: `GitHub: ${snap.github.error}` }));
@@ -1187,14 +1192,54 @@ function showInbox() {
   $("#composer-input").focus();
 }
 
+function focusUntil() {
+  const until = state.snapshot?.focus?.until;
+  return until && new Date(until) > new Date() ? new Date(until) : null;
+}
+
 function renderInboxHeader() {
   const { needs, running, review } = inboxCounts();
+  const until = focusUntil();
   $("#session-title").textContent = "Inbox";
-  const parts = [needs ? `${needs} need${needs === 1 ? "s" : ""} you` : "Nothing needs you", running ? `${running} running` : "", review ? `${review} to review` : ""];
+  const parts = [
+    until ? `Focusing until ${until.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` : "",
+    needs ? `${needs} need${needs === 1 ? "s" : ""} you` : "Nothing needs you",
+    running ? `${running} running` : "",
+    review ? `${review} to review` : "",
+  ];
   $("#session-meta").textContent = parts.filter(Boolean).join(" · ");
   $("#session-meta").title = "";
   $("#session-meta").classList.remove("yolo");
-  $("#session-actions").replaceChildren();
+  $("#session-actions").replaceChildren(state.snapshot.runtime.state === "ready" ? focusControl() : "");
+}
+
+// Focus: notifications wait, the Router handles what it can, one summary at the end.
+function focusControl() {
+  const focus = (minutes) =>
+    api("/api/focus", { method: "POST", body: { minutes } })
+      .then((focusState) => {
+        state.snapshot.focus = focusState;
+        renderInboxHeader();
+        renderStatusLine();
+        toast(minutes ? "Focusing: notifications wait until you are done." : "Focus ended.");
+      })
+      .catch((error) => toast(error.message, "error"));
+  if (focusUntil()) {
+    return el("button", { type: "button", class: "focus-on", text: "End focus", title: "Notifications are held; the summary comes when focus ends", onclick: () => focus(0) });
+  }
+  const select = el(
+    "select",
+    { class: "folder", "aria-label": "Focus", title: "Hold notifications while you focus; the Router handles what it can" },
+    el("option", { value: "", text: "Focus…" }),
+    ...[
+      [30, "30 minutes"],
+      [60, "1 hour"],
+      [120, "2 hours"],
+      [240, "4 hours"],
+    ].map(([value, text]) => el("option", { value, text: `Focus for ${text}` })),
+  );
+  select.addEventListener("change", () => select.value && focus(Number(select.value)));
+  return select;
 }
 
 let inboxFrame = 0;
@@ -1265,13 +1310,88 @@ function renderInbox() {
 
   const first = !tasks().length && !items.drafts.length && !items.uncertain.length;
   const welcome = first ? document.getElementById("inbox-welcome") || welcomeCard() : null;
-  const order = [chiefStrip(), welcome, needs, runningSection, reviewSection, recent].filter(Boolean);
+  const blocked = state.snapshot.runtime.state === "error";  // Only the way to fix it matters.
+  const order = blocked ? [setupCard()] : [setupCard(), focusSummaryCard(), chiefStrip(), welcome, needs, runningSection, reviewSection, recent].filter(Boolean);
   if (order.some((node, index) => box.children[index] !== node) || box.children.length !== order.length) box.replaceChildren(...order);
 }
 
 function taskKey(task) {
   const worker = byId(task.session_id);
   return `task:${task.id}:${task.status}:${task.updated_at}:${task.blocked ? 1 : 0}:${worker?.status || ""}:${worker?.activity || ""}:${JSON.stringify(task.receipts || null)}`;
+}
+
+// First run: what is missing before work can start.
+function setupCard() {
+  const snap = state.snapshot;
+  const key = `${snap.runtime.state}:${snap.runtime.error}:${snap.settings.projects.length}`;
+  let node = document.getElementById("inbox-setup");
+  if (node?.dataset.key === key) return node;
+  if (snap.runtime.state === "error") {
+    const retry = el("button", { type: "button", text: "Retry", onclick: async () => {
+      retry.disabled = true;
+      try {
+        await api("/api/runtime/reconnect", { method: "POST" });
+      } catch (error) {
+        toast(error.message, "error");
+      }
+      retry.disabled = false;
+    } });
+    node = el(
+      "div",
+      { id: "inbox-setup", class: "card setup" },
+      el("div", { class: "head" }, el("span", { class: "label", text: "Connect GitHub Copilot" })),
+      el("p", { text: "Chief of Staff runs your work in GitHub Copilot sessions, and Copilot is not ready yet:" }),
+      el("p", { class: "muted", text: snap.runtime.error }),
+      el(
+        "ol",
+        {},
+        el("li", {}, "Install the Copilot CLI: ", el("code", { text: "npm install -g @github/copilot" })),
+        el("li", {}, "Sign in: ", el("code", { text: "copilot login" })),
+        el("li", { text: "Retry here." }),
+      ),
+      el("div", { class: "actions" }, el("span", { class: "muted", text: "Or look around first: chiefofstaff --demo" }), retry),
+    );
+  } else if (snap.runtime.state === "ready" && !snap.demo && !snap.settings.projects.length) {
+    const input = el("input", { placeholder: "~/code/my-app", autocomplete: "off" });
+    const error = el("span", { class: "error" });
+    const add = async () => {
+      if (!input.value.trim()) return;
+      error.textContent = "";
+      try {
+        const { path } = await api("/api/projects", { method: "POST", body: { path: input.value.trim() } });
+        toast(`Added ${shortPath(path)}.`);
+        await loadState();
+      } catch (failure) {
+        error.textContent = failure.message;
+      }
+    };
+    input.addEventListener("keydown", (event) => event.key === "Enter" && add());
+    node = el(
+      "div",
+      { id: "inbox-setup", class: "card setup" },
+      el("div", { class: "head" }, el("span", { class: "label", text: "Add a project folder" })),
+      el("p", { text: "Workers change code in their own copies (git worktrees) of these folders; your own checkout stays as it is. Research and questions need no project." }),
+      el("div", { class: "actions" }, input, error, el("button", { type: "button", text: "Add", onclick: add })),
+    );
+  } else {
+    return null;
+  }
+  node.dataset.key = key;
+  return node;
+}
+
+function focusSummaryCard() {
+  if (!state.focusSummary) return null;
+  let node = document.getElementById("focus-summary");
+  if (node?.dataset.text === state.focusSummary) return node;
+  node = el(
+    "div",
+    { id: "focus-summary", class: "card update" },
+    el("div", { class: "head" }, el("span", { class: "label", text: "Focus is over" }), el("span", { class: "spacer" }), el("button", { type: "button", class: "text", text: "×", title: "Dismiss", onclick: () => { state.focusSummary = null; node.remove(); } })),
+    el("div", { class: "body", text: state.focusSummary }),
+  );
+  node.dataset.text = state.focusSummary;
+  return node;
 }
 
 function welcomeCard() {

@@ -101,6 +101,9 @@ How to route:
 The owner's attention is the scarcest resource:
 - notify_owner only when a result is ready, a decision is needed, or something failed and needs
   them. Never for progress or acknowledgements.
+- While the owner is focusing (a from="system" type="focus" message says until when), handle
+  everything you can without them; notifications wait, and they get one summary afterwards.
+  notify_owner(urgent=true) interrupts them: only for what cannot wait.
 - Keep every message to the owner short and scannable, in the owner's language: one line with
   the outcome, then at most three "- " bullets for the key facts and links when needed. Write
   file paths and links in full; the app shortens them.
