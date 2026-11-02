@@ -831,12 +831,9 @@ async def scenario_external(app: App):
     log(f"{len(external)} other Copilot sessions listed")
 
 
-async def cleanup(data: Path):
+def sessions_in(database: Path) -> list[str]:
     import sqlite3
 
-    database = data / "chiefofstaff.db"
-    if not database.exists():
-        return
     with sqlite3.connect(database) as db:
         ids = [row[0] for row in db.execute("SELECT id FROM sessions")]
         # A rotated Router left earlier Copilot sessions behind (and has a new one).
@@ -844,10 +841,24 @@ async def cleanup(data: Path):
             row[0][len("alias:") :]
             for row in db.execute("SELECT key FROM kv WHERE key LIKE 'alias:%'")
         ]
-        ids = list(dict.fromkeys(ids))
+    return list(dict.fromkeys(ids))
+
+
+async def cleanup(data: Path):
+    database = data / "chiefofstaff.db"
+    ids: list[str] = []
+    if database.exists():
+        ids = sessions_in(database)
     path = subprocess.run(["which", "copilot"], capture_output=True, text=True).stdout.strip()
     client = CopilotClient(connection=RuntimeConnection.for_stdio(path=path))
     await client.start()
+    # Also whatever the database does not list (a crash, a delete that failed): every session
+    # that worked in this run's temporary folders.
+    root = str(data.resolve().parent) + "/"
+    for meta in await client.list_sessions():
+        folder = (meta.context.working_directory if meta.context else "") or ""
+        if folder.startswith(root) and meta.session_id not in ids:
+            ids.append(meta.session_id)
     for session_id in ids:
         try:
             await client.delete_session(session_id)
