@@ -31,10 +31,16 @@ tool allowlist, permission and request callbacks, sandbox, model.
 | Module | Responsibility |
 | --- | --- |
 | `__main__.py`, `web.py` | Command line; HTTP API, auth (launch token cookie, same-origin writes, CSP), SSE. |
-| `runtime.py` | Coordination: sessions' lifecycle, tools (`t_*`), event handling, scheduling, Router rotation, drafts, focus, the UI snapshot. |
-| `state.py` | Per-session in-memory state (connection, turn flags) and the lock order. |
+| `runtime.py` | `Runtime`: the Copilot connection, each session's lifecycle (create, resume, rotate), session options, external events and threads, the UI snapshot. It creates the parts below; each keeps a reference to it. |
+| `events.py` | What sessions report as they work: one small handler per event type. |
 | `delivery.py` | Messages to sessions: stored, batched, sent, checked after a restart. |
-| `tasks.py` | Tasks, runs and dependencies; status transitions. |
+| `workers.py` | The worker queue (`max_workers`, dependencies), starting, closing, reopening, interrupting. |
+| `tasks.py` | Tasks, runs and dependencies as records; status transitions. |
+| `task_actions.py` | What happens to tasks: reports, cancel, accept, retry, follow-up; receipts and the shareable report. |
+| `tools.py` | Every tool a session can call, with its argument model; which role gets which. |
+| `drafts.py` | Drafts the owner approves (Slack replies, PR reviews, a task's folder); interrupted sends. |
+| `focus.py` | Focus Shield. |
+| `state.py` | Per-session in-memory state (connection, turn flags) and the lock order. |
 | `receipts.py` | Observed commands, changes and PR checks next to a report. |
 | `workspaces.py` | Worker folders, worktrees, clones, change stats. |
 | `policy.py` | Pure permission rules for actions without the sandbox. |
@@ -43,11 +49,11 @@ tool allowlist, permission and request callbacks, sandbox, model.
 | `asks.py` | Cards for the owner (questions, forms, sign-ins), questions between sessions, environment notes. |
 | `envelope.py` | The envelope every message to a session is wrapped in. |
 | `catalog.py` | Keyword ranking that finds the worker that owns a subject. |
-| `watchdog.py` | Cheap checks that decide when a worker deserves a review. |
+| `watchdog.py` | Cheap checks that decide when a worker deserves a review, and the Watchdog session that reviews it. |
 | `sources/` | Watchers: Slack (MCP search), GitHub (`gh`). |
 | `store.py` | SQLite: schema, migrations, small helpers. |
 | `bus.py` | Fan-out of UI events to browser tabs. |
-| `static/` | The UI: plain HTML, CSS and JavaScript, no build step. |
+| `static/` | The UI: plain HTML, CSS and JavaScript modules, no build step. |
 
 ## The agent backend
 
@@ -95,7 +101,8 @@ cancellation; usage and observed commands are counted per run. A report names it
 
 ## Events
 
-`Runtime.handle_event` runs on the event loop for every session event:
+`Events.handle_event` (`events.py`) runs on the event loop for every session event and passes it
+to the handler for its type:
 
 | Event | Effect |
 | --- | --- |
@@ -121,7 +128,7 @@ sessions, triggers, subscriptions, usage, settings, and a key-value table for ma
 What belongs to the running process is in `SessionState` (`state.py`): the live connection and
 the current turn's flags. Coroutines interleave at every `await`, so the locks are taken in a
 fixed order: rotation, then a session's lifecycle lock, then its sending lock, then the worker
-slot lock (never across a session lock).
+slot lock (`Workers.pump_lock`, never across a session lock).
 
 ## Restart
 
@@ -138,6 +145,9 @@ both Copilot sessions to the same Router.
 
 ## The UI
 
-`static/app.js` loads a snapshot (`/api/state`) and then applies SSE events (`message`,
-`session`, `task`, `draft`, `toast`, `state`, `focus_summary`). Writes are REST calls. Cards are
-reconciled by key, so a half-typed reply survives updates. There is no build step.
+The UI is plain ES modules in `static/`, with no build step: `app.js` starts the page;
+`state.js` loads a snapshot (`/api/state`) and applies SSE events (`message`, `session`, `task`,
+`draft`, `toast`, `state`, `focus_summary`); `inbox.js`, `session.js`, `sidebar.js`, `drafts.js`
+and `settings.js` render their parts; `dom.js` and `text.js` are helpers (the Markdown subset is
+escaped first). Writes are REST calls. Cards are reconciled by key and refreshed in place, so a
+half-typed reply survives updates. ESLint checks the modules in CI.

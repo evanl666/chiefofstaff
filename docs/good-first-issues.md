@@ -8,11 +8,11 @@ issue (or open one) before you start, so two people do not do the same one.
    [CONTRIBUTING.md](../CONTRIBUTING.md#add-an-event-source). Test with a fake client.
 2. **Linear or Jira issues assigned to you** become events for the Router. Same pattern; the
    Router prompt may need one line on what to do with them.
-3. **Recognize more test and build commands** in `receipts.py` (Bazel, Nx, Pants, Turborepo,
-   `deno test`). Add cases to `tests/test_receipts.py`.
+3. **Recognize more test and build commands** in `receipts.py` (Nx, Pants, Turborepo, Buck,
+   `just test`). Add cases to `tests/test_receipts.py`.
 4. **Keyboard shortcuts** in the inbox: `j`/`k` to move between cards, `a` to accept, `f` to
-   follow up, `?` for help. Plain JavaScript in `static/app.js`; add a step to
-   `scripts/demo_smoke.py`.
+   follow up, `?` for help. Plain JavaScript in `static/inbox.js` (cards) and `static/app.js`
+   (wiring); add a step to `scripts/demo_smoke.py`.
 5. **A weekly recap card**: what finished, what it cost, which workers were reused. Builds on
    `digest.py`; test like `test_daily_digest_once_a_day_and_only_when_useful`.
 6. **Approve from your phone**: send cards that need you to a Slack DM to yourself (or ntfy)
