@@ -1,12 +1,12 @@
 # Chief of Staff
 
-**English** · [简体中文](https://github.com/evanl666/chiefofstaff/blob/main/README.zh-CN.md)
+**English** · [简体中文](README.zh-CN.md)
 
 One inbox for all your GitHub Copilot sessions. Tell it what you need. It gives each task to
 its own Copilot session, sends follow-ups to the session that already has the context, drafts
 your Slack replies, and lets you know when something is ready to review.
 
-![The inbox, with finished tasks waiting for review](https://raw.githubusercontent.com/evanl666/chiefofstaff/main/docs/images/inbox-review.png)
+![The inbox, with finished tasks waiting for review](docs/images/inbox-review.png)
 
 Try it with scripted sessions first. No account needed:
 
@@ -45,7 +45,7 @@ Now I talk to one session, the Router, and Chief of Staff keeps track of the res
 It runs on the Copilot you already have: your plan, your models, your MCP servers and your
 company's policies. No other AI service or API key.
 
-![Approving a Slack reply](https://raw.githubusercontent.com/evanl666/chiefofstaff/main/docs/images/approve-dark.png)
+![Approving a Slack reply](docs/images/approve-dark.png)
 
 ## Install
 
@@ -80,7 +80,7 @@ There are a few separate sign-ins. Only the first one is required.
 3. **GitHub**, to review PRs you're asked to review: `gh auth login`. With the sandbox on, also
    run `copilot sandbox ca create && copilot sandbox ca trust` once, so `gh` works inside it.
 4. **Slack and other services.** Paste a Slack user token in Settings
-   ([how to get one](https://github.com/evanl666/chiefofstaff/blob/main/docs/guide.md#slack)).
+   ([how to get one](docs/guide.md#slack)).
    When a worker needs another service, like your docs or issue tracker, a sign-in card shows
    up in the inbox.
 
@@ -100,9 +100,9 @@ Sessions never talk to each other directly. They call tools like `spawn_worker`,
 `ask_session`, and Chief of Staff delivers the message. Each message is saved before it's sent
 and labeled with who it's from, so a Slack message can't pass itself off as you.
 
-- [User guide](https://github.com/evanl666/chiefofstaff/blob/main/docs/guide.md)
-- [Architecture](https://github.com/evanl666/chiefofstaff/blob/main/docs/ARCHITECTURE.md)
-- [Security](https://github.com/evanl666/chiefofstaff/blob/main/SECURITY.md): what the OS
+- [User guide](docs/guide.md)
+- [Architecture](docs/ARCHITECTURE.md)
+- [Security](SECURITY.md): what the OS
   sandbox enforces, what Chief of Staff enforces, and what relies on the model following
   instructions.
 
@@ -112,8 +112,8 @@ Early (0.1). Expect rough edges. Copilot usage counts against your plan like any
 session, and the inbox shows the credits each task used.
 
 Bug reports and ideas are welcome as issues. If you'd like to contribute, start with
-[CONTRIBUTING.md](https://github.com/evanl666/chiefofstaff/blob/main/CONTRIBUTING.md) and the
-[good first issues](https://github.com/evanl666/chiefofstaff/blob/main/docs/good-first-issues.md).
+[CONTRIBUTING.md](CONTRIBUTING.md) and the
+[good first issues](docs/good-first-issues.md).
 
 ## License
 
