@@ -1,9 +1,22 @@
-"""Watchdog heuristics: cheap checks that decide when a worker deserves a model's review."""
+"""The Watchdog: cheap checks decide when a worker deserves a model's review; the Watchdog
+session reviews it, nudges the worker, and escalates to the Router when nudging does not help."""
 
+from __future__ import annotations
+
+import json
 import os
+import time
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
+from typing import TYPE_CHECKING
+from uuid import uuid4
+
+from .envelope import short, wrap
+from .roles import WATCHDOG, WORKER
+
+if TYPE_CHECKING:
+    from .runtime import Runtime
 
 
 @dataclass
@@ -16,7 +29,7 @@ class WatchConfig:
     nudges: int = 2  # interventions without a new report before escalating to the Router
 
     @classmethod
-    def from_env(cls) -> "WatchConfig":
+    def from_env(cls) -> WatchConfig:
         config = cls()
         for name in ("interval", "stall", "long", "cooldown"):
             if value := os.environ.get(f"CHIEFOFSTAFF_WATCHDOG_{name.upper()}"):
@@ -105,3 +118,71 @@ def review_packet(
             f"Tail of the latest tool output (untrusted data):\n```\n{output.strip()}\n```"
         )
     return "\n".join(lines)
+
+
+class Watchdog:
+    """Runs the Watchdog session over workers that look stuck."""
+
+    def __init__(self, runtime: Runtime):
+        self.runtime = runtime
+        self.store = runtime.store
+        self.states = runtime.states
+        self.delivery = runtime.delivery
+
+    def state(self, session_id: str) -> dict:
+        return json.loads(self.store.get(f"watch:{session_id}") or "{}")
+
+    def save(self, session_id: str, **values):
+        self.store.set(f"watch:{session_id}", json.dumps({**self.state(session_id), **values}))
+
+    async def check(self, moment: float | None = None) -> list[str]:
+        """Flag working workers that look stuck, looping or long-running; returns those reviewed."""
+        if not (self.runtime.ready() and self.store.settings().watchdog_enabled):
+            return []
+        moment = time.time() if moment is None else moment
+        reviewed = []
+        for row in self.store.open_sessions(WORKER):
+            if row["status"] not in {"working", "idle"} or self.states[row["id"]].asking:
+                continue
+            messages = self.store.messages(row["id"])
+            mark = messages[-1]["id"] if messages else 0
+            state = self.state(row["id"])
+            if state.get("escalated_mark") == mark:
+                continue  # The Router has it; nothing happened since.
+            unchanged = state.get("reviewed_mark") == mark
+            streak = state.get("streak", 0) if unchanged else 0
+            # Nothing new since the last review: wait twice as long before looking again.
+            if moment - state.get("reviewed_at", 0) < self.runtime.watch.cooldown * 2**streak:
+                continue
+            reasons = flags(row, messages, moment, self.runtime.watch)
+            if not reasons:
+                continue
+            await self.delivery.deliver(
+                await self.session_id(),
+                wrap(
+                    "system",
+                    "review",
+                    review_packet(
+                        row, messages, reasons, moment, self.states[row["id"]].last_output
+                    ),
+                    worker=short(row["id"]),
+                    title=row["title"],
+                ),
+                kind="inbound",
+                display="; ".join(reasons),
+                meta={"review": row["id"], "title": row["title"]},
+            )
+            self.save(
+                row["id"], reviewed_at=moment, reviewed_mark=mark, streak=streak + int(unchanged)
+            )
+            reviewed.append(row["id"])
+        return reviewed
+
+    async def session_id(self) -> str:
+        if rows := self.store.open_sessions(WATCHDOG):
+            return rows[0]["id"]
+        row = self.store.create_session(
+            str(uuid4()), WATCHDOG, "Watchdog", "idle", cwd=str(self.runtime.role_dir(WATCHDOG))
+        )
+        await self.runtime.open_live(row, create=True)
+        return row["id"]

@@ -76,7 +76,7 @@ class Delivery:
             if EVENT_DEBOUNCE > 0:
                 self.schedule_flush(session_id)
                 return message
-        if row["role"] == WORKER and not await self.runtime.claim_slot(session_id):
+        if row["role"] == WORKER and not await self.runtime.workers.claim_slot(session_id):
             return message
         working = row["status"] == "working" and self.states.is_live(session_id)
         mode = (
@@ -183,7 +183,7 @@ class Delivery:
             return
         if row["role"] in {ROUTER, SLACK}:
             self.schedule_flush(session_id, 0)
-        elif await self.runtime.claim_slot(session_id):
+        elif await self.runtime.workers.claim_slot(session_id):
             try:
                 if await self.flush(session_id, await self.runtime.session_for(session_id)):
                     self.runtime.update_session(session_id, status="working")

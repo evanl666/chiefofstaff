@@ -11,7 +11,7 @@ this order, and none is held while waiting for the owner:
 1. ``Runtime.rotate_lock``: Router rotation.
 2. ``SessionState.lifecycle``: connecting, resuming or replacing one session's Copilot session.
 3. ``SessionState.sending``: one send at a time per session, together with its ``sent:`` mark.
-4. ``Runtime.pump_lock``: worker slots; held only around reads and writes, never across a
+4. ``Workers.pump_lock``: worker slots; held only around reads and writes, never across a
    session lock.
 """
 

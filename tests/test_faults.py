@@ -141,7 +141,7 @@ async def test_cancelling_a_running_task_frees_its_slot(tmp_path):
 
     running, waiting = await spawn("Long build"), await spawn("Next")
     assert waiting["status"] == "queued"
-    await runtime.cancel_task(running["task_id"], "Wrong branch")
+    await runtime.task_actions.cancel(running["task_id"], "Wrong branch")
     await settle(runtime)
     assert harness.session(running["session_id"]).aborted, "the turn and its command stop"
     assert harness.store.session(waiting["session_id"])["status"] == "working"
@@ -175,7 +175,7 @@ async def test_drafts_interrupted_while_sending_are_checked_before_anything_is_r
     harness.gh_replies["api repos/acme/app/pulls/7/reviews"] = json.dumps(
         [{"body": "Something else", "html_url": "https://github.com/acme/app/pull/7#r1"}]
     )
-    await runtime.check_uncertain_drafts()
+    await runtime.drafts.check_uncertain()
     assert harness.store.draft(slack["id"])["status"] == "sent"
     assert harness.store.draft(review["id"])["status"] == "pending", "not published: approve again"
     assert harness.store.draft(lost["id"])["status"] == "uncertain", "Slack search may lag"
@@ -202,9 +202,9 @@ async def test_the_owner_can_settle_a_draft_while_it_is_being_checked(tmp_path):
         return ""
 
     runtime.github.find_review = slow
-    check = asyncio.create_task(runtime.check_uncertain_drafts())
+    check = asyncio.create_task(runtime.drafts.check_uncertain())
     await looking.wait()
-    await runtime.resolve_draft(review["id"], DraftDecision(action="reject"))
+    await runtime.drafts.resolve(review["id"], DraftDecision(action="reject"))
     answer.set()
     await check
     assert harness.store.draft(review["id"])["status"] == "rejected", "dropped stays dropped"
@@ -220,9 +220,9 @@ async def test_the_owner_settles_an_interrupted_draft(tmp_path):
         harness.router_id, "slack", {"channel_id": "C1", "thread_ts": "", "to": "Ann"}, "No"
     )
     harness.store.execute("UPDATE drafts SET status='uncertain'")
-    marked = await runtime.resolve_draft(sent["id"], DraftDecision(action="mark_sent"))
+    marked = await runtime.drafts.resolve(sent["id"], DraftDecision(action="mark_sent"))
     assert marked["status"] == "sent"
-    resent = await runtime.resolve_draft(again["id"], DraftDecision(action="send"))
+    resent = await runtime.drafts.resolve(again["id"], DraftDecision(action="send"))
     assert resent["status"] == "sent"
     assert [
         call[1]["message"] for call in harness.mcp.calls if call[0] == "slack_send_message"

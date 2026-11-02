@@ -169,12 +169,12 @@ def create_app(
 
     @app.post("/api/profile")
     async def save_profile(payload: ProfileText):
-        await runtime.save_profile(payload.text)
+        await runtime.toolset.save_profile(payload.text)
         return runtime.snapshot()
 
     @app.post("/api/setup-notes")
     async def save_setup_notes(payload: SetupNotes):
-        await runtime.edit_setup_notes(payload.text, payload.initial)
+        await runtime.asks.edit_setup_notes(payload.text, payload.initial)
         return runtime.snapshot()
 
     @app.post("/api/profile/discard")
@@ -191,7 +191,7 @@ def create_app(
 
     @app.post("/api/focus")
     async def focus(payload: FocusRequest):
-        return await runtime.start_focus(payload.minutes)
+        return await runtime.focus.start(payload.minutes)
 
     @app.post("/api/projects")
     async def add_project(payload: ProjectPath):
@@ -199,36 +199,38 @@ def create_app(
 
     @app.get("/api/tasks/{task_id}")
     async def task(task_id: str):
-        return runtime.task_view(runtime.tasks.get(task_id))
+        return runtime.task_actions.view(runtime.tasks.get(task_id))
 
     @app.get("/api/tasks/{task_id}/report")
     async def task_report(task_id: str):
-        return {"markdown": runtime.task_report(task_id)}
+        return {"markdown": runtime.task_actions.report_markdown(task_id)}
 
     @app.post("/api/tasks/{task_id}/accept")
     async def accept_task(task_id: str):
-        return runtime.task_view(runtime.accept_task(task_id))
+        return runtime.task_actions.view(runtime.task_actions.accept(task_id))
 
     @app.post("/api/tasks/{task_id}/cancel")
     async def cancel_task(task_id: str, payload: TaskNote):
-        return runtime.task_view(await runtime.cancel_task(task_id, payload.text))
+        return runtime.task_actions.view(await runtime.task_actions.cancel(task_id, payload.text))
 
     @app.post("/api/tasks/{task_id}/retry")
     async def retry_task(task_id: str, payload: TaskNote):
-        return runtime.task_view(await runtime.retry_task(task_id, payload.text))
+        return runtime.task_actions.view(await runtime.task_actions.retry(task_id, payload.text))
 
     @app.post("/api/tasks/{task_id}/follow-up")
     async def follow_up_task(task_id: str, payload: OwnerMessage):
-        return runtime.task_view(await runtime.follow_up_task(task_id, payload.text))
+        return runtime.task_actions.view(
+            await runtime.task_actions.follow_up(task_id, payload.text)
+        )
 
     @app.post("/api/sessions/{session_id}/stop")
     async def stop(session_id: str):
-        await runtime.interrupt(session_id)
+        await runtime.workers.interrupt(session_id)
         return {"ok": True}
 
     @app.post("/api/sessions/{session_id}/reopen")
     async def reopen(session_id: str):
-        return await runtime.reopen(session_id)
+        return await runtime.workers.reopen(session_id)
 
     @app.post("/api/sessions/{session_id}/yolo")
     async def session_yolo(session_id: str, payload: SessionYolo):
@@ -240,20 +242,20 @@ def create_app(
 
     @app.post("/api/sessions/{session_id}/close")
     async def close(session_id: str):
-        await runtime.close_session(session_id)
+        await runtime.workers.close(session_id)
         return {"ok": True}
 
     @app.get("/api/external")
     async def external(refresh: bool = False):
-        return await runtime.external_sessions(refresh)
+        return await runtime.workers.external(refresh)
 
     @app.post("/api/external/{session_id}/adopt")
     async def adopt(session_id: str):
-        return await runtime.adopt(session_id)
+        return await runtime.workers.adopt(session_id)
 
     @app.post("/api/drafts/{draft_id}")
     async def resolve(draft_id: str, decision: DraftDecision):
-        return await runtime.resolve_draft(draft_id, decision)
+        return await runtime.drafts.resolve(draft_id, decision)
 
     @app.post("/api/settings")
     async def save_settings(settings: Settings):

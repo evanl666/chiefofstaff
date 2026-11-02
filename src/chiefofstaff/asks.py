@@ -8,12 +8,14 @@ each other.
 - Session questions: a worker asks another worker (or the Router) and gets the answer back.
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
 import os
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -21,6 +23,9 @@ from pydantic import BaseModel, Field
 from .envelope import sender, wrap
 from .models import DraftDecision
 from .store import now
+
+if TYPE_CHECKING:
+    from .runtime import Runtime
 
 logger = logging.getLogger(__name__)
 
@@ -114,8 +119,21 @@ def form_values(schema: dict, content: dict[str, Any]) -> dict[str, Any]:
     return values
 
 
-class OwnerAsks:
-    """Mixed into Runtime: requests to the owner, environment notes and session questions."""
+class Asks:
+    """Requests to the owner, environment notes and questions between sessions."""
+
+    def __init__(self, runtime: Runtime):
+        self.runtime = runtime
+        self.store = runtime.store
+        self.bus = runtime.bus
+        self.states = runtime.states
+        self.delivery = runtime.delivery
+        # Open requests to the owner (draft id -> answer) and MCP sign-ins being completed.
+        self.requests: dict[str, asyncio.Future] = {}
+        self.signins: dict[tuple[str, str], asyncio.Event] = {}
+        self.signin_locks: dict[str, asyncio.Lock] = {}
+        self.signin_pending: dict[str, asyncio.Event] = {}
+        self.signin_declined: dict[str, float] = {}
 
     # Requests
 
@@ -148,16 +166,18 @@ class OwnerAsks:
         """
         row = self.store.session(session_id)
         draft = self.store.create_draft(session_id, kind, target, text)
-        self.add_message(
+        self.runtime.add_message(
             session_id, "draft", text, {"draft_id": draft["id"], "label": LABELS[kind]}
         )
         self.bus.publish("draft", draft)
         who = "Chief of Staff" if row["role"] != "worker" else row["title"]
-        self.alert(text, session_id=session_id, needs_action=True, title=f"{LABELS[kind]} · {who}")
-        answer = self.loop.create_future()
+        self.runtime.alert(
+            text, session_id=session_id, needs_action=True, title=f"{LABELS[kind]} · {who}"
+        )
+        answer = self.runtime.loop.create_future()
         self.requests[draft["id"]] = answer
         self.states[session_id].asking[draft["id"]] = text
-        self.publish_session(self.store.session(session_id))
+        self.runtime.publish_session(self.store.session(session_id))
         finished = asyncio.ensure_future(done.wait()) if done else None
         try:
             waiting = {answer} | ({finished} if finished else set())
@@ -177,7 +197,7 @@ class OwnerAsks:
                 finished.cancel()
             self.states[session_id].asking.pop(draft["id"], None)
             if row := self.store.find_session(session_id):
-                self.publish_session(row)
+                self.runtime.publish_session(row)
 
     def cancel_requests(self, session_id: str, reason: str):
         """The session is closed or stopped: its open cards end and it stops waiting."""
@@ -225,7 +245,7 @@ class OwnerAsks:
     # Copilot callbacks (workers only, except the sign-in check)
 
     async def on_user_input(self, request: dict, context: dict) -> dict:
-        session_id = self.row_id(context.get("sessionId") or context.get("session_id", ""))
+        session_id = self.runtime.row_id(context.get("sessionId") or context.get("session_id", ""))
         question = (request.get("question") or "").strip() or "The session has a question."
         target = {
             "question": question[:2000],
@@ -241,7 +261,7 @@ class OwnerAsks:
         return result
 
     async def on_elicitation(self, context: dict) -> dict:
-        session_id = self.row_id(context.get("session_id", ""))
+        session_id = self.runtime.row_id(context.get("session_id", ""))
         source = context.get("elicitationSourceDisplayName") or context.get(
             "elicitationSource", "A tool"
         )
@@ -261,7 +281,7 @@ class OwnerAsks:
     async def on_mcp_auth(self, request: dict, context: dict) -> dict:
         """An MCP server needs sign-in: one card per server; later sessions reuse the sign-in."""
         cancelled = {"kind": "cancelled"}
-        session_id = self.row_id(context.get("sessionId", ""))
+        session_id = self.runtime.row_id(context.get("sessionId", ""))
         row = self.store.find_session(session_id)
         server = request.get("serverName", "")
         if not row or row["role"] != "worker" or not server:
@@ -278,7 +298,7 @@ class OwnerAsks:
                 if not session:
                     return cancelled
                 try:
-                    url = await self.backend.mcp_sign_in_url(session, server)
+                    url = await self.runtime.backend.mcp_sign_in_url(session, server)
                     url = http_url(url) if url else ""
                 except Exception:
                     logger.warning("Could not start sign-in to %s.", server, exc_info=True)
@@ -327,7 +347,7 @@ class OwnerAsks:
             return
         session = self.states.handle(session_id)
         if session and self.states[session_id].busy and row["status"] == "working":
-            self.add_message(session_id, "notice", text)
+            self.runtime.add_message(session_id, "notice", text)
             try:
                 await session.send(wrap("system", "system", text), mode="immediate")
                 return
@@ -367,8 +387,8 @@ class OwnerAsks:
     async def save_setup_notes(self, notes: dict[str, dict]):
         trimmed = dict(list(notes.items())[-MAX_NOTES:])
         self.store.set("setup_notes", json.dumps(trimmed))
-        self.publish_state()
-        await self.refresh("router")  # Workers started from now on get the notes too.
+        self.runtime.publish_state()
+        await self.runtime.refresh("router")  # Workers started from now on get the notes too.
 
     async def edit_setup_notes(self, text: str, initial: str):
         """The owner's edit in Settings ("topic: note" per line), applied as changes to what they
@@ -392,7 +412,7 @@ class OwnerAsks:
         await self.save_setup_notes(notes)
 
     async def t_record_setup(self, params: RecordSetup, caller: str):
-        row = self.caller(caller, "worker")
+        row = self.runtime.toolset.caller(caller, "worker")
         if row["slack"]:
             raise ValueError("Workers that read Slack cannot record environment notes.")
         topic = " ".join(params.topic.split())[:60]
@@ -404,8 +424,8 @@ class OwnerAsks:
         if note:
             notes[topic] = {"note": note, "by": row["title"], "at": now()}
         await self.save_setup_notes(notes)
-        self.add_message(
-            self.router_id(),
+        self.runtime.add_message(
+            self.runtime.router_id(),
             "notice",
             f"Environment note “{topic}” {'recorded' if note else 'removed'} by “{row['title']}”",
             {"session_id": caller},
@@ -460,7 +480,7 @@ class OwnerAsks:
                 )
 
     async def t_ask_session(self, params: AskSession, caller: str):
-        asker = self.caller(caller, "worker")
+        asker = self.runtime.toolset.caller(caller, "worker")
         try:
             target = self.store.session(params.session_id)
         except LookupError:
@@ -483,7 +503,7 @@ class OwnerAsks:
         title = "the Router" if target["role"] == "router" else f"“{target['title']}”"
         try:
             if target["closed_at"]:
-                await self.reopen(target["id"])
+                await self.runtime.workers.reopen(target["id"])
             await self.delivery.deliver(
                 target["id"],
                 wrap(
@@ -500,7 +520,7 @@ class OwnerAsks:
         except Exception:
             self.store.execute("DELETE FROM questions WHERE id=?", (question_id,))
             raise
-        self.add_message(
+        self.runtime.add_message(
             caller,
             "ask",
             params.question[:4000],
@@ -512,7 +532,7 @@ class OwnerAsks:
         )
 
     async def t_answer_session(self, params: AnswerSession, caller: str):
-        row = self.caller(caller, "worker", "router")
+        row = self.runtime.toolset.caller(caller, "worker", "router")
         question = self.question(params.question_id)
         if not question or question["target"] != caller:
             raise ValueError("No such question for you.")

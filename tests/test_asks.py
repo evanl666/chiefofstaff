@@ -30,15 +30,15 @@ async def test_a_worker_asks_the_owner_and_waits_for_the_answer(harness):
     runtime = await harness.connect()
     worker = await spawn(runtime, harness.router_id, "Pick a color")
     request = {"question": "Red or blue?", "choices": ["red", "blue"], "allowFreeform": True}
-    answer = asyncio.create_task(runtime.on_user_input(request, {"sessionId": worker}))
+    answer = asyncio.create_task(runtime.asks.on_user_input(request, {"sessionId": worker}))
     draft = await pending(harness, "question")
     assert draft["target"]["choices"] == ["red", "blue"] and draft["session_id"] == worker
     assert runtime.view(harness.store.session(worker))["status"] == "waiting"
     assert harness.store.messages(worker)[-1]["meta"]["label"] == "Question"
 
     with pytest.raises(ValueError, match="Write an answer"):
-        await runtime.resolve_draft(draft["id"], DraftDecision(action="answer", text=" "))
-    await runtime.resolve_draft(draft["id"], DraftDecision(action="answer", text="blue"))
+        await runtime.drafts.resolve(draft["id"], DraftDecision(action="answer", text=" "))
+    await runtime.drafts.resolve(draft["id"], DraftDecision(action="answer", text="blue"))
     assert await answer == {"answer": "blue", "wasFreeform": False}
     assert runtime.view(harness.store.session(worker))["status"] == "working"
     assert harness.store.draft(draft["id"])["status"] == "answered"
@@ -59,22 +59,22 @@ async def test_forms_and_links_from_mcp_tools(harness):
         "mode": "form",
         "elicitationSource": "jira",
     }
-    form = asyncio.create_task(runtime.on_elicitation(context))
+    form = asyncio.create_task(runtime.asks.on_elicitation(context))
     draft = await pending(harness, "form")
     assert draft["text"] == "jira: Which project?"
     with pytest.raises(ValueError, match="key is required"):
-        await runtime.resolve_draft(draft["id"], DraftDecision(action="answer", content={}))
+        await runtime.drafts.resolve(draft["id"], DraftDecision(action="answer", content={}))
     decision = DraftDecision(action="answer", content={"key": "ABC", "count": "3"})
-    await runtime.resolve_draft(draft["id"], decision)
+    await runtime.drafts.resolve(draft["id"], decision)
     assert await form == {"action": "accept", "content": {"key": "ABC", "count": 3}}
     assert harness.store.draft(draft["id"])["outcome"] == "Submitted", "values stay private"
 
     bad = {"session_id": worker, "message": "Go", "mode": "url", "url": "javascript:alert(1)"}
-    assert await runtime.on_elicitation(bad) == {"action": "decline"}
+    assert await runtime.asks.on_elicitation(bad) == {"action": "decline"}
     link = {**bad, "url": "https://example.com/consent"}
-    opened = asyncio.create_task(runtime.on_elicitation(link))
+    opened = asyncio.create_task(runtime.asks.on_elicitation(link))
     draft = await pending(harness, "link")
-    await runtime.resolve_draft(draft["id"], DraftDecision(action="reject"))
+    await runtime.drafts.resolve(draft["id"], DraftDecision(action="reject"))
     assert await opened == {"action": "decline"}
 
 
@@ -83,7 +83,7 @@ async def test_mcp_sign_in_asks_once_and_closes_by_itself(harness):
     worker = await spawn(runtime, harness.router_id, "Read the launch doc")
     session = harness.session(worker)
     request = {"requestId": "r1", "serverName": "docs", "serverUrl": "https://docs.example.com"}
-    signing = asyncio.create_task(runtime.on_mcp_auth(request, {"sessionId": worker}))
+    signing = asyncio.create_task(runtime.asks.on_mcp_auth(request, {"sessionId": worker}))
     draft = await pending(harness, "signin")
     assert draft["target"] == {"server": "docs", "url": session.login_url}
     assert session.sent[-1].startswith(env("system", "system", "docs needs sign-in")[:-11])
@@ -97,23 +97,25 @@ async def test_mcp_sign_in_asks_once_and_closes_by_itself(harness):
     )
 
     session.login_url = ""  # Copilot kept the credentials: nothing to ask.
-    assert await runtime.on_mcp_auth(request, {"sessionId": worker}) == {"kind": "cancelled"}
+    assert await runtime.asks.on_mcp_auth(request, {"sessionId": worker}) == {"kind": "cancelled"}
     assert not [d for d in harness.store.drafts() if d["kind"] == "signin"]
     router = harness.session(harness.router_id)
-    assert await runtime.on_mcp_auth(request, {"sessionId": harness.router_id})
+    assert await runtime.asks.on_mcp_auth(request, {"sessionId": harness.router_id})
     assert router.logins == [], "only workers sign in"
 
 
 async def test_requests_do_not_survive_a_restart(harness):
     runtime = await harness.connect()
     worker = await spawn(runtime, harness.router_id, "Ask")
-    asking = asyncio.create_task(runtime.on_user_input({"question": "Ok?"}, {"sessionId": worker}))
+    asking = asyncio.create_task(
+        runtime.asks.on_user_input({"question": "Ok?"}, {"sessionId": worker})
+    )
     draft = await pending(harness, "question")
-    runtime.requests.clear()  # As after a restart: nobody waits for this answer any more.
-    runtime.expire_requests()
+    runtime.asks.requests.clear()  # As after a restart: nobody waits for this answer any more.
+    runtime.asks.expire_requests()
     assert harness.store.draft(draft["id"])["status"] == "expired"
     with pytest.raises(ValueError, match="already handled"):
-        await runtime.resolve_draft(draft["id"], DraftDecision(action="answer", text="yes"))
+        await runtime.drafts.resolve(draft["id"], DraftDecision(action="answer", text="yes"))
     asking.cancel()
 
 
@@ -123,7 +125,7 @@ async def test_environment_notes_are_shared(harness):
     setup = await spawn(runtime, router, "Set up docs access")
     note = "company MCP server 'docs' (read_doc); signed in via its card on Nov 1"
     await call_tool(runtime, "record_setup", setup, topic="Google Docs", note=note)
-    assert runtime.setup_notes()["Google Docs"]["note"] == note
+    assert runtime.asks.setup_notes()["Google Docs"]["note"] == note
     assert harness.store.messages(router)[-1]["text"].startswith("Environment note “Google Docs”")
     later = await spawn(runtime, router, "Summarize the plan")
     prompt = harness.session(later).options["system_message"]["content"]
@@ -135,16 +137,16 @@ async def test_environment_notes_are_shared(harness):
     assert "cannot record" in refused.text_result_for_llm
     shown = f"Google Docs: {note}"
     await call_tool(runtime, "record_setup", setup, topic="Figma", note="desktop app only")
-    await runtime.edit_setup_notes(
+    await runtime.asks.edit_setup_notes(
         "Google Docs: use the docs MCP\nnot a note\nJira: via jira CLI", shown
     )
-    notes = runtime.setup_notes()
+    notes = runtime.asks.setup_notes()
     assert notes["Google Docs"]["note"] == "use the docs MCP" and notes["Jira"]["by"] == "owner"
     assert "Figma" in notes, "a note recorded while the owner edited is kept"
-    await runtime.edit_setup_notes(
+    await runtime.asks.edit_setup_notes(
         "Jira: via jira CLI", "Google Docs: use the docs MCP\nJira: via jira CLI"
     )
-    assert sorted(runtime.setup_notes()) == ["Figma", "Jira"]
+    assert sorted(runtime.asks.setup_notes()) == ["Figma", "Jira"]
 
 
 async def test_sessions_ask_each_other(harness):
@@ -204,16 +206,16 @@ async def test_messages_during_a_card_do_not_leave_the_worker_waiting(harness):
     session.emit("session.idle")
     await settle(runtime)
     asking = asyncio.create_task(
-        runtime.on_user_input({"question": "Ship?"}, {"sessionId": worker})
+        runtime.asks.on_user_input({"question": "Ship?"}, {"sessionId": worker})
     )
     draft = await pending(harness, "question")
     await runtime.owner_send(worker, "Also update the changelog")
-    await runtime.resolve_draft(draft["id"], DraftDecision(action="answer", text="yes"))
+    await runtime.drafts.resolve(draft["id"], DraftDecision(action="answer", text="yes"))
     await asking
     session.emit("session.idle")
     await settle(runtime)
     assert runtime.view(harness.store.session(worker))["status"] != "waiting"
-    assert await runtime.watch_once() is not None
+    assert await runtime.watchdog.check() is not None
 
 
 async def test_closing_a_worker_ends_its_cards_and_frees_the_sign_in(harness):
@@ -221,28 +223,28 @@ async def test_closing_a_worker_ends_its_cards_and_frees_the_sign_in(harness):
     first = await spawn(runtime, harness.router_id, "Read docs one")
     second = await spawn(runtime, harness.router_id, "Read docs two")
     request = {"requestId": "r", "serverName": "docs", "serverUrl": "https://docs.example.com"}
-    one = asyncio.create_task(runtime.on_mcp_auth(request, {"sessionId": first}))
+    one = asyncio.create_task(runtime.asks.on_mcp_auth(request, {"sessionId": first}))
     card = await pending(harness, "signin")
-    two = asyncio.create_task(runtime.on_mcp_auth(request, {"sessionId": second}))
+    two = asyncio.create_task(runtime.asks.on_mcp_auth(request, {"sessionId": second}))
     await asyncio.sleep(0)
     assert harness.session(second).logins == [], "one card per server"
-    await runtime.close_session(first)
+    await runtime.workers.close(first)
     assert await one == {"kind": "cancelled"}
     assert harness.store.draft(card["id"])["status"] == "expired"
     card = await pending(harness, "signin")
     assert card["session_id"] == second, "closing is not 'not now': the next session asks"
-    await runtime.resolve_draft(card["id"], DraftDecision(action="answer"))
+    await runtime.drafts.resolve(card["id"], DraftDecision(action="answer"))
     assert await two == {"kind": "cancelled"}
     await settle(runtime)
     assert "You are signed in to docs" in harness.session(second).sent[-1]
 
     third = await spawn(runtime, harness.router_id, "Read docs three")
-    asking = asyncio.create_task(runtime.on_mcp_auth(request, {"sessionId": third}))
+    asking = asyncio.create_task(runtime.asks.on_mcp_auth(request, {"sessionId": third}))
     card = await pending(harness, "signin")
-    await runtime.resolve_draft(card["id"], DraftDecision(action="reject"))
+    await runtime.drafts.resolve(card["id"], DraftDecision(action="reject"))
     assert await asking == {"kind": "cancelled"}
     fourth = await spawn(runtime, harness.router_id, "Read docs four")
-    assert await runtime.on_mcp_auth(request, {"sessionId": fourth}) == {"kind": "cancelled"}
+    assert await runtime.asks.on_mcp_auth(request, {"sessionId": fourth}) == {"kind": "cancelled"}
     assert harness.session(fourth).logins == [], "after 'not now', others do not ask for a while"
 
 
@@ -250,12 +252,12 @@ async def test_a_failed_question_does_not_use_up_a_slot(harness, tmp_path):
     runtime = await harness.connect()
     asker = await spawn(runtime, harness.router_id, "Invoice bug")
     gone = await spawn(runtime, harness.router_id, "Old research")
-    await runtime.close_session(gone)
+    await runtime.workers.close(gone)
     harness.store.update_session(gone, cwd=str(tmp_path / "deleted"))
     for _ in range(6):
         failed = await call_tool(runtime, "ask_session", asker, session_id=gone, question="?")
         assert "directory is gone" in failed.text_result_for_llm
-    assert runtime.open_questions(asker) == []
+    assert runtime.asks.open_questions(asker) == []
     assert not harness.store.all("SELECT key FROM kv WHERE key LIKE 'question:%'")
 
 
@@ -301,14 +303,14 @@ async def test_questions_expire_or_end_with_their_session(harness):
 
     first = await ask(billing, "Which table?")
     second = await ask(audit, "Which log?")
-    assert [q["id"] for q in runtime.open_questions(asker)] == [first, second]
-    await runtime.close_session(billing)
-    assert runtime.question(first)["status"] == "cancelled"
+    assert [q["id"] for q in runtime.asks.open_questions(asker)] == [first, second]
+    await runtime.workers.close(billing)
+    assert runtime.asks.question(first)["status"] == "cancelled"
     assert "will not be answered: that session closed" in harness.session(asker).sent[-1]
-    assert await runtime.expire_questions(time.time() + 3 * 3600) == [second]
-    assert runtime.question(second)["status"] == "expired"
+    assert await runtime.asks.expire_questions(time.time() + 3 * 3600) == [second]
+    assert runtime.asks.question(second)["status"] == "expired"
     assert "got no answer in 2 hours" in harness.session(asker).sent[-1]
-    assert runtime.open_questions(asker) == []
+    assert runtime.asks.open_questions(asker) == []
 
 
 def test_old_questions_move_into_their_table(tmp_path):

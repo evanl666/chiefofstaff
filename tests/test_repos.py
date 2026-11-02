@@ -83,7 +83,7 @@ async def test_one_workspace_with_a_worktree_per_repository(tmp_path, monkeypatc
 
     async def may_write(path):
         request = SimpleNamespace(kind="write", file_name="", resolved_path=path)
-        decision = await runtime.on_permission(request, {"session_id": row["id"]})
+        decision = await runtime.events.on_permission(request, {"session_id": row["id"]})
         return type(decision).__name__ == "PermissionDecisionApproveOnce"
 
     assert await may_write(checkouts[1]["path"] + "/src/a.ts")
@@ -139,7 +139,7 @@ async def test_yolo_skips_permission_checks_globally_or_per_worker(tmp_path):
     push = SimpleNamespace(kind="shell", full_command_text="git push --force", possible_urls=[])
 
     async def allowed(session_id):
-        decision = await runtime.on_permission(push, {"session_id": session_id})
+        decision = await runtime.events.on_permission(push, {"session_id": session_id})
         return type(decision).__name__ == "PermissionDecisionApproveOnce"
 
     assert not await allowed(worker)
@@ -345,7 +345,7 @@ async def test_receipts_show_what_was_observed_next_to_the_report(tmp_path, git_
     )
     await asyncio.sleep(0.3)  # Evidence is collected in the background (git, gh).
     for _ in range(50):
-        view = runtime.task_view(runtime.tasks.get(info["task_id"]))
+        view = runtime.task_actions.view(runtime.tasks.get(info["task_id"]))
         if view["receipts"] and view["receipts"]["checkouts"]:
             break
         await asyncio.sleep(0.05)
@@ -358,7 +358,7 @@ async def test_receipts_show_what_was_observed_next_to_the_report(tmp_path, git_
     }
     assert found["changed"]["files"] == 1 and found["changed"]["commits"] == 1
     assert found["prs"][0]["checks"] == "passing" and found["flags"] == []
-    report = runtime.task_report(info["task_id"])
+    report = runtime.task_actions.report_markdown(info["task_id"])
     assert "- Tests: `uv run pytest -q` passed" in report
     assert "[acme/app#7](https://github.com/acme/app/pull/7): checks passing" in report
     assert "Orchestrated with [Chief of Staff]" in report
@@ -373,5 +373,5 @@ async def test_receipts_show_what_was_observed_next_to_the_report(tmp_path, git_
     )
     worker.emit("tool.execution_complete", tool_call_id="x", success=True, result=None)
     await settle(runtime)
-    flags = runtime.task_view(runtime.tasks.get(claim["task_id"]))["receipts"]["flags"]
+    flags = runtime.task_actions.view(runtime.tasks.get(claim["task_id"]))["receipts"]["flags"]
     assert flags == ["Says tests pass, but no test run was observed."]

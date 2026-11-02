@@ -40,7 +40,7 @@ async def test_a_dependency_waits_for_the_new_work_of_a_reused_worker(harness):
     assert f'type="task" title="Add captcha" task="{captcha}"' in harness.session(worker).sent[-1]
 
     docs = await spawn(runtime, harness.router_id, "Document captcha", after=[worker])
-    await runtime.pump()
+    await runtime.workers.pump()
     assert docs["status"] == "queued", "it waits for the captcha, not yesterday's login fix"
     assert harness.store.session(docs["session_id"])["activity"] == "waiting for “Add captcha”"
 
@@ -149,13 +149,13 @@ async def test_the_owner_accepts_and_retries_tasks(harness):
     first = await spawn(runtime, harness.router_id, "A")
     worker = first["session_id"]
     await call_tool(runtime, "report", worker, status="done", summary="ok")
-    assert runtime.accept_task(first["task_id"])["status"] == "done"
+    assert runtime.task_actions.accept(first["task_id"])["status"] == "done"
 
     second = await spawn(runtime, harness.router_id, "B", why_new="separate")
     harness.session(second["session_id"]).emit("session.error", message="model overloaded")
     await settle(runtime)
     assert task(harness, second["task_id"])["status"] == "failed"
-    retried = await runtime.retry_task(second["task_id"], "Use the smaller model")
+    retried = await runtime.task_actions.retry(second["task_id"], "Use the smaller model")
     assert retried["status"] == "running"
     assert "Use the smaller model" in harness.session(second["session_id"]).sent[-1]
     assert [r["reason"] for r in runtime.tasks.runs(second["task_id"])] == ["start", "retry"]
@@ -179,9 +179,9 @@ async def test_a_blocked_task_shows_at_once_and_can_still_be_retried(harness):
     assert (later["task_id"], True) in published, "the inbox learns that it is blocked"
 
     # Cancelled before its worker ever started; retrying starts that worker.
-    await runtime.cancel_task(later["task_id"])
+    await runtime.task_actions.cancel(later["task_id"])
     assert later["session_id"] not in harness.client.sessions
-    retried = await runtime.retry_task(later["task_id"])
+    retried = await runtime.task_actions.retry(later["task_id"])
     assert retried["status"] == "running"
     sent = harness.session(later["session_id"]).sent[-1]
     assert "Backfill" in sent and "try task" in sent
@@ -199,7 +199,7 @@ async def test_a_retry_that_cannot_reach_its_worker_leaves_the_task_as_it_was(ha
 
     worker.send = broken
     try:
-        await runtime.retry_task(first["task_id"])
+        await runtime.task_actions.retry(first["task_id"])
     except RuntimeError:
         pass
     assert task(harness, first["task_id"])["status"] == "failed"
