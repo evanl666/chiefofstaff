@@ -693,3 +693,7 @@ a.receipt:hover { text-decoration: underline; }
 .card.setup code { font: 12px var(--mono); background: var(--hover); padding: 1px 5px; border-radius: 5px; }
 .card.setup .actions .muted { flex: 1; }
 #session-actions .focus-on { background: var(--accent-soft); color: var(--accent); font-size: 12px; padding: 4px 10px; }
+
+.copy-dialog { border: 1px solid var(--line); border-radius: 12px; background: var(--card); color: var(--text); width: min(720px, 92vw); }
+.copy-dialog .copy-area { width: 100%; font: 12px/1.5 var(--mono); border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: var(--bg); color: var(--text); }
+.copy-dialog form { display: flex; justify-content: flex-end; margin-top: 8px; }

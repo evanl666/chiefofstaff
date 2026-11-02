@@ -10,11 +10,37 @@ jobs:
         python-version: ["3.11", "3.13"]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v6
         with:
           python-version: ${{ matrix.python-version }}
-      - uses: astral-sh/setup-uv@v6
-      - run: uv sync --locked --extra dev --python "${{ matrix.python-version }}"
-      - run: uv run --locked --extra dev pytest -q
+      - run: uv sync --locked --extra dev
       - run: uv run --locked --extra dev ruff check .
       - run: uv run --locked --extra dev ruff format --check .
+      - run: uv run --locked --extra dev pytest -q
+
+  demo-ui:
+    # The whole product in a browser, with scripted sessions: no Copilot or Slack account.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+      - run: uv sync --locked --extra dev
+      - run: uv run --with playwright python -m playwright install --with-deps chromium
+      - run: uv run --with playwright python scripts/demo_smoke.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: demo-screenshots
+          path: browser-shots/
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -11,6 +11,7 @@ import time
 import urllib.error
 import urllib.request
 import webbrowser
+from importlib import metadata
 from pathlib import Path
 
 import uvicorn
@@ -33,6 +34,13 @@ def open_when_ready(port: int, url: str):
     logging.getLogger(__name__).warning("Browser not opened: server did not become ready.")
 
 
+def version() -> str:
+    try:
+        return metadata.version("chiefofstaff")
+    except metadata.PackageNotFoundError:
+        return "dev"
+
+
 def default_data_dir() -> Path:
     """The data directory; one from before the rename stays in use (worktree paths are absolute)."""
     current, legacy = user_data_path("chiefofstaff"), user_data_path("work-buddy")
@@ -43,6 +51,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Run Chief of Staff: a Router that coordinates your Copilot sessions."
     )
+    parser.add_argument("--version", action="version", version=f"chiefofstaff {version()}")
     parser.add_argument("--port", type=int, default=None, help="default 8765 (8799 for --demo)")
     parser.add_argument("--data-dir", type=Path, default=None)
     parser.add_argument("--no-browser", action="store_true")

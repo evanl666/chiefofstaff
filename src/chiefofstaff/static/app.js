@@ -1582,13 +1582,35 @@ function receiptsView(receipts) {
 }
 
 async function copyReport(task) {
+  const text = api(`/api/tasks/${task.id}/report`).then((report) => report.markdown);
+  text.catch(() => {});
   try {
-    const { markdown: text } = await api(`/api/tasks/${task.id}/report`);
-    await navigator.clipboard.writeText(text);
+    // Started within the click, so the browser still counts it as the owner's action.
+    if (window.ClipboardItem && navigator.clipboard?.write) {
+      const blob = text.then((value) => new Blob([value], { type: "text/plain" }));
+      await navigator.clipboard.write([new ClipboardItem({ "text/plain": blob })]);
+    } else {
+      await navigator.clipboard.writeText(await text);
+    }
     toast("Report copied: paste it into a PR description or a message.");
-  } catch (error) {
-    toast(error.message, "error");
+  } catch {
+    try {
+      showCopy(await text);
+    } catch (error) {
+      toast(error.message, "error");
+    }
   }
+}
+
+// Where the clipboard is not available: the text, selected, to copy by hand.
+function showCopy(text) {
+  const area = el("textarea", { class: "copy-area", rows: 14, readonly: true });
+  area.value = text;
+  const dialog = el("dialog", { class: "copy-dialog" }, el("p", { text: "Copy the report:" }), area, el("form", { method: "dialog" }, el("button", { type: "submit", text: "Done" })));
+  dialog.addEventListener("close", () => dialog.remove());
+  document.body.append(dialog);
+  dialog.showModal();
+  area.select();
 }
 
 // A draft whose sending a stop interrupted, and that could not be confirmed.
