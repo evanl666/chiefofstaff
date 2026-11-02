@@ -470,6 +470,7 @@ function renderStatusLine() {
       el("button", { type: "button", class: "link", text: "Retry", onclick: reconnect }),
     );
   }
+  if (snap.runtime.warning) nodes.push(el("div", { class: "bad", text: snap.runtime.warning }));
   if (snap.settings.slack_enabled && snap.slack.error) nodes.push(el("div", { class: "bad", text: `Slack: ${snap.slack.error}` }));
   if (snap.settings.github_enabled && snap.github.error) nodes.push(el("div", { class: "bad", text: `GitHub: ${snap.github.error}` }));
   if (snap.settings.paused) nodes.push(el("div", { text: "Watchers paused" }));

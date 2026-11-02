@@ -18,7 +18,7 @@ def app_client(tmp_path):
         async def notifier(title, text):
             pass
 
-        runtime = Runtime(store, bus, client_factory=lambda settings: client, notifier=notifier)
+        runtime = Runtime(store, bus, backend_factory=lambda settings: client, notifier=notifier)
         runtime.slack = SlackSource(store, runtime, tokens=FakeTokens(""), mcp=FakeSlackMcp())
         return runtime
 

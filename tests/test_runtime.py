@@ -490,13 +490,13 @@ def test_sessions_that_read_slack_are_contained(tmp_path):
 
 
 async def test_copilot_runs_without_chiefofstaff_secrets(monkeypatch):
-    from chiefofstaff import runtime as module
+    from chiefofstaff import backend as module
 
     captured = {}
     monkeypatch.setenv("CHIEFOFSTAFF_SLACK_USER_TOKEN", "xoxp-secret")
     monkeypatch.setenv("KEEP_ME", "1")
     monkeypatch.setattr(module, "CopilotClient", lambda **kwargs: captured.update(kwargs))
-    module.default_client(Settings(copilot_command="git"))
+    module.copilot_backend("git")
     assert "CHIEFOFSTAFF_SLACK_USER_TOKEN" not in captured["env"]
     assert captured["env"]["KEEP_ME"] == "1"
 
@@ -798,3 +798,10 @@ async def test_the_router_rotates_when_its_context_grows(harness):
         )
     ]
     assert await runtime.external_sessions(refresh=True) == []
+
+
+async def test_an_old_copilot_cli_is_pointed_out(harness):
+    harness.client.cli_version = "1.0.2"
+    runtime = await harness.connect()
+    assert runtime.status["state"] == "ready"
+    assert "older than" in runtime.status["warning"]

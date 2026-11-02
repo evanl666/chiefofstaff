@@ -31,7 +31,7 @@ dependencies = [
   "platformdirs>=4,<5",
   "keyring>=25,<26",
   "mcp>=1.24,<2",
-  "github-copilot-sdk>=1.0.28,<2",
+  "github-copilot-sdk>=1.0.28,<1.1",
   "httpx>=0.28,<1",
 ]
 
@@ -50,6 +50,7 @@ packages = ["src/chiefofstaff"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+markers = ["copilot: runs against the real GitHub Copilot CLI (set CHIEFOFSTAFF_TEST_COPILOT=1)"]
 testpaths = ["tests"]
 
 [tool.ruff]

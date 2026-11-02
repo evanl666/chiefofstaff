@@ -22,12 +22,13 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
-from copilot import CopilotClient, RuntimeConnection, ToolResult, define_tool
+from copilot import ToolResult, define_tool
 from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
 from pydantic import BaseModel, Field
 
 from . import catalog, prompts, threads
 from .asks import REQUEST_KINDS, AnswerSession, AskSession, OwnerAsks, RecordSetup
+from .backend import OLDEST_CLI, AgentBackend, copilot_backend, older
 from .bus import Bus
 from .delivery import Delivery
 from .digest import digest
@@ -224,16 +225,8 @@ class DraftGitHubReview(BaseModel):
     body: str = Field(description="The review comment (markdown)")
 
 
-def default_client(settings: Settings) -> CopilotClient:
-    path = shutil.which(settings.copilot_command) if settings.copilot_command else None
-    if not path:
-        raise RuntimeError(
-            f"Copilot CLI '{settings.copilot_command}' not found. Install it and sign in, "
-            "or fix the command in Settings."
-        )
-    # The CLI and every worker shell inherit this environment; keep Chief of Staff's secrets out.
-    env = {key: value for key, value in os.environ.items() if not key.startswith("CHIEFOFSTAFF_")}
-    return CopilotClient(connection=RuntimeConnection.for_stdio(path=path), env=env)
+def default_backend(settings: Settings) -> AgentBackend:
+    return copilot_backend(settings.copilot_command)
 
 
 def default_effort(info: dict) -> str:
@@ -296,7 +289,7 @@ class Runtime(OwnerAsks):
         store: Store,
         bus: Bus,
         *,
-        client_factory: Callable[[Settings], Any] = default_client,
+        backend_factory: Callable[[Settings], AgentBackend] = default_backend,
         notifier: Callable[[str, str], Awaitable[None]] = mac_notification,
         slack: SlackSource | None = None,
         github: GitHubSource | None = None,
@@ -304,13 +297,13 @@ class Runtime(OwnerAsks):
     ):
         self.store = store
         self.bus = bus
-        self.client_factory = client_factory
+        self.backend_factory = backend_factory
         self.notifier = notifier
         self.slack = slack or SlackSource(store, self)
         self.github = github or GitHubSource(store, self)
         self.watch = watch or WatchConfig.from_env()
         self.watch_job: asyncio.Task | None = None
-        self.client: Any = None
+        self.backend: AgentBackend | None = None
         self.states = SessionStates()
         self.pump_lock = asyncio.Lock()
         self.draft_lock = asyncio.Lock()
@@ -364,15 +357,16 @@ class Runtime(OwnerAsks):
             self.status = {"state": "starting", "error": ""}
             self.publish_state()
             try:
-                self.client = self.client_factory(self.store.settings())
-                await self.client.start()
-                auth = await self.client.get_auth_status()
+                self.backend = self.backend_factory(self.store.settings())
+                await self.backend.start()
+                auth = await self.backend.get_auth_status()
                 if not auth.isAuthenticated:
                     raise RuntimeError("Copilot is not signed in. Run `copilot login`.")
+                warning = await self.version_warning()
                 await self.ensure_router()
                 await self.resume_working()
                 await self.ensure_slack_session()
-                self.status = {"state": "ready", "error": ""}
+                self.status = {"state": "ready", "error": "", "warning": warning}
             except Exception as exc:
                 logger.exception("Copilot runtime failed to start")
                 self.status = {"state": "error", "error": describe(exc)[:500]}
@@ -380,20 +374,31 @@ class Runtime(OwnerAsks):
         if self.ready():
             self.background(self.pump())
 
+    async def version_warning(self) -> str:
+        """A note for the owner when the agent CLI is older than the versions we tested."""
+        try:
+            version = await self.backend.version()
+        except Exception:
+            return ""
+        if older(version, OLDEST_CLI):
+            name = self.backend.capabilities.name
+            return f"{name} CLI {version} is older than {OLDEST_CLI}. Update it: copilot update"
+        return ""
+
     async def disconnect(self):
         sessions = self.states.take_all_handles()
         await asyncio.gather(*(s.disconnect() for s in sessions), return_exceptions=True)
-        if self.client:
+        if self.backend:
             with suppress(Exception):
-                await self.client.stop()
-            self.client = None
+                await self.backend.stop()
+            self.backend = None
 
     async def reconnect(self):
         await self.disconnect()
         await self.connect()
 
     def ready(self) -> bool:
-        return self.status["state"] == "ready" and self.client is not None
+        return self.status["state"] == "ready" and self.backend is not None
 
     def require_ready(self):
         if not self.ready():
@@ -678,11 +683,11 @@ class Runtime(OwnerAsks):
         cached_at, models = self.models_cache
         if models and time.monotonic() - cached_at < 600:
             return models
-        if not self.client:
+        if not self.backend:
             self.require_ready()
         models = [
             describe_model(model)
-            for model in await self.client.list_models()
+            for model in await self.backend.list_models()
             if not model.policy or model.policy.state != "disabled"
         ]
         self.models_cache = (time.monotonic(), models)
@@ -726,12 +731,12 @@ class Runtime(OwnerAsks):
         options = self.options(row)
         if create:
             name = "Chief of Staff · " + clean_title(row["title"])
-            session = await self.client.create_session(
+            session = await self.backend.create_session(
                 session_id=copilot or self.copilot_id(row["id"]), name=name[:100], **options
             )
             self.store.set(f"created:{row['id']}", "1")
         else:
-            session = await self.client.resume_session(self.copilot_id(row["id"]), **options)
+            session = await self.backend.resume_session(self.copilot_id(row["id"]), **options)
         session_id = row["id"]
         loop = self.loop
         session.on(lambda event: loop.call_soon_threadsafe(self.on_event, session_id, event))
@@ -742,7 +747,7 @@ class Runtime(OwnerAsks):
     async def session_for(self, session_id: str):
         if session := self.states.handle(session_id):
             return session
-        if not self.client:
+        if not self.backend:
             self.require_ready()
         async with self.states[session_id].lifecycle:
             if session := self.states.handle(session_id):
@@ -1457,7 +1462,7 @@ class Runtime(OwnerAsks):
         if row["cwd"] and not await asyncio.to_thread(os.path.isdir, row["cwd"]):
             raise ValueError("That worker's directory is gone; start a new one instead.")
         self.require_ready()
-        if not await self.client.get_session_metadata(session_id):
+        if not await self.backend.get_session_metadata(session_id):
             raise ValueError("Copilot no longer has that conversation; start a new one instead.")
         status = row["status"] if row["status"] in {"done", "failed", "waiting"} else "idle"
         row = self.update_session(session_id, closed_at=None, status=status, activity="")
@@ -1492,7 +1497,7 @@ class Runtime(OwnerAsks):
         }
         items = []
         for meta in sorted(
-            await self.client.list_sessions(), key=lambda m: m.modified_time, reverse=True
+            await self.backend.list_sessions(), key=lambda m: m.modified_time, reverse=True
         ):
             if meta.session_id in managed or meta.is_remote:
                 continue
@@ -1516,7 +1521,7 @@ class Runtime(OwnerAsks):
         self.require_ready()
         if self.store.find_session(session_id):
             raise ValueError("Chief of Staff already manages that session.")
-        meta = await self.client.get_session_metadata(session_id)
+        meta = await self.backend.get_session_metadata(session_id)
         if not meta:
             raise LookupError("Session not found.")
         cwd = meta.context.working_directory if meta.context else ""

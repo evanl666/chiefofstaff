@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 from copilot.tools import ToolInvocation
 
+from chiefofstaff.backend import TESTED_CLI, Capabilities
 from chiefofstaff.bus import Bus
 from chiefofstaff.envelope import wrap as env  # noqa: F401  (tests import it)
 from chiefofstaff.models import Settings
@@ -67,12 +68,22 @@ class FakeSession:
 
 
 class FakeClient:
+    capabilities = Capabilities(
+        name="Fake",
+        steering=True,
+        resume=True,
+        permission_callbacks=True,
+        mcp_sign_in=True,
+        sandbox=True,
+    )
+
     def __init__(self):
         self.sessions: dict[str, FakeSession] = {}
         self.created: list[str] = []
         self.resumed: list[str] = []
         self.names: dict[str, str] = {}
         self.metas: list = []
+        self.cli_version = TESTED_CLI
 
     async def start(self):
         pass
@@ -82,6 +93,13 @@ class FakeClient:
 
     async def get_auth_status(self):
         return SimpleNamespace(isAuthenticated=True)
+
+    async def version(self):
+        return self.cli_version
+
+    async def mcp_sign_in_url(self, session, server):
+        login = await session.rpc.mcp.oauth.login(SimpleNamespace(server_name=server))
+        return login.authorization_url
 
     async def create_session(self, *, session_id, name, **options):
         session = FakeSession(session_id, options)
@@ -233,7 +251,7 @@ class Harness:
         self.runtime = Runtime(
             self.store,
             Bus(),
-            client_factory=lambda settings: self.client,
+            backend_factory=lambda settings: self.client,
             notifier=notifier,
             watch=watch or WatchConfig(),
         )

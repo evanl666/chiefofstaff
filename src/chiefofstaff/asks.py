@@ -16,7 +16,6 @@ import time
 from typing import Any
 from uuid import uuid4
 
-from copilot.generated.rpc import MCPOauthLoginRequest
 from pydantic import BaseModel, Field
 
 from .envelope import sender, wrap
@@ -279,14 +278,8 @@ class OwnerAsks:
                 if not session:
                     return cancelled
                 try:
-                    login = await session.rpc.mcp.oauth.login(
-                        MCPOauthLoginRequest(server_name=server)
-                    )
-                    url = (
-                        http_url(getattr(login, "authorization_url", None) or "")
-                        if (getattr(login, "authorization_url", None))
-                        else ""
-                    )
+                    url = await self.backend.mcp_sign_in_url(session, server)
+                    url = http_url(url) if url else ""
                 except Exception:
                     logger.warning("Could not start sign-in to %s.", server, exc_info=True)
                     return cancelled
