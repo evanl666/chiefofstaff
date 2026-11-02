@@ -1,9 +1,12 @@
+import re
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 Repository = Annotated[str, Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")]
+Role = Literal["router", "worker", "slack", "watchdog"]
+Effort = Literal["none", "low", "medium", "high", "xhigh", "max"]
 
 
 class StrictModel(BaseModel):
@@ -11,122 +14,101 @@ class StrictModel(BaseModel):
 
 
 class Settings(StrictModel):
-    backend: Literal["copilot", "demo"] = "copilot"
     copilot_command: str = "copilot"
-    model: str = "auto"
-    project_path: str = ""
-    profile: str = Field(default="", max_length=12000)
-    max_workers: int = Field(default=2, ge=1, le=4)
-    timeout_seconds: int = Field(default=300, ge=30, le=1800)
+    model: str = Field(default="", max_length=100)
+    role_models: dict[Role, Annotated[str, Field(max_length=100)]] = Field(default_factory=dict)
+    # Applied when the session's model supports that effort; otherwise the model's default.
+    role_efforts: dict[Role, Effort] = Field(default_factory=dict)
+    worker_credit_limit: float = Field(default=0, ge=0, le=100000)
+    worker_idle_hours: int = Field(default=24, ge=1, le=720)
+    # Workers act without permission checks; they still follow their instructions.
+    worker_yolo: bool = False
+    digest_time: str = Field(default="09:00", pattern=r"^(|([01]\d|2[0-3]):[0-5]\d)$")
+    projects: list[str] = Field(default_factory=list, max_length=30)
+    # Tasks without a project get a folder here; empty means inside the data directory.
+    scratch_directory: str = Field(default="", max_length=500)
+    max_workers: int = Field(default=4, ge=1, le=12)
     paused: bool = False
+    mac_notifications: bool = True
+    watchdog_enabled: bool = True
     slack_enabled: bool = False
-    slack_owner: str = ""
-    slack_channels: list[str] = Field(default_factory=list, max_length=20)
-    slack_keyword: str = Field(default="", max_length=100)
+    slack_poll_seconds: int = Field(default=60, ge=20, le=900)
     github_enabled: bool = False
-    github_repos: list[Repository] = Field(default_factory=list, max_length=5)
+    github_repos: list[Repository] = Field(default_factory=list, max_length=10)
 
     @model_validator(mode="after")
     def validate_paths(self):
-        self.github_repos = list(dict.fromkeys(repo.lower() for repo in self.github_repos))
-        if self.project_path:
-            path = Path(self.project_path).expanduser().resolve()
+        projects = []
+        for raw in self.projects:
+            path = Path(raw).expanduser().resolve()
             if not path.is_dir():
-                raise ValueError("Project path must be an existing directory.")
+                raise ValueError(f"Project is not an existing directory: {raw}")
             if path == Path.home() or path == Path(path.anchor):
-                raise ValueError("Select a project directory, not your home or filesystem root.")
-            self.project_path = str(path)
-        if self.slack_enabled and not self.slack_owner:
-            raise ValueError("Slack requires the owner's Slack member ID.")
+                raise ValueError("Choose project directories, not your home or filesystem root.")
+            if str(path) not in projects:
+                projects.append(str(path))
+        self.projects = projects
+        if self.scratch_directory:
+            scratch = Path(self.scratch_directory).expanduser()
+            if not scratch.is_absolute():
+                raise ValueError("The scratch folder must be an absolute path, e.g. ~/WorkBuddy.")
+            scratch = scratch.resolve()
+            if scratch == Path.home() or scratch == Path(scratch.anchor):
+                raise ValueError("Choose a scratch folder, not your home or filesystem root.")
+            self.scratch_directory = str(scratch)
+        self.github_repos = list(dict.fromkeys(repo.lower() for repo in self.github_repos))
         if self.github_enabled and not self.github_repos:
             raise ValueError("Choose repositories before enabling review-request monitoring.")
         return self
 
 
-class NewTask(StrictModel):
-    title: str = Field(min_length=1, max_length=200)
-    instructions: str = Field(min_length=1, max_length=20000)
-
-
-class AgentText(StrictModel):
-    message: str = Field(min_length=1, max_length=50000)
-
-
-class DailyBrief(StrictModel):
+class OwnerMessage(StrictModel):
     text: str = Field(min_length=1, max_length=20000)
 
 
-class Assignment(StrictModel):
-    title: str = Field(min_length=1, max_length=200)
-    instructions: str = Field(min_length=1, max_length=12000)
+class DraftDecision(StrictModel):
+    action: Literal["send", "reject", "choose", "answer"]
+    # For a form a session showed the owner: field name -> value.
+    content: dict[str, str | int | float | bool | list[str]] = Field(default_factory=dict)
+    # For a workspace question: the chosen folder, or "" for no project.
+    choice: str = Field(default="", max_length=1000)
+    text: str = Field(default="", max_length=12000)
+    reason: str = Field(default="", max_length=2000)
 
 
-class ProposedFile(StrictModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=False)
-    path: str = Field(min_length=1, max_length=500)
-    content: str = Field(max_length=100000)
+class SlackToken(StrictModel):
+    token: str = Field(max_length=500)
+
+    @field_validator("token")
+    @classmethod
+    def user_token(cls, value: str) -> str:
+        if not re.fullmatch(r"xoxp-[A-Za-z0-9-]+", value):
+            raise ValueError(
+                "That is not a Slack user token (xoxp-…). Bot tokens (xoxb-) do not work "
+                "with Slack's MCP server."
+            )
+        return value
 
 
-class MemoryCandidate(StrictModel):
-    text: str = Field(min_length=1, max_length=3000)
-    category: Literal["fact", "preference", "workflow"]
-    scope: Literal["project", "general"] = "project"
-    evidence: str = Field(min_length=1, max_length=3000)
+class SessionModel(StrictModel):
+    model: str = Field(default="", max_length=100)
+    effort: Literal["", "none", "low", "medium", "high", "xhigh", "max"] = ""
+    context: Literal["", "long_context"] = ""
 
 
-class AgentReply(StrictModel):
-    action: Literal["complete", "delegate", "decision", "ignore"]
-    message: str = Field(min_length=1, max_length=50000)
-    assignments: list[Assignment] = Field(default_factory=list, max_length=4)
-    options: list[str] = Field(default_factory=list, max_length=4)
-    files: list[ProposedFile] = Field(default_factory=list, max_length=10)
-    slack_reply: str = Field(default="", max_length=12000)
-    github_review: str = Field(default="", max_length=20000)
-    memories: list[MemoryCandidate] = Field(default_factory=list, max_length=12)
-
-    @model_validator(mode="after")
-    def consistent_action(self):
-        if self.action == "delegate" and not self.assignments:
-            raise ValueError("Delegation requires assignments.")
-        if self.action != "delegate" and self.assignments:
-            raise ValueError("Assignments require delegation.")
-        if self.action == "decision":
-            if not 2 <= len(self.options) <= 4 or len(set(self.options)) != len(self.options):
-                raise ValueError("A decision requires 2-4 distinct choices.")
-            if any(not choice or len(choice) > 500 for choice in self.options):
-                raise ValueError("Choices must contain 1-500 characters.")
-        elif self.options:
-            raise ValueError("Options require a decision.")
-        if self.action != "complete" and (
-            self.files or self.slack_reply or self.github_review or self.memories
-        ):
-            raise ValueError("Only complete results may propose side effects.")
-        if len({file.path for file in self.files}) != len(self.files):
-            raise ValueError("File paths must be unique.")
-        return self
+class SetupNotes(StrictModel):
+    text: str = Field(default="", max_length=30000)
+    # What the owner saw when they started editing; their changes apply against it.
+    initial: str = Field(default="", max_length=30000)
 
 
-class Resolution(StrictModel):
-    choice: str = Field(min_length=1, max_length=500)
-    reason: str = Field(default="", max_length=5000)
+class SessionYolo(StrictModel):
+    mode: Literal["", "on", "off"] = ""  # "" follows Settings.
 
 
-class Feedback(StrictModel):
-    text: str = Field(min_length=1, max_length=5000)
-    remember: bool = False
-    scope: str = Field(default="project", pattern="^(project|general)$")
+class OpenFolder(StrictModel):
+    app: Literal["finder", "vscode"]
 
 
-class MemoryInput(StrictModel):
-    text: str = Field(min_length=1, max_length=5000)
-    scope: str = Field(default="project", pattern="^(project|general)$")
-
-
-class Distillation(StrictModel):
-    material: str = Field(default="", max_length=30000)
-    source_files: list[str] = Field(default_factory=list, max_length=20)
-
-
-class SlackCredentials(StrictModel):
-    bot_token: str = Field(pattern=r"^xoxb-.+", max_length=500)
-    app_token: str = Field(pattern=r"^xapp-.+", max_length=500)
+class ProfileText(StrictModel):
+    text: str = Field(default="", max_length=20000)

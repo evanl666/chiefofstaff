@@ -1,124 +1,181 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Work Buddy | Your day</title>
-  <link rel="stylesheet" href="/static/style.css">
-  <script src="/static/app.js" defer></script>
-</head>
-<body>
-  <header class="topbar">
-    <a class="brand" href="/"><span class="logo">w.</span> Work Buddy</a>
-    <div class="top-actions">
-      <button type="button" class="quiet" data-open="profile-dialog">What Buddy knows <span id="memory-badge"></span></button>
-      <button type="button" class="quiet" data-open="settings-dialog">Settings</button>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Work Buddy</title>
+    <link rel="stylesheet" href="/static/style.css" />
+    <script src="/static/app.js" defer></script>
+  </head>
+  <body>
+    <div id="signin" class="signin" hidden>
+      <h1>Work Buddy</h1>
+      <p>Open the private launch URL printed in your terminal.</p>
     </div>
-  </header>
-  <main>
-    <div id="notice" role="status" hidden></div>
-    <section id="login" class="card" hidden>
-      <h2>Welcome back.</h2>
-      <p>Open the private launch URL in your terminal, or paste its token here.</p>
-      <form id="login-form"><label>Launch token<input name="token" type="password" required autocomplete="off"></label><button>Open my day</button></form>
-    </section>
+
     <div id="application" hidden>
-      <section class="intro">
-        <div id="day-label" class="eyebrow"></div>
-        <h1>What matters today?</h1>
-        <p>A few tasks, whatever context matters.<br>Let Buddy organize the work and pick up the rest.</p>
-      </section>
-      <section id="onboarding" class="onboarding" hidden>
-        <div><strong>First, let me get to know your work.</strong><p>Lead builds your initial profile and saves it locally. You don't have to write it yourself.</p></div>
-        <button type="button" class="secondary" data-open="profile-dialog">Get to know me</button>
-      </section>
-      <form id="daily-form" class="daily-composer">
-        <label class="sr-only" for="daily-text">Today's tasks and context</label>
-        <textarea id="daily-text" name="text" required maxlength="20000" rows="7" placeholder="Today I'd like to:&#10;&#10;- Finish the caching proposal. Keep compatibility with old clients.&#10;- Prepare notes for the design discussion.&#10;&#10;Context: the rollout is next week; the draft is in docs/."></textarea>
-        <div class="composer-footer"><span>No task forms. Just tell me what needs doing.</span><button>Hand over my day <span aria-hidden="true">&rarr;</span></button></div>
-      </form>
-      <details id="brief-history" hidden><summary>Your notes for today</summary><div id="briefs"></div></details>
-      <div class="buddy-presence"><span class="dot"></span><div><span id="lead-status">Ready when you are.</span><small id="watch-status"></small><small id="learning-status"></small></div></div>
-      <section id="decision-panel" class="section" hidden>
-        <div class="section-title"><h2>A decision for you</h2><span>I'll handle the follow-through.</span></div>
-        <div id="approvals"></div>
-      </section>
-      <section class="section">
-        <div class="section-title"><h2>From Buddy</h2><span>Progress and things picked up for you.</span></div>
-        <div id="updates"><p class="empty">Your day starts with a little direction. Updates will appear here.</p></div>
-      </section>
-      <footer>Local-first. I'll ask before changing files or speaking for you.</footer>
-    </div>
-  </main>
+      <aside id="sidebar">
+        <header class="brand">
+          <span>Work Buddy</span>
+          <button id="settings-button" class="icon" type="button" title="Settings" aria-label="Settings">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 6.8a3.2 3.2 0 1 0 0 6.4 3.2 3.2 0 0 0 0-6.4Zm7.1 4.6-1.6-.9a5.7 5.7 0 0 0 0-1l1.6-.9a.6.6 0 0 0 .2-.8l-1.5-2.6a.6.6 0 0 0-.8-.2l-1.6.9a5.9 5.9 0 0 0-.9-.5V3.6a.6.6 0 0 0-.6-.6H8.1a.6.6 0 0 0-.6.6v1.8l-.9.5-1.6-.9a.6.6 0 0 0-.8.2L2.7 7.8a.6.6 0 0 0 .2.8l1.6.9a5.7 5.7 0 0 0 0 1l-1.6.9a.6.6 0 0 0-.2.8l1.5 2.6c.2.3.5.4.8.2l1.6-.9.9.5v1.8c0 .3.3.6.6.6h3a.6.6 0 0 0 .6-.6v-1.8l.9-.5 1.6.9c.3.2.6.1.8-.2l1.5-2.6a.6.6 0 0 0-.2-.8Z"/></svg>
+          </button>
+        </header>
+        <nav id="session-list" aria-label="Sessions"></nav>
+        <details id="closed" hidden>
+          <summary>Closed <span id="closed-count"></span></summary>
+          <div id="closed-list"></div>
+        </details>
+        <details id="external">
+          <summary>Other Copilot sessions <span id="external-count"></span></summary>
+          <div id="external-list"></div>
+        </details>
+        <footer id="status-line"></footer>
+        <button id="usage-button" type="button" class="usage-link" title="Credits used">Usage</button>
+      </aside>
 
-  <dialog id="profile-dialog" aria-labelledby="profile-heading">
-    <div class="dialog-heading"><div><div class="eyebrow">LEARNING YOUR WAY OF WORKING</div><h2 id="profile-heading">What Buddy knows</h2></div><button class="quiet" data-close type="button">Close</button></div>
-    <p class="dialog-notice" role="status" hidden></p>
-    <p id="profile-status">Lead can build an initial profile from your connected project and any context you share.</p>
-    <form id="distill-form">
-      <label>Anything you'd like me to know? <span class="optional">Optional</span><textarea name="material" maxlength="30000" rows="3" placeholder="What you work on, an example of a good reply, or how you approach a review..."></textarea></label>
-      <details><summary>Choose specific source files instead</summary><label>One path per line, relative to your project<textarea name="source_files" rows="2" placeholder="docs/working-agreement.md"></textarea></label></details>
-      <p class="hint">Lead will read relevant documents in your connected project. It proposes evidence-backed observations, not guesses about you.</p>
-      <button>Build my profile</button>
-    </form>
-    <section class="section" id="memory-review-section" hidden><h3>A few things to confirm</h3><p class="hint">Saved locally as candidates. Only confirmed observations guide future work.</p><div id="memory-approvals"></div></section>
-    <section class="section"><h3>Remembered for next time</h3><div id="memories"></div></section>
-    <details class="technical"><summary>Local storage and learning history</summary><div id="memory-location" class="path"></div><div id="profile-history"></div></details>
-  </dialog>
-
-  <dialog id="task-dialog" aria-labelledby="detail-title">
-    <div class="dialog-heading"><div><div id="detail-kind" class="eyebrow"></div><h2 id="detail-title">An update from Buddy</h2></div><button class="quiet" data-close type="button">Close</button></div>
-    <p class="dialog-notice" role="status" hidden></p>
-    <p id="detail-status" class="muted"></p><pre id="detail-error" class="error-text" hidden></pre>
-    <pre id="detail-result"></pre><div id="detail-actions" class="button-row"></div>
-    <details id="detail-artifacts" hidden><summary>Drafts and files</summary><div id="artifact-links"></div></details>
-    <form id="feedback-form">
-      <label>What should I do differently?<textarea name="text" required maxlength="5000" rows="3" placeholder="Give me a correction or explain your preference. I'll learn from it."></textarea></label>
-      <button class="secondary">Tell Buddy</button>
-    </form>
-    <details class="technical"><summary>Context and execution details</summary><pre id="detail-instructions"></pre><div id="detail-workers"></div><div id="detail-approvals"></div></details>
-  </dialog>
-
-  <dialog id="settings-dialog" aria-labelledby="settings-heading">
-    <div class="dialog-heading"><div><div class="eyebrow">CONNECT ONCE, WORK EVERY DAY</div><h2 id="settings-heading">Your workspace</h2></div><button class="quiet" data-close type="button">Close</button></div>
-    <p class="dialog-notice" role="status" hidden></p>
-    <form id="settings-form">
-      <label>Project directory<input name="project_path" placeholder="/absolute/path/to/project"></label>
-      <p class="hint">Choose a narrow folder without secrets. Lead uses it for your work and initial profile.</p>
-      <details><summary>Connect Slack</summary>
-        <label class="check"><input name="slack_enabled" type="checkbox">Watch Slack for work that needs me</label>
-        <label>Your Slack member ID<input name="slack_owner" placeholder="U0123456789"></label>
-        <label>Channel IDs to watch, comma-separated<input name="slack_channels" placeholder="C0123456789"></label>
-        <label>Trigger keyword <span class="optional">Optional</span><input name="slack_keyword" maxlength="100" placeholder="Otherwise, mentions of you or the bot"></label>
-        <p class="hint">Lead triages messages against your daily priorities and learns from your replies in tracked threads. Other private conversations are not accessible.</p>
-      </details>
-      <details><summary>Connect GitHub reviews</summary>
-        <label class="check"><input name="github_enabled" type="checkbox">Pick up PRs requesting my review</label>
-        <label>Repositories to watch, comma-separated<input name="github_repos" placeholder="your-org/your-repo"></label>
-        <p class="hint">Uses your existing gh login on GitHub.com. Checks every two minutes. Lead drafts reviews; publishing always needs your approval.</p>
-      </details>
-      <details id="advanced-settings"><summary>Advanced agent settings</summary>
-        <div class="field-grid">
-          <label>Backend<select name="backend"><option value="copilot">Copilot CLI</option><option value="demo">Demo simulator (no AI)</option></select></label>
-          <label>CLI executable<input name="copilot_command" value="copilot" required></label>
-          <label>Model<input name="model" value="auto" required></label>
-          <label>Worker limit<input name="max_workers" type="number" min="1" max="4" value="2" required></label>
-          <label>Timeout, seconds<input name="timeout_seconds" type="number" min="30" max="1800" value="300" required></label>
+      <main id="main">
+        <header id="session-header">
+          <div class="heading">
+            <h1 id="session-title"></h1>
+            <div id="session-meta"></div>
+          </div>
+          <div id="session-tuning" hidden>
+            <select id="session-model" aria-label="Model" title="Model for this session"></select>
+            <select id="session-effort" aria-label="Thinking effort" title="Thinking effort"></select>
+            <select id="session-context" aria-label="Context window" title="Context window"></select>
+          </div>
+          <div id="session-actions"></div>
+        </header>
+        <div id="scroller">
+          <section id="drafts" aria-label="Waiting for you"></section>
+          <section id="timeline" aria-live="polite"></section>
         </div>
-        <label>Additional standing context<textarea name="profile" maxlength="12000" rows="3"></textarea></label>
-        <div class="button-row"><button type="button" id="check-agent" class="secondary">Check CLI</button><button type="button" id="reconnect-slack" class="secondary">Reconnect Slack</button><button type="button" id="pause" class="secondary">Pause new work</button></div>
-      </details>
-      <button>Save settings</button>
-    </form>
-    <details><summary>Slack credentials</summary>
-      <p class="hint">Use the repository's Slack app manifest. Tokens are stored in the OS keyring, never in browser storage or source code.</p>
-      <form id="credentials-form">
-        <label>Bot token<input type="password" name="bot_token" required placeholder="xoxb-..." autocomplete="off"></label>
-        <label>App-level token<input type="password" name="app_token" required placeholder="xapp-..." autocomplete="off"></label>
-        <button class="secondary">Store credentials</button>
+        <form id="composer" autocomplete="off">
+          <textarea id="composer-input" rows="1" aria-label="Message"></textarea>
+          <button type="submit" aria-label="Send" title="Send (Enter)">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 15.5V4.5M5 9.5l5-5 5 5" /></svg>
+          </button>
+        </form>
+      </main>
+    </div>
+
+    <dialog id="settings-dialog">
+      <form id="settings-form" method="dialog">
+        <h2>Settings</h2>
+        <label>
+          <span>Projects</span>
+          <textarea name="projects" rows="3" placeholder="/Users/you/code/app — one directory per line"></textarea>
+          <small>Workers may work in these directories. The Router picks one per task and asks you when it is not sure; a folder you choose there is added here.</small>
+        </label>
+        <label>
+          <span>Workspaces folder</span>
+          <input name="scratch_directory" placeholder="" autocomplete="off" />
+          <small>Each worker gets its own folder here, with its checkouts of your projects and anything it clones.</small>
+        </label>
+        <div class="row">
+          <label><span>Parallel workers</span><input name="max_workers" type="number" min="1" max="12" /></label>
+          <label title="Finished workers with nothing to follow close after this long without activity. You can reopen them."><span>Close idle after (h)</span><input name="worker_idle_hours" type="number" min="1" max="720" /></label>
+          <label class="check"><input name="mac_notifications" type="checkbox" /> Desktop notifications</label>
+        </div>
+        <label class="check"><input name="watchdog_enabled" type="checkbox" /> Watchdog: check workers for stalls and drift</label>
+        <label class="check"><input name="worker_yolo" type="checkbox" /> Yolo: workers run every command and file change without permission checks</label>
+        <small>Workers still follow their instructions (no force pushes, no pushing to main, nothing public without your approval), but nothing enforces them. A worker's header can override this.</small>
+
+        <h3>Models</h3>
+        <datalist id="model-options"></datalist>
+        <div class="row">
+          <label class="grow"><span>Default</span><input name="model" list="model-options" placeholder="Copilot default" /></label>
+          <label class="grow"><span>Router</span><input name="model_router" list="model-options" placeholder="Default" /></label>
+          <label class="grow"><span>Workers</span><input name="model_worker" list="model-options" placeholder="Default" /></label>
+        </div>
+        <div class="row">
+          <label class="grow"><span>Slack</span><input name="model_slack" list="model-options" placeholder="Default" /></label>
+          <label class="grow"><span>Watchdog</span><input name="model_watchdog" list="model-options" placeholder="Default" /></label>
+          <label class="grow"><span>Credit limit per worker</span><input name="worker_credit_limit" type="number" min="0" step="1" placeholder="0 = none" /></label>
+        </div>
+        <div class="row efforts">
+          <label class="grow"><span>Router effort</span><select name="effort_router"></select></label>
+          <label class="grow"><span>Workers effort</span><select name="effort_worker"></select></label>
+          <label class="grow"><span>Slack effort</span><select name="effort_slack"></select></label>
+          <label class="grow"><span>Watchdog effort</span><select name="effort_watchdog"></select></label>
+        </div>
+        <small>Thinking effort applies when the model supports it; otherwise the model's default. Change a session's effort and context window in its header.</small>
+
+        <h3>Slack</h3>
+        <label class="check"><input name="slack_enabled" type="checkbox" /> Watch Slack for DMs and mentions</label>
+        <div class="row">
+          <label class="grow">
+            <span>User token (xoxp-…)</span>
+            <input name="slack_token" type="password" placeholder="Paste to replace" autocomplete="off" />
+          </label>
+          <button id="slack-token-save" type="button" class="secondary">Save token</button>
+          <button id="slack-token-remove" type="button" class="link" hidden>Remove</button>
+        </div>
+        <small id="slack-status"></small>
+
+        <h3>GitHub reviews</h3>
+        <label class="check"><input name="github_enabled" type="checkbox" /> Watch review requests</label>
+        <label>
+          <span>Repositories</span>
+          <textarea name="github_repos" rows="2" placeholder="owner/name — one per line"></textarea>
+        </label>
+        <small id="github-status"></small>
+
+        <h3>Your profile</h3>
+        <p id="profile-draft" class="draft-banner" hidden>
+          A new profile draft is ready.
+          <button id="profile-use" type="button" class="link">Review it</button>
+          <button id="profile-discard" type="button" class="link">Discard</button>
+        </p>
+        <label>
+          <span>What your sessions know about you (you can edit it)</span>
+          <textarea name="profile" rows="6" placeholder="Empty. Build it from your work, or write it yourself."></textarea>
+        </label>
+        <div class="row">
+          <button id="profile-distill" type="button" class="secondary">Build from my work</button>
+          <label class="grow"><span>Daily summary at</span><input name="digest_time" type="time" /></label>
+        </div>
+
+        <h3>Environment notes</h3>
+        <label>
+          <span>What your sessions found out about tools, integrations and sign-ins on this machine. One “topic: note” per line; edit or delete freely.</span>
+          <textarea name="setup_notes" rows="4" placeholder="Empty. Workers add notes as they set things up."></textarea>
+        </label>
+
+        <details>
+          <summary>Advanced</summary>
+          <div class="row">
+            <label class="grow"><span>Copilot command</span><input name="copilot_command" /></label>
+            <label><span>Slack check (s)</span><input name="slack_poll_seconds" type="number" min="20" max="900" /></label>
+          </div>
+          <label class="check"><input name="paused" type="checkbox" /> Pause Slack and GitHub watchers</label>
+          <small id="data-directory"></small>
+        </details>
+
+        <p id="settings-error" class="error" hidden></p>
+        <footer>
+          <button type="button" class="secondary" id="settings-cancel">Cancel</button>
+          <button type="submit">Save</button>
+        </footer>
       </form>
-    </details>
-    <details class="technical"><summary>Runtime and recent events</summary><div id="connection-status" class="muted"></div><div id="data-location" class="path"></div><p class="hint">Keep the Python process running. Pause stops new invocations; cancellation stops an active task. Sleep or offline time interrupts local work.</p><div id="events"></div></details>
-  </dialog>
-</body>
+    </dialog>
+
+    <dialog id="usage-dialog">
+      <form method="dialog" class="usage">
+        <h2>Usage</h2>
+        <div class="ranges" role="group" aria-label="Range">
+          <button type="button" data-range="today">Today</button>
+          <button type="button" data-range="7">7 days</button>
+          <button type="button" data-range="30">30 days</button>
+          <span class="custom"><input type="date" name="from" /> – <input type="date" name="to" /></span>
+        </div>
+        <div id="usage-total" class="usage-total"></div>
+        <div id="usage-tables" class="usage-tables"></div>
+        <footer><button type="submit" class="secondary">Close</button></footer>
+      </form>
+    </dialog>
+
+    <div id="toasts" aria-live="polite"></div>
+  </body>
 </html>

@@ -1,319 +1,277 @@
 # Work Buddy
 
-A **local-first prototype** of a personal work agent. Your daily input is just one
-note: a few tasks and whatever context matters. Lead organizes the main work,
-picks up relevant Slack messages and PR review requests, and learns from your
-decisions and feedback. You see updates and important choices, not an agent dashboard.
+One Copilot session that runs the others.
 
-**Lead is the coding CLI itself.** It uses native MCP tools to operate Slack and
-assemble a team of additional CLI agents. Python is a thin control layer for
-events, processes, persistence, and approval boundaries, not a prewritten business
-workflow. The real agent returns normal text, not a JSON plan for Python to execute.
+You talk to a **Router**. It starts **workers** (one Copilot session per task, each in its own
+directory or git worktree), forwards Slack messages to a dedicated **Slack session**, picks up
+GitHub review requests, and only interrupts you when a result is ready, a decision is needed or
+something failed. Follow-ups in a Slack thread or PR go straight to the session that owns it,
+and a **Watchdog** checks that workers are not stuck or drifting. A small local web UI shows
+every session at a glance.
 
-**This is a working prototype, not an autonomous employee or a production security
-sandbox.** Copilot invocations are read-only. File changes, Slack replies, and PR comments
-are executed by the application only after approval of the exact payload.
+```
+            you (web UI, desktop notifications)
+                    │  ▲
+                    ▼  │ notify_owner
+ Slack watcher ──► Router ──spawn/message──► worker · worker · worker
+ GitHub watcher ─┘    │                        │ report(done/question/blocked)
+                      └──message──► Slack session ── draft_slack_reply ──► you approve ──► Slack
+```
+
+This is a local prototype built on the [Copilot SDK](https://github.com/github/copilot-sdk).
+Your Copilot subscription, policies and usage limits apply.
 
 ## Quick start
 
-Requires **Python 3.11+**, macOS or Linux. For real tasks, install and authenticate
-[GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli).
-Your existing subscription, organization policies, model access, and usage limits apply.
-The subprocess integration was exercised against CLI 1.0.102; older versions may
-not support its tool filtering and JSONL flags.
+Requires Python 3.11+, macOS or Linux, and a signed-in
+[Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli).
 
 ```bash
-git clone git@github.com:evanl666/work-buddy.git
-cd work-buddy
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -e .
-python -m work_buddy
-```
-
-Alternatively, with [uv](https://docs.astral.sh/uv/):
-
-```bash
-uv sync --python 3.13
+uv sync
 uv run python -m work_buddy
 ```
 
-The program opens `http://127.0.0.1:8765` using a private launch token. If the
-browser does not open, use the launch URL printed in your terminal. **Do not share
-that URL or token.** It grants control of your local workbench.
+The browser opens `http://127.0.0.1:8765` with a private launch token; do not share that URL.
+Closing the page does not stop your sessions. Ctrl+C stops Work Buddy; sessions resume where
+they left off on the next start.
 
-```bash
-python -m work_buddy --no-browser --port 8766
-python -m work_buddy --data-dir /path/to/private/work-buddy-data
-```
+Open **Settings** once and add the project directories workers may use.
 
-Keep the Python process running. Closing the webpage does not stop tasks. Ctrl+C
-stops the service and its CLI invocations. Sleeping/offline computers do not
-continue executing work. A busy port is an error, not an invitation to connect
-to an unrelated service.
+## The UI
 
-## First run
+- **Left:** Router, Slack and your workers. Blue pulse = working, amber = waiting for an
+  answer, green = done, red = failed. Badges count unread updates or drafts waiting for you.
+  **Other Copilot sessions** lists sessions you opened in a terminal; resume them with the shown
+  command, or let the Router manage one as a worker.
+- **Right:** the selected session. Type to the Router, or directly to any worker. Tool calls
+  collapse into one "steps" line. Reports and updates are cards with a status and time; they
+  render Markdown (lists, tables, code), show long paths as short chips (click to copy) and PR
+  links as `owner/repo#123`, and fold when long. Drafts that wait for your approval are pinned on top: edit the
+  text and **Send**, or **Reject** with an optional reason the session learns from.
+- Closed workers move to the collapsed **Closed** group. Open one to read what it did; **Reopen**
+  it, or just type to it, to continue with its conversation and checkout.
 
-1. Open **Settings** once. Connect an existing project directory and, optionally,
-   Slack and GitHub reviews. Model, executable, and worker controls are under
-   **Advanced agent settings**; they are not part of your daily input.
-2. Click **Get to know me** and **Build my profile**. Lead chooses relevant
-   documents in the connected project and builds an initial profile itself.
-   Background, examples, or selected files are optional. Without a connected
-   project, provide some background so it has evidence rather than guessing.
-3. Confirm useful observations in **What Buddy knows**. The generated profile
-   and candidates are saved locally immediately; confirmed memories guide future work.
-4. Each morning, write a single note in **What matters today?** and click
-   **Hand over my day**. No separate title, task forms, or manual worker setup.
-5. Read **From Buddy** and resolve **A decision for you** when needed. Use
-   **Read update / give feedback**, then **Tell Buddy**, to explain a correction.
+## How it works
 
-Example daily note:
+| Session | Does | Can |
+| --- | --- | --- |
+| Router | Splits your requests into tasks, routes events and reports, tells you what matters | Only its tools: `spawn_worker`, `ask_workspace`, `message_session`, `list_sessions`, `find_sessions`, `notify_owner`, `close_worker`, `answer_session`. No shell, files or web. |
+| Worker | A task, autonomously: investigate, change, test, commit, open a PR; later requests on the same subject | Everything in its working directory, plus your Copilot's MCP servers and CLIs. Reports with `report`, asks you with `ask_user`, asks other sessions with `ask_session`, records `record_setup` notes. May draft Slack replies (if given Slack access) and PR reviews. |
+| Slack | Reads conversations and drafts replies in your voice | Slack read tools and `draft_slack_reply`. No shell, files or web. |
+| Watchdog | Reviews workers that look stuck, looping or off track; nudges, interrupts or escalates | Only `assess_worker`. |
 
-```text
-Today:
-- Finish the caching proposal; keep old clients compatible.
-- Prepare notes for the design discussion.
+- Every session is a real, persistent Copilot session (`copilot --resume <id>` works).
+- Type several tasks in one message: the Router starts one worker per task. A task that needs
+  another's result is started with `after`: it waits, then starts with that task's report.
+- Requests go to the worker that already knows the subject. Follow-ups, review comments and CI
+  results about a task, and new questions about the same project, repo or topic, go to the
+  worker that worked on it, with its context and checkout. Each worker keeps a record (task,
+  project, branch, followed PRs and threads, files it wrote, reports). Your messages reach the
+  Router with the workers whose record matches (keyword search, Chinese included, or a session
+  id), and `spawn_worker` refuses once when related workers exist: the Router either continues
+  in one of them (shown as *Continued in …*) or says why a new one is needed (shown in *Started
+  … · new because …*), e.g. an independent change that needs its own branch and PR.
+- A worker closes itself when its PR is merged or closed; finished workers that follow nothing
+  close after *Close idle after* hours (default 24) without activity. Closing is reversible: a
+  closed worker is reopened by its session id with its full conversation, unless Copilot no
+  longer has the conversation or its directory is gone.
+- Folders: Settings → *Projects* lists the folders workers may work in. The Router matches a
+  task to a project (it sees each project's name, git remote and README headline); when it is
+  not sure, or you name a folder that is not a project yet, it asks you on a card: pick a
+  project, *No project*, or type another folder (which then becomes a project).
+- Workspaces: every worker gets its own folder under *Workspaces folder* (default
+  `<data>/work/workspaces/<task>`). A code change (`isolate=true`) gets a git worktree of each
+  project inside it, all on branch `wb/<task>`, started from the latest default branch of
+  `origin` (fetched first; the local HEAD when there is no remote) and not tracking it, so your
+  own checkout is untouched and parallel workers never share one. A task across repositories
+  passes the others in `more_projects`; a worker adds more later with `add_repo`, which also
+  clones a repository that is not on this machine (git URL or GitHub `owner/name`, via `gh` when
+  available) into its workspace. Reading or running a project without changing it happens in the
+  project folder itself. Workers write only in their workspace, checkouts and the temp
+  directory; a worker's header shows its repositories and opens its folder in Finder or VS Code.
+  The Router, Slack and Watchdog sessions have no file or shell tools.
+- At most *Parallel workers* run a turn at once; new tasks and follow-ups beyond that are queued
+  and start when a slot frees up.
+- Messages arriving while a session is busy are queued, not lost, and are replayed after a
+  restart if the session had not handled them. Progress reports stay in the worker's timeline;
+  only questions, blockers, results and failures reach the Router.
+- The Router's replies to your messages are normal chat. When it acts on an event or a report,
+  the result reaches you through `notify_owner` and its closing remark is shown as a footnote.
 
-Context: rollout is next week. The current draft is in docs/.
-```
+### How sessions talk
 
-Daily notes are stored with the computer's local calendar date and project.
-Lead receives those notes when triaging connected Slack messages and review
-requests, without needing you to create the side tasks. It can ignore noise;
-ignored events, workers, and learning jobs do not clutter the daily feed.
-Detailed execution state remains available inside an update's disclosure.
+Sessions never talk to each other directly: a session calls a tool, and Work Buddy stores the
+message and delivers it to the other session.
 
-### Try the workflow without spending model credits
+- **Envelopes.** Every message a session receives is wrapped as
+  `<message from="worker:7494427b" type="report" status="done" title="…">…</message>`. Only the
+  attributes say who sent it; the text inside is escaped, so a worker, a Slack message or a web
+  page cannot pose as you or the Router. Sessions see 8-character ids, and every tool accepts
+  them.
+- **Delivery.** A message is stored before it is sent; everything a session has not received
+  goes out as one message, in order, and is replayed after a restart.
+- **Your messages steer.** What you send to a working session reaches it within its current
+  turn, so "stop, wrong direction" takes effect at once (except right after you changed its
+  model: then it waits for the next turn, which uses the new model).
+- **Events are batched.** Reports and events for the Router (and thread updates for the Slack
+  session) wait while it works and for two seconds after (`WORK_BUDDY_EVENT_DEBOUNCE`), so a
+  burst becomes one turn.
+- **Questions between sessions** (`ask_session`) are tracked: unanswered ones expire after two
+  hours (`WORK_BUDDY_QUESTION_TTL`) and end when the asked session closes; the asker is told.
+- **Router rotation.** When the Router's context passes 150k tokens
+  (`WORK_BUDDY_ROUTER_CONTEXT`), a fresh Copilot session takes over when it is idle. Work Buddy
+  writes the handover from its own records (open and recent workers, waiting cards and
+  questions, the recent conversation with you), so no model turn is spent on it; the Router
+  keeps one timeline in the UI.
 
-Select **Demo simulator** under Settings / Advanced. Submit a daily note: the simulator creates two
-workers, requests a decision, then finishes. Try distillation and feedback to see
-explicitly synthetic memory candidates. Demo is never silently substituted for
-a failed Copilot call, and it cannot propose real file writes, Slack replies, or PR comments.
-Confirmed demo memories are excluded from real Copilot task context.
+### Models and usage
 
-## Local distillation and feedback loop
+Settings → Models sets a default model and one per role (Router, workers, Slack, Watchdog); the
+Router may pick a stronger or cheaper model, or a higher or lower thinking effort, for a single
+task. A session's header switches its model, thinking effort (the levels that model offers) and
+context window (e.g. 200k or 1M where the model has a long-context tier) from the next message
+on; Settings also sets a default thinking effort per role. Every model call is recorded: the
+header shows a session's credits, and **Usage** (bottom left) totals AI credits and premium
+requests for today, 7 or 30 days or any date range, by session, model and role. An optional
+credit limit per worker stops runaway workers.
 
-```text
-Connected project / optional context -> Lead distillation -> candidate memories
-                                              -> owner confirmation
-Task -> result -> human correction / decision -> background Lead learning
-                                              -> candidate memories
-                                              -> owner confirmation
-                                              -> context for future work
-```
+### Daily summary and your profile
 
-Memories carry **category** (`fact`, `preference`, `workflow`), **scope**
-(`project`, `general`), evidence, and source task. The latest 40 applicable
-confirmed memories are included in each invocation. Pending candidates are not.
-Learning never modifies permissions, and one approved action never becomes
-standing authorization. Correct contradictions by removing an old memory and
-confirming its replacement. Choices are recorded even without a written reason,
-but they are weak evidence: Lead may correctly propose no reusable memory.
-Explicit feedback, actual decisions, and your replies in already-tracked Slack
-threads enter the learning loop. An observed reply is a behavior example, not
-approval of the agent's draft. Silence and the agent's own output never count
-as human feedback or authorization.
+At the configured time (Settings, default 09:00) the Router posts one summary: what finished,
+what waits for you, what was handled without you, and credits used. Quiet days post nothing.
 
-Learning happens in the background. Candidate memories live in **What Buddy
-knows**, not the main decisions list, and Slack sends a grouped profile notice
-instead of interrupting you once for every observation. They still require
-confirmation before changing future behavior.
+**Build from my work** (Settings → Your profile, or ask the Router) starts a worker that
+distills a short profile from your projects, your GitHub activity, your recent Copilot sessions
+and, with Slack, how you write. You review and edit it before it is used; then the Router,
+the Slack session and workers get it as context. Your edits and rejections of Slack drafts are
+also kept as examples the Slack session follows.
 
-Application data is outside the checkout by default:
+### When a session needs you
 
-- macOS: `~/Library/Application Support/work-buddy/`
-- Linux: `~/.local/share/work-buddy/` (or the configured XDG data location)
-- SQLite: `work-buddy.db` holds daily notes, tasks, results, approvals, feedback, and events.
-- **`memory/confirmed.json`** is a human-readable export regenerated on memory changes.
-  The SQLite database is authoritative; edit memories through the UI, not this export.
-- **`artifacts/<task-id>-<round>.json`** holds validated Lead/Worker outputs, including
-  distillation results and memory candidates.
-- **`artifacts/<task-id>/<name>`** holds drafts saved by agent tools. Open an update's
-  **Drafts and files** section to download its own and its workers' artifacts.
+Sessions ask you directly instead of guessing; each request is a card pinned on top (Router and
+the session's view), with a desktop notification, and the session shows amber while it waits:
 
-Removing a memory excludes it from future invocations and exports, not from
-historical tasks/feedback or an already-running model call. This is not a
-data-erasure tool. General memories remain within this local installation; there
-is no cross-company profile sync or automatic model fine-tuning.
+- **Questions** – a worker uses Copilot's `ask_user`: pick a choice or type an answer.
+- **Forms and links** – an MCP tool asks for input (fields from its schema) or for you to open
+  a link and confirm.
+- **Sign-ins** – an MCP server your Copilot uses (company integrations such as docs or tickets)
+  needs OAuth: click *Sign in*, finish in the browser tab, and the card closes by itself.
+  Copilot keeps the credentials, so every session uses that sign-in; Work Buddy itself stores
+  nothing. Only workers prompt for sign-ins.
 
-## Slack setup (optional, private/internal prototype)
+Work Buddy has no per-tool settings: it uses whatever your Copilot has (MCP servers, CLIs such
+as `gh`). When you ask for a new ability ("read our company docs"), the Router starts a setup
+worker that finds what is available, asks you to sign in or grant access, checks that it works
+and records how in **environment notes** (`record_setup`). The Router and later workers get
+these notes; edit or delete them in Settings. Workers that read Slack cannot write notes.
 
-Slack is not required for the local workbench or learning loop.
+Workers can also ask each other: `ask_session` sends a question to another worker (or the
+Router), and the answer comes back as a message. Both sides show the exchange. Sessions that
+read Slack and sessions that do not cannot ask each other, so Slack content stays isolated.
 
-1. Create a Slack app **from `slack-manifest.json`** in your authorized workspace.
-   Workspace policy may require administrator approval.
-2. Under Basic Information, create an app-level token with `connections:write`.
-3. Install the app to the workspace and obtain its bot token.
-4. Enter both tokens under **Slack credentials**. The app saves them in the OS
-   keyring, not in SQLite, source files, or browser storage.
-5. Enable Slack, enter your **member ID** (`U...`), and optionally allow channel
-   IDs (`C...`). Invite the bot to each channel you want it to monitor.
+### Following threads
 
-For environments without a working OS keyring, set these variables through your
-local secret manager before launching the app:
+A Slack thread, a Slack DM or a pull request can be *followed* by a session. New activity there
+goes straight to the followers; the Router is not woken (its timeline shows a one-line notice).
 
-```text
-WORK_BUDDY_SLACK_BOT_TOKEN
-WORK_BUDDY_SLACK_APP_TOKEN
-```
+- A session follows a conversation automatically after you approve a reply it drafted there,
+  and a worker follows a PR as soon as it reports the PR's URL or you approve its review.
+- The Router passes thread keys from an event when it hands the work to a session
+  (`follow` on `spawn_worker`/`message_session`); sessions can `follow_thread`/`unfollow_thread`.
+- Slack threads and DMs are read every check, so replies without a mention arrive too. For PRs,
+  new comments, reviews, CI results and the merge/close arrive; a closed PR is unfollowed.
+- When a follower closes, activity there goes to the Router again. A followed DM expires after
+  12 hours without activity.
 
-Do not commit tokens, put them in issue reports, or paste them into agent prompts.
-These variables are not forwarded to Copilot subprocesses.
+### Watchdog
 
-The bridge uses Socket Mode: no public endpoint or cloud backend is required.
-The bot receives your DMs **to the bot**, not all your private messages. In allowed
-channels, it captures the configured keyword, or (when no keyword is configured)
-mentions of you or the bot. Lead then decides whether the message deserves work
-in the context of your daily priorities. Bot messages and retries are deduplicated. Access to
-thread history depends on Slack token scopes; failures appear in the event log.
-Old history is not automatically backfilled.
-When you reply in an already-tracked thread in an allowed channel, Lead records
-that example and learns from it in the background. It does not create another
-work task for the same reply or resolve pending approvals on your behalf.
+Every minute a cheap check (no model) looks at each worker: no activity for 15 minutes, the
+same step repeated in its last 15 steps, the same instructions for 45 minutes, or a turn that
+ended without a report. A flagged worker is reviewed by the Watchdog session (at most every 10
+minutes per worker), which sees the task, the reason and recent activity, and decides: on track,
+nudge, interrupt the hung step and nudge, or escalate to the Router. After two nudges without a
+new report the problem always goes to the Router. Turn it off in Settings. Thresholds can be
+changed with `WORK_BUDDY_WATCHDOG_INTERVAL`, `_STALL`, `_LONG` and `_COOLDOWN` (seconds).
 
-Decisions arrive in the owner's Slack DM with a confirmation modal and optional
-reason. Only the configured owner may resolve them. Actual replies are posted
-as **Work Buddy**, not impersonating you. File approvals link back to the localhost
-diff; that link only works on the computer running the service.
-Completed-task notifications include **Give feedback**, opening a dialog whose
-corrections are analyzed by Lead and returned as confirmable memory candidates.
+### What runs without asking
 
-Public distribution / Marketplace onboarding and centralized OAuth are outside
-this prototype. Do not distribute a shared app-level token to other users.
+Workers auto-approve tool use inside their workspace and checkouts, with these exceptions
+(denied; the worker must ask you): writes outside them or the temp directory, `sudo`,
+force pushes, pushes to `main`/`master`, `gh pr merge|close|review|comment`, `gh issue`
+changes, `gh api` writes (an explicit method, fields, `--input`, GraphQL mutations), GitHub MCP
+write tools, piping downloads into a shell, and system-level destructive commands.
 
-## Automatic PR review requests (optional)
+Sessions that read Slack are contained further, because Slack text is untrusted: the Slack
+session gets only its own tools and Slack's read tools; workers with Slack access cannot fetch
+URLs or run commands that contact URLs; neither may store Copilot memories. Work Buddy's own
+secrets (`WORK_BUDDY_*`) are removed from the environment Copilot and its shells run in.
 
-Install and authenticate the [GitHub CLI](https://cli.github.com/), then open
-**Settings / Connect GitHub reviews** and explicitly choose up to five repositories
-(`owner/repo`). This prototype supports GitHub.com, using the existing `gh` login.
-Nothing is fetched while this connection is disabled.
+Nothing is sent as you without approval: Slack messages and PR reviews are drafts until you
+press **Send**. The Slack MCP tools given to sessions are read-only; sending is done by Work
+Buddy itself with the exact text you approved.
 
-Every two minutes, the inbox checks open PRs **requesting your review** in those
-repositories (the 100 most recently updated requests). A new head commit becomes
-a discovered side task; the same PR/head is not repeatedly queued. Lead gets the
-description and captured diff, triages it against the day, and prepares a review.
-It does not need a manually entered task or a local checkout of the PR.
+**Yolo** (Settings, off by default; or per worker in its header) turns all these checks off for
+workers, including workers that read Slack: every command and file change runs without approval.
+Workers are still instructed not to force-push, push to `main`, merge or speak publicly as you,
+but nothing enforces it. Slack replies and PR reviews remain drafts either way, because sessions
+have no tool to send them. The header and sidebar show when yolo is on.
 
-Remote reviews and their workers cannot read or modify the unrelated local project.
-The diff context is capped at 120,000 characters and truncation is explicitly
-reported to Lead. These are review drafts, not claims of running PR tests.
+Treat everything as a prototype, not a security sandbox: workers run commands as your user.
 
-Publishing requires approval of the exact body and commit. The application checks
-that the PR is still open and the head has not changed, then posts a **COMMENT**
-review against that commit. It never automatically approves, requests changes,
-or merges a PR. A timeout or uncertain write is not retried automatically.
+## Slack (official Slack MCP server)
 
-## Lead's native tools
+Work Buddy uses Slack's [official MCP server](https://docs.slack.dev/ai/slack-mcp-server/)
+with your **user** token. A watcher searches for new DMs and mentions every minute without
+using a model and wakes the Router only when something new arrived.
 
-The application connects a task-scoped `work-buddy` MCP server to each Copilot
-invocation. No manual MCP configuration is required.
+1. Create a Slack app **from `slack-manifest.json`** (user scopes only; token rotation off).
+   Your workspace may require admin approval; only internal or Marketplace apps may use MCP.
+2. Enable MCP access for the app (Slack shows the link if it is missing:
+   `https://api.slack.com/apps/<APP_ID>/app-assistant`).
+3. Install the app to your workspace and copy the **User OAuth Token** (`xoxp-…`) from
+   *OAuth & Permissions*.
+4. In Work Buddy **Settings**, paste the token, enable *Watch Slack*, and save. The token is
+   stored in your OS keyring (or set `WORK_BUDDY_SLACK_USER_TOKEN`).
 
-| Tools | Purpose |
-| --- | --- |
-| `spawn_agent`, `get_agent`, `wait_for_agents`, `retry_agent`, `cancel_agent` | Assemble and manage a team, including further batches when new work appears |
-| `slack_recent_messages`, `slack_read_thread`, `slack_reply` | Read actual authorized conversations and prepare an exact reply for approval |
-| `write_artifact`, `read_artifact` | Exchange code/document drafts and research between Lead and workers |
-| `request_decision`, `propose_files`, `github_review` | Request owner decisions and approval of side effects |
-| `memory_candidate` | Persist initial distillation and feedback learning with evidence |
-| `buddy_status`, `ignore_task`, `report_blocker` | Inspect state, filter irrelevant inbox events, and explicitly report blockers |
+On first enable the watcher starts from "now"; older messages are not replayed.
+`WORK_BUDDY_SLACK_MCP_URL` points Work Buddy at another MCP endpoint (used by the tests).
 
-Lead chooses the tools and order. It can create up to 32 agents for a task, with
-the configured concurrent-worker limit (two by default). Workers cannot spawn
-their own armies or send messages. Finished workers exit; there is no pool of
-idle terminals consuming model usage.
+## GitHub reviews
 
-If Lead yields while workers run, the service delivers their results on its next
-invocation. A human decision or approved action similarly wakes Lead to continue.
-Exact repeated assignments and approval requests reuse their existing records.
-Worker failures are delivered to Lead so it can decide how to recover.
+Enable *Watch review requests* and list repositories (`owner/name`). Work Buddy polls
+`gh search prs --review-requested=@me` every two minutes through your signed-in `gh` CLI. The
+Router starts a worker per request; its review is published as a comment only after you approve
+the draft, and only if the PR head has not changed since.
 
-Slack reads are scoped to connected channels and the task's assigned conversation.
-History and thread tools support bounded pages/cursors; this is **not global Slack
-search** and does not expose other users' DMs. Sending is still a human-approved
-action, even though Lead initiates it through its own tool.
+## Adding sources (Teams, email, …)
 
-## Architecture and limits
+A source watches something and calls the runtime's trigger sink with stable keys, so the same
+event never reaches the Router twice. See `src/work_buddy/sources/__init__.py`;
+`sources/slack.py` and `sources/github.py` are complete examples.
 
-- FastAPI + static HTML/CSS/JS; no frontend build or external CDN.
-- SQLite task state and daily notes survive restarts. One Lead slot + bounded
-  Worker slots (default two). Existing databases/settings are preserved on upgrade.
-- Copilot runs through supported non-interactive JSONL output using stdin prompts.
-  No terminal scraping, SDK runtime download, or custom model training.
-- Each invocation is a fresh CLI session with explicit task context, confirmed
-  memories, today's priorities, prior decisions, and child outputs. Task state, not an infinite chat,
-  is the continuity mechanism.
-- Lead can delegate dynamically across multiple batches. Workers cannot delegate.
-  Maximum 32 child agents per task, eight invocations per task, and 100 MCP calls
-  per invocation, with a configurable invocation timeout.
-- CLI tool allowlist: `view`, `glob`, `rg`, plus role-scoped Work Buddy MCP tools.
-  Native shell and write permissions are denied. Built-in MCPs and custom
-  instructions are disabled. The application never requests remote control or sharing.
-  Unrelated configured MCP tools are not exposed. Internal documents must currently
-  be in the authorized local project; hosted document connectors are not included.
-- Code/document changes are full-file proposals. Approval checks the original
-  content hash and rejects stale previews, path traversal, symlinks, and changes
-  to credential/repository metadata. Files are replaced atomically individually,
-  **not as a multi-file transaction**. No deletion or automatic shell/test execution.
-- Slack writes, PR comments, and file changes are explicit approval actions. Approvals expire
-  after 24 hours. Executing actions interrupted by a crash become **uncertain**:
-  verify externally before creating a new task. They are never auto-replayed.
-- Pause prevents new invocations; it does not cancel active ones. Cancel tasks to
-  stop their CLI process groups. Restarted in-flight tasks require explicit retry.
-- A failure is displayed as failed/interrupted, never converted into a demo success.
+## Data
 
-### Trust boundary
-
-The server binds only to loopback, validates Host and mutating request Origin,
-uses a launch-token-authenticated HttpOnly/SameSite cookie, and does not enable
-CORS. Output is rendered as text, not executable HTML. Secrets live in the OS
-keyring. Data files are private to the local OS user on normal installations.
-The internal tool endpoint rejects browser requests and uses separate, expiring,
-task-scoped capabilities rather than the owner's launch token. CLI workers never
-receive Slack credentials. A capability is revoked when its invocation exits;
-role, task ownership, channel scope, and budgets are checked by the application,
-not merely described in the prompt.
-
-**This is not an OS-level sandbox.** CLI read boundaries depend on CLI permission
-enforcement and the selected project. Do not authorize directories containing
-secrets or run hostile executables. Existing local CLI plugins/configurations are
-part of your trusted computing base. Local users/processes with your OS privileges
-can access your files. Approved file content can affect later builds if *you*
-execute it; inspect diffs before approving.
-
-Local-first does **not** mean offline inference: relevant content goes to the
-configured model provider. Slack receives notifications and approved replies.
-Copilot may retain its own session logs outside Work Buddy's data directory.
-Follow organizational data policies and use only data you may access.
+Everything lives in the data directory (`--data-dir`, default per `platformdirs`): the SQLite
+database with session metadata and timelines, worktrees and scratch directories under `work/`.
+Conversation state itself is stored by Copilot in `~/.copilot/session-state`.
 
 ## Development
 
 ```bash
-uv sync --extra dev --python 3.13
-uv run pytest -q
-uv run ruff check .
-uv run ruff format --check .
+uv sync --extra dev
+uv run pytest -q                 # unit tests with a fake Copilot SDK client and fake Slack MCP
+uv run ruff check . && uv run ruff format --check .
 ```
 
-Optional browser smoke test (uses temporary data and the demo backend):
+Live tests use your real Copilot account (they consume premium requests) and a local stand-in
+for Slack's MCP server (`scripts/fake_slack_mcp.py`, same tool names and annotations). They
+delete the Copilot sessions they create.
 
 ```bash
-uv run --with playwright python -m playwright install chromium
-uv run --with playwright python scripts/browser_smoke.py
-# Or use installed Chrome: WORK_BUDDY_BROWSER_CHANNEL=chrome <the command above>
+uv run python scripts/live_e2e.py                              # API-level, ~5-10 minutes
+uv run --with playwright python scripts/browser_smoke.py       # drives the UI, saves screenshots
 ```
 
-To exercise real CLI tool calls end-to-end (consumes Copilot model usage):
-
-```bash
-uv run python scripts/copilot_smoke.py
-```
-
-This uses an authenticated Copilot CLI, a real local HTTP/MCP connection and
-child CLI processes, but **synthetic Slack**. No actual Slack messages are sent.
-It verifies spawning, conversation reads, approval-before-send, continuation,
-and native memory-candidate persistence.
-
-Tests use explicit fakes/demo backends and temporary data, never real Slack
-credentials. Real Copilot smoke checks require an installed authenticated CLI
-and consume model usage. No credentials are needed for CI.
+Try the Slack flow by hand: run `uv run python scripts/fake_slack_mcp.py`, start Work Buddy
+with `WORK_BUDDY_SLACK_MCP_URL=http://127.0.0.1:18900/mcp WORK_BUDDY_SLACK_USER_TOKEN=xoxp-demo`,
+enable Slack in Settings, and type DMs from "Alice" into the fake server's prompt.

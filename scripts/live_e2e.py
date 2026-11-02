@@ -1,0 +1,886 @@
+"""Live end-to-end test against real Copilot sessions.
+
+Starts Work Buddy as a real process with a fake Slack MCP server (same tool surface as
+Slack's official server) and drives it through the HTTP API, exactly like the UI does:
+
+A. owner -> Router -> isolated worker -> commit -> report -> owner update
+B. Slack DM -> watcher -> Router -> Slack session reads Slack -> draft -> owner edits+sends
+E. Slack thread: a reply without a mention goes straight to the session that answered
+C. restart -> Router resumes with its memory
+D. other Copilot sessions are listed
+G. watchdog reviews a worker stuck on a hung command and acts on it
+H. two tasks in one message, the second depending on the first (after=)
+I. switching the Router's model, usage per session/model/range, the daily summary
+J. distilling the owner profile, reviewing and using it
+
+Uses your signed-in Copilot CLI and consumes premium requests. All Copilot sessions it
+creates are deleted at the end.
+
+    uv run python scripts/live_e2e.py
+"""
+
+import asyncio
+import json
+import os
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+import httpx
+from copilot import CopilotClient, RuntimeConnection
+
+sys.path.insert(0, str(Path(__file__).parent))
+from fake_oauth_mcp import forget_sign_ins, keychain_accounts  # noqa: E402
+from fake_oauth_mcp import serve_in_thread as serve_docs  # noqa: E402
+from fake_slack_mcp import Workspace, serve_in_thread  # noqa: E402
+
+PORT = 18766
+SLACK_PORT = 18901
+SLACK_TOKEN = "xoxp-live-e2e"
+BASE = f"http://127.0.0.1:{PORT}"
+DASHBOARD = "https://deploy.acme.dev/dashboard"
+STAGING = "https://staging.deploy.acme.dev/dashboard"
+# A company "docs" MCP server that needs sign-in, available to workers.
+DOCS_PORT = 18904
+DOCS_ENV = {
+    "WORK_BUDDY_WORKER_MCP": json.dumps(
+        {"docs": {"type": "http", "url": f"http://127.0.0.1:{DOCS_PORT}/mcp", "tools": ["*"]}}
+    )
+}
+# Short watchdog thresholds so a hung worker is reviewed within a minute.
+WATCHDOG_ENV = {
+    "WORK_BUDDY_WATCHDOG_INTERVAL": "5",
+    "WORK_BUDDY_WATCHDOG_STALL": "30",
+    "WORK_BUDDY_WATCHDOG_COOLDOWN": "600",
+    # A low limit, so the Router is rotated during the run and the scenarios after it must pass.
+    "WORK_BUDDY_ROUTER_CONTEXT": "45000",
+}
+
+
+def log(text: str):
+    print(f"[{time.strftime('%H:%M:%S')}] {text}", flush=True)
+
+
+class App:
+    def __init__(self, data: Path, logfile: Path, extra_env: dict | None = None):
+        self.data = data
+        self.logfile = logfile
+        self.extra_env = extra_env or {}
+        self.process: subprocess.Popen | None = None
+        self.http: httpx.AsyncClient | None = None
+
+    async def start(self):
+        env = {
+            **os.environ,
+            "WORK_BUDDY_SLACK_MCP_URL": f"http://127.0.0.1:{SLACK_PORT}/mcp",
+            "WORK_BUDDY_SLACK_USER_TOKEN": SLACK_TOKEN,
+            **WATCHDOG_ENV,
+            **self.extra_env,
+        }
+        self.process = subprocess.Popen(
+            [sys.executable, "-m", "work_buddy", "--no-browser", "--port", str(PORT)]
+            + ["--data-dir", str(self.data)],
+            stdout=subprocess.PIPE,
+            stderr=self.logfile.open("a"),
+            env=env,
+            text=True,
+        )
+        token = None
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            line = await asyncio.to_thread(self.process.stdout.readline)
+            if "Private launch URL" in line:
+                token = line.split("#token=", 1)[1].strip()
+                break
+            if not line and self.process.poll() is not None:
+                break
+        if not token:
+            raise RuntimeError("Work Buddy did not start; see " + str(self.logfile))
+        self.launch_token = token
+        self.http = httpx.AsyncClient(base_url=BASE, headers={"origin": BASE}, timeout=60)
+        for _ in range(100):
+            try:
+                if (await self.http.post("/api/auth", json={"token": token})).status_code == 200:
+                    return
+            except httpx.ConnectError:
+                await asyncio.sleep(0.2)
+        raise RuntimeError("Could not sign in.")
+
+    async def stop(self):
+        if self.http:
+            await self.http.aclose()
+        if self.process and self.process.poll() is None:
+            self.process.send_signal(signal.SIGINT)
+            await asyncio.to_thread(self.process.wait, 30)
+
+    async def get(self, path: str):
+        response = await self.http.get(path)
+        response.raise_for_status()
+        return response.json()
+
+    async def post(self, path: str, body=None):
+        response = await self.http.post(path, json=body)
+        if response.status_code >= 400:
+            raise RuntimeError(f"{path}: {response.status_code} {response.text}")
+        return response.json()
+
+
+async def wait_for(what: str, check, timeout: float, app: App | None = None):
+    log(f"waiting: {what}")
+    started = time.monotonic()
+    last = ""
+    while time.monotonic() - started < timeout:
+        result = await check()
+        if result:
+            log(f"ok: {what} ({time.monotonic() - started:.0f}s)")
+            return result
+        if app:
+            state = await app.get("/api/state")
+            summary = ", ".join(
+                f"{s['role']}:{s['title'][:24]}={s['status']}" for s in state["sessions"]
+            )
+            if summary != last:
+                log(f"  sessions: {summary}")
+                last = summary
+        await asyncio.sleep(3)
+    raise TimeoutError(f"Timed out waiting for: {what}")
+
+
+def git(repo: Path, *arguments: str) -> str:
+    return subprocess.run(
+        ["git", *arguments], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout
+
+
+def transcript(messages: list[dict]) -> str:
+    return "\n".join(f"    {m['kind']:>9}: {m['text'][:160]!r}" for m in messages)
+
+
+async def scenario_worker(app: App, project: Path) -> dict:
+    state = await app.get("/api/state")
+    router = state["router_id"]
+    mark = max((m["id"] for m in await app.get(f"/api/sessions/{router}/messages")), default=0)
+    await app.post(
+        f"/api/sessions/{router}/messages",
+        {
+            "text": f"In the project {project}, add a file hello.txt containing exactly the line "
+            "`hello from a worker` and commit it with the message 'Add hello'. Use an isolated "
+            "worktree so main stays untouched. Tell me when it is done."
+        },
+    )
+
+    async def worker_done():
+        messages = await app.get(f"/api/sessions/{router}/messages?after={mark}")
+        started = [
+            m["meta"]["session_id"]
+            for m in messages
+            if m["kind"] == "notice" and m["text"].startswith("Started")
+        ]
+        updates = [m for m in messages if m["kind"] == "update"]
+        workers = [await app.get(f"/api/sessions/{sid}") for sid in started]
+        done = [w for w in workers if w["status"] == "done"]
+        return (done[0], messages) if done and updates else None
+
+    worker, messages = await wait_for("worker done + owner update", worker_done, 900, app)
+    await asyncio.sleep(10)
+    messages = await app.get(f"/api/sessions/{router}/messages?after={mark}")
+    report = next(i for i, m in enumerate(messages) if m["meta"].get("from") == worker["id"])
+    after = [m for m in messages[report:] if m["kind"] == "assistant"]
+    assert all(m["meta"].get("internal") for m in after), "event-turn replies must be footnotes"
+    updates = [m for m in messages if m["kind"] == "update"]
+    assert worker["branch"].startswith("wb/"), worker
+    tree = Path(worker["cwd"])
+    assert (tree / "hello.txt").read_text().strip() == "hello from a worker"
+    assert "Add hello" in git(tree, "log", "--format=%s", "-1", worker["branch"])
+    assert not (project / "hello.txt").exists(), "main checkout must stay untouched"
+    assert git(project, "rev-parse", "--abbrev-ref", "HEAD").strip() == "main"
+    log(f"worker branch {worker['branch']} has the commit; update: {updates[-1]['text']!r}")
+    return worker
+
+
+async def scenario_reopen(app: App, worker: dict):
+    """A follow-up on a closed worker's task goes back to that worker, with its checkout."""
+    state = await app.get("/api/state")
+    router = state["router_id"]
+    await app.post(f"/api/sessions/{worker['id']}/close")
+    assert (await app.get(f"/api/sessions/{worker['id']}"))["closed_at"]
+    assert worker["id"] in [s["id"] for s in (await app.get("/api/state"))["closed"]]
+    mark = (await app.get(f"/api/sessions/{router}/messages"))[-1]["id"]
+    await app.post(
+        f"/api/sessions/{router}/messages",
+        {
+            "text": "Follow-up on the hello.txt task from earlier: append the line `second line` "
+            "to hello.txt and commit it with the message 'Add second line'."
+        },
+    )
+    tree = Path(worker["cwd"])
+
+    async def committed():
+        if "Add second line" not in git(tree, "log", "--format=%s", "-1", worker["branch"]):
+            return None
+        row = await app.get(f"/api/sessions/{worker['id']}")
+        return row if row["status"] == "done" else None
+
+    row = await wait_for("the closed worker reopens and commits", committed, 600, app)
+
+    async def reported():
+        messages = await app.get(f"/api/sessions/{router}/messages?after={mark}")
+        return any(m["kind"] == "update" for m in messages)
+
+    await wait_for("the Router reports the follow-up", reported, 300, app)
+    assert not row["closed_at"]
+    messages = await app.get(f"/api/sessions/{router}/messages?after={mark}")
+    started = [m for m in messages if m["kind"] == "notice" and m["text"].startswith("Started")]
+    assert not started, f"no new worker for a follow-up: {started}"
+    assert any(m["text"].startswith("Reopened") for m in messages), transcript(messages)
+    assert (tree / "hello.txt").read_text().splitlines() == ["hello from a worker", "second line"]
+    log("follow-up reopened the same worker and it committed in its worktree")
+
+    # A different question about the same project goes to the worker that knows it.
+    await app.post(f"/api/sessions/{worker['id']}/close")
+    mark = (await app.get(f"/api/sessions/{router}/messages"))[-1]["id"]
+    await app.post(
+        f"/api/sessions/{router}/messages",
+        {"text": "How many commits does main have in the demo project? Just tell me the number."},
+    )
+
+    async def routed():
+        messages = await app.get(f"/api/sessions/{router}/messages?after={mark}")
+        if any(m["kind"] == "notice" and m["text"].startswith("Started") for m in messages):
+            return messages
+        reported = any(
+            m["kind"] == "inbound" and m["meta"].get("from") == worker["id"] for m in messages
+        )
+        return messages if reported else None
+
+    messages = await wait_for("a related question is routed", routed, 600, app)
+    started = [m for m in messages if m["kind"] == "notice" and m["text"].startswith("Started")]
+    assert not started, f"related question started a new worker: {transcript(messages)}"
+    assert any(m["text"].startswith("Reopened") for m in messages), transcript(messages)
+    assert any(m["text"].startswith("Continued in") for m in messages), transcript(messages)
+    log("a related question went to the worker that already knew the project")
+
+
+async def scenario_slack(app: App, workspace: Workspace):
+    async def slack_ready():
+        state = await app.get("/api/state")
+        sessions = [s for s in state["sessions"] if s["role"] == "slack"]
+        return sessions[0] if sessions and state["slack"]["connected"] else None
+
+    slack = await wait_for("Slack session and watcher ready", slack_ready, 120, app)
+    workspace.post("C0DEPLOYS", "U0BOB001", f"Deploy dashboard lives here: {DASHBOARD} (pinned)")
+    await asyncio.sleep(2)
+    dm = workspace.post(
+        "D0ALICE01",
+        "U0ALICE1",
+        "Hey! Could you send me the deploy dashboard link? Bob posted it in #deploys a while ago.",
+    )
+    log(f"Alice sent a DM (ts {dm['ts']})")
+    await app.post("/api/settings", {**(await app.get("/api/state"))["settings"]})
+
+    async def draft_ready():
+        drafts = (await app.get("/api/state"))["drafts"]
+        return drafts[0] if drafts else None
+
+    draft = await wait_for("Slack reply drafted", draft_ready, 600, app)
+    log(f"draft: {draft['text']!r} -> {draft['target']}")
+    assert draft["kind"] == "slack" and draft["target"]["channel_id"] == "D0ALICE01", draft
+    assert DASHBOARD in draft["text"], draft["text"]
+    reads = [
+        name for name, _ in workspace.calls if name in {"slack_read_channel", "slack_read_thread"}
+    ]
+    searches = [
+        a["query"] for name, a in workspace.calls if name == "slack_search_public_and_private"
+    ]
+    assert reads or any(q not in {"to:me", "<@U0OWNER1>"} for q in searches), workspace.calls
+    assert not workspace.sent, "nothing may be sent before approval"
+
+    edited = f"Here you go: {DASHBOARD} 🙂"
+    sent = await app.post(f"/api/drafts/{draft['id']}", {"action": "send", "text": edited})
+    assert sent["status"] == "sent", sent
+    assert [(m["channel"], m["text"]) for m in workspace.sent] == [("D0ALICE01", edited)]
+    if draft["target"]["thread_ts"]:
+        assert workspace.sent[0]["thread_ts"] == draft["target"]["thread_ts"]
+    sends = [a for name, a in workspace.calls if name == "slack_send_message"]
+    assert len(sends) == 1, "only the approved send may reach Slack"
+
+    async def told_about_edit():
+        messages = await app.get(f"/api/sessions/{slack['id']}/messages")
+        return any("edited draft" in m["text"] for m in messages)
+
+    await wait_for("Slack session told about the edit", told_about_edit, 30)
+    await asyncio.sleep(45)
+    router = (await app.get("/api/state"))["router_id"]
+    inbound = [
+        m
+        for m in await app.get(f"/api/sessions/{router}/messages")
+        if m["kind"] == "inbound" and m["meta"].get("source") == "slack"
+    ]
+    assert len(inbound) == 1, f"the DM must reach the Router exactly once, got {len(inbound)}"
+    log("Slack round trip verified; the DM reached the Router once")
+
+
+async def pending_draft(app: App, exclude: set[str]):
+    drafts = [d for d in (await app.get("/api/state"))["drafts"] if d["id"] not in exclude]
+    return drafts[0] if drafts else None
+
+
+async def scenario_thread(app: App, workspace: Workspace):
+    state = await app.get("/api/state")
+    router = state["router_id"]
+    slack = next(s for s in state["sessions"] if s["role"] == "slack")
+    workspace.post("C0DEPLOYS", "U0BOB001", f"Staging dashboard: {STAGING} (for testing)")
+    await asyncio.sleep(1)
+    root = workspace.post(
+        "C0DEPLOYS",
+        "U0BOB001",
+        f"<@U0OWNER1> quick check: is the deploy dashboard still {DASHBOARD}?",
+    )
+    log(f"Bob mentioned the owner in #deploys (ts {root['ts']})")
+    first = await wait_for("reply drafted for Bob", lambda: pending_draft(app, set()), 600, app)
+    assert first["target"]["channel_id"] == "C0DEPLOYS", first
+    await app.post(f"/api/drafts/{first['id']}", {"action": "send"})
+    sent = workspace.sent[-1]
+    thread_root = first["target"]["thread_ts"] or sent["ts"]
+    follows = (await app.get(f"/api/sessions/{slack['id']}"))["follows"]
+    assert f"slack:C0DEPLOYS:{thread_root}" in follows, follows
+
+    def router_slack_events(messages):
+        return [
+            m for m in messages if m["kind"] == "inbound" and m["meta"].get("source") == "slack"
+        ]
+
+    before = len(router_slack_events(await app.get(f"/api/sessions/{router}/messages")))
+    router_sent_before = len(await app.get(f"/api/sessions/{router}/messages"))
+    workspace.post(
+        "C0DEPLOYS", "U0BOB001", "Thanks! Is there also a staging dashboard?", thread_root
+    )
+    log("Bob replied in the thread without mentioning the owner")
+    second = await wait_for(
+        "follow-up drafted without the Router", lambda: pending_draft(app, {first["id"]}), 600, app
+    )
+    assert second["target"]["channel_id"] == "C0DEPLOYS", second
+    assert STAGING in second["text"], second["text"]
+    router_messages = await app.get(f"/api/sessions/{router}/messages")
+    assert len(router_slack_events(router_messages)) == before, "the Router was not involved"
+    new_router = router_messages[router_sent_before:]
+    assert any(
+        m["kind"] == "notice" and m["text"].startswith("Slack thread in C0DEPLOYS")
+        for m in new_router
+    ), new_router
+    assert not [m for m in new_router if m["kind"] == "assistant"], "no Router turn"
+    slack_messages = await app.get(f"/api/sessions/{slack['id']}/messages")
+    assert any(m["meta"].get("thread") == f"slack:C0DEPLOYS:{thread_root}" for m in slack_messages)
+    await app.post(f"/api/drafts/{second['id']}", {"action": "send"})
+    assert workspace.sent[-1]["thread_ts"] == thread_root
+    log(f"thread follow-up answered directly: {second['text']!r}")
+
+
+async def scenario_watchdog(app: App, project: Path):
+    # A long, quiet test run: the worker has to wait, so the Watchdog sees a silent worker.
+    (project / "run_tests.sh").write_text(
+        "#!/bin/sh\necho 'Running 840 integration tests against staging (about 3 minutes)...'\n"
+        "sleep 180\necho '840 passed'\n"
+    )
+    (project / "run_tests.sh").chmod(0o755)
+    git(project, "add", ".")
+    git(project, "-c", "user.email=e2e@test", "-c", "user.name=e2e", "commit", "-qm", "tests")
+    state = await app.get("/api/state")
+    router = state["router_id"]
+    await app.post(
+        f"/api/sessions/{router}/messages",
+        {
+            "text": f"In {project}, run ./run_tests.sh (the suite takes about three minutes; let "
+            "it finish) and tell me whether the tests pass. Do not change any files."
+        },
+    )
+
+    async def assessed():
+        sessions = (await app.get("/api/state"))["sessions"]
+        watchdog = next((s for s in sessions if s["role"] == "watchdog"), None)
+        if not watchdog:
+            return None
+        notes = [
+            m
+            for m in await app.get(f"/api/sessions/{watchdog['id']}/messages")
+            if m["kind"] == "notice" and m["meta"].get("session_id")
+        ]
+        return (watchdog, notes[0]) if notes else None
+
+    watchdog, verdict = await wait_for("watchdog review and verdict", assessed, 600, app)
+    worker_id = verdict["meta"]["session_id"]
+    log(f"watchdog verdict: {verdict['text']!r}")
+    reviews = [
+        m
+        for m in await app.get(f"/api/sessions/{watchdog['id']}/messages")
+        if m["kind"] == "inbound" and m["meta"].get("review") == worker_id
+    ]
+    assert reviews, "the verdict follows a review packet"
+    action = verdict["text"].split(", ")[1].split(".")[0]
+    if action in {"nudge", "interrupt"}:
+        worker_messages = await app.get(f"/api/sessions/{worker_id}/messages")
+        assert any(m["kind"] == "watchdog" for m in worker_messages), "nudge delivered"
+    elif action == "escalate":
+        router_messages = await app.get(f"/api/sessions/{router}/messages")
+        assert any(m["meta"].get("status", "").startswith("watchdog") for m in router_messages)
+    log(f"watchdog acted: {action}")
+    await app.post(f"/api/sessions/{worker_id}/close")
+
+
+async def scenario_dependencies(app: App, project: Path):
+    router = (await app.get("/api/state"))["router_id"]
+    before = len(await app.get(f"/api/sessions/{router}/messages"))
+    await app.post(
+        f"/api/sessions/{router}/messages",
+        {
+            "text": f"Two tasks in {project}: (1) add a file VERSION containing exactly 1.4.2 and "
+            "commit it; (2) once that is done, add CHANGELOG.md whose first line is "
+            "'# <the version from task 1>' and commit it. Use isolated worktrees."
+        },
+    )
+
+    async def both_done():
+        messages = (await app.get(f"/api/sessions/{router}/messages"))[before:]
+        started = [
+            m["meta"]["session_id"]
+            for m in messages
+            if m["kind"] == "notice" and m["text"].startswith("Started")
+        ]
+        workers = [await app.get(f"/api/sessions/{sid}") for sid in started]
+        if len(workers) >= 2 and all(w["status"] == "done" for w in workers[:2]):
+            return workers[:2]
+        return None
+
+    first, second = await wait_for("both dependent tasks done", both_done, 900, app)
+    transcript = await app.get(f"/api/sessions/{second['id']}/messages")
+    assert any("Results of the tasks this one waited for" in m["text"] for m in transcript), (
+        "the second task started from the first one's result"
+    )
+    changelog = Path(second["cwd"]) / "CHANGELOG.md"
+    assert changelog.read_text().splitlines()[0].strip() == "# 1.4.2", changelog.read_text()
+    log(f"dependency chain: “{first['title']}” → “{second['title']}”; CHANGELOG starts with 1.4.2")
+
+
+async def scenario_workspace(app: App, root: Path):
+    """A folder that is not a configured project: the Router asks, the owner picks it."""
+    other = root / "other-project"
+    other.mkdir()
+    git(other, "init", "-q", "-b", "main")
+    (other / "README.md").write_text("# Other project\n")
+    git(other, "add", ".")
+    git(other, "-c", "user.email=e2e@test", "-c", "user.name=e2e", "commit", "-qm", "init")
+    router = (await app.get("/api/state"))["router_id"]
+    mark = (await app.get(f"/api/sessions/{router}/messages"))[-1]["id"]
+    await app.post(
+        f"/api/sessions/{router}/messages",
+        {
+            "text": f"In {other}, add a file notes.txt containing exactly `from the folder test` "
+            "and commit it with the message 'Add notes'. Use an isolated worktree."
+        },
+    )
+
+    async def asked():
+        drafts = (await app.get("/api/state"))["drafts"]
+        return next((d for d in drafts if d["kind"] == "workspace"), None)
+
+    question = await wait_for("the Router asks which folder", asked, 300, app)
+    paths = [option["path"] for option in question["target"]["options"]]
+    assert str(other) in paths, paths
+    await app.post(f"/api/drafts/{question['id']}", {"action": "choose", "choice": str(other)})
+    settings = (await app.get("/api/state"))["settings"]
+    assert str(other) in settings["projects"], settings["projects"]
+
+    async def committed():
+        messages = await app.get(f"/api/sessions/{router}/messages?after={mark}")
+        for message in messages:
+            if message["kind"] == "notice" and message["text"].startswith("Started"):
+                worker = await app.get(f"/api/sessions/{message['meta']['session_id']}")
+                if worker["status"] == "done" and worker["branch"]:
+                    log_line = git(other, "log", "--format=%s", "-1", worker["branch"])
+                    if "Add notes" in log_line:
+                        return worker
+        return None
+
+    worker = await wait_for("the worker commits in the chosen folder", committed, 600, app)
+    assert (Path(worker["cwd"]) / "notes.txt").read_text().strip() == "from the folder test"
+    assert not (other / "notes.txt").exists(), "main checkout stays untouched"
+    log(f"Router asked for the folder; worker committed on {worker['branch']} in {other.name}")
+
+
+async def scenario_setup(app: App):
+    """A new ability: a setup worker finds the company docs tool, the owner signs in once."""
+    router = (await app.get("/api/state"))["router_id"]
+    mark = max((m["id"] for m in await app.get(f"/api/sessions/{router}/messages")), default=0)
+    await app.post(
+        f"/api/sessions/{router}/messages",
+        {
+            "text": "Set up access to our company docs so workers can read them, then tell me "
+            "the launch date written in doc 42."
+        },
+    )
+
+    async def asked():
+        drafts = (await app.get("/api/state"))["drafts"]
+        return next((d for d in drafts if d["kind"] == "signin"), None)
+
+    card = await wait_for("a sign-in card", asked, 300, app)
+    assert card["target"]["server"] == "docs", card
+    # The owner signs in: the browser follows the authorization URL back to Copilot.
+    async with httpx.AsyncClient(follow_redirects=True, timeout=30) as http:
+        assert (await http.get(card["target"]["url"])).status_code == 200
+
+    async def closed():
+        drafts = (await app.get("/api/state"))["drafts"]
+        return not any(d["id"] == card["id"] for d in drafts)
+
+    await wait_for("the sign-in card closes by itself", closed, 60, app)
+
+    async def answered():
+        messages = await app.get(f"/api/sessions/{router}/messages?after={mark}")
+        dates = ("Nov 18", "November 18", "11/18", "11-18")
+        updates = [
+            m for m in messages if m["kind"] == "update" and any(d in m["text"] for d in dates)
+        ]
+        return messages if updates else None
+
+    await wait_for("the launch date from the doc", answered, 600, app)
+    notes = (await app.get("/api/state"))["setup_notes"]
+    assert any("docs" in f"{topic} {entry['note']}".lower() for topic, entry in notes.items()), (
+        notes
+    )
+    log(f"signed in once; the doc was read; environment notes: {list(notes)}")
+
+
+async def scenario_ask_user(app: App):
+    """A worker asks the owner directly and waits for the answer."""
+    router = (await app.get("/api/state"))["router_id"]
+    await app.post(
+        f"/api/sessions/{router}/messages",
+        {
+            "text": "Start a worker that asks me directly (with ask_user) whether the greeting "
+            "should be 'hi' or 'hello', then writes my choice into greeting.txt in its own "
+            "folder and reports done."
+        },
+    )
+
+    async def asked():
+        drafts = (await app.get("/api/state"))["drafts"]
+        return next((d for d in drafts if d["kind"] == "question"), None)
+
+    question = await wait_for("the worker's question", asked, 300, app)
+    worker_id = question["session_id"]
+    assert (await app.get(f"/api/sessions/{worker_id}"))["status"] == "waiting"
+    await app.post(f"/api/drafts/{question['id']}", {"action": "answer", "text": "hello"})
+
+    async def written():
+        worker = await app.get(f"/api/sessions/{worker_id}")
+        path = Path(worker["cwd"]) / "greeting.txt"
+        return worker if worker["status"] == "done" and path.exists() else None
+
+    worker = await wait_for("the answer is used", written, 300, app)
+    assert (Path(worker["cwd"]) / "greeting.txt").read_text().strip() == "hello"
+    log("the worker asked the owner directly and used the answer")
+
+
+async def scenario_ask_session(app: App):
+    """A worker asks another worker and gets the answer back."""
+    router = (await app.get("/api/state"))["router_id"]
+
+    async def started_after(mark, done=True):
+        messages = await app.get(f"/api/sessions/{router}/messages?after={mark}")
+        for message in messages:
+            if message["kind"] == "notice" and message["text"].startswith("Started"):
+                worker = await app.get(f"/api/sessions/{message['meta']['session_id']}")
+                if worker["status"] == "done" or not done:
+                    return worker
+        return None
+
+    mark = (await app.get(f"/api/sessions/{router}/messages"))[-1]["id"]
+    await app.post(
+        f"/api/sessions/{router}/messages",
+        {
+            "text": "Start a worker titled 'Keeper'. Tell it: the code word is 'pineapple'; it "
+            "only needs to remember it and report done."
+        },
+    )
+    keeper = await wait_for("the Keeper worker", lambda: started_after(mark), 300, app)
+    mark = (await app.get(f"/api/sessions/{router}/messages"))[-1]["id"]
+    await app.post(
+        f"/api/sessions/{router}/messages",
+        {
+            "text": f"Now start a separate new worker, not the Keeper ({keeper['id']}), that asks "
+            "the Keeper for the code word with ask_session and writes the word into code.txt in "
+            "its own folder. Do not tell it the word yourself."
+        },
+    )
+
+    async def written():
+        worker = await started_after(mark)
+        if worker and (Path(worker["cwd"]) / "code.txt").exists():
+            return worker
+        return None
+
+    worker = await wait_for("the code word from the Keeper", written, 600, app)
+    assert "pineapple" in (Path(worker["cwd"]) / "code.txt").read_text()
+    messages = await app.get(f"/api/sessions/{worker['id']}/messages")
+    assert any(m["kind"] == "ask" and m["meta"]["target"] == keeper["id"] for m in messages)
+    assert any(m["meta"].get("answered_by") == keeper["id"] for m in messages)
+    log("one worker asked another and used its answer")
+
+
+def published_repo(root: Path, name: str) -> tuple[Path, Path]:
+    """A repository with an origin, and a local clone that is one commit behind it."""
+    origin = root / f"{name}.git"
+    git(root, "init", "-q", "--bare", "-b", "main", str(origin))
+    local = root / name
+    git(root, "clone", "-q", str(origin), str(local))
+    for repo, file in ((local, "README.md"), (root / f"{name}-other", "LATEST.md")):
+        if repo != local:
+            git(root, "clone", "-q", str(origin), str(repo))
+        else:
+            git(repo, "checkout", "-q", "-b", "main")
+        (repo / file).write_text(f"{name} {file}\n")
+        git(repo, "add", ".")
+        git(repo, "-c", "user.email=e2e@test", "-c", "user.name=e2e", "commit", "-qm", file)
+        git(repo, "push", "-q", "origin", "main")
+    return origin, local
+
+
+async def scenario_repos(app: App, root: Path):
+    """One task across two local projects and one repository that is only on a remote, in yolo."""
+    _, api = published_repo(root, "api")
+    _, web = published_repo(root, "web")
+    lib, _ = published_repo(root, "lib")
+    state = await app.get("/api/state")
+    settings = {**state["settings"], "worker_yolo": True}
+    settings["projects"] = [*settings["projects"], str(api), str(web)]
+    await app.post("/api/settings", settings)
+    router = state["router_id"]
+    mark = max((m["id"] for m in await app.get(f"/api/sessions/{router}/messages")), default=0)
+    await app.post(
+        f"/api/sessions/{router}/messages",
+        {
+            "text": f"One task across three repositories, for a single worker: in the {api} and "
+            f"{web} projects and in the library at file://{lib} (not on this machine), add a "
+            "file CHANGE.md containing exactly `renamed user to account` and commit it with the "
+            "message 'Rename user' in each. Use isolated worktrees."
+        },
+    )
+
+    async def done():
+        messages = await app.get(f"/api/sessions/{router}/messages?after={mark}")
+        for message in messages:
+            if message["kind"] == "notice" and message["text"].startswith("Started"):
+                worker = await app.get(f"/api/sessions/{message['meta']['session_id']}")
+                if worker["status"] == "done" and len(worker["checkouts"]) >= 3:
+                    return worker
+        return None
+
+    worker = await wait_for("one worker commits in three repositories", done, 900, app)
+    assert worker["yolo"], "workers follow the yolo setting"
+    for checkout in worker["checkouts"]:
+        tree = Path(checkout["path"])
+        assert (tree / "CHANGE.md").read_text().strip() == "renamed user to account", checkout
+        assert "Rename user" in git(tree, "log", "--format=%s", "-1"), checkout
+        assert (tree / "LATEST.md").exists(), f"started from origin's latest: {checkout}"
+        assert git(tree, "branch", "--show-current").strip() == worker["branch"]
+    assert {Path(c["path"]).name for c in worker["checkouts"]} >= {"api", "web", "lib"}
+    assert not (api / "CHANGE.md").exists() and not (web / "CHANGE.md").exists()
+    settings["worker_yolo"] = False
+    await app.post("/api/settings", settings)
+    log(f"one worker, {len(worker['checkouts'])} checkouts on {worker['branch']}, in yolo")
+
+
+async def scenario_models_usage_digest(app: App, started: float):
+    state = await app.get("/api/state")
+    router = state["router_id"]
+    models = [m["id"] for m in await app.get("/api/models") if m["id"] != "auto"]
+    chosen = next((m for m in models if "haiku" in m or "mini" in m or "fast" in m), models[-1])
+    await app.post(f"/api/sessions/{router}/model", {"model": chosen})
+    calls_before = (await app.get(f"/api/usage?since={started}"))["total"]["calls"]
+    await app.post(f"/api/sessions/{router}/messages", {"text": "Reply with just OK."})
+
+    async def used_new_model():
+        usage = await app.get(f"/api/usage?since={started}")
+        models_used = {row["model"] for row in usage["by_model"]}
+        return usage if usage["total"]["calls"] > calls_before and chosen in models_used else None
+
+    usage = await wait_for(f"Router answers with {chosen}", used_new_model, 180, app)
+    roles = {row["role"] for row in usage["by_role"]}
+    assert {"router", "worker", "slack"} <= roles, roles
+    assert usage["total"]["credits"] > 0 and usage["by_session"][0]["credits"] > 0
+    router_view = await app.get(f"/api/sessions/{router}")
+    assert router_view["credits"] > 0 and router_view["model"] == chosen
+    log(
+        f"usage: {usage['total']['credits']:.1f} credits, {usage['total']['calls']} calls, "
+        f"models {sorted(row['model'] for row in usage['by_model'])}"
+    )
+    await app.post("/api/settings", {**state["settings"], "digest_time": "00:00"})
+
+    async def summary():
+        messages = await app.get(f"/api/sessions/{router}/messages")
+        found = [m for m in messages if m["meta"].get("digest")]
+        return found[0] if found else None
+
+    digest = await wait_for("daily summary", summary, 60)
+    log("daily summary:\n" + digest["text"])
+
+
+async def scenario_profile(app: App):
+    await app.post("/api/profile/distill")
+
+    async def drafted():
+        state = await app.get("/api/state")
+        return state["profile_draft"] or None
+
+    draft = await wait_for("profile draft proposed", drafted, 900, app)
+    assert "##" in draft and len(draft) < 8000, draft[:500]
+    state = await app.post("/api/profile", {"text": draft})
+    assert state["profile"] == draft and state["profile_draft"] == ""
+    log("profile draft (first lines):\n" + "\n".join(draft.splitlines()[:8]))
+
+
+async def scenario_restart(app: App, router_before: str):
+    await app.stop()
+    log("restarted Work Buddy")
+    await app.start()
+
+    async def ready():
+        state = await app.get("/api/state")
+        return state if state["runtime"]["state"] == "ready" else None
+
+    state = await wait_for("runtime ready after restart", ready, 120)
+    assert state["router_id"] == router_before, "the Router must survive a restart"
+    before = len(await app.get(f"/api/sessions/{router_before}/messages"))
+    await app.post(
+        f"/api/sessions/{router_before}/messages",
+        {"text": "Without starting anything new: what did the hello.txt worker do? One sentence."},
+    )
+
+    async def answered():
+        messages = (await app.get(f"/api/sessions/{router_before}/messages"))[before:]
+        replies = [m["text"] for m in messages if m["kind"] == "assistant"]
+        return replies[-1] if replies else None
+
+    reply = await wait_for("Router answers from memory", answered, 300, app)
+    log(f"router after restart: {reply!r}")
+    assert "hello" in reply.lower(), reply
+
+
+async def scenario_external(app: App):
+    external = await app.get("/api/external?refresh=true")
+    assert isinstance(external, list)
+    log(f"{len(external)} other Copilot sessions listed")
+
+
+async def cleanup(data: Path):
+    import sqlite3
+
+    database = data / "work-buddy-sessions.db"
+    if not database.exists():
+        return
+    with sqlite3.connect(database) as db:
+        ids = [row[0] for row in db.execute("SELECT id FROM sessions")]
+        # A rotated Router left earlier Copilot sessions behind (and has a new one).
+        ids += [
+            row[0][len("alias:") :]
+            for row in db.execute("SELECT key FROM kv WHERE key LIKE 'alias:%'")
+        ]
+        ids = list(dict.fromkeys(ids))
+    path = subprocess.run(["which", "copilot"], capture_output=True, text=True).stdout.strip()
+    client = CopilotClient(connection=RuntimeConnection.for_stdio(path=path))
+    await client.start()
+    for session_id in ids:
+        try:
+            await client.delete_session(session_id)
+        except Exception as exc:
+            log(f"could not delete {session_id}: {exc}")
+    await client.stop()
+    log(f"deleted {len(ids)} test sessions")
+
+
+async def main():
+    workspace = Workspace()
+    serve_in_thread(workspace, SLACK_TOKEN, SLACK_PORT)
+    serve_docs(DOCS_PORT)
+    forget_sign_ins(DOCS_PORT)
+    signed_in_before = keychain_accounts()
+    with tempfile.TemporaryDirectory(prefix="wb-live-") as temporary:
+        root = Path(temporary).resolve()
+        project = root / "project"
+        project.mkdir()
+        git(project, "init", "-q", "-b", "main")
+        (project / "README.md").write_text("# Demo project\n")
+        git(project, "add", ".")
+        git(project, "-c", "user.email=e2e@test", "-c", "user.name=e2e", "commit", "-qm", "init")
+        data = root / "data"
+        app = App(data, root / "work-buddy.log", DOCS_ENV)
+        failed = False
+        started = time.time()
+        try:
+            await app.start()
+            state = await app.get("/api/state")
+            assert state["runtime"]["state"] == "ready", state["runtime"]
+            await app.post(
+                "/api/settings",
+                {
+                    "projects": [str(project)],
+                    "max_workers": 2,
+                    "mac_notifications": False,
+                    "slack_enabled": True,
+                    "slack_poll_seconds": 20,
+                    "digest_time": "",  # Scenario I turns it on; at startup it would fire at once.
+                },
+            )
+            router = state["router_id"]
+            await scenario_setup(app)
+            if sys.argv[1:] == ["setup"]:
+                log("SETUP SCENARIO PASSED")
+                return
+            if sys.argv[1:] == ["repos"]:
+                await scenario_repos(app, root)
+                log("REPOS SCENARIO PASSED")
+                return
+            worker = await scenario_worker(app, project)
+            await scenario_reopen(app, worker)
+            await scenario_slack(app, workspace)
+            await scenario_thread(app, workspace)
+            await scenario_restart(app, router)
+            await scenario_external(app)
+            await scenario_watchdog(app, project)
+            await scenario_dependencies(app, project)
+            await scenario_workspace(app, root)
+            await scenario_ask_user(app)
+            await scenario_ask_session(app)
+            await scenario_repos(app, root)
+            await scenario_models_usage_digest(app, started)
+            await scenario_profile(app)
+            router_messages = await app.get(f"/api/sessions/{router}/messages")
+            rotations = sum("fresh Router session took over" in m["text"] for m in router_messages)
+            log(f"the Router was rotated {rotations} time(s) during the run")
+            log("ALL LIVE SCENARIOS PASSED")
+        except BaseException:
+            failed = True
+            raise
+        finally:
+            try:
+                state = await app.get("/api/state")
+                for session in state["sessions"]:
+                    messages = await app.get(f"/api/sessions/{session['id']}/messages")
+                    print(f"--- {session['role']} {session['title']} [{session['status']}]")
+                    print(transcript(messages))
+            except Exception:
+                pass
+            await app.stop()
+            if failed:
+                print("--- work-buddy.log (tail)")
+                print("\n".join((root / "work-buddy.log").read_text().splitlines()[-60:]))
+            await cleanup(data)
+            log(f"removed {forget_sign_ins(DOCS_PORT, signed_in_before)} test sign-in entries")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

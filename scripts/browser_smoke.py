@@ -1,167 +1,218 @@
-"""Optional: uv run --with playwright python scripts/browser_smoke.py."""
+"""Live browser test of the Work Buddy UI against real Copilot sessions.
+
+Drives the real UI with Playwright while Work Buddy talks to your signed-in Copilot and to a
+fake Slack MCP server. Saves screenshots to ./browser-shots (light and dark).
+
+    uv run --with playwright python scripts/browser_smoke.py
+"""
 
 import asyncio
-import os
+import re
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from urllib.parse import urlsplit
 
 from playwright.async_api import async_playwright, expect
 
+sys.path.insert(0, str(Path(__file__).parent))
+from fake_slack_mcp import Workspace, serve_in_thread  # noqa: E402
+from live_e2e import BASE, DASHBOARD, SLACK_PORT, SLACK_TOKEN, App, cleanup, git, log  # noqa: E402
+
+SHOTS = Path("browser-shots")
+
+
+async def run(page, app: App, project: Path, workspace: Workspace, errors: list[str]):
+    await page.goto(f"{BASE}/#token={app.launch_token}")
+    await expect(page.locator("#application")).to_be_visible()
+    await expect(page.locator(".item.selected .label")).to_have_text("Router")
+    await expect(page.locator(".empty")).to_contain_text("What should we work on?")
+    await page.screenshot(path=SHOTS / "1-empty.png")
+
+    await page.get_by_role("button", name="Settings").click()
+    form = page.locator("#settings-form")
+    await form.locator("textarea[name=projects]").fill(str(project))
+    await form.locator("input[name=mac_notifications]").uncheck()
+    await form.locator("input[name=slack_enabled]").check()
+    await form.locator("input[name=slack_token]").fill("xoxb-wrong")
+    await page.locator("#slack-token-save").click()
+    await expect(page.locator("#settings-error")).to_contain_text("not a Slack user token")
+    await form.locator("input[name=slack_token]").fill(SLACK_TOKEN)
+    await form.locator("details summary").click()
+    await form.locator("input[name=slack_poll_seconds]").fill("20")
+    await page.screenshot(path=SHOTS / "2-settings.png")
+    await form.get_by_role("button", name="Save", exact=True).click()
+    await expect(page.locator("#settings-dialog")).to_be_hidden()
+    await expect(page.locator("#session-list")).to_contain_text("Slack", timeout=30000)
+
+    composer = page.locator("#composer-input")
+    await composer.fill(
+        f"In {project}, add notes.md with the line `notes from the UI test` and commit it "
+        "with message 'Add notes'. Use an isolated worktree."
+    )
+    await composer.press("Enter")
+    await expect(page.locator(".msg.owner")).to_contain_text("notes from the UI test")
+    worker = page.locator("#session-list .item", has_text="notes")
+    await expect(worker).to_be_visible(timeout=120000)
+    log("worker appeared in the sidebar")
+    await page.screenshot(path=SHOTS / "3-dispatched.png")
+    await worker.click()
+    await expect(page.locator("#timeline .card.router")).to_be_visible()
+    await expect(page.locator("#composer-input")).to_have_attribute(
+        "placeholder", "Message this worker directly…"
+    )
+    await expect(page.locator("#timeline .card.report.done")).to_be_visible(timeout=600000)
+    await expect(page.locator("#timeline .card.report.done .chip")).to_have_text("Done")
+    await page.screenshot(path=SHOTS / "4-worker.png")
+    await page.locator("details.steps summary").first.click()
+    await expect(page.locator("details.steps .step").first).to_be_visible()
+
+    await page.locator("#session-list .item", has_text="Router").click()
+    await expect(page.locator("#timeline .card.update")).to_be_visible(timeout=300000)
+    log("Router posted an update card")
+    await page.screenshot(path=SHOTS / "5-update.png")
+
+    workspace.post("C0DEPLOYS", "U0BOB001", f"Deploy dashboard lives here: {DASHBOARD} (pinned)")
+    await asyncio.sleep(1)
+    workspace.post(
+        "D0ALICE01",
+        "U0ALICE1",
+        "Hey! Could you send me the deploy dashboard link? Bob posted it in #deploys.",
+    )
+    log("Alice sent a DM")
+    draft = page.locator("#drafts .draft")
+    await expect(draft).to_be_visible(timeout=600000)
+    await expect(
+        page.locator("#session-list .item", has_text="Router").locator(".badge")
+    ).to_be_visible()
+    assert DASHBOARD in await draft.locator("textarea").input_value()
+    await expect(draft.locator(".label")).not_to_contain_text("D0ALICE01")
+    await page.screenshot(path=SHOTS / "6-draft.png")
+    edited = f"Here it is: {DASHBOARD}"
+    await draft.locator("textarea").fill(edited)
+    await draft.get_by_role("button", name="Send").click()
+    await expect(page.locator("#drafts .draft")).to_have_count(0, timeout=30000)
+    assert [m["text"] for m in workspace.sent] == [edited], workspace.sent
+    log("draft edited and sent from the UI")
+
+    # A worker asks the owner directly; the owner answers on the card.
+    await page.locator("#session-list .item", has_text="Router").click()
+    await composer.fill(
+        "Start a worker that asks me directly (with ask_user) to pick red or blue, "
+        "then reports my choice."
+    )
+    await composer.press("Enter")
+    question = page.locator("#drafts .request.question")
+    await expect(question).to_be_visible(timeout=300000)
+    await page.screenshot(path=SHOTS / "11-question.png")
+    await question.get_by_role("button", name=re.compile("^blue$", re.I)).click()
+    await expect(page.locator("#drafts .request.question")).to_have_count(0)
+    await expect(page.locator("#timeline .card.update").last).to_contain_text(
+        re.compile("blue", re.I), timeout=300000
+    )
+    log("the owner answered a worker's question on its card")
+
+    await page.locator("#session-list .item", has_text="Slack").click()
+    await expect(page.locator("#timeline")).to_contain_text("edited draft", timeout=30000)
+    await page.locator("#external summary").click()
+    await expect(page.locator("#external-list .item").first).to_be_visible(timeout=30000)
+    await page.screenshot(path=SHOTS / "7-slack.png")
+
+    # Close the finished worker (unless the Router already did), reopen it from the Closed
+    # group, close it again, then reply to it.
+    if await page.locator("#session-list .item", has_text="notes").count():
+        await page.locator("#session-list .item", has_text="notes").click()
+        await page.locator("#session-actions").get_by_role("button", name="Close").click()
+    await expect(page.locator("#session-list .item", has_text="notes")).to_have_count(0)
+    await page.locator("#closed summary").click()
+    await page.locator("#closed-list .item", has_text="notes").click()
+    await expect(page.locator("#closed-list .item", has_text="notes")).to_be_visible()
+    await page.locator("#session-actions").get_by_role("button", name="Reopen").click()
+    await expect(page.locator("#session-list .item", has_text="notes")).to_be_visible()
+    await expect(page.locator("#closed")).to_be_hidden()
+    await page.locator("#session-actions").get_by_role("button", name="Close").click()
+    await page.locator("#closed-list .item", has_text="notes").click()
+    await expect(page.locator("#composer-input")).to_have_attribute(
+        "placeholder", "Message to reopen this worker…"
+    )
+    await page.screenshot(path=SHOTS / "10-closed.png")
+    await composer.fill("Which file did you add? Reply with only its name, in UPPERCASE.")
+    await composer.press("Enter")
+    await expect(page.locator("#session-list .item", has_text="notes")).to_be_visible()
+    await expect(page.locator("#timeline")).to_contain_text("NOTES.MD", timeout=300000)
+    log("a reply reopened the closed worker, which still knew its task")
+
+    await page.locator("#session-list .item", has_text="Router").click()
+    picker = page.locator("#session-model")
+    await expect(picker).to_be_visible()
+    await picker.select_option("claude-sonnet-5.5")
+    await expect(page.locator(".toast").last).to_contain_text("Applies from the next message")
+    effort = page.locator("#session-effort")
+    await expect(effort).to_be_visible()
+    await effort.select_option("high")
+    await expect(page.locator(".toast").last).to_contain_text("Thinking effort: high")
+    await page.locator("#usage-button").click()
+    await expect(page.locator("#usage-total strong")).to_contain_text("credits")
+    await expect(page.locator("#usage-tables")).to_contain_text("By session")
+    overflow = await page.evaluate(
+        "() => [...document.querySelectorAll('#usage-dialog, #usage-dialog form')]"
+        ".some((node) => node.scrollWidth > node.clientWidth)"
+    )
+    assert not overflow, "the usage dialog must not scroll sideways"
+    await page.screenshot(path=SHOTS / "9-usage.png")
+    await page.get_by_role("button", name="7 days").click()
+    await expect(page.locator("#usage-dialog [data-range='7']")).to_have_class("active")
+    await page.locator("#usage-dialog").get_by_role("button", name="Close").click()
+
+    await page.emulate_media(color_scheme="dark")
+    await page.locator("#session-list .item", has_text="Router").click()
+    await expect(page.locator("#timeline .card.update").first).to_be_visible()
+    await expect(page.locator("#session-list .item", has_text="Slack")).to_be_in_viewport()
+    await page.screenshot(path=SHOTS / "8-dark.png")
+    assert not errors, errors
+
 
 async def main():
-    with tempfile.TemporaryDirectory(prefix="work-buddy-browser-") as directory:
-        process = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-m",
-            "work_buddy",
-            "--no-browser",
-            "--port",
-            "18765",
-            "--data-dir",
-            directory,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+    SHOTS.mkdir(exist_ok=True)
+    workspace = Workspace()
+    serve_in_thread(workspace, SLACK_TOKEN, SLACK_PORT)
+    with tempfile.TemporaryDirectory(prefix="wb-browser-") as temporary:
+        root = Path(temporary).resolve()
+        project = root / "project"
+        project.mkdir()
+        git(project, "init", "-q", "-b", "main")
+        (project / "README.md").write_text("# Demo\n")
+        git(project, "add", ".")
+        git(project, "-c", "user.email=e2e@test", "-c", "user.name=e2e", "commit", "-qm", "init")
+        app = App(root / "data", root / "work-buddy.log")
+        await app.start()
         try:
-            async with asyncio.timeout(20):
-                assert process.stdout
-                while True:
-                    line = (await process.stdout.readline()).decode()
-                    if "Private launch URL" in line:
-                        launch_url = line.split(": ", 1)[1].strip()
-                        break
-                    if not line:
-                        raise RuntimeError("Local service exited before startup.")
             async with async_playwright() as playwright:
-                channel = os.environ.get("WORK_BUDDY_BROWSER_CHANNEL")
-                browser = await playwright.chromium.launch(headless=True, channel=channel)
+                browser = await playwright.chromium.launch(headless=True)
+                page = await browser.new_page(viewport={"width": 1280, "height": 820})
+                errors: list[str] = []
+                page.on("pageerror", lambda error: errors.append(str(error)))
+
+                def console(message):
+                    # The 422 is the deliberately rejected bot token.
+                    if message.type == "error" and "status of 422" not in message.text:
+                        errors.append(message.text)
+
+                page.on("console", console)
                 try:
-                    page = await browser.new_page(viewport={"width": 1440, "height": 1100})
-                    errors = []
-                    page.on("pageerror", lambda error: errors.append(str(error)))
-                    await page.goto(launch_url)
-                    await expect(page.locator("#application")).to_be_visible()
-                    await expect(page.locator("#daily-form textarea")).to_have_count(1)
-                    await expect(page.locator("#daily-form input")).to_have_count(0)
-                    await page.get_by_role("button", name="Settings", exact=True).click()
-                    await page.locator("#advanced-settings > summary").click()
-                    await page.locator("select[name=backend]").select_option("demo")
-                    await page.get_by_role("button", name="Save settings", exact=True).click()
-                    await expect(page.locator("#notice")).to_contain_text("Settings saved")
-
-                    await page.get_by_role("button", name="Get to know me", exact=True).click()
-                    await page.locator("textarea[name=material]").fill(
-                        "I prefer concise replies that separate evidence from assumptions."
-                    )
-                    await page.get_by_role("button", name="Build my profile").click()
-                    await expect(page.locator("#memory-approvals")).to_contain_text(
-                        "Synthetic example",
-                        timeout=15000,
-                    )
-                    await (
-                        page.locator("#memory-approvals")
-                        .get_by_role(
-                            "button",
-                            name="Approve",
-                            exact=True,
-                        )
-                        .click()
-                    )
-                    await expect(page.locator("#memories .memory")).to_have_count(1)
-                    await (
-                        page.locator("#profile-dialog")
-                        .get_by_role("button", name="Close", exact=True)
-                        .click()
-                    )
-                    await expect(page.locator("#onboarding")).to_be_hidden()
-
-                    await page.locator("#daily-form textarea").fill(
-                        "Today: investigate caching and prepare design notes. "
-                        "Context: preserve compatibility; ask about the final format."
-                    )
-                    await page.get_by_role("button", name="Hand over my day").click()
-                    await expect(page.locator("#approvals")).to_contain_text(
-                        "Which deliverable",
-                        timeout=15000,
-                    )
-                    await page.get_by_role("button", name="Short summary", exact=True).click()
-                    await expect(page.locator("#updates")).to_contain_text(
-                        "Completed the simulated workflow",
-                        timeout=15000,
-                    )
-                    await (
-                        page.locator("#updates")
-                        .get_by_role(
-                            "button",
-                            name="Read update / give feedback",
-                        )
-                        .first.click()
-                    )
-                    await expect(page.locator("#detail-result")).to_contain_text(
-                        "Completed the simulated workflow",
-                        timeout=15000,
-                    )
-                    await page.locator("#feedback-form textarea").fill(
-                        "Include a concrete source rather than vague claims."
-                    )
-                    await page.get_by_role("button", name="Tell Buddy").click()
-                    await (
-                        page.locator("#task-dialog")
-                        .get_by_role(
-                            "button",
-                            name="Close",
-                            exact=True,
-                        )
-                        .click()
-                    )
-                    await expect(page.locator("#decision-panel")).to_be_hidden()
-                    await page.get_by_role("button", name="What Buddy knows").click()
-                    await expect(page.locator("#memory-approvals")).to_contain_text(
-                        "Confirm this candidate memory",
-                        timeout=15000,
-                    )
-                    await (
-                        page.locator("#memory-approvals")
-                        .get_by_role(
-                            "button",
-                            name="Approve",
-                            exact=True,
-                        )
-                        .click()
-                    )
-                    await expect(page.locator("#memories .memory")).to_have_count(2)
-                    await (
-                        page.locator("#profile-dialog")
-                        .get_by_role(
-                            "button",
-                            name="Close",
-                            exact=True,
-                        )
-                        .click()
-                    )
-                    await expect(page.locator("#updates article")).to_have_count(1)
-                    if screenshot := os.environ.get("WORK_BUDDY_SCREENSHOT"):
-                        await page.evaluate("window.scrollTo(0, 0)")
-                        await page.screenshot(path=screenshot, full_page=True)
-                    assert not errors, errors
-                    exported = Path(directory) / "memory/confirmed.json"
-                    assert exported.exists()
-                    assert not urlsplit(page.url).fragment, "Launch token remained in URL."
-                    print("Daily browser flow passed: brief, profile, decisions, quiet learning.")
+                    await run(page, app, project, workspace, errors)
+                    log("BROWSER TEST PASSED")
+                except BaseException:
+                    await page.screenshot(path=SHOTS / "failure.png")
+                    raise
                 finally:
                     await browser.close()
         finally:
-            if process.returncode is None:
-                process.terminate()
-            try:
-                _, stderr = await asyncio.wait_for(process.communicate(), 15)
-            except TimeoutError:
-                process.kill()
-                _, stderr = await process.communicate()
-            if process.returncode not in {0, -15}:
-                print(stderr.decode(errors="replace"), file=sys.stderr)
+            await app.stop()
+            if (root / "work-buddy.log").exists():
+                print("\n".join((root / "work-buddy.log").read_text().splitlines()[-30:]))
+            await cleanup(root / "data")
+    subprocess.run(["ls", str(SHOTS)])
 
 
 if __name__ == "__main__":

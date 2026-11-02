@@ -1,21 +1,47 @@
 import json
-import os
+import re
 import sqlite3
-import tempfile
+import threading
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from pydantic import ValidationError
+
 from .models import Settings
+
+DB_NAME = "work-buddy-sessions.db"
+LEGACY_DB_NAME = "work-buddy.db"
+SESSION_FIELDS = {
+    "title",
+    "status",
+    "activity",
+    "report",
+    "unread",
+    "closed_at",
+    "cwd",
+    "branch",
+    "model",
+    "task",
+    "effort",
+    "context",
+    "project",
+    "repos",
+    "yolo",
+}
+# Lists kept on each worker's record so a later request can find the worker again.
+RECORD_LISTS = {"files", "links"}
+SHORT_ID = re.compile(r"[0-9a-f-]+")
+DRAFT_FIELDS = {"status", "outcome", "final_text", "resolved_at"}
+# Followed Slack conversations stop being followed after this long without activity.
+CONVERSATION_TTL = 12 * 3600
+THREAD_TTL = 3 * 86400
 
 
 def now() -> str:
     return datetime.now(UTC).isoformat()
-
-
-def today() -> str:
-    return datetime.now().astimezone().date().isoformat()
 
 
 def identifier() -> str:
@@ -26,255 +52,420 @@ class Store:
     def __init__(self, directory: Path):
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.directory = directory
-        self.db = sqlite3.connect(directory / "work-buddy.db", check_same_thread=False)
+        self.lock = threading.RLock()
+        self.db = sqlite3.connect(directory / DB_NAME, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
-        self.db.execute("PRAGMA foreign_keys=ON")
         self.db.executescript("""
         CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY, value TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS tasks (
-            id TEXT PRIMARY KEY, parent_id TEXT REFERENCES tasks(id),
-            title TEXT NOT NULL, instructions TEXT NOT NULL, role TEXT NOT NULL,
-            status TEXT NOT NULL, project_path TEXT NOT NULL, source TEXT NOT NULL,
-            kind TEXT NOT NULL DEFAULT 'work',
-            result TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '',
-            rounds INTEGER NOT NULL DEFAULT 0, backend TEXT NOT NULL,
+        CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS sessions (
+            id TEXT PRIMARY KEY, role TEXT NOT NULL, title TEXT NOT NULL,
+            status TEXT NOT NULL, cwd TEXT NOT NULL DEFAULT '',
+            branch TEXT NOT NULL DEFAULT '', slack INTEGER NOT NULL DEFAULT 0,
+            activity TEXT NOT NULL DEFAULT '', report TEXT NOT NULL DEFAULT '',
+            unread INTEGER NOT NULL DEFAULT 0, closed_at TEXT,
             created_at TEXT NOT NULL, updated_at TEXT NOT NULL
         );
-        CREATE TABLE IF NOT EXISTS approvals (
-            id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id),
-            kind TEXT NOT NULL, question TEXT NOT NULL, options TEXT NOT NULL,
-            payload TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
-            choice TEXT NOT NULL DEFAULT '', reason TEXT NOT NULL DEFAULT '',
-            created_at TEXT NOT NULL
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY, session_id TEXT NOT NULL, kind TEXT NOT NULL,
+            text TEXT NOT NULL, meta TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL
         );
-        CREATE TABLE IF NOT EXISTS events (
-            id INTEGER PRIMARY KEY, task_id TEXT, kind TEXT NOT NULL,
-            message TEXT NOT NULL, created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS memories (
-            id TEXT PRIMARY KEY, text TEXT NOT NULL, scope TEXT NOT NULL,
-            project_path TEXT NOT NULL, task_id TEXT, created_at TEXT NOT NULL
-            ,category TEXT NOT NULL DEFAULT 'preference', evidence TEXT NOT NULL DEFAULT ''
-        );
-        CREATE TABLE IF NOT EXISTS feedback (
-            id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id),
+        CREATE INDEX IF NOT EXISTS messages_by_session ON messages(session_id, id);
+        CREATE TABLE IF NOT EXISTS triggers (
+            id TEXT PRIMARY KEY, source TEXT NOT NULL, key TEXT NOT NULL UNIQUE,
             text TEXT NOT NULL, created_at TEXT NOT NULL
         );
-        CREATE TABLE IF NOT EXISTS inbox (
-            event_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, created_at TEXT NOT NULL
+        CREATE TABLE IF NOT EXISTS drafts (
+            id TEXT PRIMARY KEY, session_id TEXT NOT NULL, kind TEXT NOT NULL,
+            target TEXT NOT NULL, text TEXT NOT NULL, note TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'pending', final_text TEXT NOT NULL DEFAULT '',
+            outcome TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, resolved_at TEXT
         );
-        CREATE TABLE IF NOT EXISTS daily_briefs (
-            task_id TEXT PRIMARY KEY REFERENCES tasks(id),
-            day TEXT NOT NULL, text TEXT NOT NULL, project_path TEXT NOT NULL,
-            created_at TEXT NOT NULL
+        CREATE TABLE IF NOT EXISTS usage (
+            id INTEGER PRIMARY KEY, session_id TEXT NOT NULL, role TEXT NOT NULL,
+            model TEXT NOT NULL, credits REAL NOT NULL, premium REAL NOT NULL,
+            input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, at REAL NOT NULL
         );
+        CREATE INDEX IF NOT EXISTS usage_by_time ON usage(at);
+        CREATE INDEX IF NOT EXISTS usage_by_session ON usage(session_id);
+        CREATE TABLE IF NOT EXISTS subscriptions (
+            thread TEXT NOT NULL, session_id TEXT NOT NULL,
+            since REAL NOT NULL, touched REAL NOT NULL,
+            PRIMARY KEY (thread, session_id)
+        );
+        CREATE TABLE IF NOT EXISTS questions (
+            id TEXT PRIMARY KEY, asker TEXT NOT NULL, target TEXT NOT NULL,
+            text TEXT NOT NULL, answer TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'open', asked REAL NOT NULL, closed REAL
+        );
+        CREATE INDEX IF NOT EXISTS open_questions ON questions(status, asker);
         """)
-        columns = {row["name"] for row in self.db.execute("PRAGMA table_info(tasks)")}
-        for name, definition in {
-            "tool_driven": "INTEGER NOT NULL DEFAULT 0",
-            "needs_resume": "INTEGER NOT NULL DEFAULT 0",
-        }.items():
-            if name not in columns:
-                self.db.execute(f"ALTER TABLE tasks ADD COLUMN {name} {definition}")
+        for row in self.db.execute("SELECT key, value FROM kv WHERE key LIKE 'question:%'"):
+            # Questions between sessions used to live in kv.
+            old = json.loads(row["value"])
+            answered = "answer" in old
+            self.db.execute(
+                "INSERT OR IGNORE INTO questions VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    row["key"].removeprefix("question:"),
+                    old["asker"],
+                    old["target"],
+                    old["text"],
+                    old.get("answer", ""),
+                    "answered" if answered else "open",
+                    time.time(),
+                    time.time() if answered else None,
+                ),
+            )
+        self.db.execute("DELETE FROM kv WHERE key LIKE 'question:%' OR key LIKE 'asking:%'")
+        columns = {row["name"] for row in self.db.execute("PRAGMA table_info(sessions)")}
+        if "model" not in columns:
+            self.db.execute("ALTER TABLE sessions ADD COLUMN model TEXT NOT NULL DEFAULT ''")
+        if "repos" not in columns:
+            self.db.executescript("""
+            ALTER TABLE sessions ADD COLUMN repos TEXT NOT NULL DEFAULT '[]';
+            ALTER TABLE sessions ADD COLUMN yolo TEXT NOT NULL DEFAULT '';
+            """)
+        if "project" not in columns:
+            self.db.execute("ALTER TABLE sessions ADD COLUMN project TEXT NOT NULL DEFAULT ''")
+        if "effort" not in columns:
+            self.db.executescript("""
+            ALTER TABLE sessions ADD COLUMN effort TEXT NOT NULL DEFAULT '';
+            ALTER TABLE sessions ADD COLUMN context TEXT NOT NULL DEFAULT '';
+            """)
+        if "task" not in columns:
+            self.db.executescript("""
+            ALTER TABLE sessions ADD COLUMN task TEXT NOT NULL DEFAULT '';
+            ALTER TABLE sessions ADD COLUMN files TEXT NOT NULL DEFAULT '[]';
+            ALTER TABLE sessions ADD COLUMN links TEXT NOT NULL DEFAULT '[]';
+            UPDATE sessions SET task=coalesce((SELECT text FROM messages m
+                WHERE m.session_id=sessions.id AND m.kind='router' ORDER BY m.id LIMIT 1), '')
+            WHERE role='worker';
+            """)
         self.db.commit()
-        (directory / "work-buddy.db").chmod(0o600)
+        (directory / DB_NAME).chmod(0o600)
+        if not self.one("SELECT id FROM settings WHERE id=1"):
+            self.migrate_legacy_settings()
+
+    def migrate_legacy_settings(self):
+        """Carry over still-meaningful settings from the pre-session Work Buddy database."""
+        legacy = self.directory / LEGACY_DB_NAME
+        if not legacy.exists():
+            return
+        try:
+            with sqlite3.connect(legacy) as old:
+                row = old.execute("SELECT value FROM settings WHERE id=1").fetchone()
+            values = json.loads(row[0]) if row else {}
+            settings = Settings(
+                copilot_command=values.get("copilot_command") or "copilot",
+                model="" if values.get("model") in (None, "auto") else values["model"],
+                projects=[values["project_path"]] if values.get("project_path") else [],
+                github_enabled=bool(values.get("github_enabled")),
+                github_repos=values.get("github_repos") or [],
+            )
+        except (sqlite3.Error, json.JSONDecodeError, ValidationError, KeyError, TypeError):
+            return
+        self.save_settings(settings)
 
     def close(self):
-        self.db.close()
+        with self.lock:
+            self.db.close()
 
     def all(self, sql: str, params: tuple = ()) -> list[dict[str, Any]]:
-        return [dict(row) for row in self.db.execute(sql, params).fetchall()]
+        with self.lock:
+            return [dict(row) for row in self.db.execute(sql, params).fetchall()]
 
     def one(self, sql: str, params: tuple = ()) -> dict[str, Any] | None:
-        row = self.db.execute(sql, params).fetchone()
+        with self.lock:
+            row = self.db.execute(sql, params).fetchone()
         return dict(row) if row else None
 
-    def execute(self, sql: str, params: tuple = ()):
-        with self.db:
+    def execute(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
+        with self.lock, self.db:
             return self.db.execute(sql, params)
 
     def settings(self) -> Settings:
         row = self.one("SELECT value FROM settings WHERE id=1")
-        return Settings.model_validate_json(row["value"]) if row else Settings()
+        if not row:
+            return Settings()
+        try:
+            return Settings.model_validate_json(row["value"])
+        except ValidationError:
+            # A project directory may have been deleted since it was saved.
+            values = json.loads(row["value"])
+            values["projects"] = [
+                path for path in values.get("projects", []) if Path(path).is_dir()
+            ]
+            return Settings.model_validate(values)
 
     def save_settings(self, settings: Settings):
         self.execute("INSERT OR REPLACE INTO settings VALUES (1, ?)", (settings.model_dump_json(),))
 
-    def create_daily_brief(self, text: str) -> str:
-        day = today()
-        task_id = self.create_task(
-            f"Your priorities for {day}",
-            text,
-            kind="daily",
-            source={"type": "daily", "day": day},
-        )
-        self.execute(
-            "INSERT INTO daily_briefs VALUES(?,?,?,?,?)",
-            (task_id, day, text, self.task(task_id)["project_path"], now()),
-        )
-        return task_id
+    def get(self, key: str, default: str | None = None) -> str | None:
+        row = self.one("SELECT value FROM kv WHERE key=?", (key,))
+        return row["value"] if row else default
 
-    def daily_briefs(self, project_path: str) -> list[dict]:
-        return self.all(
-            """SELECT b.*,t.status FROM daily_briefs b JOIN tasks t ON t.id=b.task_id
-            WHERE b.day=? AND b.project_path=? AND t.status!='cancelled'
-            ORDER BY b.created_at DESC LIMIT 10""",
-            (today(), project_path),
-        )
+    def set(self, key: str, value: str):
+        self.execute("INSERT OR REPLACE INTO kv VALUES (?, ?)", (key, value))
 
-    def backlog_count(self) -> int:
-        return self.one(
-            """SELECT count(*) AS n FROM tasks
-            WHERE status NOT IN ('completed','failed','cancelled','interrupted','ignored')"""
-        )["n"]
-
-    def event(self, kind: str, message: str, task_id: str | None = None):
-        self.execute(
-            "INSERT INTO events(task_id, kind, message, created_at) VALUES(?,?,?,?)",
-            (task_id, kind, message, now()),
-        )
-
-    def create_task(
+    def create_session(
         self,
+        session_id: str,
+        role: str,
         title: str,
-        instructions: str,
+        status: str,
         *,
-        parent_id: str | None = None,
-        source: dict | None = None,
-        project_path: str | None = None,
-        backend: str | None = None,
-        kind: str = "work",
-    ) -> str:
-        settings = self.settings()
-        task_id = identifier()
+        cwd: str = "",
+        branch: str = "",
+        slack: bool = False,
+    ) -> dict:
         timestamp = now()
         self.execute(
-            """INSERT INTO tasks(
-                id,parent_id,title,instructions,role,status,project_path,source,
-                backend,created_at,updated_at,kind
-            ) VALUES(?,?,?,?,?,'queued',?,?,?,?,?,?)""",
-            (
-                task_id,
-                parent_id,
-                title,
-                instructions,
-                "worker" if parent_id else "lead",
-                settings.project_path if project_path is None else project_path,
-                json.dumps(source or {}),
-                backend or settings.backend,
-                timestamp,
-                timestamp,
-                kind,
-            ),
+            """INSERT INTO sessions(id,role,title,status,cwd,branch,slack,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?)""",
+            (session_id, role, title, status, cwd, branch, int(slack), timestamp, timestamp),
         )
-        self.event("queued", title, task_id)
-        return task_id
+        return self.session(session_id)
 
-    def task(self, task_id: str) -> dict[str, Any]:
-        task = self.one("SELECT * FROM tasks WHERE id=?", (task_id,))
-        if not task:
-            raise LookupError("Task not found.")
-        task["source"] = json.loads(task["source"])
-        return task
+    def find_session(self, session_id: str) -> dict | None:
+        return self.one("SELECT * FROM sessions WHERE id=?", (session_id,))
 
-    def update_task(self, task_id: str, **values):
-        allowed = {"status", "result", "error", "rounds", "tool_driven", "needs_resume"}
-        if not values or not values.keys() <= allowed:
-            raise ValueError("Invalid task update.")
+    def session(self, session_id: str) -> dict:
+        """A session by its id, or by a unique prefix of it (sessions see 8-character ids)."""
+        row = self.find_session(session_id)
+        if not row and 6 <= len(session_id) < 36 and SHORT_ID.fullmatch(session_id):
+            rows = self.all("SELECT * FROM sessions WHERE id LIKE ? LIMIT 2", (session_id + "%",))
+            if len(rows) > 1:
+                raise LookupError(f"Several sessions start with {session_id}; use the full id.")
+            row = rows[0] if rows else None
+        if not row:
+            raise LookupError("Session not found.")
+        return row
+
+    def open_sessions(self, role: str | None = None) -> list[dict]:
+        if role:
+            return self.all(
+                "SELECT * FROM sessions WHERE closed_at IS NULL AND role=? ORDER BY created_at",
+                (role,),
+            )
+        return self.all("SELECT * FROM sessions WHERE closed_at IS NULL ORDER BY created_at")
+
+    def update_session(self, session_id: str, **values) -> dict:
+        if not values or not values.keys() <= SESSION_FIELDS:
+            raise ValueError("Invalid session update.")
         values["updated_at"] = now()
         self.execute(
-            f"UPDATE tasks SET {','.join(f'{key}=?' for key in values)} WHERE id=?",
-            (*values.values(), task_id),
+            f"UPDATE sessions SET {','.join(f'{key}=?' for key in values)} WHERE id=?",
+            (*values.values(), session_id),
         )
+        return self.session(session_id)
 
-    def children(self, task_id: str) -> list[dict]:
-        return self.all("SELECT * FROM tasks WHERE parent_id=? ORDER BY created_at", (task_id,))
+    def record(self, session_id: str, column: str, items: list[str], keep: int = 40):
+        """Add to a worker's record without counting as activity."""
+        if column not in RECORD_LISTS:
+            raise ValueError("Invalid record list.")
+        row = self.one(f"SELECT {column} FROM sessions WHERE id=?", (session_id,))
+        if not row:
+            return
+        current = json.loads(row[column])
+        added = [item for item in dict.fromkeys(items) if item and item not in current]
+        if added:
+            self.execute(
+                f"UPDATE sessions SET {column}=? WHERE id=?",
+                (json.dumps((current + added)[-keep:]), session_id),
+            )
 
-    def create_approval(
-        self,
-        task_id: str,
-        kind: str,
-        question: str,
-        options: list[str],
-        payload: dict,
-    ) -> str:
-        approval_id = identifier()
+    def add_message(self, session_id: str, kind: str, text: str, meta: dict | None = None) -> dict:
+        cursor = self.execute(
+            "INSERT INTO messages(session_id,kind,text,meta,created_at) VALUES(?,?,?,?,?)",
+            (session_id, kind, text, json.dumps(meta or {}, ensure_ascii=False), now()),
+        )
+        return self.message(cursor.lastrowid)
+
+    def message(self, message_id: int) -> dict:
+        row = self.one("SELECT * FROM messages WHERE id=?", (message_id,))
+        if not row:
+            raise LookupError("Message not found.")
+        row["meta"] = json.loads(row["meta"])
+        return row
+
+    def update_message_meta(self, message_id: int, meta: dict):
         self.execute(
-            """INSERT INTO approvals(
-                id,task_id,kind,question,options,payload,created_at
-            ) VALUES(?,?,?,?,?,?,?)""",
-            (
-                approval_id,
-                task_id,
-                kind,
-                question,
-                json.dumps(options),
-                json.dumps(payload),
-                now(),
-            ),
+            "UPDATE messages SET meta=? WHERE id=?",
+            (json.dumps(meta, ensure_ascii=False), message_id),
         )
-        self.event("approval", question, task_id)
-        return approval_id
 
-    def approval(self, approval_id: str) -> dict:
-        item = self.one("SELECT * FROM approvals WHERE id=?", (approval_id,))
-        if not item:
-            raise LookupError("Approval not found.")
-        item["options"] = json.loads(item["options"])
-        item["payload"] = json.loads(item["payload"])
-        return item
+    def messages(self, session_id: str, after: int = 0, limit: int = 400) -> list[dict]:
+        rows = self.all(
+            """SELECT * FROM (SELECT * FROM messages WHERE session_id=? AND id>?
+            ORDER BY id DESC LIMIT ?) ORDER BY id""",
+            (session_id, after, limit),
+        )
+        for row in rows:
+            row["meta"] = json.loads(row["meta"])
+        return rows
 
-    def remember(
+    def add_trigger(self, source: str, key: str, text: str) -> str | None:
+        trigger_id = "t" + identifier()[:8]
+        try:
+            self.execute(
+                "INSERT INTO triggers VALUES(?,?,?,?,?)", (trigger_id, source, key, text, now())
+            )
+        except sqlite3.IntegrityError:
+            return None
+        return trigger_id
+
+    def create_draft(
+        self, session_id: str, kind: str, target: dict, text: str, note: str = ""
+    ) -> dict:
+        draft_id = "d" + identifier()[:8]
+        self.execute(
+            """INSERT INTO drafts(id,session_id,kind,target,text,note,created_at)
+            VALUES(?,?,?,?,?,?,?)""",
+            (draft_id, session_id, kind, json.dumps(target), text, note, now()),
+        )
+        return self.draft(draft_id)
+
+    def draft(self, draft_id: str) -> dict:
+        row = self.one("SELECT * FROM drafts WHERE id=?", (draft_id,))
+        if not row:
+            raise LookupError("Draft not found.")
+        row["target"] = json.loads(row["target"])
+        return row
+
+    def drafts(self, status: str = "pending") -> list[dict]:
+        return [
+            self.draft(row["id"])
+            for row in self.all(
+                "SELECT id FROM drafts WHERE status=? ORDER BY created_at", (status,)
+            )
+        ]
+
+    def update_draft(self, draft_id: str, **values) -> dict:
+        if not values or not values.keys() <= DRAFT_FIELDS:
+            raise ValueError("Invalid draft update.")
+        self.execute(
+            f"UPDATE drafts SET {','.join(f'{key}=?' for key in values)} WHERE id=?",
+            (*values.values(), draft_id),
+        )
+        return self.draft(draft_id)
+
+    # Thread subscriptions: later activity in a followed Slack thread, DM or PR goes straight to
+    # the following sessions instead of the Router.
+
+    def follow(self, thread: str, session_id: str, since: float | None = None):
+        moment = time.time()
+        self.execute(
+            """INSERT INTO subscriptions VALUES (?,?,?,?)
+            ON CONFLICT(thread, session_id) DO UPDATE SET touched=excluded.touched""",
+            (thread, session_id, moment - 60 if since is None else since, moment),
+        )
+
+    def unfollow(self, thread: str, session_id: str | None = None):
+        if session_id:
+            self.execute(
+                "DELETE FROM subscriptions WHERE thread=? AND session_id=?", (thread, session_id)
+            )
+        else:
+            self.execute("DELETE FROM subscriptions WHERE thread=?", (thread,))
+
+    def unfollow_session(self, session_id: str):
+        self.execute("DELETE FROM subscriptions WHERE session_id=?", (session_id,))
+
+    def touch(self, thread: str):
+        self.execute("UPDATE subscriptions SET touched=? WHERE thread=?", (time.time(), thread))
+
+    def follows(self, session_id: str) -> list[str]:
+        return [
+            row["thread"]
+            for row in self.all(
+                "SELECT thread FROM subscriptions WHERE session_id=? ORDER BY since", (session_id,)
+            )
+        ]
+
+    def followers(self, thread: str) -> list[str]:
+        return [
+            row["session_id"]
+            for row in self.all(
+                """SELECT s.session_id FROM subscriptions s JOIN sessions x ON x.id=s.session_id
+                WHERE s.thread=? AND x.closed_at IS NULL ORDER BY s.since""",
+                (thread,),
+            )
+        ]
+
+    def followed(self, prefix: str) -> list[dict]:
+        """Threads with at least one open follower; quiet Slack conversations expire."""
+        moment = time.time()
+        self.execute(
+            """DELETE FROM subscriptions WHERE thread LIKE 'slack:%' AND touched < (
+                CASE WHEN thread LIKE 'slack:%:%' THEN ? ELSE ? END)""",
+            (moment - THREAD_TTL, moment - CONVERSATION_TTL),
+        )
+        return self.all(
+            """SELECT s.thread, min(s.since) AS since FROM subscriptions s
+            JOIN sessions x ON x.id=s.session_id
+            WHERE x.closed_at IS NULL AND s.thread LIKE ? GROUP BY s.thread ORDER BY s.thread""",
+            (prefix + "%",),
+        )
+
+    # Usage: one row per model call, for credits per session and over any time range.
+
+    def record_usage(
         self,
-        text: str,
-        scope: str,
-        project_path: str,
-        task_id: str | None = None,
-        category: str = "preference",
-        evidence: str = "Explicitly entered by the owner.",
+        session_id: str,
+        role: str,
+        model: str,
+        credits: float,
+        premium: float,
+        input_tokens: int,
+        output_tokens: int,
+        at: float | None = None,
     ):
         self.execute(
-            "INSERT INTO memories VALUES(?,?,?,?,?,?,?,?)",
-            (identifier(), text, scope, project_path, task_id, now(), category, evidence),
+            "INSERT INTO usage(session_id,role,model,credits,premium,input_tokens,output_tokens,at)"
+            " VALUES(?,?,?,?,?,?,?,?)",
+            (
+                session_id,
+                role,
+                model,
+                credits,
+                premium,
+                input_tokens,
+                output_tokens,
+                time.time() if at is None else at,
+            ),
         )
-        self.export_memories()
 
-    def export_memories(self):
-        folder = self.directory / "memory"
-        folder.mkdir(exist_ok=True, mode=0o700)
-        payload = {
-            "format": 1,
-            "exported_at": now(),
-            "note": "Confirmed memory export. Edit or remove memories through the local UI.",
-            "memories": self.all("SELECT * FROM memories ORDER BY created_at"),
+    def usage(self, since: float, until: float) -> dict:
+        totals = """sum(credits) AS credits, sum(premium) AS premium, count(*) AS calls,
+            sum(input_tokens) AS input_tokens, sum(output_tokens) AS output_tokens"""
+        window = (since, until)
+        total = self.one(f"SELECT {totals} FROM usage WHERE at>=? AND at<?", window)
+        return {
+            "since": since,
+            "until": until,
+            "total": {key: value or 0 for key, value in total.items()},
+            "by_role": self.all(
+                f"SELECT role, {totals} FROM usage WHERE at>=? AND at<? GROUP BY role"
+                " ORDER BY credits DESC",
+                window,
+            ),
+            "by_model": self.all(
+                f"SELECT model, {totals} FROM usage WHERE at>=? AND at<? GROUP BY model"
+                " ORDER BY credits DESC",
+                window,
+            ),
+            "by_session": self.all(
+                f"""SELECT u.session_id, s.title, s.role, s.closed_at, {totals}
+                FROM usage u LEFT JOIN sessions s ON s.id=u.session_id
+                WHERE u.at>=? AND u.at<? GROUP BY u.session_id ORDER BY credits DESC LIMIT 50""",
+                window,
+            ),
         }
-        fd, temporary = tempfile.mkstemp(dir=folder, prefix=".confirmed-")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as output:
-                json.dump(payload, output, ensure_ascii=False, indent=2)
-            os.replace(temporary, folder / "confirmed.json")
-        finally:
-            Path(temporary).unlink(missing_ok=True)
 
-    def save_artifact(self, task_id: str, invocation: int, result: dict):
-        folder = self.directory / "artifacts"
-        folder.mkdir(exist_ok=True, mode=0o700)
-        path = folder / f"{task_id}-{invocation}.json"
-        with path.open("w", encoding="utf-8") as output:
-            json.dump(result, output, ensure_ascii=False, indent=2)
-        path.chmod(0o600)
-
-    def recover(self):
-        with self.db:
-            self.db.execute(
-                """UPDATE tasks SET status='interrupted', error=?
-                WHERE status IN ('running','receiving')""",
-                ("Application stopped during execution. Explicitly retry to resume.",),
-            )
-            self.db.execute("UPDATE approvals SET status='uncertain' WHERE status='executing'")
-            self.db.execute(
-                """UPDATE tasks SET status='interrupted', error=?
-                WHERE id IN (SELECT task_id FROM approvals WHERE status='uncertain')""",
-                ("Action interrupted; verify external state before retrying. Not replayed.",),
-            )
+    def session_credits(self) -> dict[str, float]:
+        return {
+            row["session_id"]: row["credits"]
+            for row in self.all("SELECT session_id, sum(credits) AS credits FROM usage GROUP BY 1")
+        }

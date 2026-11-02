@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "work-buddy-local"
 version = "0.1.0"
-description = "A local-first work agent with Copilot workers, Slack decisions, and human feedback."
+description = "A Router that coordinates your Copilot sessions, Slack and GitHub reviews."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -14,9 +14,8 @@ dependencies = [
   "pydantic>=2.10,<3",
   "platformdirs>=4,<5",
   "keyring>=25,<26",
-  "slack-bolt>=1.23,<2",
-  "aiohttp>=3.11,<4",
-  "mcp>=1.20,<2",
+  "mcp>=1.24,<2",
+  "github-copilot-sdk>=1.0.28,<2",
   "httpx>=0.28,<1",
 ]
 
@@ -39,3 +38,7 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.ruff.lint.per-file-ignores]
+# Test drivers deliberately block on processes and files.
+"scripts/*" = ["ASYNC"]

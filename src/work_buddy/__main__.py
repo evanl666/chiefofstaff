@@ -33,7 +33,9 @@ def open_when_ready(port: int, url: str):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run your local Work Buddy workbench.")
+    parser = argparse.ArgumentParser(
+        description="Run Work Buddy: a Router that coordinates your Copilot sessions."
+    )
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--data-dir", type=Path, default=user_data_path("work-buddy"))
     parser.add_argument("--no-browser", action="store_true")
@@ -55,6 +57,8 @@ def main():
     url = f"http://127.0.0.1:{args.port}/#token={token}"
     # Bind before opening the browser so an unrelated listener cannot receive the launch token.
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    # Allows an immediate restart (port in TIME_WAIT); a live listener still blocks the bind.
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         listener.bind(("127.0.0.1", args.port))
         listener.listen(128)
@@ -63,12 +67,16 @@ def main():
         parser.error(f"Port {args.port} is unavailable. Choose another --port.")
     app = create_app(directory, token, args.port)
     print(f"Work Buddy\nPrivate launch URL (do not share): {url}\nData: {directory}", flush=True)
-    print("Closing the browser does not stop work. Ctrl+C stops this local service.", flush=True)
+    print("Closing the browser does not stop your sessions. Ctrl+C stops Work Buddy.", flush=True)
     if not args.no_browser:
         threading.Thread(target=open_when_ready, args=(args.port, url), daemon=True).start()
-    config = uvicorn.Config(app, host="127.0.0.1", port=args.port, access_log=False)
+    config = uvicorn.Config(
+        app, host="127.0.0.1", port=args.port, access_log=False, timeout_graceful_shutdown=3
+    )
     try:
         uvicorn.Server(config).run(sockets=[listener])
+    except KeyboardInterrupt:
+        pass
     finally:
         listener.close()
         data_lock.close()
