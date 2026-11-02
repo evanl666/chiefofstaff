@@ -347,3 +347,9 @@ class ScriptedBackend:
 
     async def mcp_sign_in_url(self, session: Any, server: str) -> str:
         return ""
+
+    def sandbox(self, policy: Any) -> None:
+        return None
+
+    async def gh_works_in_sandbox(self) -> bool | None:
+        return None

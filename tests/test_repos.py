@@ -9,6 +9,7 @@ from conftest import Harness, call_tool, env
 
 from chiefofstaff import workspaces as workspaces_module
 from chiefofstaff.models import Settings
+from chiefofstaff.runtime import GITHUB_HOSTS
 
 
 def run(*command, cwd=None):
@@ -146,14 +147,15 @@ async def test_yolo_skips_permission_checks_globally_or_per_worker(tmp_path):
     assert view["yolo"] and view["yolo_choice"] == "on"
     assert await allowed(worker)
     prompt = harness.session(worker).options["system_message"]["content"]
-    assert "Permission checks are off" not in prompt, "detached; the next use gets the new prompt"
+    assert "(yolo)" not in prompt, "detached; the next use gets the new prompt"
 
     harness.store.save_settings(Settings(worker_yolo=True))
     other = (await spawn(runtime, harness.router_id, title="Other", instructions="o"))["session_id"]
     harness.store.execute("UPDATE sessions SET slack=1 WHERE id=?", (other,))
     assert await allowed(other), "yolo covers workers that read Slack too"
     assert (
-        "Permission checks are off" in harness.session(other).options["system_message"]["content"]
+        "Permission prompts are off for you (yolo); the sandbox still applies"
+        in harness.session(other).options["system_message"]["content"]
     )
     await runtime.set_session_yolo(other, "off")
     assert not await allowed(other)
@@ -240,3 +242,41 @@ async def test_the_router_hears_when_projects_change(tmp_path):
     )
     await runtime.owner_send(harness.router_id, "again")
     assert "configured projects" not in router.sent[-1]
+
+
+async def test_workers_run_sandboxed_in_their_own_folders(tmp_path, git_repo):
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)], slack_enabled=True))
+    runtime = await harness.connect()
+    assert "sandbox_config" not in harness.session(harness.router_id).options
+    info = await spawn(
+        runtime,
+        harness.router_id,
+        title="Fix",
+        instructions="fix",
+        project=str(git_repo),
+        isolate=True,
+    )
+    worker = harness.session(info["session_id"])
+    policy = worker.options["sandbox_config"]
+    git_dir = str(git_repo.resolve() / ".git")
+    workspace = str(runtime.workspaces.workspace(harness.store.session(info["session_id"])))
+    assert {info["cwd"], workspace, git_dir} <= set(policy.readwrite)
+    assert {f"{git_dir}/hooks", f"{git_dir}/config"} <= set(policy.readonly), (
+        "hooks and config run code outside the sandbox: never writable"
+    )
+    assert policy.allowed_hosts == ()
+    prompt = worker.options["system_message"]["content"]
+    assert "OS sandbox" in prompt and "without -u" in prompt
+
+    slack = await spawn(runtime, harness.router_id, title="Reply", instructions="r", slack=True)
+    assert harness.session(slack["session_id"]).options["sandbox_config"].allowed_hosts == (
+        GITHUB_HOSTS
+    ), "what a Slack reader read can only go to GitHub"
+
+    harness.store.save_settings(
+        Settings(projects=[str(git_repo)], worker_sandbox=False, worker_yolo=True)
+    )
+    loose = await spawn(runtime, harness.router_id, title="Loose", instructions="l")
+    options = harness.session(loose["session_id"]).options
+    assert "sandbox_config" not in options
+    assert "there is no sandbox" in options["system_message"]["content"]

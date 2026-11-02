@@ -8,14 +8,23 @@ tests/test_backend_contract.py checks that both behave the way the runtime relie
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 from copilot import CopilotClient, RuntimeConnection
-from copilot.generated.rpc import MCPOauthLoginRequest
+from copilot.generated.rpc import (
+    MCPOauthLoginRequest,
+    SandboxConfig,
+    SandboxConfigAuth,
+    SandboxConfigUserPolicy,
+    SandboxConfigUserPolicyFilesystem,
+    SandboxConfigUserPolicyNetwork,
+)
 
 
 @dataclass(frozen=True)
@@ -82,6 +91,22 @@ class AgentBackend(Protocol):
     async def mcp_sign_in_url(self, session: AgentSession, server: str) -> str:
         """Where the owner signs in to an MCP server; "" when the backend has credentials."""
 
+    def sandbox(self, policy: SandboxPolicy) -> Any:
+        """The session option (sandbox_config) that applies this policy."""
+
+    async def gh_works_in_sandbox(self) -> bool | None:
+        """Whether gh can reach GitHub from sandboxed commands; None when not applicable."""
+
+
+@dataclass(frozen=True)
+class SandboxPolicy:
+    """What a sandboxed session's shell commands may touch."""
+
+    readwrite: tuple[str, ...]
+    readonly: tuple[str, ...] = ()
+    # Empty: any host. Otherwise only these hosts are reachable.
+    allowed_hosts: tuple[str, ...] = ()
+
 
 COPILOT = Capabilities(
     name="GitHub Copilot",
@@ -101,8 +126,9 @@ class CopilotBackend:
 
     capabilities = COPILOT
 
-    def __init__(self, client: CopilotClient):
+    def __init__(self, client: CopilotClient, command: str = "copilot"):
         self.client = client
+        self.command = command
 
     async def start(self) -> None:
         await self.client.start()
@@ -135,6 +161,29 @@ class CopilotBackend:
         login = await session.rpc.mcp.oauth.login(MCPOauthLoginRequest(server_name=server))
         return getattr(login, "authorization_url", None) or ""
 
+    async def gh_works_in_sandbox(self) -> bool | None:
+        return await gh_trusts_sandbox(self.command)
+
+    def sandbox(self, policy: SandboxPolicy) -> SandboxConfig:
+        return SandboxConfig(
+            enabled=True,
+            allow_bypass=False,
+            allow_dev_tool_access=True,
+            # git and gh get the owner's GitHub credentials through Copilot's local proxy;
+            # commands only ever see stand-in values.
+            auth=SandboxConfigAuth(gh=True, git=True),
+            user_policy=SandboxConfigUserPolicy(
+                filesystem=SandboxConfigUserPolicyFilesystem(
+                    readwrite_paths=list(policy.readwrite), readonly_paths=list(policy.readonly)
+                ),
+                network=SandboxConfigUserPolicyNetwork(
+                    allow_outbound=True,
+                    allow_local_network=False,
+                    allowed_hosts=list(policy.allowed_hosts) or None,
+                ),
+            ),
+        )
+
 
 def copilot_backend(command: str) -> CopilotBackend:
     path = shutil.which(command) if command else None
@@ -145,7 +194,34 @@ def copilot_backend(command: str) -> CopilotBackend:
         )
     # The CLI and every worker shell inherit this environment; keep our own settings out.
     env = {key: value for key, value in os.environ.items() if not key.startswith("CHIEFOFSTAFF_")}
-    return CopilotBackend(CopilotClient(connection=RuntimeConnection.for_stdio(path=path), env=env))
+    client = CopilotClient(connection=RuntimeConnection.for_stdio(path=path), env=env)
+    return CopilotBackend(client, path)
+
+
+def sandbox_supported() -> bool:
+    """Whether this machine can run Copilot's command sandbox."""
+    if sys.platform == "darwin":
+        return bool(shutil.which("sandbox-exec"))
+    return sys.platform.startswith("linux") and bool(shutil.which("bwrap"))
+
+
+async def gh_trusts_sandbox(command: str = "copilot") -> bool | None:
+    """Whether gh can reach GitHub from inside the sandbox (macOS needs Copilot's CA trusted)."""
+    if sys.platform != "darwin" or not shutil.which(command):
+        return None
+    process = await asyncio.create_subprocess_exec(
+        command,
+        "sandbox",
+        "ca",
+        "status",
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    try:
+        return await asyncio.wait_for(process.wait(), 15) == 0
+    except TimeoutError:
+        process.kill()
+        return None
 
 
 def older(version: str, than: str) -> bool:

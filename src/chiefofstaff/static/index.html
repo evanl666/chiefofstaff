@@ -79,8 +79,10 @@
           <label class="check"><input name="mac_notifications" type="checkbox" /> Desktop notifications</label>
         </div>
         <label class="check"><input name="watchdog_enabled" type="checkbox" /> Watchdog: check workers for stalls and drift</label>
-        <label class="check"><input name="worker_yolo" type="checkbox" /> Yolo: workers run every command and file change without permission checks</label>
-        <small>Workers still follow their instructions (no force pushes, no pushing to main, nothing public without your approval), but nothing enforces them. A worker's header can override this.</small>
+        <label class="check"><input name="worker_sandbox" type="checkbox" /> Sandbox: workers' commands can write only to their own folders (recommended)</label>
+        <small id="sandbox-hint" hidden></small>
+        <label class="check"><input name="worker_yolo" type="checkbox" /> Yolo: workers act without permission prompts</label>
+        <small>With the sandbox on, the OS still keeps commands in their folders. Without it, only the workers' instructions do (no force pushes, no pushing to main, nothing public without your approval). A worker's header can override this.</small>
 
         <h3>Models</h3>
         <datalist id="model-options"></datalist>

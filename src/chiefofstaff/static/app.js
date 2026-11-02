@@ -474,7 +474,8 @@ function renderStatusLine() {
   if (snap.settings.slack_enabled && snap.slack.error) nodes.push(el("div", { class: "bad", text: `Slack: ${snap.slack.error}` }));
   if (snap.settings.github_enabled && snap.github.error) nodes.push(el("div", { class: "bad", text: `GitHub: ${snap.github.error}` }));
   if (snap.settings.paused) nodes.push(el("div", { text: "Watchers paused" }));
-  if (snap.settings.worker_yolo) nodes.push(el("div", { class: "yolo", text: "Yolo: workers run without permission checks" }));
+  const sandboxed = snap.settings.worker_sandbox && snap.sandbox?.supported;
+  if (snap.settings.worker_yolo) nodes.push(el("div", { class: "yolo", text: sandboxed ? "Yolo: no permission prompts (sandboxed)" : "Yolo: workers run without permission checks or sandbox" }));
   line.replaceChildren(...nodes);
 }
 
@@ -1265,6 +1266,15 @@ function fillSettings() {
   form.scratch_directory.placeholder = `${state.snapshot.data_directory}/work/workspaces`;
   form.max_workers.value = settings.max_workers;
   form.worker_yolo.checked = settings.worker_yolo;
+  form.worker_sandbox.checked = settings.worker_sandbox;
+  const sandbox = state.snapshot.sandbox || {};
+  const hint = !sandbox.supported
+    ? "This machine cannot run Copilot's sandbox (macOS needs sandbox-exec; Linux needs bwrap), so workers run unsandboxed."
+    : sandbox.gh_trusted === false
+      ? "To let workers use gh inside the sandbox, trust Copilot's certificate once: copilot sandbox ca create && copilot sandbox ca trust"
+      : "";
+  $("#sandbox-hint").textContent = hint;
+  $("#sandbox-hint").hidden = !hint;
   form.worker_idle_hours.value = settings.worker_idle_hours;
   form.mac_notifications.checked = settings.mac_notifications;
   form.watchdog_enabled.checked = settings.watchdog_enabled;
@@ -1319,6 +1329,7 @@ async function saveSettings(event) {
     scratch_directory: form.scratch_directory.value.trim(),
     max_workers: Number(form.max_workers.value),
     worker_yolo: form.worker_yolo.checked,
+    worker_sandbox: form.worker_sandbox.checked,
     worker_idle_hours: Number(form.worker_idle_hours.value || 24),
     mac_notifications: form.mac_notifications.checked,
     watchdog_enabled: form.watchdog_enabled.checked,

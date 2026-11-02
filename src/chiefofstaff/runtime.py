@@ -28,7 +28,14 @@ from pydantic import BaseModel, Field
 
 from . import catalog, prompts, threads
 from .asks import REQUEST_KINDS, AnswerSession, AskSession, OwnerAsks, RecordSetup
-from .backend import OLDEST_CLI, AgentBackend, copilot_backend, older
+from .backend import (
+    OLDEST_CLI,
+    AgentBackend,
+    SandboxPolicy,
+    copilot_backend,
+    older,
+    sandbox_supported,
+)
 from .bus import Bus
 from .delivery import Delivery
 from .digest import digest
@@ -44,7 +51,7 @@ from .store import Store, hours_ago, now
 from .tasks import ENDED, OPEN, TaskBook
 from .tasks import migrate as migrate_tasks
 from .watchdog import WatchConfig, flags, review_packet, timestamp
-from .workspaces import BRANCH_PREFIX, Workspaces, resolve_project
+from .workspaces import BRANCH_PREFIX, Workspaces, git_dirs, resolve_project
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +82,13 @@ SLACK_TS = re.compile(r"\d{10}\.\d{6}")
 ROUTER_CONTEXT = int(os.environ.get("CHIEFOFSTAFF_ROUTER_CONTEXT", "150000"))
 # Tasks that ended within this many hours are still shown (and can be reviewed or retried).
 TASKS_SHOWN_HOURS = 72
+GITHUB_HOSTS = (
+    "github.com",
+    "api.github.com",
+    "uploads.github.com",
+    "codeload.github.com",
+    "objects.githubusercontent.com",
+)
 # Copilot's own bookkeeping tools; they say nothing about the work.
 PLUMBING_TOOLS = {"tool_search_tool", "report_intent"}
 
@@ -332,6 +346,9 @@ class Runtime(OwnerAsks):
         self.watch_job: asyncio.Task | None = None
         self.backend: AgentBackend | None = None
         self.states = SessionStates()
+        # Whether this machine can run Copilot's command sandbox, and whether gh works inside it.
+        self.sandbox_host = sandbox_supported()
+        self.sandbox_gh: bool | None = None
         self.pump_lock = asyncio.Lock()
         self.draft_lock = asyncio.Lock()
         self.connect_lock = asyncio.Lock()
@@ -394,6 +411,7 @@ class Runtime(OwnerAsks):
                 if not auth.isAuthenticated:
                     raise RuntimeError("Copilot is not signed in. Run `copilot login`.")
                 warning = await self.version_warning()
+                self.sandbox_gh = await self.backend.gh_works_in_sandbox()
                 await self.ensure_router()
                 await self.reconcile_sends()
                 await self.resume_working()
@@ -457,6 +475,32 @@ class Runtime(OwnerAsks):
         if not router_id:
             raise RuntimeError("The Router has not started yet.")
         return router_id
+
+    def sandbox_policy(self, row: dict) -> SandboxPolicy | None:
+        """What a worker's shell commands may touch; None when they run unsandboxed."""
+        if not (
+            row["role"] == WORKER
+            and self.store.settings().worker_sandbox
+            and self.sandbox_host
+            and self.backend
+            and self.backend.capabilities.sandbox
+        ):
+            return None
+        checkouts = self.workspaces.checkouts(row)
+        repositories = git_dirs(checkouts)
+        writable = [*self.workspaces.writable(row), *repositories]
+        # Hooks and config run code when the owner uses the repository: never writable.
+        readonly = [f"{git_dir}/{name}" for git_dir in repositories for name in ("hooks", "config")]
+        ssh = Path.home() / ".ssh"
+        readonly += [str(ssh / name) for name in ("known_hosts", "config") if (ssh / name).exists()]
+        if agent := os.environ.get("SSH_AUTH_SOCK"):
+            writable.append(agent)  # Signing through the agent; key files stay unreadable.
+        return SandboxPolicy(
+            readwrite=tuple(dict.fromkeys(path for path in writable if path)),
+            readonly=tuple(readonly),
+            # Workers that read Slack must not carry what they read anywhere but GitHub.
+            allowed_hosts=GITHUB_HOSTS if row["slack"] else (),
+        )
 
     def yolo(self, row: dict) -> bool:
         """Whether this worker acts without permission checks (a session choice, else Settings)."""
@@ -574,11 +618,13 @@ class Runtime(OwnerAsks):
         settings = self.store.settings()
         prompt = PROMPTS[row["role"]]
         if row["role"] == WORKER:
+            sandbox = self.sandbox_policy(row)
             prompt += "\n" + prompts.worker_context(
                 row["cwd"],
                 str(self.workspaces.workspace(row)),
                 self.workspaces.checkouts(row),
                 self.yolo(row),
+                ("on-no-gh" if self.sandbox_gh is False else "on") if sandbox else "",
             )
         if (profile := self.store.get("profile", "")) and row["role"] != WATCHDOG:
             prompt += f"\n<owner_profile>\n{profile}\n</owner_profile>"
@@ -595,6 +641,8 @@ class Runtime(OwnerAsks):
             "client_name": "chiefofstaff",
             "on_mcp_auth_request": self.on_mcp_auth,
         }
+        if row["role"] == WORKER and sandbox:
+            options["sandbox_config"] = self.backend.sandbox(sandbox)
         if row["role"] == WORKER:
             # Workers ask the owner directly: Copilot's ask_user, MCP forms and links.
             options["on_user_input_request"] = self.on_user_input
@@ -2801,6 +2849,10 @@ class Runtime(OwnerAsks):
             "profile": self.store.get("profile", ""),
             "profile_draft": self.store.get("profile_draft", ""),
             "setup_notes": self.setup_notes(),
+            "sandbox": {
+                "supported": self.sandbox_host,
+                "gh_trusted": self.sandbox_gh,
+            },
         }
 
     async def settings_changed(self, old: Settings, new: Settings):
@@ -2815,7 +2867,8 @@ class Runtime(OwnerAsks):
                 if row and not (row["model"] and row["effort"]):
                     with suppress(Exception):
                         await self.apply_model(row)
-        if (old.worker_credit_limit, old.worker_yolo) != (new.worker_credit_limit, new.worker_yolo):
+        changed = ("worker_credit_limit", "worker_yolo", "worker_sandbox")
+        if any(getattr(old, key) != getattr(new, key) for key in changed):
             await self.refresh(WORKER)
         self.slack.wake()
         self.github.wake()

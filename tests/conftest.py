@@ -105,6 +105,12 @@ class FakeClient:
     async def version(self):
         return self.cli_version
 
+    def sandbox(self, policy):
+        return policy
+
+    async def gh_works_in_sandbox(self):
+        return True
+
     async def mcp_sign_in_url(self, session, server):
         login = await session.rpc.mcp.oauth.login(SimpleNamespace(server_name=server))
         return login.authorization_url
@@ -268,6 +274,7 @@ class Harness:
             notifier=notifier,
             watch=watch or WatchConfig(),
         )
+        self.runtime.sandbox_host = True  # Whatever machine the tests run on.
         self.runtime.slack = SlackSource(self.store, self.runtime, tokens=self.tokens, mcp=self.mcp)
         self.runtime.github = GitHubSource(self.store, self.runtime, gh_command=gh)
 

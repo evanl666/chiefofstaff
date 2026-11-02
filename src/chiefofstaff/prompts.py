@@ -234,7 +234,10 @@ Then report(status="done") with one line.
 """
 
 
-def worker_context(cwd: str, workspace: str, checkouts: list[dict], yolo: bool) -> str:
+def worker_context(
+    cwd: str, workspace: str, checkouts: list[dict], yolo: bool, sandbox: str = ""
+) -> str:
+    """`sandbox`: "" (no sandbox), "on", or "on-no-gh" (gh cannot reach GitHub inside it)."""
     lines = [
         f"Working directory: {cwd}",
         f"Your workspace: {workspace} (all yours: clone, build or download things there).",
@@ -255,10 +258,26 @@ def worker_context(cwd: str, workspace: str, checkouts: list[dict], yolo: bool) 
         "clones a repository that is not on this machine (git URL or GitHub owner/name) into "
         "your workspace, on your own branch."
     )
-    if yolo:
+    if sandbox:
         lines.append(
-            "Permission checks are off for you (yolo): every command and file change runs "
-            "without approval, so keep to the boundaries below yourself."
+            "Your shell commands run in an OS sandbox: they can write only in your workspace and "
+            'checkouts (and temporary folders); elsewhere they fail with "Operation not '
+            "permitted\". The repositories' hooks and config are read-only: push with `git push "
+            "origin HEAD`, without -u. git and gh use the owner's GitHub sign-in through Copilot's "
+            'proxy. When the task needs access the sandbox denies, report(status="blocked") '
+            "saying what; never work around it."
+        )
+        if sandbox == "on-no-gh":
+            lines.append(
+                "On this machine gh cannot reach GitHub from inside the sandbox until the owner "
+                "trusts Copilot's certificate; use git, or report it as blocked."
+            )
+    if yolo and sandbox:
+        lines.append("Permission prompts are off for you (yolo); the sandbox still applies.")
+    elif yolo:
+        lines.append(
+            "Permission checks are off for you (yolo) and there is no sandbox: every command "
+            "runs with the owner's full access, so keep to the boundaries below yourself."
         )
     return "\n".join(lines)
 

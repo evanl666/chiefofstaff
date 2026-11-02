@@ -127,6 +127,31 @@ def readme_line(project: Path) -> str:
     return ""
 
 
+async def common_git_dir(path: Path) -> str:
+    """The repository's own .git directory (shared by all its worktrees), or "" if none."""
+    try:
+        found = await git(
+            "-C", str(path), "rev-parse", "--path-format=absolute", "--git-common-dir"
+        )
+    except ValueError:
+        return ""
+    return found.strip()
+
+
+def git_dirs(checkouts: list[dict]) -> list[str]:
+    """The .git directories a worker's commits write to, outside its workspace."""
+    found = []
+    for checkout in checkouts:
+        if checkout.get("remote"):
+            continue  # A clone in the workspace: its .git is inside already.
+        git_dir = checkout.get("git_dir") or (
+            str(Path(checkout["repo"]) / ".git") if checkout.get("repo") else ""
+        )
+        if git_dir and git_dir not in found:
+            found.append(git_dir)
+    return found
+
+
 class Workspaces:
     def __init__(self, store: Store, work_root: Path):
         self.store = store
@@ -162,7 +187,10 @@ class Workspaces:
         """A checkout of a configured project for a worker; None if it has that repo already."""
         path = resolve_project(project, self.store.settings().projects)
         if not isolate:
-            return {"project": str(path), "path": str(path), "branch": "", "shared": True}
+            checkout = {"project": str(path), "path": str(path), "branch": "", "shared": True}
+            if git_dir := await common_git_dir(path):
+                checkout["git_dir"] = git_dir
+            return checkout
         toplevel = await git("-C", str(path), "rev-parse", "--show-toplevel")
         top = await asyncio.to_thread(Path(toplevel.strip()).resolve)
         if str(top) in repos:
@@ -180,6 +208,7 @@ class Workspaces:
             "path": str(tree / path.relative_to(top)),
             "branch": branch,
             "base": base,
+            "git_dir": await common_git_dir(top) or str(top / ".git"),
         }
 
     @staticmethod
