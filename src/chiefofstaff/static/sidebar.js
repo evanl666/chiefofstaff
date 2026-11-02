@@ -2,7 +2,7 @@
 
 import { $, api, el, toast } from "./dom.js";
 import { ago, shortPath } from "./text.js";
-import { closedWorkers, draftsFor, loadState, sessions, state, STATUS_ORDER, STATUS_TEXT } from "./state.js";
+import { closedWorkers, DOT_HELP, draftsFor, loadState, sessions, state, STATUS_ORDER, STATUS_TEXT } from "./state.js";
 import { select } from "./session.js";
 import { inboxItem } from "./inbox.js";
 function sessionItem(session, label) {
@@ -12,16 +12,18 @@ function sessionItem(session, label) {
     : drafts
       ? el("span", { class: "badge amber", text: String(drafts), title: "Waiting for your approval" })
       : null;
+  // A session open in another Copilot window shows that, whatever Chief of Staff last saw it do.
+  const dot = session.elsewhere ? "open" : session.status;
   return el(
     "button",
     {
       type: "button",
       class: `item ${session.status}${state.selected === session.id ? " selected" : ""}`,
-      title: `${STATUS_TEXT[session.status] || session.status}${session.activity ? ` · ${session.activity}` : ""}`,
+      title: [session.elsewhere ? DOT_HELP.open : STATUS_TEXT[session.status] || session.status, session.activity].filter(Boolean).join(" · "),
       "data-id": session.id,
       onclick: () => select(session.id),
     },
-    el("span", { class: `dot ${session.status}` }),
+    el("span", { class: `dot ${dot}`, title: DOT_HELP[dot] || "" }),
     el("span", { class: "label", text: label }),
     badge,
   );
@@ -112,7 +114,7 @@ function renderExternal() {
           title: item.open ? `Open in a terminal now · ${item.cwd}` : item.cwd,
           onclick: () => showExternal(item),
         },
-        el("span", { class: `dot${item.open ? " open" : ""}` }),
+        el("span", { class: `dot${item.open ? " open" : ""}`, title: item.open ? DOT_HELP.open : "Not open anywhere" }),
         el("span", { class: "label", text: item.summary }),
         el("span", { class: "sub", text: item.open ? "open" : ago(item.modified) }),
       ),

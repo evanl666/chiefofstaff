@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.2 (2026-11-02)
+
+- Sessions open in a terminal get their own mark, a blue ring, instead of the green of finished
+  work. Every sidebar dot says what it means on hover.
+- The *Add a project folder* card has *Not now*, for working without projects.
+
 ## 0.1.1 (2026-11-02)
 
 - *Other Copilot sessions* marks the ones open in a terminal right now and lists them first.

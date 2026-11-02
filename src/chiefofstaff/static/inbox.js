@@ -29,7 +29,7 @@ export function inboxItem() {
   return el(
     "button",
     { type: "button", class: `item inbox-item${state.selected === INBOX ? " selected" : ""}`, onclick: () => select(INBOX) },
-    el("span", { class: `dot${count ? " waiting" : ""}` }),
+    el("span", { class: `dot${count ? " waiting" : ""}`, title: count ? "Something needs you" : "Nothing needs you" }),
     el("span", { class: "label", text: "Inbox" }),
     count ? el("span", { class: "badge amber", text: String(count), title: "Needs you" }) : null,
   );
@@ -228,6 +228,8 @@ function taskMeta(task) {
   return [task.worker && task.worker !== task.title ? task.worker : "", finishedAt ? `finished ${since(finishedAt)}` : `started ${since(task.created_at)}`, task.credits >= 0.05 ? `${task.credits.toFixed(1)} credits` : "", task.runs > 1 ? `${task.runs} runs` : ""].filter(Boolean).join(" · ");
 }
 // First run: what is missing before work can start.
+const NO_PROJECTS = "cos.noProjectsCard";  // The owner chose to work without projects for now.
+
 function setupCard() {
   const snap = state.snapshot;
   const key = `${snap.runtime.state}:${snap.runtime.error}:${snap.settings.projects.length}`;
@@ -258,7 +260,7 @@ function setupCard() {
       ),
       el("div", { class: "actions" }, el("span", { class: "muted", text: "Or look around first: chiefofstaff --demo" }), retry),
     );
-  } else if (snap.runtime.state === "ready" && !snap.demo && !snap.settings.projects.length) {
+  } else if (snap.runtime.state === "ready" && !snap.demo && !snap.settings.projects.length && localStorage.getItem(NO_PROJECTS) !== "1") {
     const input = el("input", { placeholder: "~/code/my-app", autocomplete: "off" });
     const error = el("span", { class: "error" });
     const add = async () => {
@@ -278,7 +280,18 @@ function setupCard() {
       { id: "inbox-setup", class: "card setup" },
       el("div", { class: "head" }, el("span", { class: "label", text: "Add a project folder" })),
       el("p", { text: "Workers change code in their own copies (git worktrees) of these folders; your own checkout stays as it is. Research and questions need no project." }),
-      el("div", { class: "actions" }, input, error, el("button", { type: "button", text: "Add", onclick: add })),
+      el(
+        "div",
+        { class: "actions" },
+        input,
+        error,
+        el("button", { type: "button", class: "text", text: "Not now", onclick: () => {
+          localStorage.setItem(NO_PROJECTS, "1");
+          node.remove();
+          toast("Add projects any time in Settings.");
+        } }),
+        el("button", { type: "button", text: "Add", onclick: add }),
+      ),
     );
   } else {
     return null;

@@ -62,6 +62,8 @@ async def run(scheme: str):
                 "waiting for “Fix the flaky login test”"
             )
             log("three tasks; one waits for another")
+            dots = page.locator("#session-list .item .dot")
+            assert all([await dot.get_attribute("title") for dot in await dots.all()]), "dot help"
             await page.screenshot(path=SHOTS / f"demo-{scheme}-1-running.png")
 
             # A half-typed note survives updates of its card as the worker moves on.
