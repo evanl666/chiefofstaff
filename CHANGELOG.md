@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.1 (unreleased)
+## 0.1.1 (2026-11-02)
 
 - *Other Copilot sessions* marks the ones open in a terminal right now and lists them first.
 - Handing a session over to the Router brings its conversation along, and is refused while it
