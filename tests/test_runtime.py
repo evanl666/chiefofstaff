@@ -55,7 +55,7 @@ async def test_router_routes_work_and_worker_reports_back(harness):
         "record_setup",
     }
     assert "available_tools" not in worker.options
-    assert worker.options["on_user_input_request"] == runtime.on_user_input
+    assert worker.options["on_user_input_request"] == runtime.asks.on_user_input
     assert harness.store.session(worker_id)["status"] == "working"
     assert ("notice", "Started “Fix flaky login test”") in harness.kinds(harness.router_id)
 
@@ -227,12 +227,12 @@ async def test_permission_handler_records_denials(harness):
         runtime, "spawn_worker", harness.router_id, title="A", instructions="a"
     )
     worker_id = json.loads(result.text_result_for_llm)["session_id"]
-    decision = await runtime.on_permission(
+    decision = await runtime.events.on_permission(
         request("shell", full_command_text="git push --force"), {"session_id": worker_id}
     )
     assert decision.kind == "reject" and "force push" in decision.feedback
     assert harness.kinds(worker_id)[-1][0] == "notice"
-    allowed = await runtime.on_permission(
+    allowed = await runtime.events.on_permission(
         request("shell", full_command_text="pytest"), {"session_id": worker_id}
     )
     assert allowed.kind == "approve-once"
@@ -371,7 +371,7 @@ async def test_slack_session_drafts_and_owner_decides(tmp_path):
     await settle(runtime)
     assert harness.notifications[-1] == ("Slack reply to approve", "Alice asks about the deploy")
 
-    sent = await runtime.resolve_draft(
+    sent = await runtime.drafts.resolve(
         first["id"], DraftDecision(action="send", text="Deploy finished at 3pm.")
     )
     assert sent["status"] == "sent"
@@ -385,23 +385,23 @@ async def test_slack_session_drafts_and_owner_decides(tmp_path):
     )
     assert "edited draft" in slack.sent[-1]
     with pytest.raises(ValueError):
-        await runtime.resolve_draft(first["id"], DraftDecision(action="send"))
+        await runtime.drafts.resolve(first["id"], DraftDecision(action="send"))
 
     second = await draft("lol no")
-    await runtime.resolve_draft(second["id"], DraftDecision(action="reject", reason="Too rude"))
+    await runtime.drafts.resolve(second["id"], DraftDecision(action="reject", reason="Too rude"))
     assert slack.sent[-1].endswith("Reason: Too rude Do not send it.\n</message>")
     assert len([c for c in harness.mcp.calls if c[0] == "slack_send_message"]) == 1
 
     third = await draft("Sure")
     harness.mcp.fail_send = True
     with pytest.raises(RuntimeError, match="Sending failed"):
-        await runtime.resolve_draft(third["id"], DraftDecision(action="send"))
+        await runtime.drafts.resolve(third["id"], DraftDecision(action="send"))
     assert harness.store.draft(third["id"])["status"] == "failed"
 
     fourth = await draft("Thanks!")
     harness.mcp.fail_send = False
     before = len(slack.sent)
-    await runtime.resolve_draft(fourth["id"], DraftDecision(action="send"))
+    await runtime.drafts.resolve(fourth["id"], DraftDecision(action="send"))
     assert len(slack.sent) == before, "an unedited approval must not wake the session"
     assert harness.kinds(slack_row["id"])[-1][1].endswith("it was sent.")
 
@@ -442,7 +442,7 @@ async def test_github_review_draft_is_published_on_approval(tmp_path):
     )
     draft = harness.store.drafts()[0]
     assert draft["target"]["head_sha"] == "abc123"
-    published = await runtime.resolve_draft(draft["id"], DraftDecision(action="send"))
+    published = await runtime.drafts.resolve(draft["id"], DraftDecision(action="send"))
     assert published["outcome"] == "https://github.com/acme/app/pull/7#review-1"
     arguments, payload = harness.gh_calls[-1]
     assert arguments[1] == "repos/acme/app/pulls/7/reviews"
@@ -467,13 +467,13 @@ async def test_external_sessions_can_be_adopted(harness, tmp_path):
             context=None,
         ),
     ]
-    items = await runtime.external_sessions(refresh=True)
+    items = await runtime.workers.external(refresh=True)
     assert [item["id"] for item in items] == ["ext-1"]
     harness.client.sessions["ext-1"] = FakeSession("ext-1", {})
-    row = await runtime.adopt("ext-1")
+    row = await runtime.workers.adopt("ext-1")
     assert row["role"] == "worker" and row["title"] == "Refactor parser"
     assert "ext-1" in harness.client.resumed
-    assert await runtime.external_sessions(refresh=True) == []
+    assert await runtime.workers.external(refresh=True) == []
 
 
 @pytest.mark.parametrize(
@@ -590,7 +590,7 @@ async def test_follow_ups_respect_the_worker_limit(tmp_path):
     harness.session(second).emit("session.idle")
     await settle(runtime)
     assert harness.session(first).sent[-1] == env("owner", "message", "one more thing")
-    assert runtime.running_workers() == 1
+    assert runtime.workers.running() == 1
 
 
 async def test_router_resumes_unhandled_events_after_restart(tmp_path):
@@ -660,10 +660,10 @@ async def test_new_settings_wait_for_a_worker_to_finish_its_turn(harness):
     old = harness.store.settings()
     await runtime.settings_changed(old, old.model_copy(update={"worker_yolo": True}))
     assert not worker.disconnected, "its turn goes on after the report"
-    assert runtime.running_workers() == 1
+    assert runtime.workers.running() == 1
     worker.emit("session.idle")
     await settle(runtime)
-    assert worker.disconnected and runtime.running_workers() == 0
+    assert worker.disconnected and runtime.workers.running() == 0
 
 
 async def test_tools_take_the_short_ids_sessions_see(harness):
@@ -821,7 +821,7 @@ async def test_the_router_rotates_when_its_context_grows(harness):
             modified_time=datetime.now(UTC),
         )
     ]
-    assert await runtime.external_sessions(refresh=True) == []
+    assert await runtime.workers.external(refresh=True) == []
 
 
 async def test_an_old_copilot_cli_is_pointed_out(harness):

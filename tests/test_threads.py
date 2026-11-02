@@ -103,7 +103,7 @@ async def test_sent_reply_makes_the_drafter_follow_the_conversation(tmp_path):
             text="ok",
         )
         draft = harness.store.drafts()[-1]
-        await runtime.resolve_draft(draft["id"], DraftDecision(action="send"))
+        await runtime.drafts.resolve(draft["id"], DraftDecision(action="send"))
 
     await send(
         "C0DEPLOYS",
@@ -133,9 +133,9 @@ async def test_watchdog_reviews_and_intervenes(tmp_path):
         result=SimpleNamespace(content="ERROR: connection refused (attempt 9), retrying"),
     )
     await settle(runtime)
-    assert await runtime.watch_once(now) == [], "a fresh worker is fine"
-    assert await runtime.watch_once(now + 1000) == [worker_id]
-    assert await runtime.watch_once(now + 1100) == [], "one review per cooldown"
+    assert await runtime.watchdog.check(now) == [], "a fresh worker is fine"
+    assert await runtime.watchdog.check(now + 1000) == [worker_id]
+    assert await runtime.watchdog.check(now + 1100) == [], "one review per cooldown"
     watchdog_id = harness.store.open_sessions("watchdog")[0]["id"]
     packet = harness.session(watchdog_id).sent[-1]
     assert packet.startswith(
@@ -185,14 +185,14 @@ async def test_watchdog_reviews_and_intervenes(tmp_path):
     assert 'title="Migrate"' in escalation and "looks stuck" in escalation
 
     await call_tool(runtime, "report", worker_id, status="progress", summary="retrying")
-    assert runtime.watch_state(worker_id)["nudges"] == 0
+    assert runtime.watchdog.state(worker_id)["nudges"] == 0
 
 
 async def test_watchdog_can_be_switched_off(tmp_path):
     harness = Harness(tmp_path / "data", Settings(watchdog_enabled=False))
     runtime = await harness.connect()
     await call_tool(runtime, "spawn_worker", harness.router_id, title="A", instructions="a")
-    assert await runtime.watch_once(time.time() + 5000) == []
+    assert await runtime.watchdog.check(time.time() + 5000) == []
     assert harness.store.open_sessions("watchdog") == []
 
 
@@ -242,7 +242,7 @@ async def test_watchdog_leaves_escalated_and_stopped_workers_alone(tmp_path):
     )
     worker_id = json.loads(result.text_result_for_llm)["session_id"]
     now = time.time()
-    assert await runtime.watch_once(now + 1000) == [worker_id]
+    assert await runtime.watchdog.check(now + 1000) == [worker_id]
     watchdog_id = harness.store.open_sessions("watchdog")[0]["id"]
     await call_tool(
         runtime,
@@ -253,11 +253,11 @@ async def test_watchdog_leaves_escalated_and_stopped_workers_alone(tmp_path):
         action="escalate",
         reason="hung",
     )
-    assert await runtime.watch_once(now + 5000) == [], "the Router has it; nothing new happened"
+    assert await runtime.watchdog.check(now + 5000) == [], "the Router has it; nothing new happened"
 
-    await runtime.interrupt(worker_id)
+    await runtime.workers.interrupt(worker_id)
     assert harness.kinds(worker_id)[-1] == ("notice", "Stopped by you.")
-    assert await runtime.watch_once(now + 9000) == [], "the owner stopped it on purpose"
+    assert await runtime.watchdog.check(now + 9000) == [], "the owner stopped it on purpose"
 
 
 async def test_unchanged_workers_are_reviewed_less_and_less(tmp_path):
@@ -265,7 +265,9 @@ async def test_unchanged_workers_are_reviewed_less_and_less(tmp_path):
     runtime = await harness.connect()
     await call_tool(runtime, "spawn_worker", harness.router_id, title="A", instructions="a")
     now = time.time()
-    reviews = [bool(await runtime.watch_once(now + 1000 + minute * 60)) for minute in range(0, 60)]
+    reviews = [
+        bool(await runtime.watchdog.check(now + 1000 + minute * 60)) for minute in range(0, 60)
+    ]
     assert sum(reviews) == 3, "after 0, 10 and 30 minutes; the next would be after 70"
 
 
@@ -285,7 +287,7 @@ async def test_a_done_worker_woken_by_a_follow_up_stays_done(harness):
     harness.session(worker_id).emit("session.idle")
     await settle(runtime)
     assert harness.store.session(worker_id)["status"] == "done"
-    assert await runtime.watch_once(time.time() + 5000) == []
+    assert await runtime.watchdog.check(time.time() + 5000) == []
 
 
 async def test_a_failed_watchdog_creation_is_retried(tmp_path):
@@ -304,7 +306,7 @@ async def test_a_failed_watchdog_creation_is_retried(tmp_path):
     harness.client.create_session = flaky
     now = time.time()
     with pytest.raises(RuntimeError):
-        await runtime.watch_once(now + 1000)
-    assert await runtime.watch_once(now + 1001) != []
+        await runtime.watchdog.check(now + 1000)
+    assert await runtime.watchdog.check(now + 1001) != []
     watchdog_id = harness.store.open_sessions("watchdog")[0]["id"]
     assert harness.session(watchdog_id).sent[-1].startswith('<message from="system" type="review"')

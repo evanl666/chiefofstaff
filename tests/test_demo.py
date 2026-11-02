@@ -41,14 +41,14 @@ async def test_the_demo_scenario_plays_through(tmp_path):
 
         question = await until(lambda: store.drafts() and store.drafts()[0])
         assert question["kind"] == "question"
-        await runtime.resolve_draft(
+        await runtime.drafts.resolve(
             question["id"], DraftDecision(action="answer", text="Per account")
         )
 
         runtime.slack.wake()
         draft = await until(lambda: next((d for d in store.drafts() if d["kind"] == "slack"), None))
         assert draft["target"]["to"] == "Maya Chen"
-        await runtime.resolve_draft(draft["id"], DraftDecision(action="send"))
+        await runtime.drafts.resolve(draft["id"], DraftDecision(action="send"))
         assert runtime.slack.mcp.sent[0]["channel_id"] == demo.MAYA_DM
 
         done = await until(
@@ -63,11 +63,11 @@ async def test_the_demo_scenario_plays_through(tmp_path):
         nudged = store.all("SELECT text FROM messages WHERE kind='watchdog'")
         assert nudged, "the Watchdog unstuck the research worker"
 
-        fix = runtime.task_view(runtime.tasks.get(titles["Fix the flaky login test"]["id"]))
+        fix = runtime.task_actions.view(runtime.tasks.get(titles["Fix the flaky login test"]["id"]))
         await until(
-            lambda: runtime.task_view(runtime.tasks.get(fix["id"]))["receipts"]["checkouts"]
+            lambda: runtime.task_actions.view(runtime.tasks.get(fix["id"]))["receipts"]["checkouts"]
         )
-        found = runtime.task_view(runtime.tasks.get(fix["id"]))["receipts"]
+        found = runtime.task_actions.view(runtime.tasks.get(fix["id"]))["receipts"]
         assert found["tests"]["passed"] and found["changed"]["commits"] == 1
         assert json.loads(json.dumps(found))  # The UI gets plain JSON.
     finally:

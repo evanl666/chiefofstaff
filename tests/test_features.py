@@ -44,8 +44,8 @@ async def test_quiet_finished_workers_are_tidied_up(harness):
         runtime, "report", following, status="done", summary="https://github.com/a/b/pull/1"
     )
     await call_tool(runtime, "report", asking, status="question", summary="which db?")
-    assert await runtime.tidy_once(time.time() + 3600) == []
-    assert await runtime.tidy_once(time.time() + 2 * 86400) == [done]
+    assert await runtime.workers.tidy(time.time() + 3600) == []
+    assert await runtime.workers.tidy(time.time() + 2 * 86400) == [done]
 
 
 async def test_dependent_tasks_start_with_the_results_they_need(harness):
@@ -54,7 +54,7 @@ async def test_dependent_tasks_start_with_the_results_they_need(harness):
     second = await spawn(runtime, harness.router_id, "Write migration", after=[first])
     assert second["status"] == "queued" and "Starts automatically" in second["note"]
     second_id = second["session_id"]
-    await runtime.pump()
+    await runtime.workers.pump()
     assert harness.store.session(second_id)["activity"] == "waiting for “Design schema”"
     assert second_id not in harness.client.sessions
 
@@ -186,7 +186,7 @@ async def test_spawning_next_to_related_workers_needs_a_reason(tmp_path):
     router = harness.router_id
     first = (await spawn(runtime, router, "Add login", project=str(project)))["session_id"]
     await call_tool(runtime, "report", first, status="done", summary="Login added.")
-    await runtime.close_session(first)
+    await runtime.workers.close(first)
 
     refused = await call_tool(
         runtime,
@@ -233,7 +233,7 @@ async def test_the_router_hears_about_related_workers(harness):
     router = harness.router_id
     worker_id = (await spawn(runtime, router, "研究 OpenHands 源码"))["session_id"]
     await call_tool(runtime, "report", worker_id, status="done", summary="源码解读已完成。")
-    await runtime.close_session(worker_id)
+    await runtime.workers.close(worker_id)
     await runtime.owner_send(router, "你去研究一下openhands的开发历史")
     sent = harness.session(router).sent[-1]
     assert sent.startswith(
@@ -304,7 +304,7 @@ async def test_profile_is_distilled_reviewed_and_used(tmp_path):
     await settle(runtime)
     assert harness.notifications[-1][0] == "Profile to review"
 
-    await runtime.save_profile("## Role and focus\n- ML infra")
+    await runtime.toolset.save_profile("## Role and focus\n- ML infra")
     assert harness.store.get("profile_draft") == ""
     worker = (await spawn(runtime, harness.router_id, "New"))["session_id"]
     prompt = harness.session(worker).options["system_message"]["content"]
@@ -321,10 +321,10 @@ async def test_slack_edits_become_style_examples(tmp_path):
         return harness.store.drafts()[-1]
 
     harness.mcp.sent_link = "https://acme.slack.com/archives/C0DEPLOYS/p1712345680000100"
-    await runtime.resolve_draft(
+    await runtime.drafts.resolve(
         (await draft("Hello! Yes.")).get("id"), DraftDecision(action="send", text="yep")
     )
-    await runtime.resolve_draft(
+    await runtime.drafts.resolve(
         (await draft("Certainly, my friend!")).get("id"),
         DraftDecision(action="reject", reason="too formal"),
     )
@@ -345,7 +345,7 @@ async def test_a_broken_dependency_is_reported_and_the_router_can_release(harnes
     second = (await spawn(runtime, harness.router_id, "B", after=[first]))["session_id"]
     harness.session(first).emit("session.error", message="boom")
     await settle(runtime)
-    await runtime.pump()
+    await runtime.workers.pump()
     await settle(runtime)
     told = [p for p in harness.session(harness.router_id).sent if "ended without finishing" in p]
     assert len(told) == 1 and 'title="B"' in told[0]
@@ -393,7 +393,7 @@ async def test_closed_workers_come_back_with_their_conversation(harness):
     runtime = await harness.connect()
     worker_id = (await spawn(runtime, harness.router_id, "Fix login"))["session_id"]
     await call_tool(runtime, "report", worker_id, status="done", summary="Fixed.")
-    assert await runtime.tidy_once(time.time() + 2 * 86400) == [worker_id]
+    assert await runtime.workers.tidy(time.time() + 2 * 86400) == [worker_id]
     listed = json.loads(
         (await call_tool(runtime, "list_sessions", harness.router_id)).text_result_for_llm
     )
@@ -409,7 +409,7 @@ async def test_closed_workers_come_back_with_their_conversation(harness):
         "router", "message", "Also the logout", task=task_of(harness, worker_id)
     )
 
-    await runtime.close_session(worker_id)
+    await runtime.workers.close(worker_id)
     await runtime.owner_send(worker_id, "One more thing")
     assert not harness.store.session(worker_id)["closed_at"]
     assert harness.session(worker_id).sent[-1] == env("owner", "message", "One more thing")
@@ -421,16 +421,16 @@ async def test_a_reopened_worker_is_not_pushed_back_onto_abandoned_work(harness)
     harness.session(worker_id).emit("assistant.turn_start")
     harness.session(worker_id).emit("tool.execution_start", tool_name="bash", arguments={})
     await settle(runtime)
-    await runtime.close_session(worker_id)
-    await runtime.reopen(worker_id)
+    await runtime.workers.close(worker_id)
+    await runtime.workers.reopen(worker_id)
     assert harness.store.session(worker_id)["status"] == "idle"
-    assert await runtime.watch_once(time.time() + 16 * 60) == []
+    assert await runtime.watchdog.check(time.time() + 16 * 60) == []
 
 
 async def test_a_worker_whose_conversation_is_gone_is_not_reopened(harness):
     runtime = await harness.connect()
     worker_id = (await spawn(runtime, harness.router_id, "Old"))["session_id"]
-    await runtime.close_session(worker_id)
+    await runtime.workers.close(worker_id)
     del harness.client.sessions[worker_id]
     result = await call_tool(
         runtime, "message_session", harness.router_id, session_id=worker_id, text="again"
@@ -448,13 +448,13 @@ async def test_find_sessions_by_task_file_pr_and_id(harness):
     other = (await spawn(runtime, router, "Write release notes"))["session_id"]
     cwd = harness.store.session(config)["cwd"]
     request = SimpleNamespace(kind="write", file_name="src/http/config.py", resolved_path=None)
-    await runtime.on_permission(request, {"session_id": config})
+    await runtime.events.on_permission(request, {"session_id": config})
     summary = f"Notes for v2.3 are ready in {cwd}/NOTES.md."
     await call_tool(runtime, "report", other, status="done", summary=summary)
-    await runtime.close_session(login)
+    await runtime.workers.close(login)
 
     def found(query):
-        return [card["session_id"] for card in runtime.find_sessions(query)]
+        return [card["session_id"] for card in runtime.workers.find(query)]
 
     assert found("登录页面又出bug了")[0] == login, "closed workers are found too"
     assert found("the config.py change")[0] == config
@@ -463,7 +463,7 @@ async def test_find_sessions_by_task_file_pr_and_id(harness):
     assert found(f"continue {review[:8]}")[0] == review
     assert found("something unrelated entirely") == []
     assert found("new data pipeline for customer support work") == [], "not the shared path"
-    assert runtime.find_sessions("PR 42")[0]["matched"] == ["42"]
+    assert runtime.workers.find("PR 42")[0]["matched"] == ["42"]
     assert harness.store.session(config)["files"] == '["src/http/config.py"]'
     assert cwd
 
@@ -514,7 +514,7 @@ async def test_the_owner_picks_the_folder_when_the_router_is_unsure(tmp_path):
     assert [option["configured"] for option in draft["target"]["options"]] == [True, False]
     assert harness.store.messages(router)[-1]["meta"]["label"] == "Folder question"
 
-    await runtime.resolve_draft(draft["id"], DraftDecision(action="choose", choice=str(notes)))
+    await runtime.drafts.resolve(draft["id"], DraftDecision(action="choose", choice=str(notes)))
     assert harness.store.settings().projects == [str(app.resolve()), str(notes.resolve())]
     told = harness.session(router).sent[-1]
     assert (
@@ -526,7 +526,7 @@ async def test_the_owner_picks_the_folder_when_the_router_is_unsure(tmp_path):
 
     await ask(str(app))
     second = harness.store.drafts()[0]["id"]
-    await runtime.resolve_draft(second, DraftDecision(action="choose", choice=""))
+    await runtime.drafts.resolve(second, DraftDecision(action="choose", choice=""))
     assert (
         harness.session(router)
         .sent[-1]
@@ -534,7 +534,7 @@ async def test_the_owner_picks_the_folder_when_the_router_is_unsure(tmp_path):
     )
     await ask(str(app))
     third = harness.store.drafts()[0]["id"]
-    await runtime.resolve_draft(third, DraftDecision(action="reject", reason="later"))
+    await runtime.drafts.resolve(third, DraftDecision(action="reject", reason="later"))
     assert "do not start it. Reason: later" in harness.session(router).sent[-1]
     try:
         await runtime.add_project(str(tmp_path))
@@ -574,8 +574,8 @@ async def test_focus_holds_notifications_and_ends_with_one_summary(harness):
     runtime = await harness.connect()
     toasts = []
     runtime.bus.publish = lambda kind, data=None: toasts.append(data) if kind == "toast" else None
-    state = await runtime.start_focus(60)
-    assert state["until"] and runtime.focusing()
+    state = await runtime.focus.start(60)
+    assert state["until"] and runtime.focus.active()
     assert 'type="focus"' in harness.session(harness.router_id).sent[-1]
 
     await call_tool(runtime, "notify_owner", harness.router_id, text="PR #3 merged")
@@ -587,8 +587,8 @@ async def test_focus_holds_notifications_and_ends_with_one_summary(harness):
     )
     assert [t["text"] for t in toasts] == ["Production is down"], "urgent breaks through"
 
-    await runtime.focus_once(time.time() + 3601)
-    assert not runtime.focusing()
+    await runtime.focus.check(time.time() + 3601)
+    assert not runtime.focus.active()
     summary = harness.store.messages(harness.router_id)[-1]
     assert summary["meta"].get("focus_summary")
     assert summary["text"].startswith("While you focused (")
