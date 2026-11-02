@@ -11,9 +11,11 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
+import subprocess
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from copilot import CopilotClient, RuntimeConnection
@@ -112,6 +114,10 @@ class AgentBackend(Protocol):
         """Whether gh can reach GitHub from sandboxed commands; None when not applicable."""
         ...
 
+    async def open_elsewhere(self) -> dict[str, int]:
+        """Sessions another program has open right now (a terminal): session id -> its pid."""
+        ...
+
 
 @dataclass(frozen=True)
 class SandboxPolicy:
@@ -179,6 +185,9 @@ class CopilotBackend:
     async def gh_works_in_sandbox(self) -> bool | None:
         return await gh_trusts_sandbox(self.command)
 
+    async def open_elsewhere(self) -> dict[str, int]:
+        return await asyncio.to_thread(sessions_in_use, copilot_home())
+
     def sandbox(self, policy: SandboxPolicy) -> SandboxConfig:
         return SandboxConfig(
             enabled=True,
@@ -214,6 +223,60 @@ def copilot_backend(command: str) -> CopilotBackend:
     env = {key: value for key, value in os.environ.items() if not key.startswith("CHIEFOFSTAFF_")}
     client = CopilotClient(connection=RuntimeConnection.for_stdio(path=path), env=env)
     return CopilotBackend(client, path)
+
+
+def copilot_home() -> Path:
+    """Where the Copilot CLI keeps its state."""
+    return Path(os.environ.get("COPILOT_HOME") or Path.home() / ".copilot")
+
+
+def own_processes() -> set[int]:
+    """This process and its descendants (the Copilot CLI it runs)."""
+    try:
+        table = subprocess.run(
+            ["ps", "-axo", "pid=,ppid="], capture_output=True, text=True, check=True, timeout=5
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {os.getpid()}
+    children: dict[int, list[int]] = {}
+    for line in table.splitlines():
+        pid, _, ppid = line.strip().partition(" ")
+        if pid.isdigit() and ppid.strip().isdigit():
+            children.setdefault(int(ppid.strip()), []).append(int(pid))
+    found, todo = set(), [os.getpid()]
+    while todo:
+        pid = todo.pop()
+        if pid not in found:
+            found.add(pid)
+            todo += children.get(pid, [])
+    return found
+
+
+def running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # Someone else's process, but it exists.
+    return True
+
+
+def sessions_in_use(home: Path) -> dict[str, int]:
+    """Sessions that another running program has open.
+
+    The Copilot CLI keeps an ``inuse.<pid>.lock`` file in the folder of each session it has open;
+    a lock whose process is gone is stale. Sessions this process's own CLI has open do not count.
+    """
+    locks = []
+    for lock in (home / "session-state").glob("*/inuse.*.lock"):
+        pid = lock.name.split(".")[1]
+        if pid.isdigit() and running(int(pid)):
+            locks.append((lock.parent.name, int(pid)))
+    if not locks:
+        return {}
+    own = own_processes()
+    return {session_id: pid for session_id, pid in locks if pid not in own}
 
 
 def sandbox_supported() -> bool:

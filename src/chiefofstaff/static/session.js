@@ -28,6 +28,7 @@ export function renderHeader() {
     const repos = session.checkouts?.length || 0;
     meta = [STATUS_TEXT[session.status], session.status === "queued" ? session.activity : "", session.branch || displayPath(session.cwd), repos > 1 ? `${repos} repos` : ""];
     if (session.yolo) meta.unshift("YOLO");
+    if (session.elsewhere) meta.unshift("Open in another Copilot window");
   }
   if (session.credits >= 0.05) meta.push(`${session.credits.toFixed(1)} credits`);
   const follows = session.follows || [];
@@ -111,7 +112,12 @@ export function renderHeader() {
     slack: "Message the Slack session…",
     watchdog: "Message the Watchdog…",
   };
-  input.placeholder = session.closed_at ? "Message to reopen this worker…" : placeholders[session.role] || "Message this worker directly…";
+  input.disabled = Boolean(session.elsewhere);
+  input.placeholder = session.elsewhere
+    ? "Open in another Copilot window: exit it there (/exit) to message it here"
+    : session.closed_at
+      ? "Message to reopen this worker…"
+      : placeholders[session.role] || "Message this worker directly…";
 }
 export const EFFORTS = { none: "none", low: "low", medium: "medium", high: "high", xhigh: "extra high", max: "max" };
 const modelInfo = (id) => state.models.find((model) => model.id === id);

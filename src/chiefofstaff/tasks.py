@@ -245,11 +245,29 @@ SESSION_TO_TASK = {
     "queued": "queued",
     "starting": "running",
     "working": "running",
-    "idle": "running",
+    "idle": "review",  # A finished turn; nothing runs until someone sends it more.
     "waiting": "waiting",
     "done": "review",
     "failed": "failed",
 }
+
+
+def settle_adopted(store: Store):
+    """Sessions adopted before tasks existed became running tasks, though nothing runs there."""
+    for task in store.all(
+        """SELECT t.id FROM tasks t JOIN sessions s ON s.id=t.session_id
+        WHERE t.status IN ('running', 'queued') AND s.status='idle' AND s.closed_at IS NULL
+        AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.session_id=s.id)"""
+    ):
+        stamp = now()
+        store.execute(
+            "UPDATE tasks SET status='done', result=?, ended_at=?, updated_at=? WHERE id=?",
+            ("Adopted from Copilot.", stamp, stamp, task["id"]),
+        )
+        store.execute(
+            "UPDATE runs SET status='succeeded', ended_at=? WHERE task_id=? AND ended_at IS NULL",
+            (stamp, task["id"]),
+        )
 
 
 def migrate(store: Store):

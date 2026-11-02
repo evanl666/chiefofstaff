@@ -376,3 +376,6 @@ class ScriptedBackend:
 
     async def gh_works_in_sandbox(self) -> bool | None:
         return None
+
+    async def open_elsewhere(self) -> dict[str, int]:
+        return {}

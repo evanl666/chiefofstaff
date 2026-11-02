@@ -100,7 +100,8 @@ async function reconnect() {
   }
 }
 function renderExternal() {
-  $("#external-count").textContent = state.external.length ? `· ${state.external.length}` : "";
+  const open = state.external.filter((item) => item.open).length;
+  $("#external-count").textContent = state.external.length ? `· ${state.external.length}${open ? ` · ${open} open` : ""}` : "";
   $("#external-list").replaceChildren(
     ...state.external.map((item) =>
       el(
@@ -108,12 +109,12 @@ function renderExternal() {
         {
           type: "button",
           class: `item${state.selected === item.id ? " selected" : ""}`,
-          title: item.cwd,
+          title: item.open ? `Open in a terminal now · ${item.cwd}` : item.cwd,
           onclick: () => showExternal(item),
         },
-        el("span", { class: "dot" }),
+        el("span", { class: `dot${item.open ? " open" : ""}` }),
         el("span", { class: "label", text: item.summary }),
-        el("span", { class: "sub", text: ago(item.modified) }),
+        el("span", { class: "sub", text: item.open ? "open" : ago(item.modified) }),
       ),
     ),
   );
@@ -130,7 +131,7 @@ function showExternal(item) {
   state.selected = item.id;
   renderSidebar();
   $("#session-title").textContent = item.summary;
-  $("#session-meta").textContent = [shortPath(item.cwd), item.branch, `updated ${ago(item.modified)} ago`].filter(Boolean).join(" · ");
+  $("#session-meta").textContent = [item.open ? "Open in a terminal now" : "", shortPath(item.cwd), item.branch, `updated ${ago(item.modified)} ago`].filter(Boolean).join(" · ");
   $("#session-actions").replaceChildren();
   $("#drafts").replaceChildren();
   $("#composer").hidden = true;
@@ -138,6 +139,7 @@ function showExternal(item) {
   const adopt = el("button", {
     type: "button",
     text: "Let the Router manage it",
+    disabled: Boolean(item.open),
     onclick: async () => {
       adopt.disabled = true;
       try {
@@ -163,7 +165,11 @@ function showExternal(item) {
         adopt,
         el("button", { type: "button", class: "secondary", text: "Copy command", onclick: () => navigator.clipboard.writeText(command).then(() => toast("Copied")) }),
       ),
-      el("small", { text: "Only adopt sessions that are not open in a terminal right now." }),
+      el("small", {
+        text: item.open
+          ? "It is open in a terminal right now. Keep using it there, or exit it (/exit) to let the Router manage it."
+          : "Its conversation so far comes along. While the Router manages it, do not also open it in a terminal.",
+      }),
     ),
   );
 }

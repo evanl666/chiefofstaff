@@ -60,7 +60,7 @@ from .sources.slack import SlackSource, describe
 from .state import SessionStates
 from .store import Store, hours_ago, now
 from .task_actions import TaskActions
-from .tasks import TaskBook
+from .tasks import TaskBook, settle_adopted
 from .tasks import migrate as migrate_tasks
 from .tools import Tools
 from .watchdog import WatchConfig, Watchdog
@@ -164,12 +164,16 @@ class Runtime:
         self.loop: asyncio.AbstractEventLoop | None = None
         self.status = {"state": "starting", "error": ""}
         self.models_cache: tuple[float, list[dict]] = (0.0, [])
+        # Sessions another program (a terminal) has open: session id -> pid. Refreshed by the
+        # watch loop and before resuming a session.
+        self.elsewhere: dict[str, int] = {}
         self.project_cache: dict[str, tuple[float, dict]] = {}
         self.rotate_lock = asyncio.Lock()
         self.work_root = store.directory / "work"
         self.workspaces = Workspaces(store, self.work_root)
         self.tasks = TaskBook(store, on_change=lambda task: self.task_actions.publish(task))
         migrate_tasks(store)
+        settle_adopted(store)
         self.delivery = Delivery(self)
         # The parts, by responsibility; each keeps a reference to this runtime.
         self.events = Events(self)
@@ -236,6 +240,7 @@ class Runtime:
             self.publish_state()
         if self.ready():
             self.background(self.workers.pump())
+            self.background(self.workers.refresh_elsewhere())
 
     async def version_warning(self) -> str:
         """A note for the owner when the agent CLI is older than the versions we tested."""
@@ -613,6 +618,7 @@ class Runtime:
             )
             self.store.set(f"created:{row['id']}", "1")
         else:
+            await self.refuse_if_open_elsewhere(row)
             session = await self.connected().resume_session(self.copilot_id(row["id"]), **options)
         session_id = row["id"]
         loop = self.loop or asyncio.get_running_loop()
@@ -623,8 +629,20 @@ class Runtime:
 
         session.on(forward)
         self.states[session_id].handle = session
+        if not create and row["role"] == WORKER:
+            await self.workers.import_history(row, session)
         self.publish_session(self.store.session(session_id))
         return session
+
+    async def refuse_if_open_elsewhere(self, row: dict):
+        """Two programs writing to one Copilot session would interleave its history: a session
+        open in a terminal is left alone until it is closed there."""
+        self.elsewhere = await self.connected().open_elsewhere()
+        if pid := self.elsewhere.get(self.copilot_id(row["id"])):
+            raise RuntimeError(
+                f"“{row['title']}” is open in another Copilot window (process {pid}). Exit it "
+                "there (/exit), then try again."
+            )
 
     async def session_for(self, session_id: str):
         if session := self.states.handle(session_id):
@@ -1047,6 +1065,7 @@ class Runtime:
                 self.digest_once,
                 self.asks.expire_questions,
                 self.focus.check,
+                self.workers.refresh_elsewhere,
             )
             for job in jobs:
                 try:
@@ -1097,6 +1116,7 @@ class Runtime:
                 "SELECT coalesce(sum(credits), 0) AS c FROM usage WHERE session_id=?", (row["id"],)
             ),
             "task": self.toolset.task_brief(self.tasks.current(row["id"])),
+            "elsewhere": self.copilot_id(row["id"]) in self.elsewhere and not row["closed_at"],
         }
 
     def publish_session(self, row: dict):

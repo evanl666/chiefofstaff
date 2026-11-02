@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.1 (unreleased)
+
+- *Other Copilot sessions* marks the ones open in a terminal right now and lists them first.
+- Handing a session over to the Router brings its conversation along, and is refused while it
+  is open in a terminal. Chief of Staff never resumes a session another Copilot window has
+  open.
+- Sessions handed over before tasks existed no longer show as running.
+
 ## 0.1.0 (2026-11-02)
 
 First public release.

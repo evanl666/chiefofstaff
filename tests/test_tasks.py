@@ -5,6 +5,7 @@ import sqlite3
 from conftest import Harness, call_tool, settle, task_of
 
 from chiefofstaff.store import Store
+from chiefofstaff.tasks import settle_adopted
 
 
 async def spawn(runtime, router_id, title, **extra):
@@ -236,3 +237,16 @@ async def test_workers_from_before_tasks_get_one_each(tmp_path):
     assert (first["status"], first["result"]) == ("review", "it is done")
     assert second["status"] == "running", "it had no unmet dependency, so it started"
     assert [dep["id"] for dep in runtime.tasks.deps(second["id"])] == [first["id"]]
+
+
+async def test_a_session_adopted_before_tasks_is_not_shown_as_running(harness):
+    await harness.connect()
+    store = harness.store
+    for identifier in ("adopted", "busy"):
+        store.create_session(identifier, "worker", identifier.title(), "idle", cwd="/tmp")
+        created = harness.runtime.tasks.create(identifier, identifier.title(), "")
+        harness.runtime.tasks.move(created["id"], "running")
+    harness.runtime.add_message("busy", "router", "Fix it", {"prompt": "Fix it"})
+    settle_adopted(store)
+    assert harness.runtime.tasks.current("adopted")["status"] == "done"
+    assert harness.runtime.tasks.current("busy")["status"] == "running", "a real task stays"

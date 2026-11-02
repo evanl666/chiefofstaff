@@ -42,6 +42,7 @@ export function showInbox() {
   $("#drafts").hidden = true;
   $("#session-tuning").hidden = true;
   $("#composer").hidden = false;
+  $("#composer-input").disabled = false;
   $("#composer-input").placeholder = "Ask your chief of staff…";
   renderSidebar();
   renderInboxHeader();
