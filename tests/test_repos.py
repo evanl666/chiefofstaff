@@ -220,7 +220,7 @@ async def test_commands_never_wait_on_a_terminal(monkeypatch):
     async def fake_exec(*arguments, **options):
         seen.update(options)
         return SimpleNamespace(
-            returncode=0, pid=1, communicate=lambda: asyncio.sleep(0, (b"ok", b""))
+            returncode=0, pid=1, communicate=lambda input=None: asyncio.sleep(0, (b"ok", b""))
         )
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
@@ -506,3 +506,47 @@ async def test_a_worker_reopened_right_after_closing_keeps_its_folders(tmp_path,
     for worker in workers:
         assert exists(worker["cwd"]), "the removal saw that it was reopened"
         assert not harness.store.session(worker["session_id"])["closed_at"]
+
+
+async def test_new_worktrees_get_the_gitignored_files_they_need(tmp_path, git_repo):
+    code = tmp_path / "code"
+    app = code / "app"
+    (git_repo / ".gitignore").write_text(".env*\nsecret.json\n!.env.example\n")
+    (git_repo / ".env.example").write_text("KEY=\n")
+    run("git", "add", ".", cwd=git_repo)
+    run("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "ignore", cwd=git_repo)
+    run("git", "clone", "-q", str(git_repo), str(app))
+    (app / ".env").write_text("KEY=1\n")
+    (app / "web").mkdir()
+    (app / "web" / ".env.local").write_text("PORT=1\n")
+    (app / "secret.json").write_text("{}")
+    (app / "notes.txt").write_text("untracked, not ignored")
+    harness = Harness(tmp_path / "data", Settings(code_folder=str(code), slack_enabled=True))
+    runtime = await harness.connect()
+    project = str(app.resolve())
+
+    first = await spawn(runtime, harness.router_id, title="A", instructions="a", project=project,
+                        isolate=True)  # fmt: skip
+    tree = Path(first["cwd"])
+    assert exists(tree / ".env") and exists(tree / "web" / ".env.local"), ".env files by default"
+    assert not exists(tree / "secret.json") and not exists(tree / "notes.txt")
+    prompt = harness.session(first["session_id"]).options["system_message"]["content"]
+    assert "(gitignored): .env, web/.env.local" in prompt and "fresh checkout" in prompt
+
+    (app / ".worktreeinclude").write_text("secret.json\nnotes.txt\n")
+    second = await spawn(runtime, harness.router_id, title="B", instructions="b", project=project,
+                         isolate=True)  # fmt: skip
+    tree = Path(second["cwd"])
+    assert exists(tree / "secret.json"), "what .worktreeinclude lists"
+    assert not exists(tree / ".env"), ".worktreeinclude replaces the default"
+    assert not exists(tree / "notes.txt"), "only gitignored files: never ones git would track"
+
+    reader = await spawn(runtime, harness.router_id, title="C", instructions="c", project=project,
+                         isolate=True, slack=True)  # fmt: skip
+    assert not exists(Path(reader["cwd"]) / "secret.json"), "workers that read Slack get none"
+
+    await runtime.workers.close(second["session_id"])
+    await settle(runtime)
+    (Path(second["cwd"]) / "secret.json").unlink(missing_ok=True)
+    await runtime.workers.reopen(second["session_id"])
+    assert exists(Path(second["cwd"]) / "secret.json"), "copied again when the worktree returns"

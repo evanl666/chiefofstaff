@@ -464,13 +464,17 @@ class Tools:
                     + json.dumps(related, ensure_ascii=False)
                 )
         session_id = str(uuid4())
+        slack = params.slack and self.runtime.slack.configured()
         workspace, checkouts = await self.workspaces.prepare_directory(
-            session_id, title, [params.project, *params.more_projects], params.isolate
+            session_id,
+            title,
+            [params.project, *params.more_projects],
+            params.isolate,
+            carry=not slack,  # Gitignored files are often secrets; Slack content is untrusted.
         )
         # It starts in its main checkout; the workspace around it is all its own.
         cwd = checkouts[0]["path"] if checkouts else str(workspace)
         branch = checkouts[0]["branch"] if checkouts else ""
-        slack = params.slack and self.runtime.slack.configured()
         self.store.create_session(
             session_id, WORKER, title, "queued", cwd=cwd, branch=branch, slack=slack
         )

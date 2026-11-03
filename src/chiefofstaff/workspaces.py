@@ -23,14 +23,14 @@ from .store import Store
 BRANCH_PREFIX = "chief/"
 
 
-async def command(*arguments: str, limit: float = 60) -> str:
+async def command(*arguments: str, limit: float = 60, input: bytes | None = None) -> str:
     """Run a command without a terminal (it can never wait for a password prompt)."""
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GH_PROMPT_DISABLED": "1"}
     # ssh asks for passphrases and host keys on the terminal, not stdin: make it fail instead.
     env.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
     process = await asyncio.create_subprocess_exec(
         *arguments,
-        stdin=asyncio.subprocess.DEVNULL,
+        stdin=asyncio.subprocess.DEVNULL if input is None else asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
@@ -38,7 +38,7 @@ async def command(*arguments: str, limit: float = 60) -> str:
     )
     try:
         async with asyncio.timeout(limit):
-            stdout, stderr = await process.communicate()
+            stdout, stderr = await process.communicate(input)
     except TimeoutError as exc:
         with suppress(ProcessLookupError):
             os.killpg(process.pid, signal.SIGKILL)  # Also ssh and other children.
@@ -50,8 +50,8 @@ async def command(*arguments: str, limit: float = 60) -> str:
     return stdout.decode(errors="replace")
 
 
-async def git(*arguments: str, limit: float = 60) -> str:
-    return await command("git", *arguments, limit=limit)
+async def git(*arguments: str, limit: float = 60, input: bytes | None = None) -> str:
+    return await command("git", *arguments, limit=limit, input=input)
 
 
 async def base_ref(top: Path) -> tuple[str, str]:
@@ -148,6 +148,51 @@ def repository_key(url: str) -> str:
     if GITHUB_NAME.fullmatch(text):
         return "github:" + text
     return text.removeprefix("file://")
+
+
+# Gitignored files a new worktree gets from the main checkout: the patterns in the repository's
+# .worktreeinclude (as with Claude Code), else its .env files.
+WORKTREE_INCLUDE = ".worktreeinclude"
+DEFAULT_INCLUDE = (".env", ".env.*")
+MAX_CARRIED = 200
+MAX_CARRIED_BYTES = 50_000_000
+
+
+async def carry_ignored_files(top: Path, tree: Path) -> list[str]:
+    """Copy the main checkout's gitignored files that a worktree should have (like .env) into
+    it; tracked files are there already. Returns their paths relative to the repository."""
+    include = top / WORKTREE_INCLUDE
+    if await asyncio.to_thread(include.is_file):
+        patterns = ["--exclude-from", str(include)]
+    else:
+        patterns = [arg for pattern in DEFAULT_INCLUDE for arg in ("--exclude", pattern)]
+    listed = await git("-C", str(top), "ls-files", "--others", "--ignored", "-z", *patterns)
+    candidates = [path for path in listed.split("\0") if path][:MAX_CARRIED]
+    if not candidates:
+        return []
+    try:  # Only what git ignores; check-ignore fails when it ignores none of them.
+        ignored = await git(
+            "-C", str(top), "check-ignore", "--stdin", "-z",
+            input="\0".join(candidates).encode() + b"\0",
+        )  # fmt: skip
+    except ValueError:
+        return []
+    return await asyncio.to_thread(copy_files, top, tree, [p for p in ignored.split("\0") if p])
+
+
+def copy_files(source: Path, target: Path, paths: list[str]) -> list[str]:
+    copied, size = [], 0
+    for relative in paths:
+        origin, copy = source / relative, target / relative
+        if not origin.is_file() or copy.exists():
+            continue
+        size += origin.stat().st_size
+        if size > MAX_CARRIED_BYTES:
+            break
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(origin, copy)
+        copied.append(relative)
+    return copied
 
 
 def free_child(parent: Path, name: str) -> Path:
@@ -378,6 +423,8 @@ class Workspaces:
                     "-C", repo, "worktree", "add", "-b", checkout["branch"], tree,
                     checkout.get("base_ref") or "HEAD",
                 )  # fmt: skip
+            if not row["slack"]:
+                await carry_ignored_files(Path(repo), Path(tree))
 
     def workspace(self, row: dict) -> Path:
         if stored := self.store.get(f"workspace:{row['id']}"):
@@ -398,9 +445,17 @@ class Workspaces:
         return [row["cwd"], str(self.workspace(row)), *(c["path"] for c in self.checkouts(row))]
 
     async def make_checkout(
-        self, workspace: Path, slug: str, project: str, isolate: bool, repos: set[str]
+        self,
+        workspace: Path,
+        slug: str,
+        project: str,
+        isolate: bool,
+        repos: set[str],
+        carry: bool = True,
     ) -> dict | None:
-        """A checkout of a configured project for a worker; None if it has that repo already."""
+        """A checkout of a configured project for a worker; None if it has that repo already.
+        `carry`: copy the gitignored files the worktree needs (not for workers that read Slack:
+        those files are often secrets)."""
         path = resolve_project(project, self.projects())
         if not isolate:
             checkout = {"project": str(path), "path": str(path), "branch": "", "shared": True}
@@ -427,6 +482,7 @@ class Workspaces:
             "base": base,
             "base_ref": start,
             "git_dir": await common_git_dir(top) or str(top / ".git"),
+            "carried": await carry_ignored_files(top, tree) if carry else [],
         }
 
     @staticmethod
@@ -463,7 +519,7 @@ class Workspaces:
         }
 
     async def prepare_directory(
-        self, session_id: str, title: str, projects: list[str], isolate: bool
+        self, session_id: str, title: str, projects: list[str], isolate: bool, carry: bool = True
     ) -> tuple[Path, list[dict]]:
         """The worker's own workspace folder, with a checkout of each project it works on."""
         slug = f"{slugify(title)}-{session_id[:6]}"
@@ -482,7 +538,8 @@ class Workspaces:
         repos: set[str] = set()
         try:
             for project in projects:
-                if checkout := await self.make_checkout(workspace, slug, project, isolate, repos):
+                checkout = await self.make_checkout(workspace, slug, project, isolate, repos, carry)
+                if checkout:
                     checkouts.append(checkout)
         except Exception:
             for checkout in checkouts:  # Leave nothing half made.
