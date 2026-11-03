@@ -146,8 +146,82 @@ def exit_code(output: str, success: bool | None) -> int | None:
     return 0 if success else 1
 
 
-def summarize(commands: Iterable[dict], evidence: dict | None, report: str) -> dict:
-    """The receipts for a task: observed commands, changes and PRs, and what disagrees."""
+QUOTED = re.compile(r"`([^`\n]{4,})`")
+
+
+def backing(evidence: str, commands: list[dict]) -> dict | None:
+    """The observed command a criterion's evidence names (in backticks, or verbatim), latest
+    first: what makes a worker's "met" an observation rather than a claim."""
+    quoted = QUOTED.findall(evidence or "")
+    for command in reversed(commands):
+        text = command["command"]
+        if any(snippet in text or text in snippet for snippet in quoted):
+            return command
+        if not quoted and len(text) >= 8 and text in (evidence or ""):
+            return command
+    return None
+
+
+def criteria_results(criteria: list[str], claims: list[dict], commands: list[dict]) -> list[dict]:
+    """Each acceptance criterion with what the worker reported and what backs it.
+
+    state: verified (met, and an observed command shows it), contradicted (met, but that command
+    failed), claimed (met, with nothing observed to show it), not_met or not_checked.
+    """
+
+    def words(text: object) -> str:
+        return " ".join(str(text).lower().split())
+
+    by_text = {words(claim.get("criterion", "")): index for index, claim in enumerate(claims)}
+    chosen = [by_text.get(words(criterion)) for criterion in criteria]
+    for index, found in enumerate(chosen):
+        if found is None and index < len(claims) and index not in chosen:
+            chosen[index] = index  # Reported in order, in its own words.
+    results = []
+    for criterion, found in zip(criteria, chosen, strict=True):
+        claim = claims[found] if found is not None else None
+        result = (claim or {}).get("result") or "not_checked"
+        proof = (claim or {}).get("evidence", "")
+        observed = backing(proof, commands) if result == "met" else None
+        state = result
+        if result == "met":
+            code = observed["exit_code"] if observed else None
+            state = "claimed" if code is None else ("verified" if code == 0 else "contradicted")
+        results.append(
+            {
+                "criterion": criterion,
+                "result": result,
+                "evidence": proof[:500],
+                "state": state,
+                "command": observed["command"][:200] if observed else "",
+                "exit_code": observed["exit_code"] if observed else None,
+            }
+        )
+    return results
+
+
+def verdict(results: list[dict]) -> str:
+    """verified, partial, unverified or failed, over a task's acceptance criteria."""
+    if not results:
+        return ""
+    states = [item["state"] for item in results]
+    if any(state in {"not_met", "contradicted"} for state in states):
+        return "failed"
+    verified = states.count("verified")
+    if verified == len(states):
+        return "verified"
+    return "partial" if verified else "unverified"
+
+
+def summarize(
+    commands: Iterable[dict],
+    evidence: dict | None,
+    report: str,
+    criteria: list[str] | None = None,
+    claims: list[dict] | None = None,
+) -> dict:
+    """The receipts for a task: observed commands, changes and PRs, the acceptance criteria and
+    what backs them, and what disagrees."""
     commands = list(commands)
     evidence = evidence or {}
     by_kind: dict[str, list[dict]] = {}
@@ -165,6 +239,8 @@ def summarize(commands: Iterable[dict], evidence: dict | None, report: str) -> d
             "exit_code": final["exit_code"],
             "passed": final["exit_code"] == 0,
             "runs": len(by_kind[name]),
+            # Failing first, then passing: what a regression test for a fix shows.
+            "failed_before": final["exit_code"] == 0 and any(c["exit_code"] for c in runs[:-1]),
         }
 
     checkouts = evidence.get("checkouts", [])
@@ -190,7 +266,33 @@ def summarize(commands: Iterable[dict], evidence: dict | None, report: str) -> d
     for pr in evidence.get("prs", []):
         if pr.get("checks") == "failing":
             flags.append(f"Checks are failing on {pr['label']}.")
+    results = criteria_results(criteria or [], claims or [], commands)
+    for item in results:
+        if item["state"] == "contradicted":
+            flags.append(
+                f"Says “{item['criterion']}” is met, but `{item['command']}` failed "
+                f"(exit {item['exit_code']})."
+            )
+        elif item["state"] == "not_met":
+            flags.append(f"Not met: {item['criterion']}")
+    unreported = sum(item["result"] == "not_checked" for item in results)
+    if results and unreported == len(results) and not claims:
+        flags.append("Did not report on its acceptance criteria.")
+    if stale := evidence.get("stale"):
+        flags.insert(0, stale)
     return {
+        "criteria": results,
+        "verdict": verdict(results),
+        "stale": stale or "",
+        "version": [
+            {
+                "branch": c.get("branch", ""),
+                "commit": c["commit"][:12],
+                "edited": bool(c.get("edits")),
+            }
+            for c in checkouts
+            if c.get("commit")
+        ],
         "tests": tests,
         "checks": last("check"),
         "build": last("build"),

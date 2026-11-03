@@ -359,6 +359,7 @@ async def test_receipts_show_what_was_observed_next_to_the_report(tmp_path, git_
         "exit_code": 0,
         "passed": True,
         "runs": 2,
+        "failed_before": True,
     }
     assert found["changed"]["files"] == 1 and found["changed"]["commits"] == 1
     assert found["prs"][0]["checks"] == "passing" and found["flags"] == []
@@ -627,3 +628,47 @@ async def test_a_closed_workers_changes_are_still_shown(tmp_path):
     await runtime.task_actions.collect_evidence(task_id)
     changed = runtime.task_actions.view(runtime.tasks.get(task_id))["receipts"]["changed"]
     assert changed["files"] == 1 and changed["commits"] == 1
+
+
+async def receipts_of(runtime, task_id, ready=lambda found: bool(found["version"])):
+    for _ in range(100):
+        found = runtime.task_actions.view(runtime.tasks.get(task_id))["receipts"]
+        if found and ready(found):
+            return found
+        await asyncio.sleep(0.03)
+    raise AssertionError(f"No receipts for {task_id}: {found}")
+
+
+async def test_evidence_is_about_one_version_of_the_code(tmp_path, git_repo):
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    runtime = await harness.connect()
+    info = await spawn(runtime, harness.router_id, title="Fix orders", instructions="fix",
+                       project=str(git_repo), isolate=True,
+                       done_when=["`pytest tests/test_orders.py` passes"])  # fmt: skip
+    worker, tree = harness.session(info["session_id"]), Path(info["cwd"])
+    assert "Done when (check each yourself" in worker.sent[0]
+    assert "- `pytest tests/test_orders.py` passes" in worker.sent[0]
+    commit(tree, "orders.py", "fixed = True\n")
+    worker.emit("tool.execution_start", tool_call_id="c1", tool_name="bash",
+                arguments={"command": "pytest tests/test_orders.py"})  # fmt: skip
+    worker.emit("tool.execution_complete", tool_call_id="c1", success=True,
+                result=SimpleNamespace(content="6 passed\n<exited with exit code 0>"))  # fmt: skip
+    criteria = [{"criterion": "`pytest tests/test_orders.py` passes", "result": "met",
+                 "evidence": "`pytest tests/test_orders.py`: 6 passed"}]  # fmt: skip
+    await call_tool(runtime, "report", info["session_id"], status="done", summary="Fixed.",
+                    criteria=criteria)  # fmt: skip
+    found = await receipts_of(runtime, info["task_id"])
+    head = run("git", "rev-parse", "HEAD", cwd=tree).strip()
+    assert found["verdict"] == "verified" and found["stale"] == ""
+    assert found["version"] == [{"branch": info["branch"], "commit": head[:12], "edited": False}]
+    report = runtime.task_actions.report_markdown(info["task_id"])
+    assert (
+        "- ✅ `pytest tests/test_orders.py` passes (verified: `pytest tests/test_orders.py`)"
+        in (report)
+    )
+
+    (tree / "orders.py").write_text("fixed = False\n")  # Edited after it was checked.
+    worker.emit("session.idle")
+    found = await receipts_of(runtime, info["task_id"], lambda found: bool(found["stale"]))
+    assert found["stale"] == "Out of date: the code was edited since it was checked."
+    assert found["flags"][0] == found["stale"]

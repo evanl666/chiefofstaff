@@ -81,6 +81,22 @@ async def test_dependent_tasks_start_with_the_results_they_need(harness):
     assert refused.result_type == "failure"
 
 
+async def test_a_task_can_wait_for_the_owners_check_of_another(harness):
+    runtime = await harness.connect()
+    api = await spawn(runtime, harness.router_id, "Design the API")
+    client = await spawn(runtime, harness.router_id, "Write the client", after=[api["task_id"]],
+                         wait_for="accepted")  # fmt: skip
+    assert "once the owner accepted" in client["note"]
+    await call_tool(runtime, "report", api["session_id"], status="done", summary="GET /orders")
+    await settle(runtime)
+    row = harness.store.session(client["session_id"])
+    assert row["status"] == "queued", "a reported result is not enough"
+    assert row["activity"] == "waiting for your review of “Design the API”"
+    runtime.task_actions.accept(api["task_id"])
+    await settle(runtime)
+    assert harness.session(client["session_id"]).sent, "accepted: it starts"
+
+
 async def test_models_per_role_task_and_session(tmp_path):
     settings = Settings(model="smart-model", role_models={"router": "fast-model"})
     harness = Harness(tmp_path / "data", settings)

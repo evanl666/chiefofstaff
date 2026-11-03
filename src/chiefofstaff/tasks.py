@@ -14,7 +14,9 @@ Task status:
     done      the owner accepted it (or it was done before tasks existed)
     failed    the worker failed; it can be retried
     cancelled stopped for good
-Tasks that depend on another start once it is in review or done.
+Tasks that depend on another start once it is in review or done, or (when they need its
+accepted result) once it is done. A task's acceptance criteria ("done when") are checks the
+worker reports on, each with its evidence, so the review card can tell verified from claimed.
 """
 
 from __future__ import annotations
@@ -104,11 +106,17 @@ class TaskBook:
         return self.store.all("SELECT * FROM runs WHERE task_id=? ORDER BY started_at", (task_id,))
 
     def deps(self, task_id: str) -> list[dict]:
+        """The tasks it depends on, each with what it needs of them (`needs`)."""
         return self.store.all(
-            """SELECT t.* FROM task_deps d JOIN tasks t ON t.id=d.depends_on
+            """SELECT t.*, d.needs FROM task_deps d JOIN tasks t ON t.id=d.depends_on
             WHERE d.task_id=? ORDER BY t.created_at""",
             (task_id,),
         )
+
+    @staticmethod
+    def criteria(task: dict) -> list[str]:
+        """Its acceptance criteria: what shows it is done."""
+        return json.loads(task["acceptance"]) if task.get("acceptance") else []
 
     def dependents(self, task_id: str) -> list[dict]:
         """Tasks that wait for this one."""
@@ -119,7 +127,12 @@ class TaskBook:
         )
 
     def unmet(self, task: dict) -> list[dict]:
-        return [dep for dep in self.deps(task["id"]) if dep["status"] not in FINISHED]
+        return [
+            dep
+            for dep in self.deps(task["id"])
+            if dep["status"] not in FINISHED
+            or (dep["needs"] == "accepted" and dep["status"] != "done")
+        ]
 
     def broken(self, task: dict) -> list[dict]:
         """Dependencies that ended without finishing: this task cannot start on its own."""
@@ -143,18 +156,21 @@ class TaskBook:
         status: str = "queued",
         why_new: str = "",
         after: tuple[str, ...] | list[str] = (),
+        needs: str = "result",
+        criteria: list[str] | None = None,
     ) -> dict:
-        assert status in STATUSES
+        assert status in STATUSES and needs in {"result", "accepted"}
         identifier, stamp = task_id(), now()
+        acceptance = json.dumps(criteria) if criteria else ""
         self.store.execute(
-            """INSERT INTO tasks(id, session_id, title, goal, status, why_new, created_at,
-            updated_at) VALUES (?,?,?,?,?,?,?,?)""",
-            (identifier, session_id, title, goal, status, why_new, stamp, stamp),
+            """INSERT INTO tasks(id, session_id, title, goal, acceptance, status, why_new,
+            created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)""",
+            (identifier, session_id, title, goal, acceptance, status, why_new, stamp, stamp),
         )
         for dependency in dict.fromkeys(after):
             self.store.execute(
-                "INSERT OR IGNORE INTO task_deps(task_id, depends_on) VALUES (?,?)",
-                (identifier, dependency),
+                "INSERT OR IGNORE INTO task_deps(task_id, depends_on, needs) VALUES (?,?,?)",
+                (identifier, dependency, needs),
             )
         self.store.execute("UPDATE sessions SET task_id=? WHERE id=?", (identifier, session_id))
         if status == "running":

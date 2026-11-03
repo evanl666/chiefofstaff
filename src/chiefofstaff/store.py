@@ -179,6 +179,13 @@ class Store:
         run_columns = {row["name"] for row in self.db.execute("PRAGMA table_info(runs)")}
         if "evidence" not in run_columns:
             self.db.execute("ALTER TABLE runs ADD COLUMN evidence TEXT NOT NULL DEFAULT ''")
+        if "criteria" not in run_columns:
+            # What the worker reported for each acceptance criterion of the task (JSON).
+            self.db.execute("ALTER TABLE runs ADD COLUMN criteria TEXT NOT NULL DEFAULT ''")
+        dep_columns = {row["name"] for row in self.db.execute("PRAGMA table_info(task_deps)")}
+        if "needs" not in dep_columns:
+            # "result": it starts once the task reports done; "accepted": once the owner accepts.
+            self.db.execute("ALTER TABLE task_deps ADD COLUMN needs TEXT NOT NULL DEFAULT 'result'")
         usage_columns = {row["name"] for row in self.db.execute("PRAGMA table_info(usage)")}
         if "run_id" not in usage_columns:
             self.db.execute("ALTER TABLE usage ADD COLUMN run_id TEXT NOT NULL DEFAULT ''")

@@ -53,6 +53,19 @@ class SpawnWorker(BaseModel):
         description="Task ids (t…) whose results this task needs; it starts once they are done "
         "and receives their results. A worker id stands for that worker's current task",
     )
+    wait_for: Literal["result", "accepted"] = Field(
+        default="result",
+        description="With after: start once they report done (result, the default), or only "
+        "once the owner accepted them (accepted: when this builds on work that must be right "
+        "first, like an API others will code against)",
+    )
+    done_when: list[str] = Field(
+        default_factory=list,
+        description="Acceptance criteria: 1-4 observable checks that show the task is done, "
+        "each one a worker can run (a test passes, a command's output, a request and its "
+        "response). For a bug fix include a regression test that fails before the fix and "
+        "passes after. Empty for research and questions",
+    )
     context_from: list[str] = Field(
         default_factory=list,
         description="Task ids (or worker ids) of earlier work this new worker should build on: "
@@ -109,6 +122,10 @@ class MessageSession(BaseModel):
         "(give a title)",
     )
     title: str = Field(default="", description="Title of the new task when task='new'")
+    done_when: list[str] = Field(
+        default_factory=list,
+        description="For task='new': its acceptance criteria, as for spawn_worker",
+    )
     follow: list[str] = Field(
         default_factory=list,
         description="Thread keys from the event (slack:<channel>:<ts>, slack:<D…>, "
@@ -143,6 +160,16 @@ class CloseWorker(BaseModel):
     session_id: str = Field(description="Worker session id (full or the short id)")
 
 
+class CriterionResult(BaseModel):
+    criterion: str = Field(description="The criterion, as given under Done when")
+    result: Literal["met", "not_met", "not_checked"]
+    evidence: str = Field(
+        default="",
+        description="What you observed: the exact command you ran in backticks and what it "
+        "showed, a URL, a file. Not a claim",
+    )
+
+
 class Report(BaseModel):
     status: Literal["progress", "question", "blocked", "done"]
     summary: str = Field(description="What happened, or the one concrete question")
@@ -151,6 +178,26 @@ class Report(BaseModel):
         description="The task this report is about (the task attribute of its message); "
         "empty for your current task",
     )
+    criteria: list[CriterionResult] = Field(
+        default_factory=list,
+        description="With status done, for a task with Done when criteria: each one's result "
+        "and its evidence",
+    )
+
+
+def task_text(instructions: str, criteria: list[str]) -> str:
+    """A task as its worker reads it: the instructions, then what shows it is done."""
+    if not criteria:
+        return instructions
+    listed = "\n".join(f"- {criterion}" for criterion in criteria)
+    return (
+        f"{instructions}\n\nDone when (check each yourself, then give each one's result and "
+        f"evidence in report(criteria=…)):\n{listed}"
+    )
+
+
+def clean_criteria(criteria: list[str]) -> list[str]:
+    return [" ".join(text.split())[:300] for text in criteria if text.strip()][:8]
 
 
 class CancelTask(BaseModel):
@@ -493,17 +540,22 @@ class Tools:
             effort = ""  # Reported below; the model's default effort applies.
         if params.model or effort:
             self.store.update_session(session_id, model=params.model, effort=effort)
+        criteria = clean_criteria(params.done_when)
         task = self.tasks.create(
             session_id,
             title,
             params.instructions[:4000],
             why_new=why_new,
             after=[dependency["id"] for dependency in after],
+            needs=params.wait_for,
+            criteria=criteria,
         )
         if distill:
             self.store.set(f"distill:{session_id}", "1")
         self.runtime.follow(session_id, follow)
-        prompt = wrap("router", "task", params.instructions, title=title, task=task["id"])
+        prompt = wrap(
+            "router", "task", task_text(params.instructions, criteria), title=title, task=task["id"]
+        )
         if context_from:
             prompt += "\n\n" + wrap("system", "context", self.tasks.briefing(context_from))
         self.runtime.add_message(
@@ -525,7 +577,11 @@ class Tools:
             offered = ", ".join(info["efforts"]) if info and info["efforts"] else "none"
             result["warning"] = f"Effort {params.effort} is not offered by this model ({offered})."
         if params.after:
-            result["note"] = "Starts automatically when the tasks it depends on are done."
+            result["note"] = (
+                "Starts automatically once the owner accepted the tasks it depends on."
+                if params.wait_for == "accepted"
+                else "Starts automatically when the tasks it depends on are done."
+            )
         elif row["status"] == "queued":
             result["note"] = "Queued until a worker slot frees up."
         return result
@@ -555,8 +611,13 @@ class Tools:
             return "Delivered."
         if params.task == "new":
             title = clean_title(params.title or params.text.splitlines()[0][:60])
-            task = self.tasks.create(target["id"], title, params.text[:4000], status="running")
-            prompt = wrap("router", "task", params.text, title=title, task=task["id"])
+            criteria = clean_criteria(params.done_when)
+            task = self.tasks.create(
+                target["id"], title, params.text[:4000], status="running", criteria=criteria
+            )
+            prompt = wrap(
+                "router", "task", task_text(params.text, criteria), title=title, task=task["id"]
+            )
             notice = f"New task “{title}” for “{target['title']}”"
         else:
             if task and task["status"] == "cancelled":
@@ -725,6 +786,13 @@ class Tools:
         )
         meta = {"status": params.status, "task_id": task["id"] if task else None}
         self.runtime.add_message(caller, "report", params.summary, meta)
+        if task and params.status == "done" and params.criteria:
+            run = self.tasks.run(caller) or self.tasks.latest_run(caller)
+            if run and run["task_id"] == task["id"]:
+                claims = [item.model_dump() for item in params.criteria[:12]]
+                self.store.execute(
+                    "UPDATE runs SET criteria=? WHERE id=?", (json.dumps(claims), run["id"])
+                )
         if task:
             if params.status == "done" and task["status"] == "done":
                 # Accepted, or its PR merged: news about it does not reopen the review.
