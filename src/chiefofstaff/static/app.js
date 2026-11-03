@@ -5,7 +5,7 @@ import { byId, connectEvents, current, loadModels, loadState, markRead, routerId
 import { externalItem, loadExternal } from "./sidebar.js";
 import { appendMessages, select } from "./session.js";
 import { INBOX, scheduleInbox } from "./inbox.js";
-import { fillSettings, refreshUsageLink, saveSettings, saveToken, settingsError, showUsage, slackStatusText } from "./settings.js";
+import { fillSettings, refreshUsageLink, renderLearning, saveSettings, saveToken, settingsError, showUsage, slackStatusText } from "./settings.js";
 function bindUi() {
   const input = $("#composer-input");
   const autosize = () => {
@@ -63,6 +63,13 @@ function bindUi() {
   $("#settings-button").addEventListener("click", () => {
     fillSettings();
     $("#settings-dialog").showModal();
+    // Feedback comes in all the time; what was learned is read fresh.
+    api("/api/state")
+      .then((data) => {
+        state.snapshot.learning = data.learning;
+        renderLearning();
+      })
+      .catch(() => {});
   });
   $("#settings-cancel").addEventListener("click", () => $("#settings-dialog").close());
   $("#profile-use").addEventListener("click", () => {
@@ -80,6 +87,15 @@ function bindUi() {
       $("#settings-dialog").close();
       await select(routerId());
       toast("The Router is building your profile. You review it before it is used.");
+    } catch (error) {
+      settingsError(error.message);
+    }
+  });
+  $("#learn-now").addEventListener("click", async () => {
+    try {
+      await api("/api/lessons/learn", { method: "POST" });
+      $("#settings-dialog").close();
+      toast("Learning from your feedback. You review the lessons before they are used.");
     } catch (error) {
       settingsError(error.message);
     }

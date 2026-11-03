@@ -350,6 +350,8 @@ class DemoBrain:
                             ],
                         },
                     )
+                elif title == "Learn from your feedback":
+                    yield CallTool("propose_lessons", {"lessons": demo_lessons(body)})
                 elif title == "Rate-limit login attempts":
                     yield CallTool(
                         "ask_decision",
@@ -435,6 +437,28 @@ FLAGS_REPORT = (
     "- **Open source C**: self-hosted, free, needs a Postgres\n"
     "- Recommendation: start with A; move to C if we need data on our servers"
 )
+
+
+def demo_lessons(prompt: str) -> list[dict]:
+    """What the demo learns from the owner's feedback, citing the feedback it rests on."""
+    feedback = [json.loads(line) for line in prompt.splitlines() if line.startswith('{"id"')]
+
+    def cited(*words: str) -> list[int]:
+        return [item["id"] for item in feedback if any(w in item["owner"] for w in words)]
+
+    lessons = [
+        {
+            "lesson": "In vendor comparisons, include pricing for a team of 50",
+            "scope": "everywhere",
+            "feedback": cited("pricing"),
+        },
+        {
+            "lesson": "Rate-limit by IP address unless told otherwise",
+            "scope": "everywhere",
+            "feedback": cited("IP address"),
+        },
+    ]
+    return [lesson for lesson in lessons if lesson["feedback"]]
 
 
 def rate_limiting(task_id: str, choice: str) -> list:

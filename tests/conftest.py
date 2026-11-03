@@ -121,6 +121,11 @@ class FakeClient:
         events = self.logs.get(session_id, [])
         return events[offset:], len(events), self.log_changed.get(session_id, 0.0)
 
+    async def read_usage(self, session_id, offset):
+        events = self.logs.get(session_id, [])
+        found = [e for e in events[offset:] if e.get("type") == "session.usage_record"]
+        return found, len(events)
+
     async def mcp_sign_in_url(self, session, server):
         login = await session.rpc.mcp.oauth.login(SimpleNamespace(server_name=server))
         return login.authorization_url

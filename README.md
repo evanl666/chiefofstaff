@@ -40,6 +40,8 @@ Now I talk to one session, the Router, and Chief of Staff keeps track of the res
 - Brings you decisions, not just questions: why, the options and their effects, a
   recommendation. Change a decision later and every task that relied on it adjusts and
   confirms.
+- Learns how you work from your decisions, review comments and draft edits, as lessons you
+  approve, so the sessions get closer to doing it your way.
 - Leaves your own checkout alone. Each worker gets its own folder and git worktree and runs in
   Copilot's OS sandbox, so it can't write anywhere else.
 - Drafts replies to Slack DMs and mentions in your style. Nothing is sent until you press Send.

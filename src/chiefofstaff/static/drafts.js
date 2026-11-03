@@ -208,6 +208,7 @@ function decisionCard(draft) {
     );
   }
   if (target.recommendation) node.append(el("div", { class: "recommendation" }, el("strong", { text: "Recommendation: " }), target.recommendation));
+  if (target.precedents?.length) node.append(el("div", { class: "precedents" }, el("strong", { text: "You decided before: " }), target.precedents.join(" · ")));
   const askers = target.askers || [];
   node.append(el("div", { class: "affects" }, el("span", { text: askers.length > 1 ? `Affects ${askers.length} tasks:` : "For" }), ...askers.map(taskLink)));
   const input = el("input", { placeholder: "Or decide something else", autocomplete: "off" });
@@ -243,7 +244,36 @@ function changeCard(draft) {
   node.append(el("div", { class: "actions" }, el("button", { type: "button", class: "text", text: "Hide", onclick: () => decide({ action: "answer" }) })), error);
   return node;
 }
+// Lessons learned from the owner's feedback: each kept (maybe reworded) or dropped.
+function lessonsCard(draft) {
+  const error = el("span", { class: "error" });
+  const rows = draft.target.lessons.map((lesson) => {
+    const keep = el("input", { type: "checkbox", checked: true, "aria-label": "Keep" });
+    const text = el("input", { value: lesson.text, "aria-label": "Lesson" });
+    const because = lesson.because.map((item) => `${item.owner}`.trim()).filter(Boolean);
+    const where = !lesson.scope ? "everywhere" : lesson.scope === "slack" ? "Slack replies" : `in ${lesson.scope.replace("project:", "").split("/").pop()}`;
+    const node = el(
+      "li",
+      {},
+      keep,
+      el("div", { class: "lesson" }, text, el("small", { text: `${where}${because.length ? ` · because you said: “${because.slice(0, 2).join("”, “")}”` : ""}` })),
+    );
+    return { lesson, keep, text, node };
+  });
+  const node = el(
+    "div",
+    { class: "card draft lessons", "data-id": draft.id },
+    el("div", { class: "head" }, el("span", { class: "label", text: "Learned from your feedback" }), el("span", { class: "chip waiting", text: "Check before use" })),
+    el("div", { class: "why", text: "Keep what fits how you work; reword or untick the rest. Kept lessons go into your sessions' instructions." }),
+    el("ul", { class: "lesson-list" }, ...rows.map((row) => row.node)),
+  );
+  const decide = cardActions(draft, node, error);
+  const keep = () => decide({ action: "answer", content: Object.fromEntries(rows.filter((row) => row.keep.checked).map((row) => [row.lesson.id, row.text.value])) });
+  node.append(el("div", { class: "actions" }, el("button", { type: "button", class: "text", text: "Drop all", onclick: () => decide({ action: "reject" }) }), el("button", { type: "button", text: "Keep ticked", onclick: keep })), error);
+  return node;
+}
 export function draftCard(draft) {
+  if (draft.kind === "lessons") return lessonsCard(draft);
   if (draft.kind === "decision") return decisionCard(draft);
   if (draft.kind === "change") return changeCard(draft);
   if (draft.kind === "workspace") return workspaceCard(draft);

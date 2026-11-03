@@ -178,6 +178,16 @@ def backing(evidence: str, commands: list[dict]) -> dict | None:
     return None
 
 
+def failed_there(evidence: str, command: str) -> bool:
+    """Whether a failed command line failed in the part the evidence names. In `a && b && c`
+    an exit code is the last part's that ran: a part before the last may have passed."""
+    parts = [part for part in simple_commands(command) if part]
+    if len(parts) <= 1:
+        return True
+    last = " ".join(parts[-1])
+    return any(names(snippet, last) for snippet in QUOTED.findall(evidence or ""))
+
+
 def criteria_results(criteria: list[str], claims: list[dict], commands: list[dict]) -> list[dict]:
     """Each acceptance criterion with what the worker reported and what backs it.
 
@@ -202,7 +212,13 @@ def criteria_results(criteria: list[str], claims: list[dict], commands: list[dic
         state = result
         if result == "met":
             code = observed["exit_code"] if observed else None
-            state = "claimed" if code is None else ("verified" if code == 0 else "contradicted")
+            if code is None:
+                state = "claimed"
+            elif code == 0:
+                state = "verified"
+            else:
+                failed = failed_there(proof, observed["command"]) if observed else False
+                state = "contradicted" if failed else "claimed"
         results.append(
             {
                 "criterion": criterion,

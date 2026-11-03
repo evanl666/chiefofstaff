@@ -48,6 +48,7 @@ tool allowlist, permission and request callbacks, sandbox, model.
 | `scripted.py` | A backend without a model (scripts); runs `demo.py` and contract tests. |
 | `asks.py` | Cards for the owner (questions, forms, sign-ins), questions between sessions, environment notes. |
 | `decisions.py` | Decision cards; the owner's decisions and the tasks that rely on them; telling those tasks when one changes. |
+| `learning.py` | The owner's feedback; lessons a learning worker proposes and the owner approves; how often the owner agrees. |
 | `envelope.py` | The envelope every message to a session is wrapped in. |
 | `catalog.py` | Keyword ranking that finds the worker that owns a subject. |
 | `watchdog.py` | Cheap checks that decide when a worker deserves a review, and the Watchdog session that reviews it. |

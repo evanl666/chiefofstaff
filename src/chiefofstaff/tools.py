@@ -20,6 +20,7 @@ from . import prompts, threads
 from .asks import AnswerSession, AskSession, RecordSetup
 from .decisions import AckDecision, AskDecision, RecordDecision
 from .envelope import clean_title, short, wrap
+from .learning import ProposeLessons
 from .models import NestedArguments
 from .policy import within
 from .roles import ROUTER, SLACK, WATCHDOG, WORKER
@@ -382,6 +383,12 @@ class Tools:
                 self.runtime.decisions.t_record_decision,
             ),
             (
+                "propose_lessons",
+                "Propose the lessons learned from the owner's feedback, for the owner to review.",
+                ProposeLessons,
+                self.runtime.learning.t_propose_lessons,
+            ),
+            (
                 "ask_session",
                 "Ask another worker (or the Router) a question; the answer comes back to you.",
                 AskSession,
@@ -522,7 +529,16 @@ class Tools:
             raise ValueError(f"This tool is not available to the {row['role']} session.")
         return row
 
-    async def t_spawn_worker(self, params: SpawnWorker, caller: str, distill: bool = False):
+    async def start_special(self, special: str, title: str, instructions: str) -> dict:
+        """A worker Chief of Staff starts for itself (to learn from feedback, say), with the
+        tools of its `special` kind; no project, no Slack."""
+        return await self.t_spawn_worker(
+            SpawnWorker(title=title, instructions=instructions),
+            self.runtime.router_id(),
+            special=special,
+        )
+
+    async def t_spawn_worker(self, params: SpawnWorker, caller: str, special: str = ""):
         self.caller(caller, ROUTER)
         title = clean_title(params.title)
         follow = [threads.normalize(key) for key in params.follow]
@@ -537,7 +553,7 @@ class Tools:
             else ""
         )
         why_new = " ".join(params.why_new.split())[:200]
-        if not distill and not why_new:
+        if not special and not why_new:
             related = self.related_workers(
                 f"{params.title}\n{params.instructions}",
                 project,
@@ -593,8 +609,8 @@ class Tools:
             criteria=criteria,
         )
         self.link_decisions(task["id"], decisions)
-        if distill:
-            self.store.set(f"distill:{session_id}", "1")
+        if special:  # Its own tools: see Runtime.tool_names.
+            self.store.set(f"{special}:{session_id}", "1")
         self.runtime.follow(session_id, follow)
         prompt = wrap(
             "router",
@@ -992,7 +1008,7 @@ class Tools:
                 slack=self.runtime.slack.configured(),
             ),
             caller,
-            distill=True,
+            special="distill",
         )
 
     async def t_propose_profile(self, params: ProposeProfile, caller: str):

@@ -77,6 +77,8 @@ class Drafts:
             return await self.runtime.decisions.answer(draft, decision)
         if draft["kind"] == "change":
             return self.runtime.decisions.dismiss(draft)
+        if draft["kind"] == "lessons":
+            return await self.runtime.learning.review(draft, decision)
         if decision.action == "choose":
             raise ValueError("This draft is not a question.")
         if decision.action == "reject":
@@ -84,6 +86,14 @@ class Drafts:
                 draft_id, status="rejected", outcome=decision.reason, resolved_at=now()
             )
             self.bus.publish("draft", draft)
+            self.runtime.learning.record(
+                "draft-rejected",
+                context=self.about(draft),
+                proposed=draft["text"],
+                owner=decision.reason,
+                scope="slack" if draft["kind"] == "slack" else "",
+                agreed=False,
+            )
             if draft["kind"] == "slack":
                 await self.learn_style(draft["text"], reason=decision.reason or "(no reason)")
             reason = f" Reason: {decision.reason}" if decision.reason else " No reason given."
@@ -111,6 +121,15 @@ class Drafts:
         )
         self.bus.publish("draft", draft)
         self.after_sent(draft, outcome or "")
+        edited = final != draft["text"]
+        self.runtime.learning.record(
+            "draft-edited" if edited else "draft-sent",
+            context=self.about(draft),
+            proposed=draft["text"],
+            owner=final if edited else "",
+            scope="slack" if draft["kind"] == "slack" else "",
+            agreed=not edited,
+        )
         if final != draft["text"] and draft["kind"] == "slack":
             await self.learn_style(draft["text"], sent=final)
         if final != draft["text"]:
@@ -250,6 +269,13 @@ class Drafts:
         examples.append({"sent": sent[:1500], "reason": reason[:500]})
         self.store.set("style_examples", json.dumps(examples[-STYLE_EXAMPLES:]))
         await self.runtime.refresh(SLACK)
+
+    @staticmethod
+    def about(draft: dict) -> str:
+        target = draft["target"]
+        if draft["kind"] == "slack":
+            return f"A Slack reply to {target.get('to') or target.get('channel_id', '')}"
+        return f"A review of {target.get('repo', '')}#{target.get('number', '')}"
 
     async def tell_drafter(self, draft: dict, text: str, wake: bool = False):
         row = self.store.find_session(draft["session_id"])

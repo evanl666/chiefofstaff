@@ -152,6 +152,18 @@ class Store:
             replaces TEXT NOT NULL DEFAULT '[]', replaced_by TEXT NOT NULL DEFAULT '',
             source TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS feedback (
+            id INTEGER PRIMARY KEY, kind TEXT NOT NULL, context TEXT NOT NULL DEFAULT '',
+            proposed TEXT NOT NULL DEFAULT '', owner TEXT NOT NULL DEFAULT '',
+            scope TEXT NOT NULL DEFAULT '', agreed INTEGER, learned INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS feedback_unlearned ON feedback(learned, id);
+        CREATE TABLE IF NOT EXISTS lessons (
+            id TEXT PRIMARY KEY, text TEXT NOT NULL, scope TEXT NOT NULL DEFAULT '',
+            evidence TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS task_decisions (
             task_id TEXT NOT NULL, decision_id TEXT NOT NULL, ack TEXT NOT NULL DEFAULT '',
             PRIMARY KEY (task_id, decision_id)

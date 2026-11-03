@@ -2,7 +2,7 @@
 
 import { $, api, el, toast } from "./dom.js";
 import { compactPaths, markdown, plural, shortPath, since } from "./text.js";
-import { byId, loadState, pendingDrafts, routerId, state } from "./state.js";
+import { byId, loadState, pendingDrafts, routerId, sessions, state } from "./state.js";
 import { renderSidebar, renderStatusLine } from "./sidebar.js";
 import { select, setComposer } from "./session.js";
 import { draftCard, draftKey } from "./drafts.js";
@@ -23,7 +23,7 @@ function needsYouCount() {
   return items.drafts.length + items.uncertain.length + items.tasks.length;
 }
 function inboxCounts() {
-  const running = tasks().filter((task) => (task.status === "running" || task.status === "queued") && !task.blocked).length;
+  const running = tasks().filter((task) => (task.status === "running" || task.status === "queued") && !task.blocked).length + inTerminal().length;
   const review = tasks().filter((task) => task.status === "review").length;
   return { needs: needsYouCount(), running, review };
 }
@@ -172,6 +172,7 @@ function updateInbox() {
   const running = tasks()
     .filter((task) => (task.status === "running" || task.status === "queued") && !task.blocked && !asking.has(task.session_id))
     .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+  const terminal = inTerminal().filter((session) => !running.some((task) => task.session_id === session.id));
   const review = tasks().filter((task) => task.status === "review").sort((a, b) => b.updated_at.localeCompare(a.updated_at));
   const finished = tasks().filter((task) => task.status === "done" || task.status === "cancelled").sort((a, b) => (b.ended_at || "").localeCompare(a.ended_at || ""));
 
@@ -181,9 +182,9 @@ function updateInbox() {
     ...items.uncertain.map((draft) => ({ key: `uncertain:${draft.id}:${draft.outcome}`, build: () => uncertainCard(draft) })),
     ...items.tasks.map((task) => taskItem(task)),
   ], editing);
-  const runningSection = section("inbox-running", "Running", running.length, "");
-  runningSection.hidden = !running.length;
-  reconcile(runningSection.querySelector(".items"), running.map((task) => taskItem(task)), editing);
+  const runningSection = section("inbox-running", "Running", running.length + terminal.length, "");
+  runningSection.hidden = !running.length && !terminal.length;
+  reconcile(runningSection.querySelector(".items"), [...terminal.map(terminalItem), ...running.map((task) => taskItem(task))], editing);
   const reviewSection = section("inbox-review", "Ready to review", review.length, "Finished work shows up here with what was observed: tests, changes and pull requests.");
   reconcile(reviewSection.querySelector(".items"), review.map((task) => taskItem(task)), editing);
 
@@ -200,6 +201,32 @@ function updateInbox() {
   const blocked = state.snapshot.runtime.state === "error";  // Only the way to fix it matters.
   const order = blocked ? [setupCard()] : [setupCard(), focusSummaryCard(), chiefStrip(), welcome, needs, runningSection, reviewSection, recent].filter(Boolean);
   if (order.some((node, index) => box.children[index] !== node) || box.children.length !== order.length) box.replaceChildren(...order);
+}
+// Workers the owner is using in a terminal right now: working, though no task says so.
+const inTerminal = () => sessions().filter((session) => session.role === "worker" && session.elsewhere && session.terminal?.working);
+function terminalItem(session) {
+  const line = () => compactPaths(session.terminal?.activity || "Working…", session.cwd);
+  return {
+    key: `terminal:${session.id}`,
+    version: line(),
+    build: () =>
+      el(
+        "div",
+        { class: "card task running terminal" },
+        el(
+          "div",
+          { class: "head" },
+          el("span", { class: "label title", text: session.title }),
+          el("span", { class: "chip progress", text: "In a terminal" }),
+          el("span", { class: "spacer" }),
+          el("button", { type: "button", class: "open", text: "Open", onclick: () => select(session.id) }),
+        ),
+        el("div", { class: "task-body" }, el("div", { class: "activity", text: line() })),
+      ),
+    refresh: (node) => {
+      node.querySelector(".activity").textContent = line();
+    },
+  };
 }
 // The key covers what changes a card's actions and layout; the version, what only its text.
 function taskItem(task) {
@@ -351,7 +378,8 @@ function chiefStrip() {
     ),
     el("div", { class: "asked", text: chief.asked }),
     ...replies.map((reply) => el("div", { class: "reply markdown", html: markdown(reply) })),
-    !replies.length || router?.status === "working" ? el("div", { class: "working-line", text: router?.status === "working" ? "Working on it…" : "Sent." }) : null,
+    // replaceChildren would show a null as the text "null".
+    !replies.length || router?.status === "working" ? el("div", { class: "working-line", text: router?.status === "working" ? "Working on it…" : "Sent." }) : "",
   );
   return node;
 }
