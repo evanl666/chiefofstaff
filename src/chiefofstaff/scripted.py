@@ -317,10 +317,13 @@ async def nothing(session: ScriptedSession, prompt: str) -> AsyncGenerator[Step,
 class ScriptedBackend:
     capabilities = SCRIPTED
 
-    def __init__(self, brain: Brain = nothing):
+    def __init__(self, brain: Brain = nothing, others: list[dict] | None = None):
         self.brain = brain
         self.histories: dict[str, list[tuple[str, str]]] = {}
         self.sessions: dict[str, ScriptedSession] = {}
+        # Sessions of the owner that Chief of Staff does not manage: their metadata (as
+        # list_sessions returns it), "open" (in a terminal) and "log" (their events).
+        self.others = others or []
 
     async def start(self):
         pass
@@ -350,7 +353,7 @@ class ScriptedBackend:
         ]
 
     async def list_sessions(self) -> list[Any]:
-        return []
+        return [other["meta"] for other in self.others]
 
     async def get_session_metadata(self, session_id: str) -> Any:
         return SimpleNamespace(session_id=session_id) if session_id in self.histories else None
@@ -378,4 +381,11 @@ class ScriptedBackend:
         return None
 
     async def open_elsewhere(self) -> dict[str, int]:
-        return {}
+        return {other["meta"].session_id: 1 for other in self.others if other.get("open")}
+
+    async def read_history(self, session_id: str, offset: int) -> tuple[list[dict], int, float]:
+        for other in self.others:
+            if other["meta"].session_id == session_id:
+                log = other.get("log", [])
+                return log[offset:], len(log), 0.0
+        return [], offset, 0.0

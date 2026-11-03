@@ -25,7 +25,7 @@ export const DOT_HELP = {
   waiting: "Waiting for your answer",
   done: "Done: finished, nothing running",
   failed: "Failed",
-  open: "Open in a terminal right now",
+  open: "Open in a terminal right now (shown read-only)",
 };
 export const state = {
   snapshot: null,

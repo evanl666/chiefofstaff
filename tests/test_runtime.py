@@ -10,7 +10,7 @@ import pytest
 from conftest import FakeSession, Harness, call_tool, env, settle, task_of
 
 from chiefofstaff import delivery as delivery_module
-from chiefofstaff.backend import sessions_in_use
+from chiefofstaff.backend import read_log, sessions_in_use
 from chiefofstaff.models import DraftDecision, Settings
 from chiefofstaff.policy import permission_denial
 from chiefofstaff.runtime import ROUTER_TOOLS
@@ -893,3 +893,82 @@ async def test_an_old_copilot_cli_is_pointed_out(harness):
     runtime = await harness.connect()
     assert runtime.status["state"] == "ready"
     assert "older than" in runtime.status["warning"]
+
+
+def logged(kind, agent=None, **data):
+    return {"type": kind, "data": data, **({"agentId": agent} if agent else {})}
+
+
+async def test_a_worker_open_in_a_terminal_is_mirrored_read_only(harness):
+    runtime = await harness.connect()
+    harness.store.create_session("term-1", "worker", "Slow query", "idle", cwd="/tmp")
+    harness.client.in_use = {"term-1": 4242}
+    harness.client.logs["term-1"] = [
+        logged("user.message", content="Find the slow query"),
+        logged("assistant.turn_start"),
+        logged("tool.execution_start", toolName="bash", arguments={"command": "rg orders"}),
+        logged("assistant.message", agent="sub-1", content="a sub-agent's notes"),
+        logged("assistant.message", content="Checking the orders join."),
+    ]
+    await runtime.workers.refresh_elsewhere()
+    await runtime.workers.mirror()
+    shown = [(m["kind"], m["text"]) for m in harness.store.messages("term-1")]
+    assert shown[1:] == [
+        ("owner", "Find the slow query"),
+        ("tool", "bash rg orders"),
+        ("assistant", "Checking the orders join."),
+    ]
+    view = runtime.view(harness.store.session("term-1"))
+    assert view["elsewhere"] and view["terminal"] == {
+        "turn": True,
+        "working": True,
+        "activity": "bash rg orders",
+    }
+    assert "term-1" not in harness.client.resumed, "never attached"
+
+    harness.client.logs["term-1"] += [
+        logged("assistant.message", content="It is the orders join."),
+        logged("assistant.turn_end"),
+    ]
+    await runtime.workers.mirror()
+    assert harness.store.messages("term-1")[-1]["text"] == "It is the orders join."
+    assert runtime.terminal["term-1"]["working"] is False
+
+    harness.store.execute(
+        "UPDATE sessions SET status='done', updated_at='2020-01-01T00:00:00+00:00' WHERE id=?",
+        ("term-1",),
+    )
+    assert await runtime.workers.tidy() == [], "not closed while in use in a terminal"
+
+    harness.client.in_use = {}
+    await runtime.workers.refresh_elsewhere()
+    await runtime.workers.mirror()
+    assert "term-1" not in runtime.terminal and harness.store.get("mirror:term-1") is None
+
+
+async def test_other_sessions_show_their_latest_conversation(harness):
+    runtime = await harness.connect()
+    harness.client.logs["ext-1"] = [
+        logged("user.message", content="Draft the release notes"),
+        logged("assistant.message", content="Here is a draft."),
+    ]
+    history = await runtime.workers.history("ext-1")
+    assert history["entries"] == [
+        {"kind": "owner", "text": "Draft the release notes"},
+        {"kind": "assistant", "text": "Here is a draft."},
+    ]
+    assert history["open"] is False and history["working"] is False
+
+
+def test_session_logs_are_read_line_by_line_as_they_grow(tmp_path):
+    log = tmp_path / "events.jsonl"
+    log.write_text('{"type": "a"}\n{"type": "b"}\n{"type": "c", "data": {"conte')
+    events, offset, _ = read_log(log, 0)
+    assert [e["type"] for e in events] == ["a", "b"], "a line being written waits"
+    with log.open("a") as file:
+        file.write('nt": "x"}}\nnot json\n{"type": "d"}\n')
+    events, offset, _ = read_log(log, offset)
+    assert [e["type"] for e in events] == ["c", "d"]
+    log.write_text('{"type": "fresh"}\n')
+    assert [e["type"] for e in read_log(log, offset)[0]] == ["fresh"], "a rewritten log restarts"
+    assert read_log(tmp_path / "missing.jsonl", 7) == ([], 7, 0.0)

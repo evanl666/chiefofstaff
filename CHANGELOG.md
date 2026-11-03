@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.5 (2026-11-02)
+
+- Opening one of your other Copilot sessions works again, and shows its latest conversation,
+  read-only, current while it works in a terminal.
+- A worker you open in a terminal is mirrored read-only from Copilot's own log: its messages
+  and steps, and whether it is working. The Watchdog and idle closing leave it alone.
+- The demo includes a session open in a terminal.
+
 ## 0.1.4 (2026-11-02)
 
 - **One code folder** (like `~/workspace`) instead of listing projects: every repository in it

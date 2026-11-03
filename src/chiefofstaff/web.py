@@ -196,6 +196,10 @@ def create_app(
     async def focus(payload: FocusRequest):
         return await runtime.focus.start(payload.minutes)
 
+    @app.get("/api/external/{session_id}/history")
+    async def external_history(session_id: str):
+        return await runtime.workers.history(session_id)
+
     @app.post("/api/projects")
     async def add_project(payload: ProjectPath):
         return await runtime.add_folder(payload.path)

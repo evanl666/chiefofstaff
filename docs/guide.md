@@ -85,10 +85,15 @@ At most *Parallel workers* run at once; the rest queue.
 
 *Other Copilot sessions* in the sidebar lists the sessions Chief of Staff does not manage, the
 ones you started in a terminal. Those open in a terminal right now come first, marked *open*.
+Opening one shows its latest conversation, read-only, and keeps it current while it works.
 *Let the Router manage it* turns one into a worker, with its conversation so far in its
 timeline. A session that is open in a terminal cannot be handed over until you exit it there
-(`/exit`), and Chief of Staff never resumes a session another Copilot window has open: two
-programs writing to one session would mix up its history.
+(`/exit`).
+
+Chief of Staff never resumes a session another Copilot window has open: two programs writing
+to one session would mix up its history. A worker you open in a terminal is shown read-only
+instead (*Working in a terminal*, with its current step), from the log Copilot writes; the
+Watchdog and idle closing leave it alone until you exit it there.
 
 ## Where workers work
 

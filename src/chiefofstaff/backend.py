@@ -9,11 +9,14 @@ tests/test_backend_contract.py checks that both behave the way the runtime relie
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -118,6 +121,11 @@ class AgentBackend(Protocol):
         """Sessions another program has open right now (a terminal): session id -> its pid."""
         ...
 
+    async def read_history(self, session_id: str, offset: int) -> tuple[list[dict], int, float]:
+        """A session's events after `offset` (its latest ones when offset is 0) without
+        attaching to it, the offset to read from next time, and when it last changed."""
+        ...
+
 
 @dataclass(frozen=True)
 class SandboxPolicy:
@@ -187,6 +195,12 @@ class CopilotBackend:
 
     async def open_elsewhere(self) -> dict[str, int]:
         return await asyncio.to_thread(sessions_in_use, copilot_home())
+
+    async def read_history(self, session_id: str, offset: int) -> tuple[list[dict], int, float]:
+        if not SESSION_ID.fullmatch(session_id):
+            raise ValueError("Not a Copilot session id.")
+        log = copilot_home() / "session-state" / session_id / "events.jsonl"
+        return await asyncio.to_thread(read_log, log, offset)
 
     def sandbox(self, policy: SandboxPolicy) -> SandboxConfig:
         return SandboxConfig(
@@ -277,6 +291,40 @@ def sessions_in_use(home: Path) -> dict[str, int]:
         return {}
     own = own_processes()
     return {session_id: pid for session_id, pid in locks if pid not in own}
+
+
+SESSION_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+# The latest part of a session's log that is read when nothing was read before.
+LOG_TAIL = 12_000_000
+LOG_CHUNK = 8_000_000
+
+
+def read_log(log: Path, offset: int) -> tuple[list[dict], int, float]:
+    """Events appended to a Copilot session log (JSON lines) since `offset`.
+
+    The CLI appends one event per line while it runs, so reading is safe while a terminal has
+    the session open; a line still being written is left for the next read.
+    """
+    try:
+        stat = log.stat()
+    except OSError:
+        return [], offset, 0.0
+    if offset > stat.st_size:
+        offset = 0  # The log was rewritten.
+    start = offset or max(0, stat.st_size - LOG_TAIL)
+    with log.open("rb") as file:
+        file.seek(start)
+        data = file.read(min(stat.st_size - start, LOG_CHUNK))
+    end = data.rfind(b"\n") + 1
+    lines = data[:end].split(b"\n")
+    if start and not offset:
+        lines = lines[1:]  # Started mid-line.
+    events = []
+    for line in lines:
+        with suppress(ValueError):
+            if line.strip() and isinstance(event := json.loads(line), dict):
+                events.append(event)
+    return events, start + end, stat.st_mtime
 
 
 def sandbox_supported() -> bool:
