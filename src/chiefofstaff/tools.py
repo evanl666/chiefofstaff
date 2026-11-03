@@ -726,7 +726,10 @@ class Tools:
         meta = {"status": params.status, "task_id": task["id"] if task else None}
         self.runtime.add_message(caller, "report", params.summary, meta)
         if task:
-            if params.status == "done":
+            if params.status == "done" and task["status"] == "done":
+                # Accepted, or its PR merged: news about it does not reopen the review.
+                task = self.tasks.update(task["id"], result=params.summary[:4000])
+            elif params.status == "done":
                 task = self.tasks.move(task["id"], "review", result=params.summary[:4000])
                 self.runtime.background(self.runtime.task_actions.collect_evidence(task["id"]))
             elif params.status in {"question", "blocked"}:

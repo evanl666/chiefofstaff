@@ -9,6 +9,7 @@ bounds, see [SECURITY.md](../SECURITY.md).
 - [Tasks and workers](#tasks-and-workers)
 - [Where workers work](#where-workers-work)
 - [Receipts](#receipts)
+- [Reviewing changes](#reviewing-changes)
 - [When a session needs you](#when-a-session-needs-you)
 - [Focus](#focus)
 - [Slack](#slack)
@@ -29,7 +30,7 @@ The home view answers three questions:
 | --- | --- |
 | **Needs you** | Questions and forms from workers, sign-ins, a folder to pick, Slack replies and PR reviews to approve, sends a restart interrupted, failed or blocked tasks. |
 | **Running** | Each task in progress: what its worker is doing now, or what it waits for. Hover for *Cancel* and *Add a note*. |
-| **Ready to review** | Finished tasks with the worker's report and [receipts](#receipts). *Accept*, *Follow up*, or *Copy report* (markdown for a PR description). |
+| **Ready to review** | Finished tasks with the worker's report and [receipts](#receipts). [Review the changes](#reviewing-changes), *Create PR*, *Accept*, *Follow up*, or *Copy report* (markdown for a PR description). |
 
 Finished and cancelled tasks stay under *Recently finished* for three days. **Chat** is the
 conversation with your Router; the session list below it opens any worker's full timeline
@@ -122,6 +123,13 @@ You set one **code folder**: where your repositories live, like `~/workspace`.
   are removed if they hold nothing uncommitted (the branches stay); reopening it brings them
   back.
 
+A worktree is a fresh checkout: no dependencies installed, and none of the files git ignores.
+Workers are told to install what the project needs (per its README or `AGENTS.md`). Gitignored
+files a worktree needs, like `.env`, are copied in from your checkout: by default `.env` and
+`.env.*` files; a `.worktreeinclude` file at the repository root (gitignore syntax, as with
+Claude Code) lists others instead. Only files git ignores are copied, and never for workers that
+read Slack.
+
 Folders outside the code folder can be added under *Advanced → Other project folders*, and
 *Task folders* puts the task folders somewhere else. A worker's header opens its folder in
 Finder or VS Code.
@@ -142,6 +150,19 @@ A worker's report is its claim. Receipts are what Chief of Staff observed:
 The review card shows them under *Observed* and flags disagreements, e.g. *Says tests pass, but
 no test run was observed*, *The last test run failed (exit 1)*, or *Checks are failing on
 acme/app#7*. *Copy report* puts goal, result and receipts into markdown.
+
+## Reviewing changes
+
+Click the changes on a review card (*+12 −3 in 2 files*) to read the worker's diff: its commits,
+uncommitted edits and new files, from where its branch started (also after the worker closed).
+Click a line to comment on it; *Send to the worker* sends all comments as one follow-up, each
+with its file and line, and the task comes back for review when the worker is done.
+
+*Create PR* pushes the worker's branch to `origin` and opens a pull request on GitHub with your
+signed-in `gh`: the task's title, and its report as the description. If a PR from that branch
+is open already, that one is used. Uncommitted work is not pushed: follow up and ask the worker
+to commit first. An open worker then follows the PR (reviews, comments and CI go to it), and
+when the PR is merged its task is marked done.
 
 ## When a session needs you
 
@@ -215,7 +236,8 @@ goes straight to it; the Router is not woken (its timeline shows one line).
 - A session follows a conversation after you approve a reply it drafted there; a worker follows
   a PR as soon as it reports the PR's URL.
 - The Router passes an event's thread keys when it hands work to a session.
-- For PRs: new comments, reviews, CI results and the merge or close arrive.
+- For PRs: new comments, reviews, CI results and the merge or close arrive. A merged PR marks
+  the task that delivered it done.
 - When a follower closes, activity goes to the Router again.
 
 ## Watchdog

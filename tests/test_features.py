@@ -27,8 +27,12 @@ async def test_a_worker_closes_itself_when_its_pr_is_finished(harness):
     await runtime.on_thread(
         "github", "github:acme/app#7", ["github:state:merged"], "The PR was merged."
     )
-    runtime.unfollow("github:acme/app#7", finished=True)
+    runtime.unfollow("github:acme/app#7", finished=True, merged=True)
+    task = task_of(harness, worker_id)
+    assert runtime.tasks.get(task)["status"] == "done", "its PR is merged: the task is done"
     assert not harness.store.session(worker_id)["closed_at"], "it handles the news first"
+    await call_tool(runtime, "report", worker_id, status="done", summary="It was merged.")
+    assert runtime.tasks.get(task)["status"] == "done", "and does not go back to review"
     harness.session(worker_id).emit("session.idle")
     await settle(runtime)
     assert harness.store.session(worker_id)["closed_at"]

@@ -4,9 +4,13 @@ receipts and shareable report of finished work.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
+import re
 from contextlib import suppress
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from . import receipts, threads
@@ -14,7 +18,7 @@ from .envelope import wrap
 from .roles import WORKER
 from .store import now
 from .tasks import ENDED, OPEN
-from .workspaces import changes
+from .workspaces import base_of, changes, diff, git
 
 if TYPE_CHECKING:
     from .runtime import Runtime
@@ -22,6 +26,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 PROJECT_URL = "https://github.com/evanl666/chiefofstaff"
+GITHUB_REMOTE = re.compile(r"github\.com[:/]([\w.-]+/[\w.-]+?)(?:\.git)?/?$")
 
 
 STATUS_WORDS = {
@@ -75,7 +80,7 @@ class TaskActions:
                 if found := await changes(checkout):
                     checkouts.append(found)
         prs = []
-        for repo, number in list(dict.fromkeys(threads.PR_URL.findall(task["result"])))[:5]:
+        for repo, number in threads.PR_URL.findall(" ".join(self.pr_urls(task)))[:5]:
             try:
                 view = json.loads(
                     await self.runtime.github.gh(
@@ -107,6 +112,116 @@ class TaskActions:
                 "UPDATE runs SET evidence=? WHERE id=?", (json.dumps(evidence), run["id"])
             )
             self.publish(self.tasks.get(task_id))
+
+    def pr_urls(self, task: dict) -> list[str]:
+        """The task's PRs: those opened with Create PR, and those its report links to."""
+        opened = json.loads(self.store.get(f"prs:{task['id']}") or "[]")
+        cited = [
+            f"https://github.com/{repo}/pull/{number}"
+            for repo, number in threads.PR_URL.findall(task["result"] or "")
+        ]
+        return list(dict.fromkeys(opened + cited))
+
+    def pr_merged(self, session_id: str, thread: str):
+        """A worker's PR was merged: the task it delivers is done."""
+        for task in self.tasks.for_session(session_id):
+            if task["status"] == "review" and thread in threads.pull_requests(
+                " ".join(self.pr_urls(task))
+            ):
+                self.tasks.move(task["id"], "done")
+
+    async def diff(self, task_id: str) -> list[dict]:
+        """What the task's worker changed, per checkout, as unified diffs."""
+        task = self.tasks.get(task_id)
+        row = self.store.session(task["session_id"])
+        found = []
+        async with self.states[row["id"]].checkouts:  # Not while its worktrees are removed.
+            for checkout in self.workspaces.checkouts(row):
+                try:
+                    found.append(await diff(checkout))
+                except ValueError as exc:
+                    logger.info("No diff for %s: %s", checkout["path"], exc)
+        return found
+
+    async def create_pr(self, task_id: str) -> dict:
+        """Push the task's branches and open a PR from each, or find the one already open."""
+        task = self.tasks.get(task_id)
+        if task["status"] not in {"review", "done"}:
+            raise ValueError(f"The task is {task['status']}: open a PR once it is finished.")
+        row = self.store.session(task["session_id"])
+        gh = self.runtime.github.gh
+        body = self.report_markdown(task_id).split("\n", 2)[-1]  # Its title is the PR's.
+        opened: list[str] = []
+        async with self.states[row["id"]].checkouts:
+            plans = []
+            for checkout in self.workspaces.checkouts(row):
+                if not (checkout.get("repo") and checkout.get("branch")):
+                    continue  # A shared project folder has no branch of its own.
+                plans.append(await self.pr_plan(checkout))
+            plans = [plan for plan in plans if plan]
+            if not plans:
+                raise ValueError("Nothing to open a PR from: the worker committed nothing.")
+            for repo, slug, branch in plans:
+                await git(
+                    "-C", repo, "push", "--quiet", "origin",
+                    f"refs/heads/{branch}:refs/heads/{branch}", limit=180,
+                )  # fmt: skip
+                listed = await gh(
+                    "pr", "list", "--repo", slug, "--head", branch, "--state", "open",
+                    "--json", "url", "--limit", "1",
+                )  # fmt: skip
+                if existing := json.loads(listed or "[]"):
+                    opened.append(existing[0]["url"])
+                    continue
+                created = await gh(
+                    "pr", "create", "--repo", slug, "--head", branch,
+                    "--title", task["title"], "--body", body,
+                )  # fmt: skip
+                if not (found := threads.PR_URL.search(created)):
+                    raise ValueError(f"GitHub did not say which PR it opened: {created[:300]}")
+                opened.append(found.group(0))
+        known = json.loads(self.store.get(f"prs:{task_id}") or "[]")
+        self.store.set(f"prs:{task_id}", json.dumps(list(dict.fromkeys(known + opened))))
+        if not row["closed_at"]:
+            # Its reviews, comments and CI come to the worker; merged, the task is done.
+            followed = self.runtime.follow(row["id"], threads.pull_requests(" ".join(opened)))
+            note = (
+                f"The owner opened {', '.join(opened)} from your branch. You follow it: its "
+                "reviews, comments and CI results come to you."
+            )
+            self.runtime.add_message(
+                row["id"],
+                "notice",
+                f"PR opened: {', '.join(opened)}",
+                {"prompt": wrap("system", "context", note)} if followed else {},
+            )
+        await self.collect_evidence(task_id)
+        return self.tasks.get(task_id)
+
+    async def pr_plan(self, checkout: dict) -> tuple[str, str, str] | None:
+        """(repository, GitHub owner/name, branch) to open a PR from, or None: no commits."""
+        repo, branch = checkout["repo"], checkout["branch"]
+        name = Path(repo).name
+        tree = checkout.get("worktree") or checkout["path"]
+        live = await asyncio.to_thread(os.path.isdir, tree)
+        if live and (await git("-C", tree, "status", "--porcelain")).strip():
+            raise ValueError(
+                f"{name} has uncommitted changes. Follow up and ask the worker to commit "
+                "them, then create the PR."
+            )
+        commits = await git(
+            "-C", repo, "rev-list", "--count", f"{base_of(checkout)}..refs/heads/{branch}"
+        )
+        if not int(commits.strip() or 0):
+            return None
+        try:
+            remote = (await git("-C", repo, "config", "--get", "remote.origin.url")).strip()
+        except ValueError:
+            remote = ""
+        match = GITHUB_REMOTE.search(remote)
+        if not match:
+            raise ValueError(f"{name} has no GitHub origin to open a PR on.")
+        return repo, match.group(1), branch
 
     def report_markdown(self, task_id: str) -> str:
         """A task as markdown to paste into a PR description or a message."""

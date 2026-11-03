@@ -653,6 +653,42 @@ button.danger { background: var(--red); color: #fff; }
 .receipt.warn, .receipt.pr.pending { background: var(--amber-soft); color: var(--amber); }
 .receipt.none { background: none; color: var(--muted); padding-left: 0; }
 a.receipt:hover { text-decoration: underline; }
+button.receipt.changes { font-size: 12px; color: var(--accent); background: var(--accent-soft); }
+button.receipt.changes:hover { text-decoration: underline; }
+
+/* Changes: a task's diff, commented line by line */
+.diff-dialog { width: min(1100px, calc(100vw - 32px)); max-height: 88vh; }
+.diff-dialog[open] { display: flex; flex-direction: column; }
+.diff-dialog > header, .diff-dialog > footer { display: flex; align-items: center; gap: 12px; padding: 12px 18px; }
+.diff-dialog > header { border-bottom: 1px solid var(--line); }
+.diff-dialog > header h2 { margin: 0; font-size: 15px; }
+.diff-dialog .spacer { flex: 1; }
+.diff-dialog > header .muted, .diff-dialog > footer .muted { font-size: 12px; color: var(--muted); }
+.diff-dialog > footer { border-top: 1px solid var(--line); justify-content: flex-end; }
+.diff-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 4px 18px 14px; }
+.diff-body h3 { font-size: 13px; margin: 14px 0 0; }
+.diff-file { border: 1px solid var(--line); border-radius: 8px; margin-top: 10px; overflow: hidden; }
+.diff-file summary { display: flex; gap: 8px; padding: 6px 10px; background: var(--side); cursor: pointer; font: 12px/1.6 var(--mono); }
+.diff-file summary .name { font-weight: 600; overflow-wrap: anywhere; }
+.diff-file summary .added { color: var(--green); }
+.diff-file summary .removed { color: var(--red); }
+.diff-lines { font: 12px/1.55 var(--mono); border-top: 1px solid var(--line); }
+.diff-line { display: grid; grid-template-columns: 46px 16px 1fr; cursor: pointer; }
+.diff-line .num { color: var(--muted); text-align: right; padding-right: 8px; user-select: none; }
+.diff-line .sign { color: var(--muted); user-select: none; }
+.diff-line .code { white-space: pre-wrap; overflow-wrap: anywhere; padding-right: 10px; }
+.diff-line.add { background: var(--green-soft); }
+.diff-line.del { background: var(--red-soft); }
+.diff-line.hunk { color: var(--muted); background: var(--accent-soft); cursor: default; }
+.diff-line:not(.hunk):hover .num { color: var(--accent); }
+.diff-line:not(.hunk):hover { box-shadow: inset 2px 0 var(--accent); }
+.diff-compose, .diff-comment { margin: 4px 10px 8px 62px; font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+.diff-compose { display: grid; gap: 6px; }
+.diff-compose textarea { border: 1px solid var(--line); border-radius: 7px; padding: 6px 9px; background: var(--bg); width: 100%; resize: vertical; }
+.diff-compose .buttons { display: flex; justify-content: flex-end; gap: 6px; }
+.diff-comment { display: flex; gap: 8px; align-items: baseline; padding: 6px 10px; border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 7px; background: var(--card); }
+.diff-comment span { flex: 1; white-space: pre-wrap; }
+.diff-lines .note { padding: 6px 10px; margin: 0; }
 .flag { font-size: 12.5px; color: var(--amber); }
 .flag::before { content: "⚠ "; }
 

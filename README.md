@@ -33,6 +33,8 @@ Now I talk to one session, the Router, and Chief of Staff keeps track of the res
   starting over in a new one.
 - Shows what was observed next to what the worker reports: the test runs, commits, diff and PR
   checks. If a report says "all tests pass" and no test ran, the card says so.
+- Lets you review the diff, comment on lines and send the comments back to the worker, then open
+  the PR with one click. The worker follows the PR; when it merges, the task is done.
 - Leaves your own checkout alone. Each worker gets its own folder and git worktree and runs in
   Copilot's OS sandbox, so it can't write anywhere else.
 - Drafts replies to Slack DMs and mentions in your style. Nothing is sent until you press Send.

@@ -6,6 +6,7 @@ import { byId, loadState, pendingDrafts, routerId, state } from "./state.js";
 import { renderSidebar, renderStatusLine } from "./sidebar.js";
 import { select } from "./session.js";
 import { draftCard } from "./drafts.js";
+import { showChanges } from "./diff.js";
 export const INBOX = "inbox";
 const tasks = () => state.snapshot?.tasks || [];
 export const uncertainDrafts = () => state.snapshot?.uncertain || [];
@@ -373,7 +374,7 @@ function taskCard(task) {
   );
   const body = taskBody(task, worker);
   if (body) node.append(body);
-  if (task.receipts && (task.status === "review" || task.status === "done")) node.append(receiptsView(task.receipts));
+  if (task.receipts && (task.status === "review" || task.status === "done")) node.append(receiptsView(task.receipts, task));
 
   async function act(path, body, done) {
     for (const button of actions.querySelectorAll("button")) button.disabled = true;
@@ -418,9 +419,13 @@ function taskCard(task) {
       return;
     }
     const buttons = [];
+    // Work on its own branch that is not in a PR yet.
+    const branched = (task.receipts?.checkouts || []).some((checkout) => checkout.branch && (checkout.commits || checkout.uncommitted));
+    const createPr = branched && !task.receipts.prs?.length ? el("button", { type: "button", class: "secondary", text: "Create PR", onclick: () => act(`/api/tasks/${task.id}/pr`, {}, "PR opened.") }) : null;
     if (task.status === "review") {
       buttons.push(
         el("button", { type: "button", class: "text", text: "Copy report", onclick: () => copyReport(task) }),
+        createPr,
         el("button", { type: "button", class: "secondary", text: "Follow up", onclick: () => reply("Send", "What else should it do?") }),
         el("button", { type: "button", text: "Accept", onclick: () => act(`/api/tasks/${task.id}/accept`) }),
       );
@@ -441,9 +446,9 @@ function taskCard(task) {
         el("button", { type: "button", class: "text", text: "Add a note", onclick: () => reply("Send", "Tell the worker now (it reads it within its current turn)") }),
       );
     } else if (task.status === "done") {
-      buttons.push(el("button", { type: "button", class: "text", text: "Copy report", onclick: () => copyReport(task) }));
+      buttons.push(el("button", { type: "button", class: "text", text: "Copy report", onclick: () => copyReport(task) }), createPr);
     }
-    actions.replaceChildren(error, ...buttons);
+    actions.replaceChildren(error, ...buttons.filter(Boolean));
   }
   function retryWithNote() {
     const input = el("textarea", { rows: 2, placeholder: "What should it do differently?" });
@@ -479,7 +484,7 @@ function taskBody(task, worker) {
   return wrapper;
 }
 // What was observed, next to what the worker reported.
-function receiptsView(receipts) {
+function receiptsView(receipts, task) {
   const items = [];
   const result = (label, item) => {
     if (!item) return;
@@ -489,7 +494,7 @@ function receiptsView(receipts) {
   result("checks", receipts.checks);
   result("build", receipts.build);
   const changed = receipts.changed || {};
-  if (changed.files) items.push(el("span", { class: "receipt", text: `+${changed.insertions} −${changed.deletions} in ${plural(changed.files, "file")}` }));
+  if (changed.files) items.push(el("button", { type: "button", class: "receipt changes", title: "See the changes and comment on them", text: `+${changed.insertions} −${changed.deletions} in ${plural(changed.files, "file")}`, onclick: () => showChanges(task, upsertTask) }));
   if (changed.commits) items.push(el("span", { class: "receipt", text: plural(changed.commits, "commit") }));
   if (changed.uncommitted) items.push(el("span", { class: "receipt warn", text: `${changed.uncommitted} uncommitted` }));
   for (const pr of receipts.prs || []) {

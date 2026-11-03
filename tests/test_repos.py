@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from conftest import Harness, call_tool, env, settle
+from conftest import Harness, call_tool, env, settle, task_of
 
 from chiefofstaff import workspaces as workspaces_module
 from chiefofstaff.models import Settings
@@ -550,3 +550,80 @@ async def test_new_worktrees_get_the_gitignored_files_they_need(tmp_path, git_re
     (Path(second["cwd"]) / "secret.json").unlink(missing_ok=True)
     await runtime.workers.reopen(second["session_id"])
     assert exists(Path(second["cwd"]) / "secret.json"), "copied again when the worktree returns"
+
+
+async def test_create_pr_pushes_the_branch_and_the_worker_follows_the_pr(tmp_path):
+    origin, app = published(tmp_path, "app")
+    # The repository is acme/app on GitHub to Chief of Staff; git really talks to `origin`.
+    run("git", "config", "remote.origin.url", "https://github.com/acme/app.git", cwd=app)
+    run("git", "config", f"url.{origin}.insteadOf", "https://github.com/acme/app.git", cwd=app)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(app)]))
+    runtime = await harness.connect()
+    pr = "https://github.com/acme/app/pull/9"
+    calls, open_prs = [], []
+
+    async def gh(*arguments, payload=None):
+        calls.append(arguments)
+        if arguments[:2] == ("pr", "list"):
+            return json.dumps([{"url": url} for url in open_prs])
+        if arguments[:2] == ("pr", "create"):
+            return f"Creating pull request\n{pr}\n"
+        assert arguments[:2] == ("pr", "view")
+        return json.dumps({"url": pr, "state": "OPEN", "statusCheckRollup": []})
+
+    runtime.github.gh = gh
+    worker = await spawn(runtime, harness.router_id, title="Fix login", instructions="x",
+                         project=str(app), isolate=True)  # fmt: skip
+    worker_id, tree = worker["session_id"], Path(worker["cwd"])
+    commit(tree, "login.py", "def login():\n    return True\n")
+    (tree / "notes.md").write_text("draft\n")
+    await call_tool(runtime, "report", worker_id, status="done", summary="Fixed the login.")
+    await settle(runtime)
+    task_id = task_of(harness, worker_id)
+
+    [found] = await runtime.task_actions.diff(task_id)
+    assert "+    return True" in found["diff"], "its commits"
+    assert "+++ b/notes.md\n@@ -0,0 +1,1 @@\n+draft" in found["diff"], "and new files"
+    with pytest.raises(ValueError, match="uncommitted changes"):
+        await runtime.task_actions.create_pr(task_id)
+    assert not calls, "nothing is pushed or opened while work is uncommitted"
+
+    (tree / "notes.md").unlink()
+    task = await runtime.task_actions.create_pr(task_id)
+    branch = run("git", "branch", "--show-current", cwd=tree).strip()
+    pushed = run("git", f"--git-dir={origin}", "rev-parse", f"refs/heads/{branch}")
+    assert pushed == run("git", "rev-parse", "HEAD", cwd=tree)
+    created = next(call for call in calls if call[:2] == ("pr", "create"))
+    assert created[created.index("--repo") + 1] == "acme/app"
+    assert created[created.index("--head") + 1] == branch
+    assert created[created.index("--title") + 1] == "Fix login"
+    assert "Fixed the login." in created[created.index("--body") + 1]
+    assert harness.store.follows(worker_id) == ["github:acme/app#9"], "its PR comes to it"
+    assert [p["url"] for p in runtime.task_actions.view(task)["receipts"]["prs"]] == [pr]
+
+    calls.clear()
+    open_prs.append(pr)
+    await runtime.task_actions.create_pr(task_id)
+    assert not any(call[:2] == ("pr", "create") for call in calls), "an open PR is not doubled"
+
+    runtime.unfollow("github:acme/app#9", finished=True, merged=True)
+    assert runtime.tasks.get(task_id)["status"] == "done", "merged, its task is done"
+
+
+async def test_a_closed_workers_changes_are_still_shown(tmp_path):
+    _, app = published(tmp_path, "app")
+    harness = Harness(tmp_path / "data", Settings(projects=[str(app)]))
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, title="Fix", instructions="x",
+                         project=str(app), isolate=True)  # fmt: skip
+    commit(Path(worker["cwd"]), "fix.py", "fixed = True\n")
+    await call_tool(runtime, "report", worker["session_id"], status="done", summary="Fixed.")
+    await runtime.workers.close(worker["session_id"])
+    await settle(runtime)
+    assert not exists(Path(worker["cwd"])), "its clean worktree was removed"
+    task_id = task_of(harness, worker["session_id"])
+    [found] = await runtime.task_actions.diff(task_id)
+    assert "+fixed = True" in found["diff"] and "README" not in found["diff"]
+    await runtime.task_actions.collect_evidence(task_id)
+    changed = runtime.task_actions.view(runtime.tasks.get(task_id))["receipts"]["changed"]
+    assert changed["files"] == 1 and changed["commits"] == 1

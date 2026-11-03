@@ -122,6 +122,23 @@ async def run(scheme: str):
             assert "**Observed**" in copied, repr(copied)
             log("copied the task report")
 
+            await fix.get_by_role("button", name="Create PR").click()
+            await expect(fix.locator(".error")).to_contain_text("no GitHub origin")
+            log("Create PR explains why the demo project cannot have one")
+
+            await fix.locator("button.receipt.changes").click()
+            changes = page.locator(".diff-dialog")
+            await expect(changes.locator(".diff-file summary")).to_contain_text("app/login.py")
+            await changes.locator(".diff-line.add").first.click()
+            await changes.locator(".diff-compose textarea").fill("Call the clock parameter now.")
+            await changes.get_by_role("button", name="Comment").click()
+            await expect(changes.locator("footer")).to_contain_text("1 comment")
+            await page.screenshot(path=SHOTS / f"demo-{scheme}-5-changes.png")
+            await changes.get_by_role("button", name="Send to the worker").click()
+            await expect(changes).to_have_count(0)
+            await expect(fix).to_contain_text("Review comments on your changes", timeout=30000)
+            log("commented on lines of the diff; the worker got the comments")
+
             research = review.filter(has_text="Compare feature-flag services")
             await research.get_by_role("button", name="Follow up").click()
             await research.locator("textarea").fill("Add pricing for 50 seats")
@@ -151,7 +168,7 @@ async def run(scheme: str):
 
             await page.locator(".item", has_text="Chat").click()
             await expect(page.locator("#timeline")).to_contain_text("Started three tasks")
-            await page.screenshot(path=SHOTS / f"demo-{scheme}-5-chat.png")
+            await page.screenshot(path=SHOTS / f"demo-{scheme}-6-chat.png")
             assert not errors, errors
             await browser.close()
     except BaseException:
