@@ -316,8 +316,38 @@ async def version(checkout: dict) -> dict | None:
             edits = await git("-C", path, "status", "--porcelain")
             if edits.strip():
                 edits += await git("-C", path, "diff", "--no-color", "--no-ext-diff", "HEAD")
+                # New files show in the status by name only: their contents count too.
+                others = await git("-C", path, "ls-files", "--others", "--exclude-standard", "-z")
+                names = [name for name in others.split("\0") if name][:MAX_NEW_FILES]
+                edits += await asyncio.to_thread(file_digest, Path(path), names)
     digest = hashlib.sha1(edits.encode()).hexdigest()[:12] if edits.strip() else ""
-    return {"commit": commit, "edits": digest}
+    return {"commit": commit, "edits": digest, "digest": DIGEST}
+
+
+# How `edits` is computed: digests of different kinds are not compared (see same_version).
+DIGEST = 2
+
+
+def same_version(recorded: dict, current: dict) -> bool:
+    """Whether a checkout still holds the code it held when it was checked."""
+    if current["commit"] != recorded.get("commit"):
+        return False
+    if recorded.get("digest") != current.get("digest"):
+        return True  # Recorded by an older Chief of Staff: only the commit can be compared.
+    return current["edits"] == recorded.get("edits", "")
+
+
+def file_digest(top: Path, names: list[str]) -> str:
+    """The contents of new files, read here: one odd entry (a nested repository, a broken link)
+    must not leave the others out."""
+    found = hashlib.sha1()
+    for name in names:
+        path = top / name
+        if name.endswith("/") or not path.is_file():
+            continue
+        with suppress(OSError), path.open("rb") as file:
+            found.update(name.encode() + b"\0" + file.read(MAX_NEW_FILE))
+    return found.hexdigest()
 
 
 async def changes(checkout: dict) -> dict | None:

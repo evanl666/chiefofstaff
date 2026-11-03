@@ -256,7 +256,7 @@ class Decisions:
                     scope=self.scope_of(target),
                 )
             text = (
-                f"The owner did not decide “{question}”" + (f": {reason}" if reason else ".")
+                "The owner did not decide" + (f": {reason}" if reason else ".")
                 + " Go on with your recommendation only if it is safe and easy to undo; "
                 "otherwise report(status=\"blocked\")."
             )  # fmt: skip
@@ -279,7 +279,7 @@ class Decisions:
             agreed=(choice.lower() == best.lower()) if best else None,
         )
         card = self.close(card["id"], "answered", choice)
-        text = f"{question}\nThe owner decided: {choice}"
+        text = f"The owner decided: {choice}"
         await self.tell_askers(target, text, f"Decision: {choice}", recorded["decision"]["id"])
         return card
 
@@ -291,10 +291,12 @@ class Decisions:
             task = self.tasks.find(asker["task_id"]) if asker["task_id"] else None
             if task and task["status"] == "waiting":
                 self.tasks.move(task["id"], "running", reason="decision")
+            # Only the owner's own words go in the owner's envelope; the question was a worker's.
+            asked = wrap("system", "context", f"Your decision card asked: {target['question']}")
             try:
                 await self.delivery.deliver(
                     row["id"],
-                    wrap("owner", "decision", text, decision=identifier or None),
+                    asked + "\n\n" + wrap("owner", "decision", text, decision=identifier or None),
                     kind="owner",
                     display=display,
                     meta={"task_id": task["id"]} if task else None,
@@ -335,13 +337,17 @@ class Decisions:
             return f"Recorded {decision['id']}, linked to {len(tasks)} task(s)."
         if not affected:
             return f"Recorded {decision['id']}. No open or finished task relied on what it changes."
-        redo = sum(item["was"] in {"review", "done"} for item in affected)
-        return (
-            f"Recorded {decision['id']}. It affects {len(affected)} task(s)"
-            + (f"; {redo} checked result(s) are out of date and reopened" if redo else "")
-            + ". Their workers were told and must confirm; the owner sees the impact on a card. "
-            "Tell the owner in one line."
-        )
+        told = [item for item in affected if item["told"]]
+        redo = sum(item["was"] in {"review", "done"} for item in told)
+        missed = [item["title"] for item in affected if not item["told"]]
+        text = f"Recorded {decision['id']}. It affects {len(affected)} task(s)"
+        if redo:
+            text += f"; {redo} checked result(s) are out of date and reopened"
+        if told:
+            text += f". {len(told)} worker(s) were told and must confirm"
+        if missed:
+            text += f". Could not tell: {', '.join(missed)} (their results are marked out of date)"
+        return text + ". The owner sees the impact on a card. Tell the owner in one line."
 
     async def record(self, text: str, tasks: list[str], replaces: list[str], source: str) -> dict:
         text = clean(text, 500)
@@ -396,7 +402,6 @@ class Decisions:
             self.runtime.task_actions.stale(
                 task["id"], f"Out of date: the decision “{before}” changed after it was checked."
             )
-            self.tasks.move(task["id"], "running", reason="decision changed")
         row = self.store.session(task["session_id"])
         note = (
             f"The owner changed a decision that task {task['id']} “{task['title']}” relies on.\n"
@@ -417,13 +422,21 @@ class Decisions:
                 meta={"task_id": task["id"]},
                 steer=True,
             )
-        except Exception:
+        except Exception as exc:
             logger.warning("Could not tell %s about the change.", row["id"], exc_info=True)
+            # Nothing will redo it: the card says so instead of waiting for a confirmation.
+            error = str(exc)[:200] or type(exc).__name__
+        else:
+            error = ""
+            if was in {"review", "done"}:
+                self.tasks.move(task["id"], "running", reason="decision changed")
         return {
             "task_id": task["id"],
             "title": task["title"],
             "session_id": row["id"],
             "was": was,
+            "told": not error,
+            "error": error,
             "ack": "",
         }
 
@@ -468,7 +481,8 @@ class Decisions:
                 if item["task_id"] in mine:
                     item["ack"] = plan
             card = self.store.update_draft_target(card["id"], target)
-            if all(item["ack"] for item in target["tasks"]):
+            told = [item for item in target["tasks"] if item.get("told", True)]
+            if told and all(item["ack"] for item in told) and len(told) == len(target["tasks"]):
                 card = self.close(card["id"], "answered", "Every affected worker confirmed.")
             else:
                 self.bus.publish("draft", card)

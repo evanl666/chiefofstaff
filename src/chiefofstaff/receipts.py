@@ -156,13 +156,20 @@ def words(text: str) -> list[str]:
         return text.split()
 
 
+def within_words(part: list[str], whole: list[str]) -> bool:
+    """Whether `part` is a run of consecutive words in `whole`."""
+    size = len(part)
+    return bool(part) and any(whole[i : i + size] == part for i in range(len(whole) - size + 1))
+
+
 def names(snippet: str, command: str) -> bool:
-    """Whether a quoted command is the one that ran: the same text, or (from two words on) all
-    of its words in it, as `git log --stat` is in `git --no-pager log --oneline --stat -2`."""
-    if snippet in command or command in snippet:
+    """Whether a quoted command is the one that ran, word for word: it is part of it, or (from
+    two words on) all of its words are in it, as `git log --stat` is in
+    `git --no-pager log --oneline --stat -2`. Never by letters: `ls` is not in `tools`."""
+    quoted, ran = words(snippet), words(command)
+    if within_words(quoted, ran):
         return True
-    quoted = words(snippet)
-    return len(quoted) >= 2 and set(quoted) <= set(words(command))
+    return len(quoted) >= 2 and set(quoted) <= set(ran)
 
 
 def backing(evidence: str, commands: list[dict]) -> dict | None:

@@ -16,6 +16,7 @@ from chiefofstaff.backend import USAGE_RECORD, read_log, scan_log, sessions_in_u
 from chiefofstaff.models import DraftDecision, Settings
 from chiefofstaff.policy import permission_denial
 from chiefofstaff.runtime import ROUTER_TOOLS
+from chiefofstaff.tasks import settle_followups
 
 
 async def test_router_routes_work_and_worker_reports_back(harness):
@@ -1009,9 +1010,35 @@ async def test_a_worker_used_in_a_terminal_meanwhile_catches_up_before_it_resume
     texts = [m["text"] for m in harness.store.messages(worker)]
     caught_up = ["Meanwhile, in a terminal", "Add a FAQ", "Added the FAQ.", "Thanks, ship it"]
     assert texts[-4:] == caught_up, "not the Router's task from its log, which it has already"
-    assert runtime.tasks.current(worker)["status"] == "running", "a message continues its task"
+    task = runtime.tasks.current(worker)
+    runtime.task_actions.accept(task["id"])
+    await runtime.owner_send(worker, "Who are you?")
+    assert runtime.tasks.get(task["id"])["status"] == "done", "a question reopens nothing"
     await call_tool(runtime, "report", worker, status="done", summary="Shipped.")
-    assert runtime.tasks.current(worker)["status"] == "review", "and its result comes back"
+    assert runtime.tasks.get(task["id"])["status"] == "review", "new work comes back for review"
+    await call_tool(runtime, "report", worker, status="done", summary="The PR was merged.")
+    runtime.task_actions.accept(task["id"])
+    await call_tool(runtime, "report", worker, status="done", summary="Noted the merge.")
+    assert runtime.tasks.get(task["id"])["status"] == "done", "news on accepted work stays done"
+
+
+async def test_a_task_left_running_by_a_question_is_settled(harness):
+    runtime = await harness.connect()
+    spawned = await call_tool(
+        runtime, "spawn_worker", harness.router_id, title="Q", instructions="q"
+    )
+    worker = json.loads(spawned.text_result_for_llm)["session_id"]
+    await call_tool(runtime, "report", worker, status="done", summary="Answer.")
+    task = runtime.tasks.current(worker)
+    runtime.tasks.move(task["id"], "running", reason="follow-up")  # As 0.1.7-0.1.9 did.
+    harness.store.update_session(worker, status="done")
+    harness.store.delete("settled_followups")  # A store from before the repair.
+    settle_followups(harness.store)
+    assert runtime.tasks.get(task["id"])["status"] == "review"
+    assert all(run["ended_at"] for run in runtime.tasks.runs(task["id"]))
+    runtime.tasks.move(task["id"], "running", reason="follow-up")
+    settle_followups(harness.store)
+    assert runtime.tasks.get(task["id"])["status"] == "running", "once: later ones are real"
 
 
 async def test_other_sessions_show_their_latest_conversation(harness):
