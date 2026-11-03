@@ -1028,13 +1028,15 @@ class Runtime:
     def followed(self, prefix: str) -> list[dict]:
         return self.store.followed(prefix)
 
-    def unfollow(self, thread: str, finished: bool = False):
+    def unfollow(self, thread: str, finished: bool = False, merged: bool = False):
         """Stop following; `finished` means the PR was merged or closed while followed."""
         followers = self.store.followers(thread)
         self.store.unfollow(thread)
         for session_id in followers:
             row = self.store.session(session_id)
             self.publish_session(row)
+            if merged and row["role"] == WORKER:
+                self.task_actions.pr_merged(session_id, thread)
             if finished and row["role"] == WORKER and not self.store.follows(session_id):
                 # Its PR is merged or closed: the task is over once this news is handled.
                 if self.states[session_id].busy or row["status"] == "working":

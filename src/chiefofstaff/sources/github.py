@@ -238,7 +238,7 @@ class GitHubSource:
             )
         self.store.set(f"ghsince:{thread}", started)
         if state != "open":
-            self.host.unfollow(thread, finished=True)
+            self.host.unfollow(thread, finished=True, merged=state == "merged")
 
     async def head(self, repo: str, number: int) -> str:
         pull = await self.pull(repo, number)

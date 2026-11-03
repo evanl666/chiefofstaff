@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.6 (2026-11-02)
+
+- **Review a task's changes**: click *+N −M in K files* on a review card for its diff, comment on
+  lines, and send the comments to the worker as one follow-up.
+- **Create PR** on a review card pushes the worker's branch and opens a pull request with the
+  task's report. The worker follows it, and the task is marked done when it is merged.
+- New worktrees get the gitignored files they need: `.env` and `.env.*` by default, or what a
+  `.worktreeinclude` file lists. Workers are told to install dependencies in a fresh worktree.
+- A closed worker's changes still show in its receipts after its worktree is removed.
+
 ## 0.1.5 (2026-11-02)
 
 - Opening one of your other Copilot sessions works again, and shows its latest conversation,

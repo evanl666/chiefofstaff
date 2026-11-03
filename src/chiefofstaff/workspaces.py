@@ -288,30 +288,94 @@ def protected_git_paths(git_dir: str, checkouts: list[dict]) -> list[str]:
     return [str(path) for path in paths]
 
 
+def locate(checkout: dict) -> tuple[str, str, bool]:
+    """Where to read a checkout's work: (folder, head, live). A closed worker's worktree may be
+    gone (see Workspaces.release); its branch is still in the repository, with all its work."""
+    tree = checkout.get("worktree")
+    if tree and checkout.get("branch") and not os.path.isdir(tree):
+        return checkout["repo"], f"refs/heads/{checkout['branch']}", False
+    return checkout["path"], "HEAD", True
+
+
+def base_of(checkout: dict) -> str:
+    return checkout.get("base_ref") or ("" if checkout.get("shared") else "origin/HEAD")
+
+
 async def changes(checkout: dict) -> dict | None:
     """What a worker changed in one checkout: commits on its branch and uncommitted edits."""
-    path = checkout["path"]
+    path, head, live = await asyncio.to_thread(locate, checkout)
     try:
         await git("-C", path, "rev-parse", "--git-dir")
     except ValueError:
         return None
-    result = {"path": path, "branch": checkout.get("branch", ""), "commits": 0}
+    result = {"path": checkout["path"], "branch": checkout.get("branch", ""), "commits": 0}
     committed = {"files": 0, "insertions": 0, "deletions": 0}
-    if base := checkout.get("base_ref") or ("" if checkout.get("shared") else "origin/HEAD"):
+    if base := base_of(checkout):
         with suppress(ValueError):
             committed = receipts.shortstat(
-                await git("-C", path, "diff", "--shortstat", f"{base}...HEAD")
+                await git("-C", path, "diff", "--shortstat", f"{base}...{head}")
             )
-            result["commits"] = int(await git("-C", path, "rev-list", "--count", f"{base}..HEAD"))
+            result["commits"] = int(await git("-C", path, "rev-list", "--count", f"{base}..{head}"))
     uncommitted = {"files": 0, "insertions": 0, "deletions": 0}
-    with suppress(ValueError):
-        uncommitted = receipts.shortstat(await git("-C", path, "diff", "--shortstat", "HEAD"))
-    with suppress(ValueError):
-        status = await git("-C", path, "status", "--porcelain")
-        result["uncommitted"] = len([line for line in status.splitlines() if line.strip()])
+    if live:
+        with suppress(ValueError):
+            uncommitted = receipts.shortstat(await git("-C", path, "diff", "--shortstat", "HEAD"))
+        with suppress(ValueError):
+            status = await git("-C", path, "status", "--porcelain")
+            result["uncommitted"] = len([line for line in status.splitlines() if line.strip()])
     for key in ("files", "insertions", "deletions"):
         result[key] = committed[key] + uncommitted[key]
     return result
+
+
+MAX_DIFF = 2_000_000
+MAX_NEW_FILES = 100
+MAX_NEW_FILE = 200_000
+# The same diff whatever the owner's git config says (prefixes, colors, external tools).
+PLAIN_DIFF = (
+    "-c", "core.quotePath=false", "diff", "--no-color", "--no-ext-diff", "--no-textconv",
+    "--src-prefix=a/", "--dst-prefix=b/",
+)  # fmt: skip
+
+
+def new_file_diff(top: Path, name: str) -> str:
+    """A diff that adds an untracked file, like git's own for a new file."""
+    header = f"diff --git a/{name} b/{name}\nnew file mode 100644\n"
+    try:
+        path = top / name
+        if path.is_symlink() or not path.is_file():
+            return ""
+        data = path.read_bytes()[: MAX_NEW_FILE + 1]
+    except OSError:
+        return ""
+    if b"\0" in data[:8000]:
+        return f"{header}Binary files /dev/null and b/{name} differ\n"
+    lines = data[:MAX_NEW_FILE].decode(errors="replace").splitlines() or [""]
+    body = "".join(f"+{line}\n" for line in lines)
+    return f"{header}--- /dev/null\n+++ b/{name}\n@@ -0,0 +1,{len(lines)} @@\n{body}"
+
+
+async def diff(checkout: dict) -> dict:
+    """The full diff of a worker's work in one checkout, from where it started: commits,
+    uncommitted edits and new files (for a shared project folder: its uncommitted edits)."""
+    path, head, live = await asyncio.to_thread(locate, checkout)
+    top = (await git("-C", path, "rev-parse", "--show-toplevel")).strip()
+    base = base_of(checkout) or "HEAD"
+    if live:
+        text = await git("-C", top, *PLAIN_DIFF, base, limit=60)
+        others = await git("-C", top, "ls-files", "--others", "--exclude-standard", "-z")
+        names = [name for name in others.split("\0") if name][:MAX_NEW_FILES]
+        for name in names:
+            text += await asyncio.to_thread(new_file_diff, Path(top), name)
+    else:
+        text = await git("-C", top, *PLAIN_DIFF, f"{base}...{head}", limit=60)
+    return {
+        "name": Path(checkout.get("repo") or top).name,
+        "path": checkout["path"],
+        "branch": checkout.get("branch", ""),
+        "diff": text[:MAX_DIFF],
+        "truncated": len(text) > MAX_DIFF,
+    }
 
 
 class Workspaces:

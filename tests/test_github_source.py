@@ -26,9 +26,9 @@ class Host:
     def followed(self, prefix):
         return [s for s in self.subscriptions if s["thread"].startswith(prefix)]
 
-    def unfollow(self, thread, finished=False):
+    def unfollow(self, thread, finished=False, merged=False):
         self.subscriptions = [s for s in self.subscriptions if s["thread"] != thread]
-        self.unfollowed.append((thread, finished))
+        self.unfollowed.append((thread, finished, merged))
 
 
 def fake_gh(state):
@@ -123,7 +123,7 @@ async def test_followed_pr_activity_reaches_its_followers(tmp_path):
     await source.poll_once()
     assert host.deliveries[-1][1] == ["github:state:github:acme/app#7:merged"]
     assert host.subscriptions == [], "a merged PR is no longer followed"
-    assert host.unfollowed == [(THREAD, True)], "it finished while followed"
+    assert host.unfollowed == [(THREAD, True, True)], "it was merged while followed"
 
 
 async def test_one_broken_pr_does_not_stop_the_others(tmp_path):
@@ -190,4 +190,4 @@ async def test_a_pr_cited_after_it_finished_is_just_unfollowed(tmp_path):
     host = Host(store)
     await GitHubSource(store, host, gh_command=fake_gh(state)).poll_once()
     assert host.deliveries == [], "no news about a PR that was already merged"
-    assert host.unfollowed == [(THREAD, False)], "and its follower is not closed"
+    assert host.unfollowed == [(THREAD, False, False)], "and its follower is not closed"
