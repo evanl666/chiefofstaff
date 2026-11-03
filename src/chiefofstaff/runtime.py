@@ -44,6 +44,7 @@ from .backend import (
     sandbox_supported,
 )
 from .bus import Bus
+from .decisions import Decisions
 from .delivery import Delivery
 from .digest import digest
 from .drafts import Drafts
@@ -92,6 +93,7 @@ ROUTER_TOOLS = [
     "distill_profile",
     "answer_session",
     "cancel_task",
+    "record_decision",
 ]
 # Tasks that ended within this many hours are still shown (and can be reviewed or retried).
 TASKS_SHOWN_HOURS = 72
@@ -185,6 +187,7 @@ class Runtime:
         self.task_actions = TaskActions(self)
         self.drafts = Drafts(self)
         self.asks = Asks(self)
+        self.decisions = Decisions(self)
         self.focus = Focus(self)
         self.watchdog = Watchdog(self)
         self.toolset = Tools(self)
@@ -474,6 +477,7 @@ class Runtime:
         names = ["report", "follow_thread", "unfollow_thread"]
         if row["role"] == WORKER:
             names += ["find_sessions", "ask_session", "answer_session", "add_repo"]
+            names += ["ask_decision", "ack_decision"]
             if not row["slack"]:
                 names.append("record_setup")
         if self.store.get(f"distill:{row['id']}"):

@@ -41,12 +41,13 @@ tool allowlist, permission and request callbacks, sandbox, model.
 | `drafts.py` | Drafts the owner approves (Slack replies, PR reviews, a task's folder); interrupted sends. |
 | `focus.py` | Focus Shield. |
 | `state.py` | Per-session in-memory state (connection, turn flags) and the lock order. |
-| `receipts.py` | Observed commands, changes and PR checks next to a report. |
+| `receipts.py` | Observed commands, changes and PR checks next to a report; acceptance criteria as verified, claimed or not met. |
 | `workspaces.py` | The code folder (its repositories, clones into it), each worker's task folder and worktrees (removed on close, restored on reopen), change stats. |
 | `policy.py` | Pure permission rules for actions without the sandbox. |
 | `backend.py` | The `AgentBackend`/`AgentSession` protocols, Copilot backend, sandbox policy. |
 | `scripted.py` | A backend without a model (scripts); runs `demo.py` and contract tests. |
 | `asks.py` | Cards for the owner (questions, forms, sign-ins), questions between sessions, environment notes. |
+| `decisions.py` | Decision cards; the owner's decisions and the tasks that rely on them; telling those tasks when one changes. |
 | `envelope.py` | The envelope every message to a session is wrapped in. |
 | `catalog.py` | Keyword ranking that finds the worker that owns a subject. |
 | `watchdog.py` | Cheap checks that decide when a worker deserves a review, and the Watchdog session that reviews it. |
@@ -93,10 +94,12 @@ Sessions never talk directly. A session calls a tool, and the runtime delivers t
 ## Tasks
 
 A worker session is a conversation and a folder. Each assignment is a **task** (`tasks`) with
-a status (`queued → running ⇄ waiting → review → done`, or `failed`/`cancelled`), a result and
-dependencies on other tasks (`task_deps`, met at `review` or `done`). A **run** (`runs`) is one
-attempt: it starts when the worker starts on the task and ends with a report, a failure or a
-cancellation; usage and observed commands are counted per run. A report names its task (the
+a status (`queued → running ⇄ waiting → review → done`, or `failed`/`cancelled`), a result,
+acceptance criteria and dependencies on other tasks (`task_deps`, met at `review` or `done`, or
+only at `done` when they need the accepted result). A **run** (`runs`) is one attempt: it
+starts when the worker starts on the task and ends with a report, a failure or a cancellation;
+usage, observed commands, evidence and the worker's claims per criterion are kept per run.
+Decisions (`decisions`) are linked to the tasks that rely on them (`task_decisions`). A report names its task (the
 `task` attribute) or defaults to the worker's current task.
 
 ## Events

@@ -73,6 +73,10 @@ class Drafts:
             return await self.answer_workspace(draft, decision)
         if draft["kind"] in REQUEST_KINDS:
             return self.runtime.asks.answer_request(draft, decision)
+        if draft["kind"] == "decision":
+            return await self.runtime.decisions.answer(draft, decision)
+        if draft["kind"] == "change":
+            return self.runtime.decisions.dismiss(draft)
         if decision.action == "choose":
             raise ValueError("This draft is not a question.")
         if decision.action == "reject":

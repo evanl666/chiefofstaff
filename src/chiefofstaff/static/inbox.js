@@ -5,7 +5,7 @@ import { compactPaths, markdown, plural, shortPath, since } from "./text.js";
 import { byId, loadState, pendingDrafts, routerId, state } from "./state.js";
 import { renderSidebar, renderStatusLine } from "./sidebar.js";
 import { select, setComposer } from "./session.js";
-import { draftCard } from "./drafts.js";
+import { draftCard, draftKey } from "./drafts.js";
 import { showChanges } from "./diff.js";
 export const INBOX = "inbox";
 const tasks = () => state.snapshot?.tasks || [];
@@ -13,7 +13,9 @@ export const uncertainDrafts = () => state.snapshot?.uncertain || [];
 const TASK_LABEL = { queued: "Queued", running: "Running", waiting: "Needs you", review: "Ready to review", done: "Done", failed: "Failed", cancelled: "Cancelled" };
 const TASK_CHIP = { queued: "", running: "progress", waiting: "waiting", review: "done", done: "done", failed: "failed", cancelled: "" };
 function needsYou() {
-  const waiting = tasks().filter((task) => task.status === "waiting" || task.status === "failed" || task.blocked);
+  // A task waiting for a decision is shown by the decision's card.
+  const deciding = new Set(pendingDrafts().filter((draft) => draft.kind === "decision").flatMap((draft) => draft.target.askers.map((asker) => asker.task_id)));
+  const waiting = tasks().filter((task) => (task.status === "waiting" && !deciding.has(task.id)) || task.status === "failed" || task.blocked);
   return { drafts: pendingDrafts(), uncertain: uncertainDrafts(), tasks: waiting };
 }
 function needsYouCount() {
@@ -175,7 +177,7 @@ function updateInbox() {
 
   const needs = section("inbox-needs", "Needs you", items.drafts.length + items.uncertain.length + items.tasks.length, "Nothing needs you right now.");
   reconcile(needs.querySelector(".items"), [
-    ...items.drafts.map((draft) => ({ key: `draft:${draft.id}`, build: () => draftCard(draft) })),
+    ...items.drafts.map((draft) => ({ key: draftKey(draft), build: () => draftCard(draft) })),
     ...items.uncertain.map((draft) => ({ key: `uncertain:${draft.id}:${draft.outcome}`, build: () => uncertainCard(draft) })),
     ...items.tasks.map((task) => taskItem(task)),
   ], editing);
@@ -532,7 +534,9 @@ function receiptsView(receipts, task) {
         ...receipts.criteria.map((item) => {
           const [kind, mark, help] = CRITERION[item.state] || CRITERION.not_checked;
           const how = item.command ? `\n${item.command}${item.exit_code ? ` (exit ${item.exit_code})` : ""}` : item.evidence ? `\n${item.evidence}` : "";
-          return el("li", { class: kind, title: `${help}${how}` }, el("span", { class: "mark", text: mark }), el("span", { text: item.criterion }));
+          // `code` in a criterion shows as code.
+          const words = item.criterion.split("`").map((part, index) => (index % 2 ? el("code", { text: part }) : part));
+          return el("li", { class: kind, title: `${help}${how}` }, el("span", { class: "mark", text: mark }), el("span", {}, ...words));
         }),
       )
     : null;

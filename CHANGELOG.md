@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.8 (2026-11-03)
+
+- **Acceptance criteria**: tasks get *done when* checks, and the worker reports each one with
+  evidence. The review card marks each as verified (a command it was seen running backs it),
+  claimed, not met or not checked, with one verdict for the task. A test that failed and then
+  passed shows as *✗→✓*.
+- **Evidence is about one version of the code**: the card shows the commit it was checked at,
+  and says *Out of date* once the code or a decision it relied on changes.
+- **Decision cards**: a worker asks for a decision with why it comes up, the options and their
+  effects, and its recommendation. Workers that hit the same question share one card.
+- **Change a decision and the work follows**: tell the Router; every task that relied on it is
+  told, finished results reopen, and a card shows the impact until each worker confirms.
+- A task can wait for another's accepted result instead of its reported one.
+
 ## 0.1.7 (2026-11-03)
 
 - Timelines are easier to read: what a session says on the way to its next steps is folded into

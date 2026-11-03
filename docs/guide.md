@@ -11,6 +11,7 @@ bounds, see [SECURITY.md](../SECURITY.md).
 - [Receipts](#receipts)
 - [Reviewing changes](#reviewing-changes)
 - [When a session needs you](#when-a-session-needs-you)
+- [Decisions](#decisions)
 - [Focus](#focus)
 - [Slack](#slack)
 - [GitHub reviews](#github-reviews)
@@ -61,6 +62,10 @@ on the same subject reuses its context.
 Task states: *queued* (waiting for a slot or for tasks it depends on), *running*, *waiting*
 (it asked something or is blocked), *review* (done, ready for you), *done* (you accepted it),
 *failed* (retry it with an optional note) and *cancelled*.
+
+A task that needs another's result starts once that one reports done. When it must build on
+work you have checked (an API others code against), the Router makes it wait until you
+*Accept* the other one instead; its card says *waiting for your review of …*.
 
 **Routing to the right worker** matters most. Your message reaches the Router together with
 the workers whose record matches it (title, task, files, branches, reports; keyword search,
@@ -156,7 +161,28 @@ A worker's report is its claim. Receipts are what Chief of Staff observed:
 
 The review card shows them under *Observed* and flags disagreements, e.g. *Says tests pass, but
 no test run was observed*, *The last test run failed (exit 1)*, or *Checks are failing on
-acme/app#7*. *Copy report* puts goal, result and receipts into markdown.
+acme/app#7*. A test that failed first and then passed (a regression test for a fix) shows as
+*✗→✓ tests*. *Copy report* puts goal, result and receipts into markdown.
+
+**Acceptance criteria.** For work that can be checked, the Router gives the task 1-4 *done when*
+criteria: a test that passes, a command and its output, a request and its response (for a bug
+fix, a regression test that fails before the fix and passes after). The worker reports each
+one with its evidence, and the card marks it:
+
+| Mark | Meaning |
+| --- | --- |
+| ✓ | **Verified**: the evidence names a command the worker was seen running, and it passed |
+| ~ | **Claimed**: reported as met, but nothing observed backs it |
+| ✗ | **Not met**, or reported met while the command behind it failed |
+| – | **Not checked** |
+
+Above them, one verdict: *✓ Verified*, *Partly verified · 2/3*, *Not verified* or *✗ Not met*.
+The summary a worker writes is never counted as evidence.
+
+**Evidence is about one version of the code.** The card shows the commit it was checked at
+(*at 2dbecc5*, *+ edits* for uncommitted ones). When the code changes after that (more commits,
+edits, another task in the same worker) or a decision it relied on changes, the card says *Out
+of date* and why.
 
 ## Reviewing changes
 
@@ -176,7 +202,12 @@ when the PR is merged its task is marked done.
 Sessions ask instead of guessing. Each request is a card under *Needs you*, with a desktop
 notification:
 
-- **Questions**: a worker uses Copilot's `ask_user`. Pick a choice or type an answer.
+- **Decisions**: a choice that is yours (scope, a trade-off, a risky change such as a migration).
+  The card says why it comes up, the options and what each means, and what the worker
+  recommends; pick one or write your own. Workers that hit the same question wait on the same
+  card, and one answer reaches all of them. See [Decisions](#decisions).
+- **Questions**: a worker uses Copilot's `ask_user` for quick facts. Pick a choice or type an
+  answer.
 - **Forms and links**: an MCP tool asks for input, or for you to open a link.
 - **Sign-ins**: an MCP server needs OAuth. Sign in in the browser tab; the card closes by
   itself. Copilot keeps the sign-in for every session (see [SECURITY.md](../SECURITY.md)).
@@ -188,6 +219,26 @@ There are no per-tool settings: Chief of Staff uses whatever your Copilot has (M
 CLIs). For a new ability ("read our company docs"), the Router starts a setup worker that finds
 what is available, asks you to sign in, checks that it works and records how in **environment
 notes** for later sessions (editable in Settings).
+
+## Decisions
+
+Work depends on decisions: "v1 is email login only", "limit attempts per account". Chief of
+Staff keeps them, each with the tasks that rely on it:
+
+- your answers on decision cards;
+- decisions you state to the Router ("SMS login is out for v1"), which it records and links to
+  the tasks they concern.
+
+**Change one and the work follows.** Tell the Router ("change of plan: SMS login is in after
+all"). It records the new decision in place of the old one, and Chief of Staff:
+
+- tells every worker whose task relied on the old one, right away (also mid-turn), what changed;
+- reopens tasks that were already finished, and marks their checked results *Out of date*;
+- shows a *Decision changed* card: what was decided before and now, the tasks it affects, how
+  many checked results need redoing, and which workers confirmed what they change. Each worker
+  confirms with `ack_decision`; once all have, the card goes away.
+
+Work that does not rely on the decision carries on untouched.
 
 ## Focus
 

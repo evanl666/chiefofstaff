@@ -1,12 +1,37 @@
 import re
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 Repository = Annotated[str, Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")]
 Role = Literal["router", "worker", "slack", "watchdog"]
 Effort = Literal["none", "low", "medium", "high", "xhigh", "max"]
+
+
+def inline_refs(schema: dict) -> dict:
+    """A JSON schema with its $defs written in place of each $ref."""
+    defs = schema.pop("$defs", {})
+
+    def resolve(node: Any) -> Any:
+        if isinstance(node, dict):
+            if "$ref" in node:
+                extra = {key: value for key, value in node.items() if key != "$ref"}
+                return resolve({**defs[node["$ref"].rsplit("/", 1)[-1]], **extra})
+            return {key: resolve(value) for key, value in node.items()}
+        if isinstance(node, list):
+            return [resolve(item) for item in node]
+        return node
+
+    return resolve(schema)
+
+
+class NestedArguments(BaseModel):
+    """Tool arguments with nested objects: the schema models see has no $ref to follow."""
+
+    @classmethod
+    def model_json_schema(cls, *args, **kwargs) -> dict:  # pyright: ignore[reportIncompatibleMethodOverride]
+        return inline_refs(super().model_json_schema(*args, **kwargs))
 
 
 class StrictModel(BaseModel):

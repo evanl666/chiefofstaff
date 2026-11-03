@@ -147,6 +147,15 @@ class Store:
         CREATE TABLE IF NOT EXISTS task_deps (
             task_id TEXT NOT NULL, depends_on TEXT NOT NULL, PRIMARY KEY (task_id, depends_on)
         );
+        CREATE TABLE IF NOT EXISTS decisions (
+            id TEXT PRIMARY KEY, text TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active',
+            replaces TEXT NOT NULL DEFAULT '[]', replaced_by TEXT NOT NULL DEFAULT '',
+            source TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS task_decisions (
+            task_id TEXT NOT NULL, decision_id TEXT NOT NULL, ack TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (task_id, decision_id)
+        );
         """)
         for row in self.db.execute("SELECT key, value FROM kv WHERE key LIKE 'question:%'"):
             # Questions between sessions used to live in kv.
@@ -429,6 +438,10 @@ class Store:
                 "SELECT id FROM drafts WHERE status=? ORDER BY created_at", (status,)
             )
         ]
+
+    def update_draft_target(self, draft_id: str, target: dict) -> dict:
+        self.execute("UPDATE drafts SET target=? WHERE id=?", (json.dumps(target), draft_id))
+        return self.draft(draft_id)
 
     def update_draft(self, draft_id: str, **values) -> dict:
         if not values or not values.keys() <= DRAFT_FIELDS:

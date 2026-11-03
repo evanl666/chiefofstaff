@@ -8,6 +8,7 @@ import asyncio
 import json
 import os
 import re
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
@@ -17,7 +18,9 @@ from pydantic import BaseModel, Field
 
 from . import prompts, threads
 from .asks import AnswerSession, AskSession, RecordSetup
+from .decisions import AckDecision, AskDecision, RecordDecision
 from .envelope import clean_title, short, wrap
+from .models import NestedArguments
 from .policy import within
 from .roles import ROUTER, SLACK, WATCHDOG, WORKER
 from .workspaces import resolve_project
@@ -70,6 +73,11 @@ class SpawnWorker(BaseModel):
         default_factory=list,
         description="Task ids (or worker ids) of earlier work this new worker should build on: "
         "it gets their goals, results, folders and files, without their whole conversation",
+    )
+    decisions: list[str] = Field(
+        default_factory=list,
+        description="Ids (dec…) of the owner's decisions this task relies on, from "
+        "list_sessions().decisions: if one changes, its worker is told",
     )
     model: str = Field(default="", description="Model id; empty for the configured default")
     effort: Literal["", "low", "medium", "high", "xhigh", "max"] = Field(
@@ -126,6 +134,10 @@ class MessageSession(BaseModel):
         default_factory=list,
         description="For task='new': its acceptance criteria, as for spawn_worker",
     )
+    decisions: list[str] = Field(
+        default_factory=list,
+        description="For task='new': ids (dec…) of decisions it relies on, as for spawn_worker",
+    )
     follow: list[str] = Field(
         default_factory=list,
         description="Thread keys from the event (slack:<channel>:<ts>, slack:<D…>, "
@@ -170,7 +182,7 @@ class CriterionResult(BaseModel):
     )
 
 
-class Report(BaseModel):
+class Report(NestedArguments):
     status: Literal["progress", "question", "blocked", "done"]
     summary: str = Field(description="What happened, or the one concrete question")
     task_id: str = Field(
@@ -185,15 +197,20 @@ class Report(BaseModel):
     )
 
 
-def task_text(instructions: str, criteria: list[str]) -> str:
-    """A task as its worker reads it: the instructions, then what shows it is done."""
-    if not criteria:
-        return instructions
-    listed = "\n".join(f"- {criterion}" for criterion in criteria)
-    return (
-        f"{instructions}\n\nDone when (check each yourself, then give each one's result and "
-        f"evidence in report(criteria=…)):\n{listed}"
-    )
+def task_text(instructions: str, criteria: list[str], decisions: Sequence[dict] = ()) -> str:
+    """A task as its worker reads it: the instructions, the owner's decisions it relies on, and
+    what shows it is done."""
+    text = instructions
+    if decisions:
+        listed = "\n".join(f"- {d['id']}: {d['text']}" for d in decisions)
+        text += f"\n\nThe owner's decisions this relies on:\n{listed}"
+    if criteria:
+        listed = "\n".join(f"- {criterion}" for criterion in criteria)
+        text += (
+            "\n\nDone when (check each yourself, then give each one's result and evidence in "
+            f"report(criteria=…)):\n{listed}"
+        )
+    return text
 
 
 def clean_criteria(criteria: list[str]) -> list[str]:
@@ -339,6 +356,30 @@ class Tools:
                 "so the Router and later workers know it.",
                 RecordSetup,
                 self.runtime.asks.t_record_setup,
+            ),
+            (
+                "ask_decision",
+                "Ask the owner to make a decision that is theirs (scope, a trade-off, a risky or "
+                "costly change): with why it comes up, the options and what each means, and your "
+                "recommendation. The answer arrives as a message; other workers can join it.",
+                AskDecision,
+                self.runtime.decisions.t_ask_decision,
+            ),
+            (
+                "ack_decision",
+                "Confirm that you now work to a changed decision of the owner's, and what you "
+                "change because of it.",
+                AckDecision,
+                self.runtime.decisions.t_ack_decision,
+            ),
+            (
+                "record_decision",
+                "Record a decision the owner made that work depends on (a requirement, scope or "
+                "design choice), linked to the tasks that rely on it. When the owner changes an "
+                "earlier decision, pass replaces: every affected worker is told and confirms, "
+                "and their checked results are marked out of date.",
+                RecordDecision,
+                self.runtime.decisions.t_record_decision,
             ),
             (
                 "ask_session",
@@ -541,6 +582,7 @@ class Tools:
         if params.model or effort:
             self.store.update_session(session_id, model=params.model, effort=effort)
         criteria = clean_criteria(params.done_when)
+        decisions = [self.runtime.decisions.get(identifier) for identifier in params.decisions]
         task = self.tasks.create(
             session_id,
             title,
@@ -550,11 +592,16 @@ class Tools:
             needs=params.wait_for,
             criteria=criteria,
         )
+        self.link_decisions(task["id"], decisions)
         if distill:
             self.store.set(f"distill:{session_id}", "1")
         self.runtime.follow(session_id, follow)
         prompt = wrap(
-            "router", "task", task_text(params.instructions, criteria), title=title, task=task["id"]
+            "router",
+            "task",
+            task_text(params.instructions, criteria, decisions),
+            title=title,
+            task=task["id"],
         )
         if context_from:
             prompt += "\n\n" + wrap("system", "context", self.tasks.briefing(context_from))
@@ -586,6 +633,13 @@ class Tools:
             result["note"] = "Queued until a worker slot frees up."
         return result
 
+    def link_decisions(self, task_id: str, decisions: list[dict]):
+        for decision in decisions:
+            self.store.execute(
+                "INSERT OR IGNORE INTO task_decisions(task_id, decision_id) VALUES (?,?)",
+                (task_id, decision["id"]),
+            )
+
     async def t_message_session(self, params: MessageSession, caller: str):
         self.caller(caller, ROUTER)
         target = self.store.session(params.session_id)
@@ -612,11 +666,17 @@ class Tools:
         if params.task == "new":
             title = clean_title(params.title or params.text.splitlines()[0][:60])
             criteria = clean_criteria(params.done_when)
+            decisions = [self.runtime.decisions.get(identifier) for identifier in params.decisions]
             task = self.tasks.create(
                 target["id"], title, params.text[:4000], status="running", criteria=criteria
             )
+            self.link_decisions(task["id"], decisions)
             prompt = wrap(
-                "router", "task", task_text(params.text, criteria), title=title, task=task["id"]
+                "router",
+                "task",
+                task_text(params.text, criteria, decisions),
+                title=title,
+                task=task["id"],
             )
             notice = f"New task “{title}” for “{target['title']}”"
         else:
@@ -650,6 +710,10 @@ class Tools:
             "models": models,
             "default_worker_model": settings.role_models.get(WORKER) or settings.model or "auto",
             "slack_connected": self.runtime.slack.configured(),
+            "decisions": [
+                {"id": d["id"], "decision": d["text"], "tasks": d["tasks"]}
+                for d in self.runtime.decisions.active()
+            ],
             "github_repos": settings.github_repos if settings.github_enabled else [],
             "sessions": [
                 {

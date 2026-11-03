@@ -91,12 +91,14 @@ async def run(scheme: str):
             now = await research.evaluate(state)
             log(f"a half-typed note survived an update of its card ({now[:60]})")
 
-            question = page.locator(".card.request.question")
+            question = page.locator(".card.decision")
             await expect(question).to_be_visible(timeout=30000)
+            await expect(question.locator(".option.recommended")).to_contain_text("Per account")
+            await expect(question).to_contain_text("lets anyone lock a user out")
             await page.screenshot(path=SHOTS / f"demo-{scheme}-2-question.png")
-            await question.get_by_role("button", name="Per account").click()
+            await question.locator(".option", has_text="Per account").click()
             await expect(question).to_have_count(0)
-            log("answered the worker's question from its card")
+            log("decided from a card with the options, their effects and a recommendation")
 
             slack = page.locator("#inbox-needs .card.draft:not(.request)")
             await expect(slack).to_be_visible(timeout=60000)
@@ -109,10 +111,15 @@ async def run(scheme: str):
             review = page.locator("#inbox-review .card.task")
             await expect(review).to_have_count(3, timeout=60000)
             fix = review.filter(has_text="Fix the flaky login test")
-            await expect(fix.locator(".receipt.pass")).to_contain_text("tests")
+            await expect(fix.locator(".receipt.pass", has_text="tests")).to_be_visible()
             await expect(fix.locator(".receipt", has_text="commit")).to_be_visible(timeout=10000)
-            await expect(review.filter(has_text="Rate-limit")).to_contain_text("per account")
-            log("results wait for review with what was observed")
+            limited = review.filter(has_text="Rate-limit")
+            await expect(limited).to_contain_text("per account")
+            await expect(fix.locator(".receipt.verdict")).to_have_text("✓ Verified")
+            await expect(fix.locator(".receipt", has_text="✗→✓ tests")).to_be_visible()
+            await expect(limited.locator(".receipt.verdict")).to_have_text("Partly verified · 1/2")
+            await expect(limited.locator(".criteria li.warn")).to_contain_text("sixth attempt")
+            log("results wait for review: verified criteria apart from claimed ones")
             await page.screenshot(path=SHOTS / f"demo-{scheme}-4-review.png", full_page=True)
 
             await fix.get_by_role("button", name="Copy report").click()
@@ -161,6 +168,19 @@ async def run(scheme: str):
             await expect(narrated).to_have_count(0)
             log("what a worker says on the way is folded into its steps, not shown as answers")
             await page.locator(".item", has_text="Inbox").first.click()
+
+            await page.fill(
+                "#composer-input", "Change of plan: limit login attempts per IP address only"
+            )
+            await page.press("#composer-input", "Enter")
+            limited = page.locator("#inbox-review .card.task", has_text="per IP address only")
+            await expect(limited).to_be_visible(timeout=30000)
+            await page.locator(".item", has_text="Chat").click()
+            await expect(page.locator("#timeline")).to_contain_text(
+                "works to the new decision", timeout=10000
+            )
+            await page.locator(".item", has_text="Inbox").first.click()
+            log("changed a decision: the affected result was redone, and its worker confirmed")
 
             await page.select_option("#session-actions select", "60")
             await expect(page.locator("#session-meta")).to_contain_text("Focusing until")

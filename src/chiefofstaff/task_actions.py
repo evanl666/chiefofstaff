@@ -59,12 +59,13 @@ class TaskActions:
             WHERE r.task_id=? ORDER BY c.id""",
             (task["id"],),
         )
+        # Claims are saved with the report; what was observed follows from git and gh.
         latest = self.store.one(
-            """SELECT evidence, criteria FROM runs WHERE task_id=? AND evidence!=''
-            ORDER BY started_at DESC""",
+            """SELECT evidence, criteria FROM runs WHERE task_id=?
+            AND (evidence!='' OR criteria!='') ORDER BY started_at DESC""",
             (task["id"],),
         )
-        evidence = json.loads(latest["evidence"]) if latest else None
+        evidence = json.loads(latest["evidence"]) if latest and latest["evidence"] else None
         criteria = self.tasks.criteria(task)
         if not commands and not evidence and not criteria:
             return None
@@ -485,6 +486,7 @@ class TaskActions:
             "credits": self.tasks.credits(task["id"]),
             "blocked": task["status"] == "queued" and bool(self.tasks.broken(task)),
             "receipts": self.receipts(task),
+            "decisions": self.runtime.decisions.for_task(task["id"]),
         }
 
     def publish(self, task: dict):
