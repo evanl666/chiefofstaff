@@ -265,9 +265,20 @@ def worker_context(
                 where += f": branch {checkout['branch']}, a dedicated git worktree"
                 if checkout.get("base"):
                     where += f" started from {checkout['base']}"
+                if carried := checkout.get("carried"):
+                    names = ", ".join(carried[:8]) + (
+                        f" and {len(carried) - 8} more" if len(carried) > 8 else ""
+                    )
+                    where += f"; copied in from the owner's checkout (gitignored): {names}"
             else:
                 where += ": the project folder itself (shared; change it only if asked)"
             lines.append(where)
+    if any(checkout.get("worktree") for checkout in checkouts):
+        lines.append(
+            "A worktree is a fresh checkout: dependencies are not installed (no node_modules, "
+            "virtualenv or build output). Set it up as the README or AGENTS.md says before you "
+            "run or test anything; never work in the owner's own checkout instead."
+        )
     lines.append(
         "Need another repository? add_repo gives you a worktree of it on your own branch: of "
         "a project folder, or of a git URL or GitHub owner/name (cloned first if it is not on "

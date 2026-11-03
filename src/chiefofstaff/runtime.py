@@ -378,7 +378,9 @@ class Runtime:
             local = await self.workspaces.local_copy(repo)
         if local:
             have = {checkout.get("repo", checkout["path"]) for checkout in checkouts}
-            found = await self.workspaces.make_checkout(workspace, slug, str(local), True, have)
+            found = await self.workspaces.make_checkout(
+                workspace, slug, str(local), True, have, carry=not row["slack"]
+            )
             if not found:
                 return "You already have a checkout of that repository: " + ", ".join(
                     checkout["path"] for checkout in checkouts
