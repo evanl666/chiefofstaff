@@ -272,12 +272,20 @@ def protected_git_paths(git_dir: str, checkouts: list[dict]) -> list[str]:
     """
     root = Path(git_dir)
     own = set()
+    shared = any(
+        checkout.get("shared") and Path(checkout.get("git_dir", "")).resolve() == root.resolve()
+        for checkout in checkouts
+    )
     for checkout in checkouts:
         pointer = Path(checkout.get("path", "")) / ".git"
         with suppress(OSError, ValueError):
             if pointer.is_file() and (text := pointer.read_text()).startswith("gitdir:"):
                 own.add(Path(text.removeprefix("gitdir:").strip()).resolve())
     paths = [root / "hooks", root / "config"]
+    if not shared:
+        # The owner's own checkout: its branch and staged changes are theirs. (A worker that
+        # works in the owner's checkout itself needs them.)
+        paths += [root / name for name in ("HEAD", "index") if (root / name).exists()]
     if (root / "modules").is_dir():
         paths.append(root / "modules")
     if (root / "worktrees").is_dir():
@@ -429,6 +437,60 @@ async def diff(checkout: dict) -> dict:
     }
 
 
+# Ignored folders that are made again by an install or a build: no reason to keep a worktree.
+REGENERABLE = {
+    *SKIPPED, ".venv", ".tox", ".nox", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+    ".cache", ".next", ".nuxt", ".turbo", ".parcel-cache", ".gradle", ".idea", ".vscode",
+    "coverage", "htmlcov", ".coverage", ".DS_Store", "out-tsc",
+}  # fmt: skip
+
+
+async def kept_ignored(checkout: dict) -> list[str]:
+    """Ignored files in a worker's worktree that may matter (git removes them with it): any
+    outside folders an install or a build makes, and copied-in files it changed (an .env)."""
+    tree = Path(checkout["worktree"])
+    try:
+        listed = await git(
+            "-C", str(tree), "ls-files", "--others", "--ignored", "--exclude-standard",
+            "--directory", "-z",
+        )  # fmt: skip
+    except ValueError:
+        return []
+    carried = set(checkout.get("carried") or [])
+    kept = []
+    for entry in filter(None, listed.split("\0")):
+        parts = entry.rstrip("/").split("/")
+        if any(part in REGENERABLE or part.endswith((".egg-info", ".pyc")) for part in parts):
+            continue
+        if await asyncio.to_thread(only_carried, tree, entry, carried, Path(checkout["repo"])):
+            continue
+        kept.append(entry)
+    return kept
+
+
+def only_carried(tree: Path, entry: str, carried: set[str], repo: Path) -> bool:
+    """Whether an ignored file (or folder, as git lists one that holds only ignored files) is
+    nothing but copies made when the worktree was, unchanged."""
+    path = tree / entry
+    if not entry.endswith("/"):
+        return entry in carried and same_file(path, repo / entry)
+    names = [
+        str(Path(folder, name).relative_to(tree))
+        for folder, _, files in itertools.islice(os.walk(path), 200)
+        for name in files
+    ]
+    return bool(names) and all(
+        name in carried and same_file(tree / name, repo / name) for name in names
+    )
+
+
+def same_file(one: Path, other: Path) -> bool:
+    try:
+        return one.read_bytes() == other.read_bytes()
+    except OSError:
+        return False
+
+
 class Workspaces:
     def __init__(self, store: Store, work_root: Path):
         self.store = store
@@ -508,6 +570,10 @@ class Workspaces:
         for checkout in self.checkouts(row):
             tree = checkout.get("worktree")
             if not tree or not await asyncio.to_thread(os.path.isdir, tree):
+                continue
+            if kept := await kept_ignored(checkout):
+                # git would delete them with the worktree: it stays instead.
+                logger.info("Kept %s: it has ignored files: %s", tree, ", ".join(kept[:5]))
                 continue
             try:
                 await git("-C", checkout["repo"], "worktree", "remove", checkout["worktree"])

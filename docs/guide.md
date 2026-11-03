@@ -134,7 +134,8 @@ You set one **code folder**: where your repositories live, like `~/workspace`.
   would overwrite each other's files and switch each other's branches.
 - Follow-ups on a task go to the same worker and folder. When a worker closes, its worktrees
   are removed if they hold nothing uncommitted (the branches stay); reopening it brings them
-  back.
+  back. A worktree with ignored files you may want (an edited `.env`, a report) is kept;
+  dependencies and build output alone do not keep it.
 
 A worktree is a fresh checkout: no dependencies installed, and none of the files git ignores.
 Workers are told to install what the project needs (per its README or `AGENTS.md`). Gitignored
@@ -148,7 +149,8 @@ Folders outside the code folder can be added under *Advanced → Other project f
 Finder or VS Code.
 
 With the **sandbox** on (Settings, default), workers' shell commands can write only to their
-workspace, checkouts and the repositories' `.git` (not their hooks or config), never see your
+workspace, checkouts and the repositories' `.git` (not their hooks, config, or your checkout's
+`HEAD` and index), never see your
 GitHub token, and cannot read `~/.ssh`. On macOS, run `copilot sandbox ca create && copilot
 sandbox ca trust` once so `gh` works inside the sandbox; Settings tells you when it is needed.
 
@@ -214,7 +216,9 @@ notification:
   itself. Copilot keeps the sign-in for every session (see [SECURITY.md](../SECURITY.md)).
 - **A folder**: the Router is not sure where a task belongs.
 - **Approvals**: Slack replies and PR reviews drafted in your voice. Edit and *Send*, or
-  *Reject* with a reason the session learns from.
+  *Reject* with a reason the session learns from. A Slack draft shows where it goes (DM,
+  channel or thread) and the latest message there, read from Slack itself, so you can check it
+  answers the right conversation.
 
 There are no per-tool settings: Chief of Staff uses whatever your Copilot has (MCP servers,
 CLIs). For a new ability ("read our company docs"), the Router starts a setup worker that finds

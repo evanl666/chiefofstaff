@@ -1,6 +1,6 @@
 // Cards for what waits for the owner: drafts to approve, questions, forms and sign-ins.
 
-import { $, api, el } from "./dom.js";
+import { $, api, el, submits } from "./dom.js";
 import { displayPath, markdown } from "./text.js";
 import { byId, draftsFor, state } from "./state.js";
 import { select } from "./session.js";
@@ -12,7 +12,13 @@ export function renderDrafts() {
     if (!ids.has(node.dataset.id)) node.remove();
   }
   for (const draft of visible) {
-    if (!box.querySelector(`[data-id="${draft.id}"]`)) box.append(draftCard(draft));
+    const node = box.querySelector(`[data-id="${draft.id}"]`);
+    if (node && node.dataset.key === draftKey(draft)) continue;
+    // New, or changed (a worker joined a decision, one confirmed a change): built afresh.
+    const card = draftCard(draft);
+    card.dataset.key = draftKey(draft);
+    if (node) node.replaceWith(card);
+    else box.append(card);
   }
 }
 // The Router is not sure which folder a task belongs in: the owner picks one.
@@ -56,7 +62,7 @@ function workspaceCard(draft) {
     el("button", { type: "button", class: "secondary", onclick: () => decide({ action: "choose", choice: "" }) }, el("span", { text: "No project" }), el("small", { text: "its own scratch folder" })),
   );
   const use = () => other.value.trim() && decide({ action: "choose", choice: other.value.trim() });
-  other.addEventListener("keydown", (event) => event.key === "Enter" && use());
+  other.addEventListener("keydown", (event) => submits(event) && use());
   node.append(
     choices,
     el(
@@ -139,7 +145,7 @@ function requestCard(draft) {
     }
     if (target.allow_freeform || !target.choices?.length) {
       const input = el("input", { placeholder: "Your answer", autocomplete: "off" });
-      input.addEventListener("keydown", (event) => event.key === "Enter" && decide({ action: "answer", text: input.value }));
+      input.addEventListener("keydown", (event) => submits(event) && decide({ action: "answer", text: input.value }));
       actions.append(input, el("button", { type: "button", text: "Answer", onclick: () => decide({ action: "answer", text: input.value }) }));
     }
     actions.append(decline("Skip"));
@@ -212,7 +218,7 @@ function decisionCard(draft) {
   const askers = target.askers || [];
   node.append(el("div", { class: "affects" }, el("span", { text: askers.length > 1 ? `Affects ${askers.length} tasks:` : "For" }), ...askers.map(taskLink)));
   const input = el("input", { placeholder: "Or decide something else", autocomplete: "off" });
-  input.addEventListener("keydown", (event) => event.key === "Enter" && input.value.trim() && decide({ action: "answer", text: input.value }));
+  input.addEventListener("keydown", (event) => submits(event) && input.value.trim() && decide({ action: "answer", text: input.value }));
   node.append(
     el("div", { class: "actions" }, input, el("button", { type: "button", class: "secondary", text: "Decide", onclick: () => decide({ action: "answer", text: input.value }) }), el("button", { type: "button", class: "text", text: "Not now", onclick: () => decide({ action: "reject" }) })),
     error,
@@ -275,6 +281,13 @@ function lessonsCard(draft) {
   node.append(el("div", { class: "actions" }, el("button", { type: "button", class: "text", text: "Drop all", onclick: () => decide({ action: "reject" }) }), el("button", { type: "button", text: "Keep ticked", onclick: keep })), error);
   return node;
 }
+// Where a Slack reply really goes, from its conversation id (D: a direct message, C: a channel,
+// G: a private group); what the drafting session calls it is only its description.
+const SLACK_KIND = { D: "direct message", C: "channel", G: "private group" };
+export function slackDestination(target) {
+  const kind = SLACK_KIND[target.channel_id?.[0]] || "conversation";
+  return `${kind} ${target.channel_id}${target.thread_ts ? ", in a thread" : ""}`;
+}
 export function draftCard(draft) {
   if (draft.kind === "lessons") return lessonsCard(draft);
   if (draft.kind === "decision") return decisionCard(draft);
@@ -285,10 +298,11 @@ export function draftCard(draft) {
   const target = draft.target;
   const label =
     draft.kind === "slack"
-      ? `Slack reply${target.thread_ts ? " in thread" : ""} · ${target.to || target.channel_id}`
+      ? `Slack reply · ${slackDestination(target)}`
       : `PR review · ${target.repo}#${target.number}`;
-  const text = el("textarea", { rows: Math.min(10, draft.text.split("\n").length + 1) });
-  text.value = draft.text;
+  const shown = draft.final_text || draft.text;
+  const text = el("textarea", { rows: Math.min(10, shown.split("\n").length + 1) });
+  text.value = shown;
   const error = el("span", { class: "error" });
   const actions = el("div", { class: "actions" });
   const node = el(
@@ -300,7 +314,12 @@ export function draftCard(draft) {
       el("span", { class: "label", text: `${label}${owner && owner.role === "worker" ? ` · from ${owner.title}` : ""}` }),
       el("span", { class: "chip waiting", text: "Waiting for you" }),
     ),
+    draft.kind === "slack" && target.to ? el("div", { class: "note", text: `The session says it is for: ${target.to}` }) : null,
+    draft.kind === "slack" && target.latest ? el("div", { class: "note", text: "Latest there, from Slack:" }) : null,
+    draft.kind === "slack" && target.latest ? el("div", { class: "quoted", text: target.latest }) : null,
     draft.note ? el("div", { class: "note", text: draft.note }) : null,
+    // Not published after an interrupted send: what happened, and the owner's edit kept.
+    draft.outcome ? el("div", { class: "note", text: draft.outcome }) : null,
     draft.kind === "github" ? el("a", { href: target.url, target: "_blank", rel: "noreferrer", text: target.url }) : null,
     text,
     actions,

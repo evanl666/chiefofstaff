@@ -206,6 +206,7 @@ class Workers:
                 },
             )
             self.store.set(f"handed:{task['id']}", "1")
+        connection = self.runtime.connections
         try:
             if self.store.get(f"created:{session_id}"):
                 session = await self.runtime.session_for(session_id)
@@ -214,15 +215,38 @@ class Workers:
                     session = self.states.handle(session_id) or await self.runtime.open_live(
                         row, create=True
                     )
+            current = self.store.session(session_id)
+            if current["closed_at"] or current["status"] != "starting":
+                # Cancelled, stopped or closed while its session was made: nothing to send now.
+                self.states[session_id].busy = False
+                self.runtime.background(self.pump())
+                return
             self.runtime.update_session(session_id, status="working")
+            task = self.tasks.current(session_id)
             if task and task["status"] == "queued":
                 self.tasks.move(task["id"], "running")
             # Flushing now includes messages that arrived while the session was being created.
             if not await self.delivery.flush(session_id, session):
                 self.states[session_id].busy = False
                 self.runtime.update_session(session_id, status="idle")
+                self.runtime.background(self.pump())
+        except asyncio.CancelledError:
+            # Stopped, reconnected or shut down meanwhile: it waits in the queue again.
+            self.requeue(session_id)
+            raise
         except Exception as exc:
+            if not self.runtime.backend or self.runtime.connections != connection:
+                self.requeue(session_id)  # Copilot disconnected meanwhile: not its failure.
+                return
             self.runtime.fail(row, f"Could not start: {describe(exc)}")
+
+    def requeue(self, session_id: str):
+        """A start that did not happen: the worker waits in the queue again."""
+        self.states[session_id].busy = False
+        current = self.store.find_session(session_id)
+        if current and not current["closed_at"] and current["status"] in {"starting", "working"}:
+            self.runtime.update_session(session_id, status="queued", activity="")
+        self.runtime.background(self.pump())  # Does nothing until Copilot is ready again.
 
     async def close(self, session_id: str):
         row = self.store.session(session_id)
@@ -394,7 +418,12 @@ class Workers:
         if session := self.states.handle(session_id):
             await session.abort()
         self.states[session_id].busy = False
-        if row["status"] in {"working", "queued"}:
+        self.states[session_id].after_refresh = ""  # Not "go on" once it is stopped.
+        if row["role"] == WORKER:
+            # Its task, given and not received, is for its next message, not a turn now. Events
+            # held for the Router or the Slack session still go out when it is idle.
+            self.delivery.defer_pending(session_id)
+        if row["status"] in {"working", "queued", "starting"}:
             self.runtime.update_session(session_id, status="idle", activity="")
             # A deliberate stop: the watchdog must not treat it as a silent stall.
             self.runtime.add_message(session_id, "notice", f"Stopped by {by}.", {"stopped": True})

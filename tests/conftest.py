@@ -100,7 +100,9 @@ class FakeClient:
         pass
 
     async def stop(self):
-        pass
+        # Like Copilot: a session that never had a message is not kept.
+        for session_id in [s for s, session in self.sessions.items() if not session.sent]:
+            del self.sessions[session_id]
 
     async def get_auth_status(self):
         return SimpleNamespace(isAuthenticated=True)

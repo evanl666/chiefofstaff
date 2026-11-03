@@ -33,6 +33,7 @@ export const state = {
   chief: null,
   external: [],
   lastId: 0,
+  loading: null,
   connectedOnce: false,
   reloadTimer: null,
   models: [],
@@ -90,7 +91,8 @@ function handleEvent({ type, data }) {
     if (state.connectedOnce) resync().catch(() => {});
     state.connectedOnce = true;
   } else if (type === "message") {
-    if (data.session_id === state.selected) appendMessages([data]);
+    if (state.loading?.id === data.session_id) state.loading.held.push(data);
+    else if (data.session_id === state.selected) appendMessages([data]);
     const meta = data.meta || {};
     if (state.chief && data.session_id === routerId() && ((data.kind === "assistant" && !meta.internal) || data.kind === "update")) {
       state.chief.replies.push(data.text);

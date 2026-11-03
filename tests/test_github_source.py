@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 
 from chiefofstaff.models import Settings
 from chiefofstaff.sources.github import GitHubSource
@@ -35,9 +36,10 @@ def fake_gh(state):
     async def gh(*arguments, payload=None):
         path = arguments[1]
         if path == "repos/acme/app/pulls/7":
-            return json.dumps(
-                {"state": state["state"], "merged": state["merged"], "head": {"sha": "abc1234"}}
-            )
+            pull = {"state": state["state"], "merged": state["merged"], "head": {"sha": "abc1234"}}
+            if state["state"] != "open":
+                pull["closed_at"] = pull["merged_at"] = state.get("ended", "2026-01-01T00:00:00Z")
+            return json.dumps(pull)
         if path.startswith("repos/acme/app/issues/7/comments"):
             return json.dumps(state["comments"])
         if path.startswith("repos/acme/app/pulls/7/comments"):
@@ -119,7 +121,7 @@ async def test_followed_pr_activity_reaches_its_followers(tmp_path):
     await source.poll_once()
     assert len(host.deliveries) == 1, "nothing new, nothing delivered"
 
-    state.update(state="closed", merged=True)
+    state.update(state="closed", merged=True, ended="2026-11-03T00:00:00Z")
     await source.poll_once()
     assert host.deliveries[-1][1] == ["github:state:github:acme/app#7:merged"]
     assert host.subscriptions == [], "a merged PR is no longer followed"
@@ -191,3 +193,20 @@ async def test_a_pr_cited_after_it_finished_is_just_unfollowed(tmp_path):
     await GitHubSource(store, host, gh_command=fake_gh(state)).poll_once()
     assert host.deliveries == [], "no news about a PR that was already merged"
     assert host.unfollowed == [(THREAD, False, False)], "and its follower is not closed"
+
+
+async def test_a_pr_is_done_by_when_it_ended_not_by_what_a_poll_saw(tmp_path):
+    store = Store(tmp_path / "data")
+    store.save_settings(Settings())
+    host = Host(store)
+    followed_at = 1793500000.0
+    state = {"state": "closed", "merged": True, "comments": [], "ended": "2026-11-03T00:00:00Z"}
+    assert datetime.fromisoformat("2026-11-03T00:00:00+00:00").timestamp() > followed_at
+    source = GitHubSource(store, host, gh_command=fake_gh(state))
+    await source.poll_once()  # Merged before any poll saw it open.
+    assert host.unfollowed == [(THREAD, True, True)]
+    assert "github:state:github:acme/app#7:merged" in host.deliveries[-1][1]
+
+    host.subscriptions = [{"thread": THREAD, "since": followed_at + 10**6}]  # Cited later.
+    await source.poll_once()
+    assert host.unfollowed[-1] == (THREAD, False, False), "already finished: just unfollowed"

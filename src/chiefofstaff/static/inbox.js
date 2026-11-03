@@ -1,11 +1,11 @@
 // The inbox: what needs the owner, what is running, and results ready to review.
 
-import { $, api, el, toast } from "./dom.js";
+import { $, api, el, submits, toast } from "./dom.js";
 import { compactPaths, markdown, plural, shortPath, since } from "./text.js";
 import { byId, loadState, pendingDrafts, routerId, sessions, state } from "./state.js";
 import { renderSidebar, renderStatusLine } from "./sidebar.js";
 import { select, setComposer } from "./session.js";
-import { draftCard, draftKey } from "./drafts.js";
+import { draftCard, draftKey, slackDestination } from "./drafts.js";
 import { showChanges } from "./diff.js";
 export const INBOX = "inbox";
 const tasks = () => state.snapshot?.tasks || [];
@@ -307,7 +307,7 @@ function setupCard() {
         error.textContent = failure.message;
       }
     };
-    input.addEventListener("keydown", (event) => event.key === "Enter" && add());
+    input.addEventListener("keydown", (event) => submits(event) && add());
     node = el(
       "div",
       { id: "inbox-setup", class: "card setup" },
@@ -422,7 +422,7 @@ function taskCard(task) {
     const input = el("textarea", { rows: 2, placeholder });
     const send = () => input.value.trim() && act(`/api/tasks/${task.id}/follow-up`, { text: input.value.trim() }, "Sent to the worker.");
     input.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" && !event.shiftKey) {
+      if (submits(event) && !event.shiftKey) {
         event.preventDefault();
         send();
       }
@@ -604,7 +604,7 @@ function showCopy(text) {
 // A draft whose sending a stop interrupted, and that could not be confirmed.
 function uncertainCard(draft) {
   const target = draft.target;
-  const where = draft.kind === "slack" ? `Slack reply to ${target.to || target.channel_id}` : `PR review on ${target.repo}#${target.number}`;
+  const where = draft.kind === "slack" ? `Slack reply to the ${slackDestination(target)}` : `PR review on ${target.repo}#${target.number}`;
   const error = el("span", { class: "error" });
   const actions = el("div", { class: "actions" });
   async function decide(body) {

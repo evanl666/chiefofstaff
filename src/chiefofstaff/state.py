@@ -32,6 +32,8 @@ class SessionState:
     retuned: bool = False
     # Reconnect once this turn ends, so new instructions apply.
     stale: bool = False
+    # Said to it in a new turn once it is reattached (after its sandbox changed).
+    after_refresh: str = ""
     # Close once this turn ends (its pull request was merged or closed).
     close_after_turn: bool = False
     # The status a done or waiting worker returns to after a follow-up turn without a report.
@@ -83,3 +85,11 @@ class SessionStates:
 
     def take_all_handles(self) -> list[Any]:
         return [handle for key in self.live_ids() if (handle := self.take_handle(key))]
+
+    def end_turns(self):
+        """Every session is disconnected: no turn is running, none holds a worker slot."""
+        for state in self._states.values():
+            state.busy = False
+            state.retuned = False
+            state.stale = False
+            state.after_refresh = ""

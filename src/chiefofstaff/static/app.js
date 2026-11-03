@@ -1,6 +1,6 @@
 // Chief of Staff's web UI: starts the page and wires its controls.
 
-import { $, api, toast } from "./dom.js";
+import { $, api, submits, toast } from "./dom.js";
 import { byId, connectEvents, current, loadModels, loadState, markRead, routerId, state } from "./state.js";
 import { externalItem, loadExternal } from "./sidebar.js";
 import { appendMessages, select } from "./session.js";
@@ -14,7 +14,7 @@ function bindUi() {
   };
   input.addEventListener("input", autosize);
   input.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+    if (submits(event) && !event.shiftKey) {
       event.preventDefault();
       $("#composer").requestSubmit();
     }

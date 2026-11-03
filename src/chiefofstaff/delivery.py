@@ -80,6 +80,7 @@ class Delivery:
             if EVENT_DEBOUNCE > 0:
                 self.schedule_flush(session_id)
                 return message
+        claimed = not self.states[session_id].busy
         if row["role"] == WORKER and not await self.runtime.workers.claim_slot(session_id):
             return message
         working = row["status"] == "working" and self.states.is_live(session_id)
@@ -88,8 +89,15 @@ class Delivery:
         )
         try:
             sent = await self.flush(session_id, await self.runtime.session_for(session_id), mode)
+        except asyncio.CancelledError:
+            if claimed:
+                self.states[session_id].busy = False
+                self.runtime.background(self.runtime.workers.pump())
+            raise
         except Exception as exc:
-            self.states[session_id].busy = False
+            if claimed or row["role"] != WORKER:
+                self.states[session_id].busy = False
+                self.runtime.background(self.runtime.workers.pump())  # Its slot is free.
             # Not replayed later: the caller sees the error (a watcher re-polls the event).
             self.store.update_message_meta(message["id"], meta or {})
             self.runtime.add_message(session_id, "error", f"Delivery failed: {describe(exc)}")
@@ -124,9 +132,22 @@ class Delivery:
 
         self.runtime.background(later())
 
-    def has_unsent(self, session_id: str) -> bool:
+    def defer_pending(self, session_id: str):
+        """Whatever it has not received yet rides along with its next message (it was stopped
+        or its task cancelled): a restart must not start a turn for it."""
         mark = int(self.store.get(f"sent:{session_id}") or 0)
-        return any("prompt" in m["meta"] for m in self.store.messages(session_id, after=mark))
+        for message in self.store.messages(session_id, after=mark):
+            if "prompt" in message["meta"] and not message["meta"].get("deferred"):
+                self.store.update_message_meta(message["id"], {**message["meta"], "deferred": True})
+
+    def has_unsent(self, session_id: str) -> bool:
+        """Whether it has messages to receive that are worth a turn (a deferred note, such as
+        a cancellation, only rides along with the next one)."""
+        mark = int(self.store.get(f"sent:{session_id}") or 0)
+        return any(
+            "prompt" in m["meta"] and not m["meta"].get("deferred")
+            for m in self.store.messages(session_id, after=mark)
+        )
 
     async def flush(self, session_id: str, session, mode: SendMode = "enqueue") -> bool:
         """Send every prompt this session has not received yet, as one message."""
@@ -155,6 +176,7 @@ class Delivery:
                 raise
             self.store.set(f"sent:{session_id}", str(pending[-1]["id"]))
             self.store.delete(f"sending:{session_id}")
+            self.store.delete(f"fresh:{self.runtime.copilot_id(session_id)}")
             if preamble:
                 self.store.delete(f"preamble:{session_id}")
             return True
@@ -185,16 +207,22 @@ class Delivery:
         row = self.store.session(session_id)
         if row["closed_at"] or row["status"] in {"queued", "starting", "working"}:
             return
+        if not self.has_unsent(session_id):
+            return  # Only deferred notes: they wait for its next message.
         if row["role"] in {ROUTER, SLACK}:
             self.schedule_flush(session_id, 0)
         elif await self.runtime.workers.claim_slot(session_id):
+            if row["status"] in {"done", "waiting"}:
+                self.states[session_id].resting = row["status"]  # As deliver does.
             try:
                 if await self.flush(session_id, await self.runtime.session_for(session_id)):
                     self.runtime.update_session(session_id, status="working")
                 else:
                     self.states[session_id].busy = False
+                    self.runtime.background(self.runtime.workers.pump())
             except Exception:
                 self.states[session_id].busy = False
+                self.runtime.background(self.runtime.workers.pump())
                 logger.warning("Could not resend to %s.", session_id, exc_info=True)
 
 

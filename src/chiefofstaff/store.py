@@ -67,6 +67,14 @@ def rename_database(directory: Path):
             return
 
 
+def valid(values: dict) -> bool:
+    try:
+        Settings.model_validate(values)
+    except ValidationError:
+        return False
+    return True
+
+
 class Store:
     def __init__(self, directory: Path):
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -293,7 +301,21 @@ class Store:
             ]
             if not Path(values.get("code_folder") or "/nonexistent").is_dir():
                 values["code_folder"] = ""
-            return Settings.model_validate(values)
+            try:
+                return Settings.model_validate(values)
+            except ValidationError:
+                # Still invalid (the code folder became a repository, say): keep what is valid,
+                # so Chief of Staff runs and Settings can fix the rest. In rounds, as some fields
+                # are valid only with others (GitHub with its repos).
+                kept: dict = {}
+                while True:
+                    before = len(kept)
+                    for key, value in values.items():
+                        if key not in kept and valid({**kept, key: value}):
+                            kept[key] = value
+                    if len(kept) == before:
+                        break
+                return Settings.model_validate(kept)
 
     def save_settings(self, settings: Settings):
         self.execute("INSERT OR REPLACE INTO settings VALUES (1, ?)", (settings.model_dump_json(),))
