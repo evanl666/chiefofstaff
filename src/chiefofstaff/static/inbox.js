@@ -483,11 +483,31 @@ function taskBody(task, worker) {
   return wrapper;
 }
 // What was observed, next to what the worker reported.
+const VERDICT = {
+  verified: ["pass", "✓ Verified", "Every acceptance criterion is backed by a check it was seen running"],
+  partial: ["warn", "Partly verified", "Some criteria are backed by a check it was seen running; others are only reported"],
+  unverified: ["warn", "Not verified", "No criterion is backed by a check it was seen running"],
+  failed: ["fail", "✗ Not met", "A criterion is not met, or the check behind it failed"],
+};
+const CRITERION = {
+  verified: ["pass", "✓", "Verified: it ran this check and it passed"],
+  claimed: ["warn", "~", "Reported met; no check was seen running"],
+  contradicted: ["fail", "✗", "Reported met, but the check failed"],
+  not_met: ["fail", "✗", "Not met"],
+  not_checked: ["none", "–", "Not checked"],
+};
 function receiptsView(receipts, task) {
   const items = [];
+  if (receipts.verdict) {
+    const [kind, text, help] = receipts.stale ? ["warn", "Out of date", receipts.stale] : VERDICT[receipts.verdict];
+    const done = receipts.criteria.filter((item) => item.state === "verified").length;
+    items.push(el("span", { class: `receipt verdict ${kind}`, title: help, text: receipts.verdict === "partial" ? `${text} · ${done}/${receipts.criteria.length}` : text }));
+  }
   const result = (label, item) => {
     if (!item) return;
-    items.push(el("span", { class: `receipt ${item.passed ? "pass" : "fail"}`, title: `${item.command}\n(${plural(item.runs, "run")})`, text: `${item.passed ? "✓" : "✗"} ${label}` }));
+    const mark = item.passed ? (item.failed_before ? "✗→✓" : "✓") : "✗";
+    const before = item.failed_before ? "\nFailed first, then passed" : "";
+    items.push(el("span", { class: `receipt ${item.passed ? "pass" : "fail"}`, title: `${item.command}\n(${plural(item.runs, "run")})${before}`, text: `${mark} ${label}` }));
   };
   result("tests", receipts.tests);
   result("checks", receipts.checks);
@@ -500,10 +520,24 @@ function receiptsView(receipts, task) {
     const checks = { passing: "✓", failing: "✗", pending: "…" }[pr.checks] || "";
     items.push(el("a", { class: `receipt pr ${pr.checks}`, href: pr.url, target: "_blank", rel: "noreferrer", text: `${pr.label}${pr.state && pr.state !== "OPEN" ? ` (${pr.state.toLowerCase()})` : ""} ${checks}`.trim() }));
   }
+  for (const item of receipts.version || []) {
+    items.push(el("span", { class: "receipt none", title: "The code these results are about", text: `at ${item.commit.slice(0, 7)}${item.edited ? " + edits" : ""}` }));
+  }
   if (!items.length) items.push(el("span", { class: "receipt none", text: receipts.observed ? `${plural(receipts.observed, "command")}, no tests or changes observed` : "Nothing observed" }));
   const view = el("div", { class: "receipts" }, el("span", { class: "observed", text: "Observed" }), ...items);
+  const criteria = (receipts.criteria || []).length
+    ? el(
+        "ul",
+        { class: "criteria" },
+        ...receipts.criteria.map((item) => {
+          const [kind, mark, help] = CRITERION[item.state] || CRITERION.not_checked;
+          const how = item.command ? `\n${item.command}${item.exit_code ? ` (exit ${item.exit_code})` : ""}` : item.evidence ? `\n${item.evidence}` : "";
+          return el("li", { class: kind, title: `${help}${how}` }, el("span", { class: "mark", text: mark }), el("span", { text: item.criterion }));
+        }),
+      )
+    : null;
   const flags = (receipts.flags || []).map((flag) => el("div", { class: "flag", text: flag }));
-  return el("div", { class: "evidence" }, view, ...flags);
+  return el("div", { class: "evidence" }, view, criteria, ...flags);
 }
 async function copyReport(task) {
   const text = api(`/api/tasks/${task.id}/report`).then((report) => report.markdown);

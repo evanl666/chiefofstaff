@@ -1,6 +1,7 @@
 """Where workers work: a workspace folder each, with worktrees or clones of their repositories."""
 
 import asyncio
+import hashlib
 import itertools
 import json
 import logging
@@ -301,8 +302,27 @@ def base_of(checkout: dict) -> str:
     return checkout.get("base_ref") or ("" if checkout.get("shared") else "origin/HEAD")
 
 
+async def version(checkout: dict) -> dict | None:
+    """Which code a checkout holds now: its commit, and a digest of its uncommitted edits ("" for
+    none). Evidence is about one version; when this changes, the evidence is out of date."""
+    path, head, live = await asyncio.to_thread(locate, checkout)
+    try:
+        commit = (await git("-C", path, "rev-parse", head)).strip()
+    except ValueError:
+        return None
+    edits = ""
+    if live:
+        with suppress(ValueError):
+            edits = await git("-C", path, "status", "--porcelain")
+            if edits.strip():
+                edits += await git("-C", path, "diff", "--no-color", "--no-ext-diff", "HEAD")
+    digest = hashlib.sha1(edits.encode()).hexdigest()[:12] if edits.strip() else ""
+    return {"commit": commit, "edits": digest}
+
+
 async def changes(checkout: dict) -> dict | None:
-    """What a worker changed in one checkout: commits on its branch and uncommitted edits."""
+    """What a worker changed in one checkout: commits on its branch and uncommitted edits, and
+    the version (commit and edits) this describes."""
     path, head, live = await asyncio.to_thread(locate, checkout)
     try:
         await git("-C", path, "rev-parse", "--git-dir")
@@ -325,6 +345,7 @@ async def changes(checkout: dict) -> dict | None:
             result["uncommitted"] = len([line for line in status.splitlines() if line.strip()])
     for key in ("files", "insertions", "deletions"):
         result[key] = committed[key] + uncommitted[key]
+    result.update(await version(checkout) or {})
     return result
 
 

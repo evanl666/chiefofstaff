@@ -150,7 +150,11 @@ class Workers:
         if not task or task["status"] != "queued" or self.store.get(f"released:{task['id']}"):
             return []
         waiting = self.tasks.unmet(task)
-        activity = "waiting for " + ", ".join(f"“{d['title']}”" for d in waiting) if waiting else ""
+        names = ", ".join(
+            f"your review of “{d['title']}”" if d["status"] == "review" else f"“{d['title']}”"
+            for d in waiting
+        )
+        activity = f"waiting for {names}" if waiting else ""
         if row["activity"] != activity:
             self.runtime.update_session(row["id"], activity=activity)
         broken = self.tasks.broken(task)

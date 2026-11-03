@@ -56,6 +56,7 @@ def test_claims_are_checked_against_what_was_observed():
         "exit_code": 0,
         "passed": True,
         "runs": 2,
+        "failed_before": True,
     }
     assert clean["changed"]["insertions"] == 40 and clean["flags"] == []
 
@@ -72,6 +73,44 @@ def test_claims_are_checked_against_what_was_observed():
         [], {"prs": [{"label": "acme/app#7", "checks": "failing"}]}, "Opened the PR."
     )
     assert red["flags"] == ["Checks are failing on acme/app#7."]
+
+
+def test_acceptance_criteria_count_only_what_was_seen():
+    criteria = [
+        "pytest tests/test_orders.py passes",
+        "Submitting twice creates one order",
+        "ruff passes",
+        "Docs updated",
+    ]
+    claims = [
+        {"criterion": "pytest tests/test_orders.py passes", "result": "met",
+         "evidence": "`uv run pytest tests/test_orders.py`: 6 passed"},
+        {"criterion": "Submitting twice creates one order", "result": "met",
+         "evidence": "I reasoned through the handler"},
+        {"criterion": "ruff passes", "result": "met", "evidence": "`ruff check .` is clean"},
+    ]  # fmt: skip
+    commands = [
+        command("uv run pytest tests/test_orders.py", 1),
+        command("uv run pytest tests/test_orders.py", 0),
+        command("ruff check .", 1),
+    ]
+    found = receipts.summarize(commands, {}, "Done.", criteria, claims)
+    assert [item["state"] for item in found["criteria"]] == [
+        "verified",  # The command it named was seen passing.
+        "claimed",  # Nothing observed backs it.
+        "contradicted",  # The command it named failed.
+        "not_checked",  # Not reported.
+    ]
+    assert found["verdict"] == "failed"
+    assert "Says “ruff passes” is met, but `ruff check .` failed (exit 1)." in found["flags"]
+    assert found["tests"]["failed_before"], "red, then green"
+
+    in_order = [{"criterion": "the test passes", "result": "met",
+                 "evidence": "`uv run pytest tests/test_orders.py`"}]  # fmt: skip
+    found = receipts.summarize(commands, {}, "Done.", criteria[:1], in_order)
+    assert found["verdict"] == "verified", "matched in order when worded differently"
+    stale = receipts.summarize([], {"stale": "Out of date: the code changed."}, "", [], [])
+    assert stale["flags"][0] == "Out of date: the code changed." and stale["verdict"] == ""
 
 
 def test_git_and_gh_output_is_read():

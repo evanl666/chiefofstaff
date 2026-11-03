@@ -18,7 +18,7 @@ from .envelope import wrap
 from .roles import WORKER
 from .store import now
 from .tasks import ENDED, OPEN
-from .workspaces import base_of, changes, diff, git
+from .workspaces import base_of, changes, diff, git, version
 
 if TYPE_CHECKING:
     from .runtime import Runtime
@@ -60,13 +60,76 @@ class TaskActions:
             (task["id"],),
         )
         latest = self.store.one(
-            "SELECT evidence FROM runs WHERE task_id=? AND evidence!='' ORDER BY started_at DESC",
+            """SELECT evidence, criteria FROM runs WHERE task_id=? AND evidence!=''
+            ORDER BY started_at DESC""",
             (task["id"],),
         )
         evidence = json.loads(latest["evidence"]) if latest else None
-        if not commands and not evidence:
+        criteria = self.tasks.criteria(task)
+        if not commands and not evidence and not criteria:
             return None
-        return receipts.summarize(commands, evidence, task["result"] or task["progress"])
+        claims = json.loads(latest["criteria"]) if latest and latest["criteria"] else []
+        return receipts.summarize(
+            commands, evidence, task["result"] or task["progress"], criteria, claims
+        )
+
+    async def check_fresh(self, session_id: str):
+        """Mark the evidence of a worker's finished tasks out of date once its code changed:
+        a "verified" must be about the code there is now."""
+        row = self.store.find_session(session_id)
+        if not row or row["role"] != WORKER:
+            return
+        live = {checkout["path"]: checkout for checkout in self.workspaces.checkouts(row)}
+        for task in self.tasks.for_session(session_id):
+            if task["status"] not in {"review", "done"}:
+                continue
+            run = self.store.one(
+                """SELECT id, evidence FROM runs WHERE task_id=? AND evidence!=''
+                ORDER BY started_at DESC""",
+                (task["id"],),
+            )
+            evidence = json.loads(run["evidence"]) if run else {}
+            if not evidence or evidence.get("stale"):
+                continue
+            if reason := await self.changed_since(evidence, live):
+                self.stale(task["id"], reason)
+
+    @staticmethod
+    async def changed_since(evidence: dict, live: dict[str, dict]) -> str:
+        for recorded in evidence.get("checkouts", []):
+            checkout = live.get(recorded["path"])
+            if not checkout or not recorded.get("commit"):
+                continue
+            with suppress(Exception):
+                current = await version(checkout)
+                if not current:
+                    continue
+                if current["commit"] != recorded["commit"]:
+                    return (
+                        f"Out of date: the code changed since it was checked "
+                        f"({recorded['commit'][:7]} → {current['commit'][:7]})."
+                    )
+                if current["edits"] != recorded.get("edits", ""):
+                    return "Out of date: the code was edited since it was checked."
+        return ""
+
+    def stale(self, task_id: str, reason: str):
+        """Its latest evidence no longer holds (the code or a decision changed)."""
+        run = self.store.one(
+            """SELECT id, evidence FROM runs WHERE task_id=? AND evidence!=''
+            ORDER BY started_at DESC""",
+            (task_id,),
+        )
+        if not run:
+            return
+        evidence = json.loads(run["evidence"])
+        if evidence.get("stale"):
+            return
+        evidence["stale"] = reason
+        self.store.execute(
+            "UPDATE runs SET evidence=? WHERE id=?", (json.dumps(evidence), run["id"])
+        )
+        self.publish(self.tasks.get(task_id))
 
     async def collect_evidence(self, task_id: str):
         """After a task is reported done: its checkouts' changes and its PRs' state."""
@@ -129,6 +192,7 @@ class TaskActions:
                 " ".join(self.pr_urls(task))
             ):
                 self.tasks.move(task["id"], "done")
+                self.runtime.background(self.runtime.workers.pump())
 
     async def diff(self, task_id: str) -> list[dict]:
         """What the task's worker changed, per checkout, as unified diffs."""
@@ -255,7 +319,27 @@ class TaskActions:
                 observed.append(f"- Branch `{checkout['branch']}`")
         for pr in found.get("prs", []):
             observed.append(f"- [{pr['label']}]({pr['url']}): checks {pr['checks']}")
+        for item in found.get("version", []):
+            edited = " with uncommitted edits" if item["edited"] else ""
+            observed.append(f"- Checked at `{item['commit'][:7]}`{edited}")
         observed += [f"- ⚠ {flag}" for flag in found.get("flags", [])]
+        if results := found.get("criteria"):
+            marks = {"verified": "✅", "claimed": "☑️", "contradicted": "❌", "not_met": "❌"}
+            words = {
+                "verified": "verified",
+                "claimed": "reported met, not observed",
+                "contradicted": "reported met, but the check failed",
+                "not_met": "not met",
+                "not_checked": "not checked",
+            }
+            lines += ["**Done when**", ""]
+            for item in results:
+                how = f": `{item['command']}`" if item["command"] else ""
+                lines.append(
+                    f"- {marks.get(item['state'], '⬜')} {item['criterion']} "
+                    f"({words[item['state']]}{how})"
+                )
+            lines.append("")
         if observed:
             lines += ["**Observed**", "", *observed, ""]
         if self.store.settings().report_footer:
@@ -329,7 +413,9 @@ class TaskActions:
         task = self.tasks.get(task_id)
         if task["status"] != "review":
             raise ValueError(f"Task {task_id} is {task['status']}, not ready for review.")
-        return self.tasks.move(task_id, "done")
+        task = self.tasks.move(task_id, "done")
+        self.runtime.background(self.runtime.workers.pump())  # Tasks waiting for its check.
+        return task
 
     async def follow_up(self, task_id: str, text: str) -> dict:
         """The owner adds to a task: its worker continues it (a finished task reopens)."""

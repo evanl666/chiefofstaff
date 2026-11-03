@@ -245,6 +245,8 @@ class Events:
             self.runtime.background(self.runtime.rotate_router())
         if row["role"] == WORKER:
             self.runtime.background(self.runtime.workers.pump())
+            # A turn may have changed code whose evidence was already collected.
+            self.runtime.background(self.runtime.task_actions.check_fresh(session_id))
 
     def error(self, row: dict, event: Any):
         session_id = row["id"]
