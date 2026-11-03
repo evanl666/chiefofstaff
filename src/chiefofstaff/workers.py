@@ -333,16 +333,22 @@ class Workers:
             return self.runtime.view(row)
         if not self.store.get(f"created:{session_id}"):
             raise ValueError("That worker never started; start a new one instead.")
+        # Held until it is open again: a removal of its folders that was started when it closed
+        # waits, then sees that it is open and leaves them.
         async with self.states[session_id].checkouts:
             with suppress(ValueError, OSError):
                 await self.workspaces.restore(row)
-        if row["cwd"] and not await asyncio.to_thread(os.path.isdir, row["cwd"]):
-            raise ValueError("That worker's directory is gone; start a new one instead.")
-        backend = self.runtime.require_ready()
-        if not await backend.get_session_metadata(session_id):
-            raise ValueError("Copilot no longer has that conversation; start a new one instead.")
-        status = row["status"] if row["status"] in {"done", "failed", "waiting"} else "idle"
-        row = self.runtime.update_session(session_id, closed_at=None, status=status, activity="")
+            if row["cwd"] and not await asyncio.to_thread(os.path.isdir, row["cwd"]):
+                raise ValueError("That worker's directory is gone; start a new one instead.")
+            backend = self.runtime.require_ready()
+            if not await backend.get_session_metadata(session_id):
+                raise ValueError(
+                    "Copilot no longer has that conversation; start a new one instead."
+                )
+            status = row["status"] if row["status"] in {"done", "failed", "waiting"} else "idle"
+            row = self.runtime.update_session(
+                session_id, closed_at=None, status=status, activity=""
+            )
         with suppress(RuntimeError):
             self.runtime.add_message(
                 self.runtime.router_id(),

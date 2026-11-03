@@ -484,3 +484,25 @@ async def test_the_inbox_adds_a_repository_or_a_folder_of_them(tmp_path, git_rep
     other.mkdir()
     run("git", "init", "-q", str(other))
     assert (await runtime.add_folder(str(other)))["kind"] == "project"
+
+
+async def test_a_worker_reopened_right_after_closing_keeps_its_folders(tmp_path, git_repo):
+    code = tmp_path / "code"
+    run("git", "clone", "-q", str(git_repo), str(code / "app"))
+    harness = Harness(tmp_path / "data", Settings(code_folder=str(code)))
+    runtime = await harness.connect()
+    app = str((code / "app").resolve())
+    workers = [
+        await spawn(runtime, harness.router_id, title="Notes", instructions="n"),
+        await spawn(runtime, harness.router_id, title="Fix", instructions="f", project=app,
+                    isolate=True),
+    ]  # fmt: skip
+    await settle(runtime)
+    for worker in workers:
+        await runtime.workers.close(worker["session_id"])
+        # The removal started by closing is still pending when the worker is reopened.
+        await runtime.workers.reopen(worker["session_id"])
+    await settle(runtime)
+    for worker in workers:
+        assert exists(worker["cwd"]), "the removal saw that it was reopened"
+        assert not harness.store.session(worker["session_id"])["closed_at"]
