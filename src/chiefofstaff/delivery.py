@@ -61,6 +61,9 @@ class Delivery:
         row = self.store.session(session_id)
         if row["closed_at"]:
             raise ValueError("That session is closed.")
+        if row["role"] == WORKER and not self.states.handle(session_id):
+            # Not attached: what it did in a terminal meanwhile goes first, before this.
+            await self.runtime.workers.catch_up(row)
         # The exact prompt is kept so a queued worker or a restart can replay it.
         message = self.runtime.add_message(
             session_id,

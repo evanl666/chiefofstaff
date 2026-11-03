@@ -3,7 +3,7 @@
 import { $, api, el, toast } from "./dom.js";
 import { ago, shortPath, since } from "./text.js";
 import { closedWorkers, DOT_HELP, draftsFor, loadState, sessions, state, STATUS_ORDER, STATUS_TEXT } from "./state.js";
-import { readOnlyTimeline, select } from "./session.js";
+import { IN_TERMINAL, readOnlyTimeline, scrollToBottom, select, setComposer } from "./session.js";
 import { inboxItem } from "./inbox.js";
 function sessionItem(session, label) {
   const drafts = draftsFor(session.id).length;
@@ -129,6 +129,9 @@ export async function loadExternal(refresh = false) {
     toast(error.message, "error");
   }
 }
+// A Copilot session Chief of Staff does not manage: its latest conversation, read from its log.
+// A message continues it here (the Router manages it from then on, in its own folder).
+export const externalItem = () => state.external.find((item) => item.id === state.selected);
 function showExternal(item) {
   state.selected = item.id;
   renderSidebar();
@@ -137,61 +140,32 @@ function showExternal(item) {
   $("#drafts").hidden = true;
   $("#session-tuning").hidden = true;
   $("#session-title").textContent = item.summary;
-  $("#session-meta").textContent = [item.open ? "Open in a terminal now" : "", shortPath(item.cwd), item.branch, `updated ${since(item.modified)}`].filter(Boolean).join(" · ");
-  $("#session-actions").replaceChildren();
-  $("#drafts").replaceChildren();
-  $("#composer").hidden = true;
+  $("#session-meta").textContent = [item.open ? "Open in a terminal" : "Not managed yet", shortPath(item.cwd), item.branch, `updated ${since(item.modified)}`].filter(Boolean).join(" · ");
+  $("#session-meta").title = item.cwd;
   const command = `copilot --resume ${item.id}`;
-  const adopt = el("button", {
-    type: "button",
-    text: "Let the Router manage it",
-    disabled: Boolean(item.open),
-    onclick: async () => {
-      adopt.disabled = true;
-      try {
-        await api(`/api/external/${item.id}/adopt`, { method: "POST" });
-        state.external = state.external.filter((other) => other.id !== item.id);
-        await loadState();
-        select(item.id);
-      } catch (error) {
-        adopt.disabled = false;
-        toast(error.message, "error");
-      }
-    },
-  });
-  const history = el("div", { class: "external-history" }, el("div", { class: "line note", text: "Loading its conversation…" }));
-  $("#timeline").replaceChildren(
-    el(
-      "div",
-      { class: "external-detail" },
-      el("div", { text: "Chief of Staff does not manage this Copilot session; this is its latest conversation, read-only. Resume it in a terminal, or let the Router manage it as a worker." }),
-      el("code", { text: command }),
-      el(
-        "div",
-        { class: "actions" },
-        adopt,
-        el("button", { type: "button", class: "secondary", text: "Copy command", onclick: () => navigator.clipboard.writeText(command).then(() => toast("Copied")) }),
-      ),
-      el("small", {
-        text: item.open
-          ? "It is open in a terminal right now. Keep using it there, or exit it (/exit) to let the Router manage it."
-          : "Its conversation so far comes along. While the Router manages it, do not also open it in a terminal.",
-      }),
-    ),
-    history,
+  $("#session-actions").replaceChildren(
+    el("button", { type: "button", class: "text", text: "Copy resume command", title: command, onclick: () => navigator.clipboard.writeText(command).then(() => toast("Copied")) }),
   );
-  loadHistory(item, history);
+  $("#drafts").replaceChildren();
+  $("#composer").hidden = false;
+  setComposer(item.open ? { locked: IN_TERMINAL } : { placeholder: "Message to continue this session here…" });
+  const history = el("div", { class: "external-history" }, el("div", { class: "line note", text: "Loading its conversation…" }));
+  $("#timeline").replaceChildren(history);
+  loadHistory(item, history, true);
 }
 
 // Read-only, from the session's log; refreshed while it is open in a terminal.
-async function loadHistory(item, box) {
+async function loadHistory(item, box, first = false) {
   if (state.selected !== item.id || !box.isConnected) return;
   try {
     const { entries, working, open } = await api(`/api/external/${item.id}/history`);
     if (state.selected !== item.id || !box.isConnected) return;
     const nodes = readOnlyTimeline(entries, item.cwd);
+    if (!nodes.length) nodes.push(el("div", { class: "line note", text: "No conversation yet." }));
     if (working) nodes.push(el("div", { class: "working-line", text: "Working in a terminal…" }));
-    box.replaceChildren(...(nodes.length ? nodes : [el("div", { class: "line note", text: "No conversation yet." })]));
+    else if (!open) nodes.push(el("div", { class: "line notice" }, el("span", { text: `A message continues it here, still in ${shortPath(item.cwd) || "its folder"}` })));
+    box.replaceChildren(...nodes);
+    scrollToBottom(first);
     if (open) setTimeout(() => loadHistory(item, box), 4000);
   } catch (error) {
     box.replaceChildren(el("div", { class: "line error", text: error.message }));

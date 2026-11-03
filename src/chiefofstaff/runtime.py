@@ -944,9 +944,19 @@ class Runtime:
             notes = [self.projects_note(), self.toolset.related_hint(text)]
             context = [wrap("system", "context", note) for note in notes if note]
             prompt = "\n\n".join([prompt, *context])
-        return await self.delivery.deliver(
-            session_id, prompt, kind="owner", display=text, steer=True
-        )
+        task = self.tasks.current(session_id) if row["role"] == WORKER else None
+        reopened = task if task and task["status"] in {"review", "done", "failed"} else None
+        if reopened:
+            # Talking to a worker continues its task: its next result comes back for review.
+            self.tasks.move(reopened["id"], "running", reason="follow-up")
+        try:
+            return await self.delivery.deliver(
+                session_id, prompt, kind="owner", display=text, steer=True
+            )
+        except Exception:
+            if reopened:
+                self.tasks.move(reopened["id"], reopened["status"])
+            raise
 
     def projects_note(self) -> str:
         """Tell the Router when the configured projects changed since it last heard."""

@@ -2,7 +2,7 @@
 
 import { $, api, toast } from "./dom.js";
 import { byId, connectEvents, current, loadModels, loadState, markRead, routerId, state } from "./state.js";
-import { loadExternal } from "./sidebar.js";
+import { externalItem, loadExternal } from "./sidebar.js";
 import { appendMessages, select } from "./session.js";
 import { INBOX, scheduleInbox } from "./inbox.js";
 import { fillSettings, refreshUsageLink, saveSettings, saveToken, settingsError, showUsage, slackStatusText } from "./settings.js";
@@ -23,10 +23,21 @@ function bindUi() {
     event.preventDefault();
     const text = input.value.trim();
     const sessionId = state.selected;
-    if (!text || (sessionId !== INBOX && !current())) return;
+    const other = externalItem();
+    if (!text || (sessionId !== INBOX && !current() && !other)) return;
     input.value = "";
     autosize();
     try {
+      if (other) {
+        // Another Copilot session: the message continues it here, as a worker.
+        input.disabled = true;
+        input.placeholder = "Continuing it here…";
+        await api(`/api/external/${sessionId}/messages`, { method: "POST", body: { text } });
+        state.external = state.external.filter((item) => item.id !== sessionId);
+        await loadState();
+        await select(sessionId);
+        return;
+      }
       if (sessionId === INBOX) {
         await api(`/api/sessions/${routerId()}/messages`, { method: "POST", body: { text } });
         state.chief = { asked: text, replies: [] };
@@ -35,6 +46,7 @@ function bindUi() {
       }
       appendMessages([await api(`/api/sessions/${sessionId}/messages`, { method: "POST", body: { text } })]);
     } catch (error) {
+      if (other) input.disabled = false;
       input.value = text;
       autosize();
       toast(error.message, "error");

@@ -312,9 +312,11 @@ def read_log(log: Path, offset: int) -> tuple[list[dict], int, float]:
     if offset > stat.st_size:
         offset = 0  # The log was rewritten.
     start = offset or max(0, stat.st_size - LOG_TAIL)
+    # A first look reads its whole tail, the latest events; later reads catch up in chunks.
+    size = min(stat.st_size - start, LOG_CHUNK) if offset else stat.st_size - start
     with log.open("rb") as file:
         file.seek(start)
-        data = file.read(min(stat.st_size - start, LOG_CHUNK))
+        data = file.read(size)
     end = data.rfind(b"\n") + 1
     lines = data[:end].split(b"\n")
     if start and not offset:

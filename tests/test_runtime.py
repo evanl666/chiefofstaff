@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 from conftest import FakeSession, Harness, call_tool, env, settle, task_of
 
+from chiefofstaff import backend as backend_module
 from chiefofstaff import delivery as delivery_module
 from chiefofstaff.backend import read_log, sessions_in_use
 from chiefofstaff.models import DraftDecision, Settings
@@ -946,6 +947,69 @@ async def test_a_worker_open_in_a_terminal_is_mirrored_read_only(harness):
     assert "term-1" not in runtime.terminal and harness.store.get("mirror:term-1") is None
 
 
+def at(seconds: float) -> str:
+    """An event time, seconds from now, as Copilot writes it."""
+    moment = datetime.fromtimestamp(datetime.now(UTC).timestamp() + seconds, UTC)
+    return moment.isoformat().replace("+00:00", "Z")
+
+
+async def test_a_terminal_visit_before_chief_of_staff_looked_is_caught_up(harness):
+    runtime = await harness.connect()
+    harness.store.create_session("term-2", "worker", "Fix login", "idle", cwd="/tmp")
+    runtime.add_message("term-2", "assistant", "Fixed the login.")
+    harness.client.logs["term-2"] = [
+        {**logged("assistant.message", content="Fixed the login."), "timestamp": at(-60)},
+        {**logged("user.message", content="Also check logout"), "timestamp": at(5)},
+        {
+            **logged("assistant.message", content="Looking.", toolRequests=[{"name": "bash"}]),
+            "timestamp": at(6),
+        },
+        {**logged("tool.execution_start", toolName="bash", arguments={"command": "rg logout"})},
+    ]
+    harness.client.in_use = {"term-2": 4242}
+    await runtime.workers.refresh_elsewhere()
+    await runtime.workers.mirror()
+    messages = harness.store.messages("term-2")
+    shown = [(m["kind"], m["text"], m["meta"].get("narration")) for m in messages]
+    assert shown[1:] == [
+        ("notice", "Its conversation in a terminal, shown read-only while it is open there", None),
+        ("owner", "Also check logout", None),
+        ("assistant", "Looking.", True),
+    ], "what it did there before we looked, not what the timeline has; a step without a time"
+
+    harness.client.logs["term-2"].append(logged("assistant.message", content="Logout is fine."))
+    harness.client.in_use = {}
+    await runtime.workers.refresh_elsewhere()
+    await runtime.workers.mirror()
+    assert harness.store.messages("term-2")[-1]["text"] == "Logout is fine.", "its last words"
+    assert harness.store.get("mirror:term-2") is None
+
+
+async def test_a_worker_used_in_a_terminal_meanwhile_catches_up_before_it_resumes(harness):
+    runtime = await harness.connect()
+    spawned = await call_tool(
+        runtime, "spawn_worker", harness.router_id, title="Docs", instructions="Write docs"
+    )
+    worker = json.loads(spawned.text_result_for_llm)["session_id"]
+    await settle(runtime)
+    await call_tool(runtime, "report", worker, status="done", summary="Docs written.")
+    await runtime.detach(worker)
+    envelope = '<message from="router" type="task">\nWrite docs\n</message>'
+    harness.client.logs[worker] = [
+        {**logged("user.message", content=envelope), "timestamp": at(-60)},
+        {**logged("tool.execution_start", toolName="report"), "timestamp": at(4)},
+        {**logged("user.message", content="Add a FAQ"), "timestamp": at(5)},
+        {**logged("assistant.message", content="Added the FAQ."), "timestamp": at(6)},
+    ]
+    await runtime.owner_send(worker, "Thanks, ship it")
+    texts = [m["text"] for m in harness.store.messages(worker)]
+    caught_up = ["Meanwhile, in a terminal", "Add a FAQ", "Added the FAQ.", "Thanks, ship it"]
+    assert texts[-4:] == caught_up, "not the Router's task from its log, which it has already"
+    assert runtime.tasks.current(worker)["status"] == "running", "a message continues its task"
+    await call_tool(runtime, "report", worker, status="done", summary="Shipped.")
+    assert runtime.tasks.current(worker)["status"] == "review", "and its result comes back"
+
+
 async def test_other_sessions_show_their_latest_conversation(harness):
     runtime = await harness.connect()
     harness.client.logs["ext-1"] = [
@@ -958,6 +1022,24 @@ async def test_other_sessions_show_their_latest_conversation(harness):
         {"kind": "assistant", "text": "Here is a draft."},
     ]
     assert history["open"] is False and history["working"] is False
+    harness.client.logs["ext-1"] += [
+        logged("user.message", content="Shorter"),
+        logged("assistant.message", content="Trimming.", toolRequests=[{"name": "edit"}]),
+    ]
+    entries = (await runtime.workers.history("ext-1"))["entries"]
+    assert entries[2:] == [
+        {"kind": "owner", "text": "Shorter"},
+        {"kind": "narration", "text": "Trimming."},
+    ], "read on from the last look; said on the way to a step is narration"
+
+
+def test_a_first_look_at_a_long_log_reads_its_latest_events(tmp_path, monkeypatch):
+    monkeypatch.setattr(backend_module, "LOG_TAIL", 400)
+    monkeypatch.setattr(backend_module, "LOG_CHUNK", 100)
+    log = tmp_path / "events.jsonl"
+    log.write_text("".join(f'{{"type": "e{n}"}}\n' for n in range(100)))
+    events, offset, _ = read_log(log, 0)
+    assert events[-1]["type"] == "e99" and offset == log.stat().st_size
 
 
 def test_session_logs_are_read_line_by_line_as_they_grow(tmp_path):

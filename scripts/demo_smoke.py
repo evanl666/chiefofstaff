@@ -152,6 +152,16 @@ async def run(scheme: str):
             await expect(page.locator("#inbox-review .card.task")).to_have_count(2)
             log("accepted a result")
 
+            await page.locator("#session-list .item", has_text="Fix the flaky login").click()
+            work = page.locator("#timeline details.steps")
+            await expect(work.locator(".said").first).to_contain_text("Passing the clock in")
+            folded = work.locator(".narration", has_text="Reproducing the flaky test first.")
+            await expect(folded).to_have_count(1)
+            narrated = page.locator("#timeline > .msg.agent", has_text="Reproducing the flaky")
+            await expect(narrated).to_have_count(0)
+            log("what a worker says on the way is folded into its steps, not shown as answers")
+            await page.locator(".item", has_text="Inbox").first.click()
+
             await page.select_option("#session-actions select", "60")
             await expect(page.locator("#session-meta")).to_contain_text("Focusing until")
             await page.click("#session-actions .focus-on")
@@ -164,11 +174,31 @@ async def run(scheme: str):
             await expect(page.locator("#inbox")).to_be_hidden()
             await expect(page.locator(".external-history")).to_contain_text("ten times faster")
             await expect(page.locator("#session-meta")).to_contain_text("Open in a terminal")
+            await expect(page.locator("#composer-note")).to_contain_text("exit it there (/exit)")
+            await expect(page.locator("#composer-input")).to_be_hidden()
+            await page.screenshot(path=SHOTS / f"demo-{scheme}-6-terminal.png")
             log("opened a session that is open in a terminal, read-only")
+
+            # An older session of the owner's: a message continues it here.
+            await page.locator("#external-list .item", has_text="Write the API changelog").click()
+            history = page.locator(".external-history")
+            await expect(history).to_contain_text("CHANGELOG.md, not committed yet")
+            await expect(history.locator(".steps .said")).to_contain_text("Reading the recent")
+            await page.screenshot(path=SHOTS / f"demo-{scheme}-6-other-session.png")
+            await page.fill("#composer-input", "Commit it")
+            await page.press("#composer-input", "Enter")
+            continued = page.locator("#session-list .item", has_text="Write the API changelog")
+            await expect(continued).to_be_visible(timeout=15000)
+            await expect(page.locator("#timeline")).to_contain_text("Draft a changelog entry")
+            await expect(page.locator("#timeline .msg.owner", has_text="Commit it")).to_be_visible()
+            await expect(page.locator("#timeline")).to_contain_text(
+                "Done: Commit it", timeout=20000
+            )
+            log("messaged an older Copilot session: it continues here, with its conversation")
 
             await page.locator(".item", has_text="Chat").click()
             await expect(page.locator("#timeline")).to_contain_text("Started three tasks")
-            await page.screenshot(path=SHOTS / f"demo-{scheme}-6-chat.png")
+            await page.screenshot(path=SHOTS / f"demo-{scheme}-7-chat.png")
             assert not errors, errors
             await browser.close()
     except BaseException:

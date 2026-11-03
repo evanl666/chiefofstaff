@@ -4,7 +4,7 @@ import { $, api, el, toast } from "./dom.js";
 import { compactPaths, markdown, plural, shortPath, since } from "./text.js";
 import { byId, loadState, pendingDrafts, routerId, state } from "./state.js";
 import { renderSidebar, renderStatusLine } from "./sidebar.js";
-import { select } from "./session.js";
+import { select, setComposer } from "./session.js";
 import { draftCard } from "./drafts.js";
 import { showChanges } from "./diff.js";
 export const INBOX = "inbox";
@@ -43,8 +43,7 @@ export function showInbox() {
   $("#drafts").hidden = true;
   $("#session-tuning").hidden = true;
   $("#composer").hidden = false;
-  $("#composer-input").disabled = false;
-  $("#composer-input").placeholder = "Ask your chief of staff…";
+  setComposer({ placeholder: "Ask your chief of staff…" });
   renderSidebar();
   renderInboxHeader();
   renderInbox();

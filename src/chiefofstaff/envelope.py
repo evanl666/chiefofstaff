@@ -42,6 +42,19 @@ def wrap(sender: str, kind: str, body: str, **attributes: object) -> str:
     return f"<message {head}>\n{escaped}\n</message>"
 
 
+ENVELOPE = re.compile(r"<message ([^>]*)>\n(.*?)\n</message>", re.DOTALL)
+
+
+def owner_text(prompt: str) -> str:
+    """What the owner said in what a session received: text typed in a terminal as it is, or
+    the owner's messages among the envelopes Chief of Staff sent ("" when none is theirs)."""
+    if not prompt.lstrip().startswith("<message "):
+        return prompt
+    return "\n\n".join(
+        body for head, body in ENVELOPE.findall(prompt) if head.startswith('from="owner"')
+    ).strip()
+
+
 def from_owner(prompt: str) -> bool:
     """Whether what a session received includes a message from the owner."""
     return bool(OWNER.search(prompt))

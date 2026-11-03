@@ -50,6 +50,8 @@ class Shell:
     seconds: float = 0.4
     # Run the command for real in the session's folder (the demo commits in its own repo).
     run: bool = False
+    # Said on the way to the command, as an agent narrates its next step.
+    note: str = ""
 
 
 @dataclass
@@ -152,7 +154,8 @@ class ScriptedSession:
         self.model = model
 
     async def get_events(self) -> list[Any]:
-        return [event("user.message", content=text) for who, text in self.history if who == "user"]
+        kinds = {"user": "user.message", "assistant": "assistant.message"}
+        return [event(kinds[who], content=text) for who, text in self.history if who in kinds]
 
     async def run(self):
         try:
@@ -231,11 +234,11 @@ class ScriptedSession:
             return await ask(request, {"sessionId": self.session_id})
         raise TypeError(f"Unknown step {step!r}")
 
-    def start_tool(self, name: str, arguments: dict) -> str:
+    def start_tool(self, name: str, arguments: dict, note: str = "") -> str:
         call_id = f"call_{next(self.calls)}"
         self.usage(name)
         request = SimpleNamespace(tool_call_id=call_id, name=name, arguments=arguments)
-        self.emit("assistant.message", content="", tool_requests=[request])
+        self.emit("assistant.message", content=note, tool_requests=[request])
         self.emit("tool.execution_start", tool_call_id=call_id, tool_name=name, arguments=arguments)
         return call_id
 
@@ -282,7 +285,7 @@ class ScriptedSession:
         )
         if denied := await self.permitted(request):
             return f"Permission denied: {denied}"
-        call_id = self.start_tool("bash", {"command": step.command})
+        call_id = self.start_tool("bash", {"command": step.command}, step.note)
         output, code = step.output, step.exit_code
         if step.run:
             process = await asyncio.create_subprocess_shell(
@@ -355,7 +358,12 @@ class ScriptedBackend:
     async def list_sessions(self) -> list[Any]:
         return [other["meta"] for other in self.others]
 
+    def other(self, session_id: str) -> dict | None:
+        return next((o for o in self.others if o["meta"].session_id == session_id), None)
+
     async def get_session_metadata(self, session_id: str) -> Any:
+        if other := self.other(session_id):
+            return other["meta"]
         return SimpleNamespace(session_id=session_id) if session_id in self.histories else None
 
     async def create_session(self, *, session_id: str, name: str, **options: Any):
@@ -365,6 +373,14 @@ class ScriptedBackend:
         return session
 
     async def resume_session(self, session_id: str, **options: Any):
+        if session_id not in self.histories and (other := self.other(session_id)):
+            # One of the owner's own sessions: its conversation so far is its log's.
+            said = {"user.message": "user", "assistant.message": "assistant"}
+            self.histories[session_id] = [
+                (said[entry["type"]], entry["data"].get("content", ""))
+                for entry in other.get("log", [])
+                if entry["type"] in said and entry["data"].get("content")
+            ]
         if session_id not in self.histories:
             raise RuntimeError("Session not found")
         session = ScriptedSession(self, session_id, options)
@@ -384,8 +400,7 @@ class ScriptedBackend:
         return {other["meta"].session_id: 1 for other in self.others if other.get("open")}
 
     async def read_history(self, session_id: str, offset: int) -> tuple[list[dict], int, float]:
-        for other in self.others:
-            if other["meta"].session_id == session_id:
-                log = other.get("log", [])
-                return log[offset:], len(log), 0.0
+        if other := self.other(session_id):
+            log = other.get("log", [])
+            return log[offset:], len(log), 0.0
         return [], offset, 0.0

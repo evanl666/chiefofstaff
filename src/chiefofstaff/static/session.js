@@ -110,18 +110,26 @@ export function renderHeader() {
   }
   actions.replaceChildren(...buttons);
   renderTuning(session);
-  const input = $("#composer-input");
   const placeholders = {
     router: "Ask your chief of staff…",
     slack: "Message the Slack session…",
     watchdog: "Message the Watchdog…",
   };
-  input.disabled = Boolean(session.elsewhere);
-  input.placeholder = session.elsewhere
-    ? "Open in another Copilot window: exit it there (/exit) to message it here"
-    : session.closed_at
-      ? "Message to reopen this worker…"
-      : placeholders[session.role] || "Message this worker directly…";
+  setComposer(
+    session.elsewhere
+      ? { locked: IN_TERMINAL }
+      : { placeholder: session.closed_at ? "Message to reopen this worker…" : placeholders[session.role] || "Message this worker directly…" },
+  );
+}
+// Two programs must not write to one Copilot session: one open in a terminal is used there.
+export const IN_TERMINAL = "Open in a terminal right now. Continue there, or exit it there (/exit) to message it here.";
+// The composer, or (locked) a note saying why there is none.
+export function setComposer({ placeholder = "", locked = "" } = {}) {
+  const input = $("#composer-input");
+  $("#composer").classList.toggle("locked", Boolean(locked));
+  $("#composer-note").textContent = locked;
+  input.disabled = Boolean(locked);
+  input.placeholder = placeholder;
 }
 export const EFFORTS = { none: "none", low: "low", medium: "medium", high: "high", xhigh: "extra high", max: "max" };
 const modelInfo = (id) => state.models.find((model) => model.id === id);
@@ -228,7 +236,7 @@ export async function select(sessionId) {
   if (byId(sessionId)?.unread) markRead(sessionId);
   if (!$("#composer").hidden) $("#composer-input").focus();
 }
-function scrollToBottom(force = false) {
+export function scrollToBottom(force = false) {
   const scroller = $("#scroller");
   if (force || scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 160) {
     scroller.scrollTop = scroller.scrollHeight;
@@ -323,56 +331,60 @@ function renderMessage(message) {
       return el("div", { class: "line", text: message.text, title: clock(time) });
   }
 }
-// A session Chief of Staff does not drive, as read from its log: messages and grouped steps.
-export function readOnlyTimeline(entries, cwd) {
-  const nodes = [];
-  for (const entry of entries) {
-    if (entry.kind === "tool") {
-      let group = nodes.at(-1);
-      if (!group?.classList.contains("steps")) {
-        group = el("details", { class: "steps" }, el("summary"));
-        nodes.push(group);
-      }
-      const step = compactPaths(entry.text, cwd);
-      group.append(el("div", { class: "step", text: step, title: entry.text }));
-      const count = group.querySelectorAll(".step").length;
-      group.querySelector("summary").replaceChildren(
-        el("span", { class: "count", text: `${count} step${count === 1 ? "" : "s"}` }),
-        el("span", { class: "last", text: step }),
-      );
-    } else if (entry.kind === "owner") {
-      nodes.push(el("div", { class: "msg owner", text: entry.text }));
-    } else {
-      nodes.push(el("div", { class: "msg agent markdown", html: markdown(entry.text) }));
-    }
+// The work between messages, folded into one line: its steps, and what the session said on the
+// way to them ("Now the tests:"), which is narration, not an answer. The line shows the latest.
+function addWork(container, kind, text, cwd) {
+  let group = container.lastElementChild;
+  if (!group?.classList.contains("steps")) {
+    group = el("details", { class: "steps" }, el("summary"));
+    container.append(group);
   }
-  return nodes;
+  let latest;
+  if (kind === "tool") {
+    latest = compactPaths(text, cwd);
+    group.append(el("div", { class: "step", text: latest, title: text }));
+  } else {
+    group.append(el("div", { class: "narration markdown", html: markdown(text) }));
+    latest = text.split("\n").find((line) => line.trim()) || text;
+    group.dataset.said = latest.replace(/[`*_#>]/g, "").trim();
+  }
+  const count = group.querySelectorAll(".step").length;
+  const said = group.dataset.said;
+  group.querySelector("summary").replaceChildren(
+    count ? el("span", { class: "count", text: `${count} step${count === 1 ? "" : "s"}` }) : "",
+    el("span", { class: said ? "said" : "last", text: said || latest, title: said || latest }),
+  );
+}
+// Narration: flagged as it arrives; in older timelines, a worker's message right before a step.
+function narration(message, next, worker) {
+  if (message.kind !== "assistant" || message.meta?.internal) return false;
+  return Boolean(message.meta?.narration) || (worker && next?.kind === "tool");
+}
+// A session Chief of Staff does not drive, as read from its log: messages and folded work.
+export function readOnlyTimeline(entries, cwd) {
+  const box = el("div");
+  for (const entry of entries) {
+    if (entry.kind === "tool" || entry.kind === "narration") addWork(box, entry.kind, entry.text, cwd);
+    else if (entry.kind === "owner") box.append(el("div", { class: "msg owner", text: entry.text }));
+    else box.append(el("div", { class: "msg agent markdown", html: markdown(entry.text) }));
+  }
+  return [...box.children];
 }
 
 export function appendMessages(messages) {
   const timeline = $("#timeline");
   timeline.querySelector(".empty")?.remove();
   timeline.querySelector(".working-line")?.remove();
-  for (const message of messages) {
-    if (message.id <= state.lastId || message.session_id !== state.selected) continue;
+  const worker = current()?.role === "worker";
+  messages.forEach((message, index) => {
+    if (message.id <= state.lastId || message.session_id !== state.selected) return;
     state.lastId = message.id;
-    if (message.kind === "tool") {
-      let group = timeline.lastElementChild;
-      if (!group?.classList.contains("steps")) {
-        group = el("details", { class: "steps" }, el("summary"));
-        timeline.append(group);
-      }
-      const step = compactPaths(message.text, current()?.cwd);
-      group.append(el("div", { class: "step", text: step, title: message.text }));
-      const count = group.querySelectorAll(".step").length;
-      group.querySelector("summary").replaceChildren(
-        el("span", { class: "count", text: `${count} step${count === 1 ? "" : "s"}` }),
-        el("span", { class: "last", text: step }),
-      );
-      continue;
+    if (message.kind === "tool" || narration(message, messages[index + 1], worker)) {
+      addWork(timeline, message.kind === "tool" ? "tool" : "narration", message.text, current()?.cwd);
+      return;
     }
     timeline.append(renderMessage(message));
-  }
+  });
   if (!timeline.children.length && state.selected === routerId()) {
     timeline.append(
       el(

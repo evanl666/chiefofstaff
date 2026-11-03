@@ -10,12 +10,13 @@ import logging
 import os
 import re
 import time
+from collections.abc import Collection
 from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from . import catalog
-from .envelope import clean_title, short, wrap
+from .envelope import clean_title, owner_text, short, wrap
 from .events import PLUMBING_TOOLS, describe_tool
 from .roles import ROUTER, WORKER
 from .sources.slack import describe
@@ -43,21 +44,38 @@ def own_event(event: dict) -> bool:
     return not event.get("agentId") and not (event.get("data") or {}).get("parentToolCallId")
 
 
-def terminal_timeline(events: list[dict]) -> list[tuple[str, str]]:
-    """What a session said and did, from its log: its messages and steps, not its sub-agents'."""
+# (kind, text, when): kind is owner, assistant (an answer), narration (said on the way to more
+# steps) or tool (a step); when is the event's ISO time.
+Entry = tuple[str, str, str]
+
+
+def terminal_timeline(events: list[dict], ours: Collection[str] = ()) -> list[Entry]:
+    """What a session said and did, from its log: its messages and steps, not its sub-agents'.
+
+    `ours`: Chief of Staff's own tools. Only its sessions have them, so calls to them are from
+    turns it ran (and shows as reports and cards), never from a terminal.
+    """
     shown = []
     for event in filter(own_event, events):
         data = event.get("data") or {}
         content = str(data.get("content") or "").strip()
-        if event.get("type") == "user.message" and content:
-            shown.append(("owner", content))
+        at = str(event.get("timestamp") or "")
+        if event.get("type") == "user.message" and (text := owner_text(content)):
+            shown.append(("owner", text, at))
         elif event.get("type") == "assistant.message" and content:
-            shown.append(("assistant", content))
+            shown.append(("narration" if data.get("toolRequests") else "assistant", content, at))
         elif event.get("type") == "tool.execution_start":
             name = data.get("toolName") or "tool"
-            if name not in PLUMBING_TOOLS:
-                shown.append(("tool", describe_tool(name, data.get("arguments"))))
+            if name not in PLUMBING_TOOLS and name not in ours:
+                shown.append(("tool", describe_tool(name, data.get("arguments")), at))
     return shown
+
+
+def moment(iso: str) -> float | None:
+    try:
+        return timestamp(iso)
+    except ValueError:
+        return None
 
 
 def turn_open(events: list[dict], before: bool) -> bool:
@@ -84,6 +102,12 @@ class Workers:
         # Taken to change which workers hold a slot (see state.py for the lock order).
         self.pump_lock = asyncio.Lock()
         self.external_cache: tuple[float, list[dict]] = (0.0, [])
+        # Reading logs of sessions open in a terminal; held while their timelines catch up.
+        self.mirror_lock = asyncio.Lock()
+        # Other sessions' logs as last read: session id -> (offset, entries, turn open).
+        self.histories: dict[str, tuple[int, list[Entry], bool]] = {}
+        # How far catch_up has read each worker's log.
+        self.read_to: dict[str, int] = {}
 
     def running(self) -> int:
         return sum(1 for row in self.store.open_sessions(WORKER) if self.states[row["id"]].busy)
@@ -470,8 +494,13 @@ class Workers:
                 getattr(event.type, "value", str(event.type))
             )
             text = (getattr(event.data, "content", "") or "").strip()
-            if kind and text and not getattr(event.data, "parent_tool_call_id", None):
-                said.append((kind, text))
+            if kind == "owner":
+                text = owner_text(text)
+            if not kind or not text or getattr(event.data, "parent_tool_call_id", None):
+                continue
+            if kind == "assistant" and getattr(event.data, "tool_requests", None):
+                kind = "narration"
+            said.append((kind, text, ""))
         if not said:
             return
         shown = said[-HISTORY_SHOWN:]
@@ -483,8 +512,74 @@ class Workers:
             + (f" ({earlier})" if earlier else ""),
             {"imported": True},
         )
-        for kind, text in shown:
-            self.runtime.add_message(row["id"], kind, text[:20000], {"imported": True})
+        self.show(row, shown, {"imported": True})
+
+    def show(self, row: dict, entries: list[Entry], meta: dict | None = None, note: str = ""):
+        """Entries read from a session's history, into its timeline. They carry no prompt: they
+        are never sent again, and the Watchdog does not take them for instructions."""
+        meta = meta or {"terminal": True}
+        if entries and note:
+            self.runtime.add_message(row["id"], "notice", note, meta)
+        for kind, text, _ in entries:
+            extra = {"narration": True} if kind == "narration" else {}
+            kind = "assistant" if kind == "narration" else kind
+            self.runtime.add_message(row["id"], kind, text[:20000], {**meta, **extra})
+
+    def missed(self, row: dict, entries: list[Entry]) -> list[Entry]:
+        """The entries after the last thing its timeline shows it say or do: what it did
+        elsewhere meanwhile (all of its latest, for a timeline without any)."""
+        last = self.store.one(
+            """SELECT created_at FROM messages WHERE session_id=?
+            AND kind IN ('owner', 'assistant', 'tool') ORDER BY id DESC LIMIT 1""",
+            (row["id"],),
+        )
+        if not last:
+            return entries[-HISTORY_SHOWN:]
+        since = timestamp(last["created_at"])
+        recent = {
+            message["text"]
+            for message in self.store.all(
+                "SELECT text FROM messages WHERE session_id=? ORDER BY id DESC LIMIT 30",
+                (row["id"],),
+            )
+        }
+        fresh = [
+            entry
+            for entry in entries
+            if (when := moment(entry[2])) is not None
+            and when > since
+            and (entry[0] == "tool" or entry[1][:20000] not in recent)  # Seen at the edge.
+        ]
+        return fresh[-HISTORY_SHOWN:]
+
+    async def catch_up(self, row: dict):
+        """Before a worker that is not attached gets a message: what it did in a terminal since
+        its timeline last showed it, from the log Copilot writes, so it comes first."""
+        backend = self.runtime.backend
+        copilot = self.runtime.copilot_id(row["id"])
+        if not backend or row["role"] != WORKER or copilot in self.runtime.elsewhere:
+            return  # Open in a terminal: the mirror shows it.
+        async with self.mirror_lock:
+            key = f"mirror:{row['id']}"
+            mirrored = self.store.get(key)
+            if mirrored is None and not self.store.one(
+                "SELECT id FROM messages WHERE session_id=? LIMIT 1", (row["id"],)
+            ):
+                return  # Adopted just now: import_history brings its conversation.
+            start = int(mirrored) if mirrored is not None else self.read_to.get(row["id"], 0)
+            try:
+                events, after, _ = await backend.read_history(copilot, start)
+            except Exception:
+                logger.warning("Could not read the log of %s.", row["id"], exc_info=True)
+                return
+            entries = terminal_timeline(events, self.runtime.tools)
+            if mirrored is not None:
+                self.show(row, entries)  # The rest of a terminal visit the mirror followed.
+            else:
+                # Its own turns through Chief of Staff are in the log too: only what is newer.
+                self.show(row, self.missed(row, entries), note="Meanwhile, in a terminal")
+            self.store.delete(key)
+            self.read_to[row["id"]] = after
 
     async def mirror_loop(self):
         rounds = 0
@@ -504,58 +599,67 @@ class Workers:
         Chief of Staff never attaches to such a session (two programs would interleave its
         history); it reads the log the CLI writes and shows it, read-only, in the timeline.
         """
-        backend = self.runtime.backend
-        if not backend:
+        if not self.runtime.backend:
             return
-        for row in self.store.open_sessions(WORKER):
-            copilot = self.runtime.copilot_id(row["id"])
-            key = f"mirror:{row['id']}"
-            if copilot not in self.runtime.elsewhere:
-                if self.runtime.terminal.pop(row["id"], None) is not None:
-                    self.runtime.publish_session(row)
-                # Its later turns come through Chief of Staff; a next terminal visit starts anew.
-                self.store.delete(key)
-                continue
-            offset = self.store.get(key)
-            events, after, changed = await backend.read_history(copilot, int(offset or 0))
-            entries = terminal_timeline(events)
-            if offset is None:
-                shown = self.store.one(
-                    "SELECT id FROM messages WHERE session_id=? LIMIT 1", (row["id"],)
-                )
-                # A timeline that has its history already shows only what happens from now on.
-                entries = [] if shown else entries[-HISTORY_SHOWN:]
-                if entries:
-                    self.runtime.add_message(
-                        row["id"],
-                        "notice",
-                        "Its conversation in a terminal, shown read-only while it is open there",
-                        {"terminal": True},
-                    )
-            for kind, text in entries:
-                self.runtime.add_message(row["id"], kind, text[:20000], {"terminal": True})
-            self.store.set(key, str(after))
-            before = self.runtime.terminal.get(row["id"]) or {}
-            turn = turn_open(events, before.get("turn", False))
-            steps = [text for kind, text in entries if kind == "tool"]
-            now = {
-                "turn": turn,
-                "working": turn or time.time() - changed < BUSY_SECONDS,
-                "activity": steps[-1] if steps else before.get("activity", ""),
-            }
-            if now != before:
-                self.runtime.terminal[row["id"]] = now
+        async with self.mirror_lock:
+            for row in self.store.open_sessions(WORKER):
+                await self.mirror_one(row)
+
+    async def mirror_one(self, row: dict):
+        backend = self.runtime.connected()
+        copilot = self.runtime.copilot_id(row["id"])
+        key = f"mirror:{row['id']}"
+        offset = self.store.get(key)
+        if copilot not in self.runtime.elsewhere:
+            if offset is not None and not self.states.handle(row["id"]):
+                # Exited there: the rest of what it did; its next turns come through us.
+                events, _, _ = await backend.read_history(copilot, int(offset))
+                self.show(row, terminal_timeline(events, self.runtime.tools))
+            self.store.delete(key)
+            if self.runtime.terminal.pop(row["id"], None) is not None:
                 self.runtime.publish_session(row)
+            return
+        events, after, changed = await backend.read_history(copilot, int(offset or 0))
+        entries = terminal_timeline(events, self.runtime.tools)
+        if offset is None:
+            # What it did there before we looked: since its timeline's last entry.
+            self.show(
+                row,
+                self.missed(row, entries),
+                note="Its conversation in a terminal, shown read-only while it is open there",
+            )
+        else:
+            self.show(row, entries)
+        self.store.set(key, str(after))
+        before = self.runtime.terminal.get(row["id"]) or {}
+        turn = turn_open(events, before.get("turn", False))
+        steps = [text for kind, text, _ in entries if kind == "tool"]
+        now = {
+            "turn": turn,
+            "working": turn or time.time() - changed < BUSY_SECONDS,
+            "activity": steps[-1] if steps else before.get("activity", ""),
+        }
+        if now != before:
+            self.runtime.terminal[row["id"]] = now
+            self.runtime.publish_session(row)
 
     async def history(self, session_id: str) -> dict:
-        """The latest of a session Chief of Staff does not manage, read-only from its log."""
+        """The latest of a session Chief of Staff does not manage, read-only from its log
+        (read on from where the last look ended, while the owner watches it)."""
         backend = self.runtime.require_ready()
-        events, _, changed = await backend.read_history(session_id, 0)
-        entries = terminal_timeline(events)[-HISTORY_SHOWN * 2 :]
+        offset, entries, turn = self.histories.pop(session_id, (0, [], False))
+        events, after, changed = await backend.read_history(session_id, offset)
+        if after < offset:  # The log was rewritten.
+            entries, turn = [], False
+        entries = (entries + terminal_timeline(events, self.runtime.tools))[-HISTORY_SHOWN * 2 :]
+        turn = turn_open(events, turn)
+        self.histories[session_id] = (after, entries, turn)
+        while len(self.histories) > 20:
+            self.histories.pop(next(iter(self.histories)))
         return {
-            "entries": [{"kind": kind, "text": text[:20000]} for kind, text in entries],
+            "entries": [{"kind": kind, "text": text[:20000]} for kind, text, _ in entries],
             "open": session_id in self.runtime.elsewhere,
-            "working": turn_open(events, False) or time.time() - changed < BUSY_SECONDS,
+            "working": turn or time.time() - changed < BUSY_SECONDS,
         }
 
     async def refresh_elsewhere(self):
