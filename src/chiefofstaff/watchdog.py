@@ -144,6 +144,8 @@ class Watchdog:
         for row in self.store.open_sessions(WORKER):
             if row["status"] not in {"working", "idle"} or self.states[row["id"]].asking:
                 continue
+            if self.runtime.copilot_id(row["id"]) in self.runtime.elsewhere:
+                continue  # Its owner is working with it in a terminal.
             messages = self.store.messages(row["id"])
             mark = messages[-1]["id"] if messages else 0
             state = self.state(row["id"])

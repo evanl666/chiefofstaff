@@ -28,7 +28,11 @@ export function renderHeader() {
     const repos = session.checkouts?.length || 0;
     meta = [STATUS_TEXT[session.status], session.status === "queued" ? session.activity : "", session.branch || displayPath(session.cwd), repos > 1 ? `${repos} repos` : ""];
     if (session.yolo) meta.unshift("YOLO");
-    if (session.elsewhere) meta.unshift("Open in another Copilot window");
+    if (session.elsewhere) {
+      // What it does in the terminal, read from its log; Chief of Staff does not drive it now.
+      const terminal = session.terminal || {};
+      meta = [terminal.working ? "Working in a terminal" : "Open in a terminal", terminal.working ? terminal.activity : "", session.branch || displayPath(session.cwd)];
+    }
   }
   if (session.credits >= 0.05) meta.push(`${session.credits.toFixed(1)} credits`);
   const follows = session.follows || [];
@@ -125,7 +129,7 @@ const tokens = (count) => (count >= 1e6 ? `${+(count / 1e6).toFixed(1)}M` : `${M
 // Model, thinking effort and context window of the selected session. Each applies from its next message.
 function renderTuning(session) {
   const box = $("#session-tuning");
-  box.hidden = Boolean(session.closed_at) || !state.models.length;
+  box.hidden = Boolean(session.closed_at || session.elsewhere) || !state.models.length;
   if (box.hidden) return;
   const model = $("#session-model");
   const effort = $("#session-effort");
@@ -319,6 +323,32 @@ function renderMessage(message) {
       return el("div", { class: "line", text: message.text, title: clock(time) });
   }
 }
+// A session Chief of Staff does not drive, as read from its log: messages and grouped steps.
+export function readOnlyTimeline(entries, cwd) {
+  const nodes = [];
+  for (const entry of entries) {
+    if (entry.kind === "tool") {
+      let group = nodes.at(-1);
+      if (!group?.classList.contains("steps")) {
+        group = el("details", { class: "steps" }, el("summary"));
+        nodes.push(group);
+      }
+      const step = compactPaths(entry.text, cwd);
+      group.append(el("div", { class: "step", text: step, title: entry.text }));
+      const count = group.querySelectorAll(".step").length;
+      group.querySelector("summary").replaceChildren(
+        el("span", { class: "count", text: `${count} step${count === 1 ? "" : "s"}` }),
+        el("span", { class: "last", text: step }),
+      );
+    } else if (entry.kind === "owner") {
+      nodes.push(el("div", { class: "msg owner", text: entry.text }));
+    } else {
+      nodes.push(el("div", { class: "msg agent markdown", html: markdown(entry.text) }));
+    }
+  }
+  return nodes;
+}
+
 export function appendMessages(messages) {
   const timeline = $("#timeline");
   timeline.querySelector(".empty")?.remove();

@@ -135,6 +135,14 @@ async def run(scheme: str):
             await expect(page.locator("#focus-summary")).to_contain_text("While you focused")
             log("focused, then got one summary")
 
+            # A session open in the owner's terminal: shown read-only, never taken over.
+            await page.locator("#external summary").click()
+            await page.locator("#external-list .item", has_text="Profile the slow orders").click()
+            await expect(page.locator("#inbox")).to_be_hidden()
+            await expect(page.locator(".external-history")).to_contain_text("ten times faster")
+            await expect(page.locator("#session-meta")).to_contain_text("Open in a terminal")
+            log("opened a session that is open in a terminal, read-only")
+
             await page.locator(".item", has_text="Chat").click()
             await expect(page.locator("#timeline")).to_contain_text("Started three tasks")
             await page.screenshot(path=SHOTS / f"demo-{scheme}-5-chat.png")

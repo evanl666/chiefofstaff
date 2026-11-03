@@ -168,6 +168,9 @@ class Runtime:
         # Sessions another program (a terminal) has open: session id -> pid. Refreshed by the
         # watch loop and before resuming a session.
         self.elsewhere: dict[str, int] = {}
+        # What workers open in a terminal are doing, read from their logs (Workers.mirror).
+        self.terminal: dict[str, dict] = {}
+        self.mirror_job: asyncio.Task | None = None
         self.project_cache: dict[str, tuple[float, dict]] = {}
         self.rotate_lock = asyncio.Lock()
         self.work_root = store.directory / "work"
@@ -201,6 +204,7 @@ class Runtime:
         for source in self.all_sources():
             await source.start()
         self.watch_job = asyncio.create_task(self.watch_loop())
+        self.mirror_job = asyncio.create_task(self.workers.mirror_loop())
         if self.store.drafts("uncertain"):
             self.background(self.drafts.check_uncertain())
 
@@ -208,9 +212,10 @@ class Runtime:
         return [self.slack, self.github, *self.sources]
 
     async def stop(self):
-        if self.watch_job:
-            self.watch_job.cancel()
-            await asyncio.gather(self.watch_job, return_exceptions=True)
+        for job in (self.watch_job, self.mirror_job):
+            if job:
+                job.cancel()
+                await asyncio.gather(job, return_exceptions=True)
         for source in self.all_sources():
             await source.stop()
         await self.disconnect()
@@ -1157,6 +1162,7 @@ class Runtime:
             ),
             "task": self.toolset.task_brief(self.tasks.current(row["id"])),
             "elsewhere": self.copilot_id(row["id"]) in self.elsewhere and not row["closed_at"],
+            "terminal": self.terminal.get(row["id"]),
         }
 
     def publish_session(self, row: dict):

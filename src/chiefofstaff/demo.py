@@ -15,6 +15,7 @@ import json
 import re
 import subprocess
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -46,6 +47,7 @@ ATTRIBUTE = re.compile(r'(\w+)="([^"]*)"')
 LOGIN = '''"""Login with expiring tokens."""
 
 import time
+from datetime import UTC, datetime
 
 TOKEN_SECONDS = 60
 
@@ -70,6 +72,7 @@ def test_a_fresh_token_is_valid():
 RATELIMIT = '''"""At most five login attempts a minute, per key (an IP address or an account)."""
 
 import time
+from datetime import UTC, datetime
 from collections import defaultdict, deque
 
 LIMIT, WINDOW = 5, 60.0
@@ -474,7 +477,9 @@ class DemoRuntime(Runtime):
         super().__init__(
             store,
             bus,
-            backend_factory=lambda settings: ScriptedBackend(brain),
+            backend_factory=lambda settings: ScriptedBackend(
+                brain, others=terminal_sessions(project)
+            ),
             watch=watch or WatchConfig(interval=3, stall=12, long=600, cooldown=30),
         )
         self.slack = SlackSource(store, self, tokens=DemoTokens(), mcp=DemoSlackMcp(slack_delay))
@@ -491,6 +496,41 @@ class DemoRuntime(Runtime):
         await self.owner_send(self.router_id(), KICKOFF)
         await asyncio.sleep(20)
         self.slack.wake()
+
+
+def terminal_sessions(project: Path) -> list[dict]:
+    """A session the owner has open in a terminal, which Chief of Staff shows read-only."""
+
+    def event(kind: str, **data) -> dict:
+        return {"type": kind, "data": data}
+
+    return [
+        {
+            "meta": SimpleNamespace(
+                session_id="0d3e8c7a-5b1f-4c2e-9a6d-2f8b1c4e7a90",
+                summary="Profile the slow orders page",
+                is_remote=False,
+                modified_time=datetime.now(UTC),
+                context=SimpleNamespace(
+                    working_directory=str(project), repository="", branch="main"
+                ),
+            ),
+            "open": True,
+            "log": [
+                event("user.message", content="Why is the orders page slow for big accounts?"),
+                event(
+                    "tool.execution_start",
+                    toolName="bash",
+                    arguments={"command": "uv run python -m cProfile app/orders.py"},
+                ),
+                event(
+                    "assistant.message",
+                    content="Most of the time goes to one query per order line. Batching "
+                    "them into a single query should make it about ten times faster.",
+                ),
+            ],
+        }
+    ]
 
 
 def factory(project: Path, autoplay: bool = True):

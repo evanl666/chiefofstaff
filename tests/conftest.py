@@ -92,6 +92,8 @@ class FakeClient:
         self.names: dict[str, str] = {}
         self.metas: list = []
         self.in_use: dict[str, int] = {}  # Sessions open in a terminal: id -> pid.
+        self.logs: dict[str, list[dict]] = {}  # Their logs (events as the CLI writes them).
+        self.log_changed: dict[str, float] = {}
         self.cli_version = TESTED_CLI
 
     async def start(self):
@@ -114,6 +116,10 @@ class FakeClient:
 
     async def open_elsewhere(self):
         return dict(self.in_use)
+
+    async def read_history(self, session_id, offset):
+        events = self.logs.get(session_id, [])
+        return events[offset:], len(events), self.log_changed.get(session_id, 0.0)
 
     async def mcp_sign_in_url(self, session, server):
         login = await session.rpc.mcp.oauth.login(SimpleNamespace(server_name=server))

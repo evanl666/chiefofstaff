@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 from . import catalog
 from .envelope import clean_title, short, wrap
+from .events import PLUMBING_TOOLS, describe_tool
 from .roles import ROUTER, WORKER
 from .sources.slack import describe
 from .store import now
@@ -29,6 +30,44 @@ logger = logging.getLogger(__name__)
 
 # An adopted session shows at most this much of its earlier conversation.
 HISTORY_SHOWN = 60
+# How often sessions open in a terminal are mirrored, and looked for.
+MIRROR_SECONDS = 3
+ELSEWHERE_EVERY = 3  # mirror rounds
+# A log that changed this recently means the session is busy (its sub-agents, say).
+BUSY_SECONDS = 20
+TURN_ENDS = {"assistant.turn_end", "session.idle", "session.error", "abort"}
+
+
+def own_event(event: dict) -> bool:
+    """An event of the session itself, not of one of its sub-agents."""
+    return not event.get("agentId") and not (event.get("data") or {}).get("parentToolCallId")
+
+
+def terminal_timeline(events: list[dict]) -> list[tuple[str, str]]:
+    """What a session said and did, from its log: its messages and steps, not its sub-agents'."""
+    shown = []
+    for event in filter(own_event, events):
+        data = event.get("data") or {}
+        content = str(data.get("content") or "").strip()
+        if event.get("type") == "user.message" and content:
+            shown.append(("owner", content))
+        elif event.get("type") == "assistant.message" and content:
+            shown.append(("assistant", content))
+        elif event.get("type") == "tool.execution_start":
+            name = data.get("toolName") or "tool"
+            if name not in PLUMBING_TOOLS:
+                shown.append(("tool", describe_tool(name, data.get("arguments"))))
+    return shown
+
+
+def turn_open(events: list[dict], before: bool) -> bool:
+    """Whether the session's own turn is still going after these events."""
+    for event in filter(own_event, events):
+        if event.get("type") == "assistant.turn_start":
+            before = True
+        elif event.get("type") in TURN_ENDS:
+            before = False
+    return before
 
 
 class Workers:
@@ -441,6 +480,78 @@ class Workers:
         for kind, text in shown:
             self.runtime.add_message(row["id"], kind, text[:20000], {"imported": True})
 
+    async def mirror_loop(self):
+        rounds = 0
+        while True:
+            await asyncio.sleep(MIRROR_SECONDS)
+            try:
+                if rounds % ELSEWHERE_EVERY == 0:
+                    await self.refresh_elsewhere()
+                await self.mirror()
+            except Exception:
+                logger.exception("Mirroring sessions open in a terminal failed")
+            rounds += 1
+
+    async def mirror(self):
+        """Workers open in a terminal: what they say and do there, read from their logs.
+
+        Chief of Staff never attaches to such a session (two programs would interleave its
+        history); it reads the log the CLI writes and shows it, read-only, in the timeline.
+        """
+        backend = self.runtime.backend
+        if not backend:
+            return
+        for row in self.store.open_sessions(WORKER):
+            copilot = self.runtime.copilot_id(row["id"])
+            key = f"mirror:{row['id']}"
+            if copilot not in self.runtime.elsewhere:
+                if self.runtime.terminal.pop(row["id"], None) is not None:
+                    self.runtime.publish_session(row)
+                # Its later turns come through Chief of Staff; a next terminal visit starts anew.
+                self.store.delete(key)
+                continue
+            offset = self.store.get(key)
+            events, after, changed = await backend.read_history(copilot, int(offset or 0))
+            entries = terminal_timeline(events)
+            if offset is None:
+                shown = self.store.one(
+                    "SELECT id FROM messages WHERE session_id=? LIMIT 1", (row["id"],)
+                )
+                # A timeline that has its history already shows only what happens from now on.
+                entries = [] if shown else entries[-HISTORY_SHOWN:]
+                if entries:
+                    self.runtime.add_message(
+                        row["id"],
+                        "notice",
+                        "Its conversation in a terminal, shown read-only while it is open there",
+                        {"terminal": True},
+                    )
+            for kind, text in entries:
+                self.runtime.add_message(row["id"], kind, text[:20000], {"terminal": True})
+            self.store.set(key, str(after))
+            before = self.runtime.terminal.get(row["id"]) or {}
+            turn = turn_open(events, before.get("turn", False))
+            steps = [text for kind, text in entries if kind == "tool"]
+            now = {
+                "turn": turn,
+                "working": turn or time.time() - changed < BUSY_SECONDS,
+                "activity": steps[-1] if steps else before.get("activity", ""),
+            }
+            if now != before:
+                self.runtime.terminal[row["id"]] = now
+                self.runtime.publish_session(row)
+
+    async def history(self, session_id: str) -> dict:
+        """The latest of a session Chief of Staff does not manage, read-only from its log."""
+        backend = self.runtime.require_ready()
+        events, _, changed = await backend.read_history(session_id, 0)
+        entries = terminal_timeline(events)[-HISTORY_SHOWN * 2 :]
+        return {
+            "entries": [{"kind": kind, "text": text[:20000]} for kind, text in entries],
+            "open": session_id in self.runtime.elsewhere,
+            "working": turn_open(events, False) or time.time() - changed < BUSY_SECONDS,
+        }
+
     async def refresh_elsewhere(self):
         """Which sessions are open in a terminal now; the UI marks the managed ones."""
         if not self.runtime.backend:
@@ -458,6 +569,8 @@ class Workers:
         idle = self.store.settings().worker_idle_hours * 3600
         closed = []
         for row in self.store.open_sessions(WORKER):
+            if self.runtime.copilot_id(row["id"]) in self.runtime.elsewhere:
+                continue  # Someone is using it in a terminal.
             quiet = moment - timestamp(row["updated_at"]) >= idle
             if row["status"] in {"done", "failed"} and quiet and not self.store.follows(row["id"]):
                 await self.close(row["id"])
