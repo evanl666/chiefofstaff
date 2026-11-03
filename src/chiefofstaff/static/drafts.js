@@ -3,6 +3,7 @@
 import { $, api, el } from "./dom.js";
 import { displayPath, markdown } from "./text.js";
 import { byId, draftsFor, state } from "./state.js";
+import { select } from "./session.js";
 export function renderDrafts() {
   const box = $("#drafts");
   const visible = draftsFor(state.selected);
@@ -159,7 +160,92 @@ function requestCard(draft) {
   node.append(actions, error);
   return node;
 }
+// Cards change as workers join a decision or confirm a changed one.
+export const draftKey = (draft) => `draft:${draft.id}:${draft.kind === "decision" ? draft.target.askers.length : draft.kind === "change" ? draft.target.tasks.map((task) => (task.ack ? 1 : 0)).join("") : ""}`;
+function cardActions(draft, node, error) {
+  return async function decide(body) {
+    for (const button of node.querySelectorAll("button")) button.disabled = true;
+    error.textContent = "";
+    try {
+      await api(`/api/drafts/${draft.id}`, { method: "POST", body });
+    } catch (failure) {
+      error.textContent = failure.message;
+      for (const button of node.querySelectorAll("button")) button.disabled = false;
+    }
+  };
+}
+const taskLink = (item) => el("button", { type: "button", class: "link", text: item.title, onclick: () => select(item.session_id) });
+// A decision that is the owner's: why it comes up, the options and what each means, and what
+// the worker recommends. Workers that hit the same question wait on the same card.
+function decisionCard(draft) {
+  const target = draft.target;
+  const error = el("span", { class: "error" });
+  const node = el(
+    "div",
+    { class: "card draft decision", "data-id": draft.id },
+    el("div", { class: "head" }, el("span", { class: "label", text: "Decision" }), el("span", { class: "chip waiting", text: "Waiting for you" })),
+    el("div", { class: "question", text: target.question }),
+    target.why ? el("div", { class: "why", text: target.why }) : null,
+  );
+  const decide = cardActions(draft, node, error);
+  const lowered = (target.recommendation || "").toLowerCase();
+  const best = (target.options || []).find((option) => lowered.includes(option.choice.toLowerCase()));
+  if (target.options?.length) {
+    node.append(
+      el(
+        "div",
+        { class: "options" },
+        ...target.options.map((option) =>
+          el(
+            "button",
+            { type: "button", class: `option${option === best ? " recommended" : ""}`, onclick: () => decide({ action: "answer", text: option.choice }) },
+            el("span", { class: "choice", text: option.choice }),
+            option === best ? el("span", { class: "tag", text: "Recommended" }) : null,
+            option.effect ? el("small", { text: option.effect }) : null,
+          ),
+        ),
+      ),
+    );
+  }
+  if (target.recommendation) node.append(el("div", { class: "recommendation" }, el("strong", { text: "Recommendation: " }), target.recommendation));
+  const askers = target.askers || [];
+  node.append(el("div", { class: "affects" }, el("span", { text: askers.length > 1 ? `Affects ${askers.length} tasks:` : "For" }), ...askers.map(taskLink)));
+  const input = el("input", { placeholder: "Or decide something else", autocomplete: "off" });
+  input.addEventListener("keydown", (event) => event.key === "Enter" && input.value.trim() && decide({ action: "answer", text: input.value }));
+  node.append(
+    el("div", { class: "actions" }, input, el("button", { type: "button", class: "secondary", text: "Decide", onclick: () => decide({ action: "answer", text: input.value }) }), el("button", { type: "button", class: "text", text: "Not now", onclick: () => decide({ action: "reject" }) })),
+    error,
+  );
+  return node;
+}
+// The owner changed a decision: which tasks it affects, and which workers confirmed.
+function changeCard(draft) {
+  const target = draft.target;
+  const error = el("span", { class: "error" });
+  const confirmed = target.tasks.filter((item) => item.ack).length;
+  const redo = target.tasks.filter((item) => item.was === "review" || item.was === "done").length;
+  const node = el(
+    "div",
+    { class: "card draft change", "data-id": draft.id },
+    el("div", { class: "head" }, el("span", { class: "label", text: "Decision changed" }), el("span", { class: "chip progress", text: `${confirmed}/${target.tasks.length} confirmed` })),
+    el("div", { class: "question", text: target.decision.text }),
+    el("div", { class: "before", text: `Was: ${target.before.join("; ")}` }),
+    el("div", { class: "why", text: `Affects ${target.tasks.length} task${target.tasks.length === 1 ? "" : "s"}${redo ? `; ${redo} checked result${redo === 1 ? " is" : "s are"} out of date and being redone` : ""}.` }),
+    el(
+      "ul",
+      { class: "impact" },
+      ...target.tasks.map((item) =>
+        el("li", { class: item.ack ? "acked" : "" }, el("span", { class: "mark", text: item.ack ? "✓" : "…" }), taskLink(item), el("span", { class: "state", text: item.ack ? item.ack : item.was === "review" || item.was === "done" ? "result out of date, updating" : "adjusting" })),
+      ),
+    ),
+  );
+  const decide = cardActions(draft, node, error);
+  node.append(el("div", { class: "actions" }, el("button", { type: "button", class: "text", text: "Hide", onclick: () => decide({ action: "answer" }) })), error);
+  return node;
+}
 export function draftCard(draft) {
+  if (draft.kind === "decision") return decisionCard(draft);
+  if (draft.kind === "change") return changeCard(draft);
   if (draft.kind === "workspace") return workspaceCard(draft);
   if (REQUEST_LABELS[draft.kind]) return requestCard(draft);
   const owner = byId(draft.session_id);

@@ -23,7 +23,6 @@ from .bus import Bus
 from .models import Settings
 from .runtime import Runtime
 from .scripted import (
-    AskOwner,
     CallTool,
     Say,
     ScriptedBackend,
@@ -163,6 +162,10 @@ class DemoBrain:
                                     "why and fix it.",
                                     "project": self.project,
                                     "isolate": True,
+                                    "done_when": [
+                                        "`uv run pytest -q` passes",
+                                        "The login tests pass 20 runs in a row",
+                                    ],
                                 },
                             )
                         )
@@ -176,6 +179,10 @@ class DemoBrain:
                             "isolate": True,
                             "after": [first["task_id"]],
                             "why_new": "A separate change with its own branch, after the fix.",
+                            "done_when": [
+                                "`uv run pytest -q` passes",
+                                "The sixth attempt within a minute is refused",
+                            ],
                         },
                     )
                     yield CallTool(
@@ -192,6 +199,24 @@ class DemoBrain:
                         "is in, and a feature-flag comparison."
                     )
                     continue
+                if "change of plan" in body.lower():
+                    listed = json.loads((yield CallTool("list_sessions", {})))
+                    earlier = next(
+                        (d for d in listed["decisions"] if "login attempts" in d["decision"]), None
+                    )
+                    if earlier:
+                        yield CallTool(
+                            "record_decision",
+                            {
+                                "decision": "Limit login attempts per IP address only",
+                                "replaces": [earlier["id"]],
+                            },
+                        )
+                        yield Say(
+                            "Changed the decision to per IP address only. The rate-limiting "
+                            "result was out of date, so its worker is redoing it."
+                        )
+                        continue
                 title = " ".join(body.split()[:7]).rstrip(".,!?") or "Task"
                 code = re.search(r"\b(fix|bug|test|code|add|refactor|repo|api)\b", body, re.I)
                 arguments = {"title": title[:60], "instructions": body}
@@ -292,6 +317,11 @@ class DemoBrain:
                         "running every test:",
                     )
                     yield Shell(
+                        "uv run pytest -q --count 20 tests/test_login.py",
+                        "....................\n20 passed in 0.41s",
+                        seconds=1,
+                    )
+                    yield Shell(
                         "git add -A && git commit -qm 'Fix flaky login test' "
                         "&& git log --oneline -1",
                         run=True,
@@ -305,32 +335,37 @@ class DemoBrain:
                             "- Cause: token expiry read the real clock, so slow runs failed\n"
                             "- Fix: `app/login.py` takes the clock as a parameter\n"
                             "- `uv run pytest -q`: 8 passed\n- Committed on my branch",
+                            "criteria": [
+                                {
+                                    "criterion": "`uv run pytest -q` passes",
+                                    "result": "met",
+                                    "evidence": "`uv run pytest -q`: 8 passed",
+                                },
+                                {
+                                    "criterion": "The login tests pass 20 runs in a row",
+                                    "result": "met",
+                                    "evidence": "`uv run pytest -q --count 20 "
+                                    "tests/test_login.py`: 20 passed",
+                                },
+                            ],
                         },
                     )
                 elif title == "Rate-limit login attempts":
-                    answer = yield AskOwner(
-                        "Should login attempts be limited per IP address or per account?",
-                        ["Per IP address", "Per account", "Both"],
-                    )
-                    choice = (answer or {}).get("answer") or "Per IP address"
-                    yield WriteFile("app/ratelimit.py", RATELIMIT)
-                    yield Shell("uv run pytest -q", "...........\n11 passed in 0.33s", seconds=2)
-                    yield Shell(
-                        "git add -A && git commit -qm 'Rate-limit login attempts' "
-                        "&& git log --oneline -1",
-                        run=True,
-                    )
                     yield CallTool(
-                        "report",
+                        "ask_decision",
                         {
-                            "status": "done",
-                            "task_id": attrs.get("task", ""),
-                            "summary": f"Added rate limiting {choice[0].lower()}{choice[1:]}: "
-                            "five attempts a "
-                            "minute.\n- New `app/ratelimit.py`, used by login\n- Built on the "
-                            "login fix (the clock is injected)\n- 11 tests pass",
+                            "question": "Limit login attempts per IP address or per account?",
+                            "why": "Per IP misses attackers who rotate addresses; per account "
+                            "lets anyone lock a user out.",
+                            "options": [
+                                {"choice": "Per IP address", "effect": "Simple; offices share IPs"},
+                                {"choice": "Per account", "effect": "Stops guessing one password"},
+                                {"choice": "Both", "effect": "Safest; one more counter"},
+                            ],
+                            "recommendation": "Per account: it protects each user directly",
                         },
                     )
+                    yield Say("Asked the owner how to limit login attempts.")
                 elif title == "Compare feature-flag services":
                     self.researchers.add(session.session_id)
                     yield Shell(
@@ -363,6 +398,22 @@ class DemoBrain:
                 else:
                     yield Say("Still on it; this step takes a moment.")
                 return
+            if sender == "owner" and kind == "decision":
+                choice = body.rsplit("The owner decided:", 1)[-1].strip() or "Per IP address"
+                for step in rate_limiting(attrs.get("task", ""), choice):
+                    yield step
+                return
+            if kind == "decision-changed":
+                yield CallTool(
+                    "ack_decision",
+                    {
+                        "decision": attrs.get("decision", ""),
+                        "plan": "Key the limiter on the IP address only.",
+                    },
+                )
+                for step in rate_limiting(attrs.get("task", ""), "Per IP address only"):
+                    yield step
+                return
             if sender == "owner" or (sender == "router" and kind == "message"):
                 yield Wait(2)
                 yield CallTool(
@@ -384,6 +435,40 @@ FLAGS_REPORT = (
     "- **Open source C**: self-hosted, free, needs a Postgres\n"
     "- Recommendation: start with A; move to C if we need data on our servers"
 )
+
+
+def rate_limiting(task_id: str, choice: str) -> list:
+    """The rate-limiting work, once the owner decided how (or changed it)."""
+    return [
+        WriteFile("app/ratelimit.py", RATELIMIT),
+        Shell("uv run pytest -q", "...........\n11 passed in 0.33s", seconds=2),
+        Shell(
+            "git add -A && git commit -qm 'Rate-limit login attempts' && git log --oneline -1",
+            run=True,
+        ),
+        CallTool(
+            "report",
+            {
+                "status": "done",
+                "task_id": task_id,
+                "summary": f"Added rate limiting {choice[0].lower()}{choice[1:]}: five attempts "
+                "a minute.\n- New `app/ratelimit.py`, used by login\n- Built on the login fix "
+                "(the clock is injected)\n- 11 tests pass",
+                "criteria": [
+                    {
+                        "criterion": "`uv run pytest -q` passes",
+                        "result": "met",
+                        "evidence": "`uv run pytest -q`: 11 passed",
+                    },
+                    {
+                        "criterion": "The sixth attempt within a minute is refused",
+                        "result": "met",
+                        "evidence": "The limiter allows five per window, so the sixth is refused.",
+                    },
+                ],
+            },
+        ),
+    ]
 
 
 def research_report(task_id: str) -> CallTool:

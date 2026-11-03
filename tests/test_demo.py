@@ -40,7 +40,7 @@ async def test_the_demo_scenario_plays_through(tmp_path):
         ]
 
         question = await until(lambda: store.drafts() and store.drafts()[0])
-        assert question["kind"] == "question"
+        assert question["kind"] == "decision" and question["target"]["recommendation"]
         await runtime.drafts.resolve(
             question["id"], DraftDecision(action="answer", text="Per account")
         )
@@ -69,6 +69,24 @@ async def test_the_demo_scenario_plays_through(tmp_path):
         )
         found = runtime.task_actions.view(runtime.tasks.get(fix["id"]))["receipts"]
         assert found["tests"]["passed"] and found["changed"]["commits"] == 1
+        assert found["verdict"] == "verified" and found["tests"]["failed_before"]
         assert json.loads(json.dumps(found))  # The UI gets plain JSON.
+        limited = runtime.task_actions.view(runtime.tasks.get(rate["id"]))["receipts"]
+        assert [c["state"] for c in limited["criteria"]] == ["verified", "claimed"]
+
+        # The owner changes the decision: the finished rate limiting is redone and confirmed.
+        await runtime.owner_send(
+            runtime.router_id(), "Change of plan: limit login attempts per IP address only"
+        )
+        redone = await until(
+            lambda: (
+                (task := runtime.tasks.get(rate["id"]))["status"] == "review"
+                and "per IP address only" in task["result"]
+                and task
+            )
+        )
+        assert runtime.tasks.runs(redone["id"])[-1]["reason"] == "decision changed"
+        [impact] = store.all("SELECT status FROM drafts WHERE kind='change'")
+        assert impact["status"] == "answered", "its worker confirmed"
     finally:
         await runtime.stop()

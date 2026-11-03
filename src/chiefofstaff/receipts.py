@@ -149,13 +149,29 @@ def exit_code(output: str, success: bool | None) -> int | None:
 QUOTED = re.compile(r"`([^`\n]{4,})`")
 
 
+def words(text: str) -> list[str]:
+    try:
+        return shlex.split(text)
+    except ValueError:
+        return text.split()
+
+
+def names(snippet: str, command: str) -> bool:
+    """Whether a quoted command is the one that ran: the same text, or (from two words on) all
+    of its words in it, as `git log --stat` is in `git --no-pager log --oneline --stat -2`."""
+    if snippet in command or command in snippet:
+        return True
+    quoted = words(snippet)
+    return len(quoted) >= 2 and set(quoted) <= set(words(command))
+
+
 def backing(evidence: str, commands: list[dict]) -> dict | None:
     """The observed command a criterion's evidence names (in backticks, or verbatim), latest
     first: what makes a worker's "met" an observation rather than a claim."""
     quoted = QUOTED.findall(evidence or "")
     for command in reversed(commands):
         text = command["command"]
-        if any(snippet in text or text in snippet for snippet in quoted):
+        if any(names(snippet, text) for snippet in quoted):
             return command
         if not quoted and len(text) >= 8 and text in (evidence or ""):
             return command

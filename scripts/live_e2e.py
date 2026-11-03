@@ -22,6 +22,7 @@ creates are deleted at the end.
 import asyncio
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -206,6 +207,11 @@ async def scenario_worker(app: App, project: Path) -> dict:
     assert not (project / "hello.txt").exists(), "main checkout must stay untouched"
     assert git(project, "rev-parse", "--abbrev-ref", "HEAD").strip() == "main"
     log(f"worker branch {worker['branch']} has the commit; update: {updates[-1]['text']!r}")
+    tasks = (await app.get("/api/state"))["tasks"]
+    task = next(t for t in tasks if t["session_id"] == worker["id"])
+    found = task["receipts"] or {}
+    criteria = [(c["state"], c["criterion"]) for c in found.get("criteria", [])]
+    log(f"acceptance criteria: {criteria}; verdict {found.get('verdict')!r}")
     return worker
 
 
@@ -757,6 +763,52 @@ async def gone(path: Path) -> bool:
     return not path.exists()
 
 
+async def scenario_decisions(app: App, project: Path):
+    """The owner states a decision a task relies on, then changes it: the Router records the
+    change, the affected worker is told and confirms, and its finished result reopens."""
+    state = await app.get("/api/state")
+    router = state["router_id"]
+    await app.post(
+        f"/api/sessions/{router}/messages",
+        {
+            "text": "Decision: our API uses snake_case JSON keys. Record that decision, then in "
+            f"the project {project} (isolated worktree) have a worker write api.md with one "
+            "example JSON response for GET /users that follows it, and commit it."
+        },
+    )
+
+    async def recorded_and_done():
+        state = await app.get("/api/state")
+        tasks = [t for t in state["tasks"] if t["decisions"] and t["status"] == "review"]
+        return tasks[0] if tasks else None
+
+    task = await wait_for("a task that relies on the decision is done", recorded_and_done, 600)
+    log(f"“{task['title']}” relies on {[d['text'] for d in task['decisions']]}")
+    await app.post(
+        f"/api/sessions/{router}/messages",
+        {"text": "Change of plan: the API uses camelCase JSON keys instead of snake_case."},
+    )
+
+    async def confirmed():
+        state = await app.get("/api/state")
+        current = await app.get(f"/api/tasks/{task['id']}")
+        changed = [d for d in current["decisions"] if d["status"] == "active" and d["ack"]]
+        pending = [d for d in state["drafts"] if d["kind"] == "change"]
+        return (
+            (changed[0], current)
+            if changed and not pending and current["status"] == "review"
+            else None
+        )
+
+    decision, current = await wait_for("the worker confirmed and redid it", confirmed, 600)
+    assert "camel" in decision["text"].lower(), decision
+    assert current["runs"] >= 2, "its finished result was reopened and redone"
+    tree = Path((await app.get(f"/api/sessions/{task['session_id']}"))["cwd"])
+    keys = re.findall(r'"(\w+)"\s*:', (tree / "api.md").read_text())
+    assert keys and not [key for key in keys if "_" in key], keys
+    log(f"decision changed; the worker confirmed: {decision['ack']!r}; keys now {keys}")
+
+
 async def scenario_code_folder(app: App, root: Path):
     """The code folder: a repository the owner names that is not on this machine is cloned into
     it; the worker changes it in its own worktree in .chief, removed when the worker closes."""
@@ -971,6 +1023,10 @@ async def main():
                 await scenario_code_folder(app, root)
                 log("CODE FOLDER SCENARIO PASSED")
                 return
+            if sys.argv[1:] == ["decisions"]:
+                await scenario_decisions(app, project)
+                log("DECISIONS SCENARIO PASSED")
+                return
             if sys.argv[1:] == ["repos"]:
                 await scenario_repos(app, root)
                 log("REPOS SCENARIO PASSED")
@@ -984,6 +1040,7 @@ async def main():
             await scenario_external(app)
             await scenario_watchdog(app, project)
             await scenario_dependencies(app, project)
+            await scenario_decisions(app, project)
             await scenario_workspace(app, root)
             await scenario_ask_user(app)
             await scenario_ask_session(app)

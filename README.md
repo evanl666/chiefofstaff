@@ -35,6 +35,11 @@ Now I talk to one session, the Router, and Chief of Staff keeps track of the res
   checks. If a report says "all tests pass" and no test ran, the card says so.
 - Lets you review the diff, comment on lines and send the comments back to the worker, then open
   the PR with one click. The worker follows the PR; when it merges, the task is done.
+- Checks results against acceptance criteria: each is marked verified only when a command the
+  worker was seen running backs it, and evidence goes out of date when the code changes.
+- Brings you decisions, not just questions: why, the options and their effects, a
+  recommendation. Change a decision later and every task that relied on it adjusts and
+  confirms.
 - Leaves your own checkout alone. Each worker gets its own folder and git worktree and runs in
   Copilot's OS sandbox, so it can't write anywhere else.
 - Drafts replies to Slack DMs and mentions in your style. Nothing is sent until you press Send.

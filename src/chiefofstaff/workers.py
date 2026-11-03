@@ -238,6 +238,7 @@ class Workers:
                     await session.disconnect()
         self.states[session_id].busy = False
         self.store.unfollow_session(session_id)
+        self.runtime.decisions.drop_asker(session_id)
         self.states[session_id].last_output = ""
         self.states[session_id].close_after_turn = False
         self.runtime.asks.cancel_requests(session_id, "The session was closed.")

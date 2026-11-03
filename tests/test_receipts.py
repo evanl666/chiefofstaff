@@ -109,6 +109,15 @@ def test_acceptance_criteria_count_only_what_was_seen():
                  "evidence": "`uv run pytest tests/test_orders.py`"}]  # fmt: skip
     found = receipts.summarize(commands, {}, "Done.", criteria[:1], in_order)
     assert found["verdict"] == "verified", "matched in order when worded differently"
+    # As real workers write it: the check they ran, cited with fewer options than they used.
+    ran = [command("git --no-pager log --oneline -3 --all --decorate && cat hello.txt", 0)]
+    cited = [{"criterion": "commit", "result": "met",
+              "evidence": "`git log --oneline --all --decorate`: 6460933 Add hello"}]  # fmt: skip
+    assert receipts.summarize(ran, {}, "", ["commit"], cited)["verdict"] == "verified"
+    other = [{"criterion": "commit", "result": "met", "evidence": "`git status --short`"}]
+    assert receipts.summarize(ran, {}, "", ["commit"], other)["verdict"] == "unverified", (
+        "a command it did not run backs nothing"
+    )
     stale = receipts.summarize([], {"stale": "Out of date: the code changed."}, "", [], [])
     assert stale["flags"][0] == "Out of date: the code changed." and stale["verdict"] == ""
 

@@ -56,6 +56,8 @@ async def test_router_routes_work_and_worker_reports_back(harness):
         "answer_session",
         "add_repo",
         "record_setup",
+        "ask_decision",
+        "ack_decision",
     }
     assert "available_tools" not in worker.options
     assert worker.options["on_user_input_request"] == runtime.asks.on_user_input
