@@ -93,6 +93,7 @@ class Drafts:
                 owner=decision.reason,
                 scope="slack" if draft["kind"] == "slack" else "",
                 agreed=False,
+                untrusted=True,  # Written from Slack messages or a PR.
             )
             if draft["kind"] == "slack":
                 await self.learn_style(draft["text"], reason=decision.reason or "(no reason)")
@@ -129,6 +130,7 @@ class Drafts:
             owner=final if edited else "",
             scope="slack" if draft["kind"] == "slack" else "",
             agreed=not edited,
+            untrusted=True,  # Written from Slack messages or a PR.
         )
         if final != draft["text"] and draft["kind"] == "slack":
             await self.learn_style(draft["text"], sent=final)
@@ -274,7 +276,7 @@ class Drafts:
     def about(draft: dict) -> str:
         target = draft["target"]
         if draft["kind"] == "slack":
-            return f"A Slack reply to {target.get('to') or target.get('channel_id', '')}"
+            return "A Slack reply"  # Who it was for was written by the session: not kept.
         return f"A review of {target.get('repo', '')}#{target.get('number', '')}"
 
     async def tell_drafter(self, draft: dict, text: str, wake: bool = False):

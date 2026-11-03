@@ -11,6 +11,7 @@ from conftest import Harness, call_tool, env, settle, task_of
 from chiefofstaff import workspaces as workspaces_module
 from chiefofstaff.models import Settings
 from chiefofstaff.runtime import GITHUB_HOSTS
+from chiefofstaff.task_actions import moved
 
 
 def run(*command, cwd=None):
@@ -600,6 +601,8 @@ async def test_create_pr_pushes_the_branch_and_the_worker_follows_the_pr(tmp_pat
     assert created[created.index("--title") + 1] == "Fix login"
     assert "Fixed the login." in created[created.index("--body") + 1]
     assert harness.store.follows(worker_id) == ["github:acme/app#9"], "its PR comes to it"
+    stale = runtime.task_actions.view(task)["receipts"]["stale"]
+    assert stale.startswith("Out of date"), "checked with notes.md, opened without it"
     assert [p["url"] for p in runtime.task_actions.view(task)["receipts"]["prs"]] == [pr]
 
     calls.clear()
@@ -607,8 +610,29 @@ async def test_create_pr_pushes_the_branch_and_the_worker_follows_the_pr(tmp_pat
     await runtime.task_actions.create_pr(task_id)
     assert not any(call[:2] == ("pr", "create") for call in calls), "an open PR is not doubled"
 
+    await runtime.owner_send(worker_id, "Is CI green?")  # A question, before the merge.
     runtime.unfollow("github:acme/app#9", finished=True, merged=True)
     assert runtime.tasks.get(task_id)["status"] == "done", "merged, its task is done"
+    await call_tool(runtime, "report", worker_id, status="done", summary="Merged, all good.")
+    assert runtime.tasks.get(task_id)["status"] == "done", "the question does not reopen it"
+
+
+async def test_editing_a_new_file_changes_the_version(tmp_path, git_repo):
+    checkout = {"path": str(git_repo)}
+    (git_repo / "new_test.py").write_text("assert True\n")
+    (git_repo / "nested").mkdir()
+    run("git", "init", "-q", cwd=git_repo / "nested")  # Listed as "nested/".
+    (git_repo / "gone").symlink_to(git_repo / "missing")  # A broken link.
+    first = await workspaces_module.version(checkout)
+    (git_repo / "new_test.py").write_text("assert False\n")
+    assert (await workspaces_module.version(checkout))["edits"] != first["edits"]
+    older = {"path": "p", "commit": "abc", "edits": "from-0.1.9"}  # No digest kind.
+    assert not moved([older], [{"path": "p", "commit": "abc", "edits": "x", "digest": 2}]), (
+        "an older digest is not compared: no false out-of-date after upgrading"
+    )
+    assert moved(
+        [{**older, "digest": 2}], [{"path": "p", "commit": "abc", "edits": "x", "digest": 2}]
+    )
 
 
 async def test_a_closed_workers_changes_are_still_shown(tmp_path):

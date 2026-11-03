@@ -18,7 +18,7 @@ from .envelope import wrap
 from .roles import WORKER
 from .store import now
 from .tasks import ENDED, OPEN
-from .workspaces import base_of, changes, diff, git, version
+from .workspaces import base_of, changes, diff, git, same_version, version
 
 if TYPE_CHECKING:
     from .runtime import Runtime
@@ -40,6 +40,23 @@ STATUS_WORDS = {
 }
 
 
+def moved(before: list[dict], now: list[dict]) -> str:
+    """Why checkouts' code is not what it was (commit or edits), or ""."""
+    current = {checkout["path"]: checkout for checkout in now}
+    for recorded in before:
+        found = current.get(recorded["path"])
+        if not found or not recorded.get("commit") or not found.get("commit"):
+            continue
+        if found["commit"] != recorded["commit"]:
+            return (
+                f"Out of date: the code changed since it was checked "
+                f"({recorded['commit'][:7]} → {found['commit'][:7]})."
+            )
+        if not same_version(recorded, found):
+            return "Out of date: the code was edited since it was checked."
+    return ""
+
+
 class TaskActions:
     """Changes tasks on behalf of sessions and the owner."""
 
@@ -51,6 +68,14 @@ class TaskActions:
         self.tasks = runtime.tasks
         self.delivery = runtime.delivery
         self.workspaces = runtime.workspaces
+
+    def about(self, task: dict, detail: str) -> str:
+        """What a piece of feedback was about, for learning: a Slack-reading worker's text may
+        carry Slack content, so its task's title is all that is kept."""
+        row = self.store.find_session(task["session_id"]) or {}
+        if row.get("slack"):
+            return task["title"]
+        return f"{task['title']}: {detail[:600]}"
 
     def receipts(self, task: dict) -> dict | None:
         """Observed commands, changes and PRs for a task, beside its report."""
@@ -103,15 +128,10 @@ class TaskActions:
                 continue
             with suppress(Exception):
                 current = await version(checkout)
-                if not current:
-                    continue
-                if current["commit"] != recorded["commit"]:
-                    return (
-                        f"Out of date: the code changed since it was checked "
-                        f"({recorded['commit'][:7]} → {current['commit'][:7]})."
-                    )
-                if current["edits"] != recorded.get("edits", ""):
-                    return "Out of date: the code was edited since it was checked."
+                if current and (
+                    reason := moved([recorded], [{**current, "path": recorded["path"]}])
+                ):
+                    return reason
         return ""
 
     def stale(self, task_id: str, reason: str):
@@ -132,8 +152,9 @@ class TaskActions:
         )
         self.publish(self.tasks.get(task_id))
 
-    async def collect_evidence(self, task_id: str):
-        """After a task is reported done: its checkouts' changes and its PRs' state."""
+    async def collect_evidence(self, task_id: str, keep_stale: bool = False):
+        """After a task is reported done: its checkouts' changes and its PRs' state.
+        `keep_stale`: not after a report (a PR opened), so what was checked did not change."""
         task = self.tasks.get(task_id)
         row = self.store.find_session(task["session_id"])
         if not row:
@@ -168,10 +189,15 @@ class TaskActions:
                 }
             )
         run = self.store.one(
-            "SELECT id FROM runs WHERE task_id=? ORDER BY started_at DESC LIMIT 1", (task_id,)
+            "SELECT id, evidence FROM runs WHERE task_id=? ORDER BY started_at DESC LIMIT 1",
+            (task_id,),
         )
         if run:
             evidence = {"checkouts": checkouts, "prs": prs, "at": now()}
+            before = json.loads(run["evidence"]) if keep_stale and run["evidence"] else {}
+            if reason := before.get("stale") or moved(before.get("checkouts", []), checkouts):
+                # The checks were about the code as it was then, not as it is now.
+                evidence |= {"checkouts": before["checkouts"], "stale": reason}
             self.store.execute(
                 "UPDATE runs SET evidence=? WHERE id=?", (json.dumps(evidence), run["id"])
             )
@@ -260,7 +286,7 @@ class TaskActions:
                 f"PR opened: {', '.join(opened)}",
                 {"prompt": wrap("system", "context", note)} if followed else {},
             )
-        await self.collect_evidence(task_id)
+        await self.collect_evidence(task_id, keep_stale=True)
         return self.tasks.get(task_id)
 
     async def pr_plan(self, checkout: dict) -> tuple[str, str, str] | None:
@@ -383,7 +409,7 @@ class TaskActions:
         if by == "you" and reason.strip():
             self.runtime.learning.record(
                 "cancel",
-                context=f"{task['title']}: {task['goal'][:600]}",
+                context=self.about(task, task["goal"]),
                 owner=reason,
                 scope=self.runtime.learning.scope_of(task["session_id"]),
             )
@@ -438,11 +464,12 @@ class TaskActions:
         before = task["status"]
         self.runtime.learning.record(
             "follow-up",
-            context=f"{task['title']}: {task['goal'][:600]}",
+            context=self.about(task, task["goal"]),
             proposed=task["result"],
             owner=text,
             scope=self.runtime.learning.scope_of(task["session_id"]),
             agreed=False if before in {"review", "done"} else None,
+            untrusted=bool(row["slack"]),
         )
         if before in {"review", "done", "failed"}:
             task = self.tasks.move(task_id, "running", reason="follow-up")
@@ -475,7 +502,7 @@ class TaskActions:
         if text.strip():
             self.runtime.learning.record(
                 "retry",
-                context=f"{task['title']}: {task['progress'][:600]}",
+                context=self.about(task, task["progress"]),
                 owner=text,
                 scope=self.runtime.learning.scope_of(task["session_id"]),
             )

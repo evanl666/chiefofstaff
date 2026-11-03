@@ -62,7 +62,7 @@ from .sources.slack import SlackSource, describe
 from .state import SessionStates
 from .store import Store, hours_ago, now
 from .task_actions import TaskActions
-from .tasks import TaskBook, settle_adopted
+from .tasks import TaskBook, settle_adopted, settle_followups
 from .tasks import migrate as migrate_tasks
 from .tools import Tools
 from .watchdog import WatchConfig, Watchdog
@@ -181,6 +181,7 @@ class Runtime:
         self.tasks = TaskBook(store, on_change=lambda task: self.task_actions.publish(task))
         migrate_tasks(store)
         settle_adopted(store)
+        settle_followups(store)
         self.delivery = Delivery(self)
         # The parts, by responsibility; each keeps a reference to this runtime.
         self.events = Events(self)
@@ -479,7 +480,8 @@ class Runtime:
         names = ["report", "follow_thread", "unfollow_thread"]
         if row["role"] == WORKER:
             names += ["find_sessions", "ask_session", "answer_session", "add_repo"]
-            names += ["ask_decision", "ack_decision"]
+            # Questions it writes reach other workers' prompts: not from Slack content.
+            names += ["ack_decision"] if row["slack"] else ["ask_decision", "ack_decision"]
             if not row["slack"]:
                 names.append("record_setup")
         if self.store.get(f"distill:{row['id']}"):
@@ -954,18 +956,12 @@ class Runtime:
             context = [wrap("system", "context", note) for note in notes if note]
             prompt = "\n\n".join([prompt, *context])
         task = self.tasks.current(session_id) if row["role"] == WORKER else None
-        reopened = task if task and task["status"] in {"review", "done", "failed"} else None
-        if reopened:
-            # Talking to a worker continues its task: its next result comes back for review.
-            self.tasks.move(reopened["id"], "running", reason="follow-up")
-        try:
-            return await self.delivery.deliver(
-                session_id, prompt, kind="owner", display=text, steer=True
-            )
-        except Exception:
-            if reopened:
-                self.tasks.move(reopened["id"], reopened["status"])
-            raise
+        if task and task["status"] in {"review", "done", "failed"}:
+            # A question changes nothing, but new work it reports comes back for review.
+            self.store.set(f"followup:{task['id']}", "1")
+        return await self.delivery.deliver(
+            session_id, prompt, kind="owner", display=text, steer=True
+        )
 
     def projects_note(self) -> str:
         """Tell the Router when the configured projects changed since it last heard."""

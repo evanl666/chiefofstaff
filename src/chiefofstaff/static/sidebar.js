@@ -160,6 +160,12 @@ async function loadHistory(item, box, first = false) {
   try {
     const { entries, working, open } = await api(`/api/external/${item.id}/history`);
     if (state.selected !== item.id || !box.isConnected) return;
+    if (item.open && !open) {
+      // Exited in the terminal while the owner watched: it can be continued here now.
+      item.open = false;
+      $("#session-meta").textContent = $("#session-meta").textContent.replace("Open in a terminal", "Not managed yet");
+      setComposer({ placeholder: "Message to continue this session here…" });
+    }
     const nodes = readOnlyTimeline(entries, item.cwd);
     if (!nodes.length) nodes.push(el("div", { class: "line note", text: "No conversation yet." }));
     if (working) nodes.push(el("div", { class: "working-line", text: "Working in a terminal…" }));

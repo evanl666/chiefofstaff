@@ -41,6 +41,8 @@ MAX_FEEDBACK = 40
 MAX_LESSONS = 40
 # Feedback that only counts towards agreement: there is nothing in the owner's words to learn.
 TALLIED = {"accept", "draft-sent"}
+# A learning worker in one of these states is still at work.
+ACTIVE = {"queued", "starting", "working"}
 
 
 class LessonProposal(BaseModel):
@@ -85,8 +87,12 @@ class Learning:
         owner: str = "",
         scope: str = "",
         agreed: bool | None = None,
+        untrusted: bool = False,
     ):
-        """One piece of the owner's feedback."""
+        """One piece of the owner's feedback. `untrusted`: what the session proposed came from
+        content no one vouches for (Slack, a PR), so only the owner's part is kept."""
+        if untrusted:
+            proposed = ""
         learned = 1 if kind in TALLIED or not owner.strip() else 0
         self.store.execute(
             """INSERT INTO feedback(kind, context, proposed, owner, scope, agreed, learned,
@@ -176,11 +182,14 @@ class Learning:
             return
         await self.learn()
 
+    def learners(self) -> list[dict]:
+        return [row for row in self.store.open_sessions() if self.store.get(f"learner:{row['id']}")]
+
     def busy(self) -> bool:
         """A learning worker is at work, or its lessons wait for the owner."""
         if any(draft["kind"] == "lessons" for draft in self.store.drafts()):
             return True
-        return any(self.store.get(f"learner:{row['id']}") for row in self.store.open_sessions())
+        return any(row["status"] in ACTIVE for row in self.learners())
 
     async def learn(self) -> dict:
         async with self.lock:
@@ -189,6 +198,8 @@ class Learning:
             items = self.unlearned()
             if not items:
                 raise ValueError("No new feedback to learn from yet.")
+            for row in self.learners():  # One that stopped without proposing anything.
+                await self.runtime.workers.close(row["id"])
             self.store.set("learned_at", str(time.time()))
             lines = [prompts.LEARN]
             if active := self.lessons():

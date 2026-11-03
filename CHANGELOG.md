@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.1.10 (2026-11-03)
+
+Fixes from a bug bash.
+
+- A message straight to a worker no longer reopens its finished task (a question left it
+  "running" forever); new work it reports still comes back for review. Tasks left running this
+  way are put back to review at startup.
+- Acceptance criteria: a command matches the evidence by whole words only (a later `ls` no longer
+  "verifies" anything); results reported on an earlier task of the worker are kept; a failure
+  later in a `&&` chain no longer counts against its first part.
+- Evidence goes out of date when a new, uncommitted file is edited, and opening a PR keeps it
+  marked out of date.
+- A decision change that cannot reach a closed worker says so instead of leaving its task
+  running.
+- A mistyped decision id no longer leaves a half-made worker behind.
+- Content from Slack and PRs stays out of decision cards and of what the learning worker reads.
+- A learning worker that stopped without proposing anything no longer blocks *Learn now*.
+- Exiting one of your other sessions in its terminal unlocks its message box right away.
+
 ## 0.1.9 (2026-11-03)
 
 - **Sessions learn from your feedback**: your decisions, review comments, follow-ups, retry and

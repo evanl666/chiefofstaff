@@ -226,6 +226,9 @@ class TaskBook:
         elif status in RUN_ENDS:
             self.end_runs(task_id, RUN_ENDS[status])
         values["ended_at"] = now() if status in ENDED else None
+        if status in {"done", "cancelled"}:
+            # Settled (accepted, merged, cancelled): an earlier question to its worker is moot.
+            self.store.delete(f"followup:{task_id}")
         if status == "running" and task["session_id"]:
             # The worker is on this task now.
             self.store.execute(
@@ -283,6 +286,30 @@ def settle_adopted(store: Store):
         store.execute(
             "UPDATE tasks SET status='done', result=?, ended_at=?, updated_at=? WHERE id=?",
             (ADOPTED, stamp, stamp, task["id"]),
+        )
+        store.execute(
+            "UPDATE runs SET status='succeeded', ended_at=? WHERE task_id=? AND ended_at IS NULL",
+            (stamp, task["id"]),
+        )
+
+
+def settle_followups(store: Store):
+    """0.1.7-0.1.9 reopened a finished task when the owner messaged its worker directly; one
+    that only answered stayed "running" with nothing running. Back to review: at startup no
+    turn runs, and a worker that was mid-turn shows as working. Once: a follow-up that is
+    legitimately between turns looks the same."""
+    if store.get("settled_followups"):
+        return
+    store.set("settled_followups", "1")
+    for task in store.all(
+        """SELECT t.id FROM tasks t JOIN sessions s ON s.id=t.session_id
+        WHERE t.status='running' AND s.status IN ('done', 'idle') AND s.closed_at IS NULL
+        AND (SELECT reason FROM runs r WHERE r.task_id=t.id ORDER BY r.started_at DESC LIMIT 1)
+            = 'follow-up'"""
+    ):
+        stamp = now()
+        store.execute(
+            "UPDATE tasks SET status='review', updated_at=? WHERE id=?", (stamp, task["id"])
         )
         store.execute(
             "UPDATE runs SET status='succeeded', ended_at=? WHERE task_id=? AND ended_at IS NULL",

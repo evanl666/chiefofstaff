@@ -223,8 +223,9 @@ function decisionCard(draft) {
 function changeCard(draft) {
   const target = draft.target;
   const error = el("span", { class: "error" });
-  const confirmed = target.tasks.filter((item) => item.ack).length;
-  const redo = target.tasks.filter((item) => item.was === "review" || item.was === "done").length;
+  const told = (item) => item.told !== false;
+  const confirmed = target.tasks.filter((item) => told(item) && item.ack).length;
+  const redo = target.tasks.filter((item) => told(item) && (item.was === "review" || item.was === "done")).length;
   const node = el(
     "div",
     { class: "card draft change", "data-id": draft.id },
@@ -236,7 +237,9 @@ function changeCard(draft) {
       "ul",
       { class: "impact" },
       ...target.tasks.map((item) =>
-        el("li", { class: item.ack ? "acked" : "" }, el("span", { class: "mark", text: item.ack ? "✓" : "…" }), taskLink(item), el("span", { class: "state", text: item.ack ? item.ack : item.was === "review" || item.was === "done" ? "result out of date, updating" : "adjusting" })),
+        !told(item)
+          ? el("li", { class: "failed" }, el("span", { class: "mark", text: "✗" }), taskLink(item), el("span", { class: "state", text: `not told: ${item.error}` }))
+          : el("li", { class: item.ack ? "acked" : "" }, el("span", { class: "mark", text: item.ack ? "✓" : "…" }), taskLink(item), el("span", { class: "state", text: item.ack ? item.ack : item.was === "review" || item.was === "done" ? "result out of date, updating" : "adjusting" })),
       ),
     ),
   );

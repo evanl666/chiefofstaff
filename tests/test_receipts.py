@@ -121,6 +121,11 @@ def test_acceptance_criteria_count_only_what_was_seen():
     ), "a chain that failed later says nothing against its first part"
     diffed = [{"criterion": "commit", "result": "met", "evidence": "`git diff --quiet main`"}]
     assert receipts.summarize(chain, {}, "", ["commit"], diffed)["verdict"] == "failed"
+    later = [command("pytest tests/test_tools.py", 1), command("ls", 0), command("pwd", 0)]
+    tools = [{"criterion": "t", "result": "met", "evidence": "`pytest tests/test_tools.py` ok"}]
+    assert receipts.summarize(later, {}, "", ["t"], tools)["verdict"] == "failed", (
+        "ls and pwd are not in test_tools.py: only whole words name a command"
+    )
     other = [{"criterion": "commit", "result": "met", "evidence": "`git status --short`"}]
     assert receipts.summarize(ran, {}, "", ["commit"], other)["verdict"] == "unverified", (
         "a command it did not run backs nothing"

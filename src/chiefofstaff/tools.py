@@ -546,6 +546,7 @@ class Tools:
         context_from = [
             self.runtime.task_actions.task_for(reference)["id"] for reference in params.context_from
         ]
+        decisions = [self.runtime.decisions.get(identifier) for identifier in params.decisions]
         await self.runtime.check_model(params.model)
         project = (
             str(resolve_project(params.project, self.workspaces.projects()))
@@ -598,7 +599,6 @@ class Tools:
         if params.model or effort:
             self.store.update_session(session_id, model=params.model, effort=effort)
         criteria = clean_criteria(params.done_when)
-        decisions = [self.runtime.decisions.get(identifier) for identifier in params.decisions]
         task = self.tasks.create(
             session_id,
             title,
@@ -867,17 +867,22 @@ class Tools:
         meta = {"status": params.status, "task_id": task["id"] if task else None}
         self.runtime.add_message(caller, "report", params.summary, meta)
         if task and params.status == "done" and params.criteria:
-            run = self.tasks.run(caller) or self.tasks.latest_run(caller)
-            if run and run["task_id"] == task["id"]:
+            run = self.store.one(
+                "SELECT * FROM runs WHERE task_id=? ORDER BY started_at DESC LIMIT 1",
+                (task["id"],),
+            )
+            if run:
                 claims = [item.model_dump() for item in params.criteria[:12]]
                 self.store.execute(
                     "UPDATE runs SET criteria=? WHERE id=?", (json.dumps(claims), run["id"])
                 )
         if task:
-            if params.status == "done" and task["status"] == "done":
+            asked = bool(self.store.get(f"followup:{task['id']}"))
+            if params.status == "done" and task["status"] == "done" and not asked:
                 # Accepted, or its PR merged: news about it does not reopen the review.
                 task = self.tasks.update(task["id"], result=params.summary[:4000])
             elif params.status == "done":
+                self.store.delete(f"followup:{task['id']}")
                 task = self.tasks.move(task["id"], "review", result=params.summary[:4000])
                 self.runtime.background(self.runtime.task_actions.collect_evidence(task["id"]))
             elif params.status in {"question", "blocked"}:
