@@ -86,15 +86,22 @@ At most *Parallel workers* run at once; the rest queue.
 
 *Other Copilot sessions* in the sidebar lists the sessions Chief of Staff does not manage, the
 ones you started in a terminal. Those open in a terminal right now come first, marked *open*.
-Opening one shows its latest conversation, read-only, and keeps it current while it works.
-*Let the Router manage it* turns one into a worker, with its conversation so far in its
-timeline. A session that is open in a terminal cannot be handed over until you exit it there
-(`/exit`).
+Opening one shows its latest conversation, and keeps it current while it works.
 
-Chief of Staff never resumes a session another Copilot window has open: two programs writing
-to one session would mix up its history. A worker you open in a terminal is shown read-only
-instead (*Working in a terminal*, with its current step), from the log Copilot writes; the
-Watchdog and idle closing leave it alone until you exit it there.
+**Send it a message to continue it here.** It becomes a worker, with its conversation so far in
+its timeline, and keeps working in its own folder, inside your code folder or not: nothing is
+moved or copied. *Copy resume command* gives `copilot --resume <id>` to continue it in a
+terminal instead.
+
+Chief of Staff never writes to a session another Copilot window has open: two programs writing
+to one session would mix up its history. Such a session (or a worker you opened in a terminal)
+is shown read-only, with *Working in a terminal* and its current step, from the log Copilot
+writes; the message box says to continue there, or exit it there (`/exit`) to message it here.
+The Watchdog and idle closing leave it alone meanwhile. What a worker did in a terminal shows in
+its timeline, also when Chief of Staff was not running then.
+
+In a timeline, what a session says on the way to its next steps ("Now the tests:") is folded
+into the line of steps, which shows the latest; its answers, reports and questions stand out.
 
 ## Where workers work
 

@@ -15,7 +15,7 @@ import json
 import re
 import subprocess
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -280,10 +280,17 @@ class DemoBrain:
                         "F\n1 failed in 0.21s (token expired: clock moved during the test)",
                         1,
                         seconds=2,
+                        note="Reproducing the flaky test first.",
                     )
                     yield Wait(2)
                     yield WriteFile("app/login.py", LOGIN_FIXED)
-                    yield Shell("uv run pytest -q", "........\n8 passed in 0.29s", seconds=2)
+                    yield Shell(
+                        "uv run pytest -q",
+                        "........\n8 passed in 0.29s",
+                        seconds=2,
+                        note="The token expiry reads the real clock. Passing the clock in, then "
+                        "running every test:",
+                    )
                     yield Shell(
                         "git add -A && git commit -qm 'Fix flaky login test' "
                         "&& git log --oneline -1",
@@ -499,7 +506,8 @@ class DemoRuntime(Runtime):
 
 
 def terminal_sessions(project: Path) -> list[dict]:
-    """A session the owner has open in a terminal, which Chief of Staff shows read-only."""
+    """The owner's own Copilot sessions: one open in a terminal, shown read-only, and an older
+    one that a message continues in Chief of Staff."""
 
     def event(kind: str, **data) -> dict:
         return {"type": kind, "data": data}
@@ -529,7 +537,36 @@ def terminal_sessions(project: Path) -> list[dict]:
                     "them into a single query should make it about ten times faster.",
                 ),
             ],
-        }
+        },
+        {
+            "meta": SimpleNamespace(
+                session_id="7b2e4f1a-9c3d-4e8b-a5f6-1d0c9e8b7a64",
+                summary="Write the API changelog",
+                is_remote=False,
+                modified_time=datetime.now(UTC) - timedelta(days=1),
+                context=SimpleNamespace(
+                    working_directory=str(project), repository="", branch="main"
+                ),
+            ),
+            "log": [
+                event("user.message", content="Draft a changelog entry for the login API."),
+                event(
+                    "assistant.message",
+                    content="Reading the recent commits first.",
+                    toolRequests=[{"name": "bash"}],
+                ),
+                event(
+                    "tool.execution_start",
+                    toolName="bash",
+                    arguments={"command": "git log --oneline -10"},
+                ),
+                event(
+                    "assistant.message",
+                    content="Drafted: “Login tokens expire on the server's clock.” It is in "
+                    "CHANGELOG.md, not committed yet.",
+                ),
+            ],
+        },
     ]
 
 

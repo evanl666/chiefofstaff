@@ -268,6 +268,12 @@ def create_app(
     async def adopt(session_id: str):
         return await runtime.workers.adopt(session_id)
 
+    @app.post("/api/external/{session_id}/messages")
+    async def continue_external(session_id: str, payload: OwnerMessage):
+        """Messaging another session continues it here: the Router manages it from then on."""
+        await runtime.workers.adopt(session_id)
+        return await runtime.owner_send(session_id, payload.text)
+
     @app.post("/api/drafts/{draft_id}")
     async def resolve(draft_id: str, decision: DraftDecision):
         return await runtime.drafts.resolve(draft_id, decision)

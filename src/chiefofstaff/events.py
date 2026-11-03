@@ -140,13 +140,18 @@ class Events:
         content = (getattr(data, "content", "") or "").strip()
         if not content or getattr(data, "parent_tool_call_id", None):
             return
-        if row["role"] != WORKER and getattr(data, "tool_requests", None):
+        # Said on the way to its next steps: narration, shown with the steps, not as an answer.
+        narration = bool(getattr(data, "tool_requests", None))
+        if row["role"] != WORKER and narration:
             return
         if row["role"] == ROUTER and self.states[row["id"]].event_turn:
             # Results reach the owner through notify_owner; the closing remark is a footnote.
             self.runtime.add_message(row["id"], "assistant", content, {"internal": True})
         else:
-            self.runtime.add_message(row["id"], "assistant", content, unread=row["role"] == ROUTER)
+            meta = {"narration": True} if narration else None
+            self.runtime.add_message(
+                row["id"], "assistant", content, meta, unread=row["role"] == ROUTER
+            )
 
     def turn_start(self, row: dict, event: Any):
         if row["role"] == WORKER:

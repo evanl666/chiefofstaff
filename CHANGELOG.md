@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.7 (2026-11-03)
+
+- Timelines are easier to read: what a session says on the way to its next steps is folded into
+  the line of steps, so its answers and reports stand out.
+- **Message one of your other Copilot sessions to continue it here.** It becomes a worker with
+  its conversation so far and keeps working in its own folder.
+- A session open in a terminal says so where the message box would be, instead of a box you
+  cannot type in.
+- What a worker did in a terminal shows in its timeline, also when Chief of Staff was started
+  later or not running then. Long session logs show their latest messages.
+- A message straight to a worker whose task was done brings its next result back for review.
+
 ## 0.1.6 (2026-11-02)
 
 - **Review a task's changes**: click *+N −M in K files* on a review card for its diff, comment on
