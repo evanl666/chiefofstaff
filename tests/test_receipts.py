@@ -114,6 +114,13 @@ def test_acceptance_criteria_count_only_what_was_seen():
     cited = [{"criterion": "commit", "result": "met",
               "evidence": "`git log --oneline --all --decorate`: 6460933 Add hello"}]  # fmt: skip
     assert receipts.summarize(ran, {}, "", ["commit"], cited)["verdict"] == "verified"
+    chain = [command("git log --oneline -2 && git diff --quiet main", 1)]
+    logged = [{"criterion": "commit", "result": "met", "evidence": "`git log --oneline -2`"}]
+    assert receipts.summarize(chain, {}, "", ["commit"], logged)["criteria"][0]["state"] == (
+        "claimed"
+    ), "a chain that failed later says nothing against its first part"
+    diffed = [{"criterion": "commit", "result": "met", "evidence": "`git diff --quiet main`"}]
+    assert receipts.summarize(chain, {}, "", ["commit"], diffed)["verdict"] == "failed"
     other = [{"criterion": "commit", "result": "met", "evidence": "`git status --short`"}]
     assert receipts.summarize(ran, {}, "", ["commit"], other)["verdict"] == "unverified", (
         "a command it did not run backs nothing"

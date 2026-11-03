@@ -51,6 +51,7 @@ from .drafts import Drafts
 from .envelope import UNTRUSTED, clean_title, sender, short, wrap
 from .events import ROUTER_CONTEXT, Events
 from .focus import Focus
+from .learning import Learning
 from .models import Settings
 from .notify import mac_notification
 from .policy import GITHUB_MCP, within
@@ -188,6 +189,7 @@ class Runtime:
         self.drafts = Drafts(self)
         self.asks = Asks(self)
         self.decisions = Decisions(self)
+        self.learning = Learning(self)
         self.focus = Focus(self)
         self.watchdog = Watchdog(self)
         self.toolset = Tools(self)
@@ -482,6 +484,8 @@ class Runtime:
                 names.append("record_setup")
         if self.store.get(f"distill:{row['id']}"):
             names.append("propose_profile")
+        if self.store.get(f"learner:{row['id']}"):
+            names.append("propose_lessons")
         if row["role"] == SLACK or row["slack"]:
             names.append("draft_slack_reply")
         if row["role"] == WORKER:
@@ -502,6 +506,7 @@ class Runtime:
             )
         if (profile := self.store.get("profile", "")) and row["role"] != WATCHDOG:
             prompt += f"\n<owner_profile>\n{profile}\n</owner_profile>"
+        prompt += self.learning.block(row)
         if row["role"] == SLACK:
             prompt += self.drafts.style_examples()
         if row["role"] in {ROUTER, WORKER}:
@@ -1208,6 +1213,7 @@ class Runtime:
             "closed": [self.view(row) for row in self.workers.recently_closed(20)],
             "profile": self.store.get("profile", ""),
             "profile_draft": self.store.get("profile_draft", ""),
+            "learning": self.learning.view(),
             "setup_notes": self.asks.setup_notes(),
             "sandbox": {
                 "supported": self.sandbox_host,

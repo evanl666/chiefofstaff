@@ -22,6 +22,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
+from . import catalog
 from .envelope import wrap
 from .models import DraftDecision, NestedArguments
 from .roles import ROUTER, WORKER
@@ -54,6 +55,11 @@ class AskDecision(NestedArguments):
     distinct: bool = Field(
         default=False,
         description="After ask_decision listed open decisions: true when yours is a different one",
+    )
+    seen_precedents: bool = Field(
+        default=False,
+        description="After ask_decision listed the owner's earlier decisions on similar questions: "
+        "true when none of them settles yours",
     )
 
 
@@ -129,6 +135,28 @@ class Decisions:
             (task_id,),
         )
 
+    def similar(self, question: str, limit: int = 3) -> list[dict]:
+        """The owner's decisions in force that are about something like this question."""
+        rows = {
+            row["id"]: row
+            for row in self.store.all(
+                "SELECT * FROM decisions WHERE status='active' ORDER BY created_at DESC LIMIT 200"
+            )
+        }
+        docs = {identifier: {"title": row["text"]} for identifier, row in rows.items()}
+        ranked = catalog.rank(question, docs)
+        # One shared word is not the same question.
+        return [rows[identifier] for identifier, terms in ranked if len(terms) >= 2][:limit]
+
+    @staticmethod
+    def recommended(target: dict) -> str:
+        """The option the worker recommended, if its recommendation names one."""
+        lowered = (target.get("recommendation") or "").lower()
+        for option in target.get("options") or []:
+            if option["choice"].lower() in lowered:
+                return option["choice"]
+        return ""
+
     def open_cards(self, kind: str) -> list[dict]:
         return [draft for draft in self.store.drafts() if draft["kind"] == kind]
 
@@ -148,6 +176,14 @@ class Decisions:
             "title": task["title"] if task else row["title"],
         }
         cards = self.open_cards("decision")
+        precedents = [] if params.same_as.strip() else self.similar(question)
+        if precedents and not params.seen_precedents:
+            listed = "\n".join(f"- {p['text']} ({p['created_at'][:10]})" for p in precedents)
+            raise ValueError(
+                f"The owner decided similar questions before:\n{listed}\nIf one settles yours, "
+                "follow it without asking and say so in your report. Otherwise call ask_decision "
+                "again with seen_precedents=true: the card shows these to the owner."
+            )
         if params.same_as.strip():
             card = next((c for c in cards if c["id"] == params.same_as.strip()), None)
             if not card:
@@ -186,6 +222,7 @@ class Decisions:
                 "options": options,
                 "recommendation": clean(params.recommendation, 300),
                 "askers": [asker],
+                "precedents": [p["text"] for p in precedents],
             }
             card = self.store.create_draft(caller, "decision", target, question)
             self.runtime.add_message(
@@ -210,6 +247,14 @@ class Decisions:
         if decision.action == "reject":
             reason = clean(decision.reason, 300)
             card = self.close(card["id"], "rejected", reason or "Not decided")
+            if reason:
+                self.runtime.learning.record(
+                    "decision-declined",
+                    context=f"{question} {target.get('why', '')}",
+                    proposed=target.get("recommendation", ""),
+                    owner=reason,
+                    scope=self.scope_of(target),
+                )
             text = (
                 f"The owner did not decide “{question}”" + (f": {reason}" if reason else ".")
                 + " Go on with your recommendation only if it is safe and easy to undo; "
@@ -224,6 +269,15 @@ class Decisions:
             raise ValueError("Pick an option or write your decision.")
         tasks = [asker["task_id"] for asker in target["askers"] if asker["task_id"]]
         recorded = await self.record(f"{question} → {choice}", tasks, [], f"card:{card['id']}")
+        best = self.recommended(target)
+        self.runtime.learning.record(
+            "decision",
+            context=f"{question} {target.get('why', '')}",
+            proposed=target.get("recommendation", ""),
+            owner=choice,
+            scope=self.scope_of(target),
+            agreed=(choice.lower() == best.lower()) if best else None,
+        )
         card = self.close(card["id"], "answered", choice)
         text = f"{question}\nThe owner decided: {choice}"
         await self.tell_askers(target, text, f"Decision: {choice}", recorded["decision"]["id"])
@@ -247,6 +301,10 @@ class Decisions:
                 )
             except Exception:
                 logger.warning("Could not tell %s the decision.", row["id"], exc_info=True)
+
+    def scope_of(self, target: dict) -> str:
+        askers = target.get("askers") or []
+        return self.runtime.learning.scope_of(askers[0]["session_id"]) if askers else ""
 
     def close(self, card_id: str, status: str, outcome: str) -> dict:
         card = self.store.update_draft(card_id, status=status, outcome=outcome, resolved_at=now())
@@ -312,6 +370,12 @@ class Decisions:
             )
         decision = self.get(identifier)
         affected = []
+        if old and source == "owner":
+            self.runtime.learning.record(
+                "decision-changed",
+                context="Before: " + "; ".join(row["text"] for row in old),
+                owner=decision["text"],
+            )
         if old:
             for task_id in relying:
                 task = self.tasks.get(task_id)

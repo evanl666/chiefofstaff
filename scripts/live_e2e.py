@@ -212,6 +212,11 @@ async def scenario_worker(app: App, project: Path) -> dict:
     found = task["receipts"] or {}
     criteria = [(c["state"], c["criterion"]) for c in found.get("criteria", [])]
     log(f"acceptance criteria: {criteria}; verdict {found.get('verdict')!r}")
+    for item in found.get("criteria", []):
+        how = f"{item['command']!r} (exit {item['exit_code']})"
+        log(f"  {item['state']}: evidence {item['evidence']!r} -> {how}")
+    for command in found.get("commands", []):
+        log(f"  ran (exit {command['exit_code']}): {command['command'][:300]}")
     return worker
 
 
@@ -272,15 +277,23 @@ async def scenario_reopen(app: App, worker: dict):
         reported = any(
             m["kind"] == "inbound" and m["meta"].get("from") == worker["id"] for m in messages
         )
-        return messages if reported else None
+        # The Router may know the answer already from that worker's reports.
+        answered = not any(m["text"].startswith("Reopened") for m in messages) and any(
+            m["kind"] == "assistant" for m in messages
+        )
+        return messages if reported or answered else None
 
     messages = await wait_for("a related question is routed", routed, 600, app)
     started = [m for m in messages if m["kind"] == "notice" and m["text"].startswith("Started")]
     assert not started, f"related question started a new worker: {transcript(messages)}"
-    assert any(m["text"].startswith("Reopened") for m in messages), transcript(messages)
-    reused = ("Continued in", "New task")  # Continued its task, or gave it a new one.
-    assert any(m["text"].startswith(reused) for m in messages), transcript(messages)
-    log("a related question went to the worker that already knew the project")
+    if any(m["text"].startswith("Reopened") for m in messages):
+        reused = ("Continued in", "New task")  # Continued its task, or gave it a new one.
+        assert any(m["text"].startswith(reused) for m in messages), transcript(messages)
+        log("a related question went to the worker that already knew the project")
+    else:
+        replies = " ".join(m["text"] for m in messages if m["kind"] == "assistant")
+        assert re.search(r"\b1\b|\bone\b", replies, re.I), transcript(messages)
+        log(f"the Router answered from what that worker had reported: {replies[:80]!r}")
 
 
 async def scenario_slack(app: App, workspace: Workspace):
@@ -809,6 +822,60 @@ async def scenario_decisions(app: App, project: Path):
     log(f"decision changed; the worker confirmed: {decision['ack']!r}; keys now {keys}")
 
 
+FEEDBACK = [
+    ("decision", "Orders status migration: add a nullable column, or backfill first?",
+     "Nullable column: fastest", "Backfill first, then make it NOT NULL", "", 0),
+    ("follow-up", "Add orders.status: add the column and use it in the API",
+     "Added the column with a migration.",
+     "Add a rollback migration too; we always need a way back.", "", 0),
+    ("retry", "Add an index on orders.created_at", "",
+     "Write the rollback before the migration this time.", "", None),
+    ("draft-edited", "A Slack reply to Maya Chen",
+     "Hi Maya! Thanks so much for reaching out. I wanted to let you know that the fix is going "
+     "out today, and I'll be sure to keep you posted on any updates!",
+     "Fix ships today. Will ping you when it's out.", "slack", 0),
+    ("draft-rejected", "A Slack reply to #deploys",
+     "Hey team, just a friendly reminder that deploys are frozen this week. Thanks a ton!",
+     "Too long and too chatty. Two sentences max, no exclamation marks.", "slack", 0),
+    ("follow-up", "Fix the flaky login test", "Fixed it; all tests pass.",
+     "Put the exact test command you ran in the report.", "", 0),
+]  # fmt: skip
+
+
+async def scenario_learning(app: App):
+    """The owner's feedback becomes lessons a real model proposes and the owner reviews."""
+    import sqlite3
+
+    database = sqlite3.connect(app.data / "chiefofstaff.db")
+    with database:
+        for kind, context, proposed, owner, scope, agreed in FEEDBACK:
+            database.execute(
+                """INSERT INTO feedback(kind, context, proposed, owner, scope, agreed, learned,
+                created_at) VALUES (?,?,?,?,?,?,0,strftime('%Y-%m-%dT%H:%M:%f+00:00','now'))""",
+                (kind, context, proposed, owner, scope, agreed),
+            )
+    database.close()
+    await app.post("/api/lessons/learn", {})
+
+    async def proposed():
+        drafts = (await app.get("/api/state"))["drafts"]
+        return next((d for d in drafts if d["kind"] == "lessons"), None)
+
+    card = await wait_for("lessons proposed from the feedback", proposed, 600)
+    lessons = card["target"]["lessons"]
+    for lesson in lessons:
+        log(f"lesson ({lesson['scope'] or 'everywhere'}): {lesson['text']}")
+    assert 2 <= len(lessons) <= 8, lessons
+    assert all(lesson["because"] for lesson in lessons), "each rests on feedback"
+    assert any(lesson["scope"] == "slack" for lesson in lessons), "how Slack replies are written"
+    assert any("rollback" in lesson["text"].lower() for lesson in lessons), lessons
+    keep = {lesson["id"]: lesson["text"] for lesson in lessons}
+    await app.post(f"/api/drafts/{card['id']}", {"action": "answer", "content": keep})
+    learned = (await app.get("/api/state"))["learning"]
+    assert len(learned["lessons"]) == len(lessons) and learned["new_feedback"] == 0, learned
+    log(f"the owner kept {len(lessons)} lessons; agreement {learned['agreement']['now']}")
+
+
 async def scenario_code_folder(app: App, root: Path):
     """The code folder: a repository the owner names that is not on this machine is cloned into
     it; the worker changes it in its own worktree in .chief, removed when the worker closes."""
@@ -1023,6 +1090,14 @@ async def main():
                 await scenario_code_folder(app, root)
                 log("CODE FOLDER SCENARIO PASSED")
                 return
+            if sys.argv[1:] == ["worker"]:
+                await scenario_worker(app, project)
+                log("WORKER SCENARIO PASSED")
+                return
+            if sys.argv[1:] == ["learning"]:
+                await scenario_learning(app)
+                log("LEARNING SCENARIO PASSED")
+                return
             if sys.argv[1:] == ["decisions"]:
                 await scenario_decisions(app, project)
                 log("DECISIONS SCENARIO PASSED")
@@ -1041,6 +1116,7 @@ async def main():
             await scenario_watchdog(app, project)
             await scenario_dependencies(app, project)
             await scenario_decisions(app, project)
+            await scenario_learning(app)
             await scenario_workspace(app, root)
             await scenario_ask_user(app)
             await scenario_ask_session(app)

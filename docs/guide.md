@@ -12,6 +12,7 @@ bounds, see [SECURITY.md](../SECURITY.md).
 - [Reviewing changes](#reviewing-changes)
 - [When a session needs you](#when-a-session-needs-you)
 - [Decisions](#decisions)
+- [Learning from your feedback](#learning-from-your-feedback)
 - [Focus](#focus)
 - [Slack](#slack)
 - [GitHub reviews](#github-reviews)
@@ -240,6 +241,30 @@ all"). It records the new decision in place of the old one, and Chief of Staff:
 
 Work that does not rely on the decision carries on untouched.
 
+When a worker is about to ask something you decided before, it is told first: it follows your
+earlier decision, or asks anyway and the card shows *You decided before: …*.
+
+## Learning from your feedback
+
+Your sessions learn how you want work done from what you do with their work:
+
+- your decisions, especially when you go against what a worker recommended;
+- review comments on a diff, follow-ups on a finished result, notes when you retry a task,
+  reasons when you cancel one;
+- the drafts you edit before sending, and why you rejected one;
+- the decisions you change.
+
+Only your own choices and words count; what a session proposed is kept beside them as context.
+Once a few new pieces of feedback came in, a short-lived worker turns them into lessons, e.g.
+*Give every database migration a rollback migration* or *In Slack replies, lead with the
+answer, two sentences at most*, each with where it applies (everywhere, Slack replies, one
+project) and the feedback it rests on. A **Learned from your feedback** card shows them: keep,
+reword or untick each. Only what you keep goes into your sessions' instructions.
+
+Settings → *Learned from your feedback* lists the lessons in use (remove any), has *Learn now*,
+and shows how close the sessions get to you: the share of recommendations you took, drafts you
+sent as written and results you accepted as they were, over the last 30 days and the 30 before.
+
 ## Focus
 
 *Focus…* (inbox header) holds notifications for 30 minutes to 4 hours. The Router keeps
@@ -326,7 +351,9 @@ Settings sets a default model and one per role, and a default thinking effort pe
 session's header switches its model, effort and context window (where the model has a
 long-context tier). The Router may choose a stronger or cheaper model or effort for one task.
 **Usage** (bottom left) totals credits by session, model and role for any date range; every
-task shows its own credits. An optional credit limit per worker stops runaway workers.
+task shows its own credits. It includes what a worker used while you had it open in a terminal,
+read from Copilot's log (also from before Chief of Staff was running). An optional credit
+limit per worker stops runaway workers.
 
 ## Daily summary and your profile
 

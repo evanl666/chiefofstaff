@@ -192,6 +192,16 @@ def create_app(
             "Build my profile: distill what my work says about me so my sessions can use it.",
         )
 
+    @app.post("/api/lessons/learn")
+    async def learn_now():
+        await runtime.learning.learn()
+        return runtime.snapshot()
+
+    @app.post("/api/lessons/{lesson_id}/remove")
+    async def remove_lesson(lesson_id: str):
+        await runtime.learning.remove(lesson_id)
+        return runtime.snapshot()
+
     @app.post("/api/focus")
     async def focus(payload: FocusRequest):
         return await runtime.focus.start(payload.minutes)

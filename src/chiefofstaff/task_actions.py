@@ -380,6 +380,13 @@ class TaskActions:
         row = self.store.find_session(task["session_id"])
         on_it = bool(row) and row["task_id"] == task_id and task["status"] in OPEN
         why = f"Cancelled by {by}" + (f": {reason}" if reason else ".")
+        if by == "you" and reason.strip():
+            self.runtime.learning.record(
+                "cancel",
+                context=f"{task['title']}: {task['goal'][:600]}",
+                owner=reason,
+                scope=self.runtime.learning.scope_of(task["session_id"]),
+            )
         task = self.tasks.move(task_id, "cancelled", progress=why)
         if row and not row["closed_at"]:
             if on_it:
@@ -416,6 +423,8 @@ class TaskActions:
             raise ValueError(f"Task {task_id} is {task['status']}, not ready for review.")
         task = self.tasks.move(task_id, "done")
         self.runtime.background(self.runtime.workers.pump())  # Tasks waiting for its check.
+        scope = self.runtime.learning.scope_of(task["session_id"])
+        self.runtime.learning.record("accept", context=task["title"], scope=scope, agreed=True)
         return task
 
     async def follow_up(self, task_id: str, text: str) -> dict:
@@ -427,6 +436,14 @@ class TaskActions:
         if row["closed_at"]:
             await self.runtime.workers.reopen(row["id"])
         before = task["status"]
+        self.runtime.learning.record(
+            "follow-up",
+            context=f"{task['title']}: {task['goal'][:600]}",
+            proposed=task["result"],
+            owner=text,
+            scope=self.runtime.learning.scope_of(task["session_id"]),
+            agreed=False if before in {"review", "done"} else None,
+        )
         if before in {"review", "done", "failed"}:
             task = self.tasks.move(task_id, "running", reason="follow-up")
         try:
@@ -455,6 +472,13 @@ class TaskActions:
         if row["closed_at"]:
             await self.runtime.workers.reopen(row["id"])
         before = task
+        if text.strip():
+            self.runtime.learning.record(
+                "retry",
+                context=f"{task['title']}: {task['progress'][:600]}",
+                owner=text,
+                scope=self.runtime.learning.scope_of(task["session_id"]),
+            )
         task = self.tasks.move(task_id, "running", reason="retry", progress="")
         body = f"The owner asks you to try task {task_id} “{task['title']}” again."
         if text.strip():

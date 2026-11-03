@@ -21,7 +21,7 @@ from .events import PLUMBING_TOOLS, describe_tool
 from .roles import ROUTER, WORKER
 from .sources.slack import describe
 from .store import now
-from .tasks import OPEN
+from .tasks import ADOPTED, OPEN
 from .watchdog import timestamp
 
 if TYPE_CHECKING:
@@ -108,6 +108,7 @@ class Workers:
         self.histories: dict[str, tuple[int, list[Entry], bool]] = {}
         # How far catch_up has read each worker's log.
         self.read_to: dict[str, int] = {}
+        self.usage_synced = False
 
     def running(self) -> int:
         return sum(1 for row in self.store.open_sessions(WORKER) if self.states[row["id"]].busy)
@@ -470,7 +471,7 @@ class Workers:
         self.store.set(f"created:{session_id}", "1")
         # Its work so far is not a task to review; the owner's next request starts one.
         task = self.tasks.create(session_id, row["title"], "(an existing Copilot session)")
-        self.tasks.move(task["id"], "done", result="Adopted from Copilot.")
+        self.tasks.move(task["id"], "done", result=ADOPTED)
         self.external_cache = (0.0, [])
         self.runtime.add_message(
             self.runtime.router_id(),
@@ -585,12 +586,61 @@ class Workers:
                 self.show(row, self.missed(row, entries), note="Meanwhile, in a terminal")
             self.store.delete(key)
             self.read_to[row["id"]] = after
+            await self.sync_usage(row)
+
+    async def sync_all_usage(self):
+        """Once a start: what workers used outside Chief of Staff while it did not look."""
+        for row in self.store.all("SELECT * FROM sessions WHERE role=?", (WORKER,)):
+            await self.sync_usage(row)
+
+    async def sync_usage(self, row: dict):
+        """Usage in a worker's log that Chief of Staff did not see come by: the turns it took
+        in a terminal since it was managed. Turns it drove are in the log too, and already
+        counted: the same model and token counts are skipped."""
+        backend = self.runtime.backend
+        if not backend or self.states.handle(row["id"]):
+            return  # Attached: its usage arrives as Copilot events.
+        key = f"usage_log:{row['id']}"
+        start = int(self.store.get(key) or 0)
+        try:
+            records, end = await backend.read_usage(self.runtime.copilot_id(row["id"]), start)
+        except Exception:
+            logger.warning("Could not read the usage of %s.", row["id"], exc_info=True)
+            return
+        since = timestamp(row["created_at"])  # Before it was managed it was not ours.
+        for event in records:
+            when = moment(str(event.get("timestamp") or "")) or time.time()
+            if when < since:
+                continue
+            usage = (event.get("data") or {}).get("usage") or {}
+            model = str(usage.get("model") or "")
+            tokens = (int(usage.get("inputTokens") or 0), int(usage.get("outputTokens") or 0))
+            if self.store.one(
+                """SELECT id FROM usage WHERE session_id=? AND model=? AND input_tokens=?
+                AND output_tokens=? LIMIT 1""",
+                (row["id"], model, *tokens),
+            ):
+                continue
+            nano = (usage.get("copilotUsage") or {}).get("totalNanoAiu") or 0
+            self.store.record_usage(
+                row["id"],
+                WORKER,
+                model,
+                nano / 1e9,
+                float(usage.get("cost") or 0),
+                *tokens,
+                at=when,
+            )
+        self.store.set(key, str(end))
 
     async def mirror_loop(self):
         rounds = 0
         while True:
             await asyncio.sleep(MIRROR_SECONDS)
             try:
+                if not self.usage_synced and self.runtime.backend:
+                    self.usage_synced = True
+                    await self.sync_all_usage()
                 if rounds % ELSEWHERE_EVERY == 0:
                     await self.refresh_elsewhere()
                 await self.mirror()
@@ -625,6 +675,7 @@ class Workers:
                 self.runtime.publish_session(row)
             return
         events, after, changed = await backend.read_history(copilot, int(offset or 0))
+        await self.sync_usage(row)
         entries = terminal_timeline(events, self.runtime.tools)
         if offset is None:
             # What it did there before we looked: since its timeline's last entry.

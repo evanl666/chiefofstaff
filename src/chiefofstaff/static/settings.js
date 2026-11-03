@@ -127,6 +127,7 @@ export function fillSettings() {
   form.setup_notes.value = notesText();
   form.setup_notes.dataset.initial = form.setup_notes.value;
   $("#profile-draft").hidden = !state.snapshot.profile_draft;
+  renderLearning();
   form.paused.checked = settings.paused;
   $("#slack-status").textContent = slackStatusText();
   $("#slack-token-remove").hidden = !state.snapshot.slack.token_saved;
@@ -134,6 +135,48 @@ export function fillSettings() {
   $("#github-status").textContent = github.error || (github.connected ? `Watching, checked ${ago(github.last_checked)} ago.` : "");
   $("#data-directory").textContent = `Data: ${state.snapshot.data_directory}`;
   $("#settings-error").hidden = true;
+}
+// What sessions learned from the owner's feedback, and how often the owner now agrees.
+const SCOPE = (scope) => (!scope ? "everywhere" : scope === "slack" ? "Slack replies" : `in ${scope.replace("project:", "").split("/").pop()}`);
+export function renderLearning() {
+  const learning = state.snapshot.learning;
+  if (!learning) return;
+  const parts = [];
+  const labels = { recommendations: "recommendations you took", drafts: "drafts sent as written", results: "results accepted as they were" };
+  for (const [key, label] of Object.entries(labels)) {
+    const [yes, total] = learning.agreement.now[key];
+    if (!total) continue;
+    const [before, earlier] = learning.agreement.before[key];
+    const trend = earlier ? ` (was ${Math.round((100 * before) / earlier)}%)` : "";
+    parts.push(`${Math.round((100 * yes) / total)}% ${label}${trend}`);
+  }
+  $("#agreement").textContent = parts.length ? `Last ${learning.agreement.days} days: ${parts.join(" · ")}.` : "";
+  $("#lessons").replaceChildren(
+    ...learning.lessons.map((lesson) =>
+      el(
+        "li",
+        {},
+        el("span", { text: lesson.text }),
+        el("small", { text: SCOPE(lesson.scope) }),
+        el("button", {
+          type: "button",
+          class: "link",
+          text: "Remove",
+          onclick: async () => {
+            try {
+              state.snapshot = { ...state.snapshot, ...(await api(`/api/lessons/${lesson.id}/remove`, { method: "POST" })) };
+              renderLearning();
+            } catch (error) {
+              settingsError(error.message);
+            }
+          },
+        }),
+      ),
+    ),
+  );
+  if (!learning.lessons.length) $("#lessons").append(el("li", { class: "empty-note", text: "No lessons yet." }));
+  $("#learn-now").disabled = !learning.new_feedback;
+  $("#learn-status").textContent = learning.new_feedback ? `${learning.new_feedback} new piece${learning.new_feedback === 1 ? "" : "s"} of feedback` : "No new feedback";
 }
 function notesText() {
   return Object.entries(state.snapshot.setup_notes || {})

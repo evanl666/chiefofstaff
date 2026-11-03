@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import subprocess
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,7 +12,7 @@ from conftest import FakeSession, Harness, call_tool, env, settle, task_of
 
 from chiefofstaff import backend as backend_module
 from chiefofstaff import delivery as delivery_module
-from chiefofstaff.backend import read_log, sessions_in_use
+from chiefofstaff.backend import USAGE_RECORD, read_log, scan_log, sessions_in_use
 from chiefofstaff.models import DraftDecision, Settings
 from chiefofstaff.policy import permission_denial
 from chiefofstaff.runtime import ROUTER_TOOLS
@@ -524,6 +525,7 @@ async def test_sessions_open_in_a_terminal_are_shown_and_left_alone(harness, tmp
     shown = [(m["kind"], m["text"]) for m in harness.store.messages(row["id"])]
     assert shown[1:] == [("owner", "Find the slow query"), ("assistant", "It is the orders join.")]
     assert runtime.tasks.current(row["id"])["status"] == "done", "nothing runs there"
+    assert not runtime.snapshot()["tasks"], "its placeholder task is not finished work"
 
     # Opened in a terminal again after a restart: Chief of Staff does not write to it too.
     await runtime.detach(row["id"])
@@ -1056,3 +1058,51 @@ def test_session_logs_are_read_line_by_line_as_they_grow(tmp_path):
     log.write_text('{"type": "fresh"}\n')
     assert [e["type"] for e in read_log(log, offset)[0]] == ["fresh"], "a rewritten log restarts"
     assert read_log(tmp_path / "missing.jsonl", 7) == ([], 7, 0.0)
+
+
+def used(model, tokens_in, tokens_out, nano, seconds=0.0):
+    usage = {"model": model, "inputTokens": tokens_in, "outputTokens": tokens_out, "cost": 1,
+             "copilotUsage": {"totalNanoAiu": nano}}  # fmt: skip
+    return {**logged("session.usage_record", usage=usage), "timestamp": at(seconds)}
+
+
+async def test_usage_in_a_terminal_is_counted_once(harness):
+    runtime = await harness.connect()
+    harness.store.create_session("term-3", "worker", "Research", "idle", cwd="/tmp")
+    harness.store.execute(
+        "UPDATE sessions SET created_at=? WHERE id='term-3'", (at(-86400).replace("Z", "+00:00"),)
+    )
+    # A turn Chief of Staff drove (counted from Copilot's events), then two in a terminal.
+    harness.store.record_usage("term-3", "worker", "opus", 1.0, 1, 1000, 10)
+    harness.client.logs["term-3"] = [
+        used("opus", 1000, 10, 1_000_000_000),
+        used("opus", 2000, 20, 2_500_000_000, -3600),
+        used("opus", 3000, 30, 4_000_000_000),
+        used("opus", 500, 5, 9_000_000_000, -86400 * 30),  # Before it was adopted.
+    ]
+    await runtime.workers.sync_all_usage()
+    report = harness.store.usage(0, time.time() + 10)
+    assert report["total"]["credits"] == 7.5 and report["total"]["calls"] == 3
+    assert report["by_session"][0]["title"] == "Research"
+    assert harness.store.usage(time.time() - 60, time.time() + 10)["total"]["calls"] == 2, (
+        "counted at the time it was used"
+    )
+
+    harness.client.logs["term-3"].append(used("opus", 4000, 40, 500_000_000))
+    harness.client.in_use = {"term-3": 4242}
+    await runtime.workers.refresh_elsewhere()
+    await runtime.workers.mirror()
+    await runtime.workers.mirror()
+    assert harness.store.usage(0, time.time() + 10)["total"]["credits"] == 8.0, "while open there"
+
+
+def test_usage_is_found_in_long_logs_line_by_line(tmp_path):
+    log = tmp_path / "events.jsonl"
+    record = '{"type": "session.usage_record", "data": {"usage": {"model": "m"}}}'
+    log.write_text(f'{{"type": "a"}}\n{record}\n{{"type": "b"}}\n{record[:20]}')
+    found, offset = scan_log(log, 0, USAGE_RECORD)
+    assert len(found) == 1 and offset == log.stat().st_size - 20, "the unfinished line waits"
+    with log.open("a") as file:
+        file.write(record[20:] + "\n")
+    found, offset = scan_log(log, offset, USAGE_RECORD)
+    assert len(found) == 1 and offset == log.stat().st_size

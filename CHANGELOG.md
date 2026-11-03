@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.9 (2026-11-03)
+
+- **Sessions learn from your feedback**: your decisions, review comments, follow-ups, retry and
+  cancel notes and draft edits become lessons ("Give every migration a rollback"). You keep,
+  reword or drop each on a card; only kept ones reach your sessions. Settings lists them and
+  shows how often you now take recommendations, send drafts as written and accept results.
+- A worker about to ask something you decided before is told your earlier decision first;
+  the card shows it too.
+- Usage counts what workers used while open in a terminal, including before Chief of Staff was
+  running.
+- A worker working in a terminal shows under Running. An adopted session's placeholder task no
+  longer shows as finished work.
+- The inbox's reply strip no longer shows a stray "null".
+
 ## 0.1.8 (2026-11-03)
 
 - **Acceptance criteria**: tasks get *done when* checks, and the worker reports each one with

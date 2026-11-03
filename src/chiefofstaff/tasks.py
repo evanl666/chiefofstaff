@@ -39,6 +39,8 @@ RUN_ENDS = {
     "failed": "failed",
     "cancelled": "cancelled",
 }
+# The result of the task an adopted session gets so it has one: nothing the owner asked for.
+ADOPTED = "Adopted from Copilot."
 TASK_FIELDS = {"title", "goal", "acceptance", "status", "result", "progress", "why_new", "ended_at"}
 
 
@@ -78,11 +80,13 @@ class TaskBook:
         )
 
     def listed(self, *, include_ended_since: str = "") -> list[dict]:
-        """Open and in-review tasks, and those that ended since the given time."""
+        """Open and in-review tasks, and those that ended since the given time (not the
+        placeholder task of an adopted session, until it is continued)."""
         return self.store.all(
-            """SELECT * FROM tasks WHERE status IN ('queued','running','waiting','review')
-            OR (ended_at IS NOT NULL AND ended_at>=?) ORDER BY created_at""",
-            (include_ended_since or now(),),
+            """SELECT * FROM tasks WHERE (status IN ('queued','running','waiting','review')
+            OR (ended_at IS NOT NULL AND ended_at>=?))
+            AND NOT (status='done' AND result=?) ORDER BY created_at""",
+            (include_ended_since or now(), ADOPTED),
         )
 
     def run(self, session_id: str) -> dict | None:
@@ -278,7 +282,7 @@ def settle_adopted(store: Store):
         stamp = now()
         store.execute(
             "UPDATE tasks SET status='done', result=?, ended_at=?, updated_at=? WHERE id=?",
-            ("Adopted from Copilot.", stamp, stamp, task["id"]),
+            (ADOPTED, stamp, stamp, task["id"]),
         )
         store.execute(
             "UPDATE runs SET status='succeeded', ended_at=? WHERE task_id=? AND ended_at IS NULL",

@@ -126,6 +126,11 @@ class AgentBackend(Protocol):
         attaching to it, the offset to read from next time, and when it last changed."""
         ...
 
+    async def read_usage(self, session_id: str, offset: int) -> tuple[list[dict], int]:
+        """The usage records in a session's log after `offset` (all of them from 0), and the
+        offset to read from next time."""
+        ...
+
 
 @dataclass(frozen=True)
 class SandboxPolicy:
@@ -201,6 +206,12 @@ class CopilotBackend:
             raise ValueError("Not a Copilot session id.")
         log = copilot_home() / "session-state" / session_id / "events.jsonl"
         return await asyncio.to_thread(read_log, log, offset)
+
+    async def read_usage(self, session_id: str, offset: int) -> tuple[list[dict], int]:
+        if not SESSION_ID.fullmatch(session_id):
+            raise ValueError("Not a Copilot session id.")
+        log = copilot_home() / "session-state" / session_id / "events.jsonl"
+        return await asyncio.to_thread(scan_log, log, offset, USAGE_RECORD)
 
     def sandbox(self, policy: SandboxPolicy) -> SandboxConfig:
         return SandboxConfig(
@@ -297,6 +308,35 @@ SESSION_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-
 # The latest part of a session's log that is read when nothing was read before.
 LOG_TAIL = 12_000_000
 LOG_CHUNK = 8_000_000
+
+
+USAGE_RECORD = b'"session.usage_record"'
+
+
+def scan_log(log: Path, offset: int, marker: bytes) -> tuple[list[dict], int]:
+    """The events in a log after `offset` whose line holds `marker`, and where the complete
+    lines end. Lines are only parsed when they match, so a long log is quick to go through."""
+    try:
+        size = log.stat().st_size
+    except OSError:
+        return [], offset
+    if offset > size:
+        offset = 0  # The log was rewritten.
+    found = []
+    position = offset
+    with log.open("rb") as file:
+        file.seek(offset)
+        rest = b""
+        while chunk := file.read(LOG_CHUNK):
+            lines = (rest + chunk).split(b"\n")
+            rest = lines.pop()  # Unfinished: read with the next chunk, or next time.
+            for line in lines:
+                position += len(line) + 1
+                if marker in line:
+                    with suppress(ValueError):
+                        if isinstance(event := json.loads(line), dict):
+                            found.append(event)
+    return found, position
 
 
 def read_log(log: Path, offset: int) -> tuple[list[dict], int, float]:

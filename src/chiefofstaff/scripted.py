@@ -399,6 +399,9 @@ class ScriptedBackend:
     async def open_elsewhere(self) -> dict[str, int]:
         return {other["meta"].session_id: 1 for other in self.others if other.get("open")}
 
+    async def read_usage(self, session_id: str, offset: int) -> tuple[list[dict], int]:
+        return [], offset
+
     async def read_history(self, session_id: str, offset: int) -> tuple[list[dict], int, float]:
         if other := self.other(session_id):
             log = other.get("log", [])
