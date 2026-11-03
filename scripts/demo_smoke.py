@@ -12,6 +12,7 @@ import asyncio
 import re
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 from playwright.async_api import async_playwright, expect
@@ -36,6 +37,11 @@ async def start() -> tuple[subprocess.Popen, str]:
     for _ in range(200):
         line = await asyncio.to_thread(process.stdout.readline)
         if match := re.search(r"(http://127\.0\.0\.1:\d+/#token=\S+)", line):
+            # The server's log, shown if the test fails.
+            process.output = []  # type: ignore[attr-defined]
+            threading.Thread(
+                target=lambda: process.output.extend(process.stdout), daemon=True
+            ).start()
             return process, match.group(1)
     process.kill()
     raise RuntimeError("The demo did not start.")
@@ -148,6 +154,10 @@ async def run(scheme: str):
             await page.screenshot(path=SHOTS / f"demo-{scheme}-5-chat.png")
             assert not errors, errors
             await browser.close()
+    except BaseException:
+        print("--- demo server log (last 60 lines)")
+        print("".join(process.output[-60:]), flush=True)
+        raise
     finally:
         process.terminate()
 
