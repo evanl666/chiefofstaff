@@ -237,7 +237,7 @@ class Events:
         if state.close_after_turn:
             self.runtime.background(self.runtime.workers.close(session_id))
         elif state.stale:
-            self.runtime.background(self.runtime.detach(session_id))
+            self.runtime.background(self.runtime.reattach(session_id))
         if row["role"] in {ROUTER, SLACK} and self.delivery.has_unsent(session_id):
             self.delivery.schedule_flush(session_id)  # Events that arrived during the turn.
         context = int(self.store.get(f"context:{session_id}") or 0)

@@ -223,15 +223,21 @@ export async function select(sessionId) {
   const timeline = $("#timeline");
   timeline.replaceChildren();
   state.lastId = 0;
+  // Messages that come by event while the history loads are added after it.
+  const loading = { id: sessionId, held: [] };
+  state.loading = loading;
   let messages = [];
   try {
     messages = await api(`/api/sessions/${sessionId}/messages`);
   } catch (error) {
     toast(error.message, "error");
   }
+  if (state.loading === loading) state.loading = null;
   if (state.selected !== sessionId) return;
   timeline.replaceChildren();
+  state.lastId = 0;
   appendMessages(messages);
+  appendMessages(loading.held);
   scrollToBottom(true);
   if (byId(sessionId)?.unread) markRead(sessionId);
   if (!$("#composer").hidden) $("#composer-input").focus();

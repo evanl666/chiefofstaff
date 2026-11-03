@@ -43,6 +43,8 @@ export async function api(path, { method = "GET", body } = {}) {
   if (!response.ok) throw new Error(errorText(data, response.status));
   return data;
 }
+// Enter that submits: not one that confirms a word in an input method (Chinese, Japanese, …).
+export const submits = (event) => event.key === "Enter" && !event.isComposing && event.keyCode !== 229;
 export function escapeHtml(text) {
   return text.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 }

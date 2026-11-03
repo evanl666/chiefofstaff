@@ -159,6 +159,7 @@ class Runtime:
         self.sources: list[Source] = []
         self.watch_job: asyncio.Task | None = None
         self.backend: AgentBackend | None = None
+        self.connections = 0  # Counts disconnects: a session opened before one is not usable.
         self.states = SessionStates()
         # Whether this machine can run Copilot's command sandbox, and whether gh works inside it.
         self.sandbox_host = sandbox_supported()
@@ -242,9 +243,21 @@ class Runtime:
                 warning = await self.version_warning()
                 self.sandbox_gh = await self.backend.gh_works_in_sandbox()
                 await self.ensure_router()
+                # A worker whose start a stop interrupted starts again.
+                self.store.execute(
+                    "UPDATE sessions SET status='queued' WHERE status='starting' "
+                    "AND closed_at IS NULL"
+                )
                 await self.reconcile_sends()
                 await self.resume_working()
-                await self.ensure_slack_session()
+                try:
+                    await self.ensure_slack_session()
+                except Exception as exc:
+                    # Slack must not keep the Router and the workers from running.
+                    logger.warning("The Slack session could not start.", exc_info=True)
+                    warning = (warning + " " if warning else "") + (
+                        f"The Slack session could not start: {describe(exc)[:200]}"
+                    )
                 self.status = {"state": "ready", "error": "", "warning": warning}
             except Exception as exc:
                 logger.exception("Copilot runtime failed to start")
@@ -267,12 +280,16 @@ class Runtime:
         return ""
 
     async def disconnect(self):
+        # Not ready from the first moment: nothing starts (a pump, a delivery) while it stops.
+        backend, self.backend = self.backend, None
+        self.connections += 1
         sessions = self.states.take_all_handles()
+        # Their turns end with the connection: no idle event will come to free their slots.
+        self.states.end_turns()
         await asyncio.gather(*(s.disconnect() for s in sessions), return_exceptions=True)
-        if self.backend:
+        if backend:
             with suppress(Exception):
-                await self.backend.stop()
-            self.backend = None
+                await backend.stop()
 
     async def reconnect(self):
         await self.disconnect()
@@ -396,7 +413,22 @@ class Runtime:
             checkout = await self.workspaces.clone_checkout(workspace, slug, repo)
         self.update_session(caller, repos=json.dumps([*checkouts, checkout]))
         self.add_message(caller, "notice", f"Added {checkout['path']} ({checkout['branch']})")
-        return {key: checkout[key] for key in ("path", "branch", "base")}
+        result = {key: checkout[key] for key in ("path", "branch", "base")}
+        if checkout.get("worktree") and self.sandbox_policy(row):
+            # A worktree's history is in its repository's .git, outside what the sandbox let
+            # this session write when it started: it is reattached with it after this turn.
+            state = self.states[caller]
+            state.stale = True
+            state.after_refresh = (
+                f"Your shell may now run git in {checkout['path']} (its history is "
+                f"{checkout.get('git_dir', '')}). Go on with the task."
+            )
+            result["note"] = (
+                "Edit files there now. git commands there (add, commit) work from your next "
+                "turn, which Chief of Staff starts as soon as this one ends: end this turn when "
+                "the rest is done."
+            )
+        return result
 
     async def add_folder(self, raw: str) -> dict:
         """A folder the owner added from the inbox: a repository becomes a project; a folder
@@ -604,6 +636,18 @@ class Runtime:
             if row["role"] in roles:
                 await self.refresh_session(row)
 
+    async def reattach(self, session_id: str):
+        """After a turn: reconnect with current options, and go on if it was told it would."""
+        note, self.states[session_id].after_refresh = self.states[session_id].after_refresh, ""
+        await self.detach(session_id)
+        if note and (row := self.store.find_session(session_id)) and not row["closed_at"]:
+            try:
+                await self.delivery.deliver(
+                    session_id, wrap("system", "context", note), kind="notice", display=note
+                )
+            except Exception:
+                logger.warning("Could not continue %s after a refresh.", session_id, exc_info=True)
+
     async def detach(self, session_id: str):
         """Disconnect from Copilot; the next use reconnects with the current options."""
         async with self.states[session_id].lifecycle:
@@ -613,6 +657,7 @@ class Runtime:
         """Disconnect; the caller holds the session's lifecycle lock."""
         state = self.states[session_id]
         state.stale = False
+        state.after_refresh = ""  # The next connection has the new options from the start.
         if state.busy:
             # A disconnected session ends no turn: free its worker slot.
             state.busy = False
@@ -669,15 +714,32 @@ class Runtime:
         with suppress(Exception):
             await self.available_models()  # Efforts and context tiers depend on the model.
         options = self.options(row)
+        copilot_id = copilot or self.copilot_id(row["id"])
+        name = ("Chief of Staff · " + clean_title(row["title"]))[:100]
+        connection = self.connections
         if create:
-            name = "Chief of Staff · " + clean_title(row["title"])
             session = await self.connected().create_session(
-                session_id=copilot or self.copilot_id(row["id"]), name=name[:100], **options
+                session_id=copilot_id, name=name, **options
             )
             self.store.set(f"created:{row['id']}", "1")
+            # Copilot keeps a session only once it has had a message: until then it cannot
+            # be resumed after a restart, and is created again instead.
+            self.store.set(f"fresh:{copilot_id}", "1")
         else:
             await self.refuse_if_open_elsewhere(row)
-            session = await self.connected().resume_session(self.copilot_id(row["id"]), **options)
+            try:
+                session = await self.connected().resume_session(copilot_id, **options)
+            except Exception:
+                if not self.store.get(f"fresh:{copilot_id}"):
+                    raise
+                session = await self.connected().create_session(
+                    session_id=copilot_id, name=name, **options
+                )
+        if self.connections != connection:
+            # Copilot reconnected meanwhile: this session belongs to the old connection.
+            with suppress(Exception):
+                await session.disconnect()
+            raise RuntimeError("Copilot reconnected meanwhile; try again.")
         session_id = row["id"]
         loop = self.loop or asyncio.get_running_loop()
 
@@ -849,8 +911,15 @@ class Runtime:
             return
         rows = self.store.open_sessions(SLACK)
         if rows:
-            await self.session_for(rows[0]["id"])
-            return
+            try:
+                await self.session_for(rows[0]["id"])
+                return
+            except Exception:
+                # Copilot may no longer have it (its session state was cleaned up).
+                logger.warning("The Slack session could not be resumed; starting a new one.",
+                               exc_info=True)  # fmt: skip
+                self.store.unfollow_session(rows[0]["id"])
+                self.update_session(rows[0]["id"], closed_at=now())
         row = self.store.create_session(
             str(uuid4()), SLACK, "Slack", "idle", cwd=str(self.role_dir(SLACK))
         )
@@ -945,6 +1014,8 @@ class Runtime:
         self.add_message(row["id"], "error", message)
         self.update_session(row["id"], status="failed", activity="")
         self.task_actions.fail(row["id"], message)
+        if row["role"] == WORKER:
+            self.background(self.workers.pump())  # Its slot is free for a queued worker.
 
     async def owner_send(self, session_id: str, text: str) -> dict:
         row = self.store.session(session_id)
@@ -1029,8 +1100,20 @@ class Runtime:
 
     # Thread subscriptions
 
+    @staticmethod
+    def check_follow(row: dict, keys: list[str]):
+        """Slack threads come only to sessions made to read Slack (restricted network, no
+        record_setup, no .env files): never to a worker without them."""
+        slack = [key for key in keys if key.startswith("slack:")]
+        if slack and row["role"] != SLACK and not row.get("slack"):
+            raise ValueError(
+                f"{', '.join(slack)}: only a session with Slack access follows Slack "
+                "threads (spawn_worker with slack=true, or the Slack session)."
+            )
+
     def follow(self, session_id: str, keys: list[str]) -> list[str]:
         followed = [threads.normalize(key) for key in keys]
+        self.check_follow(self.store.session(session_id), followed)
         for key in followed:
             self.store.follow(key, session_id)
             for prefix in ("ghfail", "slackfail"):
@@ -1065,6 +1148,14 @@ class Runtime:
         """New activity in a followed thread goes straight to its followers, not the Router."""
         self.require_ready()
         followers = self.store.followers(thread)
+        if thread.startswith("slack:"):
+            # A second guard: Slack content reaches only sessions that may read Slack.
+            followers = [
+                session_id
+                for session_id in followers
+                if (row := self.store.find_session(session_id))
+                and (row["role"] == SLACK or row["slack"])
+            ]
         if not followers:
             return False  # Leaves the keys unseen, so the event can still reach the Router.
         fresh = [key for key in keys if self.store.add_trigger(source, key, text[:4000])]

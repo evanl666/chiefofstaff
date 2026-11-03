@@ -175,6 +175,25 @@ async def test_watcher_pages_through_busy_windows(source):
     assert source.calls[0][1] == [f"slack:{stamp}" for stamp in stamps]
 
 
+async def test_more_messages_than_one_poll_reads_are_not_lost(source):
+    await source.poll_once()
+    stamps = [f"{1712340000 + i}.000100" for i in range(300)]
+
+    async def call(name, arguments):
+        if arguments.get("query") != "to:me":
+            return ""
+        after = float(arguments["after"])
+        page = [stamp for stamp in stamps if float(stamp) > after][:20]
+        return "\n".join(f"DM ts: {stamp}" for stamp in page)
+
+    source.store.set("slack_cursor", "1712339000")
+    source.mcp.call = call
+    for _ in range(3):
+        await source.poll_once()
+    delivered = {key for _, keys, *rest in source.calls for key in keys}
+    assert delivered == {f"slack:{stamp}" for stamp in stamps}, "all 300, over several polls"
+
+
 THREAD = "slack:C0DEPLOYS:1712345678.000100"
 REPLIES = """Channel: <#C0DEPLOYS> | From: <@U0BOB001> | ts: 1712345678.000100
 Text: Deploy failing again?

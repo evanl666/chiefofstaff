@@ -284,7 +284,7 @@ class TaskActions:
                 row["id"],
                 "notice",
                 f"PR opened: {', '.join(opened)}",
-                {"prompt": wrap("system", "context", note)} if followed else {},
+                {"prompt": wrap("system", "context", note), "deferred": True} if followed else {},
             )
         await self.collect_evidence(task_id, keep_stale=True)
         return self.tasks.get(task_id)
@@ -421,6 +421,8 @@ class TaskActions:
                     with suppress(Exception):
                         await handle.abort()  # Copilot also stops the running command.
                 self.states[row["id"]].busy = False
+                self.states[row["id"]].after_refresh = ""  # Not "go on" once it is stopped.
+                self.delivery.defer_pending(row["id"])  # Its task, if it never started.
                 if row["status"] in {"working", "queued", "starting", "waiting"}:
                     self.runtime.update_session(row["id"], status="idle", activity="")
             note = f"Task {task_id} “{task['title']}” was cancelled. Stop work on it; no report."
@@ -429,7 +431,11 @@ class TaskActions:
                 row["id"],
                 "notice",
                 why,
-                {"prompt": wrap("system", "cancelled", note, task=task_id), "stopped": True},
+                {
+                    "prompt": wrap("system", "cancelled", note, task=task_id),
+                    "stopped": True,
+                    "deferred": True,
+                },
             )
         with suppress(RuntimeError):
             self.runtime.add_message(

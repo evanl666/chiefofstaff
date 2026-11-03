@@ -1,6 +1,6 @@
 // A task's changes as a diff: read them, comment on lines, send the comments to its worker.
 
-import { api, el, toast } from "./dom.js";
+import { api, el, submits, toast } from "./dom.js";
 import { plural } from "./text.js";
 
 const OPEN_LINES = 400; // Larger files start folded.
@@ -123,7 +123,7 @@ export function showChanges(task, onSent) {
       counted();
     };
     input.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) add();
+      if (submits(event) && (event.metaKey || event.ctrlKey)) add();
       if (event.key === "Escape") {
         event.preventDefault();
         event.stopPropagation();

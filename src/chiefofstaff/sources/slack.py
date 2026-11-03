@@ -54,6 +54,7 @@ PAGE_SIZE = 20
 MAX_PAGES = 10
 MAX_FOLLOW_FAILURES = 5
 MAX_RESULT_CHARS = 6000
+LATEST_CHARS = 400
 PERMALINK = re.compile(r"/archives/[A-Z0-9]+/p(\d{10})(\d{6})")
 TIMESTAMP = re.compile(r"(?<![\d.])(\d{10}\.\d{6})(?![\d])")
 THREAD_TS = re.compile(r"thread_ts\W{0,4}\d{10}\.\d{6}")
@@ -298,12 +299,17 @@ class SlackSource:
             return
         await self.poll_followed()
         followed = {sub["thread"]: sub["since"] for sub in self.host.followed("slack:")}
-        since = max(0, int(float(cursor)) - LOOKBACK_SECONDS)
+        # After a poll that stopped at its page limit, go on exactly from there: looking back
+        # again could fill every page with what was read already.
+        lookback = 0 if self.store.get("slack_cursor_exact") else LOOKBACK_SECONDS
+        since = max(0, int(float(cursor)) - lookback)
         sections: list[str] = []
         shown: list[str] = []
         unseen: list[str] = []
         thread_keys: list[str] = []
         for_followers: dict[str, tuple[list[str], list[str]]] = {}
+        # How far this poll got: short of now when a query had more pages than it reads.
+        reached = started
         for query in self.queries():
             after = since
             for _ in range(MAX_PAGES):
@@ -346,6 +352,9 @@ class SlackSource:
                 if len(found) < PAGE_SIZE or newest <= after:
                     break
                 after = newest
+            else:
+                # More than MAX_PAGES pages: the rest comes with the next poll, from here.
+                reached = min(reached, after)
         for thread, (keys, texts) in for_followers.items():
             body = "\n\n".join(dict.fromkeys(texts))
             delivered = await self.host.on_thread(
@@ -379,7 +388,11 @@ class SlackSource:
         else:
             self.store.delete("slack_delegate_emoji")  # Turning it back on starts from then.
         # Only advance after the Router accepted the events, so a failure is retried.
-        self.store.set("slack_cursor", str(started))
+        self.store.set("slack_cursor", str(reached))
+        if reached < started:
+            self.store.set("slack_cursor_exact", "1")
+        else:
+            self.store.delete("slack_cursor_exact")
         self.status.update(connected=True, error="", last_checked=now())
 
     def seen(self, key: str) -> bool:
@@ -501,6 +514,21 @@ class SlackSource:
                     f"slack:{stamp}",
                 )
         return ""
+
+    async def latest(self, channel_id: str, thread_ts: str = "") -> str:
+        """The newest message where a reply would go, as Slack shows it: what the owner checks
+        a draft's destination by, rather than by what the drafting session says."""
+        try:
+            if thread_ts:
+                arguments = {"channel_id": channel_id, "message_ts": thread_ts}
+                text = await asyncio.wait_for(self.mcp.call("slack_read_thread", arguments), 20)
+                return text.strip()[-LATEST_CHARS:]  # Oldest first: the newest is at the end.
+            arguments = {"channel_id": channel_id, "limit": 1}
+            text = await asyncio.wait_for(self.mcp.call("slack_read_channel", arguments), 20)
+            return text.strip()[:LATEST_CHARS]
+        except Exception as exc:
+            logger.info("Could not read %s for a draft: %s", channel_id, describe(exc))
+            return ""
 
     async def send(self, target: dict, text: str) -> str:
         if self.fingerprint and not self.can_send:

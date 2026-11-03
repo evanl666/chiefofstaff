@@ -570,6 +570,7 @@ class Tools:
                 )
         session_id = str(uuid4())
         slack = params.slack and self.runtime.slack.configured()
+        self.runtime.check_follow({"role": WORKER, "slack": slack}, follow)
         workspace, checkouts = await self.workspaces.prepare_directory(
             session_id,
             title,
@@ -661,6 +662,7 @@ class Tools:
         target = self.store.session(params.session_id)
         if target["role"] == ROUTER:
             raise ValueError("That is your own session.")
+        self.runtime.check_follow(target, [threads.normalize(key) for key in params.follow])
         if target["closed_at"]:
             await self.runtime.workers.reopen(
                 target["id"]
@@ -929,13 +931,9 @@ class Tools:
             raise ValueError("thread_ts must look like 1712345678.123456.")
         if not params.text.strip():
             raise ValueError("The reply is empty.")
-        draft = self.store.create_draft(
-            caller,
-            "slack",
-            {"channel_id": params.channel_id, "thread_ts": params.thread_ts, "to": params.to},
-            params.text,
-            params.note,
-        )
+        target = {"channel_id": params.channel_id, "thread_ts": params.thread_ts, "to": params.to}
+        target["latest"] = await self.runtime.slack.latest(params.channel_id, params.thread_ts)
+        draft = self.store.create_draft(caller, "slack", target, params.text, params.note)
         self.runtime.add_message(caller, "draft", params.text, {"draft_id": draft["id"]})
         self.bus.publish("draft", draft)
         self.runtime.alert(

@@ -79,8 +79,9 @@ class Drafts:
             return self.runtime.decisions.dismiss(draft)
         if draft["kind"] == "lessons":
             return await self.runtime.learning.review(draft, decision)
-        if decision.action == "choose":
-            raise ValueError("This draft is not a question.")
+        if decision.action not in {"send", "reject"}:
+            # "It was sent" belongs to a draft whose sending was interrupted: never a send.
+            raise ValueError("Send this draft, or reject it.")
         if decision.action == "reject":
             draft = self.store.update_draft(
                 draft_id, status="rejected", outcome=decision.reason, resolved_at=now()

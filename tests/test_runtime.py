@@ -326,6 +326,7 @@ async def test_restart_resumes_router_and_working_sessions(tmp_path):
     )
     worker_id = json.loads(result.text_result_for_llm)["session_id"]
     router_id = first.router_id
+    await runtime.delivery.deliver(router_id, "Hello", kind="owner")
     await runtime.stop()
 
     second = Harness(tmp_path / "data", client=first.client)
@@ -374,7 +375,9 @@ async def test_slack_session_drafts_and_owner_decides(tmp_path):
         )
         return harness.store.drafts()[-1]
 
+    harness.mcp.reads["C0DEPLOYS"] = "From: <@U0ALICE01> (Alice Chen) | Text: is the deploy done?"
     first = await draft("Deploy is done.")
+    assert "Alice Chen" in first["target"]["latest"], "the card shows what is really there"
     await settle(runtime)
     assert harness.notifications[-1] == ("Slack reply to approve", "Alice asks about the deploy")
 

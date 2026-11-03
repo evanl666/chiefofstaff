@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.1.11 (2026-11-03)
+
+Fixes from a second bug bash.
+
+- Starting workers, stopping and reconnecting:
+  - A task cancelled while its worker was starting stays cancelled; nothing is sent to it.
+  - A worker whose start was interrupted (stopped, reconnected, shut down) waits in the queue
+    and starts again instead of failing.
+  - Reconnecting, or a worker failing, frees its slot, so queued workers start.
+  - A cancel notice or PR note no longer starts a finished worker after a restart; it goes
+    with your next message.
+  - A session that was started but never given a message (Copilot does not keep those over a
+    restart) is started again instead of failing.
+  - A session opened while Copilot reconnects is not left on the old connection, where every
+    message to it failed.
+- Slack:
+  - If Copilot lost the Slack session, a new one is started instead of failing at startup.
+  - Slack messages and threads only reach sessions allowed to read Slack.
+  - A burst of more messages than one check reads is picked up over the next checks, not
+    skipped.
+  - Draft cards show where a reply goes (DM, channel, thread) from Slack's own ids, and the
+    latest message there as read from Slack, so you can check the session picked the right
+    conversation.
+- A PR merged before Chief of Staff first checked it (right after *Create PR*, say) now marks
+  its task done; it was silently dropped. A PR followed again after it merged is just
+  unfollowed.
+- A worker that adds a project with `add_repo` while sandboxed can commit there from its next
+  turn, and goes on with the task by itself (unless you stopped it).
+- Closing a worker keeps its worktree if it holds ignored files you may need (an edited `.env`,
+  reports); a worktree that only holds dependencies is still removed.
+- The sandbox also keeps workers from changing your checkout's `HEAD` and index.
+- Only *Send* publishes a draft.
+- After an edit, the draft card shows the text that was sent and how it went.
+- A code folder that later became a git repository no longer resets other settings.
+- UI:
+  - Enter while choosing characters in an input method (Chinese, Japanese) no longer sends.
+  - Switching sessions quickly no longer shows another session's messages.
+
 ## 0.1.10 (2026-11-03)
 
 Fixes from a bug bash.

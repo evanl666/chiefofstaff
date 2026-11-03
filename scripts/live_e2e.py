@@ -772,6 +772,49 @@ async def scenario_repos(app: App, root: Path):
     log(f"one worker, {len(worker['checkouts'])} checkouts on {worker['branch']}, in yolo")
 
 
+async def scenario_added_repo_sandboxed(app: App, root: Path):
+    """A sandboxed worker adds a project mid-task; it commits there after being reattached."""
+    _, api = published_repo(root, "orders")
+    _, web = published_repo(root, "shop")
+    state = await app.get("/api/state")
+    settings = {**state["settings"], "worker_yolo": False}
+    settings["projects"] = [*settings["projects"], str(api), str(web)]
+    await app.post("/api/settings", settings)
+    router = state["router_id"]
+    mark = max((m["id"] for m in await app.get(f"/api/sessions/{router}/messages")), default=0)
+    await app.post(
+        f"/api/sessions/{router}/messages",
+        {
+            "text": f"Start one worker with only the {api} project, in an isolated worktree. "
+            "Tell it: add a file CHANGE.md containing exactly `renamed user to account` and "
+            f"commit it with the message 'Rename user'; then add the {web} project with "
+            "add_repo and do the same there. Do not give it the second project at the start."
+        },
+    )
+
+    async def done():
+        messages = await app.get(f"/api/sessions/{router}/messages?after={mark}")
+        for message in messages:
+            if message["kind"] == "notice" and message["text"].startswith("Started"):
+                worker = await app.get(f"/api/sessions/{message['meta']['session_id']}")
+                if worker["status"] == "done" and len(worker["checkouts"]) >= 2:
+                    return worker
+        return None
+
+    worker = await wait_for("a sandboxed worker commits in a project it added", done, 900, app)
+    assert not worker["yolo"]
+    for checkout in worker["checkouts"]:
+        tree = Path(checkout["path"])
+        assert (tree / "CHANGE.md").read_text().strip() == "renamed user to account", checkout
+        assert "Rename user" in git(tree, "log", "--format=%s", "-1"), checkout
+    for project in (api, web):
+        assert git(project, "rev-parse", "--abbrev-ref", "HEAD").strip() == "main"
+        assert not (project / "CHANGE.md").exists()
+    messages = await app.get(f"/api/sessions/{worker['id']}/messages")
+    went_on = [m for m in messages if "Go on with the task" in m["text"]]
+    log(f"sandboxed worker added a project and committed in both; reattached: {bool(went_on)}")
+
+
 async def gone(path: Path) -> bool:
     return not path.exists()
 
@@ -1102,6 +1145,10 @@ async def main():
                 await scenario_decisions(app, project)
                 log("DECISIONS SCENARIO PASSED")
                 return
+            if sys.argv[1:] == ["added-repo"]:
+                await scenario_added_repo_sandboxed(app, root)
+                log("ADDED REPO SCENARIO PASSED")
+                return
             if sys.argv[1:] == ["repos"]:
                 await scenario_repos(app, root)
                 log("REPOS SCENARIO PASSED")
@@ -1121,6 +1168,7 @@ async def main():
             await scenario_ask_user(app)
             await scenario_ask_session(app)
             await scenario_repos(app, root)
+            await scenario_added_repo_sandboxed(app, root)
             await scenario_code_folder(app, root)
             await scenario_models_usage_digest(app, started)
             await scenario_profile(app)

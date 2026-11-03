@@ -217,15 +217,13 @@ class GitHubSource:
             result = f"failed: {', '.join(failed)}" if failed else f"all {len(runs)} checks passed"
             items.append((f"github:ci:{repo}#{number}@{sha}", f"CI on {sha[:7]}: {result}"))
         state = "merged" if pull.get("merged") else pull["state"]
-        was_open = bool(self.store.get(f"ghopen:{thread}"))
-        if state == "open":
-            self.store.set(f"ghopen:{thread}", "1")
-        elif was_open:
+        if state != "open":
+            ended = pull.get("merged_at") or pull.get("closed_at")
+            if ended and datetime.fromisoformat(ended.replace("Z", "+00:00")).timestamp() < since:
+                # Already finished when followed (a PR cited in passing): just stop following it.
+                self.host.unfollow(thread)
+                return
             items.append((f"github:state:{thread}:{state}", f"The PR was {state}."))
-        else:
-            # Already finished when followed (a PR cited in passing): just stop following it.
-            self.host.unfollow(thread)
-            return
         fresh = [(key, line) for key, line in items if not self.seen(key)]
         if fresh:
             lines = "\n".join(f"- {line}" for _, line in fresh)

@@ -739,7 +739,7 @@ button.receipt.changes:hover { text-decoration: underline; }
 .card.chief { border-left: 3px solid var(--accent); }
 .card.chief .asked { color: var(--soft); font-size: 13px; white-space: pre-wrap; margin-bottom: 4px; }
 .card.chief .reply { margin-top: 4px; }
-.card.uncertain .quoted {
+.card.draft .quoted {
   white-space: pre-wrap;
   color: var(--soft);
   border-left: 2px solid var(--line);

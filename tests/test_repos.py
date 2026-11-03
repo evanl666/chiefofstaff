@@ -98,7 +98,8 @@ async def test_one_workspace_with_a_worktree_per_repository(tmp_path, monkeypatc
 async def test_add_repo_from_this_machine_or_a_remote(tmp_path):
     origin, api = published(tmp_path, "api")
     _, web = published(tmp_path, "web")
-    harness = Harness(tmp_path / "data", Settings(projects=[str(api), str(web)]))
+    _, docs = published(tmp_path, "docs")
+    harness = Harness(tmp_path / "data", Settings(projects=[str(api), str(web), str(docs)]))
     runtime = await harness.connect()
     info = await spawn(
         runtime,
@@ -113,6 +114,18 @@ async def test_add_repo_from_this_machine_or_a_remote(tmp_path):
         (await call_tool(runtime, "add_repo", worker, repo=str(web))).text_result_for_llm
     )
     assert added["branch"] == info["branch"] and Path(added["path"]).name == "web"
+    assert "end this turn" in added["note"], "its sandbox can write that history next turn"
+    harness.session(worker).emit("session.idle")
+    await settle(runtime)
+    assert worker in harness.client.resumed, "reconnected with the new sandbox"
+    assert "Go on with the task" in harness.session(worker).sent[-1]
+    third = await call_tool(runtime, "add_repo", worker, repo=str(docs))
+    assert "note" in json.loads(third.text_result_for_llm)
+    sent = len(harness.session(worker).sent)
+    await runtime.workers.interrupt(worker)  # The owner stops it before the turn ends.
+    harness.session(worker).emit("session.idle")
+    await settle(runtime)
+    assert len(harness.session(worker).sent) == sent, "stopped means stopped"
     again = await call_tool(runtime, "add_repo", worker, repo=str(web))
     assert "already have" in again.text_result_for_llm
 
@@ -125,7 +138,7 @@ async def test_add_repo_from_this_machine_or_a_remote(tmp_path):
     assert Path(cloned["path"]).parent == Path(added["path"]).parent
     assert run("git", "branch", "--show-current", cwd=cloned["path"]).strip() == info["branch"]
     assert (Path(cloned["path"]) / "LATEST.md").exists()
-    assert len(json.loads(harness.store.session(worker)["repos"])) == 3
+    assert len(json.loads(harness.store.session(worker)["repos"])) == 4
     bad = await call_tool(runtime, "add_repo", worker, repo="not a repo")
     assert "git URL or GitHub owner/name" in bad.text_result_for_llm
 
