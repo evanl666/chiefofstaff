@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 import subprocess
 import time
 from datetime import UTC, datetime
@@ -884,7 +885,8 @@ async def test_the_router_rotates_when_its_context_grows(harness):
     sent = new.sent[-1]
     assert sent.startswith('<message from="system" type="handover">')
     assert f"{worker_id[:8]} “Fix login”" in sent and "Fixed in PR #7" in sent
-    assert "- owner: Thanks, what is open?" in sent and "- you: Nothing else is open." in sent
+    assert re.search(r"- owner \(ref o[0-9a-f]{6}\): Thanks, what is open\?", sent)
+    assert "- you: Nothing else is open." in sent
     assert sent.endswith(env("owner", "message", "Start the docs task"))
     listed = await call_tool(runtime, "list_sessions", new_id)
     assert listed.result_type == "success", "the new Copilot session acts as the Router"

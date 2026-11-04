@@ -1179,7 +1179,11 @@ async def scenario_decisions(app: App, project: Path):
     async def confirmed():
         state = await app.get("/api/state")
         current = await app.get(f"/api/tasks/{task['id']}")
-        changed = [d for d in current["decisions"] if d["status"] == "active" and d["ack"]]
+        changed = [
+            d
+            for d in current["decisions"]
+            if d["status"] == "active" and d["ack"] and "camel" in d["text"].lower()
+        ]
         pending = [d for d in state["drafts"] if d["kind"] == "change"]
         return (
             (changed[0], current)

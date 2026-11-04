@@ -357,7 +357,9 @@ export function draftCard(draft) {
   // A review's comments on lines of the diff: each editable; emptied, it is not sent.
   const inline = (draft.kind === "github" && target.comments) || [];
   const comments = inline.map((comment) => {
-    const box = el("textarea", { rows: Math.min(6, comment.body.split("\n").length + 1), "aria-label": `Comment on ${comment.path}:${comment.line}` });
+    // As tall as its text wraps to (about 90 characters a line), one to six lines.
+    const wrapped = comment.body.split("\n").reduce((sum, line) => sum + Math.max(1, Math.ceil(line.length / 90)), 0);
+    const box = el("textarea", { rows: Math.min(6, wrapped), "aria-label": `Comment on ${comment.path}:${comment.line}` });
     box.value = comment.body;
     const lines = comment.start_line ? `${comment.start_line}-${comment.line}` : comment.line;
     return { box, node: el("div", { class: "inline-comment" }, el("div", { class: "where", text: `${comment.path}:${lines}${comment.side === "LEFT" ? " (old)" : ""}` }), box) };
@@ -390,7 +392,7 @@ export function draftCard(draft) {
       : null,
     draft.kind === "github" ? el("a", { href: target.comment?.url || target.url, target: "_blank", rel: "noreferrer", text: target.comment?.url || target.url }) : null,
     text,
-    comments.length ? el("div", { class: "note", text: `${comments.length} inline comment${comments.length === 1 ? "" : "s"} (empty one to leave it out):` }) : null,
+    comments.length ? el("div", { class: "note", text: `${comments.length} line comment${comments.length === 1 ? "" : "s"} (empty one to leave it out):` }) : null,
     ...comments.map((comment) => comment.node),
     actions,
   );

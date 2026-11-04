@@ -1,6 +1,8 @@
 import json
 from datetime import datetime
 
+import pytest
+
 from chiefofstaff.models import Settings
 from chiefofstaff.sources.github import GitHubSource
 from chiefofstaff.store import Store
@@ -296,3 +298,139 @@ def test_workers_learn_which_github_accounts_they_can_use():
     assert "GH_TOKEN=$(gh auth token --user evan-corp) gh" in text
     assert "Never run gh auth switch" in text
     assert "gh auth token" not in worker_context("/w", "/w", [], False, gh_accounts=accounts[:1])
+
+
+async def test_accounts_are_read_on_a_machine_that_just_booted(tmp_path, monkeypatch):
+    """The monotonic clock starts at boot: a CI runner or a laptop just started is at 30s."""
+    import chiefofstaff.sources.github as module
+
+    monkeypatch.setattr(module.time, "monotonic", lambda: 30.0)
+    store = Store(tmp_path / "data")
+
+    async def gh(*arguments, payload=None, token=""):
+        accounts = [{"login": "me", "active": True, "state": "success"}]
+        return json.dumps({"hosts": {"github.com": accounts}})
+
+    assert await GitHubSource(store, Host(store), gh_command=gh).logins() == {"me"}
+
+
+def routing_gh(calls, *, rate_limited=False, signed_out=(), corp_sees=True):
+    """gh with an active personal account and a company account that alone sees corp/*."""
+
+    async def gh(*arguments, payload=None, token=""):
+        calls.append((arguments, token))
+        if arguments[:2] == ("auth", "status"):
+            accounts = [
+                {"login": "me", "active": True, "state": "success"},
+                {"login": "corp-me", "active": False, "state": "success"},
+            ]
+            return json.dumps({"hosts": {"github.com": accounts}})
+        if arguments[:2] == ("auth", "token"):
+            if arguments[-1] in signed_out:
+                raise RuntimeError("GitHub request failed: no oauth token found")
+            return f"token-of-{arguments[-1]}\n"
+        if rate_limited and not token:
+            raise RuntimeError("GitHub request failed: API rate limit exceeded (HTTP 403)")
+        if arguments[1].startswith("repos/corp/"):
+            if token == "token-of-corp-me" and corp_sees:
+                return json.dumps({"ok": True, "as": token})
+            raise RuntimeError("GitHub request failed: gh: Not Found (HTTP 404)")
+        return json.dumps({"ok": True, "as": token or "active"})
+
+    return gh
+
+
+async def test_a_rate_limit_is_not_a_reason_to_post_as_another_account(tmp_path):
+    store = Store(tmp_path / "data")
+    calls = []
+    source = GitHubSource(store, Host(store), gh_command=routing_gh(calls, rate_limited=True))
+    with pytest.raises(RuntimeError, match="rate limit"):
+        await source.gh("api", "repos/acme/app/pulls/1/reviews", "--method=POST", payload={})
+    assert not [c for c in calls if c[1]], "no other account tried"
+    assert store.get("ghaccount:acme") is None, "and none remembered"
+
+
+async def test_an_account_signed_out_since_is_forgotten(tmp_path):
+    store = Store(tmp_path / "data")
+    calls = []
+    source = GitHubSource(store, Host(store), gh_command=routing_gh(calls))
+    await source.gh("api", "repos/corp/svc/pulls/1")
+    assert store.get("ghaccount:corp") == "corp-me"
+    source.raw = routing_gh(calls, signed_out={"corp-me"}, corp_sees=False)
+    with pytest.raises(RuntimeError, match="404"):
+        await source.gh("api", "repos/corp/svc/pulls/1")  # Its cached token fails: dropped.
+    assert "corp-me" not in source.tokens
+    with pytest.raises(RuntimeError, match="corp-me is no longer signed in to gh"):
+        await source.gh("api", "repos/corp/svc/pulls/1")  # Says what to fix.
+    store.set("ghaccount:acme", "corp-me")
+    assert json.loads(await source.gh("api", "repos/acme/app"))["as"] == "active"
+    assert store.get("ghaccount:acme") is None, "the active account answers: nothing to remember"
+
+
+async def test_a_token_is_asked_of_gh_once_for_many_calls(tmp_path):
+    store = Store(tmp_path / "data")
+    calls = []
+    source = GitHubSource(store, Host(store), gh_command=routing_gh(calls))
+    for number in range(5):
+        await source.gh("api", f"repos/corp/svc/pulls/{number}")
+    assert sum(1 for arguments, _ in calls if arguments[:2] == ("auth", "token")) == 1
+
+
+async def test_without_gh_the_error_says_so(tmp_path):
+    store = Store(tmp_path / "data")
+
+    async def missing(*arguments, payload=None, token=""):
+        raise RuntimeError(
+            "GitHub CLI not found. Install gh and sign in before connecting reviews."
+        )
+
+    with pytest.raises(RuntimeError, match="GitHub CLI not found"):
+        await GitHubSource(store, Host(store), gh_command=missing).gh("api", "repos/a/b/pulls/1")
+
+
+def test_lines_a_review_can_comment_on():
+    from chiefofstaff.sources.github import diff_lines, pages
+    from chiefofstaff.tools import InlineComment, misplaced
+
+    files = [
+        {  # Two hunks, the second with a removal and "\\ No newline".
+            "filename": "app.py",
+            "additions": 3,
+            "deletions": 1,
+            "patch": "@@ -1,2 +1,3 @@\n a\n+b\n c\n@@ -20,2 +21,2 @@\n x\n-y\n+z\n"
+            "\\ No newline at end of file",
+        },
+        {
+            "filename": "new_name.py",
+            "previous_filename": "old_name.py",
+            "additions": 1,
+            "patch": "@@ -5 +5 @@\n-old\n+new",
+        },
+        {
+            "filename": "gone.py",
+            "status": "removed",
+            "deletions": 2,
+            "patch": "@@ -1,2 +0,0 @@\n-p\n-q",
+        },
+    ]
+    lines = diff_lines(files)
+    assert lines["app.py"]["RIGHT"] == {1, 2, 3, 21, 22}
+    assert lines["app.py"]["LEFT"] == {1, 2, 20, 21}
+    assert lines["new_name.py"] == {"LEFT": {5}, "RIGHT": {5}}, "a hunk header without counts"
+    assert lines["gone.py"] == {"LEFT": {1, 2}, "RIGHT": set()}
+
+    def check(**comment):
+        return misplaced([InlineComment(body="b", **comment)], lines)
+
+    assert check(path="app.py", line=22) == []
+    assert check(path="app.py", start_line=21, line=22) == []
+    assert check(path="app.py", start_line=2, line=21), "a range across two hunks"
+    assert check(path="app.py", line=21, side="LEFT") == [], "a removed line"
+    assert check(path="gone.py", line=2, side="LEFT") == [], "a deleted file, its old side"
+    assert check(path="gone.py", line=1), "a deleted file has no new side"
+    assert "old_name.py is not changed" in check(path="old_name.py", line=5)[0], "its new name"
+    assert check(path="app.py", start_line=3, line=3), "a range must start before it ends"
+
+    assert pages('[{"a": 1}][{"a": 2}]\n[]') == [{"a": 1}, {"a": 2}], "older gh: page by page"
+    assert pages('[{"a": 1}, {"a": 2}]') == [{"a": 1}, {"a": 2}]
+    assert pages("") == []

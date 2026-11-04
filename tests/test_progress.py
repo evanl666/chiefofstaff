@@ -769,19 +769,77 @@ async def test_drafting_needs_a_pr_the_task_is_about_or_one_the_owner_reviews(ha
     assert (await draft()).result_type == "success", "GitHub asks the owner to review it"
 
 
-def test_a_task_names_a_pr_by_its_repository_and_number():
+NAMED = "acme/checkout-service"
+
+
+@pytest.mark.parametrize(
+    "text, named",
+    [
+        ("Review checkout-service PR #1529", True),
+        ("帮我review一下 checkout-service 的 PR #1529", True),
+        ("review一下checkout-service的PR 1529", True),
+        ("checkout-service里面的 #1529 帮我看看", True),
+        ("checkout-service#1529", True),
+        ("checkout-service/pull/1529", True),
+        ("https://github.com/acme/checkout-service/pull/1529", True),
+        ("acme/checkout-service#1529", True),
+        ("PR #1529 (checkout-service)", True),
+        ("please look at PR 1529 in checkout-service", True),
+        ("Review PRs checkout-service #1528 and #1529", True),
+        ("checkout-service PRs #1528, #1529", True),
+        ("review checkout-service pull request 1529", True),
+        ("Checkout-Service PR #1529", True),
+        ("checkout-service 1529", True),
+        ("checkout-service-v2 PR #1529", False),
+        ("old-checkout-service PR #1529", False),
+        ("checkout-service.old PR #1529", False),
+        ("checkout-service PR #15290", False),
+        ("checkout-service issue #1529 is related; fix it", False),
+        ("checkout-service: see JIRA-1529", False),
+        ("evil/checkout-service PR #1529", False),
+        ("PR #1529 in evil/checkout-service", False),
+        ("In checkout-service, the last 1529 rows are wrong", False),
+        ("checkout-service has a bug #1529", False),
+        ("checkout-service. Separately, PR #1529 in other-repo", False),
+    ],
+)
+def test_a_task_names_a_pr_by_its_repository_and_number(text, named):
     from chiefofstaff.tools import names_pr
 
-    repo = "acme/checkout-service"
-    assert names_pr("Review checkout-service PR #1529", repo, 1529)
-    assert names_pr("please look at PR 1529 in checkout-service", repo, 1529)
-    assert names_pr("https://github.com/acme/checkout-service/pull/1529", repo, 1529)
-    assert not names_pr("Review evil/checkout-service#1529", repo, 1529), "another owner's"
-    assert not names_pr("The app crashes on login; see issue #42", "someone/app", 42)
-    assert not names_pr("Update api client (see #12)", "org/api", 12)
-    assert not names_pr("checkout-service PR #15290", repo, 1529)
+    assert names_pr(text, NAMED, 1529) is named
+
+
+def test_a_repository_name_in_a_path_or_near_an_issue_is_not_its_pr():
+    from chiefofstaff.tools import names_pr
+
     assert names_pr("Review api PR #12; the change is in src/api/handlers.py", "acme/api", 12)
     assert names_pr("Review web PR #5 (touches packages/web)", "acme/web", 5)
+    assert not names_pr("The app crashes on login; see issue #42", "someone/app", 42)
+    assert not names_pr("Update api client (see #12)", "org/api", 12)
+    assert not names_pr("Review github:acme/web#5 and acme/api#6", "acme/web", 6)
+
+
+@pytest.mark.parametrize(
+    "text, number, named",
+    [
+        ("Review acme/web#1529 and acme/api#1600", 1529, False),
+        ("Review https://github.com/acme/web/pull/1529 and acme/api#1600", 1529, False),
+        ("Review web #1529 and api #1600", 1529, False),
+        ("web#1529, api#1600", 1529, False),
+        ("web 的 #1529 和 api 的 #1600", 1529, False),
+        ("https://ci.example.com/builds/1529 for api", 1529, False),
+        ("Review github:acme/web#5 and acme/api#6", 5, False),
+        ("acme/api#1600 and #1529 in acme/web", 1529, False),
+        ("acme/api#1600 and #1529 in acme/api", 1529, True),
+        ("web#1529 and api#1600", 1600, True),
+        ("web 的 #1529 和 api 的 #1600", 1600, True),
+    ],
+)
+def test_a_pr_number_belongs_to_the_repository_it_is_written_with(text, number, named):
+    """A task listing PRs of several repositories names each with its own number only."""
+    from chiefofstaff.tools import names_pr
+
+    assert names_pr(text, "acme/api", number) is named
 
 
 async def test_a_pr_no_signed_in_account_can_see_says_how_to_fix_it(harness):
@@ -931,3 +989,150 @@ async def test_a_one_line_report_gets_the_answer_its_worker_wrote(harness):
     assert report.startswith("Analysis complete.") and answer.strip() in report
     inbound = harness.kinds(harness.router_id)
     assert any(kind == "inbound" and answer.strip() in text for kind, text in inbound)
+
+
+async def test_review_cards_when_the_owner_drops_everything_or_the_pr_moves(harness):
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Review checkout-service PR #1529")
+    repo = "acme/checkout-service"
+    harness.gh_replies[f"api repos/{repo}/pulls/1529/files"] = json.dumps(FILES)
+    harness.gh_replies[f"api repos/{repo}/pulls/1529"] = json.dumps(PULL)
+    harness.gh_replies[f"api repos/{repo}/pulls/1529/reviews"] = json.dumps(
+        {"id": 8, "html_url": "https://github.com/x/pull/1529#pullrequestreview-8"}
+    )
+
+    async def draft():
+        await call_tool(
+            runtime, "draft_github_review", worker, repo=repo, number=1529, body="Looks fine",
+            comments=[{"path": "model/train.py", "line": 11, "body": "Why 3?"}],
+        )  # fmt: skip
+        return harness.store.drafts()[-1]
+
+    card = await draft()
+    await runtime.drafts.resolve(
+        card["id"], DraftDecision(action="send", content={"comment:0": ""})
+    )
+    arguments, payload = harness.gh_calls[-1]
+    assert arguments[1].endswith("/reviews") and "comments" not in payload, "all comments dropped"
+
+    card = await draft()
+    harness.gh_replies[f"api repos/{repo}/pulls/1529"] = json.dumps(
+        {**PULL, "head": {"sha": "newer", "ref": "feature"}}
+    )
+    posts = len([c for c in harness.gh_calls if "--method=POST" in c[0]])
+    with pytest.raises(RuntimeError, match="PR changed"):
+        await runtime.drafts.resolve(
+            card["id"], DraftDecision(action="send", content={"comment:0": "Edited"})
+        )
+    assert len([c for c in harness.gh_calls if "--method=POST" in c[0]]) == posts, "not posted"
+    failed = harness.store.draft(card["id"])
+    assert failed["status"] == "failed"
+    assert failed["target"]["comments"][0]["body"] == "Edited", "the owner's edit is kept"
+    told = harness.store.messages(worker)[-1]["text"]
+    assert "PR changed" in told, "the worker hears it, to draft again on the new head"
+
+    harness.gh_replies[f"api repos/{repo}/pulls/1529"] = json.dumps(PULL)
+    card = await draft()
+    await runtime.drafts.resolve(card["id"], DraftDecision(action="reject", reason="Not now"))
+    assert harness.store.draft(card["id"])["status"] == "rejected"
+    assert len([c for c in harness.gh_calls if "--method=POST" in c[0]]) == posts
+
+
+async def test_stopping_a_worker_files_nothing_and_asks_nothing(harness):
+    """Copilot ends the turn (idle) while the stop is still in flight."""
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Long analysis")
+    session = harness.session(worker)
+    await settle(runtime)
+    session.emit("assistant.turn_start")
+    session.emit(
+        "assistant.message", content="Halfway: north 27,760.50 so far, still summing south."
+    )
+
+    async def abort():
+        session.emit("session.idle")
+        await asyncio.sleep(0.05)  # The idle event is handled before the abort returns.
+
+    session.abort = abort
+    sent = len(session.sent)
+    await runtime.workers.interrupt(worker)
+    await settle(runtime)
+    assert not [text for kind, text in harness.kinds(worker) if kind == "report"]
+    assert len(session.sent) == sent, "no report request to a stopped worker"
+    task = harness.store.one("SELECT status FROM tasks WHERE session_id=?", (worker,))
+    assert task["status"] == "waiting"
+
+
+async def test_what_a_worker_said_last_decides_how_its_turn_end_is_read(harness):
+    runtime = await harness.connect()
+
+    async def ends_with(text, before=None):
+        worker = await spawn(runtime, harness.router_id, f"Task {len(harness.store.drafts())}")
+        session = harness.session(worker)
+        await settle(runtime)
+        if before:
+            await before(worker)
+        session.emit("assistant.message", content=text)
+        session.emit("session.idle")
+        await settle(runtime)
+        task = harness.store.one("SELECT status FROM tasks WHERE session_id=?", (worker,))
+        return worker, session, task["status"]
+
+    question = "I found two export formats in the repo, CSV and Parquet. Which one should I change?"
+    _, _, status = await ends_with(question)
+    assert status == "waiting", "a question is filed as one"
+    router = [text for kind, text in harness.kinds(harness.router_id) if kind == "inbound"]
+    assert question in router[-1]
+
+    async def progress(worker):
+        await call_tool(runtime, "report", worker, status="progress", summary="Opened PR #12")
+
+    _, session, status = await ends_with("CI runs for about ten minutes on PR #12 now.", progress)
+    assert status == "running" and not any("report-missing" in p for p in session.sent), (
+        "it said where it is: it may wait"
+    )
+
+    _worker, session, status = await ends_with(
+        "The build is still compiling; I'll report once it finishes and the tests ran."
+    )
+    assert status == "running" and "report-missing" in session.sent[-1], "waiting: asked"
+    sent = len(session.sent)
+    session.emit("session.idle")
+    await settle(runtime)
+    assert len(session.sent) == sent, "asked once, then the Watchdog follows up"
+
+
+async def test_the_owners_words_reach_an_existing_worker_and_combine(harness):
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Exports")
+    first = await runtime.owner_send(harness.router_id, "Keep the CSV header as it is.")
+    second = await runtime.owner_send(harness.router_id, "And add a row count at the end.")
+    refs = first["meta"]["ref"], second["meta"]["ref"]
+    await call_tool(
+        runtime, "message_session", harness.router_id, session_id=worker,
+        text=f"Two notes from the owner:\n{{owner:{refs[0]}}}\n{{owner: {refs[1]}}}",
+    )  # fmt: skip
+    await settle(runtime)
+    delivered = harness.session(worker).sent[-1]
+    assert "Keep the CSV header as it is.\nAnd add a row count at the end." in delivered
+    assert "{owner" not in delivered
+
+
+async def test_a_decision_recorded_again_in_the_same_words_changes_nothing(harness):
+    runtime = await harness.connect()
+    first = await call_tool(
+        runtime, "record_decision", harness.router_id, decision="API uses snake_case JSON keys"
+    )
+    decision = first.text_result_for_llm.split()[1].rstrip(",.")
+    worker = await spawn(runtime, harness.router_id, "Write api.md", decisions=[decision])
+    await settle(runtime)
+    sent = len(harness.session(worker).sent)
+    task = harness.store.one("SELECT id FROM tasks WHERE session_id=?", (worker,))["id"]
+    again = await call_tool(
+        runtime, "record_decision", harness.router_id,
+        decision="API uses snake_case JSON keys.", tasks=[task], replaces=[decision],
+    )  # fmt: skip
+    assert "nothing changed" in again.text_result_for_llm
+    await settle(runtime)
+    assert len(harness.session(worker).sent) == sent, "the worker is not told to redo anything"
+    assert not [d for d in harness.store.drafts() if d["kind"] == "change"], "no change card"

@@ -35,6 +35,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def same_words(one: str, other: str) -> bool:
+    """The same decision, written again (case, spacing and final punctuation aside)."""
+
+    def plain(text: str) -> str:
+        return " ".join(text.lower().split()).rstrip(".!")
+
+    return plain(one) == plain(other)
+
+
 class DecisionOption(BaseModel):
     choice: str = Field(description="The option, in a few words")
     effect: str = Field(default="", description="What choosing it means: cost, risk, what changes")
@@ -333,6 +342,11 @@ class Decisions:
         tasks = [self.runtime.task_actions.task_for(ref)["id"] for ref in params.tasks]
         result = await self.record(params.decision, tasks, params.replaces, "owner")
         decision, affected = result["decision"], result["affected"]
+        if result.get("same"):
+            return (
+                f"Recorded {decision['id']} in the same words as before: nothing changed, no "
+                f"worker was told. Linked to {len(tasks)} more task(s)."
+            )
         if not params.replaces:
             return f"Recorded {decision['id']}, linked to {len(tasks)} task(s)."
         if not affected:
@@ -376,6 +390,12 @@ class Decisions:
             )
         decision = self.get(identifier)
         affected = []
+        if old and all(same_words(row["text"], text) for row in old):
+            # Recorded again in the same words (to link more tasks, say): nothing changed, so
+            # no worker is told to redo anything.
+            for task_id in relying:
+                self.runtime.task_actions.publish(self.tasks.get(task_id))
+            return {"decision": decision, "affected": [], "same": True}
         if old and source == "owner":
             self.runtime.learning.record(
                 "decision-changed",

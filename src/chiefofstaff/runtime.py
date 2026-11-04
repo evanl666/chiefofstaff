@@ -80,6 +80,16 @@ from .workspaces import (
 
 logger = logging.getLogger(__name__)
 
+# A repository's own Copilot configuration that Copilot loads only in a trusted folder.
+TRUST_GATED = (".mcp.json", ".github/mcp.json", ".github/hooks", ".github/copilot")
+
+
+def needs_trust(top: Path, cwd: Path) -> bool:
+    """Whether the repository (at its top or in the folders down to cwd) has such config."""
+    folders = [cwd, *[parent for parent in cwd.parents if parent.is_relative_to(top)]]
+    return any((folder / name).exists() for folder in folders for name in TRUST_GATED)
+
+
 PROMPTS = {
     ROUTER: prompts.ROUTER,
     SLACK: prompts.SLACK,
@@ -843,8 +853,9 @@ class Runtime:
 
     def trust(self, row: dict) -> dict:
         """A worker in a worktree of a project the owner trusts in Copilot gets the trust its
-        project has: Copilot then loads the repository's own MCP servers there too. Copilot
-        keeps it (a trust for this session alone would not survive a resume)."""
+        project has: Copilot then loads the repository's own MCP servers and hooks there too.
+        Copilot keeps it among the owner's trusted folders (a trust for the session alone is
+        lost at every resume), so only a worktree with such configuration gets it."""
         cwd = row["cwd"]
         if row["role"] != WORKER or not cwd or copilot_trusts(cwd):
             return {}
@@ -853,6 +864,7 @@ class Runtime:
                 checkout.get("worktree")
                 and checkout["path"] == cwd
                 and copilot_trusts(checkout["project"] or checkout.get("repo") or "")
+                and needs_trust(Path(checkout["worktree"]), Path(cwd))
             ):
                 return {"trust_working_directory": "user"}
         return {}
@@ -1009,7 +1021,12 @@ class Runtime:
         if talk:
             lines.append("\nRecent conversation with the owner, oldest first:")
             who = {"owner": "owner", "assistant": "you", "update": "you notified the owner"}
-            lines += [f"- {who[m['kind']]}: {clip(m['text'], 400)}" for m in reversed(talk)]
+
+            def speaker(message: dict) -> str:
+                ref = json.loads(message["meta"] or "{}").get("ref")
+                return f"owner (ref {ref})" if ref else who[message["kind"]]
+
+            lines += [f"- {speaker(m)}: {clip(m['text'], 400)}" for m in reversed(talk)]
         return wrap("system", "handover", "\n".join(lines))
 
     async def ensure_router(self):

@@ -334,6 +334,14 @@ async def test_workers_load_what_the_owners_own_sessions_load(tmp_path, git_repo
         "// managed by Copilot\n" + json.dumps({"trustedFolders": [str(git_repo)]})
     )
     monkeypatch.setenv("COPILOT_HOME", str(home))
+    plain = Harness(tmp_path / "plain", Settings(projects=[str(git_repo)]))
+    runtime = await plain.connect()
+    info = await spawn(runtime, plain.router_id, title="Fix", instructions="f",
+                       project=str(git_repo), isolate=True)  # fmt: skip
+    assert "trust_working_directory" not in plain.session(info["session_id"]).options, (
+        "no MCP servers or hooks of its own: nothing to trust it for"
+    )
+    commit(git_repo, ".mcp.json", '{"mcpServers": {}}')
     harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)], slack_enabled=True))
     runtime = await harness.connect()
     info = await spawn(
