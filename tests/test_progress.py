@@ -498,7 +498,8 @@ async def test_a_session_started_in_home_never_gets_home_to_write(harness):
 
 
 def test_folders_the_sandbox_never_opens():
-    for path in ("/Users", "~", "~/.copilot", "~/.copilot/session-state", "~/.ssh"):
+    above_home = str(Path.home().parent)  # /Users on macOS, /home on Linux
+    for path in (above_home, "~", "~/.copilot", "~/.copilot/session-state", "~/.ssh"):
         with pytest.raises(ValueError):
             Settings(sandbox_writable=[path])
     assert Settings(sandbox_writable=["~/.copilot/context-repo"]).sandbox_writable == [
