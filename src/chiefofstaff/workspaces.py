@@ -11,6 +11,7 @@ import shutil
 import signal
 import time
 import unicodedata
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from pathlib import Path
 
@@ -24,9 +25,11 @@ from .store import Store
 BRANCH_PREFIX = "chief/"
 
 
-async def command(*arguments: str, limit: float = 60, input: bytes | None = None) -> str:
+async def command(
+    *arguments: str, limit: float = 60, input: bytes | None = None, env: dict | None = None
+) -> str:
     """Run a command without a terminal (it can never wait for a password prompt)."""
-    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GH_PROMPT_DISABLED": "1"}
+    env = {**os.environ, **(env or {}), "GIT_TERMINAL_PROMPT": "0", "GH_PROMPT_DISABLED": "1"}
     # ssh asks for passphrases and host keys on the terminal, not stdin: make it fail instead.
     env.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
     process = await asyncio.create_subprocess_exec(
@@ -59,6 +62,10 @@ async def git(*arguments: str, limit: float = 60, input: bytes | None = None) ->
 FETCHED: dict[str, float] = {}
 FETCH_LOCKS: dict[str, asyncio.Lock] = {}
 FETCH_FRESH_SECONDS = 120
+# A worker waits for its fetch at most this long, then starts from what this machine has: a
+# terminal session starts from the checkout as it is, and a slow network or a huge repository
+# must not keep a worker from starting.
+FETCH_LIMIT_SECONDS = 30
 
 
 async def default_branch(top: Path) -> str:
@@ -91,10 +98,12 @@ async def base_ref(top: Path) -> tuple[str, str]:
                 if ref:
                     await git(
                         "-C", str(top), "fetch", "--quiet", "origin", ref.removeprefix("origin/"),
-                        limit=180,
+                        limit=FETCH_LIMIT_SECONDS,
                     )  # fmt: skip
                 else:
-                    await git("-C", str(top), "fetch", "--quiet", "origin", limit=180)
+                    await git(
+                        "-C", str(top), "fetch", "--quiet", "origin", limit=FETCH_LIMIT_SECONDS
+                    )
                     ref = await default_branch(top)
                 FETCHED[str(top)] = time.monotonic()
             except ValueError:
@@ -189,7 +198,14 @@ async def carry_ignored_files(top: Path, tree: Path) -> list[str]:
         patterns = ["--exclude-from", str(include)]
     else:
         patterns = [arg for pattern in DEFAULT_INCLUDE for arg in ("--exclude", pattern)]
-    listed = await git("-C", str(top), "ls-files", "--others", "--ignored", "-z", *patterns)
+    try:
+        # In a huge checkout this walks every untracked folder: never wait long for it.
+        listed = await git(
+            "-C", str(top), "ls-files", "--others", "--ignored", "-z", *patterns, limit=15
+        )  # fmt: skip
+    except ValueError:
+        logger.warning("Listing the files to carry into a worktree of %s took too long.", top)
+        return []
     candidates = [path for path in listed.split("\0") if path][:MAX_CARRIED]
     if not candidates:
         return []
@@ -558,6 +574,15 @@ class Workspaces:
         self.project_cache: dict[str, tuple[float, dict]] = {}
         self.known: tuple[float, tuple, list[str]] = (0.0, (), [])
         self.clone_lock = asyncio.Lock()
+        # The token of the gh account that can see a repository ("" for gh's active one).
+        self.github_token: Callable[[str], Awaitable[str]] | None = None
+
+    async def gh_clone(self, repo: str, destination: Path):
+        token = await self.github_token(repo) if self.github_token else ""
+        await command(
+            "gh", "repo", "clone", repo, str(destination), limit=900,
+            env={"GH_TOKEN": token} if token else None,
+        )  # fmt: skip
 
     def projects(self) -> list[str]:
         """Configured projects, then the repositories in the code folders (looked up again
@@ -601,7 +626,7 @@ class Workspaces:
             await asyncio.to_thread(shutil.rmtree, partial, True)
             try:
                 if GITHUB_NAME.fullmatch(repo) and shutil.which("gh"):
-                    await command("gh", "repo", "clone", repo, str(partial), limit=900)
+                    await self.gh_clone(repo, partial)
                 else:
                     await git("clone", "--quiet", url, str(partial), limit=900)
                 await asyncio.to_thread(partial.rename, destination)
@@ -745,7 +770,7 @@ class Workspaces:
         destination = free_child(workspace, name)
         if GITHUB_NAME.fullmatch(repo) and shutil.which("gh"):
             # gh uses the owner's GitHub sign-in, so private repositories work too.
-            await command("gh", "repo", "clone", repo, str(destination), limit=900)
+            await self.gh_clone(repo, destination)
         else:
             await git("clone", "--quiet", url, str(destination), limit=900)
         default = (await git("-C", str(destination), "rev-parse", "--abbrev-ref", "HEAD")).strip()

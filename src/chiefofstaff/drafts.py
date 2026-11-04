@@ -108,6 +108,9 @@ class Drafts:
             )
             return draft
         final = decision.text.strip() or draft["text"]
+        comments_edited = ""
+        if draft["kind"] == "github" and draft["target"].get("comments"):
+            draft, comments_edited = self.edit_comments(draft, decision.content)
         self.store.update_draft(draft_id, status="sending", final_text=final)
         try:
             if draft["kind"] == "slack":
@@ -127,7 +130,7 @@ class Drafts:
         )
         self.bus.publish("draft", draft)
         self.after_sent(draft, outcome or "")
-        edited = final != draft["text"]
+        edited = final != draft["text"] or bool(comments_edited)
         self.runtime.learning.record(
             "draft-edited" if edited else "draft-sent",
             context=self.about(draft),
@@ -139,15 +142,37 @@ class Drafts:
         )
         if final != draft["text"] and draft["kind"] == "slack":
             await self.learn_style(draft["text"], sent=final)
-        if final != draft["text"]:
-            await self.tell_drafter(
-                draft,
-                f"The owner edited draft {draft_id} and sent this text instead:\n{final}",
-                True,
-            )
+        if edited:
+            parts = [f"The owner edited draft {draft_id} before it was sent."]
+            if final != draft["text"]:
+                parts.append(f"The text sent instead of yours:\n{final}")
+            if comments_edited:
+                parts.append(comments_edited)
+            await self.tell_drafter(draft, "\n\n".join(parts), True)
         else:
             await self.tell_drafter(draft, f"The owner approved draft {draft_id}; it was sent.")
         return draft
+
+    def edit_comments(self, draft: dict, content: dict) -> tuple[dict, str]:
+        """The owner's edits to a review's inline comments ("comment:<n>": text; empty drops
+        it), kept on the draft so a retry sends the same; and what changed, for the drafter."""
+        target = dict(draft["target"])
+        kept, changes = [], []
+        for index, comment in enumerate(target["comments"]):
+            text = content.get(f"comment:{index}", comment["body"])
+            text = (text if isinstance(text, str) else comment["body"]).strip()
+            where = f"{comment['path']}:{comment['line']}"
+            if not text:
+                changes.append(f"- {where}: left out (not posted)")
+                continue
+            if text != comment["body"].strip():
+                changes.append(f"- {where}: posted as the owner rewrote it: {text}")
+            kept.append({**comment, "body": text})
+        if not changes:
+            return draft, ""
+        target["comments"] = kept
+        draft = self.store.update_draft_target(draft["id"], target)
+        return draft, "Line comments the owner changed:\n" + "\n".join(changes)
 
     async def answer_workspace(self, draft: dict, decision: DraftDecision) -> dict:
         title = draft["target"]["title"]

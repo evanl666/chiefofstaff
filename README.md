@@ -42,8 +42,10 @@ Now I talk to one session, the Router, and Chief of Staff keeps track of the res
   confirms.
 - Learns how you work from your decisions, review comments and draft edits, as lessons you
   approve, so the sessions get closer to doing it your way.
-- Leaves your own checkout alone. Each worker gets its own folder and git worktree and runs in
-  Copilot's OS sandbox, so it can't write anywhere else.
+- Leaves your own checkout alone. Each worker gets its own folder and git worktree.
+- Workers can do what your own Copilot sessions can: your plugins, MCP servers, skills, custom
+  agents and tools. Turn on the sandbox in Settings to confine them to their folders; workers
+  that read Slack are always sandboxed.
 - Drafts replies to Slack DMs and mentions in your style. Nothing is sent until you press Send.
 - Lets you delegate from Slack: react 🤖 to any message ("can someone look at the export
   bug?") and it becomes a task. When it's done, the answer is drafted in that thread.
@@ -89,8 +91,10 @@ There are a few separate sign-ins. Only the first one is required.
 2. **The page itself.** Every start prints a private link with a fresh token in the terminal
    and opens it for you. It stays signed in for 24 hours. After a restart, use the new link.
    Keep it to yourself: whoever has it can act as you.
-3. **GitHub**, to review PRs you're asked to review: `gh auth login`. With the sandbox on, also
-   run `copilot sandbox ca create && copilot sandbox ca trust` once, so `gh` works inside it.
+3. **GitHub**, to review PRs you're asked to review: `gh auth login`. Sign in with every account
+   you use (your company's too): Chief of Staff uses the one that can see each repository. With
+   the sandbox on, also run `copilot sandbox ca create && copilot sandbox ca trust` once, so
+   `gh` works inside it.
 4. **Slack and other services.** Paste a Slack user token in Settings
    ([how to get one](docs/guide.md#slack)).
    When a worker needs another service, like your docs or issue tracker, a sign-in card shows

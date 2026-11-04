@@ -210,3 +210,89 @@ async def test_a_pr_is_done_by_when_it_ended_not_by_what_a_poll_saw(tmp_path):
     host.subscriptions = [{"thread": THREAD, "since": followed_at + 10**6}]  # Cited later.
     await source.poll_once()
     assert host.unfollowed[-1] == (THREAD, False, False), "already finished: just unfollowed"
+
+
+async def test_each_repository_is_reached_with_the_account_that_can_see_it(tmp_path):
+    """gh's active account is personal; the company's repositories need the company account
+    that is also signed in. Chief of Staff finds it and remembers it per owner."""
+    store = Store(tmp_path / "data")
+    store.save_settings(Settings())
+    calls = []
+
+    async def gh(*arguments, payload=None, token=""):
+        calls.append((arguments, token))
+        if arguments[:2] == ("auth", "status"):
+            accounts = [
+                {"login": "evanl666", "active": True, "state": "success"},
+                {"login": "evan-corp", "active": False, "state": "success"},
+                {"login": "expired", "active": False, "state": "error"},
+            ]
+            return json.dumps({"hosts": {"github.com": accounts}})
+        if arguments[:2] == ("auth", "token"):
+            return f"token-of-{arguments[-1]}\n"
+        if arguments[1] == "repos/corp/svc/pulls/404":
+            raise RuntimeError("GitHub request failed: gh: Not Found (HTTP 404)")
+        if arguments[1].startswith("repos/corp/") and token != "token-of-evan-corp":
+            raise RuntimeError("GitHub request failed: gh: Not Found (HTTP 404)")
+        if arguments[1] == "repos/corp/svc/pulls/9/reviews":
+            raise RuntimeError("GitHub request timed out.")
+        return json.dumps({"number": 1, "by": token or "active"})
+
+    source = GitHubSource(store, Host(store), gh_command=gh)
+    assert (await source.pull("corp/svc", 1))["by"] == "token-of-evan-corp"
+    assert store.get("ghaccount:corp") == "evan-corp"
+    assert (await source.pull("acme/app", 1))["by"] == "active", "the active one where it can"
+    assert not any(token for arguments, token in calls if "acme/app" in " ".join(arguments))
+
+    calls.clear()
+    assert (await source.pull("corp/svc", 2))["by"] == "token-of-evan-corp"
+    assert [arguments[1] for arguments, _ in calls if arguments[0] == "api"] == [
+        "repos/corp/svc/pulls/2"
+    ], "remembered: straight to the company account"
+
+    try:
+        await source.pull("corp/svc", 404)
+        raise AssertionError("a missing PR is still missing")
+    except RuntimeError as exc:
+        assert "404" in str(exc)
+    assert store.get("ghaccount:corp") == "evan-corp", "a missing PR does not forget the account"
+
+    calls.clear()
+    try:
+        await source.gh(
+            "api", "repos/corp/svc/pulls/9/reviews", "--method=POST", "--input=-", payload={}
+        )
+        raise AssertionError("a timeout is not an access problem")
+    except RuntimeError as exc:
+        assert "timed out" in str(exc)
+    posts = [arguments for arguments, _ in calls if "--method=POST" in arguments]
+    assert len(posts) == 1, "a write that may have happened is never sent again"
+    assert await source.logins() == {"evanl666", "evan-corp"}
+
+
+async def test_review_requests_are_searched_as_each_owners_account(tmp_path):
+    store = Store(tmp_path / "data")
+    store.save_settings(
+        Settings(github_enabled=True, github_repos=["acme/app", "corp/svc", "corp/web"])
+    )
+    searches = []
+
+    async def gh(*arguments, payload=None, token=""):
+        if arguments[0] == "search":
+            searches.append([a for a in arguments if a.startswith("--repo=")])
+        return "[]"
+
+    await GitHubSource(store, Host(store), gh_command=gh).poll_review_requests(
+        store.settings(), set()
+    )
+    assert searches == [["--repo=acme/app"], ["--repo=corp/svc", "--repo=corp/web"]]
+
+
+def test_workers_learn_which_github_accounts_they_can_use():
+    from chiefofstaff.prompts import worker_context
+
+    accounts = [{"login": "evanl666", "active": True}, {"login": "evan-corp", "active": False}]
+    text = worker_context("/w", "/w", [], False, gh_accounts=accounts)
+    assert "GH_TOKEN=$(gh auth token --user evan-corp) gh" in text
+    assert "Never run gh auth switch" in text
+    assert "gh auth token" not in worker_context("/w", "/w", [], False, gh_accounts=accounts[:1])

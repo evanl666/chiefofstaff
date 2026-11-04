@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.1.13 (2026-11-04)
+
+Workers can do what your own Copilot sessions can.
+
+- **Same tools as a terminal session**: workers load your Copilot plugins, a repository's own
+  MCP servers (`.mcp.json`), your and the repository's skills and custom agents, and your past
+  sessions, as a session you start in a terminal does. Before, they had only your own MCP
+  servers. A worker in a worktree of a repository you trust in Copilot is trusted too.
+- **No sandbox of Chief of Staff's by default**: in it, workers could not use your keychain,
+  Docker, Kerberos tickets, tools installed under `~/.local`, other repositories or `gh` (until
+  Copilot's certificate was trusted). Workers now run like your own sessions, under your own
+  Copilot sandbox settings if you use them. Workers that read Slack are always sandboxed; turn it
+  on for all in Settings. Existing installs switch once.
+- **Reviews on company repositories**: Chief of Staff reaches each repository with the `gh`
+  account that can see it (your company's, say, signed in next to a personal active one), and
+  remembers it per organization. "Review tscp-targeting PR #1529" works by name; a PR GitHub
+  asks you to review can always be drafted on. When no signed-in account can see a repository,
+  the worker says which are signed in.
+- **Comments on lines**: a drafted review carries comments on lines of the diff; the card lets
+  you edit or drop each. Comments off the diff are refused when drafting, so what you approve
+  publishes.
+- Workers know the other `gh` accounts signed in, and use one for a repository the active one
+  cannot see (never switching your active account).
+- **Faster hand-off**: the Router passes your message to a worker as written instead of
+  retyping it (every word it wrote delayed the worker, and could lose details).
+- **An answer always reaches you**: a worker that wrote its answer but ended without reporting
+  had its task hang in "running"; its answer is now its report (and a worker that wrote none, or
+  stopped to wait, is asked once). A one-line "done" report whose answer the worker wrote only
+  in its chat gets that answer, on its card and in Chat.
+- **Your checkout stays yours**: a worker that looked into a project in its folder and is then
+  asked to change it first gets its own worktree. Before, it could commit in your checkout.
+- A worker no longer waits more than 30 seconds for `git fetch` before starting (a slow network
+  or a huge repository): it starts from what this machine has.
+- Long reviews and replies (up to 39,000 characters) can be sent from their cards.
+- An analysis that changed no files is no longer flagged "says it made changes".
+- `scripts/live_parity.py` runs the same tasks in a terminal session and in a worker, side by
+  side.
+
 ## 0.1.12 (2026-11-03)
 
 From a day of real use on another machine.

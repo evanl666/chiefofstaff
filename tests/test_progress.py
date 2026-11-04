@@ -208,7 +208,9 @@ async def test_a_plugin_hook_that_fails_does_not_fail_the_worker(harness):
 async def test_folders_also_writable_in_the_sandbox(tmp_path):
     journal = tmp_path / "journal"
     journal.mkdir()
-    harness = Harness(tmp_path / "data", Settings(sandbox_writable=[str(journal), ""]))
+    harness = Harness(
+        tmp_path / "data", Settings(sandbox_writable=[str(journal), ""], worker_sandbox=True)
+    )
     runtime = await harness.connect()
     worker = await spawn(runtime, harness.router_id, "Work")
     policy = runtime.sandbox_policy(harness.store.session(worker))
@@ -351,6 +353,9 @@ async def test_replies_to_review_comments_on_the_workers_own_pr(harness):
             "html_url": "https://github.com/acme/model/pull/1043#discussion_r21",
             "pull_request_url": "https://api.github.com/repos/acme/model/pulls/1043",
         }
+    )
+    harness.gh_replies["api repos/acme/model/pulls/1043"] = json.dumps(
+        {"state": "open", "head": {"sha": "f61047fa", "ref": "fix"}, "user": {"login": "x"}}
     )
     harness.gh_replies["api repos/acme/model/pulls/1043/comments/21/replies"] = json.dumps(
         {"id": 99, "html_url": "https://github.com/acme/model/pull/1043#discussion_r99"}
@@ -598,7 +603,7 @@ async def test_workers_share_only_caches_whose_contents_are_checked(tmp_path, mo
     for name in (*names, ".m2/repository", ".cache/pre-commit"):
         (home / name).mkdir(parents=True)
     monkeypatch.setattr(Path, "home", lambda: home)
-    harness = Harness(tmp_path / "data")
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True))
     runtime = await harness.connect()
     worker = await spawn(runtime, harness.router_id, "Build")
     policy = runtime.sandbox_policy(harness.store.session(worker))
@@ -615,7 +620,7 @@ async def test_workers_share_only_caches_whose_contents_are_checked(tmp_path, mo
         not in runtime.sandbox_policy(harness.store.session(worker)).readwrite
     )
     harness.store.execute("UPDATE sessions SET slack=0 WHERE id=?", (worker,))
-    harness.store.save_settings(Settings(shared_caches=False))
+    harness.store.save_settings(Settings(shared_caches=False, worker_sandbox=True))
     policy = runtime.sandbox_policy(harness.store.session(worker))
     assert str(home / ".npm/_cacache") not in policy.readwrite
     assert str(home / "Library/Jupyter/runtime") in policy.denied, "denied before it exists"
@@ -648,6 +653,7 @@ async def test_workers_starting_together_fetch_only_the_default_branch_once(git_
 
 
 async def test_workers_reach_localhost_unless_they_read_slack(harness):
+    harness.store.save_settings(Settings(worker_sandbox=True))
     runtime = await harness.connect()
     worker = await spawn(runtime, harness.router_id, "Run the server tests")
     assert runtime.sandbox_policy(harness.store.session(worker)).local_network
@@ -656,3 +662,272 @@ async def test_workers_reach_localhost_unless_they_read_slack(harness):
     )
     harness.store.execute("UPDATE sessions SET slack=1 WHERE id=?", (worker,))
     assert not runtime.sandbox_policy(harness.store.session(worker)).local_network
+
+
+PULL = {
+    "state": "open",
+    "head": {"sha": "c0ffee", "ref": "feature"},
+    "user": {"login": "bob"},
+    "requested_reviewers": [{"login": "Evan-Corp"}],
+}
+FILES = [
+    {
+        "filename": "model/train.py",
+        "patch": "@@ -10,3 +10,4 @@ def train():\n     a = 1\n-    b = 2\n+    b = 3\n+    c = 4\n"
+        "     return a",
+    },
+    {"filename": "data/big.parquet"},  # Binary: no lines to comment on.
+    {"filename": "data/huge.sql", "additions": 90000},  # Too large for a patch: not checked.
+]
+
+
+async def test_reviews_a_company_pr_with_inline_comments(harness):
+    """The owner asks to review a PR by its repository's short name; the worker drafts a review
+    with comments on lines; the owner edits one, drops one and sends."""
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Review tscp-targeting PR #1529")
+    repo = "linkedin-multiproduct/tscp-targeting"
+    harness.gh_replies[f"api repos/{repo}/pulls/1529/files"] = json.dumps(FILES)
+    harness.gh_replies[f"api repos/{repo}/pulls/1529/reviews"] = json.dumps(
+        {"id": 7, "html_url": "https://github.com/x/pull/1529#pullrequestreview-7"}
+    )
+    harness.gh_replies[f"api repos/{repo}/pulls/1529"] = json.dumps(PULL)
+
+    async def draft(**extra):
+        return await call_tool(
+            runtime, "draft_github_review", worker, repo=repo, number=1529, body="Summary", **extra
+        )
+
+    misplaced = await draft(
+        comments=[
+            {"path": "model/train.py", "line": 20, "body": "x"},
+            {"path": "README.md", "line": 1, "body": "y"},
+            {"path": "model/train.py", "line": 11, "side": "LEFT", "body": "z"},
+            {"path": "data/big.parquet", "line": 1, "body": "w"},
+        ]
+    )
+    assert misplaced.result_type == "failure"
+    assert "model/train.py:20 (RIGHT): not in the diff" in misplaced.text_result_for_llm
+    assert "README.md is not changed" in misplaced.text_result_for_llm
+    assert "train.py:11 (LEFT)" not in misplaced.text_result_for_llm, "a removed line is fine"
+    assert "data/big.parquet:1 (RIGHT): not in the diff" in misplaced.text_result_for_llm
+    assert not harness.store.drafts()
+
+    made = await draft(
+        comments=[
+            {"path": "model/train.py", "line": 11, "body": "Why 3?"},
+            {"path": "model/train.py", "start_line": 10, "line": 12, "body": "Add a test"},
+            {"path": "data/huge.sql", "line": 1, "body": "Is this needed?"},
+        ]
+    )
+    assert made.result_type == "success", made.text_result_for_llm
+    [card] = harness.store.drafts()
+    assert card["target"]["via"] == "task" and len(card["target"]["comments"]) == 3
+    assert "model/train.py:11: Why 3?" in harness.kinds(worker)[-1][1]
+
+    await runtime.drafts.resolve(
+        card["id"],
+        DraftDecision(action="send", content={"comment:1": "Please add a test", "comment:2": ""}),
+    )
+    arguments, payload = harness.gh_calls[-1]
+    assert arguments[1] == f"repos/{repo}/pulls/1529/reviews"
+    assert payload["commit_id"] == "c0ffee" and payload["body"] == "Summary"
+    assert payload["comments"] == [
+        {"path": "model/train.py", "line": 11, "side": "RIGHT", "body": "Why 3?"},
+        {
+            "path": "model/train.py",
+            "line": 12,
+            "side": "RIGHT",
+            "body": "Please add a test",
+            "start_line": 10,
+            "start_side": "RIGHT",
+        },
+    ]
+    told = harness.store.messages(worker)[-1]["text"]
+    assert "data/huge.sql:1: left out (not posted)" in told
+    assert "model/train.py:12: posted as the owner rewrote it: Please add a test" in told
+
+
+async def test_drafting_needs_a_pr_the_task_is_about_or_one_the_owner_reviews(harness):
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Look into flaky tests in tscp-targeting")
+    repo = "linkedin-multiproduct/tscp-targeting"
+    other = {**PULL, "requested_reviewers": []}
+    harness.gh_replies[f"api repos/{repo}/pulls/1529"] = json.dumps(other)
+
+    async def draft():
+        return await call_tool(
+            runtime, "draft_github_review", worker, repo=repo, number=1529, body="LGTM"
+        )
+
+    refused = await draft()
+    assert refused.result_type == "failure" and "task is about" in refused.text_result_for_llm
+    harness.gh_replies[f"api repos/{repo}/pulls/1529"] = json.dumps(PULL)
+    harness.gh_replies["auth status --json hosts"] = json.dumps(
+        {"hosts": {"github.com": [{"login": "evan-corp", "active": False, "state": "success"}]}}
+    )
+    assert (await draft()).result_type == "success", "GitHub asks the owner to review it"
+
+
+def test_a_task_names_a_pr_by_its_repository_and_number():
+    from chiefofstaff.tools import names_pr
+
+    repo = "linkedin-multiproduct/tscp-targeting"
+    assert names_pr("Review tscp-targeting PR #1529", repo, 1529)
+    assert names_pr("please look at PR 1529 in tscp-targeting", repo, 1529)
+    assert names_pr("https://github.com/linkedin-multiproduct/tscp-targeting/pull/1529", repo, 1529)
+    assert not names_pr("Review evil/tscp-targeting#1529", repo, 1529), "another owner's"
+    assert not names_pr("The app crashes on login; see issue #42", "someone/app", 42)
+    assert not names_pr("Update api client (see #12)", "org/api", 12)
+    assert not names_pr("tscp-targeting PR #15290", repo, 1529)
+    assert names_pr("Review api PR #12; the change is in src/api/handlers.py", "acme/api", 12)
+    assert names_pr("Review web PR #5 (touches packages/web)", "acme/web", 5)
+
+
+async def test_a_pr_no_signed_in_account_can_see_says_how_to_fix_it(harness):
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Review https://github.com/corp/app/pull/3")
+    harness.gh_replies["auth status --json hosts"] = json.dumps(
+        {"hosts": {"github.com": [{"login": "evanl666", "active": True, "state": "success"}]}}
+    )
+    harness.gh_replies["api repos/corp/app/pulls/3"] = RuntimeError(
+        "GitHub request failed: gh: Not Found (HTTP 404)"
+    )
+    result = await call_tool(
+        runtime, "draft_github_review", worker, repo="corp/app", number=3, body="LGTM"
+    )
+    assert result.result_type == "failure"
+    assert "signed in: evanl666" in result.text_result_for_llm
+    assert "gh auth login" in result.text_result_for_llm
+    harness.gh_replies["api repos/corp/app --jq"] = "corp/app"
+    missing = await call_tool(
+        runtime, "draft_github_review", worker, repo="corp/app", number=3, body="LGTM"
+    )
+    assert "corp/app has no pull request #3" in missing.text_result_for_llm, "not an account issue"
+
+
+async def test_a_worker_whose_answer_is_only_in_its_chat_reports_it(harness):
+    """The owner sees reports: its final answer becomes one, as written, without a turn."""
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Analyze sales")
+    session = harness.session(worker)
+    await settle(runtime)
+    answer = "Revenue per region: north 27,760.50, south 25,846.00, west 24,635.00. April leads."
+    session.emit("assistant.message", content="Checking the outliers.", tool_requests=[{}])
+    session.emit("assistant.message", content=answer)
+    sent = len(session.sent)
+    session.emit("session.idle")
+    await settle(runtime)
+    assert len(session.sent) == sent, "no extra turn"
+    reports = [text for kind, text in harness.kinds(worker) if kind == "report"]
+    assert reports == [answer]
+    assert harness.store.one("SELECT status FROM tasks WHERE session_id=?", (worker,))[
+        "status"
+    ] in {"review", "done"}
+
+
+async def test_a_worker_that_stops_without_reporting_is_asked_once(harness):
+    """It stopped without an answer: it is asked once to report."""
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Analyze sales")
+    session = harness.session(worker)
+    await settle(runtime)
+    session.emit("assistant.message", content="Looked at it.")
+    session.emit("session.idle")
+    await settle(runtime)
+    assert "report-missing" in session.sent[-1]
+    notices = [text for kind, text in harness.kinds(worker) if kind == "notice"]
+    assert "It stopped without a report: asked for one." in notices
+    sent = len(session.sent)
+    session.emit("session.idle")  # It stops again without one: the Watchdog takes over.
+    await settle(runtime)
+    assert len(session.sent) == sent
+
+    await call_tool(runtime, "report", worker, status="done", summary="North leads.")
+    await runtime.owner_send(worker, "Which month was best?")
+    await settle(runtime)
+    session.emit("assistant.message", content="April.")
+    session.emit("session.idle")
+    await settle(runtime)
+    assert "report-missing" not in session.sent[-1], "the owner read its answer in its chat"
+
+
+async def test_the_router_hands_on_the_owners_words_without_copying_them(harness):
+    runtime = await harness.connect()
+    text = "In the api repo, find why exports time out for accounts with 10k+ rows; keep CSV."
+    first = await runtime.owner_send(harness.router_id, text)
+    await runtime.owner_send(harness.router_id, "Also: what is the export limit?")  # Right after.
+    ref = first["meta"]["ref"]
+    assert f'ref="{ref}"' in harness.session(harness.router_id).raw_sent[0]
+    worker = await spawn(
+        runtime,
+        harness.router_id,
+        "Export timeouts",
+        instructions=f"{{owner:{ref}}}\n\nProject: api",
+    )
+    task = harness.store.one("SELECT goal FROM tasks WHERE session_id=?", (worker,))
+    assert task["goal"] == f"{text}\n\nProject: api", "that message, not the latest"
+    assert text in harness.session(worker).sent[0]
+    wrong = await call_tool(
+        runtime, "spawn_worker", harness.router_id, title="X", instructions="{owner}", why_new="t"
+    )
+    assert wrong.result_type == "success", "{owner} alone is text (GitHub's /repos/{owner}/...)"
+    unknown = await call_tool(
+        runtime, "spawn_worker", harness.router_id, title="Y", instructions="{owner:o000000}",
+        why_new="t",
+    )  # fmt: skip
+    assert unknown.result_type == "failure" and "ref attribute" in unknown.text_result_for_llm
+
+
+async def test_no_report_request_to_a_worker_being_closed_or_reattached(harness):
+    runtime = await harness.connect()
+    for flag in ("close_after_turn", "after_refresh"):
+        worker = await spawn(runtime, harness.router_id, f"Work {flag}")
+        session = harness.session(worker)
+        await settle(runtime)
+        setattr(
+            runtime.states[worker],
+            flag,
+            "Go on with the task." if flag == "after_refresh" else True,
+        )
+        if flag == "after_refresh":
+            runtime.states[worker].stale = True
+        session.emit("session.idle")
+        await settle(runtime)
+        assert not any("report-missing" in prompt for prompt in session.sent), flag
+
+
+async def test_a_worker_that_stopped_to_wait_is_asked_not_filed_as_done(harness):
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Write the export docs")
+    session = harness.session(worker)
+    await settle(runtime)
+    session.emit(
+        "assistant.message",
+        content="I've asked the Export schema worker which columns the export has; "
+        "I'll write the docs once it answers.",
+    )
+    session.emit("session.idle")
+    await settle(runtime)
+    assert not [text for kind, text in harness.kinds(worker) if kind == "report"]
+    assert "report-missing" in session.sent[-1], "it says itself whether it is waiting"
+
+
+async def test_a_one_line_report_gets_the_answer_its_worker_wrote(harness):
+    """“Analysis complete” as the report, the numbers only in its chat: the owner's card and the
+    Router chat get the answer."""
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Analyze sales")
+    session = harness.session(worker)
+    await settle(runtime)
+    await call_tool(runtime, "report", worker, status="done", summary="Analysis complete.")
+    answer = "Revenue per region: north 27,760.50; south 25,846.00; west 24,635.00. " * 4
+    session.emit("assistant.message", content=answer)
+    session.emit("session.idle")
+    await settle(runtime)
+    task = harness.store.one("SELECT result FROM tasks WHERE session_id=?", (worker,))
+    assert answer.strip() in task["result"]
+    [report] = [text for kind, text in harness.kinds(worker) if kind == "report"]
+    assert report.startswith("Analysis complete.") and answer.strip() in report
+    inbound = harness.kinds(harness.router_id)
+    assert any(kind == "inbound" and answer.strip() in text for kind, text in inbound)

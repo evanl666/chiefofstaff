@@ -169,7 +169,14 @@ Folders outside the code folder can be added under *Advanced → Other project f
 *Task folders* puts the task folders somewhere else. A worker's header opens its folder in
 Finder or VS Code.
 
-With the **sandbox** on (Settings, default), workers' shell commands can write only to their
+Workers run like the Copilot sessions you start in a terminal: they load your plugins, your MCP
+servers (yours, your company's, and a repository's own `.mcp.json`), skills and custom agents,
+and their commands can use what yours can (your tools, keychain, Docker, other repositories). A
+worker in a worktree of a repository you trust in Copilot is trusted too, so that repository's
+MCP servers load there as well. If you use Copilot's own sandbox, workers follow your settings
+for it.
+
+With the **sandbox** on (Settings; always for workers that read Slack), workers' shell commands can write only to their
 workspace, checkouts and the repositories' `.git` (not their hooks, config, or your checkout's
 `HEAD` and index), never see your
 GitHub token, and cannot read `~/.ssh`. On macOS, run `copilot sandbox ca create && copilot
@@ -191,6 +198,11 @@ is fetched, once for workers that start together.
 Hooks of your Copilot plugins run in the sandbox too. One that writes elsewhere (a journal, say)
 fails there; the worker carries on and its timeline notes it once. To let it write, add its
 folder under *Also writable in the sandbox*.
+
+Inside the sandbox, a worker cannot use your keychain, Docker, Kerberos tickets, tools installed
+under `~/.local`, or read your home and other repositories, and `gh` needs Copilot's certificate
+trusted. That is the price of the confinement; with the sandbox off they work as in your
+terminal.
 
 ## Receipts
 
@@ -354,9 +366,20 @@ Enable *Watch review requests* and list repositories (`owner/name`). Chief of St
 per request; its review is published only after you approve the draft, and only if the PR head
 has not changed since.
 
-On a PR a worker is working on (one it opened, follows or was given), it can also draft
-**replies to review comments**, in any repository: each card shows the comment it answers, and
-the reply is posted in that thread once you approve it.
+You can also just ask: "review tscp-targeting PR #1529". A worker drafts reviews on a PR its task
+names (by URL, or by the repository's name and number), one it opened, follows or was given, or
+one GitHub asks you to review. A review carries **comments on lines** of the diff: the card
+shows each one to edit, or empty to leave out. Lines outside the diff are refused when drafting,
+so what you approve can be published.
+
+On a PR a worker is working on, it can also draft **replies to review comments**, in any
+repository: each card shows the comment it answers, and the reply is posted in that thread once
+you approve it.
+
+**Several GitHub accounts** (a personal one active in `gh`, your company's signed in as well):
+Chief of Staff reaches each repository with the account that can see it, and remembers it per
+organization. Sign in with each once (`gh auth login`); you need not switch. When none can see a
+repository, the worker tells you which accounts are signed in.
 
 Workers commit on their branch but do not push unless the task asks for it: you open the PR with
 *Create PR*. Analyses and research need no branch at all.

@@ -21,9 +21,10 @@ from .asks import AnswerSession, AskSession, RecordSetup
 from .decisions import AckDecision, AskDecision, RecordDecision
 from .envelope import clean_title, short, wrap
 from .learning import ProposeLessons
-from .models import DraftDecision, NestedArguments
+from .models import MAX_DRAFT, DraftDecision, NestedArguments
 from .policy import within
 from .roles import ROUTER, SLACK, WATCHDOG, WORKER
+from .sources.github import NO_ACCESS
 from .store import ago_minutes, now
 from .workspaces import resolve_project
 
@@ -31,10 +32,19 @@ if TYPE_CHECKING:
     from .runtime import Runtime
 
 
+# In a task the Router hands on, one of the owner's messages as written (by its ref attribute):
+# faster than having the Router copy it (every word it writes delays the worker), and nothing
+# is lost in a retelling.
+OWNER_WORDS = "{owner:<ref>}"
+OWNER_REF = re.compile(r"\{owner:\s*([A-Za-z0-9]+)\}")  # Not {owner} (GitHub's path template).
+
+
 class SpawnWorker(BaseModel):
     title: str = Field(description="Short task title shown to the owner (under 60 characters)")
     instructions: str = Field(
-        description="The task in the owner's words, plus the context the worker needs"
+        description="The task in the owner's words, plus the context the worker needs. "
+        f"{OWNER_WORDS} stands for the owner's message with that ref attribute, exactly as "
+        "written: use it instead of copying the message (add context before or after it)"
     )
     project: str = Field(
         default="",
@@ -124,7 +134,10 @@ class MessageSession(BaseModel):
         description="Target session id: from list_sessions, or the short id in a message's "
         "from attribute (worker:<id>)"
     )
-    text: str = Field(description="The message for that session")
+    text: str = Field(
+        description=f"The message for that session. {OWNER_WORDS} stands for the owner's message "
+        "with that ref attribute, exactly as written"
+    )
     task: Literal["continue", "new"] = Field(
         default="continue",
         description="For a worker: continue its current task (a follow-up or more information; "
@@ -272,15 +285,75 @@ class AssessWorker(BaseModel):
     )
 
 
+class InlineComment(BaseModel):
+    path: str = Field(description="The file's path in the PR")
+    line: int = Field(
+        description="The line commented on, as numbered in the PR's diff: in the new file for "
+        "side RIGHT, in the old file for LEFT. It must be in the diff"
+    )
+    start_line: int = Field(default=0, description="For a range of lines: its first. 0: one line")
+    side: Literal["RIGHT", "LEFT"] = "RIGHT"
+    body: str = Field(description="The comment (markdown)")
+
+
 class DraftGitHubReview(BaseModel):
     repo: str = Field(description="owner/name")
     number: int = Field(description="Pull request number")
     body: str = Field(description="The review, or your reply to a review comment (markdown)")
+    comments: list[InlineComment] = Field(
+        default_factory=list,
+        max_length=50,
+        description="Comments on specific lines of the diff, published with the review (not "
+        "with in_reply_to). Put each finding about a line here rather than in the body.",
+    )
     in_reply_to: int = Field(
         default=0,
         description="To reply to a review comment on the PR: that comment's id (from "
         "`gh api repos/<owner/name>/pulls/<number>/comments`). 0 for a review of the whole PR.",
     )
+
+
+def names_pr(text: str, repo: str, number: int) -> bool:
+    """The text names the PR by URL or key, or by its repository's name and number (as in
+    "review tscp-targeting PR #1529")."""
+    text = text.lower()
+    thread = f"github:{repo}#{number}"
+    if thread in threads.pull_requests(text) or thread in {
+        f"github:{name}#{n}" for name, n in threads.GITHUB_PR.findall(text)
+    }:
+        return True
+    owner, short_name = repo.split("/", 1)
+    name = re.escape(short_name)
+    pr = rf"(?:#\s*|\bpr\s*#?\s*|\bpull\s*(?:request)?\s*#?\s*){number}\b"
+    # The name and the number together: "tscp-targeting PR #1529", "PR 1529 in tscp-targeting",
+    # with its owner when one is written there ("evil/tscp-targeting#1529" is another's).
+    for found in (
+        *re.finditer(rf"(?<![\w./-])(?:([\w.-]+)/)?{name}(?![\w.-])[\s:,]*{pr}", text),
+        *re.finditer(rf"{pr}\s+(?:in|on|of|for|from)\s+(?:([\w.-]+)/)?{name}(?![\w.-])", text),
+    ):
+        if found.group(1) in (None, owner):
+            return True
+    return False
+
+
+def misplaced(comments: list[InlineComment], lines: dict) -> list[str]:
+    """Why GitHub would refuse each comment that is not on lines of the diff."""
+    problems = []
+    for comment in comments:
+        where = f"{comment.path}:{comment.line}"
+        if comment.path not in lines:
+            problems.append(f"{where}: {comment.path} is not changed in this PR")
+            continue
+        if comment.start_line and comment.start_line >= comment.line:
+            problems.append(f"{where}: start_line must be before line")
+            continue
+        sides = lines[comment.path]
+        if sides is None:
+            continue
+        wanted = range(comment.start_line or comment.line, comment.line + 1)
+        if any(number not in sides[comment.side] for number in wanted):
+            problems.append(f"{where} ({comment.side}): not in the diff")
+    return problems
 
 
 REPORT_STATUS = {"question": "waiting", "blocked": "waiting", "done": "done"}
@@ -604,8 +677,27 @@ class Tools:
             special=special,
         )
 
+    def owner_words(self, text: str) -> str:
+        """The owner's messages in place of {owner:<ref>}."""
+
+        def quoted(match: re.Match) -> str:
+            found = self.store.one(
+                "SELECT text FROM messages WHERE session_id=? AND kind='owner' "
+                "AND json_extract(meta, '$.ref')=?",
+                (self.runtime.router_id(), match.group(1)),
+            )
+            if not found:
+                raise ValueError(
+                    f"{match.group(0)} names no message of the owner: write {OWNER_WORDS} with "
+                    "the ref attribute of the owner's message, or write the text out."
+                )
+            return found["text"]
+
+        return OWNER_REF.sub(quoted, text)
+
     async def t_spawn_worker(self, params: SpawnWorker, caller: str, special: str = ""):
         self.caller(caller, ROUTER)
+        params = params.model_copy(update={"instructions": self.owner_words(params.instructions)})
         title = clean_title(params.title)
         follow = [threads.normalize(key) for key in params.follow]
         after = [self.runtime.task_actions.task_for(reference) for reference in params.after]
@@ -725,6 +817,7 @@ class Tools:
 
     async def t_message_session(self, params: MessageSession, caller: str):
         self.caller(caller, ROUTER)
+        params = params.model_copy(update={"text": self.owner_words(params.text)})
         try:
             target = self.store.session(params.session_id)
         except LookupError:
@@ -1046,6 +1139,12 @@ class Tools:
         for card in self.runtime.workers.find(text, limit=3):
             if card["session_id"] not in {known["session_id"] for known in cards}:
                 cards.append(card)
+        branches = {
+            row["id"]: row["branch"]
+            for row in self.store.all(
+                "SELECT id, branch FROM sessions WHERE role='worker' AND branch!=''"
+            )
+        }
         return [
             {
                 "session_id": card["session_id"],
@@ -1053,6 +1152,11 @@ class Tools:
                 "state": "closed" if card["closed"] else card["status"],
                 "task": card["task"][:200],
                 "last_report": card["last_report"][:200],
+                **(
+                    {"branch": branches[card["session_id"]]}
+                    if card["session_id"] in branches
+                    else {}
+                ),
             }
             for card in cards
             if card["session_id"] not in exclude
@@ -1208,6 +1312,8 @@ class Tools:
             raise ValueError("thread_ts must look like 1712345678.123456.")
         if not params.text.strip():
             raise ValueError("The reply is empty.")
+        if len(params.text) > MAX_DRAFT:
+            raise ValueError(f"Too long: keep the reply under {MAX_DRAFT} characters.")
         target = {"channel_id": params.channel_id, "thread_ts": params.thread_ts, "to": params.to}
         target["latest"] = await self.runtime.slack.latest(params.channel_id, params.thread_ts)
         draft = self.store.create_draft(caller, "slack", target, params.text, params.note)
@@ -1224,44 +1330,67 @@ class Tools:
             "they edit or reject it. Do not send it any other way."
         )
 
-    async def works_on_pr(self, caller: str, repo: str, number: int) -> bool:
+    async def works_on_pr(self, caller: str, repo: str, number: int, pull: dict) -> bool:
         """A PR this worker was given (by the Router or the owner: to follow, opened with Create
-        PR, named in its task), or one from its own branch. Not one it chose to follow itself:
-        what it reads (Slack, PRs) must not widen where it can draft."""
+        PR, named in its task), one from its own branch, or one GitHub asks the owner to review
+        (or that the owner wrote). Not one it chose to follow itself: what it reads (Slack, PRs)
+        must not widen where it can draft."""
         thread = f"github:{repo}#{number}"
         if self.store.get(f"given:{caller}:{thread}"):
             return True
         for task in self.tasks.for_session(caller):
-            goal = task["goal"] or ""
-            named = set(threads.pull_requests(goal)) | {
-                f"github:{name}#{n}" for name, n in threads.GITHUB_PR.findall(goal.lower())
-            }
             opened = json.loads(self.store.get(f"prs:{task['id']}") or "[]")
-            if thread in named or thread in threads.pull_requests(" ".join(opened)):
+            if names_pr(f"{task['title']}\n{task['goal'] or ''}", repo, number) or (
+                thread in threads.pull_requests(" ".join(opened))
+            ):
                 return True
+        people = {(pull.get("user") or {}).get("login", "")} | {
+            reviewer.get("login", "") for reviewer in pull.get("requested_reviewers") or []
+        }
+        if {login.lower() for login in people} & await self.runtime.github.logins():
+            return True
         row = self.store.session(caller)
         branches = {c.get("branch") or "" for c in self.workspaces.checkouts(row)}
         branches = {branch for branch in branches | {row["branch"] or ""} if branch}
-        if not branches:
-            return False
-        try:
-            pull = await self.runtime.github.pull(repo, number)
-        except Exception:
-            return False
-        return (pull.get("head") or {}).get("ref") in branches
+        return bool(branches) and (pull.get("head") or {}).get("ref") in branches
 
     async def t_draft_github_review(self, params: DraftGitHubReview, caller: str):
         self.caller(caller, WORKER)
         settings = self.store.settings()
         repo = params.repo.lower().strip()
-        connected = settings.github_enabled and repo in settings.github_repos
-        if not (connected or await self.works_on_pr(caller, repo, params.number)):
-            raise ValueError(
-                "Reviews and replies are drafted on connected repositories or on a PR your task "
-                "is about (one you follow, opened or were given)."
-            )
+        github = self.runtime.github
         if not params.body.strip():
             raise ValueError("The text is empty.")
+        if len(params.body) + sum(len(comment.body) for comment in params.comments) > MAX_DRAFT:
+            raise ValueError(f"Too long: keep the review under {MAX_DRAFT} characters.")
+        if params.in_reply_to and params.comments:
+            raise ValueError("A reply to a review comment has no inline comments of its own.")
+        try:
+            pull = await github.pull(repo, params.number)
+        except RuntimeError as exc:
+            if not NO_ACCESS.search(str(exc)):
+                raise
+            try:
+                await github.gh("api", f"repos/{repo}", "--jq", ".full_name")
+            except RuntimeError:
+                pass
+            else:
+                raise ValueError(f"{repo} has no pull request #{params.number}.") from exc
+            logins = ", ".join(sorted(await github.logins())) or "none"
+            raise ValueError(
+                f"No GitHub account signed in to gh on the owner's machine (signed in: {logins}) "
+                f"can see {repo}#{params.number}, so Chief of Staff cannot publish there. Tell "
+                'the owner with report(status="question"): signing in with the account that '
+                "can (`gh auth login`) fixes it; Chief of Staff then uses that account for the "
+                "repository on its own. Keep the drafted text in your report."
+            ) from exc
+        connected = settings.github_enabled and repo in settings.github_repos
+        if not (connected or await self.works_on_pr(caller, repo, params.number, pull)):
+            raise ValueError(
+                "Reviews and replies are drafted on connected repositories or on a PR your task "
+                "is about (one you follow, opened or were given, or one the owner is asked to "
+                "review)."
+            )
         target: dict[str, Any] = {
             "repo": repo,
             "number": params.number,
@@ -1270,17 +1399,32 @@ class Tools:
         }
         if params.in_reply_to:
             target["in_reply_to"] = params.in_reply_to
-            target["comment"] = await self.runtime.github.review_comment(
-                repo, params.number, params.in_reply_to
-            )
+            target["comment"] = await github.review_comment(repo, params.number, params.in_reply_to)
             label = f"Reply on {repo}#{params.number}"
         else:
-            target["head_sha"] = await self.runtime.github.head(repo, params.number)
+            if pull.get("state") != "open":
+                raise ValueError(f"{repo}#{params.number} is not open.")
+            target["head_sha"] = pull["head"]["sha"]
+            if params.comments:
+                if problems := misplaced(
+                    params.comments, await github.diff_lines(repo, params.number)
+                ):
+                    raise ValueError(
+                        "GitHub only takes comments on lines of the PR's diff; fix these and "
+                        "draft again (or move them into the body):\n- " + "\n- ".join(problems[:20])
+                    )
+                target["comments"] = [
+                    comment.model_dump(exclude_defaults=True) | {"side": comment.side}
+                    for comment in params.comments
+                ]
             label = f"Review of {repo}#{params.number}"
         draft = self.store.create_draft(caller, "github", target, params.body)
-        self.runtime.add_message(
-            caller, "draft", params.body, {"draft_id": draft["id"], "label": label}
-        )
+        shown = params.body
+        if params.comments:
+            shown += "\n\nInline comments:\n" + "\n".join(
+                f"- {c.path}:{c.line}: {c.body}" for c in params.comments
+            )
+        self.runtime.add_message(caller, "draft", shown, {"draft_id": draft["id"], "label": label})
         self.bus.publish("draft", draft)
         self.runtime.alert(
             label, session_id=caller, needs_action=True, title="GitHub text to approve"

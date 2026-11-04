@@ -22,7 +22,18 @@ from .roles import ROUTER, WORKER
 from .sources.slack import describe
 from .store import now
 from .tasks import ADOPTED, OPEN
-from .watchdog import timestamp
+from .watchdog import instruction, since_last_instruction, timestamp
+
+# A final answer at least this long, left in a worker's chat without report(), is its report.
+FILED_ANSWER_CHARS = 80
+# An answer in its chat this long, and twice its "done" report or more, completes that report.
+FULLER_ANSWER_CHARS = 200
+# Words of a worker that stopped to wait, not to deliver.
+WAITS = re.compile(
+    r"\b(waiting|wait for|once (it|they|the|that|this|ci)\b"
+    r"|when (it|they|ci) (finish|answer|complete)|will (continue|resume|go on|pick (it|this) up))",
+    re.IGNORECASE,
+)
 
 if TYPE_CHECKING:
     from .runtime import Runtime
@@ -126,6 +137,105 @@ class Workers:
                 return False
             self.states[session_id].busy = True
             return True
+
+    def complete_report(self, session_id: str):
+        """A worker that reported done in a line ("Analysis complete") and wrote the answer
+        itself in its chat: the owner reads reports, so the report gets that answer."""
+        task = self.tasks.current(session_id)
+        if not task or task["status"] not in {"review", "done"}:
+            return
+        recent = since_last_instruction(self.store.messages(session_id, limit=400))
+        reports = [m for m in recent if m["kind"] == "report" and m["meta"].get("status") == "done"]
+        if not reports or not self.states.handle(session_id):
+            return
+        report = reports[-1]
+        answers = [
+            m["text"].strip()
+            for m in recent
+            if m["kind"] == "assistant" and not m["meta"].get("narration")
+        ]
+        answer = max(answers, key=len, default="")
+        short = report["text"].strip()
+        if len(answer) < FULLER_ANSWER_CHARS or len(answer) < 2 * len(short) or answer in short:
+            return
+        from .tools import clip_report
+
+        full = f"{short}\n\n{answer}"
+        amended = {"amended": True}
+        self.runtime.bus.publish(
+            "message", self.store.update_message_text(report["id"], full) | amended
+        )
+        router = self.runtime.router_id()
+        inbound = self.store.one(
+            "SELECT id FROM messages WHERE session_id=? AND kind='inbound' "
+            "AND json_extract(meta, '$.from')=? AND json_extract(meta, '$.task_id')=? "
+            "ORDER BY id DESC LIMIT 1",
+            (router, session_id, task["id"]),
+        )
+        if inbound:
+            self.runtime.bus.publish(
+                "message", self.store.update_message_text(inbound["id"], full) | amended
+            )
+        self.tasks.update(task["id"], result=clip_report(full))
+        self.runtime.update_session(session_id, report=full[:4000])
+
+    async def ask_for_report(self, session_id: str):
+        """A turn that ended on its task without report(): the owner sees only reports. Its
+        final answer, when it wrote one, becomes the report as written (at once, and nothing is
+        lost in a retelling); otherwise it is asked once to report. Not after the owner's own
+        chat with it (they read its answer there), nor after that request (the Watchdog
+        follows it up)."""
+        row = self.store.session(session_id)
+        task = self.tasks.current(session_id)
+        if row["status"] != "idle" or row["closed_at"] or not task or task["status"] != "running":
+            return
+        recent = since_last_instruction(self.store.messages(session_id, limit=400))
+        if not recent or not instruction(recent[0]):
+            return
+        asked = recent[0]
+        if asked["meta"].get("report_nudge") or (
+            asked["kind"] == "owner" and not asked["meta"].get("task_id")
+        ):
+            return
+        if any(m["kind"] == "report" or m["meta"].get("stopped") for m in recent):
+            return
+        if self.states[session_id].busy or not self.states.handle(session_id):
+            return  # Working again, or being closed or reattached.
+        answers = [m for m in recent if m["kind"] == "assistant" and not m["meta"].get("narration")]
+        answer = answers[-1]["text"].strip() if answers else ""
+        # Waiting for something (an answer it asked for, a card, a thread or PR it follows):
+        # its last words say what it waits for, not its result. Then it reports itself.
+        waiting = bool(
+            WAITS.search(answer)
+            or self.runtime.asks.open_questions(session_id)
+            or self.store.follows(session_id)
+            or any(d["session_id"] == session_id for d in self.store.drafts("pending"))
+        )
+        if not waiting and len(answer) >= FILED_ANSWER_CHARS:
+            from .tools import Report
+
+            status = "question" if answer.endswith("?") else "done"
+            with suppress(Exception):
+                await self.runtime.toolset.t_report(
+                    Report(status=status, summary=answer), session_id
+                )
+                self.runtime.add_message(
+                    session_id, "notice", "It ended without a report: its answer is filed as one."
+                )
+                return
+        text = (
+            "Your turn ended without report(). The owner sees only reports: call report now "
+            "with your full result (status done), or question or blocked if you need something, "
+            "or progress if you are waiting for something. Do not redo the work."
+        )
+        with suppress(Exception):
+            await self.delivery.deliver(
+                session_id,
+                wrap("system", "report-missing", text, task=task["id"]),
+                kind="notice",
+                display="It stopped without a report: asked for one.",
+                meta={"report_nudge": True},
+            )
 
     async def pump(self):
         """Start queued workers while fewer than max_workers are running a turn."""

@@ -129,7 +129,10 @@ def permission_denial(row: dict, request: Any, writable: list[str] | None = None
         command = getattr(request, "full_command_text", "") or ""
         reasons = [reason for pattern, reason in DANGEROUS if pattern.search(command)]
         if gh_api_writes(command):
-            reasons.append("writing to GitHub through gh api")
+            reasons.append(
+                "writing to GitHub through gh api (with -f/-F fields gh sends a POST: to read, "
+                "add -X GET)"
+            )
         if reads_slack and getattr(request, "possible_urls", None):
             reasons.append("network access from a worker that can read Slack")
         if reasons:

@@ -247,6 +247,8 @@ class Events:
         if status == "working":
             status = state.pop_resting("idle")
         self.runtime.update_session(session_id, status=status, activity="")
+        # Decided now: closing or reattaching (which brings its own message) clears these.
+        settled = not (state.close_after_turn or state.stale or state.after_refresh)
         if state.close_after_turn:
             self.runtime.background(self.runtime.workers.close(session_id))
         elif state.stale:
@@ -258,6 +260,9 @@ class Events:
             self.runtime.background(self.runtime.rotate_router())
         if row["role"] == WORKER:
             self.runtime.background(self.runtime.workers.pump())
+            if settled:
+                self.runtime.workers.complete_report(session_id)
+                self.runtime.background(self.runtime.workers.ask_for_report(session_id))
             # A turn may have changed code whose evidence was already collected.
             self.runtime.background(self.runtime.task_actions.check_fresh(session_id))
 

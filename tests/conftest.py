@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 
 # Events are batched in the app; tests deliver them at once.
 os.environ.setdefault("CHIEFOFSTAFF_EVENT_DEBOUNCE", "0")
@@ -26,6 +27,7 @@ class FakeSession:
         self.session_id = session_id
         self.options = options
         self.sent: list[str] = []
+        self.raw_sent: list[str] = []
         self.handlers = []
         self.aborted = False
         self.disconnected = False
@@ -51,7 +53,9 @@ class FakeSession:
         return lambda: None
 
     async def send(self, prompt, mode=None):
-        self.sent.append(prompt)
+        self.raw_sent.append(prompt)
+        # Owner messages to the Router carry a random ref; tests compare the rest.
+        self.sent.append(re.sub(r' ref="o[0-9a-f]{6}"', "", prompt))
         self.modes.append(mode)
         return f"m{len(self.sent)}"
 
@@ -271,15 +275,18 @@ class Harness:
         self.mcp = FakeSlackMcp()
         self.tokens = FakeTokens()
         self.gh_calls: list[tuple] = []
-        self.gh_replies: dict[str, str] = {}
+        self.gh_replies: dict[str, str | Exception] = {}
 
         async def notifier(title, text):
             self.notifications.append((title, text))
 
-        async def gh(*arguments, payload=None):
+        async def gh(*arguments, payload=None, token=""):
             self.gh_calls.append((arguments, payload))
-            for prefix, reply in self.gh_replies.items():
+            # Longest prefix first: "api repos/a/b/pulls/1/files" before "api repos/a/b/pulls/1".
+            for prefix, reply in sorted(self.gh_replies.items(), key=lambda item: -len(item[0])):
                 if " ".join(arguments).startswith(prefix):
+                    if isinstance(reply, Exception):
+                        raise reply
                     return reply
             raise RuntimeError(f"unexpected gh call {arguments}")
 

@@ -442,6 +442,9 @@ async def test_github_review_draft_is_published_on_approval(tmp_path):
         runtime, "spawn_worker", harness.router_id, title="Review", instructions="review #7"
     )
     worker_id = json.loads(result.text_result_for_llm)["session_id"]
+    harness.gh_replies["api repos/other/repo/pulls/1"] = json.dumps(
+        {"state": "open", "head": {"sha": "s", "ref": "x"}, "user": {"login": "bob"}}
+    )
     refused = await call_tool(
         runtime, "draft_github_review", worker_id, repo="other/repo", number=1, body="LGTM"
     )

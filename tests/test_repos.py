@@ -11,6 +11,7 @@ from conftest import Harness, call_tool, env, settle, task_of
 from chiefofstaff import workspaces as workspaces_module
 from chiefofstaff.models import Settings
 from chiefofstaff.runtime import GITHUB_HOSTS
+from chiefofstaff.store import Store
 from chiefofstaff.task_actions import moved
 
 
@@ -99,7 +100,9 @@ async def test_add_repo_from_this_machine_or_a_remote(tmp_path):
     origin, api = published(tmp_path, "api")
     _, web = published(tmp_path, "web")
     _, docs = published(tmp_path, "docs")
-    harness = Harness(tmp_path / "data", Settings(projects=[str(api), str(web), str(docs)]))
+    harness = Harness(
+        tmp_path / "data", Settings(projects=[str(api), str(web), str(docs)], worker_sandbox=True)
+    )
     runtime = await harness.connect()
     info = await spawn(
         runtime,
@@ -151,7 +154,7 @@ async def test_add_repo_from_this_machine_or_a_remote(tmp_path):
 
 
 async def test_yolo_skips_permission_checks_globally_or_per_worker(tmp_path):
-    harness = Harness(tmp_path / "data")
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True))
     runtime = await harness.connect()
     worker = (await spawn(runtime, harness.router_id, title="Ship", instructions="s"))["session_id"]
     push = SimpleNamespace(kind="shell", full_command_text="git push --force", possible_urls=[])
@@ -167,7 +170,7 @@ async def test_yolo_skips_permission_checks_globally_or_per_worker(tmp_path):
     prompt = harness.session(worker).options["system_message"]["content"]
     assert "(yolo)" not in prompt, "detached; the next use gets the new prompt"
 
-    harness.store.save_settings(Settings(worker_yolo=True))
+    harness.store.save_settings(Settings(worker_yolo=True, worker_sandbox=True))
     other = (await spawn(runtime, harness.router_id, title="Other", instructions="o"))["session_id"]
     harness.store.execute("UPDATE sessions SET slack=1 WHERE id=?", (other,))
     assert await allowed(other), "yolo covers workers that read Slack too"
@@ -279,7 +282,10 @@ def resolved(paths) -> set[Path]:
 
 
 async def test_workers_run_sandboxed_in_their_own_folders(tmp_path, git_repo):
-    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)], slack_enabled=True))
+    harness = Harness(
+        tmp_path / "data",
+        Settings(projects=[str(git_repo)], slack_enabled=True, worker_sandbox=True),
+    )
     runtime = await harness.connect()
     assert "sandbox_config" not in harness.session(harness.router_id).options
     owner_worktree_and_submodule(git_repo, tmp_path / "mine")
@@ -315,6 +321,74 @@ async def test_workers_run_sandboxed_in_their_own_folders(tmp_path, git_repo):
     options = harness.session(loose["session_id"]).options
     assert "sandbox_config" not in options
     assert "there is no sandbox" in options["system_message"]["content"]
+
+
+async def test_workers_load_what_the_owners_own_sessions_load(tmp_path, git_repo, monkeypatch):
+    """Plugins, the repository's MCP servers, skills, agents and past sessions, as in a session
+    the owner starts in a terminal; no sandbox of Chief of Staff's unless the worker reads
+    Slack. A worktree of a repository the owner trusts in Copilot is trusted too (Copilot only
+    loads a repository's .mcp.json in a trusted folder)."""
+    home = tmp_path / "copilot-home"
+    home.mkdir()
+    (home / "config.json").write_text(
+        "// managed by Copilot\n" + json.dumps({"trustedFolders": [str(git_repo)]})
+    )
+    monkeypatch.setenv("COPILOT_HOME", str(home))
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)], slack_enabled=True))
+    runtime = await harness.connect()
+    info = await spawn(
+        runtime,
+        harness.router_id,
+        title="Fix",
+        instructions="f",
+        project=str(git_repo),
+        isolate=True,
+    )
+    options = harness.session(info["session_id"]).options
+    assert "sandbox_config" not in options
+    assert options["enable_config_discovery"] and options["enable_session_store"]
+    assert options["trust_working_directory"] == "user", "its project is trusted"
+    router = harness.session(harness.router_id).options
+    assert "enable_config_discovery" not in router and "trust_working_directory" not in router
+
+    await runtime.detach(info["session_id"])
+    await runtime.session_for(info["session_id"])
+    assert "trust_working_directory" not in harness.session(info["session_id"]).options, (
+        "a resume keeps the trust Copilot stored"
+    )
+
+    reader = await spawn(runtime, harness.router_id, title="Reply", instructions="r", slack=True)
+    options = harness.session(reader["session_id"]).options
+    assert options["sandbox_config"].allowed_hosts == GITHUB_HOSTS, "Slack readers stay sandboxed"
+    assert options["enable_config_discovery"] and not options["enable_session_store"]
+
+    (home / "config.json").write_text(json.dumps({"trustedFolders": [str(tmp_path / "other")]}))
+    untrusted = await spawn(
+        runtime,
+        harness.router_id,
+        title="Two",
+        instructions="t",
+        project=str(git_repo),
+        isolate=True,
+    )
+    assert "trust_working_directory" not in harness.session(untrusted["session_id"]).options
+
+
+def test_existing_installs_switch_to_unsandboxed_workers_once(tmp_path):
+    away = tmp_path / "on-a-drive"
+    away.mkdir()
+    store = Store(tmp_path / "data")
+    store.save_settings(Settings(worker_sandbox=True, projects=[str(away)]))
+    store.delete("migrated:worker-parity")  # As saved by 0.1.12, when it was the default.
+    store.close()
+    away.rmdir()  # A drive not mounted at the first start after the upgrade.
+    store = Store(tmp_path / "data")
+    assert not store.settings().worker_sandbox
+    away.mkdir()
+    assert store.settings().projects == [str(away)], "nothing else of the settings changes"
+    store.save_settings(Settings(worker_sandbox=True))  # The owner turns it back on.
+    store.close()
+    assert Store(tmp_path / "data").settings().worker_sandbox
 
 
 async def test_receipts_show_what_was_observed_next_to_the_report(tmp_path, git_repo):
@@ -709,3 +783,24 @@ async def test_evidence_is_about_one_version_of_the_code(tmp_path, git_repo):
     found = await receipts_of(runtime, info["task_id"], lambda found: bool(found["stale"]))
     assert found["stale"] == "Out of date: the code was edited since it was checked."
     assert found["flags"][0] == found["stale"]
+
+
+async def test_a_worker_in_the_owners_folder_gets_a_worktree_to_change_it(tmp_path, git_repo):
+    """A worker that analysed a project in its folder is the one to change it next: it adds
+    the project and works in a worktree of its own, never in the owner's checkout."""
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    runtime = await harness.connect()
+    info = await spawn(runtime, harness.router_id, title="Analyse", instructions="a",
+                       project=str(git_repo))  # fmt: skip
+    assert info["cwd"] == str(git_repo) and not info.get("branch")
+    prompt = harness.session(info["session_id"]).options["system_message"]["content"]
+    assert "change nothing there" in prompt and "first add_repo this folder" in prompt
+    added = await call_tool(runtime, "add_repo", info["session_id"], repo=str(git_repo))
+    result = json.loads(added.text_result_for_llm)
+    assert result["branch"].startswith("chief/") and result["path"] != str(git_repo)
+    assert await asyncio.to_thread(lambda: (Path(result["path"]) / ".git").exists())
+    head = await asyncio.to_thread(
+        subprocess.run, ["git", "-C", str(git_repo), "rev-parse", "--abbrev-ref", "HEAD"],
+        capture_output=True, text=True,
+    )  # fmt: skip
+    assert head.stdout.strip() == "main", "the owner's checkout stays on its branch"
