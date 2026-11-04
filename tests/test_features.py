@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-from conftest import Harness, call_tool, env, settle, task_of
+from conftest import Harness, call_tool, env, said, settle, task_of
 
 from chiefofstaff import catalog
 from chiefofstaff.digest import digest
@@ -257,7 +257,7 @@ async def test_the_router_hears_about_related_workers(harness):
     await runtime.owner_send(router, "你去研究一下openhands的开发历史")
     sent = harness.session(router).sent[-1]
     assert sent.startswith(
-        env("owner", "message", "你去研究一下openhands的开发历史")
+        said("你去研究一下openhands的开发历史")
         + '\n\n<message from="system" type="context">\nEarlier workers'
     )
     card = f"“研究 OpenHands 源码” ({worker_id}, closed). Task: 研究 OpenHands 源码"
@@ -265,7 +265,7 @@ async def test_the_router_hears_about_related_workers(harness):
     assert "send it to that worker with message_session" in sent
     assert harness.store.messages(router)[-1]["text"] == "你去研究一下openhands的开发历史"
     await runtime.owner_send(router, "book a flight to Tokyo")
-    assert harness.session(router).sent[-1] == env("owner", "message", "book a flight to Tokyo")
+    assert harness.session(router).sent[-1] == said("book a flight to Tokyo")
 
 
 async def test_usage_is_recorded_per_call_and_summed_by_range(harness):
@@ -409,7 +409,7 @@ async def test_a_finished_dependent_is_not_blocked_again(tmp_path):
     assert harness.store.session(second)["status"] == "queued"
     harness.session(first).emit("session.idle")
     await settle(runtime)
-    assert harness.session(second).sent[-1] == env("owner", "message", "tweak it")
+    assert harness.session(second).sent[-1] == said("tweak it")
 
 
 async def test_settings_models_reach_live_sessions(tmp_path):
@@ -445,7 +445,7 @@ async def test_closed_workers_come_back_with_their_conversation(harness):
     await runtime.workers.close(worker_id)
     await runtime.owner_send(worker_id, "One more thing")
     assert not harness.store.session(worker_id)["closed_at"]
-    assert harness.session(worker_id).sent[-1] == env("owner", "message", "One more thing")
+    assert harness.session(worker_id).sent[-1] == said("One more thing")
 
 
 async def test_a_reopened_worker_is_not_pushed_back_onto_abandoned_work(harness):

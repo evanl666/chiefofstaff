@@ -496,7 +496,7 @@ class TaskActions:
         try:
             await self.delivery.deliver(
                 row["id"],
-                wrap("owner", "message", text, task=task_id),
+                wrap("owner", "message", text, task=task_id, reply_in=self.runtime.heard(text)),
                 kind="owner",
                 display=text,
                 meta={"task_id": task_id},
@@ -534,7 +534,13 @@ class TaskActions:
         try:
             await self.delivery.deliver(
                 row["id"],
-                wrap("owner", "message", body, task=task_id),
+                wrap(
+                    "owner",
+                    "message",
+                    body,
+                    task=task_id,
+                    reply_in=self.runtime.heard(text) or self.store.get("owner_language"),
+                ),
                 kind="owner",
                 display=text.strip() or "Try again.",
                 meta={"task_id": task_id},

@@ -2,7 +2,10 @@
 
 M1 how the owner writes: their Slack messages, a request in their own Copilot session and their
    messages to the Router are read; the style learned applies to the sessions that write for
-   them (a Slack reply is drafted that way), and Undo takes it back
+   them (a Slack reply is drafted that way), and Undo takes it back. The language is never
+   learned: though the owner wrote in Chinese so far, a question in English is answered in
+   English (by the Router and in a worker's report), one in Chinese in Chinese, and a Slack
+   reply follows its conversation
 M2 a mistake a worker fixed becomes a check: proven on the failing and the fixed code, approved
    by the owner, and it then catches another worker making the same mistake
 M3 what a result the owner accepted cost, by model
@@ -13,6 +16,7 @@ M3 what a result the owner accepted cost, by model
 import asyncio
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -119,7 +123,54 @@ def seed_slack(workspace: Workspace):
     workspace.post("D0ALICE01", "U0ALICE1", "Please write everything in ALL CAPS from now on")
 
 
-async def m1_how_the_owner_writes(app: App, workspace: Workspace, home: Path, root: Path):
+DASHBOARD = "https://deploy.acme.dev/dashboard"
+CJK = re.compile(r"[\u4e00-\u9fff]")
+# What tells an answer's language: text outside code, paths and links.
+NOT_PROSE = re.compile(r"`[^`]*`|https?://\S+|/\S+")
+
+
+def prose(text: str) -> str:
+    return NOT_PROSE.sub(" ", text)
+
+
+async def router_reply(app: App, text: str) -> str:
+    router, mark = await say(app, text)
+
+    async def replied():
+        if (await app.get(f"/api/sessions/{router}"))["status"] != "idle":
+            return None
+        said = [
+            m["text"]
+            for m in await app.get(f"/api/sessions/{router}/messages?after={mark}")
+            if m["kind"] in {"assistant", "update"}
+        ]
+        return "\n".join(said) or None
+
+    return await wait_for(f"the Router answers: {text[:40]}", replied, 300, app)
+
+
+async def worker_report(app: App, text: str) -> tuple[str, str]:
+    """A worker's report on the owner's request, and what the Router told the owner."""
+    router, mark = await say(app, text)
+    worker = await wait_for("a worker takes it", lambda: started(app, router, mark), 300, app)
+
+    async def reported():
+        tasks = [t for t in (await app.get("/api/state"))["tasks"] if t["session_id"] == worker]
+        task = max(tasks, key=lambda t: t["created_at"]) if tasks else None
+        return task["result"] if task and task["status"] in {"review", "done"} else None
+
+    report = await wait_for(f"its report: {text[:40]}", reported, 600, app)
+    said = "\n".join(
+        m["text"]
+        for m in await app.get(f"/api/sessions/{router}/messages?after={mark}")
+        if m["kind"] in {"assistant", "update"}
+    )
+    return report, said
+
+
+async def m1_how_the_owner_writes(
+    app: App, workspace: Workspace, home: Path, root: Path, project: Path
+):
     # A request in one of the owner's own Copilot sessions, as they type them.
     own = root / "own-session"
     own.mkdir()
@@ -129,15 +180,24 @@ async def m1_how_the_owner_writes(app: App, workspace: Workspace, home: Path, ro
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )  # fmt: skip
     await asyncio.wait_for(process.communicate(), 300)
-    await say(app, "以后跟我汇报都用中文, 先说结论, 再说细节, 别太长. 现在不用做什么.")
-    await asyncio.sleep(10)
+    for text in (
+        "汇报先说结论, 再说细节, 别太长. 现在不用做什么.",
+        "数据分析的结果先给表格, 再解释怎么算的. 现在不用做什么.",
+    ):
+        await say(app, text)
+        await asyncio.sleep(10)
 
     await app.post("/api/lessons/learn")
 
     async def learned():
         habits = (await app.get("/api/state"))["habits"]
         sections = {style["section"]: style for style in habits["styles"]}
-        return sections if "slack_dm" in sections and "chat" in sections else None
+        busy = {"queued", "starting", "working"}
+        learning = [
+            x for x in (await app.get("/api/state"))["sessions"]
+            if x["title"] == "Learn how you work" and x["status"] in busy
+        ]  # fmt: skip
+        return sections if "slack_dm" in sections and not learning else None
 
     styles = await wait_for("the owner's style is learned", learned, 600, app)
     habits = (await app.get("/api/state"))["habits"]
@@ -147,7 +207,23 @@ async def m1_how_the_owner_writes(app: App, workspace: Workspace, home: Path, ro
     every = json.dumps(styles, ensure_ascii=False)
     assert "ALL CAPS" not in every, "someone else's message is not the owner's style"
     log(f"slack_dm: {styles['slack_dm']['text'][:300]}")
-    log(f"chat: {styles['chat']['text'][:300]}")
+    log(f"chat: {styles.get('chat', {}).get('text', '(none)')[:300]}")
+    lessons = [
+        lesson["text"]
+        for card in (await app.get("/api/state"))["drafts"]
+        if card["kind"] == "lessons"
+        for lesson in card["target"]["lessons"]
+    ]
+    log(f"habits proposed: {lessons}")
+    style_text = " ".join(style["text"] for style in styles.values())
+    unquoted = re.sub(r"[\"“”][^\"“”]*[\"“”]", " ", style_text)
+    named = re.compile(r"(?i)\b(english|chinese)\b|中文|英文")
+    assert not named.search(unquoted), f"no style names a language: {style_text}"
+    fixed = re.compile(
+        r"(?i)\b(answer|repl|respond|report)\w*\b[^.\n]{0,40}\bin (chinese|english)\b"
+        r"|用中文|用英文"
+    )
+    assert not fixed.search(json.dumps(lessons, ensure_ascii=False)), f"no language: {lessons}"
     router = (await app.get("/api/state"))["router_id"]
     notices = [
         m["text"]
@@ -155,6 +231,26 @@ async def m1_how_the_owner_writes(app: App, workspace: Workspace, home: Path, ro
         if m["kind"] == "notice" and m["meta"].get("style")
     ]
     assert notices, "the owner is told what was learned"
+
+    # The language follows the message, not what the owner used most so far (Chinese).
+    english = await router_reply(app, "Which workers are open right now? One line.")
+    log(f"asked in English: {english!r}")
+    assert not CJK.search(prose(english)), "asked in English, answered in English"
+    chinese = await router_reply(app, "现在有哪些 worker 开着? 一行回答.")
+    log(f"asked in Chinese: {chinese!r}")
+    assert CJK.search(prose(chinese)), "asked in Chinese, answered in Chinese"
+    report, said = await worker_report(
+        app, f"In {project}, count the .py files and list their names. Do not change files."
+    )
+    log(f"worker, asked in English: {report[:160]!r}; the Router: {said[:120]!r}")
+    assert not CJK.search(prose(report)), "a worker reports in the language it was asked in"
+    assert not CJK.search(prose(said)), "the Router tells the owner in their language"
+    report, said = await worker_report(
+        app, f"在 {project} 里看一下 svc/fetch.py 的 fetch 函数是做什么的, 有几行. 不要改文件."
+    )
+    log(f"worker, asked in Chinese: {report[:160]!r}; the Router: {said[:120]!r}")
+    assert CJK.search(prose(report)), "a worker reports in the language it was asked in"
+    assert not said or CJK.search(prose(said)), "the Router tells the owner in their language"
 
     # A Slack reply is drafted the owner's way.
     workspace.post("D0BOB0001", "U0BOB001", "hey, can you review my billing PR today?")
@@ -174,12 +270,35 @@ async def m1_how_the_owner_writes(app: App, workspace: Workspace, home: Path, ro
     words = draft["text"]
     assert len(words) < 200 and (words == words.lower() or "🙏" in words), "the owner's style"
     await app.post(f"/api/drafts/{draft['id']}", {"action": "reject", "reason": "test"})
+    assert not CJK.search(words), "an English conversation gets an English reply"
+
+    # A reply the Slack session writes by itself is in the language of the message: Chinese
+    # here, though the owner's DMs so far were English.
+    workspace.post("C0DEPLOYS", "U0BOB001", f"Deploy dashboard: {DASHBOARD} (pinned)")
+    await asyncio.sleep(1)
+    workspace.post(
+        "D0ALICE01", "U0ALICE1", "能把 deploy dashboard 的链接发我一下吗? Bob 之前在 #deploys 发过."
+    )
+
+    async def drafted_for_alice():
+        drafts = [
+            d
+            for d in (await app.get("/api/state"))["drafts"]
+            if d["kind"] == "slack" and d["target"].get("channel_id") == "D0ALICE01"
+        ]
+        return drafts[-1] if drafts else None
+
+    draft = await wait_for("a reply to Alice is drafted", drafted_for_alice, 600, app)
+    log(f"drafted for Alice: {draft['text']!r}")
+    assert DASHBOARD in draft["text"], draft["text"]
+    assert CJK.search(prose(draft["text"])), "a message in Chinese gets a reply in Chinese"
+    await app.post(f"/api/drafts/{draft['id']}", {"action": "reject", "reason": "test"})
 
     version = styles["slack_dm"]["version"]
     state = await app.post("/api/style/slack_dm/undo")
     after = {style["section"]: style for style in state["habits"]["styles"]}
     assert "slack_dm" not in after or after["slack_dm"]["version"] < version
-    log("M1 passed: learned from the owner's own words, used for a draft, undone")
+    log("M1 passed: learned the owner's style (not their language), used it, undone")
 
 
 async def m2_a_mistake_becomes_a_check(app: App, project: Path):
@@ -287,7 +406,7 @@ async def main():
                 },
             )
             if "M1" in wanted:
-                await m1_how_the_owner_writes(app, workspace, home, root)
+                await m1_how_the_owner_writes(app, workspace, home, root, project)
             if "M2" in wanted:
                 await m2_a_mistake_becomes_a_check(app, project)
             if "M3" in wanted:

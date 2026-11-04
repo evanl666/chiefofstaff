@@ -3,7 +3,7 @@ import json
 import socket
 
 import pytest
-from conftest import FakeClient, FakeSlackMcp, FakeTokens, call_tool, env
+from conftest import FakeClient, FakeSlackMcp, FakeTokens, call_tool, env, said
 from fastapi.testclient import TestClient
 
 from chiefofstaff.__main__ import LAUNCH_FILE, running_instance
@@ -57,9 +57,7 @@ def test_owner_talks_to_the_router(app_client):
         f"/api/sessions/{router}/messages", json={"text": "Ship the release notes"}, headers=ORIGIN
     )
     assert sent.status_code == 200 and sent.json()["kind"] == "owner"
-    assert app_client.fake.sessions[router].sent == [
-        env("owner", "message", "Ship the release notes")
-    ]
+    assert app_client.fake.sessions[router].sent == [said("Ship the release notes")]
     messages = app_client.get(f"/api/sessions/{router}/messages").json()
     assert [m["text"] for m in messages] == ["Ship the release notes"]
     after = app_client.get(f"/api/sessions/{router}/messages?after={messages[-1]['id']}").json()

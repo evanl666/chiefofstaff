@@ -20,7 +20,7 @@ from . import prompts, threads
 from .asks import AnswerSession, AskSession, RecordSetup
 from .checks import ProposeChecks
 from .decisions import AckDecision, AskDecision, RecordDecision
-from .envelope import clean_title, short, wrap
+from .envelope import clean_title, language, short, wrap
 from .habits import UpdateStyle
 from .learning import ProposeLessons
 from .models import MAX_DRAFT, DraftDecision, NestedArguments
@@ -788,7 +788,9 @@ class Tools:
                     "send it there with message_session instead (a closed one reopens with its "
                     "context and files; one without a branch takes its own worktree with "
                     "add_repo to change code, so needing a worktree is no reason for a new "
-                    "worker). Otherwise call spawn_worker again with why_new.\n"
+                    "worker). A code change on another subject (another feature, function or "
+                    "bug, even in the same project) is not theirs: on their branch it would ship "
+                    "in the same PR. Then call spawn_worker again with why_new.\n"
                     + json.dumps(related, ensure_ascii=False)
                 )
         session_id = str(uuid4())
@@ -846,9 +848,13 @@ class Tools:
             task_text(params.instructions, criteria, decisions),
             title=title,
             task=task["id"],
+            # The owner reads its report as written: in the language they last wrote in.
+            reply_in=self.store.get("owner_language"),
         )
         if context_from:
             prompt += "\n\n" + wrap("system", "context", self.tasks.briefing(context_from))
+        if note := self.report_language(params.instructions):
+            prompt += "\n\n" + wrap("system", "context", note)
         self.runtime.add_message(
             session_id, "router", params.instructions, {"prompt": prompt, "task_id": task["id"]}
         )
@@ -878,6 +884,15 @@ class Tools:
         elif row["status"] == "queued":
             result["note"] = "Queued until a worker slot frees up."
         return result
+
+    def report_language(self, instructions: str) -> str:
+        """A note when the Router wrote a task in another language than the owner's: the owner
+        reads the report as written."""
+        spoken = self.store.get("owner_language") or ""
+        written = language(instructions)
+        if not spoken or not written or written == spoken:
+            return ""
+        return f"Write your report in {spoken}: the owner reads it, and wrote to us in {spoken}."
 
     def link_decisions(self, task_id: str, decisions: list[dict]):
         for decision in decisions:
@@ -931,7 +946,10 @@ class Tools:
                 task_text(params.text, criteria, decisions),
                 title=title,
                 task=task["id"],
+                reply_in=self.store.get("owner_language"),
             )
+            if note := self.report_language(params.text):
+                prompt += "\n\n" + wrap("system", "context", note)
             notice = f"New task “{title}” for “{target['title']}”"
         else:
             if task and task["status"] == "cancelled":
@@ -941,7 +959,13 @@ class Tools:
                 )
             if task and task["status"] in {"review", "done", "failed"}:
                 task = self.tasks.move(task["id"], "running", reason="follow-up")
-            prompt = wrap("router", "message", params.text, task=task["id"] if task else None)
+            prompt = wrap(
+                "router",
+                "message",
+                params.text,
+                task=task["id"] if task else None,
+                reply_in=self.store.get("owner_language"),
+            )
             notice = f"Continued in “{target['title']}”"
         await self.delivery.deliver(
             target["id"],

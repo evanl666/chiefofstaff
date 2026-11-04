@@ -117,6 +117,13 @@ async def run_day(app: App, project: Path, orders: Path) -> list:
     )
     day.check("unrelated coding: another worker", kind == "new" and coder != analyst, kind)
 
+    kind, fixer = await day.ask(
+        f"In {project}, in an isolated worktree: make initials() also split on hyphens "
+        "('jean-luc picard' gives 'JLP'), add a test, and commit."
+    )
+    day.check("another change in the same project: not on the coder's branch",
+              kind == "new" and fixer not in {analyst, coder}, kind)  # fmt: skip
+
     kind, orders_worker = await day.ask(
         f"In {orders}, in an isolated worktree: make total() round to cents, add a test, commit."
     )

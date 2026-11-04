@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from conftest import FakeSession, Harness, call_tool, settle
+from conftest import FakeSession, Harness, call_tool, env, settle
 
 from chiefofstaff.models import DraftDecision, Settings
 
@@ -1241,3 +1241,112 @@ def test_a_credit_limit_under_copilots_minimum_is_raised_to_it():
     assert Settings(worker_credit_limit=5).worker_credit_limit == 30
     assert Settings(worker_credit_limit=0).worker_credit_limit == 0
     assert Settings(worker_credit_limit=45).worker_credit_limit == 45
+
+
+@pytest.mark.parametrize(
+    ("text", "spoken"),
+    [
+        ("Which workers are open right now? One line.", "English"),
+        ("帮我review一下 cos-account-routing-test 的 PR #1", "Chinese"),
+        ("看一下 `uv run pytest -q` 为什么挂了", "Chinese"),
+        ("Could you check https://github.com/a/b/pull/1 please", "English"),
+        ("progress?", ""),
+        ("LGTM", ""),
+        ("修一下src/chiefofstaff/delivery.py里的bug", "Chinese"),
+        ("帮我看下这个PR\uff1ahttps://github.com/org/repo/pull/12", "Chinese"),
+        ("Please reply to 张伟 that we ship tomorrow", "English"),
+        ("Was ist der Status?", ""),
+        ("No me funciona el build", ""),
+        ("Peux-tu regarder ce bug on a un problème", ""),
+    ],
+)
+def test_the_language_of_a_message_when_it_is_clear(text, spoken):
+    from chiefofstaff.envelope import language
+
+    assert language(text) == spoken
+
+
+async def test_answers_follow_the_language_the_owner_just_wrote_in(harness):
+    runtime = await harness.connect()
+    router = harness.session(harness.router_id)
+    await runtime.owner_send(harness.router_id, "汇报先说结论, 再说细节.")
+    assert 'reply_in="Chinese"' in router.sent[-1]
+    runtime.add_message(harness.router_id, "assistant", "收到: 以后先说结论.")
+    await runtime.owner_send(harness.router_id, "Which workers are open right now?")
+    assert 'reply_in="English"' in router.sent[-1], "not the language of the conversation so far"
+    assert "answer in English, not Chinese" in router.sent[-1], "said outright when it switches"
+    worker = await spawn(runtime, harness.router_id, "Count the files")
+    assert 'reply_in="English"' in harness.session(worker).sent[-1], "its report is read as is"
+    chinese_task = await spawn(runtime, harness.router_id, "数一下有几个文件")
+    assert "Write your report in English" in harness.session(chinese_task).sent[-1]
+    await runtime.owner_send(harness.router_id, "progress?")
+    assert "reply_in" not in router.sent[-1], "no signal: the conversation's language"
+    router.emit("session.idle")
+    await call_tool(runtime, "report", worker, status="done", summary="3 files.")
+    await settle(runtime)
+    [report] = [prompt for prompt in router.sent if 'type="report"' in prompt]
+    assert 'reply_in="English"' in report
+
+
+async def test_a_new_task_answered_without_a_report_is_filed_not_left_running(harness):
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Analyze sales.csv")
+    session = harness.session(worker)
+    await call_tool(runtime, "report", worker, status="done", summary="Totals by region: …")
+    session.emit("session.idle")
+    await settle(runtime)
+    assert harness.store.session(worker)["status"] == "done"
+    given = await call_tool(
+        runtime, "message_session", harness.router_id, session_id=worker, task="new",
+        title="Monthly growth", text="Now the month-over-month growth, as a table.",
+    )  # fmt: skip
+    assert given.result_type != "failure", given.text_result_for_llm
+    answer = "| month | growth |\n|---|---|\n| Feb | +4% |\n| Mar | +2% |\n" + "Computed so. " * 20
+    session.emit("assistant.message", content=answer)
+    session.emit("session.idle")
+    await settle(runtime)
+    task = runtime.tasks.current(worker)
+    assert task["title"] == "Monthly growth"
+    assert task["status"] == "review" and "| Feb | +4% |" in task["result"], task["status"]
+
+    # Asked about finished work (no new task), it goes back to done after answering.
+    await runtime.owner_send(worker, "Which month was best?")
+    session.emit("assistant.message", content="February.")
+    session.emit("session.idle")
+    await settle(runtime)
+    assert harness.store.session(worker)["status"] in {"done", "review"}
+
+
+async def test_a_task_reopened_after_its_message_is_still_reported(harness):
+    """A changed decision reaches a finished worker first and reopens its task after: the
+    turn's answer is still filed, and the task never stays running on a done worker."""
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Login limits")
+    session = harness.session(worker)
+    await call_tool(runtime, "report", worker, status="done", summary="Limited per IP.")
+    session.emit("session.idle")
+    await settle(runtime)
+    task = runtime.tasks.current(worker)
+    await runtime.delivery.deliver(  # As Decisions.propagate does: tell it, then reopen.
+        worker,
+        env("router", "decision-changed", "Now per account: adjust it.", task=task["id"]),
+        kind="router",
+        meta={"task_id": task["id"]},
+        steer=True,
+    )
+    runtime.tasks.move(task["id"], "running", reason="decision changed")
+    session.emit("assistant.message", content="Switched the limit to per account. " * 6)
+    session.emit("session.idle")
+    await settle(runtime)
+    assert runtime.tasks.get(task["id"])["status"] == "review"
+
+
+async def test_a_follow_up_on_a_task_card_sets_the_owners_language(harness):
+    runtime = await harness.connect()
+    await runtime.owner_send(harness.router_id, "Count the files in the project please")
+    worker = await spawn(runtime, harness.router_id, "Count files")
+    task = runtime.tasks.current(worker)
+    await call_tool(runtime, "report", worker, status="done", summary="3 files.")
+    await runtime.task_actions.follow_up(task["id"], "再把每个文件的行数也列出来")
+    assert 'reply_in="Chinese"' in harness.session(worker).sent[-1]
+    assert harness.store.get("owner_language") == "Chinese", "what the Router tells them next"

@@ -405,3 +405,43 @@ async def test_with_learning_from_work_off_nothing_read_before_is_sent(harness):
 )
 def test_a_pass_after_a_failure_is_the_same_test_run(failing, passing, same):
     assert checks_module.related(failing, passing) == same
+
+
+async def test_a_style_never_sets_the_language(tmp_path):
+    harness = Harness(tmp_path / "data", Settings(slack_enabled=True))
+    runtime = await harness.connect()
+    for index, text in enumerate(["先说结论", "三行以内", "表格先给"]):
+        runtime.habits.add("copilot", "instruction", f"o{index}", text)
+    await runtime.learning.learn()
+    learner = learner_of(harness)
+    ids = [row["id"] for row in harness.store.all("SELECT id FROM observations")]
+    for section, text in [
+        ("chat", "Writes in short Chinese sentences."),
+        ("slack_dm", "Short, 用中文, lowercase."),
+    ]:
+        refused = await call_tool(
+            runtime, "update_style", learner["id"], section=section, text=text, evidence=ids
+        )
+        assert refused.result_type == "failure" and "Leave the language out" in (
+            refused.text_result_for_llm
+        )
+    # Its lessons came before it wrote the refused style again: its task waits for that.
+    lessons = await call_tool(runtime, "propose_lessons", learner["id"], lessons=[])
+    assert "call it again for each" in lessons.text_result_for_llm
+    assert runtime.tasks.current(learner["id"])["status"] == "running"
+    quoted = await call_tool(runtime, "update_style", learner["id"], section="chat",
+                             text="Very short (“三行以内”).", evidence=ids)  # fmt: skip
+    assert "without quoting" in quoted.text_result_for_llm, "quotes pull answers into a language"
+    slack = "lowercase, ends with 🙏 (“on it 🙏”, “好的 🙏”)."
+    done = await call_tool(
+        runtime, "update_style", learner["id"], section="slack_dm", text=slack, evidence=ids
+    )
+    assert "version 1" in done.text_result_for_llm, "a Slack style may quote either language"
+    assert runtime.tasks.current(learner["id"])["status"] == "running", "chat is still to write"
+    kept = "Conclusion first, then details; three lines at most."
+    done = await call_tool(
+        runtime, "update_style", learner["id"], section="chat", text=kept, evidence=ids
+    )
+    assert "version 1" in done.text_result_for_llm
+    assert runtime.tasks.current(learner["id"])["status"] == "done"
+    assert runtime.states[learner["id"]].close_after_turn

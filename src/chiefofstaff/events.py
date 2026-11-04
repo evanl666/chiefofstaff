@@ -264,6 +264,11 @@ class Events:
         status = row["status"]
         if status == "working":
             status = state.pop_resting("idle")
+            task = self.tasks.current(session_id) if row["role"] == WORKER else None
+            if task and task["status"] == "running":
+                # Its task is open (given or reopened during the turn): it reports, or its
+                # answer is filed as its report. Never "done" with the task left running.
+                status = "idle"
         self.runtime.update_session(session_id, status=status, activity="")
         # Decided now: closing or reattaching (which brings its own message) clears these.
         settled = not (state.close_after_turn or state.stale or state.after_refresh)

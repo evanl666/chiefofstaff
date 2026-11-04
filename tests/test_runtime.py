@@ -9,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from conftest import FakeSession, Harness, call_tool, env, settle, task_of
+from conftest import FakeSession, Harness, call_tool, env, said, settle, task_of
 
 from chiefofstaff import backend as backend_module
 from chiefofstaff import delivery as delivery_module
@@ -27,7 +27,7 @@ async def test_router_routes_work_and_worker_reports_back(harness):
     assert "Router inside Chief of Staff" in router.options["system_message"]["content"]
 
     await runtime.owner_send(harness.router_id, "Fix the flaky login test")
-    assert router.sent == [env("owner", "message", "Fix the flaky login test")]
+    assert router.sent == [said("Fix the flaky login test")]
 
     result = await call_tool(
         runtime,
@@ -47,6 +47,7 @@ async def test_router_routes_work_and_worker_reports_back(harness):
             "Owner: fix the flaky login test.",
             title="Fix flaky login test",
             task=task,
+            reply_in="English",  # The owner wrote in English: the report they read is too.
         )
     ]
     assert {tool.name for tool in worker.options["tools"]} == {
@@ -279,7 +280,7 @@ async def test_router_replies_to_events_are_footnotes(harness):
     router = harness.session(harness.router_id)
     router.emit("user.message", content=env("worker:x", "report", "shipped", status="done"))
     router.emit("assistant.message", content="Told the owner.", tool_requests=None)
-    router.emit("user.message", content=env("owner", "message", "What is running?"))
+    router.emit("user.message", content=said("What is running?"))
     router.emit("assistant.message", content="Nothing right now.", tool_requests=None)
     await settle(runtime)
     footnote, answer = harness.store.messages(harness.router_id)[-2:]
@@ -635,7 +636,7 @@ async def test_message_during_worker_startup_is_not_lost(tmp_path):
     assert harness.session(worker_id).sent == [
         env("router", "task", "do B", title="B", task=task_of(harness, worker_id))
         + "\n\n"
-        + env("owner", "message", "ALSO: use the staging DB")
+        + said("ALSO: use the staging DB")
     ]
 
 
@@ -666,7 +667,7 @@ async def test_follow_ups_respect_the_worker_limit(tmp_path):
 
     harness.session(second).emit("session.idle")
     await settle(runtime)
-    assert harness.session(first).sent[-1] == env("owner", "message", "one more thing")
+    assert harness.session(first).sent[-1] == said("one more thing")
     assert runtime.workers.running() == 1
 
 
@@ -722,7 +723,7 @@ async def test_failed_delivery_is_not_replayed_later(harness):
         await runtime.owner_send(harness.router_id, "lost")
     router.send = working
     await runtime.owner_send(harness.router_id, "next")
-    assert router.sent == [env("owner", "message", "next")]
+    assert router.sent == [said("next")]
 
 
 async def test_new_settings_wait_for_a_worker_to_finish_its_turn(harness):
@@ -857,7 +858,7 @@ async def test_messages_during_a_rotation_reach_the_new_router(harness):
     new = harness.client.sessions[harness.store.get(f"copilot:{router_id}")]
     assert old.sent == [] and len(new.sent) == 1
     assert new.sent[0].startswith('<message from="system" type="handover">')
-    assert new.sent[0].endswith(env("owner", "message", "Are you there?"))
+    assert new.sent[0].endswith(said("Are you there?"))
 
 
 async def test_the_router_rotates_when_its_context_grows(harness):
@@ -887,7 +888,7 @@ async def test_the_router_rotates_when_its_context_grows(harness):
     assert f"{worker_id[:8]} “Fix login”" in sent and "Fixed in PR #7" in sent
     assert re.search(r"- owner \(ref o[0-9a-f]{6}\): Thanks, what is open\?", sent)
     assert "- you: Nothing else is open." in sent
-    assert sent.endswith(env("owner", "message", "Start the docs task"))
+    assert sent.endswith(said("Start the docs task"))
     listed = await call_tool(runtime, "list_sessions", new_id)
     assert listed.result_type == "success", "the new Copilot session acts as the Router"
     harness.client.metas = [
