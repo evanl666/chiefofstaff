@@ -150,6 +150,7 @@ class Events:
         state.owner_turn = False
         state.event_turn = not owner
         state.owner_reply = bool(owner)
+        state.turn_decisions, state.turn_tasks = [], []
 
     def assistant_message(self, row: dict, event: Any):
         data = event.data

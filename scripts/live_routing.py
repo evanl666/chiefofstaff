@@ -14,6 +14,7 @@ checks, for each request, which worker took it:
 
 import asyncio
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -29,6 +30,7 @@ live_e2e.BASE = f"http://127.0.0.1:{live_e2e.PORT}"
 from live_e2e import App, cleanup, git, log, transcript, wait_for  # noqa: E402
 from live_parity import setup, write  # noqa: E402
 
+HELPER = re.compile(r"“(Learn how you work|Learn checks from mistakes|Distill owner profile)”")
 MODEL = os.environ.get("ROUTING_MODEL", "claude-sonnet-5.5")
 ORDERS = '''"""Orders."""
 
@@ -71,8 +73,8 @@ class Day:
         async def routed():
             after = await self.app.get(f"/api/sessions/{router}/messages?after={mark}")
             for message in after:
-                if message["kind"] != "notice":
-                    continue
+                if message["kind"] != "notice" or HELPER.search(message["text"]):
+                    continue  # Chief of Staff's own learning workers are not routing.
                 for prefix, kind in (("Started", "new"), ("New task", "task"),
                                      ("Continued in", "continued")):  # fmt: skip
                     if message["text"].startswith(prefix):

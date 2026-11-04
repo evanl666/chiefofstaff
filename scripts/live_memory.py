@@ -34,6 +34,7 @@ from live_e2e import SLACK_PORT, SLACK_TOKEN, App, cleanup, git, log, transcript
 
 COPILOT = shutil.which("copilot") or "copilot"
 MODEL = os.environ.get("MEMORY_MODEL", "claude-sonnet-5.5")
+HELPER_NOTICE = re.compile(r"“(Learn how you work|Learn checks from mistakes)”")
 DMS = [
     "yep can do, give me 10 min 🙏",
     "nah not today, tmrw am? 🙏",
@@ -109,7 +110,9 @@ async def started(app: App, router: str, mark: int) -> str | None:
     found = [
         m["meta"]["session_id"]
         for m in await app.get(f"/api/sessions/{router}/messages?after={mark}")
-        if m["kind"] == "notice" and m["text"].startswith(("Started", "New task", "Continued"))
+        if m["kind"] == "notice"
+        and m["text"].startswith(("Started", "New task", "Continued"))
+        and not HELPER_NOTICE.search(m["text"])  # Its own learning workers.
     ]
     return found[-1] if found else None
 

@@ -378,8 +378,11 @@ class GitHubSource:
         pull = await self.pull(repo, int(number))
         base = f"repos/{repo}"
         items: list[tuple[str, str]] = []
-        for comment in json.loads(
-            await self.gh("api", f"{base}/issues/{number}/comments?since={after}&per_page=50")
+        # Every page: GitHub lists oldest first, so on a busy PR the new ones are on the last.
+        for comment in pages(
+            await self.gh(
+                "api", f"{base}/issues/{number}/comments?since={after}&per_page=100", "--paginate"
+            )
         ):
             items.append(
                 (
@@ -388,8 +391,10 @@ class GitHubSource:
                     f"({comment['html_url']})",
                 )
             )
-        for comment in json.loads(
-            await self.gh("api", f"{base}/pulls/{number}/comments?since={after}&per_page=50")
+        for comment in pages(
+            await self.gh(
+                "api", f"{base}/pulls/{number}/comments?since={after}&per_page=100", "--paginate"
+            )
         ):
             line = comment.get("line") or comment.get("original_line") or ""
             items.append(
@@ -399,8 +404,8 @@ class GitHubSource:
                     f"{body(comment)} ({comment['html_url']})",
                 )
             )
-        for review in json.loads(
-            await self.gh("api", f"{base}/pulls/{number}/reviews?per_page=100")
+        for review in pages(
+            await self.gh("api", f"{base}/pulls/{number}/reviews?per_page=100", "--paginate")
         ):
             if review.get("state") == "PENDING" or (review.get("submitted_at") or "") < after:
                 continue

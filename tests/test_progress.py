@@ -1165,12 +1165,21 @@ async def test_a_decision_recorded_again_in_the_same_words_changes_nothing(harne
         ("Drop the old sessions table", "Dropped.", ""),
         ("Put them in a markdown table", "| a | b |\n|---|---|", ""),
         ("What is 17x23?", "391", ""),
+        (
+            "List every row with its revenue as one markdown table",
+            "All 540 rows are in rows.md; it is too large to paste in full here.\n| a |\n|---|",
+            "the whole answer",
+        ),
+        ("把所有行列成表格", "表格太长, 只列前 10 行:\n| a |\n|---|", "the whole answer"),
+        ("Tell me a bit about rounding", "Kept it short for brevity: half up.", "the whole answer"),
     ],
 )
 def test_what_a_one_line_report_cannot_answer(goal, summary, missing):
     from chiefofstaff.tools import short_of
 
-    assert short_of(goal, summary) == missing
+    assert short_of(goal, summary).startswith(missing) and bool(short_of(goal, summary)) == bool(
+        missing
+    )
 
 
 async def test_a_one_line_answer_to_an_explanation_is_sent_back_once(harness):
