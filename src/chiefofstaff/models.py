@@ -76,6 +76,10 @@ class Settings(StrictModel):
     # Applied when the session's model supports that effort; otherwise the model's default.
     role_efforts: dict[Role, Effort] = Field(default_factory=dict)
     worker_credit_limit: float = Field(default=0, ge=0, le=100000)
+    # Learn how the owner writes and works from their Slack messages, PR reviews, commits and
+    # Copilot sessions (see habits.py), and turn workers' fixed mistakes into checks (checks.py).
+    learn_from_work: bool = True
+    learn_checks: bool = True
     worker_idle_hours: int = Field(default=24, ge=1, le=720)
     # Workers act without permission checks; they still follow their instructions.
     worker_yolo: bool = False

@@ -6,7 +6,7 @@ U3 a worker asks the owner a question mid-task; the answer is used
 U4 Create PR from a worker's branch on GitHub; the worker then follows the PR
 U5 a long answer (a 500-row table) reaches the owner whole
 U6 three requests in a row, sent while the Router is busy: none is lost
-U7 a worker that reaches the credit limit stops and says so
+U7 a credit limit under Copilot's minimum is raised to it, and workers still run
 
     uv run python scripts/live_usecases.py [U1 U2 U3 U4 U5]
 """
@@ -236,29 +236,18 @@ async def u6_rapid_requests(app: App, project: Path):
 
 
 async def u7_credit_limit(app: App, project: Path):
+    """A limit under Copilot's minimum (30 credits a session) is raised to it: before, every
+    worker failed to start ("minimum session limit is 30 ai credits")."""
     state = await app.get("/api/state")
-    await app.post("/api/settings", {**state["settings"], "worker_credit_limit": 0.01})
+    saved = await app.post("/api/settings", {**state["settings"], "worker_credit_limit": 0.01})
+    assert saved["settings"]["worker_credit_limit"] == 30, saved["settings"]
     worker, task = await ask(
-        app,
-        f"In {project}: read every file in the repository one by one and summarize each in "
-        "detail. Do not change files.",
+        app, f"In {project}: how many Python files are in the repository? Do not change files."
     )
-
-    async def stopped():
-        row = await app.get(f"/api/sessions/{worker}")
-        current = await app.get(f"/api/tasks/{task['id']}")
-        if (
-            row["status"] in {"failed", "idle", "done", "waiting"}
-            and current["status"] != "running"
-        ):
-            return row, current
-        return None
-
-    row, current = await wait_for("the worker stops at the limit", stopped, 600, app)
-    messages = await app.get(f"/api/sessions/{worker}/messages")
-    said = " ".join(m["text"] for m in messages[-6:]).lower()
-    log(f"U7: [{row['status']}/{current['status']}] {said[-200:]!r}")
-    assert "limit" in said or "credit" in said, f"it says it reached the limit: {said}"
+    current = await reaches(app, task["id"], {"review", "done"}, timeout=600)
+    row = await app.get(f"/api/sessions/{worker}")
+    assert row["status"] != "failed", row
+    log(f"U7: a 0.01 limit was saved as 30; the worker ran: {current['result'][:80]!r}")
     await app.post(
         "/api/settings", {**(await app.get("/api/state"))["settings"], "worker_credit_limit": 0}
     )

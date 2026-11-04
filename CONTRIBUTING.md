@@ -24,6 +24,10 @@ uv run chiefofstaff --demo          # the whole product, scripted, no accounts
 | `CHIEFOFSTAFF_TEST_COPILOT=1 uv run pytest -q -m copilot` | Contract tests against the real Copilot CLI | Copilot; a few small model calls |
 | `uv run python scripts/live_e2e.py` | Every feature end to end with real Copilot | Copilot; ~10 minutes of model use |
 | `uv run --with playwright python scripts/browser_smoke.py` | The UI with real Copilot | Copilot |
+| `uv run --with playwright python scripts/ui_edges.py` | UI edge cases (long reviews, memory cards and settings), light and dark | `playwright install chromium` once |
+| `uv run python scripts/live_routing.py` | Does the Router give work to the worker that knows the subject? | Copilot |
+| `uv run python scripts/live_usecases.py` | Everyday flows: revise, cancel and retry, questions, Create PR, long answers | Copilot; a GitHub test repository |
+| `uv run python scripts/live_memory.py` | How you write is learned and used; a fixed mistake becomes a check that catches it again | Copilot; macOS or `bwrap` |
 
 Before a pull request:
 

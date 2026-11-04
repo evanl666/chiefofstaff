@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.1.15 (2026-11-04)
+
+Chief of Staff keeps learning how you work, and turns mistakes into checks it can run.
+
+- **How you write, learned from your own words**: the Slack messages you send, your PR reviews
+  and review comments (every GitHub account signed in to `gh`), your commit messages, what you
+  ask your own Copilot sessions and what you tell the Router are read every two hours. A worker
+  that can only propose describes how you write in each place (answers to you, Slack DMs, Slack
+  channels, PR reviews, commits); it applies at once to the sessions that write that way for
+  you, the Router chat says what was learned, and Settings → *How you work* shows each version
+  with *Undo*. Only your own words are kept; turn it off in Settings.
+- **Habits keep coming**: guidance you repeat in your own Copilot sessions becomes habits too, and
+  habits learned while a review card waits join that card instead of waiting for it.
+- **Checks learned from mistakes**: a worker's test run that failed, then passed after a fix,
+  becomes a failure case (both versions kept as git commits, the worker's checkout untouched). A
+  worker proposes a check for a mistake that can come back; it must fail on the code with the
+  mistake and pass on the fix, in a sandbox, before you see it. Approved checks run when a worker
+  in that repository says it is done: a failing one sends it back once, then flags the review.
+- **Cost per accepted result**: Usage shows what a result you accepted cost, by the model that
+  did most of the work.
+- Workers Chief of Staff starts for itself to learn have only their own tools.
+
+Found while testing it:
+
+- **Failing tests piped into `tail` count as failing**: `pytest -q | tail -5` exits with
+  `tail`'s code, so a failing run looked like a pass on the review card (and could verify an
+  acceptance criterion). A piped test run is now read by its runner's summary line.
+- **Isolated when you ask**: the Router gives a worker its own worktree for any change to files,
+  even one it undoes or does not commit, and always when you ask for a worktree or a branch. A
+  "drill" asked for "in an isolated worktree" had run in your own checkout.
+- When a worker's final answer cannot be filed as its report (an asked-for table is missing, a
+  check fails), the worker is told why instead of only being asked to report.
+
 ## 0.1.14 (2026-11-04)
 
 From testing workers side by side with your own Copilot sessions.

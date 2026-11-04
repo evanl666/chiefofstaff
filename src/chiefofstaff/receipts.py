@@ -139,6 +139,13 @@ def program(words: list[str]) -> str:
     return " ".join([words[0].rsplit("/", 1)[-1], *words[1:]])
 
 
+def test_runs(command: str) -> list[str]:
+    """The test runs in a command line, from the runner on: `pytest -q` in
+    `cd svc && uv run pytest -q 2>&1 | tail -5; git status`."""
+    test = dict(KINDS)["test"]
+    return [text for words in simple_commands(command) if test.search(text := program(words))]
+
+
 def kind(command: str) -> str:
     """test, check, build, pr, push, commit or "" for a shell command line."""
     programs = [program(words) for words in simple_commands(command)]
@@ -146,6 +153,29 @@ def kind(command: str) -> str:
         if any(pattern.search(text) for text in programs):
             return name
     return ""
+
+
+# The summary lines test runners print when tests fail, as each prints them: pytest
+# "1 failed, 2 passed in 0.3s" and "FAILED tests/x.py::test_y", unittest "FAILED (failures=1)",
+# jest "Tests: 1 failed", vitest "Tests  1 failed | 2 passed", mocha "2 failing", go "--- FAIL:"
+# and "FAIL", cargo "test result: FAILED", Gradle "BUILD FAILED", Maven "BUILD FAILURE".
+TESTS_FAILED = re.compile(
+    r"^=* ?(\d+ \w+, )*[1-9]\d* (failed|errors?)\b.* in [\d.]+s( \([\d:]+\))?( =+)?$"
+    r"|^(FAILED|ERROR) \S+(::|\.py\b)"
+    r"|^FAILED \("
+    r"|^\s*Tests:?\s+[1-9]\d* failed\b"
+    r"|^\s*[1-9]\d* failing$"
+    r"|^(--- FAIL: |FAIL(\s|$))"
+    r"|^test result: FAILED"
+    r"|^(\[INFO\] )?BUILD FAIL(ED|URE)\b",
+    re.MULTILINE,
+)
+
+
+def masked_failure(command: str, output: str) -> bool:
+    """A test run piped into another command (`pytest | tail`) exits with that command's code:
+    its own summary says whether the tests failed."""
+    return "|" in command and bool(TESTS_FAILED.search(output[-2000:] if output else ""))
 
 
 def exit_code(output: str, success: bool | None) -> int | None:

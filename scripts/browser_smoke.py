@@ -66,7 +66,7 @@ async def run(page, app: App, project: Path, workspace: Workspace, errors: list[
 
     # The inbox composer talks to the Router; its answer shows on the inbox.
     composer = page.locator("#composer-input")
-    await expect(composer).to_have_attribute("placeholder", "Ask your chief of staff…")
+    await expect(composer).to_have_attribute("placeholder", re.compile("^Ask your chief of staff…"))
     await composer.fill(
         f"In {project}, add notes.md with the line `notes from the UI test` and commit it "
         "with message 'Add notes'. Use an isolated worktree."
@@ -95,9 +95,10 @@ async def run(page, app: App, project: Path, workspace: Workspace, errors: list[
     log("the result waits for review with its commit")
     await page.screenshot(path=SHOTS / "5-review.png")
 
+    # The worker's report is the message in the Router chat (the Router does not restate it).
     await chat.click()
-    await expect(page.locator("#timeline .card.update")).to_be_visible(timeout=300000)
-    log("Router posted an update card")
+    await expect(page.locator("#timeline .card.report.done")).to_be_visible(timeout=300000)
+    log("the Router chat shows the worker's report card")
     await page.screenshot(path=SHOTS / "5-update.png")
 
     await inbox.click()
@@ -113,7 +114,8 @@ async def run(page, app: App, project: Path, workspace: Workspace, errors: list[
     await expect(draft).to_be_visible(timeout=600000)
     await expect(inbox.locator(".badge")).to_be_visible()
     assert DASHBOARD in await draft.locator("textarea").input_value()
-    await expect(draft.locator(".label")).not_to_contain_text("D0ALICE01")
+    # Where it really goes, by Slack's id: not what the drafting session calls it.
+    await expect(draft.locator(".label")).to_contain_text("direct message D0ALICE01")
     await page.screenshot(path=SHOTS / "6-draft.png")
     edited = f"Here it is: {DASHBOARD}"
     await draft.locator("textarea").fill(edited)
@@ -134,7 +136,7 @@ async def run(page, app: App, project: Path, workspace: Workspace, errors: list[
     await question.get_by_role("button", name=re.compile("^blue$", re.I)).click()
     await expect(question).to_have_count(0)
     await chat.click()
-    await expect(page.locator("#timeline .card.update").last).to_contain_text(
+    await expect(page.locator("#timeline .card.report.done").last).to_contain_text(
         re.compile("blue", re.I), timeout=300000
     )
     log("the owner answered a worker's question on its card")
@@ -201,7 +203,7 @@ async def run(page, app: App, project: Path, workspace: Workspace, errors: list[
     await expect(page.locator("#inbox-recent, #inbox-review").first).to_be_visible()
     await page.screenshot(path=SHOTS / "8-dark-inbox.png")
     await chat.click()
-    await expect(page.locator("#timeline .card.update").first).to_be_visible()
+    await expect(page.locator("#timeline .card.report").first).to_be_visible()
     await expect(page.locator("#session-list .item", has_text="Slack")).to_be_in_viewport()
     await page.screenshot(path=SHOTS / "8-dark.png")
     assert not errors, errors

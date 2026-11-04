@@ -80,10 +80,12 @@ function bindUi() {
   $("#settings-button").addEventListener("click", () => {
     fillSettings();
     $("#settings-dialog").showModal();
-    // Feedback comes in all the time; what was learned is read fresh.
+    // Feedback, the owner's words and checks come in all the time; what was learned is read fresh.
     api("/api/state")
       .then((data) => {
         state.snapshot.learning = data.learning;
+        state.snapshot.habits = data.habits;
+        state.snapshot.checks = data.checks;
         renderLearning();
       })
       .catch(() => {});
@@ -112,7 +114,7 @@ function bindUi() {
     try {
       await api("/api/lessons/learn", { method: "POST" });
       $("#settings-dialog").close();
-      toast("Learning from your feedback. You review the lessons before they are used.");
+      toast("Learning from your work. How you write applies at once; you check new habits first.");
     } catch (error) {
       settingsError(error.message);
     }

@@ -190,6 +190,13 @@ class Workers:
         task = self.tasks.current(session_id)
         if row["status"] != "idle" or row["closed_at"] or not task or task["status"] != "running":
             return
+        if (special := self.runtime.special(row)) in {"learner", "checker"}:
+            # A helper that stopped short of its last call has nothing more to propose.
+            if special == "checker":
+                await self.runtime.checks.stopped()
+            self.tasks.move(task["id"], "done", result="Stopped without proposing more.")
+            await self.close(session_id)
+            return
         recent = since_last_instruction(self.store.messages(session_id, limit=400))
         if not recent or not instruction(recent[0]):
             return
@@ -212,23 +219,30 @@ class Workers:
             or self.store.follows(session_id)
             or any(d["session_id"] == session_id for d in self.store.drafts("pending"))
         )
-        if not waiting and len(answer) >= FILED_ANSWER_CHARS:
-            from .tools import Report
-
-            status = "question" if answer.endswith("?") else "done"
-            with suppress(Exception):
-                await self.runtime.toolset.t_report(
-                    Report(status=status, summary=answer), session_id
-                )
-                self.runtime.add_message(
-                    session_id, "notice", "It ended without a report: its answer is filed as one."
-                )
-                return
         text = (
             "Your turn ended without report(). The owner sees only reports: call report now "
             "with your full result (status done), or question or blocked if you need something, "
             "or progress if you are waiting for something. Do not redo the work."
         )
+        if not waiting and len(answer) >= FILED_ANSWER_CHARS:
+            from .tools import Report
+
+            status = "question" if answer.endswith("?") else "done"
+            try:
+                await self.runtime.toolset.t_report(
+                    Report(status=status, summary=answer), session_id
+                )
+            except ValueError as exc:
+                # Not taken as it is (a check fails, an asked-for table is missing): the worker
+                # hears why, as it would have from report.
+                text = f"Your turn ended without report(), and your answer was not taken: {exc}"
+            except Exception:
+                logger.warning("Could not file %s's answer as its report.", session_id)
+            else:
+                self.runtime.add_message(
+                    session_id, "notice", "It ended without a report: its answer is filed as one."
+                )
+                return
         with suppress(Exception):
             await self.delivery.deliver(
                 session_id,

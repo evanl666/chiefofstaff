@@ -185,6 +185,29 @@ class Store:
             task_id TEXT NOT NULL, decision_id TEXT NOT NULL, ack TEXT NOT NULL DEFAULT '',
             PRIMARY KEY (task_id, decision_id)
         );
+        CREATE TABLE IF NOT EXISTS observations (
+            id INTEGER PRIMARY KEY, source TEXT NOT NULL, kind TEXT NOT NULL,
+            ref TEXT NOT NULL UNIQUE, text TEXT NOT NULL, meta TEXT NOT NULL DEFAULT '{}',
+            learned INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS observations_unlearned ON observations(learned, kind, id);
+        CREATE TABLE IF NOT EXISTS style_versions (
+            id INTEGER PRIMARY KEY, section TEXT NOT NULL, text TEXT NOT NULL,
+            evidence TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL, created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS failure_cases (
+            id TEXT PRIMARY KEY, session_id TEXT NOT NULL, task_id TEXT NOT NULL DEFAULT '',
+            repo TEXT NOT NULL, git_dir TEXT NOT NULL, top TEXT NOT NULL, command TEXT NOT NULL,
+            output TEXT NOT NULL DEFAULT '', failing TEXT NOT NULL, fixed TEXT NOT NULL,
+            status TEXT NOT NULL, tries INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS checks (
+            id TEXT PRIMARY KEY, case_id TEXT NOT NULL, repo TEXT NOT NULL, name TEXT NOT NULL,
+            why TEXT NOT NULL, applies_to TEXT NOT NULL DEFAULT '[]', command TEXT NOT NULL,
+            evidence TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL,
+            runs INTEGER NOT NULL DEFAULT 0, caught INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
         """)
         for row in self.db.execute("SELECT key, value FROM kv WHERE key LIKE 'question:%'"):
             # Questions between sessions used to live in kv.
@@ -234,6 +257,10 @@ class Store:
             ALTER TABLE sessions ADD COLUMN effort TEXT NOT NULL DEFAULT '';
             ALTER TABLE sessions ADD COLUMN context TEXT NOT NULL DEFAULT '';
             """)
+        lesson_columns = {row["name"] for row in self.db.execute("PRAGMA table_info(lessons)")}
+        if "observed" not in lesson_columns:
+            # The owner's own words (observations) a lesson rests on, besides feedback.
+            self.db.execute("ALTER TABLE lessons ADD COLUMN observed TEXT NOT NULL DEFAULT '[]'")
         if "task" not in columns:
             self.db.executescript("""
             ALTER TABLE sessions ADD COLUMN task TEXT NOT NULL DEFAULT '';
@@ -622,7 +649,42 @@ class Store:
                 WHERE u.at>=? AND u.at<? GROUP BY u.session_id ORDER BY credits DESC LIMIT 50""",
                 window,
             ),
+            "outcomes": self.outcomes(since, until),
         }
+
+    def outcomes(self, since: float, until: float) -> list[dict]:
+        """What the owner's tasks cost per result they accepted, by the model that did most of
+        the work: the measure that counts, more than the cheapest call."""
+        helpers = {
+            key.split(":", 1)[1]
+            for prefix in ("learner:", "checker:", "distill:")
+            for key in self.keys(prefix)
+        }
+        tasks: dict[str, dict] = {}
+        for row in self.all(
+            """SELECT t.id, t.status, t.session_id, u.model, sum(u.credits) AS credits
+            FROM usage u JOIN runs r ON r.id=u.run_id JOIN tasks t ON t.id=r.task_id
+            WHERE u.at>=? AND u.at<? AND u.run_id!='' GROUP BY t.id, u.model""",
+            (since, until),
+        ):
+            if row["session_id"] in helpers:
+                continue
+            task = tasks.setdefault(row["id"], {"status": row["status"], "models": {}})
+            task["models"][row["model"]] = row["credits"] or 0
+        found: dict[str, dict] = {}
+        for task in tasks.values():
+            model = max(task["models"], key=task["models"].get)
+            entry = found.setdefault(
+                model, {"model": model, "tasks": 0, "accepted": 0, "credits": 0.0}
+            )
+            entry["tasks"] += 1
+            entry["accepted"] += task["status"] == "done"
+            entry["credits"] += sum(task["models"].values())
+        for entry in found.values():
+            entry["per_accepted"] = (
+                entry["credits"] / entry["accepted"] if entry["accepted"] else None
+            )
+        return sorted(found.values(), key=lambda entry: -entry["tasks"])
 
     def session_credits(self) -> dict[str, float]:
         return {

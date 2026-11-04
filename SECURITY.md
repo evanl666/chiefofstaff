@@ -70,6 +70,18 @@ Everything stays on your machine: a SQLite database and work folders in the data
 (owner-only permissions), plus Copilot's own session storage (`~/.copilot`). Chief of Staff sends
 no telemetry. GitHub Copilot itself works under GitHub's terms and settings.
 
+To learn how you write (Settings → *How you work*), Chief of Staff stores your own words in that
+database: Slack messages you sent, your PR reviews and review comments, your commit messages and
+what you asked your own Copilot sessions. Others' messages are not kept. The learning worker
+that reads them has no tools but its own (no shell, files or web). Turn the setting off to stop
+reading them.
+
+Checks learned from workers' mistakes are stored there too; the versions they were proven on are
+git commits under `refs/chiefofstaff/` in your repository (never pushed). A check runs only in a
+sandbox: no network, no writes outside a scratch folder, and no reads in your home folder other
+than the repository. Proposed checks run on those versions before you see them; afterwards only
+the checks you approved run.
+
 ## Known limits
 
 - Pattern checks on shell commands are guardrails, not isolation. Unless you turn the sandbox on,
