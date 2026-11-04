@@ -264,6 +264,22 @@ def copilot_home() -> Path:
     return Path(os.environ.get("COPILOT_HOME") or Path.home() / ".copilot")
 
 
+def copilot_trusts(path: str) -> bool:
+    """Whether the owner trusts this folder in Copilot (its trusted folders, or one above it):
+    Copilot then loads the folder's own MCP servers."""
+    try:
+        text = (copilot_home() / "config.json").read_text()
+        # Copilot writes comment lines at the top of it.
+        config = json.loads(
+            "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("//"))
+        )
+        folders = [Path(folder).resolve() for folder in config.get("trustedFolders") or []]
+        target = Path(path).resolve()
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
+    return any(target.is_relative_to(folder) for folder in folders)
+
+
 def own_processes() -> set[int]:
     """This process and its descendants (the Copilot CLI it runs)."""
     try:

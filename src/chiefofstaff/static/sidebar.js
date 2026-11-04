@@ -91,7 +91,7 @@ export function renderStatusLine() {
   if (snap.settings.github_enabled && snap.github.error) nodes.push(el("div", { class: "bad", text: `GitHub: ${snap.github.error}` }));
   if (snap.settings.paused) nodes.push(el("div", { text: "Watchers paused" }));
   const sandboxed = snap.settings.worker_sandbox && snap.sandbox?.supported;
-  if (snap.settings.worker_yolo) nodes.push(el("div", { class: "yolo", text: sandboxed ? "Yolo: no permission prompts (sandboxed)" : "Yolo: workers run without permission checks or sandbox" }));
+  if (snap.settings.worker_yolo) nodes.push(el("div", { class: "yolo", text: sandboxed ? "Yolo: no permission checks (sandboxed)" : "Yolo: workers run without permission checks" }));
   line.replaceChildren(...nodes);
 }
 async function reconnect() {

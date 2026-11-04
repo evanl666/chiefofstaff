@@ -807,6 +807,12 @@ button.receipt.changes:hover { text-decoration: underline; }
   margin: 6px 0 2px;
   font-size: 13px;
 }
+.card.draft .inline-comment { margin: 6px 0 0 10px; }
+.card.draft .inline-comment .where {
+  font: 12px var(--mono);
+  color: var(--soft);
+  margin-bottom: 2px;
+}
 
 .welcome { text-align: center; padding: 34px 12px 4px; }
 .welcome h2 { font-size: 18px; font-weight: 600; margin: 0 0 8px; }

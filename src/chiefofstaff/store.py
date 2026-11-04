@@ -3,6 +3,7 @@ import re
 import sqlite3
 import threading
 import time
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, overload
@@ -246,6 +247,16 @@ class Store:
         (directory / DB_NAME).chmod(0o600)
         if not self.one("SELECT id FROM settings WHERE id=1"):
             self.migrate_legacy_settings()
+        elif not self.get("migrated:worker-parity"):
+            # 0.1.13: workers run like the owner's own Copilot sessions unless they read Slack;
+            # the sandbox, on by default before, becomes a choice. Only that field changes (the
+            # rest is kept as stored, even what does not validate today).
+            row = self.one("SELECT value FROM settings WHERE id=1") or {"value": "{}"}
+            with suppress(ValueError, TypeError):
+                values = json.loads(row["value"])
+                values["worker_sandbox"] = False
+                self.execute("UPDATE settings SET value=? WHERE id=1", (json.dumps(values),))
+        self.set("migrated:worker-parity", "1")
 
     def migrate_legacy_settings(self):
         """Carry over still-meaningful settings from the pre-session database."""
@@ -428,6 +439,10 @@ class Store:
             raise LookupError("Message not found.")
         row["meta"] = json.loads(row["meta"])
         return row
+
+    def update_message_text(self, message_id: int, text: str) -> dict:
+        self.execute("UPDATE messages SET text=? WHERE id=?", (text, message_id))
+        return self.message(message_id)
 
     def update_message_meta(self, message_id: int, meta: dict):
         self.execute(

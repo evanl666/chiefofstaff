@@ -396,6 +396,15 @@ export function readOnlyTimeline(entries, cwd) {
   return [...box.children];
 }
 
+// A report completed after it was shown (its worker wrote the answer in its chat).
+export function replaceMessage(message) {
+  const old = $("#timeline").querySelector(`[data-id="${message.id}"]`);
+  const node = old && renderMessage(message);
+  if (!node?.dataset) return;
+  node.dataset.id = message.id;
+  old.replaceWith(node);
+}
+
 export function appendMessages(messages) {
   const timeline = $("#timeline");
   timeline.querySelector(".empty")?.remove();
@@ -408,7 +417,9 @@ export function appendMessages(messages) {
       addWork(timeline, message.kind === "tool" ? "tool" : "narration", message.text, current()?.cwd);
       return;
     }
-    timeline.append(renderMessage(message));
+    const node = renderMessage(message);
+    if (node?.dataset) node.dataset.id = message.id;
+    timeline.append(node);
   });
   if (!timeline.children.length && state.selected === routerId()) {
     timeline.append(

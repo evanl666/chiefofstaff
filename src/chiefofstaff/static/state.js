@@ -2,7 +2,7 @@
 
 import { $, api, el, toast } from "./dom.js";
 import { renderSidebar } from "./sidebar.js";
-import { appendMessages, renderHeader, updateDraftRecords, updateWorkingLine } from "./session.js";
+import { appendMessages, renderHeader, replaceMessage, updateDraftRecords, updateWorkingLine } from "./session.js";
 import { renderDrafts } from "./drafts.js";
 import { INBOX, scheduleInbox, uncertainDrafts, upsertTask } from "./inbox.js";
 import { refreshUsageLink } from "./settings.js";
@@ -91,6 +91,10 @@ function handleEvent({ type, data }) {
     if (state.connectedOnce) resync().catch(() => {});
     state.connectedOnce = true;
   } else if (type === "message") {
+    if (data.amended) {
+      if (data.session_id === state.selected) replaceMessage(data);
+      return;
+    }
     if (state.loading?.id === data.session_id) state.loading.held.push(data);
     else if (data.session_id === state.selected) appendMessages([data]);
     const meta = data.meta || {};

@@ -40,6 +40,7 @@ from .backend import (
     AgentBackend,
     SandboxPolicy,
     copilot_backend,
+    copilot_trusts,
     older,
     sandbox_supported,
 )
@@ -218,6 +219,7 @@ class Runtime:
         self.rotate_lock = asyncio.Lock()
         self.work_root = store.directory / "work"
         self.workspaces = Workspaces(store, self.work_root)
+        self.workspaces.github_token = lambda repo: self.github.token_for(repo)
         self.tasks = TaskBook(store, on_change=lambda task: self.task_actions.publish(task))
         migrate_tasks(store)
         settle_adopted(store)
@@ -306,6 +308,7 @@ class Runtime:
         if self.ready():
             self.background(self.workers.pump())
             self.background(self.workers.refresh_elsewhere())
+            self.background(self.github.signed_in())  # Which GitHub accounts workers can use.
 
     async def version_warning(self) -> str:
         """A note for the owner when the agent CLI is older than the versions we tested."""
@@ -373,10 +376,12 @@ class Runtime:
         return router_id
 
     def sandbox_policy(self, row: dict) -> SandboxPolicy | None:
-        """What a worker's shell commands may touch; None when they run unsandboxed."""
+        """What a worker's shell commands may touch; None when they run unsandboxed, like the
+        owner's own Copilot sessions (whose Copilot sandbox settings then apply, if any)."""
         if not (
             row["role"] == WORKER
-            and self.store.settings().worker_sandbox
+            # Workers that read Slack always: what they read must not leave through a command.
+            and (self.store.settings().worker_sandbox or row["slack"])
             and self.sandbox_host
             and self.backend
             and self.backend.capabilities.sandbox
@@ -450,7 +455,13 @@ class Runtime:
             # worktree like any project; without one the clone goes into the worker's folder.
             local = await self.workspaces.local_copy(repo)
         if local:
-            have = {checkout.get("repo", checkout["path"]) for checkout in checkouts}
+            # The project folder a worker shares with the owner is not a checkout of its own:
+            # adding that project gives it one, a worktree to change it in.
+            have = {
+                checkout.get("repo", checkout["path"])
+                for checkout in checkouts
+                if checkout.get("branch") or checkout.get("worktree")
+            }
             found = await self.workspaces.make_checkout(
                 workspace, slug, str(local), True, have, carry=not row["slack"]
             )
@@ -590,6 +601,7 @@ class Runtime:
                 caches=bool(sandbox) and settings.shared_caches and not row["slack"],
                 local=bool(sandbox and sandbox.local_network),
                 gradle=bool(sandbox) and (Path.home() / ".gradle" / "caches").is_dir(),
+                gh_accounts=self.github.accounts_cache[1],
             )
         if (profile := self.store.get("profile", "")) and row["role"] != WATCHDOG:
             prompt += f"\n<owner_profile>\n{profile}\n</owner_profile>"
@@ -600,6 +612,10 @@ class Runtime:
             prompt += self.asks.setup_block()
         tools = [self.tools[name] for name in self.tool_names(row)]
         options: dict[str, Any] = {
+            # Copilot's record of past sessions, which the owner's own sessions can search: for
+            # workers that do not read Slack. Sessions that read Slack are not recorded in it,
+            # so what anyone wrote on Slack never reaches a session through it.
+            "enable_session_store": row["role"] == WORKER and not row["slack"],
             "on_permission_request": self.events.on_permission,
             "tools": tools,
             "system_message": {"mode": "append", "content": prompt},
@@ -610,6 +626,10 @@ class Runtime:
         if row["role"] == WORKER and sandbox:
             options["sandbox_config"] = self.connected().sandbox(sandbox)
         if row["role"] == WORKER:
+            # Everything the owner's own Copilot sessions load: plugins, the repository's MCP
+            # servers, skills and custom agents (by default an SDK session loads only the
+            # owner's MCP servers).
+            options["enable_config_discovery"] = True
             # Workers ask the owner directly: Copilot's ask_user, MCP forms and links.
             options["on_user_input_request"] = self.asks.on_user_input
             options["on_elicitation_request"] = self.asks.on_elicitation
@@ -777,7 +797,7 @@ class Runtime:
         if create:
             session = await self.without_unsupported_effort(
                 row,
-                options,
+                options | self.trust(row),
                 lambda tuned: self.connected().create_session(
                     session_id=copilot_id, name=name, **tuned
                 ),
@@ -797,7 +817,7 @@ class Runtime:
                     raise
                 session = await self.without_unsupported_effort(
                     row,
-                    options,
+                    options | self.trust(row),
                     lambda tuned: self.connected().create_session(
                         session_id=copilot_id, name=name, **tuned
                     ),
@@ -820,6 +840,22 @@ class Runtime:
             await self.workers.import_history(row, session)
         self.publish_session(self.store.session(session_id))
         return session
+
+    def trust(self, row: dict) -> dict:
+        """A worker in a worktree of a project the owner trusts in Copilot gets the trust its
+        project has: Copilot then loads the repository's own MCP servers there too. Copilot
+        keeps it (a trust for this session alone would not survive a resume)."""
+        cwd = row["cwd"]
+        if row["role"] != WORKER or not cwd or copilot_trusts(cwd):
+            return {}
+        for checkout in self.workspaces.checkouts(row):
+            if (
+                checkout.get("worktree")
+                and checkout["path"] == cwd
+                and copilot_trusts(checkout["project"] or checkout.get("repo") or "")
+            ):
+                return {"trust_working_directory": "user"}
+        return {}
 
     async def without_unsupported_effort(self, row: dict, options: dict, open_session):
         """Open with the chosen thinking effort; without it if the model takes none (Copilot's
@@ -1110,7 +1146,11 @@ class Runtime:
         if row["closed_at"] and row["role"] == WORKER:
             await self.workers.reopen(session_id)
         prompt = wrap("owner", "message", text)
+        meta = {}
         if row["role"] == ROUTER:
+            # The Router hands this message on as {owner:<ref>} instead of copying it.
+            meta["ref"] = "o" + uuid4().hex[:6]
+            prompt = wrap("owner", "message", text, ref=meta["ref"])
             notes = [self.projects_note(), self.toolset.related_hint(text)]
             context = [wrap("system", "context", note) for note in notes if note]
             prompt = "\n\n".join([prompt, *context])
@@ -1119,7 +1159,7 @@ class Runtime:
             # A question changes nothing, but new work it reports comes back for review.
             self.store.set(f"followup:{task['id']}", "1")
         message = await self.delivery.deliver(
-            session_id, prompt, kind="owner", display=text, steer=True
+            session_id, prompt, kind="owner", display=text, meta=meta, steer=True
         )
         if learn and len(text.strip()) >= INSTRUCTION_CHARS:
             # What the owner asks for again and again becomes a lesson (they review it first).

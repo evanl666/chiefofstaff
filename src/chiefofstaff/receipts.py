@@ -70,6 +70,18 @@ SAYS_CHANGED = re.compile(
     r"\b(added|fixed|implemented|changed|updated|refactored|created|removed|renamed|committed)\b",
     re.IGNORECASE,
 )
+# A negation that governs the verb right after it: "No files were changed", "nothing was
+# committed", "were not updated"; not "it did not work, so I fixed it".
+NEGATED = re.compile(r"(\b(no|not|nothing|never|none|neither|nor)\b|n't)(\W+\w+){0,4}\W*$", re.I)
+
+
+def says_changed(report: str) -> bool:
+    """Whether a report claims changes: "I added a test", not "No files were changed"."""
+    for match in SAYS_CHANGED.finditer(report):
+        clause = re.split(r"[.!?;:,\n]", report[max(0, match.start() - 80) : match.start()])[-1]
+        if not NEGATED.search(clause):
+            return True
+    return False
 
 
 def simple_commands(command: str) -> list[list[str]]:
@@ -300,7 +312,7 @@ def summarize(
             flags.append(f"Says tests pass, but the last test run failed (exit {code}).")
     elif tests and not tests["passed"]:
         flags.append(f"The last test run failed (exit {tests['exit_code']}).")
-    if checkouts and SAYS_CHANGED.search(report or "") and not any(changed.values()):
+    if checkouts and says_changed(report or "") and not any(changed.values()):
         flags.append("Says it made changes, but its checkouts have none.")
     for pr in evidence.get("prs", []):
         if pr.get("checks") == "failing":

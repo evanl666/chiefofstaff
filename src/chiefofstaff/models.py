@@ -75,8 +75,10 @@ class Settings(StrictModel):
     worker_idle_hours: int = Field(default=24, ge=1, le=720)
     # Workers act without permission checks; they still follow their instructions.
     worker_yolo: bool = False
-    # Workers' shell commands run in an OS sandbox: they write only to their own folders.
-    worker_sandbox: bool = True
+    # Workers' shell commands run in Chief of Staff's OS sandbox: they write only to their own
+    # folders. Off: workers run like the owner's own Copilot sessions (with the owner's own
+    # Copilot sandbox settings, if any). Workers that read Slack are always sandboxed.
+    worker_sandbox: bool = False
     # Folders sandboxed workers may also write to (a Copilot plugin's own folder, say).
     sandbox_writable: list[str] = Field(default_factory=list, max_length=10)
     # Sandboxed workers use the owner's dependency and build caches (Gradle, Maven, npm…), as
@@ -190,6 +192,10 @@ class TaskNote(StrictModel):
     text: str = Field(default="", max_length=20000)
 
 
+# Under GitHub's 65536 characters for a review and Slack's 40000 for a message.
+MAX_DRAFT = 39000
+
+
 class DraftDecision(StrictModel):
     # mark_sent: a draft whose sending was interrupted turned out to be delivered.
     action: Literal["send", "reject", "choose", "answer", "mark_sent"]
@@ -197,7 +203,7 @@ class DraftDecision(StrictModel):
     content: dict[str, str | int | float | bool | list[str]] = Field(default_factory=dict)
     # For a workspace question: the chosen folder, or "" for no project.
     choice: str = Field(default="", max_length=1000)
-    text: str = Field(default="", max_length=12000)
+    text: str = Field(default="", max_length=MAX_DRAFT)
     reason: str = Field(default="", max_length=2000)
 
 

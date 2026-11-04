@@ -87,14 +87,15 @@
           <label class="check"><input name="mac_notifications" type="checkbox" /> Desktop notifications</label>
         </div>
         <label class="check"><input name="watchdog_enabled" type="checkbox" /> Watchdog: check workers for stalls and drift</label>
-        <label class="check"><input name="worker_sandbox" type="checkbox" /> Sandbox: workers' commands can write only to their own folders (recommended)</label>
+        <label class="check"><input name="worker_sandbox" type="checkbox" /> Sandbox: workers' commands can write only to their own folders</label>
+        <small>Off, workers can do what your own Copilot sessions can (your tools, keychain, Docker, other repos), under your Copilot sandbox settings if you use them. Workers that read Slack are always sandboxed.</small>
         <small id="sandbox-hint" hidden></small>
         <label class="check"><input name="shared_caches" type="checkbox" /> Workers use your npm and Yarn package stores (checked against lockfiles), so installs are as fast as in your terminal</label>
         <label><span>Also writable in the sandbox</span><textarea name="sandbox_writable" rows="2" placeholder="One folder per line, e.g. a Copilot plugin's own folder"></textarea>
           <small>For tools that must write outside a worker's folders, such as a Copilot plugin hook that keeps a journal.</small>
         </label>
         <label class="check"><input name="worker_yolo" type="checkbox" /> Yolo: workers act without permission prompts</label>
-        <small>With the sandbox on, the OS still keeps commands in their folders. Without it, only the workers' instructions do (no force pushes, no pushing to main, nothing public without your approval). A worker's header can override this.</small>
+        <small>Without yolo, Chief of Staff still refuses force pushes, pushes to main and posting as you without your approval. A worker's header can override this.</small>
 
         <h3>Models</h3>
         <datalist id="model-options"></datalist>

@@ -151,7 +151,7 @@ async def test_only_send_publishes_a_draft(harness):
     with pytest.raises(ValueError, match="Send this draft"):
         await runtime.drafts.resolve(draft["id"], DraftDecision(action="mark_sent"))
     assert harness.store.draft(draft["id"])["status"] == "pending"
-    assert not harness.gh_calls
+    assert not [call for call in harness.gh_calls if call[0][0] != "auth"], "nothing published"
 
 
 def test_a_code_folder_that_became_a_repository_does_not_break_settings(tmp_path):

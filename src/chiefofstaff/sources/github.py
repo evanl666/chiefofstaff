@@ -4,7 +4,9 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
+import time
 from contextlib import suppress
 from datetime import UTC, datetime
 
@@ -27,7 +29,8 @@ def body(item: dict) -> str:
 logger = logging.getLogger(__name__)
 
 
-async def gh(*arguments: str, payload: dict | None = None) -> str:
+async def gh(*arguments: str, payload: dict | None = None, token: str = "") -> str:
+    """`token`: act as that signed-in account instead of gh's active one."""
     executable = shutil.which("gh")
     if not executable:
         raise RuntimeError(
@@ -35,6 +38,8 @@ async def gh(*arguments: str, payload: dict | None = None) -> str:
         )
     env = {key: value for key, value in os.environ.items() if not key.startswith("CHIEFOFSTAFF_")}
     env.update(GH_PROMPT_DISABLED="1", GH_PAGER="cat", NO_COLOR="1")
+    if token:
+        env["GH_TOKEN"] = token
     process = await asyncio.create_subprocess_exec(
         executable,
         *arguments,
@@ -57,13 +62,68 @@ async def gh(*arguments: str, payload: dict | None = None) -> str:
     return stdout.decode(errors="replace")
 
 
+# What gh says when the account it used cannot see a repository (another may).
+NO_ACCESS = re.compile(
+    r"HTTP 40[34]|Could not resolve to a Repository|SAML|do not have permission|"
+    r"cannot be searched",
+    re.IGNORECASE,
+)
+REPOSITORY_ARGUMENT = re.compile(
+    r"^(?:repos/|--repo=?|https://github\.com/)([A-Za-z0-9_.-]+)/[A-Za-z0-9_.-]+"
+)
+
+
+def owner_of(arguments: tuple[str, ...]) -> str:
+    """The repository owner a gh command is about ("" when none)."""
+    for index, argument in enumerate(arguments):
+        if argument == "--repo" and index + 1 < len(arguments):
+            argument = "--repo=" + arguments[index + 1]
+        if found := REPOSITORY_ARGUMENT.match(argument):
+            return found.group(1).lower()
+    return ""
+
+
+def diff_lines(files: list[dict]) -> dict[str, dict[str, set[int]] | None]:
+    """The lines of each changed file a review comment can be on, by side; None when GitHub
+    gives no patch (a binary or very large file) to check against."""
+    lines: dict[str, dict[str, set[int]] | None] = {}
+    for changed in files:
+        patch = changed.get("patch")
+        if patch is None:
+            # A binary file has no lines to comment on; a very large one is not checked.
+            binary = not (changed.get("additions") or changed.get("deletions"))
+            lines[changed["filename"]] = {"LEFT": set(), "RIGHT": set()} if binary else None
+            continue
+        sides: dict[str, set[int]] = {"LEFT": set(), "RIGHT": set()}
+        old = new = 0
+        for row in patch.split("\n"):
+            if hunk := re.match(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", row):
+                old, new = int(hunk.group(1)), int(hunk.group(2))
+            elif row.startswith("+"):
+                sides["RIGHT"].add(new)
+                new += 1
+            elif row.startswith("-"):
+                sides["LEFT"].add(old)
+                old += 1
+            elif not row.startswith("\\"):  # "\ No newline at end of file"
+                sides["LEFT"].add(old)
+                sides["RIGHT"].add(new)
+                old += 1
+                new += 1
+        lines[changed["filename"]] = sides
+    return lines
+
+
 class GitHubSource:
     name = "github"
 
     def __init__(self, store: Store, host: SourceHost, *, gh_command=gh):
         self.store = store
         self.host = host
-        self.gh = gh_command
+        self.raw = gh_command
+        # Every call goes through the account that can see the repository it is about.
+        self.gh = self.routed
+        self.accounts_cache: tuple[float, list[dict]] = (0.0, [])
         self.changed = asyncio.Event()
         self.job: asyncio.Task | None = None
         self.status = {"enabled": False, "connected": False, "error": "", "last_checked": None}
@@ -90,6 +150,100 @@ class GitHubSource:
                 self.status.update(connected=False, error=str(exc)[:500])
             with suppress(TimeoutError):
                 await asyncio.wait_for(self.changed.wait(), timeout=120)
+
+    async def signed_in(self, fresh: bool = False) -> list[dict]:
+        """The github.com accounts signed in to gh ({login, active})."""
+        cached_at, accounts = self.accounts_cache
+        if not fresh and time.monotonic() - cached_at < 600:
+            return accounts
+        try:
+            status = json.loads(await self.raw("auth", "status", "--json", "hosts"))
+        except Exception:
+            return accounts  # An older gh, or none signed in: nothing else to try.
+        accounts = [
+            {"login": account["login"], "active": bool(account.get("active"))}
+            for account in status.get("hosts", {}).get("github.com", [])
+            if account.get("state") == "success" and account.get("login")
+        ]
+        self.accounts_cache = (time.monotonic(), accounts)
+        return accounts
+
+    async def accounts(self) -> list[str]:
+        """The other signed-in accounts, tried when gh's active one cannot see a repository.
+        Read afresh: the owner may just have signed in with the one that can."""
+        return [
+            account["login"]
+            for account in await self.signed_in(fresh=True)
+            if not account["active"]
+        ]
+
+    async def logins(self) -> set[str]:
+        """The owner's GitHub logins (lowercase)."""
+        return {account["login"].lower() for account in await self.signed_in()}
+
+    async def routed(self, *arguments: str, payload: dict | None = None) -> str:
+        """gh as the account that can see the repository: the one remembered for its owner,
+        else gh's active one, else another signed in (a company account, say)."""
+        owner = owner_of(arguments)
+        if not owner:
+            return await self.raw(*arguments, payload=payload)
+        remembered = self.store.get(f"ghaccount:{owner}") or ""
+        failure: RuntimeError | None = None
+        tried: set[str] = set()
+        for login in [remembered, ""]:
+            if login in tried:
+                continue
+            tried.add(login)
+            try:
+                return await self.as_account(owner, login, remembered, arguments, payload)
+            except RuntimeError as exc:
+                if not NO_ACCESS.search(str(exc)):
+                    raise
+                failure = failure or exc
+        for login in await self.accounts():
+            if login in tried:
+                continue
+            try:
+                return await self.as_account(owner, login, remembered, arguments, payload)
+            except RuntimeError as exc:
+                if not NO_ACCESS.search(str(exc)):
+                    raise
+        assert failure
+        raise failure
+
+    async def as_account(self, owner, login, remembered, arguments, payload) -> str:
+        """One attempt as `login` ("": gh's active account); a 403/404 means try another, and
+        the first that answers is remembered for the owner. A failed attempt wrote nothing, so
+        trying again as another account cannot post twice."""
+        token = ""
+        if login:
+            try:
+                token = await self.token(login)
+            except RuntimeError as exc:
+                raise RuntimeError(f"HTTP 403: {login} is no longer signed in to gh") from exc
+        extra = {"token": token} if token else {}
+        reply = await self.raw(*arguments, payload=payload, **extra)
+        if login != remembered:
+            if login:
+                self.store.set(f"ghaccount:{owner}", login)
+            else:
+                self.store.delete(f"ghaccount:{owner}")
+        return reply
+
+    async def token_for(self, repo: str) -> str:
+        """The token of the account that can see this repository, for a command that runs gh
+        itself (a clone); "" for gh's active account."""
+        try:
+            await self.gh("api", f"repos/{repo}", "--jq", ".full_name")
+        except RuntimeError:
+            return ""
+        login = self.store.get(f"ghaccount:{repo.split('/')[0].lower()}")
+        return await self.token(login) if login else ""
+
+    async def token(self, login: str) -> str:
+        return (
+            await self.raw("auth", "token", "--hostname", "github.com", "--user", login)
+        ).strip()
 
     async def pull(self, repo: str, number: int) -> dict:
         return json.loads(await self.gh("api", f"repos/{repo}/pulls/{int(number)}"))
@@ -126,16 +280,24 @@ class GitHubSource:
         self.status.update(connected=True, error="", last_checked=now())
 
     async def poll_review_requests(self, settings, followed: set[str]):
-        arguments = [
-            "search",
-            "prs",
-            "--review-requested=@me",
-            "--state=open",
-            "--limit=50",
-            "--json=number,title,repository,url,author,isDraft",
-        ]
-        arguments += [f"--repo={repo}" for repo in settings.github_repos]
-        for request in json.loads(await self.gh(*arguments)):
+        # One search per owner: each runs as the account that sees that owner's repositories
+        # (@me is that account).
+        owners: dict[str, list[str]] = {}
+        for repo in settings.github_repos:
+            owners.setdefault(repo.split("/")[0], []).append(repo)
+        requests = []
+        for repos in owners.values():
+            arguments = [
+                "search",
+                "prs",
+                "--review-requested=@me",
+                "--state=open",
+                "--limit=50",
+                "--json=number,title,repository,url,author,isDraft",
+                *(f"--repo={repo}" for repo in repos),
+            ]
+            requests += json.loads(await self.gh(*arguments))
+        for request in requests:
             repo = request["repository"]["nameWithOwner"].lower()
             if repo not in settings.github_repos or request.get("isDraft"):
                 continue
@@ -238,6 +400,12 @@ class GitHubSource:
         if state != "open":
             self.host.unfollow(thread, finished=True, merged=state == "merged")
 
+    async def diff_lines(self, repo: str, number: int) -> dict:
+        files = await self.gh(
+            "api", f"repos/{repo}/pulls/{int(number)}/files?per_page=100", "--paginate"
+        )
+        return diff_lines(json.loads(files or "[]"))
+
     async def head(self, repo: str, number: int) -> str:
         pull = await self.pull(repo, number)
         if pull["state"] != "open":
@@ -306,12 +474,31 @@ class GitHubSource:
             return await self.publish_reply(target, body)
         if await self.head(repo, target["number"]) != target["head_sha"]:
             raise ValueError("The PR changed after the draft was written; nothing was published.")
+        payload = {"event": "COMMENT", "commit_id": target["head_sha"], "body": body}
+        if comments := target.get("comments"):
+            payload["comments"] = [
+                {
+                    "path": comment["path"],
+                    "line": comment["line"],
+                    "side": comment.get("side", "RIGHT"),
+                    "body": comment["body"],
+                }
+                | (
+                    {
+                        "start_line": comment["start_line"],
+                        "start_side": comment.get("side", "RIGHT"),
+                    }
+                    if comment.get("start_line")
+                    else {}
+                )
+                for comment in comments
+            ]
         reply = await self.gh(
             "api",
             f"repos/{repo}/pulls/{int(target['number'])}/reviews",
             "--method=POST",
             "--input=-",
-            payload={"event": "COMMENT", "commit_id": target["head_sha"], "body": body},
+            payload=payload,
         )
         review = json.loads(reply)
         if review.get("id"):

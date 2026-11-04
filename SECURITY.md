@@ -25,7 +25,7 @@ makes a mistake.
 
 | Boundary | Enforced by | Holds when |
 |---|---|---|
-| A worker's shell commands write only to its workspace, its checkouts and temporary folders, plus npm's package store and Yarn's archives (whose contents those tools check against lockfiles before use; in a Node project Copilot itself also opens npm's whole cache folder) and folders you add under *Also writable in the sandbox*. Caches whose contents run as they are (Gradle and Maven jars, pre-commit hooks) are read-only | **OS sandbox** (Copilot's, Seatbelt on macOS, bubblewrap on Linux) | Sandbox is on (Settings, default) and the machine supports it. *Workers use your package caches* off keeps npm's and Yarn's out of reach too; workers that read Slack never get them. A folder you add under *Also writable* can change what your own tools run |
+| A worker's shell commands write only to its workspace, its checkouts and temporary folders, plus npm's package store and Yarn's archives (whose contents those tools check against lockfiles before use; in a Node project Copilot itself also opens npm's whole cache folder) and folders you add under *Also writable in the sandbox*. Caches whose contents run as they are (Gradle and Maven jars, pre-commit hooks) are read-only | **OS sandbox** (Copilot's, Seatbelt on macOS, bubblewrap on Linux) | Sandbox is on (Settings; off by default since 0.1.13, always on for workers that read Slack) and the machine supports it. *Workers use your package caches* off keeps npm's and Yarn's out of reach too; workers that read Slack never get them. A folder you add under *Also writable* can change what your own tools run |
 | A worker cannot change a repository's hooks or config, its submodules' config, or your other worktrees (all of which can run code when you use git there) | **OS sandbox** | Sandbox is on. Treat the worker's own folder like a stranger's pull request: running anything there, git included, runs what the worker wrote |
 | Workers never see your GitHub token; `git` and `gh` authenticate through Copilot's local proxy | **OS sandbox** + Copilot's credential proxy | Sandbox is on |
 | Workers cannot read `~/.ssh` keys or other files outside their folders' read rules | **OS sandbox** | Sandbox is on |
@@ -72,14 +72,21 @@ no telemetry. GitHub Copilot itself works under GitHub's terms and settings.
 
 ## Known limits
 
-- Pattern checks on shell commands are guardrails, not isolation. Keep the sandbox on.
+- Pattern checks on shell commands are guardrails, not isolation. Unless you turn the sandbox on,
+  workers that do not read Slack run as your own Copilot sessions do: with your access.
 - Unsandboxed commands run as you: they can reach whatever your account can, including
   keychain items that do not ask for a password.
 - The sandbox does not confine Copilot's built-in file edits as strictly as shell commands
   (Copilot applies the same policy on a best-effort basis); Chief of Staff's permission check
   covers them while yolo is off.
 - A worker in a shared project folder (not isolated) writes to that folder itself.
-- MCP servers are not sandboxed: they are what you or your company configured for Copilot, and
-  run as they do there. A worker can use any MCP server Copilot offers it.
+- MCP servers are not sandboxed: they are what you or your company configured for Copilot
+  (including your plugins' and, in a repository you trust, the repository's own), and run as they
+  do there. A worker can use any MCP server Copilot offers it. A worktree of a repository you
+  trust in Copilot is added to Copilot's trusted folders.
+- Workers that do not read Slack can search Copilot's record of your past sessions, as your own
+  sessions can. The Router, the Slack session and workers that read Slack are not recorded
+  there (from 0.1.13; earlier versions recorded them), so Slack messages do not reach workers
+  that way.
 - Agents can be persuaded. Approve drafts with care, and keep yolo off for workers that read
   untrusted content.

@@ -67,6 +67,22 @@ def test_claims_are_checked_against_what_was_observed():
         "Says tests pass, but no test run was observed.",
         "Says it made changes, but its checkouts have none.",
     ]
+    analysis = receipts.summarize(
+        [command("python3 analyze.py", 0)],
+        {"checkouts": [{}]},
+        "Analyzed data/sales.csv. No files were changed. Line 302 adds 3,600.00 to north.",
+    )
+    assert analysis["flags"] == [], "an analysis that changed nothing says so: not a claim"
+    assert not receipts.says_changed("I did not change anything, nothing was committed.")
+    assert receipts.says_changed("Nothing failed. I added a regression test.")
+    for claim in (
+        "The endpoint did not validate input, so I fixed it and added a regression test.",
+        "The login page didn't redirect after sign-in, so I updated the handler.",
+        "Without changing the public API, I refactored the parser.",
+        "Tests were not running on CI because the workflow had no trigger, so I fixed it.",
+    ):
+        assert receipts.says_changed(claim), claim
+    assert not receipts.says_changed("None of the files were changed.")
     failing = receipts.summarize([command("npm test", 1)], None, "Done.")
     assert failing["flags"] == ["The last test run failed (exit 1)."]
     red = receipts.summarize(
