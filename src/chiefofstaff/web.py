@@ -4,6 +4,7 @@ import secrets
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -194,7 +195,18 @@ def create_app(
 
     @app.post("/api/lessons/learn")
     async def learn_now():
-        await runtime.learning.learn()
+        # What the owner wrote elsewhere since the last look, then everything not learned yet.
+        await runtime.habits.learn_now()
+        return runtime.snapshot()
+
+    @app.post("/api/style/{section}/undo")
+    async def undo_style(section: str):
+        await runtime.habits.undo(section)
+        return runtime.snapshot()
+
+    @app.post("/api/checks/{check_id}/{action}")
+    async def turn_check(check_id: str, action: Literal["enable", "disable"]):
+        runtime.checks.turn(check_id, action == "enable")
         return runtime.snapshot()
 
     @app.post("/api/lessons/{lesson_id}/remove")

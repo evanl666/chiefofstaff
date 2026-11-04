@@ -283,9 +283,16 @@ async def scenario_reopen(app: App, worker: dict):
         reported = any(
             m["kind"] == "inbound" and m["meta"].get("from") == worker["id"] for m in messages
         )
-        # The Router may know the answer already from that worker's reports.
-        answered = not any(m["text"].startswith("Reopened") for m in messages) and any(
-            m["kind"] == "assistant" for m in messages
+        # The Router may know the answer already from that worker's reports. Its first words
+        # after the question may still be about the report before it: wait for the number.
+        idle = (await app.get(f"/api/sessions/{router}"))["status"] == "idle"
+        answered = (
+            idle
+            and not any(m["text"].startswith("Reopened") for m in messages)
+            and any(
+                m["kind"] == "assistant" and re.search(r"\b1\b|\bone\b", m["text"], re.I)
+                for m in messages
+            )
         )
         return messages if reported or answered else None
 
@@ -320,8 +327,7 @@ async def scenario_slack(app: App, workspace: Workspace):
     await app.post("/api/settings", {**(await app.get("/api/state"))["settings"]})
 
     async def draft_ready():
-        drafts = (await app.get("/api/state"))["drafts"]
-        return drafts[0] if drafts else None
+        return await pending_draft(app, set())
 
     draft = await wait_for("Slack reply drafted", draft_ready, 600, app)
     log(f"draft: {draft['text']!r} -> {draft['target']}")
@@ -361,8 +367,14 @@ async def scenario_slack(app: App, workspace: Workspace):
     log("Slack round trip verified; the DM reached the Router once")
 
 
-async def pending_draft(app: App, exclude: set[str]):
-    drafts = [d for d in (await app.get("/api/state"))["drafts"] if d["id"] not in exclude]
+async def pending_draft(app: App, exclude: set[str], kind: str = "slack"):
+    """The first pending draft of this kind (other cards, lessons learned meanwhile, say, may
+    come in at any time)."""
+    drafts = [
+        d
+        for d in (await app.get("/api/state"))["drafts"]
+        if d["id"] not in exclude and d["kind"] == kind
+    ]
     return drafts[0] if drafts else None
 
 
@@ -378,7 +390,25 @@ async def scenario_thread(app: App, workspace: Workspace):
         f"<@U0OWNER1> quick check: is the deploy dashboard still {DASHBOARD}?",
     )
     log(f"Bob mentioned the owner in #deploys (ts {root['ts']})")
-    first = await wait_for("reply drafted for Bob", lambda: pending_draft(app, set()), 600, app)
+    asked_at = max((m["id"] for m in await app.get(f"/api/sessions/{router}/messages")), default=0)
+
+    async def drafted_or_asked():
+        if draft := await pending_draft(app, set()):
+            return draft
+        # It may ask the owner first whether the link is still current: they say it is.
+        messages = await app.get(f"/api/sessions/{router}/messages?after={asked_at}")
+        if any(m["kind"] == "update" and "dashboard" in m["text"] for m in messages):
+            return "asked"
+        return None
+
+    first = await wait_for("reply drafted for Bob", drafted_or_asked, 600, app)
+    if first == "asked":
+        log("the owner was asked whether the link is current: yes")
+        await app.post(
+            f"/api/sessions/{router}/messages",
+            {"text": "Yes, that is still the deploy dashboard. Draft the reply to Bob."},
+        )
+        first = await wait_for("reply drafted for Bob", lambda: pending_draft(app, set()), 600, app)
     assert first["target"]["channel_id"] == "C0DEPLOYS", first
     await app.post(f"/api/drafts/{first['id']}", {"action": "send"})
     sent = workspace.sent[-1]
@@ -874,8 +904,7 @@ async def scenario_company_review(app: App):
     )  # fmt: skip
 
     async def drafted():
-        draft = await pending_draft(app, before)
-        return draft if draft and draft["kind"] == "github" else None
+        return await pending_draft(app, before, "github")
 
     draft = await wait_for("the company PR review is drafted", drafted, 900, app)
     target = draft["target"]
@@ -1227,6 +1256,19 @@ async def scenario_learning(app: App):
     """The owner's feedback becomes lessons a real model proposes and the owner reviews."""
     import sqlite3
 
+    # Learning from the owner's own words starts by itself two minutes after a start: let it
+    # finish, and clear what it proposed, so this card holds only what the feedback teaches.
+    async def settled():
+        state = await app.get("/api/state")
+        busy = [
+            s for s in state["sessions"] if s["title"] == "Learn how you work"
+            and s["status"] in {"queued", "starting", "working"}
+        ]  # fmt: skip
+        return state if not busy else None
+
+    state = await wait_for("no learning at work", settled, 300, app)
+    for card in [d for d in state["drafts"] if d["kind"] == "lessons"]:
+        await app.post(f"/api/drafts/{card['id']}", {"action": "reject"})
     database = sqlite3.connect(app.data / "chiefofstaff.db")
     with database:
         for kind, context, proposed, owner, scope, agreed in FEEDBACK:

@@ -89,6 +89,7 @@ def matches(message: dict, query: str) -> bool:
                 return False
         elif lowered.startswith("from:"):
             target = term[5:].strip("<>@")
+            target = OWNER if target.lower() == "me" else target
             if target != user and target.lower() not in NAMES.get(user, "").lower():
                 return False
         elif lowered.startswith(("has::", "hasmy::")):

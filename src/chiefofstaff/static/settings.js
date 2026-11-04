@@ -39,6 +39,28 @@ function usageTable(title, rows, label, onclick) {
     ),
   );
 }
+// What a result the owner accepted cost, by the model that did most of a task's work.
+function outcomesTable(rows) {
+  if (!rows.length) return null;
+  return el(
+    "div",
+    {},
+    el("h3", { text: "Per accepted result" }),
+    el(
+      "table",
+      {},
+      ...rows.map((row) =>
+        el(
+          "tr",
+          {},
+          el("td", { text: row.model || "unknown" }),
+          el("td", { class: "num", text: `${row.accepted} of ${row.tasks} accepted` }),
+          el("td", { class: "num", text: row.per_accepted === null ? "–" : `${row.per_accepted.toFixed(1)} credits each` }),
+        ),
+      ),
+    ),
+  );
+}
 export async function showUsage(range) {
   const form = $("#usage-dialog form");
   let since;
@@ -66,6 +88,7 @@ export async function showUsage(range) {
           $("#usage-dialog").close();
           select(row.session_id);
         }),
+        outcomesTable(usage.outcomes || []),
         usageTable("By model", usage.by_model, (row) => row.model || "unknown"),
         usageTable("By role", usage.by_role, (row) => roles[row.role] || row.role),
       ].filter(Boolean),
@@ -139,6 +162,8 @@ export function fillSettings() {
   form.setup_notes.value = notesText();
   form.setup_notes.dataset.initial = form.setup_notes.value;
   $("#profile-draft").hidden = !state.snapshot.profile_draft;
+  form.learn_from_work.checked = settings.learn_from_work;
+  form.learn_checks.checked = settings.learn_checks;
   renderLearning();
   form.paused.checked = settings.paused;
   $("#slack-status").textContent = slackStatusText();
@@ -186,9 +211,68 @@ export function renderLearning() {
       ),
     ),
   );
-  if (!learning.lessons.length) $("#lessons").append(el("li", { class: "empty-note", text: "No lessons yet." }));
-  $("#learn-now").disabled = !learning.new_feedback;
-  $("#learn-status").textContent = learning.new_feedback ? `${learning.new_feedback} new piece${learning.new_feedback === 1 ? "" : "s"} of feedback` : "No new feedback";
+  if (!learning.lessons.length) $("#lessons").append(el("li", { class: "empty-note", text: "No habits yet." }));
+  const habits = state.snapshot.habits;
+  if (habits) {
+    $("#styles").replaceChildren(
+      ...habits.styles.map((style) =>
+        el(
+          "li",
+          {},
+          el("div", { class: "style-text" }, el("strong", { text: `${style.title} · v${style.version}` }), el("small", { text: style.text })),
+          el("button", { type: "button", class: "link", text: "Undo", title: style.version > 1 ? "Back to the previous version" : "Stop using it", onclick: () => memoryAction(`/api/style/${style.section}/undo`) }),
+        ),
+      ),
+    );
+    const parts = Object.entries(OBSERVED)
+      .filter(([kind]) => habits.observed[kind])
+      .map(([kind, [one, many]]) => `${habits.observed[kind]} ${habits.observed[kind] === 1 ? one : many}`);
+    const fresh = habits.new + learning.new_feedback;
+    const errors = Object.values(habits.errors || {});
+    $("#learn-status").textContent = [
+      parts.length ? `Read ${parts.join(", ")}.` : "",
+      fresh ? `${fresh} new to learn from.` : "Nothing new to learn from.",
+      errors.length ? `Could not read: ${errors[0]}` : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+  }
+  const checks = state.snapshot.checks;
+  if (checks) {
+    $("#checks").replaceChildren(
+      ...checks.checks.map((check) =>
+        el(
+          "li",
+          { class: check.status === "disabled" ? "off" : "" },
+          el(
+            "div",
+            { class: "style-text" },
+            el("strong", { text: `${check.name} · ${check.repo}` }),
+            el("small", { text: `${check.why} Caught ${check.caught} of ${check.runs} run${check.runs === 1 ? "" : "s"}.` }),
+            el("code", { text: check.command }),
+          ),
+          el("button", { type: "button", class: "link", text: check.status === "active" ? "Turn off" : "Turn on", onclick: () => memoryAction(`/api/checks/${check.id}/${check.status === "active" ? "disable" : "enable"}`) }),
+        ),
+      ),
+    );
+    if (!checks.sandbox) $("#checks").append(el("li", { class: "empty-note", text: "Needs a sandbox (macOS sandbox-exec, or bwrap on Linux)." }));
+  }
+}
+// What the owner's words were read from, as counted.
+const OBSERVED = {
+  slack_dm: ["Slack DM", "Slack DMs"],
+  slack_channel: ["channel message", "channel messages"],
+  pr_review: ["review comment", "review comments"],
+  commit: ["commit", "commits"],
+  instruction: ["request to sessions", "requests to sessions"],
+};
+async function memoryAction(path) {
+  try {
+    state.snapshot = { ...state.snapshot, ...(await api(path, { method: "POST" })) };
+    renderLearning();
+  } catch (error) {
+    settingsError(error.message);
+  }
 }
 function notesText() {
   return Object.entries(state.snapshot.setup_notes || {})
@@ -230,6 +314,8 @@ export async function saveSettings(event) {
     ),
     worker_credit_limit: Number(form.worker_credit_limit.value || 0),
     digest_time: form.digest_time.value,
+    learn_from_work: form.learn_from_work.checked,
+    learn_checks: form.learn_checks.checked,
     paused: form.paused.checked,
   };
   try {

@@ -70,13 +70,11 @@ async def test_the_owners_feedback_becomes_lessons_they_approve(tmp_path, monkey
     assert runtime.tasks.current(learner["id"])["status"] == "done", "no task left to review"
     assert runtime.learning.unlearned() == []
     [lessons] = [d for d in harness.store.drafts() if d["kind"] == "lessons"]
-    first, _ = lessons["target"]["lessons"]
+    first, second = lessons["target"]["lessons"]
     assert first["because"][0]["owner"] == "Write a rollback"
 
-    await runtime.drafts.resolve(
-        lessons["id"],
-        DraftDecision(action="answer", content={first["id"]: "Give migrations a rollback plan"}),
-    )
+    kept = {first["id"]: "Give migrations a rollback plan", second["id"]: ""}
+    await runtime.drafts.resolve(lessons["id"], DraftDecision(action="answer", content=kept))
     assert [lesson["text"] for lesson in runtime.learning.lessons()] == [
         "Give migrations a rollback plan"
     ], "reworded by the owner; the other one dropped"

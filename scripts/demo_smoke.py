@@ -183,7 +183,7 @@ async def run(scheme: str):
             log("changed a decision: the affected result was redone, and its worker confirmed")
 
             await page.click("#settings-button")
-            await expect(page.locator("#learn-status")).to_contain_text("new piece")
+            await expect(page.locator("#learn-status")).to_contain_text("new to learn from")
             await page.click("#learn-now")
             lessons = page.locator("#inbox .card.lessons")
             await expect(lessons).to_be_visible(timeout=30000)

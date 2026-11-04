@@ -1,3 +1,9 @@
+import json
+from types import SimpleNamespace
+
+import pytest
+from conftest import call_tool, settle
+
 from chiefofstaff import receipts
 
 
@@ -163,3 +169,50 @@ def test_git_and_gh_output_is_read():
     )
     assert receipts.checks_state([{"status": "IN_PROGRESS", "conclusion": ""}]) == "pending"
     assert receipts.checks_state([]) == "none"
+
+
+async def test_a_failing_test_run_piped_into_tail_is_seen_failing(harness):
+    runtime = await harness.connect()
+    result = await call_tool(
+        runtime, "spawn_worker", harness.router_id, title="Fix", instructions="Fix", why_new="t"
+    )
+    worker = json.loads(result.text_result_for_llm)["session_id"]
+    session = harness.session(worker)
+    for call, output in [
+        ("c1", "F.\n1 failed, 1 passed in 0.1s\n<exited with exit code 0>"),
+        ("c2", "..\n2 passed in 0.1s\n<exited with exit code 0>"),
+    ]:
+        command = "uv run --with pytest pytest -q 2>&1 | tail -15"
+        session.emit("tool.execution_start", tool_name="bash", arguments={"command": command},
+                     tool_call_id=call)  # fmt: skip
+        session.emit("tool.execution_complete", tool_call_id=call, success=True,
+                     result=SimpleNamespace(content=output))  # fmt: skip
+    await settle(runtime)
+    codes = [row["exit_code"] for row in harness.store.all("SELECT exit_code FROM commands")]
+    assert codes == [1, 0], "tail's exit code is not the tests'"
+
+
+@pytest.mark.parametrize(
+    ("output", "failed"),
+    [
+        ("F.\n1 failed, 2 passed in 0.10s", True),
+        ("======= 2 passed, 1 error in 0.31s =======", True),
+        ("retried 3 errors\nflaky 2 failed attempts recovered\n5 passed in 1.2s", False),
+        ("4 passed, 1 xfailed in 0.2s", False),
+        ("--- FAIL: TestX (0.00s)\nFAIL\tpkg\t0.1s", True),
+        ("test result: FAILED. 1 passed; 1 failed", True),
+        ("Tests:       0 failed, 4 passed, 4 total", False),
+        (" Tests  1 failed | 3 passed (4)", True),
+        ("  3 passing (20ms)\n  1 failing", True),
+        ("FAILED tests/test_x.py::test_y - assert 1 == 2", True),
+        ("FAILED (failures=1)", True),
+        ("BUILD FAILED in 3s", True),
+        ("ERROR Retry - giving up\nBUILD SUCCESSFUL in 2s", False),
+        ("  1 failing upload\n    ✓ retries\n  5 passing", False),
+        ("2 errors in 0.5s while retrying\n7 passed in 1.1s", False),
+        ("test_x[1 failed] PASSED\n3 passed in 0.2s", False),
+    ],
+)
+def test_a_piped_test_run_is_read_by_its_summary(output, failed):
+    assert receipts.masked_failure("run tests 2>&1 | tail -5", output) == failed
+    assert not receipts.masked_failure("run tests", output), "unpiped: its exit code says"

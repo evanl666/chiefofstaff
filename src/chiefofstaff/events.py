@@ -108,11 +108,24 @@ class Events:
         if not call_id:
             return
         code = receipts.exit_code(output, getattr(data, "success", None))
+        ran = self.store.one(
+            "SELECT command, kind FROM commands WHERE session_id=? AND call_id=? "
+            "AND ended_at IS NULL",
+            (session_id, call_id),
+        )
+        if (
+            code == 0
+            and ran
+            and ran["kind"] == "test"
+            and receipts.masked_failure(ran["command"], output)
+        ):
+            code = 1  # The tests failed; the pipe's last command did not.
         self.store.execute(
             """UPDATE commands SET exit_code=?, output=?, ended_at=?
             WHERE session_id=? AND call_id=? AND ended_at IS NULL""",
             (code, output[-600:], now(), session_id, call_id),
         )
+        self.runtime.checks.on_command(session_id, call_id)
 
     def on_event(self, session_id: str, event: Any, source: Any = None):
         if source is not None and self.states.handle(session_id) is not source:

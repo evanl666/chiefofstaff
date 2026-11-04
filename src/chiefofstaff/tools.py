@@ -18,8 +18,10 @@ from pydantic import BaseModel, Field
 
 from . import prompts, threads
 from .asks import AnswerSession, AskSession, RecordSetup
+from .checks import ProposeChecks
 from .decisions import AckDecision, AskDecision, RecordDecision
 from .envelope import clean_title, short, wrap
+from .habits import UpdateStyle
 from .learning import ProposeLessons
 from .models import MAX_DRAFT, DraftDecision, NestedArguments
 from .policy import within
@@ -57,7 +59,8 @@ class SpawnWorker(BaseModel):
     )
     isolate: bool = Field(
         default=False,
-        description="Create a dedicated git worktree and branch; use for code changes",
+        description="Create a dedicated git worktree and branch: for any change to files, and "
+        "whenever the owner asks for a worktree or a branch",
     )
     more_projects: list[str] = Field(
         default_factory=list,
@@ -566,6 +569,19 @@ class Tools:
                 "Propose the lessons learned from the owner's feedback, for the owner to review.",
                 ProposeLessons,
                 self.runtime.learning.t_propose_lessons,
+            ),
+            (
+                "update_style",
+                "Update one section of how the owner writes; it applies at once.",
+                UpdateStyle,
+                self.runtime.habits.t_update_style,
+            ),
+            (
+                "propose_checks",
+                "Propose checks learned from workers' mistakes; each is run on the failing and "
+                "the fixed code before the owner sees it.",
+                ProposeChecks,
+                self.runtime.checks.t_propose_checks,
             ),
             (
                 "ask_session",
@@ -1304,6 +1320,13 @@ class Tools:
                 "step, the numbers, and the table if one was asked for. If this already is the "
                 "whole answer, call report again with it unchanged."
             )
+        if (
+            task
+            and params.status == "done"
+            and task["status"] == "running"
+            and (problem := await self.runtime.checks.before_done(row, task))
+        ):
+            raise ValueError(problem)
         meta = {"status": params.status, "task_id": task["id"] if task else None}
         self.runtime.add_message(caller, "report", params.summary, meta)
         if task and params.status == "done" and params.criteria:

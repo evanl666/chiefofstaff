@@ -272,13 +272,46 @@ function lessonsCard(draft) {
   const node = el(
     "div",
     { class: "card draft lessons", "data-id": draft.id },
-    el("div", { class: "head" }, el("span", { class: "label", text: "Learned from your feedback" }), el("span", { class: "chip waiting", text: "Check before use" })),
+    el("div", { class: "head" }, el("span", { class: "label", text: "Learned from your work" }), el("span", { class: "chip waiting", text: "Check before use" })),
     el("div", { class: "why", text: "Keep what fits how you work; reword or untick the rest. Kept lessons go into your sessions' instructions." }),
     el("ul", { class: "lesson-list" }, ...rows.map((row) => row.node)),
   );
   const decide = cardActions(draft, node, error);
-  const keep = () => decide({ action: "answer", content: Object.fromEntries(rows.filter((row) => row.keep.checked).map((row) => [row.lesson.id, row.text.value])) });
+  // Every lesson shown, an unticked one as "": lessons added to the card meanwhile come back.
+  const keep = () => decide({ action: "answer", content: Object.fromEntries(rows.map((row) => [row.lesson.id, row.keep.checked ? row.text.value : ""])) });
   node.append(el("div", { class: "actions" }, el("button", { type: "button", class: "text", text: "Drop all", onclick: () => decide({ action: "reject" }) }), el("button", { type: "button", text: "Keep ticked", onclick: keep })), error);
+  return node;
+}
+// A check learned from a mistake a worker fixed, with the proof that it catches it.
+function checkCard(draft) {
+  const target = draft.target;
+  const error = el("span", { class: "error" });
+  const where = target.applies_to.length ? target.applies_to.join(", ") : "any file";
+  const caught = (target.failing.output || "").trim().split("\n").slice(-3).join("\n");
+  const node = el(
+    "div",
+    { class: "card draft check", "data-id": draft.id },
+    el("div", { class: "head" }, el("span", { class: "label", text: "Check learned from a mistake" }), el("span", { class: "chip waiting", text: "Check before use" })),
+    el("div", { class: "question", text: target.name }),
+    el("div", { class: "why", text: `${target.why} Runs in ${target.repo} on ${where} when a worker says it is done${target.task ? `; from “${target.task}”` : ""}.` }),
+    el("pre", { text: target.command }),
+    el(
+      "div",
+      { class: "proof" },
+      el("span", { text: `✓ Fails on the code that had the mistake (exit ${target.failing.exit})${caught ? `: ${caught}` : ""}` }),
+      el("span", { text: `✓ Passes on the fixed code (exit ${target.fixed.exit})` }),
+    ),
+  );
+  const decide = cardActions(draft, node, error);
+  node.append(
+    el(
+      "div",
+      { class: "actions" },
+      error,
+      el("button", { type: "button", class: "text", text: "Drop", onclick: () => decide({ action: "reject" }) }),
+      el("button", { type: "button", text: "Use this check", onclick: () => decide({ action: "answer" }) }),
+    ),
+  );
   return node;
 }
 // The owner profile a worker distilled: read and edit it here; sessions use it once kept.
@@ -337,6 +370,7 @@ export function slackDestination(target) {
 }
 export function draftCard(draft) {
   if (draft.kind === "lessons") return lessonsCard(draft);
+  if (draft.kind === "check") return checkCard(draft);
   if (draft.kind === "profile") return profileCard(draft);
   if (draft.kind === "adopt") return adoptCard(draft);
   if (draft.kind === "decision") return decisionCard(draft);

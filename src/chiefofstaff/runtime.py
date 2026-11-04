@@ -45,6 +45,7 @@ from .backend import (
     sandbox_supported,
 )
 from .bus import Bus
+from .checks import Checks
 from .decisions import Decisions
 from .delivery import Delivery
 from .digest import digest
@@ -52,6 +53,7 @@ from .drafts import Drafts
 from .envelope import UNTRUSTED, clean_title, sender, short, wrap
 from .events import ROUTER_CONTEXT, Events
 from .focus import Focus
+from .habits import Habits
 from .learning import Learning
 from .models import Settings
 from .notify import mac_notification
@@ -115,6 +117,10 @@ ROUTER_TOOLS = [
 ]
 # Files opened from a report or message show at most this much.
 MAX_FILE_SHOWN = 1_000_000
+# Workers Chief of Staff starts for itself that have nothing but their own tools: they read
+# quoted data (the owner's words, test output) and propose; they run nothing.
+TOOLLESS = {"learner": ["update_style", "propose_lessons"], "checker": ["propose_checks"]}
+SPECIALS = ("learner", "checker", "distill")
 # Owner messages at least this long are instructions the learner looks at ("progress?" is not).
 INSTRUCTION_CHARS = 25
 # A message to a worker this long into a step gets a note that it waits for the step to end.
@@ -246,6 +252,8 @@ class Runtime:
         self.asks = Asks(self)
         self.decisions = Decisions(self)
         self.learning = Learning(self)
+        self.habits = Habits(self)
+        self.checks = Checks(self)
         self.focus = Focus(self)
         self.watchdog = Watchdog(self)
         self.toolset = Tools(self)
@@ -266,6 +274,7 @@ class Runtime:
             await source.start()
         self.watch_job = asyncio.create_task(self.watch_loop())
         self.mirror_job = asyncio.create_task(self.workers.mirror_loop())
+        await self.habits.start()
         if self.store.drafts("uncertain"):
             self.background(self.drafts.check_uncertain())
 
@@ -279,6 +288,7 @@ class Runtime:
                 await asyncio.gather(job, return_exceptions=True)
         for source in self.all_sources():
             await source.stop()
+        await self.habits.stop()
         await self.disconnect()
         for task in list(self.jobs):
             task.cancel()
@@ -578,9 +588,17 @@ class Runtime:
         path.mkdir(parents=True, exist_ok=True, mode=0o700)
         return path
 
+    def special(self, row: dict) -> str:
+        """The kind of worker Chief of Staff started for itself ("" for the owner's work)."""
+        if row["role"] != WORKER:
+            return ""
+        return next((kind for kind in SPECIALS if self.store.get(f"{kind}:{row['id']}")), "")
+
     def tool_names(self, row: dict) -> list[str]:
         if row["role"] == ROUTER:
             return ROUTER_TOOLS
+        if (special := self.special(row)) in TOOLLESS:
+            return TOOLLESS[special]
         if row["role"] == WATCHDOG:
             return ["assess_worker"]
         names = ["report", "follow_thread", "unfollow_thread"]
@@ -601,6 +619,8 @@ class Runtime:
         return names
 
     def options(self, row: dict) -> dict:
+        if self.special(row) in TOOLLESS:
+            return self.helper_options(row)
         settings = self.store.settings()
         prompt = PROMPTS[row["role"]]
         sandbox = self.sandbox_policy(row)
@@ -619,6 +639,7 @@ class Runtime:
         if (profile := self.store.get("profile", "")) and row["role"] != WATCHDOG:
             prompt += f"\n<owner_profile>\n{profile}\n</owner_profile>"
         prompt += self.learning.block(row)
+        prompt += self.habits.block(row)
         if row["role"] == SLACK:
             prompt += self.drafts.style_examples()
         if row["role"] in {ROUTER, WORKER}:
@@ -672,6 +693,23 @@ class Runtime:
             slack_tools = [f"slack-{name}" for name in mcp["tools"]] if mcp else []
             options["available_tools"] = [tool.name for tool in tools] + slack_tools
             options["disabled_mcp_servers"] = [GITHUB_MCP]
+        return options
+
+    def helper_options(self, row: dict) -> dict:
+        """A worker that only reads what it is given and calls its own tools."""
+        tools = [self.tools[name] for name in self.tool_names(row)]
+        options: dict[str, Any] = {
+            "on_permission_request": self.events.on_permission,
+            "tools": tools,
+            "available_tools": [tool.name for tool in tools],
+            "disabled_mcp_servers": [GITHUB_MCP],
+            "system_message": {"mode": "append", "content": prompts.HELPER},
+            "working_directory": str(self.role_dir("scratch")),
+            "client_name": "chiefofstaff",
+        }
+        if model := self.model_for(row):
+            options["model"] = model
+        options.update(self.tuning(row))
         return options
 
     def model_for(self, row: dict) -> str:
@@ -1557,6 +1595,8 @@ class Runtime:
             "profile": self.store.get("profile", ""),
             "profile_draft": self.store.get("profile_draft", ""),
             "learning": self.learning.view(),
+            "habits": self.habits.view(),
+            "checks": self.checks.view(),
             "setup_notes": self.asks.setup_notes(),
             "sandbox": {
                 "supported": self.sandbox_host,
@@ -1587,5 +1627,7 @@ class Runtime:
             await self.refresh(WORKER)
         for source in self.all_sources():
             source.wake()
+        if new.learn_from_work and not old.learn_from_work and self.ready():
+            self.background(self.habits.catch_up())
         self.background(self.workers.pump())
         self.publish_state()

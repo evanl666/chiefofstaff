@@ -12,7 +12,8 @@ bounds, see [SECURITY.md](../SECURITY.md).
 - [Reviewing changes](#reviewing-changes)
 - [When a session needs you](#when-a-session-needs-you)
 - [Decisions](#decisions)
-- [Learning from your feedback](#learning-from-your-feedback)
+- [How you work: learned, and kept up to date](#how-you-work-learned-and-kept-up-to-date)
+- [Checks learned from mistakes](#checks-learned-from-mistakes)
 - [Focus](#focus)
 - [Slack](#slack)
 - [GitHub reviews](#github-reviews)
@@ -66,7 +67,7 @@ query, a build, a job) reads new messages only when that step ends; a message yo
 gets a note saying so, with what it is doing.
 
 Instructions you give again and again ("run a small smoke job before the full one") are
-[learned](#learning-from-your-feedback), so you do not have to repeat them.
+[learned](#how-you-work-learned-and-kept-up-to-date), so you do not have to repeat them.
 
 Try `chiefofstaff --demo` to see this without an account.
 
@@ -298,9 +299,26 @@ Work that does not rely on the decision carries on untouched.
 When a worker is about to ask something you decided before, it is told first: it follows your
 earlier decision, or asks anyway and the card shows *You decided before: …*.
 
-## Learning from your feedback
+## How you work: learned, and kept up to date
 
-Your sessions learn how you want work done from what you do with their work:
+Chief of Staff keeps learning how you write and work, so its sessions get closer to doing it as
+you would.
+
+**How you write.** Every two hours (and when you press *Learn now*) it reads what you wrote
+since: the Slack messages you sent, your PR reviews and review comments (on every GitHub account
+signed in to `gh`), your commit messages in your projects (not Copilot's, nor those a worker
+made), what you asked your own Copilot sessions, and what you told the Router. Only your own
+words; others' messages are never kept. A short-lived worker, which can do nothing but propose,
+then describes how you write in each place: answers and reports to you, Slack DMs, Slack
+channels, PR reviews, commit messages (language, length, tone, greetings, formatting, a short
+quote or two). Each applies at once to the sessions that write that way for you (the Slack
+session and workers that read Slack get your Slack style; workers get your commit and review
+style; the Router and workers answer you the way you talk to them), and the Router chat says
+what was learned. Settings → *How you work* shows each, with its version; *Undo* goes back to the
+previous one. Turn *Learn from my Slack messages, PR reviews, commits and Copilot sessions* off
+to stop reading them.
+
+**How you want work done.** Your sessions also learn from what you do with their work:
 
 - your decisions, especially when you go against what a worker recommended;
 - review comments on a diff, follow-ups on a finished result, notes when you retry a task,
@@ -310,15 +328,35 @@ Your sessions learn how you want work done from what you do with their work:
 - the instructions you give the Router and workers, so that guidance you repeat becomes a lesson.
 
 Only your own choices and words count; what a session proposed is kept beside them as context.
-Once a few new pieces of feedback came in, a short-lived worker turns them into lessons, e.g.
-*Give every database migration a rollback migration* or *In Slack replies, lead with the
-answer, two sentences at most*, each with where it applies (everywhere, Slack replies, one
-project) and the feedback it rests on. A **Learned from your feedback** card shows them: keep,
-reword or untick each. Only what you keep goes into your sessions' instructions.
+Once a few new pieces of feedback came in (or guidance you keep giving your own sessions), the
+learning worker turns them into habits, e.g. *Give every database migration a rollback
+migration* or *Run a small smoke job before the full one*, each with where it applies
+(everywhere, Slack replies, one project) and what it rests on. A **Learned from your work** card
+shows them: keep, reword or untick each. Only what you keep goes into your sessions'
+instructions; habits learned while the card waits join it.
 
-Settings → *Learned from your feedback* lists the lessons in use (remove any), has *Learn now*,
-and shows how close the sessions get to you: the share of recommendations you took, drafts you
-sent as written and results you accepted as they were, over the last 30 days and the 30 before.
+Settings → *How you work* lists the habits in use (remove any) and shows how close the sessions
+get to you: the share of recommendations you took, drafts you sent as written and results you
+accepted as they were, over the last 30 days and the 30 before. Usage shows what a result you
+accepted cost, by model.
+
+## Checks learned from mistakes
+
+When a worker's test run fails and a later run passes after it changed the code, Chief of Staff
+keeps both versions (as git commits under `refs/chiefofstaff/`, without touching the worker's
+checkout). A short-lived worker reads the failure and the fix and, when it shows a mistake that
+can come back (a blocking call in async code, a forgotten migration), proposes a check: a shell
+command that fails when the mistake is there, e.g. `! git grep -nE '^[[:space:]]+time[.]sleep'
+-- 'src/*.py'`. Before you see it, the check runs on both versions: it must fail on the code with
+the mistake and pass on the fix. A **Check learned from a mistake** card shows it with that
+proof; *Use this check* turns it on.
+
+From then on, when a worker in that repository says it is done with changes to files the check
+applies to, the check runs on a clean copy of its work. If it fails, the worker is sent back
+once to fix it (or to say why it does not apply); if it still fails, the review card flags it.
+Settings → *How you work* lists the checks, how often each ran and caught something, and turns
+any off. Checks run in a sandbox: no network, no writes, and nothing in your home folder but the
+repository is readable. They need macOS (`sandbox-exec`) or `bwrap` on Linux.
 
 ## Focus
 

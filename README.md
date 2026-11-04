@@ -40,8 +40,12 @@ Now I talk to one session, the Router, and Chief of Staff keeps track of the res
 - Brings you decisions, not just questions: why, the options and their effects, a
   recommendation. Change a decision later and every task that relied on it adjusts and
   confirms.
-- Learns how you work from your decisions, review comments and draft edits, as lessons you
-  approve, so the sessions get closer to doing it your way.
+- Learns how you work, and keeps learning: how you write (from the Slack messages you send, your
+  PR reviews and commits, what you ask your own Copilot sessions) applies at once and can be
+  undone; habits from your decisions, review comments and draft edits wait for your OK.
+- Turns mistakes workers fixed into checks: a test that failed, then passed after a fix, becomes
+  a check proven on both versions in a sandbox. Once you approve it, it catches the same mistake
+  when another worker says it is done.
 - Leaves your own checkout alone. Each worker gets its own folder and git worktree.
 - Workers can do what your own Copilot sessions can: your plugins, MCP servers, skills, custom
   agents and tools. Turn on the sandbox in Settings to confine them to their folders; workers

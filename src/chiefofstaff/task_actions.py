@@ -92,12 +92,16 @@ class TaskActions:
         )
         evidence = json.loads(latest["evidence"]) if latest and latest["evidence"] else None
         criteria = self.tasks.criteria(task)
-        if not commands and not evidence and not criteria:
+        # A check learned from a mistake that still fails when the worker said done.
+        failing = self.runtime.checks.flags(task["id"])
+        if not commands and not evidence and not criteria and not failing:
             return None
         claims = json.loads(latest["criteria"]) if latest and latest["criteria"] else []
-        return receipts.summarize(
+        found = receipts.summarize(
             commands, evidence, task["result"] or task["progress"], criteria, claims
         )
+        found["flags"] += failing
+        return found
 
     async def check_fresh(self, session_id: str):
         """Mark the evidence of a worker's finished tasks out of date once its code changed:

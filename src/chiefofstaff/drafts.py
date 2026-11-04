@@ -79,6 +79,8 @@ class Drafts:
             return self.runtime.decisions.dismiss(draft)
         if draft["kind"] == "lessons":
             return await self.runtime.learning.review(draft, decision)
+        if draft["kind"] == "check":
+            return await self.runtime.checks.review(draft, decision)
         if draft["kind"] == "profile":
             return await self.runtime.toolset.review_profile(draft, decision)
         if draft["kind"] == "adopt":

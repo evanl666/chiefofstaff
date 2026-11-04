@@ -158,11 +158,15 @@
           <label class="grow"><span>Daily summary at</span><input name="digest_time" type="time" /></label>
         </div>
 
-        <h3>Learned from your feedback</h3>
-        <p class="hint">Your decisions, review comments, follow-ups and draft edits become lessons; you approve each before sessions use it.</p>
+        <h3>How you work</h3>
+        <p class="hint">Learned from what you write: Slack messages you send, your PR reviews and commits, what you ask your Copilot sessions, and your feedback here. It stays on this machine. How you write applies at once (undo any time); habits wait for your OK.</p>
+        <label class="check"><input name="learn_from_work" type="checkbox" /> Learn from my Slack messages, PR reviews, commits and Copilot sessions</label>
         <p id="agreement" class="hint"></p>
+        <ul id="styles"></ul>
         <ul id="lessons"></ul>
         <div class="row"><button id="learn-now" type="button" class="secondary">Learn now</button><small id="learn-status"></small></div>
+        <label class="check"><input name="learn_checks" type="checkbox" /> Turn mistakes workers fixed into checks: you approve each; they run in a sandbox</label>
+        <ul id="checks"></ul>
 
         <h3>Environment notes</h3>
         <label>

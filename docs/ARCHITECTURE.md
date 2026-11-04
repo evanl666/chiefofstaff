@@ -49,6 +49,8 @@ tool allowlist, permission and request callbacks, sandbox, model.
 | `asks.py` | Cards for the owner (questions, forms, sign-ins), questions between sessions, environment notes. |
 | `decisions.py` | Decision cards; the owner's decisions and the tasks that rely on them; telling those tasks when one changes. |
 | `learning.py` | The owner's feedback; lessons a learning worker proposes and the owner approves; how often the owner agrees. |
+| `habits.py` | The owner's own words, read from Slack, GitHub, git and their Copilot sessions; the style learned from them (versioned, undoable) and which sessions get it. |
+| `checks.py` | Failure cases kept from workers' test runs; checks proposed from them, proven in a sandbox on both versions, approved, then run when a worker reports done. |
 | `envelope.py` | The envelope every message to a session is wrapped in. |
 | `catalog.py` | Keyword ranking that finds the worker that owns a subject. |
 | `watchdog.py` | Cheap checks that decide when a worker deserves a review, and the Watchdog session that reviews it. |

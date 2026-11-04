@@ -350,7 +350,7 @@ class DemoBrain:
                             ],
                         },
                     )
-                elif title == "Learn from your feedback":
+                elif title == "Learn how you work":
                     yield CallTool("propose_lessons", {"lessons": demo_lessons(body)})
                 elif title == "Rate-limit login attempts":
                     yield CallTool(
@@ -442,6 +442,7 @@ FLAGS_REPORT = (
 def demo_lessons(prompt: str) -> list[dict]:
     """What the demo learns from the owner's feedback, citing the feedback it rests on."""
     feedback = [json.loads(line) for line in prompt.splitlines() if line.startswith('{"id"')]
+    feedback = [item for item in feedback if "owner" in item]  # Not the owner's other words.
 
     def cited(*words: str) -> list[int]:
         return [item["id"] for item in feedback if any(w in item["owner"] for w in words)]
