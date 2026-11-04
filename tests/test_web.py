@@ -139,8 +139,11 @@ def test_models_usage_and_profile_endpoints(app_client):
     assert app_client.get("/api/usage?since=0").json()["total"]["calls"] == 0
     saved = app_client.post("/api/profile", json={"text": "- likes short replies"}, headers=ORIGIN)
     assert saved.json()["profile"] == "- likes short replies"
-    asked = app_client.post("/api/profile/distill", headers=ORIGIN)
-    assert asked.json()["text"].startswith("Build my profile")
+    # Started at once (not left to the Router), and only once while it works.
+    started = app_client.post("/api/profile/distill", headers=ORIGIN).json()
+    again = app_client.post("/api/profile/distill", headers=ORIGIN).json()
+    assert started["session_id"] == again["session_id"]
+    assert app_client.app.state.runtime.store.get(f"distill:{started['session_id']}")
 
 
 def test_the_owner_reviews_and_follows_up_on_tasks(app_client):

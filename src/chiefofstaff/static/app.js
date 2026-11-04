@@ -4,6 +4,8 @@ import { $, api, submits, toast } from "./dom.js";
 import { byId, connectEvents, current, loadModels, loadState, markRead, routerId, state } from "./state.js";
 import { externalItem, loadExternal } from "./sidebar.js";
 import { appendMessages, select } from "./session.js";
+import { closeMentions, mention, onComposerInput, onMentionKey, routerSide, setRecipient } from "./mention.js";
+import { openFile } from "./files.js";
 import { INBOX, scheduleInbox } from "./inbox.js";
 import { fillSettings, refreshUsageLink, renderLearning, saveSettings, saveToken, settingsError, showUsage, slackStatusText } from "./settings.js";
 function bindUi() {
@@ -12,8 +14,14 @@ function bindUi() {
     input.style.height = "auto";
     input.style.height = `${input.scrollHeight}px`;
   };
-  input.addEventListener("input", autosize);
+  input.addEventListener("input", () => {
+    autosize();
+    onComposerInput();
+  });
+  // Closed once focus is elsewhere (a click on the list keeps it: mousedown is prevented there).
+  input.addEventListener("blur", () => setTimeout(() => document.activeElement !== input && closeMentions(), 150));
   input.addEventListener("keydown", (event) => {
+    if (onMentionKey(event)) return;
     if (submits(event) && !event.shiftKey) {
       event.preventDefault();
       $("#composer").requestSubmit();
@@ -27,7 +35,16 @@ function bindUi() {
     if (!text || (sessionId !== INBOX && !current() && !other)) return;
     input.value = "";
     autosize();
+    const to = routerSide() ? mention.to : null;
     try {
+      if (to) {
+        // Straight to one worker; the Router hears of it with its next message.
+        const sent = await api(`/api/sessions/${routerId()}/messages`, { method: "POST", body: { text, to: to.id } });
+        setRecipient(null);
+        // A worker deep in a step reads it only when the step ends: said here, where the owner is.
+        toast(sent.note ? `Sent to “${to.title}”. ${sent.note.split("; said")[0]}` : `Sent to “${to.title}”`);
+        return;
+      }
       if (other) {
         // Another Copilot session: the message continues it here, as a worker.
         input.disabled = true;
@@ -52,13 +69,13 @@ function bindUi() {
       toast(error.message, "error");
     }
   });
-  $("#timeline").addEventListener("click", (event) => {
+  // A path in a message or report: a file in a worker's folders opens; anything else is copied.
+  document.addEventListener("click", (event) => {
     const chip = event.target.closest(".path");
     if (!chip) return;
-    navigator.clipboard.writeText(chip.dataset.path).then(
-      () => toast("Path copied"),
-      () => toast(chip.dataset.path),
-    );
+    // In an open file: a path relative to the session that wrote it.
+    const session = chip.closest("[data-session]")?.dataset.session || (state.selected !== INBOX ? state.selected : "");
+    openFile(chip.dataset.path, session);
   });
   $("#settings-button").addEventListener("click", () => {
     fillSettings();
@@ -85,8 +102,8 @@ function bindUi() {
     try {
       await api("/api/profile/distill", { method: "POST" });
       $("#settings-dialog").close();
-      await select(routerId());
-      toast("The Router is building your profile. You review it before it is used.");
+      await select(INBOX);
+      toast("Building your profile. Its draft comes to your inbox to check before it is used.");
     } catch (error) {
       settingsError(error.message);
     }
@@ -140,6 +157,10 @@ function bindUi() {
   setInterval(() => {
     if ($("#external").open) loadExternal();
   }, 60000);
+  // Running cards say how long a step has taken: refreshed while the inbox is shown.
+  setInterval(() => {
+    if (state.selected === INBOX) scheduleInbox();
+  }, 30000);
 }
 async function boot() {
   const token = new URLSearchParams(location.hash.slice(1)).get("token");

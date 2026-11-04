@@ -47,6 +47,14 @@ def now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def ago_minutes(iso: str) -> int:
+    """Whole minutes since an ISO time (0 for a moment ago)."""
+    try:
+        return max(0, round((time.time() - datetime.fromisoformat(iso).timestamp()) / 60))
+    except ValueError:
+        return 0
+
+
 def hours_ago(hours: float) -> str:
     return datetime.fromtimestamp(time.time() - hours * 3600, UTC).isoformat()
 

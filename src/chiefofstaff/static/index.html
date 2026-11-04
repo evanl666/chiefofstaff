@@ -54,6 +54,8 @@
         </div>
         <form id="composer" autocomplete="off">
           <div id="composer-note" role="status"></div>
+          <ul id="mention-list" role="listbox" aria-label="Workers" hidden></ul>
+          <div id="composer-to" hidden></div>
           <textarea id="composer-input" rows="1" aria-label="Message"></textarea>
           <button type="submit" aria-label="Send" title="Send (Enter)">
             <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 15.5V4.5M5 9.5l5-5 5 5" /></svg>
@@ -61,6 +63,15 @@
         </form>
       </main>
     </div>
+
+    <dialog id="file-dialog" aria-label="File">
+      <div class="file-head">
+        <div class="file-title"><strong id="file-name"></strong><small id="file-path"></small></div>
+        <button type="button" class="text" id="file-copy">Copy path</button>
+        <button type="button" class="secondary" id="file-close">Close</button>
+      </div>
+      <div id="file-body"></div>
+    </dialog>
 
     <dialog id="settings-dialog">
       <form id="settings-form" method="dialog">
@@ -78,6 +89,10 @@
         <label class="check"><input name="watchdog_enabled" type="checkbox" /> Watchdog: check workers for stalls and drift</label>
         <label class="check"><input name="worker_sandbox" type="checkbox" /> Sandbox: workers' commands can write only to their own folders (recommended)</label>
         <small id="sandbox-hint" hidden></small>
+        <label class="check"><input name="shared_caches" type="checkbox" /> Workers use your npm and Yarn package stores (checked against lockfiles), so installs are as fast as in your terminal</label>
+        <label><span>Also writable in the sandbox</span><textarea name="sandbox_writable" rows="2" placeholder="One folder per line, e.g. a Copilot plugin's own folder"></textarea>
+          <small>For tools that must write outside a worker's folders, such as a Copilot plugin hook that keeps a journal.</small>
+        </label>
         <label class="check"><input name="worker_yolo" type="checkbox" /> Yolo: workers act without permission prompts</label>
         <small>With the sandbox on, the OS still keeps commands in their folders. Without it, only the workers' instructions do (no force pushes, no pushing to main, nothing public without your approval). A worker's header can override this.</small>
 
@@ -99,6 +114,7 @@
           <label class="grow"><span>Slack effort</span><select name="effort_slack"></select></label>
           <label class="grow"><span>Watchdog effort</span><select name="effort_watchdog"></select></label>
         </div>
+        <small id="effort-hint" hidden>Auto picks a model for each turn and takes no thinking effort: choose a model where you want to set one.</small>
         <small>Thinking effort applies when the model supports it; otherwise the model's default. Change a session's effort and context window in its header.</small>
 
         <h3>Slack</h3>

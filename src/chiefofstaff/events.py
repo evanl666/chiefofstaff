@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -134,6 +136,7 @@ class Events:
         owner = from_owner(getattr(event.data, "content", "") or "") or state.owner_turn
         state.owner_turn = False
         state.event_turn = not owner
+        state.owner_reply = bool(owner)
 
     def assistant_message(self, row: dict, event: Any):
         data = event.data
@@ -144,6 +147,9 @@ class Events:
         narration = bool(getattr(data, "tool_requests", None))
         if row["role"] != WORKER and narration:
             return
+        if row["role"] == WORKER:
+            # What it said last: the latest word on its progress, shown at a glance.
+            self.store.set(f"said:{row['id']}", json.dumps({"text": content[:1500], "at": now()}))
         if row["role"] == ROUTER and self.states[row["id"]].event_turn:
             # Results reach the owner through notify_owner; the closing remark is a footnote.
             self.runtime.add_message(row["id"], "assistant", content, {"internal": True})
@@ -171,13 +177,19 @@ class Events:
         arguments = getattr(data, "arguments", None)
         summary = describe_tool(name, arguments)
         self.runtime.add_message(row["id"], "tool", summary)
+        call = getattr(data, "tool_call_id", "") or f"step-{time.monotonic()}"
+        self.states[row["id"]].steps[call] = (time.time(), summary)
         self.runtime.update_session(row["id"], activity=summary)
         if row["role"] == WORKER and name in receipts.SHELL_TOOLS and isinstance(arguments, dict):
             self.record_command(row["id"], getattr(data, "tool_call_id", ""), arguments)
 
     def tool_complete(self, row: dict, event: Any):
         data = event.data
-        if row["role"] != WORKER or getattr(data, "parent_tool_call_id", None):
+        if getattr(data, "parent_tool_call_id", None):
+            return
+        if self.states[row["id"]].steps.pop(getattr(data, "tool_call_id", "") or "", None):
+            self.runtime.publish_session(self.store.session(row["id"]))  # Its "now" changed.
+        if row["role"] != WORKER:
             return
         result = getattr(data, "result", None)
         output = (getattr(result, "content", "") or "") if result else ""
@@ -227,6 +239,7 @@ class Events:
         session_id = row["id"]
         state = self.states[session_id]
         state.busy = False
+        state.steps.clear()
         state.retuned = False
         last = self.store.value("SELECT max(id) FROM messages WHERE session_id=?", (session_id,))
         self.store.set(f"idle:{session_id}", str(last or 0))
@@ -250,9 +263,15 @@ class Events:
 
     def error(self, row: dict, event: Any):
         session_id = row["id"]
+        message = (getattr(event.data, "message", "") or "The session failed.")[:2000]
+        if getattr(event.data, "error_type", "") == "hook":
+            # A hook of one of the owner's Copilot plugins failed (in a sandboxed session it
+            # cannot write outside the session's folders). Copilot goes on with the turn.
+            self.hook_failed(row, message)
+            return
         self.states[session_id].busy = False
         self.states[session_id].retuned = False
-        message = (getattr(event.data, "message", "") or "The session failed.")[:2000]
+        self.states[session_id].steps.clear()
         self.runtime.add_message(session_id, "error", message)
         if row["role"] == WORKER:
             self.runtime.update_session(session_id, status="failed", activity="")
@@ -264,6 +283,26 @@ class Events:
             self.runtime.update_session(session_id, status="idle", activity="")
             if row["role"] in {ROUTER, SLACK} and self.delivery.has_unsent(session_id):
                 self.delivery.schedule_flush(session_id)
+
+    def hook_failed(self, row: dict, message: str):
+        """Said once per session and plugin, as a note: the work itself goes on."""
+        found = re.search(r'hook from "([^"]+)"', message)
+        source = (found.group(1) if found else message.split(" failed", 1)[0])[:200]
+        if self.store.get(f"hookfail:{row['id']}:{source}"):
+            return
+        self.store.set(f"hookfail:{row['id']}:{source}", "1")
+        sandboxed = "sandbox" in message
+        hint = (
+            " If that plugin needs to write somewhere, add the folder under Settings → Workers → "
+            "Also writable in the sandbox."
+            if sandboxed
+            else ""
+        )
+        self.runtime.add_message(
+            row["id"],
+            "notice",
+            f"A Copilot plugin hook failed; the session goes on. {message}{hint}",
+        )
 
     async def on_permission(self, request: Any, invocation: dict):
         row = self.store.find_session(self.runtime.row_id(invocation.get("session_id", "")))

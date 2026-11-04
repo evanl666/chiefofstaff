@@ -6,6 +6,7 @@ import { byId, current, markRead, pendingDrafts, routerId, state, STATUS_TEXT, u
 import { renderSidebar } from "./sidebar.js";
 import { renderDrafts } from "./drafts.js";
 import { INBOX, renderInboxHeader, showInbox } from "./inbox.js";
+import { closeMentions, setRecipient } from "./mention.js";
 export function renderHeader() {
   if (state.selected === INBOX) {
     renderInboxHeader();
@@ -111,7 +112,7 @@ export function renderHeader() {
   actions.replaceChildren(...buttons);
   renderTuning(session);
   const placeholders = {
-    router: "Ask your chief of staff…",
+    router: "Ask your chief of staff… (@ to message a worker directly)",
     slack: "Message the Slack session…",
     watchdog: "Message the Watchdog…",
   };
@@ -199,6 +200,9 @@ async function post(path) {
 }
 export async function select(sessionId) {
   if (!sessionId) return;
+  closeMentions();
+  // A worker chosen with @ is for messages sent from the Router chat or the inbox.
+  if (sessionId !== INBOX && sessionId !== routerId()) setRecipient(null);
   if (sessionId === INBOX) {
     showInbox();
     return;
@@ -285,6 +289,15 @@ function renderMessage(message) {
   const time = message.created_at;
   switch (message.kind) {
     case "owner":
+      if (meta.to) {
+        // Sent from here straight to one worker.
+        return el(
+          "div",
+          { class: "msg owner", title: clock(time) },
+          el("button", { type: "button", class: "to", text: `→ ${meta.to_title}`, title: "Open this worker", onclick: () => select(meta.to) }),
+          message.text,
+        );
+      }
       return el("div", { class: "msg owner", text: message.text, title: clock(time) });
     case "assistant":
       if (meta.internal) return el("div", { class: "line note", text: message.text, title: clock(time) });
@@ -310,8 +323,12 @@ function renderMessage(message) {
       const source = { slack: "Slack", github: "GitHub" }[meta.source] || "Event";
       return card({ label: meta.delegated ? `You handed this over from ${source}` : source, body: message.text, className: "inbound", time });
     }
-    case "watchdog":
-      return card({ label: "Watchdog", body: message.text, className: "update attention", time });
+    case "watchdog": {
+      const verdict = { stuck: "looks stuck", looping: "looks like it is looping", off_track: "looks off track" }[meta.verdict];
+      const node = card({ label: verdict ? `Watchdog · ${verdict}` : "Watchdog", body: message.text, className: "update attention", time });
+      if (meta.reason) node.append(el("div", { class: "why-line", text: `Why it stepped in: ${meta.reason}` }));
+      return node;
+    }
     case "update": {
       if (meta.digest) {
         return card({ label: "Daily summary", body: message.text.replace(/^Daily summary\n/, ""), className: "update", time });
@@ -363,7 +380,9 @@ function addWork(container, kind, text, cwd) {
 }
 // Narration: flagged as it arrives; in older timelines, a worker's message right before a step.
 function narration(message, next, worker) {
-  if (message.kind !== "assistant" || message.meta?.internal) return false;
+  if (message.kind !== "assistant") return false;
+  // The Router's remarks after events and reports: the cards are what matters to the owner.
+  if (message.meta?.internal) return true;
   return Boolean(message.meta?.narration) || (worker && next?.kind === "tool");
 }
 // A session Chief of Staff does not drive, as read from its log: messages and folded work.

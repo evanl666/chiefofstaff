@@ -1,7 +1,7 @@
 // The inbox: what needs the owner, what is running, and results ready to review.
 
 import { $, api, el, submits, toast } from "./dom.js";
-import { compactPaths, markdown, plural, shortPath, since } from "./text.js";
+import { ago, compactPaths, markdown, plural, shortPath, since } from "./text.js";
 import { byId, loadState, pendingDrafts, routerId, sessions, state } from "./state.js";
 import { renderSidebar, renderStatusLine } from "./sidebar.js";
 import { select, setComposer } from "./session.js";
@@ -45,7 +45,7 @@ export function showInbox() {
   $("#drafts").hidden = true;
   $("#session-tuning").hidden = true;
   $("#composer").hidden = false;
-  setComposer({ placeholder: "Ask your chief of staff…" });
+  setComposer({ placeholder: "Ask your chief of staff… (@ to message a worker directly)" });
   renderSidebar();
   renderInboxHeader();
   renderInbox();
@@ -235,7 +235,9 @@ function taskItem(task) {
     // Receipts show on finished cards only; a running task's grow with every command.
     key: `task:${task.id}:${task.status}:${task.blocked ? 1 : 0}:${["review", "done"].includes(task.status) ? JSON.stringify(task.receipts || null) : ""}`,
     id: task.id,
-    version: `${task.updated_at}:${task.title}:${worker?.status || ""}:${worker?.activity || ""}:${task.credits}:${task.runs}`,
+    // For running cards the minute too: "this step 6m" and "3m ago" move on by themselves. Not
+    // for others, whose expanded results and selections a rebuild would undo.
+    version: `${task.updated_at}:${task.title}:${worker?.status || ""}:${worker?.activity || ""}:${worker?.said_at || ""}:${worker?.step_since || ""}:${task.credits}:${task.runs}:${["running", "queued"].includes(task.status) ? Math.floor(Date.now() / 60000) : ""}`,
     build: () => taskCard(task),
     refresh: (node) => refreshTaskCard(node, task),
   };
@@ -248,6 +250,12 @@ function refreshTaskCard(node, task) {
   node.querySelector(".head .meta").textContent = taskMeta(task);
   const body = taskBody(task, worker);
   const old = node.querySelector(":scope > .task-body");
+  // Text the owner expanded stays expanded as the card updates.
+  if (body && old?.querySelector(".more")?.textContent === "Show less") {
+    body.querySelector(".folded")?.classList.remove("folded");
+    const toggle = body.querySelector(".more");
+    if (toggle) toggle.textContent = "Show less";
+  }
   if (old && body) old.replaceWith(body);
   else if (old) old.remove();
   else if (body) node.querySelector(":scope > .head").after(body);
@@ -390,7 +398,7 @@ function taskCard(task) {
   const meta = taskMeta(task);
   const node = el(
     "div",
-    { class: `card task ${task.status}${task.blocked ? " blocked" : ""}` },
+    { class: `card task ${task.status}${task.blocked ? " blocked" : ""}`, "data-session": task.session_id || undefined },
     el(
       "div",
       { class: "head" },
@@ -491,26 +499,44 @@ function taskCard(task) {
 }
 function taskBody(task, worker) {
   if (task.status === "running" || task.status === "queued") {
-    const line = task.status === "queued" ? worker?.activity || "Waiting for a free worker slot" : worker?.activity || (worker?.status === "working" ? "Working…" : "Between turns");
-    const command = line.replace(/^(bash|shell|powershell) /, "$ ");
-    const nodes = [el("div", { class: "activity", text: compactPaths(command, worker?.cwd) })];
-    if (task.progress) nodes.push(el("div", { class: "progress markdown", html: markdown(task.progress) }));
-    return el("div", { class: "task-body" }, ...nodes);
+    // At a glance: the step it is in now (and for how long), and what it said last.
+    const queued = task.status === "queued";
+    const line = queued ? worker?.activity || "Waiting for a free worker slot" : worker?.step || worker?.activity || (worker?.status === "working" ? "Working…" : "Between turns");
+    const command = compactPaths(line.replace(/^(bash|shell|powershell) /, "$ "), worker?.cwd);
+    const long = worker?.step_since && ago(worker.step_since) !== "now";
+    const nodes = [
+      el(
+        "div",
+        { class: "activity" },
+        !queued && worker?.step ? "Now: " : "",
+        command,
+        long ? el("span", { class: "when", text: ` · this step ${ago(worker.step_since)}` }) : "",
+      ),
+    ];
+    if (!queued && worker?.said) {
+      nodes.push(el("div", { class: "said", title: worker.said }, `“${worker.said.replace(/\s+/g, " ").trim()}”`, el("span", { class: "when", text: ` · ${since(worker.said_at)}` })));
+    }
+    const wrapper = el("div", { class: "task-body" }, ...nodes);
+    if (task.progress) foldable(wrapper, el("div", { class: "progress markdown", html: markdown(task.progress) }), task.progress);
+    return wrapper;
   }
   const text = task.status === "review" || task.status === "done" ? task.result || task.progress : task.progress || (task.blocked ? "It waits for a task that ended without finishing." : "");
   if (!text) return null;
-  const content = el("div", { class: "body markdown", html: markdown(text) });
-  if (text.length > 700 || text.split("\n").length > 10) content.classList.add("folded");
-  const wrapper = el("div", { class: "task-body" }, content);
-  if (content.classList.contains("folded")) {
-    const toggle = el("button", { type: "button", class: "more", text: "Show more" });
-    toggle.addEventListener("click", () => {
-      const folded = content.classList.toggle("folded");
-      toggle.textContent = folded ? "Show more" : "Show less";
-    });
-    wrapper.append(toggle);
-  }
+  const wrapper = el("div", { class: "task-body" });
+  foldable(wrapper, el("div", { class: "body markdown", html: markdown(text) }), text);
   return wrapper;
+}
+// Long text shows its start, with Show more.
+function foldable(wrapper, content, text) {
+  wrapper.append(content);
+  if (text.length <= 700 && text.split("\n").length <= 10) return;
+  content.classList.add("folded");
+  const toggle = el("button", { type: "button", class: "more", text: "Show more" });
+  toggle.addEventListener("click", () => {
+    const folded = content.classList.toggle("folded");
+    toggle.textContent = folded ? "Show more" : "Show less";
+  });
+  wrapper.append(toggle);
 }
 // What was observed, next to what the worker reported.
 const VERDICT = {
@@ -604,7 +630,7 @@ function showCopy(text) {
 // A draft whose sending a stop interrupted, and that could not be confirmed.
 function uncertainCard(draft) {
   const target = draft.target;
-  const where = draft.kind === "slack" ? `Slack reply to the ${slackDestination(target)}` : `PR review on ${target.repo}#${target.number}`;
+  const where = draft.kind === "slack" ? `Slack reply to the ${slackDestination(target)}` : `${target.in_reply_to ? "Reply" : "PR review"} on ${target.repo}#${target.number}`;
   const error = el("span", { class: "error" });
   const actions = el("div", { class: "actions" });
   async function decide(body) {

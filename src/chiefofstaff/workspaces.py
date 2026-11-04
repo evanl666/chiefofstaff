@@ -55,28 +55,50 @@ async def git(*arguments: str, limit: float = 60, input: bytes | None = None) ->
     return await command("git", *arguments, limit=limit, input=input)
 
 
+# Repository -> when its default branch was last fetched; parallel workers fetch once.
+FETCHED: dict[str, float] = {}
+FETCH_LOCKS: dict[str, asyncio.Lock] = {}
+FETCH_FRESH_SECONDS = 120
+
+
+async def default_branch(top: Path) -> str:
+    """origin's default branch as this checkout knows it ("origin/main"), or ""."""
+    with suppress(ValueError):
+        ref = await git(
+            "-C", str(top), "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"
+        )
+        if ref.strip():
+            return ref.strip()
+    for candidate in ("origin/main", "origin/master"):
+        with suppress(ValueError):
+            await git("-C", str(top), "rev-parse", "--verify", "--quiet", candidate)
+            return candidate
+    return ""
+
+
 async def base_ref(top: Path) -> tuple[str, str]:
-    """Where a new worktree starts: the default branch's latest commit when there is a remote."""
+    """Where a new worktree starts: the default branch's latest commit when there is a remote.
+
+    Only that branch is fetched (a large repository has many), and once for workers that start
+    together."""
     if "origin" not in (await git("-C", str(top), "remote")).split():
         return "HEAD", "the HEAD of the local checkout (no origin remote)"
     note = ""
-    try:
-        await git("-C", str(top), "fetch", "--quiet", "origin", limit=180)
-    except ValueError:
-        note = " (fetch failed, so maybe not the latest)"
-    ref = ""
-    with suppress(ValueError):
-        ref = (
-            await git(
-                "-C", str(top), "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"
-            )
-        ).strip()
-    for candidate in ("origin/main", "origin/master"):
-        if ref:
-            break
-        with suppress(ValueError):
-            await git("-C", str(top), "rev-parse", "--verify", "--quiet", candidate)
-            ref = candidate
+    async with FETCH_LOCKS.setdefault(str(top), asyncio.Lock()):
+        ref = await default_branch(top)
+        if time.monotonic() - FETCHED.get(str(top), -FETCH_FRESH_SECONDS) >= FETCH_FRESH_SECONDS:
+            try:
+                if ref:
+                    await git(
+                        "-C", str(top), "fetch", "--quiet", "origin", ref.removeprefix("origin/"),
+                        limit=180,
+                    )  # fmt: skip
+                else:
+                    await git("-C", str(top), "fetch", "--quiet", "origin", limit=180)
+                    ref = await default_branch(top)
+                FETCHED[str(top)] = time.monotonic()
+            except ValueError:
+                note = " (fetch failed, so maybe not the latest)"
     if not ref:
         return "HEAD", "the HEAD of the local checkout (origin has no default branch)"
     return ref, ref + note
@@ -491,6 +513,44 @@ def same_file(one: Path, other: Path) -> bool:
         return False
 
 
+# Package stores whose contents the tools check against the project's lockfile before use
+# (npm's content-addressed store, Yarn Berry's checksummed archives): a worker writing there
+# cannot change what the owner's builds run. Not npm's _npx or Yarn classic's unpacked folders,
+# which run as they are. Copilot itself shares pip's, uv's and poetry's (and, in a Node project,
+# npm's whole folder). Caches whose contents run as they are (Gradle and Maven jars, Gradle
+# distributions, pre-commit hooks, shiv apps) are never shared; Gradle's dependency cache is
+# read, not written (see prompts.worker_context).
+CACHE_FOLDERS = (".npm/_cacache", ".yarn/berry/cache")
+# Files that let a program talk to the owner's local services as the owner: the tokens of their
+# Gradle daemons and Jupyter servers. Unreadable for workers that may use localhost.
+SERVICE_SECRETS = (".gradle/daemon", "Library/Jupyter/runtime", ".local/share/jupyter/runtime")
+
+
+def shared_caches(home: Path | None = None) -> list[str]:
+    """The owner's verified package caches that exist on this machine."""
+    home = home or Path.home()
+    return [str(home / name) for name in CACHE_FOLDERS if (home / name).is_dir()]
+
+
+def service_secrets(home: Path | None = None) -> list[str]:
+    """Denied whether they exist yet or not (Copilot then makes an empty folder): a daemon the
+    owner starts later must not be reachable either."""
+    home = home or Path.home()
+    found = [str(home / name) for name in SERVICE_SECRETS]
+    if gradle_home := os.environ.get("GRADLE_USER_HOME"):
+        found.append(str(Path(gradle_home).expanduser() / "daemon"))
+    return found
+
+
+def too_broad(path: str) -> bool:
+    """The filesystem root, home, or a folder above home."""
+    try:
+        resolved = Path(path).expanduser().resolve()
+    except (OSError, ValueError):
+        return True
+    return resolved == Path(resolved.anchor) or Path.home().resolve().is_relative_to(resolved)
+
+
 class Workspaces:
     def __init__(self, store: Store, work_root: Path):
         self.store = store
@@ -623,7 +683,10 @@ class Workspaces:
     def writable(self, row: dict) -> list[str]:
         if row["role"] != WORKER:
             return [row["cwd"]]
-        return [row["cwd"], str(self.workspace(row)), *(c["path"] for c in self.checkouts(row))]
+        own = [str(self.workspace(row)), *(c["path"] for c in self.checkouts(row))]
+        # A session continued from a terminal may have been started in home: that stays the
+        # owner's, never a worker's to write (nor to read through Chief of Staff).
+        return own if too_broad(row["cwd"]) else [row["cwd"], *own]
 
     async def make_checkout(
         self,

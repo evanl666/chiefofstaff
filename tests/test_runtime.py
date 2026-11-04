@@ -756,7 +756,7 @@ async def test_tools_take_the_short_ids_sessions_see(harness):
     missing = await call_tool(
         runtime, "message_session", harness.router_id, session_id="ffffffff", text="x"
     )
-    assert "Session not found" in missing.text_result_for_llm
+    assert "No session ffffffff" in missing.text_result_for_llm
     await call_tool(runtime, "close_worker", harness.router_id, session_id=worker_id[:8])
     assert harness.store.session(worker_id)["closed_at"]
 

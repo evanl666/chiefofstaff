@@ -3,7 +3,7 @@
 Starts Chief of Staff as a real process with a fake Slack MCP server (same tool surface as
 Slack's official server) and drives it through the HTTP API, exactly like the UI does:
 
-A. owner -> Router -> isolated worker -> commit -> report -> owner update
+A. owner -> Router -> isolated worker -> commit -> its report reaches the owner
 B. Slack DM -> watcher -> Router -> Slack session reads Slack -> draft -> owner edits+sends
 E. Slack thread: a reply without a mention goes straight to the session that answered
 C. restart -> Router resumes with its memory
@@ -188,25 +188,31 @@ async def scenario_worker(app: App, project: Path) -> dict:
             for m in messages
             if m["kind"] == "notice" and m["text"].startswith("Started")
         ]
-        updates = [m for m in messages if m["kind"] == "update"]
         workers = [await app.get(f"/api/sessions/{sid}") for sid in started]
         done = [w for w in workers if w["status"] == "done"]
-        return (done[0], messages) if done and updates else None
+        reports = [m for m in messages if done and m["meta"].get("from") == done[0]["id"]]
+        return (done[0], messages) if done and reports else None
 
-    worker, messages = await wait_for("worker done + owner update", worker_done, 900, app)
+    worker, messages = await wait_for(
+        "worker done + its report reaches the owner", worker_done, 900, app
+    )
     await asyncio.sleep(10)
     messages = await app.get(f"/api/sessions/{router}/messages?after={mark}")
     report = next(i for i, m in enumerate(messages) if m["meta"].get("from") == worker["id"])
     after = [m for m in messages[report:] if m["kind"] == "assistant"]
     assert all(m["meta"].get("internal") for m in after), "event-turn replies must be footnotes"
-    updates = [m for m in messages if m["kind"] == "update"]
+    restated = [
+        m for m in messages[report:] if m["kind"] == "update" and not m["meta"].get("needs_action")
+    ]
+    assert not restated, f"the report is the message; the Router does not restate it: {restated}"
+    reported_text = messages[report]["text"]
     assert worker["branch"].startswith("chief/"), worker
     tree = Path(worker["cwd"])
     assert (tree / "hello.txt").read_text().strip() == "hello from a worker"
     assert "Add hello" in git(tree, "log", "--format=%s", "-1", worker["branch"])
     assert not (project / "hello.txt").exists(), "main checkout must stay untouched"
     assert git(project, "rev-parse", "--abbrev-ref", "HEAD").strip() == "main"
-    log(f"worker branch {worker['branch']} has the commit; update: {updates[-1]['text']!r}")
+    log(f"worker branch {worker['branch']} has the commit; report: {reported_text!r}")
     tasks = (await app.get("/api/state"))["tasks"]
     task = next(t for t in tasks if t["session_id"] == worker["id"])
     found = task["receipts"] or {}
@@ -251,9 +257,9 @@ async def scenario_reopen(app: App, worker: dict):
 
     async def reported():
         messages = await app.get(f"/api/sessions/{router}/messages?after={mark}")
-        return any(m["kind"] == "update" for m in messages)
+        return any(m["meta"].get("from") == worker["id"] for m in messages)
 
-    await wait_for("the Router reports the follow-up", reported, 300, app)
+    await wait_for("the follow-up's report reaches the owner", reported, 300, app)
     assert not row["closed_at"]
     messages = await app.get(f"/api/sessions/{router}/messages?after={mark}")
     started = [m for m in messages if m["kind"] == "notice" and m["text"].startswith("Started")]
@@ -619,10 +625,13 @@ async def scenario_setup(app: App):
     async def answered():
         messages = await app.get(f"/api/sessions/{router}/messages?after={mark}")
         dates = ("Nov 18", "November 18", "11/18", "11-18")
-        updates = [
-            m for m in messages if m["kind"] == "update" and any(d in m["text"] for d in dates)
+        found = [
+            m
+            for m in messages
+            if (m["kind"] == "update" or m["meta"].get("from"))
+            and any(d in m["text"] for d in dates)
         ]
-        return messages if updates else None
+        return messages if found else None
 
     await wait_for("the launch date from the doc", answered, 600, app)
     notes = (await app.get("/api/state"))["setup_notes"]
@@ -813,6 +822,247 @@ async def scenario_added_repo_sandboxed(app: App, root: Path):
     messages = await app.get(f"/api/sessions/{worker['id']}/messages")
     went_on = [m for m in messages if "Go on with the task" in m["text"]]
     log(f"sandboxed worker added a project and committed in both; reattached: {bool(went_on)}")
+
+
+async def router_mark(app: App, router: str) -> int:
+    return max((m["id"] for m in await app.get(f"/api/sessions/{router}/messages")), default=0)
+
+
+async def started_since(app: App, router: str, mark: int) -> list[dict]:
+    messages = await app.get(f"/api/sessions/{router}/messages?after={mark}")
+    return [
+        await app.get(f"/api/sessions/{m['meta']['session_id']}")
+        for m in messages
+        if m["kind"] == "notice" and m["text"].startswith("Started")
+    ]
+
+
+async def router_reply(app: App, router: str, mark: int, timeout: float) -> str:
+    """The Router's visible answer to the owner after `mark`."""
+
+    async def answered():
+        messages = await app.get(f"/api/sessions/{router}/messages?after={mark}")
+        replies = [
+            m["text"]
+            for m in messages
+            if m["kind"] == "assistant" and not m["meta"].get("internal")
+        ]
+        row = await app.get(f"/api/sessions/{router}")
+        return "\n".join(replies) if replies and row["status"] != "working" else None
+
+    return await wait_for("the Router answers", answered, timeout, app)
+
+
+async def task_of(app: App, worker_id: str) -> dict:
+    tasks = (await app.get("/api/state"))["tasks"]
+    return max((t for t in tasks if t["session_id"] == worker_id), key=lambda t: t["created_at"])
+
+
+async def scenario_owner_flow(app: App, root: Path):
+    """What a day with several workers looks like: a data analysis explained in full, a long
+    step and progress questions, a message to one worker, stop and cancel, a session open in a
+    terminal, and the owner profile. Every worker has a plugin hook that fails in the sandbox."""
+    state = await app.get("/api/state")
+    router = state["router_id"]
+    await app.post("/api/settings", {**state["settings"], "role_efforts": {"worker": "high"}})
+    csv = root / "sales.csv"
+    csv.write_text(
+        "region,month,revenue\n"
+        + "".join(
+            f"{region},2026-{month:02d},{base + month * step}\n"
+            for region, base, step in [("east", 100, 10), ("west", 80, 25), ("north", 60, -5)]
+            for month in range(1, 5)
+        )
+    )
+
+    # 1. Data analysis, explained step by step: the whole answer in the report, no branch, no push.
+    mark = await router_mark(app, router)
+    await app.post(
+        f"/api/sessions/{router}/messages",
+        {
+            "text": f"用 {csv} 的数据做个分析: 每个 region 的总收入, 以及每个月的环比增长. "
+            "一步一步给我讲清楚你是怎么算的, 最后用一个 markdown 表格总结. "
+            "这是数据分析, 不用改代码."
+        },
+    )
+
+    async def analysed():
+        for worker in await started_since(app, router, mark):
+            task = await task_of(app, worker["id"])
+            if task["status"] in {"review", "done"}:
+                return worker, task
+        return None
+
+    analyst, task = await wait_for("the analysis is reported", analysed, 600, app)
+    result = task["result"] or ""
+    assert "|---" in result.replace(" ", "") or "|:--" in result.replace(" ", ""), result[:800]
+    assert "east" in result.lower() and len(result) > 400, "the whole explanation, in the report"
+    assert not analyst["branch"], "an analysis needs no branch"
+    commands = (task.get("receipts") or {}).get("commands", [])
+    assert not any("git push" in c["command"] for c in commands), commands
+    await asyncio.sleep(15)  # The Router's turn about the report.
+    after = await app.get(f"/api/sessions/{router}/messages?after={mark}")
+    restated = [m for m in after if m["kind"] == "update" and not m["meta"].get("needs_action")]
+    assert not restated, f"the report card is the message, not restated: {restated}"
+    log(f"analysis reported whole ({len(result)} chars, with a table); not restated")
+    notes = await app.get(f"/api/sessions/{analyst['id']}/messages")
+    hooks = [m for m in notes if "plugin hook failed" in m["text"]]
+    assert len(hooks) == 1 and analyst["status"] != "failed", "a failing hook is only a note"
+    log_file = Path.home() / ".copilot" / "session-state" / analyst["id"] / "events.jsonl"
+    assert '"reasoningEffort":"high"' in log_file.read_text(), "the worker effort applies"
+    log("the failing plugin hook is a note; the worker effort (high) applied")
+
+    # 2. Acting on the analysis goes to the worker that did it.
+    mark = await router_mark(app, router)
+    await app.post(
+        f"/api/sessions/{router}/messages",
+        {"text": "根据刚才的分析, 把每个 region 的总收入写进 totals.csv (两列: region,total)."},
+    )
+
+    async def acted():
+        messages = await app.get(f"/api/sessions/{router}/messages?after={mark}")
+        started = [m for m in messages if m["kind"] == "notice" and m["text"].startswith("Started")]
+        same = [
+            m
+            for m in messages
+            if m["kind"] == "notice" and m["meta"].get("session_id") == analyst["id"]
+        ]
+        task = await task_of(app, analyst["id"])
+        return (
+            (started, same) if (started or same) and task["status"] in {"review", "done"} else None
+        )
+
+    started, same = await wait_for("the follow-up is done", acted, 600, app)
+    assert same and not started, "the worker that did the analysis does the follow-up"
+    log("the follow-up went to the same worker")
+
+    # 3. A long step: progress answered at once, the worker is not called stopped.
+    mark = await router_mark(app, router)
+    await app.post(
+        f"/api/sessions/{router}/messages",
+        {
+            "text": "Start two workers in parallel. Worker 'Slow job': in its workspace run "
+            "exactly `sleep 150 && echo finished > slow.txt` as one command, then report "
+            "done. Worker 'Notes': write notes.txt in its workspace with the single line "
+            "`notes v1`, then report done."
+        },
+    )
+
+    async def both():
+        workers = await started_since(app, router, mark)
+        slow = next((w for w in workers if "slow" in w["title"].lower()), None)
+        notes = next((w for w in workers if "note" in w["title"].lower()), None)
+        if slow and notes and "sleep" in (slow.get("step") or ""):
+            return slow, notes
+        return None
+
+    slow, notes_worker = await wait_for("the slow step is running", both, 300, app)
+    await asyncio.sleep(25)
+    await app.post(f"/api/sessions/{slow['id']}/messages", {"text": "progress?"})
+    timeline = await app.get(f"/api/sessions/{slow['id']}/messages")
+    assert timeline[-1]["text"].startswith("It reads this when its current step ends"), timeline[-1]
+    log(f"a message to the busy worker says so at once: {timeline[-1]['text'][:160]!r}")
+    mark = await router_mark(app, router)
+    asked = time.monotonic()
+    await app.post(f"/api/sessions/{router}/messages", {"text": "进展怎么样了?"})
+    answer = await router_reply(app, router, mark, 120)
+    took = time.monotonic() - asked
+    assert "sleep" in answer.lower() or "150" in answer or "slow" in answer.lower(), answer
+    lowered = answer.lower()
+    assert not any(word in lowered for word in ("stopped", "已停止", "停掉了")), answer
+    log(f"progress answered in {took:.0f}s: {answer[:300]!r}")
+
+    # 4. A message to one worker from the Router chat goes to that worker only.
+    async def noted():
+        task = await task_of(app, notes_worker["id"])
+        return task if task["status"] in {"review", "done"} else None
+
+    await wait_for("the notes worker is done", noted, 300, app)
+    mark = await router_mark(app, router)
+    await app.post(
+        f"/api/sessions/{router}/messages",
+        {
+            "text": "Add a second line `notes v2` to notes.txt, then report done.",
+            "to": notes_worker["id"],
+        },
+    )
+    record = (await app.get(f"/api/sessions/{router}/messages?after={mark}"))[0]
+    assert record["kind"] == "owner" and record["meta"]["to"] == notes_worker["id"]
+    notes_file = Path(notes_worker["cwd"]) / "notes.txt"
+
+    async def second_line():
+        task = await task_of(app, notes_worker["id"])
+        text = notes_file.read_text() if notes_file.exists() else ""
+        return task["status"] in {"review", "done"} and "notes v2" in text
+
+    await wait_for("the addressed worker did it", second_line, 300, app)
+    slow_file = Path(slow["cwd"]) / "slow.txt"
+    log("the message from the Router chat reached only that worker")
+
+    # 5. Stop and cancel the slow job: it stays cancelled.
+    slow_task = await task_of(app, slow["id"])
+    await app.post(f"/api/sessions/{slow['id']}/stop")
+    await app.post(f"/api/tasks/{slow_task['id']}/cancel", {"text": "not needed any more"})
+    await asyncio.sleep(30)
+    assert (await task_of(app, slow["id"]))["status"] == "cancelled"
+    log(f"stopped and cancelled: stays cancelled (slow.txt written: {slow_file.exists()})")
+
+    # 6. A session open in a terminal: the Router knows what it does but does not write to it.
+    term = root / "terminal"
+    term.mkdir()
+    helper = subprocess.Popen(
+        [
+            sys.executable,
+            str(Path(__file__).parent / "fake_terminal.py"),
+            str(term),
+            "Remember the codeword PELICAN for later. Reply only with OK.",
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        line = await asyncio.wait_for(asyncio.to_thread(helper.stdout.readline), 200)
+        assert line.startswith("READY"), line
+        mark = await router_mark(app, router)
+        await app.post(
+            f"/api/sessions/{router}/messages",
+            {
+                "text": "我在终端里还开着另一个 Copilot session (关于 codeword 的). "
+                "它记住的 codeword 是什么?"
+            },
+        )
+        answer = await router_reply(app, router, mark, 180)
+        assert "PELICAN" in answer.upper(), answer
+        mark = await router_mark(app, router)
+        await app.post(
+            f"/api/sessions/{router}/messages",
+            {"text": "让那个终端里的 session 再记住 OSPREY."},
+        )
+        answer = await router_reply(app, router, mark, 180)
+        assert any(word in answer for word in ("终端", "terminal", "Terminal")), answer
+        session_id = line.split()[1]
+        assert not (await app.get("/api/state"))["sessions"] or all(
+            s["id"] != session_id for s in (await app.get("/api/state"))["sessions"]
+        ), "not taken over while open there"
+        log(f"terminal session: read, not written: {answer[:200]!r}")
+    finally:
+        helper.kill()
+
+    # 7. The owner profile is reviewed on a card in the inbox.
+    await app.post("/api/profile/distill")
+
+    async def profile_card():
+        drafts = (await app.get("/api/state"))["drafts"]
+        return next((d for d in drafts if d["kind"] == "profile"), None)
+
+    card = await wait_for("the profile card", profile_card, 600, app)
+    assert card["text"].count("##") >= 2, card["text"][:400]
+    await app.post(f"/api/drafts/{card['id']}", {"action": "answer", "text": card["text"]})
+    assert (await app.get("/api/state"))["profile"] == card["text"].strip()
+    log(f"profile reviewed on its card ({len(card['text'])} chars) and in use")
+    workers = [s for s in (await app.get("/api/state"))["sessions"] if s["role"] == "worker"]
+    failed = [s["title"] for s in workers if s["status"] == "failed"]
+    assert not failed, f"no worker failed: {failed}"
 
 
 async def gone(path: Path) -> bool:
@@ -1101,7 +1351,26 @@ async def main():
         git(project, "add", ".")
         git(project, "-c", "user.email=e2e@test", "-c", "user.name=e2e", "commit", "-qm", "init")
         data = root / "data"
-        app = App(data, root / "chiefofstaff.log", DOCS_ENV)
+        # Like a company plugin's journal hook: it writes outside the sandbox, so it fails.
+        hooks = root / "hooks"
+        hooks.mkdir()
+        probe = 'echo x >> "$HOME/.cos-live-hook-probe"'
+        (hooks / "journal.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "hooks": {
+                        name: [{"type": "command", "bash": probe, "timeoutSec": 20}]
+                        for name in ("sessionStart", "agentStop")
+                    },
+                }
+            )
+        )
+        app = App(
+            data,
+            root / "chiefofstaff.log",
+            {**DOCS_ENV, "CHIEFOFSTAFF_WORKER_HOOKS": str(hooks)},
+        )
         failed = False
         started = time.time()
         try:
@@ -1145,6 +1414,15 @@ async def main():
                 await scenario_decisions(app, project)
                 log("DECISIONS SCENARIO PASSED")
                 return
+            if sys.argv[1:] == ["profile"]:
+                await scenario_profile(app)  # Twice: the second asks for a profile again.
+                await scenario_profile(app)
+                log("PROFILE SCENARIO PASSED")
+                return
+            if sys.argv[1:] == ["owner-flow"]:
+                await scenario_owner_flow(app, root)
+                log("OWNER FLOW SCENARIO PASSED")
+                return
             if sys.argv[1:] == ["added-repo"]:
                 await scenario_added_repo_sandboxed(app, root)
                 log("ADDED REPO SCENARIO PASSED")
@@ -1169,6 +1447,7 @@ async def main():
             await scenario_ask_session(app)
             await scenario_repos(app, root)
             await scenario_added_repo_sandboxed(app, root)
+            await scenario_owner_flow(app, root)
             await scenario_code_folder(app, root)
             await scenario_models_usage_digest(app, started)
             await scenario_profile(app)
@@ -1194,6 +1473,10 @@ async def main():
                 print("\n".join((root / "chiefofstaff.log").read_text().splitlines()[-60:]))
             await cleanup(data)
             log(f"removed {forget_sign_ins(DOCS_PORT, signed_in_before)} test sign-in entries")
+            written = Path.home() / ".cos-live-hook-probe"
+            if written.exists():
+                log("WARNING: a hook wrote outside the sandbox (an unsandboxed worker?)")
+                written.unlink()
 
 
 if __name__ == "__main__":

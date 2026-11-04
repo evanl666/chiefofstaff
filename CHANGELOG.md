@@ -1,5 +1,63 @@
 # Changelog
 
+## 0.1.12 (2026-11-03)
+
+From a day of real use on another machine.
+
+- **Progress at a glance**: each running card in the inbox shows the step its worker is in now
+  (and for how long) and what it said last.
+  - Ask the Router how work is going: it reads each worker's activity (new `read_session`) and
+    answers at once, instead of asking busy workers and waiting, or calling a busy worker
+    stopped.
+  - A message to a worker that is in a long step (a query, a job) gets a note at once: it reads
+    the message when that step ends, and what it is doing meanwhile.
+  - The Router's follow-ups reach a busy worker within its turn.
+- **Message one worker directly**: type `@` in the inbox or Chat and pick a worker. Chat shows
+  it as `→ worker`; the Router hears of it with its next message.
+- **Your other Copilot sessions**: the Router knows the ones open in a terminal and can say what
+  they are doing. It says when it cannot write to one (open there), and asks you on a card before
+  continuing one here.
+- **One message per result**: a worker's report is the message, whole (a long explanation, a
+  table): the Router no longer repeats it in an update, nor answers you twice (in two languages).
+  Its remarks after events fold into its steps. Reports are no longer cut at 4,000 characters,
+  and when you ask for an explanation the worker puts it in its report, not only in a file.
+- **Open files from reports**: a path to a file in a worker's folders opens it in the app;
+  Markdown shows formatted.
+- **Your profile** arrives as a card in the inbox, with its text, to correct and use; it is no
+  longer only in Settings.
+- **PR review comments**: a worker on a PR (one it opened, follows or was given) drafts replies
+  to its review comments, in any repository; each card shows the comment it answers.
+- **Workers as fast as your terminal**: in the sandbox, Gradle could not run at all (its
+  daemon talks over localhost), tests that start a server failed, and npm and similar tools
+  could not write their caches, so workers got stuck or moved `HOME` and downloaded everything
+  again. Now (measured: a worker is as fast as the same task in a terminal):
+  - workers may use localhost (not workers that read Slack); your own Gradle daemons' and
+    Jupyter servers' tokens stay unreadable to them;
+  - Gradle builds use your dependency cache read-only, with the worker's own daemon;
+  - npm's package store and Yarn's archives are shared (both are checked against the lockfile
+    before use); caches whose contents would run as they are (Gradle and Maven jars,
+    pre-commit hooks, npx's installs) are not;
+  - before a worktree is made, only the default branch is fetched, once for workers that
+    start together.
+- **No unasked pushes**: workers commit on their branch and leave pushing and the PR to you;
+  analyses and research need no branch.
+- Repeated instructions ("run a small smoke job first") are learned like other feedback.
+- A worker that researched a subject is preferred for acting on it next.
+- The Watchdog leaves a worker that makes progress alone, and its nudges say why it stepped in.
+- Fixes:
+  - A Copilot plugin hook that fails in the sandbox no longer marks the worker failed or fails
+    your message: the session goes on, with one note. *Also writable in the sandbox* (Settings)
+    lets such a plugin write its folder (never keys, Copilot's settings or plugin code).
+  - A session continued here that was started in your home folder no longer gets your home
+    folder to write in.
+  - The thinking effort chosen in Settings applies to Copilot's default model too (it was
+    dropped until the default was known); Copilot's *Auto*, which takes none, is said so.
+  - Cancelling a stopped task keeps it cancelled even when the worker's report was already on its
+    way; news about a task in review or accepted no longer leaves it stuck "in progress".
+  - With many sessions (about 25 and up) the Router could no longer read its own list of them;
+    the list now stays compact.
+  - A PR merged after later reports that did not link it again still settles its task.
+
 ## 0.1.11 (2026-11-03)
 
 Fixes from a second bug bash.

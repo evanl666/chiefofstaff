@@ -55,7 +55,7 @@ export function displayPath(full) {
 }
 function pathChip(path) {
   // Matched on escaped text without "&", so the path needs no further escaping.
-  return `<span class="path" data-path="${path}" title="${path}\nClick to copy">${escapeHtml(displayPath(path))}</span>`;
+  return `<span class="path" data-path="${path}" title="${path}\nClick to open (or copy)">${escapeHtml(displayPath(path))}</span>`;
 }
 function inlineEscaped(escaped) {
   return escaped.replace(inlinePattern(), (match, code, bold, strike, italic, label, href, bare, path) => {

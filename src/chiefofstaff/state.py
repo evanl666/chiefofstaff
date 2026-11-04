@@ -42,14 +42,23 @@ class SessionState:
     event_turn: bool = False
     # The next turn resumes one the owner started (after a restart).
     owner_turn: bool = False
+    # The Router's current turn answers the owner: its reply is what the owner reads.
+    owner_reply: bool = False
     # Open cards for the owner: draft id -> text.
     asking: dict[str, str] = field(default_factory=dict)
     # The tail of the latest tool output, for the Watchdog.
     last_output: str = ""
+    # The steps (tool calls) it is in now, by call id: when each started and what it is.
+    steps: dict[str, tuple[float, str]] = field(default_factory=dict)
     lifecycle: asyncio.Lock = field(default_factory=asyncio.Lock)
     sending: asyncio.Lock = field(default_factory=asyncio.Lock)
     # Serializes add_repo for one worker.
     checkouts: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    def step(self) -> tuple[float, str]:
+        """The longest-running step it is in now: when it started and what it is; (0, "")
+        between steps. Several run at once when it calls tools in parallel."""
+        return min(self.steps.values()) if self.steps else (0.0, "")
 
     def pop_resting(self, default: str) -> str:
         status, self.resting = self.resting or default, ""
@@ -93,3 +102,4 @@ class SessionStates:
             state.retuned = False
             state.stale = False
             state.after_refresh = ""
+            state.steps.clear()

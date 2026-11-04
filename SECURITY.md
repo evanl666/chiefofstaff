@@ -25,11 +25,11 @@ makes a mistake.
 
 | Boundary | Enforced by | Holds when |
 |---|---|---|
-| A worker's shell commands write only to its workspace, its checkouts and temporary folders | **OS sandbox** (Copilot's, Seatbelt on macOS, bubblewrap on Linux) | Sandbox is on (Settings, default) and the machine supports it |
+| A worker's shell commands write only to its workspace, its checkouts and temporary folders, plus npm's package store and Yarn's archives (whose contents those tools check against lockfiles before use; in a Node project Copilot itself also opens npm's whole cache folder) and folders you add under *Also writable in the sandbox*. Caches whose contents run as they are (Gradle and Maven jars, pre-commit hooks) are read-only | **OS sandbox** (Copilot's, Seatbelt on macOS, bubblewrap on Linux) | Sandbox is on (Settings, default) and the machine supports it. *Workers use your package caches* off keeps npm's and Yarn's out of reach too; workers that read Slack never get them. A folder you add under *Also writable* can change what your own tools run |
 | A worker cannot change a repository's hooks or config, its submodules' config, or your other worktrees (all of which can run code when you use git there) | **OS sandbox** | Sandbox is on. Treat the worker's own folder like a stranger's pull request: running anything there, git included, runs what the worker wrote |
 | Workers never see your GitHub token; `git` and `gh` authenticate through Copilot's local proxy | **OS sandbox** + Copilot's credential proxy | Sandbox is on |
 | Workers cannot read `~/.ssh` keys or other files outside their folders' read rules | **OS sandbox** | Sandbox is on |
-| Workers that read Slack reach only GitHub hosts over the network | **OS sandbox** | Sandbox is on |
+| Workers that read Slack reach only GitHub hosts over the network, and not localhost. Other workers may use localhost (servers their tests start, their build daemon) and so reach your local services; the tokens of your Gradle daemons and Jupyter servers are unreadable to them, and Unix sockets (Docker's) stay closed | **OS sandbox** | Sandbox is on |
 | The Router, the Slack session and the Watchdog have no shell, file or web tools | **Copilot** (session tool allowlist) | Always |
 | Slack messages are sent only after you approve a draft | **Chief of Staff** (Slack write tools are refused; only the app sends) | Always for the Slack tools; sessions are never given your Slack token |
 | PR reviews are published only after you approve a draft | **Chief of Staff** (permission check refuses GitHub MCP writes, `gh pr review/merge/comment` and `gh api` writes) | Yolo is off. With yolo on, a worker's `gh` can still write to GitHub |

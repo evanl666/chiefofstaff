@@ -262,6 +262,7 @@ class Workers:
                 with suppress(Exception):
                     await session.disconnect()
         self.states[session_id].busy = False
+        self.states[session_id].steps.clear()
         self.store.unfollow_session(session_id)
         self.runtime.decisions.drop_asker(session_id)
         self.states[session_id].last_output = ""
@@ -419,6 +420,7 @@ class Workers:
             await session.abort()
         self.states[session_id].busy = False
         self.states[session_id].after_refresh = ""  # Not "go on" once it is stopped.
+        self.states[session_id].steps.clear()
         if row["role"] == WORKER:
             # Its task, given and not received, is for its next message, not a turn now. Events
             # held for the Router or the Slack session still go out when it is idle.

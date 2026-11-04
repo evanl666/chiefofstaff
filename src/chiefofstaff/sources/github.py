@@ -257,11 +257,53 @@ class GitHubSource:
                 return review.get("html_url") or "Review published."
         return ""
 
+    async def review_comment(self, repo: str, number: int, comment_id: int) -> dict:
+        """A review comment on a PR, as the owner sees it next to a drafted reply."""
+        comment = json.loads(await self.gh("api", f"repos/{repo}/pulls/comments/{int(comment_id)}"))
+        if not str(comment.get("pull_request_url", "")).endswith(f"/pulls/{int(number)}"):
+            raise ValueError(f"Comment {comment_id} is not on {repo}#{number}.")
+        return {
+            "author": (comment.get("user") or {}).get("login", ""),
+            "body": body(comment)[:1500],
+            "path": comment.get("path") or "",
+            "line": comment.get("line") or comment.get("original_line") or "",
+            "url": comment.get("html_url") or "",
+        }
+
+    async def find_reply(self, target: dict, text: str) -> str:
+        """The URL of a published reply with this text to the target comment, or ""."""
+        path = f"repos/{target['repo']}/pulls/{int(target['number'])}/comments"
+        comments = json.loads(await self.gh("api", path, "--paginate") or "[]")
+        for comment in comments:
+            if comment.get("in_reply_to_id") == target["in_reply_to"] and (
+                (comment.get("body") or "").strip() == text.strip()
+            ):
+                return comment.get("html_url") or "Reply published."
+        return ""
+
+    async def publish_reply(self, target: dict, text: str) -> str:
+        repo, number = target["repo"], int(target["number"])
+        reply = json.loads(
+            await self.gh(
+                "api",
+                f"repos/{repo}/pulls/{number}/comments/{int(target['in_reply_to'])}/replies",
+                "--method=POST",
+                "--input=-",
+                payload={"body": text},
+            )
+        )
+        if reply.get("id"):
+            # Our own reply must not come back as activity on the followed PR.
+            self.store.add_trigger("github-sent", f"github:reviewcomment:{reply['id']}", text)
+        return reply.get("html_url", "Reply published.")
+
     async def publish_review(self, target: dict, body: str) -> str:
         settings = self.store.settings()
         repo = target["repo"]
-        if repo not in settings.github_repos:
+        if target.get("via", "connected") == "connected" and repo not in settings.github_repos:
             raise ValueError("This repository is no longer connected; nothing was published.")
+        if target.get("in_reply_to"):
+            return await self.publish_reply(target, body)
         if await self.head(repo, target["number"]) != target["head_sha"]:
             raise ValueError("The PR changed after the draft was written; nothing was published.")
         reply = await self.gh(

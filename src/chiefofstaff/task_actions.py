@@ -204,13 +204,23 @@ class TaskActions:
             self.publish(self.tasks.get(task_id))
 
     def pr_urls(self, task: dict) -> list[str]:
-        """The task's PRs: those opened with Create PR, and those its report links to."""
+        """The task's PRs: those opened with Create PR, and those any of its reports linked to."""
         opened = json.loads(self.store.get(f"prs:{task['id']}") or "[]")
-        cited = [
+        cited = json.loads(self.store.get(f"cited:{task['id']}") or "[]") + [
             f"https://github.com/{repo}/pull/{number}"
             for repo, number in threads.PR_URL.findall(task["result"] or "")
         ]
         return list(dict.fromkeys(opened + cited))
+
+    def remember_prs(self, task_id: str, report: str):
+        """PRs a done report links to stay the task's when a later report does not repeat them
+        (a merged PR then still settles it)."""
+        cited = json.loads(self.store.get(f"cited:{task_id}") or "[]")
+        found = [
+            f"https://github.com/{repo}/pull/{n}" for repo, n in threads.PR_URL.findall(report)
+        ]
+        if found:
+            self.store.set(f"cited:{task_id}", json.dumps(list(dict.fromkeys(cited + found))))
 
     def pr_merged(self, session_id: str, thread: str):
         """A worker's PR was merged: the task it delivers is done."""
