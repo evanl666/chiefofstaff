@@ -502,6 +502,7 @@ class TaskActions:
             if task["status"] != before:
                 self.tasks.move(task_id, before)  # The follow-up never reached its worker.
             raise
+        self.runtime.owner_told(row, text)
         return task
 
     async def retry(self, task_id: str, text: str = "") -> dict:
@@ -537,6 +538,7 @@ class TaskActions:
         except Exception:
             self.tasks.move(task_id, before["status"], progress=before["progress"])
             raise
+        self.runtime.owner_told(row, body)
         return task
 
     def view(self, task: dict) -> dict:

@@ -130,7 +130,7 @@ async def test_thinking_effort_and_context_follow_what_the_model_supports(tmp_pa
     worker_id = (await spawn(runtime, harness.router_id, "Hard bug"))["session_id"]
     assert harness.session(worker_id).options["reasoning_effort"] == "high"
     quick = (await spawn(runtime, harness.router_id, "Chore", effort="low"))["session_id"]
-    assert harness.session(quick).options["reasoning_effort"] == "low"
+    assert harness.session(quick).options["reasoning_effort"] == "high", "the owner's is least"
     plain = (await spawn(runtime, harness.router_id, "Plain", model="fast-model"))["session_id"]
     options = harness.session(plain).options
     assert "reasoning_effort" not in options and "context_tier" not in options

@@ -90,6 +90,9 @@ def needs_trust(top: Path, cwd: Path) -> bool:
     return any((folder / name).exists() for folder in folders for name in TRUST_GATED)
 
 
+# Copilot's own threshold for deferring MCP tools behind tool search (its SDK's default).
+COPILOT_DEFER_THRESHOLD = 30
+
 PROMPTS = {
     ROUTER: prompts.ROUTER,
     SLACK: prompts.SLACK,
@@ -640,6 +643,10 @@ class Runtime:
             # servers, skills and custom agents (by default an SDK session loads only the
             # owner's MCP servers).
             options["enable_config_discovery"] = True
+            # Copilot hides MCP tools behind a search once a session has more than 30 tools.
+            # Chief of Staff's own tools must not tip a worker over sooner than the owner's own
+            # sessions: their MCP tools stay in plain sight in both, or are searched in both.
+            options["tool_search"] = {"defer_threshold": COPILOT_DEFER_THRESHOLD + len(tools)}
             # Workers ask the owner directly: Copilot's ask_user, MCP forms and links.
             options["on_user_input_request"] = self.asks.on_user_input
             options["on_elicitation_request"] = self.asks.on_elicitation
@@ -714,7 +721,10 @@ class Runtime:
             if not self.model_for(row):
                 self.store.set(f"pinned:{row['id']}", "1")
             model = self.effective_model(row) or "auto"
-            await session.set_model(model, **self.tuning(row, switching=True))
+            tuning = self.tuning(row, switching=True)
+            if model == "auto":
+                tuning.pop("reasoning_effort", None)  # Auto takes none.
+            await session.set_model(model, **tuning)
 
     async def refresh(self, *roles: str):
         """Sessions of these roles pick up new prompts (profile, style) on their next use."""
@@ -1157,8 +1167,12 @@ class Runtime:
         if row["role"] == WORKER:
             self.background(self.workers.pump())  # Its slot is free for a queued worker.
 
-    async def owner_send(self, session_id: str, text: str, *, learn: bool = True) -> dict:
-        """`learn`: the owner typed it (not a message the app sends for them)."""
+    async def owner_send(
+        self, session_id: str, text: str, *, learn: bool = True, tell_router: bool = True
+    ) -> dict:
+        """`learn`: the owner typed it (not a message the app sends for them). A message to a
+        worker is also noted for the Router (`tell_router`), which must know what the owner
+        asked for."""
         row = self.store.session(session_id)
         if row["closed_at"] and row["role"] == WORKER:
             await self.workers.reopen(session_id)
@@ -1178,6 +1192,8 @@ class Runtime:
         message = await self.delivery.deliver(
             session_id, prompt, kind="owner", display=text, meta=meta, steer=True
         )
+        if row["role"] == WORKER and tell_router:
+            self.owner_told(row, text)
         if learn and len(text.strip()) >= INSTRUCTION_CHARS:
             # What the owner asks for again and again becomes a lesson (they review it first).
             self.learning.record(
@@ -1205,27 +1221,32 @@ class Runtime:
             raise ValueError("Address a worker.")
         message = await self.owner_send(row["id"], text)
         note = self.busy_note(row["id"])
-        self.add_message(
-            router_id,
-            "owner",
-            text,
-            {
-                "to": row["id"],
-                "to_title": row["title"],
-                # Not a turn of its own: it goes with the Router's next message.
-                "prompt": wrap(
-                    "system",
-                    "to-worker",
-                    f"The owner told this worker directly: {text}",
-                    worker=short(row["id"]),
-                    title=row["title"],
-                ),
-                "deferred": True,
-            },
-        )
         if note:  # Where the owner is: Chat or the inbox.
             self.add_message(router_id, "notice", note, {"session_id": row["id"]})
         return {**message, "note": note}
+
+    def owner_told(self, row: dict, text: str):
+        """What the owner told a worker directly (in its timeline, @ in Chat, on a task card):
+        the Router hears of it with its next message, so it never takes the result for drift."""
+        with suppress(RuntimeError):
+            self.add_message(
+                self.router_id(),
+                "owner",
+                text,
+                {
+                    "to": row["id"],
+                    "to_title": row["title"],
+                    # Not a turn of its own: it goes with the Router's next message.
+                    "prompt": wrap(
+                        "system",
+                        "to-worker",
+                        f"The owner told this worker directly: {text}",
+                        worker=short(row["id"]),
+                        title=row["title"],
+                    ),
+                    "deferred": True,
+                },
+            )
 
     def projects_note(self) -> str:
         """Tell the Router when the configured projects changed since it last heard."""

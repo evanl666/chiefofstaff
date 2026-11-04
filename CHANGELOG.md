@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.1.14 (2026-11-04)
+
+From testing workers side by side with your own Copilot sessions.
+
+- **MCP tools in plain sight**: Copilot hides MCP tools behind a search once a session has more
+  than 30 tools, and Chief of Staff's own tools made workers cross that line sooner than your
+  sessions. With your company's MCP servers, a worker had to search for tools your own session
+  saw directly. Now both cross it at the same point.
+- **Your worker effort is kept**: a background call of Copilot's on a cheaper model (naming a
+  session, say) could be taken for its default model, which takes no thinking effort, and the
+  effort you chose for workers was then dropped. And the Router could give a worker less effort
+  than you chose ("medium" for a data analysis): yours is now the least a worker gets; the Router
+  can only raise it for a hard task.
+- **What you tell a worker, the Router knows**: a follow-up on a task card, a retry or a
+  message in a worker's timeline went straight to the worker. The Router never heard of it,
+  and could have the worker undo the change you asked for. Now it is told, and never has a
+  worker undo or redo a result just because it did not ask for it: it asks you.
+- **The right worker gets the follow-up**: asked to fix what a worker had found, the Router
+  could start a new worker because it took the first one for read-only. No worker is: needing
+  a worktree, a branch or a commit is no reason for a new one.
+- **Credit limit**: Copilot starts no session with a limit under 30 credits, so a lower limit
+  kept every worker from starting. It is raised to 30.
+- **Whole answers**: a worker that answers an explanation or a table you asked for with one line
+  ("analysis done") is sent back once for the whole answer.
+- Workers check that a change took effect before reporting it, and know that macOS's `sed`
+  differs from GNU's.
+- New live suites: `scripts/live_routing.py` (does the Router give work to the worker that
+  knows the subject?) and `scripts/live_usecases.py` (revise, accept, cancel and retry, a
+  question mid-task, Create PR, long answers, rapid requests, the credit limit).
+
 ## 0.1.13 (2026-11-04)
 
 Workers can do what your own Copilot sessions can.

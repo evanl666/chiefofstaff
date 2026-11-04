@@ -990,7 +990,10 @@ async def scenario_owner_flow(app: App, root: Path):
     # Copilot reports some hook failures (one the sandbox stops) and carries on past others.
     assert len(hooks) <= 1 and analyst["status"] != "failed", "a failing hook is at most a note"
     log_file = Path.home() / ".copilot" / "session-state" / analyst["id"] / "events.jsonl"
-    assert '"reasoningEffort":"high"' in log_file.read_text(), "the worker effort applies"
+    recorded = log_file.read_text()
+    used = sorted(set(re.findall(r'"(?:model|reasoningEffort)":"([^"]+)"', recorded)))
+    asked = analyst.get("effort") or "(none)"
+    assert '"reasoningEffort":"high"' in recorded, f"the worker effort applies: {used}, {asked}"
     log(f"a failing plugin hook did not stop the worker ({len(hooks)} note); effort high applied")
 
     # 2. Acting on the analysis goes to the worker that did it.
@@ -1302,7 +1305,7 @@ async def scenario_code_folder(app: App, root: Path):
     log(f"cloned into {clone}, changed in {tree} on {checkout['branch']}; worktree removed")
 
 
-async def scenario_models_usage_digest(app: App, started: float):
+async def scenario_models_usage_digest(app: App, started: float, slack: bool = True):
     state = await app.get("/api/state")
     router = state["router_id"]
     models = [m["id"] for m in await app.get("/api/models") if m["id"] != "auto"]
@@ -1318,7 +1321,7 @@ async def scenario_models_usage_digest(app: App, started: float):
 
     usage = await wait_for(f"Router answers with {chosen}", used_new_model, 180, app)
     roles = {row["role"] for row in usage["by_role"]}
-    assert {"router", "worker", "slack"} <= roles, roles
+    assert {"router", "worker", *(["slack"] if slack else [])} <= roles, roles
     assert usage["total"]["credits"] > 0 and usage["by_session"][0]["credits"] > 0
     router_view = await app.get(f"/api/sessions/{router}")
     assert router_view["credits"] > 0 and router_view["model"] == chosen
@@ -1507,6 +1510,14 @@ async def main():
             if sys.argv[1:] == ["owner-flow"]:
                 await scenario_owner_flow(app, root)
                 log("OWNER FLOW SCENARIO PASSED")
+                return
+            if sys.argv[1:] == ["from-owner-flow"]:  # The end of the full run.
+                await scenario_owner_flow(app, root)
+                await scenario_company_review(app)
+                await scenario_code_folder(app, root)
+                await scenario_models_usage_digest(app, started, slack=False)
+                await scenario_profile(app)
+                log("LAST SCENARIOS PASSED")
                 return
             if sys.argv[1:] == ["added-repo"]:
                 await scenario_added_repo_sandboxed(app, root)

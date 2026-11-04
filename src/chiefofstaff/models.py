@@ -65,6 +65,10 @@ def private_folders(home: Path) -> list[Path]:
     ]
 
 
+# Copilot refuses to start a session with a lower credit limit.
+MIN_CREDIT_LIMIT = 30
+
+
 class Settings(StrictModel):
     copilot_command: str = "copilot"
     model: str = Field(default="", max_length=100)
@@ -107,6 +111,12 @@ class Settings(StrictModel):
     )
     github_enabled: bool = False
     github_repos: list[Repository] = Field(default_factory=list, max_length=10)
+
+    @field_validator("worker_credit_limit")
+    @classmethod
+    def copilot_minimum(cls, value: float) -> float:
+        # Copilot starts no session with less; a lower limit (saved before, say) is raised.
+        return MIN_CREDIT_LIMIT if 0 < value < MIN_CREDIT_LIMIT else value
 
     @field_validator("slack_delegate_emoji", mode="before")
     @classmethod
