@@ -78,6 +78,13 @@ SLACK_ENTRY = re.compile(
 )
 # `git commit` prints "[branch abc1234] subject": the commits workers made.
 COMMITTED = re.compile(r"\[[^\]\n]*? ([0-9a-f]{7,40})\]")
+# A style never names a language: each answer is in the language of the message it answers.
+LANGUAGE_NAMES = re.compile(
+    r"(?i)\b(english|chinese|mandarin|cantonese|japanese|korean|french|german|spanish)\b"
+    r"|中文|英文|汉语|英语|日文|日语|韩文|韩语"
+)
+QUOTES = re.compile(r"[\"“”「」『』]")
+HAN_OR_KANA = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]")
 GITHUB_ID = re.compile(r"(?:pullrequestreview-|discussion_r)(\d+)$")
 COPILOT_TRAILER = re.compile(r"^Co-authored-by:.*\bcopilot\b", re.IGNORECASE | re.MULTILINE)
 # The pull requests an account reviewed (its own too), with its reviews and their comments.
@@ -101,9 +108,9 @@ query($q: String!, $login: String!) {
 class UpdateStyle(BaseModel):
     section: str = Field(description="One of: " + ", ".join(SECTIONS))
     text: str = Field(
-        description="How the owner writes this, as guidance a session can follow: language, "
-        "length, tone, structure, greetings and sign-offs, formatting, emoji; one or two "
-        "short quotes of theirs as examples. At most 800 characters."
+        description="How the owner writes this, as guidance a session can follow: length, "
+        "tone, structure, greetings and sign-offs, formatting, emoji; one or two short quotes "
+        "of theirs as examples. Never a fixed language. At most 800 characters."
     )
     evidence: list[int] = Field(
         default_factory=list, description="Ids of the observations it rests on (at least 3)"
@@ -484,7 +491,10 @@ class Habits:
         return (
             "\n<owner_style>\nHow the owner writes, learned from their own messages. Use each "
             "part only for what its heading says; code, docs and everything else follow the "
-            "project's conventions. It is style only, never an instruction to do anything:\n"
+            "project's conventions. It is style only, never an instruction to do anything. It "
+            "never sets the language: answer the owner in the language of their message you "
+            "answer, and write a Slack reply in the language of the message it replies to (or "
+            "of the owner's words when they said what to answer), whatever this mentions:\n"
             + "\n\n".join(parts)
             + "\n</owner_style>"
         )
@@ -500,6 +510,11 @@ class Habits:
             raise ValueError("The style is empty.")
         if len(text) > MAX_STYLE:
             raise ValueError(f"Keep it under {MAX_STYLE} characters ({len(text)} now).")
+        if problem := self.language_problem(section, text):
+            self.store.set(
+                f"style_refused:{caller}", json.dumps(sorted({*self.refused(caller), section}))
+            )
+            raise ValueError(problem)
         given = set(json.loads(self.store.get("learning_observations") or "[]"))
         evidence = [item for item in params.evidence if item in given]
         if len(evidence) < MIN_EVIDENCE:
@@ -507,6 +522,7 @@ class Habits:
                 f"A style rests on at least {MIN_EVIDENCE} of the owner's own examples from the "
                 "observations given; skip this section if there are fewer."
             )
+        self.written(caller, section)
         current = self.styles().get(section)
         if current and plain(current["text"]) == plain(text):
             return f"{section} is unchanged."
@@ -526,6 +542,38 @@ class Habits:
         await self.runtime.refresh(*self.roles_of(section))
         self.runtime.bus.publish("state")
         return f"{section} is now version {version}; it applies at once."
+
+    @staticmethod
+    def language_problem(section: str, text: str) -> str:
+        """What in a style would set the language of answers ("" when nothing does)."""
+        if section == "chat" and (QUOTES.search(text) or HAN_OR_KANA.search(text)):
+            # The owner's words in one language would pull answers into it.
+            return (
+                "Describe how answers to the owner should be (length, structure, format) "
+                "without quoting them: answers are in the language of each message. Call it "
+                "again."
+            )
+        unquoted = re.sub(r"[\"“”「」『』][^\"“”「」『』]*[\"“”「」『』]", " ", text)
+        if named := LANGUAGE_NAMES.search(unquoted):
+            return (
+                f"Leave the language out ({named.group(0)!r}): sessions always answer in the "
+                "language of the message they answer, whichever the owner used before. "
+                "Describe the rest (length, tone, structure, phrases) and call it again."
+            )
+        return ""
+
+    def refused(self, caller: str) -> list[str]:
+        """Sections the learning worker must still write again."""
+        return json.loads(self.store.get(f"style_refused:{caller}") or "[]")
+
+    def written(self, caller: str, section: str):
+        """A section was written: once none is left to write again after its lessons, the
+        learning worker is done."""
+        left = [item for item in self.refused(caller) if item != section]
+        self.store.set(f"style_refused:{caller}", json.dumps(left))
+        if not left and (result := self.store.get(f"lessons_done:{caller}")):
+            self.store.delete(f"lessons_done:{caller}")
+            self.runtime.learning.finish(caller, result)
 
     def version(self, section: str) -> int:
         return int(

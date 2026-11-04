@@ -50,7 +50,7 @@ from .decisions import Decisions
 from .delivery import Delivery
 from .digest import digest
 from .drafts import Drafts
-from .envelope import UNTRUSTED, clean_title, sender, short, wrap
+from .envelope import UNTRUSTED, clean_title, language, sender, short, wrap
 from .events import ROUTER_CONTEXT, Events
 from .focus import Focus
 from .habits import Habits
@@ -1214,15 +1214,18 @@ class Runtime:
         row = self.store.session(session_id)
         if row["closed_at"] and row["role"] == WORKER:
             await self.workers.reopen(session_id)
-        prompt = wrap("owner", "message", text)
+        # Answers come in the language of this message, whatever the conversation used before.
+        spoken = self.heard(text) if learn else language(text)
+        prompt = wrap("owner", "message", text, reply_in=spoken)
         meta = {}
+        notes = [self.switched_language(session_id, spoken)]
         if row["role"] == ROUTER:
             # The Router hands this message on as {owner:<ref>} instead of copying it.
             meta["ref"] = "o" + uuid4().hex[:6]
-            prompt = wrap("owner", "message", text, ref=meta["ref"])
-            notes = [self.projects_note(), self.toolset.related_hint(text)]
-            context = [wrap("system", "context", note) for note in notes if note]
-            prompt = "\n\n".join([prompt, *context])
+            prompt = wrap("owner", "message", text, ref=meta["ref"], reply_in=spoken)
+            notes += [self.projects_note(), self.toolset.related_hint(text)]
+        context = [wrap("system", "context", note) for note in notes if note]
+        prompt = "\n\n".join([prompt, *context])
         task = self.tasks.current(session_id) if row["role"] == WORKER else None
         if task and task["status"] in {"review", "done", "failed", "cancelled"}:
             # A question changes nothing, but new work it reports comes back for review.
@@ -1243,6 +1246,27 @@ class Runtime:
         if note := self.busy_note(session_id):
             self.add_message(session_id, "notice", note, {"progress": True})
         return message
+
+    def heard(self, text: str) -> str:
+        """The language of what the owner wrote, remembered when clear: what they read next
+        (reports, the Router's notes about them, new tasks) is in it."""
+        spoken = language(text)
+        if spoken:
+            self.store.set("owner_language", spoken)
+        return spoken
+
+    def switched_language(self, session_id: str, spoken: str) -> str:
+        """A note when the owner writes in another language than the session last answered in:
+        a conversation in one language pulls a model's answer back into it."""
+        last = self.store.one(
+            "SELECT text FROM messages WHERE session_id=? AND kind IN ('assistant', 'report') "
+            "ORDER BY id DESC LIMIT 1",
+            (session_id,),
+        )
+        before = language(last["text"]) if last else ""
+        if not spoken or not before or before == spoken:
+            return ""
+        return f"The owner wrote this in {spoken}: answer in {spoken}, not {before}."
 
     def busy_note(self, session_id: str) -> str:
         """For a message to a worker deep in a step: it reads it only when the step ends."""
@@ -1309,6 +1333,8 @@ class Runtime:
                 status=status,
                 task=task["id"] if task else None,
                 title=title,
+                # What the Router tells the owner about it is in the owner's language.
+                reply_in=self.store.get("owner_language"),
             ),
             batch=True,
             kind="inbound",
@@ -1338,7 +1364,10 @@ class Runtime:
         try:
             await self.delivery.deliver(
                 self.router_id(),
-                wrap(source, kind, text, trust=UNTRUSTED),
+                # What the Router tells the owner about it is in the owner's language.
+                wrap(
+                    source, kind, text, trust=UNTRUSTED, reply_in=self.store.get("owner_language")
+                ),
                 batch=True,
                 kind="inbound",
                 display=(display or text)[:2000],

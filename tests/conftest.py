@@ -13,13 +13,19 @@ from copilot.tools import ToolInvocation
 
 from chiefofstaff.backend import TESTED_CLI, Capabilities
 from chiefofstaff.bus import Bus
-from chiefofstaff.envelope import wrap as env  # noqa: F401  (tests import it)
+from chiefofstaff.envelope import language
+from chiefofstaff.envelope import wrap as env
 from chiefofstaff.models import Settings
 from chiefofstaff.runtime import Runtime
 from chiefofstaff.sources.github import GitHubSource
 from chiefofstaff.sources.slack import SlackSource
 from chiefofstaff.store import Store
 from chiefofstaff.watchdog import WatchConfig
+
+
+def said(text: str) -> str:
+    """What a session receives when the owner writes this: tagged with its language."""
+    return env("owner", "message", text, reply_in=language(text))
 
 
 class FakeSession:

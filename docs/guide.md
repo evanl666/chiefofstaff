@@ -311,10 +311,13 @@ made), what you asked your own Copilot sessions, and what you told the Router. O
 words; others' messages are never kept. A short-lived worker, which can do nothing but propose,
 then describes how you write in each place: answers and reports to you, Slack DMs, Slack
 channels, PR reviews, commit messages (language, length, tone, greetings, formatting, a short
-quote or two). Each applies at once to the sessions that write that way for you (the Slack
-session and workers that read Slack get your Slack style; workers get your commit and review
-style; the Router and workers answer you the way you talk to them), and the Router chat says
-what was learned. Settings → *How you work* shows each, with its version; *Undo* goes back to the
+quote or two). It never sets the language: answers are in the language of the message they
+answer (write in English and you are answered in English, in Chinese and you are answered in
+Chinese), and a Slack reply is in the language of the message it replies to, or in your words
+when you said what to answer. Each style applies at once to the sessions that write that way
+for you (the Slack session and workers that read Slack get your Slack style; workers get your
+commit and review style; the Router and workers answer you the way you talk to them), and the
+Router chat says what was learned. Settings → *How you work* shows each, with its version; *Undo* goes back to the
 previous one. Turn *Learn from my Slack messages, PR reviews, commits and Copilot sessions* off
 to stop reading them.
 

@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from conftest import Harness, call_tool, env, settle, task_of
+from conftest import Harness, call_tool, env, said, settle, task_of
 
 from chiefofstaff import workspaces as workspaces_module
 from chiefofstaff.models import Settings
@@ -255,7 +255,7 @@ async def test_the_router_hears_when_projects_change(tmp_path):
     runtime = await harness.connect()
     router = harness.session(harness.router_id)
     await runtime.owner_send(harness.router_id, "hi")
-    assert router.sent[-1] == env("owner", "message", "hi"), "nothing to say the first time"
+    assert router.sent[-1] == said("hi"), "nothing to say the first time"
     harness.store.save_settings(Settings(projects=[str(app)]))
     await runtime.owner_send(harness.router_id, "work on app")
     assert router.sent[-1].endswith(

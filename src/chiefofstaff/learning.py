@@ -322,12 +322,23 @@ class Learning:
                 needs_action=True,
                 title="Lessons to review",
             )
+        result = f"Proposed {len(proposed)} lesson(s)."
+        if refused := self.runtime.habits.refused(caller):
+            # A style it must still write again: it ends once that is done.
+            self.store.set(f"lessons_done:{caller}", result)
+            return (
+                f"{result} The owner reviews them. update_style refused {', '.join(refused)}: "
+                "call it again for each without naming a language; then you are done."
+            )
+        self.finish(caller, result)
+        return f"{result} The owner reviews them. You are done."
+
+    def finish(self, caller: str, result: str):
+        """The learning worker's task is done, and it closes after this turn."""
         task = self.runtime.tasks.current(caller)
         if task and task["status"] not in {"done", "cancelled"}:
-            result = f"Proposed {len(proposed)} lesson(s)."
             self.runtime.tasks.move(task["id"], "done", result=result)
         self.runtime.states[caller].close_after_turn = True
-        return f"Proposed {len(proposed)} lesson(s); the owner reviews them. You are done."
 
     def pending_card(self) -> dict | None:
         return next((d for d in self.store.drafts() if d["kind"] == "lessons"), None)

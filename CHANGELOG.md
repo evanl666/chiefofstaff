@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.1.16 (2026-11-04)
+
+- **Answers in the language you just wrote in**: write in English and the Router, the workers'
+  reports and its notes about events are in English; write in Chinese and they are in Chinese,
+  whatever language the conversation was in before. Before, a conversation in one language kept
+  pulling answers back into it, and a style learned from your Chinese messages could make
+  answers Chinese. Your messages now carry their language when it is clear ("progress?" does
+  not: it keeps the conversation's), tasks carry it to workers, and a switch is said outright.
+- **A style never sets the language**: what Chief of Staff learns about how you write leaves
+  the language out (and answers to you are described without quoting you), so a style learned
+  from Chinese messages does not turn English answers Chinese. A Slack reply is in the language
+  of the message it answers, or in your words when you said what to answer.
+- **A new task for a finished worker is never left running**: given a new task (or its task
+  reopened, by a follow-up or a changed decision), a worker that wrote its answer but ended
+  without a report went back to "done", and the task stayed "running" with the answer unseen.
+  The answer is now filed as its report, as for any other task.
+- **Unrelated changes get their own branch**: asked for a bug fix in a project where a worker had
+  just added a feature, the Router could give the fix to that worker, and its branch (and PR)
+  then held both. A change on another subject now gets its own worker, even in the same project.
+- The learning worker writes again a style it was refused before it ends.
+- New routing scenario: an unrelated change in the same project is not put on another worker's
+  branch.
+
 ## 0.1.15 (2026-11-04)
 
 Chief of Staff keeps learning how you work, and turns mistakes into checks it can run.

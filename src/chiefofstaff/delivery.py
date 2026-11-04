@@ -71,9 +71,8 @@ class Delivery:
             prompt if display is None else display,
             {**(meta or {}), "prompt": prompt},
         )
-        if row["role"] == WORKER and row["status"] in {"done", "waiting"}:
-            # Unless this turn reports anew, the worker returns to this state afterwards.
-            self.states[session_id].resting = row["status"]
+        if row["role"] == WORKER:
+            self.rest_after(row)
         if batch and row["role"] in {ROUTER, SLACK}:
             if row["status"] == "working":
                 return message  # It gets this with the next flush, when it is idle.
@@ -202,6 +201,17 @@ class Delivery:
         self.store.delete(f"sending:{session_id}")
         return arrived
 
+    def rest_after(self, row: dict):
+        """A done or waiting worker asked about its work returns to that state after a turn
+        without a report. Not one given work to do (a new task, or its task reopened): that
+        work is reported, and an answer it leaves without a report is filed as one."""
+        task = self.runtime.tasks.current(row["id"])
+        state = self.states[row["id"]]
+        if task and task["status"] == "running":
+            state.resting = ""
+        elif row["status"] in {"done", "waiting"}:
+            state.resting = row["status"]
+
     async def resume(self, session_id: str):
         """Send what an idle session was given but never received (after a restart)."""
         row = self.store.session(session_id)
@@ -212,8 +222,7 @@ class Delivery:
         if row["role"] in {ROUTER, SLACK}:
             self.schedule_flush(session_id, 0)
         elif await self.runtime.workers.claim_slot(session_id):
-            if row["status"] in {"done", "waiting"}:
-                self.states[session_id].resting = row["status"]  # As deliver does.
+            self.rest_after(row)  # As deliver does.
             try:
                 if await self.flush(session_id, await self.runtime.session_for(session_id)):
                     self.runtime.update_session(session_id, status="working")
