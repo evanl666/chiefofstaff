@@ -434,3 +434,31 @@ def test_lines_a_review_can_comment_on():
     assert pages('[{"a": 1}][{"a": 2}]\n[]') == [{"a": 1}, {"a": 2}], "older gh: page by page"
     assert pages('[{"a": 1}, {"a": 2}]') == [{"a": 1}, {"a": 2}]
     assert pages("") == []
+
+
+async def test_a_new_review_on_a_busy_pr_is_seen(tmp_path):
+    """GitHub lists a PR's reviews oldest first, 100 a page: a new one can be on page two."""
+    store = Store(tmp_path / "data")
+    store.save_settings(Settings())
+    host = Host(store)
+    state = {"state": "open", "merged": False, "comments": []}
+    gh = fake_gh(state)
+    old = [
+        {"id": n, "user": {"login": "bob"}, "state": "COMMENTED", "body": f"old {n}",
+         "html_url": f"u{n}", "submitted_at": "2026-01-01T00:00:00Z"}
+        for n in range(100)
+    ]  # fmt: skip
+    new = [{"id": 500, "user": {"login": "carol"}, "state": "APPROVED", "body": "Ship it",
+            "html_url": "u500", "submitted_at": "2026-11-02T00:00:00Z"}]  # fmt: skip
+
+    async def busy(*arguments, payload=None):
+        if arguments[1].startswith("repos/acme/app/pulls/7/reviews"):
+            # How gh prints every page with --paginate (older versions: one array per page).
+            return (
+                json.dumps(old) + json.dumps(new) if "--paginate" in arguments else json.dumps(old)
+            )
+        return await gh(*arguments, payload=payload)
+
+    await GitHubSource(store, host, gh_command=busy).poll_once()
+    [(_, keys, text)] = host.deliveries
+    assert "github:review:500" in keys and "carol approved: Ship it" in text

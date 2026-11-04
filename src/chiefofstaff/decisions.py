@@ -340,8 +340,13 @@ class Decisions:
         if self.store.session(caller)["role"] != ROUTER:
             raise ValueError("Only the Router records decisions.")
         tasks = [self.runtime.task_actions.task_for(ref)["id"] for ref in params.tasks]
+        state = self.runtime.states[caller]
+        if not params.replaces:
+            # Tasks it gave out in this turn came with this decision in the owner's message.
+            tasks = list(dict.fromkeys(tasks + state.turn_tasks))
         result = await self.record(params.decision, tasks, params.replaces, "owner")
         decision, affected = result["decision"], result["affected"]
+        state.turn_decisions.append(decision["id"])
         if result.get("same"):
             return (
                 f"Recorded {decision['id']} in the same words as before: nothing changed, no "

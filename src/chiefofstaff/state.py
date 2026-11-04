@@ -44,6 +44,10 @@ class SessionState:
     owner_turn: bool = False
     # The Router's current turn answers the owner: its reply is what the owner reads.
     owner_reply: bool = False
+    # Decisions the Router recorded and tasks it gave out in its current turn: what one owner
+    # message decided and asked for together belongs together.
+    turn_decisions: list[str] = field(default_factory=list)
+    turn_tasks: list[str] = field(default_factory=list)
     # Open cards for the owner: draft id -> text.
     asking: dict[str, str] = field(default_factory=dict)
     # The tail of the latest tool output, for the Watchdog.

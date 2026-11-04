@@ -334,12 +334,26 @@ ASKS_EXPLANATION = re.compile(
 )
 
 
+# A report that leaves part of the answer out for its length ("too large to paste here").
+CUT_FOR_LENGTH = re.compile(
+    r"\btoo (?:large|long|big) to (?:paste|include|show|list|put|fit|reproduce)|"
+    r"\b(?:omitted|truncated|abridged|shortened) (?:here |)for (?:brevity|length|space)|"
+    r"\bfor brevity\b|太长|篇幅",
+    re.IGNORECASE,
+)
+
+
 def short_of(goal: str, summary: str) -> str:
     """What the task asked for that this done report lacks ("" when nothing is missing)."""
     if ASKS_TABLE.search(goal) and "|" not in summary:
         return "a table"
     if ASKS_EXPLANATION.search(goal) and len(summary) < 400:
         return "an explanation"
+    if CUT_FOR_LENGTH.search(summary) and len(summary) < MAX_RESULT // 2:
+        return (
+            f"the whole answer: a report holds up to {MAX_RESULT:,} characters, so nothing has "
+            "to be left out for its length"
+        )
     return ""
 
 
@@ -767,7 +781,7 @@ class Tools:
         context_from = [
             self.runtime.task_actions.task_for(reference)["id"] for reference in params.context_from
         ]
-        decisions = [self.runtime.decisions.get(identifier) for identifier in params.decisions]
+        decisions = self.with_turn_decisions(caller, params.decisions)
         await self.runtime.check_model(params.model)
         project = (
             str(resolve_project(params.project, self.workspaces.projects()))
@@ -839,6 +853,8 @@ class Tools:
             criteria=criteria,
         )
         self.link_decisions(task["id"], decisions)
+        if not special:
+            self.states[caller].turn_tasks.append(task["id"])
         if special:  # Its own tools: see Runtime.tool_names.
             self.store.set(f"{special}:{session_id}", "1")
         self.runtime.follow(session_id, follow)
@@ -894,6 +910,17 @@ class Tools:
             return ""
         return f"Write your report in {spoken}: the owner reads it, and wrote to us in {spoken}."
 
+    def with_turn_decisions(self, caller: str, identifiers: list[str]) -> list[dict]:
+        """The decisions a task relies on: those named, and those recorded in this turn (the
+        owner decided them in the message that asked for the task)."""
+        named = [self.runtime.decisions.get(identifier) for identifier in identifiers]
+        recorded = [
+            self.runtime.decisions.get(identifier)
+            for identifier in self.states[caller].turn_decisions
+            if identifier not in identifiers
+        ]
+        return named + [decision for decision in recorded if decision["status"] == "active"]
+
     def link_decisions(self, task_id: str, decisions: list[dict]):
         for decision in decisions:
             self.store.execute(
@@ -935,11 +962,12 @@ class Tools:
         if params.task == "new":
             title = clean_title(params.title or params.text.splitlines()[0][:60])
             criteria = clean_criteria(params.done_when)
-            decisions = [self.runtime.decisions.get(identifier) for identifier in params.decisions]
+            decisions = self.with_turn_decisions(caller, params.decisions)
             task = self.tasks.create(
                 target["id"], title, params.text[:4000], status="running", criteria=criteria
             )
             self.link_decisions(task["id"], decisions)
+            self.states[caller].turn_tasks.append(task["id"])
             prompt = wrap(
                 "router",
                 "task",

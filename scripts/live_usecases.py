@@ -14,6 +14,7 @@ U7 a credit limit under Copilot's minimum is raised to it, and workers still run
 import asyncio
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -32,6 +33,8 @@ from live_parity import setup  # noqa: E402
 MODEL = os.environ.get("USECASES_MODEL", "claude-sonnet-5.5")
 PR_REPO = os.environ.get("CHIEFOFSTAFF_E2E_PR_REPO", "evanl666/cos-pr-e2e-1793727958")
 
+HELPER_NOTICE = re.compile(r"“(Learn how you work|Learn checks from mistakes)”")
+
 
 async def ask(app: App, text: str) -> tuple[str, dict]:
     router = (await app.get("/api/state"))["router_id"]
@@ -42,7 +45,9 @@ async def ask(app: App, text: str) -> tuple[str, dict]:
         found = [
             m["meta"]["session_id"]
             for m in await app.get(f"/api/sessions/{router}/messages?after={mark}")
-            if m["kind"] == "notice" and m["text"].startswith(("Started", "New task", "Continued"))
+            if m["kind"] == "notice"
+            and m["text"].startswith(("Started", "New task", "Continued"))
+            and not HELPER_NOTICE.search(m["text"])  # Its own learning workers.
         ]
         return found[-1] if found else None
 

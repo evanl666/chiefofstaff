@@ -918,11 +918,13 @@ async def scenario_company_review(app: App):
     )
     assert sent["status"] == "sent" and "pullrequestreview" in sent["outcome"], sent
     env = {**os.environ, "GH_TOKEN": token}
-    published = json.loads(subprocess.run(
-        ["gh", "api", f"repos/{COMPANY_REPO}/pulls/1/comments"], env=env,
-        capture_output=True, text=True, check=True,
-    ).stdout)  # fmt: skip
     review = int(sent["outcome"].rsplit("pullrequestreview-", 1)[1])
+    listed = subprocess.run(
+        ["gh", "api", f"repos/{COMPANY_REPO}/pulls/1/comments?per_page=100", "--paginate",
+         "--jq", ".[] | {path, line, body, pull_request_review_id}"],
+        env=env, capture_output=True, text=True, check=True,
+    ).stdout  # fmt: skip
+    published = [json.loads(line) for line in listed.splitlines() if line.strip()]
     mine = {
         (c["path"], c["line"], c["body"])
         for c in published

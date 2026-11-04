@@ -118,6 +118,8 @@ class Delivery:
             row = self.store.find_session(session_id)
             if not row or row["closed_at"] or row["status"] == "working":
                 return  # Closed, or busy: it gets them when idle.
+            if not self.runtime.ready():
+                return  # Stopping or reconnecting: they are sent once connected (resume).
             try:
                 if await self.flush(session_id, await self.runtime.session_for(session_id)):
                     self.runtime.update_session(session_id, status="working")
