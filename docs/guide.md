@@ -31,12 +31,15 @@ The home view answers three questions:
 | Section | What is there |
 | --- | --- |
 | **Needs you** | Questions and forms from workers, sign-ins, a folder to pick, Slack replies and PR reviews to approve, sends a restart interrupted, failed or blocked tasks. |
-| **Running** | Each task in progress: what its worker is doing now, or what it waits for. Hover for *Cancel* and *Add a note*. |
+| **Running** | Each task in progress at a glance: the step its worker is in now and for how long, and what it said last; or what it waits for. Hover for *Cancel* and *Add a note*. |
 | **Ready to review** | Finished tasks with the worker's report and [receipts](#receipts). [Review the changes](#reviewing-changes), *Create PR*, *Accept*, *Follow up*, or *Copy report* (markdown for a PR description). |
 
 Finished and cancelled tasks stay under *Recently finished* for three days. **Chat** is the
 conversation with your Router; the session list below it opens any worker's full timeline
 (every step, report and message), where you can also talk to it directly.
+
+A file path in a report or message opens the file when it is in a worker's folders (a
+walkthrough, results, a log): Markdown shows formatted. Other paths are copied.
 
 The dot next to each session shows its state (hover it for the words): pulsing blue, working;
 amber, waiting for your answer; green, done; red, failed; hollow grey, queued; grey, idle; a
@@ -50,7 +53,20 @@ for it; *Not now* hides that card, and Settings still has it.
 Type into the inbox or Chat. Several things at once is fine: the Router splits them into
 tasks and starts a worker for each, in parallel. When one task needs another's result, it
 waits and then starts with that result. The Router replies with one line; results come back
-as they finish.
+as they finish: each worker's report comes to you whole, as a card, and the Router does not
+repeat it. When you write to the Router, its reply is the one answer you get.
+
+**To one worker:** type `@` in the inbox or Chat and pick a worker; the message goes straight to
+it (`→ worker` in Chat), and the Router hears of it with its next message. Or open the worker,
+or use *Add a note* on its card.
+
+**Progress:** ask the Router ("how is it going?"). It reads what each worker is doing now and
+said last, and answers at once instead of waiting on the workers. A worker in a long step (a
+query, a build, a job) reads new messages only when that step ends; a message you send it then
+gets a note saying so, with what it is doing.
+
+Instructions you give again and again ("run a small smoke job before the full one") are
+[learned](#learning-from-your-feedback), so you do not have to repeat them.
 
 Try `chiefofstaff --demo` to see this without an account.
 
@@ -98,6 +114,11 @@ Opening one shows its latest conversation, and keeps it current while it works.
 its timeline, and keeps working in its own folder, inside your code folder or not: nothing is
 moved or copied. *Copy resume command* gives `copilot --resume <id>` to continue it in a
 terminal instead.
+
+The Router knows these sessions too: ask it what one open in a terminal is doing, and it reads
+it. It cannot type into it: give such a session instructions there, or exit it there. To
+continue one that is not open anywhere, the Router asks you first: a *Continue a session here?*
+card shows the session and what the Router wants to give it.
 
 Chief of Staff never writes to a session another Copilot window has open: two programs writing
 to one session would mix up its history. Such a session (or a worker you opened in a terminal)
@@ -153,6 +174,23 @@ workspace, checkouts and the repositories' `.git` (not their hooks, config, or y
 `HEAD` and index), never see your
 GitHub token, and cannot read `~/.ssh`. On macOS, run `copilot sandbox ca create && copilot
 sandbox ca trust` once so `gh` works inside the sandbox; Settings tells you when it is needed.
+
+Workers can start servers on localhost (a test's server, Gradle's daemon); the token files of
+your own Gradle daemons and Jupyter servers stay unreadable to them (their folders,
+`~/.gradle/daemon` and Jupyter's `runtime`, are created empty if they do not exist yet). Workers that read Slack
+cannot reach localhost.
+
+So that installs and builds are as fast as in your terminal: npm's package store and Yarn's
+archives are shared (checked against the lockfile before use; Copilot already shares pip's and
+uv's), and Gradle builds read your dependency cache without writing it, with the worker's own
+daemon. Caches whose contents would run as they are (Gradle and Maven jars, pre-commit hooks,
+npx's installs) stay out of reach; add one under *Also writable in the sandbox* only if you accept that. Workers
+that read Slack share no caches. Before a worker's worktree is made, only origin's default branch
+is fetched, once for workers that start together.
+
+Hooks of your Copilot plugins run in the sandbox too. One that writes elsewhere (a journal, say)
+fails there; the worker carries on and its timeline notes it once. To let it write, add its
+folder under *Also writable in the sandbox*.
 
 ## Receipts
 
@@ -256,7 +294,8 @@ Your sessions learn how you want work done from what you do with their work:
 - review comments on a diff, follow-ups on a finished result, notes when you retry a task,
   reasons when you cancel one;
 - the drafts you edit before sending, and why you rejected one;
-- the decisions you change.
+- the decisions you change;
+- the instructions you give the Router and workers, so that guidance you repeat becomes a lesson.
 
 Only your own choices and words count; what a session proposed is kept beside them as context.
 Once a few new pieces of feedback came in, a short-lived worker turns them into lessons, e.g.
@@ -315,6 +354,13 @@ Enable *Watch review requests* and list repositories (`owner/name`). Chief of St
 per request; its review is published only after you approve the draft, and only if the PR head
 has not changed since.
 
+On a PR a worker is working on (one it opened, follows or was given), it can also draft
+**replies to review comments**, in any repository: each card shows the comment it answers, and
+the reply is posted in that thread once you approve it.
+
+Workers commit on their branch but do not push unless the task asks for it: you open the PR with
+*Create PR*. Analyses and research need no branch at all.
+
 ## Following threads
 
 A Slack thread, a Slack DM or a pull request can be *followed* by a session. New activity there
@@ -333,7 +379,9 @@ Every minute a cheap check (no model) looks at each working worker: no activity 
 the same step repeated, the same instructions for 45 minutes, or a turn that ended without a
 report. A flagged worker is reviewed by the Watchdog session, which decides: on track, nudge
 (into the worker's current turn), interrupt a hung step and nudge, or escalate to the Router.
-After two nudges without a new report the problem goes to the Router.
+After two nudges without a new report the problem goes to the Router. It does not coach a worker
+that is making progress, however long it takes; a nudge says why it stepped in (*Watchdog ·
+looks stuck*, and the evidence).
 
 ## What runs without asking
 
@@ -351,7 +399,8 @@ these boundaries the OS enforces and which rely on the model.
 
 ## Models and usage
 
-Settings sets a default model and one per role, and a default thinking effort per role. A
+Settings sets a default model and one per role, and a default thinking effort per role (it
+applies to Copilot's default model too; *Auto*, which picks a model each turn, takes none). A
 session's header switches its model, effort and context window (where the model has a
 long-context tier). The Router may choose a stronger or cheaper model or effort for one task.
 **Usage** (bottom left) totals credits by session, model and role for any date range; every
@@ -365,8 +414,9 @@ At the configured time (default 09:00) the Router posts one summary: what finish
 for you, what was handled without you, credits used. Quiet days post nothing.
 
 **Build from my work** (Settings → Your profile) starts a worker that distills a short profile
-from your projects, GitHub activity, recent Copilot sessions and, with Slack, how you write. You
-review it before sessions use it. Your edits to Slack drafts also teach the Slack session your
+from your projects, GitHub activity, recent Copilot sessions and, with Slack, how you write. It
+arrives as a card in the inbox: correct anything, then *Use this profile*; sessions use it only
+then. Your edits to Slack drafts also teach the Slack session your
 style.
 
 ## Settings and environment variables

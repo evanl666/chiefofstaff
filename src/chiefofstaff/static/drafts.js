@@ -281,6 +281,53 @@ function lessonsCard(draft) {
   node.append(el("div", { class: "actions" }, el("button", { type: "button", class: "text", text: "Drop all", onclick: () => decide({ action: "reject" }) }), el("button", { type: "button", text: "Keep ticked", onclick: keep })), error);
   return node;
 }
+// The owner profile a worker distilled: read and edit it here; sessions use it once kept.
+function profileCard(draft) {
+  const error = el("span", { class: "error" });
+  const text = el("textarea", { rows: Math.min(18, draft.text.split("\n").length + 1), "aria-label": "Profile" });
+  text.value = draft.text;
+  const node = el(
+    "div",
+    { class: "card draft profile", "data-id": draft.id },
+    el("div", { class: "head" }, el("span", { class: "label", text: "Your profile" }), el("span", { class: "chip waiting", text: "Check before use" })),
+    el("div", { class: "why", text: "Distilled from your work. Correct anything; once you use it, your sessions get it with their instructions." }),
+    text,
+  );
+  const decide = cardActions(draft, node, error);
+  node.append(
+    el(
+      "div",
+      { class: "actions" },
+      error,
+      el("button", { type: "button", class: "text", text: "Discard", onclick: () => decide({ action: "reject" }) }),
+      el("button", { type: "button", text: "Use this profile", onclick: () => text.value.trim() && decide({ action: "answer", text: text.value }) }),
+    ),
+  );
+  return node;
+}
+// One of the owner's own Copilot sessions, which the Router wants to continue here.
+function adoptCard(draft) {
+  const target = draft.target;
+  const error = el("span", { class: "error" });
+  const node = el(
+    "div",
+    { class: "card draft adopt", "data-id": draft.id },
+    el("div", { class: "head" }, el("span", { class: "label", text: "Continue a session here?" }), el("span", { class: "chip waiting", text: "Waiting for you" })),
+    el("div", { class: "why", text: `“${target.title}”, one of your Copilot sessions (${displayPath(target.cwd || "")}). The Router wants to give it this, as a new task:` }),
+    el("div", { class: "quoted", text: target.text }),
+  );
+  const decide = cardActions(draft, node, error);
+  node.append(
+    el(
+      "div",
+      { class: "actions" },
+      error,
+      el("button", { type: "button", class: "text", text: "Not now", onclick: () => decide({ action: "reject" }) }),
+      el("button", { type: "button", text: "Continue it here", onclick: () => decide({ action: "answer" }) }),
+    ),
+  );
+  return node;
+}
 // Where a Slack reply really goes, from its conversation id (D: a direct message, C: a channel,
 // G: a private group); what the drafting session calls it is only its description.
 const SLACK_KIND = { D: "direct message", C: "channel", G: "private group" };
@@ -290,6 +337,8 @@ export function slackDestination(target) {
 }
 export function draftCard(draft) {
   if (draft.kind === "lessons") return lessonsCard(draft);
+  if (draft.kind === "profile") return profileCard(draft);
+  if (draft.kind === "adopt") return adoptCard(draft);
   if (draft.kind === "decision") return decisionCard(draft);
   if (draft.kind === "change") return changeCard(draft);
   if (draft.kind === "workspace") return workspaceCard(draft);
@@ -299,7 +348,9 @@ export function draftCard(draft) {
   const label =
     draft.kind === "slack"
       ? `Slack reply · ${slackDestination(target)}`
-      : `PR review · ${target.repo}#${target.number}`;
+      : target.in_reply_to
+        ? `Reply on ${target.repo}#${target.number}${target.comment?.author ? ` · to ${target.comment.author}` : ""}`
+        : `PR review · ${target.repo}#${target.number}`;
   const shown = draft.final_text || draft.text;
   const text = el("textarea", { rows: Math.min(10, shown.split("\n").length + 1) });
   text.value = shown;
@@ -307,7 +358,7 @@ export function draftCard(draft) {
   const actions = el("div", { class: "actions" });
   const node = el(
     "div",
-    { class: "card draft", "data-id": draft.id },
+    { class: "card draft", "data-id": draft.id, "data-session": draft.session_id },
     el(
       "div",
       { class: "head" },
@@ -320,7 +371,15 @@ export function draftCard(draft) {
     draft.note ? el("div", { class: "note", text: draft.note }) : null,
     // Not published after an interrupted send: what happened, and the owner's edit kept.
     draft.outcome ? el("div", { class: "note", text: draft.outcome }) : null,
-    draft.kind === "github" ? el("a", { href: target.url, target: "_blank", rel: "noreferrer", text: target.url }) : null,
+    draft.kind === "github" && target.comment
+      ? el(
+          "div",
+          { class: "quoted" },
+          el("strong", { text: `${target.comment.author}${target.comment.path ? ` on ${target.comment.path}${target.comment.line ? `:${target.comment.line}` : ""}` : ""}: ` }),
+          target.comment.body,
+        )
+      : null,
+    draft.kind === "github" ? el("a", { href: target.comment?.url || target.url, target: "_blank", rel: "noreferrer", text: target.comment?.url || target.url }) : null,
     text,
     actions,
   );

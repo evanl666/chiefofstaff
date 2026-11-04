@@ -36,6 +36,8 @@ logger = logging.getLogger(__name__)
 
 # A learning worker starts once this much new feedback is in, at most this often.
 LEARN_AFTER = 5
+# Plain instructions are many and mostly one-off: only this many start a learning worker alone.
+LEARN_AFTER_INSTRUCTIONS = 15
 LEARN_EVERY = 6 * 3600
 MAX_FEEDBACK = 40
 MAX_LESSONS = 40
@@ -175,7 +177,12 @@ class Learning:
 
     async def maybe_learn(self):
         """Start a learning worker once enough new feedback is in (and not too often)."""
-        if len(self.unlearned()) < LEARN_AFTER or self.busy():
+        items = self.unlearned()
+        instructions = sum(1 for item in items if item["kind"] == "instruction")
+        enough = (
+            len(items) - instructions >= LEARN_AFTER or instructions >= LEARN_AFTER_INSTRUCTIONS
+        )
+        if not enough or self.busy():
             return
         last = float(self.store.get("learned_at") or 0)
         if time.time() - last < LEARN_EVERY:

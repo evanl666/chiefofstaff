@@ -140,6 +140,10 @@ class SandboxPolicy:
     readonly: tuple[str, ...] = ()
     # Empty: any host. Otherwise only these hosts are reachable.
     allowed_hosts: tuple[str, ...] = ()
+    # Loopback: servers its tests start, a build tool's daemon (Gradle's), local services.
+    local_network: bool = False
+    # Neither readable nor writable.
+    denied: tuple[str, ...] = ()
 
 
 COPILOT = Capabilities(
@@ -216,6 +220,9 @@ class CopilotBackend:
     def sandbox(self, policy: SandboxPolicy) -> SandboxConfig:
         return SandboxConfig(
             enabled=True,
+            # Its folders are listed in the policy: a working directory such as home is not
+            # added just because the session started there.
+            add_current_working_directory=False,
             allow_bypass=False,
             allow_dev_tool_access=True,
             # MCP servers are what the owner or their company configured, not what an agent
@@ -226,11 +233,13 @@ class CopilotBackend:
             auth=SandboxConfigAuth(gh=True, git=True),
             user_policy=SandboxConfigUserPolicy(
                 filesystem=SandboxConfigUserPolicyFilesystem(
-                    readwrite_paths=list(policy.readwrite), readonly_paths=list(policy.readonly)
+                    readwrite_paths=list(policy.readwrite),
+                    readonly_paths=list(policy.readonly),
+                    denied_paths=list(policy.denied) or None,
                 ),
                 network=SandboxConfigUserPolicyNetwork(
                     allow_outbound=True,
-                    allow_local_network=False,
+                    allow_local_network=policy.local_network,
                     allowed_hosts=list(policy.allowed_hosts) or None,
                 ),
             ),

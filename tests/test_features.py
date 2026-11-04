@@ -323,9 +323,22 @@ async def test_profile_is_distilled_reviewed_and_used(tmp_path):
     assert harness.store.get("profile_draft").startswith("## Role")
     await settle(runtime)
     assert harness.notifications[-1][0] == "Profile to review"
+    # The whole draft is on a card in the inbox and in the worker's timeline; its task is done.
+    [card] = [draft for draft in harness.store.drafts() if draft["kind"] == "profile"]
+    assert card["text"] == "## Role and focus\n- ML infra"
+    assert ("draft", "## Role and focus\n- ML infra") in harness.kinds(distiller)
+    assert runtime.tasks.current(distiller)["status"] == "done"
+    assert runtime.states[distiller].close_after_turn
 
-    await runtime.toolset.save_profile("## Role and focus\n- ML infra")
+    edited = "## Role and focus\n- ML infra and data pipelines"
+    used = await runtime.drafts.resolve(card["id"], DraftDecision(action="answer", text=edited))
+    assert used["status"] == "answered" and harness.store.get("profile") == edited
     assert harness.store.get("profile_draft") == ""
+    await call_tool(runtime, "propose_profile", distiller, markdown="## Role\n- second")
+    await runtime.toolset.save_profile("## Role and focus\n- ML infra")
+    assert not [draft for draft in harness.store.drafts() if draft["kind"] == "profile"], (
+        "using it from Settings settles the card"
+    )
     worker = (await spawn(runtime, harness.router_id, "New"))["session_id"]
     prompt = harness.session(worker).options["system_message"]["content"]
     assert "<owner_profile>\n## Role and focus\n- ML infra\n</owner_profile>" in prompt

@@ -38,6 +38,33 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
 
+def private_folders(home: Path) -> list[Path]:
+    """Never writable by workers: SSH keys, and Copilot's settings, sign-ins, session logs and
+    plugin code (hooks run from there outside the sandbox). A plugin's own data folder, such as
+    a journal in ~/.copilot/<name>, may be opened."""
+    copilot = home / ".copilot"
+    return [
+        home / ".ssh",
+        home / "Library" / "Caches" / "copilot",
+        *(
+            copilot / name
+            for name in (
+                "session-state",
+                "mcp-oauth-config",
+                "installed-plugins",
+                "servers",
+                "ide",
+                "logs",
+                "pkg",
+                "marketplaces",
+            )
+        ),
+        *copilot.glob("*.json"),
+        *copilot.glob("*.db*"),
+        *copilot.glob("*.lock"),
+    ]
+
+
 class Settings(StrictModel):
     copilot_command: str = "copilot"
     model: str = Field(default="", max_length=100)
@@ -50,6 +77,11 @@ class Settings(StrictModel):
     worker_yolo: bool = False
     # Workers' shell commands run in an OS sandbox: they write only to their own folders.
     worker_sandbox: bool = True
+    # Folders sandboxed workers may also write to (a Copilot plugin's own folder, say).
+    sandbox_writable: list[str] = Field(default_factory=list, max_length=10)
+    # Sandboxed workers use the owner's dependency and build caches (Gradle, Maven, npm…), as
+    # sessions in a terminal do, instead of downloading and building everything again.
+    shared_caches: bool = True
     # Copied task reports end with a short "Orchestrated with Chief of Staff" line.
     report_footer: bool = True
     digest_time: str = Field(default="09:00", pattern=r"^(|([01]\d|2[0-3]):[0-5]\d)$")
@@ -91,6 +123,25 @@ class Settings(StrictModel):
             if str(path) not in projects:
                 projects.append(str(path))
         self.projects = projects
+        writable = []
+        for raw in self.sandbox_writable:
+            if not raw.strip():
+                continue
+            path = Path(raw.strip()).expanduser()
+            if not path.is_absolute():
+                raise ValueError(f"Use an absolute folder for the sandbox: {raw}")
+            path = path.resolve()
+            home = Path.home().resolve()
+            if path == Path(path.anchor) or home.is_relative_to(path):
+                raise ValueError("The sandbox cannot open your whole home or a folder above it.")
+            if path == home / ".copilot" or any(
+                private.is_relative_to(path) or path.is_relative_to(private)
+                for private in private_folders(home)
+            ):
+                raise ValueError(f"The sandbox cannot open {path}: it holds keys or settings.")
+            if str(path) not in writable:
+                writable.append(str(path))
+        self.sandbox_writable = writable
         if self.code_folder:
             path = Path(self.code_folder).expanduser().resolve()
             if not path.is_dir():
@@ -122,6 +173,8 @@ class Settings(StrictModel):
 
 class OwnerMessage(StrictModel):
     text: str = Field(min_length=1, max_length=20000)
+    # From the Router chat, addressed to one worker: it goes to that worker directly.
+    to: str = Field(default="", max_length=64)
 
 
 class FocusRequest(StrictModel):

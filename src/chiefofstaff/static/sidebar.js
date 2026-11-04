@@ -5,6 +5,7 @@ import { ago, shortPath, since } from "./text.js";
 import { closedWorkers, DOT_HELP, draftsFor, loadState, sessions, state, STATUS_ORDER, STATUS_TEXT } from "./state.js";
 import { IN_TERMINAL, readOnlyTimeline, scrollToBottom, select, setComposer } from "./session.js";
 import { inboxItem } from "./inbox.js";
+import { closeMentions, setRecipient } from "./mention.js";
 function sessionItem(session, label) {
   const drafts = draftsFor(session.id).length;
   const badge = session.unread
@@ -133,6 +134,9 @@ export async function loadExternal(refresh = false) {
 // A message continues it here (the Router manages it from then on, in its own folder).
 export const externalItem = () => state.external.find((item) => item.id === state.selected);
 function showExternal(item) {
+  // A worker chosen with @ is for the Router chat and the inbox, not for this session.
+  closeMentions();
+  setRecipient(null);
   state.selected = item.id;
   renderSidebar();
   $("#inbox").hidden = true;

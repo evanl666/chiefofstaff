@@ -79,6 +79,10 @@ class Drafts:
             return self.runtime.decisions.dismiss(draft)
         if draft["kind"] == "lessons":
             return await self.runtime.learning.review(draft, decision)
+        if draft["kind"] == "profile":
+            return await self.runtime.toolset.review_profile(draft, decision)
+        if draft["kind"] == "adopt":
+            return await self.runtime.toolset.answer_adopt(draft, decision)
         if decision.action not in {"send", "reject"}:
             # "It was sent" belongs to a draft whose sending was interrupted: never a send.
             raise ValueError("Send this draft, or reject it.")
@@ -211,6 +215,8 @@ class Drafts:
             try:
                 if draft["kind"] == "slack":
                     found = await self.runtime.slack.find_sent(draft["target"], text, created)
+                elif draft["kind"] == "github" and draft["target"].get("in_reply_to"):
+                    found = await self.runtime.github.find_reply(draft["target"], text)
                 elif draft["kind"] == "github":
                     found = await self.runtime.github.find_review(draft["target"], text)
                 else:

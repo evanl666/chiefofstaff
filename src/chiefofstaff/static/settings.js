@@ -93,6 +93,8 @@ export function fillSettings() {
   form.max_workers.value = settings.max_workers;
   form.worker_yolo.checked = settings.worker_yolo;
   form.worker_sandbox.checked = settings.worker_sandbox;
+  form.shared_caches.checked = settings.shared_caches;
+  form.sandbox_writable.value = (settings.sandbox_writable || []).join("\n");
   const sandbox = state.snapshot.sandbox || {};
   const hint = !sandbox.supported
     ? "This machine cannot run Copilot's sandbox (macOS needs sandbox-exec; Linux needs bwrap), so workers run unsandboxed."
@@ -121,6 +123,16 @@ export function fillSettings() {
     );
     select.value = settings.role_efforts[role] || "";
   }
+  // An effort applies to a model; Auto (Copilot's model picker) takes none.
+  const effortHint = () => {
+    const auto = (role) => (form[`model_${role}`].value.trim() || form.model.value.trim()).toLowerCase() === "auto";
+    $("#effort-hint").hidden = !["router", "worker", "slack", "watchdog"].some((role) => auto(role) && form[`effort_${role}`].value);
+  };
+  for (const name of ["model", "model_router", "model_worker", "model_slack", "model_watchdog", "effort_router", "effort_worker", "effort_slack", "effort_watchdog"]) {
+    form[name].oninput = effortHint;
+    form[name].onchange = effortHint;
+  }
+  effortHint();
   form.worker_credit_limit.value = settings.worker_credit_limit || "";
   form.digest_time.value = settings.digest_time;
   form.profile.value = state.snapshot.profile || "";
@@ -198,6 +210,8 @@ export async function saveSettings(event) {
     max_workers: Number(form.max_workers.value),
     worker_yolo: form.worker_yolo.checked,
     worker_sandbox: form.worker_sandbox.checked,
+    shared_caches: form.shared_caches.checked,
+    sandbox_writable: lines(form.sandbox_writable.value),
     worker_idle_hours: Number(form.worker_idle_hours.value || 24),
     mac_notifications: form.mac_notifications.checked,
     watchdog_enabled: form.watchdog_enabled.checked,

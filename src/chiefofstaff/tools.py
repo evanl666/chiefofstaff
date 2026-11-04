@@ -21,9 +21,10 @@ from .asks import AnswerSession, AskSession, RecordSetup
 from .decisions import AckDecision, AskDecision, RecordDecision
 from .envelope import clean_title, short, wrap
 from .learning import ProposeLessons
-from .models import NestedArguments
+from .models import DraftDecision, NestedArguments
 from .policy import within
 from .roles import ROUTER, SLACK, WATCHDOG, WORKER
+from .store import ago_minutes, now
 from .workspaces import resolve_project
 
 if TYPE_CHECKING:
@@ -150,6 +151,13 @@ class ListSessions(BaseModel):
     pass
 
 
+class ReadSession(BaseModel):
+    session_id: str = Field(
+        description="A session from list_sessions: a worker, or one of terminal_sessions"
+    )
+    items: int = Field(default=12, ge=1, le=40, description="How many of its latest entries")
+
+
 class FindSessions(BaseModel):
     query: str = Field(
         description="What the request is about: topic, repo, file, branch, PR number, person, "
@@ -267,10 +275,61 @@ class AssessWorker(BaseModel):
 class DraftGitHubReview(BaseModel):
     repo: str = Field(description="owner/name")
     number: int = Field(description="Pull request number")
-    body: str = Field(description="The review comment (markdown)")
+    body: str = Field(description="The review, or your reply to a review comment (markdown)")
+    in_reply_to: int = Field(
+        default=0,
+        description="To reply to a review comment on the PR: that comment's id (from "
+        "`gh api repos/<owner/name>/pulls/<number>/comments`). 0 for a review of the whole PR.",
+    )
 
 
 REPORT_STATUS = {"question": "waiting", "blocked": "waiting", "done": "done"}
+MAX_RESULT = 30000
+# Copilot hands a tool output over 50 KB to the model as a file, which the Router cannot read.
+LISTED_BYTES = 32000
+
+
+def shortened(listed: dict) -> dict:
+    """list_sessions small enough to be read whole, however many sessions there are."""
+
+    def size() -> int:
+        return len(json.dumps(listed, ensure_ascii=False).encode())
+
+    if size() <= LISTED_BYTES:
+        return listed
+    listed["tasks"] = [
+        task
+        for task in listed["tasks"]
+        if task["status"] in {"queued", "running", "waiting", "review"}
+    ]
+    listed["recently_closed"] = listed["recently_closed"][:3]
+    for limit in (100, 0):
+        if size() <= LISTED_BYTES:
+            break
+        for entry in listed["sessions"]:
+            if limit:
+                entry["last_report"] = entry.get("last_report", "")[:limit]
+            else:
+                entry.pop("last_report", None)
+                entry.pop("now", None)
+    if size() > LISTED_BYTES:
+        listed["projects"] = [{"path": card["path"]} for card in listed["projects"]]
+        listed["recently_closed"] = []
+    if size() > LISTED_BYTES:
+        # Each session already names its current task.
+        listed["tasks"] = [task for task in listed["tasks"] if task["status"] != "review"]
+    listed["note"] = "Shortened to fit: read_session and find_sessions give any session's details."
+    return listed
+
+
+def clip_report(text: str) -> str:
+    """A task's result as the owner reads it: whole, unless it is very long."""
+    if len(text) <= MAX_RESULT:
+        return text
+    cut = text.rfind("\n", 0, MAX_RESULT)
+    return text[: cut if cut > MAX_RESULT // 2 else MAX_RESULT] + (
+        "\n\n… (cut here; the whole report is in the worker's session)"
+    )
 
 
 SLACK_ID = re.compile(r"[CDGUW][A-Z0-9]{2,}")
@@ -413,6 +472,13 @@ class Tools:
                 "Send a message to an existing worker or the Slack session.",
                 MessageSession,
                 self.t_message_session,
+            ),
+            (
+                "read_session",
+                "What a session is doing now, what it said last and its latest messages and "
+                "steps, without interrupting it. Use it to answer the owner about progress.",
+                ReadSession,
+                self.t_read_session,
             ),
             (
                 "list_sessions",
@@ -659,7 +725,13 @@ class Tools:
 
     async def t_message_session(self, params: MessageSession, caller: str):
         self.caller(caller, ROUTER)
-        target = self.store.session(params.session_id)
+        try:
+            target = self.store.session(params.session_id)
+        except LookupError:
+            # One of the owner's own Copilot sessions: the owner decides whether it continues
+            # here (unless it is open in a terminal: two programs writing one session would
+            # garble it).
+            return await self.ask_to_continue(params)
         if target["role"] == ROUTER:
             raise ValueError("That is your own session.")
         self.runtime.check_follow(target, [threads.normalize(key) for key in params.follow])
@@ -713,9 +785,170 @@ class Tools:
             kind="router",
             display=params.text,
             meta={"task_id": task["id"]} if task else None,
+            # More on the task it is working on reaches it within its turn; a new task waits.
+            steer=params.task == "continue",
         )
         self.runtime.add_message(caller, "notice", notice, {"session_id": target["id"]})
         return f"Delivered (task {task['id']})." if task else "Delivered."
+
+    async def ask_to_continue(self, params: MessageSession) -> str:
+        reference = params.session_id
+        found = [
+            item
+            for item in await self.runtime.workers.external(refresh=True)
+            if item["id"] == reference or (len(reference) >= 6 and item["id"].startswith(reference))
+        ]
+        if len(found) != 1:
+            raise ValueError(f"No session {reference}; list_sessions lists them.")
+        item = found[0]
+        if item["open"]:
+            raise ValueError(
+                "That session is open in the owner's terminal, and Chief of Staff cannot type "
+                "into it. Tell the owner to type it there, or to exit it there (then "
+                "message_session asks them to continue it here)."
+            )
+        title = clean_title(params.title or params.text.splitlines()[0][:60])
+        target = {
+            "session_id": item["id"],
+            "title": item["summary"],
+            "cwd": item["cwd"],
+            "text": params.text[:4000],
+            "task_title": title,
+        }
+        asked = next(
+            (
+                card
+                for card in self.store.drafts()
+                if card["kind"] == "adopt" and card["target"]["session_id"] == item["id"]
+            ),
+            None,
+        )
+        if asked:
+            # One card per session: the new one, so the owner approves only what they see.
+            replaced = self.store.update_draft(
+                asked["id"], status="rejected", outcome="Replaced by a newer request.",
+                resolved_at=now(),
+            )  # fmt: skip
+            self.bus.publish("draft", replaced)
+        card = self.store.create_draft(
+            self.runtime.router_id(), "adopt", target, params.text[:4000], item["summary"]
+        )
+        self.bus.publish("draft", card)
+        self.runtime.alert(
+            f"Continue “{item['summary']}” here?",
+            session_id=self.runtime.router_id(),
+            needs_action=True,
+            title="Continue a session here?",
+        )
+        return (
+            "That is one of the owner's own sessions: they were asked whether it continues "
+            'here. If they agree, it gets your message as a new task (a type="draft-outcome" '
+            "message tells you)."
+        )
+
+    async def answer_adopt(self, card: dict, decision: DraftDecision) -> dict:
+        """The owner lets one of their own sessions continue here, with the Router's message."""
+        target = card["target"]
+        if decision.action == "reject":
+            card = self.store.update_draft(
+                card["id"], status="rejected", outcome="Not now.", resolved_at=now()
+            )
+            self.bus.publish("draft", card)
+            await self.runtime.drafts.tell_drafter(
+                card, f"The owner did not continue “{target['title']}” here.", True
+            )
+            return card
+        if decision.action != "answer":
+            raise ValueError("Continue it here, or not now.")
+        # Continued here meanwhile (from Other Copilot sessions, say): it just gets the message.
+        row = self.store.find_session(target["session_id"]) or await self.runtime.workers.adopt(
+            target["session_id"]
+        )
+        reply = await self.t_message_session(
+            MessageSession(
+                session_id=row["id"], text=target["text"], task="new", title=target["task_title"]
+            ),
+            self.runtime.router_id(),
+        )
+        card = self.store.update_draft(
+            card["id"], status="answered", outcome="Continued here.", resolved_at=now()
+        )
+        self.bus.publish("draft", card)
+        await self.runtime.drafts.tell_drafter(
+            card,
+            f"The owner continued “{target['title']}” here as worker {short(row['id'])}: {reply}",
+            True,
+        )
+        return card
+
+    async def t_read_session(self, params: ReadSession, caller: str):
+        self.caller(caller, ROUTER)
+        try:
+            row = self.store.session(params.session_id)
+        except LookupError:
+            return await self.read_terminal_session(params)
+        entries = []
+        steps, last_step = 0, ""
+        for message in self.store.messages(row["id"])[-200:]:
+            if message["kind"] == "tool":
+                steps, last_step = steps + 1, message["text"]
+                continue
+            if steps:
+                entries.append(f"{steps} step(s), the last: {last_step[:200]}")
+                steps = 0
+            kind = message["kind"]
+            if kind == "assistant":
+                kind = "said" if message["meta"].get("narration") else "answered"
+            when = ago_minutes(message["created_at"])
+            entries.append(f"{when} min ago, {kind}: {message['text'][:600]}")
+        if steps:
+            entries.append(f"{steps} step(s), the last: {last_step[:200]}")
+        return {
+            "session_id": row["id"],
+            "title": row["title"],
+            "status": row["status"],
+            "task": self.task_brief(self.tasks.current(row["id"])),
+            "now": self.runtime.progress_line(row) or row["status"],
+            "open_in_terminal": self.runtime.copilot_id(row["id"]) in self.runtime.elsewhere,
+            "latest": entries[-params.items :],
+        }
+
+    async def read_terminal_session(self, params: ReadSession) -> dict:
+        found = [
+            item
+            for item in await self.runtime.workers.external()
+            if item["id"] == params.session_id
+            or (len(params.session_id) >= 6 and item["id"].startswith(params.session_id))
+        ]
+        if len(found) != 1:
+            raise ValueError(f"No session {params.session_id}; list_sessions lists them.")
+        history = await self.runtime.workers.history(found[0]["id"])
+        entries = [f"{entry['kind']}: {entry['text'][:600]}" for entry in history["entries"]]
+        return {
+            "session_id": found[0]["id"],
+            "title": found[0]["summary"],
+            "cwd": found[0]["cwd"],
+            "open_in_terminal": history["open"],
+            "working": history["working"],
+            "latest": entries[-params.items :],
+        }
+
+    async def terminal_sessions(self) -> list[dict]:
+        """The owner's own Copilot sessions open in a terminal now."""
+        try:
+            listed = await self.runtime.workers.external()
+        except Exception:
+            return []
+        return [
+            {
+                "session_id": item["id"],
+                "title": item["summary"],
+                "cwd": item["cwd"],
+                "last_active": item["modified"],
+            }
+            for item in listed
+            if item["open"]
+        ][:10]
 
     async def t_list_sessions(self, params: ListSessions, caller: str):
         settings = self.store.settings()
@@ -723,45 +956,71 @@ class Tools:
             models = [item["id"] for item in await self.runtime.available_models()]
         except Exception:
             models = []
-        return {
-            "projects": await self.workspaces.project_cards(),
-            "models": models,
-            "default_worker_model": settings.role_models.get(WORKER) or settings.model or "auto",
-            "slack_connected": self.runtime.slack.configured(),
+        sessions = [
+            self.session_entry(row) for row in self.store.open_sessions() if row["role"] != ROUTER
+        ]
+        listed = {
+            # The owner's own sessions and standing decisions first: they are short.
+            "terminal_sessions": await self.terminal_sessions(),
             "decisions": [
                 {"id": d["id"], "decision": d["text"], "tasks": d["tasks"]}
                 for d in self.runtime.decisions.active()
             ],
-            "github_repos": settings.github_repos if settings.github_enabled else [],
-            "sessions": [
-                {
-                    "session_id": row["id"],
-                    "role": row["role"],
-                    "title": row["title"],
-                    "status": row["status"],
-                    "cwd": row["cwd"],
-                    "branch": row["branch"],
-                    "slack_access": bool(row["slack"]),
-                    "last_report": row["report"][:400],
-                    "follows": self.store.follows(row["id"]),
-                    "task": self.task_brief(self.tasks.current(row["id"])),
-                    "model": self.runtime.model_for(row),
-                }
-                for row in self.store.open_sessions()
-                if row["role"] != ROUTER
-            ],
+            "sessions": sessions,
             "tasks": [
                 {
-                    **(self.task_brief(task) or {}),
+                    "task_id": task["id"],
+                    "title": task["title"],
+                    "status": task["status"],
                     "worker": short(task["session_id"]),
-                    "after": [dep["id"] for dep in self.tasks.deps(task["id"])],
+                    **(
+                        {"after": after}
+                        if (after := [d["id"] for d in self.tasks.deps(task["id"])])
+                        else {}
+                    ),
                 }
                 for task in self.tasks.listed()
             ],
+            "projects": await self.workspaces.project_cards(),
+            "models": models,
+            "default_worker_model": settings.role_models.get(WORKER) or settings.model or "auto",
+            "slack_connected": self.runtime.slack.configured(),
+            "github_repos": settings.github_repos if settings.github_enabled else [],
             "recently_closed": [
                 self.runtime.workers.card(row) for row in self.runtime.workers.recently_closed(8)
             ],
         }
+        return shortened(listed)
+
+    def session_entry(self, row: dict) -> dict:
+        """A session as list_sessions shows it: what tells it apart; read_session has the rest."""
+        entry: dict[str, Any] = {
+            "session_id": row["id"],
+            "role": row["role"],
+            "title": row["title"],
+            "status": row["status"],
+            "cwd": row["cwd"],
+        }
+        if row["branch"]:
+            entry["branch"] = row["branch"]
+        if row["slack"]:
+            entry["slack_access"] = True
+        if follows := self.store.follows(row["id"]):
+            entry["follows"] = follows
+        if model := self.runtime.model_for(row):
+            entry["model"] = model
+        if task := self.tasks.current(row["id"]):
+            entry["task"] = {
+                "task_id": task["id"],
+                "title": task["title"],
+                "status": task["status"],
+            }
+        if row["report"]:
+            entry["last_report"] = " ".join(row["report"].split())[:200]
+        working = row["role"] == WORKER and row["status"] == "working"
+        if working and (now := self.runtime.progress_line(row, brief=True)):
+            entry["now"] = now
+        return entry
 
     @staticmethod
     def task_brief(task: dict | None) -> dict | None:
@@ -841,6 +1100,9 @@ class Tools:
 
     async def t_notify_owner(self, params: NotifyOwner, caller: str):
         self.caller(caller, ROUTER)
+        if self.states[caller].owner_reply and not (params.needs_action or params.urgent):
+            # One message per answer: the owner reads the reply of this turn.
+            return "Not sent: the owner wrote to you, so say this in your reply instead."
         meta = {"needs_action": params.needs_action, "urgent": params.urgent}
         self.runtime.add_message(caller, "update", params.text, meta, unread=True)
         self.runtime.alert(
@@ -878,27 +1140,42 @@ class Tools:
                 self.store.execute(
                     "UPDATE runs SET criteria=? WHERE id=?", (json.dumps(claims), run["id"])
                 )
+        settled = False
         if task:
             asked = bool(self.store.get(f"followup:{task['id']}"))
-            if params.status == "done" and task["status"] == "done" and not asked:
+            if task["status"] == "cancelled" and not asked:
+                # Cancelled (a report already on its way, say): it stays cancelled.
+                settled = True
+            elif task["status"] == "cancelled" and params.status != "done":
+                # Answering the owner's question about it: news, not the task coming back.
+                task = self.tasks.update(task["id"], progress=params.summary[:6000])
+            elif task["status"] in {"review", "done"} and params.status == "progress":
+                # News about finished work (PR feedback handled, a question answered): it stays
+                # where it is. A blocker or a question needs the owner, and shows as such.
+                task = self.tasks.update(task["id"], progress=params.summary[:6000])
+            elif params.status == "done" and task["status"] == "done" and not asked:
                 # Accepted, or its PR merged: news about it does not reopen the review.
-                task = self.tasks.update(task["id"], result=params.summary[:4000])
+                self.runtime.task_actions.remember_prs(task["id"], params.summary)
+                task = self.tasks.update(task["id"], result=clip_report(params.summary))
             elif params.status == "done":
                 self.store.delete(f"followup:{task['id']}")
-                task = self.tasks.move(task["id"], "review", result=params.summary[:4000])
+                self.runtime.task_actions.remember_prs(task["id"], params.summary)
+                task = self.tasks.move(task["id"], "review", result=clip_report(params.summary))
                 self.runtime.background(self.runtime.task_actions.collect_evidence(task["id"]))
             elif params.status in {"question", "blocked"}:
-                task = self.tasks.move(task["id"], "waiting", progress=params.summary[:1000])
+                task = self.tasks.move(task["id"], "waiting", progress=params.summary[:6000])
             elif task["status"] != "running":
-                task = self.tasks.move(task["id"], "running", progress=params.summary[:1000])
+                task = self.tasks.move(task["id"], "running", progress=params.summary[:6000])
             else:
-                task = self.tasks.update(task["id"], progress=params.summary[:1000])
+                task = self.tasks.update(task["id"], progress=params.summary[:6000])
         self.states[caller].resting = ""
         if row["role"] == WORKER and params.status in {"progress", "done"}:
             # A PR it delivers is its PR: reviews, comments and CI come back to it.
-            self.runtime.follow(caller, threads.pull_requests(params.summary))
+            self.runtime.follow(caller, threads.pull_requests(params.summary), given=False)
         if row["role"] == WORKER:
             self.runtime.watchdog.save(caller, nudges=0)
+        if settled and task:
+            return f"Task {task['id']} was cancelled: this report stays in your session only."
         values: dict[str, Any] = {"report": params.summary[:4000]}
         if row["role"] == WORKER and params.status in REPORT_STATUS:
             values["status"] = REPORT_STATUS[params.status]
@@ -947,33 +1224,66 @@ class Tools:
             "they edit or reject it. Do not send it any other way."
         )
 
+    async def works_on_pr(self, caller: str, repo: str, number: int) -> bool:
+        """A PR this worker was given (by the Router or the owner: to follow, opened with Create
+        PR, named in its task), or one from its own branch. Not one it chose to follow itself:
+        what it reads (Slack, PRs) must not widen where it can draft."""
+        thread = f"github:{repo}#{number}"
+        if self.store.get(f"given:{caller}:{thread}"):
+            return True
+        for task in self.tasks.for_session(caller):
+            goal = task["goal"] or ""
+            named = set(threads.pull_requests(goal)) | {
+                f"github:{name}#{n}" for name, n in threads.GITHUB_PR.findall(goal.lower())
+            }
+            opened = json.loads(self.store.get(f"prs:{task['id']}") or "[]")
+            if thread in named or thread in threads.pull_requests(" ".join(opened)):
+                return True
+        row = self.store.session(caller)
+        branches = {c.get("branch") or "" for c in self.workspaces.checkouts(row)}
+        branches = {branch for branch in branches | {row["branch"] or ""} if branch}
+        if not branches:
+            return False
+        try:
+            pull = await self.runtime.github.pull(repo, number)
+        except Exception:
+            return False
+        return (pull.get("head") or {}).get("ref") in branches
+
     async def t_draft_github_review(self, params: DraftGitHubReview, caller: str):
         self.caller(caller, WORKER)
         settings = self.store.settings()
-        repo = params.repo.lower()
-        if not (settings.github_enabled and repo in settings.github_repos):
-            raise ValueError("Reviews can only be published on connected repositories.")
+        repo = params.repo.lower().strip()
+        connected = settings.github_enabled and repo in settings.github_repos
+        if not (connected or await self.works_on_pr(caller, repo, params.number)):
+            raise ValueError(
+                "Reviews and replies are drafted on connected repositories or on a PR your task "
+                "is about (one you follow, opened or were given)."
+            )
         if not params.body.strip():
-            raise ValueError("The review is empty.")
-        head = await self.runtime.github.head(repo, params.number)
-        draft = self.store.create_draft(
-            caller,
-            "github",
-            {
-                "repo": repo,
-                "number": params.number,
-                "head_sha": head,
-                "url": f"https://github.com/{repo}/pull/{params.number}",
-            },
-            params.body,
+            raise ValueError("The text is empty.")
+        target: dict[str, Any] = {
+            "repo": repo,
+            "number": params.number,
+            "url": f"https://github.com/{repo}/pull/{params.number}",
+            "via": "connected" if connected else "task",
+        }
+        if params.in_reply_to:
+            target["in_reply_to"] = params.in_reply_to
+            target["comment"] = await self.runtime.github.review_comment(
+                repo, params.number, params.in_reply_to
+            )
+            label = f"Reply on {repo}#{params.number}"
+        else:
+            target["head_sha"] = await self.runtime.github.head(repo, params.number)
+            label = f"Review of {repo}#{params.number}"
+        draft = self.store.create_draft(caller, "github", target, params.body)
+        self.runtime.add_message(
+            caller, "draft", params.body, {"draft_id": draft["id"], "label": label}
         )
-        self.runtime.add_message(caller, "draft", params.body, {"draft_id": draft["id"]})
         self.bus.publish("draft", draft)
         self.runtime.alert(
-            f"Review for {repo}#{params.number}",
-            session_id=caller,
-            needs_action=True,
-            title="PR review to approve",
+            label, session_id=caller, needs_action=True, title="GitHub text to approve"
         )
         return f"Draft {draft['id']} is waiting for the owner's approval."
 
@@ -1014,32 +1324,94 @@ class Tools:
             special="distill",
         )
 
+    async def distill_now(self) -> dict:
+        """Settings' Build from my work: a profile worker, unless one is at work already."""
+        for row in self.store.open_sessions(WORKER):
+            if self.store.get(f"distill:{row['id']}") and row["status"] in {
+                "queued",
+                "starting",
+                "working",
+            }:
+                return {"session_id": row["id"], "status": row["status"]}
+        return await self.t_distill_profile(DistillProfile(), self.runtime.router_id())
+
     async def t_propose_profile(self, params: ProposeProfile, caller: str):
         self.caller(caller, WORKER)
         if not self.store.get(f"distill:{caller}"):
             raise ValueError("Only a profile distillation worker can propose a profile.")
-        text = params.markdown.strip()[:20000]
+        text = params.markdown.strip()[:12000]
         if not text:
             raise ValueError("The profile is empty.")
+        self.settle_profile_cards("Replaced by a newer draft.")
         self.store.set("profile_draft", text)
+        card = self.store.create_draft(
+            self.runtime.router_id(),
+            "profile",
+            {"worker": caller},
+            text,
+            "Distilled from your work",
+        )
+        self.bus.publish("draft", card)
+        self.runtime.add_message(
+            caller, "draft", text, {"draft_id": card["id"], "label": "Profile draft"}
+        )
         self.bus.publish("state")
         self.runtime.alert(
-            "Your profile draft is ready to review in Settings.",
+            "Your profile draft is ready: check it in the inbox before sessions use it.",
             session_id=self.runtime.router_id(),
             needs_action=True,
             title="Profile to review",
         )
-        return "Proposed. The owner reviews it in Settings before it is used."
+        task = self.tasks.current(caller)
+        if task and task["status"] not in {"done", "cancelled"}:
+            self.tasks.move(task["id"], "done", result="Proposed your profile; it is in the inbox.")
+        self.states[caller].close_after_turn = True
+        return "Proposed. The owner reviews it in the inbox. You are done: do not call report."
 
     async def save_profile(self, text: str):
         self.store.set("profile", text.strip())
         self.store.set("profile_draft", "")
+        self.settle_profile_cards("Saved from Settings.", "answered")
         await self.runtime.refresh(ROUTER, SLACK)
         self.bus.publish("state")
 
+    def discard_profile(self):
+        self.store.set("profile_draft", "")
+        self.settle_profile_cards("Discarded.")
+        self.bus.publish("state")
+
+    def ensure_profile_card(self):
+        """A profile draft from before drafts were reviewed in the inbox gets its card."""
+        text = self.store.get("profile_draft", "")
+        if text and not any(card["kind"] == "profile" for card in self.store.drafts()):
+            card = self.store.create_draft(
+                self.runtime.router_id(), "profile", {}, text, "Distilled from your work"
+            )
+            self.bus.publish("draft", card)
+
+    def settle_profile_cards(self, outcome: str, status: str = "rejected"):
+        """Pending profile cards end when the draft is used or dropped some other way."""
+        for card in self.store.drafts():
+            if card["kind"] == "profile":
+                card = self.store.update_draft(
+                    card["id"], status=status, outcome=outcome, resolved_at=now()
+                )
+                self.bus.publish("draft", card)
+
+    async def review_profile(self, card: dict, decision: DraftDecision) -> dict:
+        """The owner uses the drafted profile (edited or not) or drops it."""
+        if decision.action == "reject":
+            self.discard_profile()
+        elif decision.action == "answer" and decision.text.strip():
+            await self.save_profile(decision.text)
+        else:
+            raise ValueError("Use the profile, or discard it.")
+        return self.store.draft(card["id"])
+
     async def t_follow_thread(self, params: FollowThread, caller: str):
         self.caller(caller, WORKER, SLACK)
-        return f"Following {', '.join(self.runtime.follow(caller, [params.thread]))}."
+        followed = self.runtime.follow(caller, [params.thread], given=False)
+        return f"Following {', '.join(followed)}."
 
     async def t_unfollow_thread(self, params: FollowThread, caller: str):
         self.caller(caller, WORKER, SLACK)
@@ -1072,6 +1444,8 @@ class Tools:
                 wrap("watchdog", "nudge", text),
                 kind="watchdog",
                 display=text,
+                # Shown with the nudge: why the Watchdog stepped in.
+                meta={"verdict": params.verdict, "reason": params.reason[:500]},
                 steer=True,
             )
             self.runtime.watchdog.save(row["id"], nudges=nudges + 1)

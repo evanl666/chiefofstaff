@@ -148,6 +148,8 @@ def create_app(
 
     @app.post("/api/sessions/{session_id}/messages")
     async def send(session_id: str, payload: OwnerMessage):
+        if payload.to:
+            return await runtime.owner_send_to(session_id, payload.to, payload.text)
         return await runtime.owner_send(session_id, payload.text)
 
     @app.post("/api/sessions/{session_id}/read")
@@ -182,15 +184,13 @@ def create_app(
 
     @app.post("/api/profile/discard")
     async def discard_profile():
-        store.set("profile_draft", "")
+        runtime.toolset.discard_profile()
         return runtime.snapshot()
 
     @app.post("/api/profile/distill")
     async def distill_profile():
-        return await runtime.owner_send(
-            runtime.router_id(),
-            "Build my profile: distill what my work says about me so my sessions can use it.",
-        )
+        # The owner asked for it: started at once, not left to the Router's judgment.
+        return await runtime.toolset.distill_now()
 
     @app.post("/api/lessons/learn")
     async def learn_now():
@@ -205,6 +205,10 @@ def create_app(
     @app.post("/api/focus")
     async def focus(payload: FocusRequest):
         return await runtime.focus.start(payload.minutes)
+
+    @app.get("/api/file")
+    async def read_file(path: str, session: str = ""):
+        return await runtime.read_file(path, session)
 
     @app.get("/api/external/{session_id}/history")
     async def external_history(session_id: str):
@@ -292,6 +296,9 @@ def create_app(
     async def save_settings(settings: Settings):
         if any(directory.is_relative_to(Path(project)) for project in settings.projects):
             raise ValueError("A project must not contain Chief of Staff's private data directory.")
+        for folder in map(Path, settings.sandbox_writable):
+            if directory.is_relative_to(folder) or folder.is_relative_to(directory):
+                raise ValueError("Workers must not write Chief of Staff's private data directory.")
         await asyncio.to_thread(runtime.workspaces.check_scratch, settings)
         old = store.settings()
         store.save_settings(settings)

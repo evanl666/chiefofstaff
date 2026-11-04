@@ -28,7 +28,7 @@ import sys
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -60,7 +60,7 @@ from .sources import Source
 from .sources.github import GitHubSource
 from .sources.slack import SlackSource, describe
 from .state import SessionStates
-from .store import Store, hours_ago, now
+from .store import Store, ago_minutes, hours_ago, now
 from .task_actions import TaskActions
 from .tasks import TaskBook, settle_adopted, settle_followups
 from .tasks import migrate as migrate_tasks
@@ -73,6 +73,8 @@ from .workspaces import (
     common_git_dir,
     git_dirs,
     protected_git_paths,
+    service_secrets,
+    shared_caches,
 )
 
 logger = logging.getLogger(__name__)
@@ -92,10 +94,17 @@ ROUTER_TOOLS = [
     "notify_owner",
     "close_worker",
     "distill_profile",
+    "read_session",
     "answer_session",
     "cancel_task",
     "record_decision",
 ]
+# Files opened from a report or message show at most this much.
+MAX_FILE_SHOWN = 1_000_000
+# Owner messages at least this long are instructions the learner looks at ("progress?" is not).
+INSTRUCTION_CHARS = 25
+# A message to a worker this long into a step gets a note that it waits for the step to end.
+STEP_NOTE_SECONDS = 20
 # Tasks that ended within this many hours are still shown (and can be reviewed or retried).
 TASKS_SHOWN_HOURS = 72
 GITHUB_HOSTS = (
@@ -105,6 +114,36 @@ GITHUB_HOSTS = (
     "codeload.github.com",
     "objects.githubusercontent.com",
 )
+
+
+def span(iso: str) -> str:
+    """How long since an ISO time, in words: "under a minute", "1 min", "12 min"."""
+    minutes = ago_minutes(iso)
+    return f"{minutes} min" if minutes else "under a minute"
+
+
+def read_text_file(raw: str, cwd: str, roots: list[str]) -> dict:
+    path = Path(raw.strip()).expanduser()
+    if not path.is_absolute():
+        if not cwd:
+            raise ValueError("That path is relative; open it from the session that wrote it.")
+        path = Path(cwd) / path
+    resolved = path.resolve()
+    if not any(within(str(resolved), root) for root in roots if root):
+        raise ValueError("Only files in workers' own folders open here.")
+    if not resolved.is_file():
+        raise ValueError("That is not a file (any more).")
+    size = resolved.stat().st_size
+    with resolved.open("rb") as handle:
+        data = handle.read(MAX_FILE_SHOWN)
+    if b"\0" in data[:8000]:
+        raise ValueError("That is not a text file.")
+    return {
+        "path": str(resolved),
+        "name": resolved.name,
+        "text": data.decode("utf-8", errors="replace"),
+        "truncated": size > MAX_FILE_SHOWN,
+    }
 
 
 def default_backend(settings: Settings) -> AgentBackend:
@@ -243,6 +282,7 @@ class Runtime:
                 warning = await self.version_warning()
                 self.sandbox_gh = await self.backend.gh_works_in_sandbox()
                 await self.ensure_router()
+                self.toolset.ensure_profile_card()
                 # A worker whose start a stop interrupted starts again.
                 self.store.execute(
                     "UPDATE sessions SET status='queued' WHERE status='starting' "
@@ -344,7 +384,12 @@ class Runtime:
             return None
         checkouts = self.workspaces.checkouts(row)
         repositories = git_dirs(checkouts)
-        writable = [*self.workspaces.writable(row), *repositories]
+        settings = self.store.settings()
+        writable = [*self.workspaces.writable(row), *repositories, *settings.sandbox_writable]
+        if settings.shared_caches and not row["slack"]:
+            # Packages its installs need are what the owner's installs already have (checked
+            # against lockfiles before use). Not for workers that read Slack.
+            writable += shared_caches()
         readonly = [
             path for git_dir in repositories for path in protected_git_paths(git_dir, checkouts)
         ]
@@ -357,6 +402,11 @@ class Runtime:
             readonly=tuple(readonly),
             # Workers that read Slack must not carry what they read anywhere but GitHub.
             allowed_hosts=GITHUB_HOSTS if row["slack"] else (),
+            # Tests that start a server, Gradle's daemon and the like need localhost; not for
+            # workers that read Slack, whose content must not reach the owner's local services.
+            local_network=not row["slack"],
+            # Its own daemons, yes; the owner's (their tokens are in these files), no.
+            denied=tuple(service_secrets()),
         )
 
     def yolo(self, row: dict) -> bool:
@@ -537,6 +587,9 @@ class Runtime:
                 self.workspaces.checkouts(row),
                 self.yolo(row),
                 ("on-no-gh" if self.sandbox_gh is False else "on") if sandbox else "",
+                caches=bool(sandbox) and settings.shared_caches and not row["slack"],
+                local=bool(sandbox and sandbox.local_network),
+                gradle=bool(sandbox) and (Path.home() / ".gradle" / "caches").is_dir(),
             )
         if (profile := self.store.get("profile", "")) and row["role"] != WATCHDOG:
             prompt += f"\n<owner_profile>\n{profile}\n</owner_profile>"
@@ -562,11 +615,12 @@ class Runtime:
             options["on_elicitation_request"] = self.asks.on_elicitation
             if extra := os.environ.get("CHIEFOFSTAFF_WORKER_MCP"):
                 options["mcp_servers"] = json.loads(extra)  # Test servers only.
+            if hooks := os.environ.get("CHIEFOFSTAFF_WORKER_HOOKS"):
+                options["hook_directories"] = [hooks]  # Test hooks only (like a plugin's).
         tuning = self.tuning(row)
         model = self.model_for(row)
-        if tuning and not model:
+        if tuning and not model and (model := self.effective_model(row)):
             # Effort and context tier were checked against this model: pin it so they fit.
-            model = self.effective_model(row)
             self.store.set(f"pinned:{row['id']}", "1")
         if model:
             options["model"] = model
@@ -601,11 +655,13 @@ class Runtime:
         model switch keeps the previous effort unless told, so `switching` also sets defaults.
         """
         info = self.model_info(self.effective_model(row))
+        effort = row.get("effort") or self.store.settings().role_efforts.get(row["role"], "")
         if not info:
-            return {}
+            # Copilot's default model, before its first turn shows which it is: Copilot applies
+            # the effort to it (open_live retries without one if the default takes none).
+            return {"reasoning_effort": effort} if effort else {}
         result = {}
         if info["efforts"]:
-            effort = row.get("effort") or self.store.settings().role_efforts.get(row["role"], "")
             if effort in info["efforts"]:
                 result["reasoning_effort"] = effort
             elif switching:
@@ -658,6 +714,7 @@ class Runtime:
         state = self.states[session_id]
         state.stale = False
         state.after_refresh = ""  # The next connection has the new options from the start.
+        state.steps.clear()  # A disconnected session is in no step.
         if state.busy:
             # A disconnected session ends no turn: free its worker slot.
             state.busy = False
@@ -718,8 +775,12 @@ class Runtime:
         name = ("Chief of Staff · " + clean_title(row["title"]))[:100]
         connection = self.connections
         if create:
-            session = await self.connected().create_session(
-                session_id=copilot_id, name=name, **options
+            session = await self.without_unsupported_effort(
+                row,
+                options,
+                lambda tuned: self.connected().create_session(
+                    session_id=copilot_id, name=name, **tuned
+                ),
             )
             self.store.set(f"created:{row['id']}", "1")
             # Copilot keeps a session only once it has had a message: until then it cannot
@@ -728,12 +789,18 @@ class Runtime:
         else:
             await self.refuse_if_open_elsewhere(row)
             try:
-                session = await self.connected().resume_session(copilot_id, **options)
+                session = await self.without_unsupported_effort(
+                    row, options, lambda tuned: self.connected().resume_session(copilot_id, **tuned)
+                )
             except Exception:
                 if not self.store.get(f"fresh:{copilot_id}"):
                     raise
-                session = await self.connected().create_session(
-                    session_id=copilot_id, name=name, **options
+                session = await self.without_unsupported_effort(
+                    row,
+                    options,
+                    lambda tuned: self.connected().create_session(
+                        session_id=copilot_id, name=name, **tuned
+                    ),
                 )
         if self.connections != connection:
             # Copilot reconnected meanwhile: this session belongs to the old connection.
@@ -752,6 +819,26 @@ class Runtime:
         if not create and row["role"] == WORKER:
             await self.workers.import_history(row, session)
         self.publish_session(self.store.session(session_id))
+        return session
+
+    async def without_unsupported_effort(self, row: dict, options: dict, open_session):
+        """Open with the chosen thinking effort; without it if the model takes none (Copilot's
+        default can be Auto, which picks a model each turn)."""
+        try:
+            return await open_session(options)
+        except Exception as exc:
+            if "reasoning_effort" not in options or "effort is not supported" not in str(exc):
+                raise
+        options = {key: value for key, value in options.items() if key != "reasoning_effort"}
+        session = await open_session(options)
+        if not self.store.get("effort_unsupported_noted"):
+            self.store.set("effort_unsupported_noted", "1")
+            self.add_message(
+                row["id"],
+                "notice",
+                "Copilot's default model takes no thinking effort (Auto picks a model each turn), "
+                "so this session uses the model's own. Choose a model in Settings to set one.",
+            )
         return session
 
     async def refuse_if_open_elsewhere(self, row: dict):
@@ -1017,7 +1104,8 @@ class Runtime:
         if row["role"] == WORKER:
             self.background(self.workers.pump())  # Its slot is free for a queued worker.
 
-    async def owner_send(self, session_id: str, text: str) -> dict:
+    async def owner_send(self, session_id: str, text: str, *, learn: bool = True) -> dict:
+        """`learn`: the owner typed it (not a message the app sends for them)."""
         row = self.store.session(session_id)
         if row["closed_at"] and row["role"] == WORKER:
             await self.workers.reopen(session_id)
@@ -1027,12 +1115,60 @@ class Runtime:
             context = [wrap("system", "context", note) for note in notes if note]
             prompt = "\n\n".join([prompt, *context])
         task = self.tasks.current(session_id) if row["role"] == WORKER else None
-        if task and task["status"] in {"review", "done", "failed"}:
+        if task and task["status"] in {"review", "done", "failed", "cancelled"}:
             # A question changes nothing, but new work it reports comes back for review.
             self.store.set(f"followup:{task['id']}", "1")
-        return await self.delivery.deliver(
+        message = await self.delivery.deliver(
             session_id, prompt, kind="owner", display=text, steer=True
         )
+        if learn and len(text.strip()) >= INSTRUCTION_CHARS:
+            # What the owner asks for again and again becomes a lesson (they review it first).
+            self.learning.record(
+                "instruction",
+                context=f"to {row['title']}",
+                owner=text,
+                scope=self.learning.scope_of(session_id),
+            )
+        if note := self.busy_note(session_id):
+            self.add_message(session_id, "notice", note, {"progress": True})
+        return message
+
+    def busy_note(self, session_id: str) -> str:
+        """For a message to a worker deep in a step: it reads it only when the step ends."""
+        row = self.store.session(session_id)
+        since, _ = self.states[session_id].step()
+        if row["role"] != WORKER or not since or time.time() - since < STEP_NOTE_SECONDS:
+            return ""
+        return "It reads this when its current step ends. " + self.progress_line(row)
+
+    async def owner_send_to(self, router_id: str, worker_id: str, text: str) -> dict:
+        """From the Router chat, straight to one worker; the Router hears of it later."""
+        row = self.store.session(worker_id)
+        if row["role"] != WORKER:
+            raise ValueError("Address a worker.")
+        message = await self.owner_send(row["id"], text)
+        note = self.busy_note(row["id"])
+        self.add_message(
+            router_id,
+            "owner",
+            text,
+            {
+                "to": row["id"],
+                "to_title": row["title"],
+                # Not a turn of its own: it goes with the Router's next message.
+                "prompt": wrap(
+                    "system",
+                    "to-worker",
+                    f"The owner told this worker directly: {text}",
+                    worker=short(row["id"]),
+                    title=row["title"],
+                ),
+                "deferred": True,
+            },
+        )
+        if note:  # Where the owner is: Chat or the inbox.
+            self.add_message(router_id, "notice", note, {"session_id": row["id"]})
+        return {**message, "note": note}
 
     def projects_note(self) -> str:
         """Tell the Router when the configured projects changed since it last heard."""
@@ -1111,11 +1247,15 @@ class Runtime:
                 "threads (spawn_worker with slack=true, or the Slack session)."
             )
 
-    def follow(self, session_id: str, keys: list[str]) -> list[str]:
+    def follow(self, session_id: str, keys: list[str], *, given: bool = True) -> list[str]:
+        """`given`: the Router or the owner gave the session these threads (not the session
+        itself), so it may also draft replies there."""
         followed = [threads.normalize(key) for key in keys]
         self.check_follow(self.store.session(session_id), followed)
         for key in followed:
             self.store.follow(key, session_id)
+            if given:
+                self.store.set(f"given:{session_id}:{key}", "1")
             for prefix in ("ghfail", "slackfail"):
                 self.store.set(f"{prefix}:{key}", "0")
         self.store.record(session_id, "links", followed)
@@ -1273,7 +1413,45 @@ class Runtime:
             "task": self.toolset.task_brief(self.tasks.current(row["id"])),
             "elsewhere": self.copilot_id(row["id"]) in self.elsewhere and not row["closed_at"],
             "terminal": self.terminal.get(row["id"]),
+            **(self.progress(row) if row["role"] == WORKER else {}),
         }
+
+    async def read_file(self, raw: str, session_id: str = "") -> dict:
+        """A text file in a worker's own folders (what it wrote), for the owner to read."""
+        row = self.store.find_session(session_id) if session_id else None
+        rows = self.store.all(
+            "SELECT * FROM sessions WHERE role=? ORDER BY created_at DESC LIMIT 300", (WORKER,)
+        )
+        roots = [str(self.work_root)] + [
+            root for item in rows for root in self.workspaces.writable(item)
+        ]
+        return await asyncio.to_thread(read_text_file, raw, row["cwd"] if row else "", roots)
+
+    def progress(self, row: dict) -> dict:
+        """What a session is doing now and what it said last: progress at a glance."""
+        since, step = self.states[row["id"]].step()
+        said = json.loads(self.store.get(f"said:{row['id']}") or "{}")
+        running = bool(since) and row["status"] == "working"
+        return {
+            "step": step if running else "",
+            "step_since": datetime.fromtimestamp(since, UTC).isoformat() if running else "",
+            "said": said.get("text", ""),
+            "said_at": said.get("at", ""),
+        }
+
+    def progress_line(self, row: dict, brief: bool = False) -> str:
+        """The same in words, for the Router and for the owner's messages to a busy worker."""
+        seen = self.progress(row)
+        parts = []
+        limit = 120 if brief else 300
+        if seen["step"]:
+            parts.append(f"now in a step for {span(seen['step_since'])}: {seen['step'][:limit]}")
+        elif row["status"] == "working":
+            parts.append("working (thinking between steps)")
+        if seen["said"]:
+            said = " ".join(seen["said"].split())[:limit]
+            parts.append(f"said {span(seen['said_at'])} ago: “{said}”")
+        return "; ".join(parts)
 
     def publish_session(self, row: dict):
         self.bus.publish("session", self.view(row))
@@ -1320,7 +1498,13 @@ class Runtime:
                 if row and not (row["model"] and row["effort"]):
                     with suppress(Exception):
                         await self.apply_model(row)
-        changed = ("worker_credit_limit", "worker_yolo", "worker_sandbox")
+        changed = (
+            "worker_credit_limit",
+            "worker_yolo",
+            "worker_sandbox",
+            "sandbox_writable",
+            "shared_caches",
+        )
         if any(getattr(old, key) != getattr(new, key) for key in changed):
             await self.refresh(WORKER)
         for source in self.all_sources():
