@@ -15,9 +15,11 @@ Workers can do what your own Copilot sessions can.
   on for all in Settings. Existing installs switch once.
 - **Reviews on company repositories**: Chief of Staff reaches each repository with the `gh`
   account that can see it (your company's, say, signed in next to a personal active one), and
-  remembers it per organization. "Review tscp-targeting PR #1529" works by name; a PR GitHub
-  asks you to review can always be drafted on. When no signed-in account can see a repository,
-  the worker says which are signed in.
+  remembers it per organization. A rate limit never makes it switch accounts. "Review
+  tscp-targeting PR #1529" works by name, in English or Chinese ("tscp-targeting 的 PR #1529");
+  a PR GitHub asks you to review can always be drafted on. When no signed-in account can see a
+  repository, the worker says which are signed in (or that the organization needs single
+  sign-on authorized).
 - **Comments on lines**: a drafted review carries comments on lines of the diff; the card lets
   you edit or drop each. Comments off the diff are refused when drafting, so what you approve
   publishes.
@@ -31,12 +33,24 @@ Workers can do what your own Copilot sessions can.
   in its chat gets that answer, on its card and in Chat.
 - **Your checkout stays yours**: a worker that looked into a project in its folder and is then
   asked to change it first gets its own worktree. Before, it could commit in your checkout.
+- Stopping a worker files nothing as its result and asks it nothing: the end of its turn could
+  arrive before the stop was recorded.
+- A decision the Router records again in the same words (to link a task) no longer tells its
+  workers that it changed.
+- The Router answers in the language of your latest message, not of a worker's report.
+- Right after the machine starts, Chief of Staff no longer misses your other GitHub accounts
+  (for ten minutes) or your terminal sessions (for fifteen seconds).
+- Reviews and replies are found again after a restart with older `gh` versions too (which print
+  long lists page by page).
+- A worktree is added to Copilot's trusted folders only when its repository has MCP servers,
+  hooks or settings of its own.
 - A worker no longer waits more than 30 seconds for `git fetch` before starting (a slow network
   or a huge repository): it starts from what this machine has.
 - Long reviews and replies (up to 39,000 characters) can be sent from their cards.
 - An analysis that changed no files is no longer flagged "says it made changes".
 - `scripts/live_parity.py` runs the same tasks in a terminal session and in a worker, side by
-  side.
+  side; `scripts/live_edges.py` and `scripts/ui_edges.py` test edge cases live and in the
+  browser.
 
 ## 0.1.12 (2026-11-03)
 

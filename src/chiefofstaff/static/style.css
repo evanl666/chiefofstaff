@@ -808,6 +808,7 @@ button.receipt.changes:hover { text-decoration: underline; }
   font-size: 13px;
 }
 .card.draft .inline-comment { margin: 6px 0 0 10px; }
+.card.draft .inline-comment textarea { min-height: 0; padding: 5px 9px; }
 .card.draft .inline-comment .where {
   font: 12px var(--mono);
   color: var(--soft);

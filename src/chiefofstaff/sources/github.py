@@ -63,11 +63,26 @@ async def gh(*arguments: str, payload: dict | None = None, token: str = "") -> s
 
 
 # What gh says when the account it used cannot see a repository (another may).
-NO_ACCESS = re.compile(
+ACCESS_ERRORS = re.compile(
     r"HTTP 40[34]|Could not resolve to a Repository|SAML|do not have permission|"
     r"cannot be searched",
     re.IGNORECASE,
 )
+# How long a signed-in account's token is reused before gh is asked for it again.
+TOKEN_SECONDS = 300
+# A 403 that says nothing about this account's access: another account must not take over.
+TRANSIENT = re.compile(r"rate limit|abuse detection|try again later", re.IGNORECASE)
+
+
+class NoAccess:
+    """Whether a gh failure means this account cannot see the repository (another may)."""
+
+    @staticmethod
+    def search(text: str) -> bool:
+        return bool(ACCESS_ERRORS.search(text)) and not TRANSIENT.search(text)
+
+
+NO_ACCESS = NoAccess()
 REPOSITORY_ARGUMENT = re.compile(
     r"^(?:repos/|--repo=?|https://github\.com/)([A-Za-z0-9_.-]+)/[A-Za-z0-9_.-]+"
 )
@@ -114,6 +129,19 @@ def diff_lines(files: list[dict]) -> dict[str, dict[str, set[int]] | None]:
     return lines
 
 
+def pages(text: str) -> list:
+    """The items of a paginated gh api answer: one array, or (older gh) one array per page
+    printed back to back."""
+    decoder, items, at = json.JSONDecoder(), [], 0
+    text = text.strip()
+    while at < len(text):
+        page, at = decoder.raw_decode(text, at)
+        items += page if isinstance(page, list) else [page]
+        while at < len(text) and text[at].isspace():
+            at += 1
+    return items
+
+
 class GitHubSource:
     name = "github"
 
@@ -123,7 +151,9 @@ class GitHubSource:
         self.raw = gh_command
         # Every call goes through the account that can see the repository it is about.
         self.gh = self.routed
-        self.accounts_cache: tuple[float, list[dict]] = (0.0, [])
+        # Never read yet (not 0: the monotonic clock starts at boot, so 0 can be "just now").
+        self.accounts_cache: tuple[float, list[dict]] = (float("-inf"), [])
+        self.tokens: dict[str, tuple[float, str]] = {}
         self.changed = asyncio.Event()
         self.job: asyncio.Task | None = None
         self.status = {"enabled": False, "connected": False, "error": "", "last_checked": None}
@@ -222,7 +252,13 @@ class GitHubSource:
             except RuntimeError as exc:
                 raise RuntimeError(f"HTTP 403: {login} is no longer signed in to gh") from exc
         extra = {"token": token} if token else {}
-        reply = await self.raw(*arguments, payload=payload, **extra)
+        try:
+            reply = await self.raw(*arguments, payload=payload, **extra)
+        except RuntimeError:
+            if login:
+                # Revoked, rotated or signed out since: gh is asked for it again next time.
+                self.tokens.pop(login, None)
+            raise
         if login != remembered:
             if login:
                 self.store.set(f"ghaccount:{owner}", login)
@@ -241,9 +277,14 @@ class GitHubSource:
         return await self.token(login) if login else ""
 
     async def token(self, login: str) -> str:
-        return (
+        cached_at, token = self.tokens.get(login, (float("-inf"), ""))
+        if time.monotonic() - cached_at < TOKEN_SECONDS:
+            return token
+        token = (
             await self.raw("auth", "token", "--hostname", "github.com", "--user", login)
         ).strip()
+        self.tokens[login] = (time.monotonic(), token)
+        return token
 
     async def pull(self, repo: str, number: int) -> dict:
         return json.loads(await self.gh("api", f"repos/{repo}/pulls/{int(number)}"))
@@ -404,7 +445,7 @@ class GitHubSource:
         files = await self.gh(
             "api", f"repos/{repo}/pulls/{int(number)}/files?per_page=100", "--paginate"
         )
-        return diff_lines(json.loads(files or "[]"))
+        return diff_lines(pages(files))
 
     async def head(self, repo: str, number: int) -> str:
         pull = await self.pull(repo, number)
@@ -414,11 +455,10 @@ class GitHubSource:
 
     async def find_review(self, target: dict, body: str) -> str:
         """The URL of a published review with this body on the target PR, or ""."""
-        reviews = json.loads(
+        reviews = pages(
             await self.gh(
                 "api", f"repos/{target['repo']}/pulls/{int(target['number'])}/reviews", "--paginate"
             )
-            or "[]"
         )
         for review in reviews:
             if (review.get("body") or "").strip() == body.strip():
@@ -441,7 +481,7 @@ class GitHubSource:
     async def find_reply(self, target: dict, text: str) -> str:
         """The URL of a published reply with this text to the target comment, or ""."""
         path = f"repos/{target['repo']}/pulls/{int(target['number'])}/comments"
-        comments = json.loads(await self.gh("api", path, "--paginate") or "[]")
+        comments = pages(await self.gh("api", path, "--paginate"))
         for comment in comments:
             if comment.get("in_reply_to_id") == target["in_reply_to"] and (
                 (comment.get("body") or "").strip() == text.strip()

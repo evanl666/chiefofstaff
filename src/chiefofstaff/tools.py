@@ -323,13 +323,33 @@ def names_pr(text: str, repo: str, number: int) -> bool:
     }:
         return True
     owner, short_name = repo.split("/", 1)
-    name = re.escape(short_name)
-    pr = rf"(?:#\s*|\bpr\s*#?\s*|\bpull\s*(?:request)?\s*#?\s*){number}\b"
-    # The name and the number together: "tscp-targeting PR #1529", "PR 1529 in tscp-targeting",
-    # with its owner when one is written there ("evil/tscp-targeting#1529" is another's).
+    # ASCII boundaries: \w and \b would take "的" in "tscp-targeting的PR" for part of a word.
+    word = r"A-Za-z0-9_.\-"
+    name = rf"(?<![{word}/])(?:([{word}]+)/)?{re.escape(short_name)}(?![{word}])"
+    pr = r"(?<![A-Za-z0-9_])(?:pr|prs|pull requests?)(?![A-Za-z0-9_])"
+    # The number as a PR: "#1529", "PR 1529", "pull/1529" (not JIRA-1529 or 15290).
+    marked = rf"(?:#\s*|{pr}\s*#?\s*|/pull/|/){number}(?!\d)"
+    # After the name: spaces, punctuation, Chinese ("tscp-targeting 的 PR #1529", "里面的 #1529"),
+    # the repository's other PR numbers ("PRs #1528, #1529"). Not a number that belongs to the
+    # repository named right after it ("api#1600 and #1529 in web").
+    after_name = (
+        rf"(?:\s|[,:()&\uff0c\uff1a\uff08\uff09\u3001]|[\u3000-\u9fff]|#\d+|{pr}|"
+        r"(?<![A-Za-z])and(?![A-Za-z]))"
+    )
+    elsewhere = (
+        r"(?!\s*(?:in|on|of|for|from)\s+(?!(?:[A-Za-z0-9_.\-]+/)?"
+        + re.escape(short_name)
+        + r"(?![A-Za-z0-9_.\-])))"
+    )
+    # Before the name, only a PR's own marks: "PR #1529 (tscp-targeting)", "PR 1529 in
+    # tscp-targeting"; not "web#1529 and api", whose number is web's.
+    number_first = rf"(?:(?<![{word}/])#\s*|{pr}\s*#?\s*){number}(?!\d)"
+    before_name = r"(?:\s|[:(\uff1a\uff08]|(?<![A-Za-z])(?:in|on|of|for|from)(?![A-Za-z]))"
     for found in (
-        *re.finditer(rf"(?<![\w./-])(?:([\w.-]+)/)?{name}(?![\w.-])[\s:,]*{pr}", text),
-        *re.finditer(rf"{pr}\s+(?:in|on|of|for|from)\s+(?:([\w.-]+)/)?{name}(?![\w.-])", text),
+        *re.finditer(
+            rf"{name}(?:{after_name}{{0,12}}?{marked}{elsewhere}|\s{{1,2}}{number}(?!\d))", text
+        ),
+        *re.finditer(rf"{number_first}{before_name}{{0,6}}?{name}", text),
     ):
         if found.group(1) in (None, owner):
             return True
@@ -1377,12 +1397,21 @@ class Tools:
             else:
                 raise ValueError(f"{repo} has no pull request #{params.number}.") from exc
             logins = ", ".join(sorted(await github.logins())) or "none"
+            if "saml" in str(exc).lower():
+                fix = (
+                    "the organization requires single sign-on: authorize gh's token for it "
+                    "(the link in GitHub's message, or `gh auth refresh -h github.com`)"
+                )
+            else:
+                fix = (
+                    "signing in with the account that can (`gh auth login`) fixes it; Chief of "
+                    "Staff then uses that account for the repository on its own"
+                )
             raise ValueError(
                 f"No GitHub account signed in to gh on the owner's machine (signed in: {logins}) "
                 f"can see {repo}#{params.number}, so Chief of Staff cannot publish there. Tell "
-                'the owner with report(status="question"): signing in with the account that '
-                "can (`gh auth login`) fixes it; Chief of Staff then uses that account for the "
-                "repository on its own. Keep the drafted text in your report."
+                f'the owner with report(status="question"): {fix}. Keep the drafted text in '
+                f"your report. GitHub said: {str(exc)[-400:]}"
             ) from exc
         connected = settings.github_enabled and repo in settings.github_repos
         if not (connected or await self.works_on_pr(caller, repo, params.number, pull)):

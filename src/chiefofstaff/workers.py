@@ -112,7 +112,8 @@ class Workers:
         self.workspaces = runtime.workspaces
         # Taken to change which workers hold a slot (see state.py for the lock order).
         self.pump_lock = asyncio.Lock()
-        self.external_cache: tuple[float, list[dict]] = (0.0, [])
+        # Never read yet (not 0: the monotonic clock starts at boot, so 0 can be "just now").
+        self.external_cache: tuple[float, list[dict]] = (float("-inf"), [])
         # Reading logs of sessions open in a terminal; held while their timelines catch up.
         self.mirror_lock = asyncio.Lock()
         # Other sessions' logs as last read: session id -> (offset, entries, turn open).
@@ -526,22 +527,24 @@ class Workers:
     async def interrupt(self, session_id: str, by: str = "you"):
         row = self.store.session(session_id)
         self.runtime.asks.cancel_requests(session_id, f"Stopped by {by}.")
+        self.states[session_id].after_refresh = ""  # Not "go on" once it is stopped.
+        if row["status"] in {"working", "queued", "starting"}:
+            # Recorded before the abort: the turn's end (idle) can arrive before the abort
+            # returns, and must find a deliberate stop, not a worker that ended without a report
+            # (nor a silent stall for the Watchdog).
+            self.runtime.update_session(session_id, status="idle", activity="")
+            self.runtime.add_message(session_id, "notice", f"Stopped by {by}.", {"stopped": True})
+            task = self.tasks.current(session_id)
+            if task and task["status"] in {"queued", "running"}:
+                self.tasks.move(task["id"], "waiting", progress=f"Stopped by {by}.")
         if session := self.states.handle(session_id):
             await session.abort()
         self.states[session_id].busy = False
-        self.states[session_id].after_refresh = ""  # Not "go on" once it is stopped.
         self.states[session_id].steps.clear()
         if row["role"] == WORKER:
             # Its task, given and not received, is for its next message, not a turn now. Events
             # held for the Router or the Slack session still go out when it is idle.
             self.delivery.defer_pending(session_id)
-        if row["status"] in {"working", "queued", "starting"}:
-            self.runtime.update_session(session_id, status="idle", activity="")
-            # A deliberate stop: the watchdog must not treat it as a silent stall.
-            self.runtime.add_message(session_id, "notice", f"Stopped by {by}.", {"stopped": True})
-            task = self.tasks.current(session_id)
-            if task and task["status"] in {"queued", "running"}:
-                self.tasks.move(task["id"], "waiting", progress=f"Stopped by {by}.")
         self.runtime.background(self.pump())
 
     async def external(self, refresh: bool = False) -> list[dict]:
@@ -613,7 +616,7 @@ class Workers:
         # Its work so far is not a task to review; the owner's next request starts one.
         task = self.tasks.create(session_id, row["title"], "(an existing Copilot session)")
         self.tasks.move(task["id"], "done", result=ADOPTED)
-        self.external_cache = (0.0, [])
+        self.external_cache = (float("-inf"), [])
         self.runtime.add_message(
             self.runtime.router_id(),
             "notice",
