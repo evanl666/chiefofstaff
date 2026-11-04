@@ -55,6 +55,11 @@ def words(text: str) -> list[str]:
 
 def initials(name: str) -> str:
     return "".join(part[0].upper() for part in name.split() if part)
+
+
+def chunk(items: list, size: int) -> list[list]:
+    """Items in groups of `size`; the last group may be smaller."""
+    return [items[start : start + size] for start in range(0, len(items) - size, size)]
 '''
 
 MONEY = '''"""Money formatting."""
@@ -171,16 +176,83 @@ ANALYSIS = (
     "revenue (units * unit_price) per region, the month with the highest total revenue, and "
     "any rows that look wrong. Give the exact numbers. Do not change any files."
 )
+CHINESE = (  # As the owner writes: full-width punctuation included.
+    "用 data/sales.csv 算一下每个 region 的总收入\uff08units * unit_price\uff09"
+    "和每个月的环比增长\uff0c"
+    "一步一步讲清楚你是怎么算的\uff0c最后用一个 markdown 表格总结。不要改任何文件。"
+)
+SKILLS = (
+    "Use the probe-repo-skill skill, then delegate a one-line task to the probe-user custom "
+    "agent asking it to say hi. Report what each one said, word for word."
+)
+WEB = (
+    "Look up the latest released version of the Python package `requests` on PyPI (fetch "
+    "https://pypi.org/pypi/requests/json) and tell me the version and its release date."
+)
+MCP_READ = (
+    "Using the GitHub MCP server's tools (not the gh command), find the three most recent "
+    "releases of cli/cli and list their tag names."
+)
+INVESTIGATE = (
+    "Users say textkit.chunk() sometimes drops items at the end. Find out exactly why, with "
+    "an example input that shows it, and say what the fix is. Do not change any files."
+)
 TASKS = {
     "capabilities": CAPABILITIES,
     "coding": CODING,
     "bugfix": BUGFIX,
     "analysis": ANALYSIS,
     "review": REVIEW,
+    "chinese": CHINESE,
+    "skills": SKILLS,
+    "web": WEB,
+    "mcp_read": MCP_READ,
+    "investigate": INVESTIGATE,
 }
 if only := os.environ.get("PARITY_TASKS"):
     TASKS = {name: TASKS[name] for name in only.split(",")}
 HIDDEN = {"coding": HIDDEN_TESTS, "bugfix": HIDDEN_MONEY}
+
+
+def truths() -> dict:
+    """Answers checked against the world, taken when the run starts."""
+    import urllib.request
+
+    found = {}
+    try:
+        with urllib.request.urlopen("https://pypi.org/pypi/requests/json", timeout=20) as page:
+            found["requests"] = json.load(page)["info"]["version"]
+    except Exception:
+        found["requests"] = ""
+    tags = subprocess.run(
+        ["gh", "api", "repos/cli/cli/releases?per_page=3", "--jq", ".[].tag_name"],
+        capture_output=True, text=True,
+    ).stdout.split()  # fmt: skip
+    found["releases"] = tags
+    return found
+
+
+def score(name: str, answer: str, truth: dict, world: dict) -> str:
+    """How much of what was asked the answer has (beyond the hidden tests and the analysis)."""
+    plain = answer.replace(",", "")
+    if name == "chinese":
+        totals = [f"{t:.2f}".rstrip("0").rstrip(".") in plain for t in truth["totals"].values()]
+        table = "|---" in answer.replace(" ", "") or "|:--" in answer.replace(" ", "")
+        return f"totals {sum(totals)}/3, table {'ok' if table else 'MISSING'}, {len(answer)} chars"
+    if name == "skills":
+        skill = "probe-repo-skill" in answer
+        agent = "probe-user" in answer
+        return f"skill {'ok' if skill else 'MISSING'}, agent {'ok' if agent else 'MISSING'}"
+    if name == "web":
+        version = world.get("requests", "")
+        return f"version {'ok' if version and version in answer else 'MISSING'} ({version})"
+    if name == "mcp_read":
+        tags = world.get("releases") or []
+        return f"tags {sum(tag in answer for tag in tags)}/{len(tags)}"
+    if name == "investigate":
+        cause = "len(items) - size" in answer or "len(items)-size" in answer
+        return f"cause {'ok' if cause else 'MISSING'}"
+    return ""
 
 
 def analysis_score(answer: str, truth: dict) -> str:
@@ -407,6 +479,7 @@ async def run(number: int) -> list[str]:
     with tempfile.TemporaryDirectory(prefix="cos-parity-") as temporary:
         root = Path(temporary).resolve()
         home, project, truth = setup(root)
+        world = truths()
         app = App(root / "data", root / "chiefofstaff.log", {"COPILOT_HOME": str(home)})
         await app.start()
         summary = []
@@ -448,6 +521,8 @@ async def run(number: int) -> list[str]:
                         )
                     if name == "analysis":
                         line += f"\n    {label}: {analysis_score(result['answer'], truth)}"
+                    if extra := score(name, result["answer"], truth, world):
+                        line += f"\n    {label}: {extra}"
                 summary.append(line)
             changed = git(project, "status", "--porcelain", "--untracked-files=no").strip()
             commits = git(project, "rev-list", "--count", "main").strip()

@@ -214,6 +214,11 @@ class Events:
         if (
             model
             and own
+            # The session's own conversation: not a sub-agent's or a background call's model
+            # (a cheaper one, say), nor one that Auto picked for this turn only.
+            and getattr(data, "interaction_type", None) in (None, "conversation-agent")
+            and getattr(data, "initiator", None) not in ("sub-agent",)
+            and not getattr(data, "is_auto", False)
             and not self.runtime.model_for(row)
             and not self.store.get(f"pinned:{session_id}")
         ):

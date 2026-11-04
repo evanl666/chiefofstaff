@@ -1,5 +1,7 @@
 """System prompts appended to Copilot's own system prompt for each Chief of Staff role."""
 
+import sys
+
 from .envelope import RULES
 
 ROUTER = """\
@@ -95,10 +97,12 @@ How to route:
   type="context" list of earlier workers that may be related (keyword matches): use it, and
   check list_sessions or find_sessions when unsure. A worker that researched or analysed a
   subject is the one to act on it next (implement, rerun, repopulate, fix): its findings are the
-  context that work needs, so "it only did research" is no reason for a new worker; add_repo
-  gives it a worktree when it needs one. Start a new worker only when no worker
-  covers the subject, when the request is an independent code change that needs its own branch
-  and PR, or when it must run in parallel with what the related worker is doing now.
+  context that work needs, so "it only did research" is no reason for a new worker. No worker
+  is read-only: one working in the project folder itself takes its own worktree and branch with
+  add_repo when it has to change code, so needing a worktree, a branch or a commit is never a
+  reason for a new worker. Start a new worker only when no worker covers the subject, when the
+  request is an independent code change on a different subject (its own branch and PR), or when
+  it must run in parallel with what the related worker is doing now.
   spawn_worker refuses once when related workers exist and lists them: then either
   message_session one of them, or call spawn_worker again with why_new saying briefly why none
   fits (the owner sees it).
@@ -141,7 +145,9 @@ How to route:
   only when read_session does not answer the question. Call a worker stopped, stuck or done
   only when read_session or list_sessions says so.
 - from="system" type="to-worker": the owner told that worker something directly; it already
-  has it. Take it into account; do not forward it again.
+  has it. Take it into account; do not forward it again. A worker's result may come from such a
+  direct request you did not see: never have a worker undo or redo a result because you did
+  not ask for it; ask the owner first.
 - list_sessions().terminal_sessions are the owner's own Copilot sessions open in a terminal now.
   read_session them to answer about them. You cannot send them anything while they are open
   there: tell the owner to type it there, or to exit it there. message_session to one of the
@@ -203,7 +209,9 @@ Communicating:
   changed, checks you actually ran, links such as the PR URL) are enough. Markdown; write file
   paths and links in full: the app shortens them and the owner can open files in your folders.
 - Always finish a task with report(status="done") or report(status="blocked"), passing its id as
-  task_id when you have had more than one task. Never claim work you did not do.
+  task_id when you have had more than one task. Never claim work you did not do: before you
+  report a change, check that it took effect (read the changed lines again, run the tests). A
+  command can fail without you noticing, a follow-up's quick edit as much as the first one.
 - Decisions that are the owner's (scope, a trade-off, a risky or costly change such as a data
   migration): ask with ask_decision, saying why it comes up, 2-4 options with what each means,
   and your recommendation, then end your turn. ask_user is for quick facts and access. If
@@ -361,6 +369,11 @@ def worker_context(
         f"Working directory: {cwd}",
         f"Your workspace: {workspace} (all yours: clone, build or download things there).",
     ]
+    if sys.platform == "darwin":
+        lines.append(
+            "This is macOS: BSD sed needs `sed -i ''` (GNU's `sed -i` fails here); your edit "
+            "tool avoids the difference."
+        )
     if checkouts:
         lines.append("Your checkouts (commit your changes in each; never in the owner's own):")
         for checkout in checkouts:

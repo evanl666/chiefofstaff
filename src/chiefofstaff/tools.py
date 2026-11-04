@@ -39,6 +39,10 @@ OWNER_WORDS = "{owner:<ref>}"
 OWNER_REF = re.compile(r"\{owner:\s*([A-Za-z0-9]+)\}")  # Not {owner} (GitHub's path template).
 
 
+# Thinking efforts, least first.
+EFFORTS = ["none", "low", "medium", "high", "xhigh", "max"]
+
+
 class SpawnWorker(BaseModel):
     title: str = Field(description="Short task title shown to the owner (under 60 characters)")
     instructions: str = Field(
@@ -95,7 +99,7 @@ class SpawnWorker(BaseModel):
     effort: Literal["", "low", "medium", "high", "xhigh", "max"] = Field(
         default="",
         description="Thinking effort: higher for hard debugging, design or research, lower for "
-        "simple chores; empty for the default",
+        "simple chores; empty for the default. Never below the effort the owner set for workers",
     )
     follow: list[str] = Field(
         default_factory=list,
@@ -311,6 +315,29 @@ class DraftGitHubReview(BaseModel):
         description="To reply to a review comment on the PR: that comment's id (from "
         "`gh api repos/<owner/name>/pulls/<number>/comments`). 0 for a review of the whole PR.",
     )
+
+
+# What a request asks for that a one-line report cannot be.
+# A table to read, not a database's ("add the orders table").
+ASKS_TABLE = re.compile(
+    r"\bmarkdown tables?\b|\b(?:in|as|into) an? (?:\w+ )?table\b|\bsummary table\b|\btabular\b|"
+    r"\btable (?:of|with|summari[sz]ing|comparing)\b|表格",
+    re.IGNORECASE,
+)
+ASKS_EXPLANATION = re.compile(
+    r"\bexplain|step[- ]by[- ]step|walk me through|\bhow you|\bin detail|讲清楚|解释|一步一步|"
+    r"详细|怎么算",
+    re.IGNORECASE,
+)
+
+
+def short_of(goal: str, summary: str) -> str:
+    """What the task asked for that this done report lacks ("" when nothing is missing)."""
+    if ASKS_TABLE.search(goal) and "|" not in summary:
+        return "a table"
+    if ASKS_EXPLANATION.search(goal) and len(summary) < 400:
+        return "an explanation"
+    return ""
 
 
 def names_pr(text: str, repo: str, number: int) -> bool:
@@ -743,7 +770,9 @@ class Tools:
                 raise ValueError(
                     "Related workers exist. If this is about the same subject as one of them, "
                     "send it there with message_session instead (a closed one reopens with its "
-                    "context and files). Otherwise call spawn_worker again with why_new.\n"
+                    "context and files; one without a branch takes its own worktree with "
+                    "add_repo to change code, so needing a worktree is no reason for a new "
+                    "worker). Otherwise call spawn_worker again with why_new.\n"
                     + json.dumps(related, ensure_ascii=False)
                 )
         session_id = str(uuid4())
@@ -773,6 +802,10 @@ class Tools:
         info = self.runtime.model_info(
             self.runtime.effective_model({"model": params.model, "role": WORKER})
         )
+        floor = self.store.settings().role_efforts.get(WORKER, "")
+        lowered = bool(effort and floor and EFFORTS.index(effort) < EFFORTS.index(floor))
+        if lowered:
+            effort = ""  # The owner's choice for workers is the least they get.
         if effort and info and effort not in info["efforts"]:
             effort = ""  # Reported below; the model's default effort applies.
         if params.model or effort:
@@ -815,7 +848,9 @@ class Tools:
             result["checkouts"] = [checkout["path"] for checkout in checkouts]
         if params.slack and not slack:
             result["warning"] = "Slack is not connected, so this worker has no Slack access."
-        if params.effort and not effort:
+        if lowered:
+            result["effort"] = f"The owner set workers to {floor} effort: it was kept."
+        elif params.effort and not effort:
             offered = ", ".join(info["efforts"]) if info and info["efforts"] else "none"
             result["warning"] = f"Effort {params.effort} is not offered by this model ({offered})."
         if params.after:
@@ -1252,6 +1287,23 @@ class Tools:
             if row["role"] == WORKER
             else None
         )
+        if (
+            task
+            and params.status == "done"
+            # Its first answer: not a follow-up's news, nor a cancelled task's.
+            and task["status"] == "running"
+            and not task["result"]
+            and not self.store.get(f"fuller:{task['id']}")
+            and (missing := short_of(task["goal"] or "", params.summary))
+        ):
+            # Asked once: a short answer that is the whole answer is taken the second time.
+            self.store.set(f"fuller:{task['id']}", "1")
+            raise ValueError(
+                f"Not reported: the owner asked for {missing}, and this report is all they "
+                "read. Call report again with the whole answer: how you got there step by "
+                "step, the numbers, and the table if one was asked for. If this already is the "
+                "whole answer, call report again with it unchanged."
+            )
         meta = {"status": params.status, "task_id": task["id"] if task else None}
         self.runtime.add_message(caller, "report", params.summary, meta)
         if task and params.status == "done" and params.criteria:

@@ -248,6 +248,18 @@ async def test_the_chosen_effort_applies_before_the_default_model_is_known(tmp_p
     assert len(notes) == 1
 
 
+async def test_the_router_raises_a_workers_effort_but_never_lowers_the_owners(tmp_path):
+    harness = Harness(tmp_path / "data", Settings(role_efforts={"worker": "high"}))
+    runtime = await harness.connect()
+    simple = await spawn(runtime, harness.router_id, "Sum a column", effort="medium")
+    assert harness.session(simple).options["reasoning_effort"] == "high"
+    hard = await spawn(runtime, harness.router_id, "Debug the race", effort="xhigh")
+    assert harness.session(hard).options["reasoning_effort"] == "xhigh"
+    harness.store.save_settings(Settings())  # No effort chosen: the Router's applies.
+    chore = await spawn(runtime, harness.router_id, "Rename a file", effort="low")
+    assert harness.session(chore).options["reasoning_effort"] == "low"
+
+
 async def test_a_late_report_does_not_reopen_a_cancelled_task(harness):
     runtime = await harness.connect()
     worker = await spawn(runtime, harness.router_id, "Research the table")
@@ -1136,3 +1148,96 @@ async def test_a_decision_recorded_again_in_the_same_words_changes_nothing(harne
     await settle(runtime)
     assert len(harness.session(worker).sent) == sent, "the worker is not told to redo anything"
     assert not [d for d in harness.store.drafts() if d["kind"] == "change"], "no change card"
+
+
+@pytest.mark.parametrize(
+    "goal, summary, missing",
+    [
+        (
+            "用 sales.csv 做个分析, 一步一步讲清楚, 最后用一个 markdown 表格总结",
+            "分析完成。",
+            "a table",
+        ),
+        ("Summarize the results in a table", "North leads.", "a table"),
+        ("Explain why the export times out", "The cursor resets.", "an explanation"),
+        ("Review PR #12 and walk me through the risks", "LGTM", "an explanation"),
+        ("Add the orders table", "Added it.", ""),
+        ("Drop the old sessions table", "Dropped.", ""),
+        ("Put them in a markdown table", "| a | b |\n|---|---|", ""),
+        ("What is 17x23?", "391", ""),
+    ],
+)
+def test_what_a_one_line_report_cannot_answer(goal, summary, missing):
+    from chiefofstaff.tools import short_of
+
+    assert short_of(goal, summary) == missing
+
+
+async def test_a_one_line_answer_to_an_explanation_is_sent_back_once(harness):
+    runtime = await harness.connect()
+    worker = await spawn(
+        runtime, harness.router_id, "Sales analysis",
+        instructions="Analyse sales.csv, explain step by step, end with a markdown table",
+    )  # fmt: skip
+    first = await call_tool(runtime, "report", worker, status="done", summary="Analysis done.")
+    assert first.result_type == "failure" and "a table" in first.text_result_for_llm
+    task = harness.store.one("SELECT status FROM tasks WHERE session_id=?", (worker,))
+    assert task["status"] == "running", "nothing filed yet"
+    again = await call_tool(runtime, "report", worker, status="done", summary="Analysis done.")
+    assert again.result_type == "success", "the second time it is taken as the whole answer"
+
+
+async def test_chief_of_staffs_tools_do_not_hide_a_workers_mcp_tools_sooner(harness):
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Work")
+    options = harness.session(worker).options
+    assert options["tool_search"]["defer_threshold"] == 30 + len(options["tools"])
+    assert "tool_search" not in harness.session(harness.router_id).options
+
+
+async def test_a_background_call_on_another_model_is_not_copilots_default(harness):
+    """Copilot names sessions and summarizes with a cheaper model that takes no effort: taken
+    for the default model, it made Chief of Staff drop the owner's worker effort."""
+    harness.store.save_settings(Settings(role_efforts={"worker": "high"}))
+    runtime = await harness.connect()
+    router = harness.session(harness.router_id)
+    router.emit(
+        "assistant.usage", model="smart-model", cost=1, interaction_type="conversation-agent"
+    )
+    router.emit("assistant.usage", model="fast-model", interaction_type="conversation-title")
+    router.emit("assistant.usage", model="fast-model", initiator="sub-agent")
+    router.emit("assistant.usage", model="fast-model", is_auto=True)
+    await settle(runtime)
+    assert harness.store.get("copilot_default_model") == "smart-model"
+    worker = await spawn(runtime, harness.router_id, "Analyse")
+    assert harness.session(worker).options["reasoning_effort"] == "high"
+
+
+async def test_the_router_hears_everything_the_owner_tells_a_worker_directly(harness):
+    """A revision on a task card, a retry note or a message in a worker's own timeline: the
+    Router must know, or it takes the worker's result for drift and has it undone."""
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Add shout()")
+    await call_tool(runtime, "report", worker, status="done", summary="Added shout().")
+    task = harness.store.one("SELECT id FROM tasks WHERE session_id=?", (worker,))["id"]
+    await runtime.task_actions.follow_up(task, "Also add an exclamation mark.")
+    await runtime.owner_send(worker, "Keep the docstring short.")
+    notes = [
+        m for m in harness.store.messages(harness.router_id)
+        if m["meta"].get("to") == worker
+    ]  # fmt: skip
+    assert [m["text"] for m in notes] == [
+        "Also add an exclamation mark.",
+        "Keep the docstring short.",
+    ]
+    assert all(m["meta"]["deferred"] for m in notes), "with the Router's next message, no turn"
+    await runtime.owner_send(harness.router_id, "What is open?")
+    sent = harness.session(harness.router_id).sent[-1]
+    assert "The owner told this worker directly: Also add an exclamation mark." in sent
+
+
+def test_a_credit_limit_under_copilots_minimum_is_raised_to_it():
+    """Copilot starts no session with a limit under 30 credits: every worker would fail."""
+    assert Settings(worker_credit_limit=5).worker_credit_limit == 30
+    assert Settings(worker_credit_limit=0).worker_credit_limit == 0
+    assert Settings(worker_credit_limit=45).worker_credit_limit == 45
