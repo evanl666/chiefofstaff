@@ -2,143 +2,111 @@
 
 **English** · [简体中文](README.zh-CN.md)
 
-One home for all your GitHub Copilot sessions. Tell it what you need. It gives each task to
-its own Copilot session, sends follow-ups to the session that already has the context, drafts
-your Slack replies, and lets you know when something is ready to review.
+[![PyPI](https://img.shields.io/pypi/v/chiefofstaff)](https://pypi.org/project/chiefofstaff/) [![Python](https://img.shields.io/pypi/pyversions/chiefofstaff)](https://pypi.org/project/chiefofstaff/) [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-![Home: the chat, what needs you and every task's progress on one screen](docs/images/home-review.png)
+One home for all your GitHub Copilot sessions. Say what you need: each task gets its own
+Copilot session, follow-ups go to the session that already has the context, and you are asked
+only when a decision is yours or something is ready to review.
 
-Try it with scripted sessions first. No account needed:
+![Home: the chat, what needs you, and every task's live progress](docs/images/home.png)
 
 ```bash
-uvx chiefofstaff --demo
+uvx chiefofstaff --demo    # try it with scripted sessions, no sign-in needed
 ```
 
-## Why I built this
+## Why
 
-I usually have several Copilot sessions going at once: one fixing a test, one reviewing a PR,
-one digging through logs. Every few minutes I'd flip between terminals to see which one was
-stuck, which one had a question, and which one had quietly finished. Slack kept pinging me in
-between. After a while I couldn't remember which session knew what, and I'd start a new one for
-a follow-up that an old one could have answered in a minute.
-
-Now I talk to one session, the Router, and Chief of Staff keeps track of the rest.
+I run several Copilot sessions at once: one fixing a test, one reviewing a PR, one reading
+logs. I kept switching terminals to see which was stuck, which had a question and which had
+finished, while Slack kept pinging me. Now I talk to one session, the Router, and Chief of
+Staff keeps track of the rest.
 
 ## What it does
 
-- Splits a request into tasks. "Fix the flaky login test, then add rate limiting, and compare
-  feature-flag services" becomes three tasks. The second waits for the first and starts with
-  its result.
-- Sends follow-ups to the session that did the work, with its history and checkout, instead of
-  starting over in a new one.
-- Shows what was observed next to what the worker reports: the test runs, commits, diff and PR
-  checks. If a report says "all tests pass" and no test ran, the card says so.
-- Lets you review the diff, comment on lines and send the comments back to the worker, then open
-  the PR with one click. The worker follows the PR; when it merges, the task is done.
-- Checks results against acceptance criteria: each is marked verified only when a command the
-  worker was seen running backs it, and evidence goes out of date when the code changes.
-- Brings you decisions, not just questions: why, the options and their effects, a
-  recommendation. Change a decision later and every task that relied on it adjusts and
-  confirms.
-- Learns how you work, and keeps learning: how you write (from the Slack messages you send, your
-  PR reviews and commits, what you ask your own Copilot sessions) applies at once and can be
-  undone; habits from your decisions, review comments and draft edits wait for your OK.
-- Turns mistakes workers fixed into checks: a test that failed, then passed after a fix, becomes
-  a check proven on both versions in a sandbox. Once you approve it, it catches the same mistake
-  when another worker says it is done.
-- Leaves your own checkout alone. Each worker gets its own folder and git worktree.
-- Workers can do what your own Copilot sessions can: your plugins, MCP servers, skills, custom
-  agents and tools. Turn on the sandbox in Settings to confine them to their folders; workers
-  that read Slack are always sandboxed.
-- Drafts replies to Slack DMs and mentions in your style. Nothing is sent until you press Send.
-- Watches what you tell it to (Slack mentions, doc comments, mail) with whatever tools your
-  Copilot has, Glean or your company's search included, and has replies drafted for you.
-- Reaches you when you are away from your desk, through your company's Slack bot say, and takes
-  your answers from there.
-- Takes the skills, plugins and MCP servers you add in Settings, and screenshots in the chat.
-- Lets you delegate from Slack: react 🤖 to any message ("can someone look at the export
-  bug?") and it becomes a task. When it's done, the answer is drafted in that thread.
-- Has a focus mode. Pick how long: notifications wait, the Router handles what it can, and you
-  get one summary at the end.
-- Watches for workers that stall or go in circles, and nudges them.
+**All your work in one place**
+- Splits a request into tasks and runs each in its own Copilot session, in parallel or in order.
+- Sends a follow-up to the session that did the work, with its history and checkout.
+- Shows every task live on one board: what it is doing now, what waits and why, what is done.
 
-It runs on the Copilot you already have: your plan, your models, your MCP servers and your
-company's policies. No other AI service or API key.
+**Results you can check**
+- Shows what was observed next to each report (test runs, commits, diff, PR checks), and flags
+  claims nothing backs.
+- Lets you comment on the diff, send it back, and open the PR in one click.
 
-![A decision a worker needs from you](docs/images/needs-you-dark.png)
+**Asks only when it needs you**
+- One card per thing: a decision with options and a recommendation, a question, a draft.
+- Reaches you when you are away from your desk (through your company's Slack bot, say) and
+  takes your answers from there.
+- Focus mode: notifications wait, and you get one summary at the end.
+
+**Speaks for you, once you approve**
+- Drafts Slack replies and PR reviews, approvals included, in your voice.
+- Watches what you ask it to (Slack mentions, doc comments, mail) with any tool your Copilot
+  has, Glean or your company's search included.
+- React 🤖 to any Slack message to hand it over as a task.
+
+**Learns how you work**
+- Picks up how you write and what you keep asking for. Your style applies at once; habits wait
+  for your OK.
+- Turns mistakes workers fixed into checks that catch them next time.
+
+**Your Copilot, your machine**
+- Uses the Copilot you already have: your plan, models, plugins, skills, MCP servers and your
+  company's policies, plus anything you add in Settings. No other AI service or API key.
+- Every worker gets its own folder and git worktree, so your checkouts stay untouched. Workers
+  run like your own Copilot sessions; turn on permission checks or an OS sandbox in Settings.
 
 ## Install
 
-You need macOS or Linux, Python 3.11 or newer, [uv](https://docs.astral.sh/uv/getting-started/installation/)
-(or pipx), and the [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli):
+You need macOS or Linux, Python 3.11+, [uv](https://docs.astral.sh/uv/getting-started/installation/)
+(or pipx) and the [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli):
 
 ```bash
 npm install -g @github/copilot
 copilot login
-uvx chiefofstaff            # or: pipx install chiefofstaff && chiefofstaff
+uvx chiefofstaff           # or: pipx install chiefofstaff && chiefofstaff
 ```
 
-Your browser opens `http://127.0.0.1:8765`. Tell it where your code lives (like `~/workspace`),
-then type what you need in the box at the bottom. Repositories a task needs that aren't there
-yet get cloned into that folder, and each worker works in its own git worktree inside it, so
-your own checkouts are never touched.
+Your browser opens Chief of Staff through a private link printed in the terminal (keep it to
+yourself). Tell it where your code lives, like `~/workspace`, and type what you need.
 
-Everything runs on your machine, and your data stays in `~/Library/Application Support/chiefofstaff`
-(macOS) or `~/.local/share/chiefofstaff` (Linux). Closing the tab doesn't stop anything; press
-Ctrl+C in the terminal to stop. Sessions continue where they left off when you start it again.
-If it's already running, starting it again just opens the page.
+Everything runs on your machine; data stays in `~/Library/Application Support/chiefofstaff`
+(macOS) or `~/.local/share/chiefofstaff` (Linux). Ctrl+C stops it, and sessions pick up where
+they left off next time. Options: `--port`, `--data-dir`, `--no-browser`, `--demo`. Update with
+`uvx chiefofstaff@latest`.
 
-Options: `--port`, `--data-dir`, `--no-browser`, `--demo`. To update: `uvx chiefofstaff@latest`
-or `pipx upgrade chiefofstaff`.
-
-## Signing in
-
-There are a few separate sign-ins. Only the first one is required.
-
-1. **Copilot.** Run `copilot login` once. If you haven't, the page tells you what to do. On a
-   company plan, an admin may need to turn on Copilot CLI for you.
-2. **The page itself.** Every start prints a private link with a fresh token in the terminal
-   and opens it for you. It stays signed in for 24 hours. After a restart, use the new link.
-   Keep it to yourself: whoever has it can act as you.
-3. **GitHub**, to review PRs you're asked to review: `gh auth login`. Sign in with every account
-   you use (your company's too): Chief of Staff uses the one that can see each repository. With
-   the sandbox on, also run `copilot sandbox ca create && copilot sandbox ca trust` once, so
-   `gh` works inside it.
-4. **Slack and other services.** Paste a Slack user token in Settings
-   ([how to get one](docs/guide.md#slack)).
-   When a worker needs another service, like your docs or issue tracker, a sign-in card shows
-   up under *Needs you* on Home.
+**Optional sign-ins**
+- **GitHub**: `gh auth login` with every account you use, to review PRs and open them.
+- **Slack**: paste a user token in Settings ([how](docs/guide.md#slack)), or reach Slack through
+  a tool your Copilot already has, such as Glean.
+- **Other services** (docs, issue trackers): a sign-in card appears when a worker needs one.
 
 ## How it works
 
-Every session is a regular Copilot CLI session. You'll find them in `copilot --resume`, named
-"Chief of Staff · …". Chief of Staff drives them through the Copilot SDK:
+Each session is a regular Copilot CLI session, driven through the Copilot SDK; `copilot --resume`
+lists them as "Chief of Staff · …". Sessions never talk to each other directly: they call tools
+such as `spawn_worker` and `report`, and Chief of Staff delivers each message, labeled with
+who sent it, so a Slack message cannot pass itself off as you.
 
 ```
-you ── Home ─── Router ── tasks ──► worker · worker · worker
-                  ▲                 (own folder, worktree, sandbox)
-Slack, GitHub ────┘    Slack session ──► drafts you approve
-                       Watchdog ──► nudges stuck workers
+you ── Home ── Router ── tasks ──► worker · worker · worker
+                 ▲                 (own folder and worktree)
+Slack, GitHub, ──┘    drafts ────► wait for your approval
+your watches          Watchdog ──► nudges stuck workers
 ```
 
-Sessions never talk to each other directly. They call tools like `spawn_worker`, `report` or
-`ask_session`, and Chief of Staff delivers the message. Each message is saved before it's sent
-and labeled with who it's from, so a Slack message can't pass itself off as you.
+## Learn more
 
 - [User guide](docs/guide.md)
 - [Architecture](docs/ARCHITECTURE.md)
-- [Security](SECURITY.md): what the OS
-  sandbox enforces, what Chief of Staff enforces, and what relies on the model following
-  instructions.
+- [Security](SECURITY.md): what the OS sandbox, Chief of Staff and the model each enforce
+- [Changelog](CHANGELOG.md)
 
 ## Status
 
-Early (0.1). Expect rough edges. Copilot usage counts against your plan like any other
-session, and Home shows the credits each task used.
-
-Bug reports and ideas are welcome as issues. If you'd like to contribute, start with
-[CONTRIBUTING.md](CONTRIBUTING.md) and the
-[good first issues](docs/good-first-issues.md).
+Early (0.1): expect rough edges. Copilot usage counts against your plan, and Home shows the
+credits each task used. Issues and ideas are welcome; to contribute, see
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

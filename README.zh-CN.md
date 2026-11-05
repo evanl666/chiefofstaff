@@ -2,128 +2,101 @@
 
 [English](README.md) · **简体中文**
 
-在一个首页上管理你所有的 GitHub Copilot session。你说要做什么，它把每个任务交给一个单独的
-Copilot session；后续的追问会发给已经了解情况的那个 session；Slack 消息它帮你起草回复；
-事情做完了，再提醒你来检查。
+[![PyPI](https://img.shields.io/pypi/v/chiefofstaff)](https://pypi.org/project/chiefofstaff/) [![Python](https://img.shields.io/pypi/pyversions/chiefofstaff)](https://pypi.org/project/chiefofstaff/) [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-![首页：对话、需要你处理的事和每个任务的进度在同一屏](docs/images/home-review.png)
+在一个首页上管理你所有的 GitHub Copilot session。你说要做什么：每个任务交给一个单独的 Copilot
+session，追问发给已经了解情况的那个 session；只有需要你做决定、或者有结果要检查时才来找你。
 
-可以先用脚本模拟的 session 体验一下，不需要登录任何账号：
+![首页：对话、需要你处理的事、每个任务的实时进度](docs/images/home.png)
 
 ```bash
-uvx chiefofstaff --demo
+uvx chiefofstaff --demo    # 用脚本模拟的 session 先体验，不需要登录
 ```
 
 ## 为什么做这个
 
-我平时会同时开好几个 Copilot session：一个修测试，一个看 PR，一个翻日志。每隔几分钟就得在
-几个终端之间来回切，看哪个卡住了，哪个在等我回答，哪个已经悄悄做完了。中间 Slack 还不停地
-@我。时间一长，我就记不清哪个 session 知道什么了，有时候一个旧 session 一分钟就能回答的追问，
-我却开了个新的从头来。
-
-现在我只跟其中一个 session 说话，也就是 Router，其余的交给 Chief of Staff 去管。
+我平时同时开好几个 Copilot session：一个修测试，一个看 PR，一个翻日志。总要在几个终端之间来回切，看哪个卡住了、哪个在等我回答、哪个已经做完了，中间 Slack 还不停地 @我。现在我只跟一个 session
+说话，也就是 Router，其余的交给 Chief of Staff。
 
 ## 能做什么
 
-- 把一句话拆成几个任务。比如"修好那个不稳定的登录测试，然后加上限流，再对比一下几个
-  feature flag 服务"，会变成三个任务。第二个会等第一个做完，带着它的结果开始。
-- 追问会发给做过这件事的那个 session，它有之前的对话和代码目录，不用从头再来。
-- 把实际观察到的东西放在 worker 的汇报旁边：跑了哪些测试、提交了什么、改了多少行、PR 检查
-  有没有过。如果汇报里说"测试全部通过"，但根本没看到跑测试，卡片上会直接标出来。
-- 可以直接看 diff，在某一行写评论，一起发回给 worker 改；改好后一键开 PR。worker 会跟着这个
-  PR，PR 合并后任务自动标成完成。
-- 按验收条件核对结果：只有被观察到实际运行过、并且通过的命令支撑的条件才算"已验证"；代码改了，
-  之前的证据会标成过期。
-- 给你的是决策卡，不只是问题：为什么要决定、有哪些选项、各自影响、worker 的建议。之后改了决定，
-  依赖它的任务都会收到通知、调整并确认。
-- 从你的决定、review 评论和对草稿的修改里学习你的做事方式，总结成规则，经你确认后才生效，
-  让各个 session 越来越接近你的做法。
-- 不碰你自己的代码目录。每个 worker 有自己的文件夹和 git worktree，跑在 Copilot 的系统沙箱里，
-  写不到别的地方。
-- 按你的语气起草 Slack 私信和 @ 的回复。你不点 Send，什么都不会发出去。
+**所有工作在一个地方**
+- 把一句话拆成几个任务，每个任务一个 Copilot session，可以并行，也可以按顺序。
+- 追问发给做过这件事的 session，它有之前的对话和代码。
+- 一个面板看所有任务的实时进度：正在做什么、谁在排队以及为什么、哪些做完了。
+
+**结果可以核对**
+- 汇报旁边列出实际观察到的东西（跑了哪些测试、提交、diff、PR 检查），没有依据的说法会标出来。
+- 可以在 diff 上评论、发回去改，一键开 PR。
+
+**只在需要你时找你**
+- 每件事一张卡片：带选项和建议的决定、一个问题、一份草稿。
+- 你离开电脑时，通过你指定的方式（比如公司的 Slack bot）找到你，你在那边回复就行。
+- 专注模式：通知先压着，结束后给你一份总结。
+
+**你同意后才替你说话**
+- 按你的语气起草 Slack 回复和 PR review，包括 approve。
 - 按你说的帮你盯着（Slack 里 @ 你的、文档评论、邮件），用你的 Copilot 现有的任何工具，包括 Glean
-  或公司自己的搜索，并帮你起草回复。
-- 你离开电脑时，通过你说的方式（比如公司的 Slack bot）告诉你需要你处理的事，你在那边回复就行。
-- 可以在 Settings 里加 skill、插件和 MCP server；对话里可以直接贴截图。
-- 可以直接在 Slack 里委派：给任何一条消息点个 🤖（比如"谁能看下导出功能的 bug？"），它就
-  变成一个任务。做完以后，回复会起草在那条消息的 thread 里。
-- 专注模式：选一个时长，期间通知先压着，Router 能处理的自己处理，结束后给你一份总结。
-- 发现卡住或者原地打转的 worker，会去推它一把。
+  或公司自己的搜索。
+- 在 Slack 任意消息上点 🤖，它就变成一个任务。
 
-它用的就是你现有的 Copilot：你的订阅、模型、MCP server 和公司的策略，不需要额外的 AI 服务
-或 API key。
+**学习你的做事方式**
+- 学你的写法和你反复提的要求：写法立即生效，习惯经你确认后生效。
+- 把 worker 修过的错误变成检查，下次自动拦住。
 
-![一个需要你做的决定](docs/images/needs-you-dark.png)
+**用你自己的 Copilot，跑在你自己的电脑上**
+- 用你现有的 Copilot：订阅、模型、插件、skill、MCP server 和公司策略，也可以在 Settings 里再加。不需要别的 AI 服务或 API key。
+- 每个 worker 有自己的文件夹和 git worktree，不会动你的代码目录。worker 和你自己的 Copilot
+  session 一样运行，可以在 Settings 里打开权限检查或系统沙箱。
 
 ## 安装
 
-需要 macOS 或 Linux、Python 3.11 及以上、[uv](https://docs.astral.sh/uv/getting-started/installation/)
-（或者 pipx），以及 [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli)：
+需要 macOS 或 Linux、Python 3.11+、[uv](https://docs.astral.sh/uv/getting-started/installation/)
+（或 pipx），以及 [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli)：
 
 ```bash
 npm install -g @github/copilot
 copilot login
-uvx chiefofstaff            # 或者：pipx install chiefofstaff && chiefofstaff
+uvx chiefofstaff           # 或者：pipx install chiefofstaff && chiefofstaff
 ```
 
-浏览器会打开 `http://127.0.0.1:8765`。先告诉它你的代码放在哪个文件夹（比如 `~/workspace`），然后在
-底部的输入框里说你要做什么。任务要用到、但那里还没有的仓库，会自动 clone 进去；每个 worker 在里面
-用自己的 git worktree 干活，不会动你自己的代码目录。
+浏览器会通过终端里打印的私密链接打开 Chief of Staff（这个链接别给别人）。告诉它你的代码放在哪，比如 `~/workspace`，然后说你要做什么。
 
-所有东西都在你自己的电脑上跑，数据存在 `~/Library/Application Support/chiefofstaff`（macOS）
-或 `~/.local/share/chiefofstaff`（Linux）。关掉网页不会停掉任何东西，要停就在终端里按 Ctrl+C。
-下次启动时，各个 session 会接着之前的进度继续。如果已经在运行，再启动一次只会打开那个页面。
+所有东西都在你的电脑上跑，数据存在 `~/Library/Application Support/chiefofstaff`（macOS）或
+`~/.local/share/chiefofstaff`（Linux）。Ctrl+C 停止，下次启动时 session 会接着之前的进度。参数：`--port`、`--data-dir`、`--no-browser`、`--demo`。升级：`uvx chiefofstaff@latest`。
 
-常用参数：`--port`、`--data-dir`、`--no-browser`、`--demo`。升级：`uvx chiefofstaff@latest`
-或 `pipx upgrade chiefofstaff`。
-
-## 登录
-
-一共有几处登录，只有第一个是必须的。
-
-1. **Copilot**：运行一次 `copilot login`。如果还没登录，页面上会告诉你怎么做。公司账号可能
-   需要管理员先为你开启 Copilot CLI。
-2. **本地网页**：每次启动，终端里都会打印一个带新 token 的私密链接，并自动打开。登录状态保持
-   24 小时，重启之后要用新的链接。这个链接别给别人，拿到它就能以你的身份操作。
-3. **GitHub**：如果要让它帮你 review 别人请你看的 PR，需要 `gh auth login`。开着沙箱的话，还要
-   运行一次 `copilot sandbox ca create && copilot sandbox ca trust`，这样沙箱里的 `gh` 才能用。
-4. **Slack 和其他服务**：在 Settings 里粘贴 Slack user token
-   （[怎么获取](docs/guide.md#slack)，英文）。
-   worker 需要用到别的服务时，比如公司文档或 issue 系统，首页的“需要你”里会出现一张登录卡片。
+**可选的登录**
+- **GitHub**：用你所有的账号各 `gh auth login` 一次，用来 review 和开 PR。
+- **Slack**：在 Settings 里粘贴 user token（[怎么获取](docs/guide.md#slack)，英文），或者通过你的
+  Copilot 已有的工具（比如 Glean）访问 Slack。
+- **其他服务**（文档、issue 系统）：worker 需要时会出现一张登录卡片。
 
 ## 工作原理
 
-每个 session 都是普通的 Copilot CLI session，在 `copilot --resume` 里能找到，名字是
-"Chief of Staff · …"。Chief of Staff 通过 Copilot SDK 来驱动它们：
+每个 session 都是普通的 Copilot CLI session，通过 Copilot SDK 驱动，在 `copilot --resume` 里叫
+"Chief of Staff · …"。session 之间从不直接对话：它们调用 `spawn_worker`、`report` 这类工具，由
+Chief of Staff 传话，并标明是谁发的，所以一条 Slack 消息没法冒充成你。
 
 ```
 你 ── 首页 ── Router ── 任务 ──► worker · worker · worker
-                  ▲                (各自的文件夹、worktree、沙箱)
-Slack、GitHub ────┘    Slack session ──► 等你批准的草稿
-                       Watchdog ──► 推一把卡住的 worker
+                ▲                (各自的文件夹和 worktree)
+Slack、GitHub ──┘   草稿 ──────► 等你批准
+你的关注            Watchdog ──► 推一把卡住的 worker
 ```
 
-session 之间从不直接对话。它们调用 `spawn_worker`、`report`、`ask_session` 这类工具，由
-Chief of Staff 负责传话。每条消息发出去之前都会先存下来，并标明是谁发的，所以一条 Slack 消息
-没法冒充成你。
-
-更多文档（英文）：
+## 更多文档（英文）
 
 - [使用指南](docs/guide.md)
 - [架构](docs/ARCHITECTURE.md)
-- [安全说明](SECURITY.md)：哪些限制由系统沙箱
-  保证，哪些由 Chief of Staff 保证，哪些要靠模型遵守指令。
+- [安全说明](SECURITY.md)：哪些由系统沙箱保证，哪些由 Chief of Staff 保证，哪些靠模型遵守指令
+- [更新日志](CHANGELOG.md)
 
 ## 当前状态
 
-早期版本（0.1），会有不少粗糙的地方。Copilot 的用量和平时一样算在你的订阅里，首页会显示
-每个任务用了多少 credits。
-
-欢迎在 issue 里提 bug 和想法。想参与开发的话，可以先看
-[CONTRIBUTING.md](CONTRIBUTING.md) 和
-[适合新手的任务](docs/good-first-issues.md)。
+早期版本（0.1），会有粗糙的地方。Copilot 用量照常算在你的订阅里，首页会显示每个任务用了多少
+credits。欢迎提 issue；想参与开发请看 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 许可证
 
-MIT。Chief of Staff 是独立项目，不是 GitHub 出品，和 GitHub 也没有关联。GitHub Copilot 是
-GitHub, Inc. 的商标。
+MIT。Chief of Staff 是独立项目，不是 GitHub 出品，也与 GitHub 无关。GitHub Copilot 是 GitHub, Inc.
+的商标。
