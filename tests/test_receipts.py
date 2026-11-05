@@ -211,8 +211,36 @@ async def test_a_failing_test_run_piped_into_tail_is_seen_failing(harness):
         ("  1 failing upload\n    ✓ retries\n  5 passing", False),
         ("2 errors in 0.5s while retrying\n7 passed in 1.1s", False),
         ("test_x[1 failed] PASSED\n3 passed in 0.2s", False),
+        # The new test failing before the fix, then every test passing after it, in one command.
+        ("F\n1 failed in 0.05s\n......\n6 passed in 0.08s", False),
+        ("......\n6 passed in 0.08s\nF\n1 failed, 5 passed in 0.1s", True),
     ],
 )
 def test_a_piped_test_run_is_read_by_its_summary(output, failed):
     assert receipts.masked_failure("run tests 2>&1 | tail -5", output) == failed
     assert not receipts.masked_failure("run tests", output), "unpiped: its exit code says"
+
+
+async def test_a_done_report_right_after_failing_tests_is_asked_to_look_again(harness):
+    runtime = await harness.connect()
+    result = await call_tool(
+        runtime, "spawn_worker", harness.router_id, title="Fix", instructions="Fix", why_new="t"
+    )
+    worker = json.loads(result.text_result_for_llm)["session_id"]
+    session = harness.session(worker)
+    command = "uv run --with pytest pytest -q"
+    session.emit("tool.execution_start", tool_name="bash", arguments={"command": command},
+                 tool_call_id="c1")  # fmt: skip
+    output = SimpleNamespace(content="F\n1 failed in 0.1s\n<exited with exit code 1>")
+    session.emit("tool.execution_complete", tool_call_id="c1", success=True, result=output)
+    await settle(runtime)
+    early = await call_tool(runtime, "report", worker, status="done", summary="Fixed.")
+    assert early.result_type == "failure" and "last test run failed" in early.text_result_for_llm
+    again = await call_tool(
+        runtime,
+        "report",
+        worker,
+        status="done",
+        summary="Fixed; the failure is the old flaky test.",
+    )
+    assert again.result_type == "success", "once: an expected failure is reported as such"

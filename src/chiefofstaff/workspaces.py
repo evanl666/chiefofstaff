@@ -405,6 +405,13 @@ async def changes(checkout: dict) -> dict | None:
     except ValueError:
         return None
     result = {"path": checkout["path"], "branch": checkout.get("branch", ""), "commits": 0}
+    if live:
+        # The branch it is on now: a PR it checked out to review is someone else's, not one
+        # to open a PR from.
+        with suppress(ValueError):
+            current = (await git("-C", path, "rev-parse", "--abbrev-ref", "HEAD")).strip()
+            if current and current != "HEAD":
+                result["branch"] = current
     committed = {"files": 0, "insertions": 0, "deletions": 0}
     if base := base_of(checkout):
         with suppress(ValueError):

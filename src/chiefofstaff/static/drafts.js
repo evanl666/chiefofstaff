@@ -1,84 +1,106 @@
-// Cards for what waits for the owner: drafts to approve, questions, forms and sign-ins.
+// Cards for what waits for the owner, under Needs you on Home: drafts to approve, questions,
+// decisions, forms and sign-ins. Each has one main action; the others are behind "⋯". A card
+// leaves as soon as the owner acts, and comes back with the reason if that did not work.
 
-import { $, api, el, submits } from "./dom.js";
+import { api, el, moreMenu, submits, toast } from "./dom.js";
 import { displayPath, markdown } from "./text.js";
-import { byId, draftsFor, state } from "./state.js";
+import { applyDraft, state } from "./state.js";
 import { select } from "./session.js";
-export function renderDrafts() {
-  const box = $("#drafts");
-  const visible = draftsFor(state.selected);
-  const ids = new Set(visible.map((draft) => draft.id));
-  for (const node of [...box.children]) {
-    if (!ids.has(node.dataset.id)) node.remove();
-  }
-  for (const draft of visible) {
-    const node = box.querySelector(`[data-id="${draft.id}"]`);
-    if (node && node.dataset.key === draftKey(draft)) continue;
-    // New, or changed (a worker joined a decision, one confirmed a change): built afresh.
-    const card = draftCard(draft);
-    card.dataset.key = draftKey(draft);
-    if (node) node.replaceWith(card);
-    else box.append(card);
-  }
+import { renderSidebar } from "./sidebar.js";
+import { scheduleHome } from "./inbox.js";
+// A card: its label (what kind of thing it is), then what it is about.
+function card(draft, className, label, ...content) {
+  return el("div", { class: `card draft ${className}`.trim(), "data-id": draft.id, "data-session": draft.session_id || undefined }, el("div", { class: "head" }, el("span", { class: "label" }, label)), ...content);
+}
+// A text box as tall as its text, up to `max` lines; it grows as the owner writes.
+export function fitting(text, { label = "", max = 12 } = {}) {
+  const box = el("textarea", { rows: 1, "aria-label": label || undefined });
+  box.value = text;
+  const fit = () => {
+    if (!box.isConnected) return;
+    box.style.height = "auto";
+    const line = parseFloat(getComputedStyle(box).lineHeight) || 21;
+    const limit = line * max + 16;
+    box.style.height = `${Math.min(box.scrollHeight + 2, limit)}px`;
+    box.style.overflowY = box.scrollHeight + 2 > limit ? "auto" : "hidden";
+  };
+  box.addEventListener("input", fit);
+  // Sized once it is on the page, and again when its width changes (a tab shown, a resize).
+  let width = 0;
+  new window.ResizeObserver(([entry]) => {
+    if (Math.abs(entry.contentRect.width - width) < 1) return;
+    width = entry.contentRect.width;
+    requestAnimationFrame(fit);
+  }).observe(box);
+  return box;
+}
+// "Something else…": a field that shows only when the owner wants it.
+function later(text, build) {
+  const link = el("button", { type: "button", class: "link", text });
+  link.addEventListener("click", () => {
+    const field = build();
+    link.replaceWith(...field);
+    field.find((node) => node.matches?.("input, textarea"))?.focus();
+  });
+  return link;
+}
+// The actions row: the main action last, the rest behind "⋯".
+function actionRow(error, main, more = [], ...extra) {
+  return el("div", { class: "actions" }, error, ...extra, moreMenu(more), main);
+}
+// The owner's decision on a card: it leaves at once, the toast says what was done; if the
+// server says no, the card comes back with why.
+function decider(draft, node, error) {
+  return async function decide(body, done = "") {
+    const key = `draft:${draft.id}`;
+    error.textContent = "";
+    state.leaving.add(key);
+    node.classList.add("leaving");
+    renderSidebar();
+    scheduleHome();
+    try {
+      const result = await api(`/api/drafts/${draft.id}`, { method: "POST", body });
+      applyDraft(result?.id === draft.id && result.status ? result : { ...draft, status: "answered" });
+      if (done) toast(done);
+    } catch (failure) {
+      state.leaving.delete(key);
+      node.classList.remove("leaving");
+      error.textContent = failure.message;
+      renderSidebar();
+      scheduleHome();
+    }
+  };
 }
 // The Router is not sure which folder a task belongs in: the owner picks one.
 function workspaceCard(draft) {
   const target = draft.target;
   const error = el("span", { class: "error" });
   const other = el("input", { placeholder: "Another folder, e.g. ~/code/app" });
-  const node = el(
-    "div",
-    { class: "card draft workspace", "data-id": draft.id },
-    el(
-      "div",
-      { class: "head" },
-      el("span", { class: "label", text: `Where should “${target.title}” work?` }),
-      el("span", { class: "chip waiting", text: "Waiting for you" }),
-    ),
-    el("div", { class: "note", text: [draft.text, target.why].filter(Boolean).join(" — ") }),
-  );
+  const node = card(draft, "workspace", `Where should “${target.title}” work?`, el("div", { class: "note", text: [draft.text, target.why].filter(Boolean).join(" — ") }));
+  const decide = decider(draft, node, error);
+  const choose = (choice) => decide({ action: "choose", choice }, "Starting it there.");
   const choices = el("div", { class: "choices" });
-  async function decide(body) {
-    for (const button of node.querySelectorAll("button")) button.disabled = true;
-    error.textContent = "";
-    try {
-      await api(`/api/drafts/${draft.id}`, { method: "POST", body });
-    } catch (failure) {
-      error.textContent = failure.message;
-      for (const button of node.querySelectorAll("button")) button.disabled = false;
-    }
-  }
   target.options.forEach((option, index) => {
     choices.append(
       el(
         "button",
-        { type: "button", class: index ? "secondary" : "", title: option.path, onclick: () => decide({ action: "choose", choice: option.path }) },
+        { type: "button", class: index ? "secondary" : "", title: option.path, onclick: () => choose(option.path) },
         el("span", { text: option.path.split("/").pop() }),
         el("small", { text: `${displayPath(option.path)}${option.configured ? "" : " · new project"}` }),
       ),
     );
   });
-  choices.append(
-    el("button", { type: "button", class: "secondary", onclick: () => decide({ action: "choose", choice: "" }) }, el("span", { text: "No project" }), el("small", { text: "its own scratch folder" })),
-  );
-  const use = () => other.value.trim() && decide({ action: "choose", choice: other.value.trim() });
+  choices.append(el("button", { type: "button", class: "secondary", onclick: () => choose("") }, el("span", { text: "No project" }), el("small", { text: "its own scratch folder" })));
+  const use = () => other.value.trim() && choose(other.value.trim());
   other.addEventListener("keydown", (event) => submits(event) && use());
   node.append(
     choices,
-    el(
-      "div",
-      { class: "actions" },
-      other,
-      el("button", { type: "button", class: "secondary", text: "Use", onclick: use }),
-      el("button", { type: "button", class: "text", text: "Don't start", onclick: () => decide({ action: "reject" }) }),
-    ),
-    error,
+    actionRow(error, el("button", { type: "button", class: "secondary", text: "Use", onclick: use }), [{ text: "Don't start it", onclick: () => decide({ action: "reject" }, "Not started.") }], other),
   );
   return node;
 }
 const REQUEST_LABELS = { question: "Question", form: "Form", link: "Link to open", signin: "Sign-in" };
 const SECRET_FIELD = /pass(word)?|secret|token|api[_-]?key/i;
-// Fields for a form an MCP tool asks the owner to fill in (a flat JSON schema).
 function formFields(schema) {
   const properties = schema?.properties || {};
   const required = new Set(schema?.required || []);
@@ -110,90 +132,60 @@ function formFields(schema) {
   };
 }
 // Something a session needs from the owner: an answer, a form, a link to open or a sign-in.
+// Something a session needs from the owner: an answer, a form, a link to open or a sign-in.
 function requestCard(draft) {
-  const owner = byId(draft.session_id);
-  const who = owner?.role === "worker" ? owner.title : "";
   const target = draft.target;
   const error = el("span", { class: "error" });
-  const actions = el("div", { class: "actions" });
-  const node = el(
-    "div",
-    { class: `card draft request ${draft.kind}`, "data-id": draft.id },
-    el(
-      "div",
-      { class: "head" },
-      el("span", { class: "label", text: `${REQUEST_LABELS[draft.kind]}${who ? ` · ${who}` : ""}` }),
-      el("span", { class: "chip waiting", text: "Waiting for you" }),
-    ),
-    el("div", { class: "body markdown", html: markdown(draft.text) }),
-  );
-  async function decide(body) {
-    for (const button of node.querySelectorAll("button")) button.disabled = true;
-    error.textContent = "";
-    try {
-      await api(`/api/drafts/${draft.id}`, { method: "POST", body });
-    } catch (failure) {
-      error.textContent = failure.message;
-      for (const button of node.querySelectorAll("button")) button.disabled = false;
-    }
-  }
-  const decline = (text) => el("button", { type: "button", class: "text", text, onclick: () => decide({ action: "reject" }) });
+  const node = card(draft, `request ${draft.kind}`, REQUEST_LABELS[draft.kind], el("div", { class: "body markdown", html: markdown(draft.text) }));
+  const decide = decider(draft, node, error);
+  const decline = (text) => ({ text, onclick: () => decide({ action: "reject" }, "Declined.") });
   const link = (url, text) => (/^https?:\/\//.test(url) ? el("a", { class: "button", href: url, target: "_blank", rel: "noreferrer", text }) : null);
   if (draft.kind === "question") {
+    const answer = (text) => text.trim() && decide({ action: "answer", text }, "Answered.");
     if (target.choices?.length) {
-      node.append(el("div", { class: "choices" }, ...target.choices.map((choice) => el("button", { type: "button", class: "secondary", text: choice, onclick: () => decide({ action: "answer", text: choice }) }))));
+      node.append(el("div", { class: "choices" }, ...target.choices.map((choice) => el("button", { type: "button", class: "secondary", text: choice, onclick: () => answer(choice) }))));
     }
-    if (target.allow_freeform || !target.choices?.length) {
-      const input = el("input", { placeholder: "Your answer", autocomplete: "off" });
-      input.addEventListener("keydown", (event) => submits(event) && decide({ action: "answer", text: input.value }));
-      actions.append(input, el("button", { type: "button", text: "Answer", onclick: () => decide({ action: "answer", text: input.value }) }));
-    }
-    actions.append(decline("Skip"));
+    const field = () => {
+      const input = el("input", { placeholder: "Your answer", autocomplete: "off", "aria-label": "Your answer" });
+      input.addEventListener("keydown", (event) => submits(event) && answer(input.value));
+      return [input, el("button", { type: "button", class: target.choices?.length ? "secondary" : "", text: "Answer", onclick: () => answer(input.value) })];
+    };
+    if (!target.choices?.length) node.append(actionRow(error, null, [decline("Skip")], ...field()));
+    // With choices to pick from, typing an answer is the exception: there when wanted.
+    else node.append(actionRow(error, null, [decline("Skip")], target.allow_freeform !== false ? later("Other answer…", field) : ""));
   } else if (draft.kind === "form") {
     const fields = formFields(target.schema);
-    node.append(fields.node);
-    actions.append(decline("Decline"), el("button", { type: "button", text: "Submit", onclick: () => decide({ action: "answer", content: fields.values() }) }));
+    node.append(fields.node, actionRow(error, el("button", { type: "button", text: "Submit", onclick: () => decide({ action: "answer", content: fields.values() }, "Submitted.") }), [decline("Decline")]));
   } else if (draft.kind === "link") {
-    actions.append(link(target.url, "Open link"), el("button", { type: "button", class: "secondary", text: "Done", onclick: () => decide({ action: "answer" }) }), decline("Decline"));
+    node.append(actionRow(error, link(target.url, "Open link"), [{ text: "Done", onclick: () => decide({ action: "answer" }, "Done.") }, decline("Decline")]));
   } else {
-    node.append(el("div", { class: "note", text: "Sign in in the tab that opens. This card closes by itself once it worked; every session then uses the sign-in." }));
-    actions.append(
-      link(target.url, `Sign in to ${target.server}`),
-      el("button", { type: "button", class: "secondary", text: "Done", title: "I signed in", onclick: () => decide({ action: "answer" }) }),
-      decline("Not now"),
+    node.append(
+      el("div", { class: "note", text: "This card closes by itself once you're signed in." }),
+      actionRow(error, link(target.url, `Sign in to ${target.server}`), [{ text: "I signed in", onclick: () => decide({ action: "answer" }, "Done.") }, decline("Not now")]),
     );
   }
-  node.append(actions, error);
   return node;
 }
 // Cards change as workers join a decision or confirm a changed one.
 export const draftKey = (draft) => `draft:${draft.id}:${draft.kind === "decision" ? draft.target.askers.length : draft.kind === "change" ? draft.target.tasks.map((task) => (task.ack ? 1 : 0)).join("") : ""}`;
-function cardActions(draft, node, error) {
-  return async function decide(body) {
-    for (const button of node.querySelectorAll("button")) button.disabled = true;
-    error.textContent = "";
-    try {
-      await api(`/api/drafts/${draft.id}`, { method: "POST", body });
-    } catch (failure) {
-      error.textContent = failure.message;
-      for (const button of node.querySelectorAll("button")) button.disabled = false;
-    }
-  };
-}
 const taskLink = (item) => el("button", { type: "button", class: "link", text: item.title, onclick: () => select(item.session_id) });
 // A decision that is the owner's: why it comes up, the options and what each means, and what
 // the worker recommends. Workers that hit the same question wait on the same card.
 function decisionCard(draft) {
   const target = draft.target;
   const error = el("span", { class: "error" });
-  const node = el(
-    "div",
-    { class: "card draft decision", "data-id": draft.id },
-    el("div", { class: "head" }, el("span", { class: "label", text: "Decision" }), el("span", { class: "chip waiting", text: "Waiting for you" })),
+  // Which task asks, in its label; several tasks that wait on it are listed below it.
+  const askers = target.askers || [];
+  const node = card(
+    draft,
+    "decision",
+    askers.length === 1 ? ["Decision for ", taskLink(askers[0])] : "Decision",
+    askers.length > 1 ? el("div", { class: "affects" }, el("span", { text: `For ${askers.length} tasks:` }), ...askers.map(taskLink)) : null,
     el("div", { class: "question", text: target.question }),
     target.why ? el("div", { class: "why", text: target.why }) : null,
   );
-  const decide = cardActions(draft, node, error);
+  const decide = decider(draft, node, error);
+  const answer = (text) => text.trim() && decide({ action: "answer", text }, "Decided.");
   const lowered = (target.recommendation || "").toLowerCase();
   const best = (target.options || []).find((option) => lowered.includes(option.choice.toLowerCase()));
   if (target.options?.length) {
@@ -204,7 +196,7 @@ function decisionCard(draft) {
         ...target.options.map((option) =>
           el(
             "button",
-            { type: "button", class: `option${option === best ? " recommended" : ""}`, onclick: () => decide({ action: "answer", text: option.choice }) },
+            { type: "button", class: `option${option === best ? " recommended" : ""}`, onclick: () => answer(option.choice) },
             el("span", { class: "choice", text: option.choice }),
             option === best ? el("span", { class: "tag", text: "Recommended" }) : null,
             option.effect ? el("small", { text: option.effect }) : null,
@@ -213,16 +205,18 @@ function decisionCard(draft) {
       ),
     );
   }
-  if (target.recommendation) node.append(el("div", { class: "recommendation" }, el("strong", { text: "Recommendation: " }), target.recommendation));
-  if (target.precedents?.length) node.append(el("div", { class: "precedents" }, el("strong", { text: "You decided before: " }), target.precedents.join(" · ")));
-  const askers = target.askers || [];
-  node.append(el("div", { class: "affects" }, el("span", { text: askers.length > 1 ? `Affects ${askers.length} tasks:` : "For" }), ...askers.map(taskLink)));
-  const input = el("input", { placeholder: "Or decide something else", autocomplete: "off" });
-  input.addEventListener("keydown", (event) => submits(event) && input.value.trim() && decide({ action: "answer", text: input.value }));
-  node.append(
-    el("div", { class: "actions" }, input, el("button", { type: "button", class: "secondary", text: "Decide", onclick: () => decide({ action: "answer", text: input.value }) }), el("button", { type: "button", class: "text", text: "Not now", onclick: () => decide({ action: "reject" }) })),
-    error,
-  );
+  if (target.recommendation) {
+    // "Per account: it protects each user directly" says why next to the option marked.
+    const reason = best && lowered.startsWith(best.choice.toLowerCase()) ? target.recommendation.slice(best.choice.length).replace(/^[\s:,.;—–-]+/, "") : "";
+    node.append(el("div", { class: "recommendation", text: reason ? `Why ${best.choice.toLowerCase()}: ${reason}` : `Recommended: ${target.recommendation}` }));
+  }
+  if (target.precedents?.length) node.append(el("div", { class: "precedents", text: `You decided before: ${target.precedents.join(" · ")}` }));
+  const field = () => {
+    const input = el("input", { placeholder: "Your decision", autocomplete: "off", "aria-label": "Your decision" });
+    input.addEventListener("keydown", (event) => submits(event) && answer(input.value));
+    return [input, el("button", { type: "button", class: "secondary", text: "Decide", onclick: () => answer(input.value) })];
+  };
+  node.append(actionRow(error, null, [{ text: "Not now", onclick: () => decide({ action: "reject" }, "Left for later.") }], target.options?.length ? later("Something else…", field) : field()));
   return node;
 }
 // The owner changed a decision: which tasks it affects, and which workers confirmed.
@@ -232,13 +226,13 @@ function changeCard(draft) {
   const told = (item) => item.told !== false;
   const confirmed = target.tasks.filter((item) => told(item) && item.ack).length;
   const redo = target.tasks.filter((item) => told(item) && (item.was === "review" || item.was === "done")).length;
-  const node = el(
-    "div",
-    { class: "card draft change", "data-id": draft.id },
-    el("div", { class: "head" }, el("span", { class: "label", text: "Decision changed" }), el("span", { class: "chip progress", text: `${confirmed}/${target.tasks.length} confirmed` })),
+  const node = card(
+    draft,
+    "change",
+    "Decision changed",
     el("div", { class: "question", text: target.decision.text }),
     el("div", { class: "before", text: `Was: ${target.before.join("; ")}` }),
-    el("div", { class: "why", text: `Affects ${target.tasks.length} task${target.tasks.length === 1 ? "" : "s"}${redo ? `; ${redo} checked result${redo === 1 ? " is" : "s are"} out of date and being redone` : ""}.` }),
+    el("div", { class: "why", text: `${confirmed} of ${target.tasks.length} task${target.tasks.length === 1 ? "" : "s"} confirmed${redo ? `; ${redo} checked result${redo === 1 ? " is" : "s are"} out of date and being redone` : ""}.` }),
     el(
       "ul",
       { class: "impact" },
@@ -249,8 +243,8 @@ function changeCard(draft) {
       ),
     ),
   );
-  const decide = cardActions(draft, node, error);
-  node.append(el("div", { class: "actions" }, el("button", { type: "button", class: "text", text: "Hide", onclick: () => decide({ action: "answer" }) })), error);
+  const decide = decider(draft, node, error);
+  node.append(actionRow(error, el("button", { type: "button", class: "secondary", text: "Got it", onclick: () => decide({ action: "answer" }) })));
   return node;
 }
 // Lessons learned from the owner's feedback: each kept (maybe reworded) or dropped.
@@ -269,17 +263,17 @@ function lessonsCard(draft) {
     );
     return { lesson, keep, text, node };
   });
-  const node = el(
-    "div",
-    { class: "card draft lessons", "data-id": draft.id },
-    el("div", { class: "head" }, el("span", { class: "label", text: "Learned from your work" }), el("span", { class: "chip waiting", text: "Check before use" })),
-    el("div", { class: "why", text: "Keep what fits how you work; reword or untick the rest. Kept lessons go into your sessions' instructions." }),
+  const node = card(
+    draft,
+    "lessons",
+    "Learned from your work",
+    el("div", { class: "why", text: "Keep what fits how you work; reword or untick the rest. Kept ones go into your sessions' instructions." }),
     el("ul", { class: "lesson-list" }, ...rows.map((row) => row.node)),
   );
-  const decide = cardActions(draft, node, error);
+  const decide = decider(draft, node, error);
   // Every lesson shown, an unticked one as "": lessons added to the card meanwhile come back.
-  const keep = () => decide({ action: "answer", content: Object.fromEntries(rows.map((row) => [row.lesson.id, row.keep.checked ? row.text.value : ""])) });
-  node.append(el("div", { class: "actions" }, el("button", { type: "button", class: "text", text: "Drop all", onclick: () => decide({ action: "reject" }) }), el("button", { type: "button", text: "Keep ticked", onclick: keep })), error);
+  const keep = () => decide({ action: "answer", content: Object.fromEntries(rows.map((row) => [row.lesson.id, row.keep.checked ? row.text.value : ""])) }, "Kept.");
+  node.append(actionRow(error, el("button", { type: "button", text: "Keep ticked", onclick: keep }), [{ text: "Drop all", onclick: () => decide({ action: "reject" }, "Dropped.") }]));
   return node;
 }
 // A check learned from a mistake a worker fixed, with the proof that it catches it.
@@ -288,10 +282,10 @@ function checkCard(draft) {
   const error = el("span", { class: "error" });
   const where = target.applies_to.length ? target.applies_to.join(", ") : "any file";
   const caught = (target.failing.output || "").trim().split("\n").slice(-3).join("\n");
-  const node = el(
-    "div",
-    { class: "card draft check", "data-id": draft.id },
-    el("div", { class: "head" }, el("span", { class: "label", text: "Check learned from a mistake" }), el("span", { class: "chip waiting", text: "Check before use" })),
+  const node = card(
+    draft,
+    "check",
+    "Check learned from a mistake",
     el("div", { class: "question", text: target.name }),
     el("div", { class: "why", text: `${target.why} Runs in ${target.repo} on ${where} when a worker says it is done${target.task ? `; from “${target.task}”` : ""}.` }),
     el("pre", { text: target.command }),
@@ -302,63 +296,32 @@ function checkCard(draft) {
       el("span", { text: `✓ Passes on the fixed code (exit ${target.fixed.exit})` }),
     ),
   );
-  const decide = cardActions(draft, node, error);
-  node.append(
-    el(
-      "div",
-      { class: "actions" },
-      error,
-      el("button", { type: "button", class: "text", text: "Drop", onclick: () => decide({ action: "reject" }) }),
-      el("button", { type: "button", text: "Use this check", onclick: () => decide({ action: "answer" }) }),
-    ),
-  );
+  const decide = decider(draft, node, error);
+  node.append(actionRow(error, el("button", { type: "button", text: "Use this check", onclick: () => decide({ action: "answer" }, "Check in use.") }), [{ text: "Drop", onclick: () => decide({ action: "reject" }, "Dropped.") }]));
   return node;
 }
 // The owner profile a worker distilled: read and edit it here; sessions use it once kept.
 function profileCard(draft) {
   const error = el("span", { class: "error" });
-  const text = el("textarea", { rows: Math.min(18, draft.text.split("\n").length + 1), "aria-label": "Profile" });
-  text.value = draft.text;
-  const node = el(
-    "div",
-    { class: "card draft profile", "data-id": draft.id },
-    el("div", { class: "head" }, el("span", { class: "label", text: "Your profile" }), el("span", { class: "chip waiting", text: "Check before use" })),
-    el("div", { class: "why", text: "Distilled from your work. Correct anything; once you use it, your sessions get it with their instructions." }),
-    text,
-  );
-  const decide = cardActions(draft, node, error);
-  node.append(
-    el(
-      "div",
-      { class: "actions" },
-      error,
-      el("button", { type: "button", class: "text", text: "Discard", onclick: () => decide({ action: "reject" }) }),
-      el("button", { type: "button", text: "Use this profile", onclick: () => text.value.trim() && decide({ action: "answer", text: text.value }) }),
-    ),
-  );
+  const text = fitting(draft.text, { label: "Profile", max: 14 });
+  const node = card(draft, "profile", "Your profile", el("div", { class: "why", text: "Distilled from your work. Correct anything; once you use it, your sessions get it with their instructions." }), text);
+  const decide = decider(draft, node, error);
+  node.append(actionRow(error, el("button", { type: "button", text: "Use this profile", onclick: () => text.value.trim() && decide({ action: "answer", text: text.value }, "Profile in use.") }), [{ text: "Discard", onclick: () => decide({ action: "reject" }, "Discarded.") }]));
   return node;
 }
 // One of the owner's own Copilot sessions, which the Router wants to continue here.
 function adoptCard(draft) {
   const target = draft.target;
   const error = el("span", { class: "error" });
-  const node = el(
-    "div",
-    { class: "card draft adopt", "data-id": draft.id },
-    el("div", { class: "head" }, el("span", { class: "label", text: "Continue a session here?" }), el("span", { class: "chip waiting", text: "Waiting for you" })),
+  const node = card(
+    draft,
+    "adopt",
+    "Continue a session here?",
     el("div", { class: "why", text: `“${target.title}”, one of your Copilot sessions (${displayPath(target.cwd || "")}). The Router wants to give it this, as a new task:` }),
     el("div", { class: "quoted", text: target.text }),
   );
-  const decide = cardActions(draft, node, error);
-  node.append(
-    el(
-      "div",
-      { class: "actions" },
-      error,
-      el("button", { type: "button", class: "text", text: "Not now", onclick: () => decide({ action: "reject" }) }),
-      el("button", { type: "button", text: "Continue it here", onclick: () => decide({ action: "answer" }) }),
-    ),
-  );
+  const decide = decider(draft, node, error);
+  node.append(actionRow(error, el("button", { type: "button", text: "Continue it here", onclick: () => decide({ action: "answer" }, "Continuing it here.") }), [{ text: "Not now", onclick: () => decide({ action: "reject" }, "Left as it is.") }]));
   return node;
 }
 // Where a Slack reply really goes, from its conversation id (D: a direct message, C: a channel,
@@ -368,6 +331,56 @@ export function slackDestination(target) {
   const kind = SLACK_KIND[target.channel_id?.[0]] || "conversation";
   return `${kind} ${target.channel_id}${target.thread_ts ? ", in a thread" : ""}`;
 }
+// A PR review's verdict, published as the owner's: what the card calls it, and its Send button.
+const VERDICTS = {
+  comment: ["Review", "Send review", "Comment"],
+  approve: ["Approval", "Approve & send", "Approve"],
+  request_changes: ["Changes requested", "Request changes & send", "Request changes"],
+};
+// Rejecting asks why (optional): it helps the next draft.
+function rejectForm(actions, decide, back) {
+  const reason = el("input", { placeholder: "Why? (optional, helps the next draft)" });
+  reason.addEventListener("keydown", (event) => submits(event) && decide({ action: "reject", reason: reason.value }, "Dropped."));
+  actions.replaceChildren(
+    reason,
+    el("button", { type: "button", class: "text", text: "Cancel", onclick: back }),
+    el("button", { type: "button", class: "secondary", text: "Reject", onclick: () => decide({ action: "reject", reason: reason.value }, "Dropped.") }),
+  );
+  reason.focus();
+}
+// A reply Chief of Staff cannot send itself (mail, a doc, Slack without a token): the owner
+// copies it and sends it there.
+function replyCard(draft) {
+  const target = draft.target;
+  const text = fitting(draft.final_text || draft.text, { label: "Reply" });
+  const error = el("span", { class: "error" });
+  // Where it goes opens the conversation, to paste it there.
+  const where = target.where || "conversation";
+  const link = /^https?:\/\//.test(target.link || "") ? el("a", { href: target.link, target: "_blank", rel: "noreferrer", title: "Open the conversation", text: `${where} ↗` }) : where;
+  const node = card(
+    draft,
+    "reply",
+    [`Reply to ${target.to || "someone"} · `, link],
+    draft.note ? el("div", { class: "note", text: draft.note }) : null,
+    text,
+  );
+  const decide = decider(draft, node, error);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(text.value);
+    } catch {
+      error.textContent = "Could not copy: select the text and copy it, then mark it sent.";
+      return;
+    }
+    decide({ action: "send", text: text.value }, "Copied. Paste it there and send it.");
+  };
+  const actions = el("div", { class: "actions" });
+  const show = () =>
+    actions.replaceChildren(error, moreMenu([{ text: "Reject…", onclick: () => rejectForm(actions, decide, show) }]), el("button", { type: "button", text: "Copy & mark sent", onclick: copy }));
+  show();
+  node.append(actions);
+  return node;
+}
 export function draftCard(draft) {
   if (draft.kind === "lessons") return lessonsCard(draft);
   if (draft.kind === "check") return checkCard(draft);
@@ -376,44 +389,45 @@ export function draftCard(draft) {
   if (draft.kind === "decision") return decisionCard(draft);
   if (draft.kind === "change") return changeCard(draft);
   if (draft.kind === "workspace") return workspaceCard(draft);
+  if (draft.kind === "reply") return replyCard(draft);
   if (REQUEST_LABELS[draft.kind]) return requestCard(draft);
-  const owner = byId(draft.session_id);
   const target = draft.target;
-  const label =
+  // A review (not a reply to a comment) carries a verdict the owner can change before sending.
+  const verdict =
+    draft.kind === "github" && !target.in_reply_to && !target.own && VERDICTS[target.verdict]
+      ? el("select", { class: "verdict", "aria-label": "Verdict", title: "What the review says on GitHub" }, ...Object.entries(VERDICTS).map(([value, [, , text]]) => el("option", { value, text })))
+      : null;
+  if (verdict) verdict.value = target.verdict;
+  const pr = () => el("a", { href: target.comment?.url || target.url, target: "_blank", rel: "noreferrer", title: "Open on GitHub", text: `${target.repo}#${target.number}` });
+  // Where a Slack reply really goes is in its tooltip, by Slack's id.
+  const label = () =>
     draft.kind === "slack"
-      ? `Slack reply · ${slackDestination(target)}`
+      ? el("span", { title: slackDestination(target), text: `Slack reply · ${SLACK_KIND[target.channel_id?.[0]] || "conversation"}${target.thread_ts ? ", in a thread" : ""}` })
       : target.in_reply_to
-        ? `Reply on ${target.repo}#${target.number}${target.comment?.author ? ` · to ${target.comment.author}` : ""}`
-        : `PR review · ${target.repo}#${target.number}`;
-  const shown = draft.final_text || draft.text;
-  const text = el("textarea", { rows: Math.min(10, shown.split("\n").length + 1) });
-  text.value = shown;
+        ? [`Reply on `, pr(), target.comment?.author ? ` · to ${target.comment.author}` : ""]
+        : [`${verdict ? VERDICTS[verdict.value][0] : "PR review"} of `, pr()];
+  const text = fitting(draft.final_text || draft.text, { label: "Draft" });
   // A review's comments on lines of the diff: each editable; emptied, it is not sent.
   const inline = (draft.kind === "github" && target.comments) || [];
   const comments = inline.map((comment) => {
     // As tall as its text wraps to (about 90 characters a line), one to six lines.
     const wrapped = comment.body.split("\n").reduce((sum, line) => sum + Math.max(1, Math.ceil(line.length / 90)), 0);
-    const box = el("textarea", { rows: Math.min(6, wrapped), "aria-label": `Comment on ${comment.path}:${comment.line}` });
-    box.value = comment.body;
+    const box = fitting(comment.body, { label: `Comment on ${comment.path}:${comment.line}`, max: 6 });
+    box.rows = Math.min(6, wrapped);
     const lines = comment.start_line ? `${comment.start_line}-${comment.line}` : comment.line;
     return { box, node: el("div", { class: "inline-comment" }, el("div", { class: "where", text: `${comment.path}:${lines}${comment.side === "LEFT" ? " (old)" : ""}` }), box) };
   });
   const content = () => Object.fromEntries(comments.map((comment, index) => [`comment:${index}`, comment.box.value]));
   const error = el("span", { class: "error" });
   const actions = el("div", { class: "actions" });
-  const node = el(
-    "div",
-    { class: "card draft", "data-id": draft.id, "data-session": draft.session_id },
-    el(
-      "div",
-      { class: "head" },
-      el("span", { class: "label", text: `${label}${owner && owner.role === "worker" ? ` · from ${owner.title}` : ""}` }),
-      el("span", { class: "chip waiting", text: "Waiting for you" }),
-    ),
-    draft.kind === "slack" && target.to ? el("div", { class: "note", text: `The session says it is for: ${target.to}` }) : null,
-    draft.kind === "slack" && target.latest ? el("div", { class: "note", text: "Latest there, from Slack:" }) : null,
+  // What it answers, then who it is for and why, in one quiet line.
+  const about = [draft.kind === "slack" && target.to ? `For ${target.to}` : "", draft.note].filter(Boolean).join(" · ");
+  const node = card(
+    draft,
+    "",
+    label(),
     draft.kind === "slack" && target.latest ? el("div", { class: "quoted", text: target.latest }) : null,
-    draft.note ? el("div", { class: "note", text: draft.note }) : null,
+    about ? el("div", { class: "note", text: about }) : null,
     // Not published after an interrupted send: what happened, and the owner's edit kept.
     draft.outcome ? el("div", { class: "note", text: draft.outcome }) : null,
     draft.kind === "github" && target.comment
@@ -424,42 +438,42 @@ export function draftCard(draft) {
           target.comment.body,
         )
       : null,
-    draft.kind === "github" ? el("a", { href: target.comment?.url || target.url, target: "_blank", rel: "noreferrer", text: target.comment?.url || target.url }) : null,
     text,
-    comments.length ? el("div", { class: "note", text: `${comments.length} line comment${comments.length === 1 ? "" : "s"} (empty one to leave it out):` }) : null,
+    comments.length ? el("div", { class: "note comments-note", title: "Empty a comment to leave it out", text: `${comments.length} line comment${comments.length === 1 ? "" : "s"}` }) : null,
     ...comments.map((comment) => comment.node),
     actions,
   );
-
-  async function decide(body) {
-    for (const button of actions.querySelectorAll("button")) button.disabled = true;
-    error.textContent = "";
-    try {
-      await api(`/api/drafts/${draft.id}`, { method: "POST", body });
-    } catch (failure) {
-      error.textContent = failure.message;
-      for (const button of actions.querySelectorAll("button")) button.disabled = false;
-    }
-  }
-
-  function showDefault() {
-    actions.replaceChildren(
-      error,
-      el("button", { type: "button", class: "secondary", text: "Reject", onclick: showReject }),
-      el("button", { type: "button", text: "Send", onclick: () => decide({ action: "send", text: text.value, content: content() }) }),
-    );
-  }
-
-  function showReject() {
-    const reason = el("input", { placeholder: "Why? (optional, helps the next draft)" });
-    actions.replaceChildren(
-      reason,
-      el("button", { type: "button", class: "text", text: "Cancel", onclick: showDefault }),
-      el("button", { type: "button", class: "secondary", text: "Reject", onclick: () => decide({ action: "reject", reason: reason.value }) }),
-    );
-    reason.focus();
-  }
-
-  showDefault();
+  const decide = decider(draft, node, error);
+  const sent = draft.kind === "slack" ? "Sent on Slack." : "Posted on GitHub.";
+  const send = el("button", { type: "button", onclick: () => decide({ action: "send", text: text.value, content: verdict ? { ...content(), verdict: verdict.value } : content() }, sent) });
+  const named = () => {
+    send.textContent = verdict ? VERDICTS[verdict.value][1] : "Send";
+    node.querySelector(".head .label").replaceChildren(...[label()].flat());
+  };
+  verdict?.addEventListener("change", named);
+  named();
+  const show = () => actions.replaceChildren(error, verdict || "", moreMenu([{ text: "Reject…", onclick: () => rejectForm(actions, decide, show) }]), send);
+  show();
+  return node;
+}
+// A draft whose sending a stop interrupted, and that could not be confirmed.
+export function uncertainCard(draft) {
+  const target = draft.target;
+  const where = draft.kind === "slack" ? `Slack reply to the ${slackDestination(target)}` : draft.kind === "reply" ? `Reply to ${target.to}` : `${target.in_reply_to ? "Reply" : "PR review"} on ${target.repo}#${target.number}`;
+  const error = el("span", { class: "error" });
+  const node = el(
+    "div",
+    { class: "card draft uncertain" },
+    el("div", { class: "head" }, el("span", { class: "label", text: where }), el("span", { class: "chip waiting", text: "Sent?" })),
+    el("div", { class: "note", text: draft.outcome || "Chief of Staff stopped while sending this. Check whether it arrived." }),
+    el("div", { class: "body quoted", text: draft.final_text || draft.text }),
+  );
+  const decide = decider(draft, node, error);
+  node.append(
+    actionRow(error, el("button", { type: "button", text: "Send again", onclick: () => decide({ action: "send", text: draft.final_text || draft.text }, "Sent.") }), [
+      { text: "It was sent", onclick: () => decide({ action: "mark_sent" }, "Marked as sent.") },
+      { text: "Drop it", onclick: () => decide({ action: "reject" }, "Dropped.") },
+    ]),
+  );
   return node;
 }

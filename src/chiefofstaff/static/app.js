@@ -1,13 +1,14 @@
 // Chief of Staff's web UI: starts the page and wires its controls.
 
-import { $, api, submits, toast } from "./dom.js";
-import { byId, connectEvents, current, loadModels, loadState, markRead, routerId, state } from "./state.js";
+import { $, api, closeMenus, submits, toast } from "./dom.js";
+import { byId, connectEvents, current, HOME, loadModels, loadState, markRead, routerId, state, viewedId } from "./state.js";
 import { externalItem, loadExternal } from "./sidebar.js";
-import { appendMessages, select } from "./session.js";
+import { appendMessages, renderHeader, scrollToBottom, select } from "./session.js";
 import { closeMentions, mention, onComposerInput, onMentionKey, routerSide, setRecipient } from "./mention.js";
 import { openFile } from "./files.js";
-import { INBOX, scheduleInbox } from "./inbox.js";
-import { fillSettings, refreshUsageLink, renderLearning, saveSettings, saveToken, settingsError, showUsage, slackStatusText } from "./settings.js";
+import { scheduleHome, showHomeTab } from "./inbox.js";
+import { attachmentBody, bindAttachments, hasAttachments, restoreAttachments, takeAttachments } from "./composer.js";
+import { bindSettings, openSettings, refreshUsageLink, showUsage } from "./settings.js";
 function bindUi() {
   const input = $("#composer-input");
   const autosize = () => {
@@ -32,15 +33,23 @@ function bindUi() {
     const text = input.value.trim();
     const sessionId = state.selected;
     const other = externalItem();
-    if (!text || (sessionId !== INBOX && !current() && !other)) return;
+    if ((!text && !hasAttachments()) || (sessionId !== HOME && !current() && !other)) return;
+    if (sessionId === HOME && !routerId()) {
+      toast("Your chief of staff starts once Copilot is ready.", "error");
+      return;
+    }
+    const files = takeAttachments();
     input.value = "";
     autosize();
     const to = routerSide() ? mention.to : null;
+    // Images go along only when there are any: a server without them takes the message as before.
+    const body = (extra = {}) => ({ text, ...extra, ...(files.length ? { attachments: attachmentBody(files) } : {}) });
     try {
       if (to) {
         // Straight to one worker; the Router hears of it with its next message.
-        const sent = await api(`/api/sessions/${routerId()}/messages`, { method: "POST", body: { text, to: to.id } });
+        const sent = await api(`/api/sessions/${routerId()}/messages`, { method: "POST", body: body({ to: to.id }) });
         setRecipient(null);
+        appendMessages([sent]);
         // A worker deep in a step reads it only when the step ends: said here, where the owner is.
         toast(sent.note ? `Sent to “${to.title}”. ${sent.note.split("; said")[0]}` : `Sent to “${to.title}”`);
         return;
@@ -55,70 +64,51 @@ function bindUi() {
         await select(sessionId);
         return;
       }
-      if (sessionId === INBOX) {
-        await api(`/api/sessions/${routerId()}/messages`, { method: "POST", body: { text } });
-        state.chief = { asked: text, replies: [] };
-        scheduleInbox();
-        return;
-      }
-      appendMessages([await api(`/api/sessions/${sessionId}/messages`, { method: "POST", body: { text } })]);
+      appendMessages([await api(`/api/sessions/${viewedId()}/messages`, { method: "POST", body: body() })]);
     } catch (error) {
       if (other) input.disabled = false;
       input.value = text;
+      restoreAttachments(files);
       autosize();
       toast(error.message, "error");
     }
+  });
+  bindAttachments();
+  // The owner is here: what needs them is not sent elsewhere meanwhile (When you're away).
+  let seen = 0;
+  const present = () => {
+    if (document.visibilityState !== "visible" || Date.now() - seen < 60000) return;
+    seen = Date.now();
+    api("/api/presence", { method: "POST" }).catch(() => {});
+  };
+  for (const type of ["keydown", "mousemove", "pointerdown"]) window.addEventListener(type, present, { passive: true });
+  document.addEventListener("visibilitychange", present);
+  for (const button of document.querySelectorAll("#home-tabs button")) {
+    button.addEventListener("click", () => showHomeTab(button.dataset.tab, true));
+  }
+  // Wider again, the chat comes back beside the panel: its end in view, as when it was left.
+  window.matchMedia("(max-width: 1099px)").addEventListener("change", (event) => {
+    if (!event.matches && state.selected === HOME && state.homeTab !== "chat") scrollToBottom(true);
   });
   // A path in a message or report: a file in a worker's folders opens; anything else is copied.
   document.addEventListener("click", (event) => {
     const chip = event.target.closest(".path");
     if (!chip) return;
     // In an open file: a path relative to the session that wrote it.
-    const session = chip.closest("[data-session]")?.dataset.session || (state.selected !== INBOX ? state.selected : "");
+    const session = chip.closest("[data-session]")?.dataset.session || viewedId() || "";
     openFile(chip.dataset.path, session);
   });
-  $("#settings-button").addEventListener("click", () => {
-    fillSettings();
-    $("#settings-dialog").showModal();
-    // Feedback, the owner's words and checks come in all the time; what was learned is read fresh.
-    api("/api/state")
-      .then((data) => {
-        state.snapshot.learning = data.learning;
-        state.snapshot.habits = data.habits;
-        state.snapshot.checks = data.checks;
-        renderLearning();
-      })
-      .catch(() => {});
+  $("#settings-button").addEventListener("click", () => openSettings());
+  $("#back-home").addEventListener("click", () => select(HOME));
+  $("#session-more-button").addEventListener("click", (event) => {
+    event.stopPropagation();
+    const menu = $("#session-more");
+    const open = menu.hidden;
+    closeMenus();
+    if (open) renderHeader();  // As the session is now.
+    menu.hidden = !open;
   });
-  $("#settings-cancel").addEventListener("click", () => $("#settings-dialog").close());
-  $("#profile-use").addEventListener("click", () => {
-    $("#settings-form").profile.value = state.snapshot.profile_draft;
-    $("#profile-draft").hidden = true;
-    settingsError("Review the draft, edit it if needed, then Save to use it.");
-  });
-  $("#profile-discard").addEventListener("click", async () => {
-    state.snapshot = { ...state.snapshot, ...(await api("/api/profile/discard", { method: "POST" })) };
-    $("#profile-draft").hidden = true;
-  });
-  $("#profile-distill").addEventListener("click", async () => {
-    try {
-      await api("/api/profile/distill", { method: "POST" });
-      $("#settings-dialog").close();
-      await select(INBOX);
-      toast("Building your profile. Its draft comes to your inbox to check before it is used.");
-    } catch (error) {
-      settingsError(error.message);
-    }
-  });
-  $("#learn-now").addEventListener("click", async () => {
-    try {
-      await api("/api/lessons/learn", { method: "POST" });
-      $("#settings-dialog").close();
-      toast("Learning from your work. How you write applies at once; you check new habits first.");
-    } catch (error) {
-      settingsError(error.message);
-    }
-  });
+  bindSettings();
   $("#usage-button").addEventListener("click", () => {
     $("#usage-dialog").showModal();
     showUsage("today");
@@ -130,39 +120,18 @@ function bindUi() {
     input.addEventListener("change", () => showUsage("custom"));
   }
   setInterval(refreshUsageLink, 60000);
-  $("#settings-form").addEventListener("submit", saveSettings);
-  $("#slack-token-save").addEventListener("click", async () => {
-    try {
-      settingsError("");
-      await saveToken();
-    } catch (error) {
-      settingsError(error.message);
-    }
-  });
-  $("#slack-token-remove").addEventListener("click", async () => {
-    try {
-      const snapshot = await api("/api/slack/token", { method: "DELETE" });
-      state.snapshot = { ...state.snapshot, ...snapshot };
-      $("#slack-status").textContent = slackStatusText();
-      $("#slack-token-remove").hidden = true;
-    } catch (error) {
-      settingsError(error.message);
-    }
-  });
   $("#external").addEventListener("toggle", (event) => {
     if (event.target.open) loadExternal(true);
   });
   window.addEventListener("focus", () => {
-    const session = byId(state.selected);
+    const session = byId(viewedId());
     if (session?.unread) markRead(session.id);
   });
   setInterval(() => {
     if ($("#external").open) loadExternal();
   }, 60000);
-  // Running cards say how long a step has taken: refreshed while the inbox is shown.
-  setInterval(() => {
-    if (state.selected === INBOX) scheduleInbox();
-  }, 30000);
+  // Running cards say how long a step has taken: refreshed while Home is shown.
+  setInterval(scheduleHome, 30000);
 }
 async function boot() {
   const token = new URLSearchParams(location.hash.slice(1)).get("token");
@@ -180,6 +149,6 @@ async function boot() {
   connectEvents();
   loadModels();
   refreshUsageLink();
-  await select(state.selected || INBOX);
+  await select(state.selected || HOME);
 }
 boot();

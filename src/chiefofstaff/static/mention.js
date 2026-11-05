@@ -1,12 +1,11 @@
-// Addressing one worker from the Router chat or the inbox: "@" picks a worker, and the message
-// goes straight to it. The Router hears of it with its next message.
+// Addressing one worker from Home: "@" picks a worker, and the message goes straight to it. The
+// Router hears of it with its next message.
 import { $, el } from "./dom.js";
-import { routerId, sessions, state } from "./state.js";
+import { HOME, sessions, state } from "./state.js";
 
 export const mention = { to: null, options: [], active: 0 };
 
-const INBOX = "inbox";
-export const routerSide = () => state.selected === INBOX || state.selected === routerId();
+export const routerSide = () => state.selected === HOME;
 
 function query(input) {
   const before = input.value.slice(0, input.selectionStart);
@@ -52,7 +51,7 @@ export function onComposerInput() {
   }
   const text = found.text.toLowerCase();
   mention.options = sessions()
-    .filter((session) => session.role === "worker" && !session.closed_at && session.title.toLowerCase().includes(text))
+    .filter((session) => session.role === "worker" && !session.helper && !session.closed_at && session.title.toLowerCase().includes(text))
     .slice(0, 8);
   mention.active = 0;
   render();

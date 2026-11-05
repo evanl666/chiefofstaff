@@ -2,11 +2,11 @@
 
 **English** · [简体中文](README.zh-CN.md)
 
-One inbox for all your GitHub Copilot sessions. Tell it what you need. It gives each task to
+One home for all your GitHub Copilot sessions. Tell it what you need. It gives each task to
 its own Copilot session, sends follow-ups to the session that already has the context, drafts
 your Slack replies, and lets you know when something is ready to review.
 
-![The inbox, with finished tasks waiting for review](docs/images/inbox-review.png)
+![Home: the chat, what needs you and every task's progress on one screen](docs/images/home-review.png)
 
 Try it with scripted sessions first. No account needed:
 
@@ -51,6 +51,11 @@ Now I talk to one session, the Router, and Chief of Staff keeps track of the res
   agents and tools. Turn on the sandbox in Settings to confine them to their folders; workers
   that read Slack are always sandboxed.
 - Drafts replies to Slack DMs and mentions in your style. Nothing is sent until you press Send.
+- Watches what you tell it to (Slack mentions, doc comments, mail) with whatever tools your
+  Copilot has, Glean or your company's search included, and has replies drafted for you.
+- Reaches you when you are away from your desk, through your company's Slack bot say, and takes
+  your answers from there.
+- Takes the skills, plugins and MCP servers you add in Settings, and screenshots in the chat.
 - Lets you delegate from Slack: react 🤖 to any message ("can someone look at the export
   bug?") and it becomes a task. When it's done, the answer is drafted in that thread.
 - Has a focus mode. Pick how long: notifications wait, the Router handles what it can, and you
@@ -60,7 +65,7 @@ Now I talk to one session, the Router, and Chief of Staff keeps track of the res
 It runs on the Copilot you already have: your plan, your models, your MCP servers and your
 company's policies. No other AI service or API key.
 
-![Approving a Slack reply](docs/images/approve-dark.png)
+![A decision a worker needs from you](docs/images/needs-you-dark.png)
 
 ## Install
 
@@ -102,7 +107,7 @@ There are a few separate sign-ins. Only the first one is required.
 4. **Slack and other services.** Paste a Slack user token in Settings
    ([how to get one](docs/guide.md#slack)).
    When a worker needs another service, like your docs or issue tracker, a sign-in card shows
-   up in the inbox.
+   up under *Needs you* on Home.
 
 ## How it works
 
@@ -110,7 +115,7 @@ Every session is a regular Copilot CLI session. You'll find them in `copilot --r
 "Chief of Staff · …". Chief of Staff drives them through the Copilot SDK:
 
 ```
-you ── inbox ── Router ── tasks ──► worker · worker · worker
+you ── Home ─── Router ── tasks ──► worker · worker · worker
                   ▲                 (own folder, worktree, sandbox)
 Slack, GitHub ────┘    Slack session ──► drafts you approve
                        Watchdog ──► nudges stuck workers
@@ -129,7 +134,7 @@ and labeled with who it's from, so a Slack message can't pass itself off as you.
 ## Status
 
 Early (0.1). Expect rough edges. Copilot usage counts against your plan like any other
-session, and the inbox shows the credits each task used.
+session, and Home shows the credits each task used.
 
 Bug reports and ideas are welcome as issues. If you'd like to contribute, start with
 [CONTRIBUTING.md](CONTRIBUTING.md) and the

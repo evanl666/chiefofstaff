@@ -40,6 +40,7 @@ class FakeSession:
         self.models: list[str] = []
         self.tunings: list[dict] = []
         self.modes: list[str | None] = []
+        self.attachments: list[list | None] = []
         # MCP sign-in: the URL to open, or "" when Copilot already has the credentials.
         self.login_url = "https://login.example.com/authorize?state=1"
         self.logins: list[str] = []
@@ -58,7 +59,8 @@ class FakeSession:
         self.handlers.append(handler)
         return lambda: None
 
-    async def send(self, prompt, mode=None):
+    async def send(self, prompt, mode=None, attachments=None):
+        self.attachments.append(attachments)
         self.raw_sent.append(prompt)
         # Owner messages to the Router carry a random ref; tests compare the rest.
         self.sent.append(re.sub(r' ref="o[0-9a-f]{6}"', "", prompt))
@@ -319,7 +321,8 @@ class Harness:
         return self.store.get("router_id")
 
     def session(self, session_id) -> FakeSession:
-        return self.client.sessions[session_id]
+        """The Copilot session behind one of ours now (a rerun helper gets a fresh one)."""
+        return self.client.sessions[self.store.get(f"copilot:{session_id}") or session_id]
 
     def kinds(self, session_id):
         return [(m["kind"], m["text"]) for m in self.store.messages(session_id)]

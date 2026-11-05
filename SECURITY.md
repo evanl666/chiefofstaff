@@ -2,8 +2,8 @@
 
 Chief of Staff runs AI agents on your machine with your accounts. This page says what keeps
 them in bounds, and how firmly: some boundaries are enforced by the operating system, some by
-Chief of Staff, and some only by the agents' instructions. Please read it before you turn on
-yolo, Slack or GitHub.
+Chief of Staff, and some only by the agents' instructions. Please read it before you use
+yolo (on by default), Slack or GitHub.
 
 ## Reporting a vulnerability
 
@@ -32,18 +32,27 @@ makes a mistake.
 | Workers that read Slack reach only GitHub hosts over the network, and not localhost. Other workers may use localhost (servers their tests start, their build daemon) and so reach your local services; the tokens of your Gradle daemons and Jupyter servers are unreadable to them, and Unix sockets (Docker's) stay closed | **OS sandbox** | Sandbox is on |
 | The Router, the Slack session and the Watchdog have no shell, file or web tools | **Copilot** (session tool allowlist) | Always |
 | Slack messages are sent only after you approve a draft | **Chief of Staff** (Slack write tools are refused; only the app sends) | Always for the Slack tools; sessions are never given your Slack token |
-| PR reviews are published only after you approve a draft | **Chief of Staff** (permission check refuses GitHub MCP writes, `gh pr review/merge/comment` and `gh api` writes) | Yolo is off. With yolo on, a worker's `gh` can still write to GitHub |
-| No force pushes, no pushes to `main`/`master`, no `sudo`, no `curl \| sh` | **Chief of Staff** (permission check on each command) | Yolo is off. These are pattern checks, not a sandbox: an agent determined to evade them can |
-| A worker does not write outside its folders with Copilot's file-edit tool | **Chief of Staff** (permission check) and Copilot (best effort) | Yolo is off |
+| PR reviews are published only after you approve a draft | **Chief of Staff** (permission check refuses GitHub MCP writes, `gh pr review/merge/comment` and `gh api` writes) | Yolo is off for the worker (it is on by default, except for workers that read Slack). With yolo on, a worker's `gh` can still write to GitHub |
+| No force pushes, no pushes to `main`/`master`, no `sudo`, no `curl \| sh` | **Chief of Staff** (permission check on each command) | Yolo is off for the worker (on by default, except for workers that read Slack). These are pattern checks, not a sandbox: an agent determined to evade them can |
+| A worker does not write outside its folders with Copilot's file-edit tool | **Chief of Staff** (permission check) and Copilot (best effort) | Yolo is off for the worker |
+| The connector (watches, notifications when you are away) only looks, and messages nobody but you | **The model**, guided by instructions; it runs as a worker that reads Slack (sandboxed, permission checks on, Slack writes refused) | As far as the model follows its instructions. It can use every MCP server your Copilot has, including ones that can send: give it a way to reach you that can message only you if you can |
 | A message cannot pretend to come from you or the Router | **Chief of Staff** (envelopes: only the app writes the sender; text inside is escaped) | Always |
 | Content from Slack, GitHub and the web is treated as data, not instructions | **The model**, guided by marked envelopes (`trust="untrusted"`) | As far as the model follows its instructions |
 | Only your own reaction delegates a Slack message (others reacting with the same emoji do nothing) | **Chief of Staff** (the watcher searches `hasmy::emoji:`, your reactions only) | Always |
 | A delegated message is acted on for what it asks, but risky requests in it are confirmed with you | **The model**, guided by instructions | As far as the model follows its instructions. Delegate only messages you would forward to a colleague |
 | Workers stay on their task, don't merge PRs, don't speak publicly as you | **The model**, guided by instructions; the Watchdog flags drift | As far as the model follows its instructions |
 
-**Yolo** turns off Chief of Staff's permission prompts and checks for workers. With the sandbox
-on, the OS boundaries above still hold. With the sandbox off (or unsupported), yolo means a
-worker can do anything your user account can.
+**Yolo** turns off Chief of Staff's permission prompts and checks for workers. It is on by
+default, as in your own Copilot sessions, except for workers that read Slack (they keep the
+checks unless you choose yolo in their header); turn it off in Settings, or per worker with
+*Ask first*. With the sandbox on, the OS boundaries above still hold. With the sandbox off (or unsupported), yolo means a
+worker can do anything your user account can. Yolo is on by default since 0.1.18, as your own
+Copilot sessions usually run: if workers read content you do not trust (PR comments from
+strangers, say), turn it off in Settings.
+
+**Abilities you add** (Settings → Connections: skills, plugins, MCP servers) run as they would
+in your own Copilot sessions: a plugin's hooks and an MCP server run as you, outside the
+sandbox. Add only what you would install for yourself.
 
 ## Sign-ins and credentials
 

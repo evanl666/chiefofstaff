@@ -1359,3 +1359,36 @@ async def test_a_follow_up_on_a_task_card_sets_the_owners_language(harness):
     await runtime.task_actions.follow_up(task["id"], "再把每个文件的行数也列出来")
     assert 'reply_in="Chinese"' in harness.session(worker).sent[-1]
     assert harness.store.get("owner_language") == "Chinese", "what the Router tells them next"
+
+
+async def test_answering_a_task_that_needs_you_takes_it_out_of_needs_you(harness):
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Pick a port")
+    task = runtime.tasks.current(worker)
+    await call_tool(
+        runtime, "report", worker, status="question", summary="Which port, 8080 or 9090?"
+    )
+    harness.session(worker).emit("session.idle")
+    await settle(runtime)
+    assert runtime.tasks.get(task["id"])["status"] == "waiting"
+    view = await runtime.task_actions.follow_up(task["id"], "9090")
+    assert view["status"] == "running", "the card leaves Needs you at once"
+    assert harness.session(worker).sent[-1].endswith("\n9090\n</message>")
+
+
+async def test_a_report_that_misses_a_message_sent_meanwhile_waits_for_it(harness):
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Fix the parser")
+    session = harness.session(worker)
+    session.emit("user.message", content=session.sent[-1])
+    await settle(runtime)
+    await call_tool(
+        runtime, "message_session", harness.router_id, session_id=worker, text="Also cover tabs"
+    )
+    early = await call_tool(runtime, "report", worker, status="done", summary="Fixed.")
+    assert early.result_type == "failure" and "Also cover tabs" in early.text_result_for_llm
+    assert runtime.tasks.current(worker)["status"] == "running", "the Router is not told yet"
+    session.emit("user.message", content=session.sent[-1])
+    await settle(runtime)
+    done = await call_tool(runtime, "report", worker, status="done", summary="Fixed, tabs too.")
+    assert done.result_type == "success"

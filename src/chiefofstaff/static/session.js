@@ -1,24 +1,49 @@
-// The main pane for one session: header, model settings and its timeline.
+// The main pane: Home or one session, with its header, model settings and timeline.
 
-import { $, api, el, toast } from "./dom.js";
-import { clock, compactPaths, displayPath, markdown, threadLabel } from "./text.js";
-import { byId, current, markRead, pendingDrafts, routerId, state, STATUS_TEXT, upsertSession } from "./state.js";
+import { $, api, el, foldable, toast } from "./dom.js";
+import { clock, compactPaths, markdown, threadLabel } from "./text.js";
+import { byId, current, HOME, markRead, pendingDrafts, routerId, state, STATUS_TEXT, upsertSession, viewedId } from "./state.js";
 import { renderSidebar } from "./sidebar.js";
-import { renderDrafts } from "./drafts.js";
-import { INBOX, renderInboxHeader, showInbox } from "./inbox.js";
+import { focusDraft, focusTask, renderHome, renderHomeHeader, showHomeTab, welcomeCard } from "./inbox.js";
 import { closeMentions, setRecipient } from "./mention.js";
+import { openSettings } from "./settings.js";
+const ROUTER_PLACEHOLDER = "Ask for anything… (@ to message one worker)";
+// Every view but Home has "← Home" at the top left.
+function backHome(shown) {
+  $("#back-home").hidden = !shown;
+}
+// The "⋯" of a session: its model settings, and what is done with it less often.
+function sessionMenu(session, items = []) {
+  // Not rebuilt while open: a choice the owner is making stays where it is.
+  if (!$("#session-more").hidden && $("#session-menu").dataset.for === session?.id) return;
+  $("#session-menu").dataset.for = session?.id || "";
+  $("#session-more").hidden = true;
+  if (session) renderTuning(session);
+  else $("#session-tuning").hidden = true;
+  $("#session-menu-items").replaceChildren(...items.filter(Boolean));
+  $("#session-menu").hidden = $("#session-tuning").hidden && !$("#session-menu-items").children.length;
+}
+const menuButton = (text, onclick, className = "") => el("button", { type: "button", class: className, text, onclick });
 export function renderHeader() {
-  if (state.selected === INBOX) {
-    renderInboxHeader();
+  if (state.selected === HOME) {
+    backHome(false);
+    renderHomeHeader();
+    const router = byId(routerId());
+    sessionMenu(router);
+    $("#composer").hidden = false;
+    const waiting = !router && state.snapshot.runtime.state !== "ready";
+    setComposer(router?.elsewhere ? { locked: IN_TERMINAL } : waiting ? { locked: "You can ask once Copilot is connected." } : { placeholder: ROUTER_PLACEHOLDER });
     return;
   }
   const session = current();
   const actions = $("#session-actions");
   if (!session) return;
+  backHome(true);
+  delete actions.dataset.key;
   $("#composer").hidden = Boolean(session.closed_at) && session.role !== "worker";
   let meta = [];
   if (session.closed_at) {
-    meta = ["Closed", session.branch || displayPath(session.cwd)];
+    meta = ["Closed", session.branch];
   } else if (session.role === "router") {
     meta = ["Coordinates your sessions", session.status === "working" ? "routing…" : ""];
   } else if (session.role === "slack") {
@@ -26,13 +51,13 @@ export function renderHeader() {
   } else if (session.role === "watchdog") {
     meta = ["Checks workers for stalls and drift", STATUS_TEXT[session.status]];
   } else {
+    // Its state and branch; the folders it works in are in the tooltip and its ⋯ menu.
     const repos = session.checkouts?.length || 0;
-    meta = [STATUS_TEXT[session.status], session.status === "queued" ? session.activity : "", session.branch || displayPath(session.cwd), repos > 1 ? `${repos} repos` : ""];
-    if (session.yolo) meta.unshift("YOLO");
+    meta = [STATUS_TEXT[session.status], session.status === "queued" ? session.activity : "", session.branch, repos > 1 ? `${repos} repos` : ""];
     if (session.elsewhere) {
       // What it does in the terminal, read from its log; Chief of Staff does not drive it now.
       const terminal = session.terminal || {};
-      meta = [terminal.working ? "Working in a terminal" : "Open in a terminal", terminal.working ? terminal.activity : "", session.branch || displayPath(session.cwd)];
+      meta = [terminal.working ? "Working in a terminal" : "Open in a terminal", terminal.working ? terminal.activity : "", session.branch];
     }
   }
   if (session.credits >= 0.05) meta.push(`${session.credits.toFixed(1)} credits`);
@@ -43,76 +68,59 @@ export function renderHeader() {
   $("#session-meta").textContent = meta.filter(Boolean).join(" · ");
   const where = session.role === "worker" ? (session.checkouts?.length ? session.checkouts.map((checkout) => `${checkout.path}${checkout.branch ? ` (${checkout.branch})` : ""}`) : [session.cwd]) : [];
   $("#session-meta").title = [...where, ...follows.map(threadLabel)].filter(Boolean).join("\n");
-  $("#session-meta").classList.toggle("yolo", Boolean(session.yolo && !session.closed_at));
+  // Stop is on the line that shows it working, at the end of its timeline.
   const buttons = [];
-  if (session.status === "working" && !session.closed_at) {
-    buttons.push(el("button", { type: "button", class: "text", text: "Stop", title: "Interrupt the current turn", onclick: () => post(`/api/sessions/${session.id}/stop`) }));
+  if (session.role === "worker" && session.closed_at) {
+    buttons.push(el("button", { type: "button", class: "secondary", text: "Reopen", title: "Continue with its conversation and checkout", onclick: () => reopen(session.id) }));
   }
+  actions.replaceChildren(...buttons);
+  const items = [];
   if (session.role === "worker" && !session.closed_at) {
     const globalYolo = state.snapshot.settings.worker_yolo;
     const checks = el(
       "select",
-      { class: `folder${session.yolo ? " yolo" : ""}`, "aria-label": "Permission checks", title: "Permission checks for this worker" },
-      el("option", { value: "", text: `Checks: default (${globalYolo ? "yolo" : "on"})` }),
-      el("option", { value: "off", text: "Checks: on" }),
-      el("option", { value: "on", text: "Yolo: no checks" }),
+      { class: session.yolo ? "yolo" : "", title: "Permission checks for this worker" },
+      el("option", { value: "", text: `Default: ${globalYolo && !session.slack ? "yolo" : "ask first"}` }),
+      el("option", { value: "on", text: "Yolo (no permission checks)" }),
+      el("option", { value: "off", text: "Ask first (permission checks)" }),
     );
     checks.value = session.yolo_choice || "";
     checks.onchange = async () => {
       try {
         const view = await api(`/api/sessions/${session.id}/yolo`, { method: "POST", body: { mode: checks.value } });
         upsertSession(view);
-        toast(view.yolo ? "Yolo: this worker runs without permission checks." : "Permission checks are on for this worker.");
+        toast(view.yolo ? "Yolo: this worker runs without permission checks." : "Ask first: permission checks are on for this worker.");
       } catch (error) {
         toast(error.message, "error");
       }
     };
-    buttons.push(checks);
+    items.push(el("label", {}, el("span", { text: "Permission checks" }), checks));
   }
   if (session.role === "worker" && session.cwd) {
-    const folder = el(
-      "select",
-      { class: "folder", "aria-label": "Folder", title: session.cwd },
-      el("option", { value: "", text: "Folder" }),
-      el("option", { value: "finder", text: "Open in Finder" }),
-      el("option", { value: "vscode", text: "Open in VS Code" }),
-      el("option", { value: "copy", text: "Copy path" }),
+    const open = (app) => api(`/api/sessions/${session.id}/open`, { method: "POST", body: { app } }).catch((error) => toast(error.message, "error"));
+    items.push(
+      el("hr"),
+      menuButton("Open in Finder", () => open("finder")),
+      menuButton("Open in VS Code", () => open("vscode")),
+      menuButton("Copy folder path", () => navigator.clipboard.writeText(session.cwd).then(() => toast("Path copied."), (error) => toast(error.message, "error"))),
     );
-    folder.onchange = async () => {
-      const choice = folder.value;
-      folder.value = "";
-      try {
-        if (choice === "copy") {
-          await navigator.clipboard.writeText(session.cwd);
-          toast("Path copied");
-        } else if (choice) {
-          await api(`/api/sessions/${session.id}/open`, { method: "POST", body: { app: choice } });
-        }
-      } catch (error) {
-        toast(error.message, "error");
-      }
-    };
-    buttons.push(folder);
-  }
-  if (session.role === "worker" && session.closed_at) {
-    buttons.push(el("button", { type: "button", class: "text", text: "Reopen", title: "Continue with its conversation and checkout", onclick: () => reopen(session.id) }));
   }
   if (session.role === "worker" && !session.closed_at) {
-    buttons.push(
-      el("button", {
-        type: "button",
-        class: "text",
-        text: "Close",
-        onclick: () => {
+    items.push(
+      el("hr"),
+      session.status === "working" ? menuButton("Stop what it is doing", () => post(`/api/sessions/${session.id}/stop`)) : "",
+      menuButton(
+        "Close worker",
+        () => {
           if (session.status !== "working" || confirm("This worker is still working. Close it?")) post(`/api/sessions/${session.id}/close`);
         },
-      }),
+        "danger",
+      ),
     );
   }
-  actions.replaceChildren(...buttons);
-  renderTuning(session);
+  sessionMenu(session, items);
   const placeholders = {
-    router: "Ask your chief of staff… (@ to message a worker directly)",
+    router: ROUTER_PLACEHOLDER,
     slack: "Message the Slack session…",
     watchdog: "Message the Watchdog…",
   };
@@ -124,10 +132,11 @@ export function renderHeader() {
 }
 // Two programs must not write to one Copilot session: one open in a terminal is used there.
 export const IN_TERMINAL = "Open in a terminal right now. Continue there, or exit it there (/exit) to message it here.";
-// The composer, or (locked) a note saying why there is none.
-export function setComposer({ placeholder = "", locked = "" } = {}) {
+// The composer, or (locked) a note saying why there is none. `attach`: images can go along.
+export function setComposer({ placeholder = "", locked = "", attach = true } = {}) {
   const input = $("#composer-input");
   $("#composer").classList.toggle("locked", Boolean(locked));
+  $("#composer").classList.toggle("no-attach", !attach);
   $("#composer-note").textContent = locked;
   input.disabled = Boolean(locked);
   input.placeholder = placeholder;
@@ -144,6 +153,9 @@ function renderTuning(session) {
   const effort = $("#session-effort");
   const context = $("#session-context");
   const fallback = session.model_choice ? "" : modelInfo(session.model)?.name || session.model;
+  const show = (select, shown) => {
+    select.closest("label").hidden = !shown;
+  };
   model.replaceChildren(
     el("option", { value: "", text: `Default${fallback ? ` · ${fallback}` : ""}` }),
     ...state.models.map((item) => el("option", { value: item.id, text: item.name })),
@@ -151,23 +163,25 @@ function renderTuning(session) {
   model.value = session.model_choice || "";
   const info = modelInfo(session.model);
   const efforts = info?.efforts || [];
-  effort.hidden = !efforts.length;
+  show(effort, efforts.length);
   effort.replaceChildren(
-    el("option", { value: "", text: `Effort · default${session.effort && !session.effort_choice ? ` (${EFFORTS[session.effort] || session.effort})` : ""}` }),
-    ...efforts.map((level) => el("option", { value: level, text: `Effort · ${EFFORTS[level] || level}` })),
+    el("option", { value: "", text: `Default${session.effort && !session.effort_choice ? ` (${EFFORTS[session.effort] || session.effort})` : ""}` }),
+    ...efforts.map((level) => el("option", { value: level, text: EFFORTS[level] || level })),
   );
   effort.value = efforts.includes(session.effort_choice) ? session.effort_choice : "";
-  context.hidden = !info?.long_context;
+  show(context, info?.long_context);
   if (info?.long_context) {
     context.replaceChildren(
-      el("option", { value: "", text: `${tokens(info.context)} context` }),
-      el("option", { value: "long_context", text: `${tokens(info.long_context)} context` }),
+      el("option", { value: "", text: `${tokens(info.context)} tokens` }),
+      el("option", { value: "long_context", text: `${tokens(info.long_context)} tokens` }),
     );
     context.value = session.context || "";
   }
   const save = async (body, what) => {
     try {
-      upsertSession(await api(`/api/sessions/${session.id}/model`, { method: "POST", body }));
+      const view = await api(`/api/sessions/${session.id}/model`, { method: "POST", body });
+      upsertSession(view);
+      renderTuning(view);  // Its efforts and context windows are the new model's, menu open or not.
       toast(`${what}. Applies from the next message.`);
     } catch (error) {
       toast(error.message, "error");
@@ -182,7 +196,7 @@ function renderTuning(session) {
   effort.onchange = () =>
     save({ model: session.model_choice, effort: effort.value, context: keptContext }, `Thinking effort: ${EFFORTS[effort.value] || "default"}`);
   context.onchange = () =>
-    save({ model: session.model_choice, effort: keptEffort, context: context.value }, `Context window: ${context.selectedOptions[0].text.replace(" context", "")}`);
+    save({ model: session.model_choice, effort: keptEffort, context: context.value }, `Context window: ${context.selectedOptions[0].text.replace(" tokens", "")}`);
 }
 async function reopen(sessionId) {
   try {
@@ -198,52 +212,59 @@ async function post(path) {
     toast(error.message, "error");
   }
 }
+// Home has the Router's conversation and a panel beside it; a session, its timeline alone.
+export function setLayout(home) {
+  $("#main").classList.toggle("home", home);
+  $("#panel").hidden = !home;
+  $("#home-tabs").hidden = !home;
+  $("#notices").hidden = !home || !$("#notices").children.length;
+  $("#timeline").hidden = false;
+  if (home) showHomeTab(state.homeTab);
+}
 export async function select(sessionId) {
   if (!sessionId) return;
+  // The Router's chat and the inbox of earlier versions are Home.
+  if (sessionId === "inbox" || sessionId === routerId()) sessionId = HOME;
   closeMentions();
-  // A worker chosen with @ is for messages sent from the Router chat or the inbox.
-  if (sessionId !== INBOX && sessionId !== routerId()) setRecipient(null);
-  if (sessionId === INBOX) {
-    showInbox();
-    return;
-  }
-  $("#inbox").hidden = true;
-  $("#timeline").hidden = false;
-  $("#drafts").hidden = false;
-  $("#composer-input").placeholder = "";
-  if (!byId(sessionId)) {
+  // A worker chosen with @ is for messages sent from Home.
+  if (sessionId !== HOME) setRecipient(null);
+  if (sessionId !== HOME && !byId(sessionId)) {
     try {
       state.viewing = await api(`/api/sessions/${sessionId}`);
     } catch {
-      if (sessionId !== routerId()) await select(routerId());
+      await select(HOME);
       return;
     }
   }
   state.selected = sessionId;
   localStorage.setItem("cos.selected", sessionId);
+  setLayout(sessionId === HOME);
   renderSidebar();
   renderHeader();
-  renderDrafts();
+  renderHome();
   const timeline = $("#timeline");
   timeline.replaceChildren();
   state.lastId = 0;
-  // Messages that come by event while the history loads are added after it.
-  const loading = { id: sessionId, held: [] };
-  state.loading = loading;
+  const viewed = viewedId();
   let messages = [];
-  try {
-    messages = await api(`/api/sessions/${sessionId}/messages`);
-  } catch (error) {
-    toast(error.message, "error");
+  // Messages that come by event while the history loads are added after it.
+  const loading = { id: viewed, held: [] };
+  if (viewed) {
+    state.loading = loading;
+    try {
+      messages = await api(`/api/sessions/${viewed}/messages`);
+    } catch (error) {
+      toast(error.message, "error");
+    }
+    if (state.loading === loading) state.loading = null;
+    if (state.selected !== sessionId) return;
   }
-  if (state.loading === loading) state.loading = null;
-  if (state.selected !== sessionId) return;
   timeline.replaceChildren();
   state.lastId = 0;
   appendMessages(messages);
   appendMessages(loading.held);
   scrollToBottom(true);
-  if (byId(sessionId)?.unread) markRead(sessionId);
+  if (viewed && byId(viewed)?.unread) markRead(viewed);
   if (!$("#composer").hidden) $("#composer-input").focus();
 }
 export function scrollToBottom(force = false) {
@@ -284,21 +305,94 @@ function card({ label, body, className = "", status, time, open }) {
   }
   return node;
 }
+// The first line of a text, without its Markdown: what a one-line entry shows.
+function firstLine(text) {
+  const lines = text.split("\n").map((line) => line.replace(/^[#>*\-\s\d.]+/, "").replace(/[*_`]/g, "").trim()).filter(Boolean);
+  // Not a lead-in like "Results:" when something follows it.
+  return lines.find((line) => !/^[\p{L}\s]{1,24}:$/u.test(line)) || lines[0] || "";
+}
+// One line in the Home chat: a mark, what happened, a link to where it is; with `body`, it opens
+// in place to read it all.
+function eventLine({ mark = "·", kind = "", text, time, view = null, viewText = "View", body = "" }) {
+  const parts = [
+    el("span", { class: "mark", text: mark }),
+    el("span", { class: "what", text, title: text }),
+    view ? el("button", { type: "button", class: "link", text: viewText, onclick: (event) => { event.preventDefault(); event.stopPropagation(); view(); } }) : null,
+    time ? el("time", { text: clock(time), title: new Date(time).toLocaleString() }) : null,
+  ];
+  if (!body) return el("div", { class: `event ${kind}`.trim() }, ...parts);
+  return el("details", { class: `event ${kind}`.trim() }, el("summary", {}, ...parts), el("div", { class: "markdown", html: markdown(body) }));
+}
+// What a worker's report says, in a word: the report itself is on the task's card.
+const REPORTED = {
+  done: ["✓", "done", "finished"],
+  question: ["?", "waiting", "has a question"],
+  blocked: ["!", "waiting", "is blocked"],
+  failed: ["✗", "failed", "failed"],
+  progress: ["…", "", "reported progress"],
+};
+const SOURCES = { slack: "Slack", github: "GitHub" };
+// Home's conversation is the owner and the Router. Everything else that reaches the Router is
+// one line: a task's news points at its card beside the chat; the rest opens in place.
+function homeEntry(message) {
+  const meta = message.meta || {};
+  const time = message.created_at;
+  const text = message.text || "";
+  switch (message.kind) {
+    case "inbound": {
+      if (meta.from && meta.status?.startsWith("watchdog")) {
+        return eventLine({ mark: "⚠", kind: "waiting", text: `Watchdog: “${meta.title}” looks ${meta.status.replace("watchdog: ", "").replace("_", " ")}`, time, body: text });
+      }
+      if (meta.from && meta.status) {
+        const [mark, kind, what] = REPORTED[meta.status] || ["·", "", meta.status];
+        return eventLine({ mark, kind, text: `${meta.title} ${what}`, time, view: () => focusTask(meta.task_id, meta.from) });
+      }
+      if (meta.asked_by) return eventLine({ mark: "?", text: `Question from “${meta.title}”: ${firstLine(text)}`, time, body: text, view: () => select(meta.asked_by), viewText: "Open" });
+      if (meta.answered_by) return eventLine({ mark: "↩", text: `Answer from ${meta.title}: ${firstLine(text)}`, time, body: text, view: () => select(meta.answered_by), viewText: "Open" });
+      if (meta.review) return eventLine({ mark: "·", text: `Review · ${meta.title}: ${firstLine(text)}`, time, body: text, view: () => select(meta.review), viewText: "Open" });
+      if (meta.thread) return eventLine({ mark: "↘", text: `${threadLabel(meta.thread)}: ${firstLine(text)}`, time, body: text });
+      const source = SOURCES[meta.source] || "Event";
+      return eventLine({ mark: "↘", text: `${meta.delegated ? `Handed over from ${source}` : `From ${source}`}: ${firstLine(text)}`, time, body: text });
+    }
+    case "ask":
+      return eventLine({ mark: "→", text: `Asked ${meta.title}: ${firstLine(text)}`, time, body: text, view: () => select(meta.target), viewText: "Open" });
+    case "watchdog": {
+      const verdict = { stuck: "looks stuck", looping: "looks like it is looping", off_track: "looks off track" }[meta.verdict];
+      return eventLine({ mark: "⚠", kind: "waiting", text: `Watchdog${verdict ? ` · ${verdict}` : ""}: ${firstLine(text)}`, time, body: `${text}${meta.reason ? `\n\nWhy it stepped in: ${meta.reason}` : ""}` });
+    }
+    case "update":
+      if (meta.digest) return null;
+      return eventLine({ mark: meta.needs_action ? "!" : "·", kind: meta.needs_action ? "waiting" : "", text: firstLine(text), time, body: text.includes("\n") || text.length > 140 ? text : "" });
+    case "draft": {
+      const node = eventLine({ mark: "✎", text: `${meta.label || "Draft"}: ${firstLine(text)}`, time, body: text });
+      node.classList.add("draft-record");
+      node.dataset.draftId = meta.draft_id;
+      node.dataset.label = meta.label || "Draft";
+      return node;
+    }
+    case "notice": {
+      if (meta.settings) return eventLine({ mark: "✦", text, time, view: () => openSettings(meta.settings), viewText: "Open Settings" });
+      if (meta.away_reply) return eventLine({ mark: "↩", text, time });
+      // "Started “X” · new because …": the why is on hover.
+      const started = /^(Started|New task|Continued)/.test(text);
+      const node = eventLine({ mark: started ? "" : "·", kind: started ? "started" : "", text: text.split(" · ")[0], time, view: meta.session_id ? () => focusTask("", meta.session_id) : null });
+      node.querySelector(".what").title = text;
+      return node;
+    }
+    default:
+      return null;
+  }
+}
 function renderMessage(message) {
   const meta = message.meta || {};
   const time = message.created_at;
+  if (state.selected === HOME && message.session_id === routerId()) {
+    const entry = homeEntry(message);
+    if (entry) return entry;
+  }
   switch (message.kind) {
     case "owner":
-      if (meta.to) {
-        // Sent from here straight to one worker.
-        return el(
-          "div",
-          { class: "msg owner", title: clock(time) },
-          el("button", { type: "button", class: "to", text: `→ ${meta.to_title}`, title: "Open this worker", onclick: () => select(meta.to) }),
-          message.text,
-        );
-      }
-      return el("div", { class: "msg owner", text: message.text, title: clock(time) });
+      return ownerMessage(message.text, meta, time);
     case "assistant":
       if (meta.internal) return el("div", { class: "line note", text: message.text, title: clock(time) });
       return el("div", { class: "msg agent markdown", html: markdown(message.text), title: clock(time) });
@@ -346,13 +440,41 @@ function renderMessage(message) {
     }
     case "notice": {
       const open = meta.session_id ? () => select(meta.session_id) : undefined;
-      return el("div", { class: `line notice${open ? " link" : ""}`, title: clock(time), onclick: open }, el("span", { text: message.text }));
+      // What Chief of Staff learned or changed on its own: where to see it in Settings.
+      const settings = meta.settings
+        ? el("button", { type: "button", class: "link", text: "Open Settings", onclick: (event) => { event.stopPropagation(); openSettings(meta.settings); } })
+        : null;
+      return el("div", { class: `line notice${open ? " link" : ""}${settings ? " wide" : ""}`, title: clock(time), onclick: open }, el("span", { text: message.text }), settings);
     }
     case "error":
       return el("div", { class: "line error", text: message.text, title: clock(time) });
     default:
       return el("div", { class: "line", text: message.text, title: clock(time) });
   }
+}
+// The owner's message: long ones fold, images show small and open full size.
+function ownerMessage(text, meta = {}, time = "") {
+  const node = el("div", { class: "msg owner", title: time ? clock(time) : undefined });
+  // Sent from Home straight to one worker.
+  if (meta.to) node.append(el("button", { type: "button", class: "to", text: `→ ${meta.to_title}`, title: "Open this worker", onclick: () => select(meta.to) }));
+  const files = meta.attachments || [];
+  if (files.length) {
+    node.append(
+      el(
+        "div",
+        { class: "attachments" },
+        ...files.map((file) =>
+          el(
+            "a",
+            { href: file.url, target: "_blank", rel: "noreferrer", title: file.name },
+            file.type?.startsWith("image/") ? el("img", { src: file.url, alt: file.name, loading: "lazy" }) : el("span", { class: "file", text: file.name }),
+          ),
+        ),
+      ),
+    );
+  }
+  if (text) foldable(node, el("div", { class: "text", text }), text);
+  return node;
 }
 // The work between messages, folded into one line: its steps, and what the session said on the
 // way to them ("Now the tests:"), which is narration, not an answer. The line shows the latest.
@@ -390,7 +512,7 @@ export function readOnlyTimeline(entries, cwd) {
   const box = el("div");
   for (const entry of entries) {
     if (entry.kind === "tool" || entry.kind === "narration") addWork(box, entry.kind, entry.text, cwd);
-    else if (entry.kind === "owner") box.append(el("div", { class: "msg owner", text: entry.text }));
+    else if (entry.kind === "owner") box.append(ownerMessage(entry.text));
     else box.append(el("div", { class: "msg agent markdown", html: markdown(entry.text) }));
   }
   return [...box.children];
@@ -409,28 +531,22 @@ export function appendMessages(messages) {
   const timeline = $("#timeline");
   timeline.querySelector(".empty")?.remove();
   timeline.querySelector(".working-line")?.remove();
-  const worker = current()?.role === "worker";
+  const shown = state.selected === HOME ? byId(routerId()) : current();
+  const worker = shown?.role === "worker";
+  const viewed = viewedId();
   messages.forEach((message, index) => {
-    if (message.id <= state.lastId || message.session_id !== state.selected) return;
+    if (message.id <= state.lastId || message.session_id !== viewed) return;
     state.lastId = message.id;
     if (message.kind === "tool" || narration(message, messages[index + 1], worker)) {
-      addWork(timeline, message.kind === "tool" ? "tool" : "narration", message.text, current()?.cwd);
+      addWork(timeline, message.kind === "tool" ? "tool" : "narration", message.text, shown?.cwd);
       return;
     }
     const node = renderMessage(message);
     if (node?.dataset) node.dataset.id = message.id;
     timeline.append(node);
   });
-  if (!timeline.children.length && state.selected === routerId()) {
-    timeline.append(
-      el(
-        "div",
-        { class: "empty" },
-        el("strong", { text: "What should we work on?" }),
-        "Tell your chief of staff what you need. It starts workers, watches Slack, and only interrupts you when something is ready.",
-      ),
-    );
-  }
+  // Nothing said yet: what to ask for (unless Copilot must be set up first).
+  if (!timeline.children.length && state.selected === HOME && state.snapshot?.runtime.state !== "error") timeline.append(welcomeCard());
   updateWorkingLine();
   updateDraftRecords();
   scrollToBottom();
@@ -438,18 +554,34 @@ export function appendMessages(messages) {
 export function updateWorkingLine() {
   const timeline = $("#timeline");
   timeline.querySelector(".working-line")?.remove();
-  const session = byId(state.selected);
+  const session = byId(viewedId());
   if (session?.status !== "working") return;
   timeline.append(
-    el("div", { class: "working-line" }, el("span", { class: "dot working" }), el("span", { text: session.activity || "Thinking…" })),
+    el(
+      "div",
+      { class: "working-line" },
+      el("span", { class: "dot working" }),
+      el("span", { text: session.activity || "Thinking…" }),
+      el("button", { type: "button", class: "link", text: "Stop", title: "Interrupt what it is doing now", onclick: () => post(`/api/sessions/${session.id}/stop`) }),
+    ),
   );
   scrollToBottom();
 }
+// A draft in a timeline: while it waits for the owner, a way to its card under Needs you.
 export function updateDraftRecords() {
   const pending = new Set(pendingDrafts().map((draft) => draft.id));
   for (const node of document.querySelectorAll(".draft-record")) {
-    const label = node.dataset.label || "Draft";
-    node.querySelector(".label").textContent = pending.has(node.dataset.draftId) ? `${label} · waiting for you` : label;
-    node.classList.toggle("pending", pending.has(node.dataset.draftId));
+    const waiting = pending.has(node.dataset.draftId);
+    node.classList.toggle("pending", waiting);
+    const head = node.querySelector(".head, summary");
+    let link = head.querySelector(".goto");
+    if (waiting && !link) {
+      link = el("button", { type: "button", class: "link goto", text: "Waiting for you · Needs you", onclick: (event) => { event.preventDefault(); event.stopPropagation(); focusDraft(node.dataset.draftId); } });
+      const time = head.querySelector("time");
+      if (time) time.before(link);
+      else head.append(link);
+    } else if (!waiting) {
+      link?.remove();
+    }
   }
 }

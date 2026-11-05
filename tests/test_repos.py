@@ -58,7 +58,7 @@ async def spawn(runtime, router, **arguments):
 async def test_one_workspace_with_a_worktree_per_repository(tmp_path, monkeypatch):
     _, api = published(tmp_path, "api")
     _, web = published(tmp_path, "web")
-    harness = Harness(tmp_path / "data", Settings(projects=[str(api), str(web)]))
+    harness = Harness(tmp_path / "data", Settings(projects=[str(api), str(web)], worker_yolo=False))
     runtime = await harness.connect()
     info = await spawn(
         runtime,
@@ -154,7 +154,7 @@ async def test_add_repo_from_this_machine_or_a_remote(tmp_path):
 
 
 async def test_yolo_skips_permission_checks_globally_or_per_worker(tmp_path):
-    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True))
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, worker_yolo=False))
     runtime = await harness.connect()
     worker = (await spawn(runtime, harness.router_id, title="Ship", instructions="s"))["session_id"]
     push = SimpleNamespace(kind="shell", full_command_text="git push --force", possible_urls=[])
@@ -173,13 +173,18 @@ async def test_yolo_skips_permission_checks_globally_or_per_worker(tmp_path):
     harness.store.save_settings(Settings(worker_yolo=True, worker_sandbox=True))
     other = (await spawn(runtime, harness.router_id, title="Other", instructions="o"))["session_id"]
     harness.store.execute("UPDATE sessions SET slack=1 WHERE id=?", (other,))
-    assert await allowed(other), "yolo covers workers that read Slack too"
+    assert not await allowed(other), "workers that read Slack keep the checks by default"
+    await runtime.set_session_yolo(other, "on")
+    assert await allowed(other), "unless chosen for that worker"
     assert (
         "Permission prompts are off for you (yolo); the sandbox still applies"
         in harness.session(other).options["system_message"]["content"]
     )
     await runtime.set_session_yolo(other, "off")
     assert not await allowed(other)
+    harness.store.save_settings(Settings(worker_sandbox=True))
+    third = (await spawn(runtime, harness.router_id, title="Third", instructions="t"))["session_id"]
+    assert runtime.yolo(harness.store.session(third)), "on by default"
     assert not runtime.yolo(harness.store.session(harness.router_id)), "only workers"
 
 
@@ -812,3 +817,10 @@ async def test_a_worker_in_the_owners_folder_gets_a_worktree_to_change_it(tmp_pa
         capture_output=True, text=True,
     )  # fmt: skip
     assert head.stdout.strip() == "main", "the owner's checkout stays on its branch"
+
+
+async def test_receipts_name_the_branch_a_worker_is_on_now(git_repo):
+    run("git", "branch", "chief/fix", cwd=git_repo)
+    run("git", "checkout", "-q", "-b", "their-feature", cwd=git_repo)  # A PR checked out to review.
+    found = await workspaces_module.changes({"path": str(git_repo), "branch": "chief/fix"})
+    assert found and found["branch"] == "their-feature", "not one of its own to open a PR from"

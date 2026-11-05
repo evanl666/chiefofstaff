@@ -172,10 +172,30 @@ TESTS_FAILED = re.compile(
 )
 
 
+# The summary lines of a run in which every test passed: pytest "6 passed in 0.1s" (with skipped
+# and the like), unittest "OK", jest and vitest "Tests: 6 passed", go "ok  pkg", cargo
+# "test result: ok", Gradle and Maven "BUILD SUCCESS(FUL)".
+TESTS_PASSED = re.compile(
+    r"^=* ?[1-9]\d* passed(, \d+ (skipped|deselected|xfailed|xpassed|warnings?))* in [\d.]+s"
+    r"|^OK( \(|$)"
+    r"|^\s*Tests:?\s+[1-9]\d* passed\b(?!.*failed)"
+    r"|^ok\s+\S+"
+    r"|^test result: ok\b"
+    r"|^(\[INFO\] )?BUILD SUCCESS(FUL)?\b",
+    re.MULTILINE,
+)
+
+
 def masked_failure(command: str, output: str) -> bool:
     """A test run piped into another command (`pytest | tail`) exits with that command's code:
-    its own summary says whether the tests failed."""
-    return "|" in command and bool(TESTS_FAILED.search(output[-2000:] if output else ""))
+    its own summary says whether the tests failed. The last summary counts: a command that runs
+    the tests twice (the new test failing before the fix, then passing) passed."""
+    if "|" not in command or not output:
+        return False
+    tail = output[-2000:]
+    failed = [match.start() for match in TESTS_FAILED.finditer(tail)]
+    passed = [match.start() for match in TESTS_PASSED.finditer(tail)]
+    return bool(failed) and (not passed or failed[-1] > passed[-1])
 
 
 def exit_code(output: str, success: bool | None) -> int | None:

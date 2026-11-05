@@ -1,75 +1,72 @@
-// The inbox: what needs the owner, what is running, and results ready to review.
+// Home: the conversation with the Router, and beside it what needs the owner and every task.
 
-import { $, api, el, submits, toast } from "./dom.js";
-import { ago, compactPaths, markdown, plural, shortPath, since } from "./text.js";
-import { byId, loadState, pendingDrafts, routerId, sessions, state } from "./state.js";
-import { renderSidebar, renderStatusLine } from "./sidebar.js";
-import { select, setComposer } from "./session.js";
-import { draftCard, draftKey, slackDestination } from "./drafts.js";
-import { showChanges } from "./diff.js";
-export const INBOX = "inbox";
-const tasks = () => state.snapshot?.tasks || [];
-export const uncertainDrafts = () => state.snapshot?.uncertain || [];
-const TASK_LABEL = { queued: "Queued", running: "Running", waiting: "Needs you", review: "Ready to review", done: "Done", failed: "Failed", cancelled: "Cancelled" };
-const TASK_CHIP = { queued: "", running: "progress", waiting: "waiting", review: "done", done: "done", failed: "failed", cancelled: "" };
-function needsYou() {
-  // A task waiting for a decision is shown by the decision's card.
-  const deciding = new Set(pendingDrafts().filter((draft) => draft.kind === "decision").flatMap((draft) => draft.target.askers.map((asker) => asker.task_id)));
-  const waiting = tasks().filter((task) => (task.status === "waiting" && !deciding.has(task.id)) || task.status === "failed" || task.blocked);
-  return { drafts: pendingDrafts(), uncertain: uncertainDrafts(), tasks: waiting };
+import { $, api, el, keepingFocus, moreMenu, reconcile, submits, toast } from "./dom.js";
+import { markdown, shortPath } from "./text.js";
+import { byId, HOME, loadState, pendingDrafts, routerId, state, uncertainDrafts } from "./state.js";
+import { renderStatusLine } from "./sidebar.js";
+import { renderHeader, scrollToBottom, select } from "./session.js";
+import { draftCard, draftKey, uncertainCard } from "./drafts.js";
+import { expandTask, inTerminal, ownTasks, taskItem, terminalItem } from "./tasks.js";
+// What waits for the owner. A task whose worker asks something on a card shows as that card.
+export function needsYou() {
+  const drafts = pendingDrafts();
+  const deciding = new Set(drafts.filter((draft) => draft.kind === "decision").flatMap((draft) => draft.target.askers.map((asker) => asker.task_id)));
+  const asking = askingSessions();
+  const waiting = ownTasks().filter((task) => (task.status === "waiting" && !deciding.has(task.id) && !asking.has(task.session_id)) || task.status === "failed" || task.blocked);
+  return { drafts, uncertain: uncertainDrafts(), tasks: waiting };
 }
-function needsYouCount() {
+// What the badge counts: not the cards the owner just acted on.
+export function needsCount() {
   const items = needsYou();
-  return items.drafts.length + items.uncertain.length + items.tasks.length;
+  const shown = (key) => !state.leaving.has(key);
+  return items.drafts.filter((draft) => shown(`draft:${draft.id}`)).length + items.uncertain.filter((draft) => shown(`draft:${draft.id}`)).length + items.tasks.filter((task) => shown(`task:${task.id}`)).length;
 }
-function inboxCounts() {
-  const running = tasks().filter((task) => (task.status === "running" || task.status === "queued") && !task.blocked).length + inTerminal().length;
-  const review = tasks().filter((task) => task.status === "review").length;
-  return { needs: needsYouCount(), running, review };
+const askingSessions = () => new Set(pendingDrafts().map((draft) => draft.session_id));
+// The task board: each group newest first; queued in the order they will start.
+function board() {
+  const asking = askingSessions();
+  const mine = ownTasks().filter((task) => !task.blocked);
+  const newest = (a, b) => b.updated_at.localeCompare(a.updated_at);
+  const running = mine.filter((task) => task.status === "running" && !asking.has(task.session_id)).sort(newest);
+  return {
+    running,
+    terminal: inTerminal().filter((session) => !running.some((task) => task.session_id === session.id)),
+    queued: mine.filter((task) => task.status === "queued").sort((a, b) => a.created_at.localeCompare(b.created_at)),
+    // A result whose worker drafted something for the owner (a reply, a review) is reviewed on
+    // that card: it shows the task, and sending it accepts the task.
+    review: mine.filter((task) => task.status === "review" && !asking.has(task.session_id)).sort(newest),
+    finished: mine.filter((task) => task.status === "done" || task.status === "cancelled").sort((a, b) => (b.ended_at || "").localeCompare(a.ended_at || "")),
+  };
 }
-export function inboxItem() {
-  const count = needsYouCount();
+export function homeItem() {
+  const count = needsCount();
+  const router = byId(routerId());
+  const working = router?.status === "working";
   return el(
     "button",
-    { type: "button", class: `item inbox-item${state.selected === INBOX ? " selected" : ""}`, onclick: () => select(INBOX) },
-    el("span", { class: `dot${count ? " waiting" : ""}`, title: count ? "Something needs you" : "Nothing needs you" }),
-    el("span", { class: "label", text: "Inbox" }),
-    count ? el("span", { class: "badge amber", text: String(count), title: "Needs you" }) : null,
+    { type: "button", class: `item home-item${state.selected === HOME ? " selected" : ""}`, onclick: () => select(HOME) },
+    el("span", { class: `dot${working ? " working" : ""}`, title: working ? "Your chief of staff is working" : "Your chief of staff" }),
+    el("span", { class: "label", text: "Home" }),
+    count ? el("span", { class: "badge amber", text: String(count), title: `${count} need${count === 1 ? "s" : ""} you` }) : null,
   );
-}
-export function showInbox() {
-  state.selected = INBOX;
-  localStorage.setItem("cos.selected", INBOX);
-  $("#inbox").hidden = false;
-  $("#timeline").hidden = true;
-  $("#drafts").hidden = true;
-  $("#session-tuning").hidden = true;
-  $("#composer").hidden = false;
-  setComposer({ placeholder: "Ask your chief of staff… (@ to message a worker directly)" });
-  renderSidebar();
-  renderInboxHeader();
-  renderInbox();
-  $("#scroller").scrollTop = 0;
-  $("#composer-input").focus();
 }
 function focusUntil() {
   const until = state.snapshot?.focus?.until;
   return until && new Date(until) > new Date() ? new Date(until) : null;
 }
-export function renderInboxHeader() {
-  const { needs, running, review } = inboxCounts();
+export function renderHomeHeader() {
   const until = focusUntil();
-  $("#session-title").textContent = "Inbox";
-  const parts = [
-    until ? `Focusing until ${until.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` : "",
-    needs ? `${needs} need${needs === 1 ? "s" : ""} you` : "Nothing needs you",
-    running ? `${running} running` : "",
-    review ? `${review} to review` : "",
-  ];
-  $("#session-meta").textContent = parts.filter(Boolean).join(" · ");
+  const router = byId(routerId());
+  $("#session-title").textContent = "Home";
+  $("#session-meta").textContent = until ? `Focusing until ${until.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}: notifications wait` : "";
   $("#session-meta").title = "";
-  $("#session-meta").classList.remove("yolo");
-  $("#session-actions").replaceChildren(state.snapshot.runtime.state === "ready" ? focusControl() : "");
+  const actions = $("#session-actions");
+  // Rebuilt only when they change: an open Focus menu stays open as tasks move. (Stop is on
+  // the "Thinking…" line, where the Router is seen working.)
+  const key = `home:${Boolean(until)}:${state.snapshot.runtime.state}:${Boolean(router)}`;
+  if (actions.dataset.key === key) return;
+  actions.dataset.key = key;
+  actions.replaceChildren(state.snapshot.runtime.state === "ready" ? focusControl() : "");
 }
 // Focus: notifications wait, the Router handles what it can, one summary at the end.
 function focusControl() {
@@ -77,7 +74,7 @@ function focusControl() {
     api("/api/focus", { method: "POST", body: { minutes } })
       .then((focusState) => {
         state.snapshot.focus = focusState;
-        renderInboxHeader();
+        renderHeader();
         renderStatusLine();
         toast(minutes ? "Focusing: notifications wait until you are done." : "Focus ended.");
       })
@@ -85,184 +82,173 @@ function focusControl() {
   if (focusUntil()) {
     return el("button", { type: "button", class: "focus-on", text: "End focus", title: "Notifications are held; the summary comes when focus ends", onclick: () => focus(0) });
   }
-  const select = el(
-    "select",
-    { class: "folder", "aria-label": "Focus", title: "Hold notifications while you focus; the Router handles what it can" },
-    el("option", { value: "", text: "Focus…" }),
-    ...[
-      [30, "30 minutes"],
-      [60, "1 hour"],
-      [120, "2 hours"],
-      [240, "4 hours"],
-    ].map(([value, text]) => el("option", { value, text: `Focus for ${text}` })),
-  );
-  select.addEventListener("change", () => select.value && focus(Number(select.value)));
-  return select;
+  const durations = [
+    [30, "30 minutes"],
+    [60, "1 hour"],
+    [120, "2 hours"],
+    [240, "4 hours"],
+  ];
+  const menu = moreMenu(durations.map(([minutes, text]) => ({ text: `For ${text}`, onclick: () => focus(minutes) })), "Hold notifications while you focus; the Router handles what it can", "Focus");
+  menu.classList.add("focus");
+  return menu;
 }
-let inboxFrame = 0;
-export function scheduleInbox() {
-  if (state.selected !== INBOX || inboxFrame) return;
-  inboxFrame = requestAnimationFrame(() => {
-    inboxFrame = 0;
-    renderInboxHeader();
-    renderInbox();
+let homeFrame = 0;
+export function scheduleHome() {
+  if (state.selected !== HOME || homeFrame) return;
+  homeFrame = requestAnimationFrame(() => {
+    homeFrame = 0;
+    renderHome();
   });
 }
-// Keeps nodes whose key did not change; `refresh` updates their content when only their
-// `version` did, so a button under the mouse is never swapped out mid-click. A card whose key
-// changed is rebuilt, and a form the owner has open on it (a half-typed note) moves into the
-// new card, with its text and focus, even when the card moves to another section.
-function reconcile(container, items, editing = openForms()) {
-  const existing = new Map([...container.children].map((node) => [node.dataset.key, node]));
-  const nodes = items.map(({ key, id, version, build, refresh }) => {
-    let node = existing.get(key);
-    if (node && refresh && node.dataset.version !== version) refresh(node);
-    if (!node) {
-      node = build();
-      const form = id && editing.get(id);
-      if (form) {
-        const fresh = node.querySelector(":scope > .actions");
-        if (fresh) fresh.replaceWith(form);
-        else node.append(form);
-      }
-    }
-    node.dataset.key = key;
-    if (id) node.dataset.id = id;
-    if (version !== undefined) node.dataset.version = version;
-    return node;
+export function renderHome() {
+  if (state.selected !== HOME || !state.snapshot) return;
+  renderHeader();
+  keepingFocus(() => {
+    renderNotices();
+    renderPanel();
   });
-  if (nodes.length !== container.children.length || nodes.some((node, index) => container.children[index] !== node)) {
-    container.replaceChildren(...nodes);
+}
+// On a narrow window Home shows one part at a time: the chat, Needs you or Tasks.
+export function showHomeTab(tab, focus = false) {
+  state.homeTab = tab;
+  const main = $("#main");
+  for (const name of ["chat", "needs", "tasks"]) main.classList.toggle(`tab-${name}`, name === tab);
+  for (const button of document.querySelectorAll("#home-tabs button")) button.setAttribute("aria-selected", String(button.dataset.tab === tab));
+  if (focus && tab === "chat") {
+    scrollToBottom(true);
+    $("#composer-input").focus();
   }
 }
-// Moving a focused field in the page blurs it: put the focus and cursor back afterwards.
-function keepingFocus(change) {
-  const active = document.activeElement;
-  const selection = active && "selectionStart" in active ? [active.selectionStart, active.selectionEnd] : null;
-  change();
-  if (active?.isConnected && document.activeElement !== active) {
-    active.focus();
-    if (selection) active.setSelectionRange(...selection);
-  }
-}
-// Forms the owner has open on inbox cards, by task id; collected before any section changes.
+// Forms the owner has open on task cards, by task id; collected before any section changes.
 function openForms() {
-  return new Map([...document.querySelectorAll("#inbox .card > .actions[data-editing]")].map((form) => [form.parentElement.dataset.id, form]));
+  return new Map([...document.querySelectorAll("#panel .card > .actions[data-editing]")].map((form) => [form.parentElement.dataset.id, form]));
 }
-function section(id, title, count, hint) {
+function section(parent, id, title, { tag = "div", hint = "" } = {}) {
   let node = document.getElementById(id);
   if (!node) {
-    node = el("section", { id, class: "inbox-section" }, el("h2", {}, el("span", { class: "title" }), el("span", { class: "count" })), el("div", { class: "items" }), el("p", { class: "empty-hint" }));
+    const heading = tag === "details" ? el("summary") : el("h3");
+    node = el(tag, { id, class: "task-group" }, heading, el("div", { class: "items" }));
+    if (hint) node.append(el("p", { class: "empty-hint", text: hint }));
+    parent.append(node);
   }
-  node.querySelector(".title").textContent = title;
-  node.querySelector(".count").textContent = count ? String(count) : "";
-  node.querySelector(".empty-hint").textContent = count ? "" : hint;
+  node.firstElementChild.replaceChildren(el("span", { text: title }), el("span", { class: "count" }));
   return node;
 }
-function renderInbox() {
-  if (state.selected !== INBOX || !state.snapshot) return;
-  keepingFocus(updateInbox);
+function counted(node, count) {
+  node.querySelector(".count").textContent = count ? String(count) : "";
 }
-function updateInbox() {
-  const box = $("#inbox");
-  const items = needsYou();
+function renderPanel() {
+  const panel = $("#panel");
   const editing = openForms();
-  // A worker waiting on a card for the owner shows as that card, under Needs you.
-  const asking = new Set(items.drafts.map((draft) => draft.session_id));
-  const running = tasks()
-    .filter((task) => (task.status === "running" || task.status === "queued") && !task.blocked && !asking.has(task.session_id))
-    .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
-  const terminal = inTerminal().filter((session) => !running.some((task) => task.session_id === session.id));
-  const review = tasks().filter((task) => task.status === "review").sort((a, b) => b.updated_at.localeCompare(a.updated_at));
-  const finished = tasks().filter((task) => task.status === "done" || task.status === "cancelled").sort((a, b) => (b.ended_at || "").localeCompare(a.ended_at || ""));
+  const items = needsYou();
+  const tasks = board();
 
-  const needs = section("inbox-needs", "Needs you", items.drafts.length + items.uncertain.length + items.tasks.length, "Nothing needs you right now.");
+  const needs = document.getElementById("needs") || el("section", { id: "needs", class: "panel-section" }, el("h2", {}, el("span", { text: "Needs you" }), el("span", { class: "count" })), el("div", { class: "items" }), el("p", { class: "empty-hint", text: "Nothing needs you." }));
+  const needCount = needsCount();
+  counted(needs, needCount);
+  needs.querySelector(".empty-hint").hidden = Boolean(needCount);
   reconcile(needs.querySelector(".items"), [
-    ...items.drafts.map((draft) => ({ key: draftKey(draft), build: () => draftCard(draft) })),
+    ...items.drafts.map((draft) => draftItem(draft)),
     ...items.uncertain.map((draft) => ({ key: `uncertain:${draft.id}:${draft.outcome}`, build: () => uncertainCard(draft) })),
     ...items.tasks.map((task) => taskItem(task)),
   ], editing);
-  const runningSection = section("inbox-running", "Running", running.length + terminal.length, "");
-  runningSection.hidden = !running.length && !terminal.length;
-  reconcile(runningSection.querySelector(".items"), [...terminal.map(terminalItem), ...running.map((task) => taskItem(task))], editing);
-  const reviewSection = section("inbox-review", "Ready to review", review.length, "Finished work shows up here with what was observed: tests, changes and pull requests.");
-  reconcile(reviewSection.querySelector(".items"), review.map((task) => taskItem(task)), editing);
 
-  let recent = document.getElementById("inbox-recent");
-  if (!recent) {
-    recent = el("details", { id: "inbox-recent", class: "inbox-section recent" }, el("summary"), el("div", { class: "items" }));
+  const taskBox = document.getElementById("tasks") || el("section", { id: "tasks", class: "panel-section" }, el("h2", {}, el("span", { text: "Tasks" }), el("span", { class: "count" })), el("p", { class: "empty-hint", text: "Nothing running. Ask for anything — e.g. “fix the flaky login test in api”." }));
+  const active = tasks.running.length + tasks.terminal.length + tasks.queued.length + tasks.review.length;
+  counted(taskBox, active);
+  taskBox.querySelector(".empty-hint").hidden = Boolean(active || tasks.finished.length || ownTasks().some((task) => !["done", "cancelled"].includes(task.status)));
+  const groups = [
+    ["tasks-running", "Running", [...tasks.terminal.map(terminalItem), ...tasks.running.map(taskItem)]],
+    ["tasks-queued", "Queued", tasks.queued.map(taskItem)],
+    ["tasks-review", "Ready to review", tasks.review.map(taskItem)],
+  ];
+  for (const [id, title, list] of groups) {
+    const group = section(taskBox, id, title);
+    counted(group, list.length);
+    group.hidden = !list.length;
+    reconcile(group.querySelector(".items"), list, editing);
   }
-  recent.hidden = !finished.length;
-  recent.querySelector("summary").textContent = `Recently finished · ${finished.length}`;
-  reconcile(recent.querySelector(".items"), finished.slice(0, 30).map((task) => taskItem(task)), editing);
+  const recent = section(taskBox, "tasks-recent", "Recently finished", { tag: "details" });
+  counted(recent, tasks.finished.length);
+  recent.hidden = !tasks.finished.length;
+  reconcile(recent.querySelector(".items"), tasks.finished.slice(0, 30).map(taskItem), editing);
+  // The recent group stays last as groups are added.
+  if (taskBox.lastElementChild !== recent) taskBox.append(recent);
 
-  const first = !tasks().length && !items.drafts.length && !items.uncertain.length;
-  const welcome = first ? document.getElementById("inbox-welcome") || welcomeCard() : null;
-  const blocked = state.snapshot.runtime.state === "error";  // Only the way to fix it matters.
-  const order = blocked ? [setupCard()] : [setupCard(), focusSummaryCard(), chiefStrip(), welcome, needs, runningSection, reviewSection, recent].filter(Boolean);
-  if (order.some((node, index) => box.children[index] !== node) || box.children.length !== order.length) box.replaceChildren(...order);
+  if (panel.children[0] !== needs || panel.children[1] !== taskBox) panel.replaceChildren(needs, taskBox);
+  const tabs = document.querySelectorAll("#home-tabs .count");
+  tabs[0].textContent = needCount ? String(needCount) : "";
+  tabs[1].textContent = active ? String(active) : "";
 }
-// Workers the owner is using in a terminal right now: working, though no task says so.
-const inTerminal = () => sessions().filter((session) => session.role === "worker" && session.elsewhere && session.terminal?.working);
-function terminalItem(session) {
-  const line = () => compactPaths(session.terminal?.activity || "Working…", session.cwd);
+// The task a card is about: the one its worker is on (a decision card lists its own).
+function draftTask(draft) {
+  if (draft.kind === "decision") return null;
+  return ownTasks().find((task) => task.session_id === draft.session_id && ["running", "waiting", "review", "queued"].includes(task.status));
+}
+function draftItem(draft) {
+  const task = draftTask(draft);
   return {
-    key: `terminal:${session.id}`,
-    version: line(),
-    build: () =>
-      el(
-        "div",
-        { class: "card task running terminal" },
-        el(
-          "div",
-          { class: "head" },
-          el("span", { class: "label title", text: session.title }),
-          el("span", { class: "chip progress", text: "In a terminal" }),
-          el("span", { class: "spacer" }),
-          el("button", { type: "button", class: "open", text: "Open", onclick: () => select(session.id) }),
-        ),
-        el("div", { class: "task-body" }, el("div", { class: "activity", text: line() })),
-      ),
-    refresh: (node) => {
-      node.querySelector(".activity").textContent = line();
-    },
+    key: draftKey(draft),
+    version: task ? `${task.id}:${task.status}:${task.updated_at}` : "",
+    build: () => withTask(draftCard(draft), task, draft),
+    refresh: (node) => withTask(node, task, draft),
   };
 }
-// The key covers what changes a card's actions and layout; the version, what only its text.
-function taskItem(task) {
-  const worker = byId(task.session_id);
-  return {
-    // Receipts show on finished cards only; a running task's grow with every command.
-    key: `task:${task.id}:${task.status}:${task.blocked ? 1 : 0}:${["review", "done"].includes(task.status) ? JSON.stringify(task.receipts || null) : ""}`,
-    id: task.id,
-    // For running cards the minute too: "this step 6m" and "3m ago" move on by themselves. Not
-    // for others, whose expanded results and selections a rebuild would undo.
-    version: `${task.updated_at}:${task.title}:${worker?.status || ""}:${worker?.activity || ""}:${worker?.said_at || ""}:${worker?.step_since || ""}:${task.credits}:${task.runs}:${["running", "queued"].includes(task.status) ? Math.floor(Date.now() / 60000) : ""}`,
-    build: () => taskCard(task),
-    refresh: (node) => refreshTaskCard(node, task),
-  };
-}
-function refreshTaskCard(node, task) {
-  const worker = byId(task.session_id);
-  const title = node.querySelector(".head .title");
-  title.textContent = task.title;
-  title.title = task.goal;
-  node.querySelector(".head .meta").textContent = taskMeta(task);
-  const body = taskBody(task, worker);
-  const old = node.querySelector(":scope > .task-body");
-  // Text the owner expanded stays expanded as the card updates.
-  if (body && old?.querySelector(".more")?.textContent === "Show less") {
-    body.querySelector(".folded")?.classList.remove("folded");
-    const toggle = body.querySelector(".more");
-    if (toggle) toggle.textContent = "Show less";
+// Which task the card is about, with what it found folded under its title.
+function withTask(node, task, draft) {
+  const old = node.querySelector(":scope > .context");
+  if (!task) {
+    // Not about a task: which worker asks, when it is one (a decision names its tasks itself).
+    const worker = byId(draft.session_id);
+    const from = draft.kind !== "decision" && worker?.role === "worker" && !worker.helper ? el("div", { class: "context" }, el("span", { class: "muted", text: "From " }), el("strong", { text: worker.title })) : null;
+    if (old && from) old.replaceWith(from);
+    else if (old) old.remove();
+    else if (from) node.querySelector(":scope > .head").after(from);
+    return node;
   }
-  if (old && body) old.replaceWith(body);
-  else if (old) old.remove();
-  else if (body) node.querySelector(":scope > .head").after(body);
+  const text = task.status === "review" ? task.result || task.progress : task.progress || task.goal || "";
+  const title = [el("span", { class: "muted", text: task.status === "review" ? "Result of " : "For " }), el("strong", { text: task.title })];
+  const context = text
+    ? el("details", { class: "context", open: old?.open }, el("summary", {}, ...title), el("div", { class: "markdown", html: markdown(text) }))
+    : el("div", { class: "context" }, ...title);
+  if (old) old.replaceWith(context);
+  else node.querySelector(":scope > .head").after(context);
+  node.dataset.task = task.id;
+  return node;
 }
-function taskMeta(task) {
-  const finishedAt = ["review", "done", "failed", "cancelled"].includes(task.status) ? task.ended_at || task.updated_at : "";
-  return [task.worker && task.worker !== task.title ? task.worker : "", finishedAt ? `finished ${since(finishedAt)}` : `started ${since(task.created_at)}`, task.credits >= 0.05 ? `${task.credits.toFixed(1)} credits` : "", task.runs > 1 ? `${task.runs} runs` : ""].filter(Boolean).join(" · ");
+const narrow = () => window.matchMedia("(max-width: 1099px)").matches;
+// From the chat: the task's card in the panel, brought into view (its report open), or the
+// card that asks the owner about it. Not on the board any more: its worker.
+export function focusTask(taskId, sessionId = "") {
+  const node = (taskId && (document.querySelector(`#panel .card.task[data-id="${taskId}"]`) || document.querySelector(`#panel .card[data-task="${taskId}"]`))) || (sessionId && document.querySelector(`#panel .card.task[data-session="${sessionId}"]`));
+  if (!node) {
+    if (sessionId) select(sessionId);
+    return;
+  }
+  if (node.classList.contains("review")) expandTask(node, true);
+  bringIntoView(node);
+}
+// A card waiting for the owner, from a draft in a session's timeline.
+export async function focusDraft(draftId) {
+  if (state.selected !== HOME) await select(HOME);
+  const node = document.querySelector(`#needs .card[data-id="${draftId}"]`);
+  if (node) bringIntoView(node);
+}
+function bringIntoView(node) {
+  if (narrow()) showHomeTab(node.closest("#needs") ? "needs" : "tasks");
+  const group = node.closest("details");
+  if (group) group.open = true;
+  node.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  node.classList.remove("flash");
+  void node.offsetWidth;  // Restarts the highlight.
+  node.classList.add("flash");
+}
+// Above the conversation: what must be fixed first, and the summary after focus.
+function renderNotices() {
+  const box = $("#notices");
+  const nodes = [setupCard(), focusSummaryCard()].filter(Boolean);
+  if (nodes.length !== box.children.length || nodes.some((node, index) => box.children[index] !== node)) box.replaceChildren(...nodes);
+  box.hidden = !nodes.length;
 }
 // First run: what is missing before work can start.
 const NO_PROJECTS = "cos.noProjectsCard";  // The owner chose to work without projects for now.
@@ -270,7 +256,7 @@ const NO_PROJECTS = "cos.noProjectsCard";  // The owner chose to work without pr
 function setupCard() {
   const snap = state.snapshot;
   const key = `${snap.runtime.state}:${snap.runtime.error}:${snap.settings.projects.length}:${snap.settings.code_folder}`;
-  let node = document.getElementById("inbox-setup");
+  let node = document.getElementById("home-setup");
   if (node?.dataset.key === key) return node;
   if (snap.runtime.state === "error") {
     const retry = el("button", { type: "button", text: "Retry", onclick: async () => {
@@ -284,7 +270,7 @@ function setupCard() {
     } });
     node = el(
       "div",
-      { id: "inbox-setup", class: "card setup" },
+      { id: "home-setup", class: "card setup" },
       el("div", { class: "head" }, el("span", { class: "label", text: "Connect GitHub Copilot" })),
       el("p", { text: "Chief of Staff runs your work in GitHub Copilot sessions, and Copilot is not ready yet:" }),
       el("p", { class: "muted", text: snap.runtime.error }),
@@ -298,7 +284,7 @@ function setupCard() {
       el("div", { class: "actions" }, el("span", { class: "muted", text: "Or look around first: chiefofstaff --demo" }), retry),
     );
   } else if (snap.runtime.state === "ready" && !snap.demo && !snap.settings.projects.length && !snap.settings.code_folder && localStorage.getItem(NO_PROJECTS) !== "1") {
-    const input = el("input", { placeholder: "~/workspace", autocomplete: "off" });
+    const input = el("input", { placeholder: "~/workspace", autocomplete: "off", "aria-label": "Code folder" });
     const error = el("span", { class: "error" });
     const add = async () => {
       if (!input.value.trim()) return;
@@ -318,9 +304,9 @@ function setupCard() {
     input.addEventListener("keydown", (event) => submits(event) && add());
     node = el(
       "div",
-      { id: "inbox-setup", class: "card setup" },
+      { id: "home-setup", class: "card setup" },
       el("div", { class: "head" }, el("span", { class: "label", text: "Where is your code?" })),
-      el("p", { text: "The folder your repositories live in, like ~/workspace. Repositories a task needs that are not there yet get cloned into it. Each worker works in its own copy (a git worktree in .chief inside that folder), so your own checkouts stay as they are. Research and questions need no code." }),
+      el("p", { text: "The folder your repositories live in, like ~/workspace. Workers use their own copies, so your checkouts stay as they are." }),
       el(
         "div",
         { class: "actions" },
@@ -329,6 +315,7 @@ function setupCard() {
         el("button", { type: "button", class: "text", text: "Not now", onclick: () => {
           localStorage.setItem(NO_PROJECTS, "1");
           node.remove();
+          renderNotices();
           toast("Set your code folder any time in Settings.");
         } }),
         el("button", { type: "button", text: "Add", onclick: add }),
@@ -347,13 +334,14 @@ function focusSummaryCard() {
   node = el(
     "div",
     { id: "focus-summary", class: "card update" },
-    el("div", { class: "head" }, el("span", { class: "label", text: "Focus is over" }), el("span", { class: "spacer" }), el("button", { type: "button", class: "text", text: "×", title: "Dismiss", onclick: () => { state.focusSummary = null; node.remove(); } })),
-    el("div", { class: "body", text: state.focusSummary }),
+    el("div", { class: "head" }, el("span", { class: "label", text: "Focus is over" }), el("span", { class: "spacer" }), el("button", { type: "button", class: "text", text: "×", title: "Dismiss", onclick: () => { state.focusSummary = null; renderNotices(); } })),
+    el("div", { class: "body markdown", html: markdown(state.focusSummary) }),
   );
   node.dataset.text = state.focusSummary;
   return node;
 }
-function welcomeCard() {
+// An empty conversation: what to ask for.
+export function welcomeCard() {
   const examples = [
     "Fix the flaky login test in the api repo and open a PR",
     "Research how other teams use feature flags and summarize the options",
@@ -361,307 +349,9 @@ function welcomeCard() {
   ];
   return el(
     "div",
-    { id: "inbox-welcome", class: "welcome" },
-    el("h2", { text: "Give your chief of staff some work" }),
-    el("p", { text: "Say what you need below, several things at once if you like. Each task gets its own worker in its own folder; you approve anything sent in your name, and finished work waits here for your review." }),
+    { id: "home-welcome", class: "welcome empty" },
+    el("h2", { text: "Ask for anything" }),
+    el("p", { text: "Several things at once is fine. Each task gets its own worker and shows up under Tasks; anything sent in your name waits for your OK." }),
     el("div", { class: "examples" }, ...examples.map((text) => el("button", { type: "button", class: "secondary", text, onclick: () => { $("#composer-input").value = text; $("#composer-input").focus(); } }))),
   );
-}
-// The latest exchange with the Router, so a request from the inbox gets its answer here too.
-function chiefStrip() {
-  const chief = state.chief;
-  if (!chief) return null;
-  let node = document.getElementById("chief-strip");
-  if (!node) node = el("div", { id: "chief-strip", class: "card chief" });
-  const router = byId(routerId());
-  const replies = chief.replies.slice(-2);
-  node.replaceChildren(
-    el(
-      "div",
-      { class: "head" },
-      el("span", { class: "label", text: "You asked" }),
-      el("span", { class: "spacer" }),
-      el("button", { type: "button", class: "open", text: "Open chat", onclick: () => select(routerId()) }),
-      el("button", { type: "button", class: "text", text: "×", title: "Hide", onclick: () => { state.chief = null; node.remove(); } }),
-    ),
-    el("div", { class: "asked", text: chief.asked }),
-    ...replies.map((reply) => el("div", { class: "reply markdown", html: markdown(reply) })),
-    // replaceChildren would show a null as the text "null".
-    !replies.length || router?.status === "working" ? el("div", { class: "working-line", text: router?.status === "working" ? "Working on it…" : "Sent." }) : "",
-  );
-  return node;
-}
-function taskCard(task) {
-  const worker = byId(task.session_id);
-  const error = el("span", { class: "error" });
-  const actions = el("div", { class: "actions" });
-  const meta = taskMeta(task);
-  const node = el(
-    "div",
-    { class: `card task ${task.status}${task.blocked ? " blocked" : ""}`, "data-session": task.session_id || undefined },
-    el(
-      "div",
-      { class: "head" },
-      el("span", { class: "label title", text: task.title, title: task.goal }),
-      el("span", { class: `chip ${task.blocked ? "blocked" : TASK_CHIP[task.status]}`, text: task.blocked ? "Blocked" : TASK_LABEL[task.status] }),
-      el("span", { class: "spacer" }),
-      el("span", { class: "meta", text: meta }),
-      task.session_id ? el("button", { type: "button", class: "open", text: "Open", onclick: () => select(task.session_id) }) : null,
-    ),
-  );
-  const body = taskBody(task, worker);
-  if (body) node.append(body);
-  if (task.receipts && (task.status === "review" || task.status === "done")) node.append(receiptsView(task.receipts, task));
-
-  async function act(path, body, done) {
-    for (const button of actions.querySelectorAll("button")) button.disabled = true;
-    error.textContent = "";
-    try {
-      const view = await api(path, { method: "POST", body: body || {} });
-      showActions();  // The form is done: the card may be rebuilt from now on.
-      upsertTask(view);
-      if (done) toast(done);
-    } catch (failure) {
-      error.textContent = failure.message;
-      for (const button of actions.querySelectorAll("button")) button.disabled = false;
-    }
-  }
-  function reply(label, placeholder) {
-    const input = el("textarea", { rows: 2, placeholder });
-    const send = () => input.value.trim() && act(`/api/tasks/${task.id}/follow-up`, { text: input.value.trim() }, "Sent to the worker.");
-    input.addEventListener("keydown", (event) => {
-      if (submits(event) && !event.shiftKey) {
-        event.preventDefault();
-        send();
-      }
-    });
-    actions.replaceChildren(input, el("button", { type: "button", class: "text", text: "Cancel", onclick: showActions }), el("button", { type: "button", text: label, onclick: send }));
-    actions.dataset.editing = "1";
-    input.focus();
-  }
-  function confirmCancel() {
-    const reason = el("input", { placeholder: "Why? (optional)" });
-    actions.replaceChildren(reason, el("button", { type: "button", class: "text", text: "Keep it", onclick: showActions }), el("button", { type: "button", class: "danger", text: "Cancel task", onclick: () => act(`/api/tasks/${task.id}/cancel`, { text: reason.value.trim() }, "Task cancelled.") }));
-    actions.dataset.editing = "1";
-    reason.focus();
-  }
-  function showActions() {
-    delete actions.dataset.editing;
-    const host = actions.parentElement;
-    if (host && host !== node) {
-      // This form moved into a newer card for the task: that card shows its own actions.
-      actions.remove();
-      delete host.dataset.key;
-      scheduleInbox();
-      return;
-    }
-    const buttons = [];
-    // Work on its own branch that is not in a PR yet.
-    const branched = (task.receipts?.checkouts || []).some((checkout) => checkout.branch && (checkout.commits || checkout.uncommitted));
-    const createPr = branched && !task.receipts.prs?.length ? el("button", { type: "button", class: "secondary", text: "Create PR", onclick: () => act(`/api/tasks/${task.id}/pr`, {}, "PR opened.") }) : null;
-    if (task.status === "review") {
-      buttons.push(
-        el("button", { type: "button", class: "text", text: "Copy report", onclick: () => copyReport(task) }),
-        createPr,
-        el("button", { type: "button", class: "secondary", text: "Follow up", onclick: () => reply("Send", "What else should it do?") }),
-        el("button", { type: "button", text: "Accept", onclick: () => act(`/api/tasks/${task.id}/accept`) }),
-      );
-    } else if (task.status === "waiting") {
-      buttons.push(
-        el("button", { type: "button", class: "text", text: "Cancel task", onclick: confirmCancel }),
-        el("button", { type: "button", text: "Reply", onclick: () => reply("Send", "Your answer") }),
-      );
-    } else if (task.status === "failed") {
-      buttons.push(
-        el("button", { type: "button", class: "text", text: "Cancel task", onclick: confirmCancel }),
-        el("button", { type: "button", class: "secondary", text: "Retry with a note", onclick: () => retryWithNote() }),
-        el("button", { type: "button", text: "Retry", onclick: () => act(`/api/tasks/${task.id}/retry`, {}, "Retrying.") }),
-      );
-    } else if (task.status === "running" || task.status === "queued") {
-      buttons.push(
-        el("button", { type: "button", class: "text", text: "Cancel", onclick: confirmCancel }),
-        el("button", { type: "button", class: "text", text: "Add a note", onclick: () => reply("Send", "Tell the worker now (it reads it within its current turn)") }),
-      );
-    } else if (task.status === "done") {
-      buttons.push(el("button", { type: "button", class: "text", text: "Copy report", onclick: () => copyReport(task) }), createPr);
-    }
-    actions.replaceChildren(error, ...buttons.filter(Boolean));
-  }
-  function retryWithNote() {
-    const input = el("textarea", { rows: 2, placeholder: "What should it do differently?" });
-    actions.replaceChildren(input, el("button", { type: "button", class: "text", text: "Cancel", onclick: showActions }), el("button", { type: "button", text: "Retry", onclick: () => act(`/api/tasks/${task.id}/retry`, { text: input.value.trim() }, "Retrying.") }));
-    actions.dataset.editing = "1";
-    input.focus();
-  }
-  showActions();
-  if (actions.children.length > 1) node.append(actions);
-  return node;
-}
-function taskBody(task, worker) {
-  if (task.status === "running" || task.status === "queued") {
-    // At a glance: the step it is in now (and for how long), and what it said last.
-    const queued = task.status === "queued";
-    const line = queued ? worker?.activity || "Waiting for a free worker slot" : worker?.step || worker?.activity || (worker?.status === "working" ? "Working…" : "Between turns");
-    const command = compactPaths(line.replace(/^(bash|shell|powershell) /, "$ "), worker?.cwd);
-    const long = worker?.step_since && ago(worker.step_since) !== "now";
-    const nodes = [
-      el(
-        "div",
-        { class: "activity" },
-        !queued && worker?.step ? "Now: " : "",
-        command,
-        long ? el("span", { class: "when", text: ` · this step ${ago(worker.step_since)}` }) : "",
-      ),
-    ];
-    if (!queued && worker?.said) {
-      nodes.push(el("div", { class: "said", title: worker.said }, `“${worker.said.replace(/\s+/g, " ").trim()}”`, el("span", { class: "when", text: ` · ${since(worker.said_at)}` })));
-    }
-    const wrapper = el("div", { class: "task-body" }, ...nodes);
-    if (task.progress) foldable(wrapper, el("div", { class: "progress markdown", html: markdown(task.progress) }), task.progress);
-    return wrapper;
-  }
-  const text = task.status === "review" || task.status === "done" ? task.result || task.progress : task.progress || (task.blocked ? "It waits for a task that ended without finishing." : "");
-  if (!text) return null;
-  const wrapper = el("div", { class: "task-body" });
-  foldable(wrapper, el("div", { class: "body markdown", html: markdown(text) }), text);
-  return wrapper;
-}
-// Long text shows its start, with Show more.
-function foldable(wrapper, content, text) {
-  wrapper.append(content);
-  if (text.length <= 700 && text.split("\n").length <= 10) return;
-  content.classList.add("folded");
-  const toggle = el("button", { type: "button", class: "more", text: "Show more" });
-  toggle.addEventListener("click", () => {
-    const folded = content.classList.toggle("folded");
-    toggle.textContent = folded ? "Show more" : "Show less";
-  });
-  wrapper.append(toggle);
-}
-// What was observed, next to what the worker reported.
-const VERDICT = {
-  verified: ["pass", "✓ Verified", "Every acceptance criterion is backed by a check it was seen running"],
-  partial: ["warn", "Partly verified", "Some criteria are backed by a check it was seen running; others are only reported"],
-  unverified: ["warn", "Not verified", "No criterion is backed by a check it was seen running"],
-  failed: ["fail", "✗ Not met", "A criterion is not met, or the check behind it failed"],
-};
-const CRITERION = {
-  verified: ["pass", "✓", "Verified: it ran this check and it passed"],
-  claimed: ["warn", "~", "Reported met; no check was seen running"],
-  contradicted: ["fail", "✗", "Reported met, but the check failed"],
-  not_met: ["fail", "✗", "Not met"],
-  not_checked: ["none", "–", "Not checked"],
-};
-function receiptsView(receipts, task) {
-  const items = [];
-  if (receipts.verdict) {
-    const [kind, text, help] = receipts.stale ? ["warn", "Out of date", receipts.stale] : VERDICT[receipts.verdict];
-    const done = receipts.criteria.filter((item) => item.state === "verified").length;
-    items.push(el("span", { class: `receipt verdict ${kind}`, title: help, text: receipts.verdict === "partial" ? `${text} · ${done}/${receipts.criteria.length}` : text }));
-  }
-  const result = (label, item) => {
-    if (!item) return;
-    const mark = item.passed ? (item.failed_before ? "✗→✓" : "✓") : "✗";
-    const before = item.failed_before ? "\nFailed first, then passed" : "";
-    items.push(el("span", { class: `receipt ${item.passed ? "pass" : "fail"}`, title: `${item.command}\n(${plural(item.runs, "run")})${before}`, text: `${mark} ${label}` }));
-  };
-  result("tests", receipts.tests);
-  result("checks", receipts.checks);
-  result("build", receipts.build);
-  const changed = receipts.changed || {};
-  if (changed.files) items.push(el("button", { type: "button", class: "receipt changes", title: "See the changes and comment on them", text: `+${changed.insertions} −${changed.deletions} in ${plural(changed.files, "file")}`, onclick: () => showChanges(task, upsertTask) }));
-  if (changed.commits) items.push(el("span", { class: "receipt", text: plural(changed.commits, "commit") }));
-  if (changed.uncommitted) items.push(el("span", { class: "receipt warn", text: `${changed.uncommitted} uncommitted` }));
-  for (const pr of receipts.prs || []) {
-    const checks = { passing: "✓", failing: "✗", pending: "…" }[pr.checks] || "";
-    items.push(el("a", { class: `receipt pr ${pr.checks}`, href: pr.url, target: "_blank", rel: "noreferrer", text: `${pr.label}${pr.state && pr.state !== "OPEN" ? ` (${pr.state.toLowerCase()})` : ""} ${checks}`.trim() }));
-  }
-  for (const item of receipts.version || []) {
-    items.push(el("span", { class: "receipt none", title: "The code these results are about", text: `at ${item.commit.slice(0, 7)}${item.edited ? " + edits" : ""}` }));
-  }
-  if (!items.length) items.push(el("span", { class: "receipt none", text: receipts.observed ? `${plural(receipts.observed, "command")}, no tests or changes observed` : "Nothing observed" }));
-  const view = el("div", { class: "receipts" }, el("span", { class: "observed", text: "Observed" }), ...items);
-  const criteria = (receipts.criteria || []).length
-    ? el(
-        "ul",
-        { class: "criteria" },
-        ...receipts.criteria.map((item) => {
-          const [kind, mark, help] = CRITERION[item.state] || CRITERION.not_checked;
-          const how = item.command ? `\n${item.command}${item.exit_code ? ` (exit ${item.exit_code})` : ""}` : item.evidence ? `\n${item.evidence}` : "";
-          // `code` in a criterion shows as code.
-          const words = item.criterion.split("`").map((part, index) => (index % 2 ? el("code", { text: part }) : part));
-          return el("li", { class: kind, title: `${help}${how}` }, el("span", { class: "mark", text: mark }), el("span", {}, ...words));
-        }),
-      )
-    : null;
-  const flags = (receipts.flags || []).map((flag) => el("div", { class: "flag", text: flag }));
-  return el("div", { class: "evidence" }, view, criteria, ...flags);
-}
-async function copyReport(task) {
-  const text = api(`/api/tasks/${task.id}/report`).then((report) => report.markdown);
-  text.catch(() => {});
-  try {
-    // Started within the click, so the browser still counts it as the owner's action.
-    if (window.ClipboardItem && navigator.clipboard?.write) {
-      const blob = text.then((value) => new Blob([value], { type: "text/plain" }));
-      await navigator.clipboard.write([new ClipboardItem({ "text/plain": blob })]);
-    } else {
-      await navigator.clipboard.writeText(await text);
-    }
-    toast("Report copied: paste it into a PR description or a message.");
-  } catch {
-    try {
-      showCopy(await text);
-    } catch (error) {
-      toast(error.message, "error");
-    }
-  }
-}
-// Where the clipboard is not available: the text, selected, to copy by hand.
-function showCopy(text) {
-  const area = el("textarea", { class: "copy-area", rows: 14, readonly: true });
-  area.value = text;
-  const dialog = el("dialog", { class: "copy-dialog" }, el("p", { text: "Copy the report:" }), area, el("form", { method: "dialog" }, el("button", { type: "submit", text: "Done" })));
-  dialog.addEventListener("close", () => dialog.remove());
-  document.body.append(dialog);
-  dialog.showModal();
-  area.select();
-}
-// A draft whose sending a stop interrupted, and that could not be confirmed.
-function uncertainCard(draft) {
-  const target = draft.target;
-  const where = draft.kind === "slack" ? `Slack reply to the ${slackDestination(target)}` : `${target.in_reply_to ? "Reply" : "PR review"} on ${target.repo}#${target.number}`;
-  const error = el("span", { class: "error" });
-  const actions = el("div", { class: "actions" });
-  async function decide(body) {
-    for (const button of actions.querySelectorAll("button")) button.disabled = true;
-    try {
-      await api(`/api/drafts/${draft.id}`, { method: "POST", body });
-    } catch (failure) {
-      error.textContent = failure.message;
-      for (const button of actions.querySelectorAll("button")) button.disabled = false;
-    }
-  }
-  actions.append(
-    error,
-    el("button", { type: "button", class: "text", text: "Drop it", onclick: () => decide({ action: "reject" }) }),
-    el("button", { type: "button", class: "secondary", text: "It was sent", onclick: () => decide({ action: "mark_sent" }) }),
-    el("button", { type: "button", text: "Send again", onclick: () => decide({ action: "send", text: draft.final_text || draft.text }) }),
-  );
-  return el(
-    "div",
-    { class: "card draft uncertain" },
-    el("div", { class: "head" }, el("span", { class: "label", text: where }), el("span", { class: "chip waiting", text: "Sent?" })),
-    el("div", { class: "note", text: draft.outcome || "Chief of Staff stopped while sending this. Check whether it arrived." }),
-    el("div", { class: "body quoted", text: draft.final_text || draft.text }),
-    actions,
-  );
-}
-export function upsertTask(task) {
-  if (!state.snapshot) return;
-  const list = tasks().filter((item) => item.id !== task.id);
-  list.push(task);
-  state.snapshot.tasks = list;
-  scheduleInbox();
-  renderSidebar();
 }

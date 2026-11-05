@@ -118,9 +118,21 @@ async def test_a_learner_that_stopped_does_not_block_learning(harness):
     await settle(runtime)
     harness.store.update_session(started["session_id"], status="done")  # Proposed nothing.
     runtime.learning.record("follow-up", context="t", owner="And name the tests")
+    first_conversation = harness.session(started["session_id"])
     again = await runtime.learning.learn()
-    assert again["session_id"] != started["session_id"]
-    assert harness.store.session(started["session_id"])["closed_at"], "the stale one is closed"
+    await settle(runtime)
+    learner = again["session_id"]
+    assert learner == started["session_id"], "the same learner: one entry, one history"
+    assert again["task_id"] != started["task_id"]
+    assert first_conversation.disconnected
+    fresh = runtime.copilot_id(learner)
+    assert fresh != learner, "on a fresh Copilot conversation"
+    assert "And name the tests" in harness.client.sessions[fresh].sent[-1]
+    assert not harness.store.session(learner)["closed_at"]
+    notices = [
+        m["text"] for m in harness.store.messages(harness.router_id) if m["kind"] == "notice"
+    ]
+    assert not any("Learn how you work" in text for text in notices), "helpers come and go quietly"
 
 
 async def test_what_a_slack_reading_worker_wrote_is_not_learned_from(harness):

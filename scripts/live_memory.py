@@ -228,12 +228,19 @@ async def m1_how_the_owner_writes(
     )
     assert not fixed.search(json.dumps(lessons, ensure_ascii=False)), f"no language: {lessons}"
     router = (await app.get("/api/state"))["router_id"]
-    notices = [
-        m["text"]
-        for m in await app.get(f"/api/sessions/{router}/messages")
-        if m["kind"] == "notice" and m["meta"].get("style")
-    ]
-    assert notices, "the owner is told what was learned"
+
+    async def told():
+        # One summary when the learning run ends, linking to Settings.
+        return [
+            m["text"]
+            for m in await app.get(f"/api/sessions/{router}/messages")
+            if m["kind"] == "notice" and m["meta"].get("styles")
+        ] or None
+
+    notices = await wait_for("the owner is told what was learned", told, 300, app)
+    log(f"told: {notices}")
+    rows = await app.get(f"/api/sessions/{router}/messages")
+    assert not [m for m in rows if m["meta"].get("style")], "a summary, not a notice per style"
 
     # The language follows the message, not what the owner used most so far (Chinese).
     english = await router_reply(app, "Which workers are open right now? One line.")
