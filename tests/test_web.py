@@ -192,3 +192,38 @@ def test_a_second_start_finds_only_an_instance_that_answers(tmp_path):
         port = unused.getsockname()[1]
     (tmp_path / LAUNCH_FILE).write_text(f"http://127.0.0.1:{port}/#token=abc")
     assert running_instance(tmp_path) == "", "a stale file from a crash is not trusted"
+
+
+def test_the_owner_attaches_an_image_and_the_router_hands_it_on(app_client):
+    import base64
+
+    sign_in(app_client)
+    router = app_client.get("/api/state").json()["router_id"]
+    png = b"\x89PNG\r\n\x1a\n" + b"\0" * 32
+    image = {"name": "bug.png", "type": "image/png", "data": base64.b64encode(png).decode()}
+    url = f"/api/sessions/{router}/messages"
+    fake = {**image, "data": base64.b64encode(b"<svg/>").decode()}
+    refused = app_client.post(url, json={"attachments": [fake]}, headers=ORIGIN)
+    assert refused.status_code == 400 and "not a PNG" in refused.text
+    sent = app_client.post(url, json={"text": "", "attachments": [image]}, headers=ORIGIN)
+    assert sent.status_code == 200
+    [saved] = sent.json()["meta"]["attachments"]
+    assert app_client.get(saved["url"]).content == png
+    assert app_client.get("/api/attachments/..%2Fdata.db").status_code == 404
+    session = app_client.fake.sessions[router]
+    assert session.attachments[-1] == [
+        {"type": "file", "path": saved["path"], "displayName": "bug.png"}
+    ]
+    assert saved["path"] in session.sent[-1], "the Router can hand it on by path"
+
+    result = app_client.portal.call(
+        lambda: call_tool(
+            app_client.app.state.runtime,
+            "spawn_worker",
+            router,
+            title="Fix the layout",
+            instructions=f"Fix what this screenshot shows: {saved['path']}",
+        )
+    )
+    worker = json.loads(result.text_result_for_llm)["session_id"]
+    assert app_client.fake.sessions[worker].attachments[-1][0]["path"] == saved["path"]

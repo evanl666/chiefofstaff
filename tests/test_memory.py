@@ -164,7 +164,14 @@ async def test_the_owners_style_is_learned_applies_at_once_and_can_be_undone(tmp
         runtime, "update_style", learner["id"], section="slack_dm", text=style, evidence=ids
     )
     assert "version 1" in done.text_result_for_llm
-    assert any("Slack direct messages" in text for _, text in harness.kinds(harness.router_id))
+    told = lambda: [m for m in harness.store.messages(harness.router_id) if "Learned" in m["text"]]  # noqa: E731
+    assert not told(), "told once, when the run ends"
+    await call_tool(runtime, "propose_lessons", learner["id"], lessons=[])
+    session.emit("session.idle")
+    await settle(runtime)
+    [notice] = told()
+    assert "Slack direct messages (v1)" in notice["text"] and notice["meta"]["settings"] == "you"
+    assert runtime.habits.view()["last"]["text"] == notice["text"]
 
     worker = await spawn(runtime, harness.router_id, "Write notes")
     slack_worker = await spawn(runtime, harness.router_id, "Answer Bob", slack=True)
@@ -445,3 +452,20 @@ async def test_a_style_never_sets_the_language(tmp_path):
     assert "version 1" in done.text_result_for_llm
     assert runtime.tasks.current(learner["id"])["status"] == "done"
     assert runtime.states[learner["id"]].close_after_turn
+
+
+async def test_learn_now_answers_at_once_and_helpers_take_no_worker_slot(tmp_path):
+    harness = Harness(tmp_path / "data", Settings(max_workers=1))
+    runtime = await harness.connect()
+    busy = (await spawn(runtime, harness.router_id, "Long job"))["session_id"]
+    assert harness.store.session(busy)["status"] == "working"
+    runtime.learning.record("follow-up", context="t", owner="Shorter reports")
+    runtime.habits.start_learning()
+    assert runtime.habits.view()["running"], "shown running at once"
+    with pytest.raises(ValueError):
+        runtime.habits.start_learning()
+    await settle(runtime)
+    learner = learner_of(harness)
+    assert learner["status"] == "working", "not queued behind the owner's worker"
+    assert runtime.workers.running() == 1
+    assert "learning from it now" in runtime.habits.view()["last"]["text"]

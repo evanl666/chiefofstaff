@@ -146,6 +146,8 @@ class Watchdog:
                 continue
             if self.runtime.copilot_id(row["id"]) in self.runtime.elsewhere:
                 continue  # Its owner is working with it in a terminal.
+            if self.runtime.special(row) == "connector":
+                continue  # Chief of Staff's own: a run ends without a report.
             messages = self.store.messages(row["id"])
             mark = messages[-1]["id"] if messages else 0
             state = self.state(row["id"])

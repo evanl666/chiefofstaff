@@ -48,6 +48,15 @@ def task_id() -> str:
     return "t" + uuid4().hex[:7]
 
 
+# Chief of Staff's own helper workers (learning, checks, profile, connector): not the owner's
+# tasks, never listed with them.
+HELPER_KINDS = ("learner", "checker", "distill", "connector")
+HELPERS = " UNION ".join(
+    f"SELECT substr(key, {len(kind) + 2}) FROM kv WHERE key >= '{kind}:' AND key < '{kind}:\uffff'"
+    for kind in HELPER_KINDS
+)
+
+
 class TaskBook:
     def __init__(self, store: Store, on_change: Callable[[dict], None] = lambda task: None):
         self.store = store
@@ -83,9 +92,10 @@ class TaskBook:
         """Open and in-review tasks, and those that ended since the given time (not the
         placeholder task of an adopted session, until it is continued)."""
         return self.store.all(
-            """SELECT * FROM tasks WHERE (status IN ('queued','running','waiting','review')
+            f"""SELECT * FROM tasks WHERE (status IN ('queued','running','waiting','review')
             OR (ended_at IS NOT NULL AND ended_at>=?))
-            AND NOT (status='done' AND result=?) ORDER BY created_at""",
+            AND NOT (status='done' AND result=?) AND session_id NOT IN ({HELPERS})
+            ORDER BY created_at""",
             (include_ended_since or now(), ADOPTED),
         )
 

@@ -4,7 +4,7 @@ How Chief of Staff works from your side: what you see, what it does on its own, 
 asks you. For how it is built, see [ARCHITECTURE.md](ARCHITECTURE.md). For what keeps agents in
 bounds, see [SECURITY.md](../SECURITY.md).
 
-- [The inbox](#the-inbox)
+- [Home](#home)
 - [Giving work](#giving-work)
 - [Tasks and workers](#tasks-and-workers)
 - [Where workers work](#where-workers-work)
@@ -25,41 +25,57 @@ bounds, see [SECURITY.md](../SECURITY.md).
 - [Settings and environment variables](#settings-and-environment-variables)
 - [Data](#data)
 
-## The inbox
+## Home
 
-The home view answers three questions:
+Home is the one screen you work from. On the left is your conversation with the Router: what
+you asked, its short answers, and one line for each thing that happened on the way (*Started
+“Fix the flaky login test”*, *Fix the flaky login test finished · View*). **View** brings up the
+task's card on the right instead of repeating its report in the chat; lines from Slack, the
+Watchdog and other sessions open in place.
+
+On the right, everything has one place:
 
 | Section | What is there |
 | --- | --- |
-| **Needs you** | Questions and forms from workers, sign-ins, a folder to pick, Slack replies and PR reviews to approve, sends a restart interrupted, failed or blocked tasks. |
-| **Running** | Each task in progress at a glance: the step its worker is in now and for how long, and what it said last; or what it waits for. Hover for *Cancel* and *Add a note*. |
-| **Ready to review** | Finished tasks with the worker's report and [receipts](#receipts). [Review the changes](#reviewing-changes), *Create PR*, *Accept*, *Follow up*, or *Copy report* (markdown for a PR description). |
+| **Needs you** | Questions and forms from workers, sign-ins, decisions, a folder to pick, Slack replies, PR reviews and replies to approve, sends a restart interrupted, failed or blocked tasks. Each card has one main action (*Send*, *Answer*, *Accept*…); the rest is behind **⋯**. A card leaves as soon as you act and a short note confirms it; if that did not work, it comes back with the reason. |
+| **Tasks** | *Running*: each task at a glance, with the step its worker is in now and for how long, and what it said last. *Queued*: why it waits (*Waiting for “…”*, or *Waiting for a worker slot · 3 of 3 busy* when *Parallel workers* are all in use). *Ready to review*: the outcome in a line and the [receipts](#receipts); *Show report* opens the whole report. *Accept*, or under **⋯** *Follow up*, *Copy report* (markdown for a PR description) and *Create PR* (for work on a branch of its own). *Recently finished* keeps finished and cancelled tasks for three days. |
 
-Finished and cancelled tasks stay under *Recently finished* for three days. **Chat** is the
-conversation with your Router; the session list below it opens any worker's full timeline
-(every step, report and message), where you can also talk to it directly.
+When a finished task's worker drafted something for you (a Slack reply, a PR review), the draft
+is the one card: it shows the task's result, and sending it accepts the task.
+
+Click a task's title (or *Open worker*) to see its worker's full timeline, every step, report
+and message, and to talk to it directly; **← Home** goes back. *Stop*, next to *Thinking…* at
+the end of a timeline, interrupts what a session is doing; a worker's **⋯** (top right) has its
+model, its permission checks, its folder and *Close worker*. On a narrow window Home shows
+*Chat*, *Needs you* and *Tasks* one at a time. The sidebar has Home (its count is what needs
+you, the only count anywhere), your workers, running first, then *Closed* and *Other Copilot
+sessions*; Settings and Usage are the icons at the bottom.
 
 A file path in a report or message opens the file when it is in a worker's folders (a
 walkthrough, results, a log): Markdown shows formatted. Other paths are copied.
 
-The dot next to each session shows its state (hover it for the words): pulsing blue, working;
+The dot next to each worker shows its state (hover it for the words): pulsing blue, working;
 amber, waiting for your answer; green, done; red, failed; hollow grey, queued; grey, idle; a
 blue ring, open in a terminal right now.
 
-Until you set your code folder (see [Where workers work](#where-workers-work)), the inbox asks
-for it; *Not now* hides that card, and Settings still has it.
+Until you set your code folder (see [Where workers work](#where-workers-work)), Home asks for
+it; *Not now* hides that card, and Settings still has it.
 
 ## Giving work
 
-Type into the inbox or Chat. Several things at once is fine: the Router splits them into
+Type on Home. Several things at once is fine: the Router splits them into
 tasks and starts a worker for each, in parallel. When one task needs another's result, it
 waits and then starts with that result. The Router replies with one line; results come back
 as they finish: each worker's report comes to you whole, as a card, and the Router does not
 repeat it. When you write to the Router, its reply is the one answer you get.
 
-**To one worker:** type `@` in the inbox or Chat and pick a worker; the message goes straight to
-it (`→ worker` in Chat), and the Router hears of it with its next message. Or open the worker,
-or use *Add a note* on its card.
+**To one worker:** type `@` on Home and pick a worker; the message goes straight to it (`→
+worker` in the chat), and the Router hears of it with its next message. Or open the worker, or
+use *Add a note* in its card's **⋯**.
+
+**Images:** paste a screenshot, drop images on the chat, or use the paperclip (up to five, 5 MB
+each); they show small above the message until you send it. Long messages you sent fold, with
+*Show more*.
 
 **Progress:** ask the Router ("how is it going?"). It reads what each worker is doing now and
 said last, and answers at once instead of waiting on the workers. A worker in a long step (a
@@ -317,7 +333,7 @@ Chinese), and a Slack reply is in the language of the message it replies to, or 
 when you said what to answer. Each style applies at once to the sessions that write that way
 for you (the Slack session and workers that read Slack get your Slack style; workers get your
 commit and review style; the Router and workers answer you the way you talk to them), and the
-Router chat says what was learned. Settings → *How you work* shows each, with its version; *Undo* goes back to the
+Router chat says what was learned, with a link to Settings. Settings → *You* → *How you work* shows each, with its version; *Undo* goes back to the
 previous one. Turn *Learn from my Slack messages, PR reviews, commits and Copilot sessions* off
 to stop reading them.
 
@@ -338,7 +354,7 @@ migration* or *Run a small smoke job before the full one*, each with where it ap
 shows them: keep, reword or untick each. Only what you keep goes into your sessions'
 instructions; habits learned while the card waits join it.
 
-Settings → *How you work* lists the habits in use (remove any) and shows how close the sessions
+Settings → *You* lists the habits in use (remove any) and shows how close the sessions
 get to you: the share of recommendations you took, drafts you sent as written and results you
 accepted as they were, over the last 30 days and the 30 before. Usage shows what a result you
 accepted cost, by model.
@@ -357,13 +373,13 @@ proof; *Use this check* turns it on.
 From then on, when a worker in that repository says it is done with changes to files the check
 applies to, the check runs on a clean copy of its work. If it fails, the worker is sent back
 once to fix it (or to say why it does not apply); if it still fails, the review card flags it.
-Settings → *How you work* lists the checks, how often each ran and caught something, and turns
+Settings → *You* lists the checks, how often each ran and caught something, and turns
 any off. Checks run in a sandbox: no network, no writes, and nothing in your home folder but the
 repository is readable. They need macOS (`sandbox-exec`) or `bwrap` on Linux.
 
 ## Focus
 
-*Focus…* (inbox header) holds notifications for 30 minutes to 4 hours. The Router keeps
+**Focus** (at the top of Home) holds notifications for 30 minutes to 4 hours. The Router keeps
 working: Slack messages that need a reply get drafts, code work goes to workers, noise is
 ignored. Only what the Router marks urgent (an outage, someone blocked on you today) gets
 through. When focus ends you get one summary: messages handled, replies drafted, tasks ready to
@@ -395,7 +411,7 @@ you: it starts a worker (or gives it to the one that knows the subject), and whe
 waiting, the worker drafts a reply in that thread with the outcome for you to approve. Write a
 note to yourself and react to it to delegate from your phone.
 
-Change the emoji (or empty it to turn this off) in **Settings → Slack**. The watcher finds
+Change the emoji (or empty it to turn this off) in **Settings → Connections → Slack**. The watcher finds
 reactions with Slack's `hasmy::robot_face:` search, among the 20 most recent messages you
 reacted to; reactions from before you turned it on are ignored. The message itself is still
 someone else's text: the Router checks with you before anything risky it asks for.
@@ -409,7 +425,10 @@ has not changed since.
 
 You can also just ask: "review checkout-service PR #1529". A worker drafts reviews on a PR its task
 names (by URL, or by the repository's name and number), one it opened, follows or was given, or
-one GitHub asks you to review. A review carries **comments on lines** of the diff: the card
+one GitHub asks you to review. A review carries a **verdict**: approve, request changes or
+comment. Ask "review it and approve it if nothing blocks merging" and the card says *Approve &
+send*; you can change the verdict on the card before sending, and an approval is a real GitHub
+approval. A review carries **comments on lines** of the diff: the card
 shows each one to edit, or empty to leave out. Lines outside the diff are refused when drafting,
 so what you approve can be published.
 
@@ -424,6 +443,54 @@ repository, the worker tells you which accounts are signed in.
 
 Workers commit on their branch but do not push unless the task asks for it: you open the PR with
 *Create PR*. Analyses and research need no branch at all.
+
+## Watches: what to look out for
+
+Settings → Connections → *Watches* says what to look out for, in your words: "Slack DMs and
+mentions of me", "comments on my Google Docs", "emails from customers". Optionally say with
+what: "Glean search", "the Slack MCP server", your company's own search. Chief of Staff's
+connector checks them on a schedule (every 5 minutes in work hours, every 30 after; both
+settable, 0 turns after-hours checks off) with whatever MCP servers, skills and CLIs your
+Copilot has here, so it works without a Slack token wherever your company gives Copilot a
+search. *Scan now* checks at once.
+
+What needs you (a question, a request, a mention that expects your answer) goes to the Router,
+like a Slack event. It has a worker look into it, read the conversation and draft the reply in
+your voice. Where Chief of Staff can send it (Slack connected), you approve and it is sent;
+otherwise approving copies it for you to paste. Bots, FYIs and what you already answered are
+left alone, and nothing is handed over twice. A watch whose tool is missing here says so under
+*Watches*. The connector only looks: it never posts, replies or reacts.
+
+It also collects what you write there (your own messages only), so *How you work* learns your
+voice even where Slack is reached through another tool.
+
+## When you are away
+
+Turn on Settings → Connections → *When you're away* and say how to reach you, for example
+"DM me on Slack through the acmebot plugin". After that many minutes without keyboard or mouse,
+what needs you (cards, questions from workers, a question the Router asked you in the chat,
+failed tasks) is sent to you that way, once, each with a five-letter code. Answer where you got
+it with the code: "K3XQ7 send" sends a draft, "K3XQ7 2" picks option 2 of a decision, "K3XQ7
+use port 9090" answers a question, "K3XQ7 retry" retries a failed task. The connector reads
+your answers on its next check, and the chat notes each one. *Send a test* tries the way you
+gave. Without a bot that can message you, say "send it to my own Slack DM": you see it there,
+without a phone notification.
+
+## Abilities: skills, plugins and MCP servers
+
+Workers load everything your own Copilot sessions load: your plugins, skills, MCP servers and
+agents, your company's, and a repository's own. Settings → Connections → *Abilities* adds more:
+upload a skill (a `SKILL.md` with a name and a description), name folders of skills, list
+Copilot plugins to install (`owner/repo`, `owner/repo:path`, `name@marketplace` or a git URL;
+installed with `copilot plugin install`, each with its status), and MCP servers as in Copilot's
+`mcp-config.json`. They run as they do in your own sessions: add only what you would install
+for yourself.
+
+## Images
+
+Paste or drop screenshots into the chat (PNG, JPEG, GIF or WebP, up to 5 MB, five at a time).
+The Router sees them, and a worker it gives them to gets them too; a message straight to a
+worker (@) brings them along.
 
 ## Following threads
 
@@ -449,14 +516,16 @@ looks stuck*, and the evidence).
 
 ## What runs without asking
 
-Workers act without asking inside their folders. Chief of Staff refuses (the worker must ask
-you): writes outside its folders, `sudo`, force pushes, pushes to `main`/`master`,
+Workers act without asking inside their folders. With *Ask first* (below), Chief of Staff also
+refuses (the worker must ask you): writes outside its folders, `sudo`, force pushes, pushes to `main`/`master`,
 `gh pr merge|close|review|comment`, `gh issue` changes, `gh api` writes, GitHub MCP writes,
 piping downloads into a shell, and system-level destructive commands. Workers that read Slack
 cannot fetch URLs, and their network reaches only GitHub when sandboxed.
 
-**Yolo** (Settings, or per worker in its header) turns these checks off. The sandbox still
-applies when it is on. Slack replies and PR reviews remain drafts either way.
+**Yolo** is on by default, as in your own Copilot sessions: workers run without these checks.
+Turn it off in Settings → *Workers* (or per worker in its header's **⋯**: *Ask first*) to have
+them enforced. Workers that read Slack keep the checks unless you choose yolo for them there. The sandbox
+still applies when it is on. Slack replies and PR reviews remain drafts either way.
 
 Nothing is sent as you without your approval. See [SECURITY.md](../SECURITY.md) for which of
 these boundaries the OS enforces and which rely on the model.
@@ -465,10 +534,10 @@ these boundaries the OS enforces and which rely on the model.
 
 Settings sets a default model and one per role, and a default thinking effort per role (it
 applies to Copilot's default model too; *Auto*, which picks a model each turn, takes none). A
-session's header switches its model, effort and context window (where the model has a
-long-context tier). The Router may choose a stronger or cheaper model or effort for one task.
-**Usage** (bottom left) totals credits by session, model and role for any date range; every
-task shows its own credits. It includes what a worker used while you had it open in a terminal,
+session's **⋯** (top right; on Home, the Router's) switches its model, effort and context window
+(where the model has a long-context tier). The Router may choose a stronger or cheaper model or effort for one task.
+**Usage** (the chart icon, bottom left, with today's credits) totals credits by session, model
+and role for any date range; every task shows its own credits (hover its time). It includes what a worker used while you had it open in a terminal,
 read from Copilot's log (also from before Chief of Staff was running). An optional credit
 limit per worker stops runaway workers.
 
@@ -477,9 +546,9 @@ limit per worker stops runaway workers.
 At the configured time (default 09:00) the Router posts one summary: what finished, what waits
 for you, what was handled without you, credits used. Quiet days post nothing.
 
-**Build from my work** (Settings → Your profile) starts a worker that distills a short profile
+**Build from my work** (Settings → *You* → *Your profile*) starts a worker that distills a short profile
 from your projects, GitHub activity, recent Copilot sessions and, with Slack, how you write. It
-arrives as a card in the inbox: correct anything, then *Use this profile*; sessions use it only
+arrives as a card under *Needs you*: correct anything, then *Use this profile*; sessions use it only
 then. Your edits to Slack drafts also teach the Slack session your
 style.
 

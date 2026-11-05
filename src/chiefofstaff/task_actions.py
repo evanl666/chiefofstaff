@@ -493,6 +493,9 @@ class TaskActions:
         )
         if before in {"review", "done", "failed"}:
             task = self.tasks.move(task_id, "running", reason="follow-up")
+        elif before == "waiting":
+            # The owner answered what it waited for: it goes on (and asks again if need be).
+            task = self.tasks.move(task_id, "running", progress="")
         try:
             await self.delivery.deliver(
                 row["id"],

@@ -169,12 +169,28 @@ class Delivery:
             text = "\n\n".join(prompts)
             marker = {"upto": pending[-1]["id"], "digest": digest(text)}
             self.store.set(f"sending:{session_id}", json.dumps(marker))
+            row = self.store.session(session_id)
+            state = self.states[session_id]
+            mid_turn = row["role"] == WORKER and row["status"] == "working" and state.echoes
+            attachments = [
+                {"type": "file", "path": item["path"], "displayName": item["name"]}
+                for message in pending
+                for item in message["meta"].get("attachments") or []
+            ]
             try:
-                await session.send(text, mode=mode)
+                if attachments:
+                    await session.send(text, mode=mode, attachments=attachments)
+                else:
+                    await session.send(text, mode=mode)
             except BaseException:
                 # The caller hears of the failure and the messages count as not delivered.
                 self.store.delete(f"sending:{session_id}")
                 raise
+            if mid_turn:
+                # It sees this once its conversation shows it (events.user_message): a report
+                # before that is about the work without it.
+                state.unread[marker["digest"]] = pending[-1]["text"][:300]
+            self.store.set(f"prevsent:{session_id}", str(mark))  # To send again after a failure.
             self.store.set(f"sent:{session_id}", str(pending[-1]["id"]))
             self.store.delete(f"sending:{session_id}")
             self.store.delete(f"fresh:{self.runtime.copilot_id(session_id)}")

@@ -342,9 +342,8 @@ class Store:
         except ValidationError:
             # A project directory may have been deleted since it was saved.
             values = json.loads(row["value"])
-            values["projects"] = [
-                path for path in values.get("projects", []) if Path(path).is_dir()
-            ]
+            for key in ("projects", "skill_folders"):
+                values[key] = [path for path in values.get(key, []) if Path(path).is_dir()]
             if not Path(values.get("code_folder") or "/nonexistent").is_dir():
                 values["code_folder"] = ""
             try:

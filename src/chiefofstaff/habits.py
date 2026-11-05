@@ -142,6 +142,7 @@ class Habits:
         self.lock = asyncio.Lock()
         self.job: asyncio.Task | None = None
         self.status: dict[str, str] = {}  # Source -> its last error ("" when it worked).
+        self.running = False  # Learn now: reading the owner's work, then starting to learn.
 
     # Collecting
 
@@ -171,17 +172,76 @@ class Habits:
 
     async def learn_now(self) -> dict:
         """Settings' Learn now: read what is new, then learn from everything not learned yet."""
-        await self.collect()
+        await self.collect(by_owner=True)
         return await self.runtime.learning.learn()
+
+    def start_learning(self):
+        """Learn now, in the background: reading Slack, GitHub and sessions takes a while; the
+        owner sees it running in Settings and its outcome there."""
+        if self.running or self.runtime.learning.busy():
+            raise ValueError("Chief of Staff is learning from your work already.")
+        self.running = True
+        self.runtime.bus.publish("state")
+
+        async def run():
+            try:
+                await self.learn_now()
+                self.last("Reading done: learning from it now.")
+            except ValueError as exc:
+                self.last(str(exc))
+            except Exception as exc:
+                logger.warning("Learn now failed.", exc_info=True)
+                self.last("", error=str(exc)[:300])
+            finally:
+                self.running = False
+                self.runtime.bus.publish("state")
+
+        self.runtime.background(run())
+
+    def last(self, text: str, error: str = ""):
+        self.store.set("habits_last", json.dumps({"at": now(), "text": text, "error": error}))
+
+    def learned(self, caller: str, section: str, version: int):
+        """What a learning run changed, for its one summary when it ends (see summarize)."""
+        changed = json.loads(self.store.get(f"learned_styles:{caller}") or "{}")
+        changed[section] = version
+        self.store.set(f"learned_styles:{caller}", json.dumps(changed))
+
+    def summarize(self, caller: str):
+        """One notice when a learning run ends: what changed, and where to see it. Nothing
+        when nothing changed (lessons to review come as their own card)."""
+        changed = json.loads(self.store.get(f"learned_styles:{caller}") or "{}")
+        self.store.delete(f"learned_styles:{caller}")
+        lessons = self.runtime.learning.pending_card()
+        count = len(lessons["target"]["lessons"]) if lessons else 0
+        parts = [f"{TITLES[section]} (v{version})" for section, version in changed.items()]
+        if parts:
+            text = "Learned how you write: " + ", ".join(parts) + ". It applies now"
+            text += f"; {count} habit(s) wait for your OK." if count else "."
+            self.last(text)
+            self.runtime.add_message(
+                self.runtime.router_id(), "notice", text, {"settings": "you", "styles": changed}
+            )
+        else:
+            self.last(
+                f"{count} habit(s) wait for your OK." if count else "Nothing new learned this time."
+            )
 
     def enabled(self) -> bool:
         settings = self.store.settings()
         return settings.learn_from_work and not settings.paused
 
-    async def collect(self) -> int:
-        """Read what the owner wrote since the last time; how many new observations."""
+    async def collect(self, by_owner: bool = False) -> int:
+        """Read what the owner wrote since the last time; how many new observations. Without
+        Slack connected here, the connector reads it with whatever tools work (it arrives
+        later, for the next run)."""
         if not self.enabled():
             return 0
+        if not self.runtime.slack.configured():
+            try:
+                await self.runtime.connector.collect_words(by_owner=by_owner)
+            except Exception as exc:
+                logger.info("The connector could not collect the owner's words: %s", exc)
         async with self.lock:
             added = 0
             for name, collector in (
@@ -532,13 +592,7 @@ class Habits:
             (section, text, json.dumps(evidence), "active", now()),
         )
         version = self.version(section)
-        notice = (
-            f"Learned how you write: {TITLES[section]} (version {version}). It applies now; "
-            "see it or undo it in Settings → How you work."
-        )
-        self.runtime.add_message(
-            self.runtime.router_id(), "notice", notice, {"style": section, "version": version}
-        )
+        self.learned(caller, section, version)  # Told in one summary when the run ends.
         await self.runtime.refresh(*self.roles_of(section))
         self.runtime.bus.publish("state")
         return f"{section} is now version {version}; it applies at once."
@@ -625,5 +679,7 @@ class Habits:
             "observed": counts,
             "new": self.unlearned(),
             "collected_at": self.store.get("habits_collected_at") or "",
+            "running": self.running or self.runtime.learning.busy(),
+            "last": json.loads(self.store.get("habits_last") or "{}"),
             "errors": {name: error for name, error in self.status.items() if error},
         }

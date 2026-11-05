@@ -626,3 +626,35 @@ async def test_focus_holds_notifications_and_ends_with_one_summary(harness):
     assert summary["meta"].get("focus_summary")
     assert summary["text"].startswith("While you focused (")
     assert "1 task ready to review" in summary["text"]
+
+
+async def test_a_model_copilot_refuses_falls_back_and_the_message_is_sent_again(tmp_path):
+    settings = Settings(model="smart-model", role_efforts={"worker": "high"})
+    harness = Harness(tmp_path / "data", settings)
+    runtime = await harness.connect()
+    worker = (await spawn(runtime, harness.router_id, "Hard bug"))["session_id"]
+    session = harness.session(worker)
+    task = session.sent[-1]
+    refused = "Execution failed: 400 The requested model is not supported. (Request ID: x)"
+
+    session.emit("session.error", message=refused)
+    await settle(runtime)
+    assert session.models[-1] == "smart-model" and session.tunings[-1] == {
+        "reasoning_effort": "medium",
+        "context_tier": "default",
+    }, "first without the chosen effort and context size"
+    assert session.sent[-1] == task, "the turn that failed is sent again"
+    assert harness.store.session(worker)["status"] == "working", "not failed"
+
+    session.emit("session.error", message=refused)
+    await settle(runtime)
+    assert session.models[-1] == "auto", "then on Copilot's default model"
+    assert session.sent[-1] == task
+    notes = [text for kind, text in harness.kinds(worker) if kind == "notice" and "refused" in text]
+    assert len(notes) == 2 and "smart-model" in notes[1]
+    other = (await spawn(runtime, harness.router_id, "Docs", why_new="other"))["session_id"]
+    assert "model" not in harness.session(other).options, "a refused model is not asked again"
+
+    session.emit("session.error", message=refused)
+    await settle(runtime)
+    assert runtime.tasks.current(worker)["status"] == "failed", "nothing left: it fails"

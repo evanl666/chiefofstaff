@@ -1,18 +1,13 @@
-// The sidebar: the inbox, the Router's chat, sessions, closed workers and other Copilot sessions.
+// The sidebar: Home, sessions, closed workers and other Copilot sessions.
 
 import { $, api, el, toast } from "./dom.js";
 import { ago, shortPath, since } from "./text.js";
-import { closedWorkers, DOT_HELP, draftsFor, loadState, sessions, state, STATUS_ORDER, STATUS_TEXT } from "./state.js";
-import { IN_TERMINAL, readOnlyTimeline, scrollToBottom, select, setComposer } from "./session.js";
-import { inboxItem } from "./inbox.js";
+import { closedWorkers, DOT_HELP, HOME, loadState, sessions, state, STATUS_ORDER, STATUS_TEXT } from "./state.js";
+import { IN_TERMINAL, readOnlyTimeline, scrollToBottom, select, setComposer, setLayout } from "./session.js";
+import { homeItem, needsCount } from "./inbox.js";
 import { closeMentions, setRecipient } from "./mention.js";
+// One count in the whole sidebar, on Home: what needs the owner. Sessions show only their dot.
 function sessionItem(session, label) {
-  const drafts = draftsFor(session.id).length;
-  const badge = session.unread
-    ? el("span", { class: "badge", text: String(session.unread) })
-    : drafts
-      ? el("span", { class: "badge amber", text: String(drafts), title: "Waiting for your approval" })
-      : null;
   // A session open in another Copilot window shows that, whatever Chief of Staff last saw it do.
   const dot = session.elsewhere ? `open${session.terminal?.working ? " busy" : ""}` : session.status;
   return el(
@@ -26,33 +21,29 @@ function sessionItem(session, label) {
     },
     el("span", { class: `dot ${dot}`, title: DOT_HELP[dot.split(" ")[0]] || "" }),
     el("span", { class: "label", text: label }),
-    badge,
   );
 }
 export function renderSidebar() {
   const list = $("#session-list");
   const all = sessions();
-  const router = all.find((session) => session.role === "router");
-  const slack = all.find((session) => session.role === "slack");
-  const watchdog = all.find((session) => session.role === "watchdog");
+  // Chief of Staff's own helpers (learning, checks, the profile) are not the owner's workers.
   const workers = all
-    .filter((session) => session.role === "worker")
+    .filter((session) => session.role === "worker" && !session.helper)
     .sort((a, b) => (STATUS_ORDER[a.status] ?? 9) - (STATUS_ORDER[b.status] ?? 9) || b.created_at.localeCompare(a.created_at));
-  const nodes = [inboxItem()];
-  if (router) nodes.push(sessionItem(router, "Chat"));
-  if (slack && state.snapshot.settings.slack_enabled) nodes.push(sessionItem(slack, "Slack"));
-  if (watchdog && state.snapshot.settings.watchdog_enabled) nodes.push(sessionItem(watchdog, "Watchdog"));
+  const nodes = [homeItem()];
   if (workers.length) {
-    nodes.push(el("div", { class: "group", text: `Workers · ${workers.length}` }));
+    nodes.push(el("div", { class: "group", text: "Workers" }));
     nodes.push(...workers.map((worker) => sessionItem(worker, worker.title)));
   }
   list.replaceChildren(...nodes);
+  const count = needsCount();
+  document.title = count ? `(${count}) Chief of Staff` : "Chief of Staff";
   renderClosed();
   renderExternal();
   renderStatusLine();
 }
 function renderClosed() {
-  const closed = closedWorkers();
+  const closed = closedWorkers().filter((session) => !session.helper);
   $("#closed").hidden = !closed.length;
   $("#closed-count").textContent = `· ${closed.length}`;
   $("#closed-list").replaceChildren(
@@ -77,7 +68,8 @@ export function renderStatusLine() {
   const snap = state.snapshot;
   const nodes = [];
   if (snap.runtime.state === "starting") nodes.push(el("div", { text: "Connecting to Copilot…" }));
-  if (snap.runtime.state === "error") {
+  // On Home the setup card says it, with what to do.
+  if (snap.runtime.state === "error" && state.selected !== HOME) {
     nodes.push(
       el("div", { class: "bad", text: `Copilot: ${snap.runtime.error}` }),
       el("button", { type: "button", class: "link", text: "Retry", onclick: reconnect }),
@@ -90,8 +82,6 @@ export function renderStatusLine() {
   if (snap.settings.slack_enabled && snap.slack.error) nodes.push(el("div", { class: "bad", text: `Slack: ${snap.slack.error}` }));
   if (snap.settings.github_enabled && snap.github.error) nodes.push(el("div", { class: "bad", text: `GitHub: ${snap.github.error}` }));
   if (snap.settings.paused) nodes.push(el("div", { text: "Watchers paused" }));
-  const sandboxed = snap.settings.worker_sandbox && snap.sandbox?.supported;
-  if (snap.settings.worker_yolo) nodes.push(el("div", { class: "yolo", text: sandboxed ? "Yolo: no permission checks (sandboxed)" : "Yolo: workers run without permission checks" }));
   line.replaceChildren(...nodes);
 }
 async function reconnect() {
@@ -134,25 +124,24 @@ export async function loadExternal(refresh = false) {
 // A message continues it here (the Router manages it from then on, in its own folder).
 export const externalItem = () => state.external.find((item) => item.id === state.selected);
 function showExternal(item) {
-  // A worker chosen with @ is for the Router chat and the inbox, not for this session.
+  // A worker chosen with @ is for messages sent from Home, not for this session.
   closeMentions();
   setRecipient(null);
   state.selected = item.id;
+  setLayout(false);
   renderSidebar();
-  $("#inbox").hidden = true;
-  $("#timeline").hidden = false;
-  $("#drafts").hidden = true;
-  $("#session-tuning").hidden = true;
+  $("#back-home").hidden = false;
+  $("#session-menu").hidden = true;
   $("#session-title").textContent = item.summary;
   $("#session-meta").textContent = [item.open ? "Open in a terminal" : "Not managed yet", shortPath(item.cwd), item.branch, `updated ${since(item.modified)}`].filter(Boolean).join(" · ");
   $("#session-meta").title = item.cwd;
   const command = `copilot --resume ${item.id}`;
+  delete $("#session-actions").dataset.key;
   $("#session-actions").replaceChildren(
     el("button", { type: "button", class: "text", text: "Copy resume command", title: command, onclick: () => navigator.clipboard.writeText(command).then(() => toast("Copied")) }),
   );
-  $("#drafts").replaceChildren();
   $("#composer").hidden = false;
-  setComposer(item.open ? { locked: IN_TERMINAL } : { placeholder: "Message to continue this session here…" });
+  setComposer(item.open ? { locked: IN_TERMINAL } : { placeholder: "Message to continue this session here…", attach: false });
   const history = el("div", { class: "external-history" }, el("div", { class: "line note", text: "Loading its conversation…" }));
   $("#timeline").replaceChildren(history);
   loadHistory(item, history, true);
@@ -168,7 +157,7 @@ async function loadHistory(item, box, first = false) {
       // Exited in the terminal while the owner watched: it can be continued here now.
       item.open = false;
       $("#session-meta").textContent = $("#session-meta").textContent.replace("Open in a terminal", "Not managed yet");
-      setComposer({ placeholder: "Message to continue this session here…" });
+      setComposer({ placeholder: "Message to continue this session here…", attach: false });
     }
     const nodes = readOnlyTimeline(entries, item.cwd);
     if (!nodes.length) nodes.push(el("div", { class: "line note", text: "No conversation yet." }));

@@ -53,8 +53,11 @@ SendMode = Literal["enqueue", "immediate"]
 class AgentSession(Protocol):
     session_id: str
 
-    async def send(self, prompt: str, *, mode: SendMode = "enqueue") -> Any:
-        """Queue a message and return at once; the turn's progress arrives as events."""
+    async def send(
+        self, prompt: str, *, mode: SendMode = "enqueue", attachments: list[Any] | None = None
+    ) -> Any:
+        """Queue a message and return at once; the turn's progress arrives as events.
+        `attachments`: files sent with it ({"type": "file", "path", "displayName"})."""
         ...
 
     async def abort(self) -> None:

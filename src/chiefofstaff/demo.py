@@ -238,13 +238,10 @@ class DemoBrain:
                 else:
                     yield Say(f"Started a worker on “{title}”.")
             elif sender.startswith("worker:") and kind == "report":
+                # A finished task reaches the owner by itself (its report, its card on Home):
+                # nothing to repeat. What needs the owner is said once more, to be sure.
                 status = attrs.get("status")
-                if status == "done":
-                    headline = body.strip().splitlines()[0]
-                    yield CallTool(
-                        "notify_owner", {"text": f"“{attrs.get('title')}” is done: {headline}"}
-                    )
-                elif status in {"question", "blocked", "failed"}:
+                if status in {"question", "blocked", "failed"}:
                     yield CallTool(
                         "notify_owner",
                         {"text": f"“{attrs.get('title')}”: {body.strip()}", "needs_action": True},

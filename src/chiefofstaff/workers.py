@@ -123,7 +123,13 @@ class Workers:
         self.usage_synced = False
 
     def running(self) -> int:
-        return sum(1 for row in self.store.open_sessions(WORKER) if self.states[row["id"]].busy)
+        """Workers in a turn, of the owner's limit: Chief of Staff's own helpers (learning,
+        checks) do not take the owner's slots."""
+        return sum(
+            1
+            for row in self.store.open_sessions(WORKER)
+            if self.states[row["id"]].busy and not self.runtime.special(row)
+        )
 
     async def claim_slot(self, session_id: str) -> bool:
         """Reserve a worker slot for a new turn, or leave the message pending (queued)."""
@@ -133,7 +139,8 @@ class Workers:
                 return False
             if self.states[session_id].busy:
                 return True
-            if self.running() >= self.store.settings().max_workers:
+            limit = self.store.settings().max_workers
+            if self.running() >= limit and not self.runtime.special(row):
                 self.runtime.update_session(session_id, status="queued", activity="")
                 return False
             self.states[session_id].busy = True
@@ -189,6 +196,10 @@ class Workers:
         row = self.store.session(session_id)
         task = self.tasks.current(session_id)
         if row["status"] != "idle" or row["closed_at"] or not task or task["status"] != "running":
+            return
+        if self.runtime.special(row) == "connector":
+            # It reports through its own tools: a run that ended is done.
+            self.tasks.move(task["id"], "done", result="Run finished.")
             return
         if (special := self.runtime.special(row)) in {"learner", "checker"}:
             # A helper that stopped short of its last call has nothing more to propose.
@@ -264,7 +275,7 @@ class Workers:
                     continue
                 if not self.store.get(f"created:{row['id']}") and self.waiting_for(row):
                     continue
-                if self.running() < limit:
+                if self.running() < limit or self.runtime.special(row):
                     self.states[row["id"]].busy = True
                     starting.append(self.runtime.update_session(row["id"], status="starting"))
         for row in starting:
@@ -400,13 +411,18 @@ class Workers:
         # Not "stopped without reporting": the Watchdog leaves a reopened worker alone until told.
         self.runtime.add_message(session_id, "notice", "Closed.", {"stopped": True})
         self.runtime.update_session(session_id, closed_at=now(), activity="")
-        with suppress(RuntimeError):
-            self.runtime.add_message(
-                self.runtime.router_id(),
-                "notice",
-                f"Closed “{row['title']}”",
-                {"session_id": session_id},
-            )
+        if special := self.runtime.special(row):
+            # Chief of Staff's own helper: what it did is told once, not its comings and goings.
+            if special == "learner":
+                self.runtime.habits.summarize(session_id)
+        else:
+            with suppress(RuntimeError):
+                self.runtime.add_message(
+                    self.runtime.router_id(),
+                    "notice",
+                    f"Closed “{row['title']}”",
+                    {"session_id": session_id},
+                )
         self.runtime.background(self.pump())
         if row["role"] == WORKER:
             self.runtime.background(self.release(session_id))
@@ -445,11 +461,13 @@ class Workers:
 
     def find(self, query: str, limit: int = 6) -> list[dict]:
         """Workers, open or closed, whose task matches the query, best first."""
+        helpers = self.runtime.helper_ids()
         rows = {
             row["id"]: row
             for row in self.store.all(
                 "SELECT * FROM sessions WHERE role='worker' ORDER BY updated_at DESC LIMIT 2000"
             )
+            if row["id"] not in helpers
         }
         named = []  # A session id, or its first 8+ characters, names the worker.
         for word in re.findall(r"[0-9a-f-]{8,}", query.lower()):

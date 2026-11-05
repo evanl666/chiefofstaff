@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
 
 from . import receipts
+from .delivery import digest
 from .envelope import from_owner
 from .policy import permission_denial, written_file
 from .roles import ROUTER, SLACK, WORKER
@@ -57,6 +58,12 @@ def describe_tool(name: str, arguments: Any) -> str:
 
 # When the Router's context (prompt tokens of its last call) grows past this, a fresh Router
 # session takes over with a summary.
+# Copilot will not run the model asked for (a model or option the company does not allow).
+MODEL_REFUSED = re.compile(
+    r"requested model is not supported|model[^.\n]{0,60}not (?:supported|available|enabled)|"
+    r"not allowed to use (?:the )?model|context tier[^.\n]{0,40}not supported",
+    re.IGNORECASE,
+)
 ROUTER_CONTEXT = int(os.environ.get("CHIEFOFSTAFF_ROUTER_CONTEXT", "150000"))
 
 
@@ -146,6 +153,11 @@ class Events:
 
     def user_message(self, row: dict, event: Any):
         state = self.states[row["id"]]
+        state.echoes = True
+        if state.unread:
+            # It sees a message now: that one (or, changed on the way, the oldest).
+            seen = digest(getattr(event.data, "content", "") or "")
+            state.unread.pop(seen if seen in state.unread else next(iter(state.unread)))
         owner = from_owner(getattr(event.data, "content", "") or "") or state.owner_turn
         state.owner_turn = False
         state.event_turn = not owner
@@ -155,6 +167,8 @@ class Events:
     def assistant_message(self, row: dict, event: Any):
         data = event.data
         content = (getattr(data, "content", "") or "").strip()
+        if row["role"] == ROUTER and content:
+            self.store.delete(f"rotated:{row['id']}")  # The fresh session answers: it stays.
         if not content or getattr(data, "parent_tool_call_id", None):
             return
         # Said on the way to its next steps: narration, shown with the steps, not as an answer.
@@ -280,7 +294,7 @@ class Events:
         if row["role"] in {ROUTER, SLACK} and self.delivery.has_unsent(session_id):
             self.delivery.schedule_flush(session_id)  # Events that arrived during the turn.
         context = int(self.store.get(f"context:{session_id}") or 0)
-        if row["role"] == ROUTER and context > ROUTER_CONTEXT:
+        if row["role"] == ROUTER and context > self.runtime.router_context_limit(row):
             self.runtime.background(self.runtime.rotate_router())
         if row["role"] == WORKER:
             self.runtime.background(self.runtime.workers.pump())
@@ -301,6 +315,16 @@ class Events:
         self.states[session_id].busy = False
         self.states[session_id].retuned = False
         self.states[session_id].steps.clear()
+        if MODEL_REFUSED.search(message):
+            # The company's policy, say: it recovers on another model instead of failing again
+            # on every message.
+            self.runtime.update_session(session_id, status="idle", activity="")
+            self.runtime.background(self.refused(row, message))
+            return
+        if row["role"] == ROUTER and self.store.get(f"rotated:{session_id}"):
+            self.runtime.update_session(session_id, status="idle", activity="")
+            self.runtime.background(self.router_failed(row, message))
+            return
         self.runtime.add_message(session_id, "error", message)
         if row["role"] == WORKER:
             self.runtime.update_session(session_id, status="failed", activity="")
@@ -312,6 +336,25 @@ class Events:
             self.runtime.update_session(session_id, status="idle", activity="")
             if row["role"] in {ROUTER, SLACK} and self.delivery.has_unsent(session_id):
                 self.delivery.schedule_flush(session_id)
+
+    async def router_failed(self, row: dict, message: str):
+        """A Router turn failed: if a fresh session had just taken over, the earlier one goes
+        on; otherwise the error stands."""
+        if not await self.runtime.undo_rotation(message):
+            self.runtime.add_message(row["id"], "error", message)
+            if self.delivery.has_unsent(row["id"]):
+                self.delivery.schedule_flush(row["id"])
+
+    async def refused(self, row: dict, message: str):
+        if await self.runtime.recover_model(row, message):
+            return
+        # Nothing left to fall back to: an error as any other.
+        self.runtime.add_message(row["id"], "error", message)
+        if row["role"] == WORKER:
+            self.runtime.update_session(row["id"], status="failed", activity="")
+            self.runtime.task_actions.fail(row["id"], message)
+            task = self.tasks.current(row["id"])
+            await self.runtime.tell_router(row, "failed", message, task)
 
     def hook_failed(self, row: dict, message: str):
         """Said once per session and plugin, as a note: the work itself goes on."""

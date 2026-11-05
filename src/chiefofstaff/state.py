@@ -50,6 +50,11 @@ class SessionState:
     turn_tasks: list[str] = field(default_factory=list)
     # Open cards for the owner: draft id -> text.
     asking: dict[str, str] = field(default_factory=dict)
+    # Messages sent to it that its conversation has not shown it yet (sent while it was
+    # finishing a turn, say): digest of what was sent -> the newest message's text.
+    unread: dict[str, str] = field(default_factory=dict)
+    # Its connection has shown a message it received (so unread ones can be told apart).
+    echoes: bool = False
     # The tail of the latest tool output, for the Watchdog.
     last_output: str = ""
     # The steps (tool calls) it is in now, by call id: when each started and what it is.

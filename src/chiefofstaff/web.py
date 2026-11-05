@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 import secrets
 import time
 from contextlib import asynccontextmanager
@@ -24,6 +25,7 @@ from .models import (
     SessionYolo,
     Settings,
     SetupNotes,
+    SkillUpload,
     SlackToken,
     TaskNote,
 )
@@ -36,6 +38,9 @@ STATIC = Path(__file__).parent / "static"
 
 class Login(BaseModel):
     token: str
+
+
+ATTACHMENT_FILE = re.compile(r"[0-9a-f]{32}\.(?:png|jpg|gif|webp)")
 
 
 def create_app(
@@ -150,8 +155,19 @@ def create_app(
     @app.post("/api/sessions/{session_id}/messages")
     async def send(session_id: str, payload: OwnerMessage):
         if payload.to:
-            return await runtime.owner_send_to(session_id, payload.to, payload.text)
-        return await runtime.owner_send(session_id, payload.text)
+            return await runtime.owner_send_to(
+                session_id, payload.to, payload.text, payload.attachments
+            )
+        return await runtime.owner_send(session_id, payload.text, attachments=payload.attachments)
+
+    @app.get("/api/attachments/{name}")
+    async def attachment(name: str):
+        if not ATTACHMENT_FILE.fullmatch(name):
+            raise HTTPException(404)
+        path = runtime.attachments_dir / name
+        if not path.is_file():
+            raise HTTPException(404)
+        return FileResponse(path, headers={"Cache-Control": "private, max-age=86400"})
 
     @app.post("/api/sessions/{session_id}/read")
     async def mark_read(session_id: str):
@@ -195,9 +211,42 @@ def create_app(
 
     @app.post("/api/lessons/learn")
     async def learn_now():
-        # What the owner wrote elsewhere since the last look, then everything not learned yet.
-        await runtime.habits.learn_now()
+        # What the owner wrote elsewhere since the last look, then everything not learned yet:
+        # in the background, shown running in Settings.
+        runtime.habits.start_learning()
         return runtime.snapshot()
+
+    @app.post("/api/skills")
+    async def add_skill(payload: SkillUpload):
+        return await runtime.abilities.add_skill(payload.content)
+
+    @app.post("/api/skills/{name}/remove")
+    async def remove_skill(name: str):
+        await runtime.abilities.remove_skill(name)
+        return runtime.snapshot()
+
+    @app.post("/api/plugins/retry")
+    async def retry_plugins():
+        for source, status in runtime.abilities.plugin_status().items():
+            if status.get("state") == "failed":
+                runtime.store.delete(f"plugin:{source}")
+        runtime.background(runtime.abilities.sync())
+        return runtime.snapshot()
+
+    @app.post("/api/watch/scan")
+    async def scan_now():
+        await runtime.connector.scan(by_owner=True)
+        return runtime.snapshot()
+
+    @app.post("/api/away/test")
+    async def away_test():
+        await runtime.connector.notify_away(test=True)
+        return runtime.snapshot()
+
+    @app.post("/api/presence")
+    async def presence():
+        runtime.connector.last_seen = time.time()
+        return {"ok": True}
 
     @app.post("/api/style/{section}/undo")
     async def undo_style(section: str):
@@ -260,6 +309,8 @@ def create_app(
 
     @app.post("/api/tasks/{task_id}/follow-up")
     async def follow_up_task(task_id: str, payload: OwnerMessage):
+        if not payload.text.strip():
+            raise ValueError("Write what the worker should do.")
         return runtime.task_actions.view(
             await runtime.task_actions.follow_up(task_id, payload.text)
         )
@@ -298,7 +349,7 @@ def create_app(
     async def continue_external(session_id: str, payload: OwnerMessage):
         """Messaging another session continues it here: the Router manages it from then on."""
         await runtime.workers.adopt(session_id)
-        return await runtime.owner_send(session_id, payload.text)
+        return await runtime.owner_send(session_id, payload.text, attachments=payload.attachments)
 
     @app.post("/api/drafts/{draft_id}")
     async def resolve(draft_id: str, decision: DraftDecision):

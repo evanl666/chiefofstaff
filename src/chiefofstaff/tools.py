@@ -265,6 +265,16 @@ class DraftSlackReply(BaseModel):
     note: str = Field(default="", description="One line for the owner: what this answers")
 
 
+class DraftReply(BaseModel):
+    text: str = Field(description="The exact reply in the owner's voice")
+    to: str = Field(description="Who it answers, e.g. 'Alice Chen'")
+    where: str = Field(
+        description="Where the owner sends it, e.g. 'Slack DM', '#deploys thread', 'email'"
+    )
+    link: str = Field(default="", description="A link to the conversation it answers")
+    note: str = Field(default="", description="One line for the owner: what this answers")
+
+
 class DistillProfile(BaseModel):
     focus: str = Field(default="", description="Optional: what to focus on or update")
 
@@ -317,6 +327,13 @@ class DraftGitHubReview(BaseModel):
         default=0,
         description="To reply to a review comment on the PR: that comment's id (from "
         "`gh api repos/<owner/name>/pulls/<number>/comments`). 0 for a review of the whole PR.",
+    )
+    verdict: Literal["comment", "approve", "request_changes"] = Field(
+        default="comment",
+        description="The review's verdict, published as the owner's: approve when the owner "
+        "asked you to approve it, or nothing you found blocks merging and they asked for your "
+        "recommendation; request_changes for problems that must be fixed before merging; "
+        "comment otherwise. The owner sees it on the card and can change it. Not for replies.",
     )
 
 
@@ -533,6 +550,7 @@ class Tools:
 
     def definitions(self) -> dict:
         definitions = [
+            *self.runtime.connector.tools(),
             (
                 "spawn_worker",
                 "Start a new worker session for one task. Returns its session id.",
@@ -679,6 +697,13 @@ class Tools:
                 self.t_draft_slack_reply,
             ),
             (
+                "draft_reply",
+                "Draft a reply in the owner's voice that the owner sends themself (Slack when it "
+                "is not connected, mail, a document comment): they approve, edit and copy it.",
+                DraftReply,
+                self.t_draft_reply,
+            ),
+            (
                 "distill_profile",
                 "Start a worker that distills what the owner's work says about them into a "
                 "profile the owner reviews; later sessions use it.",
@@ -745,14 +770,53 @@ class Tools:
             raise ValueError(f"This tool is not available to the {row['role']} session.")
         return row
 
-    async def start_special(self, special: str, title: str, instructions: str) -> dict:
+    async def start_special(
+        self, special: str, title: str, instructions: str, slack: bool = False
+    ) -> dict:
         """A worker Chief of Staff starts for itself (to learn from feedback, say), with the
-        tools of its `special` kind; no project, no Slack."""
+        tools of its `special` kind; no project, no Slack. The same one each time (one entry,
+        one history), on a fresh Copilot conversation: each run is given all it needs."""
+        if previous := self.last_special(special):
+            return await self.rerun_special(previous, special, instructions)
         return await self.t_spawn_worker(
             SpawnWorker(title=title, instructions=instructions),
             self.runtime.router_id(),
             special=special,
+            untrusted=slack,
         )
+
+    def last_special(self, special: str) -> dict | None:
+        ids = [key.split(":", 1)[1] for key in self.store.keys(f"{special}:")]
+        rows = [row for row in map(self.store.find_session, ids) if row and row["role"] == WORKER]
+        return max(rows, key=lambda row: row["created_at"], default=None)
+
+    async def rerun_special(self, row: dict, special: str, instructions: str) -> dict:
+        session_id = row["id"]
+        if row["status"] in {"queued", "starting", "working"} and not row["closed_at"]:
+            raise ValueError(f"“{row['title']}” is at work already.")
+        # Held as reopening does: a removal of its folder started when it closed waits.
+        async with self.states[session_id].checkouts, self.states[session_id].lifecycle:
+            await self.runtime.drop_handle(session_id)
+            fresh = str(uuid4())
+            self.store.set(f"alias:{fresh}", session_id)
+            self.store.set(f"copilot:{session_id}", fresh)
+            self.store.delete(f"created:{session_id}")
+            for key in ("style_refused", "lessons_done", "learned_styles"):
+                self.store.delete(f"{key}:{session_id}")
+            workspace = self.store.get(f"workspace:{session_id}") or row["cwd"]
+            await asyncio.to_thread(Path(workspace).mkdir, parents=True, exist_ok=True)
+            self.states[session_id].close_after_turn = False
+            self.runtime.update_session(
+                session_id, closed_at=None, status="queued", activity="", task=instructions[:4000]
+            )
+        task = self.tasks.create(session_id, row["title"], instructions[:4000])
+        prompt = wrap("router", "task", instructions, title=row["title"], task=task["id"])
+        self.runtime.add_message(
+            session_id, "router", instructions, {"prompt": prompt, "task_id": task["id"]}
+        )
+        await self.runtime.workers.pump()
+        status = self.store.session(session_id)["status"]
+        return {"task_id": task["id"], "session_id": session_id, "status": status}
 
     def owner_words(self, text: str) -> str:
         """The owner's messages in place of {owner:<ref>}."""
@@ -772,7 +836,11 @@ class Tools:
 
         return OWNER_REF.sub(quoted, text)
 
-    async def t_spawn_worker(self, params: SpawnWorker, caller: str, special: str = ""):
+    async def t_spawn_worker(
+        self, params: SpawnWorker, caller: str, special: str = "", untrusted: bool = False
+    ):
+        """`untrusted`: a helper that reads untrusted content (the connector) runs as a worker
+        that reads Slack does, whether or not Slack is connected."""
         self.caller(caller, ROUTER)
         params = params.model_copy(update={"instructions": self.owner_words(params.instructions)})
         title = clean_title(params.title)
@@ -808,7 +876,7 @@ class Tools:
                     + json.dumps(related, ensure_ascii=False)
                 )
         session_id = str(uuid4())
-        slack = params.slack and self.runtime.slack.configured()
+        slack = (params.slack and self.runtime.slack.configured()) or untrusted
         self.runtime.check_follow({"role": WORKER, "slack": slack}, follow)
         workspace, checkouts = await self.workspaces.prepare_directory(
             session_id,
@@ -871,11 +939,13 @@ class Tools:
             prompt += "\n\n" + wrap("system", "context", self.tasks.briefing(context_from))
         if note := self.report_language(params.instructions):
             prompt += "\n\n" + wrap("system", "context", note)
-        self.runtime.add_message(
-            session_id, "router", params.instructions, {"prompt": prompt, "task_id": task["id"]}
-        )
-        notice = f"Started “{title}”" + (f" · new because {why_new}" if why_new else "")
-        self.runtime.add_message(caller, "notice", notice, {"session_id": session_id})
+        meta: dict[str, Any] = {"prompt": prompt, "task_id": task["id"]}
+        if images := self.runtime.attachments_in(params.instructions):
+            meta["attachments"] = images  # The owner's images it names come with it.
+        self.runtime.add_message(session_id, "router", params.instructions, meta)
+        if not special:  # Chief of Staff's own helpers come and go quietly.
+            notice = f"Started “{title}”" + (f" · new because {why_new}" if why_new else "")
+            self.runtime.add_message(caller, "notice", notice, {"session_id": session_id})
         await self.runtime.workers.pump()
         row = self.store.session(session_id)
         result = {"task_id": task["id"], "session_id": session_id, "status": row["status"]}
@@ -900,6 +970,14 @@ class Tools:
         elif row["status"] == "queued":
             result["note"] = "Queued until a worker slot frees up."
         return result
+
+    def failed_tests(self, task: dict) -> str:
+        """The task's last test run, when it failed: "`command` exited 1" ("" otherwise)."""
+        found = (self.runtime.task_actions.receipts(task) or {}).get("tests") or {}
+        if not found or found.get("passed") is not False:
+            return ""
+        command = " ".join(found.get("command", "").split())[:160]
+        return f"`{command}` exited {found.get('exit_code')}"
 
     def report_language(self, instructions: str) -> str:
         """A note when the Router wrote a task in another language than the owner's: the owner
@@ -940,6 +1018,8 @@ class Tools:
             return await self.ask_to_continue(params)
         if target["role"] == ROUTER:
             raise ValueError("That is your own session.")
+        if self.runtime.special(target):
+            raise ValueError("That is Chief of Staff's own helper, not a worker to give work to.")
         self.runtime.check_follow(target, [threads.normalize(key) for key in params.follow])
         if target["closed_at"]:
             await self.runtime.workers.reopen(
@@ -995,12 +1075,15 @@ class Tools:
                 reply_in=self.store.get("owner_language"),
             )
             notice = f"Continued in “{target['title']}”"
+        meta: dict[str, Any] = {"task_id": task["id"]} if task else {}
+        if images := self.runtime.attachments_in(params.text):
+            meta["attachments"] = images  # The owner's images it names come with it.
         await self.delivery.deliver(
             target["id"],
             prompt,
             kind="router",
             display=params.text,
-            meta={"task_id": task["id"]} if task else None,
+            meta=meta or None,
             # More on the task it is working on reaches it within its turn; a new task waits.
             steer=params.task == "continue",
         )
@@ -1172,8 +1255,11 @@ class Tools:
             models = [item["id"] for item in await self.runtime.available_models()]
         except Exception:
             models = []
+        helpers = self.runtime.helper_ids()  # Chief of Staff's own: never given work.
         sessions = [
-            self.session_entry(row) for row in self.store.open_sessions() if row["role"] != ROUTER
+            self.session_entry(row)
+            for row in self.store.open_sessions()
+            if row["role"] != ROUTER and row["id"] not in helpers
         ]
         listed = {
             # The owner's own sessions and standing decisions first: they are short.
@@ -1203,7 +1289,9 @@ class Tools:
             "slack_connected": self.runtime.slack.configured(),
             "github_repos": settings.github_repos if settings.github_enabled else [],
             "recently_closed": [
-                self.runtime.workers.card(row) for row in self.runtime.workers.recently_closed(8)
+                self.runtime.workers.card(row)
+                for row in self.runtime.workers.recently_closed(8)
+                if row["id"] not in helpers
             ],
         }
         return shortened(listed)
@@ -1376,6 +1464,37 @@ class Tools:
             task
             and params.status == "done"
             and task["status"] == "running"
+            and (unread := self.states[caller].unread)
+            and not self.store.get(f"unread_report:{task['id']}")
+        ):
+            # Sent while it was finishing: a report now would be without it, and whoever sent
+            # it would send it again. Once: it may be lost on the way.
+            self.store.set(f"unread_report:{task['id']}", "1")
+            newest = list(unread.values())[-1]
+            raise ValueError(
+                "Not reported yet: a newer message for this task arrived while you were "
+                f"finishing (“{newest[:200]}”). It reaches you next: handle it, then report once, "
+                "covering both. If you see it nowhere after this, report again as you were."
+            )
+        if (
+            task
+            and params.status == "done"
+            and task["status"] == "running"
+            and (failed := self.failed_tests(task))
+            and not self.store.get(f"failing_report:{task['id']}")
+        ):
+            # Once: a failure it expected (the regression test before the fix) or one that is
+            # not its own is reported as such.
+            self.store.set(f"failing_report:{task['id']}", "1")
+            raise ValueError(
+                f"Not reported yet: your last test run failed ({failed}). Fix what fails and "
+                "run it again; if the failure is expected or not caused by your change, call "
+                "report again and say so."
+            )
+        if (
+            task
+            and params.status == "done"
+            and task["status"] == "running"
             and (problem := await self.runtime.checks.before_done(row, task))
         ):
             raise ValueError(problem)
@@ -1412,7 +1531,20 @@ class Tools:
                 self.store.delete(f"followup:{task['id']}")
                 self.runtime.task_actions.remember_prs(task["id"], params.summary)
                 task = self.tasks.move(task["id"], "review", result=clip_report(params.summary))
-                self.runtime.background(self.runtime.task_actions.collect_evidence(task["id"]))
+                if self.store.get(f"draft_sent:{task['id']}"):
+                    # The owner already sent what it drafted: one approval was enough.
+                    self.runtime.background(
+                        self.runtime.drafts.settle_reported(task["id"], reported=True)
+                    )
+                else:
+                    self.runtime.background(self.runtime.task_actions.collect_evidence(task["id"]))
+                    # The one notification a finished task gets (the Router does not retell it).
+                    self.runtime.alert(
+                        f"“{task['title']}” is ready to review",
+                        session_id=caller,
+                        needs_action=False,
+                        title="Ready to review",
+                    )
             elif params.status in {"question", "blocked"}:
                 task = self.tasks.move(task["id"], "waiting", progress=params.summary[:6000])
             elif task["status"] != "running":
@@ -1477,6 +1609,32 @@ class Tools:
             "they edit or reject it. Do not send it any other way."
         )
 
+    async def t_draft_reply(self, params: DraftReply, caller: str):
+        """A reply Chief of Staff cannot send itself (Slack not connected, mail, a doc comment):
+        the owner approves it and sends it themself (it is copied for them)."""
+        self.caller(caller, WORKER, SLACK)
+        text = params.text.strip()
+        if not text:
+            raise ValueError("The reply is empty.")
+        if len(text) > MAX_DRAFT:
+            raise ValueError(f"Too long: keep the reply under {MAX_DRAFT} characters.")
+        link = params.link.strip()
+        if link and not re.match(r"^https?://\S+$", link):
+            raise ValueError("link must be an http(s) URL, or empty.")
+        target = {"to": params.to[:200], "where": params.where[:200], "link": link}
+        draft = self.store.create_draft(caller, "reply", target, text, params.note[:300])
+        self.runtime.add_message(
+            caller, "draft", text, {"draft_id": draft["id"], "label": f"Reply to {params.to}"}
+        )
+        self.bus.publish("draft", draft)
+        self.runtime.alert(
+            params.note or text, session_id=caller, needs_action=True, title="Reply to approve"
+        )
+        return (
+            f"Draft {draft['id']} is waiting for the owner: they copy it and send it themself. "
+            "You will be told what they did."
+        )
+
     async def works_on_pr(self, caller: str, repo: str, number: int, pull: dict) -> bool:
         """A PR this worker was given (by the Router or the owner: to follow, opened with Create
         PR, named in its task), one from its own branch, or one GitHub asks the owner to review
@@ -1512,6 +1670,8 @@ class Tools:
             raise ValueError(f"Too long: keep the review under {MAX_DRAFT} characters.")
         if params.in_reply_to and params.comments:
             raise ValueError("A reply to a review comment has no inline comments of its own.")
+        if params.in_reply_to and params.verdict != "comment":
+            raise ValueError("A reply to a review comment has no verdict: leave verdict out.")
         try:
             pull = await github.pull(repo, params.number)
         except RuntimeError as exc:
@@ -1561,6 +1721,13 @@ class Tools:
             if pull.get("state") != "open":
                 raise ValueError(f"{repo}#{params.number} is not open.")
             target["head_sha"] = pull["head"]["sha"]
+            target["verdict"] = params.verdict
+            author = ((pull.get("user") or {}).get("login") or "").lower()
+            if author and author == await github.acting_login(repo):
+                # GitHub allows only comments on one's own pull request (one of the owner's
+                # other accounts may approve it).
+                target["own"] = True
+                target["verdict"] = "comment"
             if params.comments:
                 if problems := misplaced(
                     params.comments, await github.diff_lines(repo, params.number)
@@ -1573,7 +1740,9 @@ class Tools:
                     comment.model_dump(exclude_defaults=True) | {"side": comment.side}
                     for comment in params.comments
                 ]
-            label = f"Review of {repo}#{params.number}"
+            label = {"approve": "Approval", "request_changes": "Changes requested"}.get(
+                target["verdict"], "Review"
+            ) + f" of {repo}#{params.number}"
         draft = self.store.create_draft(caller, "github", target, params.body)
         shown = params.body
         if params.comments:
@@ -1585,7 +1754,13 @@ class Tools:
         self.runtime.alert(
             label, session_id=caller, needs_action=True, title="GitHub text to approve"
         )
-        return f"Draft {draft['id']} is waiting for the owner's approval."
+        result = f"Draft {draft['id']} is waiting for the owner's approval."
+        if target.get("own") and params.verdict != "comment":
+            result += (
+                " The PR is by the account that publishes the review, and GitHub does not let "
+                "anyone approve or request changes on their own PR: it is drafted as a comment."
+            )
+        return result
 
     async def t_distill_profile(self, params: DistillProfile, caller: str):
         self.caller(caller, ROUTER)

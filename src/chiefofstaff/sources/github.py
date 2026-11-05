@@ -74,6 +74,10 @@ TOKEN_SECONDS = 300
 TRANSIENT = re.compile(r"rate limit|abuse detection|try again later", re.IGNORECASE)
 
 
+# A review's verdict, as GitHub's review event.
+REVIEW_EVENTS = {"approve": "APPROVE", "request_changes": "REQUEST_CHANGES", "comment": "COMMENT"}
+
+
 class NoAccess:
     """Whether a gh failure means this account cannot see the repository (another may)."""
 
@@ -206,6 +210,14 @@ class GitHubSource:
             for account in await self.signed_in(fresh=True)
             if not account["active"]
         ]
+
+    async def acting_login(self, repo: str) -> str:
+        """The account that reaches this repository (lowercase): the one remembered for its
+        owner, else gh's active one. What it publishes there is published as it."""
+        if remembered := self.store.get(f"ghaccount:{repo.split('/')[0].lower()}"):
+            return remembered.lower()
+        active = [a["login"] for a in await self.signed_in() if a["active"]]
+        return active[0].lower() if active else ""
 
     async def logins(self) -> set[str]:
         """The owner's GitHub logins (lowercase)."""
@@ -519,7 +531,8 @@ class GitHubSource:
             return await self.publish_reply(target, body)
         if await self.head(repo, target["number"]) != target["head_sha"]:
             raise ValueError("The PR changed after the draft was written; nothing was published.")
-        payload = {"event": "COMMENT", "commit_id": target["head_sha"], "body": body}
+        event = REVIEW_EVENTS.get(target.get("verdict", ""), "COMMENT")
+        payload = {"event": event, "commit_id": target["head_sha"], "body": body}
         if comments := target.get("comments"):
             payload["comments"] = [
                 {
@@ -538,15 +551,20 @@ class GitHubSource:
                 )
                 for comment in comments
             ]
-        reply = await self.gh(
-            "api",
-            f"repos/{repo}/pulls/{int(target['number'])}/reviews",
-            "--method=POST",
-            "--input=-",
-            payload=payload,
-        )
+        path = f"repos/{repo}/pulls/{int(target['number'])}/reviews"
+        note = ""
+        try:
+            reply = await self.gh("api", path, "--method=POST", "--input=-", payload=payload)
+        except RuntimeError as exc:
+            # GitHub refuses (422, nothing published) to approve or request changes on one's
+            # own pull request: a comment is what it allows.
+            if event == "COMMENT" or "422" not in str(exc):
+                raise
+            payload["event"] = "COMMENT"
+            reply = await self.gh("api", path, "--method=POST", "--input=-", payload=payload)
+            note = " (posted as a comment: GitHub allows no approval on your own PR)"
         review = json.loads(reply)
         if review.get("id"):
             # Our own review must not come back as activity on the followed PR.
             self.store.add_trigger("github-sent", f"github:review:{review['id']}", body)
-        return review.get("html_url", "Review published.")
+        return review.get("html_url", "Review published.") + note

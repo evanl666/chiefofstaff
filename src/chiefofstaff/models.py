@@ -68,6 +68,27 @@ def private_folders(home: Path) -> list[Path]:
 # Copilot refuses to start a session with a lower credit limit.
 MIN_CREDIT_LIMIT = 30
 
+# A Copilot plugin to install: owner/repo, owner/repo:path, name@marketplace or a git URL.
+PluginSource = Annotated[
+    str,
+    Field(
+        max_length=300,
+        pattern=r"^([\w.-]+/[\w.-]+(:[\w./-]+)?|[\w.-]+@[\w.-]+|https://[\w.-]+/[\w./~%-]+)$",
+    ),
+]
+McpName = Annotated[str, Field(pattern=r"^[A-Za-z0-9_-]{1,40}$")]
+HourRange = Annotated[str, Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$")]
+
+
+class Watch(StrictModel):
+    """Something to look out for on the owner's behalf, with whatever tools work on this
+    machine (Slack, Glean, a company search, mail, docs…)."""
+
+    what: str = Field(min_length=3, max_length=500)
+    # Which tool or source to use, when the owner knows ("Glean search", "the Slack MCP").
+    how: str = Field(default="", max_length=300)
+    enabled: bool = True
+
 
 class Settings(StrictModel):
     copilot_command: str = "copilot"
@@ -81,8 +102,9 @@ class Settings(StrictModel):
     learn_from_work: bool = True
     learn_checks: bool = True
     worker_idle_hours: int = Field(default=24, ge=1, le=720)
-    # Workers act without permission checks; they still follow their instructions.
-    worker_yolo: bool = False
+    # Workers act without permission checks, as the owner's own Copilot sessions do; they still
+    # follow their instructions. Workers that read Slack keep the checks unless set per worker.
+    worker_yolo: bool = True
     # Workers' shell commands run in Chief of Staff's OS sandbox: they write only to their own
     # folders. Off: workers run like the owner's own Copilot sessions (with the owner's own
     # Copilot sandbox settings, if any). Workers that read Slack are always sandboxed.
@@ -115,6 +137,43 @@ class Settings(StrictModel):
     )
     github_enabled: bool = False
     github_repos: list[Repository] = Field(default_factory=list, max_length=10)
+    # More for workers than Copilot finds by itself (the owner's plugins, skills and MCP
+    # servers are loaded anyway): folders of skills (each skill a folder with a SKILL.md),
+    # Copilot plugins to install, and MCP servers as in Copilot's mcp-config.json.
+    skill_folders: list[str] = Field(default_factory=list, max_length=20)
+    plugins: list[PluginSource] = Field(default_factory=list, max_length=20)
+    mcp_servers: dict[McpName, dict[str, Any]] = Field(default_factory=dict, max_length=10)
+    # Watches run in work hours every watch_minutes, otherwise every watch_after_hours_minutes
+    # (0: not after hours), in the machine's time zone.
+    watches: list[Watch] = Field(default_factory=list, max_length=10)
+    watch_hours: HourRange = "09:00-18:00"
+    watch_minutes: int = Field(default=5, ge=1, le=240)
+    watch_after_hours_minutes: int = Field(default=30, ge=0, le=1440)
+    # Away from this computer (no keyboard or mouse for away_minutes): what needs the owner
+    # also reaches them as away_how says (a Slack DM from a bot, say).
+    away_notify: bool = False
+    away_minutes: int = Field(default=10, ge=1, le=240)
+    away_how: str = Field(default="", max_length=500)
+
+    @field_validator("mcp_servers")
+    @classmethod
+    def mcp_config(cls, value: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        for name, config in value.items():
+            if not (isinstance(config.get("command"), str) or isinstance(config.get("url"), str)):
+                raise ValueError(f"MCP server {name}: give a command (local) or a url (remote).")
+            config.setdefault("tools", ["*"])
+        return value
+
+    @field_validator("skill_folders")
+    @classmethod
+    def skill_paths(cls, value: list[str]) -> list[str]:
+        folders = []
+        for raw in value:
+            path = Path(raw.strip()).expanduser()
+            if not path.is_absolute() or not path.is_dir():
+                raise ValueError(f"Not an existing folder: {raw}")
+            folders.append(str(path.resolve()))
+        return list(dict.fromkeys(folders))
 
     @field_validator("worker_credit_limit")
     @classmethod
@@ -187,10 +246,30 @@ class Settings(StrictModel):
         return self
 
 
+class SkillUpload(StrictModel):
+    content: str = Field(min_length=10, max_length=100_000)
+
+
+class Attachment(StrictModel):
+    """An image the owner attached to a message (pasted or dropped into the composer)."""
+
+    name: str = Field(default="image", max_length=200)
+    type: Literal["image/png", "image/jpeg", "image/gif", "image/webp"]
+    # Base64, without a data: prefix; at most 5 MB decoded.
+    data: str = Field(min_length=4, max_length=7_000_000)
+
+
 class OwnerMessage(StrictModel):
-    text: str = Field(min_length=1, max_length=20000)
+    text: str = Field(default="", max_length=20000)
     # From the Router chat, addressed to one worker: it goes to that worker directly.
     to: str = Field(default="", max_length=64)
+    attachments: list[Attachment] = Field(default_factory=list, max_length=5)
+
+    @model_validator(mode="after")
+    def something(self) -> "OwnerMessage":
+        if not self.text.strip() and not self.attachments:
+            raise ValueError("Write a message or attach an image.")
+        return self
 
 
 class FocusRequest(StrictModel):

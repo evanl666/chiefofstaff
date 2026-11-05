@@ -123,7 +123,9 @@ class ScriptedSession:
         for handler in list(self.handlers):
             handler(event(kind, **data))
 
-    async def send(self, prompt: str, *, mode: str | None = "enqueue") -> str:
+    async def send(
+        self, prompt: str, *, mode: str | None = "enqueue", attachments: list | None = None
+    ) -> str:
         if self.closed:
             raise RuntimeError("The session is disconnected.")
         if mode == "immediate" and self.turn and not self.turn.done():

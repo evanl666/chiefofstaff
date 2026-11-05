@@ -1,5 +1,92 @@
 # Changelog
 
+## 0.1.18 (2026-11-05)
+
+From a 31-item bug bash, and a new 54-scenario live suite.
+
+A calmer, simpler app:
+- **Home**: the Inbox and the Router chat are one screen. The chat is on the left; on the right,
+  *Needs you* (everything waiting for you, one card each, one main button, the rest under ⋯)
+  and *Tasks*, a live board of every task: what it is doing now and for how long, what it said
+  last, what is queued and why ("Waiting for a worker slot · 3 of 3 busy"), and what is ready
+  to review. On narrow windows they are tabs.
+- **Less noise**: one badge (what needs you); a finished task is one line in the chat ("✓ Fix
+  login finished · View") and one card, not three; a task that ends with a draft shows only the
+  draft, with the task's result in it; one "ready to review" notification per task; toasts only
+  confirm what you did. A card you answer leaves at once. Long messages fold.
+- **Settings in tabs** (General, Workers, Models, Connections, You, Advanced), with plainer
+  words; *How you work* shows styles, habits and checks as short rows, Learn now's progress and
+  its last run. Chief of Staff's own helpers are never listed as your workers.
+- **Polish**: three type sizes, readable contrast in light and dark (checked against WCAG AA),
+  larger click targets, keyboard focus rings, quieter cards. A new `scripts/ui_quality.py`
+  checks every screen at 800 to 1440 px, light and dark, for overflow, crowding, contrast and
+  more.
+
+New:
+- **Watches, with whatever tools you have**: tell Chief of Staff what to look out for ("Slack
+  DMs and mentions of me", "comments on my Google Docs") and, if you like, with what ("Glean",
+  "the Slack MCP server"). Its connector checks on a schedule (every 5 minutes in work hours,
+  every 30 after, both settable) with any MCP server, skill or CLI your Copilot has, so a
+  company without a Slack token can use Glean or its own search. What needs you goes to the
+  Router, which has replies drafted in your voice for you to approve. It never posts anything.
+- **When you are away**: after a few minutes without keyboard or mouse, what needs you (cards,
+  questions, failed tasks, and a question the Router asked you in the chat) reaches you as you
+  say, say a Slack DM from your company's bot, each with a short code. Answer with the code
+  ("K3XQ7 send", "K3XQ7 9090") and the answer comes back: a draft is sent, a worker continues.
+  Settings has a test button.
+- **More abilities**: upload a skill (a SKILL.md), add skill folders, Copilot plugins (installed
+  with `copilot plugin install`, with their status shown) and MCP servers in Settings. Workers
+  already load everything your own Copilot sessions load; this adds to it.
+- **Replies you send yourself**: where Chief of Staff cannot send for you (Slack not connected,
+  mail, a doc comment), a worker drafts the reply on a card; approving copies it for you.
+- **Images**: paste or drop screenshots into the chat. The Router sees them and can hand them
+  to a worker.
+- **Real approvals**: a PR review draft carries its verdict (approve, request changes,
+  comment), shown on the card and changeable there; approving publishes a real GitHub
+  approval, not a comment.
+
+Fixed:
+- **"400 The requested model is not supported" again and again**: when Copilot refuses a
+  session's model (your company's policy, say), the session goes on without the chosen effort
+  and context size, then on Copilot's default model, and the failed message is sent again. You
+  get one note saying so.
+- **The Router stopped answering after its context was renewed**: it is renewed much later now
+  (at 80% of its model's context window instead of 150k tokens), and if the fresh session
+  fails before answering, the earlier one takes over again with your message. The fresh session
+  is given far more: everything you said (not only the last 30 messages, each cut to 400
+  characters) and your standing decisions, so a fact you gave hours ago is still known.
+- **Yolo is on by default for workers**, as in your own Copilot sessions (workers that read
+  Slack still ask first). Saved settings keep your choice; the header's choices are now clear:
+  "Yolo" or "Ask first".
+- **Learn now** answers at once and learns in the background, shown in Settings. It reuses the
+  same learning session instead of a new one each time, and no longer posts "Started" and
+  "Closed" notices in the chat: one summary of what it learned instead. Chief of Staff's own
+  helpers never take one of your worker slots, and the Router never gives them work.
+- **Answering a card**: the card leaves Needs you as soon as you answer.
+- **One approval, not two**: a task whose result was a reply or a review is done once you send
+  that draft, whether you send it before or after the worker reports.
+- **No Create PR on a review**: it is offered only for a worker's own branch.
+- **The same instruction twice**: a message for a task that arrived while its worker was
+  finishing could be missed by its report, and the Router sent it again. The report now waits
+  for it.
+- **Reports after failing tests**: a worker that reports done right after its own test run
+  failed is asked once to fix it or say why the failure is expected.
+- **Test receipts of one long command**: a command that ran the new test failing before the fix
+  and every test passing after it was shown as failed tests. The last summary now counts.
+- **Reviews of your own PR**: GitHub allows no approval or change request there; such a review
+  is drafted as a comment, and is posted as one if GitHub refuses anyway.
+- New live suite `scripts/live_wide.py`, 54 scenarios in three parallel shards (each with its
+  own app, fake Slack, a Glean-like company search and a company bot MCP server): the core flow
+  (ask, progress, cards, decisions, queue, learning, stop and go on, reopen, yolo, a quiet long
+  command, closing and stopping in bulk, memory across Router renewals, an experience budget
+  for one task), code and GitHub (a fix with receipts, diffs, reuse, a real PR approval,
+  skills, MCP servers and plugins from Settings), and watches, away notifications answered by
+  code, images and long messages.
+- Workers and tasks are named by title, never by id; "progress?" gets one line per task; a
+  long paste with a few words of yours is read for what you ask, not for what the paste says;
+  workers no longer wait on CI with sleep loops, nor scan whole disks or reread files; the
+  Watchdog interrupts only a command whose output shows it hangs, never a quiet long one.
+
 ## 0.1.17 (2026-11-04)
 
 From 24 new live scenarios (`scripts/live_more.py`): what a working day throws at it.

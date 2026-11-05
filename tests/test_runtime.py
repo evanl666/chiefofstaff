@@ -54,6 +54,7 @@ async def test_router_routes_work_and_worker_reports_back(harness):
         "report",
         "follow_thread",
         "unfollow_thread",
+        "draft_reply",
         "draft_github_review",
         "find_sessions",
         "ask_session",
@@ -87,7 +88,10 @@ async def test_router_routes_work_and_worker_reports_back(harness):
     assert harness.kinds(harness.router_id)[-1] == ("update", "Login test fixed: PR #7")
     assert harness.store.session(harness.router_id)["unread"] == 1
     await settle(runtime)
-    assert harness.notifications == [("Chief of Staff", "Login test fixed: PR #7")]
+    assert harness.notifications == [
+        ("Ready to review", "“Fix flaky login test” is ready to review"),  # The task itself.
+        ("Chief of Staff", "Login test fixed: PR #7"),
+    ]
 
     await call_tool(runtime, "close_worker", harness.router_id, session_id=worker_id)
     assert harness.store.session(worker_id)["closed_at"]
@@ -230,7 +234,8 @@ def test_permission_scopes_by_role(tmp_path):
     assert permission_denial(slack, read) is None
 
 
-async def test_permission_handler_records_denials(harness):
+async def test_permission_handler_records_denials(tmp_path):
+    harness = Harness(tmp_path / "data", Settings(worker_yolo=False))
     runtime = await harness.connect()
     result = await call_tool(
         runtime, "spawn_worker", harness.router_id, title="A", instructions="a"
@@ -462,6 +467,136 @@ async def test_github_review_draft_is_published_on_approval(tmp_path):
     arguments, payload = harness.gh_calls[-1]
     assert arguments[1] == "repos/acme/app/pulls/7/reviews"
     assert payload == {"event": "COMMENT", "commit_id": "abc123", "body": "Looks good"}
+
+
+async def test_an_approval_is_published_as_one_and_settles_the_review_task(tmp_path):
+    harness = Harness(tmp_path / "data", Settings(github_enabled=True, github_repos=["acme/app"]))
+    runtime = await harness.connect()
+    harness.gh_replies["api repos/acme/app/pulls/7/reviews"] = json.dumps({"html_url": "u"})
+    harness.gh_replies["api repos/acme/app/pulls/7"] = json.dumps(
+        {"state": "open", "head": {"sha": "abc123"}}
+    )
+    result = await call_tool(
+        runtime, "spawn_worker", harness.router_id, title="Review #7", instructions="approve #7"
+    )
+    worker_id = json.loads(result.text_result_for_llm)["session_id"]
+    reply = await call_tool(
+        runtime, "draft_github_review", worker_id, repo="acme/app", number=7, body="Nice",
+        in_reply_to=5, verdict="approve",
+    )  # fmt: skip
+    assert "no verdict" in reply.text_result_for_llm
+    await call_tool(
+        runtime, "draft_github_review", worker_id, repo="acme/app", number=7, body="LGTM",
+        verdict="approve",
+    )  # fmt: skip
+    await call_tool(runtime, "report", worker_id, status="done", summary="Approval drafted.")
+    task = runtime.tasks.current(worker_id)
+    assert task["status"] == "review"
+    [draft] = harness.store.drafts()
+    assert draft["target"]["verdict"] == "approve"
+    await runtime.drafts.resolve(draft["id"], DraftDecision(action="send"))
+    assert harness.gh_calls[-1][1]["event"] == "APPROVE"
+    assert runtime.tasks.get(task["id"])["status"] == "done", "one approval, not two"
+
+
+async def test_a_draft_sent_before_the_report_settles_the_task_when_it_reports(tmp_path):
+    harness = Harness(tmp_path / "data")
+    runtime = await harness.connect()
+    worker_id = json.loads(
+        (
+            await call_tool(
+                runtime, "spawn_worker", harness.router_id, title="Answer Carol", instructions="a"
+            )
+        ).text_result_for_llm
+    )["session_id"]
+    await call_tool(
+        runtime, "draft_reply", worker_id, text="friday works", to="Carol", where="mail"
+    )
+    [draft] = harness.store.drafts()
+    await runtime.drafts.resolve(draft["id"], DraftDecision(action="send", text="friday works!"))
+    task = runtime.tasks.current(worker_id)
+    assert task["status"] == "running"
+    told = [m["text"] for m in harness.store.messages(worker_id)]
+    assert any("sends it themself" in text for text in told)
+    await call_tool(runtime, "report", worker_id, status="done", summary="Drafted the reply.")
+    await settle(runtime)
+    assert runtime.tasks.get(task["id"])["status"] == "done", "sent already: no second click"
+
+
+async def test_the_owner_can_change_a_reviews_verdict(tmp_path):
+    harness = Harness(tmp_path / "data", Settings(github_enabled=True, github_repos=["acme/app"]))
+    runtime = await harness.connect()
+    harness.gh_replies["api repos/acme/app/pulls/7/reviews"] = json.dumps({"html_url": "u"})
+    harness.gh_replies["api repos/acme/app/pulls/7"] = json.dumps(
+        {"state": "open", "head": {"sha": "abc123"}}
+    )
+    worker_id = json.loads(
+        (
+            await call_tool(
+                runtime, "spawn_worker", harness.router_id, title="Review", instructions="r"
+            )
+        ).text_result_for_llm
+    )["session_id"]
+    await call_tool(
+        runtime, "draft_github_review", worker_id, repo="acme/app", number=7, body="Hmm"
+    )
+    [draft] = harness.store.drafts()
+    await runtime.drafts.resolve(
+        draft["id"], DraftDecision(action="send", content={"verdict": "request_changes"})
+    )
+    assert harness.gh_calls[-1][1]["event"] == "REQUEST_CHANGES"
+    assert "changed the verdict to request_changes" in harness.session(worker_id).sent[-1]
+
+
+async def test_a_review_of_the_owners_own_pr_is_a_comment(tmp_path):
+    harness = Harness(tmp_path / "data", Settings(github_enabled=True, github_repos=["acme/app"]))
+    runtime = await harness.connect()
+    harness.gh_replies["auth status"] = json.dumps(
+        {"hosts": {"github.com": [{"login": "Evan", "active": True, "state": "success"}]}}
+    )
+    harness.gh_replies["api repos/acme/app/pulls/7"] = json.dumps(
+        {"state": "open", "head": {"sha": "abc"}, "user": {"login": "evan"}}
+    )
+    worker = json.loads(
+        (
+            await call_tool(
+                runtime, "spawn_worker", harness.router_id, title="Review", instructions="r"
+            )
+        ).text_result_for_llm
+    )["session_id"]
+    result = await call_tool(
+        runtime, "draft_github_review", worker, repo="acme/app", number=7, body="Blockers",
+        verdict="request_changes",
+    )  # fmt: skip
+    assert "drafted as a comment" in result.text_result_for_llm
+    [draft] = harness.store.drafts()
+    assert draft["target"]["verdict"] == "comment" and draft["target"]["own"]
+
+    # By another of the owner's accounts, published as the active one: an approval it may give.
+    harness.gh_replies["api repos/acme/app/pulls/8"] = json.dumps(
+        {"state": "open", "head": {"sha": "def"}, "user": {"login": "evan-work"}}
+    )
+    await call_tool(
+        runtime, "draft_github_review", worker, repo="acme/app", number=8, body="LGTM",
+        verdict="approve",
+    )  # fmt: skip
+    other = next(d for d in harness.store.drafts() if d["target"]["number"] == 8)
+    assert other["target"]["verdict"] == "approve" and not other["target"].get("own")
+
+    # Approved elsewhere as the owner's own after all: GitHub refuses, a comment goes instead.
+    events = []
+
+    async def gh(*arguments, payload=None, token=""):
+        if payload:
+            events.append(payload["event"])
+            if payload["event"] != "COMMENT":
+                raise RuntimeError("gh: Unprocessable Entity (HTTP 422)")
+            return json.dumps({"id": 1, "html_url": "https://github.com/acme/app/pull/7#r1"})
+        return json.dumps({"state": "open", "head": {"sha": "abc"}})
+
+    runtime.github.gh = gh
+    outcome = await runtime.github.publish_review({**draft["target"], "verdict": "approve"}, "LGTM")
+    assert events == ["APPROVE", "COMMENT"] and "posted as a comment" in outcome
 
 
 async def test_external_sessions_can_be_adopted(harness, tmp_path):
@@ -726,7 +861,8 @@ async def test_failed_delivery_is_not_replayed_later(harness):
     assert router.sent == [said("next")]
 
 
-async def test_new_settings_wait_for_a_worker_to_finish_its_turn(harness):
+async def test_new_settings_wait_for_a_worker_to_finish_its_turn(tmp_path):
+    harness = Harness(tmp_path / "data", Settings(worker_yolo=False))
     runtime = await harness.connect()
     result = await call_tool(
         runtime, "spawn_worker", harness.router_id, title="A", instructions="a"
@@ -859,6 +995,43 @@ async def test_messages_during_a_rotation_reach_the_new_router(harness):
     assert old.sent == [] and len(new.sent) == 1
     assert new.sent[0].startswith('<message from="system" type="handover">')
     assert new.sent[0].endswith(said("Are you there?"))
+
+
+async def test_a_fresh_router_remembers_what_the_owner_said_long_ago(harness):
+    runtime = await harness.connect()
+    router_id = harness.router_id
+    await runtime.owner_send(router_id, "Remember: my release codename is BLUE-HERON-7.")
+    for n in range(80):
+        runtime.add_message(router_id, "assistant", f"Reply {n}: " + "status line. " * 20)
+        runtime.add_message(router_id, "owner", f"Question {n}: how is task {n} going?")
+    handover = runtime.handover()
+    assert "BLUE-HERON-7" in handover, "the owner's words are kept, not only the last 30"
+    assert "Question 79" in handover and len(handover) < 80_000
+
+
+async def test_a_fresh_router_that_fails_hands_back_to_the_earlier_one(harness):
+    runtime = await harness.connect()
+    router_id = harness.router_id
+    old = harness.session(router_id)
+    old.emit("assistant.usage", model="m", input_tokens=200_000)
+    old.emit("session.idle")
+    await settle(runtime)
+    fresh_id = harness.store.get(f"copilot:{router_id}")
+    assert fresh_id and fresh_id != router_id
+    await runtime.owner_send(router_id, "Status?")
+    fresh = harness.client.sessions[fresh_id]
+    assert fresh.sent[-1].endswith(said("Status?"))
+
+    fresh.emit("session.error", message="Execution failed: 500 upstream overloaded")
+    await settle(runtime)
+    assert harness.store.get(f"copilot:{router_id}") == router_id, "the earlier session goes on"
+    resumed = harness.client.sessions[router_id]
+    assert resumed.sent[-1].endswith(said("Status?")), "the message is sent again"
+    assert not resumed.sent[-1].startswith('<message from="system" type="handover">')
+    resumed.emit("assistant.usage", model="m", input_tokens=210_000)
+    resumed.emit("session.idle")
+    await settle(runtime)
+    assert harness.store.get(f"copilot:{router_id}") == router_id, "no new rotation right away"
 
 
 async def test_the_router_rotates_when_its_context_grows(harness):

@@ -1,0 +1,486 @@
+"""Browser checks of how the UI looks and reads, with no accounts: a realistic Home (three
+tasks, cards that need the owner) on a fake Copilot, at 800 to 1440 px, light and dark.
+
+Fails on: horizontal scrolling; elements overflowing their card or overlapping each other;
+more than one main (filled) button per card or dialog footer; controls under 28 px tall or
+without an accessible name; text under 12 px; more than three font sizes in a view; WCAG AA
+violations found by axe-core (serious or critical); a crowded panel (more than 7 buttons at
+rest with three tasks and two cards); more than three chat lines about one finished task; no
+visible focus ring.
+
+    uv run --with playwright python scripts/ui_quality.py
+"""
+
+# The checks run in the page are JavaScript, written on long lines.
+# ruff: noqa: E501
+
+import asyncio
+import json
+import sys
+import tempfile
+import urllib.request
+from pathlib import Path
+from types import SimpleNamespace
+
+import uvicorn
+from playwright.async_api import async_playwright, expect
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "tests"))
+from conftest import FakeClient, FakeSlackMcp, FakeTokens, call_tool, settle  # noqa: E402
+
+from chiefofstaff.runtime import Runtime  # noqa: E402
+from chiefofstaff.sources.slack import SlackSource  # noqa: E402
+from chiefofstaff.web import create_app  # noqa: E402
+
+PORT = 8796
+TOKEN = "ui-quality-token"
+BASE = f"http://127.0.0.1:{PORT}"
+SHOTS = ROOT / "browser-shots"
+AXE = "https://cdn.jsdelivr.net/npm/axe-core@4.10.2/axe.min.js"
+WIDTHS = (800, 1024, 1280, 1440)
+ASK = (
+    "Fix the flaky login test in acme-api, then add rate limiting to login attempts. "
+    "Also compare a few feature-flag services for us."
+)
+FIX, COMPARE, LIMIT = (
+    "Fix the flaky login test",
+    "Compare feature-flag services",
+    "Rate-limit login attempts",
+)
+
+
+def log(text: str):
+    print(f"  {text}", flush=True)
+
+
+# What each check measures, in the page. Each returns a list of problems (strings).
+CHECKS = r"""
+(scope) => {
+  const problems = [];
+  const root = scope ? document.querySelector(scope) : document;
+  const shown = (node) => {
+    if (!node.isConnected) return false;
+    const box = node.getBoundingClientRect();
+    if (box.width < 1 || box.height < 1) return false;
+    for (let at = node; at && at !== document; at = at.parentElement) {
+      const style = getComputedStyle(at);
+      if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) return false;
+    }
+    return true;
+  };
+  const name = (node) => {
+    const what = node.tagName.toLowerCase() + (node.id ? `#${node.id}` : "") + (node.className && typeof node.className === "string" ? `.${node.className.trim().split(/\s+/).join(".")}` : "");
+    const text = (node.textContent || node.value || "").trim().replace(/\s+/g, " ").slice(0, 30);
+    return text ? `${what} "${text}"` : what;
+  };
+  const probe = document.createElement("span");
+  probe.style.color = "var(--text)";
+  document.body.append(probe);
+  const filled = getComputedStyle(probe).color;
+  probe.remove();
+  // No sideways scrolling, anywhere.
+  if (!scope && document.documentElement.scrollWidth > innerWidth + 1) problems.push(`page scrolls sideways (${document.documentElement.scrollWidth} > ${innerWidth})`);
+  for (const box of root.querySelectorAll("#scroller, #panel, #settings-pane, #sidebar, .diff-body, #usage-tables, #file-body")) {
+    if (shown(box) && box.scrollWidth > box.clientWidth + 1) problems.push(`${name(box)} scrolls sideways (${box.scrollWidth} > ${box.clientWidth})`);
+  }
+  // Inside each card: nothing sticks out, and nothing in a row lies on top of another.
+  const inside = (outer, inner) => inner.left >= outer.left - 1 && inner.right <= outer.right + 1 && inner.top >= outer.top - 1 && inner.bottom <= outer.bottom + 1;
+  const overlap = (a, b) => Math.max(0, Math.min(a.right, b.right) - Math.max(a.left, b.left)) * Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top));
+  for (const card of root.querySelectorAll(".card, .menu, dialog[open] footer, .event, .msg")) {
+    if (!shown(card)) continue;
+    const box = card.getBoundingClientRect();
+    for (const child of card.querySelectorAll("*")) {
+      if (!shown(child) || child.closest(".menu") !== card.closest(".menu")) continue;
+      if (getComputedStyle(child).position === "absolute" || child.closest(".folded, .clamp, .markdown table, pre")) continue;
+      if (!inside(box, child.getBoundingClientRect())) problems.push(`${name(child)} sticks out of ${name(card)}`);
+    }
+    for (const row of [card, ...card.querySelectorAll(".head, .actions, .receipts, .choices, .options, summary, .learn-row, .row")]) {
+      const items = [...row.children].filter((item) => shown(item) && getComputedStyle(item).position !== "absolute");
+      for (let i = 0; i < items.length; i++) {
+        for (let j = i + 1; j < items.length; j++) {
+          if (overlap(items[i].getBoundingClientRect(), items[j].getBoundingClientRect()) > 4) problems.push(`${name(items[i])} overlaps ${name(items[j])}`);
+        }
+      }
+    }
+  }
+  // Text that does not fit its control (unless it is cut on purpose, with an ellipsis).
+  for (const node of root.querySelectorAll("button, a.button, .chip, .receipt, label > span")) {
+    if (!shown(node) || getComputedStyle(node).textOverflow === "ellipsis") continue;
+    if (node.scrollWidth > node.clientWidth + 1 && getComputedStyle(node).overflow !== "visible") problems.push(`${name(node)} text does not fit`);
+  }
+  // One main (filled) action per card and per dialog footer.
+  const primary = (node) => shown(node) && getComputedStyle(node).backgroundColor === filled;
+  for (const card of root.querySelectorAll(".card, dialog[open] footer")) {
+    if (!shown(card)) continue;
+    const main = [...card.querySelectorAll("button, a.button")].filter(primary);
+    if (main.length > 1) problems.push(`${name(card)} has ${main.length} main buttons: ${main.map(name).join(", ")}`);
+  }
+  // Controls big enough to hit, and named for screen readers.
+  for (const node of root.querySelectorAll("button, a[href], input:not([type=hidden]), select, textarea, summary, [role=button], [role=menuitem]")) {
+    if (!shown(node) || node.closest(".markdown, .msg.owner .attachments")) continue;
+    const checkbox = node.type === "checkbox" || node.type === "radio";
+    const target = checkbox ? node.closest("label") || node : node;
+    const height = target.getBoundingClientRect().height;
+    if (height < 27.5) problems.push(`${name(target)} is ${height.toFixed(0)}px tall`);
+    const label = node.getAttribute("aria-label") || node.getAttribute("aria-labelledby") || (node.labels && node.labels.length) || node.title || node.placeholder || (node.textContent || "").trim() || node.querySelector("img[alt]");
+    if (!label) problems.push(`${name(node)} has no accessible name`);
+  }
+  // Text at 12px or more; few sizes per view.
+  const sizes = new Map();
+  const walker = document.createTreeWalker(root === document ? document.body : root, NodeFilter.SHOW_TEXT);
+  while (walker.nextNode()) {
+    const text = walker.currentNode.textContent.trim();
+    const parent = walker.currentNode.parentElement;
+    if (!text || !parent || !shown(parent) || parent.closest("dialog:not([open]), option, select")) continue;
+    if (!scope && parent.closest("dialog")) continue;
+    const size = parseFloat(getComputedStyle(parent).fontSize);
+    if (size < 11.95) problems.push(`${name(parent)} text is ${size}px`);
+    if (/[\p{L}\p{N}]/u.test(text) && !parent.closest(".toast")) sizes.set(size, [...(sizes.get(size) || []), name(parent)]);
+  }
+  if (sizes.size > 3) problems.push(`${sizes.size} font sizes: ${[...sizes].map(([size, where]) => `${size}px (${where.slice(0, 2).join(", ")})`).join("; ")}`);
+  return [...new Set(problems)];
+}
+"""
+
+# Buttons that look like buttons (filled or outlined), in Home's panel.
+PANEL_BUTTONS = r"""
+() => [...document.querySelectorAll("#panel button, #panel a.button")].filter((node) => {
+  const box = node.getBoundingClientRect();
+  if (box.width < 1 || box.height < 1 || node.closest("[hidden], .menu") || node.matches(".receipt")) return false;
+  const style = getComputedStyle(node);
+  const painted = style.backgroundColor !== "rgba(0, 0, 0, 0)" && style.backgroundColor !== "transparent";
+  const outlined = parseFloat(style.borderTopWidth) > 0 && style.borderTopColor !== "rgba(0, 0, 0, 0)";
+  return painted || outlined;
+}).map((node) => (node.textContent || node.getAttribute("aria-label") || "").trim())
+"""
+
+
+async def seed(runtime, client, code: Path) -> dict:
+    """Three tasks (one running, one queued, one to review), and a decision and a Slack reply
+    that need the owner."""
+    store = runtime.store
+    settings = store.settings().model_copy(
+        update={"code_folder": str(code), "max_workers": 2, "mac_notifications": False}
+    )
+    store.save_settings(settings)
+    router = store.get("router_id")
+    await runtime.owner_send(router, ASK)
+    await settle(runtime)
+    workers = {}
+    for title in (FIX, COMPARE, LIMIT):
+        result = await call_tool(
+            runtime, "spawn_worker", router, title=title, instructions=title, why_new="test"
+        )
+        found = json.loads(result.text_result_for_llm)
+        workers[title] = found
+        await settle(runtime)
+    session = lambda title: client.sessions[runtime.copilot_id(workers[title]["session_id"])]  # noqa: E731
+    router_session = client.sessions[runtime.copilot_id(router)]
+    router_session.emit(
+        "assistant.message",
+        content="Started three tasks: the flaky login test, rate limiting once the fix is in, "
+        "and a feature-flag comparison.",
+        tool_requests=None,
+    )
+    router_session.emit("session.idle")
+    fix = session(FIX)
+    for call, output in [
+        ("c1", "F\n1 failed in 0.21s\n<exited with exit code 1>"),
+        ("c2", "........\n8 passed in 0.29s\n<exited with exit code 0>"),
+    ]:
+        fix.emit("tool.execution_start", tool_name="bash",
+                 arguments={"command": "uv run pytest -q"}, tool_call_id=call)  # fmt: skip
+        fix.emit("tool.execution_complete", tool_call_id=call, success=True,
+                 result=SimpleNamespace(content=output))  # fmt: skip
+    await settle(runtime)
+    await call_tool(
+        runtime, "report", workers[FIX]["session_id"], status="done",
+        summary="Fixed the flaky login test; all tests pass.\n- Cause: token expiry read the "
+        "real clock, so slow runs failed\n- Fix: `app/login.py` takes the clock as a parameter\n"
+        "- `uv run pytest -q`: 8 passed",
+        criteria=[{"criterion": "`uv run pytest -q` passes", "result": "met",
+                   "evidence": "`uv run pytest -q`: 8 passed"}],
+    )  # fmt: skip
+    compare = session(COMPARE)
+    compare.emit("assistant.message", content="Reading the pricing pages of three services.",
+                 tool_requests=None)  # fmt: skip
+    compare.emit("tool.execution_start", tool_name="bash", tool_call_id="p1",
+                 arguments={"command": "curl -s https://example.com/pricing | head -40"})  # fmt: skip
+    await settle(runtime)
+    limit = workers[LIMIT]
+    decision = store.create_draft(
+        router, "decision",
+        {"question": "Limit login attempts per IP address or per account?",
+         "why": "Per IP misses attackers who rotate addresses; per account lets anyone lock a "
+         "user out.",
+         "options": [{"choice": "Per IP address", "effect": "Simple; offices share IPs"},
+                     {"choice": "Per account", "effect": "Stops guessing one password"},
+                     {"choice": "Both", "effect": "Safest; one more counter"}],
+         "recommendation": "Per account: it protects each user directly",
+         "askers": [{"task_id": limit["task_id"], "title": LIMIT,
+                     "session_id": limit["session_id"]}]},
+        "Limit login attempts per IP address or per account?",
+    )  # fmt: skip
+    slack = store.create_draft(
+        router, "slack",
+        {"channel_id": "D0DEMOMAYA", "thread_ts": "", "to": "Maya Chen",
+         "latest": "hey! is the login fix going out today? support keeps asking"},
+        "Yes! The flaky login test is fixed and waiting for review; rate limiting lands right "
+        "after. I'll ping you when it ships.",
+        note="Maya asks whether the login fix goes out today.",
+    )  # fmt: skip
+    for draft in (decision, slack):
+        runtime.bus.publish("draft", store.draft(draft["id"]))
+    runtime.bus.publish("state")
+    return {"workers": workers, "router": router}
+
+
+def gallery(runtime, seeded: dict) -> list[dict]:
+    """Every other kind of card: a question, a PR review with a verdict and line comments, a
+    reply to send yourself, and a sign-in."""
+    store = runtime.store
+    compare = seeded["workers"][COMPARE]["session_id"]
+    fix = seeded["workers"][FIX]["session_id"]
+    drafts = [
+        store.create_draft(
+            compare, "question",
+            {"question": "Which seat count should the comparison price?",
+             "choices": ["10 seats", "50 seats", "200 seats"], "allow_freeform": True},
+            "Which seat count should the comparison price?",
+        ),
+        store.create_draft(
+            fix, "github",
+            {"repo": "acme/api", "number": 42, "url": "https://github.com/acme/api/pull/42",
+             "via": "task", "head_sha": "c0ffee", "verdict": "approve",
+             "comments": [{"path": "app/login.py", "line": 12, "side": "RIGHT",
+                           "body": "Pass the clock in here too."},
+                          {"path": "tests/test_login.py", "line": 4, "side": "RIGHT",
+                           "body": "Nice: this no longer races the clock."}]},
+            "Looks good. Two small notes inline.",
+        ),
+        store.create_draft(
+            compare, "reply",
+            {"to": "Ann Lee", "where": "email", "link": "https://mail.example.com/t/1"},
+            "Hi Ann, the comparison is coming tomorrow morning.",
+        ),
+        store.create_draft(
+            compare, "signin", {"url": "https://login.example.com/authorize", "server": "Jira"},
+            "Jira needs you to sign in.",
+        ),
+    ]  # fmt: skip
+    for draft in drafts:
+        runtime.bus.publish("draft", store.draft(draft["id"]))
+    return drafts
+
+
+class Quality:
+    def __init__(self):
+        self.failures: list[str] = []
+        self.axe = urllib.request.urlopen(AXE, timeout=30).read().decode()
+
+    async def check(self, page, where: str, scope: str = ""):
+        found = await page.evaluate(CHECKS, scope)
+        self.failures += [f"{where}: {problem}" for problem in found]
+
+    async def contrast(self, page, where: str, scope: str = ""):
+        # Colors as they end up, not halfway through a fade.
+        await page.evaluate(
+            "() => Promise.all(document.getAnimations()"
+            ".filter((a) => a.effect?.getComputedTiming().iterations !== Infinity)"
+            ".map((a) => a.finished.catch(() => {})))"
+        )
+        if not await page.evaluate("() => Boolean(window.axe)"):
+            await page.add_script_tag(content=self.axe)
+        result = await page.evaluate(
+            """async (scope) => {
+            const found = await axe.run(scope || document, {
+              runOnly: { type: "tag", values: ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"] },
+            });
+            return found.violations.filter((v) => ["serious", "critical"].includes(v.impact))
+              .map((v) => `${v.id}: ${v.nodes.slice(0, 4).map((n) => n.target.join(" ") +
+                (n.any[0]?.data?.contrastRatio ? ` (${n.any[0].data.contrastRatio}:1)` : "")).join(", ")}${v.nodes.length > 4 ? ` +${v.nodes.length - 4}` : ""}`);
+            }""",
+            scope,
+        )  # fmt: skip
+        self.failures += [f"{where}: axe {problem}" for problem in result]
+
+
+async def run(runtime, seeded, browser, quality: Quality, phase: str):
+    for scheme in ("light", "dark"):
+        context = await browser.new_context(
+            viewport={"width": 1440, "height": 900}, color_scheme=scheme, bypass_csp=True
+        )
+        page = await context.new_page()
+        errors: list[str] = []
+        page.on("pageerror", lambda error: errors.append(str(error)))  # noqa: B023
+        await page.goto(f"{BASE}/#token={TOKEN}")
+        await expect(page.locator("#tasks .card.task")).to_have_count(3, timeout=15000)
+        await expect(page.locator("#needs .card")).to_have_count(2)
+        await page.wait_for_timeout(400)
+        for width in WIDTHS:
+            await page.set_viewport_size({"width": width, "height": 900})
+            await page.wait_for_timeout(150)
+            where = f"home {width} {scheme}"
+            await page.screenshot(path=SHOTS / f"quality-{phase}-home-{width}-{scheme}.png")
+            await quality.check(page, where)
+            if width >= 1100:
+                panel = await page.evaluate(PANEL_BUTTONS)
+                if len(panel) > 7:
+                    quality.failures.append(f"{where}: {len(panel)} buttons in the panel: {panel}")
+        await quality.contrast(page, f"home {scheme}")
+        await page.set_viewport_size({"width": 1280, "height": 900})
+        await page.locator("#tasks").scroll_into_view_if_needed()
+        await page.locator("#tasks").screenshot(path=SHOTS / f"quality-{phase}-tasks-{scheme}.png")
+        review = page.locator("#tasks-review .card.task").first
+        await review.get_by_role("button", name="Show report").click()
+        await review.screenshot(path=SHOTS / f"quality-{phase}-review-open-{scheme}.png")
+        await quality.check(page, f"review open {scheme}", "#panel")
+        await review.get_by_role("button", name="Hide report").click()
+        # A finished task: at most its start, the Router's reply and its end in the chat.
+        lines = await page.locator("#timeline > *", has_text=FIX).count()
+        if lines > 3:
+            quality.failures.append(f"chat {scheme}: {lines} lines about “{FIX}”")
+        # A visible focus ring for keyboard users.
+        await page.set_viewport_size({"width": 1280, "height": 900})
+        await page.keyboard.press("Tab")
+        ring = await page.evaluate(
+            """() => {
+            const button = document.querySelector("#panel .card .actions button:not(.more-button)");
+            button.focus();
+            const style = getComputedStyle(button);
+            return button.matches(":focus-visible") && (style.outlineStyle !== "none" || style.boxShadow !== "none");
+            }"""
+        )  # fmt: skip
+        if not ring:
+            quality.failures.append(f"focus {scheme}: no visible focus ring on a card's button")
+
+        await page.locator("#session-list .item", has_text=FIX).click()
+        await expect(page.locator("#back-home")).to_be_visible()
+        await page.wait_for_timeout(300)
+        for width in (1024, 800):
+            await page.set_viewport_size({"width": width, "height": 900})
+            await page.screenshot(path=SHOTS / f"quality-{phase}-worker-{width}-{scheme}.png")
+            await quality.check(page, f"worker {width} {scheme}")
+        await page.locator("#session-more-button").click()
+        await page.wait_for_timeout(200)
+        await page.screenshot(path=SHOTS / f"quality-{phase}-worker-menu-{scheme}.png")
+        await quality.check(page, f"worker menu {scheme}", "#session-more")
+        await quality.contrast(page, f"worker {scheme}")
+        await page.keyboard.press("Escape")
+        await page.locator("#back-home").click()
+
+        await page.set_viewport_size({"width": 1280, "height": 900})
+        await page.locator("#settings-button").click()
+        for tab in ("general", "workers", "models", "connections", "you", "advanced"):
+            await page.locator(f"#settings-tabs [data-tab={tab}]").click()
+            if tab == "connections":
+                for section in ("slack", "abilities", "watches", "away"):
+                    details = page.locator(f"#conn-{section}")
+                    if not await details.evaluate("section => section.open"):
+                        await details.locator("summary").click()
+            await page.wait_for_timeout(150)
+            await page.screenshot(path=SHOTS / f"quality-{phase}-settings-{tab}-{scheme}.png")
+            await quality.check(page, f"settings {tab} {scheme}", "#settings-dialog")
+            await quality.contrast(page, f"settings {tab} {scheme}", "#settings-dialog")
+        await page.set_viewport_size({"width": 800, "height": 900})
+        await page.screenshot(path=SHOTS / f"quality-{phase}-settings-800-{scheme}.png")
+        await quality.check(page, f"settings 800 {scheme}", "#settings-dialog")
+        await page.locator("#settings-cancel").click()
+        await page.set_viewport_size({"width": 1280, "height": 900})
+        await page.locator("#usage-button").click()
+        await page.wait_for_timeout(400)
+        await page.screenshot(path=SHOTS / f"quality-{phase}-usage-{scheme}.png")
+        await quality.check(page, f"usage {scheme}", "#usage-dialog")
+        await quality.contrast(page, f"usage {scheme}", "#usage-dialog")
+        await page.keyboard.press("Escape")
+        quality.failures += [f"page error {scheme}: {error}" for error in errors]
+        await context.close()
+
+
+async def cards(runtime, seeded, browser, quality: Quality, phase: str):
+    """Every kind of card that needs the owner, at the panel's widths."""
+    drafts = gallery(runtime, seeded)
+    for scheme in ("light", "dark"):
+        context = await browser.new_context(
+            viewport={"width": 1440, "height": 2000}, color_scheme=scheme, bypass_csp=True
+        )
+        page = await context.new_page()
+        await page.goto(f"{BASE}/#token={TOKEN}")
+        await expect(page.locator("#needs .card")).to_have_count(6, timeout=15000)
+        # Each card says once what it is about: a decision names its task in its label only.
+        decision = page.locator("#needs .card.decision")
+        await expect(decision.locator(".head .label")).to_contain_text(f"Decision for {LIMIT}")
+        if await decision.locator(".context").count():
+            quality.failures.append(f"cards {scheme}: the decision names its task twice")
+        for width in (1440, 1100, 800):
+            await page.set_viewport_size({"width": width, "height": 2000})
+            if width < 1100:
+                await page.locator("#home-tabs [data-tab=needs]").click()
+            await page.wait_for_timeout(150)
+            await page.locator("#needs").screenshot(
+                path=SHOTS / f"quality-{phase}-cards-{width}-{scheme}.png"
+            )
+            await quality.check(page, f"cards {width} {scheme}", "#panel")
+        await quality.contrast(page, f"cards {scheme}", "#panel")
+        await page.set_viewport_size({"width": 1280, "height": 900})
+        for index, card in enumerate(await page.locator("#needs .card").all()):
+            await card.scroll_into_view_if_needed()
+            await card.screenshot(path=SHOTS / f"quality-{phase}-card-{index}-{scheme}.png")
+        await context.close()
+    for draft in drafts:
+        runtime.store.update_draft(draft["id"], status="rejected")
+        runtime.bus.publish("draft", runtime.store.draft(draft["id"]))
+
+
+async def main():
+    phase = sys.argv[1] if len(sys.argv) > 1 else "check"
+    SHOTS.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="cos-quality-") as temporary:
+        holder: dict = {}
+
+        def factory(store, bus):
+            async def notifier(title, text):
+                pass
+
+            client = FakeClient()
+            runtime = Runtime(
+                store, bus, backend_factory=lambda settings: client, notifier=notifier
+            )
+            runtime.slack = SlackSource(store, runtime, tokens=FakeTokens(""), mcp=FakeSlackMcp())
+            holder.update(runtime=runtime, client=client)
+            return runtime
+
+        app = create_app(Path(temporary) / "data", TOKEN, PORT, runtime_factory=factory)
+        server = uvicorn.Server(uvicorn.Config(app, port=PORT, log_level="warning"))
+        serving = asyncio.create_task(server.serve())
+        while not server.started:
+            await asyncio.sleep(0.05)
+        runtime = holder["runtime"]
+        for _ in range(100):
+            if runtime.ready():
+                break
+            await asyncio.sleep(0.1)
+        code = Path(temporary) / "code"
+        code.mkdir()
+        seeded = await seed(runtime, holder["client"], code)
+        quality = Quality()
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch()
+            await run(runtime, seeded, browser, quality, phase)
+            log("Home, a worker, Settings and Usage: 800 to 1440 px, light and dark")
+            await cards(runtime, seeded, browser, quality, phase)
+            log("every kind of card that needs the owner")
+            await browser.close()
+        server.should_exit = True
+        await serving
+    if quality.failures:
+        print(f"{len(quality.failures)} problems:")
+        for failure in quality.failures:
+            print(f"  - {failure}")
+        sys.exit(1)
+    print("UI QUALITY PASSED")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

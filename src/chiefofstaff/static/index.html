@@ -15,12 +15,7 @@
 
     <div id="application" hidden>
       <aside id="sidebar">
-        <header class="brand">
-          <span>Chief of Staff</span>
-          <button id="settings-button" class="icon" type="button" title="Settings" aria-label="Settings">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 6.8a3.2 3.2 0 1 0 0 6.4 3.2 3.2 0 0 0 0-6.4Zm7.1 4.6-1.6-.9a5.7 5.7 0 0 0 0-1l1.6-.9a.6.6 0 0 0 .2-.8l-1.5-2.6a.6.6 0 0 0-.8-.2l-1.6.9a5.9 5.9 0 0 0-.9-.5V3.6a.6.6 0 0 0-.6-.6H8.1a.6.6 0 0 0-.6.6v1.8l-.9.5-1.6-.9a.6.6 0 0 0-.8.2L2.7 7.8a.6.6 0 0 0 .2.8l1.6.9a5.7 5.7 0 0 0 0 1l-1.6.9a.6.6 0 0 0-.2.8l1.5 2.6c.2.3.5.4.8.2l1.6-.9.9.5v1.8c0 .3.3.6.6.6h3a.6.6 0 0 0 .6-.6v-1.8l.9-.5 1.6.9c.3.2.6.1.8-.2l1.5-2.6a.6.6 0 0 0-.2-.8Z"/></svg>
-          </button>
-        </header>
+        <header class="brand">Chief of Staff</header>
         <nav id="session-list" aria-label="Sessions"></nav>
         <details id="closed" hidden>
           <summary>Closed <span id="closed-count"></span></summary>
@@ -30,37 +25,68 @@
           <summary>Other Copilot sessions <span id="external-count"></span></summary>
           <div id="external-list"></div>
         </details>
-        <footer id="status-line"></footer>
-        <button id="usage-button" type="button" class="usage-link" title="Credits used">Usage</button>
+        <footer id="sidebar-foot">
+          <div id="status-line"></div>
+          <div class="foot-row">
+            <button id="settings-button" class="icon" type="button" title="Settings" aria-label="Settings">
+              <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 6.8a3.2 3.2 0 1 0 0 6.4 3.2 3.2 0 0 0 0-6.4Zm7.1 4.6-1.6-.9a5.7 5.7 0 0 0 0-1l1.6-.9a.6.6 0 0 0 .2-.8l-1.5-2.6a.6.6 0 0 0-.8-.2l-1.6.9a5.9 5.9 0 0 0-.9-.5V3.6a.6.6 0 0 0-.6-.6H8.1a.6.6 0 0 0-.6.6v1.8l-.9.5-1.6-.9a.6.6 0 0 0-.8.2L2.7 7.8a.6.6 0 0 0 .2.8l1.6.9a5.7 5.7 0 0 0 0 1l-1.6.9a.6.6 0 0 0-.2.8l1.5 2.6c.2.3.5.4.8.2l1.6-.9.9.5v1.8c0 .3.3.6.6.6h3a.6.6 0 0 0 .6-.6v-1.8l.9-.5 1.6.9c.3.2.6.1.8-.2l1.5-2.6a.6.6 0 0 0-.2-.8Z"/></svg>
+            </button>
+            <button id="usage-button" class="icon usage" type="button" title="Usage" aria-label="Usage">
+              <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 16V10M8.7 16V5M13.3 16v-8M18 16H2" /></svg>
+              <span id="usage-today"></span>
+            </button>
+          </div>
+        </footer>
       </aside>
 
       <main id="main">
         <header id="session-header">
+          <button id="back-home" type="button" class="back" title="Back to Home" hidden>← Home</button>
           <div class="heading">
             <h1 id="session-title"></h1>
             <div id="session-meta"></div>
           </div>
-          <div id="session-tuning" hidden>
-            <select id="session-model" aria-label="Model" title="Model for this session"></select>
-            <select id="session-effort" aria-label="Thinking effort" title="Thinking effort"></select>
-            <select id="session-context" aria-label="Context window" title="Context window"></select>
-          </div>
           <div id="session-actions"></div>
+          <span id="session-menu" class="menu-wrap" hidden>
+            <button id="session-more-button" type="button" class="more-button" title="Model and more" aria-label="Model and more" aria-haspopup="menu">⋯</button>
+            <div id="session-more" class="menu wide" role="dialog" aria-label="Model and more" hidden>
+              <div id="session-tuning" hidden>
+                <label><span>Model</span><select id="session-model"></select></label>
+                <label><span>Thinking effort</span><select id="session-effort"></select></label>
+                <label><span>Context window</span><select id="session-context"></select></label>
+              </div>
+              <div id="session-menu-items"></div>
+            </div>
+          </span>
         </header>
-        <div id="scroller">
-          <section id="inbox" aria-label="Inbox" hidden></section>
-          <section id="drafts" aria-label="Waiting for you"></section>
-          <section id="timeline" aria-live="polite"></section>
+        <nav id="home-tabs" role="tablist" aria-label="Home" hidden>
+          <button type="button" role="tab" data-tab="chat">Chat</button>
+          <button type="button" role="tab" data-tab="needs">Needs you <span class="count"></span></button>
+          <button type="button" role="tab" data-tab="tasks">Tasks <span class="count"></span></button>
+        </nav>
+        <div id="body">
+          <div id="conversation">
+            <div id="notices" hidden></div>
+            <div id="scroller">
+              <section id="timeline" aria-live="polite"></section>
+            </div>
+            <form id="composer" autocomplete="off">
+              <div id="composer-note" role="status"></div>
+              <ul id="mention-list" role="listbox" aria-label="Workers" hidden></ul>
+              <div id="composer-to" hidden></div>
+              <div id="attachments" aria-label="Images to send" hidden></div>
+              <textarea id="composer-input" rows="1" aria-label="Message"></textarea>
+              <button id="attach-button" type="button" class="attach" aria-label="Add images" title="Add images (or paste, or drop them here)">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M15.5 9.2 9.6 15a3.6 3.6 0 0 1-5.1-5.1l6.4-6.4a2.4 2.4 0 0 1 3.4 3.4l-6.4 6.4a1.2 1.2 0 0 1-1.7-1.7l5.8-5.8" /></svg>
+              </button>
+              <input id="attach-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden />
+              <button type="submit" aria-label="Send" title="Send (Enter)">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 15.5V4.5M5 9.5l5-5 5 5" /></svg>
+              </button>
+            </form>
+          </div>
+          <aside id="panel" aria-label="Needs you and tasks" hidden></aside>
         </div>
-        <form id="composer" autocomplete="off">
-          <div id="composer-note" role="status"></div>
-          <ul id="mention-list" role="listbox" aria-label="Workers" hidden></ul>
-          <div id="composer-to" hidden></div>
-          <textarea id="composer-input" rows="1" aria-label="Message"></textarea>
-          <button type="submit" aria-label="Send" title="Send (Enter)">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 15.5V4.5M5 9.5l5-5 5 5" /></svg>
-          </button>
-        </form>
       </main>
     </div>
 
@@ -73,129 +99,223 @@
       <div id="file-body"></div>
     </dialog>
 
-    <dialog id="settings-dialog">
+    <dialog id="settings-dialog" aria-label="Settings">
       <form id="settings-form" method="dialog">
         <h2>Settings</h2>
-        <label>
-          <span>Code folder</span>
-          <input name="code_folder" placeholder="/Users/you/workspace" autocomplete="off" />
-          <small>Where your repositories live. Each one is a project; a repository a task needs that is not here is cloned into it. Every worker works in its own folder in .chief inside it, with a git worktree of each repository it changes, so your own checkouts are never touched.</small>
-        </label>
-        <div class="row">
-          <label><span>Parallel workers</span><input name="max_workers" type="number" min="1" max="12" /></label>
-          <label title="Finished workers with nothing to follow close after this long without activity. You can reopen them."><span>Close idle after (h)</span><input name="worker_idle_hours" type="number" min="1" max="720" /></label>
-          <label class="check"><input name="mac_notifications" type="checkbox" /> Desktop notifications</label>
+        <nav id="settings-tabs" role="tablist" aria-label="Settings sections" aria-orientation="vertical">
+          <button type="button" role="tab" data-tab="general">General</button>
+          <button type="button" role="tab" data-tab="workers">Workers</button>
+          <button type="button" role="tab" data-tab="models">Models</button>
+          <button type="button" role="tab" data-tab="connections">Connections</button>
+          <button type="button" role="tab" data-tab="you">You</button>
+          <button type="button" role="tab" data-tab="advanced">Advanced</button>
+        </nav>
+        <div id="settings-pane">
+          <section class="tab" data-tab="general">
+            <label>
+              <span>Code folder</span>
+              <input name="code_folder" placeholder="/Users/you/workspace" autocomplete="off" />
+              <small>Where your repositories live. Each worker works in its own copy, so your checkouts are never touched; a repository that is missing is cloned here.</small>
+            </label>
+            <div class="row">
+              <label><span>Parallel workers</span><input name="max_workers" type="number" min="1" max="12" /></label>
+              <label><span>Close idle after (h)</span><input name="worker_idle_hours" type="number" min="1" max="720" /></label>
+              <label><span>Daily summary at</span><input name="digest_time" type="time" /></label>
+            </div>
+            <small>More tasks wait in the queue. Idle finished workers close; you can reopen them.</small>
+            <label class="check"><input name="mac_notifications" type="checkbox" /> Desktop notifications</label>
+          </section>
+
+          <section class="tab" data-tab="workers" hidden>
+            <label class="check"><input name="worker_yolo" type="checkbox" /> Workers act without asking for permission first (yolo)</label>
+            <small>Either way, nothing is force-pushed, pushed to main or posted as you without your OK. Change it for one worker in its ⋯ menu.</small>
+            <label class="check"><input name="worker_sandbox" type="checkbox" /> Sandbox: workers can change files only in their own folders</label>
+            <small>Off, workers can do what your own Copilot sessions can (your tools, keychain, Docker, other repos), under your Copilot sandbox settings if you use them. Workers that read Slack are always sandboxed.</small>
+            <small id="sandbox-hint" hidden></small>
+            <label>
+              <span>Also writable in the sandbox</span>
+              <textarea name="sandbox_writable" rows="2" placeholder="One folder per line, e.g. a Copilot plugin's own folder"></textarea>
+              <small>For tools that must write outside a worker's folders, such as a Copilot plugin hook that keeps a journal.</small>
+            </label>
+            <label class="check"><input name="shared_caches" type="checkbox" /> Share your npm and Yarn package stores, so installs are as fast as in your terminal</label>
+            <div class="check-row"><label class="check"><input name="watchdog_enabled" type="checkbox" /> Watchdog: check workers for stalls and drift</label><button id="watchdog-activity" type="button" class="link quiet" hidden>View activity</button></div>
+            <label class="short"><span>Credit limit per worker</span><input name="worker_credit_limit" type="number" min="0" step="1" placeholder="0 = none, or 30 and up" /></label>
+          </section>
+
+          <section class="tab" data-tab="models" hidden>
+            <datalist id="model-options"></datalist>
+            <div class="model-grid">
+              <span></span><small>Model</small><small>Thinking effort</small>
+              <span>Default</span><input name="model" list="model-options" placeholder="Copilot default" aria-label="Default model" /><span></span>
+              <span>Router</span><input name="model_router" list="model-options" placeholder="Default" aria-label="Router model" /><select name="effort_router" aria-label="Router thinking effort"></select>
+              <span>Workers</span><input name="model_worker" list="model-options" placeholder="Default" aria-label="Workers model" /><select name="effort_worker" aria-label="Workers thinking effort"></select>
+              <span>Slack</span><input name="model_slack" list="model-options" placeholder="Default" aria-label="Slack model" /><select name="effort_slack" aria-label="Slack thinking effort"></select>
+              <span>Watchdog</span><input name="model_watchdog" list="model-options" placeholder="Default" aria-label="Watchdog model" /><select name="effort_watchdog" aria-label="Watchdog thinking effort"></select>
+            </div>
+            <small id="effort-hint" hidden>Auto picks a model for each turn and takes no thinking effort: choose a model where you want to set one.</small>
+            <small>Effort applies where the model supports it. Change one session's model in its ⋯ menu.</small>
+          </section>
+
+          <section class="tab" data-tab="connections" hidden>
+            <details class="section" id="conn-slack">
+              <summary><span>Slack</span><small id="slack-summary"></small></summary>
+              <div class="section-body">
+                <label class="check"><input name="slack_enabled" type="checkbox" /> Watch Slack for DMs and mentions</label>
+                <div class="row">
+                  <label class="grow">
+                    <span>User token (xoxp-…)</span>
+                    <input name="slack_token" type="password" placeholder="Paste to replace" autocomplete="off" />
+                  </label>
+                  <button id="slack-token-save" type="button" class="secondary">Save token</button>
+                  <button id="slack-token-remove" type="button" class="link" hidden>Remove</button>
+                </div>
+                <small id="slack-status"></small>
+                <label>
+                  <span>Delegate emoji</span>
+                  <input name="slack_delegate_emoji" placeholder=":robot_face:" autocomplete="off" />
+                  <small>React with it to any Slack message, yours or someone else's, to hand it to your chief of staff. Empty turns it off.</small>
+                </label>
+                <div><button id="slack-activity" type="button" class="link quiet" hidden>View activity</button></div>
+              </div>
+            </details>
+
+            <details class="section" id="conn-github">
+              <summary><span>GitHub reviews</span><small id="github-summary"></small></summary>
+              <div class="section-body">
+                <label class="check"><input name="github_enabled" type="checkbox" /> Watch review requests</label>
+                <label>
+                  <span>Repositories</span>
+                  <textarea name="github_repos" rows="2" placeholder="owner/name — one per line"></textarea>
+                </label>
+                <small id="github-status"></small>
+              </div>
+            </details>
+
+            <details class="section" id="conn-abilities">
+              <summary><span>Abilities</span><small id="abilities-summary"></small></summary>
+              <div class="section-body">
+                <p class="hint">Skills, plugins and MCP servers for workers, on top of what your Copilot has.</p>
+                <h4>Skills</h4>
+                <ul id="skills" class="memory"></ul>
+                <div class="inline-actions">
+                  <button id="skill-upload" type="button" class="secondary">Upload SKILL.md</button>
+                  <button id="skill-paste" type="button" class="link">Paste one</button>
+                  <input id="skill-file" type="file" accept=".md,text/markdown,text/plain" hidden />
+                </div>
+                <div id="skill-paste-box" class="paste-box" hidden>
+                  <textarea id="skill-text" rows="6" aria-label="SKILL.md" placeholder="---&#10;name: release-notes&#10;description: How we write release notes&#10;---&#10;…"></textarea>
+                  <div class="inline-actions"><button id="skill-add" type="button">Add skill</button><button id="skill-cancel" type="button" class="link">Cancel</button></div>
+                </div>
+                <label><span>Skill folders</span><textarea name="skill_folders" rows="2" placeholder="Folders of skills (each a folder with a SKILL.md) — one per line"></textarea></label>
+                <h4>Plugins</h4>
+                <label><span>Copilot plugins to install</span><textarea name="plugins" rows="2" placeholder="owner/repo, owner/repo:path, name@marketplace or an https URL — one per line"></textarea></label>
+                <ul id="plugin-status" class="memory"></ul>
+                <div><button id="plugins-retry" type="button" class="link" hidden>Retry failed</button></div>
+                <h4>MCP servers</h4>
+                <label>
+                  <span>As in Copilot's mcp-config.json</span>
+                  <textarea name="mcp_servers" rows="4" class="mono" spellcheck="false" placeholder='{"jira": {"command": "npx", "args": ["-y", "jira-mcp"]}, "docs": {"type": "http", "url": "https://…"}}'></textarea>
+                  <small id="mcp-error" class="error" hidden></small>
+                </label>
+              </div>
+            </details>
+
+            <details class="section" id="conn-watches">
+              <summary><span>Watches</span><small id="watches-summary"></small></summary>
+              <div class="section-body">
+                <p class="hint">Uses whatever tools your Copilot has here — Slack, Glean, mail. Found items go to the Router, which drafts replies in your voice for you to approve.</p>
+                <ul id="watch-list" class="watch-list"></ul>
+                <div><button id="watch-add" type="button" class="link">+ Add watch</button></div>
+                <div class="row">
+                  <label class="hours"><span>Work hours</span><span class="range"><input id="watch-from" type="time" aria-label="Work hours from" /><span>–</span><input id="watch-to" type="time" aria-label="Work hours to" /></span></label>
+                  <label><span>Every (min)</span><input name="watch_minutes" type="number" min="1" max="240" /></label>
+                  <label><span>After hours (min)</span><input name="watch_after_hours_minutes" type="number" min="0" max="1440" title="0: no watching outside work hours" /></label>
+                </div>
+                <small>After hours 0 means no watching outside work hours.</small>
+                <div class="learn-row">
+                  <button id="watch-scan" type="button" class="secondary">Scan now</button>
+                  <span id="watch-state" role="status"></span>
+                  <button id="watch-activity" type="button" class="link quiet" hidden>View activity</button>
+                </div>
+              </div>
+            </details>
+
+            <details class="section" id="conn-away">
+              <summary><span>When you're away</span><small id="away-summary"></small></summary>
+              <div class="section-body">
+                <label class="check"><input name="away_notify" type="checkbox" /> Reach me elsewhere when something needs me and I'm away</label>
+                <label class="short"><span>Away after (minutes without keyboard or mouse)</span><input name="away_minutes" type="number" min="1" max="240" /></label>
+                <label><span>How to reach you</span><textarea name="away_how" rows="2" placeholder="e.g. DM me on Slack via the company bot plugin"></textarea></label>
+                <div class="learn-row">
+                  <button id="away-test" type="button" class="secondary">Send a test</button>
+                  <span id="away-state" role="status"></span>
+                </div>
+              </div>
+            </details>
+            <div id="connections-extra"></div>
+          </section>
+
+          <section class="tab" data-tab="you" hidden>
+            <h3>How you work</h3>
+            <p class="hint">Learned from what you write and how you correct your sessions. It stays on this machine; how you write applies at once, habits wait for your OK.</p>
+            <label class="check"><input name="learn_from_work" type="checkbox" /> Learn from what I write: Slack (or any tool here that reaches it, such as Glean), PR reviews, commits and Copilot sessions</label>
+            <div class="learn-row">
+              <button id="learn-now" type="button" class="secondary">Learn now</button>
+              <span id="learn-state" role="status"></span>
+              <button id="learn-last-run" type="button" class="link" hidden>View last run</button>
+            </div>
+            <small id="learn-status"></small>
+            <label class="check"><input name="learn_checks" type="checkbox" /> Turn mistakes workers fixed into checks (you approve each)</label>
+            <p id="learned-nothing" class="hint" hidden>Nothing learned yet. What it learns shows here, and new habits and checks come to Needs you first.</p>
+            <h4>Writing styles</h4>
+            <ul id="styles" class="memory"></ul>
+            <h4>Habits</h4>
+            <ul id="lessons" class="memory"></ul>
+            <h4>Checks</h4>
+            <ul id="checks" class="memory"></ul>
+            <p id="agreement" class="hint"></p>
+
+            <h3>Your profile</h3>
+            <p id="profile-draft" class="draft-banner" hidden>
+              A new profile draft is ready.
+              <button id="profile-use" type="button" class="link">Review it</button>
+              <button id="profile-discard" type="button" class="link">Discard</button>
+            </p>
+            <label>
+              <span>What your sessions know about you (you can edit it)</span>
+              <textarea name="profile" rows="5" placeholder="Empty. Build it from your work, or write it yourself."></textarea>
+            </label>
+            <div><button id="profile-distill" type="button" class="secondary">Build from my work</button></div>
+
+            <h3>Environment notes</h3>
+            <label>
+              <span>What your sessions found out about tools, integrations and sign-ins on this machine. One “topic: note” per line; edit or delete freely.</span>
+              <textarea name="setup_notes" rows="4" placeholder="Empty. Workers add notes as they set things up."></textarea>
+            </label>
+          </section>
+
+          <section class="tab" data-tab="advanced" hidden>
+            <div class="row">
+              <label class="grow"><span>Copilot command</span><input name="copilot_command" /></label>
+              <label><span>Slack check (s)</span><input name="slack_poll_seconds" type="number" min="20" max="900" /></label>
+            </div>
+            <label class="check"><input name="paused" type="checkbox" /> Pause Slack and GitHub watchers</label>
+            <label class="check"><input name="report_footer" type="checkbox" /> Copied reports end with a short “Orchestrated with Chief of Staff” line</label>
+            <label>
+              <span>Other project folders</span>
+              <textarea name="projects" rows="2" placeholder="/Users/you/elsewhere/app — one per line"></textarea>
+              <small>Folders outside the code folder that workers may also work in. A folder you pick when the Router asks is added here.</small>
+            </label>
+            <label>
+              <span>Task folders</span>
+              <input name="scratch_directory" autocomplete="off" />
+              <small>Where each worker's own folder goes. Empty: .chief in the code folder.</small>
+            </label>
+            <small id="data-directory"></small>
+          </section>
         </div>
-        <label class="check"><input name="watchdog_enabled" type="checkbox" /> Watchdog: check workers for stalls and drift</label>
-        <label class="check"><input name="worker_sandbox" type="checkbox" /> Sandbox: workers' commands can write only to their own folders</label>
-        <small>Off, workers can do what your own Copilot sessions can (your tools, keychain, Docker, other repos), under your Copilot sandbox settings if you use them. Workers that read Slack are always sandboxed.</small>
-        <small id="sandbox-hint" hidden></small>
-        <label class="check"><input name="shared_caches" type="checkbox" /> Workers use your npm and Yarn package stores (checked against lockfiles), so installs are as fast as in your terminal</label>
-        <label><span>Also writable in the sandbox</span><textarea name="sandbox_writable" rows="2" placeholder="One folder per line, e.g. a Copilot plugin's own folder"></textarea>
-          <small>For tools that must write outside a worker's folders, such as a Copilot plugin hook that keeps a journal.</small>
-        </label>
-        <label class="check"><input name="worker_yolo" type="checkbox" /> Yolo: workers act without permission prompts</label>
-        <small>Without yolo, Chief of Staff still refuses force pushes, pushes to main and posting as you without your approval. A worker's header can override this.</small>
-
-        <h3>Models</h3>
-        <datalist id="model-options"></datalist>
-        <div class="row">
-          <label class="grow"><span>Default</span><input name="model" list="model-options" placeholder="Copilot default" /></label>
-          <label class="grow"><span>Router</span><input name="model_router" list="model-options" placeholder="Default" /></label>
-          <label class="grow"><span>Workers</span><input name="model_worker" list="model-options" placeholder="Default" /></label>
-        </div>
-        <div class="row">
-          <label class="grow"><span>Slack</span><input name="model_slack" list="model-options" placeholder="Default" /></label>
-          <label class="grow"><span>Watchdog</span><input name="model_watchdog" list="model-options" placeholder="Default" /></label>
-          <label class="grow"><span>Credit limit per worker</span><input name="worker_credit_limit" type="number" min="0" step="1" placeholder="0 = none, or 30 and up" /></label>
-        </div>
-        <div class="row efforts">
-          <label class="grow"><span>Router effort</span><select name="effort_router"></select></label>
-          <label class="grow"><span>Workers effort</span><select name="effort_worker"></select></label>
-          <label class="grow"><span>Slack effort</span><select name="effort_slack"></select></label>
-          <label class="grow"><span>Watchdog effort</span><select name="effort_watchdog"></select></label>
-        </div>
-        <small id="effort-hint" hidden>Auto picks a model for each turn and takes no thinking effort: choose a model where you want to set one.</small>
-        <small>Thinking effort applies when the model supports it; otherwise the model's default. Change a session's effort and context window in its header.</small>
-
-        <h3>Slack</h3>
-        <label class="check"><input name="slack_enabled" type="checkbox" /> Watch Slack for DMs and mentions</label>
-        <div class="row">
-          <label class="grow">
-            <span>User token (xoxp-…)</span>
-            <input name="slack_token" type="password" placeholder="Paste to replace" autocomplete="off" />
-          </label>
-          <button id="slack-token-save" type="button" class="secondary">Save token</button>
-          <button id="slack-token-remove" type="button" class="link" hidden>Remove</button>
-        </div>
-        <label>
-          <span>Delegate emoji</span>
-          <input name="slack_delegate_emoji" placeholder=":robot_face:" autocomplete="off" />
-        </label>
-        <small>React with it to any Slack message, yours or someone else's, to hand it to your chief of staff. Empty turns it off.</small>
-        <small id="slack-status"></small>
-
-        <h3>GitHub reviews</h3>
-        <label class="check"><input name="github_enabled" type="checkbox" /> Watch review requests</label>
-        <label>
-          <span>Repositories</span>
-          <textarea name="github_repos" rows="2" placeholder="owner/name — one per line"></textarea>
-        </label>
-        <small id="github-status"></small>
-
-        <h3>Your profile</h3>
-        <p id="profile-draft" class="draft-banner" hidden>
-          A new profile draft is ready.
-          <button id="profile-use" type="button" class="link">Review it</button>
-          <button id="profile-discard" type="button" class="link">Discard</button>
-        </p>
-        <label>
-          <span>What your sessions know about you (you can edit it)</span>
-          <textarea name="profile" rows="6" placeholder="Empty. Build it from your work, or write it yourself."></textarea>
-        </label>
-        <div class="row">
-          <button id="profile-distill" type="button" class="secondary">Build from my work</button>
-          <label class="grow"><span>Daily summary at</span><input name="digest_time" type="time" /></label>
-        </div>
-
-        <h3>How you work</h3>
-        <p class="hint">Learned from what you write: Slack messages you send, your PR reviews and commits, what you ask your Copilot sessions, and your feedback here. It stays on this machine. How you write applies at once (undo any time); habits wait for your OK.</p>
-        <label class="check"><input name="learn_from_work" type="checkbox" /> Learn from my Slack messages, PR reviews, commits and Copilot sessions</label>
-        <p id="agreement" class="hint"></p>
-        <ul id="styles"></ul>
-        <ul id="lessons"></ul>
-        <div class="row"><button id="learn-now" type="button" class="secondary">Learn now</button><small id="learn-status"></small></div>
-        <label class="check"><input name="learn_checks" type="checkbox" /> Turn mistakes workers fixed into checks: you approve each; they run in a sandbox</label>
-        <ul id="checks"></ul>
-
-        <h3>Environment notes</h3>
-        <label>
-          <span>What your sessions found out about tools, integrations and sign-ins on this machine. One “topic: note” per line; edit or delete freely.</span>
-          <textarea name="setup_notes" rows="4" placeholder="Empty. Workers add notes as they set things up."></textarea>
-        </label>
-
-        <details>
-          <summary>Advanced</summary>
-          <div class="row">
-            <label class="grow"><span>Copilot command</span><input name="copilot_command" /></label>
-            <label><span>Slack check (s)</span><input name="slack_poll_seconds" type="number" min="20" max="900" /></label>
-          </div>
-          <label class="check"><input name="paused" type="checkbox" /> Pause Slack and GitHub watchers</label>
-          <label>
-            <span>Other project folders</span>
-            <textarea name="projects" rows="2" placeholder="/Users/you/elsewhere/app — one per line"></textarea>
-            <small>Folders outside the code folder that workers may also work in. A folder you pick when the Router asks is added here.</small>
-          </label>
-          <label>
-            <span>Task folders</span>
-            <input name="scratch_directory" autocomplete="off" />
-            <small>Where each worker's own folder goes. Empty: .chief in the code folder.</small>
-          </label>
-          <small id="data-directory"></small>
-        </details>
-
-        <p id="settings-error" class="error" hidden></p>
         <footer>
+          <p id="settings-error" class="error" hidden></p>
           <button type="button" class="secondary" id="settings-cancel">Cancel</button>
           <button type="submit">Save</button>
         </footer>
@@ -205,11 +325,14 @@
     <dialog id="usage-dialog">
       <form method="dialog" class="usage">
         <h2>Usage</h2>
-        <div class="ranges" role="group" aria-label="Range">
-          <button type="button" data-range="today">Today</button>
-          <button type="button" data-range="7">7 days</button>
-          <button type="button" data-range="30">30 days</button>
-          <span class="custom"><input type="date" name="from" /> – <input type="date" name="to" /></span>
+        <div class="ranges">
+          <span class="segments" role="group" aria-label="Range">
+            <button type="button" data-range="today">Today</button>
+            <button type="button" data-range="7">7 days</button>
+            <button type="button" data-range="30">30 days</button>
+            <button type="button" data-range="custom" id="usage-custom">Custom…</button>
+          </span>
+          <span class="custom" hidden><input type="date" name="from" aria-label="From" /> – <input type="date" name="to" aria-label="To" /></span>
         </div>
         <div id="usage-total" class="usage-total"></div>
         <div id="usage-tables" class="usage-tables"></div>

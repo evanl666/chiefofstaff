@@ -1,4 +1,4 @@
-"""Browser test of the demo: the inbox through a whole scenario, with no accounts.
+"""Browser test of the demo: Home through a whole scenario, with no accounts.
 
     uv run --with playwright python scripts/demo_smoke.py
 
@@ -61,21 +61,28 @@ async def run(scheme: str):
             page.on("pageerror", lambda error: errors.append(str(error)))
             await page.goto(url)
 
-            inbox = page.locator("#inbox")
-            await expect(inbox).to_be_visible()
-            await expect(page.locator("#inbox-running .card.task")).to_have_count(3, timeout=20000)
-            await expect(page.locator(".card.task.queued")).to_contain_text(
-                "waiting for “Fix the flaky login test”"
+            # Home: the chat with the Router, and beside it Needs you and the task board.
+            await expect(page.locator("#conversation")).to_be_visible()
+            await expect(page.locator("#panel")).to_be_visible()
+            await expect(page.locator("#session-list .item", has_text="Chat")).to_have_count(0)
+            board = page.locator("#tasks-running .card.task, #tasks-queued .card.task")
+            await expect(board).to_have_count(3, timeout=20000)
+            await expect(page.locator("#tasks-queued .card.task")).to_contain_text(
+                "Waiting for “Fix the flaky login test”"
             )
-            log("three tasks; one waits for another")
+            started = page.locator(
+                "#timeline .event", has_text="Started “Fix the flaky login test”"
+            )
+            await expect(started).to_be_visible()
+            log("three tasks on the board as they start, a line each in the chat; one waits")
             dots = page.locator("#session-list .item .dot")
             assert all([await dot.get_attribute("title") for dot in await dots.all()]), "dot help"
             await page.screenshot(path=SHOTS / f"demo-{scheme}-1-running.png")
 
             # A half-typed note survives updates of its card as the worker moves on.
-            research = page.locator("#inbox .card.task", has_text="Compare feature-flag services")
-            await research.hover()
-            await research.get_by_role("button", name="Add a note").click()
+            research = page.locator("#tasks .card.task", has_text="Compare feature-flag services")
+            await research.locator(".more-button").click()
+            await research.get_by_role("menuitem", name="Add a note…").click()
             await research.locator("textarea").press_sequentially("Include pricing")
             state = "n => n.className + (n.querySelector('.activity')?.textContent || '')"
             before = await research.evaluate(state)
@@ -91,45 +98,60 @@ async def run(scheme: str):
             now = await research.evaluate(state)
             log(f"a half-typed note survived an update of its card ({now[:60]})")
 
-            question = page.locator(".card.decision")
+            question = page.locator("#needs .card.decision")
             await expect(question).to_be_visible(timeout=30000)
             await expect(question.locator(".option.recommended")).to_contain_text("Per account")
             await expect(question).to_contain_text("lets anyone lock a user out")
+            await expect(page.locator(".home-item .badge")).to_be_visible()
+            await expect(page.locator("#sidebar .badge")).to_have_count(1)
             await page.screenshot(path=SHOTS / f"demo-{scheme}-2-question.png")
             await question.locator(".option", has_text="Per account").click()
             await expect(question).to_have_count(0)
+            await expect(page.locator(".toast", has_text="Decided.")).to_be_visible()
             log("decided from a card with the options, their effects and a recommendation")
 
-            slack = page.locator("#inbox-needs .card.draft:not(.request)")
+            slack = page.locator("#needs .card.draft:not(.request)")
             await expect(slack).to_be_visible(timeout=60000)
             await expect(slack).to_contain_text("Maya Chen")
             await page.screenshot(path=SHOTS / f"demo-{scheme}-3-approve.png")
-            await slack.get_by_role("button", name="Send").click()
+            await slack.get_by_role("button", name="Send", exact=True).click()
             await expect(slack).to_have_count(0)
+            await expect(page.locator(".toast", has_text="Sent on Slack.")).to_be_visible()
             log("approved a Slack reply drafted in the owner's voice")
 
-            review = page.locator("#inbox-review .card.task")
+            review = page.locator("#tasks-review .card.task")
             await expect(review).to_have_count(3, timeout=60000)
             fix = review.filter(has_text="Fix the flaky login test")
             await expect(fix.locator(".receipt.pass", has_text="tests")).to_be_visible()
-            await expect(fix.locator(".receipt", has_text="commit")).to_be_visible(timeout=10000)
             limited = review.filter(has_text="Rate-limit")
-            await expect(limited).to_contain_text("per account")
+            await expect(limited.locator(".outcome")).to_contain_text("per account")
             await expect(fix.locator(".receipt.verdict")).to_have_text("✓ Verified")
             await expect(fix.locator(".receipt", has_text="✗→✓ tests")).to_be_visible()
             await expect(limited.locator(".receipt.verdict")).to_have_text("Partly verified · 1/2")
             await expect(limited.locator(".criteria li.warn")).to_contain_text("sixth attempt")
-            log("results wait for review: verified criteria apart from claimed ones")
-            await page.screenshot(path=SHOTS / f"demo-{scheme}-4-review.png", full_page=True)
+            # Compact until opened: the whole report, with its commit.
+            await expect(fix.locator(".report")).to_be_hidden()
+            await fix.get_by_role("button", name="Show report").click()
+            await expect(fix.locator(".report .receipt", has_text="commit")).to_be_visible(
+                timeout=10000
+            )
+            # The chat says it finished in one line, pointing at this card.
+            await expect(
+                page.locator("#timeline .event.done", has_text="Fix the flaky login test")
+            ).to_contain_text("finished")
+            log("results wait for review: compact, verified criteria apart from claimed ones")
+            await page.screenshot(path=SHOTS / f"demo-{scheme}-4-review.png")
 
-            await fix.get_by_role("button", name="Copy report").click()
+            await fix.locator(".actions .more-button").click()
+            await fix.get_by_role("menuitem", name="Copy report").click()
             await expect(page.locator(".toast", has_text="Report copied")).to_be_visible()
             copied = await page.evaluate("navigator.clipboard.readText()")
             assert copied.startswith("## Fix the flaky login test"), repr(copied[:300])
             assert "**Observed**" in copied, repr(copied)
             log("copied the task report")
 
-            await fix.get_by_role("button", name="Create PR").click()
+            await fix.locator(".actions .more-button").click()
+            await fix.get_by_role("menuitem", name="Create PR").click()
             await expect(fix.locator(".error")).to_contain_text("no GitHub origin")
             log("Create PR explains why the demo project cannot have one")
 
@@ -147,16 +169,19 @@ async def run(scheme: str):
             log("commented on lines of the diff; the worker got the comments")
 
             research = review.filter(has_text="Compare feature-flag services")
-            await research.get_by_role("button", name="Follow up").click()
+            await research.locator(".actions .more-button").click()
+            await research.get_by_role("menuitem", name="Follow up…").click()
             await research.locator("textarea").fill("Add pricing for 50 seats")
             await research.get_by_role("button", name="Send").click()
+            await expect(page.locator(".toast", has_text="Sent to the worker.")).to_be_visible()
             await expect(
-                page.locator("#inbox-review .card.task", has_text="Compare feature-flag services")
+                page.locator("#tasks-review .card.task", has_text="Compare feature-flag services")
             ).to_be_visible(timeout=30000)
             log("followed up on a finished task; it came back for review")
 
             await fix.get_by_role("button", name="Accept").click()
-            await expect(page.locator("#inbox-review .card.task")).to_have_count(2)
+            await expect(page.locator("#tasks-review .card.task")).to_have_count(2)
+            await expect(page.locator(".toast", has_text="Accepted.")).to_be_visible()
             log("accepted a result")
 
             await page.locator("#session-list .item", has_text="Fix the flaky login").click()
@@ -167,25 +192,36 @@ async def run(scheme: str):
             narrated = page.locator("#timeline > .msg.agent", has_text="Reproducing the flaky")
             await expect(narrated).to_have_count(0)
             log("what a worker says on the way is folded into its steps, not shown as answers")
-            await page.locator(".item", has_text="Inbox").first.click()
+            await page.locator("#back-home").click()
 
             await page.fill(
                 "#composer-input", "Change of plan: limit login attempts per IP address only"
             )
             await page.press("#composer-input", "Enter")
-            limited = page.locator("#inbox-review .card.task", has_text="per IP address only")
+            limited = page.locator("#tasks-review .card.task", has_text="per IP address only")
             await expect(limited).to_be_visible(timeout=30000)
-            await page.locator(".item", has_text="Chat").click()
             await expect(page.locator("#timeline")).to_contain_text(
                 "works to the new decision", timeout=10000
             )
-            await page.locator(".item", has_text="Inbox").first.click()
             log("changed a decision: the affected result was redone, and its worker confirmed")
 
+            # Learn now: "Learning…" at once in the open dialog, then how it went.
             await page.click("#settings-button")
+            await page.click("#settings-tabs [data-tab=you]")
             await expect(page.locator("#learn-status")).to_contain_text("new to learn from")
-            await page.click("#learn-now")
-            lessons = page.locator("#inbox .card.lessons")
+            learn = page.locator("#learn-now")
+            await learn.click()
+            await expect(learn).to_have_text("Learning…")
+            await expect(learn).to_be_disabled()
+            await expect(page.locator("#settings-dialog")).to_be_visible()
+            await expect(learn).to_have_text("Learn now", timeout=60000)
+            await expect(page.locator("#learn-state")).not_to_be_empty()
+            await expect(page.locator("#learn-last-run")).to_be_visible()
+            await page.click("#settings-cancel")
+            # Chief of Staff's own learning worker is not one of the owner's.
+            for place in ("#session-list", "#tasks", "#closed-list"):
+                await expect(page.locator(place)).not_to_contain_text("Learn how you work")
+            lessons = page.locator("#needs .card.lessons")
             await expect(lessons).to_be_visible(timeout=30000)
             await expect(lessons).to_contain_text("because you said")
             await page.screenshot(path=SHOTS / f"demo-{scheme}-5-lessons.png")
@@ -194,6 +230,9 @@ async def run(scheme: str):
             await lessons.get_by_role("button", name="Keep ticked").click()
             await expect(lessons).to_have_count(0)
             await page.click("#settings-button")
+            await expect(page.locator("#settings-tabs [data-tab=you]")).to_have_attribute(
+                "aria-selected", "true"
+            )
             await expect(page.locator("#lessons")).to_contain_text("pricing for a team of 50")
             await expect(page.locator("#lessons")).not_to_contain_text("Rate-limit")
             await expect(page.locator("#agreement")).to_contain_text("recommendations you took")
@@ -201,7 +240,8 @@ async def run(scheme: str):
             await page.click("#settings-cancel")
             log("learned from the owner's feedback; the owner kept one lesson of two")
 
-            await page.select_option("#session-actions select", "60")
+            await page.locator("#session-actions .menu-button", has_text="Focus").click()
+            await page.get_by_role("menuitem", name="For 1 hour").click()
             await expect(page.locator("#session-meta")).to_contain_text("Focusing until")
             await page.click("#session-actions .focus-on")
             await expect(page.locator("#focus-summary")).to_contain_text("While you focused")
@@ -210,7 +250,8 @@ async def run(scheme: str):
             # A session open in the owner's terminal: shown read-only, never taken over.
             await page.locator("#external summary").click()
             await page.locator("#external-list .item", has_text="Profile the slow orders").click()
-            await expect(page.locator("#inbox")).to_be_hidden()
+            await expect(page.locator("#panel")).to_be_hidden()
+            await expect(page.locator("#back-home")).to_be_visible()
             await expect(page.locator(".external-history")).to_contain_text("ten times faster")
             await expect(page.locator("#session-meta")).to_contain_text("Open in a terminal")
             await expect(page.locator("#composer-note")).to_contain_text("exit it there (/exit)")
@@ -235,7 +276,7 @@ async def run(scheme: str):
             )
             log("messaged an older Copilot session: it continues here, with its conversation")
 
-            await page.locator(".item", has_text="Chat").click()
+            await page.locator(".home-item").click()
             await expect(page.locator("#timeline")).to_contain_text("Started three tasks")
             await page.screenshot(path=SHOTS / f"demo-{scheme}-7-chat.png")
             assert not errors, errors

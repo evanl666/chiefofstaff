@@ -16,6 +16,7 @@ from .asks import REQUEST_KINDS
 from .envelope import wrap
 from .models import DraftDecision
 from .roles import SLACK
+from .sources.github import REVIEW_EVENTS
 from .sources.slack import describe, message_keys
 from .store import now
 
@@ -110,9 +111,20 @@ class Drafts:
             )
             return draft
         final = decision.text.strip() or draft["text"]
+        if draft["kind"] == "reply":
+            return await self.copied(draft, final)
         comments_edited = ""
         if draft["kind"] == "github" and draft["target"].get("comments"):
             draft, comments_edited = self.edit_comments(draft, decision.content)
+        verdict = decision.content.get("verdict")
+        if draft["kind"] == "github" and "verdict" in draft["target"] and verdict:
+            if verdict not in REVIEW_EVENTS:
+                raise ValueError("The verdict is approve, request_changes or comment.")
+            if verdict != draft["target"]["verdict"]:
+                comments_edited += f"\nThe owner changed the verdict to {verdict}."
+                draft = self.store.update_draft_target(
+                    draft_id, {**draft["target"], "verdict": verdict}
+                )
         self.store.update_draft(draft_id, status="sending", final_text=final)
         try:
             if draft["kind"] == "slack":
@@ -132,6 +144,7 @@ class Drafts:
         )
         self.bus.publish("draft", draft)
         self.after_sent(draft, outcome or "")
+        await self.settle_task(draft)
         edited = final != draft["text"] or bool(comments_edited)
         self.runtime.learning.record(
             "draft-edited" if edited else "draft-sent",
@@ -280,6 +293,62 @@ class Drafts:
                 outcome="Not found in Slack after a restart. Send it again if it is missing.",
             )
         self.bus.publish("draft", draft)
+
+    async def copied(self, draft: dict, final: str) -> dict:
+        """A reply the owner sends themself: approved (and copied for them) is as good as sent."""
+        draft = self.store.update_draft(
+            draft["id"],
+            status="sent",
+            final_text=final,
+            outcome="Copied by the owner",
+            resolved_at=now(),
+        )
+        self.bus.publish("draft", draft)
+        await self.settle_task(draft)
+        edited = final != draft["text"]
+        self.runtime.learning.record(
+            "draft-edited" if edited else "draft-sent",
+            context=self.about(draft),
+            proposed=draft["text"],
+            owner=final if edited else "",
+            agreed=not edited,
+            untrusted=True,
+        )
+        told = f"The owner approved draft {draft['id']} and sends it themself."
+        if edited:
+            told += f" They changed it to:\n{final}"
+        await self.tell_drafter(draft, told)
+        return draft
+
+    async def settle_task(self, draft: dict):
+        """A task whose result was this text (a reply, a review) is done once the owner sent
+        it: one approval, not a second one for the task. Not one that also changed code: that
+        is still for the owner to review. Sent before the worker reported: settled when it
+        reports (settle_reported)."""
+        task = self.runtime.tasks.current(draft["session_id"])
+        if task and task["status"] in {"running", "queued"}:
+            self.store.set(f"draft_sent:{task['id']}", "1")
+            return
+        if not task or task["status"] != "review":
+            return
+        await self.settle_reported(task["id"])
+
+    async def settle_reported(self, task_id: str, reported: bool = False):
+        """Its evidence first: whether it changed code decides. `reported`: just reported done
+        (its evidence is collected as after any report)."""
+        await self.runtime.task_actions.collect_evidence(task_id, keep_stale=not reported)
+        task = self.runtime.tasks.get(task_id)
+        if task["status"] != "review":
+            return
+        receipts = self.runtime.task_actions.receipts(task) or {}
+        changed = receipts.get("prs") or any(
+            checkout.get("commits") or checkout.get("uncommitted")
+            for checkout in receipts.get("checkouts") or []
+        )
+        pending = any(other["session_id"] == task["session_id"] for other in self.store.drafts())
+        if not changed and not pending:
+            self.store.delete(f"draft_sent:{task_id}")
+            self.runtime.task_actions.accept(task_id)
 
     def after_sent(self, draft: dict, outcome: str):
         """The drafting session now owns the conversation: it follows the thread or PR."""

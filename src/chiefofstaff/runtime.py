@@ -20,13 +20,16 @@ wires together the parts that do the rest, each in its own module:
 """
 
 import asyncio
+import base64
+import binascii
 import json
 import logging
 import os
+import re
 import shutil
 import sys
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -34,6 +37,7 @@ from typing import Any
 from uuid import uuid4
 
 from . import prompts, threads
+from .abilities import Abilities
 from .asks import Asks
 from .backend import (
     OLDEST_CLI,
@@ -46,6 +50,7 @@ from .backend import (
 )
 from .bus import Bus
 from .checks import Checks
+from .connector import Connector
 from .decisions import Decisions
 from .delivery import Delivery
 from .digest import digest
@@ -55,7 +60,7 @@ from .events import ROUTER_CONTEXT, Events
 from .focus import Focus
 from .habits import Habits
 from .learning import Learning
-from .models import Settings
+from .models import Attachment, Settings
 from .notify import mac_notification
 from .policy import GITHUB_MCP, within
 from .roles import ROUTER, SLACK, WATCHDOG, WORKER
@@ -65,7 +70,7 @@ from .sources.slack import SlackSource, describe
 from .state import SessionStates
 from .store import Store, ago_minutes, hours_ago, now
 from .task_actions import TaskActions
-from .tasks import TaskBook, settle_adopted, settle_followups
+from .tasks import HELPER_KINDS, TaskBook, settle_adopted, settle_followups
 from .tasks import migrate as migrate_tasks
 from .tools import Tools
 from .watchdog import WatchConfig, Watchdog
@@ -119,8 +124,26 @@ ROUTER_TOOLS = [
 MAX_FILE_SHOWN = 1_000_000
 # Workers Chief of Staff starts for itself that have nothing but their own tools: they read
 # quoted data (the owner's words, test output) and propose; they run nothing.
+# How much of the conversation a fresh Router session is given (characters; about 15k tokens).
+HANDOVER_CHARS = 60_000
+# The owner's images: what each type starts with, and its file extension.
+IMAGE_MAGIC = {
+    "image/png": b"\x89PNG\r\n\x1a\n",
+    "image/jpeg": b"\xff\xd8\xff",
+    "image/gif": b"GIF8",
+    "image/webp": b"RIFF",
+}
+IMAGE_EXTENSIONS = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+}
+MAX_ATTACHMENT = 5 * 1024 * 1024
+ATTACHMENT_NAME = re.compile(r"\b([0-9a-f]{32}\.(?:png|jpg|gif|webp))\b")
 TOOLLESS = {"learner": ["update_style", "propose_lessons"], "checker": ["propose_checks"]}
-SPECIALS = ("learner", "checker", "distill")
+SPECIALS = HELPER_KINDS
+CONNECTOR_TOOLS = ["report_found", "report_owner_words", "report_notified", "report_owner_replies"]
 # Owner messages at least this long are instructions the learner looks at ("progress?" is not).
 INSTRUCTION_CHARS = 25
 # A message to a worker this long into a step gets a note that it waits for the step to end.
@@ -256,6 +279,8 @@ class Runtime:
         self.checks = Checks(self)
         self.focus = Focus(self)
         self.watchdog = Watchdog(self)
+        self.abilities = Abilities(self)
+        self.connector = Connector(self)
         self.toolset = Tools(self)
         self.tools = self.toolset.definitions()
 
@@ -275,6 +300,8 @@ class Runtime:
         self.watch_job = asyncio.create_task(self.watch_loop())
         self.mirror_job = asyncio.create_task(self.workers.mirror_loop())
         await self.habits.start()
+        await self.connector.start()
+        self.background(self.abilities.sync())
         if self.store.drafts("uncertain"):
             self.background(self.drafts.check_uncertain())
 
@@ -289,6 +316,7 @@ class Runtime:
         for source in self.all_sources():
             await source.stop()
         await self.habits.stop()
+        await self.connector.stop()
         await self.disconnect()
         for task in list(self.jobs):
             task.cancel()
@@ -443,7 +471,8 @@ class Runtime:
             return False
         if row.get("yolo") in {"on", "off"}:
             return row["yolo"] == "on"
-        return self.store.settings().worker_yolo
+        # What it reads in Slack must not steer unchecked commands: on for it only by choice.
+        return self.store.settings().worker_yolo and not row.get("slack")
 
     async def set_session_yolo(self, session_id: str, mode: str) -> dict:
         row = self.store.session(session_id)
@@ -588,6 +617,9 @@ class Runtime:
         path.mkdir(parents=True, exist_ok=True, mode=0o700)
         return path
 
+    def helper_ids(self) -> set[str]:
+        return {key.split(":", 1)[1] for kind in SPECIALS for key in self.store.keys(f"{kind}:")}
+
     def special(self, row: dict) -> str:
         """The kind of worker Chief of Staff started for itself ("" for the owner's work)."""
         if row["role"] != WORKER:
@@ -599,6 +631,8 @@ class Runtime:
             return ROUTER_TOOLS
         if (special := self.special(row)) in TOOLLESS:
             return TOOLLESS[special]
+        if special == "connector":
+            return CONNECTOR_TOOLS
         if row["role"] == WATCHDOG:
             return ["assess_worker"]
         names = ["report", "follow_thread", "unfollow_thread"]
@@ -615,7 +649,7 @@ class Runtime:
         if row["role"] == SLACK or row["slack"]:
             names.append("draft_slack_reply")
         if row["role"] == WORKER:
-            names.append("draft_github_review")
+            names += ["draft_reply", "draft_github_review"]
         return names
 
     def options(self, row: dict) -> dict:
@@ -623,6 +657,8 @@ class Runtime:
             return self.helper_options(row)
         settings = self.store.settings()
         prompt = PROMPTS[row["role"]]
+        if self.special(row) == "connector":
+            prompt = prompts.CONNECTOR  # Not a worker with tasks to report.
         sandbox = self.sandbox_policy(row)
         if row["role"] == WORKER:
             prompt += "\n" + prompts.worker_context(
@@ -671,8 +707,13 @@ class Runtime:
             # Workers ask the owner directly: Copilot's ask_user, MCP forms and links.
             options["on_user_input_request"] = self.asks.on_user_input
             options["on_elicitation_request"] = self.asks.on_elicitation
+            # What the owner added in Settings (see abilities.py).
+            if skills := self.abilities.skill_directories():
+                options["skill_directories"] = skills
+            if settings.mcp_servers:
+                options["mcp_servers"] = dict(settings.mcp_servers)
             if extra := os.environ.get("CHIEFOFSTAFF_WORKER_MCP"):
-                options["mcp_servers"] = json.loads(extra)  # Test servers only.
+                options["mcp_servers"] = {**options.get("mcp_servers", {}), **json.loads(extra)}
             if hooks := os.environ.get("CHIEFOFSTAFF_WORKER_HOOKS"):
                 options["hook_directories"] = [hooks]  # Test hooks only (like a plugin's).
         tuning = self.tuning(row)
@@ -714,7 +755,16 @@ class Runtime:
 
     def model_for(self, row: dict) -> str:
         settings = self.store.settings()
-        return row.get("model") or settings.role_models.get(row["role"]) or settings.model
+        chosen = row.get("model") or settings.role_models.get(row["role"]) or settings.model
+        if row.get("id") and self.store.get(f"fallback:{row['id']}") == "model":
+            return ""  # Copilot refused it for this session: its default model instead.
+        if chosen and chosen in self.refused_models():
+            return ""
+        return chosen
+
+    def refused_models(self) -> set[str]:
+        """Models Copilot refused to run ("not supported": the company's policy, say)."""
+        return set(json.loads(self.store.get("refused_models") or "[]"))
 
     def effective_model(self, row: dict) -> str:
         """The configured model, or else the Copilot default as last seen in use."""
@@ -731,6 +781,16 @@ class Runtime:
         """
         info = self.model_info(self.effective_model(row))
         effort = row.get("effort") or self.store.settings().role_efforts.get(row["role"], "")
+        if row.get("id") and self.store.get(f"fallback:{row['id']}"):
+            # Copilot refused this session's model with these options: the model's own defaults.
+            if not info:
+                return {}
+            defaults: dict[str, str] = {}
+            if info["efforts"]:
+                defaults["reasoning_effort"] = default_effort(info)
+            if info["long_context"]:
+                defaults["context_tier"] = "default"
+            return defaults if switching else {}
         if not info:
             # Copilot's default model, before its first turn shows which it is: Copilot applies
             # the effort to it (open_live retries without one if the default takes none).
@@ -751,6 +811,48 @@ class Runtime:
     def shown_effort(self, row: dict) -> str:
         info = self.model_info(self.effective_model(row))
         return self.tuning(row).get("reasoning_effort") or (info or {}).get("default_effort", "")
+
+    async def recover_model(self, row: dict, error: str) -> bool:
+        """Copilot refused the session's model ("not supported"): first without the extra
+        options (thinking effort, long context), then on Copilot's default model. The turn that
+        failed is sent again. False when there is nothing left to fall back to."""
+        session_id = row["id"]
+        stage = self.store.get(f"fallback:{session_id}") or ""
+        tuned = bool(self.tuning(row))
+        chosen = self.model_for(row)
+        if not stage and tuned:
+            stage = "tuning"
+        elif stage != "model" and chosen:
+            stage = "model"
+            refused = sorted(self.refused_models() | {chosen})
+            self.store.set("refused_models", json.dumps(refused))
+        else:
+            return False
+        self.store.set(f"fallback:{session_id}", stage)
+        what = (
+            "the thinking effort and context size chosen for it"
+            if stage == "tuning"
+            else f"the model {chosen}"
+        )
+        self.add_message(
+            session_id,
+            "notice",
+            f"Copilot refused {what} ({error.strip()[:160]}). It goes on with "
+            + ("the model's own settings" if stage == "tuning" else "Copilot's default model")
+            + "; choose another in Settings or this session's header. Your message is sent again.",
+        )
+        if session := self.states.handle(session_id):
+            model = self.effective_model(self.store.session(session_id)) or "auto"
+            tuning = self.tuning(self.store.session(session_id), switching=True)
+            if model == "auto":
+                tuning.pop("reasoning_effort", None)
+            with suppress(Exception):
+                await session.set_model(model, **tuning)
+        # What the failed turn was given is sent again.
+        if (before := self.store.get(f"prevsent:{session_id}")) is not None:
+            self.store.set(f"sent:{session_id}", before)
+        self.background(self.delivery.resume(session_id))
+        return True
 
     async def apply_model(self, row: dict):
         if row["status"] == "working":
@@ -793,6 +895,8 @@ class Runtime:
         state.stale = False
         state.after_refresh = ""  # The next connection has the new options from the start.
         state.steps.clear()  # A disconnected session is in no step.
+        state.unread.clear()  # What it was sent is resent or replayed, not waiting in a turn.
+        state.echoes = False
         if state.busy:
             # A disconnected session ends no turn: free its worker slot.
             state.busy = False
@@ -985,7 +1089,12 @@ class Runtime:
         ):
             row = self.store.session(router_id)
             context = int(self.store.get(f"context:{router_id}") or 0)
-            if row["status"] == "working" or row["closed_at"] or context <= ROUTER_CONTEXT:
+            if (
+                row["status"] == "working"
+                or row["closed_at"]
+                or context <= self.router_context_limit(row)
+                or time.time() < float(self.store.get(f"rotate_after:{router_id}") or 0)
+            ):
                 return False
             old, new = self.copilot_id(router_id), str(uuid4())
             self.store.set(f"alias:{old}", router_id)
@@ -999,6 +1108,8 @@ class Runtime:
                 logger.warning("Could not rotate the Router.", exc_info=True)
                 return False
             self.store.set(f"copilot:{router_id}", new)
+            # Until the fresh session has answered once, a failure goes back to the old one.
+            self.store.set(f"rotated:{router_id}", old)
             self.store.set(f"preamble:{router_id}", self.handover())
             self.store.set(f"context:{router_id}", "0")
             self.add_message(
@@ -1010,6 +1121,47 @@ class Runtime:
         if self.delivery.has_unsent(router_id):
             self.delivery.schedule_flush(router_id, 0)  # Held during the rotation.
         return True
+
+    async def undo_rotation(self, error: str) -> bool:
+        """The fresh Router session failed before answering once: the earlier one goes on, and
+        what it was given is sent again. False when no rotation is pending."""
+        router_id = self.router_id()
+        old = self.store.get(f"rotated:{router_id}")
+        if not old:
+            return False
+        async with (
+            self.rotate_lock,
+            self.states[router_id].lifecycle,
+            self.states[router_id].sending,
+        ):
+            self.store.delete(f"rotated:{router_id}")
+            self.store.set(f"copilot:{router_id}", old)
+            self.store.delete(f"preamble:{router_id}")
+            # Not again for a while: the same failure would follow every turn.
+            self.store.set(f"rotate_after:{router_id}", str(time.time() + 3600))
+            await self.drop_handle(router_id)
+        if (before := self.store.get(f"prevsent:{router_id}")) is not None:
+            self.store.set(f"sent:{router_id}", before)
+        self.add_message(
+            router_id,
+            "notice",
+            f"The fresh Router session failed ({error.strip()[:160]}); the earlier one goes on, "
+            "and your message is sent again.",
+        )
+        self.background(self.delivery.resume(router_id))
+        return True
+
+    def router_context_limit(self, row: dict) -> int:
+        """When the Router hands over to a fresh session: most of its model's context window
+        (the longer one when chosen), never below ROUTER_CONTEXT. A long conversation keeps
+        more of what the owner said; Copilot summarizes within the session meanwhile."""
+        if "CHIEFOFSTAFF_ROUTER_CONTEXT" in os.environ:
+            return ROUTER_CONTEXT  # Set exactly (tests).
+        info = self.model_info(self.effective_model(row)) or {}
+        window = info.get("context") or 0
+        if row.get("context") == "long_context" and info.get("long_context"):
+            window = info["long_context"]
+        return max(ROUTER_CONTEXT, int(window * 0.8))
 
     def handover(self) -> str:
         """What a new Router session needs to know, from Chief of Staff's records."""
@@ -1057,24 +1209,33 @@ class Runtime:
         ):
             lines.append("\nQuestions from workers you have not answered (answer_session):")
             lines += [f"- {q['id']} from {short(q['asker'])}: {clip(q['text'])}" for q in questions]
-        talk = [
-            message
-            for message in self.store.all(
-                """SELECT * FROM messages WHERE session_id=?
-                AND kind IN ('owner','update','assistant') ORDER BY id DESC LIMIT 60""",
-                (router,),
-            )
-            if not json.loads(message["meta"] or "{}").get("internal")
-        ][:30]
+        if decisions := self.decisions.active():
+            lines.append("\nThe owner's standing decisions:")
+            lines += [f"- {d['id']}: {clip(d['text'], 400)}" for d in decisions]
+        # The conversation, newest first until the budget: everything the owner said (their
+        # requests, facts to remember, preferences) matters most, so theirs are kept long.
+        talk, size = [], 0
+        for message in self.store.all(
+            """SELECT * FROM messages WHERE session_id=?
+            AND kind IN ('owner','update','assistant') ORDER BY id DESC LIMIT 2000""",
+            (router,),
+        ):
+            meta = json.loads(message["meta"] or "{}")
+            if meta.get("internal"):
+                continue
+            text = clip(message["text"], 3000 if message["kind"] == "owner" else 600)
+            if size + len(text) > HANDOVER_CHARS:
+                break
+            talk.append((message, meta, text))
+            size += len(text)
         if talk:
-            lines.append("\nRecent conversation with the owner, oldest first:")
+            lines.append(
+                "\nThe conversation with the owner, oldest first (what they told you still holds):"
+            )
             who = {"owner": "owner", "assistant": "you", "update": "you notified the owner"}
-
-            def speaker(message: dict) -> str:
-                ref = json.loads(message["meta"] or "{}").get("ref")
-                return f"owner (ref {ref})" if ref else who[message["kind"]]
-
-            lines += [f"- {speaker(m)}: {clip(m['text'], 400)}" for m in reversed(talk)]
+            for message, meta, text in reversed(talk):
+                ref = meta.get("ref")
+                lines.append(f"- {f'owner (ref {ref})' if ref else who[message['kind']]}: {text}")
         return wrap("system", "handover", "\n".join(lines))
 
     async def ensure_router(self):
@@ -1205,8 +1366,57 @@ class Runtime:
         if row["role"] == WORKER:
             self.background(self.workers.pump())  # Its slot is free for a queued worker.
 
+    @property
+    def attachments_dir(self) -> Path:
+        return self.store.directory / "attachments"
+
+    def save_attachments(self, attachments: Sequence[Attachment]) -> list[dict]:
+        """The owner's images, kept as files: sessions get them with the message, and the
+        Router can hand them on to a worker by path."""
+        saved = []
+        folder = self.attachments_dir
+        folder.mkdir(parents=True, exist_ok=True)
+        for item in attachments:
+            try:
+                data = base64.b64decode(item.data, validate=True)
+            except (binascii.Error, ValueError):
+                raise ValueError(f"{item.name}: not a valid image.") from None
+            if len(data) > MAX_ATTACHMENT:
+                raise ValueError(f"{item.name} is over 5 MB.")
+            if not data.startswith(IMAGE_MAGIC[item.type]) or (
+                item.type == "image/webp" and data[8:12] != b"WEBP"
+            ):
+                raise ValueError(f"{item.name} is not a {item.type.split('/')[1].upper()} image.")
+            name = uuid4().hex + IMAGE_EXTENSIONS[item.type]
+            (folder / name).write_bytes(data)
+            saved.append(
+                {
+                    "name": " ".join(item.name.split())[:120] or "image",
+                    "type": item.type,
+                    "path": str(folder / name),
+                    "url": f"/api/attachments/{name}",
+                }
+            )
+        return saved
+
+    def attachments_in(self, text: str) -> list[dict]:
+        """The owner's images a message names by path (the Router handing them on)."""
+        folder = str(self.attachments_dir)
+        found = []
+        for name in dict.fromkeys(ATTACHMENT_NAME.findall(text or "")):
+            path = Path(folder) / name
+            if path.is_file():
+                found.append({"name": name, "path": str(path), "url": f"/api/attachments/{name}"})
+        return found
+
     async def owner_send(
-        self, session_id: str, text: str, *, learn: bool = True, tell_router: bool = True
+        self,
+        session_id: str,
+        text: str,
+        *,
+        learn: bool = True,
+        tell_router: bool = True,
+        attachments: Sequence[Attachment] = (),
     ) -> dict:
         """`learn`: the owner typed it (not a message the app sends for them). A message to a
         worker is also noted for the Router (`tell_router`), which must know what the owner
@@ -1217,8 +1427,21 @@ class Runtime:
         # Answers come in the language of this message, whatever the conversation used before.
         spoken = self.heard(text) if learn else language(text)
         prompt = wrap("owner", "message", text, reply_in=spoken)
-        meta = {}
+        meta: dict[str, Any] = {}
         notes = [self.switched_language(session_id, spoken)]
+        if attachments:
+            meta["attachments"] = self.save_attachments(attachments)
+            paths = ", ".join(f"{a['path']} ({a['name']})" for a in meta["attachments"])
+            notes.append(
+                f"The owner attached {len(meta['attachments'])} image(s), which you see with "
+                f"this message: {paths}."
+                + (
+                    " To hand them to a worker, put these paths in its instructions or message: "
+                    "it gets the images too."
+                    if row["role"] == ROUTER
+                    else ""
+                )
+            )
         if row["role"] == ROUTER:
             # The Router hands this message on as {owner:<ref>} instead of copying it.
             meta["ref"] = "o" + uuid4().hex[:6]
@@ -1276,12 +1499,14 @@ class Runtime:
             return ""
         return "It reads this when its current step ends. " + self.progress_line(row)
 
-    async def owner_send_to(self, router_id: str, worker_id: str, text: str) -> dict:
+    async def owner_send_to(
+        self, router_id: str, worker_id: str, text: str, attachments: Sequence[Attachment] = ()
+    ) -> dict:
         """From the Router chat, straight to one worker; the Router hears of it later."""
         row = self.store.session(worker_id)
         if row["role"] != WORKER:
             raise ValueError("Address a worker.")
-        message = await self.owner_send(row["id"], text)
+        message = await self.owner_send(row["id"], text, attachments=attachments)
         note = self.busy_note(row["id"])
         if note:  # Where the owner is: Chat or the inbox.
             self.add_message(router_id, "notice", note, {"session_id": row["id"]})
@@ -1551,7 +1776,13 @@ class Runtime:
             "context": row["context"],
             "yolo": self.yolo(row),
             "yolo_choice": row["yolo"],
+            # Chief of Staff's own helper (learning, checks, profile): not one of the owner's.
+            "helper": self.special(row) if row["role"] == WORKER else "",
+            # It holds one of the owner's worker slots (in a turn, or finishing one).
+            "slot": row["role"] == WORKER and self.states[row["id"]].busy,
             "checkouts": self.workspaces.checkouts(row),
+            # Its own folder (its checkouts are in it, or its files when it has none).
+            "workspace": str(self.workspaces.workspace(row)) if row["role"] == WORKER else "",
             "credits": self.store.value(
                 "SELECT coalesce(sum(credits), 0) AS c FROM usage WHERE session_id=?", (row["id"],)
             ),
@@ -1625,6 +1856,8 @@ class Runtime:
             "profile_draft": self.store.get("profile_draft", ""),
             "learning": self.learning.view(),
             "habits": self.habits.view(),
+            "abilities": self.abilities.view(),
+            "connector": self.connector.view(),
             "checks": self.checks.view(),
             "setup_notes": self.asks.setup_notes(),
             "sandbox": {
@@ -1651,11 +1884,15 @@ class Runtime:
             "worker_sandbox",
             "sandbox_writable",
             "shared_caches",
+            "skill_folders",
+            "mcp_servers",
         )
         if any(getattr(old, key) != getattr(new, key) for key in changed):
             await self.refresh(WORKER)
         for source in self.all_sources():
             source.wake()
+        if new.plugins != old.plugins:
+            self.background(self.abilities.sync())
         if new.learn_from_work and not old.learn_from_work and self.ready():
             self.background(self.habits.catch_up())
         self.background(self.workers.pump())

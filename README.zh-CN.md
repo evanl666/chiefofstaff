@@ -2,11 +2,11 @@
 
 [English](README.md) · **简体中文**
 
-用一个收件箱管理你所有的 GitHub Copilot session。你说要做什么，它把每个任务交给一个单独的
+在一个首页上管理你所有的 GitHub Copilot session。你说要做什么，它把每个任务交给一个单独的
 Copilot session；后续的追问会发给已经了解情况的那个 session；Slack 消息它帮你起草回复；
 事情做完了，再提醒你来检查。
 
-![收件箱：做完的任务在等你检查](docs/images/inbox-review.png)
+![首页：对话、需要你处理的事和每个任务的进度在同一屏](docs/images/home-review.png)
 
 可以先用脚本模拟的 session 体验一下，不需要登录任何账号：
 
@@ -41,6 +41,10 @@ uvx chiefofstaff --demo
 - 不碰你自己的代码目录。每个 worker 有自己的文件夹和 git worktree，跑在 Copilot 的系统沙箱里，
   写不到别的地方。
 - 按你的语气起草 Slack 私信和 @ 的回复。你不点 Send，什么都不会发出去。
+- 按你说的帮你盯着（Slack 里 @ 你的、文档评论、邮件），用你的 Copilot 现有的任何工具，包括 Glean
+  或公司自己的搜索，并帮你起草回复。
+- 你离开电脑时，通过你说的方式（比如公司的 Slack bot）告诉你需要你处理的事，你在那边回复就行。
+- 可以在 Settings 里加 skill、插件和 MCP server；对话里可以直接贴截图。
 - 可以直接在 Slack 里委派：给任何一条消息点个 🤖（比如"谁能看下导出功能的 bug？"），它就
   变成一个任务。做完以后，回复会起草在那条消息的 thread 里。
 - 专注模式：选一个时长，期间通知先压着，Router 能处理的自己处理，结束后给你一份总结。
@@ -49,7 +53,7 @@ uvx chiefofstaff --demo
 它用的就是你现有的 Copilot：你的订阅、模型、MCP server 和公司的策略，不需要额外的 AI 服务
 或 API key。
 
-![批准一条 Slack 回复](docs/images/approve-dark.png)
+![一个需要你做的决定](docs/images/needs-you-dark.png)
 
 ## 安装
 
@@ -85,7 +89,7 @@ uvx chiefofstaff            # 或者：pipx install chiefofstaff && chiefofstaff
    运行一次 `copilot sandbox ca create && copilot sandbox ca trust`，这样沙箱里的 `gh` 才能用。
 4. **Slack 和其他服务**：在 Settings 里粘贴 Slack user token
    （[怎么获取](docs/guide.md#slack)，英文）。
-   worker 需要用到别的服务时，比如公司文档或 issue 系统，收件箱里会出现一张登录卡片。
+   worker 需要用到别的服务时，比如公司文档或 issue 系统，首页的“需要你”里会出现一张登录卡片。
 
 ## 工作原理
 
@@ -93,7 +97,7 @@ uvx chiefofstaff            # 或者：pipx install chiefofstaff && chiefofstaff
 "Chief of Staff · …"。Chief of Staff 通过 Copilot SDK 来驱动它们：
 
 ```
-你 ── 收件箱 ── Router ── 任务 ──► worker · worker · worker
+你 ── 首页 ── Router ── 任务 ──► worker · worker · worker
                   ▲                (各自的文件夹、worktree、沙箱)
 Slack、GitHub ────┘    Slack session ──► 等你批准的草稿
                        Watchdog ──► 推一把卡住的 worker
@@ -112,7 +116,7 @@ Chief of Staff 负责传话。每条消息发出去之前都会先存下来，�
 
 ## 当前状态
 
-早期版本（0.1），会有不少粗糙的地方。Copilot 的用量和平时一样算在你的订阅里，收件箱会显示
+早期版本（0.1），会有不少粗糙的地方。Copilot 的用量和平时一样算在你的订阅里，首页会显示
 每个任务用了多少 credits。
 
 欢迎在 issue 里提 bug 和想法。想参与开发的话，可以先看

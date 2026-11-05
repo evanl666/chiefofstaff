@@ -1,10 +1,146 @@
 // The settings and usage dialogs.
 
 import { $, api, el, toast } from "./dom.js";
-import { ago, lines } from "./text.js";
-import { state } from "./state.js";
+import { lines, plural, since } from "./text.js";
+import { closedWorkers, HOME, loadState, sessions, state } from "./state.js";
 import { renderSidebar } from "./sidebar.js";
 import { EFFORTS, renderHeader, select } from "./session.js";
+// Settings opens on the tab last used, or the one asked for ("you" for what was learned).
+const TAB = "cos.settingsTab";
+export function showSettingsTab(tab) {
+  const tabs = [...document.querySelectorAll("#settings-form .tab")];
+  const shown = tabs.find((section) => section.dataset.tab === tab) || tabs[0];
+  localStorage.setItem(TAB, shown.dataset.tab);
+  for (const section of tabs) section.hidden = section !== shown;
+  for (const button of document.querySelectorAll("#settings-tabs button")) {
+    button.setAttribute("aria-selected", String(button.dataset.tab === shown.dataset.tab));
+  }
+  $("#settings-pane").scrollTop = 0;
+}
+export function openSettings(tab = "") {
+  fillSettings();
+  showSettingsTab(tab || localStorage.getItem(TAB) || "general");
+  const dialog = $("#settings-dialog");
+  if (!dialog.open) dialog.showModal();
+  // Feedback, the owner's words and checks come in all the time; what was learned is read fresh.
+  api("/api/state")
+    .then((data) => {
+      state.snapshot.learning = data.learning;
+      state.snapshot.habits = data.habits;
+      state.snapshot.checks = data.checks;
+      state.snapshot.abilities = data.abilities;
+      state.snapshot.connector = data.connector;
+      renderLearning();
+      renderConnections();
+    })
+    .catch(() => {});
+}
+export function bindSettings() {
+  const dialog = $("#settings-dialog");
+  for (const button of document.querySelectorAll("#settings-tabs button")) {
+    button.addEventListener("click", () => showSettingsTab(button.dataset.tab));
+  }
+  // A field the browser finds invalid on Save may be on another tab: show that tab.
+  $("#settings-form").addEventListener("invalid", (event) => showSettingsTab(event.target.closest(".tab")?.dataset.tab), true);
+  $("#settings-form").addEventListener("submit", saveSettings);
+  $("#settings-cancel").addEventListener("click", () => dialog.close());
+  $("#profile-use").addEventListener("click", () => {
+    $("#settings-form").profile.value = state.snapshot.profile_draft;
+    $("#profile-draft").hidden = true;
+    settingsError("Review the draft, edit it if needed, then Save to use it.");
+  });
+  $("#profile-discard").addEventListener("click", async () => {
+    state.snapshot = { ...state.snapshot, ...(await api("/api/profile/discard", { method: "POST" })) };
+    $("#profile-draft").hidden = true;
+  });
+  $("#profile-distill").addEventListener("click", async () => {
+    try {
+      await api("/api/profile/distill", { method: "POST" });
+      dialog.close();
+      await select(HOME);
+      toast("Building your profile. Its draft comes to Needs you, to check before it is used.");
+    } catch (error) {
+      settingsError(error.message);
+    }
+  });
+  $("#learn-now").addEventListener("click", learnNow);
+  $("#learn-last-run").addEventListener("click", () => {
+    const run = lastLearner();
+    if (!run) return;
+    dialog.close();
+    select(run.id);
+  });
+  $("#skill-upload").addEventListener("click", () => $("#skill-file").click());
+  $("#skill-file").addEventListener("change", async () => {
+    const file = $("#skill-file").files[0];
+    $("#skill-file").value = "";
+    if (file) await addSkill(await file.text());
+  });
+  $("#skill-paste").addEventListener("click", () => {
+    $("#skill-paste-box").hidden = false;
+    $("#skill-text").focus();
+  });
+  $("#skill-cancel").addEventListener("click", () => {
+    $("#skill-paste-box").hidden = true;
+  });
+  $("#skill-add").addEventListener("click", async () => {
+    if (await addSkill($("#skill-text").value)) {
+      $("#skill-text").value = "";
+      $("#skill-paste-box").hidden = true;
+    }
+  });
+  $("#plugins-retry").addEventListener("click", () => settingsAction("/api/plugins/retry", "Retrying the plugins that failed."));
+  $("#settings-form").mcp_servers.addEventListener("input", () => {
+    try {
+      mcpServers();
+      $("#mcp-error").hidden = true;
+    } catch (error) {
+      $("#mcp-error").textContent = error.message;
+      $("#mcp-error").hidden = false;
+    }
+  });
+  $("#watch-add").addEventListener("click", () => {
+    if ($("#watch-list").children.length >= 10) {
+      settingsError("At most 10 watches.");
+      return;
+    }
+    const row = watchRow({ what: "", how: "", enabled: true });
+    $("#watch-list").append(row);
+    row.querySelector(".what").focus();
+  });
+  $("#watch-scan").addEventListener("click", () => settingsAction("/api/watch/scan", "Scanning now."));
+  $("#away-test").addEventListener("click", () => settingsAction("/api/away/test", ""));
+  for (const [id, find] of [
+    ["#watch-activity", () => state.snapshot.connector?.session_id],
+    ["#slack-activity", () => sessions().find((session) => session.role === "slack")?.id],
+    ["#watchdog-activity", () => sessions().find((session) => session.role === "watchdog")?.id],
+  ]) {
+    $(id).addEventListener("click", () => {
+      const sessionId = find();
+      if (!sessionId) return;
+      dialog.close();
+      select(sessionId);
+    });
+  }
+  $("#slack-token-save").addEventListener("click", async () => {
+    try {
+      settingsError("");
+      await saveToken();
+    } catch (error) {
+      settingsError(error.message);
+    }
+  });
+  $("#slack-token-remove").addEventListener("click", async () => {
+    try {
+      const snapshot = await api("/api/slack/token", { method: "DELETE" });
+      state.snapshot = { ...state.snapshot, ...snapshot };
+      $("#slack-status").textContent = slackStatusText();
+      $("#slack-token-remove").hidden = true;
+    } catch (error) {
+      settingsError(error.message);
+    }
+  });
+}
 function startOfDay(date) {
   const day = new Date(date);
   day.setHours(0, 0, 0, 0);
@@ -13,9 +149,11 @@ function startOfDay(date) {
 export async function refreshUsageLink() {
   try {
     const usage = await api(`/api/usage?since=${startOfDay(new Date())}`);
-    $("#usage-button").textContent = `Today · ${usage.total.credits.toFixed(1)} credits`;
+    $("#usage-today").textContent = `${usage.total.credits.toFixed(1)} credits today`;
+    $("#usage-button").title = `Usage: ${usage.total.credits.toFixed(1)} credits today`;
   } catch {
-    $("#usage-button").textContent = "Usage";
+    $("#usage-today").textContent = "";
+    $("#usage-button").title = "Usage";
   }
 }
 function usageTable(title, rows, label, onclick) {
@@ -65,9 +203,15 @@ export async function showUsage(range) {
   const form = $("#usage-dialog form");
   let since;
   let until = Date.now() / 1000 + 1;
+  // Dates show only for a custom range.
+  form.querySelector(".custom").hidden = range !== "custom";
   if (range === "today") since = startOfDay(new Date());
   else if (range === "custom") {
-    if (!form.from.value) return;
+    for (const button of form.querySelectorAll("[data-range]")) button.classList.toggle("active", button.dataset.range === range);
+    if (!form.from.value) {
+      form.from.focus();
+      return;
+    }
     since = startOfDay(new Date(`${form.from.value}T00:00`));
     if (form.to.value) until = startOfDay(new Date(`${form.to.value}T00:00`)) + 86400;
   } else since = Date.now() / 1000 - Number(range) * 86400;
@@ -102,7 +246,7 @@ export function slackStatusText() {
   const slack = state.snapshot.slack;
   const parts = [slack.token_saved ? "Token saved." : "No token yet."];
   if (slack.error) parts.push(slack.error);
-  else if (slack.connected) parts.push(`Watching${slack.last_checked ? `, checked ${ago(slack.last_checked)} ago` : ""}.`);
+  else if (slack.connected) parts.push(`Watching${slack.last_checked ? `, checked ${since(slack.last_checked)}` : ""}.`);
   if (slack.token_saved && slack.connected && !slack.can_send) parts.push("This token cannot send messages (chat:write).");
   return parts.join(" ");
 }
@@ -166,15 +310,195 @@ export function fillSettings() {
   form.learn_checks.checked = settings.learn_checks;
   renderLearning();
   form.paused.checked = settings.paused;
+  form.report_footer.checked = settings.report_footer !== false;
+  form.report_footer.closest("label").hidden = !("report_footer" in settings);
+  form.skill_folders.value = (settings.skill_folders || []).join("\n");
+  form.plugins.value = (settings.plugins || []).join("\n");
+  const servers = settings.mcp_servers || {};
+  form.mcp_servers.value = Object.keys(servers).length ? JSON.stringify(servers, null, 2) : "";
+  $("#mcp-error").hidden = true;
+  $("#watch-list").replaceChildren(...(settings.watches || []).map(watchRow));
+  const [from, to] = (settings.watch_hours || "09:00-18:00").split("-");
+  $("#watch-from").value = from;
+  $("#watch-to").value = to;
+  form.watch_minutes.value = settings.watch_minutes ?? 5;
+  form.watch_after_hours_minutes.value = settings.watch_after_hours_minutes ?? 30;
+  form.away_notify.checked = Boolean(settings.away_notify);
+  form.away_minutes.value = settings.away_minutes ?? 10;
+  form.away_how.value = settings.away_how || "";
+  renderConnections();
   $("#slack-status").textContent = slackStatusText();
   $("#slack-token-remove").hidden = !state.snapshot.slack.token_saved;
   const github = state.snapshot.github;
-  $("#github-status").textContent = github.error || (github.connected ? `Watching, checked ${ago(github.last_checked)} ago.` : "");
+  $("#github-status").textContent = github.error || (github.connected ? `Watching${github.last_checked ? `, checked ${since(github.last_checked)}` : ""}.` : "");
   $("#data-directory").textContent = `Data: ${state.snapshot.data_directory}`;
   $("#settings-error").hidden = true;
 }
+// Connections: what each section has, in its summary line; what runs, as it changes.
+function watchRow(watch) {
+  return el(
+    "li",
+    {},
+    el("input", { class: "what", value: watch.what, placeholder: "What to look out for, e.g. “questions about the release in #eng”", "aria-label": "What to watch for" }),
+    el("input", { class: "how", value: watch.how || "", placeholder: "How (optional): e.g. Glean search", "aria-label": "How to look" }),
+    el("label", { class: "check", title: "On" }, el("input", { class: "on", type: "checkbox", checked: watch.enabled !== false, "aria-label": "On" })),
+    el("button", { type: "button", class: "link remove", text: "×", title: "Remove", "aria-label": "Remove watch", onclick: (event) => event.currentTarget.closest("li").remove() }),
+  );
+}
+function mcpServers() {
+  const text = $("#settings-form").mcp_servers.value.trim();
+  if (!text) return {};
+  let value;
+  try {
+    value = JSON.parse(text);
+  } catch (error) {
+    throw new Error(`MCP servers: not valid JSON (${error.message}).`);
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("MCP servers: write an object, {\"name\": {…}}.");
+  for (const [name, config] of Object.entries(value)) {
+    if (!config || typeof config !== "object" || !(typeof config.command === "string" || typeof config.url === "string")) {
+      throw new Error(`MCP server ${name}: give a command (local) or a url (remote).`);
+    }
+  }
+  return value;
+}
+async function addSkill(content) {
+  settingsError("");
+  try {
+    const skill = await api("/api/skills", { method: "POST", body: { content } });
+    toast(`Skill added: ${skill.name}.`);
+    await loadState();
+    renderConnections();
+    return true;
+  } catch (error) {
+    settingsError(error.message);
+    return false;
+  }
+}
+// A button in Settings that does something now (not on Save): the snapshot it returns.
+async function settingsAction(path, done) {
+  settingsError("");
+  try {
+    state.snapshot = { ...state.snapshot, ...(await api(path, { method: "POST" })) };
+    renderConnections();
+    if (done) toast(done);
+  } catch (error) {
+    settingsError(error.message);
+  }
+}
+const PLUGIN_STATE = { pending: "waiting", installing: "installing…", installed: "installed", failed: "failed" };
+export function renderConnections() {
+  const snap = state.snapshot;
+  if (!snap) return;
+  const settings = snap.settings;
+  const slack = snap.slack || {};
+  $("#slack-summary").textContent = !settings.slack_enabled ? "Off" : slack.error ? "Problem" : slack.connected ? "Watching" : "On";
+  const repos = settings.github_repos.length;
+  $("#github-summary").textContent = settings.github_enabled ? `${repos} ${repos === 1 ? "repository" : "repositories"}` : "Off";
+  const abilities = snap.abilities || { skills: [], plugins: {} };
+  const servers = Object.keys(settings.mcp_servers || {}).length;
+  $("#abilities-summary").textContent = [abilities.skills.length ? plural(abilities.skills.length, "skill") : "", (settings.plugins || []).length ? plural(settings.plugins.length, "plugin") : "", servers ? plural(servers, "MCP server") : ""].filter(Boolean).join(" · ") || "None added";
+  $("#skills").replaceChildren(
+    ...abilities.skills.map((skill) =>
+      el(
+        "li",
+        {},
+        el("div", { class: "row-text" }, el("strong", { text: skill.name }), el("small", { text: skill.description })),
+        el("button", { type: "button", class: "link", text: "Remove", onclick: () => settingsAction(`/api/skills/${encodeURIComponent(skill.name)}/remove`, "Skill removed.") }),
+      ),
+    ),
+  );
+  if (!abilities.skills.length) $("#skills").append(el("li", { class: "empty-note", text: "None uploaded." }));
+  const plugins = Object.entries(abilities.plugins || {});
+  $("#plugin-status").replaceChildren(
+    ...plugins.map(([source, status]) =>
+      el(
+        "li",
+        { title: status.error || status.note || "" },
+        el("div", { class: "row-text" }, el("span", { class: "mono", text: source }), status.error || status.note ? el("small", { text: status.error || status.note }) : null),
+        el("span", { class: `chip ${status.state === "installed" ? "done" : status.state === "failed" ? "failed" : "progress"}`, text: PLUGIN_STATE[status.state] || status.state }),
+      ),
+    ),
+  );
+  $("#plugins-retry").hidden = !plugins.some(([, status]) => status.state === "failed");
+  const connector = snap.connector || {};
+  const watches = settings.watches || [];
+  const on = watches.filter((watch) => watch.enabled !== false).length;
+  const last = connector.last || {};
+  const scanned = connector.scanning
+    ? "Scanning now…"
+    : connector.scanned_at
+      ? `Scanned ${since(connector.scanned_at)}${last.found !== undefined ? ` · ${last.found} found` : ""}${last.problems?.length ? ` · ${last.problems.join("; ")}` : ""}`
+      : "";
+  $("#watches-summary").textContent = watches.length ? [`${on} on`, connector.scanned_at ? `scanned ${since(connector.scanned_at)}` : ""].filter(Boolean).join(" · ") : "None";
+  $("#watch-state").textContent = scanned;
+  $("#watch-state").classList.toggle("error", Boolean(last.problems?.length));
+  $("#watch-scan").disabled = Boolean(connector.scanning);
+  $("#watch-activity").hidden = !connector.session_id;
+  const away = connector.away || {};
+  const tried = away.last || {};
+  $("#away-summary").textContent = settings.away_notify ? `On${away.where ? ` · ${away.where}` : ""}` : "Off";
+  $("#away-state").textContent = tried.at ? (tried.ok ? `Reached you${tried.where ? ` via ${tried.where}` : ""} ${since(tried.at)}` : `Could not reach you ${since(tried.at)}: ${tried.error || "unknown error"}`) : "";
+  $("#away-state").classList.toggle("error", Boolean(tried.at && !tried.ok));
+  $("#slack-activity").hidden = !sessions().some((session) => session.role === "slack");
+  $("#watchdog-activity").hidden = !sessions().some((session) => session.role === "watchdog");
+}
 // What sessions learned from the owner's feedback, and how often the owner now agrees.
 const SCOPE = (scope) => (!scope ? "everywhere" : scope === "slack" ? "Slack replies" : `in ${scope.replace("project:", "").split("/").pop()}`);
+// A long text shows one line, with "more" to read it all.
+function clamped(text) {
+  const node = el("span", { class: "clamp", text });
+  if (text.length <= 90 && !text.includes("\n")) return node;
+  const toggle = el("button", { type: "button", class: "link more", text: "more" });
+  toggle.addEventListener("click", () => {
+    const open = node.classList.toggle("open");
+    toggle.textContent = open ? "less" : "more";
+  });
+  return el("span", { class: "clamped" }, node, toggle);
+}
+// Chief of Staff's own learning worker: the latest one, and whether one works now.
+function lastLearner() {
+  return [...sessions(), ...closedWorkers()].filter((session) => session.helper === "learner").sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
+}
+let pressed = false;  // Learn now was clicked and its answer has not come yet.
+function learningNow() {
+  const run = lastLearner();
+  return pressed || Boolean(state.snapshot.habits?.running) || Boolean(run && !run.closed_at && ["working", "starting", "queued"].includes(run.status));
+}
+async function learnNow() {
+  settingsError("");
+  pressed = true;
+  renderLearnRow();
+  try {
+    const snapshot = await api("/api/lessons/learn", { method: "POST" });
+    if (snapshot?.habits && "running" in snapshot.habits) {
+      // It goes on in the background: its progress and outcome show here.
+      state.snapshot = { ...state.snapshot, ...snapshot };
+    } else {
+      // An older server answers once it is done reading.
+      $("#settings-dialog").close();
+      toast("Learning from your work. How you write applies at once; you check new habits first.");
+    }
+  } catch (error) {
+    settingsError(error.message);
+  } finally {
+    pressed = false;
+    renderLearning();
+  }
+}
+function renderLearnRow() {
+  const busy = learningNow();
+  const button = $("#learn-now");
+  button.disabled = busy;
+  button.classList.toggle("busy", busy);
+  button.textContent = busy ? "Learning…" : "Learn now";
+  const habits = state.snapshot.habits || {};
+  const last = habits.last || {};
+  const status = $("#learn-state");
+  status.classList.toggle("error", Boolean(!busy && last.error));
+  status.textContent = busy ? "Learning now…" : last.error ? `Last run failed: ${last.error}` : last.text ? `${last.text}${last.at ? ` · ${since(last.at)}` : ""}` : "";
+  $("#learn-last-run").hidden = !lastLearner();
+}
 export function renderLearning() {
   const learning = state.snapshot.learning;
   if (!learning) return;
@@ -193,25 +517,12 @@ export function renderLearning() {
       el(
         "li",
         {},
-        el("span", { text: lesson.text }),
-        el("small", { text: SCOPE(lesson.scope) }),
-        el("button", {
-          type: "button",
-          class: "link",
-          text: "Remove",
-          onclick: async () => {
-            try {
-              state.snapshot = { ...state.snapshot, ...(await api(`/api/lessons/${lesson.id}/remove`, { method: "POST" })) };
-              renderLearning();
-            } catch (error) {
-              settingsError(error.message);
-            }
-          },
-        }),
+        el("div", { class: "row-text" }, clamped(lesson.text), el("small", { text: SCOPE(lesson.scope) })),
+        el("button", { type: "button", class: "link", text: "Remove", onclick: () => memoryAction(`/api/lessons/${lesson.id}/remove`) }),
       ),
     ),
   );
-  if (!learning.lessons.length) $("#lessons").append(el("li", { class: "empty-note", text: "No habits yet." }));
+  showList("#lessons", learning.lessons.length);
   const habits = state.snapshot.habits;
   if (habits) {
     $("#styles").replaceChildren(
@@ -219,11 +530,12 @@ export function renderLearning() {
         el(
           "li",
           {},
-          el("div", { class: "style-text" }, el("strong", { text: `${style.title} · v${style.version}` }), el("small", { text: style.text })),
+          el("div", { class: "row-text" }, el("span", {}, el("strong", { text: style.title }), el("small", { text: ` · v${style.version}` })), clamped(style.text)),
           el("button", { type: "button", class: "link", text: "Undo", title: style.version > 1 ? "Back to the previous version" : "Stop using it", onclick: () => memoryAction(`/api/style/${style.section}/undo`) }),
         ),
       ),
     );
+    showList("#styles", habits.styles.length);
     const parts = Object.entries(OBSERVED)
       .filter(([kind]) => habits.observed[kind])
       .map(([kind, [one, many]]) => `${habits.observed[kind]} ${habits.observed[kind] === 1 ? one : many}`);
@@ -243,20 +555,25 @@ export function renderLearning() {
       ...checks.checks.map((check) =>
         el(
           "li",
-          { class: check.status === "disabled" ? "off" : "" },
-          el(
-            "div",
-            { class: "style-text" },
-            el("strong", { text: `${check.name} · ${check.repo}` }),
-            el("small", { text: `${check.why} Caught ${check.caught} of ${check.runs} run${check.runs === 1 ? "" : "s"}.` }),
-            el("code", { text: check.command }),
-          ),
+          { class: check.status === "disabled" ? "off" : "", title: `${check.why}\n${check.command}` },
+          el("div", { class: "row-text" }, el("strong", { text: check.name }), el("small", { text: `${check.repo.split("/").pop()} · caught ${check.caught} of ${check.runs} run${check.runs === 1 ? "" : "s"}` })),
           el("button", { type: "button", class: "link", text: check.status === "active" ? "Turn off" : "Turn on", onclick: () => memoryAction(`/api/checks/${check.id}/${check.status === "active" ? "disable" : "enable"}`) }),
         ),
       ),
     );
     if (!checks.sandbox) $("#checks").append(el("li", { class: "empty-note", text: "Needs a sandbox (macOS sandbox-exec, or bwrap on Linux)." }));
+    showList("#checks", $("#checks").children.length);
   }
+  // Nothing learned yet: one line says so, not three empty lists.
+  const empty = ["#styles", "#lessons", "#checks"].every((id) => !$(id).children.length);
+  $("#learned-nothing").hidden = !empty;
+  renderLearnRow();
+}
+// A list and its heading, shown only when there is something in it.
+function showList(id, count) {
+  const list = $(id);
+  list.hidden = !count;
+  list.previousElementSibling.hidden = !count;
 }
 // What the owner's words were read from, as counted.
 const OBSERVED = {
@@ -284,10 +601,13 @@ export function settingsError(message) {
   node.textContent = message;
   node.hidden = !message;
 }
-export async function saveSettings(event) {
+async function saveSettings(event) {
   event.preventDefault();
   const form = $("#settings-form");
+  const settings = state.snapshot.settings;
   const body = {
+    // Settings this page does not show are sent back as they are, not reset.
+    ...settings,
     projects: lines(form.projects.value),
     code_folder: form.code_folder.value.trim(),
     scratch_directory: form.scratch_directory.value.trim(),
@@ -317,7 +637,28 @@ export async function saveSettings(event) {
     learn_from_work: form.learn_from_work.checked,
     learn_checks: form.learn_checks.checked,
     paused: form.paused.checked,
+    skill_folders: lines(form.skill_folders.value),
+    plugins: lines(form.plugins.value),
+    mcp_servers: {},
+    watches: [...document.querySelectorAll("#watch-list li")]
+      .map((row) => ({ what: row.querySelector(".what").value.trim(), how: row.querySelector(".how").value.trim(), enabled: row.querySelector(".on").checked }))
+      .filter((watch) => watch.what),
+    watch_hours: `${$("#watch-from").value || "09:00"}-${$("#watch-to").value || "18:00"}`,
+    watch_minutes: Number(form.watch_minutes.value || 5),
+    watch_after_hours_minutes: Number(form.watch_after_hours_minutes.value || 0),
+    away_notify: form.away_notify.checked,
+    away_minutes: Number(form.away_minutes.value || 10),
+    away_how: form.away_how.value.trim(),
   };
+  if ("report_footer" in settings) body.report_footer = form.report_footer.checked;
+  try {
+    body.mcp_servers = mcpServers();
+  } catch (error) {
+    $("#conn-abilities").open = true;
+    showSettingsTab("connections");
+    settingsError(error.message);
+    return;
+  }
   try {
     if (form.slack_token.value.trim()) await saveToken();
     let snapshot = await api("/api/settings", { method: "POST", body });
