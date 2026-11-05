@@ -4,6 +4,7 @@ import re
 
 # Events are batched in the app; tests deliver them at once.
 os.environ.setdefault("CHIEFOFSTAFF_EVENT_DEBOUNCE", "0")
+os.environ.setdefault("CHIEFOFSTAFF_RETRY_DELAY", "0.01")
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace

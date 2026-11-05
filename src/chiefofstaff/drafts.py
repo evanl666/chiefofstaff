@@ -15,7 +15,7 @@ from . import threads
 from .asks import REQUEST_KINDS
 from .envelope import wrap
 from .models import DraftDecision
-from .roles import SLACK
+from .roles import SLACK, WORKER
 from .sources.github import REVIEW_EVENTS
 from .sources.slack import describe, message_keys
 from .store import now
@@ -86,6 +86,8 @@ class Drafts:
             return await self.runtime.toolset.review_profile(draft, decision)
         if draft["kind"] == "adopt":
             return await self.runtime.toolset.answer_adopt(draft, decision)
+        if decision.action == "revise":
+            return await self.revise(draft, decision.reason or decision.text)
         if decision.action not in {"send", "reject"}:
             # "It was sent" belongs to a draft whose sending was interrupted: never a send.
             raise ValueError("Send this draft, or reject it.")
@@ -111,8 +113,22 @@ class Drafts:
             )
             return draft
         final = decision.text.strip() or draft["text"]
+        if draft["kind"] == "github" and "body" in decision.content:
+            # The review's summary as the owner left it: empty posts the line comments alone.
+            final = str(decision.content["body"]).strip()
         if draft["kind"] == "reply":
             return await self.copied(draft, final)
+        if draft["kind"] == "github" and not final:
+            # Checked before anything about the draft changes.
+            if draft["target"].get("in_reply_to"):
+                raise ValueError("The reply is empty.")
+            kept = [
+                comment
+                for index, comment in enumerate(draft["target"].get("comments") or [])
+                if str(decision.content.get(f"comment:{index}", comment["body"])).strip()
+            ]
+            if not kept and draft["target"].get("verdict") != "approve":
+                raise ValueError("Nothing to post: write a summary or keep a line comment.")
         comments_edited = ""
         if draft["kind"] == "github" and draft["target"].get("comments"):
             draft, comments_edited = self.edit_comments(draft, decision.content)
@@ -160,7 +176,11 @@ class Drafts:
         if edited:
             parts = [f"The owner edited draft {draft_id} before it was sent."]
             if final != draft["text"]:
-                parts.append(f"The text sent instead of yours:\n{final}")
+                parts.append(
+                    f"The text sent instead of yours:\n{final}"
+                    if final
+                    else "The owner removed the summary: only the line comments were posted."
+                )
             if comments_edited:
                 parts.append(comments_edited)
             await self.tell_drafter(draft, "\n\n".join(parts), True)
@@ -294,6 +314,48 @@ class Drafts:
             )
         self.bus.publish("draft", draft)
 
+    async def revise(self, draft: dict, reason: str) -> dict:
+        """The owner wants the draft done again: its session drafts a new one, as they ask."""
+        tools = {
+            "slack": "draft_slack_reply",
+            "github": "draft_github_review",
+            "reply": "draft_reply",
+        }
+        if draft["kind"] not in tools:
+            raise ValueError("Only replies and reviews can be drafted again.")
+        reason = " ".join(reason.split())[:2000]
+        row = self.store.find_session(draft["session_id"])
+        if row and row["closed_at"] and row["role"] == WORKER:
+            await self.runtime.workers.reopen(row["id"])
+        draft = self.store.update_draft(
+            draft["id"], status="rejected", outcome=f"Redo: {reason}" if reason else "Redo",
+            resolved_at=now(),
+        )  # fmt: skip
+        self.bus.publish("draft", draft)
+        self.runtime.learning.record(
+            "draft-rejected",
+            context=self.about(draft),
+            proposed=draft["text"],
+            owner=reason,
+            scope="slack" if draft["kind"] == "slack" else "",
+            agreed=False,
+            untrusted=True,
+        )
+        if (task := self.runtime.tasks.current(draft["session_id"])) and task["status"] in {
+            "review",
+            "done",
+        }:
+            self.runtime.tasks.move(task["id"], "running", reason="redo")
+        await self.tell_drafter(
+            draft,
+            f"The owner wants draft {draft['id']} done again"
+            + (f": {reason}" if reason else ".")
+            + f" Draft it again with {tools[draft['kind']]}, changed as they ask; this one is "
+            "not sent.",
+            True,
+        )
+        return draft
+
     async def copied(self, draft: dict, final: str) -> dict:
         """A reply the owner sends themself: approved (and copied for them) is as good as sent."""
         draft = self.store.update_draft(
@@ -341,7 +403,18 @@ class Drafts:
         if task["status"] != "review":
             return
         receipts = self.runtime.task_actions.receipts(task) or {}
-        changed = receipts.get("prs") or any(
+        # Its own work, not the PR it reviewed (its report links to that one too).
+        reviewed = {
+            f"{target['repo']}#{target['number']}".lower()
+            for row in self.store.all(
+                "SELECT target FROM drafts WHERE session_id=? AND kind='github'",
+                (task["session_id"],),
+            )
+            if (target := json.loads(row["target"])).get("repo")
+        }
+        changed = any(
+            pr.get("label", "").lower() not in reviewed for pr in receipts.get("prs") or []
+        ) or any(
             checkout.get("commits") or checkout.get("uncommitted")
             for checkout in receipts.get("checkouts") or []
         )

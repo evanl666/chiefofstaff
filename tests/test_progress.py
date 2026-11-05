@@ -200,7 +200,7 @@ async def test_a_plugin_hook_that_fails_does_not_fail_the_worker(harness):
     notes = [text for kind, text in harness.kinds(worker) if "plugin hook failed" in text]
     assert len(notes) == 1 and "Also writable in the sandbox" in notes[0]
     assert not [m for m in harness.store.messages(harness.router_id) if m["kind"] == "inbound"]
-    session.emit("session.error", error_type="model", message="overloaded")
+    session.emit("session.error", error_type="model", message="invalid tool schema")
     await settle(runtime)
     assert harness.store.session(worker)["status"] == "failed", "other errors still fail it"
 
@@ -703,6 +703,7 @@ async def test_reviews_a_company_pr_with_inline_comments(harness):
     harness.gh_replies[f"api repos/{repo}/pulls/1529/reviews"] = json.dumps(
         {"id": 7, "html_url": "https://github.com/x/pull/1529#pullrequestreview-7"}
     )
+    harness.gh_replies[f"api repos/{repo}/pulls/1529/reviews/7/comments"] = "[]"
     harness.gh_replies[f"api repos/{repo}/pulls/1529"] = json.dumps(PULL)
 
     async def draft(**extra):
@@ -741,7 +742,7 @@ async def test_reviews_a_company_pr_with_inline_comments(harness):
         card["id"],
         DraftDecision(action="send", content={"comment:1": "Please add a test", "comment:2": ""}),
     )
-    arguments, payload = harness.gh_calls[-1]
+    [(arguments, payload)] = [call for call in harness.gh_calls if call[1]]
     assert arguments[1] == f"repos/{repo}/pulls/1529/reviews"
     assert payload["commit_id"] == "c0ffee" and payload["body"] == "Summary"
     assert payload["comments"] == [
@@ -1281,15 +1282,26 @@ async def test_answers_follow_the_language_the_owner_just_wrote_in(harness):
     await runtime.owner_send(harness.router_id, "汇报先说结论, 再说细节.")
     assert 'reply_in="Chinese"' in router.sent[-1]
     runtime.add_message(harness.router_id, "assistant", "收到: 以后先说结论.")
+    router.emit("assistant.turn_start")
     await runtime.owner_send(harness.router_id, "Which workers are open right now?")
     assert 'reply_in="English"' in router.sent[-1], "not the language of the conversation so far"
     assert "answer in English, not Chinese" in router.sent[-1], "said outright when it switches"
+    assert router.modes[-1] == "enqueue", "its own turn, not the Chinese one running"
+    runtime.add_message(harness.router_id, "assistant", "None are open.")
+    await runtime.owner_send(harness.router_id, "And how many are queued?")
+    assert router.modes[-1] == "immediate", "the same language: into the running turn"
+    router.emit("session.idle")
     worker = await spawn(runtime, harness.router_id, "Count the files")
     assert 'reply_in="English"' in harness.session(worker).sent[-1], "its report is read as is"
     chinese_task = await spawn(runtime, harness.router_id, "数一下有几个文件")
     assert "Write your report in English" in harness.session(chinese_task).sent[-1]
     await runtime.owner_send(harness.router_id, "progress?")
     assert "reply_in" not in router.sent[-1], "no signal: the conversation's language"
+    router.emit("session.idle")
+    await runtime.owner_send(harness.router_id, "你能帮我做哪些事?")
+    router.emit("assistant.turn_start")
+    await runtime.owner_send(harness.router_id, "Which tasks are running right now?")
+    assert router.modes[-1] == "enqueue", "it is still on the Chinese one, not yet answered"
     router.emit("session.idle")
     await call_tool(runtime, "report", worker, status="done", summary="3 files.")
     await settle(runtime)
@@ -1392,3 +1404,34 @@ async def test_a_report_that_misses_a_message_sent_meanwhile_waits_for_it(harnes
     await settle(runtime)
     done = await call_tool(runtime, "report", worker, status="done", summary="Fixed, tabs too.")
     assert done.result_type == "success"
+
+
+async def test_copilot_failing_on_its_side_is_tried_again_not_left_to_the_owner(harness):
+    runtime = await harness.connect()
+    router = harness.session(harness.router_id)
+    await runtime.owner_send(harness.router_id, "What is open?")
+    asked = router.sent[-1]
+    router.emit("session.error", message="No response was returned. Send your message again.")
+    await settle(runtime)
+    await asyncio.sleep(0.05)
+    await settle(runtime)
+    assert router.sent[-1] == asked and len(router.sent) == 2, "the same turn, sent again"
+    assert not [k for k, _ in harness.kinds(harness.router_id) if k == "error"], "no red error"
+
+    worker = await spawn(runtime, harness.router_id, "Fix the build")
+    session = harness.session(worker)
+    step(session, "bash", {"command": "make"})
+    session.emit("session.error", message="Execution failed: 503 Service Unavailable")
+    await settle(runtime)
+    await asyncio.sleep(0.05)
+    await settle(runtime)
+    assert "finish what is left of it" in session.sent[-1], "acted already: a note, not a resend"
+    assert runtime.tasks.current(worker)["status"] == "running", "its task did not fail"
+    for _ in range(2):
+        session.emit("session.error", message="Execution failed: 503 Service Unavailable")
+        await settle(runtime)
+        await asyncio.sleep(0.05)
+        await settle(runtime)
+    assert runtime.tasks.current(worker)["status"] == "failed", "the third time it does"
+    errors = [text for kind, text in harness.kinds(worker) if kind == "error"]
+    assert errors and "3 times" in errors[-1]

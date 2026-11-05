@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import time
 from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -16,7 +17,7 @@ from typing import TYPE_CHECKING
 from . import receipts, threads
 from .envelope import wrap
 from .roles import WORKER
-from .store import now
+from .store import hours_ago, now
 from .tasks import ENDED, OPEN
 from .workspaces import base_of, changes, diff, git, same_version, version
 
@@ -55,6 +56,11 @@ def moved(before: list[dict], now: list[dict]) -> str:
         if not same_version(recorded, found):
             return "Out of date: the code was edited since it was checked."
     return ""
+
+
+# A recent task's open PRs are read again this often (seconds), and for this long (hours).
+PR_REFRESH = 180
+PR_HOURS = 72
 
 
 class TaskActions:
@@ -168,6 +174,24 @@ class TaskActions:
             with suppress(Exception):
                 if found := await changes(checkout):
                     checkouts.append(found)
+        prs = await self.read_prs(task)
+        run = self.store.one(
+            "SELECT id, evidence FROM runs WHERE task_id=? ORDER BY started_at DESC LIMIT 1",
+            (task_id,),
+        )
+        if run:
+            evidence = {"checkouts": checkouts, "prs": prs, "at": now(), "prs_at": time.time()}
+            before = json.loads(run["evidence"]) if keep_stale and run["evidence"] else {}
+            if reason := before.get("stale") or moved(before.get("checkouts", []), checkouts):
+                # The checks were about the code as it was then, not as it is now.
+                evidence |= {"checkouts": before["checkouts"], "stale": reason}
+            self.store.execute(
+                "UPDATE runs SET evidence=? WHERE id=?", (json.dumps(evidence), run["id"])
+            )
+            self.publish(self.tasks.get(task_id))
+
+    async def read_prs(self, task: dict) -> list[dict]:
+        """The task's PRs as GitHub has them now: open or merged, checks, review."""
         prs = []
         for repo, number in threads.PR_URL.findall(" ".join(self.pr_urls(task)))[:5]:
             try:
@@ -183,29 +207,66 @@ class TaskActions:
             except Exception:
                 logger.info("Could not read %s#%s for receipts.", repo, number, exc_info=True)
                 continue
+            rollup = view.get("statusCheckRollup") or []
             prs.append(
                 {
                     "label": f"{repo}#{number}",
                     "url": view.get("url") or f"https://github.com/{repo}/pull/{number}",
                     "state": view.get("state", ""),
-                    "checks": receipts.checks_state(view.get("statusCheckRollup") or []),
+                    "checks": receipts.checks_state(rollup),
+                    "failing": receipts.failing_checks(rollup)[:5],
                     "review": view.get("reviewDecision") or "",
+                    "at": now(),
                 }
             )
+        return prs
+
+    async def refresh_prs(self, task_id: str) -> bool:
+        """The PR chips of a task show what is true now, not what was when it reported: a PR
+        whose failing checks pass on a later run turns green. True when anything changed."""
         run = self.store.one(
-            "SELECT id, evidence FROM runs WHERE task_id=? ORDER BY started_at DESC LIMIT 1",
+            """SELECT id, evidence FROM runs WHERE task_id=? AND evidence!=''
+            ORDER BY started_at DESC LIMIT 1""",
             (task_id,),
         )
-        if run:
-            evidence = {"checkouts": checkouts, "prs": prs, "at": now()}
-            before = json.loads(run["evidence"]) if keep_stale and run["evidence"] else {}
-            if reason := before.get("stale") or moved(before.get("checkouts", []), checkouts):
-                # The checks were about the code as it was then, not as it is now.
-                evidence |= {"checkouts": before["checkouts"], "stale": reason}
-            self.store.execute(
-                "UPDATE runs SET evidence=? WHERE id=?", (json.dumps(evidence), run["id"])
-            )
+        if not run:
+            return False
+        evidence = json.loads(run["evidence"])
+        if not evidence.get("prs"):
+            return False
+        prs = await self.read_prs(self.tasks.get(task_id))
+        if not prs:
+            return False
+        shown = [{k: v for k, v in pr.items() if k != "at"} for pr in evidence["prs"]]
+        changed = shown != [{k: v for k, v in pr.items() if k != "at"} for pr in prs]
+        evidence |= {"prs": prs, "prs_at": time.time()}
+        self.store.execute(
+            "UPDATE runs SET evidence=? WHERE id=?", (json.dumps(evidence), run["id"])
+        )
+        if changed:
             self.publish(self.tasks.get(task_id))
+        return changed
+
+    async def refresh_open_prs(self, pull: str = "", every: float = PR_REFRESH):
+        """Every few minutes (and at once for `pull`, "owner/repo#n", when something happened
+        on it): the PRs of recent tasks that are not merged or closed yet."""
+        for task in self.tasks.listed(include_ended_since=hours_ago(PR_HOURS)):
+            run = self.store.one(
+                """SELECT evidence FROM runs WHERE task_id=? AND evidence!=''
+                ORDER BY started_at DESC LIMIT 1""",
+                (task["id"],),
+            )
+            evidence = json.loads(run["evidence"]) if run else {}
+            prs = evidence.get("prs") or []
+            if not prs or all(pr.get("state") in {"MERGED", "CLOSED"} for pr in prs):
+                continue
+            named = pull and any(pr.get("label", "").lower() == pull.lower() for pr in prs)
+            if not named and time.time() - evidence.get("prs_at", 0) < every:
+                continue
+            try:
+                await self.refresh_prs(task["id"])
+            except Exception:
+                logger.info("Could not refresh the PRs of %s.", task["id"], exc_info=True)
 
     def pr_urls(self, task: dict) -> list[str]:
         """The task's PRs: those opened with Create PR, and those any of its reports linked to."""

@@ -55,12 +55,39 @@ export function terminalItem(session) {
     },
   };
 }
+// Workers at work whose task is finished (news on a PR they follow, a question about it): they
+// are running too, and say on what.
+export function followUpItem(session) {
+  const line = () => compactPaths((session.step || session.activity || "Working…").replace(/^(bash|shell|powershell) /, "$ "), session.cwd);
+  const about = session.task ? `following up on “${session.task.title}”` : "working";
+  return {
+    key: `followup:${session.id}`,
+    version: `${line()}:${about}`,
+    build: () =>
+      el(
+        "div",
+        { class: "card task running followup" },
+        el(
+          "div",
+          { class: "head" },
+          el("span", { class: "dot working", title: "Working" }),
+          el("button", { type: "button", class: "title", text: session.title, title: "Open its worker", onclick: () => select(session.id) }),
+          el("span", { class: "meta", text: about }),
+        ),
+        el("div", { class: "task-body" }, el("div", { class: "activity", text: line() })),
+      ),
+    refresh: (node) => {
+      node.querySelector(".activity").textContent = line();
+      node.querySelector(".head .meta").textContent = about;
+    },
+  };
+}
 // The key covers what changes a card's actions and layout; the version, what only its text.
 export function taskItem(task) {
   const worker = byId(task.session_id);
   const live = ["running", "queued"].includes(task.status);
   return {
-    key: `task:${task.id}:${task.status}:${task.blocked ? 1 : 0}:${createsPr(task) ? 1 : 0}`,
+    key: `task:${task.id}:${task.status}:${task.blocked ? 1 : 0}:${createsPr(task) ? 1 : 0}:${task.asking ? 1 : 0}`,
     id: task.id,
     // For running cards the minute too: "6m" and "3m ago" move on by themselves.
     version: `${task.updated_at}:${task.title}:${worker?.status || ""}:${worker?.activity || ""}:${worker?.said_at || ""}:${worker?.step_since || ""}:${task.credits}:${task.runs}:${task.status === "review" ? JSON.stringify(task.receipts || null) : ""}:${live ? `${Math.floor(Date.now() / 60000)}:${queuedKey()}` : ""}`,
@@ -86,6 +113,7 @@ function refreshTaskCard(node, task) {
     else if (old) old.remove();
     else if (fresh) (node.querySelector(":scope > .actions") ? node.querySelector(":scope > .actions").before(fresh) : node.append(fresh));
   }
+  expandTask(node, review && openReports.has(task.id));
 }
 // Short on the card: how long it has run, or when it finished; the rest on hover.
 function taskMeta(task) {
@@ -114,11 +142,14 @@ function createsPr(task) {
   if (!receipts || receipts.prs?.length) return false;
   return (receipts.checkouts || []).some((checkout) => checkout.branch?.startsWith("chief/") && (checkout.commits || checkout.uncommitted));
 }
-// A result to review shows its full report on demand.
+// A result to review shows its full report on demand; an open one stays open while the card
+// is redrawn (new receipts, a fresh PR state).
+const openReports = new Set();
 export function expandTask(node, open = !node.classList.contains("expanded")) {
   node.classList.toggle("expanded", open);
   const toggle = node.querySelector(".expand");
   if (toggle) toggle.textContent = open ? "Hide report" : "Show report";
+  if (node.dataset.task) openReports[open ? "add" : "delete"](node.dataset.task);
 }
 function taskCard(task) {
   const error = el("span", { class: "error" });
@@ -127,18 +158,20 @@ function taskCard(task) {
   const open = task.session_id ? () => select(task.session_id) : null;
   const node = el(
     "div",
-    { class: `card task ${task.status}${task.blocked ? " blocked" : ""}`, "data-session": task.session_id || undefined },
+    { class: `card task ${task.status}${task.blocked ? " blocked" : ""}`, "data-session": task.session_id || undefined, "data-task": task.id },
     el(
       "div",
       { class: "head" },
       el("span", { class: `dot ${task.blocked ? "waiting" : DOT[task.status]}` }),
       el("button", { type: "button", class: "title", text: task.title, title: open ? "Open its worker" : task.goal || "", onclick: open, disabled: !open }),
+      task.asking ? el("span", { class: "chip waiting", text: "Needs you", title: "Its worker waits for you on a card under Needs you" }) : null,
       el("span", { class: "meta", text: meta, title: help }),
     ),
   );
   const body = taskBody(task);
   if (body) node.append(body);
   if (task.status === "review") node.append(...[chips(task), report(task)].filter(Boolean));
+  expandTask(node, task.status === "review" && openReports.has(task.id));
   const key = `task:${task.id}`;
 
   // The card leaves its place at once (`moves`); the task's new state puts it where it goes.

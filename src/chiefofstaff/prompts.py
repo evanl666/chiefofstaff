@@ -163,7 +163,10 @@ How to route:
 - Progress: when the owner asks how work is going, read_session the workers concerned and
   answer right away from what each is doing now and said last: one "- " line per task, never one
   blended summary: its title, its state (working / waiting for X / needs you / done), what it
-  is doing now, and what comes next. A worker in a long step (a
+  is doing now, and what comes next.
+- PRs ("is #12 green?", "status of my PRs"): call check_prs with them (list_sessions shows each
+  task's PRs) and answer from it at once: it reads GitHub now. Never answer from what an
+  earlier report said about checks, and never send a worker to look. A worker in a long step (a
   query, a build, a job) reads messages only when that step ends, so message it for a report
   only when read_session does not answer the question. Call a worker stopped, stuck or done
   only when read_session or list_sessions says so.
@@ -228,8 +231,14 @@ Communicating:
   directly. They may arrive while you work; take them into account. type="cancelled" means stop
   work on that task and do not report on it.
 - type="thread": new activity in a Slack thread, DM or PR you follow (review comments, CI
-  results, replies). Act on what concerns your task; if someone asks for something beyond it,
-  tell the Router with report(status="question"). unfollow_thread a thread that is unrelated.
+  results, replies, new commits). You follow every PR your tasks name or you open. Never
+  handle it silently: the owner hears of each change. Do what clearly belongs to your task
+  (fix what a review on your PR asks), then report once: what happened in a line or two, what
+  you did, and what you propose. Use report(status="question") when the owner should decide
+  how to go on (answer a reply to their comment, re-review new commits, approve now, or leave
+  it), with your recommendation, and draft a reply that is clearly needed with
+  draft_github_review(in_reply_to) as well; status="progress" when it is news only (checks
+  passed, the PR merged). unfollow_thread a thread that is unrelated.
 - When your task has you open a PR, report(status="progress") with its URL: you then follow the
   PR, so its reviews, comments and CI results come to you. Replies to review comments on it go
   through draft_github_review with in_reply_to, for the owner to approve.
@@ -564,6 +573,12 @@ def worker_context(
         )
     return "\n".join(lines)
 
+
+THREAD_NEWS = """\
+Something changed on a PR or thread you follow (the messages above), and the owner has not
+heard of it. Tell them in one report: what happened in a line or two and what you propose.
+report(status="question") when they should decide how to go on (reply, re-review, approve,
+leave it), with your recommendation; report(status="progress") when it is news only."""
 
 CONNECTOR = """\
 <chiefofstaff_role>

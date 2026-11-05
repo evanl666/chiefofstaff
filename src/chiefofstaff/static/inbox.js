@@ -2,11 +2,11 @@
 
 import { $, api, el, keepingFocus, moreMenu, reconcile, submits, toast } from "./dom.js";
 import { markdown, shortPath } from "./text.js";
-import { byId, HOME, loadState, pendingDrafts, routerId, state, uncertainDrafts } from "./state.js";
+import { byId, HOME, loadState, pendingDrafts, routerId, sessions, state, uncertainDrafts } from "./state.js";
 import { renderStatusLine } from "./sidebar.js";
 import { renderHeader, scrollToBottom, select } from "./session.js";
 import { draftCard, draftKey, uncertainCard } from "./drafts.js";
-import { expandTask, inTerminal, ownTasks, taskItem, terminalItem } from "./tasks.js";
+import { expandTask, followUpItem, inTerminal, ownTasks, taskItem, terminalItem } from "./tasks.js";
 // What waits for the owner. A task whose worker asks something on a card shows as that card.
 export function needsYou() {
   const drafts = pendingDrafts();
@@ -27,10 +27,15 @@ function board() {
   const asking = askingSessions();
   const mine = ownTasks().filter((task) => !task.blocked);
   const newest = (a, b) => b.updated_at.localeCompare(a.updated_at);
-  const running = mine.filter((task) => task.status === "running" && !asking.has(task.session_id)).sort(newest);
+  // Every task at work shows, even when its worker also waits on a card (marked so).
+  const running = mine.filter((task) => task.status === "running").map((task) => (asking.has(task.session_id) ? { ...task, asking: true } : task)).sort(newest);
+  const terminal = inTerminal().filter((session) => !running.some((task) => task.session_id === session.id));
+  // At work, though its task is finished: news on a PR it follows, a question about its work.
+  const followUps = sessions().filter((session) => session.role === "worker" && !session.helper && !session.closed_at && session.status === "working" && !running.some((task) => task.session_id === session.id) && !terminal.some((other) => other.id === session.id));
   return {
     running,
-    terminal: inTerminal().filter((session) => !running.some((task) => task.session_id === session.id)),
+    terminal,
+    followUps,
     queued: mine.filter((task) => task.status === "queued").sort((a, b) => a.created_at.localeCompare(b.created_at)),
     // A result whose worker drafted something for the owner (a reply, a review) is reviewed on
     // that card: it shows the task, and sending it accepts the task.
@@ -154,11 +159,11 @@ function renderPanel() {
   ], editing);
 
   const taskBox = document.getElementById("tasks") || el("section", { id: "tasks", class: "panel-section" }, el("h2", {}, el("span", { text: "Tasks" }), el("span", { class: "count" })), el("p", { class: "empty-hint", text: "Nothing running. Ask for anything — e.g. “fix the flaky login test in api”." }));
-  const active = tasks.running.length + tasks.terminal.length + tasks.queued.length + tasks.review.length;
+  const active = tasks.running.length + tasks.terminal.length + tasks.followUps.length + tasks.queued.length + tasks.review.length;
   counted(taskBox, active);
   taskBox.querySelector(".empty-hint").hidden = Boolean(active || tasks.finished.length || ownTasks().some((task) => !["done", "cancelled"].includes(task.status)));
   const groups = [
-    ["tasks-running", "Running", [...tasks.terminal.map(terminalItem), ...tasks.running.map(taskItem)]],
+    ["tasks-running", "Running", [...tasks.terminal.map(terminalItem), ...tasks.running.map(taskItem), ...tasks.followUps.map(followUpItem)]],
     ["tasks-queued", "Queued", tasks.queued.map(taskItem)],
     ["tasks-review", "Ready to review", tasks.review.map(taskItem)],
   ];
@@ -212,7 +217,8 @@ function withTask(node, task, draft) {
     ? el("details", { class: "context", open: old?.open }, el("summary", {}, ...title), el("div", { class: "markdown", html: markdown(text) }))
     : el("div", { class: "context" }, ...title);
   if (old) old.replaceWith(context);
-  else node.querySelector(":scope > .head").after(context);
+  // After what the card is (a review says which PR first).
+  else (node.querySelector(":scope > .pr-line") || node.querySelector(":scope > .head")).after(context);
   node.dataset.task = task.id;
   return node;
 }

@@ -38,7 +38,11 @@ def fake_gh(state):
     async def gh(*arguments, payload=None):
         path = arguments[1]
         if path == "repos/acme/app/pulls/7":
-            pull = {"state": state["state"], "merged": state["merged"], "head": {"sha": "abc1234"}}
+            pull = {
+                "state": state["state"],
+                "merged": state["merged"],
+                "head": {"sha": state.get("sha", "abc1234")},
+            }
             if state["state"] != "open":
                 pull["closed_at"] = pull["merged_at"] = state.get("ended", "2026-01-01T00:00:00Z")
             return json.dumps(pull)
@@ -76,17 +80,30 @@ def fake_gh(state):
                         "html_url": "u32",
                         "submitted_at": "2026-11-01T03:00:00Z",
                     },
+                    {  # What GitHub adds for carol's line comment: no news of its own.
+                        "id": 33,
+                        "user": {"login": "carol"},
+                        "state": "COMMENTED",
+                        "body": "",
+                        "html_url": "u33",
+                        "submitted_at": "2026-11-01T03:00:00Z",
+                    },
                 ]
             )
-        if path.startswith("repos/acme/app/commits/abc1234/check-runs"):
+        if path.startswith("repos/acme/app/compare/"):
+            return json.dumps(state["compare"])
+        if path.startswith("repos/acme/app/commits/") and "/check-runs" in path:
             return json.dumps(
                 {
-                    "check_runs": [
+                    "check_runs": state.get("runs")
+                    or [
                         {"name": "tests", "status": "completed", "conclusion": "failure"},
                         {"name": "lint", "status": "completed", "conclusion": "success"},
                     ]
                 }
             )
+        if path.startswith("repos/acme/app/commits/") and path.endswith("/status"):
+            return json.dumps({"statuses": state.get("statuses", [])})
         raise AssertionError(path)
 
     return gh
@@ -113,7 +130,7 @@ async def test_followed_pr_activity_reaches_its_followers(tmp_path):
         "github:issuecomment:11",
         "github:reviewcomment:21",
         "github:review:32",
-        "github:ci:acme/app#7@abc1234",
+        "github:ci:acme/app#7@abc1234:failed-tests",
     ]
     assert "carol on app.py:12: Off by one?" in text
     assert "carol changes requested: Please add a test" in text
@@ -123,11 +140,67 @@ async def test_followed_pr_activity_reaches_its_followers(tmp_path):
     await source.poll_once()
     assert len(host.deliveries) == 1, "nothing new, nothing delivered"
 
+    # Re-run on the same commit: tests now pass (its latest run counts), a status check fails.
+    state["runs"] = [
+        {"name": "tests", "status": "completed", "conclusion": "failure", "completed_at": "1"},
+        {"name": "tests", "status": "completed", "conclusion": "success", "completed_at": "2"},
+        {"name": "lint", "status": "completed", "conclusion": "success", "completed_at": "1"},
+    ]
+    state["statuses"] = [{"context": "validate", "state": "error"}]
+    await source.poll_once()
+    assert host.deliveries[-1][1] == ["github:ci:acme/app#7@abc1234:failed-validate"]
+    assert "CI on abc1234: failed: validate" in host.deliveries[-1][2]
+    state["statuses"] = [{"context": "validate", "state": "pending"}]
+    await source.poll_once()
+    assert len(host.deliveries) == 2, "nothing while a check is still running"
+    state["statuses"] = [{"context": "validate", "state": "success"}]
+    await source.poll_once()
+    assert "CI on abc1234: all 3 checks passed" in host.deliveries[-1][2]
+
     state.update(state="closed", merged=True, ended="2026-11-03T00:00:00Z")
     await source.poll_once()
     assert host.deliveries[-1][1] == ["github:state:github:acme/app#7:merged"]
     assert host.subscriptions == [], "a merged PR is no longer followed"
     assert host.unfollowed == [(THREAD, True, True)], "it was merged while followed"
+
+
+async def test_new_commits_on_a_followed_pr_are_news_unless_its_own(tmp_path):
+    store = Store(tmp_path / "data")
+    store.save_settings(Settings())
+    state = {"state": "open", "merged": False, "comments": []}
+    host = Host(store)
+    source = GitHubSource(store, host, gh_command=fake_gh(state))
+
+    async def acting_login(repo):
+        return "me"  # The account Chief of Staff works as there.
+
+    source.acting_login = acting_login
+    await source.poll_once()
+    seen = len(host.deliveries)
+    state["runs"] = [{"name": "tests", "status": "in_progress"}]
+
+    def commit(login, message):
+        return {"author": {"login": login}, "commit": {"message": message, "author": {}}}
+
+    state |= {"sha": "def5678", "compare": {"status": "ahead", "commits": [
+        commit("bob", "Handle empty lists\n\nAs asked in review."),
+    ]}}  # fmt: skip
+    await source.poll_once()
+    assert len(host.deliveries) == seen + 1
+    assert host.deliveries[-1][1] == ["github:head:acme/app#7@def5678"]
+    assert (
+        "1 new commit(s), the head is now def5678: bob: Handle empty lists"
+        in (host.deliveries[-1][2])
+    )
+    await source.poll_once()
+    assert len(host.deliveries) == seen + 1, "told once"
+
+    state |= {"sha": "0a0b0c0", "compare": {"status": "ahead", "commits": [commit("Me", "Fix")]}}
+    await source.poll_once()
+    assert len(host.deliveries) == seen + 1, "a push of its own is not news"
+    state |= {"sha": "9f9f9f9", "compare": {"status": "diverged", "commits": []}}
+    await source.poll_once()
+    assert "force-pushed" in host.deliveries[-1][2]
 
 
 async def test_one_broken_pr_does_not_stop_the_others(tmp_path):

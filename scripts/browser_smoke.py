@@ -115,7 +115,7 @@ async def run(page, app: App, project: Path, workspace: Workspace, errors: list[
         "Hey! Could you send me the deploy dashboard link? Bob posted it in #deploys.",
     )
     log("Alice sent a DM")
-    draft = page.locator("#needs .card.draft:not(.request)")
+    draft = page.locator("#needs .card.draft.slack")
     await expect(draft).to_be_visible(timeout=600000)
     await expect(home.locator(".badge")).to_be_visible()
     assert DASHBOARD in await draft.locator("textarea").input_value()

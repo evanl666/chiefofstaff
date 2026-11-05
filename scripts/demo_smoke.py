@@ -9,6 +9,7 @@ browser-shots/ (light and dark).
 """
 
 import asyncio
+import os
 import re
 import subprocess
 import sys
@@ -19,7 +20,7 @@ from playwright.async_api import async_playwright, expect
 
 ROOT = Path(__file__).resolve().parent.parent
 SHOTS = ROOT / "browser-shots"
-PORT = 8797
+PORT = int(os.environ.get("DEMO_SMOKE_PORT", "8797"))
 
 
 def log(text: str):
@@ -110,7 +111,7 @@ async def run(scheme: str):
             await expect(page.locator(".toast", has_text="Decided.")).to_be_visible()
             log("decided from a card with the options, their effects and a recommendation")
 
-            slack = page.locator("#needs .card.draft:not(.request)")
+            slack = page.locator("#needs .card.draft.slack")
             await expect(slack).to_be_visible(timeout=60000)
             await expect(slack).to_contain_text("Maya Chen")
             await page.screenshot(path=SHOTS / f"demo-{scheme}-3-approve.png")
@@ -118,6 +119,29 @@ async def run(scheme: str):
             await expect(slack).to_have_count(0)
             await expect(page.locator(".toast", has_text="Sent on Slack.")).to_be_visible()
             log("approved a Slack reply drafted in the owner's voice")
+
+            # A review drafted for a teammate's PR: the PR in a line, each comment with its
+            # code; one comment left out, the rest posted.
+            review = page.locator("#needs .card.pr-review")
+            await expect(review).to_be_visible(timeout=60000)
+            await expect(review.locator(".pr-line")).to_contain_text("by @maya")
+            await review.get_by_role("button", name="Review…").click()
+            view = page.locator(".review-dialog")
+            rows = view.locator(".review-comment")
+            await expect(rows).to_have_count(3)
+            await expect(rows.first.locator(".file")).to_have_text("CompanyNameNormalizer.scala:48")
+            wide = await view.evaluate(
+                "v => [...v.querySelectorAll('*')].some((n) => !n.closest('pre') && "
+                "n.getBoundingClientRect().right > v.getBoundingClientRect().right + 1)"
+            )
+            assert not wide, "nothing runs past the review view"
+            await page.screenshot(path=SHOTS / f"demo-{scheme}-3-review.png")
+            await rows.last.get_by_role("button", name="✕ Remove").click()
+            await view.locator("footer button.send").click()
+            await expect(view).to_have_count(0)
+            await expect(review).to_have_count(0)
+            await expect(page.locator(".toast", has_text="Posted on GitHub.")).to_be_visible()
+            log("reviewed the review: one line comment left out, the rest posted")
 
             review = page.locator("#tasks-review .card.task")
             await expect(review).to_have_count(3, timeout=60000)

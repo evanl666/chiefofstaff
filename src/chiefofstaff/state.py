@@ -55,6 +55,13 @@ class SessionState:
     unread: dict[str, str] = field(default_factory=dict)
     # Its connection has shown a message it received (so unread ones can be told apart).
     echoes: bool = False
+    # Tools it called in its current turn: a turn that failed after acting is not sent again.
+    turn_tools: int = 0
+    # Its failed turn is sent again shortly (not a turn that ended without a report).
+    retrying: bool = False
+    # Its current turn brings news from a thread or PR it follows: the owner hears of it.
+    thread_turn: bool = False
+    thread_nudged: bool = False
     # The tail of the latest tool output, for the Watchdog.
     last_output: str = ""
     # The steps (tool calls) it is in now, by call id: when each started and what it is.

@@ -154,7 +154,9 @@ async def test_the_owner_accepts_and_retries_tasks(harness):
     assert runtime.task_actions.accept(first["task_id"])["status"] == "done"
 
     second = await spawn(runtime, harness.router_id, "B", why_new="separate")
-    harness.session(second["session_id"]).emit("session.error", message="model overloaded")
+    harness.session(second["session_id"]).emit(
+        "session.error", message="Execution failed: invalid tool schema"
+    )
     await settle(runtime)
     assert task(harness, second["task_id"])["status"] == "failed"
     retried = await runtime.task_actions.retry(second["task_id"], "Use the smaller model")
@@ -176,7 +178,9 @@ async def test_a_blocked_task_shows_at_once_and_can_still_be_retried(harness):
     runtime.bus.publish = spy
     first = await spawn(runtime, harness.router_id, "Migrate")
     later = await spawn(runtime, harness.router_id, "Backfill", after=[first["task_id"]])
-    harness.session(first["session_id"]).emit("session.error", message="model overloaded")
+    harness.session(first["session_id"]).emit(
+        "session.error", message="Execution failed: invalid tool schema"
+    )
     await settle(runtime)
     assert (later["task_id"], True) in published, "the inbox learns that it is blocked"
 
@@ -193,7 +197,7 @@ async def test_a_retry_that_cannot_reach_its_worker_leaves_the_task_as_it_was(ha
     runtime = await harness.connect()
     first = await spawn(runtime, harness.router_id, "A")
     worker = harness.session(first["session_id"])
-    worker.emit("session.error", message="model overloaded")
+    worker.emit("session.error", message="Execution failed: invalid tool schema")
     await settle(runtime)
 
     async def broken(prompt, mode=None):

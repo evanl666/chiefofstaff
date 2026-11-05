@@ -493,6 +493,61 @@ def rate_limiting(task_id: str, choice: str) -> list:
     ]
 
 
+DEMO_SCALA = (
+    "services/matching/src/main/scala/com/acme/openconnect/pysparkjobs/company_matching/"
+    "normalizers/CompanyNameNormalizer.scala"
+)
+DEMO_REVIEW = {
+    "repo": "acme/matching",
+    "number": 42,
+    "url": "https://github.com/acme/matching/pull/42",
+    "via": "task",
+    "head_sha": "c0ffee",
+    "verdict": "request_changes",
+    "pr": {
+        "title": "Match companies by normalized name",
+        "author": "maya",
+        "about": "Adds a normalizer for company names (case, punctuation, legal suffixes such as "
+        "Inc. and GmbH) and uses it in the nightly matching job, so the same company spelled "
+        "two ways is matched once.",
+        "additions": 214,
+        "deletions": 37,
+        "files": 6,
+    },
+    "comments": [
+        {
+            "path": DEMO_SCALA,
+            "line": 48,
+            "side": "RIGHT",
+            "body": "This drops every non-Latin character, so 株式会社トヨタ normalizes to an "
+            "empty string and matches every other empty name. Keep letters from all scripts.",
+            "context": '     val cleaned = name.toLowerCase\n-    .replaceAll("[^a-z ]", "")\n'
+            '+    .replaceAll("[^a-z0-9 ]", "").trim  // only ASCII letters and digits are kept',
+        },
+        {
+            "path": "services/matching/jobs/nightly_match.py",
+            "line": 112,
+            "side": "RIGHT",
+            "body": "Joining on the domain alone fans out when two companies share one "
+            "(gmail.com): join on the normalized name too.",
+            "context": '+    matches = companies.join(accounts, on="domain")',
+        },
+        {
+            "path": "services/matching/jobs/nightly_match.py",
+            "start_line": 140,
+            "line": 146,
+            "side": "LEFT",
+            "body": "Was removing the dedupe step on purpose?",
+            "context": '-    matches = matches.dropDuplicates(["company_id"])',
+        },
+    ],
+}
+DEMO_REVIEW_BODY = (
+    "Good direction. Two things before this merges: the normalizer drops non-Latin names, and "
+    "the join on domain alone can fan out."
+)
+
+
 def research_report(task_id: str) -> CallTool:
     """The research result (reported after a nudge, or anyway when no nudge came)."""
     return CallTool("report", {"status": "done", "task_id": task_id, "summary": FLAGS_REPORT})
@@ -599,6 +654,12 @@ class DemoRuntime(Runtime):
         self.slack = SlackSource(store, self, tokens=DemoTokens(), mcp=DemoSlackMcp(slack_delay))
         self.autoplay = autoplay
 
+        async def published(target: dict, body: str) -> str:
+            # Nothing goes to GitHub in the demo: the review is "posted" here.
+            return f"{target['url']}#pullrequestreview-demo"
+
+        self.github.publish_review = published
+
     async def start(self):
         await super().start()
         if self.autoplay and not self.store.get("demo_played"):
@@ -610,6 +671,14 @@ class DemoRuntime(Runtime):
         await self.owner_send(self.router_id(), KICKOFF)
         await asyncio.sleep(20)
         self.slack.wake()
+        await asyncio.sleep(6)
+        self.review_request()
+
+    def review_request(self):
+        """A teammate's PR to review, with a review drafted for the owner to check: the PR in a
+        line, and each line comment with the code it is about."""
+        draft = self.store.create_draft(self.router_id(), "github", DEMO_REVIEW, DEMO_REVIEW_BODY)
+        self.bus.publish("draft", draft)
 
 
 def terminal_sessions(project: Path) -> list[dict]:

@@ -366,7 +366,8 @@ def summarize(
         flags.append("Says it made changes, but its checkouts have none.")
     for pr in evidence.get("prs", []):
         if pr.get("checks") == "failing":
-            flags.append(f"Checks are failing on {pr['label']}.")
+            names = ", ".join(pr.get("failing") or [])
+            flags.append(f"Checks are failing on {pr['label']}" + (f": {names}." if names else "."))
     results = criteria_results(criteria or [], claims or [], commands)
     for item in results:
         if item["state"] == "contradicted":
@@ -428,15 +429,41 @@ def shortstat(text: str) -> dict:
     }
 
 
+def latest_checks(rollup: list[dict]) -> list[dict]:
+    """Each check's latest run: one that failed and passed when run again has passed."""
+    latest: dict[tuple, dict] = {}
+    for item in rollup:
+        key = (item.get("workflowName") or "", item.get("name") or item.get("context") or "")
+        when = item.get("completedAt") or item.get("startedAt") or item.get("createdAt") or ""
+        seen = latest.get(key)
+        if not seen or when >= (seen.get("completedAt") or seen.get("startedAt") or ""):
+            latest[key] = item
+    return list(latest.values())
+
+
+def outcome(item: dict) -> str:
+    return (item.get("conclusion") or item.get("state") or item.get("status") or "").upper()
+
+
+FAILED = {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"}
+
+
+def failing_checks(rollup: list[dict]) -> list[str]:
+    """The names of the checks whose latest run failed."""
+    return [
+        item.get("name") or item.get("context") or "a check"
+        for item in latest_checks(rollup)
+        if outcome(item) in FAILED
+    ]
+
+
 def checks_state(rollup: list[dict]) -> str:
-    """passing, failing, pending or none, from gh's statusCheckRollup."""
+    """passing, failing, pending or none, from gh's statusCheckRollup, by each check's latest
+    run."""
     if not rollup:
         return "none"
-    states = {
-        (item.get("conclusion") or item.get("state") or item.get("status") or "").upper()
-        for item in rollup
-    }
-    if states & {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"}:
+    states = {outcome(item) for item in latest_checks(rollup)}
+    if states & FAILED:
         return "failing"
     if states & {"PENDING", "IN_PROGRESS", "QUEUED", "EXPECTED", "WAITING", ""}:
         return "pending"

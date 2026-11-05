@@ -143,7 +143,11 @@ export function applyDraft(data) {
   const uncertain = uncertainDrafts().filter((draft) => draft.id !== data.id);
   if (data.status === "uncertain") uncertain.push(data);
   state.snapshot.uncertain = uncertain;
-  if (data.status !== "pending" && data.status !== "uncertain") state.leaving.delete(`draft:${data.id}`);
+  if (data.status !== "pending" && data.status !== "uncertain") {
+    state.leaving.delete(`draft:${data.id}`);
+    // Its review view, if one was opened, goes with it.
+    document.querySelector(`.review-dialog[data-draft="${data.id}"]`)?.remove();
+  }
   renderSidebar();
   updateDraftRecords();
   scheduleHome();

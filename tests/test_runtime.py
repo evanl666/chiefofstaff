@@ -267,17 +267,20 @@ async def test_session_events_become_the_timeline(harness):
     worker.emit("assistant.message", content="Looking at the test", tool_requests=[1])
     router.emit("assistant.message", content="Routing…", tool_requests=[1])
     router.emit("assistant.message", content="Started a worker.", tool_requests=None)
-    worker.emit("session.error", message="model overloaded")
+    worker.emit("session.error", message="Execution failed: invalid tool schema")
     await settle(runtime)
 
     assert harness.kinds(worker_id)[-3:] == [
         ("tool", "bash pytest -q"),
         ("assistant", "Looking at the test"),
-        ("error", "model overloaded"),
+        ("error", "Execution failed: invalid tool schema"),
     ]
     assert harness.store.session(worker_id)["status"] == "failed"
     assert harness.kinds(harness.router_id)[-2][1] == "Started a worker."
-    assert 'status="failed"' in router.sent[-1] and "model overloaded" in router.sent[-1]
+    assert (
+        'status="failed"' in router.sent[-1]
+        and "Execution failed: invalid tool schema" in router.sent[-1]
+    )
 
 
 async def test_router_replies_to_events_are_footnotes(harness):
@@ -489,13 +492,20 @@ async def test_an_approval_is_published_as_one_and_settles_the_review_task(tmp_p
         runtime, "draft_github_review", worker_id, repo="acme/app", number=7, body="LGTM",
         verdict="approve",
     )  # fmt: skip
-    await call_tool(runtime, "report", worker_id, status="done", summary="Approval drafted.")
+    # Its report links to the PR it reviewed: not its own work to review.
+    harness.gh_replies["pr view https://github.com/acme/app/pull/7"] = json.dumps(
+        {"url": "https://github.com/acme/app/pull/7", "state": "OPEN", "statusCheckRollup": []}
+    )
+    summary = "Approval drafted for https://github.com/acme/app/pull/7"
+    await call_tool(runtime, "report", worker_id, status="done", summary=summary)
+    await settle(runtime)
     task = runtime.tasks.current(worker_id)
     assert task["status"] == "review"
     [draft] = harness.store.drafts()
     assert draft["target"]["verdict"] == "approve"
     await runtime.drafts.resolve(draft["id"], DraftDecision(action="send"))
-    assert harness.gh_calls[-1][1]["event"] == "APPROVE"
+    posted = [payload for _, payload in harness.gh_calls if payload]
+    assert posted[-1]["event"] == "APPROVE"
     assert runtime.tasks.get(task["id"])["status"] == "done", "one approval, not two"
 
 
@@ -597,6 +607,88 @@ async def test_a_review_of_the_owners_own_pr_is_a_comment(tmp_path):
     runtime.github.gh = gh
     outcome = await runtime.github.publish_review({**draft["target"], "verdict": "approve"}, "LGTM")
     assert events == ["APPROVE", "COMMENT"] and "posted as a comment" in outcome
+
+
+PATCH = (
+    "@@ -1,3 +1,4 @@\n def greet(name):\n-    return name\n+    if not name:\n"
+    "+        raise ValueError\n+    return f'Hello, {name}!'"
+)
+
+
+async def review_harness(tmp_path):
+    harness = Harness(tmp_path / "data", Settings(github_enabled=True, github_repos=["acme/app"]))
+    runtime = await harness.connect()
+    harness.gh_replies["api repos/acme/app/pulls/7/reviews"] = json.dumps({"html_url": "u"})
+    harness.gh_replies["api repos/acme/app/pulls/7/files"] = json.dumps(
+        [{"filename": "greet.py", "patch": PATCH, "additions": 3, "deletions": 1}]
+    )
+    harness.gh_replies["api repos/acme/app/pulls/7"] = json.dumps({
+        "state": "open", "head": {"sha": "abc"}, "user": {"login": "maya"}, "title": "Add greet",
+        "body": "Greets people.\n\nNothing else.", "additions": 3, "deletions": 1,
+        "changed_files": 1,
+    })  # fmt: skip
+    worker = json.loads(
+        (
+            await call_tool(
+                runtime, "spawn_worker", harness.router_id, title="Review #7", instructions="r"
+            )
+        ).text_result_for_llm
+    )["session_id"]
+    comment = {"path": "greet.py", "line": 3, "body": "Say why it is empty."}
+    await call_tool(
+        runtime, "draft_github_review", worker, repo="acme/app", number=7, body="Looks fine.",
+        comments=[comment],
+    )  # fmt: skip
+    [draft] = harness.store.drafts()
+    return harness, runtime, worker, draft
+
+
+async def test_a_review_card_shows_the_pr_and_the_lines_each_comment_is_about(tmp_path):
+    _, runtime, worker, draft = await review_harness(tmp_path)
+    task = runtime.tasks.current(worker)
+    assert runtime.task_actions.pr_urls(task) == ["https://github.com/acme/app/pull/7"], (
+        "the task's card follows the PR it reviews"
+    )
+    assert draft["target"]["pr"] == {
+        "title": "Add greet", "author": "maya", "about": "Greets people. Nothing else.",
+        "additions": 3, "deletions": 1, "files": 1,
+    }  # fmt: skip
+    context = draft["target"]["comments"][0]["context"]
+    assert context.splitlines()[-2:] == ["+    if not name:", "+        raise ValueError"]
+
+
+async def test_the_owner_can_post_the_line_comments_alone(tmp_path):
+    harness, runtime, worker, draft = await review_harness(tmp_path)
+    with pytest.raises(ValueError, match="Nothing to post"):
+        await runtime.drafts.resolve(
+            draft["id"], DraftDecision(action="send", content={"body": "", "comment:0": ""})
+        )
+    harness.gh_replies["api repos/acme/app/pulls/7/reviews"] = json.dumps(
+        {"id": 9, "html_url": "u"}
+    )
+    harness.gh_replies["api repos/acme/app/pulls/7/reviews/9/comments"] = json.dumps(
+        [{"id": 77, "body": "Say why it is empty."}]
+    )
+    await runtime.drafts.resolve(draft["id"], DraftDecision(action="send", content={"body": ""}))
+    [payload] = [payload for _, payload in harness.gh_calls if payload]
+    assert payload["body"] == "" and payload["comments"][0]["body"] == "Say why it is empty."
+    assert "only the line comments were posted" in harness.session(worker).sent[-1]
+    assert runtime.github.seen("github:reviewcomment:77"), "our own comments are not PR news"
+
+
+async def test_a_draft_the_owner_wants_redone_goes_back_to_its_worker(tmp_path):
+    harness, runtime, worker, draft = await review_harness(tmp_path)
+    await call_tool(runtime, "report", worker, status="done", summary="Review drafted.")
+    task = runtime.tasks.current(worker)
+    assert task["status"] == "review"
+    redone = await runtime.drafts.resolve(
+        draft["id"], DraftDecision(action="revise", reason="Shorter, and check the tests too")
+    )
+    assert redone["status"] == "rejected" and redone["outcome"].startswith("Redo")
+    told = harness.session(worker).sent[-1]
+    assert "Shorter, and check the tests too" in told and "draft_github_review" in told
+    assert runtime.tasks.get(task["id"])["status"] == "running", "back at work on the board"
+    assert not harness.store.drafts(), "the old card is gone"
 
 
 async def test_external_sessions_can_be_adopted(harness, tmp_path):
@@ -969,7 +1061,7 @@ async def test_held_messages_are_retried_when_sending_fails(harness, monkeypatch
     assert failures and len(router.sent) == 1 and "Alice: one" in router.sent[0]
 
     await runtime.on_trigger("slack", ["slack:2"], "Bob: two")
-    router.emit("session.error", message="model overloaded")
+    router.emit("session.error", message="Execution failed: invalid tool schema")
     await asyncio.sleep(0.1)
     await settle(runtime)
     assert len(router.sent) == 2 and "Bob: two" in router.sent[1], "sent after a failed turn"

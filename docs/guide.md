@@ -282,10 +282,11 @@ notification:
 - **Sign-ins**: an MCP server needs OAuth. Sign in in the browser tab; the card closes by
   itself. Copilot keeps the sign-in for every session (see [SECURITY.md](../SECURITY.md)).
 - **A folder**: the Router is not sure where a task belongs.
-- **Approvals**: Slack replies and PR reviews drafted in your voice. Edit and *Send*, or
-  *Reject* with a reason the session learns from. A Slack draft shows where it goes (DM,
-  channel or thread) and the latest message there, read from Slack itself, so you can check it
-  answers the right conversation.
+- **Approvals**: Slack replies and PR reviews drafted in your voice. Edit and *Send*; or,
+  under **⋯**, *Ask to redo…* (say what should change: the same session drafts it again and a
+  new card comes) or *Reject* with a reason the session learns from. A Slack draft shows where
+  it goes (DM, channel or thread) and the latest message there, read from Slack itself, so you
+  can check it answers the right conversation.
 
 There are no per-tool settings: Chief of Staff uses whatever your Copilot has (MCP servers,
 CLIs). For a new ability ("read our company docs"), the Router starts a setup worker that finds
@@ -426,11 +427,17 @@ has not changed since.
 You can also just ask: "review checkout-service PR #1529". A worker drafts reviews on a PR its task
 names (by URL, or by the repository's name and number), one it opened, follows or was given, or
 one GitHub asks you to review. A review carries a **verdict**: approve, request changes or
-comment. Ask "review it and approve it if nothing blocks merging" and the card says *Approve &
-send*; you can change the verdict on the card before sending, and an approval is a real GitHub
-approval. A review carries **comments on lines** of the diff: the card
-shows each one to edit, or empty to leave out. Lines outside the diff are refused when drafting,
-so what you approve can be published.
+comment. Ask "review it and approve it if nothing blocks merging" and it is drafted as an
+approval, a real GitHub approval once sent. A review also carries **comments on lines** of the
+diff; lines outside the diff are refused when drafting, so what you approve can be published.
+
+The card under *Needs you* says what the PR is (“Add greet” by @maya · +3 −1 in 1 file), the
+verdict, the start of the summary and how many line comments there are. **Review…** opens the
+review to check it: the PR and what it is about, the summary, and each line comment with the
+lines of code it is about. Edit anything; *✕ Remove* leaves a comment out (*Undo* brings it
+back); an empty summary posts the line comments alone. The verdict is beside the send button,
+which says what it does (*Approve & send*, *Request changes & send*, *Send review*). Not like
+this at all? *Ask to redo…* sends it back to the worker with what should change.
 
 On a PR a worker is working on, it can also draft **replies to review comments**, in any
 repository: each card shows the comment it answers, and the reply is posted in that thread once
@@ -497,11 +504,20 @@ worker (@) brings them along.
 A Slack thread, a Slack DM or a pull request can be *followed* by a session. New activity there
 goes straight to it; the Router is not woken (its timeline shows one line).
 
-- A session follows a conversation after you approve a reply it drafted there; a worker follows
-  a PR as soon as it reports the PR's URL.
+- A worker follows every PR its task names (to review it, check it or work on it), every PR
+  it opens or reports, and the PR of a review you sent. A session follows a Slack conversation
+  after you approve a reply it drafted there.
 - The Router passes an event's thread keys when it hands work to a session.
-- For PRs: new comments, reviews, CI results and the merge or close arrive. A merged PR marks
-  the task that delivered it done.
+- For PRs: new comments, replies, reviews, commits, CI results (checks and commit statuses, also
+  when a check passes on a re-run) and the merge or close arrive; your own reviews and comments
+  do not come back as news. The worker tells you each time, even when its task is finished: news
+  as a line in the chat ("CI passes now"), and a question when you should decide how to go on
+  (someone answered your comment: reply, re-review, approve, or leave it), often with a reply
+  drafted. A merged PR marks the task that delivered it done.
+- A task card's PR chips (a review task's card shows the PR it reviews) show the PR as it is
+  now: read again every few minutes and as soon as something happens on it, judging each check
+  by its latest run. "What's the status of my PRs?" is answered from that, not from an earlier
+  report.
 - When a follower closes, activity goes to the Router again.
 
 ## Watchdog

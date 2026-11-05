@@ -133,6 +133,37 @@ def diff_lines(files: list[dict]) -> dict[str, dict[str, set[int]] | None]:
     return lines
 
 
+def snippet(files: list[dict], path: str, line: int, side: str = "RIGHT", around: int = 3) -> str:
+    """The diff lines around a comment's line (as the PR shows them), for the owner to see what
+    it is about; "" when GitHub gives no patch for the file."""
+    changed = next((f for f in files if f.get("filename") == path), None)
+    patch = (changed or {}).get("patch")
+    if not patch:
+        return ""
+    rows: list[tuple[int | None, int | None, str]] = []
+    old = new = 0
+    for row in patch.split("\n"):
+        if hunk := re.match(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", row):
+            old, new = int(hunk.group(1)), int(hunk.group(2))
+            rows.append((None, None, "…"))
+        elif row.startswith("+"):
+            rows.append((None, new, row))
+            new += 1
+        elif row.startswith("-"):
+            rows.append((old, None, row))
+            old += 1
+        elif not row.startswith("\\"):
+            rows.append((old, new, row))
+            old += 1
+            new += 1
+    key = 0 if side == "LEFT" else 1
+    found = next((i for i, row in enumerate(rows) if row[key] == line), None)
+    if found is None:
+        return ""
+    picked = [row[2] for row in rows[max(0, found - around) : found + 1] if row[2] != "…"]
+    return "\n".join(text[:200] for text in picked)
+
+
 def pages(text: str) -> list:
     """The items of a paginated gh api answer: one array, or (older gh) one array per page
     printed back to back."""
@@ -421,6 +452,9 @@ class GitHubSource:
         ):
             if review.get("state") == "PENDING" or (review.get("submitted_at") or "") < after:
                 continue
+            if review.get("state") == "COMMENTED" and not (review.get("body") or "").strip():
+                # It only holds line comments (a reply to one is such a review): listed above.
+                continue
             state = review["state"].lower().replace("_", " ")
             items.append(
                 (
@@ -429,13 +463,24 @@ class GitHubSource:
                 )
             )
         sha = pull["head"]["sha"]
-        runs = json.loads(
-            await self.gh("api", f"{base}/commits/{sha}/check-runs?per_page=100")
-        ).get("check_runs", [])
-        if runs and all(run["status"] == "completed" for run in runs):
-            failed = [run["name"] for run in runs if run.get("conclusion") in FAILED]
-            result = f"failed: {', '.join(failed)}" if failed else f"all {len(runs)} checks passed"
-            items.append((f"github:ci:{repo}#{number}@{sha}", f"CI on {sha[:7]}: {result}"))
+        last = self.store.get(f"ghhead:{thread}")
+        # New commits (a re-requested review already said so: not twice).
+        if (
+            last
+            and last != sha
+            and not self.seen(f"github:{repo}#{number}@{sha}")
+            and (line := await self.pushed(repo, last, sha))
+        ):
+            items.append((f"github:head:{repo}#{number}@{sha}", line))
+        if ci := await self.ci_result(base, sha):
+            # Keyed by the outcome too: a check that failed and passed when run again on the
+            # same commit is news.
+            items.append(
+                (
+                    f"github:ci:{repo}#{number}@{sha}:{ci['outcome']}",
+                    f"CI on {sha[:7]}: {ci['text']}",
+                )
+            )
         state = "merged" if pull.get("merged") else pull["state"]
         if state != "open":
             ended = pull.get("merged_at") or pull.get("closed_at")
@@ -455,14 +500,78 @@ class GitHubSource:
                 lines,
             )
         self.store.set(f"ghsince:{thread}", started)
+        self.store.set(f"ghhead:{thread}", sha)
         if state != "open":
             self.host.unfollow(thread, finished=True, merged=state == "merged")
 
-    async def diff_lines(self, repo: str, number: int) -> dict:
-        files = await self.gh(
-            "api", f"repos/{repo}/pulls/{int(number)}/files?per_page=100", "--paginate"
+    async def pushed(self, repo: str, old: str, new: str) -> str:
+        """What was pushed between two heads, by whom; "" when only the account Chief of Staff
+        works as pushed (a worker's own commits are not news to it)."""
+        try:
+            compare = json.loads(await self.gh("api", f"repos/{repo}/compare/{old}...{new}"))
+        except RuntimeError:
+            return f"The branch was rewritten (force-pushed): the head is now {new[:7]}."
+        commits = compare.get("commits") or []
+
+        def login(commit: dict) -> str:
+            return ((commit.get("author") or {}).get("login") or "").lower()
+
+        acting = await self.acting_login(repo)
+        if commits and all(login(commit) == acting for commit in commits):
+            return ""
+        if not commits or compare.get("status") in {"diverged", "behind"}:
+            return f"The branch was rewritten (force-pushed): the head is now {new[:7]}."
+        shown = "; ".join(
+            f"{login(c) or c['commit']['author']['name']}: "
+            f"{(c['commit']['message'].splitlines() or [''])[0][:120]}"
+            for c in commits[-5:]
         )
-        return diff_lines(pages(files))
+        more = f" (the last 5 of {len(commits)})" if len(commits) > 5 else ""
+        return f"{len(commits)} new commit(s), the head is now {new[:7]}{more}: {shown}"
+
+    async def ci_result(self, base: str, sha: str) -> dict | None:
+        """Once every check on the commit is finished (Actions check runs and commit statuses,
+        each by its latest run): what they came to; None while any is still running."""
+        runs = json.loads(
+            await self.gh("api", f"{base}/commits/{sha}/check-runs?per_page=100")
+        ).get("check_runs", [])
+        try:
+            statuses = json.loads(await self.gh("api", f"{base}/commits/{sha}/status")).get(
+                "statuses", []
+            )
+        except RuntimeError:
+            statuses = []
+        latest: dict[str, tuple[str, str]] = {}  # Name -> (when, outcome).
+        for run in runs:
+            if run["status"] != "completed":
+                return None
+            when = run.get("completed_at") or ""
+            if when >= latest.get(run["name"], ("", ""))[0]:
+                latest[run["name"]] = (when, run.get("conclusion") or "")
+        for status in statuses:  # GitHub lists each context's latest first.
+            if status["context"] not in latest:
+                if status.get("state") == "pending":
+                    return None
+                latest[status["context"]] = ("", status.get("state") or "")
+        if not latest:
+            return None
+        failed = sorted(
+            name for name, (_, outcome) in latest.items() if outcome in FAILED | {"error"}
+        )
+        if failed:
+            return {"outcome": "failed-" + ",".join(failed), "text": f"failed: {', '.join(failed)}"}
+        return {"outcome": "passed", "text": f"all {len(latest)} checks passed"}
+
+    async def files(self, repo: str, number: int) -> list[dict]:
+        """The PR's changed files, each with its patch."""
+        return pages(
+            await self.gh(
+                "api", f"repos/{repo}/pulls/{int(number)}/files?per_page=100", "--paginate"
+            )
+        )
+
+    async def diff_lines(self, repo: str, number: int) -> dict:
+        return diff_lines(await self.files(repo, number))
 
     async def head(self, repo: str, number: int) -> str:
         pull = await self.pull(repo, number)
@@ -471,7 +580,10 @@ class GitHubSource:
         return pull["head"]["sha"]
 
     async def find_review(self, target: dict, body: str) -> str:
-        """The URL of a published review with this body on the target PR, or ""."""
+        """The URL of a published review with this body on the target PR, or "" (also for a
+        review with line comments only: nothing tells it apart)."""
+        if not body.strip():
+            return ""
         reviews = pages(
             await self.gh(
                 "api", f"repos/{target['repo']}/pulls/{int(target['number'])}/reviews", "--paginate"
@@ -565,6 +677,26 @@ class GitHubSource:
             note = " (posted as a comment: GitHub allows no approval on your own PR)"
         review = json.loads(reply)
         if review.get("id"):
-            # Our own review must not come back as activity on the followed PR.
+            # Our own review, and its line comments, must not come back as activity on the
+            # followed PR.
             self.store.add_trigger("github-sent", f"github:review:{review['id']}", body)
+            if target.get("comments"):
+                try:
+                    posted = pages(
+                        await self.gh(
+                            "api",
+                            f"repos/{repo}/pulls/{int(target['number'])}/reviews/"
+                            f"{review['id']}/comments",
+                            "--paginate",
+                        )
+                    )
+                except Exception:
+                    logger.info("Could not list the review's comments.", exc_info=True)
+                    posted = []
+                for comment in posted:
+                    self.store.add_trigger(
+                        "github-sent",
+                        f"github:reviewcomment:{comment['id']}",
+                        comment.get("body", ""),
+                    )
         return review.get("html_url", "Review published.") + note
