@@ -393,7 +393,11 @@ summary { min-height: 28px; }
   padding: 12px 16px;
   background: var(--card);
   box-shadow: var(--shadow);
+  /* A long path or word wraps instead of widening the card. */
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
+.card pre, .card code { max-width: 100%; }
 .card .head { display: flex; align-items: center; gap: 8px; min-height: 28px; margin-bottom: 4px; }
 .card .label {
   font-size: var(--small);
@@ -710,7 +714,7 @@ dialog input:not([type="checkbox"]), dialog textarea, dialog select {
 }
 dialog textarea { padding: 6px 10px; line-height: 1.5; }
 dialog small { color: var(--muted); font-size: var(--small); line-height: 1.5; }
-dialog .row { display: flex; gap: 12px; align-items: flex-end; }
+dialog .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
 dialog .row .grow { flex: 1; }
 dialog .row label:not(.grow):not(.check) { width: 130px; }
 dialog details summary { cursor: pointer; color: var(--soft); font-size: var(--body); margin-top: 8px; }
@@ -1135,6 +1139,7 @@ button.receipt.changes:hover { text-decoration: underline; }
   margin: 0 0 8px;
   font-size: var(--body);
 }
+.card.draft .quoted strong { overflow-wrap: anywhere; }
 .card.draft .inline-comment { margin: 8px 0 0; }
 .card.draft .inline-comment textarea { padding: 4px 10px; }
 .card.draft .inline-comment .where {
@@ -1162,3 +1167,55 @@ button.receipt.changes:hover { text-decoration: underline; }
 .copy-dialog .copy-area { width: 100%; font: var(--small)/1.5 var(--mono); border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: var(--bg); color: var(--text); }
 .copy-dialog form { display: flex; justify-content: flex-end; margin-top: 8px; }
 dialog .row label.hours:not(.grow) { width: auto; flex: none; }
+
+/* A PR review: compact in Needs you, read and changed in its own view. */
+.card.pr-review .head .chip { margin-left: auto; }
+.pr-line { color: var(--muted); font-size: var(--small); margin: -4px 0 8px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.summary-preview { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-line; }
+.summary-preview.empty { color: var(--muted); font-style: italic; }
+.card.pr-review .comments-note { margin: 4px 0 0; }
+.card.pr-review .context { margin: -8px 0 8px; }
+
+.review-dialog { width: min(860px, calc(100vw - 32px)); max-height: min(88vh, 960px); }
+.review-dialog[open] { display: flex; flex-direction: column; }
+.review-dialog > header { padding: 20px 24px 12px; border-bottom: 1px solid var(--line); display: grid; gap: 4px; }
+.review-dialog > header .title { display: flex; align-items: center; gap: 8px; }
+.review-dialog > header h2 { flex: 1; min-width: 0; margin: 0; font-size: var(--title); display: flex; align-items: center; gap: 0.3em; white-space: nowrap; }
+.review-dialog > header h2 a { color: inherit; display: flex; align-items: center; min-height: 28px; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.review-dialog > header h2 a:hover { color: var(--accent); }
+.review-dialog .close { font-size: var(--body); }
+.review-dialog .pr-line { margin: 0; white-space: normal; color: var(--soft); }
+.review-dialog .pr-about { margin: 0; display: flex; gap: 6px; align-items: center; font-size: var(--small); color: var(--muted); min-width: 0; }
+.review-dialog .pr-about .clamp { color: var(--muted); }
+.review-dialog .pr-about .more { flex: none; padding: 0 4px; font-size: var(--small); color: var(--accent); }
+.review-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 16px 24px 24px; display: grid; grid-template-columns: minmax(0, 1fr); align-content: start; gap: 12px; }
+.review-body .field { display: grid; gap: 4px; }
+.review-body .field > span { color: var(--soft); font-size: var(--small); font-weight: 500; }
+.review-body textarea { display: block; width: 100%; border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 10px; background: var(--bg); line-height: 1.5; resize: none; overflow-y: hidden; }
+.review-body h3 { margin: 8px 0 0; font-size: var(--body); display: flex; gap: 6px; align-items: baseline; }
+.review-body h3 .count { color: var(--muted); font-size: var(--small); font-weight: 500; }
+.review-comments { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
+.review-comment { min-width: 0; display: grid; gap: 6px; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--card); transition: opacity 0.15s var(--ease); }
+.review-comment .where { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 28px; font-size: var(--small); }
+.review-comment .where .file { flex: none; max-width: 70%; font-family: var(--mono); font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.review-comment .where .side { flex: none; padding: 0 6px; border-radius: 6px; background: var(--red-soft); color: var(--red); font-weight: 500; }
+.review-comment .where .dir { flex: 1 1 0; min-width: 0; color: var(--muted); font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+.review-comment .where .remove { flex: none; margin-left: auto; padding: 0 8px; font-size: var(--small); }
+.review-comment:not(.removed) .where .remove:not(:disabled):hover { color: var(--red); background: var(--red-soft); }
+.diff-context { margin: 0; max-width: 100%; overflow-x: auto; padding: 6px 0; border-radius: var(--radius); background: var(--bg); border: 1px solid var(--line); font: var(--small)/1.6 var(--mono); white-space: pre; }
+.diff-context span { display: block; padding: 0 10px; min-width: max-content; }
+.diff-context .add { background: var(--green-soft); }
+.diff-context .del { background: var(--red-soft); }
+.review-comment.removed { padding-top: 4px; padding-bottom: 4px; background: none; border-style: dashed; }
+.review-comment.removed .file { text-decoration: line-through; color: var(--muted); font-weight: 400; }
+.review-comment.removed :is(.diff-context, textarea, .dir) { display: none; }
+.review-comment.removed .where .remove { color: var(--accent); }
+.review-dialog > footer { margin: 0; padding: 12px 24px; border-top: 1px solid var(--line); display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.review-dialog > footer .error { flex: 1 1 100%; }
+.review-dialog > footer .spacer { flex: 1; }
+.review-dialog > footer .verdict { flex: none; width: auto; margin: 0; field-sizing: content; }
+.review-dialog > footer input { flex: 1 1 240px; min-height: 32px; border: 1px solid var(--line); border-radius: var(--radius); padding: 4px 10px; background: var(--bg); color: var(--text); }
+@media (max-width: 640px) {
+  .review-dialog > header, .review-body, .review-dialog > footer { padding-left: 16px; padding-right: 16px; }
+  .review-comment .where .dir { display: none; }
+}

@@ -284,6 +284,10 @@ async def test_a_done_worker_woken_by_a_follow_up_stays_done(harness):
     assert harness.store.session(worker_id)["status"] == "working"
     harness.session(worker_id).emit("session.idle")
     await settle(runtime)
+    # It said nothing to the owner about it: asked to, once; its task stays done.
+    assert "has not\nheard of it" in harness.session(worker_id).sent[-1]
+    harness.session(worker_id).emit("session.idle")
+    await settle(runtime)
     assert harness.store.session(worker_id)["status"] == "done"
     assert await runtime.watchdog.check(time.time() + 5000) == []
 
@@ -308,3 +312,52 @@ async def test_a_failed_watchdog_creation_is_retried(tmp_path):
     assert await runtime.watchdog.check(now + 1001) != []
     watchdog_id = harness.store.open_sessions("watchdog")[0]["id"]
     assert harness.session(watchdog_id).sent[-1].startswith('<message from="system" type="review"')
+
+
+async def test_a_pr_a_worker_was_given_is_followed_and_its_news_reaches_the_owner(harness):
+    runtime = await harness.connect()
+    url = "https://github.com/acme/app/pull/7"
+    result = await call_tool(
+        runtime, "spawn_worker", harness.router_id, title="Review #7",
+        instructions=f"Review {url}", why_new="t",
+    )  # fmt: skip
+    worker = json.loads(result.text_result_for_llm)["session_id"]
+    assert "github:acme/app#7" in harness.store.follows(worker), "followed without being told to"
+    docs = await call_tool(
+        runtime, "spawn_worker", harness.router_id, title="Docs", instructions="docs", why_new="t"
+    )
+    other = json.loads(docs.text_result_for_llm)["session_id"]
+    await call_tool(
+        runtime, "message_session", harness.router_id, session_id=other,
+        text="Also look at github:acme/web#3",
+    )  # fmt: skip
+    assert "github:acme/web#3" in harness.store.follows(other)
+
+    await call_tool(runtime, "report", worker, status="done", summary="Reviewed.")
+    session = harness.session(worker)
+    session.emit("session.idle")
+    await settle(runtime)
+    runtime.task_actions.accept(runtime.tasks.current(worker)["id"])
+    await runtime.on_thread(
+        "github", "github:acme/app#7", ["github:comment:1"], "bob replied to your comment: done"
+    )
+    await settle(runtime)
+    assert "bob replied" in session.sent[-1]
+    session.emit("session.idle")  # It handled it without a word to the owner.
+    await settle(runtime)
+    assert "the owner has not\nheard of it" in session.sent[-1], "asked once to tell the owner"
+    session.emit("session.idle")
+    await settle(runtime)
+    assert (
+        session.sent[-1].count("has not") == 1
+        and len([s for s in session.sent if "has not\nheard" in s]) == 1
+    ), "once"
+
+    await runtime.on_thread("github", "github:acme/app#7", ["github:ci:2"], "CI on abc: all passed")
+    await settle(runtime)
+    harness.notifications.clear()
+    await call_tool(runtime, "report", worker, status="progress", summary="#7: CI passed now.")
+    await settle(runtime)
+    shown = [m for m in harness.store.messages(harness.router_id) if m["kind"] == "inbound"]
+    assert shown[-1]["text"] == "#7: CI passed now." and shown[-1]["meta"]["status"] == "progress"
+    assert any("Update on" in text for _, text in harness.notifications)

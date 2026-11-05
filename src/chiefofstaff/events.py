@@ -6,6 +6,7 @@ observed commands behind a task's receipts.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -16,9 +17,9 @@ from typing import TYPE_CHECKING, Any
 
 from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
 
-from . import receipts
+from . import prompts, receipts
 from .delivery import digest
-from .envelope import from_owner
+from .envelope import from_owner, wrap
 from .policy import permission_denial, written_file
 from .roles import ROUTER, SLACK, WORKER
 from .store import now
@@ -58,6 +59,17 @@ def describe_tool(name: str, arguments: Any) -> str:
 
 # When the Router's context (prompt tokens of its last call) grows past this, a fresh Router
 # session takes over with a summary.
+# Failures on Copilot's side, gone when the turn is tried again.
+TRANSIENT = re.compile(
+    r"no response was returned|rate.?limit|too many requests|\b(429|500|502|503|504)\b|"
+    r"overloaded|temporarily unavailable|service unavailable|internal server error|"
+    r"timed? ?out|ECONNRESET|socket hang up|connection (reset|closed|error)|network error|"
+    r"fetch failed|stream (ended|closed)",
+    re.IGNORECASE,
+)
+RETRIES = 2
+RETRY_WINDOW = 600
+RETRY_DELAY = float(os.environ.get("CHIEFOFSTAFF_RETRY_DELAY", "8"))
 # Copilot will not run the model asked for (a model or option the company does not allow).
 MODEL_REFUSED = re.compile(
     r"requested model is not supported|model[^.\n]{0,60}not (?:supported|available|enabled)|"
@@ -163,6 +175,7 @@ class Events:
         state.event_turn = not owner
         state.owner_reply = bool(owner)
         state.turn_decisions, state.turn_tasks = [], []
+        state.turn_tools = 0
 
     def assistant_message(self, row: dict, event: Any):
         data = event.data
@@ -196,6 +209,7 @@ class Events:
     def tool_start(self, row: dict, event: Any):
         data = event.data
         name = getattr(data, "tool_name", "") or "tool"
+        self.states[row["id"]].turn_tools += 1
         if (
             name in self.runtime.tools
             or name in PLUMBING_TOOLS
@@ -298,11 +312,28 @@ class Events:
             self.runtime.background(self.runtime.rotate_router())
         if row["role"] == WORKER:
             self.runtime.background(self.runtime.workers.pump())
-            if settled:
+            if settled and not state.retrying:
                 self.runtime.workers.complete_report(session_id)
                 self.runtime.background(self.runtime.workers.ask_for_report(session_id))
+                self.news_unreported(row, state)
             # A turn may have changed code whose evidence was already collected.
             self.runtime.background(self.runtime.task_actions.check_fresh(session_id))
+
+    def news_unreported(self, row: dict, state):
+        """A followed PR or thread changed and the worker, its work finished, said nothing to
+        the owner: asked once to tell them (and how it proposes to go on)."""
+        task = self.tasks.current(row["id"])
+        if not state.thread_turn or state.thread_nudged or (task and task["status"] == "running"):
+            return
+        state.thread_nudged = True
+        self.runtime.background(
+            self.delivery.deliver(
+                row["id"],
+                wrap("system", "news", prompts.THREAD_NEWS),
+                kind="notice",
+                display="Asked to tell you what changed on what it follows.",
+            )
+        )
 
     def error(self, row: dict, event: Any):
         session_id = row["id"]
@@ -325,6 +356,10 @@ class Events:
             self.runtime.update_session(session_id, status="idle", activity="")
             self.runtime.background(self.router_failed(row, message))
             return
+        if TRANSIENT.search(message):
+            if self.retry_turn(row, message):
+                return
+            message = f"Copilot failed on this turn {RETRIES + 1} times: {message}"
         self.runtime.add_message(session_id, "error", message)
         if row["role"] == WORKER:
             self.runtime.update_session(session_id, status="failed", activity="")
@@ -336,6 +371,49 @@ class Events:
             self.runtime.update_session(session_id, status="idle", activity="")
             if row["role"] in {ROUTER, SLACK} and self.delivery.has_unsent(session_id):
                 self.delivery.schedule_flush(session_id)
+
+    def retry_turn(self, row: dict, message: str) -> bool:
+        """Copilot failed on its side (no answer, overloaded, a dropped connection): the turn is
+        tried again, not left to the owner. As it was given when nothing was done yet; after
+        some steps, a note to finish it (sending it again could do those steps twice). Twice
+        within ten minutes; False after that, and the error is shown."""
+        session_id = row["id"]
+        state = self.states[session_id]
+        recent = json.loads(self.store.get(f"retries:{session_id}") or "[]")
+        recent = [at for at in recent if time.time() - at < RETRY_WINDOW]
+        if len(recent) >= RETRIES:
+            self.store.delete(f"retries:{session_id}")
+            return False
+        self.store.set(f"retries:{session_id}", json.dumps([*recent, time.time()]))
+        acted = state.turn_tools > 0
+        state.turn_tools = 0
+        if not acted and (before := self.store.get(f"prevsent:{session_id}")) is not None:
+            self.store.set(f"sent:{session_id}", before)  # What the failed turn was given.
+        elif acted:
+            note = (
+                f"Your last turn stopped with an error on Copilot's side ({message.strip()[:200]}) "
+                "after some steps. Check what is done, and finish what is left of it."
+            )
+            self.runtime.add_message(
+                session_id, "notice", note, {"prompt": wrap("system", "retry", note)}
+            )
+        if row["role"] != WORKER:
+            self.runtime.update_session(session_id, status="idle", activity="")
+            self.delivery.schedule_flush(session_id, RETRY_DELAY * (len(recent) + 1))
+        else:
+            # Its task stays at work; its slot is free until the turn is sent again.
+            state.retrying = True
+            self.runtime.update_session(session_id, status="idle", activity="")
+            self.runtime.background(self.resend_later(session_id, len(recent) + 1))
+        logger.info("Retrying %s after %s", session_id, message[:200])
+        return True
+
+    async def resend_later(self, session_id: str, attempt: int):
+        try:
+            await asyncio.sleep(RETRY_DELAY * attempt)
+            await self.delivery.resume(session_id)
+        finally:
+            self.states[session_id].retrying = False
 
     async def router_failed(self, row: dict, message: str):
         """A Router turn failed: if a fresh session had just taken over, the earlier one goes

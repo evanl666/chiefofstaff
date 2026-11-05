@@ -18,7 +18,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -273,22 +273,21 @@ def write(path: Path, text: str):
 
 
 def sales(path: Path) -> dict:
-    """A sales file with known answers: two bad rows (a negative quantity, a 100x price)."""
+    """A sales file with known answers: two bad rows (a negative quantity, a 100x price), and
+    nothing else a careful reader could call wrong (every date and region appears once)."""
     rng = random.Random(7)
     rows, totals, months = [], {}, {}
-    for day in range(1, 181):
-        month = 1 + (day - 1) // 30
+    for day in range(180):
+        day_of = (date(2026, 1, 1) + timedelta(days=day)).isoformat()
         for region in ("north", "south", "west"):
             units = rng.randint(1, 20)
             price = rng.choice([9.5, 12.0, 20.0])
-            rows.append(
-                [f"2026-{month:02d}-{(day - 1) % 28 + 1:02d}", region, "widget", units, price]
-            )
+            rows.append([day_of, region, "widget", units, price])
     rows[40][3] = -5
     rows[300][4] = 1200.0
-    for date, region, _, units, price in rows:
+    for day_of, region, _, units, price in rows:
         totals[region] = totals.get(region, 0) + units * price
-        months[date[:7]] = months.get(date[:7], 0) + units * price
+        months[day_of[:7]] = months.get(day_of[:7], 0) + units * price
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="") as handle:
         out = csv.writer(handle)

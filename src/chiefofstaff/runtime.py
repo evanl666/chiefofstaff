@@ -119,11 +119,10 @@ ROUTER_TOOLS = [
     "answer_session",
     "cancel_task",
     "record_decision",
+    "check_prs",
 ]
 # Files opened from a report or message show at most this much.
 MAX_FILE_SHOWN = 1_000_000
-# Workers Chief of Staff starts for itself that have nothing but their own tools: they read
-# quoted data (the owner's words, test output) and propose; they run nothing.
 # How much of the conversation a fresh Router session is given (characters; about 15k tokens).
 HANDOVER_CHARS = 60_000
 # The owner's images: what each type starts with, and its file extension.
@@ -141,6 +140,8 @@ IMAGE_EXTENSIONS = {
 }
 MAX_ATTACHMENT = 5 * 1024 * 1024
 ATTACHMENT_NAME = re.compile(r"\b([0-9a-f]{32}\.(?:png|jpg|gif|webp))\b")
+# Workers Chief of Staff starts for itself that have nothing but their own tools: they read
+# quoted data (the owner's words, test output) and propose; they run nothing.
 TOOLLESS = {"learner": ["update_style", "propose_lessons"], "checker": ["propose_checks"]}
 SPECIALS = HELPER_KINDS
 CONNECTOR_TOOLS = ["report_found", "report_owner_words", "report_notified", "report_owner_replies"]
@@ -1428,7 +1429,8 @@ class Runtime:
         spoken = self.heard(text) if learn else language(text)
         prompt = wrap("owner", "message", text, reply_in=spoken)
         meta: dict[str, Any] = {}
-        notes = [self.switched_language(session_id, spoken)]
+        switched = self.switched_language(session_id, spoken)
+        notes = [switched]
         if attachments:
             meta["attachments"] = self.save_attachments(attachments)
             paths = ", ".join(f"{a['path']} ({a['name']})" for a in meta["attachments"])
@@ -1454,7 +1456,14 @@ class Runtime:
             # A question changes nothing, but new work it reports comes back for review.
             self.store.set(f"followup:{task['id']}", "1")
         message = await self.delivery.deliver(
-            session_id, prompt, kind="owner", display=text, meta=meta, steer=True
+            session_id,
+            prompt,
+            kind="owner",
+            display=text,
+            meta=meta,
+            # Steered into a Router turn written in the other language, the answer stays in it;
+            # its own turn (Router turns are short) starts in the owner's.
+            steer=not (switched and row["role"] == ROUTER),
         )
         if row["role"] == WORKER and tell_router:
             self.owner_told(row, text)
@@ -1479,11 +1488,12 @@ class Runtime:
         return spoken
 
     def switched_language(self, session_id: str, spoken: str) -> str:
-        """A note when the owner writes in another language than the session last answered in:
-        a conversation in one language pulls a model's answer back into it."""
+        """A note when the owner writes in another language than the session last answered in
+        (or than their message it is still on): a conversation in one language pulls a model's
+        answer back into it."""
         last = self.store.one(
-            "SELECT text FROM messages WHERE session_id=? AND kind IN ('assistant', 'report') "
-            "ORDER BY id DESC LIMIT 1",
+            "SELECT text FROM messages WHERE session_id=? "
+            "AND kind IN ('assistant', 'report', 'owner') ORDER BY id DESC LIMIT 1",
             (session_id,),
         )
         before = language(last["text"]) if last else ""
@@ -1672,6 +1682,9 @@ class Runtime:
         if not fresh:
             return False
         self.store.touch(thread)
+        if thread.startswith("github:"):
+            # CI or a review came in: the PR's chips change now, not at the next round.
+            self.background(self.task_actions.refresh_open_prs(thread.removeprefix("github:")))
         delivered = []
         for session_id in followers:
             try:
@@ -1726,6 +1739,7 @@ class Runtime:
             await asyncio.sleep(self.watch.interval)
             jobs = (
                 self.watchdog.check,
+                self.task_actions.refresh_open_prs,
                 self.workers.tidy,
                 self.digest_once,
                 self.asks.expire_questions,

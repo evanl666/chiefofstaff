@@ -16,6 +16,7 @@ visible focus ring.
 
 import asyncio
 import json
+import os
 import sys
 import tempfile
 import urllib.request
@@ -33,7 +34,7 @@ from chiefofstaff.runtime import Runtime  # noqa: E402
 from chiefofstaff.sources.slack import SlackSource  # noqa: E402
 from chiefofstaff.web import create_app  # noqa: E402
 
-PORT = 8796
+PORT = int(os.environ.get("UI_QUALITY_PORT", "8796"))
 TOKEN = "ui-quality-token"
 BASE = f"http://127.0.0.1:{PORT}"
 SHOTS = ROOT / "browser-shots"
@@ -61,6 +62,9 @@ CHECKS = r"""
   const root = scope ? document.querySelector(scope) : document;
   const shown = (node) => {
     if (!node.isConnected) return false;
+    // Inside a closed <details> (not its summary): not on screen, whatever its box says.
+    const closed = node.closest("details:not([open])");
+    if (closed && !closed.querySelector(":scope > summary")?.contains(node)) return false;
     const box = node.getBoundingClientRect();
     if (box.width < 1 || box.height < 1) return false;
     for (let at = node; at && at !== document; at = at.parentElement) {
@@ -81,13 +85,13 @@ CHECKS = r"""
   probe.remove();
   // No sideways scrolling, anywhere.
   if (!scope && document.documentElement.scrollWidth > innerWidth + 1) problems.push(`page scrolls sideways (${document.documentElement.scrollWidth} > ${innerWidth})`);
-  for (const box of root.querySelectorAll("#scroller, #panel, #settings-pane, #sidebar, .diff-body, #usage-tables, #file-body")) {
+  for (const box of root.querySelectorAll("#scroller, #panel, #settings-pane, #sidebar, .diff-body, #usage-tables, #file-body, .review-body")) {
     if (shown(box) && box.scrollWidth > box.clientWidth + 1) problems.push(`${name(box)} scrolls sideways (${box.scrollWidth} > ${box.clientWidth})`);
   }
   // Inside each card: nothing sticks out, and nothing in a row lies on top of another.
   const inside = (outer, inner) => inner.left >= outer.left - 1 && inner.right <= outer.right + 1 && inner.top >= outer.top - 1 && inner.bottom <= outer.bottom + 1;
   const overlap = (a, b) => Math.max(0, Math.min(a.right, b.right) - Math.max(a.left, b.left)) * Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top));
-  for (const card of root.querySelectorAll(".card, .menu, dialog[open] footer, .event, .msg")) {
+  for (const card of root.querySelectorAll(".card, .menu, dialog[open] footer, .event, .msg, .review-comment, .review-dialog > header")) {
     if (!shown(card)) continue;
     const box = card.getBoundingClientRect();
     for (const child of card.querySelectorAll("*")) {
@@ -103,6 +107,14 @@ CHECKS = r"""
         }
       }
     }
+  }
+  // Text running past its own box, inside a card or a dialog: a long path, a line of code.
+  for (const box of root.querySelectorAll(".card *, dialog[open] *")) {
+    if (!shown(box) || box.closest("pre, .folded, .clamp, .markdown table")) continue;
+    const style = getComputedStyle(box);
+    if (style.display.startsWith("inline") && style.display !== "inline-block" && style.display !== "inline-flex") continue;
+    if (style.overflowX !== "visible" || style.textOverflow === "ellipsis" || box.matches("textarea, input, select")) continue;
+    if (box.scrollWidth > box.clientWidth + 1) problems.push(`${name(box)} runs past its box (${box.scrollWidth} > ${box.clientWidth})`);
   }
   // Text that does not fit its control (unless it is cut on purpose, with an ellipsis).
   for (const node of root.querySelectorAll("button, a.button, .chip, .receipt, label > span")) {
@@ -236,6 +248,40 @@ async def seed(runtime, client, code: Path) -> dict:
     return {"workers": workers, "router": router}
 
 
+# A review with what the owner needs to review it: the PR, and the lines each comment is about.
+# One path is long (120 characters): nothing may run past the card or the review view.
+LONG_PATH = (
+    "services/matching/src/main/scala/com/acme/openconnect/pysparkjobs/company_matching/"
+    "normalizers/CompanyNameNormalizer.scala"
+)
+REVIEW = {
+    "repo": "acme/api", "number": 42, "url": "https://github.com/acme/api/pull/42",
+    "via": "task", "head_sha": "c0ffee", "verdict": "request_changes",
+    "pr": {"title": "Match companies by normalized name", "author": "maya",
+           "about": "Adds a normalizer for company names (case, punctuation, legal suffixes "
+           "such as Inc. and GmbH) and uses it in the nightly matching job, so the same "
+           "company spelled two ways is matched once.",
+           "additions": 214, "deletions": 37, "files": 6},
+    "comments": [
+        {"path": LONG_PATH, "line": 48, "side": "RIGHT",
+         "body": "This drops every non-Latin character, so 株式会社トヨタ normalizes to an empty "
+         "string and matches every other empty name. Keep letters from all scripts.",
+         "context": "     val cleaned = name.toLowerCase\n-    .replaceAll(\"[^a-z0-9 ]\", \"\")\n"
+         "+    .replaceAll(\"[^a-z0-9 ]\", \"\").trim  // keeps only ASCII letters and digits"},
+        {"path": "services/matching/jobs/nightly_match.py", "line": 112, "side": "RIGHT",
+         "body": "Joining on domain alone fans out when two companies share one (gmail.com).",
+         "context": "+    matches = companies.join(accounts, on=\"domain\")"},
+        {"path": "services/matching/jobs/nightly_match.py", "start_line": 140, "line": 146,
+         "side": "LEFT", "body": "Was removing the dedupe step on purpose?",
+         "context": "-    matches = matches.dropDuplicates([\"company_id\"])"},
+    ],
+}  # fmt: skip
+REVIEW_BODY = (
+    "Good direction. Two things before this merges: the normalizer drops non-Latin names, and "
+    "the join on domain can fan out."
+)
+
+
 def gallery(runtime, seeded: dict) -> list[dict]:
     """Every other kind of card: a question, a PR review with a verdict and line comments, a
     reply to send yourself, and a sign-in."""
@@ -249,16 +295,7 @@ def gallery(runtime, seeded: dict) -> list[dict]:
              "choices": ["10 seats", "50 seats", "200 seats"], "allow_freeform": True},
             "Which seat count should the comparison price?",
         ),
-        store.create_draft(
-            fix, "github",
-            {"repo": "acme/api", "number": 42, "url": "https://github.com/acme/api/pull/42",
-             "via": "task", "head_sha": "c0ffee", "verdict": "approve",
-             "comments": [{"path": "app/login.py", "line": 12, "side": "RIGHT",
-                           "body": "Pass the clock in here too."},
-                          {"path": "tests/test_login.py", "line": 4, "side": "RIGHT",
-                           "body": "Nice: this no longer races the clock."}]},
-            "Looks good. Two small notes inline.",
-        ),
+        store.create_draft(fix, "github", REVIEW, REVIEW_BODY),
         store.create_draft(
             compare, "reply",
             {"to": "Ann Lee", "where": "email", "link": "https://mail.example.com/t/1"},
@@ -423,6 +460,28 @@ async def cards(runtime, seeded, browser, quality: Quality, phase: str):
             )
             await quality.check(page, f"cards {width} {scheme}", "#panel")
         await quality.contrast(page, f"cards {scheme}", "#panel")
+        # The review, opened: the PR, the summary, each comment with its code; at every width.
+        review = page.locator("#needs .card.pr-review")
+        await page.set_viewport_size({"width": 1280, "height": 900})
+        await review.get_by_role("button", name="Review…").click()
+        view = page.locator(".review-dialog")
+        await expect(view.locator(".review-comment")).to_have_count(len(REVIEW["comments"]))
+        await expect(view.locator(".review-comment .where").first).to_have_attribute(
+            "title", f"{LONG_PATH}:48"
+        )
+        for width in WIDTHS:
+            await page.set_viewport_size({"width": width, "height": 900})
+            await page.wait_for_timeout(200)
+            await page.screenshot(path=SHOTS / f"quality-{phase}-review-view-{width}-{scheme}.png")
+            await quality.check(page, f"review view {width} {scheme}", ".review-dialog")
+        await view.locator(".review-comment").last.get_by_role("button", name="✕ Remove").click()
+        await view.get_by_role("button", name="Ask to redo…").click()
+        await page.screenshot(path=SHOTS / f"quality-{phase}-review-view-redo-{scheme}.png")
+        await quality.check(page, f"review view redo {scheme}", ".review-dialog")
+        await quality.contrast(page, f"review view {scheme}", ".review-dialog")
+        await page.keyboard.press("Escape")
+        await page.keyboard.press("Escape")
+        await expect(view).to_be_hidden()
         await page.set_viewport_size({"width": 1280, "height": 900})
         for index, card in enumerate(await page.locator("#needs .card").all()):
             await card.scroll_into_view_if_needed()

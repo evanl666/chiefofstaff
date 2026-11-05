@@ -244,3 +244,81 @@ async def test_a_done_report_right_after_failing_tests_is_asked_to_look_again(ha
         summary="Fixed; the failure is the old flaky test.",
     )
     assert again.result_type == "success", "once: an expected failure is reported as such"
+
+
+def test_a_check_that_failed_and_then_passed_has_passed():
+    rerun = [
+        {"name": "validate", "conclusion": "FAILURE", "completedAt": "2026-11-05T09:00:00Z"},
+        {"name": "validate", "conclusion": "SUCCESS", "completedAt": "2026-11-05T09:20:00Z"},
+        {"context": "ci/lint", "state": "SUCCESS", "startedAt": "2026-11-05T09:01:00Z"},
+    ]
+    assert receipts.checks_state(rerun) == "passing" and receipts.failing_checks(rerun) == []
+    again = [
+        *rerun,
+        {"name": "validate", "conclusion": "FAILURE", "completedAt": "2026-11-05T10:00:00Z"},
+    ]
+    assert receipts.checks_state(again) == "failing"
+    assert receipts.failing_checks(again) == ["validate"]
+
+
+async def test_a_task_card_shows_its_prs_as_they_are_now(harness):
+    runtime = await harness.connect()
+    result = await call_tool(
+        runtime, "spawn_worker", harness.router_id, title="Fix", instructions="Fix", why_new="t"
+    )
+    worker = json.loads(result.text_result_for_llm)["session_id"]
+    url = "https://github.com/acme/app/pull/7"
+
+    def pr(conclusion):
+        rollup = [
+            {"name": "validate", "conclusion": conclusion, "completedAt": "2026-11-05T09:00Z"}
+        ]
+        return json.dumps({"url": url, "state": "OPEN", "statusCheckRollup": rollup})
+
+    harness.gh_replies[f"pr view {url}"] = pr("FAILURE")
+    await call_tool(runtime, "report", worker, status="done", summary=f"Opened {url}")
+    await settle(runtime)
+    task = runtime.tasks.current(worker)
+    found = runtime.task_actions.receipts(task)
+    assert found["prs"][0]["checks"] == "failing" and found["prs"][0]["failing"] == ["validate"]
+    assert "Checks are failing on acme/app#7: validate." in found["flags"]
+
+    harness.gh_replies[f"pr view {url}"] = pr("SUCCESS")
+    await runtime.task_actions.refresh_open_prs(every=3600)
+    assert runtime.task_actions.receipts(task)["prs"][0]["checks"] == "failing", "not yet due"
+    await runtime.task_actions.refresh_open_prs("acme/app#7", every=3600)
+    fresh = runtime.task_actions.receipts(task)
+    assert fresh["prs"][0]["checks"] == "passing" and not fresh["flags"], "something happened on it"
+
+    harness.gh_replies[f"pr view {url}"] = pr("FAILURE")
+    read = json.loads(
+        (
+            await call_tool(runtime, "read_session", harness.router_id, session_id=worker)
+        ).text_result_for_llm
+    )
+    assert read["task"]["prs_now"][0]["checks"] == "failing", "the Router reads it as it is now"
+
+
+async def test_the_router_reads_pr_status_from_github_now(harness):
+    runtime = await harness.connect()
+    rollup = [
+        {"name": "validate", "conclusion": "FAILURE", "completedAt": "2026-11-05T09:00Z"},
+        {"name": "validate", "conclusion": "SUCCESS", "completedAt": "2026-11-05T09:30Z"},
+    ]
+    harness.gh_replies["pr view https://github.com/acme/app/pull/7"] = json.dumps(
+        {"title": "Fix", "url": "u", "state": "OPEN", "statusCheckRollup": rollup,
+         "reviewDecision": "APPROVED", "mergeable": "MERGEABLE"}
+    )  # fmt: skip
+    result = await call_tool(
+        runtime, "check_prs", harness.router_id,
+        prs=["https://github.com/acme/app/pull/7", "github:acme/app#7"],
+    )  # fmt: skip
+    [pr] = json.loads(result.text_result_for_llm)["prs"]
+    assert pr["checks"] == "passing" and pr["failing"] == [] and pr["review"] == "APPROVED"
+    worker = await call_tool(
+        runtime, "spawn_worker", harness.router_id, title="W", instructions="w"
+    )
+    refused = await call_tool(
+        runtime, "check_prs", json.loads(worker.text_result_for_llm)["session_id"], prs=["x"]
+    )
+    assert refused.result_type == "failure", "the Router's tool"

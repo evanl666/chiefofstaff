@@ -581,7 +581,8 @@ async def s18_github_question(app: App):
         if tasks:  # A worker looks it up: its report is the answer.
             return tasks[0]["result"] if tasks[0]["status"] in FINISHED else None
         said = await router_said(app, router, mark)
-        return said if re.search(r"(?<![\d-])\d{1,3}(?![\d])", said.replace(repo, "")) else None
+        # A number on its own ("12"), not the 2 of "cos-pr-e2e".
+        return said if re.search(r"(?<![\w-])\d{1,3}(?![\w])", said.replace(repo, "")) else None
 
     said = await wait_for("the number", answered, 600, app)
     truth = {before, pull_count(repo)}  # Another suite may open one meanwhile.

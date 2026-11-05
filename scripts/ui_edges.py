@@ -6,6 +6,7 @@ on a fake Copilot, so the test can create cards and events and check what the pa
 
 import asyncio
 import base64
+import itertools
 import json
 import re
 import sys
@@ -56,9 +57,29 @@ def log(text: str):
     print(f"  {text}", flush=True)
 
 
+# A path as long as some are (a Scala package six levels deep): it must not widen anything.
+LONG_PATH = (
+    "services/matching/src/main/scala/com/acme/openconnect/pysparkjobs/company_matching/"
+    "normalizers/CompanyNameNormalizer.scala"
+)
+# Nothing in it may run past it: the elements that do, with how far.
+OVERFLOWS = """root => [root, ...root.querySelectorAll("*")].filter((node) => {
+  const box = node.getBoundingClientRect();
+  if (!box.width || node.closest("pre")) return false;
+  const style = getComputedStyle(node);
+  const own = style.overflowX === "visible" && style.textOverflow !== "ellipsis"
+    && !node.matches("textarea, input, select") && node.scrollWidth > node.clientWidth + 1;
+  const outer = root.getBoundingClientRect();
+  return own || box.right > outer.right + 1 || box.left < outer.left - 1;
+}).map((node) => `${node.className || node.tagName}: ${node.scrollWidth}/${node.clientWidth}`)"""
+
+
 def review(repo: str, comments: list[dict]) -> dict:
     target = {"repo": repo, "number": 7, "url": f"https://github.com/{repo}/pull/7",
-              "via": "task", "head_sha": "c0ffee", "verdict": "comment"}  # fmt: skip
+              "via": "task", "head_sha": "c0ffee", "verdict": "comment",
+              "pr": {"title": "Export every row", "author": "maya", "about":
+                     "The exporter stopped at 10,000 rows. " * 6, "additions": 3,
+                     "deletions": 1, "files": 1}}  # fmt: skip
     if comments:
         target["comments"] = comments
     return target
@@ -450,6 +471,50 @@ async def home(runtime, browser, failures: list[str]):
     assert await page.evaluate("navigator.clipboard.readText()") == "Sure, Friday at 10 works."
     assert store.draft(reply["id"])["status"] == "sent"
     log("a reply to send yourself: edited, copied and marked sent from its card")
+
+    # Not like this: back to the worker that drafted it, with what should change.
+    again = store.create_draft(
+        started[0], "reply", {"to": "Bo", "where": "email", "link": ""}, "Sure."
+    )
+    runtime.bus.publish("draft", store.draft(again["id"]))
+    card = page.locator(f'#needs .card.draft[data-id="{again["id"]}"]')
+    await card.locator(".actions .more-button").click()
+    await card.get_by_role("menuitem", name="Ask to redo…").click()
+    await card.get_by_label("What should change?").fill("Warmer, and say when")
+    async with page.expect_request(f"**/api/drafts/{again['id']}") as request:
+        await card.get_by_role("button", name="Send back").click()
+    sent = (await request.value).post_data_json
+    assert sent == {"action": "revise", "reason": "Warmer, and say when"}, sent
+    await expect(card).to_have_count(0, timeout=5000)
+    await expect(page.locator(".toast", has_text="Sent back to redo.")).to_be_visible()
+    assert store.draft(again["id"])["outcome"] == "Redo: Warmer, and say when"
+    log("a reply sent back to redo, with what should change")
+
+    # Every worker at work shows under Running: one whose task is finished, handling news on
+    # a PR it follows; and one at work whose card waits for the owner, marked so.
+    running = page.locator("#tasks-running .card")
+
+    async def spawn(title):
+        made = await call_tool(
+            runtime, "spawn_worker", router, title=title, instructions=title, why_new="test"
+        )
+        await settle(runtime)
+        return json.loads(made.text_result_for_llm)["session_id"]
+
+    store.save_settings(store.settings().model_copy(update={"max_workers": 6}))
+    follow_up = await spawn("Review api PR #12")
+    await call_tool(runtime, "report", follow_up, status="done", summary="Reviewed.")
+    runtime.update_session(follow_up, status="working", activity="reading the reply")
+    card = running.filter(has_text="Review api PR #12")
+    await expect(card).to_contain_text("following up on “Review api PR #12”")
+    worker = await spawn("Ship the docs")
+    runtime.update_session(worker, status="working")
+    card_draft = store.create_draft(worker, "reply", {"to": "Al", "where": "email"}, "Hi")
+    runtime.bus.publish("draft", store.draft(card_draft["id"]))
+    shown = running.filter(has_text="Ship the docs")
+    await expect(shown).to_have_count(1)
+    await expect(shown.locator(".chip", has_text="Needs you")).to_be_visible()
+    log("Running shows every worker at work: a follow-up on finished work, one waiting on a card")
     await context.close()
 
     store.update_draft(question["id"], status="rejected")
@@ -494,9 +559,13 @@ async def main():
 
         plain = store.create_draft(worker, "github", review("acme/plain", []), "LGTM.")
         many = [
-            {"path": f"src/module_{i}.py", "line": 10 + i, "side": "RIGHT", "body": f"Note {i}."}
-            for i in range(18)
-        ]
+            {"path": f"src/module_{i}.py", "line": 10 + i, "side": "RIGHT", "body": f"Note {i}.",
+             "context": f"+    rows = fetch(cursor, limit={i})"}
+            for i in range(17)
+        ]  # fmt: skip
+        many.append({"path": LONG_PATH, "line": 48, "side": "RIGHT", "body": "Keep all scripts.",
+                     "context": "-    .replaceAll(\"[^a-z ]\", \"\")\n+    .replaceAll(\"[^a-z0-9 ]"
+                     "\", \"\").trim  // " + "only ASCII letters are kept " * 4})  # fmt: skip
         many.append(
             {"path": "src/old.py", "line": 4, "side": "LEFT", "body": "Removed on purpose?"}
         )
@@ -524,31 +593,130 @@ async def main():
                 plain_card = page.locator(f'#needs .card.draft[data-id="{plain["id"]}"]')
                 busy_card = page.locator(f'#needs .card.draft[data-id="{busy["id"]}"]')
                 await expect(plain_card).to_be_visible(timeout=15000)
-                # The card says which task it is about.
+                # The card says which task it is about, and what the PR is, in a line.
                 await expect(plain_card.locator(".context")).to_contain_text(
                     "Review the exports PR"
                 )
-                assert await plain_card.locator(".inline-comment").count() == 0
-                assert "line comment" not in (await plain_card.inner_text())
-                await expect(busy_card.locator(".inline-comment")).to_have_count(20)
-                text = await busy_card.inner_text()
-                assert "src/old.py:4 (old)" in text, text[:400]
-                assert "src/range.py:140-146" in text, text[:400]
-                wide = await busy_card.evaluate("node => node.scrollWidth > node.clientWidth")
-                assert not wide, "a long comment does not widen the card"
-                boxes = busy_card.locator(".inline-comment textarea")
-                assert await boxes.last.get_attribute("rows") == "6", "a long comment scrolls"
-                assert await boxes.first.get_attribute("rows") == "1", "a short one is one line"
-                await busy_card.scroll_into_view_if_needed()
+                await expect(plain_card.locator(".pr-line")).to_have_text(
+                    "“Export every row” by @maya · +3 −1 in 1 file"
+                )
+                await expect(plain_card.locator(".comments-note")).to_have_text("No line comments")
+                # Compact: the comments are read and changed in the review view.
+                await expect(busy_card.locator(".comments-note")).to_have_text("20 line comments")
+                await expect(busy_card.locator("textarea")).to_have_count(0)
+                await expect(busy_card.get_by_role("button", name="Review…")).to_be_visible()
+                for width in (1280, 1100, 800):
+                    await page.set_viewport_size({"width": width, "height": 900})
+                    if width < 1100:
+                        await page.locator("#home-tabs [data-tab=needs]").click()
+                    for card in (plain_card, busy_card):
+                        found = await card.evaluate(OVERFLOWS)
+                        assert not found, (width, found)
+                await page.set_viewport_size({"width": 1280, "height": 900})
+                await busy_card.get_by_role("button", name="Review…").click()
+                view = page.locator(".review-dialog")
+                rows = view.locator(".review-comment")
+                await expect(rows).to_have_count(20)
+                long_row = rows.filter(has_text="CompanyNameNormalizer.scala:48")
+                await expect(long_row.locator(".where")).to_have_attribute(
+                    "title", f"{LONG_PATH}:48"
+                )
+                await expect(rows.filter(has_text="old.py:4")).to_contain_text("old")
+                await expect(rows.filter(has_text="range.py:140\u2013146")).to_have_count(1)
+                await expect(long_row.locator(".diff-context .del")).to_have_count(1)
+                await expect(long_row.locator(".diff-context .add")).to_have_count(1)
+                for width in (1440, 1024, 800):
+                    await page.set_viewport_size({"width": width, "height": 900})
+                    await long_row.scroll_into_view_if_needed()
+                    for root in (view.locator(".review-body"), long_row, view.locator("footer")):
+                        found = await root.evaluate(OVERFLOWS)
+                        assert not found, (width, found)
+                    page_wide = await page.evaluate(
+                        "document.documentElement.scrollWidth > innerWidth"
+                    )
+                    assert not page_wide, width
+                # A long note grows its box (up to ten lines, then scrolls): no overlap.
+                boxes = await rows.evaluate_all(
+                    "rows => rows.map((row) => [...row.children].map((n) => {"
+                    "const b = n.getBoundingClientRect(); return [b.top, b.bottom]; }))"
+                )
+                for row in boxes:
+                    for upper, lower in itertools.pairwise(row):
+                        assert upper[1] <= lower[0] + 1, ("overlap", row)
+                await page.set_viewport_size({"width": 1280, "height": 900})
                 await page.screenshot(path=SHOTS / f"ui-edges-review-{scheme}.png")
+                await view.get_by_role("button", name="Close").click()
                 await context.close()
-            log("review cards: no comments, twenty, an old-side one, a range, a long one")
+            log("review cards: compact, the PR in a line; the view: twenty comments, a long path")
 
             context = await browser.new_context(viewport={"width": 1280, "height": 900})
             page = await context.new_page()
             page.on("pageerror", lambda error: failures.append(str(error)))
             await page.goto(f"{BASE}/#token={TOKEN}")
             busy_card = page.locator(f'.card.draft[data-id="{busy["id"]}"]')
+            # A comment removed, the summary cleared: what is posted says so; the server's 400
+            # shows in the view, which comes back as the owner left it.
+            await busy_card.get_by_role("button", name="Review…").click()
+            view = page.locator(".review-dialog")
+            await (
+                view.locator(".review-comment")
+                .nth(1)
+                .get_by_role("button", name="✕ Remove")
+                .click()
+            )
+            await expect(view.locator(".review-comment.removed")).to_have_count(1)
+            await (
+                view.locator(".review-comment")
+                .nth(2)
+                .get_by_role("button", name="✕ Remove")
+                .click()
+            )
+            await view.locator(".review-comment").nth(2).get_by_role("button", name="Undo").click()
+            await expect(view.locator(".review-comment.removed")).to_have_count(1)
+            await view.get_by_label("Summary").fill("")
+            await expect(busy_card.locator(".summary-preview")).to_have_text(
+                "No summary: the line comments only."
+            )
+            await expect(busy_card.locator(".comments-note")).to_have_text("19 of 20 line comments")
+            refused: list[dict] = []
+
+            async def refuse(route):
+                refused.append(route.request.post_data_json)
+                await route.fulfill(
+                    status=400,
+                    json={"detail": "Nothing to post: write a summary or keep a line comment."},
+                )
+
+            await page.route(f"**/api/drafts/{busy['id']}", refuse)
+            await view.locator("footer button.send").click()
+            await expect(view.locator(".error")).to_have_text(
+                "Nothing to post: write a summary or keep a line comment.", timeout=5000
+            )
+            await expect(view).to_be_visible()
+            await expect(busy_card).to_be_visible()
+            content = refused[0]["content"]
+            assert refused[0]["action"] == "send" and content["body"] == "", refused
+            assert content["comment:1"] == "" and content["comment:2"] == "Note 2.", content
+            assert content["verdict"] == "comment", content
+            await expect(view.locator(".review-comment.removed")).to_have_count(1)
+            await page.unroute(f"**/api/drafts/{busy['id']}")
+            # Sent back to its worker to draft again, with what should change.
+            await view.get_by_role("button", name="Ask to redo…").click()
+            async with page.expect_request(f"**/api/drafts/{busy['id']}") as request:
+                await view.get_by_label("What should change?").fill("Fewer nits; only bugs")
+                await view.get_by_role("button", name="Send back").click()
+            assert (await request.value).post_data_json == {
+                "action": "revise",
+                "reason": "Fewer nits; only bugs",
+            }
+            await expect(view).to_be_hidden()
+            await expect(busy_card).to_have_count(0, timeout=10000)
+            redone = store.draft(busy["id"])
+            assert redone["status"] == "rejected" and redone["outcome"].startswith("Redo"), redone
+            log("review view: a comment removed, the summary cleared, the 400 inline; redo")
+            store.update_draft(busy["id"], status="pending", outcome="")
+            runtime.bus.publish("draft", store.draft(busy["id"]))
+            await expect(busy_card).to_be_visible(timeout=10000)
             # Rejecting is the card's other action, behind "⋯".
             await busy_card.locator(".actions .more-button").click()
             await busy_card.get_by_role("menuitem", name="Reject…").click()
@@ -570,12 +738,15 @@ async def main():
             await expect(plain_card.locator(".context .markdown")).to_contain_text("Review done.")
             reviewing = page.locator("#tasks .card.task", has_text="Review the exports PR")
             await expect(reviewing).to_have_count(0)
-            # Its verdict can change before it is sent.
-            send = plain_card.locator(".actions > button").last
+            # Its verdict can change before it is sent, in the review view.
+            await plain_card.get_by_role("button", name="Review…").click()
+            view = page.locator(".review-dialog")
+            send = view.locator("footer button.send")
             await expect(send).to_have_text("Send review")
-            await plain_card.locator("select.verdict").select_option("approve")
+            await view.locator("select.verdict").select_option("approve")
             await expect(send).to_have_text("Approve & send")
-            await expect(plain_card.locator(".label")).to_contain_text("Approval of acme/plain#7")
+            await expect(plain_card.locator(".head .chip")).to_have_text("Approve")
+            await expect(plain_card.locator(".label")).to_contain_text("Review of acme/plain#7")
             # Acting on a card takes it away at once; if that fails, it is back with why.
             posted: list[dict] = []
             answers = [
@@ -592,18 +763,21 @@ async def main():
             await expect(badge).to_have_text("1")
             await page.route(f"**/api/drafts/{plain['id']}", sending)
             await send.click()
+            # The view closes and the card goes at once; not posted, both come back, with why.
+            await expect(view).to_be_hidden()
             await expect(plain_card).to_be_hidden()
             await expect(badge).to_have_count(0)
-            await expect(plain_card).to_be_visible(timeout=5000)
-            await expect(plain_card.locator(".error")).to_contain_text("network down")
+            await expect(view.locator(".error")).to_contain_text("network down", timeout=5000)
+            await expect(plain_card).to_be_visible()
             await expect(badge).to_have_text("1")
             await send.click()
             await expect(plain_card).to_be_hidden()
+            await expect(view).to_have_count(0, timeout=5000)
             # Gone for good once the answer comes: the page does not wait for an event.
             await expect(plain_card).to_have_count(0, timeout=5000)
             await expect(page.locator(".toast", has_text="Posted on GitHub.")).to_be_visible()
             assert [body["action"] for body in posted] == ["send", "send"], posted
-            assert posted[1]["content"]["verdict"] == "approve", posted
+            assert posted[1]["content"] == {"body": "LGTM.", "verdict": "approve"}, posted
             await page.unroute(f"**/api/drafts/{plain['id']}")
             store.update_draft(plain["id"], status="rejected")
             runtime.bus.publish("draft", store.draft(plain["id"]))
@@ -616,6 +790,23 @@ async def main():
             await reported.get_by_role("button", name="View").click()
             await expect(reviewing).to_have_class(re.compile(r"\bexpanded\b"))
             await expect(reviewing.locator(".report")).to_contain_text("Review done.")
+            # New receipts redraw the card (a commit seen: Create PR comes): the report the
+            # owner opened stays open.
+            task = runtime.tasks.current(worker)
+            run = store.one(
+                "SELECT id FROM runs WHERE task_id=? ORDER BY started_at DESC", (task["id"],)
+            )
+            checkout = {"path": "/tmp/exports", "branch": "chief/exports", "commit": "a" * 40,
+                        "commits": 1, "files": 1, "insertions": 2, "deletions": 0}  # fmt: skip
+            store.execute(
+                "UPDATE runs SET evidence=? WHERE id=?",
+                (json.dumps({"checkouts": [checkout], "prs": []}), run["id"]),
+            )
+            runtime.task_actions.publish(runtime.tasks.get(task["id"]))
+            await expect(reviewing.locator(".receipt.changes")).to_be_visible(timeout=5000)
+            await expect(reviewing).to_have_class(re.compile(r"\bexpanded\b"))
+            await expect(reviewing.locator(".expand")).to_have_text("Hide report")
+            await expect(reviewing.locator(".report")).to_be_visible()
             log(
                 "a done task with a draft: one card; verdict; gone at once, back on error; "
                 "its report a line in the chat"

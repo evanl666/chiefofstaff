@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "chiefofstaff"
-version = "0.1.19"
+version = "0.1.20"
 description = "One inbox for all your GitHub Copilot sessions: tasks and follow-ups go to the right session, Slack replies wait for your approval, and finished work waits for your review."
 license = "MIT"
 dynamic = ["readme"]

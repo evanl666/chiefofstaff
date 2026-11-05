@@ -17,7 +17,8 @@ export function fitting(text, { label = "", max = 12 } = {}) {
   const box = el("textarea", { rows: 1, "aria-label": label || undefined });
   box.value = text;
   const fit = () => {
-    if (!box.isConnected) return;
+    // Not on screen (a closed view, a hidden tab): sized when it shows, by the observer.
+    if (!box.isConnected || !box.clientWidth) return;
     box.style.height = "auto";
     const line = parseFloat(getComputedStyle(box).lineHeight) || 21;
     const limit = line * max + 16;
@@ -49,8 +50,8 @@ function actionRow(error, main, more = [], ...extra) {
   return el("div", { class: "actions" }, error, ...extra, moreMenu(more), main);
 }
 // The owner's decision on a card: it leaves at once, the toast says what was done; if the
-// server says no, the card comes back with why.
-function decider(draft, node, error) {
+// server says no, the card comes back with why (`failed` shows it elsewhere, in a view).
+function decider(draft, node, error, failed = null) {
   return async function decide(body, done = "") {
     const key = `draft:${draft.id}`;
     error.textContent = "";
@@ -62,14 +63,39 @@ function decider(draft, node, error) {
       const result = await api(`/api/drafts/${draft.id}`, { method: "POST", body });
       applyDraft(result?.id === draft.id && result.status ? result : { ...draft, status: "answered" });
       if (done) toast(done);
+      return true;
     } catch (failure) {
       state.leaving.delete(key);
       node.classList.remove("leaving");
-      error.textContent = failure.message;
+      if (failed) failed(failure.message);
+      else error.textContent = failure.message;
       renderSidebar();
       scheduleHome();
+      return false;
     }
   };
+}
+// A one-line reason in place of a card's actions: to reject a draft, or to have it redone.
+function reasonForm(actions, { placeholder, label, className = "secondary", submit, back }) {
+  const reason = el("input", { placeholder, "aria-label": placeholder, autocomplete: "off" });
+  const go = () => submit(reason.value.trim());
+  reason.addEventListener("keydown", (event) => {
+    if (submits(event)) go();
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      back();
+    }
+  });
+  actions.replaceChildren(reason, el("button", { type: "button", class: "text", text: "Cancel", onclick: back }), el("button", { type: "button", class: className, text: label, onclick: go }));
+  reason.focus();
+}
+// What the owner does not like about a draft: dropped, or sent back to its session to redo.
+function rejectForm(actions, decide, back) {
+  reasonForm(actions, { placeholder: "Why? (optional, helps the next draft)", label: "Reject", back, submit: (reason) => decide({ action: "reject", reason }, "Dropped.") });
+}
+function redoForm(actions, decide, back) {
+  reasonForm(actions, { placeholder: "What should change?", label: "Send back", back, submit: (reason) => decide({ action: "revise", reason }, "Sent back to redo. The new draft comes here.") });
 }
 // The Router is not sure which folder a task belongs in: the owner picks one.
 function workspaceCard(draft) {
@@ -131,7 +157,6 @@ function formFields(schema) {
     values: () => Object.fromEntries(Object.entries(inputs).map(([name, read]) => [name, read()])),
   };
 }
-// Something a session needs from the owner: an answer, a form, a link to open or a sign-in.
 // Something a session needs from the owner: an answer, a form, a link to open or a sign-in.
 function requestCard(draft) {
   const target = draft.target;
@@ -337,17 +362,6 @@ const VERDICTS = {
   approve: ["Approval", "Approve & send", "Approve"],
   request_changes: ["Changes requested", "Request changes & send", "Request changes"],
 };
-// Rejecting asks why (optional): it helps the next draft.
-function rejectForm(actions, decide, back) {
-  const reason = el("input", { placeholder: "Why? (optional, helps the next draft)" });
-  reason.addEventListener("keydown", (event) => submits(event) && decide({ action: "reject", reason: reason.value }, "Dropped."));
-  actions.replaceChildren(
-    reason,
-    el("button", { type: "button", class: "text", text: "Cancel", onclick: back }),
-    el("button", { type: "button", class: "secondary", text: "Reject", onclick: () => decide({ action: "reject", reason: reason.value }, "Dropped.") }),
-  );
-  reason.focus();
-}
 // A reply Chief of Staff cannot send itself (mail, a doc, Slack without a token): the owner
 // copies it and sends it there.
 function replyCard(draft) {
@@ -376,7 +390,14 @@ function replyCard(draft) {
   };
   const actions = el("div", { class: "actions" });
   const show = () =>
-    actions.replaceChildren(error, moreMenu([{ text: "Reject…", onclick: () => rejectForm(actions, decide, show) }]), el("button", { type: "button", text: "Copy & mark sent", onclick: copy }));
+    actions.replaceChildren(
+      error,
+      moreMenu([
+        { text: "Ask to redo…", onclick: () => redoForm(actions, decide, show) },
+        { text: "Reject…", onclick: () => rejectForm(actions, decide, show) },
+      ]),
+      el("button", { type: "button", text: "Copy & mark sent", onclick: copy }),
+    );
   show();
   node.append(actions);
   return node;
@@ -391,70 +412,287 @@ export function draftCard(draft) {
   if (draft.kind === "workspace") return workspaceCard(draft);
   if (draft.kind === "reply") return replyCard(draft);
   if (REQUEST_LABELS[draft.kind]) return requestCard(draft);
+  if (draft.kind === "github" && !draft.target.in_reply_to) return reviewCard(draft);
+  return messageCard(draft);
+}
+// A Slack reply, or a reply to a comment on a PR: the text to send, edited in place.
+function messageCard(draft) {
   const target = draft.target;
-  // A review (not a reply to a comment) carries a verdict the owner can change before sending.
-  const verdict =
-    draft.kind === "github" && !target.in_reply_to && !target.own && VERDICTS[target.verdict]
-      ? el("select", { class: "verdict", "aria-label": "Verdict", title: "What the review says on GitHub" }, ...Object.entries(VERDICTS).map(([value, [, , text]]) => el("option", { value, text })))
-      : null;
-  if (verdict) verdict.value = target.verdict;
   const pr = () => el("a", { href: target.comment?.url || target.url, target: "_blank", rel: "noreferrer", title: "Open on GitHub", text: `${target.repo}#${target.number}` });
   // Where a Slack reply really goes is in its tooltip, by Slack's id.
-  const label = () =>
+  const label =
     draft.kind === "slack"
       ? el("span", { title: slackDestination(target), text: `Slack reply · ${SLACK_KIND[target.channel_id?.[0]] || "conversation"}${target.thread_ts ? ", in a thread" : ""}` })
-      : target.in_reply_to
-        ? [`Reply on `, pr(), target.comment?.author ? ` · to ${target.comment.author}` : ""]
-        : [`${verdict ? VERDICTS[verdict.value][0] : "PR review"} of `, pr()];
+      : [`Reply on `, pr(), target.comment?.author ? ` · to ${target.comment.author}` : ""];
   const text = fitting(draft.final_text || draft.text, { label: "Draft" });
-  // A review's comments on lines of the diff: each editable; emptied, it is not sent.
-  const inline = (draft.kind === "github" && target.comments) || [];
-  const comments = inline.map((comment) => {
-    // As tall as its text wraps to (about 90 characters a line), one to six lines.
-    const wrapped = comment.body.split("\n").reduce((sum, line) => sum + Math.max(1, Math.ceil(line.length / 90)), 0);
-    const box = fitting(comment.body, { label: `Comment on ${comment.path}:${comment.line}`, max: 6 });
-    box.rows = Math.min(6, wrapped);
-    const lines = comment.start_line ? `${comment.start_line}-${comment.line}` : comment.line;
-    return { box, node: el("div", { class: "inline-comment" }, el("div", { class: "where", text: `${comment.path}:${lines}${comment.side === "LEFT" ? " (old)" : ""}` }), box) };
-  });
-  const content = () => Object.fromEntries(comments.map((comment, index) => [`comment:${index}`, comment.box.value]));
   const error = el("span", { class: "error" });
   const actions = el("div", { class: "actions" });
   // What it answers, then who it is for and why, in one quiet line.
   const about = [draft.kind === "slack" && target.to ? `For ${target.to}` : "", draft.note].filter(Boolean).join(" · ");
+  const comment = target.comment;
   const node = card(
     draft,
-    "",
-    label(),
+    draft.kind,
+    label,
     draft.kind === "slack" && target.latest ? el("div", { class: "quoted", text: target.latest }) : null,
+    comment ? el("div", { class: "quoted" }, el("strong", { title: comment.path || "", text: `${comment.author}${comment.path ? ` on ${basename(comment.path)}${comment.line ? `:${comment.line}` : ""}` : ""}: ` }), comment.body) : null,
     about ? el("div", { class: "note", text: about }) : null,
     // Not published after an interrupted send: what happened, and the owner's edit kept.
     draft.outcome ? el("div", { class: "note", text: draft.outcome }) : null,
-    draft.kind === "github" && target.comment
-      ? el(
-          "div",
-          { class: "quoted" },
-          el("strong", { text: `${target.comment.author}${target.comment.path ? ` on ${target.comment.path}${target.comment.line ? `:${target.comment.line}` : ""}` : ""}: ` }),
-          target.comment.body,
-        )
-      : null,
     text,
-    comments.length ? el("div", { class: "note comments-note", title: "Empty a comment to leave it out", text: `${comments.length} line comment${comments.length === 1 ? "" : "s"}` }) : null,
-    ...comments.map((comment) => comment.node),
     actions,
   );
   const decide = decider(draft, node, error);
   const sent = draft.kind === "slack" ? "Sent on Slack." : "Posted on GitHub.";
-  const send = el("button", { type: "button", onclick: () => decide({ action: "send", text: text.value, content: verdict ? { ...content(), verdict: verdict.value } : content() }, sent) });
-  const named = () => {
-    send.textContent = verdict ? VERDICTS[verdict.value][1] : "Send";
-    node.querySelector(".head .label").replaceChildren(...[label()].flat());
-  };
-  verdict?.addEventListener("change", named);
-  named();
-  const show = () => actions.replaceChildren(error, verdict || "", moreMenu([{ text: "Reject…", onclick: () => rejectForm(actions, decide, show) }]), send);
+  const show = () =>
+    actions.replaceChildren(
+      error,
+      moreMenu([
+        { text: "Ask to redo…", onclick: () => redoForm(actions, decide, show) },
+        { text: "Reject…", onclick: () => rejectForm(actions, decide, show) },
+      ]),
+      el("button", { type: "button", text: "Send", onclick: () => decide({ action: "send", text: text.value }, sent) }),
+    );
   show();
   return node;
+}
+const basename = (path) => path.split("/").pop();
+// A long name keeps its start and its end: "CompanyNa…Normalizer.scala".
+const middle = (text, max = 44) => (text.length <= max ? text : `${text.slice(0, Math.ceil(max / 2) - 1)}…${text.slice(-Math.floor(max / 2))}`);
+// What the PR is, in a line: “Add greet” by @maya · +3 −1 in 1 file.
+function prLine(pr) {
+  if (!pr) return "";
+  const size = pr.files ? ` · +${pr.additions} −${pr.deletions} in ${pr.files} file${pr.files === 1 ? "" : "s"}` : "";
+  return `${pr.title ? `“${pr.title}”` : "This PR"}${pr.author ? ` by @${pr.author}` : ""}${size}`;
+}
+const VERDICT_CHIP = { comment: "", approve: "done", request_changes: "waiting" };
+// A PR review: compact here (what the PR is, the verdict, the summary's start, how many line
+// comments); read and edited in its own view, where it is sent from.
+function reviewCard(draft) {
+  const target = draft.target;
+  const comments = target.comments || [];
+  const review = {
+    summary: draft.final_text || draft.text,
+    verdict: VERDICTS[target.verdict] && !target.own ? target.verdict : "comment",
+    comments: comments.map((comment) => ({ ...comment, text: comment.body, removed: false })),
+  };
+  const error = el("span", { class: "error" });
+  const actions = el("div", { class: "actions" });
+  const pr = el("a", { href: target.url, target: "_blank", rel: "noreferrer", title: "Open on GitHub", text: `${target.repo}#${target.number}` });
+  const chip = el("span", { class: "chip" });
+  const preview = el("div", { class: "summary-preview" });
+  const count = el("div", { class: "note comments-note" });
+  const node = card(
+    draft,
+    "github pr-review",
+    ["Review of ", pr],
+    target.pr ? el("div", { class: "pr-line", title: target.pr.about || "", text: prLine(target.pr) }) : null,
+    draft.outcome ? el("div", { class: "note", text: draft.outcome }) : null,
+    preview,
+    count,
+    actions,
+  );
+  node.querySelector(".head").append(chip);
+  // The card says what the view has now: edits there show here.
+  const refresh = () => {
+    const [, , verdict] = VERDICTS[review.verdict];
+    chip.textContent = verdict;
+    chip.className = `chip ${VERDICT_CHIP[review.verdict]}`;
+    chip.hidden = review.verdict === "comment";
+    const summary = review.summary.trim();
+    preview.textContent = summary || "No summary: the line comments only.";
+    preview.classList.toggle("empty", !summary);
+    const kept = review.comments.filter((comment) => !comment.removed).length;
+    count.textContent = !comments.length ? "No line comments" : kept === comments.length ? `${comments.length} line comment${comments.length === 1 ? "" : "s"}` : `${kept} of ${comments.length} line comments`;
+  };
+  let view = null;
+  const decide = decider(draft, node, error);
+  // Sent from the view: if it is not posted, the view comes back as the owner left it, with why.
+  const decideInView = decider(draft, node, error, (message) => view.failed(message));
+  const open = () => {
+    view ||= reviewView(draft, review, { decide: decideInView, refresh });
+    view.open();
+  };
+  const show = () =>
+    actions.replaceChildren(
+      error,
+      moreMenu([
+        { text: "Ask to redo…", onclick: () => redoForm(actions, decide, show) },
+        { text: "Reject…", onclick: () => rejectForm(actions, decide, show) },
+      ]),
+      el("button", { type: "button", text: "Review…", onclick: open }),
+    );
+  show();
+  refresh();
+  return node;
+}
+// A comment's diff lines, as the PR shows them: added green, removed red.
+function diffContext(context) {
+  if (!context) return null;
+  return el(
+    "pre",
+    { class: "diff-context" },
+    ...context.split("\n").map((line) => el("span", { class: line.startsWith("+") ? "add" : line.startsWith("-") ? "del" : "", text: `${line}\n` })),
+  );
+}
+// The review, to read and change before it goes out as the owner's: the summary, each line
+// comment with the code it is about (remove one, with Undo), the verdict; sent from here.
+function reviewView(draft, review, { decide, refresh }) {
+  const target = draft.target;
+  const summary = fitting(review.summary, { label: "Summary", max: 14 });
+  summary.placeholder = "No summary: post the line comments only";
+  summary.addEventListener("input", () => {
+    review.summary = summary.value;
+    refresh();
+  });
+  const rows = review.comments.map((comment) => commentRow(comment, refresh));
+  const error = el("p", { class: "error", role: "alert" });
+  const verdict = target.own ? null : el("select", { class: "verdict", "aria-label": "Verdict", title: "What the review says on GitHub" }, ...Object.entries(VERDICTS).map(([value, [, , text]]) => el("option", { value, text })));
+  if (verdict) verdict.value = review.verdict;
+  const send = el("button", { type: "button", class: "send" });
+  const named = () => {
+    send.textContent = VERDICTS[review.verdict][1];
+  };
+  verdict?.addEventListener("change", () => {
+    review.verdict = verdict.value;
+    named();
+    refresh();
+  });
+  named();
+  const footer = el("footer");
+  const close = el("button", { type: "button", class: "icon close", title: "Close (your changes are kept)", "aria-label": "Close", text: "✕" });
+  const about = target.pr?.about ? el("p", { class: "pr-about" }, el("span", { class: "clamp", text: target.pr.about })) : null;
+  if (about && target.pr.about.length > 90) {
+    const more = el("button", { type: "button", class: "link more", text: "more" });
+    more.addEventListener("click", () => {
+      const opened = about.firstChild.classList.toggle("open");
+      more.textContent = opened ? "less" : "more";
+    });
+    about.append(more);
+  }
+  const dialog = el(
+    "dialog",
+    { class: "review-dialog", "data-draft": draft.id, "aria-label": `Review of ${target.repo}#${target.number}` },
+    el(
+      "header",
+      {},
+      el("div", { class: "title" }, el("h2", {}, el("span", { text: "Review of" }), el("a", { href: target.url, target: "_blank", rel: "noreferrer", title: "Open on GitHub", text: `${target.repo}#${target.number} ↗` })), close),
+      target.pr ? el("p", { class: "pr-line", text: prLine(target.pr) }) : null,
+      about,
+    ),
+    el(
+      "div",
+      { class: "review-body" },
+      el("label", { class: "field" }, el("span", { text: "Summary" }), summary),
+      rows.length ? el("h3", {}, "Line comments ", el("span", { class: "count", text: String(rows.length) })) : el("p", { class: "note", text: "No line comments." }),
+      el("div", { class: "review-comments" }, ...rows),
+    ),
+    footer,
+  );
+  // Everything that would go out, as the owner left it.
+  const body = () => ({
+    action: "send",
+    content: {
+      body: review.summary,
+      ...(verdict ? { verdict: review.verdict } : {}),
+      ...Object.fromEntries(review.comments.map((comment, index) => [`comment:${index}`, comment.removed ? "" : comment.text])),
+    },
+  });
+  const sendIt = async () => {
+    error.textContent = "";
+    const kept = review.comments.some((comment) => !comment.removed && comment.text.trim());
+    if (!review.summary.trim() && !kept && review.verdict !== "approve") {
+      error.textContent = "Nothing to post: write a summary or keep a line comment.";
+      return;
+    }
+    dialog.close();
+    await decide(body(), "Posted on GitHub.");
+  };
+  const actions = () => {
+    footer.replaceChildren(
+      error,
+      verdict || el("span", { class: "note", text: "Your own PR: comments only" }),
+      el("span", { class: "spacer" }),
+      el("button", { type: "button", class: "secondary", text: "Ask to redo…", onclick: redo }),
+      send,
+    );
+  };
+  function redo() {
+    const reason = el("input", { placeholder: "What should change? The worker drafts it again.", "aria-label": "What should change?", autocomplete: "off" });
+    const back = () => {
+      actions();
+      send.focus();
+    };
+    const go = async () => {
+      dialog.close();
+      await decide({ action: "revise", reason: reason.value.trim() }, "Sent back to redo. The new draft comes here.");
+    };
+    reason.addEventListener("keydown", (event) => {
+      if (submits(event)) go();
+      if (event.key === "Escape") {
+        event.preventDefault();
+        back();
+      }
+    });
+    footer.replaceChildren(error, reason, el("button", { type: "button", class: "text", text: "Cancel", onclick: back }), el("button", { type: "button", text: "Send back", onclick: go }));
+    reason.focus();
+  }
+  send.addEventListener("click", sendIt);
+  close.addEventListener("click", () => dialog.close());
+  actions();
+  document.body.append(dialog);
+  return {
+    open() {
+      if (!dialog.isConnected) document.body.append(dialog);
+      if (!dialog.open) dialog.showModal();
+      summary.focus();
+    },
+    failed(message) {
+      actions();
+      error.textContent = message;
+      if (!dialog.open) dialog.showModal();
+    },
+  };
+}
+// One line comment in the review view: where, the code, the comment; removed, it stays as a
+// struck-through line with Undo.
+function commentRow(comment, changed) {
+  const lines = comment.start_line ? `${comment.start_line}–${comment.line}` : comment.line;
+  const name = basename(comment.path);
+  const dir = comment.path.slice(0, comment.path.length - name.length);
+  const text = fitting(comment.text, { label: `Comment on ${name}:${lines}`, max: 10 });
+  text.addEventListener("input", () => {
+    comment.text = text.value;
+    changed();
+  });
+  const toggle = el("button", { type: "button", class: "link remove" });
+  const row = el(
+    "div",
+    { class: "review-comment" },
+    el(
+      "div",
+      { class: "where", title: `${comment.path}:${lines}${comment.side === "LEFT" ? " (removed lines)" : ""}` },
+      el("span", { class: "file", text: `${middle(name)}:${lines}` }),
+      comment.side === "LEFT" ? el("span", { class: "side", text: "old" }) : null,
+      dir ? el("span", { class: "dir", text: dir.replace(/\/$/, "") }) : null,
+      toggle,
+    ),
+    diffContext(comment.context),
+    text,
+  );
+  const show = () => {
+    row.classList.toggle("removed", comment.removed);
+    toggle.textContent = comment.removed ? "Undo" : "✕ Remove";
+    toggle.title = comment.removed ? "Keep this comment" : "Leave this comment out";
+  };
+  toggle.addEventListener("click", () => {
+    comment.removed = !comment.removed;
+    show();
+    changed();
+    if (!comment.removed) text.focus();
+  });
+  show();
+  return row;
 }
 // A draft whose sending a stop interrupted, and that could not be confirmed.
 export function uncertainCard(draft) {

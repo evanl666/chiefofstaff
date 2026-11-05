@@ -265,7 +265,10 @@ async def test_the_router_hears_about_related_workers(harness):
     assert "send it to that worker with message_session" in sent
     assert harness.store.messages(router)[-1]["text"] == "你去研究一下openhands的开发历史"
     await runtime.owner_send(router, "book a flight to Tokyo")
-    assert harness.session(router).sent[-1] == said("book a flight to Tokyo")
+    unrelated = harness.session(router).sent[-1]
+    assert (
+        unrelated.startswith(said("book a flight to Tokyo")) and "Earlier workers" not in unrelated
+    )
 
 
 async def test_usage_is_recorded_per_call_and_summed_by_range(harness):

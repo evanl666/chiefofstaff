@@ -9,6 +9,7 @@ import json
 import os
 import re
 from collections.abc import Sequence
+from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
@@ -16,7 +17,7 @@ from uuid import uuid4
 from copilot import ToolResult, define_tool
 from pydantic import BaseModel, Field
 
-from . import prompts, threads
+from . import prompts, receipts, threads
 from .asks import AnswerSession, AskSession, RecordSetup
 from .checks import ProposeChecks
 from .decisions import AckDecision, AskDecision, RecordDecision
@@ -26,7 +27,7 @@ from .learning import ProposeLessons
 from .models import MAX_DRAFT, DraftDecision, NestedArguments
 from .policy import within
 from .roles import ROUTER, SLACK, WATCHDOG, WORKER
-from .sources.github import NO_ACCESS
+from .sources.github import NO_ACCESS, diff_lines, snippet
 from .store import ago_minutes, now
 from .workspaces import resolve_project
 
@@ -169,6 +170,14 @@ class MessageSession(BaseModel):
 
 class ListSessions(BaseModel):
     pass
+
+
+class CheckPrs(BaseModel):
+    prs: list[str] = Field(
+        min_length=1,
+        max_length=10,
+        description="PR URLs or github:<owner/repo>#<n> keys (from reports and list_sessions)",
+    )
 
 
 class ReadSession(BaseModel):
@@ -316,7 +325,10 @@ class InlineComment(BaseModel):
 class DraftGitHubReview(BaseModel):
     repo: str = Field(description="owner/name")
     number: int = Field(description="Pull request number")
-    body: str = Field(description="The review, or your reply to a review comment (markdown)")
+    body: str = Field(
+        description="The review's summary, or your reply to a review comment (markdown). Empty "
+        "for a review of line comments only, when the owner asked for that."
+    )
     comments: list[InlineComment] = Field(
         default_factory=list,
         max_length=50,
@@ -492,6 +504,16 @@ SLACK_ID = re.compile(r"[CDGUW][A-Z0-9]{2,}")
 SLACK_TS = re.compile(r"\d{10}\.\d{6}")
 
 
+def named_pulls(text: str) -> list[str]:
+    """The PRs a text names, as thread keys: by URL or as github:<owner/repo>#<n>."""
+    keys = threads.pull_requests(text or "")
+    keys += [f"github:{repo.lower()}#{n}" for repo, n in GITHUB_KEY.findall(text or "")]
+    return list(dict.fromkeys(keys))
+
+
+GITHUB_KEY = re.compile(r"\bgithub:([\w.-]+/[\w.-]+)#(\d+)")
+
+
 class Tools:
     """Builds the tool definitions and runs their handlers."""
 
@@ -640,6 +662,14 @@ class Tools:
                 "Send a message to an existing worker or the Slack session.",
                 MessageSession,
                 self.t_message_session,
+            ),
+            (
+                "check_prs",
+                "The state of pull requests on GitHub right now: open, merged or closed, each "
+                "check by its latest run (and which fail), the review decision, mergeable. Use "
+                "it to answer about PRs instead of asking a worker or going by earlier reports.",
+                CheckPrs,
+                self.t_check_prs,
             ),
             (
                 "read_session",
@@ -925,7 +955,10 @@ class Tools:
             self.states[caller].turn_tasks.append(task["id"])
         if special:  # Its own tools: see Runtime.tool_names.
             self.store.set(f"{special}:{session_id}", "1")
-        self.runtime.follow(session_id, follow)
+        # A PR the task is about is followed: its reviews, replies and CI come to the worker.
+        self.runtime.follow(
+            session_id, list(dict.fromkeys(follow + named_pulls(params.instructions)))
+        )
         prompt = wrap(
             "router",
             "task",
@@ -1030,7 +1063,8 @@ class Tools:
         if task and task["status"] == "queued" and self.tasks.deps(task["id"]):
             self.store.set(f"released:{task['id']}", "1")  # The Router decides to go ahead.
             self.runtime.background(self.runtime.workers.pump())
-        self.runtime.follow(target["id"], params.follow)
+        pulls = named_pulls(params.text) if target["role"] == WORKER else []
+        self.runtime.follow(target["id"], list(dict.fromkeys(params.follow + pulls)))
         if target["role"] != WORKER:
             await self.delivery.deliver(
                 target["id"],
@@ -1202,15 +1236,62 @@ class Tools:
             entries.append(f"{when} min ago, {kind}: {message['text'][:600]}")
         if steps:
             entries.append(f"{steps} step(s), the last: {last_step[:200]}")
+        task = self.tasks.current(row["id"])
+        brief = self.task_brief(task)
+        if task and brief:
+            # Its PRs as GitHub has them now, not as its report put them.
+            with suppress(Exception):
+                await asyncio.wait_for(self.runtime.task_actions.refresh_prs(task["id"]), 30)
+            if prs := (self.runtime.task_actions.receipts(task) or {}).get("prs"):
+                brief["prs_now"] = [
+                    {k: pr.get(k) for k in ("label", "state", "checks", "failing", "review")}
+                    for pr in prs
+                ]
         return {
             "session_id": row["id"],
             "title": row["title"],
             "status": row["status"],
-            "task": self.task_brief(self.tasks.current(row["id"])),
+            "task": brief,
             "now": self.runtime.progress_line(row) or row["status"],
             "open_in_terminal": self.runtime.copilot_id(row["id"]) in self.runtime.elsewhere,
             "latest": entries[-params.items :],
         }
+
+    async def t_check_prs(self, params: CheckPrs, caller: str):
+        self.caller(caller, ROUTER)
+        found = []
+        for key in dict.fromkeys(named_pulls(" ".join(params.prs))):
+            repo, number = key.removeprefix("github:").rsplit("#", 1)
+            try:
+                view = json.loads(
+                    await self.runtime.github.gh(
+                        "pr", "view", f"https://github.com/{repo}/pull/{number}", "--json",
+                        "title,url,state,isDraft,statusCheckRollup,reviewDecision,mergeable,"
+                        "updatedAt",
+                    )
+                )  # fmt: skip
+            except Exception as exc:
+                found.append({"pr": f"{repo}#{number}", "error": str(exc)[-300:]})
+                continue
+            rollup = view.get("statusCheckRollup") or []
+            found.append(
+                {
+                    "pr": f"{repo}#{number}",
+                    "title": view.get("title", ""),
+                    "url": view.get("url", ""),
+                    "state": "DRAFT" if view.get("isDraft") else view.get("state", ""),
+                    "checks": receipts.checks_state(rollup),
+                    "failing": receipts.failing_checks(rollup),
+                    "review": view.get("reviewDecision") or "none yet",
+                    "mergeable": view.get("mergeable", ""),
+                    "updated": view.get("updatedAt", ""),
+                }
+            )
+            # Task cards with this PR show it as it is now too.
+            self.runtime.background(self.runtime.task_actions.refresh_open_prs(f"{repo}#{number}"))
+        if not found:
+            raise ValueError("Name each PR by its URL or as github:<owner/repo>#<n>.")
+        return {"checked_at": now(), "prs": found}
 
     async def read_terminal_session(self, params: ReadSession) -> dict:
         found = [
@@ -1275,6 +1356,7 @@ class Tools:
                     "title": task["title"],
                     "status": task["status"],
                     "worker": short(task["session_id"]),
+                    **({"prs": prs} if (prs := self.runtime.task_actions.pr_urls(task)) else {}),
                     **(
                         {"after": after}
                         if (after := [d["id"] for d in self.tasks.deps(task["id"])])
@@ -1567,9 +1649,17 @@ class Tools:
             self.runtime.background(
                 self.runtime.workers.pump()
             )  # Tasks waiting for this one may start now.
-        if params.status == "progress":
+        news = self.states[caller].thread_turn and (not task or task["status"] != "running")
+        self.states[caller].thread_turn = False  # It told the owner.
+        if params.status == "progress" and not news:
             return "Noted in your session. The Router is not interrupted for progress."
         await self.runtime.tell_router(row, params.status, params.summary, task)
+        if news and params.status == "progress":
+            # News on a PR it follows, for work already finished: the owner reads it.
+            self.runtime.alert(
+                f"Update on “{row['title']}”", session_id=caller, needs_action=False,
+                title="PR update",
+            )  # fmt: skip
         return "Reported to the Router."
 
     async def t_cancel_task(self, params: CancelTask, caller: str):
@@ -1664,7 +1754,7 @@ class Tools:
         settings = self.store.settings()
         repo = params.repo.lower().strip()
         github = self.runtime.github
-        if not params.body.strip():
+        if not params.body.strip() and (params.in_reply_to or not params.comments):
             raise ValueError("The text is empty.")
         if len(params.body) + sum(len(comment.body) for comment in params.comments) > MAX_DRAFT:
             raise ValueError(f"Too long: keep the review under {MAX_DRAFT} characters.")
@@ -1722,6 +1812,15 @@ class Tools:
                 raise ValueError(f"{repo}#{params.number} is not open.")
             target["head_sha"] = pull["head"]["sha"]
             target["verdict"] = params.verdict
+            # What the PR is, in a line, for the owner to review the review.
+            target["pr"] = {
+                "title": (pull.get("title") or "")[:200],
+                "author": (pull.get("user") or {}).get("login", ""),
+                "about": " ".join((pull.get("body") or "").split())[:300],
+                "additions": pull.get("additions", 0),
+                "deletions": pull.get("deletions", 0),
+                "files": pull.get("changed_files", 0),
+            }
             author = ((pull.get("user") or {}).get("login") or "").lower()
             if author and author == await github.acting_login(repo):
                 # GitHub allows only comments on one's own pull request (one of the owner's
@@ -1729,21 +1828,28 @@ class Tools:
                 target["own"] = True
                 target["verdict"] = "comment"
             if params.comments:
-                if problems := misplaced(
-                    params.comments, await github.diff_lines(repo, params.number)
-                ):
+                files = await github.files(repo, params.number)
+                if problems := misplaced(params.comments, diff_lines(files)):
                     raise ValueError(
                         "GitHub only takes comments on lines of the PR's diff; fix these and "
                         "draft again (or move them into the body):\n- " + "\n- ".join(problems[:20])
                     )
                 target["comments"] = [
-                    comment.model_dump(exclude_defaults=True) | {"side": comment.side}
+                    comment.model_dump(exclude_defaults=True)
+                    | {
+                        "side": comment.side,
+                        # The lines it is about, as the PR shows them.
+                        "context": snippet(files, comment.path, comment.line, comment.side),
+                    }
                     for comment in params.comments
                 ]
             label = {"approve": "Approval", "request_changes": "Changes requested"}.get(
                 target["verdict"], "Review"
             ) + f" of {repo}#{params.number}"
         draft = self.store.create_draft(caller, "github", target, params.body)
+        if task := self.runtime.tasks.current(caller):
+            # Its card shows the PR it is about, as GitHub has it.
+            self.runtime.task_actions.remember_prs(task["id"], target["url"])
         shown = params.body
         if params.comments:
             shown += "\n\nInline comments:\n" + "\n".join(

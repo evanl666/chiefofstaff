@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.1.20 (2026-11-05)
+
+- **PR reviews you can shape**: the card shows the PR in a line (title, author, size) and opens
+  a review view: the summary, and each line comment with the code it is about. Remove a comment
+  you do not want, leave the summary empty to post the line comments alone (it was posted
+  anyway before), change the verdict, or *Ask to redo…* with what to change: the same worker
+  drafts it again. *Ask to redo…* works for Slack and reply drafts too. Long file paths no
+  longer run out of the card.
+- **PRs are followed, and you hear of them**: a worker follows every PR its task names, not
+  only those it opens. When something happens there (someone answers your comment, new
+  commits, CI), it tells you, even after its task is done, and asks how to go on when that is
+  yours to decide. New commits pushed to the PR are news too (who pushed what; before, only
+  when your review was requested again), but not the ones its own worker pushes. Your own
+  review's line comments no longer come back as news, and CI news counts commit statuses too
+  and a check that passes when run again on the same commit.
+- **PR status as it is now**: a card's PR chips (and the Router's answer about them) showed
+  the checks as they were when the worker reported: a PR whose failing check later passed
+  stayed red. They are read again every few minutes and whenever the PR changes, by each
+  check's latest run, and a failing chip names the checks. A review task's card shows the PR
+  it reviews.
+- **"No response was returned"**: when Copilot fails on its side (no answer, overloaded, a
+  dropped connection), the turn is tried again by itself, up to twice, instead of asking you
+  to resend; a turn that had already done something is asked to finish rather than redo it.
+- A review task whose approval you already sent no longer waits in *Ready to review*: the PR it
+  reviewed is not its own work.
+- **Every worker at work is on the board**: *Running* left out a worker handling news on a PR
+  it follows after its task was done, and one at work whose card waited for you. Both show now:
+  "following up on …", or the task marked *Needs you*.
+- A report you opened on a task card (*Show report*) stays open when the card updates: new
+  receipts or a fresh PR state closed it, or left it open under a *Show report* link.
+- Switching language mid-conversation (English after Chinese) while the Router was still busy
+  could get the answer in the old language; that message now gets its own turn.
+- **"Is my PR green?"**: the Router reads PRs on GitHub directly (`check_prs`: checks by their
+  latest run, review, mergeable) and answers at once, instead of asking a worker to look.
+- `scripts/live_wide.py` has 62 scenarios in four shards: shard D covers a language switch while
+  the Router is busy, several PRs' states at once, a fresh PR followed through a review and the
+  author's fix, two jobs in parallel, and redoing a Slack reply. The sales fixture has unique
+  dates, so its only bad rows are the two planted ones.
+
 ## 0.1.19 (2026-11-05)
 
 - A shorter, clearer README (here and on PyPI), in English and Chinese, with a current

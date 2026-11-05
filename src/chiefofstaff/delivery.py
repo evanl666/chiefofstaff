@@ -186,6 +186,8 @@ class Delivery:
                 # The caller hears of the failure and the messages count as not delivered.
                 self.store.delete(f"sending:{session_id}")
                 raise
+            if row["role"] == WORKER and any(m["meta"].get("thread") for m in pending):
+                state.thread_turn, state.thread_nudged = True, False
             if mid_turn:
                 # It sees this once its conversation shows it (events.user_message): a report
                 # before that is about the work without it.

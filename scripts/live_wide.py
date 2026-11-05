@@ -1,4 +1,4 @@
-"""A wide live suite: 52 scenarios of a working day, in three shards that run in parallel
+"""A wide live suite: 62 scenarios of a working day, in four shards that run in parallel
 (each its own Chief of Staff, fake Slack, company search and company bot).
 
 Shard A, the core flow:
@@ -32,6 +32,10 @@ W24 more on the same change: the same worker
 W25 an unrelated change in the same project: a new worker on its own branch
 W26 research, then "fix it": the same worker
 W27 "review and approve this PR": an approval card; sent, GitHub has the approval; no Create PR
+W55 a review with line comments: the PR in a line, the code each is about; redone on request;
+    sent with no summary and one comment removed, GitHub has just the rest
+W57 the PR's author answers the owner's line comment: the reviewer tells the owner, asks what next
+W56 a PR whose check failed and then passed: its card turns green, the Router says passing
 W28 an uploaded skill: a worker uses it
 W29 a SKILL.md without front matter: refused, with how to fix it
 W30 an MCP server added in Settings: a worker calls it
@@ -60,14 +64,23 @@ W49 a 6,000-character message: handled whole
 W50 Learn now reads the owner's words through the connector
 W51 the connector is hidden from the Router and from the tasks
 
+Shard D, this round's flows:
+W58 Chinese, then English while the Router is still on it: the English one answered in English
+W59 three PRs at once (open, merged, closed): each line says so
+W60 a fresh PR reviewed: the review is no news to its worker; the author pushes a fix: the owner
+    hears of it
+W61 two jobs at once: both running, their workers at work; "progress?" names both
+W62 Alice asks in Slack for a number: a reply card, redone on request by the same session
+
 All shards:
 W52 no Router reply names a worker by its session id
 
-    uv run python scripts/live_wide.py A|B|C [W1 W2 …]
+    uv run python scripts/live_wide.py A|B|C|D [W1 W2 …]
 """
 
 import asyncio
 import base64
+import csv
 import json
 import os
 import re
@@ -87,7 +100,9 @@ from fake_slack_mcp import Workspace, serve_in_thread
 from live_e2e import SLACK_TOKEN, App, cleanup, git, log, transcript, wait_for
 from live_parity import COPILOT, setup, write
 
-SHARDS = {"A": (18781, 18911), "B": (18782, 18912), "C": (18783, 18913)}
+SHARDS = {
+    "A": (18781, 18911), "B": (18782, 18912), "C": (18783, 18913), "D": (18784, 18914),
+}  # fmt: skip
 MODEL = "claude-sonnet-5.5"
 CJK = re.compile(r"[\u4e00-\u9fff]")
 NOT_PROSE = re.compile(r"`[^`]*`|https?://\S+|/\S+")
@@ -422,10 +437,19 @@ def sales_question(ctx: Ctx) -> str:
     )
 
 
-async def cleaned_rows(ctx: Ctx, since: str) -> int:
+async def cleaned_rows(ctx: Ctx, since: str) -> list[list[str]]:
+    """The data rows of the cleaned.csv a worker wrote."""
     cleaned = await file_of(ctx, since, "cleaned.csv", "cleaned.csv", 900)
     await asyncio.sleep(3)
-    return len([line for line in cleaned.read_text().splitlines() if line.strip()]) - 1
+    return [row for row in csv.reader(cleaned.read_text().splitlines()) if row][1:]
+
+
+def bad_rows_dropped(ctx: Ctx, rows: list[list[str]]):
+    """Both planted bad rows (a negative quantity, a 100x price) are gone; the rest is kept."""
+    keys = {(row[0], row[1]) for row in rows}
+    for date, region, *_ in ctx.truth["bad_rows"]:
+        assert (date, region) not in keys, f"the bad row {date} {region} is dropped"
+    assert len(rows) == 538, f"only the two bad rows dropped: {len(rows)} kept"
 
 
 PORT_QUESTION = (
@@ -444,10 +468,11 @@ async def w6_answer_on_card(ctx: Ctx):
         assert result["status"] == "running", f"it leaves Needs you at once: {result['status']}"
     else:
         assert result["status"] == "answered"
-    rows = await cleaned_rows(ctx, since)
+    await cleaned_rows(ctx, since)
     await finished(ctx, since, 1, "the cleaning task", 400)
-    log(f"W6: {rows} rows kept")
-    assert rows == 538, "the two bad rows dropped"
+    rows = await cleaned_rows(ctx, since)
+    log(f"W6: {len(rows)} rows kept")
+    bad_rows_dropped(ctx, rows)
     log("W6 passed")
 
 
@@ -964,20 +989,32 @@ async def w26_research_then_fix(ctx: Ctx):
     await router_said(ctx, router, mark)
     given = await task_sessions(ctx, later)
     reopened = (await ctx.app.get(f"/api/tasks/{research['id']}"))["updated_at"] > later
-    log(f"W26: new tasks in {given}; research task reopened: {reopened}")
-    assert given == [research["session_id"]] or (not given and reopened), "the same worker"
+    # The research may have gone to a worker with other work on its branch: then the fix gets
+    # a branch, and a worker, of its own.
+    other_work = [
+        t for t in (await state(ctx))["tasks"]
+        if t["session_id"] == research["session_id"] and t["created_at"] < since
+    ]  # fmt: skip
+    log(f"W26: new tasks in {given}; reopened: {reopened}; researcher had {len(other_work)}")
+    if other_work and given and given != [research["session_id"]]:
+        assert len(given) == 1, "one worker for the fix"
+    else:
+        assert given == [research["session_id"]] or (not given and reopened), "the same worker"
+    fixer = given[0] if given else research["session_id"]
 
     async def done():
         snap = await state(ctx)
-        mine = [t for t in snap["tasks"] if t["session_id"] == research["session_id"]]
+        mine = [t for t in snap["tasks"] if t["session_id"] == fixer]
         return all(t["status"] in FINISHED for t in mine) or None
 
     await wait_for("the money fix", done, 900, ctx.app)
-    assert not await workers_since(ctx, later), "no new worker"
+    if fixer == research["session_id"]:
+        assert not await workers_since(ctx, later), "no new worker"
     log("W26 passed")
 
 
 async def w27_approve(ctx: Ctx):
+    set_check("success")  # Nothing blocks it, whatever an earlier run (W56) left.
     since = now()
     await say(
         ctx,
@@ -1019,6 +1056,402 @@ async def w27_approve(ctx: Ctx):
         for c in checkouts
     ), "nothing to open a PR from"
     log("W27 passed")
+
+
+async def w55_review_redo_and_inline_only(ctx: Ctx):
+    since = now()
+    await say(
+        ctx,
+        f"Review https://github.com/{APPROVE_REPO}/pull/1: put at least two findings as line "
+        "comments on greet.py (small nits are fine), plus a short summary. Comment only, don't "
+        "approve.",
+    )
+
+    async def card(after: str, not_id: str = ""):
+        async def check():
+            snap = await state(ctx)
+            found = [
+                d for d in snap["drafts"]
+                if d["kind"] == "github" and d["created_at"] > after and d["id"] != not_id
+                and d["target"].get("repo") == APPROVE_REPO
+            ]  # fmt: skip
+            return found[0] if found else None
+
+        return await wait_for("a review card", check, 900, ctx.app)
+
+    first = await card(since)
+    target = first["target"]
+    log(f"W55: {target.get('pr')}; {[(c['path'], c['line']) for c in target.get('comments', [])]}")
+    assert target["pr"]["title"] and target["pr"]["author"] == "evan666-lgtm", "the PR in a line"
+    assert len(target["comments"]) >= 2 and all(c["context"] for c in target["comments"])
+    redo_at = now()
+    body = {"action": "revise", "reason": "Make every comment one short sentence."}
+    assert (await ctx.app.post(f"/api/drafts/{first['id']}", body))["status"] == "rejected"
+    second = await card(redo_at, first["id"])
+    assert second["session_id"] == first["session_id"], "the same worker drafts it again"
+    comments = second["target"]["comments"]
+    log(f"W55: redone: {[c['body'] for c in comments]}")
+    assert comments, "line comments again"
+    content = {"body": "", "comment:0": ""} if len(comments) > 1 else {"body": ""}
+    sent = await ctx.app.post(f"/api/drafts/{second['id']}", {"action": "send", "content": content})
+    assert sent["status"] == "sent", sent
+    review = re.search(r"pullrequestreview-(\d+)", sent["outcome"]).group(1)
+    posted = json.loads(subprocess.run(
+        ["gh", "api", f"repos/{APPROVE_REPO}/pulls/1/reviews/{review}"],
+        capture_output=True, text=True, check=True,
+    ).stdout)  # fmt: skip
+    inline = json.loads(subprocess.run(
+        ["gh", "api", f"repos/{APPROVE_REPO}/pulls/1/reviews/{review}/comments"],
+        capture_output=True, text=True, check=True,
+    ).stdout)  # fmt: skip
+    log(f"W55: posted {posted['state']} body {posted['body']!r}, {len(inline)} line comments")
+    assert posted["body"] == "", "no summary: the line comments alone"
+    assert len(inline) == max(1, len(comments) - 1), "the removed one is not posted"
+    ctx.notes["w55"] = {"session": second["session_id"], "comment": inline[0]["id"]}
+    log("W55 passed")
+
+
+async def w57_reply_to_your_comment(ctx: Ctx):
+    """The PR's author answers the owner's line comment on GitHub: the worker that wrote it
+    follows the PR, tells the owner, and asks how to go on."""
+    reviewer, comment = ctx.notes["w55"]["session"], ctx.notes["w55"]["comment"]
+    router = (await state(ctx))["router_id"]
+    mark = max(m["id"] for m in await messages(ctx, router))
+    token = subprocess.run(
+        ["gh", "auth", "token", "--user", "evan666-lgtm"], capture_output=True, text=True,
+        check=True,
+    ).stdout.strip()  # fmt: skip
+    subprocess.run(
+        ["gh", "api", f"repos/{APPROVE_REPO}/pulls/1/comments/{comment}/replies", "--method",
+         "POST", "-f", "body=Fair point, but greet() is only called with validated names. "
+         "OK to leave it as it is?"],
+        capture_output=True, text=True, check=True, env={**os.environ, "GH_TOKEN": token},
+    )  # fmt: skip
+
+    async def told():
+        rows = await ctx.app.get(f"/api/sessions/{router}/messages?after={mark}")
+        news = [m for m in rows if m["kind"] == "inbound" and m["meta"].get("from") == reviewer]
+        snap = await state(ctx)
+        asking = [d for d in snap["drafts"] if d["session_id"] == reviewer]
+        waiting = [
+            t for t in snap["tasks"] if t["session_id"] == reviewer and t["status"] == "waiting"
+        ]
+        return (news, asking, waiting) if news or asking or waiting else None
+
+    news, asking, _ = await wait_for("the owner hears of the reply", told, 900, ctx.app)
+    log(f"W57: news {[m['text'][:300] for m in news]}; cards {[d['kind'] for d in asking]}")
+    said = " ".join(m["text"] for m in news) + " ".join(d["text"] for d in asking)
+    assert re.search(r"valid|leave|repl|answer|回复", said, re.IGNORECASE), "what happened"
+    # GitHub wraps a reply in a review with no text: that is not news of its own.
+    assert not re.search(r"no text|empty review|without (a )?(text|body)", said, re.IGNORECASE)
+    log("W57 passed")
+
+
+def set_check(state: str):
+    """A "validate" check on the test PR's head, set as its owner would see CI report it."""
+    token = subprocess.run(
+        ["gh", "auth", "token", "--user", "evan666-lgtm"], capture_output=True, text=True,
+        check=True,
+    ).stdout.strip()  # fmt: skip
+    env = {**os.environ, "GH_TOKEN": token}
+    sha = subprocess.run(
+        ["gh", "api", f"repos/{APPROVE_REPO}/pulls/1", "--jq", ".head.sha"],
+        capture_output=True, text=True, check=True, env=env,
+    ).stdout.strip()  # fmt: skip
+    subprocess.run(
+        ["gh", "api", f"repos/{APPROVE_REPO}/statuses/{sha}", "--method", "POST",
+         "-f", f"state={state}", "-f", "context=validate", "-f", f"description=live test {state}"],
+        capture_output=True, text=True, check=True, env=env,
+    )  # fmt: skip
+
+
+async def w56_pr_status_now(ctx: Ctx):
+    """PR states are read when asked, and the PR chips on task cards follow GitHub."""
+    set_check("failure")
+    router = (await state(ctx))["router_id"]
+    mark = max(m["id"] for m in await messages(ctx, router))
+    await say(
+        ctx,
+        f"Check https://github.com/{APPROVE_REPO}/pull/1: what state are its CI checks in? "
+        "Report briefly with the PR link. Change nothing.",
+    )
+
+    # The Router may read GitHub itself or have a worker do it: either way the owner hears.
+    async def answered():
+        rows = await ctx.app.get(f"/api/sessions/{router}/messages?after={mark}")
+        said = [
+            m["text"] for m in rows
+            if m["kind"] == "assistant" and re.search(r"fail|失败", m["text"], re.IGNORECASE)
+        ]  # fmt: skip
+        return said or None
+
+    said = await wait_for("the Router tells the CI state", answered, 600, ctx.app)
+    log(f"W56: the Router: {said[0][:300]!r}")
+    assert "validate" in " ".join(said), "the failing check is named"
+    label = f"{APPROVE_REPO}#1".lower()
+
+    def chips(expected: str):
+        """Every task card showing the PR shows it so."""
+
+        async def check():
+            shown = {
+                task["title"]: pr["checks"]
+                for task in (await state(ctx))["tasks"]
+                for pr in (task.get("receipts") or {}).get("prs") or []
+                if pr.get("label", "").lower() == label
+            }
+            return shown if shown and set(shown.values()) == {expected} else None
+
+        return check
+
+    # The review tasks of W27 and W55 are about the PR.
+    before = await wait_for("its cards show failing", chips("failing"), 300, ctx.app)
+    log(f"W56: before {before}")
+    set_check("success")
+    after = await wait_for("its cards turn green", chips("passing"), 420, ctx.app)
+    log(f"W56: after {after}")
+    reply = await ask(ctx, f"What is the CI state of {APPROVE_REPO}#1 right now? One line.")
+    log(f"W56: the Router: {reply!r}")
+    assert re.search(r"pass|green|success|通过", reply, re.IGNORECASE), "as it is now"
+    log("W56 passed")
+
+
+# Shard D, this round's flows
+
+
+async def w58_language_switch_while_busy(ctx: Ctx):
+    """The owner writes in Chinese, then in English while the Router is still on it: the
+    English one is answered in English."""
+    router, mark = await say(ctx, "用中文简单说说: 你能帮我做哪些事? 三条以内.")
+
+    async def busy():
+        return (await session(ctx, router))["status"] == "working" or None
+
+    await wait_for("the Router is on it", busy, 60, ctx.app)
+    await say(ctx, "Which tasks are running right now? One line.")
+
+    async def answered():
+        if (await session(ctx, router))["status"] != "idle":
+            return None
+        rows = await ctx.app.get(f"/api/sessions/{router}/messages?after={mark}")
+        last_owner = max(m["id"] for m in rows if m["kind"] == "owner")
+        after = [m["text"] for m in rows if m["kind"] == "assistant" and m["id"] > last_owner]
+        return after or None
+
+    replies = await wait_for("the English one answered", answered, 300, ctx.app)
+    log(f"W58: {replies!r}")
+    assert not CJK.search(prose(replies[-1])), "in the language of the latest message"
+    log("W58 passed")
+
+
+E2E_REPO = "evanl666/cos-pr-e2e-1793727958"
+
+
+async def w59_several_prs(ctx: Ctx):
+    """The state of three PRs at once, as GitHub has them: open, merged, closed."""
+    since = now()
+    router, mark = await say(
+        ctx,
+        f"Status of these PRs, one line each: https://github.com/{APPROVE_REPO}/pull/1 , "
+        f"https://github.com/{E2E_REPO}/pull/2 and https://github.com/{E2E_REPO}/pull/3",
+    )
+
+    async def answered():
+        tasks = await tasks_since(ctx, since)
+        if any(t["status"] not in FINISHED for t in tasks):
+            return None
+        if (await session(ctx, router))["status"] != "idle":
+            return None
+        rows = await ctx.app.get(f"/api/sessions/{router}/messages?after={mark}")
+        said = "\n".join(m["text"] for m in rows if m["kind"] in {"assistant", "update"})
+        return said if re.search(r"merged", said, re.IGNORECASE) else None
+
+    said = await wait_for("the three states", answered, 600, ctx.app)
+    log(f"W59: {said!r}; workers: {len(await tasks_since(ctx, since))}")
+
+    def line_of(number: int) -> str:
+        # Only #1 is in the other repository: a number names the PR.
+        pattern = rf"(#|/pull/|PR ){number}(?!\d)"
+        return " ".join(line for line in said.splitlines() if re.search(pattern, line))
+
+    assert re.search(r"merged", line_of(2), re.IGNORECASE), f"#2 merged: {line_of(2)!r}"
+    three = line_of(3)
+    assert re.search(r"closed", three, re.IGNORECASE), f"#3 closed: {three!r}"
+    unmerged = r"not merged|without merg|unmerged|n't merged|never merged|未合并"
+    assert not re.search(r"\bmerged\b", three, re.IGNORECASE) or re.search(
+        unmerged, three, re.IGNORECASE
+    ), "#3 is not merged"
+    log("W59 passed")
+
+
+def author_gh(*arguments: str) -> str:
+    """gh as the test PRs' author (evan666-lgtm)."""
+    token = subprocess.run(
+        ["gh", "auth", "token", "--user", "evan666-lgtm"], capture_output=True, text=True,
+        check=True,
+    ).stdout.strip()  # fmt: skip
+    return subprocess.run(
+        ["gh", *arguments], capture_output=True, text=True, check=True,
+        env={**os.environ, "GH_TOKEN": token},
+    ).stdout  # fmt: skip
+
+
+def put_file(branch: str, path: str, text: str, message: str, sha: str = "") -> dict:
+    arguments = [
+        "api", f"repos/{APPROVE_REPO}/contents/{path}", "-X", "PUT", "-f", f"message={message}",
+        "-f", f"content={base64.b64encode(text.encode()).decode()}", "-f", f"branch={branch}",
+    ]  # fmt: skip
+    return json.loads(author_gh(*arguments, *(["-f", f"sha={sha}"] if sha else [])))
+
+
+STATS = "def mean(values):\n    return sum(values) / len(values)\n"
+STATS_FIXED = (
+    'def mean(values):\n    if not values:\n        raise ValueError("mean() of nothing")\n'
+    "    return sum(values) / len(values)\n"
+)
+
+
+async def w60_followed_pr_news(ctx: Ctx):
+    """A fresh PR reviewed with a line comment: the review itself is no news to its worker;
+    the author then pushes a fix, and the owner hears of it."""
+    branch = f"cos-live-{int(time.time())}"
+    main = author_gh("api", f"repos/{APPROVE_REPO}/git/ref/heads/main", "--jq", ".object.sha")
+    author_gh(
+        "api", f"repos/{APPROVE_REPO}/git/refs", "-X", "POST", "-f", f"ref=refs/heads/{branch}",
+        "-f", f"sha={main.strip()}",
+    )  # fmt: skip
+    number = 0
+    try:
+        file = put_file(branch, "stats.py", STATS, "Add mean()")
+        number = json.loads(author_gh(
+            "api", f"repos/{APPROVE_REPO}/pulls", "-X", "POST", "-f", "title=Add mean()",
+            "-f", f"head={branch}", "-f", "base=main", "-f", "body=Adds a mean() helper.",
+        ))["number"]  # fmt: skip
+        url = f"https://github.com/{APPROVE_REPO}/pull/{number}"
+        await say(
+            ctx,
+            f"Review {url}: comment only, don't approve. Put each problem as a line comment on "
+            "stats.py, plus a one-line summary.",
+        )
+
+        async def card():
+            for draft in (await state(ctx))["drafts"]:
+                target = draft["target"]
+                if draft["kind"] == "github" and int(target.get("number") or 0) == number:
+                    return draft
+            return None
+
+        draft = await wait_for("the review card", card, 900, ctx.app)
+        reviewer = draft["session_id"]
+        log(f"W60: {draft['text'][:200]!r}; {len(draft['target'].get('comments') or [])} lines")
+        sent = await ctx.app.post(f"/api/drafts/{draft['id']}", {"action": "send"})
+        assert sent["status"] == "sent", sent
+        mark = max(m["id"] for m in await messages(ctx, reviewer))
+
+        async def activity():
+            return [
+                m["text"] for m in await messages(ctx, reviewer)
+                if m["id"] > mark and m["kind"] == "inbound"
+                and f"#{number}" in m["meta"].get("thread", "")
+            ]  # fmt: skip
+
+        await asyncio.sleep(150)  # The PR is read every two minutes.
+        assert not await activity(), f"its own review is not news: {await activity()}"
+
+        router = (await state(ctx))["router_id"]
+        told_mark = max(m["id"] for m in await messages(ctx, router))
+        put_file(branch, "stats.py", STATS_FIXED, "Handle an empty list", file["content"]["sha"])
+
+        async def pushed():
+            return [text for text in await activity() if "new commit" in text] or None
+
+        news = await wait_for("the reviewer hears of the push", pushed, 300, ctx.app)
+        log(f"W60: the reviewer got {news!r}")
+        assert "Handle an empty list" in news[0] and "evan666-lgtm" in news[0]
+
+        async def told():
+            rows = await ctx.app.get(f"/api/sessions/{router}/messages?after={told_mark}")
+            said = [
+                m["text"] for m in rows
+                if m["kind"] == "inbound" and m["meta"].get("from") == reviewer
+            ]  # fmt: skip
+            said += [d["text"] for d in (await state(ctx))["drafts"] if d["session_id"] == reviewer]
+            return said or None
+
+        said = " ".join(await wait_for("the owner hears", told, 400, ctx.app))
+        log(f"W60: the owner hears {said[:400]!r}")
+        assert re.search(r"commit|push|empty|fix|更新|提交", said, re.IGNORECASE)
+        log("W60 passed")
+    finally:
+        if number:
+            author_gh(
+                "api", f"repos/{APPROVE_REPO}/pulls/{number}", "-X", "PATCH", "-f", "state=closed"
+            )
+        author_gh("api", f"repos/{APPROVE_REPO}/git/refs/heads/{branch}", "-X", "DELETE")
+
+
+async def w61_parallel_on_the_board(ctx: Ctx):
+    """Two jobs at once: both running with their workers at work, and "progress?" names both."""
+    since = now()
+    await say(
+        ctx,
+        f"Two separate jobs, each with its own worker so they run at the same time. (1) In "
+        f"{ctx.project}: run `sleep 75 && wc -l data/sales.csv` and report the output. (2) In "
+        f"{ctx.project}: run `sleep 75 && ls data` and report the output. Change nothing.",
+    )
+
+    async def both():
+        snap = await state(ctx)
+        working = {s["id"] for s in snap["sessions"] if s["status"] == "working"}
+        busy = [
+            t for t in snap["tasks"]
+            if t["created_at"] > since and t["status"] == "running" and t["session_id"] in working
+        ]  # fmt: skip
+        return busy if len({t["session_id"] for t in busy}) >= 2 else None
+
+    busy = await wait_for("both at work", both, 240, ctx.app)
+    titles = [t["title"] for t in busy]
+    log(f"W61: running {titles}")
+    reply = await ask(ctx, "progress?")
+    log(f"W61: {reply!r}")
+    for title in titles:
+        words = [w for w in re.findall(r"\w+", title.lower()) if len(w) > 3]
+        assert any(w in reply.lower() for w in words), f"{title} is named"
+    await finished(ctx, since, 2, "both jobs", 600)
+    log("W61 passed")
+
+
+async def w62_redo_a_slack_reply(ctx: Ctx):
+    """Alice asks in Slack for a number only the project has: a reply card; asked to be
+    redone, the same session drafts it again with what the owner asked for."""
+    since = now()
+    ctx.slack.post(
+        "D0ALICE01", "U0ALICE1",
+        f"Hi! How many data rows does data/sales.csv in {ctx.project} have? Need it for the deck.",
+    )  # fmt: skip
+
+    async def card(after: str, not_id: str = ""):
+        async def check():
+            found = [
+                d for d in (await state(ctx))["drafts"]
+                if d["kind"] in {"reply", "slack"} and d["created_at"] > after
+                and d["id"] != not_id
+            ]  # fmt: skip
+            return found[0] if found else None
+
+        return await wait_for("a reply card", check, 900, ctx.app)
+
+    first = await card(since)
+    log(f"W62: {first['kind']}: {first['text']!r}")
+    redo_at = now()
+    body = {"action": "revise", "reason": "Also say the full file is on the shared drive."}
+    assert (await ctx.app.post(f"/api/drafts/{first['id']}", body))["status"] == "rejected"
+    second = await card(redo_at, first["id"])
+    log(f"W62: redone: {second['text']!r}")
+    assert second["session_id"] == first["session_id"], "the same session"
+    assert "shared drive" in second["text"].lower()
+    assert "540" in second["text"], "the number, still"
+    log("W62 passed")
 
 
 SKILL = """---
@@ -1165,10 +1598,15 @@ async def w34_what_needs_me(ctx: Ctx):
     log(f"W34: {reply!r}")
     assert re.search(r"row|sales|drop|correct", reply, re.IGNORECASE)
     await answer(ctx, waiting, "Correct the negative quantity to 5, and drop the other one.")
-    rows = await cleaned_rows(ctx, since)
+    await cleaned_rows(ctx, since)
     await finished(ctx, since, 1, "the cleaning task", 400)
-    log(f"W34: {rows} rows kept")
-    assert rows == 539
+    rows = await cleaned_rows(ctx, since)
+    log(f"W34: {len(rows)} rows kept")
+    negative, expensive = ctx.truth["bad_rows"]
+    fixed = [row for row in rows if (row[0], row[1]) == (negative[0], negative[1])]
+    assert fixed and float(fixed[0][3]) == 5, f"the negative quantity corrected: {fixed}"
+    assert not any((row[0], row[1]) == (expensive[0], expensive[1]) for row in rows)
+    assert len(rows) == 539
     log("W34 passed")
 
 
@@ -1355,6 +1793,19 @@ async def w38_drafted_replies(ctx: Ctx):
                 log(f"W38: it asks {task['progress'][:200]!r}")
                 body = {"text": "Yes, Nov 20 still holds."}
                 await ctx.app.post(f"/api/tasks/{task['id']}/follow-up", body)
+        # Or the Router asks it in the chat, once for both.
+        router = snap["router_id"]
+        if "router" not in answered and (await session(ctx, router))["status"] == "idle":
+            rows = await messages(ctx, router)
+            owner = max((m["id"] for m in rows if m["kind"] == "owner"), default=0)
+            asked = [
+                m for m in rows
+                if m["id"] > owner and m["kind"] in {"assistant", "update"} and "?" in m["text"]
+            ]  # fmt: skip
+            if asked:
+                answered.add("router")
+                log(f"W38: the Router asks {asked[-1]['text'][:200]!r}")
+                await say(ctx, "Yes, Nov 20 still holds. Draft both replies.")
         return None
 
     found = await wait_for("replies drafted", drafts, 900, ctx.app)
@@ -1447,7 +1898,11 @@ async def w42_away(ctx: Ctx):
     assert away["last"].get("ok")
     assert len(re.findall(r"\[[A-Z2-7]{5}\]", "\n".join(told))) == 1, "one item, told once"
     reply_away(ctx, f"{code} drop them")
-    assert await cleaned_rows(ctx, since) == 538, "the answer came back"
+    await cleaned_rows(ctx, since)
+    await finished(ctx, since, 1, "the cleaning task", 400)
+    rows = await cleaned_rows(ctx, since)
+    log(f"W42: {len(rows)} rows kept")
+    bad_rows_dropped(ctx, rows)
     router = (await state(ctx))["router_id"]
     notices = [m["text"] for m in await messages(ctx, router) if m["meta"].get("away_reply")]
     log(f"W42: {notices}")
@@ -1650,7 +2105,9 @@ SCENARIOS = {
     ],
     "B": [
         w21_bug_fix, w22_diff, w23_create_pr_without_github, w24_more_on_it,
-        w25_unrelated_change, w26_research_then_fix, w27_approve, w28_skill, w29_bad_skill,
+        w25_unrelated_change, w26_research_then_fix, w27_approve, w55_review_redo_and_inline_only,
+        w56_pr_status_now, w57_reply_to_your_comment,
+        w28_skill, w29_bad_skill,
         w30_mcp_from_settings, w31_bad_mcp, w32_plugin, w33_missing_plugin, w34_what_needs_me,
         w35_more_slots, w52_no_ids,
     ],
@@ -1660,6 +2117,10 @@ SCENARIOS = {
         w44_at_the_desk, w45_image_to_router,
         w46_image_to_worker, w47_image_straight_to_worker, w48_fake_image, w49_long_message,
         w50_learn_through_connector, w51_connector_hidden, w52_no_ids,
+    ],
+    "D": [
+        w58_language_switch_while_busy, w59_several_prs, w60_followed_pr_news,
+        w61_parallel_on_the_board, w62_redo_a_slack_reply, w52_no_ids,
     ],
 }  # fmt: skip
 
