@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.19 (2026-11-05)
+
+- A shorter, clearer README (here and on PyPI), in English and Chinese, with a current
+  screenshot of Home. No change to the app.
+
 ## 0.1.18 (2026-11-05)
 
 From a 31-item bug bash, and a new 54-scenario live suite.
