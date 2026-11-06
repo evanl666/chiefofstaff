@@ -351,8 +351,22 @@ class DraftGitHubReview(BaseModel):
     )
     in_reply_to: int = Field(
         default=0,
-        description="To reply to a review comment on the PR: that comment's id (from "
+        description="To reply to a review comment on a line of the PR: that comment's id (from "
         "`gh api repos/<owner/name>/pulls/<number>/comments`). 0 for a review of the whole PR.",
+    )
+    reply_to_comment: int = Field(
+        default=0,
+        description="To answer a comment in the PR's conversation that is not on a line (a "
+        "top-level comment, or the summary of someone's review): its id (an issue comment from "
+        "`gh api repos/<owner/name>/issues/<number>/comments`, or a review from "
+        "`gh api repos/<owner/name>/pulls/<number>/reviews`). GitHub has no replies to those: "
+        "it is posted in the conversation, starting with @ and its author's login.",
+    )
+    resolve: bool = Field(
+        default=False,
+        description="With in_reply_to: resolve the conversation once the reply is posted, "
+        "when your reply says the point is fixed or settled (not when you ask something or "
+        "leave it open). The owner can change it on the card.",
     )
     verdict: Literal["comment", "approve", "request_changes"] = Field(
         default="comment",
@@ -1666,11 +1680,14 @@ class Tools:
                 task = self.tasks.update(task["id"], progress=params.summary[:6000])
             elif task["status"] in {"review", "done"} and params.status == "progress":
                 # News about finished work (PR feedback handled, a question answered): it stays
-                # where it is. A blocker or a question needs the owner, and shows as such.
+                # where it is, and stays in sight until the owner has seen it. A blocker or a
+                # question needs the owner, and shows as such.
+                self.runtime.task_actions.news(task["id"], params.summary)
                 task = self.tasks.update(task["id"], progress=params.summary[:6000])
             elif params.status == "done" and task["status"] == "done" and not asked:
                 # Accepted, or its PR merged: news about it does not reopen the review.
                 self.runtime.task_actions.remember_prs(task["id"], params.summary)
+                self.runtime.task_actions.news(task["id"], params.summary)
                 task = self.tasks.update(task["id"], result=clip_report(params.summary))
             elif params.status == "done":
                 self.store.delete(f"followup:{task['id']}")
@@ -1777,6 +1794,10 @@ class Tools:
         if link and not re.match(r"^https?://\S+$", link):
             raise ValueError("link must be an http(s) URL, or empty.")
         target = {"to": params.to[:200], "where": params.where[:200], "link": link}
+        if pulls := threads.PR_URL.findall(f"{link} {params.where}"):
+            # On a PR: what the owner posts there themself settles it.
+            repo, number = pulls[0]
+            target |= {"repo": repo.lower(), "number": int(number), "anywhere": True}
         draft = self.store.create_draft(caller, "reply", target, text, params.note[:300])
         self.runtime.add_message(
             caller, "draft", text, {"draft_id": draft["id"], "label": f"Reply to {params.to}"}
@@ -1819,14 +1840,22 @@ class Tools:
         settings = self.store.settings()
         repo = params.repo.lower().strip()
         github = self.runtime.github
-        if not params.body.strip() and (params.in_reply_to or not params.comments):
+        if not params.body.strip() and (
+            params.in_reply_to or params.reply_to_comment or not params.comments
+        ):
             raise ValueError("The text is empty.")
         if len(params.body) + sum(len(comment.body) for comment in params.comments) > MAX_DRAFT:
             raise ValueError(f"Too long: keep the review under {MAX_DRAFT} characters.")
-        if params.in_reply_to and params.comments:
-            raise ValueError("A reply to a review comment has no inline comments of its own.")
-        if params.in_reply_to and params.verdict != "comment":
-            raise ValueError("A reply to a review comment has no verdict: leave verdict out.")
+        reply = params.in_reply_to or params.reply_to_comment
+        if params.in_reply_to and params.reply_to_comment:
+            raise ValueError("Reply to a line comment (in_reply_to) or to a conversation comment "
+                             "(reply_to_comment), not both.")  # fmt: skip
+        if reply and params.comments:
+            raise ValueError("A reply to a comment has no inline comments of its own.")
+        if reply and params.verdict != "comment":
+            raise ValueError("A reply to a comment has no verdict: leave verdict out.")
+        if params.resolve and not params.in_reply_to:
+            raise ValueError("Only a conversation on a line (in_reply_to) can be resolved.")
         try:
             pull = await github.pull(repo, params.number)
         except RuntimeError as exc:
@@ -1868,9 +1897,20 @@ class Tools:
             "url": f"https://github.com/{repo}/pull/{params.number}",
             "via": "connected" if connected else "task",
         }
+        body = params.body
         if params.in_reply_to:
             target["in_reply_to"] = params.in_reply_to
             target["comment"] = await github.review_comment(repo, params.number, params.in_reply_to)
+            if params.resolve:
+                target["resolve"] = True
+            label = f"Reply on {repo}#{params.number}"
+        elif params.reply_to_comment:
+            target["reply_to_comment"] = params.reply_to_comment
+            target["comment"] = await github.conversation_comment(
+                repo, params.number, params.reply_to_comment
+            )
+            # Who it answers is named: a conversation comment has no thread to reply in.
+            body = mention(body, target["comment"]["author"])
             label = f"Reply on {repo}#{params.number}"
         else:
             if pull.get("state") != "open":
@@ -1911,11 +1951,11 @@ class Tools:
             label = {"approve": "Approval", "request_changes": "Changes requested"}.get(
                 target["verdict"], "Review"
             ) + f" of {repo}#{params.number}"
-        draft = self.store.create_draft(caller, "github", target, params.body)
+        draft = self.store.create_draft(caller, "github", target, body)
         if task := self.runtime.tasks.current(caller):
             # Its card shows the PR it is about, as GitHub has it.
             self.runtime.task_actions.remember_prs(task["id"], target["url"])
-        shown = params.body
+        shown = body
         if params.comments:
             shown += "\n\nInline comments:\n" + "\n".join(
                 f"- {c.path}:{c.line}: {c.body}" for c in params.comments
@@ -2116,3 +2156,10 @@ class Tools:
                 },
             )
         return f"Recorded: {action}."
+
+
+def mention(body: str, login: str) -> str:
+    """A reply that names whom it answers: "@login " first, unless it mentions them already."""
+    if not login or re.search(rf"(?<![\w-])@{re.escape(login)}(?![\w-])", body, re.IGNORECASE):
+        return body
+    return f"@{login} {body.lstrip()}"

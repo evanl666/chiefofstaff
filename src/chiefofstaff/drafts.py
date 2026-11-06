@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -147,6 +148,10 @@ class Drafts:
                 outcome = await self.runtime.slack.send(draft["target"], final)
             else:
                 outcome = await self.runtime.github.publish_review(draft["target"], final)
+                if draft["target"].get("in_reply_to") and decision.content.get(
+                    "resolve", draft["target"].get("resolve", False)
+                ):
+                    outcome += await self.resolve_conversation(draft)
         except Exception as exc:
             error = describe(exc)[:1000]
             draft = self.store.update_draft(
@@ -277,6 +282,8 @@ class Drafts:
                     found = await self.runtime.slack.find_sent(draft["target"], text, created)
                 elif draft["kind"] == "github" and draft["target"].get("in_reply_to"):
                     found = await self.runtime.github.find_reply(draft["target"], text)
+                elif draft["kind"] == "github" and draft["target"].get("reply_to_comment"):
+                    found = await self.runtime.github.find_conversation_reply(draft["target"], text)
                 elif draft["kind"] == "github":
                     found = await self.runtime.github.find_review(draft["target"], text)
                 else:
@@ -423,6 +430,57 @@ class Drafts:
             self.store.delete(f"draft_sent:{task_id}")
             self.runtime.task_actions.accept(task_id)
 
+    async def resolve_conversation(self, draft: dict) -> str:
+        """After a reply on a line: its conversation resolved, as the owner chose. The reply is
+        posted either way: a failure here is said, not raised."""
+        try:
+            why = await self.runtime.github.resolve_thread(draft["target"])
+        except Exception as exc:
+            why = describe(exc)[:300]
+        return " · conversation resolved" if not why else f" · not resolved: {why}"
+
+    async def check_posted_by_owner(self, every: float = 120):
+        """A GitHub draft the owner copied and posted themself (perhaps edited a little) is
+        sent: its card leaves, and its session is told, so nobody asks about it again."""
+        for draft in self.store.drafts("pending"):
+            # A GitHub draft, or one the owner sends themself on a PR (its link is the PR).
+            if draft["kind"] != "github" and not draft["target"].get("repo"):
+                continue
+            created = datetime.fromisoformat(draft["created_at"]).timestamp()
+            last = float(self.store.get(f"postcheck:{draft['id']}") or 0)
+            if time.time() - created < 60 or time.time() - last < every:
+                continue
+            self.store.set(f"postcheck:{draft['id']}", str(time.time()))
+            text = draft["final_text"] or draft["text"]
+            if not text.strip():
+                continue
+            try:
+                found = await self.runtime.github.owner_posted(
+                    draft["target"], text, since=draft["created_at"]
+                )
+            except Exception:
+                logger.info("Could not look for draft %s on GitHub.", draft["id"], exc_info=True)
+                continue
+            if not found:
+                continue
+            async with self.draft_lock:
+                if self.store.draft(draft["id"])["status"] != "pending":
+                    continue
+                draft = self.store.update_draft(
+                    draft["id"],
+                    status="sent",
+                    outcome=f"You posted it yourself on GitHub: {found}"[:1000],
+                    resolved_at=now(),
+                )
+            self.bus.publish("draft", draft)
+            self.after_sent(draft, found)
+            await self.settle_task(draft)
+            await self.tell_drafter(
+                draft,
+                f"The owner posted draft {draft['id']} on GitHub themself ({found}): it is sent. "
+                "Do not ask about sending it again.",
+            )
+
     def after_sent(self, draft: dict, outcome: str):
         """The drafting session now owns the conversation: it follows the thread or PR."""
         target = draft["target"]
@@ -460,7 +518,11 @@ class Drafts:
         if not row or row["closed_at"]:
             return
         if not wake:
-            self.runtime.add_message(row["id"], "notice", text)
+            # Not worth a turn of its own, but it must know (or it asks about the draft again):
+            # it reads this with its next message.
+            self.delivery.hold(
+                row["id"], wrap("system", "draft-outcome", text), kind="notice", display=text
+            )
             return
         try:
             await self.delivery.deliver(

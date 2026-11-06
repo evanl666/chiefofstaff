@@ -1,6 +1,6 @@
-"""A wide live suite: 79 scenarios of a working day, in six shards that run in parallel
-(each its own Chief of Staff, fake Slack, company search and company bot). B and E set checks
-on the same test PR: run them one after the other.
+"""A wide live suite: 85 scenarios of a working day, in seven shards that run in parallel
+(each its own Chief of Staff, fake Slack, company search and company bot). B, E and G set
+checks on the same test PR: run them one after the other.
 
 Shard A, the core flow:
 W1  ask: the task shows at once, the Router answers in a line, the right result
@@ -96,10 +96,20 @@ E16 a quiet finished worker lets go of its Copilot session (its MCP server ends)
 Shard F, a computer low on memory:
 F1  new work waits and says why; nothing starts; the Router tells the owner
 
+Shard G, round two:
+G1  a failing run, the fix, the same tests run again by a sub-agent: the card says passed
+G2  news on a followed PR for an accepted task: under Ready to review (Update) until Got it
+G3  an answer to an overall PR comment starts with @ its author; posted in the conversation
+G4  a reply on a line sent with "resolve": the conversation is resolved on GitHub
+G5  the owner posts a drafted reply themself, edited a little: the draft settles, its worker
+    is told
+G6  a worker given a second task while on its first: one card, a line per task; its menu
+    reads; Settings closes with a click around it
+
 All shards:
 W52 no Router reply names a worker by its session id
 
-    uv run python scripts/live_wide.py A|B|C|D|E|F [W1 E1 …]  (E needs --with playwright)
+    uv run python scripts/live_wide.py A|B|C|D|E|F|G [W1 E1 …]  (E needs --with playwright)
 """
 
 import asyncio
@@ -126,7 +136,7 @@ from live_parity import COPILOT, setup, write
 
 SHARDS = {
     "A": (18781, 18911), "B": (18782, 18912), "C": (18783, 18913), "D": (18784, 18914),
-    "E": (18785, 18915), "F": (18786, 18916),
+    "E": (18785, 18915), "F": (18786, 18916), "G": (18787, 18917),
 }  # fmt: skip
 MODEL = "claude-sonnet-5.5"
 CJK = re.compile(r"[\u4e00-\u9fff]")
@@ -2643,6 +2653,265 @@ async def f1_low_memory(ctx: Ctx):
     log("F1 passed")
 
 
+# Shard G, round two: newer runs in sub-agents, news in sight, replies that name and resolve,
+# drafts the owner posted, a worker with two tasks
+
+
+def tester(*arguments: str) -> str:
+    """gh as the test account: the PR's author, and the reviewer whose comments are answered."""
+    token = subprocess.run(
+        ["gh", "auth", "token", "--user", "evan666-lgtm"], capture_output=True, text=True,
+        check=True,
+    ).stdout.strip()  # fmt: skip
+    return subprocess.run(
+        ["gh", *arguments], capture_output=True, text=True, check=True,
+        env={**os.environ, "GH_TOKEN": token},
+    ).stdout  # fmt: skip
+
+
+def owner_gh(*arguments: str) -> str:
+    return subprocess.run(["gh", *arguments], capture_output=True, text=True, check=True).stdout
+
+
+async def drafted(ctx: Ctx, what: str, check, timeout=600) -> dict:
+    async def found():
+        return next((d for d in (await state(ctx))["drafts"] if check(d)), None)
+
+    return await wait_for(what, found, timeout, ctx.app)
+
+
+async def g1_sub_agent_runs_again(ctx: Ctx):
+    """A failing run, the fix, and the same tests run again by a sub-agent: the card says
+    they passed (failed first, then passed)."""
+    since = now()
+    await say(
+        ctx,
+        f"In the calc project ({ctx.notes['calc']}), run `uv run --with pytest python -m pytest "
+        "-q subtract` once (it fails). Then fix sub in calc.py, and have a sub-agent (your task "
+        "tool) run that same command again to check the fix. Report done with the result.",
+    )
+    task = await titled(ctx, since, "")
+    done = await task_status(ctx, task["id"], FINISHED, "its report", 900)
+    tests = done["receipts"]["tests"]
+    used = [s for s in await steps(ctx, task["session_id"]) if s.split(" ")[0] in {"task", "agent"}]
+    log(f"G1: tests {tests}; flags {done['receipts']['flags']}; sub-agent steps {used}")
+    assert tests["passed"] is True and tests["failed_before"], "the newer run counts"
+    assert not any("test run failed" in flag for flag in done["receipts"]["flags"])
+    log("G1 passed")
+
+
+async def g2_news_stays_in_sight(ctx: Ctx):
+    """News on a followed PR, for a task already accepted, waits under Ready to review (or as
+    a question under Needs you) until the owner has seen it."""
+    set_check("success")
+    since = now()
+    await say(
+        ctx,
+        f"Follow https://github.com/{APPROVE_REPO}/pull/1 for me: report done now with its CI "
+        "state in one line, and from then on tell me whenever its CI changes.",
+    )
+    task = await titled(ctx, since, "")
+    first = await task_status(ctx, task["id"], FINISHED, "its first report", 600)
+    if first["status"] == "review":
+        await ctx.app.post(f"/api/tasks/{task['id']}/accept", {})
+    set_check("failure")
+
+    async def heard():
+        current = await ctx.app.get(f"/api/tasks/{task['id']}")
+        return current if current.get("news") or current["status"] == "waiting" else None
+
+    news = await wait_for("the news stays in sight", heard, 720, ctx.app)
+    log(f"G2: {news['status']}; news {news.get('news')}; progress {news['progress'][:200]!r}")
+    if news.get("news"):
+        from playwright.async_api import async_playwright, expect
+
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch()
+            page = await browser.new_page(viewport={"width": 1400, "height": 900})
+            await page.goto(f"{ctx.app_base}/#token={ctx.app.launch_token}")
+            card = page.locator("#tasks-review .card.task").filter(
+                has=page.locator(".head .title", has_text=news["title"])
+            )
+            await expect(card.locator(".news .chip")).to_have_text("Update", timeout=20000)
+            await card.screenshot(path=SCRIPTS.parent / "browser-shots" / "live-g-news.png")
+            await card.get_by_role("button", name="Got it").click()
+            await expect(card).to_have_count(0, timeout=10000)
+            await browser.close()
+        assert (await ctx.app.get(f"/api/tasks/{task['id']}"))["news"] is None
+    set_check("success")
+    log("G2 passed")
+
+
+async def g3_answer_names_the_commenter(ctx: Ctx):
+    """An answer to an overall comment on a PR starts with @ and its author's login."""
+    stamp = int(time.time())
+    comment = json.loads(tester(
+        "api", f"repos/{APPROVE_REPO}/issues/1/comments", "-f",
+        f"body=Overall question ({stamp}): why does greet() return a string instead of printing?",
+    ))  # fmt: skip
+    await say(
+        ctx,
+        f"On https://github.com/{APPROVE_REPO}/pull/1, evan666-lgtm asked an overall question "
+        f"(comment {comment['id']}, not on a line). Draft a reply for me: it returns a string so "
+        "callers and tests can use it. I will approve it.",
+    )
+    draft = await drafted(ctx, "the reply", lambda d: d["kind"] == "github"
+                          and d["target"].get("reply_to_comment") == comment["id"])  # fmt: skip
+    log(f"G3: {draft['text']!r}")
+    assert draft["text"].startswith("@evan666-lgtm"), "names whom it answers"
+    sent = await ctx.app.post(f"/api/drafts/{draft['id']}", {"action": "send"})
+    posted = json.loads(owner_gh("api", f"repos/{APPROVE_REPO}/issues/1/comments?per_page=100"))
+    mine = [c for c in posted if c["user"]["login"] == "evanl666" and c["created_at"] >= comment[
+        "created_at"] and c["body"].startswith("@evan666-lgtm")]  # fmt: skip
+    log(f"G3: sent {sent.get('outcome', '')!r}; on GitHub {[c['html_url'] for c in mine]}")
+    assert mine, "posted in the conversation, naming its author"
+    for item in mine:
+        owner_gh("api", "-X", "DELETE", f"repos/{APPROVE_REPO}/issues/comments/{item['id']}")
+    tester("api", "-X", "DELETE", f"repos/{APPROVE_REPO}/issues/comments/{comment['id']}")
+    log("G3 passed")
+
+
+async def g4_reply_resolves(ctx: Ctx):
+    """A reply on a line, sent with "resolve": the conversation on GitHub is resolved."""
+    stamp = int(time.time())
+    sha = json.loads(tester("api", f"repos/{APPROVE_REPO}/pulls/1"))["head"]["sha"]
+    comment = json.loads(tester(
+        "api", f"repos/{APPROVE_REPO}/pulls/1/comments", "-f", f"body=Please add a docstring "
+        f"({stamp}).", "-f", f"commit_id={sha}", "-f", "path=greet.py", "-F", "line=1",
+        "-f", "side=RIGHT",
+    ))  # fmt: skip
+    await say(
+        ctx,
+        f"On https://github.com/{APPROVE_REPO}/pull/1, evan666-lgtm commented on greet.py "
+        f"(review comment {comment['id']}). Draft a reply saying it is handled (a docstring "
+        "lands in the next commit), and resolve that conversation once the reply is posted.",
+    )
+    draft = await drafted(ctx, "the reply", lambda d: d["kind"] == "github"
+                          and d["target"].get("in_reply_to") == comment["id"])  # fmt: skip
+    log(f"G4: {draft['text']!r}; resolve proposed {draft['target'].get('resolve')}")
+    assert draft["target"].get("resolve"), "the worker proposes resolving it"
+    sent = await ctx.app.post(
+        f"/api/drafts/{draft['id']}", {"action": "send", "content": {"resolve": True}}
+    )
+    log(f"G4: {sent.get('outcome')!r}")
+    assert "conversation resolved" in sent.get("outcome", "")
+    query = (
+        'query{repository(owner:"evan666-lgtm",name:"cos-approve-test"){pullRequest(number:1)'
+        "{reviewThreads(first:100){nodes{isResolved comments(first:5){nodes{databaseId}}}}}}}"
+    )
+    found = json.loads(tester("api", "graphql", "-f", f"query={query}"))
+    threads_ = found["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
+    mine = [
+        t for t in threads_ if comment["id"] in {c["databaseId"] for c in t["comments"]["nodes"]}
+    ]
+    assert mine and mine[0]["isResolved"], "resolved on GitHub"
+    tester("api", "-X", "DELETE", f"repos/{APPROVE_REPO}/pulls/comments/{comment['id']}")
+    log("G4 passed")
+
+
+async def g5_owner_posted_it(ctx: Ctx):
+    """The owner copies a drafted reply and posts it themself, a little edited: the draft is
+    settled as sent and its worker is told, so nobody asks about it again."""
+    stamp = int(time.time())
+    comment = json.loads(tester(
+        "api", f"repos/{APPROVE_REPO}/issues/1/comments", "-f",
+        f"body=Could you also mention greet() in the README? ({stamp})",
+    ))  # fmt: skip
+    await say(
+        ctx,
+        f"On https://github.com/{APPROVE_REPO}/pull/1, draft a reply to evan666-lgtm's comment "
+        f"{comment['id']}: yes, a README note follows in this PR. Do not send it; I will.",
+    )
+    # As an answer to that comment, or as a comment on the PR that names its author.
+    draft = await drafted(ctx, "the reply", lambda d: d["kind"] == "github" and (
+        d["target"].get("reply_to_comment") == comment["id"] or "README" in d["text"]))  # fmt: skip
+    log(f"G5: drafted {draft['text']!r} as {sorted(draft['target'])}")
+    posted = json.loads(owner_gh(
+        "api", f"repos/{APPROVE_REPO}/issues/1/comments", "-f", f"body={draft['text']} Thanks!",
+    ))  # fmt: skip
+
+    async def settled():
+        snap = await state(ctx)
+        still = any(d["id"] == draft["id"] for d in snap["drafts"])
+        return None if still else True
+
+    await wait_for("the draft is settled", settled, 420, ctx.app)
+    told = [
+        m["text"] for m in await messages(ctx, draft["session_id"]) if "posted draft" in m["text"]
+    ]
+    log(f"G5: told {told}")
+    assert told and posted["html_url"] in told[-1]
+    for item in (posted["id"],):
+        owner_gh("api", "-X", "DELETE", f"repos/{APPROVE_REPO}/issues/comments/{item}")
+    tester("api", "-X", "DELETE", f"repos/{APPROVE_REPO}/issues/comments/{comment['id']}")
+    log("G5 passed")
+
+
+async def g6_two_tasks_one_worker(ctx: Ctx):
+    """A worker given a second task while on its first: one card for the worker, a line per
+    task (the one it is on, the other waiting its turn); its menu and Settings behave."""
+    since = now()
+    await say(ctx, "Start a worker titled 'Twin Tasks' (no project): run `sleep 150`, then "
+              "report 'first done'.")  # fmt: skip
+    first = await titled(ctx, since, "twin")
+
+    async def sleeping():
+        row = await session(ctx, first["session_id"])
+        return row if "sleep" in (row.get("step") or "") else None
+
+    await wait_for("it sleeps", sleeping, 300, ctx.app)
+    later = now()
+    await say(
+        ctx,
+        "Give the Twin Tasks worker a second, separate task (a new task for that same worker, "
+        "not a new worker): write the word second into second.txt in its folder.",
+    )
+
+    async def second():
+        found = [t for t in await tasks_since(ctx, later) if t["session_id"] == first["session_id"]]
+        return found[0] if found else None
+
+    other = await wait_for("its second task", second, 300, ctx.app)
+    from playwright.async_api import async_playwright, expect
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch()
+        page = await browser.new_page(viewport={"width": 1400, "height": 900})
+        errors: list[str] = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        await page.goto(f"{ctx.app_base}/#token={ctx.app.launch_token}")
+        group = page.locator(".card.worker-group").filter(
+            has=page.locator(".head .title", has_text="Twin Tasks")
+        )
+        open_now = [t for t in (await state(ctx))["tasks"] if t["session_id"] == first["session_id"]
+                    and t["status"] in {"running", "queued", "waiting"}]  # fmt: skip
+        log(f"G6: open tasks {[(t['title'], t['status']) for t in open_now]}")
+        if len(open_now) >= 2:
+            await expect(group.locator(".task-row")).to_have_count(len(open_now), timeout=20000)
+            # Still in the sleep it began before the second task came: on the first one.
+            if "sleep" in ((await session(ctx, first["session_id"])).get("step") or ""):
+                await expect(group.locator(".task-row.now .title")).to_have_text("Twin Tasks")
+            await group.screenshot(path=SCRIPTS.parent / "browser-shots" / "live-g-group.png")
+            row = group.locator(".task-row").first
+            await row.locator(".more-button").click()
+            danger = row.locator(".menu button.danger")
+            colors = await danger.evaluate(
+                "(b) => [getComputedStyle(b).color, getComputedStyle(b).backgroundColor]"
+            )
+            assert colors[0] != colors[1], colors
+            await page.keyboard.press("Escape")
+        await page.locator("#settings-button").click()
+        await expect(page.locator("#settings-dialog")).to_be_visible()
+        await page.mouse.click(10, 450)
+        await expect(page.locator("#settings-dialog")).to_be_hidden()
+        await browser.close()
+        assert not errors, errors
+    assert len(open_now) >= 2, "both its tasks were open at once"
+    await finished(ctx, since, 2, "both tasks", 900)
+    assert other["session_id"] == first["session_id"]
+    log("G6 passed")
+
+
 SCENARIOS = {
     "A": [
         w1_ask, w2_progress, w3_answered_directly, w4_pasted_orders, w5_chinese_log,
@@ -2678,6 +2947,10 @@ SCENARIOS = {
         e14_card_follows_the_fix, e15_browser, e16_quiet_worker_lets_go, w52_no_ids,
     ],
     "F": [f1_low_memory],
+    "G": [
+        g1_sub_agent_runs_again, g2_news_stays_in_sight, g3_answer_names_the_commenter,
+        g4_reply_resolves, g5_owner_posted_it, g6_two_tasks_one_worker, w52_no_ids,
+    ],
 }  # fmt: skip
 
 
@@ -2712,7 +2985,7 @@ async def main():
         passed: list[str] = []
         try:
             extra = []
-            if shard == "E":
+            if shard in {"E", "G"}:
                 ctx.notes["calc"] = calc_project(root)
                 extra = [str(ctx.notes["calc"])]
             await settings(

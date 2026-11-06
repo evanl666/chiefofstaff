@@ -681,6 +681,145 @@ async def this_round(runtime, browser, failures: list[str]):
     await context.close()
 
 
+async def round_two(runtime, browser, failures: list[str]):
+    """A risky menu item is readable; a click around a dialog closes it (a selection dragged
+    out of it does not); news on finished work waits under Ready to review until seen; a
+    worker with two tasks shows which it is on; replies say whom they answer and can resolve."""
+    store = runtime.store
+    router = store.get("router_id")
+
+    async def start(title, **extra):
+        result = await call_tool(runtime, "spawn_worker", router, title=title,
+                                 instructions=title, why_new="test", **extra)  # fmt: skip
+        return json.loads(result.text_result_for_llm)["session_id"]
+
+    first = await start("Editor event paths")
+    await settle(runtime)
+    second = await call_tool(runtime, "message_session", router, session_id=first,
+                             text="Also fix the review comments", task="new",
+                             title="Fix review comments on lms")  # fmt: skip
+    assert second.result_type == "success", second.text_result_for_llm
+    quiet = await start("Buyer Group Graph 7-pager")
+    await settle(runtime)
+    runtime.update_session(quiet, status="idle", activity="")  # Between turns, its task on.
+    store.execute("UPDATE sessions SET updated_at=? WHERE id=?",
+                  ("2026-11-05T09:00:00+00:00", quiet))  # fmt: skip
+    finished = await start("Filter opt-outs before inference")
+    await call_tool(runtime, "report", finished, status="done", summary="Opened acme/app#71.")
+    runtime.task_actions.accept(runtime.tasks.current(finished)["id"])
+    news = "PR 71 is approved and ready to merge: you need to click merge."
+    await call_tool(runtime, "report", finished, status="progress", summary=news)
+    reviewing = await start("Answer PR comments")
+    for target, text in [
+        ({"repo": "acme/model", "number": 1043, "url": "https://github.com/acme/model/pull/1043",
+          "via": "task", "in_reply_to": 21, "resolve": True, "comment": {"author": "ygchen",
+          "body": "Opt-out titles are not removed", "path": "seeds.py", "line": 117, "url": "u"}},
+         "Fixed in f61047fa."),
+        ({"repo": "acme/model", "number": 1043, "url": "https://github.com/acme/model/pull/1043",
+          "via": "task", "reply_to_comment": 55, "comment": {"author": "ckrsek", "body":
+          "Overall: please document the filter.", "url": "u"}}, "@ckrsek Documented in README."),
+    ]:  # fmt: skip
+        draft = store.create_draft(reviewing, "github", target, text)
+        runtime.bus.publish("draft", draft)
+    await settle(runtime)
+
+    context = await browser.new_context(viewport={"width": 1400, "height": 900})
+    page = await context.new_page()
+    page.on("pageerror", lambda error: failures.append(str(error)))
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    board = page.locator("#tasks")
+
+    def titled(title):
+        return board.locator(".card.task").filter(has=page.locator(".head .title", has_text=title))
+
+    # One card for the worker, a line per task: the new one it is on first, the earlier one
+    # waiting its turn.
+    group = board.locator(".card.worker-group").filter(
+        has=page.locator(".head .title", has_text="Editor event paths")
+    )
+    rows = group.locator(".task-row")
+    await expect(rows).to_have_count(2, timeout=15000)
+    await expect(group.locator(".head .meta")).to_have_text("2 tasks")
+    await expect(rows.nth(0).locator(".title")).to_have_text("Fix review comments on lms")
+    await expect(rows.nth(0)).to_have_class(re.compile(r"\bnow\b"))
+    await expect(rows.nth(0).locator(".state")).to_contain_text("on it now")
+    await expect(rows.nth(1).locator(".title")).to_have_text("Editor event paths")
+    await expect(rows.nth(1).locator(".state")).to_have_text("waits its turn")
+    await expect(group.locator(".activity")).to_have_count(1)
+    assert await titled("Fix review comments on lms").count() == 0, "not a card of its own too"
+    await group.screenshot(path=SHOTS / "ui-edges-worker-group.png")
+    # A step it began before the newer task came (a long sleep) is about the earlier task.
+    newer = next(t for t in runtime.tasks.for_session(first) if t["title"].startswith("Fix"))
+    store.execute("UPDATE tasks SET created_at=? WHERE id=?",
+                  ("2099-01-01T00:00:00+00:00", newer["id"]))  # fmt: skip
+    runtime.states.handle(first).emit(
+        "tool.execution_start", tool_name="bash", tool_call_id="sleep-1",
+        arguments={"command": "sleep 150"},
+    )  # fmt: skip
+    runtime.task_actions.publish(runtime.tasks.get(newer["id"]))
+    await expect(rows.nth(0).locator(".title")).to_have_text("Editor event paths", timeout=10000)
+    await expect(rows.nth(1).locator(".state")).to_have_text("waits its turn")
+    runtime.states.handle(first).emit("tool.execution_complete", tool_call_id="sleep-1",
+                                      success=True)  # fmt: skip
+    store.execute("UPDATE tasks SET created_at=? WHERE id=?",
+                  (newer["created_at"], newer["id"]))  # fmt: skip
+    runtime.task_actions.publish(runtime.tasks.get(newer["id"]))
+    idle = titled("Buyer Group Graph 7-pager")
+    await expect(idle.locator(".activity")).to_contain_text("Quiet since")
+    log("a worker with two tasks: the one it is on, and the next; a quiet one says since when")
+
+    update = page.locator("#tasks-review .card.task", has_text="Filter opt-outs before inference")
+    await expect(update.locator(".news")).to_contain_text("approved and ready to merge")
+    await expect(update.locator(".news .chip")).to_have_text("Update")
+    await update.get_by_role("button", name="Got it").click()
+    await expect(update).to_have_count(0, timeout=10000)
+    await expect(
+        page.locator("#tasks-recent .card.task", has_text="Filter opt-outs")
+    ).to_have_count(1)
+    log("news on finished work: under Ready to review until Got it, then back with the finished")
+
+    # The reply itself is in a text box: the cards are found by what they answer.
+    line_reply = page.locator(".card.draft", has_text="Opt-out titles are not removed")
+    resolve = line_reply.locator('label.resolve input[type="checkbox"]')
+    await expect(resolve).to_be_checked()
+    talk = page.locator(".card.draft", has_text="please document the filter")
+    await expect(talk.locator(".quoted")).to_contain_text("ckrsek: Overall: please document")
+    await expect(talk.locator("label.resolve")).to_have_count(0)
+    await line_reply.screenshot(path=SHOTS / "ui-edges-reply-resolve.png")
+    log("a reply on a line can resolve its conversation; one in the conversation names its author")
+
+    card = rows.nth(0)
+    await card.locator(".more-button").click()
+    danger = card.locator(".menu button.danger")
+    await expect(danger).to_have_text("Cancel task…")
+    colors = await danger.evaluate(
+        "(b) => [getComputedStyle(b).color, getComputedStyle(b).backgroundColor]"
+    )
+    assert colors[0] != colors[1] and colors[1] in {"rgba(0, 0, 0, 0)", "transparent"}, colors
+    await card.screenshot(path=SHOTS / "ui-edges-menu-danger.png")
+    await page.keyboard.press("Escape")
+    log("a risky item in a menu is red text on the menu, readable")
+
+    await page.locator("#settings-button").click()
+    dialog = page.locator("#settings-dialog")
+    await expect(dialog).to_be_visible()
+    box = await dialog.bounding_box()
+    # A selection dragged from inside out of it keeps it open.
+    await page.mouse.move(box["x"] + 200, box["y"] + 120)
+    await page.mouse.down()
+    await page.mouse.move(box["x"] - 30, box["y"] + 120, steps=4)
+    await page.mouse.up()
+    await expect(dialog).to_be_visible()
+    await page.mouse.click(box["x"] - 30, box["y"] + 40)
+    await expect(dialog).to_be_hidden()
+    await page.locator("#usage-button").click()
+    await expect(page.locator("#usage-dialog")).to_be_visible()
+    await page.mouse.click(8, 8)
+    await expect(page.locator("#usage-dialog")).to_be_hidden()
+    log("a click around a dialog closes it; a selection dragged out of it does not")
+    await context.close()
+
+
 async def main():
     with tempfile.TemporaryDirectory(prefix="cos-ui-") as temporary:
         holder: dict = {}
@@ -988,6 +1127,7 @@ async def main():
             await home(runtime, browser, failures)
             await memory(runtime, browser, failures)
             await this_round(runtime, browser, failures)
+            await round_two(runtime, browser, failures)
             await browser.close()
         server.should_exit = True
         await serving

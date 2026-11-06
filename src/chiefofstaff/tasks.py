@@ -89,11 +89,13 @@ class TaskBook:
         )
 
     def listed(self, *, include_ended_since: str = "") -> list[dict]:
-        """Open and in-review tasks, and those that ended since the given time (not the
-        placeholder task of an adopted session, until it is continued)."""
+        """Open and in-review tasks, those that ended since the given time, and finished ones
+        with news the owner has not seen (not the placeholder task of an adopted session, until
+        it is continued)."""
         return self.store.all(
             f"""SELECT * FROM tasks WHERE (status IN ('queued','running','waiting','review')
-            OR (ended_at IS NOT NULL AND ended_at>=?))
+            OR (ended_at IS NOT NULL AND ended_at>=?)
+            OR 'news:' || id IN (SELECT key FROM kv WHERE key LIKE 'news:%'))
             AND NOT (status='done' AND result=?) AND session_id NOT IN ({HELPERS})
             ORDER BY created_at""",
             (include_ended_since or now(), ADOPTED),

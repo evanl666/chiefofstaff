@@ -153,3 +153,23 @@ export function toast(text, kind = "", sessionId = null) {
   $("#toasts").append(node);
   setTimeout(() => node.remove(), kind === "attention" ? 12000 : 6000);
 }
+// A click on the dim area around an open dialog closes it as Esc does: through its "cancel"
+// event, so a dialog that keeps unsaved work (the diff's comments) decides. Only when the press
+// started there too: a text selection that ends outside the dialog closes nothing.
+export function closeOnBackdrop() {
+  let pressed = null;
+  const outside = (dialog, event) => {
+    const box = dialog.getBoundingClientRect();
+    return event.clientX < box.left || event.clientX > box.right || event.clientY < box.top || event.clientY > box.bottom;
+  };
+  document.addEventListener("pointerdown", (event) => {
+    const dialog = event.target;
+    pressed = dialog instanceof HTMLDialogElement && dialog.open && outside(dialog, event) ? dialog : null;
+  });
+  document.addEventListener("click", (event) => {
+    const dialog = event.target;
+    if (dialog !== pressed || !(dialog instanceof HTMLDialogElement) || !dialog.open || !outside(dialog, event)) return;
+    pressed = null;
+    if (dialog.dispatchEvent(new Event("cancel", { cancelable: true }))) dialog.close();
+  });
+}

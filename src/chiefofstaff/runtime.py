@@ -697,6 +697,8 @@ class Runtime:
             "system_message": {"mode": "append", "content": prompt},
             "working_directory": row["cwd"] or str(self.role_dir("scratch")),
             "client_name": "chiefofstaff",
+            # Commits made for the owner are theirs: no Copilot co-author line in them.
+            "coauthor_enabled": False,
             "on_mcp_auth_request": self.asks.on_mcp_auth,
         }
         if row["role"] == WORKER and sandbox:
@@ -1747,6 +1749,7 @@ class Runtime:
                 self.task_actions.refresh_open_prs,
                 self.workers.tidy,
                 self.workers.release_idle,
+                self.drafts.check_posted_by_owner,
                 # Queued work starts once memory frees up, not only when a turn ends.
                 self.workers.pump,
                 self.digest_once,

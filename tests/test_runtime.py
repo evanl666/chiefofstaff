@@ -66,6 +66,7 @@ async def test_router_routes_work_and_worker_reports_back(harness):
         "ack_decision",
     }
     assert "available_tools" not in worker.options
+    assert worker.options["coauthor_enabled"] is False, "its commits are the owner's"
     assert worker.options["on_user_input_request"] == runtime.asks.on_user_input
     assert harness.store.session(worker_id)["status"] == "working"
     assert ("notice", "Started “Fix flaky login test”") in harness.kinds(harness.router_id)

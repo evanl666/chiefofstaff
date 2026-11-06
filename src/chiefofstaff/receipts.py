@@ -245,7 +245,7 @@ TEST_SUMMARY = re.compile(
     r"|^Ran \d+ tests? in [\d.]+s"
     r"|^\s*Tests:?\s+\d+ (passed|failed)\b"
     r"|^\s*\d+ passing \("
-    r"|^(ok|FAIL)\s+\S+\s+[\d.]+s"
+    r"|^(ok|FAIL)\s+\S+\t[\d.]+s"
     r"|^test result: (ok|FAILED)\.",
     re.MULTILINE,
 )

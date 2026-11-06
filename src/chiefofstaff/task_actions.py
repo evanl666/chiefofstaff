@@ -531,10 +531,22 @@ class TaskActions:
         )  # Tasks that depended on it are now blocked.
         return task
 
+    def news(self, task_id: str, text: str):
+        """What a worker reported about its finished work (its PR approved or merged, a reply
+        handled): kept in sight on the board until the owner has seen it."""
+        self.store.set(f"news:{task_id}", json.dumps({"text": text.strip()[:2000], "at": now()}))
+
+    def news_seen(self, task_id: str) -> dict:
+        self.store.delete(f"news:{task_id}")
+        task = self.tasks.get(task_id)
+        self.publish(task)
+        return task
+
     def accept(self, task_id: str) -> dict:
         task = self.tasks.get(task_id)
         if task["status"] != "review":
             raise ValueError(f"Task {task_id} is {task['status']}, not ready for review.")
+        self.store.delete(f"news:{task_id}")  # Seen with the result.
         task = self.tasks.move(task_id, "done")
         self.runtime.background(self.runtime.workers.pump())  # Tasks waiting for its check.
         scope = self.runtime.learning.scope_of(task["session_id"])
@@ -549,6 +561,7 @@ class TaskActions:
         row = self.store.session(task["session_id"])
         if row["closed_at"]:
             await self.runtime.workers.reopen(row["id"])
+        self.store.delete(f"news:{task_id}")  # Answering it, the owner has seen its news.
         before = task["status"]
         self.runtime.learning.record(
             "follow-up",
@@ -637,6 +650,7 @@ class TaskActions:
             "blocked": task["status"] == "queued" and bool(self.tasks.broken(task)),
             "receipts": self.receipts(task),
             "decisions": self.runtime.decisions.for_task(task["id"]),
+            "news": json.loads(self.store.get(f"news:{task['id']}") or "null"),
         }
 
     def publish(self, task: dict):

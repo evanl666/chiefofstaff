@@ -299,6 +299,10 @@ def create_app(
     async def accept_task(task_id: str):
         return runtime.task_actions.view(runtime.task_actions.accept(task_id))
 
+    @app.post("/api/tasks/{task_id}/news-seen")
+    async def task_news_seen(task_id: str):
+        return runtime.task_actions.view(runtime.task_actions.news_seen(task_id))
+
     @app.post("/api/tasks/{task_id}/cancel")
     async def cancel_task(task_id: str, payload: TaskNote):
         return runtime.task_actions.view(await runtime.task_actions.cancel(task_id, payload.text))

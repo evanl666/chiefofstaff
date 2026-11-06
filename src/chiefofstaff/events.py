@@ -288,21 +288,29 @@ class Events:
         data = event.data
         name = getattr(data, "tool_name", "") or "tool"
         self.states[row["id"]].turn_tools += 1
-        if (
-            name in self.runtime.tools
-            or name in PLUMBING_TOOLS
-            or getattr(data, "parent_tool_call_id", None)
-        ):
-            return  # Chief of Staff's own tools show as what they did; sub-agents as one step.
         arguments = getattr(data, "arguments", None)
+        call = getattr(data, "tool_call_id", "") or f"step-{time.monotonic()}"
+        if getattr(data, "parent_tool_call_id", None):
+            # A sub-agent's steps show as its one step; the commands it runs (a test suite, a
+            # flow, often run again there) are receipts all the same.
+            self.observe_shell(row, name, call, arguments)
+            return
+        if name in self.runtime.tools or name in PLUMBING_TOOLS:
+            return  # Chief of Staff's own tools show as what they did.
         summary = describe_tool(name, arguments)
         self.runtime.add_message(row["id"], "tool", summary)
-        call = getattr(data, "tool_call_id", "") or f"step-{time.monotonic()}"
         self.states[row["id"]].steps[call] = (time.time(), summary)
         self.runtime.update_session(row["id"], activity=summary)
-        if row["role"] == WORKER and name in receipts.SHELL_TOOLS and isinstance(arguments, dict):
-            self.record_command(row["id"], getattr(data, "tool_call_id", ""), arguments)
-        elif row["role"] == WORKER and name in receipts.SHELL_READERS | receipts.SHELL_STOPPERS:
+        self.observe_shell(row, name, call, arguments)
+
+    def observe_shell(self, row: dict, name: str, call: str, arguments: Any):
+        """A worker's shell command is recorded for receipts; reading, typing into or stopping
+        a shell may settle one Copilot left running there."""
+        if row["role"] != WORKER:
+            return
+        if name in receipts.SHELL_TOOLS and isinstance(arguments, dict):
+            self.record_command(row["id"], call, arguments)
+        elif name in receipts.SHELL_READERS | receipts.SHELL_STOPPERS:
             shell = (
                 str((arguments or {}).get("shellId") or "") if isinstance(arguments, dict) else ""
             )
@@ -310,16 +318,17 @@ class Events:
 
     def tool_complete(self, row: dict, event: Any):
         data = event.data
-        if getattr(data, "parent_tool_call_id", None):
-            return
-        if self.states[row["id"]].steps.pop(getattr(data, "tool_call_id", "") or "", None):
+        sub = bool(getattr(data, "parent_tool_call_id", None))
+        if not sub and self.states[row["id"]].steps.pop(
+            getattr(data, "tool_call_id", "") or "", None
+        ):
             self.runtime.publish_session(self.store.session(row["id"]))  # Its "now" changed.
         if row["role"] != WORKER:
             return
         result = getattr(data, "result", None)
         output = (getattr(result, "content", "") or "") if result else ""
         # Kept for the watchdog: the tail of the latest output shows hangs and errors.
-        if output:
+        if output and not sub:
             self.states[row["id"]].last_output = output[-1500:]
         shell_call = self.states[row["id"]].shell_calls.pop(getattr(data, "tool_call_id", ""), None)
         if shell_call:
