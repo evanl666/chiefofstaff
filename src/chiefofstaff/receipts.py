@@ -11,9 +11,19 @@ from __future__ import annotations
 import re
 import shlex
 from collections.abc import Iterable
+from datetime import datetime
 
 # Copilot's shell tools (bash on macOS and Linux, powershell on Windows).
 SHELL_TOOLS = frozenset({"bash", "shell", "powershell", "run_in_terminal"})
+# The tools that read, type into or stop a command still running in one of their shells.
+SHELL_READERS = frozenset({"read_bash", "write_bash", "read_powershell", "write_powershell"})
+SHELL_STOPPERS = frozenset({"stop_bash", "stop_powershell"})
+# A command Copilot left running (past its wait, or started in the background): its result comes
+# later, from reading its shell or from the notice that it ended.
+STILL_RUNNING = re.compile(
+    r"with shellId: ([^\s>]+) is still running|started in background with shellId: ([^\s>]+)"
+)
+SHELL_DONE = re.compile(r"<shellId: ([^\s>]+) completed with exit code (-?\d+)>")
 
 # Matched against each simple command, from the program on: `grep pytest`, `pip install jest`
 # or a commit message that mentions tests are not test runs.
@@ -22,9 +32,9 @@ KINDS = [
         "test",
         re.compile(
             r"^(pytest|py\.test|unittest|tox|nox|jest|vitest|mocha|rspec|phpunit|ctest|"
-            r"go test|cargo (test|nextest)|mvnw?( -\S+)* (test|verify)|gradlew?( -\S+)* "
-            r"(test|check)|(npm|pnpm|yarn|bun)( run)? test|make( -\S+)* (test|check)|swift test|"
-            r"dotnet test|mix test|bazel test|deno test|playwright test)\b"
+            r"go test|cargo (test|nextest)|mvnw?( -\S+)* (test|verify)|(li)?gradlew?( -\S+)* "
+            r"(\S*:)?(test|check)\b|(npm|pnpm|yarn|bun)( run)? test|make( -\S+)* (test|check)|"
+            r"swift test|dotnet test|mix test|bazel test|deno test|playwright test)\b"
         ),
     ),
     (
@@ -52,13 +62,17 @@ SEPARATORS = {"&&", "||", ";", "|", "&", "(", ")"}
 PREFIXES = {"env", "time", "sudo", "nice", "nohup", "command", "exec", "xvfb-run"}
 # `npm run test` runs a script, which KINDS knows by name; `npm exec jest` runs a program.
 RUNNERS = {
-    **{key: {"run"} for key in ("uv", "poetry", "pipenv", "hatch", "pdm", "rye")},
+    **{key: {"run"} for key in ("uv", "poetry", "pipenv", "hatch", "pdm", "rye", "pixi")},
+    **{key: {"run"} for key in ("conda", "mamba", "micromamba")},
     **{key: {"exec", "dlx"} for key in ("bundle", "npm", "pnpm", "yarn")},
 }
 LAUNCHERS = {"npx", "bunx", "pnpx"}
+# `bash -c "pytest -q"`: the shell runs the commands in its script.
+SHELLS = {"bash", "sh", "zsh", "dash"}
 VALUE_OPTIONS = {
     "--directory", "--env-file", "--extra", "--from", "--group", "--index", "--only-group",
-    "--package", "--project", "--python", "--with", "-C", "-c", "-p",
+    "--package", "--project", "--python", "--with", "-C", "-c", "-p", "-n", "--name",
+    "--prefix", "--environment", "--manifest-path",
 }  # fmt: skip
 EXIT = re.compile(r"exit(?:ed with)? code (-?\d+)", re.IGNORECASE)
 SAYS_TESTS_PASS = re.compile(
@@ -73,19 +87,22 @@ SAYS_CHANGED = re.compile(
 # A negation that governs the verb right after it: "No files were changed", "nothing was
 # committed", "were not updated"; not "it did not work, so I fixed it".
 NEGATED = re.compile(r"(\b(no|not|nothing|never|none|neither|nor)\b|n't)(\W+\w+){0,4}\W*$", re.I)
+# Or right after it: "I changed nothing", "modified no files" (not "added no-cache headers").
+NOTHING_AFTER = re.compile(r"\s+(nothing|none|no\s)", re.I)
 
 
 def says_changed(report: str) -> bool:
     """Whether a report claims changes: "I added a test", not "No files were changed"."""
     for match in SAYS_CHANGED.finditer(report):
         clause = re.split(r"[.!?;:,\n]", report[max(0, match.start() - 80) : match.start()])[-1]
-        if not NEGATED.search(clause):
+        if not NEGATED.search(clause) and not NOTHING_AFTER.match(report, match.end()):
             return True
     return False
 
 
-def simple_commands(command: str) -> list[list[str]]:
-    """The simple commands in a shell command line, as words (quotes respected)."""
+def simple_commands(command: str, depth: int = 0) -> list[list[str]]:
+    """The simple commands in a shell command line, as words (quotes respected); those in a
+    `bash -c "…"` script count as its own."""
     lexer = shlex.shlex(command.replace("\n", " ; "), posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
     try:
@@ -100,7 +117,23 @@ def simple_commands(command: str) -> list[list[str]]:
         else:
             current.append(word)
     found.append(current)
-    return [words for words in found if words]
+    expanded = []
+    for words in found:
+        script = shell_script(words) if depth < 3 else None
+        expanded += simple_commands(script, depth + 1) if script else [words] if words else []
+    return expanded
+
+
+def shell_script(words: list[str]) -> str | None:
+    """The script of `bash -c "…"` (or `sh -lc`, `zsh -ec`): what that shell runs."""
+    if len(words) < 3 or words[0].rsplit("/", 1)[-1] not in SHELLS:
+        return None
+    for index, word in enumerate(words[1:-1], start=1):
+        if not word.startswith("-"):
+            return None
+        if not word.startswith("--") and "c" in word[1:]:
+            return words[index + 1]
+    return None
 
 
 def skip_options(words: list[str]) -> list[str]:
@@ -192,10 +225,76 @@ def masked_failure(command: str, output: str) -> bool:
     the tests twice (the new test failing before the fix, then passing) passed."""
     if "|" not in command or not output:
         return False
-    tail = output[-2000:]
+    return last_summary(output) == "failed"
+
+
+def last_summary(output: str) -> str:
+    """ "passed" or "failed": what the last test summary in the output says ("" if none)."""
+    tail = (output or "")[-4000:]
     failed = [match.start() for match in TESTS_FAILED.finditer(tail)]
     passed = [match.start() for match in TESTS_PASSED.finditer(tail)]
-    return bool(failed) and (not passed or failed[-1] > passed[-1])
+    if not failed and not passed:
+        return ""
+    return "failed" if failed and (not passed or failed[-1] > passed[-1]) else "passed"
+
+
+# A test runner's own summary line: what shows a command ran tests, whatever started them
+# (`./run_tests.sh`, `python tests/run.py`, a Makefile target with another name).
+TEST_SUMMARY = re.compile(
+    r"^=* ?(\d+ \w+, )*\d+ (passed|failed|errors?)\b.* in [\d.]+s"
+    r"|^Ran \d+ tests? in [\d.]+s"
+    r"|^\s*Tests:?\s+\d+ (passed|failed)\b"
+    r"|^\s*\d+ passing \("
+    r"|^(ok|FAIL)\s+\S+\s+[\d.]+s"
+    r"|^test result: (ok|FAILED)\.",
+    re.MULTILINE,
+)
+# Programs that show or search text: a test summary in what they print is an old run's.
+READERS = {
+    "cat", "tail", "head", "less", "more", "grep", "egrep", "rg", "ag", "sed", "awk", "echo",
+    "printf", "ls", "find", "wc", "jq", "sort", "uniq", "cut", "tr", "tee", "git", "gh", "diff",
+    "bat", "nl", "column", "cd", "export", "source", ".", "set", "unset", "pushd", "popd",
+    "true", "false", "sleep", "test", "[", "mkdir", "rm", "cp", "mv", "touch", "pwd", "which",
+    "type", "date", "clear", "read",
+}  # fmt: skip
+
+
+def output_kind(command: str, output: str) -> str:
+    """ "test" when a command no pattern knows printed a test runner's summary of its own."""
+    runs = [program(words).split(" ", 1)[0] for words in simple_commands(command)]
+    if not any(name and name not in READERS for name in runs):
+        return ""
+    return "test" if TEST_SUMMARY.search((output or "")[-4000:]) else ""
+
+
+def test_exit(command: str, output: str, code: int | None) -> int | None:
+    """Whether the tests in a command line passed (0) or failed, rather than the line: piped
+    into `tail` they exit 0 even when they fail; in `pytest && git push` a rejected push exits
+    1 after every test passed."""
+    if code is None:
+        return None
+    summary = last_summary(output)
+    if code == 0 and "|" in command and summary == "failed":
+        return 1
+    if code != 0 and summary == "passed":
+        parts = simple_commands(command)
+        test = dict(KINDS)["test"]
+        ran = [index for index, words in enumerate(parts) if test.search(program(words))]
+        if ran and ran[-1] < len(parts) - 1:
+            return 0  # A part after the tests failed, not the tests.
+    return code
+
+
+def running_shell(output: str) -> str:
+    """The shell of a command Copilot left running, from its output ("" once it ended)."""
+    found = STILL_RUNNING.search((output or "")[-600:])
+    return (found.group(1) or found.group(2)) if found else ""
+
+
+def shell_done(output: str) -> tuple[str, int] | None:
+    """(shell, exit code) when reading a shell shows its command ended."""
+    found = SHELL_DONE.findall((output or "")[-400:])
+    return (found[-1][0], int(found[-1][1])) if found else None
 
 
 def exit_code(output: str, success: bool | None) -> int | None:
@@ -314,6 +413,22 @@ def verdict(results: list[dict]) -> str:
     return "partial" if verified else "unverified"
 
 
+def running_now(command: dict) -> bool:
+    """A command that has not ended (Copilot left it running and has not said it ended)."""
+    return "ended_at" in command and command["ended_at"] is None
+
+
+def after(later: str, earlier: str) -> bool:
+    """Whether the time `later` (ISO) is after `earlier`; a run without a time (an old record)
+    is earlier than anything."""
+    if not earlier:
+        return bool(later)
+    try:
+        return datetime.fromisoformat(later) > datetime.fromisoformat(earlier)
+    except (ValueError, TypeError):
+        return False
+
+
 def summarize(
     commands: Iterable[dict],
     evidence: dict | None,
@@ -330,18 +445,28 @@ def summarize(
         if command["kind"]:
             by_kind.setdefault(command["kind"], []).append(command)
 
+    ended: dict[str, str] = {}
+
     def last(name: str) -> dict | None:
-        runs = [c for c in by_kind.get(name, []) if c["exit_code"] is not None]
+        every = by_kind.get(name, [])
+        runs = [c for c in every if c["exit_code"] is not None]
+        # Copilot left it running (a long test run): its result is not in yet.
+        running = bool(every) and every[-1]["exit_code"] is None and running_now(every[-1])
         if not runs:
-            return None
+            if not running:
+                return None
+            return {"command": every[-1]["command"][:200], "exit_code": None, "passed": None,
+                    "runs": len(every), "failed_before": False, "running": True}  # fmt: skip
         final = runs[-1]
+        ended[name] = final.get("ended_at") or ""
         return {
             "command": final["command"][:200],
             "exit_code": final["exit_code"],
             "passed": final["exit_code"] == 0,
-            "runs": len(by_kind[name]),
+            "runs": len(every),
             # Failing first, then passing: what a regression test for a fix shows.
             "failed_before": final["exit_code"] == 0 and any(c["exit_code"] for c in runs[:-1]),
+            "running": running,
         }
 
     checkouts = evidence.get("checkouts", [])
@@ -354,17 +479,35 @@ def summarize(
     }
     flags = []
     tests = last("test")
-    if SAYS_TESTS_PASS.search(report or ""):
+    prs = evidence.get("prs", [])
+    if tests and tests["passed"] is False:
+        # The PR's checks started after it ended, so they tested newer code: what CI says now is
+        # the newer word on the tests.
+        green = [
+            pr["label"]
+            for pr in prs
+            if pr.get("checks") == "passing"
+            and pr.get("state") != "CLOSED"
+            and after(pr.get("checks_started", ""), ended.get("test", ""))
+        ]
+        tests["ci_passing"] = green
+    if tests and tests["passed"] is False and tests.get("ci_passing"):
+        code, where = tests["exit_code"], ", ".join(tests["ci_passing"])
+        flags.append(f"The last local test run failed (exit {code}), but the checks on {where} "
+                     "pass now.")  # fmt: skip
+    elif tests and tests["running"] and tests["passed"] is not True:
+        pass  # Its tests are running again: their result is not in yet.
+    elif SAYS_TESTS_PASS.search(report or ""):
         if not tests:
             flags.append("Says tests pass, but no test run was observed.")
-        elif not tests["passed"]:
+        elif tests["passed"] is False:
             code = tests["exit_code"]
             flags.append(f"Says tests pass, but the last test run failed (exit {code}).")
-    elif tests and not tests["passed"]:
+    elif tests and tests["passed"] is False:
         flags.append(f"The last test run failed (exit {tests['exit_code']}).")
     if checkouts and says_changed(report or "") and not any(changed.values()):
         flags.append("Says it made changes, but its checkouts have none.")
-    for pr in evidence.get("prs", []):
+    for pr in prs:
         if pr.get("checks") == "failing":
             names = ", ".join(pr.get("failing") or [])
             flags.append(f"Checks are failing on {pr['label']}" + (f": {names}." if names else "."))
@@ -446,6 +589,7 @@ def outcome(item: dict) -> str:
 
 
 FAILED = {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"}
+PENDING = {"PENDING", "IN_PROGRESS", "QUEUED", "EXPECTED", "WAITING", ""}
 
 
 def failing_checks(rollup: list[dict]) -> list[str]:
@@ -465,6 +609,18 @@ def checks_state(rollup: list[dict]) -> str:
     states = {outcome(item) for item in latest_checks(rollup)}
     if states & FAILED:
         return "failing"
-    if states & {"PENDING", "IN_PROGRESS", "QUEUED", "EXPECTED", "WAITING", ""}:
+    if states & PENDING:
         return "pending"
     return "passing"
+
+
+def checks_started(rollup: list[dict]) -> str:
+    """When the latest run of the PR's checks started (ISO, the earliest of them; "" while one
+    is still running): what they tested was pushed before then."""
+    latest = latest_checks(rollup)
+    if not latest or any(outcome(item) in PENDING for item in latest):
+        return ""
+    return min(
+        item.get("startedAt") or item.get("createdAt") or item.get("completedAt") or ""
+        for item in latest
+    )

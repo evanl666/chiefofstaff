@@ -28,6 +28,7 @@ uv run chiefofstaff --demo          # the whole product, scripted, no accounts
 | `uv run python scripts/live_routing.py` | Does the Router give work to the worker that knows the subject? | Copilot |
 | `uv run python scripts/live_usecases.py` | Everyday flows: revise, cancel and retry, questions, Create PR, long answers | Copilot; a GitHub test repository |
 | `uv run python scripts/live_more.py` | 24 everyday scenarios: several tasks at once, cancel, restart mid-step, focus, Slack orders, languages, diffs… | Copilot; a GitHub test repository |
+| `uv run --with playwright python scripts/live_wide.py A\|B\|C\|D\|E\|F` | 79 scenarios of a working day in six shards (B and E one after the other) | Copilot; a GitHub test repository |
 | `uv run python scripts/live_memory.py` | How you write is learned and used; a fixed mistake becomes a check that catches it again | Copilot; macOS or `bwrap` |
 
 Before a pull request:

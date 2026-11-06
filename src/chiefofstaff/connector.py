@@ -241,7 +241,10 @@ class Connector:
                     "The owner may have answered Chief of Staff's notifications to them "
                     f"({self.store.get('away_where') or 'where they were sent'}): replies that "
                     f"name one of these codes: {', '.join(codes)}. Pass each with "
-                    "report_owner_replies, only when the owner themself wrote it there."
+                    "report_owner_replies, only when the owner themself wrote it there. These "
+                    "still wait: a reply naming one of them has not been passed on yet, even if "
+                    "you saw it or think you passed it on before (one passed on is not listed "
+                    "again)."
                 )
             lines.append(prompts.CONNECTOR_SCAN)
             shown = "; ".join(w.what for w in watches) or "your answers to notifications"

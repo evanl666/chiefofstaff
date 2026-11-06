@@ -1,5 +1,59 @@
 # Changelog
 
+## 0.1.21 (2026-11-06)
+
+- **Workers that work together tell each other**: tasks that run at the same time and need each
+  other while they work (two sides of one change, a value one finds that the other uses, a
+  shared schema) are told about each other, and pass what the other needs straight to it with
+  `tell_session` (or ask with `ask_session`): the exact words, within the other's turn, without
+  a Router turn in between. Before, a worker had no way to hand something over: it sent it as a
+  "question", or the Router relayed it. The Router says which tasks work together
+  (`works_with`); tasks whose instructions name each other by title are linked even when it
+  does not say so, and are not refused as "related" to each other. A worker waiting for another
+  one's message waits quietly (*waiting for “…”*, no "waiting" report); when the other finishes,
+  its result reaches the ones still at work, and if its task fails or is cancelled they hear
+  that too. A worker that says it waits for another one by name is linked to it. What workers
+  tell each other is information, not new work: a worker that should change course asks the
+  Router.
+- **The Router keeps the picture**: a copy of what workers tell and ask each other rides along
+  with its next turn (it does not start one), so it can answer "what did the scout pass on?" at
+  once; Home shows each in a line (*↔ “Token Scout” told “Token Writer”: …*).
+- **Test results as they are now**: a card could say *the last test run failed (exit 1)* when
+  the tests had passed, or stay as it was after the worker ran them again.
+  - A run Copilot left running (a long suite past its wait, or one in the background) counted
+    as passed at once; it now shows *… tests running* and gets its result when the worker reads
+    its shell or Copilot says it ended. A stopped one counts as no result.
+  - A command Copilot refused (blocked, not allowed) counted as a failed run; it never ran.
+  - In `pytest && git push`, a rejected push counted as failed tests.
+  - Tests run by the project's own script (`./run_tests.sh`, `bash -c "…"`, `conda run`, Gradle
+    task paths) are known by the test runner's summary.
+  - The card changes as soon as a test run, push or commit ends, also after the report.
+  - Commands left running end with Copilot when it reconnects, not only at a restart.
+  - A report that says "I changed nothing" is no longer flagged *Says it made changes*.
+- **PR status on the card**: the PR in a few words, as GitHub has it now (*app#7 · ✓ CI ·
+  approved*, *CI running*, *✗ CI*, *merged*; hover for the checks that fail), not a long name
+  with a lone *…*. When its checks passed after the last local test run failed, the card says
+  so (*✗ tests locally*; *The last local test run failed (exit 1), but the checks on … pass
+  now*), and the worker is not held back at its report for it. Local lint shows as *lint*, not
+  *checks*. Only checks that started after the local run count: CI on older code does not.
+- **Home's border drags**: the border between the chat and *Needs you* / *Tasks* can be dragged
+  (or moved with the arrow keys); the width is kept, the chat keeps room to read, and a double
+  click sets it back.
+- **Habits (and writing styles, checks) in a compact list that scrolls**: one line each, with
+  where it applies beside it, in a box of a few rows; the heading counts them.
+- **More parallel workers**: up to 1000 (was 12), and the computer stays responsive:
+  - New work waits while the computer is low on memory (under 10% free); its card says
+    *Waiting for memory: 6% free on this computer*, and the Router says why. Running work is
+    never stopped.
+  - A worker quiet for ten minutes lets go of its Copilot session, which ends the MCP servers it
+    started (each working session starts its own); its next message picks it up where it was.
+    Measured: an open, idle session costs about 0.5 MB, one that has worked about 11 MB plus
+    its MCP servers.
+- **The away connector passes on every reply**: a reply to a code Chief of Staff still waits on
+  is passed on, even when the connector thinks it did so before.
+- `scripts/live_wide.py` shards E and F: 17 scenarios of this round (79 in all), with a browser
+  pass.
+
 ## 0.1.20 (2026-11-05)
 
 - **PR reviews you can shape**: the card shows the PR in a line (title, author, size) and opens

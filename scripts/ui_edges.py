@@ -523,6 +523,164 @@ async def home(runtime, browser, failures: list[str]):
     runtime.bus.publish("state")
 
 
+async def this_round(runtime, browser, failures: list[str]):
+    """The Habits list scrolls in a compact box; the border beside the panel drags (and is
+    kept, and resets); more than 100 parallel workers; a test run in progress, a local failure
+    the PR's checks passed after, the PR in a few words; what workers told each other."""
+    store = runtime.store
+    router = store.get("router_id")
+    store.save_settings(store.settings().model_copy(update={"max_workers": 8}))
+    for index in range(25):
+        store.execute(
+            "INSERT INTO lessons(id, text, scope, evidence, status, created_at, updated_at) "
+            "VALUES (?, ?, ?, '[]', 'active', 'now', 'now')",
+            (f"lh{index}", f"Habit {index}: put explanations in the reply itself. " * 3,
+             "" if index % 3 else "project:/work/acme/svc"),
+        )  # fmt: skip
+    spawned = await call_tool(
+        runtime, "spawn_worker", router, title="Filter opt-outs", instructions="Filter opt-outs",
+        why_new="test",
+    )  # fmt: skip
+    worker = json.loads(spawned.text_result_for_llm)["session_id"]
+    peer_spawn = await call_tool(
+        runtime, "spawn_worker", router, title="Opt-out client", instructions="Use the filter",
+        why_new="test", works_with=[worker],
+    )  # fmt: skip
+    peer = json.loads(peer_spawn.text_result_for_llm)["session_id"]
+    await runtime.workers.pump()
+    await settle(runtime)
+    await call_tool(runtime, "tell_session", worker, session_id=peer,
+                    text="The filter is in optout.py: is_opted_out(member).")  # fmt: skip
+    task = runtime.tasks.current(worker)
+    run = store.one("SELECT id FROM runs WHERE task_id=?", (task["id"],))
+    for call, command, code, ended in [
+        ("u1", "uv run pytest -q tests/test_filter.py", 1, "2026-11-05T09:00:00+00:00"),
+        ("u2", "uv run ruff check .", 0, "2026-11-05T09:01:00+00:00"),
+    ]:
+        store.execute(
+            "INSERT INTO commands(session_id, run_id, call_id, command, kind, exit_code, "
+            "started_at, ended_at) VALUES (?,?,?,?,?,?,?,?)",
+            (worker, run["id"], call, command, "test" if "pytest" in command else "check", code,
+             ended, ended),
+        )  # fmt: skip
+    pr = {"label": "acme/ranking-model#71",
+          "url": "https://github.com/acme/ranking-model/pull/71",
+          "state": "OPEN", "checks": "passing", "failing": [], "review": "APPROVED",
+          "checks_started": "2026-11-05T10:00:00Z", "at": "2026-11-05T10:05:00+00:00"}  # fmt: skip
+    store.execute(
+        "UPDATE runs SET evidence=? WHERE id=?",
+        (json.dumps({"checkouts": [], "prs": [pr]}), run["id"]),
+    )
+    runtime.tasks.move(task["id"], "review", result="Filtered LEATCH and 3rd party opt-outs.")
+    await settle(runtime)
+
+    context = await browser.new_context(viewport={"width": 1400, "height": 900})
+    page = await context.new_page()
+    page.on("pageerror", lambda error: failures.append(str(error)))
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    card = page.locator(".card.task.review", has_text="Filter opt-outs")
+    await expect(card).to_be_visible(timeout=15000)
+    await expect(card.locator(".receipt.pr")).to_have_text(
+        "ranking-model#71 · ✓ CI · approved"
+    )
+    title = await card.locator(".receipt.pr").get_attribute("title")
+    assert "acme/ranking-model#71" in title and "Checks pass" in title
+    await expect(card.locator(".receipt.warn", has_text="✗ tests locally")).to_be_visible()
+    await expect(card.locator(".receipt.pass", has_text="✓ lint")).to_be_visible()
+    await expect(card.locator(".flag")).to_contain_text(
+        "The last local test run failed (exit 1), but the checks on "
+        "acme/ranking-model#71 pass now."
+    )
+    found = await card.evaluate(OVERFLOWS)
+    assert not found, found
+    store.execute(
+        "INSERT INTO commands(session_id, run_id, call_id, command, kind, exit_code, "
+        "started_at, ended_at, shell) VALUES (?,?,?,?,?,NULL,'now',NULL,'7')",
+        (worker, run["id"], "u3", "uv run pytest -q tests/", "test"),
+    )
+    runtime.task_actions.publish(runtime.tasks.get(task["id"]))
+    await expect(card.locator(".receipt", has_text="running again")).to_be_visible(timeout=5000)
+    await card.screenshot(path=SHOTS / "ui-edges-receipts-now.png")
+    log("a task card: the PR in a few words, a local failure CI passed after, a run in progress")
+
+    # What workers told each other: a line in the Router's chat, cards in their timelines.
+    await expect(page.locator("#timeline .event", has_text="“Filter opt-outs” told “Opt-out "
+                              "client”")).to_be_visible(timeout=5000)  # fmt: skip
+    await page.locator("#session-list .item", has_text="Opt-out client").click()
+    await expect(page.locator("#timeline .card", has_text="From “Filter opt-outs”")).to_be_visible()
+    await page.locator("#session-list .item", has_text="Filter opt-outs").click()
+    await expect(page.locator("#timeline .card", has_text="Told “Opt-out client”")).to_be_visible()
+    await page.locator("#back-home").click()
+    log("workers that work together: who told whom, in the chat and in their timelines")
+
+    # The border beside the panel: dragged, kept after a reload, reset by a double click.
+    panel, handle = page.locator("#panel"), page.locator("#panel-resizer")
+    await expect(handle).to_be_visible()
+    before = (await panel.bounding_box())["width"]
+    box = await handle.bounding_box()
+    x, y = box["x"] + box["width"] / 2, box["y"] + 200
+    await page.mouse.move(x, y)
+    await page.mouse.down()
+    await page.mouse.move(x - 120, y, steps=6)
+    await page.mouse.move(x - 240, y, steps=6)
+    await page.mouse.up()
+    wider = (await panel.bounding_box())["width"]
+    assert abs(wider - (before + 240)) <= 6, (before, wider)
+    await page.reload()
+    await expect(panel).to_be_visible(timeout=15000)
+    kept = (await panel.bounding_box())["width"]
+    assert abs(kept - wider) <= 2, (wider, kept)
+    await handle.focus()
+    await page.keyboard.press("ArrowRight")
+    assert abs((await panel.bounding_box())["width"] - (kept - 32)) <= 2
+    await page.mouse.move(x, y)
+    await page.mouse.down()
+    await page.mouse.move(40, y, steps=8)
+    await page.mouse.up()
+    widest = (await panel.bounding_box())["width"]
+    chat = (await page.locator("#conversation").bounding_box())["width"]
+    assert chat >= 359, ("the chat keeps its room", chat, widest)
+    await handle.dblclick()
+    assert abs((await panel.bounding_box())["width"] - before) <= 2, "reset"
+    await page.set_viewport_size({"width": 1000, "height": 900})
+    await expect(handle).to_be_hidden()
+    await page.set_viewport_size({"width": 1400, "height": 900})
+    log("the panel's border drags, is kept, stops where the chat needs its room, resets")
+
+    # Settings: more than 100 parallel workers; the Habits list scrolls in a compact box.
+    await page.locator("#settings-button").click()
+    dialog = page.locator("#settings-dialog")
+    await dialog.locator("#settings-tabs [data-tab=general]").click()
+    await dialog.locator('input[name="max_workers"]').fill("150")
+    await dialog.get_by_role("button", name="Save", exact=True).click()
+    await expect(dialog).to_be_hidden(timeout=10000)
+    assert store.settings().max_workers == 150
+    await page.locator("#settings-button").click()
+    await dialog.locator("#settings-tabs [data-tab=general]").click()
+    await expect(dialog.locator('input[name="max_workers"]')).to_have_value("150")
+    await dialog.locator("#settings-tabs [data-tab=you]").click()
+    habits = dialog.locator("#lessons")
+    await expect(habits.locator("li")).to_have_count(26)  # With "Run a smoke test first".
+    await expect(habits.locator("xpath=preceding-sibling::h4[1]")).to_have_attribute(
+        "data-count", "26"
+    )
+    sizes = await habits.evaluate(
+        "(list) => ({client: list.clientHeight, scroll: list.scrollHeight, "
+        "rows: [...list.children].map((row) => row.getBoundingClientRect().height)})"
+    )
+    assert sizes["client"] <= 240 and sizes["scroll"] > sizes["client"], sizes
+    assert max(sizes["rows"]) <= 40, ("one line a habit", sizes["rows"])
+    await habits.evaluate("(list) => list.scrollTo(0, list.scrollHeight)")
+    await expect(habits.locator("li").last).to_be_in_viewport()
+    row = habits.locator("li", has_text="Habit 1:")
+    await row.get_by_role("button", name="more").click()
+    await expect(row.locator(".clamp.open")).to_be_visible()
+    await habits.screenshot(path=SHOTS / "ui-edges-habits.png")
+    await page.locator("#settings-cancel").click()
+    log("150 parallel workers saved; 26 habits in a box of a few one-line rows that scrolls")
+    await context.close()
+
+
 async def main():
     with tempfile.TemporaryDirectory(prefix="cos-ui-") as temporary:
         holder: dict = {}
@@ -829,6 +987,7 @@ async def main():
 
             await home(runtime, browser, failures)
             await memory(runtime, browser, failures)
+            await this_round(runtime, browser, failures)
             await browser.close()
         server.should_exit = True
         await serving

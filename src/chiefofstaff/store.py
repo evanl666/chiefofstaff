@@ -157,7 +157,7 @@ class Store:
             id INTEGER PRIMARY KEY, session_id TEXT NOT NULL, run_id TEXT NOT NULL DEFAULT '',
             call_id TEXT NOT NULL, command TEXT NOT NULL, kind TEXT NOT NULL DEFAULT '',
             exit_code INTEGER, output TEXT NOT NULL DEFAULT '',
-            started_at TEXT NOT NULL, ended_at TEXT
+            started_at TEXT NOT NULL, ended_at TEXT, shell TEXT NOT NULL DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS commands_by_run ON commands(run_id, id);
         CREATE INDEX IF NOT EXISTS commands_by_call ON commands(session_id, call_id);
@@ -261,6 +261,10 @@ class Store:
         if "observed" not in lesson_columns:
             # The owner's own words (observations) a lesson rests on, besides feedback.
             self.db.execute("ALTER TABLE lessons ADD COLUMN observed TEXT NOT NULL DEFAULT '[]'")
+        command_columns = {row["name"] for row in self.db.execute("PRAGMA table_info(commands)")}
+        if "shell" not in command_columns:
+            # The shell Copilot left a long command running in: its result comes from there.
+            self.db.execute("ALTER TABLE commands ADD COLUMN shell TEXT NOT NULL DEFAULT ''")
         if "task" not in columns:
             self.db.executescript("""
             ALTER TABLE sessions ADD COLUMN task TEXT NOT NULL DEFAULT '';

@@ -1,5 +1,6 @@
-"""A wide live suite: 62 scenarios of a working day, in four shards that run in parallel
-(each its own Chief of Staff, fake Slack, company search and company bot).
+"""A wide live suite: 79 scenarios of a working day, in six shards that run in parallel
+(each its own Chief of Staff, fake Slack, company search and company bot). B and E set checks
+on the same test PR: run them one after the other.
 
 Shard A, the core flow:
 W1  ask: the task shows at once, the Router answers in a line, the right result
@@ -72,10 +73,33 @@ W60 a fresh PR reviewed: the review is no news to its worker; the author pushes 
 W61 two jobs at once: both running, their workers at work; "progress?" names both
 W62 Alice asks in Slack for a number: a reply card, redone on request by the same session
 
+Shard E, workers that work together and test results as they are now:
+E1  two workers at once: one finds a token and tells the other itself; the Router has a copy,
+    relays nothing, and the one waiting reports no "waiting"
+E2  "what token did the scout pass on?": the Router answers from its copy, no worker
+E3  a contract between two parallel workers (a column name), asked for in Chinese
+E4  a worker that tells no one: the one waiting gets its result when it finishes
+E5  a worker asks another; the Router has a copy of the question and of the answer
+E6  two unrelated tasks at once are not linked
+E7  one worker's value goes to two others
+E8  a test run left running in the background: shown running, then passed
+E9  a failing run that outlasts Copilot's wait: failed, not passed
+E10 `pytest && git push` with a rejected push: the tests passed
+E11 tests run by the project's own script are a test run
+E12 a command Copilot refused is no failed test run
+E13 tests fail here, the PR's checks pass after: the card says CI passes now
+E14 a failing run, then the fix in a follow-up: the card turns green by itself
+E15 in the browser: those cards, who told whom, the panel's border, 120 parallel workers
+E16 a quiet finished worker lets go of its Copilot session (its MCP server ends); a follow-up
+    resumes it and it remembers (E runs with workers let go after a minute)
+
+Shard F, a computer low on memory:
+F1  new work waits and says why; nothing starts; the Router tells the owner
+
 All shards:
 W52 no Router reply names a worker by its session id
 
-    uv run python scripts/live_wide.py A|B|C|D [W1 W2 …]
+    uv run python scripts/live_wide.py A|B|C|D|E|F [W1 E1 …]  (E needs --with playwright)
 """
 
 import asyncio
@@ -102,6 +126,7 @@ from live_parity import COPILOT, setup, write
 
 SHARDS = {
     "A": (18781, 18911), "B": (18782, 18912), "C": (18783, 18913), "D": (18784, 18914),
+    "E": (18785, 18915), "F": (18786, 18916),
 }  # fmt: skip
 MODEL = "claude-sonnet-5.5"
 CJK = re.compile(r"[\u4e00-\u9fff]")
@@ -142,6 +167,7 @@ class Ctx:
         self.app, self.root, self.home, self.project, self.truth = app, root, home, project, truth
         self.slack = slack
         self.notes: dict = {}
+        self.app_base = ""
 
 
 async def state(ctx: Ctx) -> dict:
@@ -226,7 +252,9 @@ def find_file(folder: str, name: str, after: float = 0) -> Path | None:
     base = Path(folder)
     candidates = [base / name, *base.rglob(name)] if base.is_dir() else []
     for path in candidates:
-        if path.is_file() and ".git" not in path.parts and path.stat().st_mtime >= after:
+        # Written, not only created: a file being written is empty at first.
+        info = path.stat() if path.is_file() else None
+        if info and ".git" not in path.parts and info.st_mtime >= after and info.st_size:
             return path
     return None
 
@@ -1880,6 +1908,13 @@ def reply_away(ctx: Ctx, text: str):
 
 
 async def w42_away(ctx: Ctx):
+    # Only this scenario's question waits for the owner: drafts earlier ones left are dropped.
+    for draft in (await state(ctx))["drafts"]:
+        try:
+            dropped = {"action": "reject", "reason": "left by an earlier scenario"}
+            await ctx.app.post(f"/api/drafts/{draft['id']}", dropped)
+        except Exception as exc:
+            log(f"W42: could not drop draft {draft['id']}: {exc}")
     (ctx.root / "idle").write_text("3600")
     await settings(ctx, away_notify=True, watch_minutes=1)
     since = now()
@@ -1940,7 +1975,9 @@ async def w44_at_the_desk(ctx: Ctx):
     (ctx.root / "idle").write_text("0")
     before = len(outbox(ctx))
     since = now()
-    await say(ctx, sales_question(ctx))
+    # The same request as W42's: asked for again, it may be answered as done.
+    await say(ctx, "A fresh check, not the earlier one: start a new worker for it. "
+              + sales_question(ctx))  # fmt: skip
     waiting = await waiting_on_owner(ctx, since, "the question")
     await asyncio.sleep(60)
     assert len(outbox(ctx)) == before, "nothing sent while the owner is here"
@@ -2095,6 +2132,517 @@ async def w52_no_ids(ctx: Ctx):
     log("W52 passed")
 
 
+# Shard E, this round: workers that work together; test results as they are now
+
+
+def calc_project(root: Path) -> Path:
+    """A small repository whose tests take long, fail on purpose, or run through a script."""
+    project = root / "calc"
+    project.mkdir()
+    git(project, "init", "-q", "-b", "main")
+    write(project / "calc.py", "def add(a, b):\n    return a + b\n\n\ndef sub(a, b):\n"
+          "    return b - a\n")  # fmt: skip
+    write(project / "tests" / "test_add.py", "from calc import add\n\n\ndef test_add():\n"
+          "    assert add(2, 3) == 5\n")  # fmt: skip
+    write(project / "subtract" / "test_sub.py", "from calc import sub\n\n\ndef test_sub():\n"
+          "    assert sub(5, 3) == 2\n")  # fmt: skip
+    write(project / "slow" / "test_slow.py", "import time\n\n\ndef test_slow():\n"
+          "    time.sleep(50)\n")  # fmt: skip
+    write(project / "slow_fail" / "test_slow_fail.py", "import time\n\n\n"
+          "def test_slow_fail():\n    time.sleep(40)\n    assert 'slow' == 'fast'\n")  # fmt: skip
+    write(project / "local_fail" / "test_local.py", "import os\n\n\ndef test_needs_ci():\n"
+          "    assert os.environ.get('CI') == 'true'\n")  # fmt: skip
+    script = project / "scripts" / "run_unit_tests.sh"
+    write(script, '#!/bin/sh\nset -e\ncd "$(dirname "$0")/.."\n'
+          "exec uv run --quiet --with pytest python -m pytest -q tests\n")  # fmt: skip
+    script.chmod(0o755)
+    pyproject = '[project]\nname = "calc"\nversion = "0.1.0"\nrequires-python = ">=3.11"\n'
+    write(
+        project / "pyproject.toml", pyproject + '\n[tool.pytest.ini_options]\npythonpath = ["."]\n'
+    )
+    write(project / "AGENTS.md", "Run tests with `uv run --with pytest python -m pytest -q "
+          "<folder>`.\n")  # fmt: skip
+    git(project, "add", ".")
+    git(project, "-c", "user.email=p@test", "-c", "user.name=p", "commit", "-qm", "init")
+    return project
+
+
+async def titled(ctx: Ctx, since: str, word: str, timeout=300) -> dict:
+    """The task given since then whose title has the word, and its worker."""
+
+    async def check():
+        for task in await tasks_since(ctx, since):
+            if word.lower() in task["title"].lower():
+                return task
+        return None
+
+    return await wait_for(f"the task “{word}”", check, timeout, ctx.app)
+
+
+def prompts_of(rows: list[dict]) -> str:
+    return "\n".join(m["meta"].get("prompt", "") for m in rows)
+
+
+async def show(ctx: Ctx, *workers: str):
+    for worker in workers:
+        row = await session(ctx, worker)
+        log(f"--- {row['title']}\n{transcript(await messages(ctx, worker))[-2500:]}")
+
+
+async def peers_ok(ctx: Ctx, since: str, giver: dict, takers: list[dict], value: str):
+    """The value went straight from the giver to each taker, the Router has a copy and did not
+    relay it, and no taker reported that it was waiting."""
+    router = (await state(ctx))["router_id"]
+    given = await messages(ctx, giver["session_id"])
+    told = {m["meta"].get("target") for m in given if m["kind"] == "tell"}
+    asked = [m for m in given if m["kind"] == "ask"]
+    linked = []
+    for taker in takers:
+        rows = await messages(ctx, taker["session_id"])
+        inbound = [m for m in rows if m["kind"] == "inbound" and value in m["text"]]
+        relayed = [m for m in rows if m["kind"] == "router" and value in m["text"]]
+        waited = [m for m in rows if m["kind"] == "report" and m["meta"].get("status") != "done"
+                  and re.search(r"\bwait", m["text"], re.I)]  # fmt: skip
+        linked.append('type="peer' in prompts_of(rows))
+        log(f"  {taker['title']}: told={taker['session_id'] in told} "
+            f"from={[m['meta'].get('told_by', '')[:8] for m in inbound]} relayed={len(relayed)} "
+            f"waiting-reports={len(waited)}")  # fmt: skip
+        assert inbound and all(m["meta"].get("told_by") == giver["session_id"] for m in inbound)
+        assert not relayed, "the Router did not relay it"
+        assert not waited, "waiting for a peer needs no report"
+    assert told >= {t["session_id"] for t in takers}, "told with tell_session"
+    assert not asked, "no question used to hand something over"
+    assert all(linked), "the Router said they work together (works_with)"
+    copies = [m for m in await messages(ctx, router) if m["kind"] == "peer" and value in m["text"]]
+    assert copies, "the Router has a copy"
+    assert all(m["created_at"] > since for m in copies)
+
+
+async def e1_parallel_handoff(ctx: Ctx):
+    """Two workers at once; one finds a value only it can know and passes it on itself."""
+    since = now()
+    await say(
+        ctx,
+        "Two tasks in parallel, no project, one worker each, started now. 'Token Scout': run "
+        '`python3 -c "import secrets; print(secrets.token_hex(4))"` once, write its output '
+        "into token.txt in your folder, and pass the token on to the 'Token Writer' worker "
+        "yourself. 'Token Writer': do not make up a token; wait until the Token Scout's token "
+        "reaches you, then write exactly it into result.txt in your folder and report done.",
+    )
+    token = (await file_of(ctx, since, "token.txt", "the scout's token", 600)).read_text().strip()
+    result = await file_of(ctx, since, "result.txt", "the writer's result", 900)
+    await finished(ctx, since, 2, "both tasks", 600)
+    scout, writer = await titled(ctx, since, "scout"), await titled(ctx, since, "writer")
+    await show(ctx, scout["session_id"], writer["session_id"])
+    log(f"E1: token {token!r} result {result.read_text()!r}")
+    assert result.read_text().strip() == token
+    await peers_ok(ctx, since, scout, [writer], token)
+    ctx.notes["e1_token"] = token
+    log("E1 passed")
+
+
+async def e2_router_knows(ctx: Ctx):
+    """The Router knows what workers told each other, without a worker to ask."""
+    since = now()
+    reply = await ask(ctx, "What token did the Token Scout give the Token Writer? Only the token.")
+    log(f"E2: {reply!r}")
+    assert ctx.notes["e1_token"] in reply
+    assert not await tasks_since(ctx, since), "answered from what it has"
+    log("E2 passed")
+
+
+async def e3_contract_in_chinese(ctx: Ctx):
+    """A contract between two parallel workers (a column name), asked for in Chinese."""
+    since = now()
+    await say(
+        ctx,
+        "两个任务, 现在同时开始, 各用一个 worker, 不用项目. 'Column Maker': 用 "
+        "`python3 -c \"import secrets; print('col_' + secrets.token_hex(3))\"` 生成一个列名, "
+        "在你的文件夹里写 schema.sql, 内容是 `CREATE TABLE events (<列名> TEXT);`, "
+        "并且你自己把列名告诉 'Query Writer'. 'Query Writer': 不要自己编列名, "
+        "等 Column Maker 告诉你列名, 然后在你的文件夹里写 query.sql, "
+        "内容是 `SELECT <列名> FROM events;`, 然后报告完成.",
+    )
+    schema = await file_of(ctx, since, "schema.sql", "the schema", 600)
+    query = await file_of(ctx, since, "query.sql", "the query", 900)
+    await finished(ctx, since, 2, "both tasks", 600)
+    column = re.search(r"col_[0-9a-f]{6}", schema.read_text())
+    log(f"E3: schema {schema.read_text()!r} query {query.read_text()!r}")
+    assert column and f"SELECT {column.group(0)} FROM events" in query.read_text()
+    maker, writer = await titled(ctx, since, "column"), await titled(ctx, since, "query")
+    await peers_ok(ctx, since, maker, [writer], column.group(0))
+    assert CJK.search(writer["result"]), "reported in Chinese"
+    log("E3 passed")
+
+
+async def e4_result_when_done(ctx: Ctx):
+    """A worker that tells no one: the one waiting for it gets its result when it finishes."""
+    since = now()
+    await say(
+        ctx,
+        "Two tasks in parallel, no project, one worker each, started now. 'Quiet Scout': run "
+        '`python3 -c "import secrets; print(secrets.token_hex(4))"` once and report done with '
+        "the token in your report; do not message any other worker. 'Patient Writer': do not "
+        "make up a token; wait for the Quiet Scout's token, then write exactly it into "
+        "patient.txt in your folder and report done.",
+    )
+    scout = await titled(ctx, since, "quiet")
+    result = await file_of(ctx, since, "patient.txt", "the patient writer's file", 900)
+    tasks = await finished(ctx, since, 2, "both tasks", 600)
+    scout = next(t for t in tasks if t["id"] == scout["id"])
+    token = re.search(r"\b[0-9a-f]{8}\b", scout["result"])
+    writer = await titled(ctx, since, "patient")
+    rows = await messages(ctx, writer["session_id"])
+    path = (
+        "peer-done"
+        if any(m["meta"].get("finished") for m in rows)
+        else ("dependency" if any("Results of the tasks" in m["text"] for m in rows) else "other")
+    )
+    log(f"E4: token {token and token.group(0)!r} file {result.read_text()!r} via {path}")
+    assert token and result.read_text().strip() == token.group(0)
+    assert path in {"peer-done", "dependency"}
+    log("E4 passed")
+
+
+async def e5_ask_a_peer(ctx: Ctx):
+    """A worker asks another; the Router has a copy of the question and the answer."""
+    since = now()
+    word = "marigold"
+    await say(ctx, f"Start a worker titled 'Keeper': the code word is '{word}'; it only needs "
+              "to remember it and report done.")  # fmt: skip
+    keeper = await titled(ctx, since, "keeper")
+    await finished(ctx, since, 1, "the keeper", 400)
+    later = now()
+    await say(
+        ctx,
+        "Now start a separate new worker titled 'Seeker', not the Keeper: it asks the Keeper "
+        "for the code word with ask_session and writes the word into seeker.txt in its own "
+        "folder. Do not tell it the word yourself.",
+    )
+    written = await file_of(ctx, later, "seeker.txt", "the seeker's file", 600)
+    seeker = await titled(ctx, later, "seeker")
+    router = (await state(ctx))["router_id"]
+    copies = [m["text"] for m in await messages(ctx, router)
+              if m["kind"] == "peer" and m["created_at"] > later]  # fmt: skip
+    log(f"E5: {written.read_text()!r}; copies {copies}")
+    assert word in written.read_text()
+    assert word not in prompts_of(
+        [m for m in await messages(ctx, seeker["session_id"]) if m["kind"] == "router"]
+    ), "not told by the Router"
+    assert any("asked" in c and "Keeper" in c for c in copies)
+    assert any("answered" in c and word in c for c in copies)
+    assert keeper["session_id"] != seeker["session_id"]
+    log("E5 passed")
+
+
+async def e6_independent_not_linked(ctx: Ctx):
+    """Two unrelated tasks at once are not told about each other."""
+    since = now()
+    await say(
+        ctx,
+        "Two unrelated tasks, no project, one worker each. 'Haiku Writer': write a haiku about "
+        "autumn into haiku.txt in your folder. 'Prime Counter': count the primes below 1000 "
+        "with python and report the number.",
+    )
+    tasks = await finished(ctx, since, 2, "both tasks", 600)
+    for task in tasks:
+        rows = await messages(ctx, task["session_id"])
+        assert 'type="peers"' not in prompts_of(rows), task["title"]
+        assert not [m for m in rows if m["kind"] in {"tell", "ask"}], task["title"]
+    counter = next(t for t in tasks if "prime" in t["title"].lower())
+    log(f"E6: {counter['result'][:200]!r}")
+    assert "168" in counter["result"]
+    log("E6 passed")
+
+
+async def e7_one_to_two(ctx: Ctx):
+    """One worker's value goes to two others at once."""
+    since = now()
+    await say(
+        ctx,
+        "Three tasks in parallel, no project, one worker each, all started now. 'Seed Maker': "
+        "pick a random whole number between 100000 and 999999 with python, write it into "
+        "seed.txt in your folder, and give it yourself to both the 'Doubler' and the "
+        "'Tripler' workers. 'Doubler': wait for the Seed Maker's number, then write twice it "
+        "into double.txt in your folder. 'Tripler': wait for the Seed Maker's number, then "
+        "write three times it into triple.txt in your folder. Nobody makes up a number.",
+    )
+    seed = int((await file_of(ctx, since, "seed.txt", "the seed", 600)).read_text().strip())
+    double = await file_of(ctx, since, "double.txt", "the double", 900)
+    triple = await file_of(ctx, since, "triple.txt", "the triple", 900)
+    await finished(ctx, since, 3, "the three tasks", 600)
+    log(f"E7: {seed} {double.read_text()!r} {triple.read_text()!r}")
+    assert int(double.read_text().strip()) == 2 * seed
+    assert int(triple.read_text().strip()) == 3 * seed
+    maker = await titled(ctx, since, "seed")
+    takers = [await titled(ctx, since, "doubler"), await titled(ctx, since, "tripler")]
+    await peers_ok(ctx, since, maker, takers, str(seed))
+    log("E7 passed")
+
+
+async def tests_seen(ctx: Ctx, task_id: str, what: str, check, timeout=400) -> dict:
+    """The task's receipts once `check` holds for them."""
+
+    async def ready():
+        task = await ctx.app.get(f"/api/tasks/{task_id}")
+        receipts = task.get("receipts") or {}
+        return receipts if check(receipts) else None
+
+    return await wait_for(what, ready, timeout, ctx.app)
+
+
+async def steps(ctx: Ctx, worker: str) -> list[str]:
+    return [m["text"] for m in await messages(ctx, worker) if m["kind"] == "tool"]
+
+
+async def e8_long_run_in_background(ctx: Ctx):
+    """A test run left running in the background: shown running, then passed."""
+    since = now()
+    await say(
+        ctx,
+        f"In the calc project ({ctx.notes['calc']}), run `uv run --with pytest python -m pytest "
+        "-q slow` in the background (async mode; it takes about a minute), wait for it to end, "
+        "then report done with how many tests passed. Change no files.",
+    )
+    task = await titled(ctx, since, "")
+    seen_running = []
+
+    async def running_or_done():
+        current = await ctx.app.get(f"/api/tasks/{task['id']}")
+        tests = (current.get("receipts") or {}).get("tests") or {}
+        if tests.get("running"):
+            seen_running.append(True)
+        return current if current["status"] in FINISHED else None
+
+    done = await wait_for("the slow run", running_or_done, 900, ctx.app)
+    tests = done["receipts"]["tests"]
+    shells = [step for step in await steps(ctx, task["session_id"]) if "bash" in step][:6]
+    log(f"E8: running seen {bool(seen_running)}; tests {tests}; flags "
+        f"{done['receipts']['flags']}; steps {shells}")  # fmt: skip
+    assert tests["passed"] is True and "slow" in tests["command"]
+    assert not any("failed" in flag for flag in done["receipts"]["flags"])
+    assert seen_running, "shown running while it ran"
+    log("E8 passed")
+
+
+async def e9_long_failure_after_a_short_wait(ctx: Ctx):
+    """A failing run that outlasts Copilot's wait: failed, not passed."""
+    since = now()
+    await say(
+        ctx,
+        f"In the calc project ({ctx.notes['calc']}), run `uv run --with pytest python -m pytest "
+        "-q slow_fail` with an initial wait of 10 seconds (it takes about 40 seconds), wait for "
+        "it to end, and report what failed. Do not fix anything.",
+    )
+    task = await titled(ctx, since, "")
+    receipts = await tests_seen(ctx, task["id"], "the failed run", lambda r: (
+        (r.get("tests") or {}).get("passed") is not None and not r["tests"].get("running")
+    ), 900)  # fmt: skip
+    await task_status(ctx, task["id"], FINISHED, "its report", 600)
+    log(f"E9: {receipts['tests']}; flags {receipts['flags']}; steps "
+        f"{[s for s in await steps(ctx, task['session_id']) if 'bash' in s][:6]}")  # fmt: skip
+    assert receipts["tests"]["passed"] is False and receipts["tests"]["exit_code"] == 1
+    log("E9 passed")
+
+
+async def e10_push_fails_after_tests(ctx: Ctx):
+    """`pytest && git push` where the push fails: the tests passed."""
+    since = now()
+    await say(
+        ctx,
+        f"In the calc project ({ctx.notes['calc']}), run exactly this once: `uv run --with "
+        "pytest python -m pytest -q tests && git push origin HEAD`. The repository has no "
+        "remote, so the push fails; that is expected. Report done with the test result. Change "
+        "no files.",
+    )
+    task = await titled(ctx, since, "")
+    done = await task_status(ctx, task["id"], FINISHED, "its report", 600)
+    tests = done["receipts"]["tests"]
+    log(f"E10: {tests}; flags {done['receipts']['flags']}")
+    assert tests["passed"] is True, "the push failed, not the tests"
+    assert not any("test run failed" in flag for flag in done["receipts"]["flags"])
+    log("E10 passed")
+
+
+async def e11_tests_through_a_script(ctx: Ctx):
+    """Tests run by a project's own script are seen as a test run."""
+    since = now()
+    await say(
+        ctx,
+        f"In the calc project ({ctx.notes['calc']}), run `./scripts/run_unit_tests.sh` and "
+        "report the result. Do not run the tests any other way and change no files.",
+    )
+    task = await titled(ctx, since, "")
+    done = await task_status(ctx, task["id"], FINISHED, "its report", 600)
+    tests = done["receipts"]["tests"]
+    log(f"E11: {tests}")
+    assert tests and tests["passed"] is True and "run_unit_tests" in tests["command"]
+    log("E11 passed")
+
+
+async def e12_blocked_part(ctx: Ctx):
+    """A command that never ran (refused by Copilot) is no failed test run."""
+    since = now()
+    await say(
+        ctx,
+        f"In the calc project ({ctx.notes['calc']}), run exactly `pkill -f calc-no-such-thing; "
+        "uv run --with pytest python -m pytest -q tests` once; if that is refused, run the "
+        "tests alone. Report the test result. Change no files.",
+    )
+    task = await titled(ctx, since, "")
+    done = await task_status(ctx, task["id"], FINISHED, "its report", 600)
+    log(f"E12: {done['receipts']['tests']}; flags {done['receipts']['flags']}; "
+        f"steps {[s for s in await steps(ctx, task['session_id']) if 'bash' in s]}")  # fmt: skip
+    assert done["receipts"]["tests"]["passed"] is True
+    assert not any("failed" in flag for flag in done["receipts"]["flags"])
+    log("E12 passed")
+
+
+async def e13_ci_passes_after_a_local_failure(ctx: Ctx):
+    """Tests fail here but the PR's checks pass after: the card says so."""
+    set_check("failure")
+    since = now()
+    await say(
+        ctx,
+        f"In the calc project ({ctx.notes['calc']}), run `uv run --with pytest python -m pytest "
+        "-q local_fail` once. It fails here because it needs CI's environment; that is expected, "
+        "do not change anything. Then report done, naming "
+        f"https://github.com/{APPROVE_REPO}/pull/1 as the PR this check is about.",
+    )
+    task = await titled(ctx, since, "")
+    done = await task_status(ctx, task["id"], FINISHED, "its report", 600)
+    log(f"E13: before {done['receipts']['tests']} {done['receipts']['flags']}")
+    assert done["receipts"]["tests"]["passed"] is False
+    set_check("success")
+    label = f"{APPROVE_REPO}#1"
+    receipts = await tests_seen(ctx, task["id"], "CI's newer word", lambda r: any(
+        "pass now" in flag for flag in r.get("flags", [])
+    ), 480)  # fmt: skip
+    log(f"E13: after {receipts['tests']} {receipts['flags']} {receipts['prs']}")
+    assert receipts["tests"]["ci_passing"] == [label]
+    assert (
+        f"The last local test run failed (exit 1), but the checks on {label} pass now."
+        in (receipts["flags"])
+    )
+    ctx.notes["e13_task"] = task["id"]
+    log("E13 passed")
+
+
+async def e14_card_follows_the_fix(ctx: Ctx):
+    """A failing run, then the fix in a follow-up: the card turns green by itself."""
+    since = now()
+    await say(
+        ctx,
+        f"In the calc project ({ctx.notes['calc']}), run `uv run --with pytest python -m pytest "
+        "-q subtract` and report what fails. Do not fix it yet.",
+    )
+    task = await titled(ctx, since, "")
+    done = await task_status(ctx, task["id"], FINISHED, "its report", 600)
+    assert done["receipts"]["tests"]["passed"] is False
+    await ctx.app.post(f"/api/tasks/{task['id']}/follow-up", {
+        "text": "Now fix sub in calc.py and run the same tests again."
+    })  # fmt: skip
+    receipts = await tests_seen(ctx, task["id"], "the card turns green", lambda r: (
+        (r.get("tests") or {}).get("passed") is True
+    ), 600)  # fmt: skip
+    log(f"E14: {receipts['tests']}")
+    assert receipts["tests"]["failed_before"], "failed first, then passed"
+    await task_status(ctx, task["id"], FINISHED, "its second report", 600)
+    log("E14 passed")
+
+
+async def e15_browser(ctx: Ctx):
+    """In the browser: the cards of this round, who told whom, the border, the settings."""
+    from playwright.async_api import async_playwright, expect
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch()
+        page = await browser.new_page(viewport={"width": 1400, "height": 900})
+        errors: list[str] = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        await page.goto(f"{ctx.app_base}/#token={ctx.app.launch_token}")
+        title = (await ctx.app.get(f"/api/tasks/{ctx.notes['e13_task']}"))["title"]
+        card = page.locator(".card.task", has_text=title).first
+        await card.scroll_into_view_if_needed(timeout=20000)
+        await expect(card.locator(".receipt.pr")).to_contain_text("cos-approve-test#1 · ✓ CI")
+        await expect(card.locator(".receipt.warn", has_text="✗ tests locally")).to_be_visible()
+        await card.screenshot(path=SCRIPTS.parent / "browser-shots" / "live-e-ci-card.png")
+        lines = page.locator("#timeline .event", has_text="told")
+        assert await lines.count() >= 1, "who told whom, in the chat"
+        handle, panel = page.locator("#panel-resizer"), page.locator("#panel")
+        before = (await panel.bounding_box())["width"]
+        box = await handle.bounding_box()
+        await page.mouse.move(box["x"] + 4, box["y"] + 300)
+        await page.mouse.down()
+        await page.mouse.move(box["x"] - 150, box["y"] + 300, steps=8)
+        await page.mouse.up()
+        assert abs((await panel.bounding_box())["width"] - before - 154) <= 8
+        await page.locator("#settings-button").click()
+        await page.locator('#settings-tabs [data-tab="general"]').click()
+        await page.locator('input[name="max_workers"]').fill("120")
+        await page.get_by_role("button", name="Save", exact=True).click()
+        await expect(page.locator("#settings-dialog")).to_be_hidden(timeout=10000)
+        assert (await state(ctx))["settings"]["max_workers"] == 120
+        await page.screenshot(path=SCRIPTS.parent / "browser-shots" / "live-e-home.png")
+        await browser.close()
+        assert not errors, errors
+    await settings(ctx, max_workers=4)
+    log("E15 passed")
+
+
+def probe_servers(ctx: Ctx) -> int:
+    """The MCP server processes this shard's Copilot sessions started (one per session)."""
+    out = subprocess.run(["ps", "-axo", "command="], capture_output=True, text=True).stdout
+    return sum(str(ctx.root / "probe_mcp.py") in line for line in out.splitlines())
+
+
+async def e16_quiet_worker_lets_go(ctx: Ctx):
+    """A finished worker, quiet for a while, lets go of its Copilot session (its MCP server
+    process ends); a follow-up resumes it, and it remembers."""
+    since = now()
+    await say(ctx, "Start a worker titled 'Word Holder': remember the word 'tangerine' and "
+              "report done with one line saying you will remember it.")  # fmt: skip
+    task = (await finished(ctx, since, 1, "the holder", 400))[0]
+    worker = task["session_id"]
+    held = probe_servers(ctx)
+
+    async def let_go():
+        return (await session(ctx, worker))["live"] is False or None
+
+    await wait_for("it lets go of its session", let_go, 300, ctx.app)
+    after = probe_servers(ctx)
+    log(f"E16: MCP server processes {held} -> {after}")
+    assert after < held, "its MCP server ended with it"
+    question = {"text": "Which word did I ask you to remember? Just the word."}
+    await ctx.app.post(f"/api/tasks/{task['id']}/follow-up", question)
+
+    async def answered():
+        current = await ctx.app.get(f"/api/tasks/{task['id']}")
+        later = current["status"] in FINISHED and "tangerine" in current["result"].lower()
+        return current if later and current["updated_at"] > task["updated_at"] else None
+
+    done = await wait_for("it answers from where it was", answered, 400, ctx.app)
+    log(f"E16: {done['result'][:200]!r}; live again {(await session(ctx, worker))['live']}")
+    log("E16 passed")
+
+
+async def f1_low_memory(ctx: Ctx):
+    """While the computer is low on memory, new work waits and says why; nothing starts."""
+    since = now()
+    reply = await ask(ctx, f"How many data rows are in data/sales.csv in {ctx.project}? Don't "
+                      "change any files.")  # fmt: skip
+    task = await titled(ctx, since, "")
+    await asyncio.sleep(70)  # A watch-loop tick: it still waits.
+    row = await session(ctx, task["session_id"])
+    current = await ctx.app.get(f"/api/tasks/{task['id']}")
+    log(f"F1: the Router: {reply!r}; worker {row['status']} {row['activity']!r}; "
+        f"task {current['status']}")  # fmt: skip
+    assert row["status"] == "queued" and row["activity"].startswith("waiting for memory: ")
+    assert current["status"] == "queued"
+    assert re.search(r"memory|内存", reply, re.IGNORECASE), "the Router says why"
+    log("F1 passed")
+
+
 SCENARIOS = {
     "A": [
         w1_ask, w2_progress, w3_answered_directly, w4_pasted_orders, w5_chinese_log,
@@ -2122,6 +2670,14 @@ SCENARIOS = {
         w58_language_switch_while_busy, w59_several_prs, w60_followed_pr_news,
         w61_parallel_on_the_board, w62_redo_a_slack_reply, w52_no_ids,
     ],
+    "E": [
+        e1_parallel_handoff, e2_router_knows, e3_contract_in_chinese, e4_result_when_done,
+        e5_ask_a_peer, e6_independent_not_linked, e7_one_to_two, e8_long_run_in_background,
+        e9_long_failure_after_a_short_wait, e10_push_fails_after_tests,
+        e11_tests_through_a_script, e12_blocked_part, e13_ci_passes_after_a_local_failure,
+        e14_card_follows_the_fix, e15_browser, e16_quiet_worker_lets_go, w52_no_ids,
+    ],
+    "F": [f1_low_memory],
 }  # fmt: skip
 
 
@@ -2145,15 +2701,23 @@ async def main():
             "COPILOT_HOME": str(home),
             "CHIEFOFSTAFF_CONNECTOR_TICK": "5",
             "CHIEFOFSTAFF_IDLE_FILE": str(root / "idle"),
+            # E: quiet workers let go of their sessions after a minute; F: memory is low.
+            **({"CHIEFOFSTAFF_RELEASE_IDLE_MINUTES": "1"} if shard == "E" else {}),
+            **({"CHIEFOFSTAFF_MIN_FREE_MEMORY": "101"} if shard == "F" else {}),
         }
         app = App(root / "data", root / "log", env)
         ctx = Ctx(app, root, home, project, truth, workspace)
+        ctx.app_base = live_e2e.BASE
         await app.start()
         passed: list[str] = []
         try:
+            extra = []
+            if shard == "E":
+                ctx.notes["calc"] = calc_project(root)
+                extra = [str(ctx.notes["calc"])]
             await settings(
-                ctx, projects=[str(project)], model=MODEL, max_workers=4, mac_notifications=False,
-                digest_time="", slack_enabled=shard != "C",
+                ctx, projects=[str(project), *extra], model=MODEL, max_workers=4,
+                mac_notifications=False, digest_time="", slack_enabled=shard != "C",
             )  # fmt: skip
             if shard == "A":
                 await ask(

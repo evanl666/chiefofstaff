@@ -188,11 +188,12 @@ async def test_sessions_ask_each_other(harness):
     assert "already" in again.text_result_for_llm
 
     await call_tool(runtime, "ask_session", asker, session_id=router, question="Who owns billing?")
-    assert (
-        harness.session(router)
-        .sent[-1]
-        .startswith(f'<message from="worker:{asker[:8]}" type="question"')
-    )
+    sent = harness.session(router).sent[-1]
+    # What the two workers said to each other rides along with the Router's next turn.
+    assert sent.startswith('<message from="system" type="peer-message">')
+    assert "“Invoice bug” asked “Billing research”: Which table holds invoices?" in sent
+    assert "“Billing research” answered “Invoice bug”: billing.inv" in sent
+    assert f'<message from="worker:{asker[:8]}" type="question"' in sent
     reader = await spawn(runtime, router, "Slack reader", slack=True)
     harness.store.execute("UPDATE sessions SET slack=1 WHERE id=?", (reader,))
     refused = await call_tool(runtime, "ask_session", asker, session_id=reader, question="?")
@@ -334,3 +335,141 @@ def test_old_questions_move_into_their_table(tmp_path):
         "text": "Which?",
     }
     assert not moved.all("SELECT key FROM kv WHERE key LIKE 'question:%' OR key LIKE 'asking:%'")
+
+
+async def test_workers_that_work_together_tell_each_other(harness):
+    runtime = await harness.connect()
+    router = harness.router_id
+    scout = await spawn(runtime, router, "Token scout")
+    scout_task = runtime.tasks.current(scout)["id"]
+    writer = await spawn(runtime, router, "Token writer", works_with=[scout_task])
+    first = harness.session(writer).sent[0]
+    assert '<message from="system" type="peers">' in first
+    assert f"“Token scout” (worker:{scout[:8]}), on task {scout_task}" in first
+    assert (
+        f"“Token writer” (worker:{writer[:8]}) now works at the same time"
+        in (harness.session(scout).sent[-1])
+    ), "the one already at work hears of the new one"
+    listed = json.loads((await call_tool(runtime, "list_sessions", router)).text_result_for_llm)
+    entry = next(s for s in listed["sessions"] if s["session_id"] == writer)
+    assert entry["works_with"] == [scout[:8]]
+
+    # The writer waits for the token: no report asked for while its peer is at it.
+    writer_session = harness.session(writer)
+    writer_session.emit("assistant.message", content="Waiting for the Token scout's token.")
+    writer_session.emit("session.idle")
+    await settle(runtime)
+    assert not any("report-missing" in sent for sent in writer_session.sent)
+    assert harness.store.session(writer)["activity"] == "waiting for “Token scout”"
+
+    told = await call_tool(runtime, "tell_session", scout, session_id=f"worker:{writer[:8]}",
+                           text="The token is 48d6e521.")  # fmt: skip
+    assert told.text_result_for_llm == "Told “Token writer”."
+    assert writer_session.sent[-1] == env(
+        f"worker:{scout[:8]}", "note", "The token is 48d6e521.", title="Token scout",
+        task=scout_task,
+    )  # fmt: skip
+    assert harness.store.messages(scout)[-1]["kind"] == "tell"
+    copy = harness.store.messages(router)[-1]
+    assert copy["kind"] == "peer" and copy["meta"]["deferred"], "rides along, no Router turn"
+    assert copy["text"] == "“Token scout” told “Token writer”: The token is 48d6e521."
+    assert not runtime.delivery.has_unsent(router)
+
+    await call_tool(runtime, "report", scout, status="done", summary="Token 48d6e521 made.")
+    await settle(runtime)
+    assert "“Token scout” finished “Token scout”:\nToken 48d6e521 made." in writer_session.sent[-1]
+
+    for refused, target, why in [
+        ("me", scout, "That is you."),
+        ("router", router, "for other workers"),
+    ]:
+        result = await call_tool(runtime, "tell_session", scout, session_id=target, text="x")
+        assert why in result.text_result_for_llm, refused
+
+
+async def test_telling_a_finished_or_closed_worker_does_not_start_it(harness):
+    runtime = await harness.connect()
+    router = harness.router_id
+    done = await spawn(runtime, router, "Finished one")
+    teller = await spawn(runtime, router, "Teller")
+    await call_tool(runtime, "report", done, status="done", summary="Done.")
+    harness.session(done).emit("session.idle")
+    await settle(runtime)
+    sent = len(harness.session(done).sent)
+    result = await call_tool(runtime, "tell_session", teller, session_id=done, text="FYI: v2.")
+    assert "has finished its task" in result.text_result_for_llm
+    assert len(harness.session(done).sent) == sent, "held for its next message, no turn"
+    for _ in range(11):
+        await call_tool(runtime, "tell_session", teller, session_id=done, text="more")
+    flood = await call_tool(runtime, "tell_session", teller, session_id=done, text="more")
+    assert "report to the Router" in flood.text_result_for_llm
+    await runtime.workers.close(done)
+    closed = await call_tool(runtime, "tell_session", teller, session_id=done, text="x")
+    assert "closed" in closed.text_result_for_llm
+
+
+async def test_tasks_that_name_each_other_work_together_unless_told(harness):
+    runtime = await harness.connect()
+    router = harness.router_id
+
+    async def start(title, instructions, why_new="test"):
+        result = await call_tool(runtime, "spawn_worker", router, title=title,
+                                 instructions=instructions, why_new=why_new)  # fmt: skip
+        return json.loads(result.text_result_for_llm)["session_id"]
+
+    scout = await start("Token Scout", "Make a token and pass it to the Token Writer.")
+    # Not refused as related to the scout: they are two parts of one request.
+    writer = await start("Token Writer", "Wait for the Token Scout's token, then write it.", "")
+    assert runtime.peers.of(writer) == [scout], "the scout's task names the writer"
+    haiku = await start("Haiku Writer", "Write a haiku about autumn.")
+    primes = await start("Prime Counter", "Count the primes below 1000.")
+    assert runtime.peers.of(haiku) == [] and runtime.peers.of(primes) == []
+    both = "Two tasks: 'Alpha Report' sums a.csv; 'Beta Report' sums b.csv."
+    alpha = await start("Alpha Report", both)
+    await start("Beta Report", both)
+    assert runtime.peers.of(alpha) == [], "the same message of the owner's is no link"
+
+    # Waiting for a worker it names, linked or not: no report asked for.
+    session = harness.session(haiku)
+    session.emit("assistant.message", content="Waiting for the Prime Counter to finish.")
+    session.emit("session.idle")
+    await settle(runtime)
+    assert not any("report-missing" in sent for sent in session.sent)
+
+
+async def test_tasks_started_at_once_are_linked_by_title(harness):
+    runtime = await harness.connect()
+    router = harness.router_id
+
+    def start(title, instructions, works_with):
+        return call_tool(runtime, "spawn_worker", router, title=title, instructions=instructions,
+                         works_with=works_with, why_new="test")  # fmt: skip
+
+    # In parallel calls, neither exists when the other starts: each names the other by title.
+    api, client = await asyncio.gather(
+        start("Orders API", "Add GET /orders.", ["Orders client"]),
+        start("Orders client", "Call GET /orders.", ["Orders API"]),
+    )
+    api, client = (json.loads(r.text_result_for_llm)["session_id"] for r in (api, client))
+    assert runtime.peers.of(api) == [client] and runtime.peers.of(client) == [api]
+    await settle(runtime)
+    told = harness.session(api).sent + harness.session(client).sent
+    assert any(f"(worker:{client[:8]})" in sent for sent in told)
+    assert any(f"(worker:{api[:8]})" in sent for sent in told)
+
+
+async def test_only_the_workers_it_names_hold_its_report_and_a_stopped_one_says_so(harness):
+    runtime = await harness.connect()
+    router = harness.router_id
+    api = await spawn(runtime, router, "Orders API")
+    client = await spawn(runtime, router, "Orders client", works_with=["Orders API"])
+    session = harness.session(client)
+    session.emit("assistant.message", content="Done with my part, waiting for CI on the PR.")
+    session.emit("session.idle")
+    await settle(runtime)
+    assert any("report-missing" in sent for sent in session.sent), "CI is no peer"
+
+    await call_tool(runtime, "cancel_task", router, task_id=runtime.tasks.current(api)["id"])
+    await settle(runtime)
+    assert "“Orders API”'s task “Orders API” was cancelled" in session.sent[-1]
+    assert 'type="peer-stopped"' in session.sent[-1]

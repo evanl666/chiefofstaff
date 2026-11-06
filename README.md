@@ -85,8 +85,9 @@ they left off next time. Options: `--port`, `--data-dir`, `--no-browser`, `--dem
 
 Each session is a regular Copilot CLI session, driven through the Copilot SDK; `copilot --resume`
 lists them as "Chief of Staff · …". Sessions never talk to each other directly: they call tools
-such as `spawn_worker` and `report`, and Chief of Staff delivers each message, labeled with
-who sent it, so a Slack message cannot pass itself off as you.
+such as `spawn_worker`, `report` and `tell_session`, and Chief of Staff delivers each message,
+labeled with who sent it, so a Slack message cannot pass itself off as you. Workers that work
+together pass what the other needs straight to it; the Router gets a copy.
 
 ```
 you ── Home ── Router ── tasks ──► worker · worker · worker

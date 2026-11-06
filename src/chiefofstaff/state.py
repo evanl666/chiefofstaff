@@ -66,6 +66,8 @@ class SessionState:
     last_output: str = ""
     # The steps (tool calls) it is in now, by call id: when each started and what it is.
     steps: dict[str, tuple[float, str]] = field(default_factory=dict)
+    # Its calls that read, type into or stop a shell, by call id: (tool, shell id).
+    shell_calls: dict[str, tuple[str, str]] = field(default_factory=dict)
     lifecycle: asyncio.Lock = field(default_factory=asyncio.Lock)
     sending: asyncio.Lock = field(default_factory=asyncio.Lock)
     # Serializes add_repo for one worker.

@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 from copilot.tools import ToolInvocation
 
+from chiefofstaff import machine
 from chiefofstaff.backend import TESTED_CLI, Capabilities
 from chiefofstaff.bus import Bus
 from chiefofstaff.envelope import language
@@ -327,6 +328,13 @@ class Harness:
 
     def kinds(self, session_id):
         return [(m["kind"], m["text"]) for m in self.store.messages(session_id)]
+
+
+@pytest.fixture(autouse=True)
+def plenty_of_memory(monkeypatch):
+    """Tests do not depend on how much memory the machine running them has left."""
+    monkeypatch.setattr(machine, "free_memory", lambda: None)
+    monkeypatch.setattr(machine, "_cached", (0.0, None))
 
 
 @pytest.fixture

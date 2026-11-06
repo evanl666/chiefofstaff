@@ -101,6 +101,20 @@ A task that needs another's result starts once that one reports done. When it mu
 work you have checked (an API others code against), the Router makes it wait until you
 *Accept* the other one instead; its card says *waiting for your review of …*.
 
+**Workers that work together.** Some tasks run at the same time and need each other while they
+work: two sides of one change (an API and its client), a value one of them finds that the other
+uses, a schema or file format they share. The Router starts them together and says they work
+together; each is told about the others. They pass what the other needs straight to it
+(`tell_session`, or `ask_session` for a question), in their exact words and at once, without a
+Router turn in between. A worker waiting for another one's message waits quietly (its card
+says *waiting for “…”*) and goes on when it arrives; when the other one finishes, its result
+reaches the ones still at work. The Router keeps the picture without being in the way: a copy
+of each message rides along with its next turn, and Home shows it in a line (*↔ “Token Scout”
+told “Token Writer”: …*), so "what did the scout pass on?" is answered at once. What workers
+tell each other is information, never new work: when one should change course (scope, another
+approach, overlapping work), it asks the Router, which decides or asks you. Independent tasks
+started together are not linked.
+
 **Routing to the right worker** matters most. Your message reaches the Router together with
 the workers whose record matches it (title, task, files, branches, reports; keyword search,
 Chinese included). For work on a subject a worker already knows, the Router either:
@@ -119,7 +133,22 @@ Workers close themselves when their PR is merged or closed. Finished workers tha
 nothing close after *Close idle after* hours (default 24). Closing is reversible: talk to a
 closed worker, or open it and press *Reopen*, to continue with its conversation and checkout.
 
-At most *Parallel workers* run at once; the rest queue.
+At most *Parallel workers* run at once (up to 1000); the rest queue.
+
+**Your computer stays responsive.** A Copilot session is light (an open, idle one takes about
+half a megabyte; one that has worked about ten, plus the MCP servers it starts for itself).
+What weighs is what workers run: test suites, builds, browsers. So:
+
+- While the computer is low on memory (less than 10% free, as macOS's memory pressure or
+  Linux's available memory says), new work waits; its card says *Waiting for memory: 6% free
+  on this computer*, and it starts once memory frees up. Work already running is never stopped.
+- A worker that has been quiet for ten minutes lets go of its Copilot session, which ends the
+  MCP servers it started; its next message (a follow-up, news on its PR, another worker's)
+  picks it up again where it was. Not one that is in a turn, waits in one for you, has a
+  command still running (a server it started), or is open in a terminal.
+
+How many workers to run at once depends on what they run: four builds of a large project need
+more than four searches.
 
 ### Your other Copilot sessions
 
@@ -225,7 +254,8 @@ terminal.
 
 A worker's report is its claim. Receipts are what Chief of Staff observed:
 
-- the shell commands it ran and their exit codes, recognized as tests, checks or builds;
+- the shell commands it ran and their exit codes, recognized as tests, checks or builds (also
+  tests run through a script of the project's, known by the test runner's summary);
 - commits and changes in its checkouts (`git diff` against where its branch started);
 - the state and checks of pull requests it reported.
 
@@ -233,6 +263,15 @@ The review card shows them under *Observed* and flags disagreements, e.g. *Says 
 no test run was observed*, *The last test run failed (exit 1)*, or *Checks are failing on
 acme/app#7*. A test that failed first and then passed (a regression test for a fix) shows as
 *✗→✓ tests*. *Copy report* puts goal, result and receipts into markdown.
+
+Receipts show the latest: the card changes as soon as a test run, push or commit ends, also
+after the report (work on its PR). A test run Copilot left running (a long suite, or one in the
+background) shows *… tests running* and gets its result when it ends; a command that never ran
+(refused, blocked) is no failed run; in `pytest && git push`, a rejected push is not failed
+tests. A PR shows in a few words, as GitHub has it now: *app#7 · ✓ CI · approved*, *CI
+running*, *✗ CI* (hover for the failing checks), *merged*. When the PR's checks passed after
+the last local test run failed, the card says so (*✗ tests locally*, and *The last local test
+run failed (exit 1), but the checks on … pass now*): CI has the newer word.
 
 **Acceptance criteria.** For work that can be checked, the Router gives the task 1-4 *done when*
 criteria: a test that passes, a command and its output, a request and its response (for a bug
@@ -581,6 +620,8 @@ Most settings are in the UI. Environment variables for tuning and tests:
 | `CHIEFOFSTAFF_QUESTION_TTL` | `7200` | Seconds before an unanswered question between sessions expires |
 | `CHIEFOFSTAFF_REQUEST_TIMEOUT` | `3600` | Seconds a card for you stays open |
 | `CHIEFOFSTAFF_WATCHDOG_INTERVAL`, `_STALL`, `_LONG`, `_COOLDOWN` | `60`, `900`, `2700`, `600` | Watchdog timing (seconds) |
+| `CHIEFOFSTAFF_MIN_FREE_MEMORY` | `10` | New worker turns wait while less memory than this (percent) is free; `0` turns it off |
+| `CHIEFOFSTAFF_RELEASE_IDLE_MINUTES` | `10` | A quiet worker lets go of its Copilot session after this long |
 
 Chief of Staff removes its own `CHIEFOFSTAFF_*` variables from the environment Copilot and its
 commands run in.

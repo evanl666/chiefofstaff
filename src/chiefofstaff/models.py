@@ -125,7 +125,7 @@ class Settings(StrictModel):
     projects: list[str] = Field(default_factory=list, max_length=30)
     # Tasks without a project get a folder here; empty means inside the data directory.
     scratch_directory: str = Field(default="", max_length=500)
-    max_workers: int = Field(default=4, ge=1, le=12)
+    max_workers: int = Field(default=4, ge=1, le=1000)
     paused: bool = False
     mac_notifications: bool = True
     watchdog_enabled: bool = True

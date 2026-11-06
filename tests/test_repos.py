@@ -461,6 +461,7 @@ async def test_receipts_show_what_was_observed_next_to_the_report(tmp_path, git_
         "passed": True,
         "runs": 2,
         "failed_before": True,
+        "running": False,
     }
     assert found["changed"]["files"] == 1 and found["changed"]["commits"] == 1
     assert found["prs"][0]["checks"] == "passing" and found["flags"] == []

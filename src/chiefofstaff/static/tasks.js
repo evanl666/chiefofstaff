@@ -306,6 +306,18 @@ function taskBody(task) {
   foldable(wrapper, el("div", { class: "body markdown", html: markdown(text) }), text, { chars: 360, lines: 5 });
   return wrapper;
 }
+// A PR as GitHub has it now, in a few words: "app#7 · ✓ CI · approved".
+function prChip(pr) {
+  const short = pr.label.replace(/^[^/]+\//, "");
+  const ci = { passing: "✓ CI", failing: "✗ CI", pending: "CI running" }[pr.checks] || "";
+  const state = pr.state === "MERGED" ? "merged" : pr.state === "CLOSED" ? "closed" : "";
+  const review = { APPROVED: "approved", CHANGES_REQUESTED: "changes requested" }[pr.review] || "";
+  const failing = pr.checks === "failing" && pr.failing?.length ? `\nFailing: ${pr.failing.join(", ")}` : "";
+  const ciWords = { passing: "Checks pass", failing: "Checks fail", pending: "Checks are running", none: "No checks" }[pr.checks] || "";
+  const seen = pr.at ? `\nAs of ${new Date(pr.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` : "";
+  const title = [pr.label, ciWords + failing, review && `Review: ${review}`, state && `PR ${state}`].filter(Boolean).join("\n") + seen;
+  return el("a", { class: `receipt pr ${state || pr.checks}`, href: pr.url, target: "_blank", rel: "noreferrer", title, text: [short, state || ci, !state && review].filter(Boolean).join(" · ") });
+}
 // What was observed while it worked, at a glance: the verdict, tests, changes and PRs.
 function chips(task) {
   const receipts = task.receipts;
@@ -317,19 +329,24 @@ function chips(task) {
   }
   const result = (label, item) => {
     if (!item) return;
+    if (item.passed === null) {
+      items.push(el("span", { class: "receipt warn", title: `${item.command}\nRunning now`, text: `… ${label} running` }));
+      return;
+    }
     const mark = item.passed ? (item.failed_before ? "✗→✓" : "✓") : "✗";
     const before = item.failed_before ? "\nFailed first, then passed" : "";
-    items.push(el("span", { class: `receipt ${item.passed ? "pass" : "fail"}`, title: `${item.command}\n(${plural(item.runs, "run")})${before}`, text: `${mark} ${label}` }));
+    const again = item.running ? "\nRunning again now" : "";
+    // The PR's checks passed after this run failed here: CI has the newer word.
+    const ci = !item.passed && item.ci_passing?.length;
+    const why = ci ? `\nThe checks on ${item.ci_passing.join(", ")} pass now` : "";
+    items.push(el("span", { class: `receipt ${item.passed ? "pass" : ci ? "warn" : "fail"}`, title: `${item.command}\n(${plural(item.runs, "run")})${before}${again}${why}`, text: `${mark} ${label}${ci ? " locally" : ""}${item.running ? " · running again" : ""}` }));
   };
   result("tests", receipts?.tests);
-  result("checks", receipts?.checks);
+  result("lint", receipts?.checks);
   result("build", receipts?.build);
   const changed = receipts?.changed || {};
   if (changed.files) items.push(el("button", { type: "button", class: "receipt changes", title: "See the changes and comment on them", text: `+${changed.insertions} −${changed.deletions} in ${plural(changed.files, "file")}`, onclick: () => showChanges(task, upsertTask) }));
-  for (const pr of receipts?.prs || []) {
-    const checks = { passing: "✓", failing: "✗", pending: "…" }[pr.checks] || "";
-    items.push(el("a", { class: `receipt pr ${pr.checks}`, href: pr.url, target: "_blank", rel: "noreferrer", text: `${pr.label}${pr.state && pr.state !== "OPEN" ? ` (${pr.state.toLowerCase()})` : ""} ${checks}`.trim() }));
-  }
+  for (const pr of receipts?.prs || []) items.push(prChip(pr));
   const flags = (receipts?.flags || []).map((flag) => el("div", { class: "flag", text: flag }));
   const toggle = el("button", { type: "button", class: "expand link", text: "Show report", onclick: (event) => expandTask(event.currentTarget.closest(".card")) });
   return el("div", { class: "chips" }, el("div", { class: "receipts", title: "Observed while it worked, not just reported" }, ...items, toggle), ...flags);

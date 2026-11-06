@@ -797,8 +797,23 @@ label.hours input { width: 118px; }
   animation: spin 0.8s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
-ul.memory { list-style: none; padding: 0; margin: 0; font-size: var(--body); }
-ul.memory li { display: flex; gap: 12px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); }
+/* A list of any length stays a box of a few rows that scrolls; shadows show there is more. */
+ul.memory {
+  list-style: none; padding: 0 10px; margin: 0; font-size: var(--body);
+  max-height: 232px; overflow-y: auto; overscroll-behavior: contain;
+  border: 1px solid var(--line); border-radius: var(--radius);
+  background:
+    linear-gradient(var(--card) 30%, transparent) top / 100% 24px no-repeat local,
+    linear-gradient(transparent, var(--card) 70%) bottom / 100% 24px no-repeat local,
+    radial-gradient(farthest-side at 50% 0, rgb(0 0 0 / 14%), transparent) top / 100% 8px no-repeat scroll,
+    radial-gradient(farthest-side at 50% 100%, rgb(0 0 0 / 14%), transparent) bottom / 100% 8px no-repeat scroll,
+    var(--card);
+}
+ul.memory li { display: flex; gap: 10px; align-items: center; padding: 4px 0; border-bottom: 1px solid var(--line); }
+ul.memory .row-text.inline { display: flex; align-items: baseline; gap: 8px; }
+ul.memory .row-text.inline .clamped { flex: 1; }
+ul.memory .row-text.inline > small { flex: none; white-space: nowrap; min-width: 84px; text-align: right; }
+h4[data-count]::after { content: " · " attr(data-count); color: var(--muted); font-weight: 400; }
 ul.memory li:last-child { border-bottom: 0; }
 ul.memory li.off { opacity: 0.55; }
 ul.memory li.empty-note { color: var(--muted); font-size: var(--small); }
@@ -903,6 +918,14 @@ details.event > .markdown { margin: 4px 0 8px 24px; padding: 8px 12px; font-size
   flex-direction: column;
   gap: 24px;
 }
+/* The border between the chat and the panel: drag it to make the panel wider or narrower. */
+#panel-resizer { flex: none; width: 9px; margin: 0 -5px 0 -4px; cursor: col-resize; position: relative; z-index: 3; touch-action: none; }
+#panel-resizer::after { content: ""; position: absolute; top: 0; bottom: 0; left: 4px; width: 1px; transition: background 0.15s var(--ease); }
+#panel-resizer:hover::after, #panel-resizer:focus-visible::after, body.resizing #panel-resizer::after { left: 3px; width: 3px; background: var(--accent); }
+#panel-resizer:focus-visible { outline: none; }
+#body:has(> #panel[hidden]) > #panel-resizer { display: none; }
+body.resizing { cursor: col-resize; user-select: none; }
+body.resizing iframe { pointer-events: none; }
 .panel-section > h2 {
   display: flex;
   align-items: center;
@@ -947,7 +970,8 @@ details.task-group > summary:hover { color: var(--text); }
 @media (max-width: 1099px) {
   #home-tabs:not([hidden]) { display: flex; }
   #main.home:not(.tab-chat) #conversation, #main.home.tab-chat #panel { display: none; }
-  #main.home #panel { width: auto; flex: 1; border-left: 0; background: var(--bg); padding: 16px 20px 32px; }
+  #main.home #panel { width: auto !important; flex: 1; border-left: 0; background: var(--bg); padding: 16px 20px 32px; }
+  #main.home #panel-resizer { display: none; }
   #main.home #panel > * { width: 100%; max-width: 760px; margin: 0 auto; }
   #main.tab-needs #tasks, #main.tab-tasks #needs { display: none; }
 }
@@ -1046,6 +1070,9 @@ button.receipt { min-height: 22px; font-weight: 400; }
 .receipt.fail, .receipt.pr.failing { background: var(--red-soft); color: var(--red); }
 .receipt.warn, .receipt.pr.pending { background: var(--amber-soft); color: var(--amber); }
 .receipt.none { background: none; color: var(--muted); padding-left: 0; }
+.receipt.pr { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.receipt.pr.merged { background: var(--accent-soft); color: var(--accent); }
+.receipt.pr.closed { color: var(--muted); }
 a.receipt:hover { text-decoration: underline; }
 button.receipt.changes { font-size: var(--small); color: var(--accent); background: var(--accent-soft); }
 .receipt.verdict { font-weight: 600; }

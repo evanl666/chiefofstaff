@@ -517,7 +517,7 @@ export function renderLearning() {
       el(
         "li",
         {},
-        el("div", { class: "row-text" }, clamped(lesson.text), el("small", { text: SCOPE(lesson.scope) })),
+        el("div", { class: "row-text inline" }, clamped(lesson.text), el("small", { text: SCOPE(lesson.scope) })),
         el("button", { type: "button", class: "link", text: "Remove", onclick: () => memoryAction(`/api/lessons/${lesson.id}/remove`) }),
       ),
     ),
@@ -574,6 +574,7 @@ function showList(id, count) {
   const list = $(id);
   list.hidden = !count;
   list.previousElementSibling.hidden = !count;
+  list.previousElementSibling.dataset.count = count;
 }
 // What the owner's words were read from, as counted.
 const OBSERVED = {

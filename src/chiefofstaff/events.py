@@ -101,6 +101,7 @@ class Events:
             "session.mcp_server_tools_loaded": self.mcp_status,
             "session.idle": self.idle,
             "session.error": self.error,
+            "system.notification": self.notification,
         }
 
     def record_command(self, session_id: str, call_id: str, arguments: dict):
@@ -126,25 +127,102 @@ class Events:
         call_id = getattr(data, "tool_call_id", "") or ""
         if not call_id:
             return
-        code = receipts.exit_code(output, getattr(data, "success", None))
         ran = self.store.one(
-            "SELECT command, kind FROM commands WHERE session_id=? AND call_id=? "
-            "AND ended_at IS NULL",
+            "SELECT * FROM commands WHERE session_id=? AND call_id=? AND ended_at IS NULL "
+            "ORDER BY id DESC",
             (session_id, call_id),
         )
-        if (
-            code == 0
-            and ran
-            and ran["kind"] == "test"
-            and receipts.masked_failure(ran["command"], output)
-        ):
-            code = 1  # The tests failed; the pipe's last command did not.
+        if not ran:
+            return
+        error = getattr(data, "error", None)
+        if getattr(data, "success", None) is False and error is not None and not output:
+            # It never ran (refused, blocked, or stopped before it started): no failed run.
+            message = str(getattr(error, "message", "") or error)
+            self.store.execute(
+                "UPDATE commands SET kind='', exit_code=NULL, output=?, ended_at=? WHERE id=?",
+                (message[-600:], now(), ran["id"]),
+            )
+            self.command_changed(ran)
+            return
+        if shell := receipts.running_shell(output):
+            # Still running past Copilot's wait, or in the background: its exit code comes
+            # when the worker reads its shell or Copilot says it ended.
+            self.store.execute(
+                "UPDATE commands SET shell=?, output=? WHERE id=?",
+                (shell, output[-600:], ran["id"]),
+            )
+            self.command_changed(ran)
+            return
+        execution = getattr(data, "shell_execution", None)
+        code = getattr(execution, "exit_code", None)
+        if code is None:
+            code = receipts.exit_code(output, getattr(data, "success", None))
+        self.settle_command(session_id, ran, code, output)
+
+    def settle_command(self, session_id: str, ran: dict, code: int | None, output: str):
+        """A command ended: its kind (a test run may show only by its output), and for test
+        runs whether the tests passed rather than the command line."""
+        kind = ran["kind"] or receipts.output_kind(ran["command"], output)
+        if kind == "test":
+            code = receipts.test_exit(ran["command"], output, code)
+        if ran["ended_at"] and (kind, code) == (ran["kind"], ran["exit_code"]):
+            return
         self.store.execute(
-            """UPDATE commands SET exit_code=?, output=?, ended_at=?
-            WHERE session_id=? AND call_id=? AND ended_at IS NULL""",
-            (code, output[-600:], now(), session_id, call_id),
+            "UPDATE commands SET kind=?, exit_code=?, output=?, ended_at=? WHERE id=?",
+            (kind, code, output[-600:], ran["ended_at"] or now(), ran["id"]),
         )
-        self.runtime.checks.on_command(session_id, call_id)
+        self.runtime.checks.on_command(session_id, ran["call_id"])
+        self.command_changed({**ran, "kind": kind})
+
+    def command_changed(self, ran: dict):
+        """A test run, push or the like started or ended: its task's card shows it now, also
+        when the task was reported already (work on its PR after the report)."""
+        if not ran["kind"] or not ran["run_id"]:
+            return
+        run = self.store.one("SELECT task_id FROM runs WHERE id=?", (ran["run_id"],))
+        task = self.tasks.get(run["task_id"]) if run else None
+        if task:
+            self.runtime.task_actions.publish(task)
+
+    def shell_read(self, session_id: str, tool: str, shell: str, output: str):
+        """The worker read, typed into or stopped a shell: a command Copilot left running there
+        may have ended."""
+        done = receipts.shell_done(output)
+        shell = done[0] if done else shell
+        if not shell:
+            return
+        ran = self.store.one(
+            "SELECT * FROM commands WHERE session_id=? AND shell=? ORDER BY id DESC",
+            (session_id, shell),
+        )
+        if not ran:
+            return
+        text = (ran["output"] + output) if ran["ended_at"] is None or done else ran["output"]
+        if done:
+            # Also after Copilot's notice settled it: what the worker reads now shows how the
+            # tests went (`pytest | tail`), or that it ran tests at all.
+            self.settle_command(session_id, ran, done[1], text)
+        elif ran["ended_at"] is None and tool in receipts.SHELL_STOPPERS:
+            self.store.execute(
+                "UPDATE commands SET output=?, ended_at=? WHERE id=?",
+                (text[-600:], now(), ran["id"]),
+            )
+            self.command_changed(ran)  # Stopped: no result.
+        elif ran["ended_at"] is None:
+            self.store.execute("UPDATE commands SET output=? WHERE id=?", (text[-600:], ran["id"]))
+
+    def notification(self, row: dict, event: Any):
+        """Copilot tells a session that a command it left running ended."""
+        kind = getattr(event.data, "kind", None)
+        if row["role"] != WORKER or getattr(kind, "type", "") != "shell_completed":
+            return
+        ran = self.store.one(
+            "SELECT * FROM commands WHERE session_id=? AND shell=? AND ended_at IS NULL "
+            "ORDER BY id DESC",
+            (row["id"], getattr(kind, "shell_id", "") or ""),
+        )
+        if ran:
+            self.settle_command(row["id"], ran, getattr(kind, "exit_code", None), ran["output"])
 
     def on_event(self, session_id: str, event: Any, source: Any = None):
         if source is not None and self.states.handle(session_id) is not source:
@@ -224,6 +302,11 @@ class Events:
         self.runtime.update_session(row["id"], activity=summary)
         if row["role"] == WORKER and name in receipts.SHELL_TOOLS and isinstance(arguments, dict):
             self.record_command(row["id"], getattr(data, "tool_call_id", ""), arguments)
+        elif row["role"] == WORKER and name in receipts.SHELL_READERS | receipts.SHELL_STOPPERS:
+            shell = (
+                str((arguments or {}).get("shellId") or "") if isinstance(arguments, dict) else ""
+            )
+            self.states[row["id"]].shell_calls[call] = (name, shell)
 
     def tool_complete(self, row: dict, event: Any):
         data = event.data
@@ -238,7 +321,11 @@ class Events:
         # Kept for the watchdog: the tail of the latest output shows hangs and errors.
         if output:
             self.states[row["id"]].last_output = output[-1500:]
-        self.finish_command(row["id"], data, output)
+        shell_call = self.states[row["id"]].shell_calls.pop(getattr(data, "tool_call_id", ""), None)
+        if shell_call:
+            self.shell_read(row["id"], *shell_call, output)
+        else:
+            self.finish_command(row["id"], data, output)
 
     def usage(self, row: dict, event: Any):
         data = event.data
