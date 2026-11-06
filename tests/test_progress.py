@@ -1435,3 +1435,237 @@ async def test_copilot_failing_on_its_side_is_tried_again_not_left_to_the_owner(
     assert runtime.tasks.current(worker)["status"] == "failed", "the third time it does"
     errors = [text for kind, text in harness.kinds(worker) if kind == "error"]
     assert errors and "3 times" in errors[-1]
+
+
+async def reply_setup(harness, runtime):
+    worker = await spawn(
+        runtime, harness.router_id, "Address review comments",
+        instructions="Answer the comments on https://github.com/acme/model/pull/1043",
+    )  # fmt: skip
+    harness.gh_replies["api repos/acme/model/pulls/1043"] = json.dumps(
+        {"state": "open", "head": {"sha": "f61047fa", "ref": "fix"}, "user": {"login": "x"}}
+    )
+    harness.gh_replies["api repos/acme/model/pulls/comments/21"] = json.dumps({
+        "user": {"login": "ygchen"}, "body": "Opt-out titles are not removed", "path": "seeds.py",
+        "line": 117, "html_url": "https://github.com/acme/model/pull/1043#discussion_r21",
+        "pull_request_url": "https://api.github.com/repos/acme/model/pulls/1043",
+    })  # fmt: skip
+    harness.gh_replies["api repos/acme/model/pulls/1043/comments/21/replies"] = json.dumps(
+        {"id": 99, "html_url": "https://github.com/acme/model/pull/1043#discussion_r99"}
+    )
+    return worker
+
+
+async def test_a_reply_on_a_line_can_resolve_its_conversation(harness):
+    runtime = await harness.connect()
+    worker = await reply_setup(harness, runtime)
+    harness.gh_replies["api graphql -f query=query"] = json.dumps({"data": {"repository": {
+        "pullRequest": {"reviewThreads": {"nodes": [
+            {"id": "T_other", "isResolved": False, "comments": {"nodes": [{"databaseId": 5}]}},
+            {"id": "T_21", "isResolved": False, "comments": {"nodes": [{"databaseId": 21}]}},
+        ]}}}}})  # fmt: skip
+    harness.gh_replies["api graphql -f query=mutation"] = json.dumps({"data": {}})
+    refused = await call_tool(runtime, "draft_github_review", worker, repo="acme/model",
+                              number=1043, body="Done.", resolve=True)  # fmt: skip
+    assert "Only a conversation on a line" in refused.text_result_for_llm
+    for resolve, expected in ((True, " · conversation resolved"), (False, "")):
+        await call_tool(runtime, "draft_github_review", worker, repo="acme/model", number=1043,
+                        body="Fixed in f61047fa.", in_reply_to=21, resolve=True)  # fmt: skip
+        [draft] = harness.store.drafts()
+        assert draft["target"]["resolve"] is True, "proposed; the owner decides on the card"
+        harness.gh_calls.clear()
+        decision = DraftDecision(action="send", content={"resolve": resolve})
+        sent = await runtime.drafts.resolve(draft["id"], decision)
+        assert (
+            sent["outcome"] == "https://github.com/acme/model/pull/1043#discussion_r99" + expected
+        )
+        mutations = [a for a, _ in harness.gh_calls if a[:2] == ("api", "graphql")
+                     and a[3].startswith("query=mutation")]  # fmt: skip
+        assert len(mutations) == int(resolve)
+        if resolve:
+            assert "id=T_21" in mutations[0], "the thread the comment is in"
+
+
+async def test_an_answer_to_a_conversation_comment_names_its_author(harness):
+    runtime = await harness.connect()
+    worker = await reply_setup(harness, runtime)
+    harness.gh_replies["api repos/acme/model/issues/comments/55"] = json.dumps({
+        "user": {"login": "ckrsek"}, "body": "Overall: please document the opt-out filter.",
+        "html_url": "https://github.com/acme/model/pull/1043#issuecomment-55",
+        "issue_url": "https://api.github.com/repos/acme/model/issues/1043",
+    })  # fmt: skip
+    harness.gh_replies["api repos/acme/model/issues/comments/77"] = RuntimeError("HTTP 404")
+    harness.gh_replies["api repos/acme/model/pulls/1043/reviews/77"] = json.dumps({
+        "user": {"login": "maya"}, "body": "Looks good overall; one question on naming.",
+        "html_url": "https://github.com/acme/model/pull/1043#pullrequestreview-77",
+    })  # fmt: skip
+    harness.gh_replies["api repos/acme/model/issues/1043/comments"] = json.dumps(
+        {"id": 501, "html_url": "https://github.com/acme/model/pull/1043#issuecomment-501"}
+    )
+    documented = "Documented it in README.md, see 3b6c1e0."
+    await call_tool(runtime, "draft_github_review", worker, repo="acme/model", number=1043,
+                    body=documented, reply_to_comment=55)  # fmt: skip
+    await call_tool(runtime, "draft_github_review", worker, repo="acme/model", number=1043,
+                    body="Thanks @Maya, renamed it.", reply_to_comment=77)  # fmt: skip
+    first, second = harness.store.drafts()
+    assert first["text"] == "@ckrsek Documented it in README.md, see 3b6c1e0."
+    assert first["target"]["comment"]["author"] == "ckrsek"
+    assert second["text"] == "Thanks @Maya, renamed it.", "named already: not twice"
+    sent = await runtime.drafts.resolve(first["id"], DraftDecision(action="send"))
+    assert sent["outcome"] == "https://github.com/acme/model/pull/1043#issuecomment-501"
+    arguments, payload = harness.gh_calls[-1]
+    assert arguments[1] == "repos/acme/model/issues/1043/comments"
+    assert payload == {"body": "@ckrsek Documented it in README.md, see 3b6c1e0."}
+    both = await call_tool(runtime, "draft_github_review", worker, repo="acme/model",
+                           number=1043, body="x", in_reply_to=21, reply_to_comment=55)  # fmt: skip
+    assert "not both" in both.text_result_for_llm
+
+
+async def test_a_draft_the_owner_posted_themself_is_settled(harness):
+    runtime = await harness.connect()
+    worker = await reply_setup(harness, runtime)
+    harness.gh_replies["auth status --json hosts"] = json.dumps(
+        {"hosts": {"github.com": [{"login": "Evan-L", "active": True, "state": "success"}]}}
+    )
+    await call_tool(runtime, "draft_github_review", worker, repo="acme/model", number=1043,
+                    body="Fixed in f61047fa: opted-out titles are removed first, before "
+                         "embedding inference.", in_reply_to=21)  # fmt: skip
+    [draft] = harness.store.drafts()
+    harness.store.execute(
+        "UPDATE drafts SET created_at=? WHERE id=?", ("2026-01-01T00:00:00+00:00", draft["id"])
+    )
+    comments = [
+        {"id": 7, "user": {"login": "ygchen"}, "in_reply_to_id": 21, "body": "Fixed in "
+         "f61047fa: opted-out titles are removed first, before embedding inference.",
+         "html_url": "u7"},
+    ]  # fmt: skip
+    harness.gh_replies["api repos/acme/model/pulls/1043/comments"] = json.dumps(comments)
+    await runtime.drafts.check_posted_by_owner(every=0)
+    assert harness.store.draft(draft["id"])["status"] == "pending", "someone else's comment"
+    comments.append({"id": 8, "user": {"login": "evan-l"}, "html_url": "u8", "in_reply_to_id": 21,
+                     "body":
+                     "Fixed in **f61047fa**: opted-out titles are removed first, before the "
+                     "embedding inference."})  # fmt: skip
+    harness.gh_replies["api repos/acme/model/pulls/1043/comments"] = json.dumps(comments)
+    await runtime.drafts.check_posted_by_owner(every=0)
+    await settle(runtime)
+    settled = harness.store.draft(draft["id"])
+    assert settled["status"] == "sent" and settled["outcome"].endswith("u8")
+    told = harness.store.messages(worker)[-1]
+    assert told["meta"]["deferred"], "with its next message: no turn of its own"
+    assert '<message from="system" type="draft-outcome">' in told["meta"]["prompt"]
+    assert "Do not ask about sending it again" in told["text"]
+
+
+async def test_news_on_finished_work_stays_in_sight_until_seen(harness):
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Filter opt-outs")
+    await call_tool(runtime, "report", worker, status="done", summary="Opened acme/app#71.")
+    task = runtime.tasks.current(worker)
+    runtime.task_actions.accept(task["id"])
+    await call_tool(runtime, "report", worker, status="progress",
+                    summary="PR 71 is approved and ready to merge.")  # fmt: skip
+    view = runtime.task_actions.view(runtime.tasks.get(task["id"]))
+    assert (
+        view["status"] == "done" and view["news"]["text"] == "PR 71 is approved and ready to merge."
+    )
+    seen = runtime.task_actions.view(runtime.task_actions.news_seen(task["id"]))
+    assert seen["news"] is None
+    await call_tool(runtime, "report", worker, status="done", summary="PR 71 is merged.")
+    assert runtime.task_actions.view(runtime.tasks.get(task["id"]))["news"]["text"] == (
+        "PR 71 is merged."
+    )
+    await runtime.task_actions.follow_up(task["id"], "Delete the audit tables.")
+    assert runtime.task_actions.view(runtime.tasks.get(task["id"]))["news"] is None
+
+
+async def test_a_sub_agents_commands_are_receipts(harness):
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Run the flow")
+    session = harness.session(worker)
+    for call, parent, output in [
+        ("c1", None, "F\n1 failed in 3.0s\n<shellId: 1 completed with exit code 1>"),
+        ("c2", "task-1", "....\n4 passed in 3.1s\n<shellId: 2 completed with exit code 0>"),
+    ]:
+        session.emit("tool.execution_start", tool_name="bash", tool_call_id=call,
+                     parent_tool_call_id=parent,
+                     arguments={"command": "uv run pytest -q flows/"})  # fmt: skip
+        result = SimpleNamespace(content=output)
+        session.emit("tool.execution_complete", tool_call_id=call, success=True,
+                     parent_tool_call_id=parent, result=result)  # fmt: skip
+    await settle(runtime)
+    tests = runtime.task_actions.receipts(runtime.tasks.current(worker))["tests"]
+    assert tests["passed"] is True and tests["failed_before"], "run again by a sub-agent"
+    steps = [m["text"] for m in harness.store.messages(worker) if m["kind"] == "tool"]
+    assert len(steps) == 1, "a sub-agent's steps are not the worker's own"
+
+
+async def test_a_reply_to_copy_the_owner_posted_on_the_pr_is_settled(harness):
+    runtime = await harness.connect()
+    worker = await reply_setup(harness, runtime)
+    harness.gh_replies["auth status --json hosts"] = json.dumps(
+        {"hosts": {"github.com": [{"login": "evan-l", "active": True, "state": "success"}]}}
+    )
+    await call_tool(runtime, "draft_reply", worker, text="Yes, a README note about greet() "
+                    "follows in this PR.", to="ckrsek", where="PR conversation",
+                    link="https://github.com/acme/model/pull/1043#issuecomment-55")  # fmt: skip
+    [draft] = harness.store.drafts()
+    assert draft["target"]["repo"] == "acme/model" and draft["target"]["number"] == 1043
+    harness.store.execute(
+        "UPDATE drafts SET created_at=? WHERE id=?", ("2026-01-01T00:00:00+00:00", draft["id"])
+    )
+    harness.gh_replies["api repos/acme/model/pulls/1043/comments"] = "[]"
+    harness.gh_replies["api repos/acme/model/pulls/1043/reviews"] = "[]"
+    harness.gh_replies["api repos/acme/model/issues/1043/comments"] = json.dumps([
+        {"id": 9, "user": {"login": "evan-l"}, "html_url": "u9",
+         "body": "@ckrsek Yes, a README note about greet() follows in this PR. Thanks!"},
+    ])  # fmt: skip
+    await runtime.drafts.check_posted_by_owner(every=0)
+    settled = harness.store.draft(draft["id"])
+    assert settled["status"] == "sent" and settled["outcome"].endswith("u9")
+
+
+async def test_only_what_the_owner_posted_after_the_draft_in_its_thread_settles_it(harness):
+    runtime = await harness.connect()
+    worker = await reply_setup(harness, runtime)
+    harness.gh_replies["auth status --json hosts"] = json.dumps(
+        {"hosts": {"github.com": [{"login": "evan-l", "active": True, "state": "success"}]}}
+    )
+    text = "Good catch: fixed in f61047fa, the opted-out titles are removed before inference."
+    await call_tool(runtime, "draft_github_review", worker, repo="acme/model", number=1043,
+                    body=text, in_reply_to=21)  # fmt: skip
+    [draft] = harness.store.drafts()
+    harness.store.execute("UPDATE drafts SET created_at=? WHERE id=?",
+                          ("2026-11-06T10:00:00+00:00", draft["id"]))  # fmt: skip
+    harness.store.add_trigger("github-sent", "github:reviewcomment:12", text)
+
+    def comment(id_, at, thread, by="evan-l"):
+        return {"id": id_, "user": {"login": by}, "in_reply_to_id": thread, "body": text,
+                "created_at": at, "html_url": f"u{id_}"}  # fmt: skip
+
+    harness.gh_replies["api repos/acme/model/pulls/1043/comments"] = json.dumps([
+        comment(10, "2026-11-06T09:00:00Z", 21),  # Before the draft: another reply.
+        comment(11, "2026-11-06T10:05:00Z", 34),  # In another thread.
+        comment(12, "2026-11-06T10:06:00Z", 21),  # Chief of Staff posted it.
+    ])  # fmt: skip
+    await runtime.drafts.check_posted_by_owner(every=0)
+    assert harness.store.draft(draft["id"])["status"] == "pending"
+    from chiefofstaff.sources.github import same_text
+
+    # A short reply is the same words, or another reply.
+    assert same_text("Done, thanks.", "done thanks")
+    assert not same_text("LGTM, merging now", "LGTM")
+
+
+async def test_news_keeps_an_old_task_on_the_board(harness):
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Filter opt-outs")
+    await call_tool(runtime, "report", worker, status="done", summary="Opened acme/app#71.")
+    task = runtime.tasks.current(worker)
+    runtime.task_actions.accept(task["id"])
+    harness.store.execute("UPDATE tasks SET ended_at='2026-01-01T00:00:00+00:00' WHERE id=?",
+                          (task["id"],))  # fmt: skip
+    since = "2026-11-01T00:00:00+00:00"
+    assert task["id"] not in {t["id"] for t in runtime.tasks.listed(include_ended_since=since)}
+    await call_tool(runtime, "report", worker, status="progress", summary="PR 71 merged.")
+    assert task["id"] in {t["id"] for t in runtime.tasks.listed(include_ended_since=since)}

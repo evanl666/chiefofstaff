@@ -412,7 +412,7 @@ export function draftCard(draft) {
   if (draft.kind === "workspace") return workspaceCard(draft);
   if (draft.kind === "reply") return replyCard(draft);
   if (REQUEST_LABELS[draft.kind]) return requestCard(draft);
-  if (draft.kind === "github" && !draft.target.in_reply_to) return reviewCard(draft);
+  if (draft.kind === "github" && !draft.target.in_reply_to && !draft.target.reply_to_comment) return reviewCard(draft);
   return messageCard(draft);
 }
 // A Slack reply, or a reply to a comment on a PR: the text to send, edited in place.
@@ -430,6 +430,8 @@ function messageCard(draft) {
   // What it answers, then who it is for and why, in one quiet line.
   const about = [draft.kind === "slack" && target.to ? `For ${target.to}` : "", draft.note].filter(Boolean).join(" · ");
   const comment = target.comment;
+  // A reply on a line can resolve its conversation too (ticked when its worker proposed it).
+  const resolve = draft.kind === "github" && target.in_reply_to ? el("input", { type: "checkbox", checked: Boolean(target.resolve) }) : null;
   const node = card(
     draft,
     draft.kind,
@@ -440,6 +442,7 @@ function messageCard(draft) {
     // Not published after an interrupted send: what happened, and the owner's edit kept.
     draft.outcome ? el("div", { class: "note", text: draft.outcome }) : null,
     text,
+    resolve ? el("label", { class: "check resolve" }, resolve, " Resolve the conversation") : null,
     actions,
   );
   const decide = decider(draft, node, error);
@@ -451,7 +454,7 @@ function messageCard(draft) {
         { text: "Ask to redo…", onclick: () => redoForm(actions, decide, show) },
         { text: "Reject…", onclick: () => rejectForm(actions, decide, show) },
       ]),
-      el("button", { type: "button", text: "Send", onclick: () => decide({ action: "send", text: text.value }, sent) }),
+      el("button", { type: "button", text: "Send", onclick: () => decide({ action: "send", text: text.value, ...(resolve ? { content: { resolve: resolve.checked } } : {}) }, resolve?.checked ? "Posted on GitHub; resolving the conversation." : sent) }),
     );
   show();
   return node;

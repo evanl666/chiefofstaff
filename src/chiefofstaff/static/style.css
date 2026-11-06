@@ -288,7 +288,9 @@ summary { min-height: 28px; }
   white-space: nowrap;
 }
 .menu > button:not(:disabled):hover, #session-menu-items > button:not(:disabled):hover { background: var(--hover); opacity: 1; }
-.menu > button.danger, #session-menu-items > button.danger { color: var(--red); }
+/* A risky item in a menu is red text, not a red button (button.danger below is one). */
+.menu > button.danger, #session-menu-items > button.danger { color: var(--red); background: none; }
+.menu > button.danger:not(:disabled):hover, #session-menu-items > button.danger:not(:disabled):hover { background: var(--red-soft); }
 .menu.wide { width: 280px; padding: 12px; gap: 8px; }
 .menu.wide label { display: grid; gap: 4px; font-size: var(--small); color: var(--muted); }
 .menu.wide select { width: 100%; min-height: 32px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); color: var(--text); font-size: var(--body); padding: 0 8px; }
@@ -960,6 +962,23 @@ details.task-group > summary:hover { color: var(--text); }
 #panel .card { padding: 12px; }
 #panel .card.decision .options { grid-template-columns: 1fr; }
 #panel .card .label { white-space: normal; }
+.card.task .news { margin-top: 6px; padding: 6px 10px; border-radius: var(--radius); background: var(--accent-soft); font-size: var(--small); }
+.card.task .news-head { display: flex; gap: 8px; align-items: center; color: var(--muted); }
+.card.task .worker-line { font-size: var(--small); color: var(--muted); }
+/* A worker with several tasks: a line per task, the one it is on first. */
+.card.worker-group .task-rows { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 2px; border-top: 1px solid var(--line); }
+.card.worker-group .task-row { display: flex; gap: 8px; padding: 6px 0 2px; border-bottom: 1px solid var(--line); }
+.card.worker-group .task-row:last-child { border-bottom: 0; }
+.card.worker-group .task-row .mark { flex: none; width: 14px; text-align: center; color: var(--muted); font-size: var(--small); line-height: 22px; }
+.card.worker-group .task-row.now .mark { color: var(--accent); }
+.card.worker-group .task-row.waiting .mark { color: var(--amber); }
+.card.worker-group .row-main { flex: 1; min-width: 0; }
+.card.worker-group .row-head { display: flex; gap: 8px; align-items: center; min-width: 0; }
+.card.worker-group .row-head .title { flex: 1; min-width: 0; text-align: left; padding: 0; font-weight: 500; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card.worker-group .row-head .state { flex: none; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--small); color: var(--muted); }
+.card.worker-group .task-row.now .state { color: var(--accent); }
+.card.worker-group .task-row.waiting .state { color: var(--amber); }
+.card.worker-group .task-row .said { font-size: var(--small); color: var(--soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 #home-tabs { display: none; gap: 4px; padding: 8px 20px; border-bottom: 1px solid var(--line); }
 #home-tabs button { background: none; color: var(--soft); min-height: 32px; padding: 0 12px; font-weight: 400; display: flex; gap: 6px; align-items: center; }

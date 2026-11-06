@@ -23,9 +23,9 @@ import time
 from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from . import prompts
 from .envelope import UNTRUSTED, wrap
@@ -111,6 +111,19 @@ class OwnerReply(BaseModel):
 
 class ReportOwnerReplies(NestedArguments):
     replies: list[OwnerReply] = Field(default_factory=list, max_length=20)
+
+    @model_validator(mode="before")
+    @classmethod
+    def one_reply(cls, data: Any) -> Any:
+        """One reply passed on its own ({code, text}) is a list of one: never dropped."""
+        if isinstance(data, dict) and "replies" not in data and {"code", "text"} <= data.keys():
+            return {"replies": [{"code": data["code"], "text": data["text"]}]}
+        return data
+
+
+def words_of(text: str) -> set[str]:
+    """The telling words of a text (four letters and up), for comparing two tellings."""
+    return set(re.findall(r"\w{4,}", text.casefold()))
 
 
 def minutes_of(clock: str) -> int:
@@ -377,10 +390,11 @@ class Connector:
             items.append(
                 {"id": f"draft:{draft['id']}", "code": code_of(draft["id"]), "draft": draft}
             )
-        if ask := self.router_question():
+        tasks = self.runtime.tasks.listed()
+        if (ask := self.router_question()) and not self.relays(ask, tasks):
             key = f"router:{ask['id']}"
             items.append({"id": key, "code": code_of(key), "ask": ask})
-        for task in self.runtime.tasks.listed():
+        for task in tasks:
             if task["status"] == "waiting" and (
                 task["id"] in deciding or task["session_id"] in carded
             ):
@@ -394,6 +408,25 @@ class Connector:
                     }
                 )
         return items
+
+    def relays(self, ask: dict, tasks: list[dict]) -> bool:
+        """Whether the Router's question is a worker's, retold: a question of a waiting task
+        reached it after the owner's last message and before it asked, in much the same words.
+        The owner is told it once, as the task's."""
+        waiting = {task["id"]: task for task in tasks if task["status"] == "waiting"}
+        if not waiting:
+            return False
+        latest = self.store.messages(self.runtime.router_id(), limit=40)
+        owner = max((m["id"] for m in latest if m["kind"] == "owner"), default=0)
+        asked = words_of(ask["text"])
+        for message in latest:
+            task = waiting.get(message["meta"].get("task_id") or "")
+            if not (owner < message["id"] < ask["id"] and message["kind"] == "inbound" and task):
+                continue
+            theirs = words_of(f"{message['text']} {task['progress']}")
+            if asked and len(asked & theirs) >= 0.4 * len(asked):
+                return True
+        return False
 
     def router_question(self) -> dict | None:
         """What the Router asked the owner in the chat and they have not answered yet: its
@@ -522,6 +555,11 @@ class Connector:
 
     async def t_report_owner_replies(self, params: ReportOwnerReplies, caller: str):
         self.check(caller)
+        if not params.replies:
+            raise ValueError(
+                'No reply was given: pass replies=[{"code": "ABCDE", "text": "the owner\'s '
+                'reply, exactly"}], one item per code.'
+            )
         items = {item["code"]: item for item in self.waiting_items()}
         done = []
         for reply in params.replies:

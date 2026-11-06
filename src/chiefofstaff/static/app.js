@@ -1,6 +1,6 @@
 // Chief of Staff's web UI: starts the page and wires its controls.
 
-import { $, api, closeMenus, submits, toast } from "./dom.js";
+import { $, api, closeMenus, closeOnBackdrop, submits, toast } from "./dom.js";
 import { byId, connectEvents, current, HOME, loadModels, loadState, markRead, routerId, state, viewedId } from "./state.js";
 import { externalItem, loadExternal } from "./sidebar.js";
 import { appendMessages, renderHeader, scrollToBottom, select } from "./session.js";
@@ -148,6 +148,7 @@ async function boot() {
   $("#application").hidden = false;
   bindUi();
   bindSplitter();
+  closeOnBackdrop();
   connectEvents();
   loadModels();
   refreshUsageLink();

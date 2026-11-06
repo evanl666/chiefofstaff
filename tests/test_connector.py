@@ -121,6 +121,8 @@ async def test_away_the_owner_is_told_where_they_are_and_answers_from_there(tmp_
     sent = harness.session(row["id"]).sent
     assert len(sent) == 2 and sent[-1].startswith('<message from="system" type="scan">')
     assert draft_code in sent[-1] and "Send the owner" not in sent[-1], "told once"
+    empty = await call_tool(runtime, "report_owner_replies", row["id"], answers=["send"])
+    assert empty.result_type == "failure" and "No reply was given" in empty.text_result_for_llm
     applied = await call_tool(
         runtime, "report_owner_replies", row["id"],
         replies=[
@@ -235,3 +237,29 @@ async def test_a_task_waiting_on_a_decision_is_told_once(harness):
     items = runtime.connector.waiting_items()
     assert [item["draft"]["kind"] for item in items] == ["decision"]
     assert "1) Drop; 2) Correct" in runtime.connector.describe(items[0])
+
+
+def test_a_reply_passed_on_its_own_is_not_dropped():
+    from chiefofstaff.connector import ReportOwnerReplies
+
+    flat = ReportOwnerReplies.model_validate({"code": "7AUBM", "text": "7AUBM drop them"})
+    assert [(r.code, r.text) for r in flat.replies] == [("7AUBM", "7AUBM drop them")]
+    assert ReportOwnerReplies.model_validate({}).replies == []
+
+
+async def test_a_workers_question_the_router_retells_is_told_once(harness):
+    runtime = await harness.connect()
+    router = harness.router_id
+    worker = await spawn(runtime, router, "Clean data/sales.csv")
+    question = ("Two rows look wrong: line 42 has negative units and line 302 has price 1200. "
+                "Drop or correct them?")  # fmt: skip
+    await call_tool(runtime, "report", worker, status="question", summary=question)
+    await settle(runtime)
+    runtime.add_message(router, "assistant", "Clean data/sales.csv found 2 odd rows: line 42 "
+                        "negative units, line 302 price 1200. Drop or correct?")  # fmt: skip
+    items = runtime.connector.waiting_items()
+    assert [item["id"].split(":")[0] for item in items] == ["task"], "once, as the task's"
+    runtime.add_message(router, "assistant", "Separately: should I also archive last year's "
+                        "invoices in the billing folder?")  # fmt: skip
+    kinds = sorted(item["id"].split(":")[0] for item in runtime.connector.waiting_items())
+    assert kinds == ["router", "task"], "a question of its own is told"

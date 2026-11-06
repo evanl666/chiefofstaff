@@ -38,7 +38,7 @@ On the right, everything has one place:
 | Section | What is there |
 | --- | --- |
 | **Needs you** | Questions and forms from workers, sign-ins, decisions, a folder to pick, Slack replies, PR reviews and replies to approve, sends a restart interrupted, failed or blocked tasks. Each card has one main action (*Send*, *Answer*, *Accept*…); the rest is behind **⋯**. A card leaves as soon as you act and a short note confirms it; if that did not work, it comes back with the reason. |
-| **Tasks** | *Running*: each task at a glance, with the step its worker is in now and for how long, and what it said last. *Queued*: why it waits (*Waiting for “…”*, or *Waiting for a worker slot · 3 of 3 busy* when *Parallel workers* are all in use). *Ready to review*: the outcome in a line and the [receipts](#receipts); *Show report* opens the whole report. *Accept*, or under **⋯** *Follow up*, *Copy report* (markdown for a PR description) and *Create PR* (for work on a branch of its own). *Recently finished* keeps finished and cancelled tasks for three days. |
+| **Tasks** | *Running*: each task at a glance, with the step its worker is in now and for how long, and what it said last; a worker with several tasks is one card, with a line per task: the one it is on now, the ones waiting their turn, for you or for a slot, each with its own latest progress. *Queued*: why it waits (*Waiting for “…”*, or *Waiting for a worker slot · 3 of 3 busy* when *Parallel workers* are all in use). *Ready to review*: the outcome in a line and the [receipts](#receipts); *Show report* opens the whole report. Finished work its worker has news about (its PR approved or merged, a reply handled) is back here too, marked *Update*, until you press *Got it* (or answer it). *Accept*, or under **⋯** *Follow up*, *Copy report* (markdown for a PR description) and *Create PR* (for work on a branch of its own). *Recently finished* keeps finished and cancelled tasks for three days. |
 
 When a finished task's worker drafted something for you (a Slack reply, a PR review), the draft
 is the one card: it shows the task's result, and sending it accepts the task.
@@ -255,7 +255,8 @@ terminal.
 A worker's report is its claim. Receipts are what Chief of Staff observed:
 
 - the shell commands it ran and their exit codes, recognized as tests, checks or builds (also
-  tests run through a script of the project's, known by the test runner's summary);
+  tests run through a script of the project's, known by the test runner's summary, and runs a
+  worker hands to one of Copilot's sub-agents);
 - commits and changes in its checkouts (`git diff` against where its branch started);
 - the state and checks of pull requests it reported.
 
@@ -480,7 +481,16 @@ this at all? *Ask to redo…* sends it back to the worker with what should chang
 
 On a PR a worker is working on, it can also draft **replies to review comments**, in any
 repository: each card shows the comment it answers, and the reply is posted in that thread once
-you approve it.
+you approve it. When the reply says the point is fixed or settled, the card has *Resolve the
+conversation* ticked: sent, the conversation is resolved on GitHub too (untick it to leave it
+open). A comment that is not on a line (a top-level comment, or the summary of someone's
+review) has no thread to reply in: the answer is posted in the PR's conversation and starts
+with @ and its author's login.
+
+**Posted it yourself?** Copied a drafted reply or review and posted it on GitHub yourself
+(edited a little, even)? Within a few minutes Chief of Staff finds it there: the card leaves as
+sent, and the worker is told, so it does not ask you about it again. A worker also always hears
+what became of its drafts (sent, edited, rejected), with its next message.
 
 **Several GitHub accounts** (a personal one active in `gh`, your company's signed in as well):
 Chief of Staff reaches each repository with the account that can see it, and remembers it per

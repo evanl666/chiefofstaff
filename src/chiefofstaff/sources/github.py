@@ -164,6 +164,24 @@ def snippet(files: list[dict], path: str, line: int, side: str = "RIGHT", around
     return "\n".join(text[:200] for text in picked)
 
 
+def same_text(posted: str, drafted: str) -> bool:
+    """Whether a posted text is a drafted one, copied and perhaps edited a little."""
+    from difflib import SequenceMatcher
+
+    def plain(text: str) -> str:
+        return " ".join(re.sub(r"[^\w\s@]", " ", text).casefold().split())
+
+    posted, drafted = plain(posted), plain(drafted)
+    if not posted or not drafted:
+        return False
+    if min(len(posted), len(drafted)) < 40:
+        return posted == drafted  # "LGTM" is no copy of "LGTM!" by itself.
+    shorter, longer = sorted((posted, drafted), key=len)
+    if shorter in longer and len(shorter) >= 0.6 * len(longer):
+        return True
+    return SequenceMatcher(None, posted, drafted, autojunk=False).ratio() >= 0.8
+
+
 def pages(text: str) -> list:
     """The items of a paginated gh api answer: one array, or (older gh) one array per page
     printed back to back."""
@@ -607,6 +625,122 @@ class GitHubSource:
             "url": comment.get("html_url") or "",
         }
 
+    async def conversation_comment(self, repo: str, number: int, comment_id: int) -> dict:
+        """A comment in a PR's conversation (not on a line): a top-level comment, or a review's
+        summary, as the owner sees it next to a drafted answer."""
+        try:
+            comment = json.loads(
+                await self.gh("api", f"repos/{repo}/issues/comments/{int(comment_id)}")
+            )
+            if not str(comment.get("issue_url", "")).endswith(f"/issues/{int(number)}"):
+                raise ValueError(f"Comment {comment_id} is not on {repo}#{number}.")
+        except RuntimeError:
+            # Not a top-level comment: a review's summary, by the review's id.
+            comment = json.loads(
+                await self.gh("api", f"repos/{repo}/pulls/{int(number)}/reviews/{int(comment_id)}")
+            )
+        return {
+            "author": (comment.get("user") or {}).get("login", ""),
+            "body": body(comment)[:1500],
+            "url": comment.get("html_url") or "",
+        }
+
+    async def publish_conversation_reply(self, target: dict, text: str) -> str:
+        repo, number = target["repo"], int(target["number"])
+        posted = json.loads(
+            await self.gh(
+                "api",
+                f"repos/{repo}/issues/{number}/comments",
+                "--method=POST",
+                "--input=-",
+                payload={"body": text},
+            )
+        )
+        if posted.get("id"):
+            # Our own reply must not come back as activity on the followed PR.
+            self.store.add_trigger("github-sent", f"github:issuecomment:{posted['id']}", text)
+        return posted.get("html_url", "Reply published.")
+
+    async def find_conversation_reply(self, target: dict, text: str) -> str:
+        """The URL of a published comment with this text on the target PR, or ""."""
+        path = f"repos/{target['repo']}/issues/{int(target['number'])}/comments"
+        for comment in pages(await self.gh("api", path, "--paginate")):
+            if (comment.get("body") or "").strip() == text.strip():
+                return comment.get("html_url") or "Reply published."
+        return ""
+
+    async def graphql(self, repo: str, query: str, **variables: str) -> dict:
+        """A GraphQL call as the account that reaches the repository (the one that posts
+        there), its variables passed as strings."""
+        owner = repo.split("/", 1)[0].lower()
+        remembered = self.store.get(f"ghaccount:{owner}") or ""
+        arguments = ["api", "graphql", "-f", f"query={query}"]
+        for name, value in variables.items():
+            arguments += ["-f", f"{name}={value}"]
+        return json.loads(await self.as_account(owner, remembered, remembered, arguments, None))
+
+    async def resolve_thread(self, target: dict) -> str:
+        """Resolve the review thread the replied-to comment is in: "" when done, else why not."""
+        owner, name = target["repo"].split("/", 1)
+        query = (
+            "query($owner:String!,$name:String!){repository(owner:$owner,name:$name)"
+            f"{{pullRequest(number:{int(target['number'])}){{reviewThreads(first:100){{nodes"
+            "{id isResolved comments(first:100){nodes{databaseId}}}}}}}"
+        )
+        found = await self.graphql(target["repo"], query, owner=owner, name=name)
+        if found.get("errors"):
+            return str(found["errors"][0].get("message", "GitHub refused"))[:200]
+        pull = ((found.get("data") or {}).get("repository") or {}).get("pullRequest") or {}
+        wanted = int(target["in_reply_to"])
+        for thread in (pull.get("reviewThreads") or {}).get("nodes") or []:
+            ids = {c.get("databaseId") for c in (thread.get("comments") or {}).get("nodes") or []}
+            if wanted not in ids:
+                continue
+            if thread.get("isResolved"):
+                return ""
+            mutation = (
+                "mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}"
+            )
+            done = await self.graphql(target["repo"], mutation, id=thread["id"])
+            if done.get("errors"):
+                return str(done["errors"][0].get("message", "GitHub refused"))[:200]
+            return ""
+        return "its conversation was not found on the PR"
+
+    async def owner_posted(self, target: dict, text: str, since: str = "") -> str:
+        """The URL of what the owner posted themself on the target PR, since the draft was
+        written, that is this text (copied from a draft, perhaps edited a little), or "". Not
+        what Chief of Staff posted (also as the owner), nor a reply in another thread."""
+        repo, number = target["repo"], int(target["number"])
+        mine = await self.logins()
+        candidates: list[tuple[str, dict]] = []
+        in_reply_to = target.get("in_reply_to")
+        if in_reply_to or target.get("anywhere"):
+            path = f"repos/{repo}/pulls/{number}/comments"
+            for item in pages(await self.gh("api", path, "--paginate")):
+                if in_reply_to and item.get("in_reply_to_id") != in_reply_to:
+                    continue
+                candidates.append((f"github:reviewcomment:{item.get('id')}", item))
+        if not in_reply_to:
+            path = f"repos/{repo}/issues/{number}/comments"
+            for item in pages(await self.gh("api", path, "--paginate")):
+                candidates.append((f"github:issuecomment:{item.get('id')}", item))
+            path = f"repos/{repo}/pulls/{number}/reviews"
+            for item in pages(await self.gh("api", path, "--paginate")):
+                candidates.append((f"github:review:{item.get('id')}", item))
+        start = datetime.fromisoformat(since) if since else None
+        for key, item in candidates:
+            if ((item.get("user") or {}).get("login") or "").lower() not in mine:
+                continue
+            when = item.get("created_at") or item.get("submitted_at") or ""
+            if start and when and datetime.fromisoformat(when.replace("Z", "+00:00")) < start:
+                continue  # Before the draft was written: another reply.
+            if self.seen(key):
+                continue  # Chief of Staff posted it (as the owner): not theirs by hand.
+            if same_text(item.get("body") or "", text):
+                return item.get("html_url") or "Posted."
+        return ""
+
     async def find_reply(self, target: dict, text: str) -> str:
         """The URL of a published reply with this text to the target comment, or ""."""
         path = f"repos/{target['repo']}/pulls/{int(target['number'])}/comments"
@@ -641,6 +775,8 @@ class GitHubSource:
             raise ValueError("This repository is no longer connected; nothing was published.")
         if target.get("in_reply_to"):
             return await self.publish_reply(target, body)
+        if target.get("reply_to_comment"):
+            return await self.publish_conversation_reply(target, body)
         if await self.head(repo, target["number"]) != target["head_sha"]:
             raise ValueError("The PR changed after the draft was written; nothing was published.")
         event = REVIEW_EVENTS.get(target.get("verdict", ""), "COMMENT")

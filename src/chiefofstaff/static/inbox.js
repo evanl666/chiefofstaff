@@ -6,7 +6,7 @@ import { byId, HOME, loadState, pendingDrafts, routerId, sessions, state, uncert
 import { renderStatusLine } from "./sidebar.js";
 import { renderHeader, scrollToBottom, select } from "./session.js";
 import { draftCard, draftKey, uncertainCard } from "./drafts.js";
-import { expandTask, followUpItem, inTerminal, ownTasks, taskItem, terminalItem } from "./tasks.js";
+import { expandTask, followUpItem, inTerminal, ownTasks, taskItem, terminalItem, workerGroupItem } from "./tasks.js";
 // What waits for the owner. A task whose worker asks something on a card shows as that card.
 export function needsYou() {
   const drafts = pendingDrafts();
@@ -32,15 +32,23 @@ function board() {
   const terminal = inTerminal().filter((session) => !running.some((task) => task.session_id === session.id));
   // At work, though its task is finished: news on a PR it follows, a question about its work.
   const followUps = sessions().filter((session) => session.role === "worker" && !session.helper && !session.closed_at && session.status === "working" && !running.some((task) => task.session_id === session.id) && !terminal.some((other) => other.id === session.id));
+  // A worker with several open tasks (at work on one, the others waiting their turn, for the
+  // owner or queued) is one card with a line per task.
+  const open = mine.filter((task) => ["running", "waiting", "queued"].includes(task.status));
+  const perWorker = new Map();
+  for (const task of open) perWorker.set(task.session_id, [...(perWorker.get(task.session_id) || []), task]);
+  const grouped = new Set([...perWorker].filter(([id, list]) => list.length > 1 && list.some((task) => task.status === "running") && byId(id)).map(([id]) => id));
   return {
-    running,
+    running: running.filter((task) => !grouped.has(task.session_id)),
+    workers: [...grouped].map((id) => [byId(id), perWorker.get(id)]),
     terminal,
     followUps,
-    queued: mine.filter((task) => task.status === "queued").sort((a, b) => a.created_at.localeCompare(b.created_at)),
+    queued: mine.filter((task) => task.status === "queued" && !grouped.has(task.session_id)).sort((a, b) => a.created_at.localeCompare(b.created_at)),
     // A result whose worker drafted something for the owner (a reply, a review) is reviewed on
     // that card: it shows the task, and sending it accepts the task.
-    review: mine.filter((task) => task.status === "review" && !asking.has(task.session_id)).sort(newest),
-    finished: mine.filter((task) => task.status === "done" || task.status === "cancelled").sort((a, b) => (b.ended_at || "").localeCompare(a.ended_at || "")),
+    // With them, finished work its worker has news about (its PR approved or merged) until seen.
+    review: mine.filter((task) => (task.status === "review" || (task.status === "done" && task.news)) && !asking.has(task.session_id)).sort(newest),
+    finished: mine.filter((task) => (task.status === "done" && !task.news) || task.status === "cancelled").sort((a, b) => (b.ended_at || "").localeCompare(a.ended_at || "")),
   };
 }
 export function homeItem() {
@@ -159,11 +167,11 @@ function renderPanel() {
   ], editing);
 
   const taskBox = document.getElementById("tasks") || el("section", { id: "tasks", class: "panel-section" }, el("h2", {}, el("span", { text: "Tasks" }), el("span", { class: "count" })), el("p", { class: "empty-hint", text: "Nothing running. Ask for anything — e.g. “fix the flaky login test in api”." }));
-  const active = tasks.running.length + tasks.terminal.length + tasks.followUps.length + tasks.queued.length + tasks.review.length;
+  const active = tasks.running.length + tasks.workers.reduce((sum, [, list]) => sum + list.filter((task) => task.status !== "waiting").length, 0) + tasks.terminal.length + tasks.followUps.length + tasks.queued.length + tasks.review.length;
   counted(taskBox, active);
   taskBox.querySelector(".empty-hint").hidden = Boolean(active || tasks.finished.length || ownTasks().some((task) => !["done", "cancelled"].includes(task.status)));
   const groups = [
-    ["tasks-running", "Running", [...tasks.terminal.map(terminalItem), ...tasks.running.map(taskItem), ...tasks.followUps.map(followUpItem)]],
+    ["tasks-running", "Running", [...tasks.terminal.map(terminalItem), ...tasks.workers.map(([worker, list]) => workerGroupItem(worker, list)), ...tasks.running.map(taskItem), ...tasks.followUps.map(followUpItem)]],
     ["tasks-queued", "Queued", tasks.queued.map(taskItem)],
     ["tasks-review", "Ready to review", tasks.review.map(taskItem)],
   ];

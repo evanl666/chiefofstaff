@@ -87,10 +87,10 @@ export function taskItem(task) {
   const worker = byId(task.session_id);
   const live = ["running", "queued"].includes(task.status);
   return {
-    key: `task:${task.id}:${task.status}:${task.blocked ? 1 : 0}:${createsPr(task) ? 1 : 0}:${task.asking ? 1 : 0}`,
+    key: `task:${task.id}:${task.status}:${task.blocked ? 1 : 0}:${createsPr(task) ? 1 : 0}:${task.asking ? 1 : 0}:${task.news?.at || ""}`,
     id: task.id,
     // For running cards the minute too: "6m" and "3m ago" move on by themselves.
-    version: `${task.updated_at}:${task.title}:${worker?.status || ""}:${worker?.activity || ""}:${worker?.said_at || ""}:${worker?.step_since || ""}:${task.credits}:${task.runs}:${task.status === "review" ? JSON.stringify(task.receipts || null) : ""}:${live ? `${Math.floor(Date.now() / 60000)}:${queuedKey()}` : ""}`,
+    version: `${task.updated_at}:${task.title}:${worker?.status || ""}:${worker?.activity || ""}:${worker?.said_at || ""}:${worker?.step_since || ""}:${worker?.task?.task_id || ""}:${task.credits}:${task.runs}:${task.status === "review" ? JSON.stringify(task.receipts || null) : ""}:${live ? `${Math.floor(Date.now() / 60000)}:${queuedKey()}` : ""}`,
     build: () => taskCard(task),
     refresh: (node) => refreshTaskCard(node, task),
   };
@@ -106,9 +106,9 @@ function refreshTaskCard(node, task) {
   node.querySelector(".head .meta").textContent = meta;
   node.querySelector(".head .meta").title = help;
   const review = task.status === "review";
-  for (const part of [".task-body", ".chips", ".report"]) {
+  for (const part of [".task-body", ".news", ".chips", ".report"]) {
     const old = node.querySelector(`:scope > ${part}`);
-    const fresh = part === ".task-body" ? taskBody(task) : !review ? null : part === ".chips" ? chips(task) : report(task);
+    const fresh = part === ".task-body" ? taskBody(task) : part === ".news" ? newsBlock(task) : !review ? null : part === ".chips" ? chips(task) : report(task);
     if (old && fresh) old.replaceWith(fresh);
     else if (old) old.remove();
     else if (fresh) (node.querySelector(":scope > .actions") ? node.querySelector(":scope > .actions").before(fresh) : node.append(fresh));
@@ -170,6 +170,8 @@ function taskCard(task) {
   );
   const body = taskBody(task);
   if (body) node.append(body);
+  const news = newsBlock(task);
+  if (news) node.append(news);
   if (task.status === "review") node.append(...[chips(task), report(task)].filter(Boolean));
   expandTask(node, task.status === "review" && openReports.has(task.id));
   const key = `task:${task.id}`;
@@ -216,7 +218,7 @@ function taskCard(task) {
   // Live and finished cards keep their "⋯" in the head, on one line with the title; a form
   // the owner opens takes a line of its own.
   function place() {
-    const inline = ["running", "queued", "done", "cancelled"].includes(task.status) && !task.blocked && !actions.dataset.editing;
+    const inline = ["running", "queued", "done", "cancelled"].includes(task.status) && !task.blocked && !task.news && !actions.dataset.editing;
     actions.classList.toggle("inline", inline);
     const parent = inline ? node.querySelector(":scope > .head") : node;
     if (actions.parentElement !== parent) parent.append(actions);
@@ -263,6 +265,10 @@ function taskCard(task) {
       more = [{ text: "Retry with a note…", onclick: retryWithNote }, worker, cancel];
     } else if (task.status === "running" || task.status === "queued") {
       more = [note, worker, cancel];
+    } else if (task.status === "done" && task.news) {
+      // News about finished work: seen, it goes back to the finished ones.
+      main = el("button", { type: "button", text: "Got it", onclick: () => act(`/api/tasks/${task.id}/news-seen`, {}, "") });
+      more = [{ text: "Follow up…", onclick: () => reply("What should it do about it?", "Sent to the worker.") }, copy, pr, worker];
     } else if (task.status === "done") {
       more = [copy, pr, worker];
     } else {
@@ -280,19 +286,7 @@ function taskBody(task) {
     const reason = queuedReason(task);
     return el("div", { class: "task-body" }, el("div", { class: "reason", text: reason.text, title: reason.help || "" }));
   }
-  if (task.status === "running") {
-    // At a glance: the step it is in now (and for how long), and what it said last.
-    const line = worker?.step || worker?.activity || (worker?.status === "working" ? "Working…" : "Between turns");
-    const command = compactPaths(line.replace(/^(bash|shell|powershell) /, "$ "), worker?.cwd);
-    const long = worker?.step_since && ago(worker.step_since) !== "now";
-    const nodes = [
-      el("div", { class: "activity", title: line }, worker?.step ? "Now: " : "", command, long ? el("span", { class: "when", text: ` · ${ago(worker.step_since)}` }) : ""),
-    ];
-    if (worker?.said) {
-      nodes.push(el("div", { class: "said", title: worker.said }, `“${worker.said.replace(/\s+/g, " ").trim()}”`, el("span", { class: "when", text: ` · ${since(worker.said_at)}` })));
-    }
-    return el("div", { class: "task-body" }, ...nodes);
-  }
+  if (task.status === "running") return runningBody(task, worker);
   if (task.status === "done" || task.status === "cancelled") return null;
   if (task.status === "review") {
     // One line of what came out; the whole report on demand.
@@ -304,6 +298,123 @@ function taskBody(task) {
   if (!text) return null;
   const wrapper = el("div", { class: "task-body" });
   foldable(wrapper, el("div", { class: "body markdown", html: markdown(text) }), text, { chars: 360, lines: 5 });
+  return wrapper;
+}
+// A worker with several open tasks, as one card: the worker and what it does now, then each of
+// its tasks a line: where it stands (on it now, waiting its turn, waiting for you, queued), for
+// how long, and its own latest progress. The owner sees at once which task moves.
+export function workerGroupItem(worker, list) {
+  const rows = list.map((task) => `${task.id}:${task.status}:${task.updated_at}:${task.progress?.length || 0}`).join(",");
+  return {
+    key: `worker:${worker.id}:${list.map((task) => task.id).join(",")}`,
+    id: worker.id,
+    version: `${worker.status}:${worker.step || ""}:${worker.activity || ""}:${worker.said_at || ""}:${worker.step_since || ""}:${worker.task?.task_id || ""}:${rows}:${Math.floor(Date.now() / 60000)}`,
+    build: () => workerGroupCard(worker, list),
+    refresh: (node) => node.replaceChildren(...workerGroupCard(worker, list).childNodes),
+  };
+}
+// The task a worker with several is on now. One conversation does them in turn: a step it
+// began before a newer task came is still about an earlier one, so the latest task it had when
+// its step began; between steps, the one it was given last.
+function activeTask(worker, list) {
+  const running = list.filter((task) => task.status === "running").sort((a, b) => a.created_at.localeCompare(b.created_at));
+  if (!running.length) return "";
+  if (worker.status === "working" && worker.step_since) {
+    const before = running.filter((task) => task.created_at <= worker.step_since);
+    if (before.length) return before[before.length - 1].id;
+  }
+  return running.some((task) => task.id === worker.task?.task_id) ? worker.task.task_id : running[running.length - 1].id;
+}
+// Where one of a worker's tasks stands, in a few words, with its mark.
+function taskState(task, worker, active) {
+  const current = active === task.id;
+  if (task.status === "waiting") return ["?", "waiting", "waits for you · Needs you"];
+  if (task.status === "queued") return ["…", "queued", queuedReason(task).text];
+  if (!current) return ["‖", "paused", "waits its turn"];
+  const started = ago(task.created_at);
+  if (worker.status === "working") return ["●", "now", `on it now${started === "now" ? "" : ` · ${started}`}`];
+  return ["●", "now", worker.activity?.startsWith("waiting for") ? worker.activity : "between turns"];
+}
+function workerGroupCard(worker, list) {
+  const order = { running: 0, waiting: 1, queued: 2 };
+  const active = activeTask(worker, list);
+  const current = (task) => (active === task.id ? -1 : 0);
+  const sorted = [...list].sort((a, b) => current(a) - current(b) || order[a.status] - order[b.status] || a.created_at.localeCompare(b.created_at));
+  const working = worker.status === "working";
+  const line = worker.step || worker.activity || (working ? "Working…" : quiet(worker));
+  const long = worker.step_since && ago(worker.step_since) !== "now";
+  const rows = sorted.map((task) => {
+    const [mark, kind, words] = taskState(task, worker, active);
+    const said = task.progress || (kind === "now" ? worker.said : "") || "";
+    const at = task.progress ? task.updated_at : worker.said_at;
+    const confirmCancel = async () => {
+      if (!confirm(`Cancel “${task.title}”? Its worker stops working on it.`)) return;
+      try {
+        upsertTask(await api(`/api/tasks/${task.id}/cancel`, { method: "POST", body: { text: "" } }));
+        toast("Task cancelled.");
+      } catch (error) {
+        toast(error.message, "error");
+      }
+    };
+    return el(
+      "li",
+      { class: `task-row ${kind}`, "data-task": task.id },
+      el("span", { class: "mark", text: mark, title: words }),
+      el("div", { class: "row-main" },
+        el("div", { class: "row-head" },
+          el("button", { type: "button", class: "title link", text: task.title, title: task.goal || task.title, onclick: () => select(worker.id) }),
+          el("span", { class: "state", text: words }),
+          moreMenu([{ text: "Open worker", onclick: () => select(worker.id) }, { text: "Cancel task…", onclick: confirmCancel, danger: true }])),
+        said ? el("div", { class: "said", title: said }, `“${said.replace(/\s+/g, " ").trim()}”`, at ? el("span", { class: "when", text: ` · ${since(at)}` }) : "") : null),
+    );
+  });
+  return el(
+    "div",
+    { class: "card task worker-group running", "data-session": worker.id },
+    el("div", { class: "head" },
+      el("span", { class: `dot ${working ? "working" : "done"}` }),
+      el("button", { type: "button", class: "title", text: worker.title, title: "Open the worker", onclick: () => select(worker.id) }),
+      el("span", { class: "meta", text: plural(list.length, "task") })),
+    el("div", { class: "task-body" },
+      el("div", { class: "activity", title: line }, worker.step ? "Now: " : "", compactPaths(line.replace(/^(bash|shell|powershell) /, "$ "), worker.cwd), long ? el("span", { class: "when", text: ` · ${ago(worker.step_since)}` }) : "")),
+    el("ol", { class: "task-rows" }, ...rows),
+  );
+}
+// A running task at a glance: which worker has it and whether that worker is on it right now
+// (a worker with several tasks works on one at a time); the step it is in and for how long, or
+// how long it has been quiet and what it waits for; and this task's own latest progress.
+function runningBody(task, worker) {
+  const nodes = [];
+  const named = worker && worker.title !== task.title;
+  // Its newest task done or in review: it is back on this one.
+  const current = !worker?.task || worker.task.task_id === task.id || worker.task.status !== "running";
+  if (!current) {
+    nodes.push(el("div", { class: "reason", text: `Waiting: its worker “${worker.title}” is on “${worker.task.title}” now` }));
+  } else {
+    const working = worker?.status === "working";
+    const line = worker?.step || worker?.activity || (working ? "Working…" : quiet(worker));
+    const command = compactPaths(line.replace(/^(bash|shell|powershell) /, "$ "), worker?.cwd);
+    const long = worker?.step_since && ago(worker.step_since) !== "now";
+    nodes.push(el("div", { class: "activity", title: line }, worker?.step ? "Now: " : "", command, long ? el("span", { class: "when", text: ` · ${ago(worker.step_since)}` }) : ""));
+  }
+  if (named && current) nodes.push(el("div", { class: "worker-line", text: `Worker: ${worker.title}` }));
+  // Its own progress: what it last reported on this task, else (on it now) what it said last.
+  const said = task.progress ? task.progress : current && worker?.said ? worker.said : "";
+  const at = task.progress ? task.updated_at : worker?.said_at;
+  if (said) nodes.push(el("div", { class: "said", title: said }, `“${said.replace(/\s+/g, " ").trim()}”`, at ? el("span", { class: "when", text: ` · ${since(at)}` }) : ""));
+  return el("div", { class: "task-body" }, ...nodes);
+}
+// A worker between turns on a running task: how long it has been quiet, and what it follows.
+function quiet(worker) {
+  if (!worker) return "Starting…";
+  const follows = (worker.follows || []).map((key) => key.replace(/^github:[^/]+\//, "").replace(/^slack:.*/, "a Slack thread"));
+  return [`Quiet since ${since(worker.updated_at)}`, follows.length ? `follows ${follows.slice(0, 2).join(", ")}` : ""].filter(Boolean).join(" · ");
+}
+// News about finished work (its PR approved or merged, a reply handled), in sight until seen.
+function newsBlock(task) {
+  if (!task.news || !["review", "done"].includes(task.status)) return null;
+  const wrapper = el("div", { class: "news" }, el("div", { class: "news-head" }, el("span", { class: "chip progress", text: "Update" }), el("span", { class: "when", text: since(task.news.at) })));
+  foldable(wrapper, el("div", { class: "body markdown", html: markdown(task.news.text) }), task.news.text, { chars: 360, lines: 4 });
   return wrapper;
 }
 // A PR as GitHub has it now, in a few words: "app#7 · ✓ CI · approved".

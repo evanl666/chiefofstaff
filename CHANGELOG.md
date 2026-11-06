@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.1.22 (2026-11-06)
+
+- **A worker's newest run counts, also when a sub-agent ran it**: Copilot often hands a test
+  suite or a flow to a sub-agent; those commands were not receipts, so a card kept saying *the
+  last test run failed* after the run that passed. They are now (the sub-agent's steps still
+  show as its one step).
+- **News on finished work stays in sight**: what a worker reports about a task you already
+  accepted (its PR approved or merged, a reply handled) came as a notification and a line in
+  the chat, easy to miss. The task is back under *Ready to review*, marked *Update* with the
+  news, until you press *Got it*, follow up or accept. News that needs you (merge it yourself,
+  delete what is left over) is asked as a question, under *Needs you*.
+- **Answers to overall PR comments name whom they answer**: a top-level comment or a review's
+  summary has no thread to reply in; a worker's answer to one (`reply_to_comment`) is posted in
+  the conversation and starts with @ and its author's login.
+- **Replies can resolve their conversation**: a reply on a line that says the point is fixed or
+  settled comes with *Resolve the conversation* ticked; sent, the conversation on GitHub is
+  resolved too.
+- **Drafts you posted yourself**: a reply or review you copied and posted on GitHub yourself
+  (edited a little, even) is found there within minutes; its card leaves as sent and its worker
+  is told. That holds for a reply on a PR given to you to copy as well. Workers draft replies on
+  GitHub as GitHub drafts also when you say you will post them yourself (you can copy them from
+  the card), and always hear what became of their drafts (sent, edited, rejected) with their
+  next message; before, a draft sent as written left its worker none the wiser, and it asked
+  about it again.
+- **A worker with several tasks** is one card under *Running*: what it does now, then a line per
+  task (on it now, waiting its turn, waiting for you, queued), each with its own latest
+  progress. "On it now" is the task its current step is about: a step it began before a newer
+  task came (a long run) is still the earlier one's. A worker between turns says how long it has
+  been quiet and what it follows.
+- **Commits are yours**: workers' commits no longer carry a "Co-authored-by: Copilot" line.
+- "Tell me when its CI changes": the Router gives the PR to a worker that follows it, instead of
+  saying it cannot watch anything.
+- The *Cancel task…* item of a task's menu was a blank red bar (red text on red): it reads now.
+- **Your answers from away always arrive**: the connector's hand-over of your reply could be
+  dropped without a word (a reply passed in another shape came through as nothing, and was
+  answered "Nothing to apply"); a reply on its own is now taken, and an empty hand-over is
+  refused with the shape to use. A worker's question the Router retells in the chat reaches you
+  once, not twice under two codes.
+- Settings, Usage and other dialogs close with a click around them, as with Esc; a text
+  selection dragged out of one does not close it.
+- `scripts/live_wide.py` shard G: 6 scenarios of this round (85 in all), with browser passes.
+
 ## 0.1.21 (2026-11-06)
 
 - **Workers that work together tell each other**: tasks that run at the same time and need each
