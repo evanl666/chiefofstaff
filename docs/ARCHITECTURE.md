@@ -19,7 +19,7 @@ browser ── REST (actions) ──────────────► web.
 | Session | Does | Tools |
 | --- | --- | --- |
 | **Router** | Turns requests into tasks, routes reports and events, tells the owner what matters. | Only its own: `spawn_worker`, `message_session`, `cancel_task`, `list_sessions`, `find_sessions`, `ask_workspace`, `notify_owner`, `close_worker`, `answer_session`, `distill_profile`. No shell, files or web. |
-| **Worker** | One task at a time, autonomously; later tasks on the same subject. | Everything Copilot offers in its folders, plus `report`, `ask_session`, `add_repo`, `record_setup`, `follow_thread`, drafts. |
+| **Worker** | One task at a time, autonomously; later tasks on the same subject. | Everything Copilot offers in its folders, plus `report`, `ask_session`, `tell_session`, `add_repo`, `record_setup`, `follow_thread`, drafts. |
 | **Slack session** | Reads conversations and drafts replies in the owner's voice. | Slack read tools and `draft_slack_reply`. |
 | **Watchdog** | Reviews workers a cheap check flagged. | `assess_worker`. |
 
@@ -41,12 +41,13 @@ tool allowlist, permission and request callbacks, sandbox, model.
 | `drafts.py` | Drafts the owner approves (Slack replies, PR reviews, a task's folder); interrupted sends. |
 | `focus.py` | Focus Shield. |
 | `state.py` | Per-session in-memory state (connection, turn flags) and the lock order. |
-| `receipts.py` | Observed commands, changes and PR checks next to a report; acceptance criteria as verified, claimed or not met. |
+| `receipts.py` | Observed commands, changes and PR checks next to a report; acceptance criteria as verified, claimed or not met; a test run's outcome from its runner's summary (piped, chained, run by a script). |
 | `workspaces.py` | The code folder (its repositories, clones into it), each worker's task folder and worktrees (removed on close, restored on reopen), change stats. |
 | `policy.py` | Pure permission rules for actions without the sandbox. |
 | `backend.py` | The `AgentBackend`/`AgentSession` protocols, Copilot backend, sandbox policy. |
 | `scripted.py` | A backend without a model (scripts); runs `demo.py` and contract tests. |
 | `asks.py` | Cards for the owner (questions, forms, sign-ins), questions between sessions, environment notes. |
+| `peers.py` | Workers that work together (`works_with`): told about each other, passing information straight to each other (`tell_session`), a copy for the Router riding along with its next turn, a finished one's result for the others. |
 | `decisions.py` | Decision cards; the owner's decisions and the tasks that rely on them; telling those tasks when one changes. |
 | `learning.py` | The owner's feedback; lessons a learning worker proposes and the owner approves; how often the owner agrees. |
 | `habits.py` | The owner's own words, read from Slack, GitHub, git and their Copilot sessions; the style learned from them (versioned, undoable) and which sessions get it. |
@@ -54,6 +55,7 @@ tool allowlist, permission and request callbacks, sandbox, model.
 | `abilities.py` | Skills the owner uploads or names, Copilot plugins installed from Settings (`copilot plugin install`), and MCP servers from Settings, added to workers' options. |
 | `checks.py` | Failure cases kept from workers' test runs; checks proposed from them, proven in a sandbox on both versions, approved, then run when a worker reports done. |
 | `envelope.py` | The envelope every message to a session is wrapped in. |
+| `machine.py` | How much memory the computer has left: new worker turns wait while it is low (`Workers.claim_slot`, `pump`); quiet workers let go of their Copilot session (`Workers.release_idle`). |
 | `catalog.py` | Keyword ranking that finds the worker that owns a subject. |
 | `watchdog.py` | Cheap checks that decide when a worker deserves a review, and the Watchdog session that reviews it. |
 | `sources/` | Watchers: Slack (MCP search), GitHub (`gh`). |
@@ -92,6 +94,11 @@ Sessions never talk directly. A session calls a tool, and the runtime delivers t
 - **Modes.** The owner's messages steer a working session (`immediate`, within its turn).
   Events and reports for the Router are batched: held while it works and briefly after, so a
   burst becomes one turn. Everything else is queued (`enqueue`).
+- **Workers that work together.** `works_with` on `spawn_worker` links tasks that run at the
+  same time and need each other. A worker's `tell_session` (and `ask_session`) goes straight to
+  the other worker, within its turn; the Router gets a copy held in its outbox (`Delivery.hold`:
+  stored, not flushed), so it rides along with the Router's next turn without starting one.
+  When a linked worker reports done, the others still at work get its result.
 - **Routing of external events.** Watchers turn new Slack messages and GitHub activity into
   events with stable keys (`triggers`, never twice). Activity in a followed thread or PR goes
   straight to its followers (`subscriptions`); the rest goes to the Router.
@@ -118,7 +125,8 @@ to the handler for its type:
 | `assistant.message` | The session's words, into its timeline. |
 | `assistant.turn_start` | A worker's slot is busy; status `working`. |
 | `tool.execution_start` | A step in the timeline and the session's activity; shell commands are recorded for receipts. |
-| `tool.execution_complete` | Exit code for receipts; last output for the Watchdog. |
+| `tool.execution_complete` | Exit code for receipts (a command left running keeps its shell id; reading or stopping that shell settles it); last output for the Watchdog. |
+| `system.notification` | A command left running ended (`shell_completed`): its exit code. |
 | `assistant.usage` | Credits and tokens per run; the Router's context size. |
 | `session.idle` | Turn over: free the slot, send held messages, rotate the Router if needed, start queued workers. |
 | `session.error` | A failed worker task; the Router is told. |

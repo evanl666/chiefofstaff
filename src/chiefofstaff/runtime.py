@@ -62,6 +62,7 @@ from .habits import Habits
 from .learning import Learning
 from .models import Attachment, Settings
 from .notify import mac_notification
+from .peers import Peers
 from .policy import GITHUB_MCP, within
 from .roles import ROUTER, SLACK, WATCHDOG, WORKER
 from .sources import Source
@@ -275,6 +276,7 @@ class Runtime:
         self.drafts = Drafts(self)
         self.asks = Asks(self)
         self.decisions = Decisions(self)
+        self.peers = Peers(self)
         self.learning = Learning(self)
         self.habits = Habits(self)
         self.checks = Checks(self)
@@ -325,6 +327,9 @@ class Runtime:
 
     async def connect(self):
         async with self.connect_lock:
+            # Copilot starts afresh (at start, or reconnecting): the commands its shells were
+            # running ended with the one before.
+            self.store.execute("UPDATE commands SET ended_at=? WHERE ended_at IS NULL", (now(),))
             self.status = {"state": "starting", "error": ""}
             self.publish_state()
             try:
@@ -638,7 +643,7 @@ class Runtime:
             return ["assess_worker"]
         names = ["report", "follow_thread", "unfollow_thread"]
         if row["role"] == WORKER:
-            names += ["find_sessions", "ask_session", "answer_session", "add_repo"]
+            names += ["find_sessions", "ask_session", "answer_session", "tell_session", "add_repo"]
             # Questions it writes reach other workers' prompts: not from Slack content.
             names += ["ack_decision"] if row["slack"] else ["ask_decision", "ack_decision"]
             if not row["slack"]:
@@ -1741,6 +1746,9 @@ class Runtime:
                 self.watchdog.check,
                 self.task_actions.refresh_open_prs,
                 self.workers.tidy,
+                self.workers.release_idle,
+                # Queued work starts once memory frees up, not only when a turn ends.
+                self.workers.pump,
                 self.digest_once,
                 self.asks.expire_questions,
                 self.focus.check,

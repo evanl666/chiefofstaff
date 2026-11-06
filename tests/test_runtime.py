@@ -59,6 +59,7 @@ async def test_router_routes_work_and_worker_reports_back(harness):
         "find_sessions",
         "ask_session",
         "answer_session",
+        "tell_session",
         "add_repo",
         "record_setup",
         "ask_decision",
@@ -1407,3 +1408,55 @@ def test_usage_is_found_in_long_logs_line_by_line(tmp_path):
         file.write(record[20:] + "\n")
     found, offset = scan_log(log, offset, USAGE_RECORD)
     assert len(found) == 1 and offset == log.stat().st_size
+
+
+async def test_workers_wait_while_the_computer_is_low_on_memory(harness, monkeypatch):
+    from chiefofstaff import machine
+
+    runtime = await harness.connect()
+    monkeypatch.setattr(machine, "free_memory", lambda: 6.0)
+    monkeypatch.setattr(machine, "_cached", (0.0, None))
+    result = await call_tool(
+        runtime, "spawn_worker", harness.router_id, title="Build", instructions="Build it"
+    )
+    spawned = json.loads(result.text_result_for_llm)
+    assert "low on memory (6% free on this computer)" in spawned["note"]
+    row = harness.store.session(spawned["session_id"])
+    assert row["status"] == "queued"
+    assert row["activity"] == "waiting for memory: 6% free on this computer"
+    assert spawned["session_id"] not in harness.client.sessions, "nothing started"
+
+    monkeypatch.setattr(machine, "free_memory", lambda: 40.0)
+    monkeypatch.setattr(machine, "_cached", (0.0, None))
+    await runtime.workers.pump()  # The watch loop does this every minute.
+    await settle(runtime)
+    assert harness.store.session(spawned["session_id"])["status"] == "working"
+
+
+async def test_quiet_workers_let_go_of_their_copilot_session(harness):
+    runtime = await harness.connect()
+    started = []
+    for title in ("Quiet one", "Server keeper"):
+        result = await call_tool(runtime, "spawn_worker", harness.router_id, title=title,
+                                 instructions=title, why_new="t")  # fmt: skip
+        started.append(json.loads(result.text_result_for_llm)["session_id"])
+    quiet, keeper = started
+    keeper_session = harness.session(keeper)
+    keeper_session.emit("tool.execution_start", tool_name="bash", tool_call_id="c1",
+                        arguments={"command": "npm run dev", "mode": "async"})  # fmt: skip
+    keeper_session.emit("tool.execution_complete", tool_call_id="c1", success=True,
+                        result=SimpleNamespace(content="<command started in background with "
+                                               "shellId: dev>"))  # fmt: skip
+    for worker in started:
+        await call_tool(runtime, "report", worker, status="done", summary="Done.")
+        harness.session(worker).emit("session.idle")
+    await settle(runtime)
+    assert await runtime.workers.release_idle(time.time()) == [], "not quiet for long yet"
+    later = time.time() + 11 * 60
+    assert await runtime.workers.release_idle(later) == [quiet], "its server still runs"
+    assert not runtime.states.is_live(quiet) and runtime.states.is_live(keeper)
+
+    await runtime.task_actions.follow_up(runtime.tasks.current(quiet)["id"], "One more thing.")
+    await settle(runtime)
+    assert runtime.states.is_live(quiet), "its next message resumes it"
+    assert harness.session(quiet).sent[-1].endswith("One more thing.\n</message>")

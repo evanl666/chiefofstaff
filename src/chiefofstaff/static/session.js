@@ -356,6 +356,9 @@ function homeEntry(message) {
     }
     case "ask":
       return eventLine({ mark: "→", text: `Asked ${meta.title}: ${firstLine(text)}`, time, body: text, view: () => select(meta.target), viewText: "Open" });
+    case "peer":
+      // What workers that work together told each other: the Router's copy, in a line.
+      return eventLine({ mark: "↔", text: firstLine(text), time, body: text, view: () => select(meta.peer_to), viewText: "Open" });
     case "watchdog": {
       const verdict = { stuck: "looks stuck", looping: "looks like it is looping", off_track: "looks off track" }[meta.verdict];
       return eventLine({ mark: "⚠", kind: "waiting", text: `Watchdog${verdict ? ` · ${verdict}` : ""}: ${firstLine(text)}`, time, body: `${text}${meta.reason ? `\n\nWhy it stepped in: ${meta.reason}` : ""}` });
@@ -400,7 +403,14 @@ function renderMessage(message) {
       return card({ label: "From the Router", body: message.text, className: "router", time });
     case "ask":
       return card({ label: `Asked ${meta.title}`, body: message.text, className: "ask", time, open: () => select(meta.target) });
+    case "tell":
+      return card({ label: `Told “${meta.title}”`, body: message.text, className: "ask", time, open: () => select(meta.target) });
+    case "peer":
+      return el("div", { class: "line notice link", title: clock(time), onclick: () => select(meta.peer_to) }, el("span", { text: message.text }));
     case "inbound": {
+      if (meta.told_by) {
+        return card({ label: meta.finished ? `“${meta.title}” finished` : `From “${meta.title}”`, body: message.text, className: "inbound", time, open: () => select(meta.told_by) });
+      }
       if (meta.asked_by) {
         return card({ label: `Question from “${meta.title}”`, body: message.text, className: "inbound", time, open: () => select(meta.asked_by) });
       }

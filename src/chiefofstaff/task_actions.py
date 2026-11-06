@@ -86,8 +86,8 @@ class TaskActions:
     def receipts(self, task: dict) -> dict | None:
         """Observed commands, changes and PRs for a task, beside its report."""
         commands = self.store.all(
-            """SELECT c.command, c.kind, c.exit_code FROM commands c JOIN runs r ON r.id=c.run_id
-            WHERE r.task_id=? ORDER BY c.id""",
+            """SELECT c.command, c.kind, c.exit_code, c.ended_at FROM commands c
+            JOIN runs r ON r.id=c.run_id WHERE r.task_id=? ORDER BY c.id""",
             (task["id"],),
         )
         # Claims are saved with the report; what was observed follows from git and gh.
@@ -215,6 +215,7 @@ class TaskActions:
                     "state": view.get("state", ""),
                     "checks": receipts.checks_state(rollup),
                     "failing": receipts.failing_checks(rollup)[:5],
+                    "checks_started": receipts.checks_started(rollup),
                     "review": view.get("reviewDecision") or "",
                     "at": now(),
                 }
@@ -407,7 +408,13 @@ class TaskActions:
         observed = []
         for label, key in (("Tests", "tests"), ("Checks", "checks"), ("Build", "build")):
             if item := found.get(key):
-                mark = "passed" if item["passed"] else f"failed (exit {item['exit_code']})"
+                mark = (
+                    "running"
+                    if item["passed"] is None
+                    else "passed"
+                    if item["passed"]
+                    else f"failed (exit {item['exit_code']})"
+                )
                 observed.append(f"- {label}: `{item['command']}` {mark}")
         changed = found.get("changed") or {}
         if changed.get("files"):
@@ -634,6 +641,12 @@ class TaskActions:
 
     def publish(self, task: dict):
         self.bus.publish("task", self.view(task))
+        if task["status"] in {"failed", "cancelled"} and not self.store.get(
+            f"peerstop:{task['id']}"
+        ):
+            # Once: the workers it works with stop waiting for it.
+            self.store.set(f"peerstop:{task['id']}", "1")
+            self.runtime.background(self.runtime.peers.stopped(task))
         # Whether a task is blocked depends on the tasks it waits for.
         for dependent in self.tasks.dependents(task["id"]):
             if dependent["status"] in OPEN:

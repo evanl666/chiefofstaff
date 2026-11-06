@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 from collections.abc import Sequence
@@ -25,6 +26,7 @@ from .envelope import clean_title, language, short, wrap
 from .habits import UpdateStyle
 from .learning import ProposeLessons
 from .models import MAX_DRAFT, DraftDecision, NestedArguments
+from .peers import TellSession
 from .policy import within
 from .roles import ROUTER, SLACK, WATCHDOG, WORKER
 from .sources.github import NO_ACCESS, diff_lines, snippet
@@ -44,6 +46,9 @@ OWNER_REF = re.compile(r"\{owner:\s*([A-Za-z0-9]+)\}")  # Not {owner} (GitHub's 
 
 # Thinking efforts, least first.
 EFFORTS = ["none", "low", "medium", "high", "xhigh", "max"]
+
+
+logger = logging.getLogger(__name__)
 
 
 class SpawnWorker(BaseModel):
@@ -93,6 +98,15 @@ class SpawnWorker(BaseModel):
         default_factory=list,
         description="Task ids (or worker ids) of earlier work this new worker should build on: "
         "it gets their goals, results, folders and files, without their whole conversation",
+    )
+    works_with: list[str] = Field(
+        default_factory=list,
+        description="The tasks running at the same time that this one needs while it works, "
+        "or that need it (two sides of one change, a value one finds that the other uses): "
+        "their titles (also of tasks you start in this same turn, in parallel calls) or task "
+        "ids. Each is told about the other, they pass information straight to each other, and "
+        "you get a copy. Not for a task that needs another's finished result before it can "
+        "start: that is after",
     )
     decisions: list[str] = Field(
         default_factory=list,
@@ -650,6 +664,16 @@ class Tools:
                 self.runtime.asks.t_answer_session,
             ),
             (
+                "tell_session",
+                "Tell another worker something it needs for its work now: a value it waits for, "
+                "an interface, name or file format you changed, a finding that affects its task. "
+                "It gets it within its current turn; no answer is expected (ask_session asks). "
+                "Information only: what it should do differently than its task says goes to the "
+                "Router (report status question).",
+                TellSession,
+                self.runtime.peers.t_tell_session,
+            ),
+            (
                 "ask_workspace",
                 "Ask the owner which folder a new task should work in, when you are not "
                 "confident: offer your best candidates; the owner can also pick no project or "
@@ -879,6 +903,17 @@ class Tools:
         context_from = [
             self.runtime.task_actions.task_for(reference)["id"] for reference in params.context_from
         ]
+        peers, wanted = self.runtime.peers.resolve(params.works_with)
+        if not special:
+            # Parts of one request that work together (named or not), not "related" workers.
+            known = {row["id"] for row in peers}
+            peers += [
+                row
+                for row in self.runtime.peers.candidates(
+                    title, params.instructions, bool(params.slack), wanted
+                )
+                if row["id"] not in known
+            ]
         decisions = self.with_turn_decisions(caller, params.decisions)
         await self.runtime.check_model(params.model)
         project = (
@@ -891,7 +926,9 @@ class Tools:
             related = self.related_workers(
                 f"{params.title}\n{params.instructions}",
                 project,
-                exclude=[task["session_id"] for task in after],
+                # The workers it works with are the other parts of its request, not
+                # candidates for this one.
+                exclude=[task["session_id"] for task in after] + [row["id"] for row in peers],
             )
             if related:
                 # Routing to the worker that already knows the subject matters: decide explicitly.
@@ -952,6 +989,18 @@ class Tools:
         )
         self.link_decisions(task["id"], decisions)
         if not special:
+            # Again now that it exists: another task started at the same time may exist now.
+            self.runtime.peers.want(session_id, wanted)
+            known = {row["id"] for row in peers}
+            peers += [
+                row
+                for row in self.runtime.peers.candidates(
+                    title, params.instructions, slack, wanted, new=session_id
+                )
+                if row["id"] not in known
+            ]
+        self.runtime.peers.link(session_id, [row["id"] for row in peers])
+        if not special:
             self.states[caller].turn_tasks.append(task["id"])
         if special:  # Its own tools: see Runtime.tool_names.
             self.store.set(f"{special}:{session_id}", "1")
@@ -970,6 +1019,8 @@ class Tools:
         )
         if context_from:
             prompt += "\n\n" + wrap("system", "context", self.tasks.briefing(context_from))
+        if introduction := self.runtime.peers.introduction(session_id):
+            prompt += "\n\n" + wrap("system", "peers", introduction)
         if note := self.report_language(params.instructions):
             prompt += "\n\n" + wrap("system", "context", note)
         meta: dict[str, Any] = {"prompt": prompt, "task_id": task["id"]}
@@ -979,6 +1030,11 @@ class Tools:
         if not special:  # Chief of Staff's own helpers come and go quietly.
             notice = f"Started “{title}”" + (f" · new because {why_new}" if why_new else "")
             self.runtime.add_message(caller, "notice", notice, {"session_id": session_id})
+        if peers:
+            try:
+                await self.runtime.peers.introduce(self.store.session(session_id), peers)
+            except Exception:
+                logger.warning("Could not tell %s's peers about it.", session_id, exc_info=True)
         await self.runtime.workers.pump()
         row = self.store.session(session_id)
         result = {"task_id": task["id"], "session_id": session_id, "status": row["status"]}
@@ -1000,6 +1056,11 @@ class Tools:
                 if params.wait_for == "accepted"
                 else "Starts automatically when the tasks it depends on are done."
             )
+        elif row["status"] == "queued" and row["activity"].startswith("waiting for memory"):
+            result["note"] = (
+                f"Queued: this computer is low on memory ({row['activity'].split(': ', 1)[-1]});"
+                " it starts once memory frees up."
+            )
         elif row["status"] == "queued":
             result["note"] = "Queued until a worker slot frees up."
         return result
@@ -1007,8 +1068,8 @@ class Tools:
     def failed_tests(self, task: dict) -> str:
         """The task's last test run, when it failed: "`command` exited 1" ("" otherwise)."""
         found = (self.runtime.task_actions.receipts(task) or {}).get("tests") or {}
-        if not found or found.get("passed") is not False:
-            return ""
+        if found.get("passed") is not False or found.get("running") or found.get("ci_passing"):
+            return ""  # Passed, running again, or the PR's checks passed after it.
         command = " ".join(found.get("command", "").split())[:160]
         return f"`{command}` exited {found.get('exit_code')}"
 
@@ -1393,6 +1454,8 @@ class Tools:
             entry["slack_access"] = True
         if follows := self.store.follows(row["id"]):
             entry["follows"] = follows
+        if peers := self.runtime.peers.of(row["id"]):
+            entry["works_with"] = [short(peer) for peer in peers]
         if model := self.runtime.model_for(row):
             entry["model"] = model
         if task := self.tasks.current(row["id"]):
@@ -1613,6 +1676,8 @@ class Tools:
                 self.store.delete(f"followup:{task['id']}")
                 self.runtime.task_actions.remember_prs(task["id"], params.summary)
                 task = self.tasks.move(task["id"], "review", result=clip_report(params.summary))
+                # The workers it works with that are still at it get its result.
+                self.runtime.background(self.runtime.peers.finished(caller, task, params.summary))
                 if self.store.get(f"draft_sent:{task['id']}"):
                     # The owner already sent what it drafted: one approval was enough.
                     self.runtime.background(

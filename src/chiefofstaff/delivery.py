@@ -133,6 +133,15 @@ class Delivery:
 
         self.runtime.background(later())
 
+    def hold(
+        self, session_id: str, prompt: str, *, kind: str, display: str, meta: dict | None = None
+    ) -> dict:
+        """Give a session a message that rides along with its next one: worth knowing, not
+        worth a turn of its own (what workers told each other, for the Router)."""
+        return self.runtime.add_message(
+            session_id, kind, display, {**(meta or {}), "prompt": prompt, "deferred": True}
+        )
+
     def defer_pending(self, session_id: str):
         """Whatever it has not received yet rides along with its next message (it was stopped
         or its task cancelled): a restart must not start a turn for it."""

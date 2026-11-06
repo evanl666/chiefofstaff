@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 
 from .envelope import sender, wrap
 from .models import DraftDecision
+from .peers import clip
 from .store import now
 
 if TYPE_CHECKING:
@@ -527,6 +528,11 @@ class Asks:
             params.question[:4000],
             {"target": target["id"], "title": title, "question_id": question_id},
         )
+        if target["role"] == "worker":
+            self.runtime.peers.copy_to_router(
+                f"“{asker['title']}” asked {title}: {clip(params.question, 600)}",
+                {"peer_from": caller, "peer_to": target["id"]},
+            )
         return (
             f'Asked {title} ({question_id}). The answer arrives as a type="answer" message; go on '
             "with other work meanwhile."
@@ -557,4 +563,9 @@ class Asks:
             display=params.answer[:4000],
             meta={"answered_by": caller, "title": title, "question_id": params.question_id},
         )
+        if row["role"] == "worker" and asker["role"] == "worker":
+            self.runtime.peers.copy_to_router(
+                f"“{row['title']}” answered “{asker['title']}”: {clip(params.answer, 600)}",
+                {"peer_from": caller, "peer_to": asker["id"]},
+            )
         return "Delivered."

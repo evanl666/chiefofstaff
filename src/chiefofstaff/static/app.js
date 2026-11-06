@@ -9,6 +9,7 @@ import { openFile } from "./files.js";
 import { scheduleHome, showHomeTab } from "./inbox.js";
 import { attachmentBody, bindAttachments, hasAttachments, restoreAttachments, takeAttachments } from "./composer.js";
 import { bindSettings, openSettings, refreshUsageLink, showUsage } from "./settings.js";
+import { bindSplitter } from "./splitter.js";
 function bindUi() {
   const input = $("#composer-input");
   const autosize = () => {
@@ -146,6 +147,7 @@ async function boot() {
   }
   $("#application").hidden = false;
   bindUi();
+  bindSplitter();
   connectEvents();
   loadModels();
   refreshUsageLink();

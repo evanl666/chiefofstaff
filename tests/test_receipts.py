@@ -63,6 +63,7 @@ def test_claims_are_checked_against_what_was_observed():
         "passed": True,
         "runs": 2,
         "failed_before": True,
+        "running": False,
     }
     assert clean["changed"]["insertions"] == 40 and clean["flags"] == []
 
@@ -89,6 +90,9 @@ def test_claims_are_checked_against_what_was_observed():
     ):
         assert receipts.says_changed(claim), claim
     assert not receipts.says_changed("None of the files were changed.")
+    for nothing in ("The failure is expected; I changed nothing.", "I updated no files."):
+        assert not receipts.says_changed(nothing), nothing
+    assert receipts.says_changed("I added no-cache headers to the responses.")
     failing = receipts.summarize([command("npm test", 1)], None, "Done.")
     assert failing["flags"] == ["The last test run failed (exit 1)."]
     red = receipts.summarize(
@@ -322,3 +326,159 @@ async def test_the_router_reads_pr_status_from_github_now(harness):
         runtime, "check_prs", json.loads(worker.text_result_for_llm)["session_id"], prs=["x"]
     )
     assert refused.result_type == "failure", "the Router's tool"
+
+
+def run(session, call, command, output, success=True, **extra):
+    session.emit("tool.execution_start", tool_name="bash", arguments={"command": command},
+                 tool_call_id=call)  # fmt: skip
+    session.emit("tool.execution_complete", tool_call_id=call, success=success,
+                 result=SimpleNamespace(content=output), **extra)  # fmt: skip
+
+
+def read(session, call, shell, output, tool="read_bash"):
+    session.emit("tool.execution_start", tool_name=tool, arguments={"shellId": shell},
+                 tool_call_id=call)  # fmt: skip
+    session.emit("tool.execution_complete", tool_call_id=call, success=True,
+                 result=SimpleNamespace(content=output))  # fmt: skip
+
+
+async def worker_with_task(harness):
+    runtime = await harness.connect()
+    result = await call_tool(
+        runtime, "spawn_worker", harness.router_id, title="Fix", instructions="Fix", why_new="t"
+    )
+    worker = json.loads(result.text_result_for_llm)["session_id"]
+    return runtime, worker, harness.session(worker)
+
+
+def observed_tests(runtime, worker):
+    return runtime.task_actions.receipts(runtime.tasks.current(worker))["tests"]
+
+
+async def test_a_long_test_run_gets_its_result_when_it_ends(harness):
+    runtime, worker, session = await worker_with_task(harness)
+    published = []
+    publish = runtime.task_actions.publish
+    runtime.task_actions.publish = lambda task: (published.append(task["id"]), publish(task))
+    still = "collected 900 items\n....\n<command with shellId: 4 is still running after 30 " \
+        "seconds. The command is still running. Use stop_bash to stop it.>"  # fmt: skip
+    run(session, "c1", "uv run pytest tests/", still)
+    await settle(runtime)
+    found = observed_tests(runtime, worker)
+    assert found["running"] and found["passed"] is None, "running: no result yet, not a pass"
+    assert published, "the card shows it running"
+    read(session, "r1", "4", "....F\nFAILED tests/a.py::t\n1 failed, 899 passed in 80.1s\n"
+         "<shellId: 4 completed with exit code 1>")  # fmt: skip
+    await settle(runtime)
+    assert observed_tests(runtime, worker)["passed"] is False
+
+    run(session, "c2", "uv run pytest tests/ 2>&1 | tail -3",
+        "<command started in background with shellId: 5>")  # fmt: skip
+    ended = SimpleNamespace(type="shell_completed", shell_id="5", exit_code=0)
+    event = SimpleNamespace(type=SimpleNamespace(value="system.notification"),
+                            data=SimpleNamespace(content="ended", kind=ended))  # fmt: skip
+    for handler in session.handlers:
+        handler(event)
+    await settle(runtime)
+    assert observed_tests(runtime, worker)["passed"] is True, "Copilot's notice that it ended"
+    read(session, "r2", "5", "F\n1 failed, 899 passed in 80.1s\n<shellId: 5 completed with "
+         "exit code 0>")  # fmt: skip
+    await settle(runtime)
+    assert observed_tests(runtime, worker)["passed"] is False, "tail's 0; its output says it failed"
+
+    run(session, "c3", "uv run pytest tests/", "<command with shellId: 6 is still running "
+        "after 30 seconds.>")  # fmt: skip
+    read(session, "s1", "6", "<shellId: 6 stopped>", tool="stop_bash")
+    await settle(runtime)
+    found = observed_tests(runtime, worker)
+    assert not found["running"] and found["passed"] is False, "stopped: no result of its own"
+
+
+async def test_a_command_that_never_ran_is_no_failed_test_run(harness):
+    runtime, worker, session = await worker_with_task(harness)
+    run(session, "c1", "uv run pytest -q", "\n2 passed in 0.1s\n<shellId: 1 completed with "
+        "exit code 0>")  # fmt: skip
+    blocked = SimpleNamespace(message="Command not executed. The 'pkill' command is not allowed.")
+    run(session, "c2", "pkill -f server; uv run pytest -q", "", success=False, error=blocked)
+    await settle(runtime)
+    assert observed_tests(runtime, worker)["passed"] is True
+    assert "test run failed" not in json.dumps(
+        runtime.task_actions.receipts(runtime.tasks.current(worker))["flags"]
+    )
+
+
+async def test_the_tests_pass_when_a_later_part_of_the_line_fails(harness):
+    runtime, worker, session = await worker_with_task(harness)
+    run(session, "c1", "uv run pytest -q && git push", "......\n6 passed in 0.2s\n! [rejected] "
+        "main -> main (fetch first)\n<shellId: 1 completed with exit code 1>")  # fmt: skip
+    await settle(runtime)
+    assert observed_tests(runtime, worker)["passed"] is True
+    run(session, "c2", "uv run pytest -q && git push", "F.\n1 failed, 1 passed in 0.2s\n"
+        "<shellId: 2 completed with exit code 1>")  # fmt: skip
+    await settle(runtime)
+    assert observed_tests(runtime, worker)["passed"] is False
+
+
+async def test_a_test_run_is_known_by_its_runners_summary(harness):
+    runtime, worker, session = await worker_with_task(harness)
+    run(session, "c1", "cd model && ./scripts/run_unit_tests.sh", "....\n2 failed, 40 passed in "
+        "9.1s\n<shellId: 1 completed with exit code 1>")  # fmt: skip
+    run(session, "c2", "cat /tmp/old-run.log", "....\n42 passed in 9.1s\n<shellId: 2 "
+        "completed with exit code 0>")  # fmt: skip
+    await settle(runtime)
+    assert observed_tests(runtime, worker)["passed"] is False, "an old log is not a run"
+    run(session, "c3", "conda run -n torch python -m unittest discover", "......\nRan 6 tests "
+        "in 0.4s\n\nOK\n<shellId: 3 completed with exit code 0>")  # fmt: skip
+    await settle(runtime)
+    assert observed_tests(runtime, worker) | {"runs": 0} == observed_tests(runtime, worker) | {
+        "runs": 0, "passed": True, "command": "conda run -n torch python -m unittest discover"
+    }  # fmt: skip
+    assert receipts.kind("bash -lc 'cd svc && pytest -q'") == "test"
+    assert receipts.kind("ligradle :ads-model:test") == "test"
+    assert receipts.kind("pixi run pytest") == "test"
+
+
+async def test_the_prs_checks_passing_after_a_local_failure_say_so(harness):
+    runtime, worker, session = await worker_with_task(harness)
+    run(session, "c1", "uv run pytest -q", "F\n1 failed in 0.1s\n<shellId: 1 completed with "
+        "exit code 1>")  # fmt: skip
+    await settle(runtime)
+    url = "https://github.com/acme/app/pull/7"
+    rollup = [{"name": "tests", "conclusion": "SUCCESS", "completedAt": "2099-01-01T00:00:00Z"}]
+    harness.gh_replies[f"pr view {url}"] = json.dumps(
+        {"url": url, "state": "OPEN", "statusCheckRollup": rollup}
+    )
+    for _ in range(2):  # Asked once to look at the failed run first.
+        await call_tool(runtime, "report", worker, status="done", summary=f"Opened {url}.")
+    await settle(runtime)
+    found = runtime.task_actions.receipts(runtime.tasks.current(worker))
+    assert found["tests"]["ci_passing"] == ["acme/app#7"]
+    assert found["flags"] == [
+        "The last local test run failed (exit 1), but the checks on acme/app#7 pass now."
+    ]
+
+
+def test_ci_that_started_before_the_local_failure_is_not_newer():
+    failed = [{"command": "pytest -q", "kind": "test", "exit_code": 1,
+               "ended_at": "2026-11-05T10:02:00+00:00"}]  # fmt: skip
+    rollup = [{"name": "ci", "conclusion": "SUCCESS", "startedAt": "2026-11-05T10:00:00Z",
+               "completedAt": "2026-11-05T10:06:00Z"}]  # fmt: skip
+    pr = {"label": "acme/app#7", "checks": "passing", "state": "OPEN",
+          "checks_started": receipts.checks_started(rollup)}  # fmt: skip
+    found = receipts.summarize(failed, {"prs": [pr]}, "Done.")
+    assert found["tests"]["ci_passing"] == [], "CI ran the code pushed before the failure"
+    pr["checks_started"] = "2026-11-05T10:05:00Z"
+    assert receipts.summarize(failed, {"prs": [pr]}, "Done.")["tests"]["ci_passing"] == [
+        "acme/app#7"
+    ]
+
+
+async def test_a_reconnect_ends_the_commands_left_running(harness):
+    runtime, worker, session = await worker_with_task(harness)
+    run(session, "c1", "uv run pytest tests/", "<command with shellId: 4 is still running "
+        "after 30 seconds.>")  # fmt: skip
+    await settle(runtime)
+    assert observed_tests(runtime, worker)["running"]
+    await runtime.reconnect()
+    await settle(runtime)
+    assert observed_tests(runtime, worker) is None, "no result, and not running"

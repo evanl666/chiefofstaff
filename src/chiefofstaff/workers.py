@@ -15,7 +15,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from . import catalog
+from . import catalog, machine
 from .envelope import clean_title, owner_text, short, wrap
 from .events import PLUMBING_TOOLS, describe_tool
 from .roles import ROUTER, WORKER
@@ -24,6 +24,10 @@ from .store import now
 from .tasks import ADOPTED, OPEN
 from .watchdog import instruction, since_last_instruction, timestamp
 
+# A worker quiet this long (seconds) lets go of its Copilot session (see release_idle).
+RELEASE_IDLE = float(os.environ.get("CHIEFOFSTAFF_RELEASE_IDLE_MINUTES", "10")) * 60
+# What a queued worker's card says while the computer is low on memory.
+MEMORY_WAIT = "waiting for memory"
 # A final answer at least this long, left in a worker's chat without report(), is its report.
 FILED_ANSWER_CHARS = 80
 # An answer in its chat this long, and twice its "done" report or more, completes that report.
@@ -143,6 +147,9 @@ class Workers:
             if self.running() >= limit and not self.runtime.special(row):
                 self.runtime.update_session(session_id, status="queued", activity="")
                 return False
+            if not self.runtime.special(row) and (free := machine.short_of_memory()) is not None:
+                self.runtime.update_session(session_id, status="queued", activity=memory_note(free))
+                return False
             self.states[session_id].busy = True
             return True
 
@@ -230,6 +237,11 @@ class Workers:
             or self.store.follows(session_id)
             or any(d["session_id"] == session_id for d in self.store.drafts("pending"))
         )
+        if WAITS.search(answer) and (peers := self.runtime.peers.waiting_on(session_id, answer)):
+            # Waiting for a worker it works with: that worker's message starts its next turn.
+            names = ", ".join(f"“{peer['title']}”" for peer in peers)
+            self.runtime.update_session(session_id, activity=f"waiting for {names}")
+            return
         text = (
             "Your turn ended without report(). The owner sees only reports: call report now "
             "with your full result (status done), or question or blocked if you need something, "
@@ -270,10 +282,16 @@ class Workers:
         starting = []
         async with self.pump_lock:
             limit = self.store.settings().max_workers
+            short = machine.short_of_memory()
             for row in self.store.open_sessions(WORKER):
                 if row["status"] != "queued":
                     continue
                 if not self.store.get(f"created:{row['id']}") and self.waiting_for(row):
+                    continue
+                if short is not None and not self.runtime.special(row):
+                    # More work now could freeze the computer: it starts once memory frees up.
+                    if row["activity"] != memory_note(short):
+                        self.runtime.update_session(row["id"], activity=memory_note(short))
                     continue
                 if self.running() < limit or self.runtime.special(row):
                     self.states[row["id"]].busy = True
@@ -292,7 +310,9 @@ class Workers:
             for d in waiting
         )
         activity = f"waiting for {names}" if waiting else ""
-        if row["activity"] != activity:
+        if row["activity"] != activity and not (
+            not waiting and row["activity"].startswith(MEMORY_WAIT)
+        ):
             self.runtime.update_session(row["id"], activity=activity)
         broken = self.tasks.broken(task)
         if broken and not self.store.get(f"depblocked:{task['id']}"):
@@ -905,6 +925,34 @@ class Workers:
             if self.runtime.copilot_id(row["id"]) in changed:
                 self.runtime.publish_session(row)
 
+    async def release_idle(self, moment: float | None = None) -> list[str]:
+        """Workers quiet for a while let go of their Copilot session: the MCP servers it
+        started and its memory in Copilot are freed. Their next message resumes it as it was.
+        Not one in a turn (or waiting in one for the owner), nor one with a command still
+        running in its shells (a server it started, say), nor one open in a terminal."""
+        moment = time.time() if moment is None else moment
+        released = []
+        for row in self.store.open_sessions(WORKER):
+            state = self.states[row["id"]]
+            if (
+                not self.states.is_live(row["id"])
+                or state.busy
+                or row["status"] in {"working", "starting", "queued"}
+                or self.runtime.special(row)
+                or self.runtime.copilot_id(row["id"]) in self.runtime.elsewhere
+                or moment - timestamp(row["updated_at"]) < RELEASE_IDLE
+                or self.store.one(
+                    "SELECT id FROM commands WHERE session_id=? AND ended_at IS NULL LIMIT 1",
+                    (row["id"],),
+                )
+            ):
+                continue
+            await self.runtime.detach(row["id"])
+            released.append(row["id"])
+        if released:
+            logger.info("Let go of %d quiet workers' Copilot sessions.", len(released))
+        return released
+
     async def tidy(self, moment: float | None = None) -> list[str]:
         """Close finished workers that follow nothing and have been quiet for a day."""
         moment = time.time() if moment is None else moment
@@ -918,3 +966,7 @@ class Workers:
                 await self.close(row["id"])
                 closed.append(row["id"])
         return closed
+
+
+def memory_note(free: float) -> str:
+    return f"{MEMORY_WAIT}: {free:.0f}% free on this computer"

@@ -74,8 +74,9 @@ uvx chiefofstaff           # 或者：pipx install chiefofstaff && chiefofstaff
 ## 工作原理
 
 每个 session 都是普通的 Copilot CLI session，通过 Copilot SDK 驱动，在 `copilot --resume` 里叫
-"Chief of Staff · …"。session 之间从不直接对话：它们调用 `spawn_worker`、`report` 这类工具，由
-Chief of Staff 传话，并标明是谁发的，所以一条 Slack 消息没法冒充成你。
+"Chief of Staff · …"。session 之间从不直接对话：它们调用 `spawn_worker`、`report`、`tell_session`
+这类工具，由 Chief of Staff 传话，并标明是谁发的，所以一条 Slack 消息没法冒充成你。一起干活的 worker
+把对方需要的信息直接传给对方，Router 会收到一份副本。
 
 ```
 你 ── 首页 ── Router ── 任务 ──► worker · worker · worker
