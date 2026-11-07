@@ -1,5 +1,79 @@
 # Changelog
 
+## 0.1.23 (2026-11-07)
+
+- **A worker's question is never lost**: a question (or a blocker) stays under *Needs you*
+  until you answer it, also when its task is cancelled or finished meanwhile, or its worker has
+  a draft waiting too (that draft used to hide it), or it asked on Copilot's own question card.
+  It has *Reply* and *Dismiss*: answering means you want the work, so a task cancelled or
+  finished meanwhile goes on with your answer (also when you answer from away); *Dismiss* if
+  not. The Router no longer asks you again what already waits there.
+- **Tasks keep their state**: a merged PR no longer closes a worker that has other open work
+  (its other tasks were cancelled); a message to an ended task is refused before anything
+  changes; thanks or an FYI about finished work is a *note* to the worker (`task="note"`), not
+  a follow-up that reopens it; cancelling a follow-up gives the earlier result back instead of
+  cancelling it; a changed decision that changes nothing for a task (`ack_decision` with
+  `changes=false`) gives its result back; a worker with several open tasks says which one it
+  reports on. A worker that answers without reporting is asked once, and its answer is then
+  filed as its report, so finished work does not sit under *Running*.
+- **PRs ready to merge**: when a PR a worker opened for you is open, its checks pass and GitHub
+  would merge it now, a *Ready to merge* card comes under *Needs you* (and a notification, and
+  away, a message): *Merge* merges it as it was shown (anything pushed since stops it), the way
+  the repository allows, and its task is done at once. A PR its report only mentions gets no
+  card and does not settle its task; a card that goes while GitHub works out whether the PR can
+  merge comes back once it can. Its own PR read as merged settles its task also when following
+  it failed. Checks that wait for a person ("Owner Approval") count as *awaiting
+  approval*, not as CI running. A running task's PR is on its card with GitHub's state, read
+  again every few minutes.
+- **Only a worker's own PRs are followed**: a PR a report merely mentions is no longer followed
+  (its old CI failures came as news); CI that had finished before a PR was followed is where it
+  stands, not news. A closed PR's failed checks are not flagged.
+- **Home says what each worker does**: a worker's card lists its tasks, each with where it
+  stands, its latest report in two clean lines (no Markdown marks, click for all of it) and
+  what it made or points to: its PRs with their state, docs, runs, tickets, the threads it
+  watches, a draft or question waiting for you. Steps read as what they are for (a command's
+  description), not raw commands; the cards no longer overflow (each row fits its card).
+  Running tasks whose worker is between turns watching a PR or thread are under *Waiting on
+  others*; every count on Home counts tasks. A task's title opens its worker at that task's
+  report, not at its latest message.
+- **Sidebar dots match Home**: amber needs you, blue pulsing works now, a blue ring is running
+  between steps, a gray ring is queued, green is ready to review, gray has nothing open; *?*
+  beside *Workers* explains them. A worker shows by the task it is on, the header in the same
+  words.
+- **Away notifications that can use your tools**: they are sent by a messenger of their own,
+  outside the connector's sandbox (the connector reads others' messages, so it reaches GitHub
+  only and a company bot's CLI could not run there). It is given the message in a file and
+  says how it sent it. A failure is said once, not at every attempt; Settings shows the latest.
+- **Watches**: *Scan now* saves the watches written in the form first (a watch just added used
+  to be "None" and the scan said to add one); the summary counts what is written. A message the
+  owner already answered is left out (the scan reads its thread and says so), and the watcher's
+  context is marked as its own reading. A found Slack message says which thread to follow, or
+  why none can; Slack threads without Slack connected are refused with what to do instead.
+- **Add your own habits** in Settings → You.
+- Markdown tables: a `|` in code or escaped stays in its cell, empty rows are left out, a blank
+  line inside a table does not end it, columns keep their alignment, and long cells wrap.
+- A Copilot plugin hook that fails (the same in every session: the plugin's problem or this
+  machine's) is said once a day, not in every worker.
+- A test run followed by other commands (`pytest; git status`) that failed is seen failing:
+  the line's exit code is the last command's, so the runner's own summary decides, as it
+  already did for a run piped into `tail`.
+- The Slack problem line in the sidebar has *Settings* and *Turn off*; the Watchdog leaves
+  finished workers alone; the same answer arriving twice within a minute shows once (never a
+  message meant for a worker, such as a second cancellation); "tests pass" quoted or said of CI
+  is not taken as a worker's claim.
+- A report that leaves the table or the rows you asked for in a file ("the full table is saved
+  at …") is sent back once: the answer goes in the report itself.
+- Your answers to away notifications are read at night and on weekends too: watches that do
+  not run then left them unread, and the work that waited for them stayed stuck.
+- A worker told to ask you this time asks, even when you decided a similar question before (it
+  used to follow the earlier decision without asking).
+- A reply you will post yourself is still drafted on a card (the Router no longer tells workers
+  to give the text only): you copy it there, nothing is posted until you approve, and what you
+  post is found and settles it.
+- A reply you posted yourself on a PR is found also when the PR's follower read it first (it
+  was taken for one Chief of Staff posted, and its card stayed).
+- `scripts/live_wide.py` shard H: 5 scenarios of this round (90 in all).
+
 ## 0.1.22 (2026-11-06)
 
 - **A worker's newest run counts, also when a sub-agent ran it**: Copilot often hands a test

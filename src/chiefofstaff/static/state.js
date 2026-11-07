@@ -60,6 +60,13 @@ export const viewedId = () => (state.selected === HOME ? routerId() : state.sele
 export const pendingDrafts = () => state.snapshot?.drafts || [];
 export const uncertainDrafts = () => state.snapshot?.uncertain || [];
 export const tasks = () => state.snapshot?.tasks || [];
+export const ownerQuestions = () => state.snapshot?.questions || [];
+// A worker by what it is on: its latest task while that is open (a worker given new work keeps
+// the title it was started with), else that title.
+export function workerTitle(session) {
+  const task = session?.task;
+  return task?.title && ["running", "waiting", "queued"].includes(task.status) ? task.title : session?.title || "";
+}
 export async function loadState() {
   const data = await api("/api/state");
   const first = !state.snapshot;

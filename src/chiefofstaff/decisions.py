@@ -91,6 +91,11 @@ class RecordDecision(BaseModel):
 class AckDecision(BaseModel):
     decision: str = Field(description="The decision id (dec…) from the message")
     plan: str = Field(description="What you change because of it, or why nothing has to change")
+    changes: bool = Field(
+        default=True,
+        description="False when nothing in your work has to change: a finished task goes back "
+        "to where it was (its result stands), with no new report needed",
+    )
 
 
 def decision_id() -> str:
@@ -190,8 +195,9 @@ class Decisions:
             listed = "\n".join(f"- {p['text']} ({p['created_at'][:10]})" for p in precedents)
             raise ValueError(
                 f"The owner decided similar questions before:\n{listed}\nIf one settles yours, "
-                "follow it without asking and say so in your report. Otherwise call ask_decision "
-                "again with seen_precedents=true: the card shows these to the owner."
+                "follow it without asking and say so in your report, unless your task asks you "
+                "to ask the owner this time (then ask anyway). Otherwise call ask_decision again "
+                "with seen_precedents=true: the card shows these to the owner."
             )
         if params.same_as.strip():
             card = next((c for c in cards if c["id"] == params.same_as.strip()), None)
@@ -454,6 +460,8 @@ class Decisions:
         else:
             error = ""
             if was in {"review", "done"}:
+                # Remembered: if nothing has to change, it goes back there (ack_decision).
+                self.store.set(f"decision_was:{task['id']}", was)
                 self.tasks.move(task["id"], "running", reason="decision changed")
         return {
             "task_id": task["id"],
@@ -497,6 +505,13 @@ class Decisions:
                 "UPDATE task_decisions SET ack=? WHERE task_id=? AND decision_id=?",
                 (plan, task_id, decision["id"]),
             )
+            was = self.store.get(f"decision_was:{task_id}")
+            self.store.delete(f"decision_was:{task_id}")
+            task = self.tasks.get(task_id)
+            if was and not params.changes and task["status"] == "running":
+                # Nothing changes: its result stands, as it was before the change.
+                self.runtime.task_actions.unstale(task_id)
+                self.tasks.move(task_id, was, progress=f"Unchanged by the new decision: {plan}")
         self.runtime.add_message(caller, "notice", f"Works to the new decision: {plan}")
         for card in self.open_cards("change"):
             target = card["target"]
@@ -518,6 +533,8 @@ class Decisions:
                 f"“{row['title']}” works to the new decision: {plan}",
                 {"session_id": caller},
             )
+        if not params.changes:
+            return "Noted: your finished work stands as it was. Nothing more to do or report."
         return "Noted. Go on with the task under the new decision."
 
     def dismiss(self, card: dict) -> dict:

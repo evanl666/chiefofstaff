@@ -272,6 +272,12 @@ class OwnerMessage(StrictModel):
         return self
 
 
+class NewLesson(StrictModel):
+    text: str = Field(min_length=1, max_length=600)
+    # "", "slack", or a project folder.
+    scope: str = Field(default="", max_length=500)
+
+
 class FocusRequest(StrictModel):
     # 0 ends focus now.
     minutes: int = Field(ge=0, le=600)

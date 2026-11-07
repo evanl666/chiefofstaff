@@ -43,7 +43,7 @@ async def test_progress_shows_the_step_it_is_in_and_what_it_said_last(harness):
     assert view["step_since"] and view["said"] == "Running the dry run on a 0.1% sample."
 
     steps = runtime.states[worker].steps
-    steps["c1"] = (time.time() - 600, steps["c1"][1])  # Ten minutes into that step.
+    steps["c1"] = (time.time() - 600, *steps["c1"][1:])  # Ten minutes into that step.
     read = json.loads(
         (
             await call_tool(runtime, "read_session", harness.router_id, session_id=worker[:8])
@@ -200,6 +200,10 @@ async def test_a_plugin_hook_that_fails_does_not_fail_the_worker(harness):
     notes = [text for kind, text in harness.kinds(worker) if "plugin hook failed" in text]
     assert len(notes) == 1 and "Also writable in the sandbox" in notes[0]
     assert not [m for m in harness.store.messages(harness.router_id) if m["kind"] == "inbound"]
+    other = await spawn(runtime, harness.router_id, "Another task")
+    harness.session(other).emit("session.error", error_type="hook", message=message)
+    await settle(runtime)
+    assert not [t for _, t in harness.kinds(other) if "plugin hook failed" in t], "once a day"
     session.emit("session.error", error_type="model", message="invalid tool schema")
     await settle(runtime)
     assert harness.store.session(worker)["status"] == "failed", "other errors still fail it"
@@ -428,7 +432,11 @@ async def test_the_owner_sees_the_step_note_where_they_wrote(harness):
     worker = await spawn(runtime, harness.router_id, "Long query")
     step(harness.session(worker), "bash", {"command": "trino -f big.sql"})
     await settle(runtime)
-    runtime.states[worker].steps["c1"] = (time.time() - 400, "bash trino -f big.sql")
+    runtime.states[worker].steps["c1"] = (
+        time.time() - 400,
+        "bash trino -f big.sql",
+        "bash trino -f big.sql",
+    )
     await runtime.owner_send_to(harness.router_id, worker, "progress?")
     kind, text = harness.kinds(harness.router_id)[-1]
     assert kind == "notice" and "It reads this when its current step ends" in text
@@ -587,6 +595,7 @@ async def test_a_merged_pr_settles_its_task_after_later_reports(harness):
     await call_tool(
         runtime, "report", worker, status="done", summary="Done: https://github.com/acme/app/pull/7"
     )
+    await settle(runtime)
     task = runtime.tasks.current(worker)
     await call_tool(
         runtime, "message_session", harness.router_id, session_id=worker, text="Logout too"
@@ -956,6 +965,9 @@ async def test_no_report_request_to_a_worker_being_closed_or_reattached(harness)
         worker = await spawn(runtime, harness.router_id, f"Work {flag}")
         session = harness.session(worker)
         await settle(runtime)
+        if flag == "close_after_turn":
+            # Closed by itself only once nothing of it is open (its PR merged, its task done).
+            runtime.tasks.move(runtime.tasks.current(worker)["id"], "done")
         setattr(
             runtime.states[worker],
             flag,
@@ -1173,6 +1185,31 @@ async def test_a_decision_recorded_again_in_the_same_words_changes_nothing(harne
         ),
         ("把所有行列成表格", "表格太长, 只列前 10 行:\n| a |\n|---|", "the whole answer"),
         ("Tell me a bit about rounding", "Kept it short for brevity: half up.", "the whole answer"),
+        (
+            "list every row of data/sales.csv with its revenue (units * unit_price) as one "
+            "markdown table, sorted by revenue descending. All rows, no summary.",
+            "The full 540-row table (sorted by revenue descending, ties in file order) is saved "
+            "at /tmp/w/sales_by_revenue.md. Top rows:\n| date | revenue |\n|---|---|",
+            "the whole answer",
+        ),
+        (
+            "把所有行列成表格",
+            "完整表格已保存到 /tmp/rows.md, 前 10 行:\n| a |\n|---|",
+            "the whole answer",
+        ),
+        (
+            "Write every row as a markdown table to rows.md",
+            "The full table is saved at rows.md.\n|",
+            "",
+        ),
+        ("List all open PRs", "#12 and #14 are open. I saved the full list notes earlier.", ""),
+        (
+            "list every row of data/sales.csv with its revenue as one markdown table",
+            "The full table (540 rows) is in the file below. Pasting it all inline would exceed "
+            "the report size.\n\nFile: /tmp/w/t.md\n| a |\n|---|",
+            "the whole answer",
+        ),
+        ("Profile the import job", "Peak memory would exceed 2 GB with 10x data.", ""),
     ],
 )
 def test_what_a_one_line_report_cannot_answer(goal, summary, missing):
@@ -1620,9 +1657,13 @@ async def test_a_reply_to_copy_the_owner_posted_on_the_pr_is_settled(harness):
         {"id": 9, "user": {"login": "evan-l"}, "html_url": "u9",
          "body": "@ckrsek Yes, a README note about greet() follows in this PR. Thanks!"},
     ])  # fmt: skip
+    # The PR's follower read it first: it is still the owner's own post.
+    harness.store.add_trigger("github", "github:issuecomment:9", "evan-l commented")
     await runtime.drafts.check_posted_by_owner(every=0)
     settled = harness.store.draft(draft["id"])
     assert settled["status"] == "sent" and settled["outcome"].endswith("u9")
+    told = [m["text"] for m in harness.store.messages(worker) if "posted draft" in m["text"]]
+    assert told and "u9" in told[-1], "its worker is told"
 
 
 async def test_only_what_the_owner_posted_after_the_draft_in_its_thread_settles_it(harness):
@@ -1669,3 +1710,296 @@ async def test_news_keeps_an_old_task_on_the_board(harness):
     assert task["id"] not in {t["id"] for t in runtime.tasks.listed(include_ended_since=since)}
     await call_tool(runtime, "report", worker, status="progress", summary="PR 71 merged.")
     assert task["id"] in {t["id"] for t in runtime.tasks.listed(include_ended_since=since)}
+
+
+async def test_a_merged_pr_does_not_close_a_worker_with_other_open_work(harness):
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Fix login")
+    await call_tool(
+        runtime, "report", worker, status="done", summary="https://github.com/acme/app/pull/7"
+    )
+    await settle(runtime)
+    await call_tool(
+        runtime, "message_session", harness.router_id, session_id=worker, text="Now logout",
+        task="new", title="Fix logout",
+    )  # fmt: skip
+    second = runtime.tasks.current(worker)
+    runtime.unfollow("github:acme/app#7", finished=True, merged=True)
+    harness.session(worker).emit("session.idle")
+    await settle(runtime)
+    assert not harness.store.session(worker)["closed_at"], "its other task is still open"
+    assert runtime.tasks.get(second["id"])["status"] != "cancelled"
+
+
+async def test_a_question_stays_under_needs_you_until_answered(harness):
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Pick a db")
+    task = runtime.tasks.current(worker)
+    await call_tool(runtime, "report", worker, status="question", summary="Postgres or SQLite?")
+    assert runtime.snapshot()["questions"] == [], "its waiting task shows it"
+    await runtime.task_actions.cancel(task["id"])
+    [question] = runtime.snapshot()["questions"]
+    assert question["text"] == "Postgres or SQLite?" and question["task_status"] == "cancelled"
+    await runtime.task_actions.answer_question(worker, "Postgres")
+    assert runtime.snapshot()["questions"] == [], "answered"
+    assert runtime.tasks.get(task["id"])["status"] == "running", "answered, it goes on"
+    assert "Postgres" in harness.session(worker).sent[-1]
+
+
+async def test_an_ended_task_is_not_reopened_by_a_message(harness):
+    runtime = await harness.connect()
+    cancelled = await spawn(runtime, harness.router_id, "Cancelled")
+    await runtime.task_actions.cancel(runtime.tasks.current(cancelled)["id"])
+    await runtime.workers.close(cancelled)
+    refused = await call_tool(
+        runtime, "message_session", harness.router_id, session_id=cancelled, text="go on"
+    )
+    assert refused.result_type == "failure" and "was cancelled" in refused.text_result_for_llm
+    assert harness.store.session(cancelled)["closed_at"], "not reopened for nothing"
+
+    accepted = await spawn(runtime, harness.router_id, "Accepted")
+    task = runtime.tasks.current(accepted)
+    await call_tool(runtime, "report", accepted, status="done", summary="Done.")
+    runtime.task_actions.accept(task["id"])
+    refused = await call_tool(
+        runtime, "message_session", harness.router_id, session_id=accepted, text="thanks!"
+    )
+    assert refused.result_type == "failure" and "task='note'" in refused.text_result_for_llm
+    told = await call_tool(
+        runtime, "message_session", harness.router_id, session_id=accepted, text="thanks!",
+        task="note",
+    )  # fmt: skip
+    assert told.result_type == "success"
+    assert runtime.tasks.get(task["id"])["status"] == "done"
+    assert 'type="note"' in harness.session(accepted).sent[-1]
+
+
+async def test_cancelling_a_follow_up_keeps_the_finished_result(harness):
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Report")
+    task = runtime.tasks.current(worker)
+    await call_tool(runtime, "report", worker, status="done", summary="The numbers.")
+    await call_tool(
+        runtime, "message_session", harness.router_id, session_id=worker, text="Add March"
+    )
+    assert runtime.tasks.get(task["id"])["status"] == "running"
+    await runtime.task_actions.cancel(task["id"])
+    after = runtime.tasks.get(task["id"])
+    assert after["status"] == "review" and after["result"] == "The numbers."
+    assert "Follow-up cancelled" in after["progress"]
+
+
+async def test_a_worker_with_several_open_tasks_names_the_one_it_reports(harness):
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "First")
+    first = runtime.tasks.current(worker)
+    await call_tool(
+        runtime, "message_session", harness.router_id, session_id=worker, text="Also this",
+        task="new", title="Second",
+    )  # fmt: skip
+    second = runtime.tasks.current(worker)
+    assert first["id"] != second["id"]
+    runtime.tasks.move(second["id"], "running")
+    vague = await call_tool(runtime, "report", worker, status="done", summary="Done.")
+    assert vague.result_type == "failure" and "task_id" in vague.text_result_for_llm
+    named = await call_tool(
+        runtime, "report", worker, status="done", summary="First is done.", task_id=first["id"]
+    )
+    assert named.result_type == "success"
+    assert runtime.tasks.get(first["id"])["status"] == "review"
+    assert runtime.tasks.get(second["id"])["status"] == "running"
+
+
+async def test_a_worker_that_stays_silent_after_a_nudge_has_its_answer_filed(harness):
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Look into it")
+    task = runtime.tasks.current(worker)
+    session = harness.session(worker)
+    for _ in range(2):
+        session.emit("assistant.turn_start")
+        session.emit("assistant.message", content="It was the cache: cleared it, works now.")
+        session.emit("session.idle")
+        await settle(runtime)
+    assert "report" in session.sent[-1].lower(), "asked once to report"
+    assert runtime.tasks.get(task["id"])["status"] == "review", "its answer is its report"
+    assert "It was the cache" in runtime.tasks.get(task["id"])["result"]
+
+
+def pr_view(**changes):
+    view = {
+        "number": 7, "url": "https://github.com/acme/app/pull/7", "state": "OPEN",
+        "title": "Fix login", "isDraft": False, "mergeStateStatus": "CLEAN",
+        "headRefOid": "abc1234", "author": {"login": "me"}, "reviewDecision": "APPROVED",
+        "statusCheckRollup": [{"name": "tests", "conclusion": "SUCCESS"}],
+        "headRefName": "fix-login", "createdAt": "2999-01-01T00:00:00Z",
+    }  # fmt: skip
+    return json.dumps(view | changes)
+
+
+async def test_the_owners_pr_ready_to_merge_comes_as_a_card_once(harness):
+    runtime = await harness.connect()
+    harness.gh_replies["auth status --json hosts"] = json.dumps(
+        {"hosts": {"github.com": [{"login": "me", "state": "success", "active": True}]}}
+    )
+    harness.gh_replies["pr view https://github.com/acme/app/pull/7"] = pr_view(
+        mergeStateStatus="BLOCKED"
+    )
+    worker = await spawn(runtime, harness.router_id, "Fix login")
+    task = runtime.tasks.current(worker)
+    await call_tool(
+        runtime, "report", worker, status="done", summary="https://github.com/acme/app/pull/7"
+    )
+    await settle(runtime)
+    assert not [d for d in harness.store.drafts() if d["kind"] == "merge"], "not ready yet"
+
+    harness.gh_replies["pr view https://github.com/acme/app/pull/7"] = pr_view()
+    await runtime.task_actions.refresh_prs(task["id"])
+    await runtime.task_actions.refresh_prs(task["id"])
+    [card] = [d for d in harness.store.drafts() if d["kind"] == "merge"]
+    assert card["target"]["head"] == "abc1234" and card["target"]["task_id"] == task["id"]
+    await settle(runtime)
+    assert ("Ready to merge", "acme/app#7 is ready to merge") in harness.notifications
+
+    harness.gh_replies["api repos/acme/app"] = json.dumps({"allow_squash_merge": True})
+    harness.gh_replies["pr merge"] = ""
+    harness.gh_replies["pr view https://github.com/acme/app/pull/7"] = pr_view(state="MERGED")
+    decided = await runtime.drafts.resolve(card["id"], DraftDecision(action="send"))
+    assert decided["status"] == "sent" and "squashed and merged" in decided["outcome"]
+    assert runtime.tasks.get(task["id"])["status"] == "done", "merged: its task is done at once"
+    merge = [args for args, _ in harness.gh_calls if args[:2] == ("pr", "merge")]
+    assert merge and "--match-head-commit" in merge[0] and "abc1234" in merge[0]
+
+
+async def test_a_ready_to_merge_card_goes_when_the_pr_moves_on(harness):
+    runtime = await harness.connect()
+    harness.gh_replies["auth status --json hosts"] = json.dumps(
+        {"hosts": {"github.com": [{"login": "me", "state": "success", "active": True}]}}
+    )
+    harness.gh_replies["pr view https://github.com/acme/app/pull/7"] = pr_view()
+    worker = await spawn(runtime, harness.router_id, "Fix login")
+    task = runtime.tasks.current(worker)
+    await call_tool(
+        runtime, "report", worker, status="done", summary="https://github.com/acme/app/pull/7"
+    )
+    await settle(runtime)
+    [card] = [d for d in harness.store.drafts() if d["kind"] == "merge"]
+    harness.gh_replies["pr view https://github.com/acme/app/pull/7"] = pr_view(
+        headRefOid="def5678", statusCheckRollup=[{"name": "tests", "status": "IN_PROGRESS"}]
+    )
+    await runtime.task_actions.refresh_prs(task["id"])
+    assert harness.store.draft(card["id"])["status"] == "rejected", "its head moved"
+    assert not [d for d in harness.store.drafts() if d["kind"] == "merge"]
+
+
+async def test_a_pr_a_worker_reviewed_is_not_offered_to_merge(harness):
+    runtime = await harness.connect()
+    harness.gh_replies["auth status --json hosts"] = json.dumps(
+        {"hosts": {"github.com": [{"login": "me", "state": "success", "active": True}]}}
+    )
+    harness.gh_replies["pr view https://github.com/acme/app/pull/7"] = pr_view()
+    worker = await spawn(runtime, harness.router_id, "Review #7")
+    review = {"repo": "acme/app", "number": 7, "url": "https://github.com/acme/app/pull/7",
+              "verdict": "approve", "comments": []}  # fmt: skip
+    harness.store.create_draft(worker, "github", review, "LGTM")
+    await call_tool(
+        runtime, "report", worker, status="done", summary="https://github.com/acme/app/pull/7"
+    )
+    await settle(runtime)
+    assert not [d for d in harness.store.drafts() if d["kind"] == "merge"]
+
+
+def signed_in_as_me(harness):
+    harness.gh_replies["auth status --json hosts"] = json.dumps(
+        {"hosts": {"github.com": [{"login": "me", "state": "success", "active": True}]}}
+    )
+
+
+async def test_only_the_tasks_own_prs_settle_it_or_come_to_merge(harness):
+    runtime = await harness.connect()
+    signed_in_as_me(harness)
+    # #8 is its own (opened since the task began); #6 merged long ago and #9 is an old open PR
+    # of the owner's: its report only mentions them.
+    harness.gh_replies["pr view https://github.com/acme/app/pull/8"] = pr_view(
+        number=8, url="https://github.com/acme/app/pull/8", mergeStateStatus="BLOCKED"
+    )
+    harness.gh_replies["pr view https://github.com/acme/app/pull/6"] = pr_view(
+        number=6, state="MERGED", author={"login": "someone"}, createdAt="2020-01-01T00:00:00Z"
+    )
+    harness.gh_replies["pr view https://github.com/acme/app/pull/9"] = pr_view(
+        number=9, headRefName="old", createdAt="2020-01-01T00:00:00Z"
+    )
+    worker = await spawn(runtime, harness.router_id, "Fix the regression")
+    task = runtime.tasks.current(worker)
+    summary = (
+        "Opened https://github.com/acme/app/pull/8, fixing the regression from "
+        "https://github.com/acme/app/pull/6 (like https://github.com/acme/app/pull/9)."
+    )
+    await call_tool(runtime, "report", worker, status="done", summary=summary)
+    await settle(runtime)
+    await runtime.task_actions.refresh_prs(task["id"])
+    assert runtime.tasks.get(task["id"])["status"] == "review", "its own PR is still open"
+    assert not [d for d in harness.store.drafts() if d["kind"] == "merge"], "only its own"
+
+
+async def test_a_ready_to_merge_card_comes_back_once_the_pr_is_ready_again(harness):
+    runtime = await harness.connect()
+    signed_in_as_me(harness)
+    pr = "pr view https://github.com/acme/app/pull/7"
+    harness.gh_replies[pr] = pr_view()
+    worker = await spawn(runtime, harness.router_id, "Fix login")
+    task = runtime.tasks.current(worker)
+    await call_tool(
+        runtime, "report", worker, status="done", summary="https://github.com/acme/app/pull/7"
+    )
+    await settle(runtime)
+    [first] = [d for d in harness.store.drafts() if d["kind"] == "merge"]
+
+    def cards():
+        return [d for d in harness.store.drafts() if d["kind"] == "merge"]
+
+    # GitHub works out mergeability again (its base moved): the card stays as it is.
+    harness.gh_replies[pr] = pr_view(mergeStateStatus="UNKNOWN")
+    await runtime.task_actions.refresh_prs(task["id"])
+    assert [card["id"] for card in cards()] == [first["id"]]
+    # Its checks run again at the same commit: not ready for now, then ready again.
+    harness.gh_replies[pr] = pr_view(statusCheckRollup=[{"name": "tests", "status": "QUEUED"}])
+    await runtime.task_actions.refresh_prs(task["id"])
+    assert not cards()
+    harness.gh_replies[pr] = pr_view()
+    await runtime.task_actions.refresh_prs(task["id"])
+    [again] = cards()
+    assert again["id"] != first["id"] and again["target"]["head"] == "abc1234"
+    await settle(runtime)
+    alerts = [n for n in harness.notifications if n[0] == "Ready to merge"]
+    assert len(alerts) == 1, "the same commit is said once"
+    await runtime.drafts.resolve(again["id"], DraftDecision(action="reject"))
+    await runtime.task_actions.refresh_prs(task["id"])
+    assert not cards(), "not now: stays so"
+
+
+async def test_two_cancellations_in_a_minute_both_reach_the_worker(harness):
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "First")
+    tasks = [runtime.tasks.current(worker)]
+    for title in ("Second", "Third"):
+        await call_tool(
+            runtime, "message_session", harness.router_id, session_id=worker, text=title,
+            task="new", title=title,
+        )  # fmt: skip
+        tasks.append(runtime.tasks.current(worker))
+    await runtime.task_actions.cancel(tasks[1]["id"])
+    await runtime.task_actions.cancel(tasks[2]["id"])
+    prompts = [
+        m["meta"]["prompt"] for m in harness.store.messages(worker) if m["meta"].get("prompt")
+    ]
+    for task in tasks[1:]:
+        assert any(task["id"] in prompt and "cancelled" in prompt for prompt in prompts), task
+
+    session = harness.session(harness.router_id)
+    for _ in range(2):  # The same answer twice (a turn retried): shown once.
+        session.emit("assistant.turn_start")
+        session.emit("assistant.message", content="All three are on it.")
+        session.emit("session.idle")
+        await settle(runtime)
+    said = [m for m in harness.store.messages(harness.router_id) if m["kind"] == "assistant"]
+    assert [m["text"] for m in said].count("All three are on it.") == 1

@@ -4,9 +4,11 @@ import { $, api, el, foldable, toast } from "./dom.js";
 import { clock, compactPaths, markdown, threadLabel } from "./text.js";
 import { byId, current, HOME, markRead, pendingDrafts, routerId, state, STATUS_TEXT, upsertSession, viewedId } from "./state.js";
 import { renderSidebar } from "./sidebar.js";
-import { focusDraft, focusTask, renderHome, renderHomeHeader, showHomeTab, welcomeCard } from "./inbox.js";
+import { focusDraft, focusTask, renderHome, renderHomeHeader, showHomeTab, welcomeCard, workerStates } from "./inbox.js";
 import { closeMentions, setRecipient } from "./mention.js";
 import { openSettings } from "./settings.js";
+// A worker's state in the header, as its sidebar dot and Home have it.
+const SHORT_STATE = { waiting: "Needs you", failed: "Failed", working: "Working", watching: "Running · between steps", queued: "Queued", done: "Ready to review", idle: "Idle" };
 const ROUTER_PLACEHOLDER = "Ask for anything… (@ to message one worker)";
 // Every view but Home has "← Home" at the top left.
 function backHome(shown) {
@@ -53,7 +55,9 @@ export function renderHeader() {
   } else {
     // Its state and branch; the folders it works in are in the tooltip and its ⋯ menu.
     const repos = session.checkouts?.length || 0;
-    meta = [STATUS_TEXT[session.status], session.status === "queued" ? session.activity : "", session.branch, repos > 1 ? `${repos} repos` : ""];
+    // Where it stands, in the words of its sidebar dot and of Home.
+    const where = workerStates().get(session.id)?.dot || "idle";
+    meta = [SHORT_STATE[where] || STATUS_TEXT[session.status], session.status === "queued" ? session.activity : "", session.branch, repos > 1 ? `${repos} repos` : ""];
     if (session.elsewhere) {
       // What it does in the terminal, read from its log; Chief of Staff does not drive it now.
       const terminal = session.terminal || {};
@@ -221,7 +225,9 @@ export function setLayout(home) {
   $("#timeline").hidden = false;
   if (home) showHomeTab(state.homeTab);
 }
-export async function select(sessionId) {
+// `task`: the conversation opens at that task's latest report (or what it was given), not at
+// its end: the worker may have gone on to other work since.
+export async function select(sessionId, { task = "" } = {}) {
   if (!sessionId) return;
   // The Router's chat and the inbox of earlier versions are Home.
   if (sessionId === "inbox" || sessionId === routerId()) sessionId = HOME;
@@ -264,8 +270,18 @@ export async function select(sessionId) {
   appendMessages(messages);
   appendMessages(loading.held);
   scrollToBottom(true);
+  if (task) showTaskInTimeline(task);
   if (viewed && byId(viewed)?.unread) markRead(viewed);
   if (!$("#composer").hidden) $("#composer-input").focus();
+}
+function showTaskInTimeline(taskId) {
+  const nodes = [...$("#timeline").querySelectorAll(`[data-task="${taskId}"]`)];
+  const node = nodes.filter((item) => item.dataset.kind === "report").pop() || nodes.pop();
+  if (!node) return;
+  node.scrollIntoView({ block: "start" });
+  node.classList.remove("flash");
+  void node.offsetWidth;  // Restarts the highlight.
+  node.classList.add("flash");
 }
 export function scrollToBottom(force = false) {
   const scroller = $("#scroller");
@@ -533,7 +549,7 @@ export function replaceMessage(message) {
   const old = $("#timeline").querySelector(`[data-id="${message.id}"]`);
   const node = old && renderMessage(message);
   if (!node?.dataset) return;
-  node.dataset.id = message.id;
+  Object.assign(node.dataset, { ...old.dataset, id: message.id });
   old.replaceWith(node);
 }
 
@@ -552,7 +568,11 @@ export function appendMessages(messages) {
       return;
     }
     const node = renderMessage(message);
-    if (node?.dataset) node.dataset.id = message.id;
+    if (node?.dataset) {
+      node.dataset.id = message.id;
+      node.dataset.kind = message.kind;
+      if (message.meta?.task_id) node.dataset.task = message.meta.task_id;
+    }
     timeline.append(node);
   });
   // Nothing said yet: what to ask for (unless Copilot must be set up first).

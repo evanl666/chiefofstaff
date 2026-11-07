@@ -58,6 +58,7 @@ async def test_router_hands_threads_to_the_worker_it_starts(harness):
     await call_tool(
         runtime, "report", worker_id, status="progress", summary="https://github.com/a/b/pull/3"
     )
+    await settle(runtime)
     assert "github:a/b#3" in harness.store.follows(worker_id)
     await call_tool(runtime, "unfollow_thread", worker_id, thread="github:a/b#3")
     await call_tool(runtime, "close_worker", harness.router_id, session_id=worker_id)
@@ -361,3 +362,54 @@ async def test_a_pr_a_worker_was_given_is_followed_and_its_news_reaches_the_owne
     shown = [m for m in harness.store.messages(harness.router_id) if m["kind"] == "inbound"]
     assert shown[-1]["text"] == "#7: CI passed now." and shown[-1]["meta"]["status"] == "progress"
     assert any("Update on" in text for _, text in harness.notifications)
+
+
+async def test_a_report_follows_only_the_workers_own_prs(harness):
+    runtime = await harness.connect()
+    harness.gh_replies["auth status --json hosts"] = json.dumps(
+        {"hosts": {"github.com": [{"login": "me", "state": "success", "active": True}]}}
+    )
+    harness.gh_replies["api repos/acme/app/pulls/5"] = json.dumps(
+        {
+            "user": {"login": "someone"},
+            "head": {"ref": "main"},
+            "created_at": "2020-01-01T00:00:00Z",
+        }
+    )
+    harness.gh_replies["api repos/acme/app/pulls/6"] = json.dumps(
+        {"user": {"login": "me"}, "head": {"ref": "fix"}, "created_at": "2999-01-01T00:00:00Z"}
+    )
+    worker = json.loads(
+        (
+            await call_tool(
+                runtime, "spawn_worker", harness.router_id, title="Fix", instructions="fix"
+            )
+        ).text_result_for_llm
+    )["session_id"]
+    summary = "Opened https://github.com/acme/app/pull/6, like https://github.com/acme/app/pull/5"
+    await call_tool(runtime, "report", worker, status="done", summary=summary)
+    await settle(runtime)
+    assert harness.store.follows(worker) == ["github:acme/app#6"]
+
+
+async def test_slack_threads_without_slack_say_so(harness):
+    runtime = await harness.connect()
+    refused = await call_tool(
+        runtime, "spawn_worker", harness.router_id, title="Reply", instructions="x", slack=True,
+        follow=["slack:D0123ABC"],
+    )  # fmt: skip
+    assert refused.result_type == "failure"
+    assert "Slack is not connected" in refused.text_result_for_llm
+    assert harness.store.open_sessions("worker") == []
+
+
+async def test_the_watchdog_leaves_finished_workers_alone(harness):
+    runtime = await harness.connect()
+    result = await call_tool(
+        runtime, "spawn_worker", harness.router_id, title="Done", instructions="d"
+    )
+    worker_id = json.loads(result.text_result_for_llm)["session_id"]
+    await call_tool(runtime, "report", worker_id, status="done", summary="Done.")
+    harness.session(worker_id).emit("session.idle")
+    await settle(runtime)
+    assert await runtime.watchdog.check(time.time() + 3 * 3600) == []

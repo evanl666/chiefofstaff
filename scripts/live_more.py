@@ -167,7 +167,7 @@ async def s3_cancel_from_chat(app: App):
         if not tasks:
             return None
         row = await app.get(f"/api/sessions/{tasks[0]['session_id']}")
-        step = f"{row.get('step') or ''} {row.get('activity') or ''}"
+        step = " ".join(row.get(key) or "" for key in ("step_command", "step", "activity"))
         return (tasks[0], row) if "sleep" in step else None
 
     task, row = await wait_for("the worker is in its long step", in_step, 300, app)
@@ -230,7 +230,7 @@ async def s5_progress_mid_step(app: App):
         if not tasks:
             return None
         row = await app.get(f"/api/sessions/{tasks[0]['session_id']}")
-        step = f"{row.get('step') or ''} {row.get('activity') or ''}"
+        step = " ".join(row.get(key) or "" for key in ("step_command", "step", "activity"))
         return (tasks[0], row) if "sleep" in step else None
 
     task, row = await wait_for("the worker is in its long step", in_step, 300, app)
@@ -441,7 +441,7 @@ async def in_step(app: App, since: str, word: str = "sleep"):
         if not tasks:
             return None
         row = await app.get(f"/api/sessions/{tasks[0]['session_id']}")
-        step = f"{row.get('step') or ''} {row.get('activity') or ''}"
+        step = " ".join(row.get(key) or "" for key in ("step_command", "step", "activity"))
         return (tasks[0], row) if word in step else None
 
     return await wait_for("the worker is in its long step", check, 300, app)
@@ -577,10 +577,11 @@ async def s18_github_question(app: App):
     )
 
     async def answered():
+        # Its reply first: by then any worker it started for this is listed.
+        said = await router_said(app, router, mark)
         tasks = await tasks_since(app, since)
         if tasks:  # A worker looks it up: its report is the answer.
             return tasks[0]["result"] if tasks[0]["status"] in FINISHED else None
-        said = await router_said(app, router, mark)
         # A number on its own ("12"), not the 2 of "cos-pr-e2e".
         return said if re.search(r"(?<![\w-])\d{1,3}(?![\w])", said.replace(repo, "")) else None
 

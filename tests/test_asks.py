@@ -473,3 +473,17 @@ async def test_only_the_workers_it_names_hold_its_report_and_a_stopped_one_says_
     await settle(runtime)
     assert "“Orders API”'s task “Orders API” was cancelled" in session.sent[-1]
     assert 'type="peer-stopped"' in session.sent[-1]
+
+
+async def test_a_question_card_outlives_its_cancelled_task(harness):
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Pick a port")
+    request = {"question": "8080 or 9090?", "choices": ["8080", "9090"]}
+    answer = asyncio.create_task(runtime.asks.on_user_input(request, {"sessionId": worker}))
+    card = await pending(harness, "question")
+    await runtime.task_actions.cancel(runtime.tasks.current(worker)["id"])
+    await asyncio.wait_for(answer, 2)
+    assert harness.store.draft(card["id"])["status"] == "expired"
+    [question] = runtime.snapshot()["questions"]
+    assert "8080 or 9090?" in question["text"] and "Choices: 8080, 9090" in question["text"]
+    assert question["task_status"] == "cancelled"

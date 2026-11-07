@@ -11,6 +11,7 @@ from contextlib import suppress
 from datetime import UTC, datetime
 
 from .. import threads
+from ..receipts import APPROVAL
 from ..store import Store, now
 from . import SourceHost
 
@@ -353,6 +354,11 @@ class GitHubSource:
     def seen(self, key: str) -> bool:
         return bool(self.store.one("SELECT id FROM triggers WHERE key=?", (key,)))
 
+    def sent_by_us(self, key: str) -> bool:
+        """Chief of Staff posted it (as the owner). Not just read by a PR's follower."""
+        found = "SELECT id FROM triggers WHERE key=? AND source='github-sent'"
+        return bool(self.store.one(found, (key,)))
+
     async def poll_once(self):
         settings = self.store.settings()
         self.status["enabled"] = settings.github_enabled
@@ -490,7 +496,12 @@ class GitHubSource:
             and (line := await self.pushed(repo, last, sha))
         ):
             items.append((f"github:head:{repo}#{number}@{sha}", line))
-        if ci := await self.ci_result(base, sha):
+        ci = await self.ci_result(base, sha)
+        if ci and not last and ci["at"] and ci["at"] < github_time(since):
+            # Its first look, at CI that finished before it was followed: where it stands, not
+            # news (a PR named in passing would bring its old failures).
+            self.store.add_trigger("github", f"github:ci:{repo}#{number}@{sha}:{ci['outcome']}", "")
+        elif ci:
             # Keyed by the outcome too: a check that failed and passed when run again on the
             # same commit is news.
             items.append(
@@ -560,16 +571,26 @@ class GitHubSource:
         except RuntimeError:
             statuses = []
         latest: dict[str, tuple[str, str]] = {}  # Name -> (when, outcome).
+        ended = ""
+        waiting_for: list[str] = []
         for run in runs:
+            if run["status"] != "completed" and APPROVAL.search(run["name"]):
+                waiting_for.append(run["name"])  # A person's approval, not CI.
+                continue
             if run["status"] != "completed":
                 return None
             when = run.get("completed_at") or ""
+            ended = max(ended, when)
             if when >= latest.get(run["name"], ("", ""))[0]:
                 latest[run["name"]] = (when, run.get("conclusion") or "")
         for status in statuses:  # GitHub lists each context's latest first.
             if status["context"] not in latest:
+                if status.get("state") == "pending" and APPROVAL.search(status["context"]):
+                    waiting_for.append(status["context"])
+                    continue
                 if status.get("state") == "pending":
                     return None
+                ended = max(ended, status.get("updated_at") or "")
                 latest[status["context"]] = ("", status.get("state") or "")
         if not latest:
             return None
@@ -577,8 +598,19 @@ class GitHubSource:
             name for name, (_, outcome) in latest.items() if outcome in FAILED | {"error"}
         )
         if failed:
-            return {"outcome": "failed-" + ",".join(failed), "text": f"failed: {', '.join(failed)}"}
-        return {"outcome": "passed", "text": f"all {len(latest)} checks passed"}
+            return {
+                "outcome": "failed-" + ",".join(failed),
+                "text": f"failed: {', '.join(failed)}",
+                "at": ended,
+            }
+        if waiting_for:
+            names = ", ".join(sorted(set(waiting_for)))
+            return {
+                "outcome": "passed-awaiting",
+                "text": f"all {len(latest)} CI checks passed; waiting for approval: {names}",
+                "at": ended,
+            }
+        return {"outcome": "passed", "text": f"all {len(latest)} checks passed", "at": ended}
 
     async def files(self, repo: str, number: int) -> list[dict]:
         """The PR's changed files, each with its patch."""
@@ -679,6 +711,33 @@ class GitHubSource:
             arguments += ["-f", f"{name}={value}"]
         return json.loads(await self.as_account(owner, remembered, remembered, arguments, None))
 
+    async def merge(self, target: dict) -> str:
+        """Merge a PR, its head as it was shown (GitHub refuses if it moved), the way the
+        repository allows: squash, else a merge commit, else rebase."""
+        repo = json.loads(await self.gh("api", f"repos/{target['repo']}"))
+        method = next(
+            (
+                flag
+                for flag, allowed in (
+                    ("--squash", repo.get("allow_squash_merge", True)),
+                    ("--merge", repo.get("allow_merge_commit", True)),
+                    ("--rebase", repo.get("allow_rebase_merge", True)),
+                )
+                if allowed
+            ),
+            "--merge",
+        )
+        await self.gh(
+            "pr", "merge", f"https://github.com/{target['repo']}/pull/{int(target['number'])}",
+            method, "--match-head-commit", target["head"],
+        )  # fmt: skip
+        word = {
+            "--squash": "squashed and merged",
+            "--merge": "merged",
+            "--rebase": "rebased and merged",
+        }
+        return f"{target['label']} {word[method]}."
+
     async def resolve_thread(self, target: dict) -> str:
         """Resolve the review thread the replied-to comment is in: "" when done, else why not."""
         owner, name = target["repo"].split("/", 1)
@@ -735,7 +794,7 @@ class GitHubSource:
             when = item.get("created_at") or item.get("submitted_at") or ""
             if start and when and datetime.fromisoformat(when.replace("Z", "+00:00")) < start:
                 continue  # Before the draft was written: another reply.
-            if self.seen(key):
+            if self.sent_by_us(key):
                 continue  # Chief of Staff posted it (as the owner): not theirs by hand.
             if same_text(item.get("body") or "", text):
                 return item.get("html_url") or "Posted."

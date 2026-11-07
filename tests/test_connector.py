@@ -1,5 +1,7 @@
 import json
+import re
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 from conftest import Harness, call_tool, settle
@@ -80,6 +82,28 @@ async def test_a_scan_hands_what_needs_the_owner_to_the_router_once(tmp_path):
     assert stranger.result_type == "failure", "only the connector hands in findings"
 
 
+async def test_answers_to_away_notifications_are_read_at_night_and_on_weekends(tmp_path):
+    watch = Watch(what="Slack DMs and mentions of me", how="Glean search")
+    settings = Settings(
+        watches=[watch], watch_after_hours_minutes=0, away_notify=True, away_how="DM me"
+    )
+    harness = Harness(tmp_path / "data", settings)
+    runtime = await harness.connect()
+    connector = runtime.connector
+    saturday, evening = datetime(2026, 11, 7, 10, 0), datetime(2026, 11, 4, 20, 0)
+    assert connector.interval(saturday) == 0, "no watches on a Saturday"
+    asker = await spawn(runtime, harness.router_id, "Pick a port")
+    await call_tool(runtime, "report", asker, status="question", summary="8080 or 9090?")
+    await connector.notify_away()
+    await settle(runtime)
+    assert connector.open_codes(), "told the owner, who may answer from there"
+    assert connector.interval(saturday) == 5 and connector.interval(evening) == 5
+
+
+def read(path: str) -> str:
+    return Path(path).read_text()
+
+
 async def test_away_the_owner_is_told_where_they_are_and_answers_from_there(tmp_path):
     settings = Settings(away_notify=True, away_minutes=5, away_how="DM me via the acme bot")
     harness = Harness(tmp_path / "data", settings)
@@ -104,23 +128,29 @@ async def test_away_the_owner_is_told_where_they_are_and_answers_from_there(tmp_
 
     await connector.tick()
     await settle(runtime)
-    row = connector.session()
-    sent = harness.session(row["id"]).sent[-1]
-    assert "DM me via the acme bot" in sent
-    assert f"[{draft_code}]" in sent and "yes, friday works" in sent
-    assert f"[{task_code}]" in sent and "8080 or 9090?" in sent
+    # The messenger sends it: outside the connector's sandbox (which reaches GitHub only, as it
+    # reads others' messages), given Chief of Staff's own text in a file.
+    messenger = runtime.toolset.last_special("messenger")
+    assert messenger and not messenger["slack"] and connector.session() is None
+    sent = harness.session(messenger["id"]).sent[-1]
+    assert "DM me via the acme bot" in sent and "yes, friday works" not in sent
+    body = read(re.search(r"(/\S+notification-\d+\.txt)", sent).group(1))
+    assert f"[{draft_code}]" in body and "yes, friday works" in body
+    assert f"[{task_code}]" in body and "8080 or 9090?" in body
     await call_tool(
-        runtime, "report_notified", row["id"], ok=True, where="Slack DM from acmebot",
-        method="acmebot.send_dm(to=me)",
+        runtime, "report_notified", messenger["id"], ok=True, where="Slack DM from acmebot",
+        method="acmebot send --file <file>",
     )  # fmt: skip
-    harness.session(row["id"]).emit("session.idle")
+    harness.session(messenger["id"]).emit("session.idle")
     await settle(runtime)
     assert connector.due(), "it looks for the owner's answers even without watches"
     await connector.tick()
     await settle(runtime)
+    assert len(harness.session(messenger["id"]).sent) == 1, "told once"
+    row = connector.session()
     sent = harness.session(row["id"]).sent
-    assert len(sent) == 2 and sent[-1].startswith('<message from="system" type="scan">')
-    assert draft_code in sent[-1] and "Send the owner" not in sent[-1], "told once"
+    assert len(sent) == 1 and "Scan now" in sent[-1]
+    assert draft_code in sent[-1] and "Send the owner" not in sent[-1]
     empty = await call_tool(runtime, "report_owner_replies", row["id"], answers=["send"])
     assert empty.result_type == "failure" and "No reply was given" in empty.text_result_for_llm
     applied = await call_tool(
@@ -142,6 +172,80 @@ async def test_away_the_owner_is_told_where_they_are_and_answers_from_there(tmp_
     ]
     assert any("You answered from Slack DM from acmebot" in note for note in notices)
     assert json.loads(harness.store.get("away_last"))["ok"]
+
+
+async def test_away_the_owner_merges_and_answers_a_cancelled_tasks_question(tmp_path):
+    harness = Harness(tmp_path / "data", Settings(away_notify=True, away_how="DM me"))
+    runtime = await harness.connect()
+    connector = runtime.connector
+
+    async def idle():
+        return 3600
+
+    connector.idle_seconds = idle
+    pull = {
+        "number": 7, "url": "https://github.com/acme/app/pull/7", "state": "OPEN",
+        "title": "Fix login", "isDraft": False, "mergeStateStatus": "CLEAN",
+        "headRefOid": "abc1234", "author": {"login": "me"}, "reviewDecision": "APPROVED",
+        "statusCheckRollup": [{"name": "tests", "conclusion": "SUCCESS"}],
+        "createdAt": "2999-01-01T00:00:00Z",
+    }  # fmt: skip
+    harness.gh_replies |= {
+        "auth status --json hosts": json.dumps(
+            {"hosts": {"github.com": [{"login": "me", "state": "success", "active": True}]}}
+        ),
+        "pr view https://github.com/acme/app/pull/7": json.dumps(pull),
+        "api repos/acme/app": json.dumps({"allow_squash_merge": True}),
+        "pr merge": "",
+    }
+    fixer = await spawn(runtime, harness.router_id, "Fix login")
+    fix = runtime.tasks.current(fixer)
+    await call_tool(
+        runtime, "report", fixer, status="done", summary="https://github.com/acme/app/pull/7"
+    )
+    asker = await spawn(runtime, harness.router_id, "Pick a port")
+    asked = runtime.tasks.current(asker)
+    await call_tool(runtime, "report", asker, status="question", summary="8080 or 9090?")
+    await runtime.task_actions.cancel(asked["id"])
+    await settle(runtime)
+    [card] = [d for d in harness.store.drafts() if d["kind"] == "merge"]
+    [question] = runtime.snapshot()["questions"]
+    merge_code = code_of(f"merge:acme/app#7@{card['target']['head']}")
+    question_code = code_of(f"question:{asker}:{question['at']}")
+
+    await connector.tick()
+    await settle(runtime)
+    messenger = runtime.toolset.last_special("messenger")
+    body = read(
+        re.search(r"(/\S+notification-\d+\.txt)", harness.session(messenger["id"]).sent[-1]).group(
+            1
+        )
+    )
+    assert f"[{merge_code}] Ready to merge: acme/app#7" in body
+    assert f"[{question_code}]" in body and "8080 or 9090?" in body
+    await call_tool(runtime, "report_notified", messenger["id"], ok=True, where="DM")
+    harness.session(messenger["id"]).emit("session.idle")
+    await settle(runtime)
+    await connector.tick()
+    await settle(runtime)
+    harness.gh_replies["pr view https://github.com/acme/app/pull/7"] = json.dumps(
+        pull | {"state": "MERGED"}
+    )
+    applied = await call_tool(
+        runtime, "report_owner_replies", connector.session()["id"],
+        replies=[
+            {"code": merge_code, "text": f"{merge_code} merge"},
+            {"code": question_code, "text": f"{question_code} 9090"},
+        ],
+    )  # fmt: skip
+    text = applied.text_result_for_llm
+    assert f"{merge_code}: acme/app#7 squashed and merged" in text, text
+    assert f"{question_code}: sent to the worker" in text, text
+    assert [args for args, _ in harness.gh_calls if args[:2] == ("pr", "merge")]
+    assert runtime.tasks.get(fix["id"])["status"] == "done", "merged: its task is done"
+    assert runtime.tasks.get(asked["id"])["status"] == "running", "answered: it goes on"
+    assert "9090" in harness.session(asker).sent[-1]
+    assert runtime.snapshot()["questions"] == []
 
 
 async def test_the_owners_words_reach_learning_through_any_tool(harness):
@@ -263,3 +367,52 @@ async def test_a_workers_question_the_router_retells_is_told_once(harness):
                         "invoices in the billing folder?")  # fmt: skip
     kinds = sorted(item["id"].split(":")[0] for item in runtime.connector.waiting_items())
     assert kinds == ["router", "task"], "a question of its own is told"
+
+
+async def test_away_failures_are_said_once_until_it_works(tmp_path):
+    harness = Harness(tmp_path / "data", Settings(away_notify=True, away_how="notabot"))
+    runtime = await harness.connect()
+    await runtime.connector.notify_away(test=True)
+    await settle(runtime)
+    messenger = runtime.toolset.last_special("messenger")
+    for _ in range(2):
+        await call_tool(
+            runtime, "report_notified", messenger["id"], ok=False, error="authn-cli failed"
+        )
+    notices = [
+        m for m in harness.store.messages(harness.router_id) if "Could not reach you" in m["text"]
+    ]
+    assert len(notices) == 1
+    await call_tool(runtime, "report_notified", messenger["id"], ok=True, where="DM")
+    await call_tool(runtime, "report_notified", messenger["id"], ok=False, error="down again")
+    notices = [
+        m for m in harness.store.messages(harness.router_id) if "Could not reach you" in m["text"]
+    ]
+    assert len(notices) == 2, "said again once it had worked in between"
+
+
+async def test_a_found_message_the_owner_answered_is_left_out(tmp_path):
+    settings = Settings(watches=[Watch(what="Questions for me")])
+    harness = Harness(tmp_path / "data", settings)
+    runtime = await harness.connect()
+    await runtime.connector.scan()
+    await settle(runtime)
+    row = runtime.connector.session()
+    link = "https://acme.slack.com/archives/C0123ABC/p1700000000000100"
+    found = await call_tool(
+        runtime, "report_found", row["id"],
+        items=[
+            {"key": "a", "source": "slack", "sender": "Megha", "text": "ACL ok?", "link": link,
+             "when": "2026-11-07T01:00:00Z", "owner_replied_at": "2026-11-07T02:31:00Z"},
+            {"key": "b", "source": "slack", "sender": "Bob", "text": "review?", "link": link,
+             "context": "Bob says the owner never answered"},
+        ],
+    )  # fmt: skip
+    assert found.text_result_for_llm.startswith("1 new item") and "already answered" in (
+        found.text_result_for_llm
+    )
+    await settle(runtime)
+    router = harness.session(harness.router_id).sent[-1]
+    assert "review?" in router and "ACL ok?" not in router
+    assert "Thread: slack:C0123ABC:1700000000.000100 (Slack is not connected here" in router
+    assert "Context (as the watcher read it)" in router

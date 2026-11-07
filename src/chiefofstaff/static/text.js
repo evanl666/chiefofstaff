@@ -86,10 +86,34 @@ const QUOTE_DEPTH = 6;
 const RULE = /^\s*([-*_])(\s*\1){2,}\s*$/;
 const QUOTE = /^\s*>/;
 const ITEM = /^(\s*)([-*•+]|\d+[.)])\s+(.*)$/;
-const TABLE_RULE = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/;
-const isTable = (lines, i) => lines[i].includes("|") && TABLE_RULE.test(lines[i + 1] || "") && (lines[i + 1] || "").includes("-");
+const TABLE_RULE = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
+const isTable = (lines, i) => lines[i].includes("|") && TABLE_RULE.test(lines[i + 1] || "") && /\||--/.test(lines[i + 1] || "");
 const startsBlock = (lines, i) => [FENCE, HEADING, RULE, QUOTE, ITEM].some((re) => re.test(lines[i])) || isTable(lines, i);
-const cells = (line) => line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim());
+// A table row's cells: a "|" inside `code` or escaped ("\\|") is part of its cell.
+function cells(line) {
+  const row = line.trim().replace(/^\|/, "");
+  const found = [];
+  let cell = "";
+  let code = false;
+  for (let i = 0; i < row.length; i += 1) {
+    const char = row[i];
+    if (char === "\\" && row[i + 1] === "|") {
+      cell += "|";
+      i += 1;
+    } else if (char === "`") {
+      code = !code;
+      cell += char;
+    } else if (char === "|" && !code) {
+      found.push(cell.trim());
+      cell = "";
+    } else {
+      cell += char;
+    }
+  }
+  if (cell.trim() || !row.endsWith("|")) found.push(cell.trim());
+  return found;
+}
+const ALIGN = (rule) => cells(rule).map((cell) => (cell.startsWith(":") && cell.endsWith(":") ? "center" : cell.endsWith(":") ? "right" : ""));
 function renderList(items) {
   let html = "";
   const stack = [];
@@ -124,11 +148,21 @@ export function markdown(text, depth = 0) {
       out.push(`<pre><code>${escapeHtml(code.join("\n"))}</code></pre>`);
     } else if (isTable(lines, i)) {
       const head = cells(line);
+      const align = ALIGN(lines[i + 1]);
+      const style = (n) => (align[n] ? ` class="align-${align[n]}"` : "");
       const rows = [];
-      for (i += 2; i < lines.length && lines[i].includes("|") && lines[i].trim(); i += 1) rows.push(cells(lines[i]));
+      for (i += 2; i < lines.length; i += 1) {
+        // A blank line inside a table, with more rows after it, does not end it.
+        if (!lines[i].trim() && lines[i + 1]?.trim().startsWith("|") && !isTable(lines, i + 1)) continue;
+        if (!lines[i].includes("|") || !lines[i].trim()) break;
+        const row = cells(lines[i]);
+        if (row.some(Boolean)) rows.push(row);  // An empty row shows as nothing, not a gap.
+      }
+      const width = Math.max(head.length, ...rows.map((row) => row.length));
+      const columns = [...Array(width).keys()];
       out.push(
-        `<div class="table"><table><thead><tr>${head.map((cell) => `<th>${inline(cell)}</th>`).join("")}</tr></thead>` +
-          `<tbody>${rows.map((row) => `<tr>${head.map((_, n) => `<td>${inline(row[n] || "")}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`,
+        `<div class="table"><table><thead><tr>${columns.map((n) => `<th${style(n)}>${inline(head[n] || "")}</th>`).join("")}</tr></thead>` +
+          `<tbody>${rows.map((row) => `<tr>${columns.map((n) => `<td${style(n)}>${inline(row[n] || "")}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`,
       );
     } else if (HEADING.test(line)) {
       const title = HEADING.exec(line)[2].trimEnd().replace(/(^|\s)#+$/, "").trimEnd();
@@ -166,6 +200,39 @@ export function markdown(text, depth = 0) {
     }
   }
   return out.join("");
+}
+// Markdown as plain words, for a line on a card: no marks, links as their text, code as is.
+export function plainText(text) {
+  return (text || "")
+    .replace(/```[\s\S]*?(```|$)/g, " ")
+    .replace(/\[([^\]\n]+)\]\((https?:[^\s)]+)\)/g, "$1")
+    .replace(/(\*\*|__|~~)(.+?)\1/g, "$2")
+    .replace(/(?<![\w*])\*([^*\s][^*\n]*?)\*(?![\w*])/g, "$1")
+    .replace(/`([^`\n]+)`/g, "$1")
+    .replace(/^\s*(#{1,6}|>+|[-*•+]|\d+[.)])\s+/gm, "")
+    .replace(/^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?\s*$/gm, "")
+    .replace(/^[ \t]*\|[ \t]*|[ \t]*\|[ \t]*$/gm, "")
+    .replace(/[ \t]*\|[ \t]*/g, " · ")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{2,}/g, "\n")
+    .trim();
+}
+// What a report says, in its first sentences: past a title ("## Summary", "Result:"), a rule or
+// a lone label, to the first line that says something.
+export function gist(text) {
+  const lines = (text || "").replace(/```[\s\S]*?(```|$)/g, "").split("\n");
+  const said = lines.filter((line) => {
+    const bare = line.trim();
+    if (!bare || /^#{1,6}\s/.test(bare) || /^([-*_])(\s*\1){2,}$/.test(bare) || /^\|?\s*:?-{2,}/.test(bare)) return false;
+    // A label alone: "Summary:", "**结论**", "结论：".
+    const plain = plainText(bare).replace(/[:：]$/, "");
+    return !(plain.length <= 12 && plain.split(/\s+/).length <= 2 && (/[:：]$/.test(plainText(bare)) || /^\*\*.*\*\*$/.test(bare)));
+  });
+  // Links as what they are, short: "app#592", "docs.google.com…".
+  return plainText(said.join("\n"))
+    .replace(/\s*\n\s*/g, " ")
+    .replace(/https:\/\/github\.com\/[^/\s]+\/([^/\s]+)\/(?:pull|issues)\/(\d+)[^\s]*/g, "$1#$2")
+    .replace(/https?:\/\/(?:www\.)?([^/\s]+)\/[^\s]*/g, "$1…");
 }
 export function clock(iso) {
   const date = new Date(iso);

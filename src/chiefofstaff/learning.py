@@ -413,6 +413,22 @@ class Learning:
             (now(), identifier),
         )
 
+    async def add(self, text: str, scope: str = "") -> str:
+        """A habit the owner writes down: in use at once (they need not approve their own)."""
+        text = clean(text, 300)
+        if not text:
+            raise ValueError("Write the habit, e.g. “Run the linter before every commit”.")
+        identifier = "l" + uuid4().hex[:7]
+        self.store.execute(
+            """INSERT INTO lessons(id, text, scope, evidence, observed, status, created_at,
+            updated_at) VALUES (?,?,?,'[]','[]','active',?,?)""",
+            (identifier, text, self.scope(scope), now(), now()),
+        )
+        self.retire_oldest()
+        await self.runtime.refresh(ROUTER, SLACK, WORKER)
+        self.bus.publish("state")
+        return identifier
+
     async def remove(self, identifier: str):
         """The owner no longer wants a lesson used."""
         self.retire(identifier)

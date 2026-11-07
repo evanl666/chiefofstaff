@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from . import prompts
+from . import prompts, threads
 from .envelope import UNTRUSTED, wrap
 from .models import DraftDecision, NestedArguments
 from .roles import WORKER
@@ -39,17 +39,28 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 SPECIAL = "connector"
+MESSENGER = "messenger"  # Sends the owner's away notifications, outside the connector's sandbox.
 TITLE = "Watch for you"
 TICK = float(os.environ.get("CHIEFOFSTAFF_CONNECTOR_TICK", "60"))
 LOOKBACK_HOURS = 24
 # A fresh conversation once its context is this large: each scan carries what it needs.
 FRESH_AFTER = 120_000
 # Kinds of needs-you cards a notification lists, and how a reply settles each.
-NOTIFIED_KINDS = {"slack", "github", "reply", "question", "decision", "workspace"}
+NOTIFIED_KINDS = {"slack", "github", "reply", "question", "decision", "workspace", "merge"}
 CODE = re.compile(r"\b([A-Z2-7]{5})\b")
 SEND_WORDS = {"send", "ok", "okay", "yes", "y", "approve", "lgtm", "发", "发送", "好", "可以"}
 REJECT_WORDS = {"reject", "no", "n", "skip", "don't", "dont", "不", "不要", "拒绝"}
 HID_IDLE = re.compile(r'"HIDIdleTime" = (\d+)')
+
+
+def later(first: str, second: str) -> bool:
+    """Whether ISO time `first` is after `second` (False when either cannot be read)."""
+    try:
+        return datetime.fromisoformat(first.replace("Z", "+00:00")) > datetime.fromisoformat(
+            second.replace("Z", "+00:00")
+        )
+    except (ValueError, TypeError):
+        return False
 
 
 class FoundItem(BaseModel):
@@ -66,6 +77,14 @@ class FoundItem(BaseModel):
         default="", description="What it answers or follows: the thread or document, briefly"
     )
     watch: int = Field(default=0, description="The number of the watch it is for")
+    owner_replied: bool = Field(
+        default=False,
+        description="True when the owner already wrote in the same thread or DM after it (read "
+        "the thread to know): then it needs nothing from them",
+    )
+    owner_replied_at: str = Field(
+        default="", description="When the owner last wrote there, if they did (ISO time)"
+    )
 
 
 class ReportFound(NestedArguments):
@@ -206,13 +225,17 @@ class Connector:
     def interval(self, moment: datetime | None = None) -> int:
         """Minutes between scans now (0: none now)."""
         settings = self.store.settings()
+        # Answers the owner may give to notifications sent while they were away: looked for at
+        # the work-hours pace, at night and on weekends too (the notifications go out then).
+        answers = settings.watch_minutes if settings.away_notify and self.open_codes() else 0
         if not any(watch.enabled for watch in settings.watches):
-            # Answers the owner may give to notifications sent while they were away.
-            return settings.watch_minutes if settings.away_notify and self.open_codes() else 0
+            return answers
         moment = moment or datetime.now()
         if in_hours(settings.watch_hours, moment):
             return settings.watch_minutes
-        return settings.watch_after_hours_minutes
+        return min(
+            (every for every in (settings.watch_after_hours_minutes, answers) if every), default=0
+        )
 
     def due(self) -> bool:
         every = self.interval()
@@ -276,7 +299,11 @@ class Connector:
             ),
         )
         new = 0
+        answered = 0
         for item in params.items:
+            if item.owner_replied or later(item.owner_replied_at, item.when):
+                answered += 1  # The owner answered it already: nothing for them to do.
+                continue
             key = "watch:" + hashlib.sha256(item.key.strip().encode()).hexdigest()[:24]
             text = "\n".join(
                 part
@@ -285,7 +312,11 @@ class Connector:
                     f"From: {item.sender}" if item.sender else "",
                     f"When: {item.when}" if item.when else "",
                     f"Link: {item.link}" if item.link else "",
-                    f"Context: {item.context[:1000]}" if item.context else "",
+                    self.thread_line(item.link),
+                    # The watcher's own reading, not checked: the thread is what counts.
+                    f"Context (as the watcher read it): {item.context[:1000]}"
+                    if item.context
+                    else "",
                     f"Message:\n{item.text[:2000]}",
                 )
                 if part
@@ -294,7 +325,22 @@ class Connector:
             if await self.runtime.on_trigger("watch", [key], text, display=display):
                 new += 1
         self.runtime.publish_state()
-        return f"{new} new item(s) handed to the Router; the rest were seen before."
+        skipped = f" {answered} the owner already answered were left out." if answered else ""
+        return f"{new} new item(s) handed to the Router; the rest were seen before.{skipped}"
+
+    def thread_line(self, link: str) -> str:
+        """The Slack thread a found message is in, as a key a Slack-reading worker can follow;
+        or why none can."""
+        found = threads.slack_messages(link)
+        if not found:
+            return ""
+        key = next(iter(found.values()))[0]
+        if not self.runtime.slack.configured():
+            return (
+                f"Thread: {key} (Slack is not connected here, so no session can follow it: a "
+                "worker reads it with the tools it has)"
+            )
+        return f"Thread: {key} (spawn_worker with slack=true and follow=[{key!r}] to follow it)"
 
     async def t_report_owner_words(self, params: ReportOwnerWords, caller: str):
         self.check(caller)
@@ -322,9 +368,9 @@ class Connector:
         await self.send("learn", prompts.CONNECTOR_WORDS, "Read what you wrote lately")
         return True
 
-    def check(self, caller: str):
+    def check(self, caller: str, kinds: tuple[str, ...] = (SPECIAL,)):
         row = self.store.session(caller)
-        if row["role"] != WORKER or not self.store.get(f"{SPECIAL}:{caller}"):
+        if row["role"] != WORKER or not any(self.store.get(f"{kind}:{caller}") for kind in kinds):
             raise ValueError("Only Chief of Staff's connector calls this.")
 
     def view(self) -> dict:
@@ -376,8 +422,9 @@ class Connector:
         """What needs the owner now, each with a code to answer it by."""
         items = []
         drafts = self.store.drafts()
-        # A task waiting on a card (a decision, a question) is told as that card, once.
-        carded = {d["session_id"] for d in drafts if d["kind"] in NOTIFIED_KINDS}
+        # A task waiting on a card that asks (a question, a folder to choose) is told as that card,
+        # once; a draft of its worker's (a reply to approve) is not its question.
+        carded = {d["session_id"] for d in drafts if d["kind"] in {"question", "workspace"}}
         deciding = {
             asker.get("task_id")
             for d in drafts
@@ -387,10 +434,15 @@ class Connector:
         for draft in drafts:
             if draft["kind"] not in NOTIFIED_KINDS:
                 continue
-            items.append(
-                {"id": f"draft:{draft['id']}", "code": code_of(draft["id"]), "draft": draft}
-            )
+            key = draft["id"]
+            if draft["kind"] == "merge":
+                # A PR offered again at the same commit is the same item: told once, one code.
+                key = f"merge:{draft['target']['label'].lower()}@{draft['target']['head']}"
+            items.append({"id": f"draft:{key}", "code": code_of(key), "draft": draft})
         tasks = self.runtime.tasks.listed()
+        for question in self.runtime.asks.owner_questions():
+            key = f"question:{question['session_id']}:{question['at']}"
+            items.append({"id": key, "code": code_of(key), "question": question})
         if (ask := self.router_question()) and not self.relays(ask, tasks):
             key = f"router:{ask['id']}"
             items.append({"id": key, "code": code_of(key), "ask": ask})
@@ -477,12 +529,22 @@ class Connector:
                     )
                     + f' Reply "{code} <number or your answer>".'
                 )
+            if kind == "merge":
+                return (
+                    f"[{code}] Ready to merge: {target['label']} “{target.get('title', '')}” "
+                    f'(CI passes). Reply "{code} merge" to merge it, "{code} no" to leave it.'
+                )
             if kind == "workspace":
                 options = target.get("options") or []
                 listed = "; ".join(f"{n}) {o['path']}" for n, o in enumerate(options, 1))
                 title = target.get("title", "")
                 return f'[{code}] Which folder for “{title}”? {listed}. Reply "{code} <number>".'
             return f'[{code}] Question: {draft["text"][:800]} Reply "{code} <your answer>".'
+        if question := item.get("question"):
+            return (
+                f"[{code}] “{question['worker']}” asks: {question['text'][:800]} "
+                f'Reply "{code} <your answer>".'
+            )
         task = item["task"]
         if task["status"] == "failed":
             return f'[{code}] Failed: “{task["title"]}”. Reply "{code} retry" to run it again.'
@@ -497,7 +559,9 @@ class Connector:
         fresh = [item for item in self.waiting_items() if item["id"] not in sent]
         if not fresh and not test:
             return
-        if self.busy() and not test:
+        if self.messenger_busy():
+            if test:
+                raise ValueError("A notification is being sent now: try again in a minute.")
             return  # After its current run: one message at a time.
         settings = self.store.settings()
         if test:
@@ -510,9 +574,12 @@ class Connector:
                 self.describe(item) for item in fresh[:8]
             )
         how = settings.away_how.strip() or prompts.AWAY_DEFAULT
+        # Sent by the messenger, outside the connector's sandbox (which reaches GitHub only, as
+        # it reads others' messages): it is given Chief of Staff's own text, in a file.
+        path = await asyncio.to_thread(self.write_notification, body)
         lines = [
-            "Send the owner this message, as it is (only to the owner themself, nobody else):",
-            f"<notification>\n{body}\n</notification>",
+            f"Send the owner the message in this file, as it is (only to the owner themself, "
+            f"nobody else): {path}",
             f"How the owner wants to get it: {how}",
         ]
         if method := self.store.get("away_method"):
@@ -521,11 +588,29 @@ class Connector:
             "Then call report_notified with whether it arrived, where, and the exact method. "
             "Never post it anywhere else or as the owner to anyone else."
         )
-        self.store.set("away_sent", json.dumps((sent + [item["id"] for item in fresh])[-200:]))
-        await self.send("notify", "\n\n".join(lines), "Tell the owner: " + body[:300])
+        if not test:
+            self.store.set("away_sent", json.dumps((sent + [item["id"] for item in fresh])[-200:]))
+        await self.runtime.toolset.start_special(
+            MESSENGER, "Tell you when you're away", "\n\n".join(lines)
+        )
+
+    def write_notification(self, body: str) -> Path:
+        """The message, in a file of its own (the last 20 are kept)."""
+        folder = self.runtime.role_dir("away")
+        path = folder / f"notification-{int(time.time() * 1000)}.txt"
+        path.write_text(body + "\n", encoding="utf-8")
+        for old in sorted(folder.glob("notification-*.txt"))[:-20]:
+            old.unlink(missing_ok=True)
+        return path
+
+    def messenger_busy(self) -> bool:
+        row = self.runtime.toolset.last_special(MESSENGER)
+        return bool(
+            row and not row["closed_at"] and row["status"] in {"queued", "starting", "working"}
+        )
 
     async def t_report_notified(self, params: ReportNotified, caller: str):
-        self.check(caller)
+        self.check(caller, (SPECIAL, MESSENGER))
         if params.ok:
             if params.method.strip():
                 self.store.set("away_method", params.method.strip()[:1000])
@@ -542,12 +627,15 @@ class Connector:
                 }
             ),
         )
-        if not params.ok:
+        failing = self.store.get("away_failing") == "1"
+        self.store.set("away_failing", "0" if params.ok else "1")
+        if not params.ok and not failing:
+            # Said once, not after every attempt: Settings shows the latest until it works.
             self.runtime.add_message(
                 self.runtime.router_id(),
                 "notice",
                 f"Could not reach you while you were away: {params.error[:300]}. Change how in "
-                "Settings → Connections.",
+                "Settings → Connections (this is said once; Settings shows the latest attempt).",
                 {"settings": "connections"},
             )
         self.runtime.publish_state()
@@ -595,6 +683,14 @@ class Connector:
         if draft := item.get("draft"):
             kind = draft["kind"]
             drafts = self.runtime.drafts
+            if kind == "merge":
+                if word in SEND_WORDS | {"merge", "合并"}:
+                    merged = await drafts.resolve(draft["id"], DraftDecision(action="send"))
+                    return merged.get("outcome") or "merged"
+                if word in REJECT_WORDS:
+                    await drafts.resolve(draft["id"], DraftDecision(action="reject"))
+                    return "left as it is"
+                raise ValueError('answer "merge" or "no"')
             if kind in {"slack", "github", "reply"}:
                 if word in SEND_WORDS:
                     await drafts.resolve(draft["id"], DraftDecision(action="send"))
@@ -620,6 +716,11 @@ class Connector:
                 return f"chose {choice}"
             await drafts.resolve(draft["id"], DraftDecision(action="answer", text=answer))
             return "answered"
+        if question := item.get("question"):
+            if not answer:
+                raise ValueError("write your answer after the code")
+            await self.runtime.task_actions.answer_question(question["session_id"], answer)
+            return "sent to the worker"
         task = item["task"]
         if task["status"] == "failed":
             if word != "retry":

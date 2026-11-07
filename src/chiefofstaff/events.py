@@ -57,6 +57,20 @@ def describe_tool(name: str, arguments: Any) -> str:
     return f"{name} {detail}".strip()[:200]
 
 
+def describe_step(name: str, arguments: Any) -> str:
+    """A step as the owner reads it on a card: what it is for when the call says so (a shell
+    command's description), else what it runs."""
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except json.JSONDecodeError:
+            arguments = {}
+    described = arguments.get("description") if isinstance(arguments, dict) else None
+    if isinstance(described, str) and described.strip():
+        return " ".join(described.split())[:200]
+    return describe_tool(name, arguments)
+
+
 # When the Router's context (prompt tokens of its last call) grows past this, a fresh Router
 # session takes over with a summary.
 # Failures on Copilot's side, gone when the turn is tried again.
@@ -299,8 +313,9 @@ class Events:
             return  # Chief of Staff's own tools show as what they did.
         summary = describe_tool(name, arguments)
         self.runtime.add_message(row["id"], "tool", summary)
-        self.states[row["id"]].steps[call] = (time.time(), summary)
-        self.runtime.update_session(row["id"], activity=summary)
+        step = describe_step(name, arguments)
+        self.states[row["id"]].steps[call] = (time.time(), step, summary)
+        self.runtime.update_session(row["id"], activity=step)
         self.observe_shell(row, name, call, arguments)
 
     def observe_shell(self, row: dict, name: str, call: str, arguments: Any):
@@ -395,6 +410,15 @@ class Events:
                 # answer is filed as its report. Never "done" with the task left running.
                 status = "idle"
         self.runtime.update_session(session_id, status=status, activity="")
+        if (
+            state.close_after_turn
+            and row["role"] == WORKER
+            and not self.runtime.special(row)
+            and not self.runtime.workers.finished(session_id)
+        ):
+            # Its PR is merged or closed, but it still has work open (a question it just
+            # asked, another task): it stays, and nothing of it is cancelled.
+            state.close_after_turn = False
         # Decided now: closing or reattaching (which brings its own message) clears these.
         settled = not (state.close_after_turn or state.stale or state.after_refresh)
         if state.close_after_turn:
@@ -531,12 +555,14 @@ class Events:
             await self.runtime.tell_router(row, "failed", message, task)
 
     def hook_failed(self, row: dict, message: str):
-        """Said once per session and plugin, as a note: the work itself goes on."""
+        """Said once a day per plugin, as a note: the work itself goes on. The same hook fails
+        in every session alike (a plugin's problem, or this machine's), so once is enough."""
         found = re.search(r'hook from "([^"]+)"', message)
         source = (found.group(1) if found else message.split(" failed", 1)[0])[:200]
-        if self.store.get(f"hookfail:{row['id']}:{source}"):
+        key = f"hookfail:{source}"
+        if time.time() - float(self.store.get(key) or 0) < 86400:
             return
-        self.store.set(f"hookfail:{row['id']}:{source}", "1")
+        self.store.set(key, str(time.time()))
         sandboxed = "sandbox" in message
         hint = (
             " If that plugin needs to write somewhere, add the folder under Settings → Workers → "

@@ -152,6 +152,8 @@ INSTRUCTION_CHARS = 25
 STEP_NOTE_SECONDS = 20
 # Tasks that ended within this many hours are still shown (and can be reviewed or retried).
 TASKS_SHOWN_HOURS = 72
+# The same message again within this long is not shown twice.
+REPEAT_SECONDS = 60
 GITHUB_HOSTS = (
     "github.com",
     "api.github.com",
@@ -639,6 +641,8 @@ class Runtime:
             return TOOLLESS[special]
         if special == "connector":
             return CONNECTOR_TOOLS
+        if special == "messenger":
+            return ["report_notified"]
         if row["role"] == WATCHDOG:
             return ["assess_worker"]
         names = ["report", "follow_thread", "unfollow_thread"]
@@ -665,6 +669,8 @@ class Runtime:
         prompt = PROMPTS[row["role"]]
         if self.special(row) == "connector":
             prompt = prompts.CONNECTOR  # Not a worker with tasks to report.
+        elif self.special(row) == "messenger":
+            prompt = prompts.MESSENGER
         sandbox = self.sandbox_policy(row)
         if row["role"] == WORKER:
             prompt += "\n" + prompts.worker_context(
@@ -1354,12 +1360,37 @@ class Runtime:
         *,
         unread: bool = False,
     ) -> dict:
+        if (
+            kind in {"assistant", "notice"}
+            and not (meta or {}).get("prompt")  # Something to deliver is never dropped.
+            and (same := self.repeated(session_id, kind, text, meta or {}))
+        ):
+            return same  # The same answer again within a minute (a turn retried, say): once.
         message = self.store.add_message(session_id, kind, text, meta)
         self.bus.publish("message", message)
         if unread:
             row = self.store.session(session_id)
             self.update_session(session_id, unread=row["unread"] + 1)
         return message
+
+    def repeated(self, session_id: str, kind: str, text: str, meta: dict) -> dict | None:
+        """The session's last message when it says the same (with the same meta), and came
+        within REPEAT_SECONDS."""
+        last = self.store.one(
+            "SELECT * FROM messages WHERE session_id=? ORDER BY id DESC LIMIT 1", (session_id,)
+        )
+        if not last or last["kind"] != kind or last["text"].strip() != text.strip():
+            return None
+        if json.loads(last["meta"] or "{}") != meta:
+            return None
+        try:
+            age = time.time() - datetime.fromisoformat(last["created_at"]).timestamp()
+        except ValueError:
+            return None
+        if age > REPEAT_SECONDS:
+            return None
+        last["meta"] = json.loads(last["meta"])
+        return last
 
     def update_session(self, session_id: str, **values) -> dict:
         row = self.store.update_session(session_id, **values)
@@ -1432,6 +1463,8 @@ class Runtime:
         row = self.store.session(session_id)
         if row["closed_at"] and row["role"] == WORKER:
             await self.workers.reopen(session_id)
+        if row["role"] == WORKER:
+            self.asks.answered(session_id)  # The owner answers it.
         # Answers come in the language of this message, whatever the conversation used before.
         spoken = self.heard(text) if learn else language(text)
         prompt = wrap("owner", "message", text, reply_in=spoken)
@@ -1662,8 +1695,14 @@ class Runtime:
             self.publish_session(row)
             if merged and row["role"] == WORKER:
                 self.task_actions.pr_merged(session_id, thread)
-            if finished and row["role"] == WORKER and not self.store.follows(session_id):
-                # Its PR is merged or closed: the task is over once this news is handled.
+            if (
+                finished
+                and row["role"] == WORKER
+                and not self.store.follows(session_id)
+                and self.workers.finished(session_id)
+            ):
+                # Its PR is merged or closed: the task is over once this news is handled (and
+                # closed only if nothing else of it is open then).
                 if self.states[session_id].busy or row["status"] == "working":
                     self.states[session_id].close_after_turn = True
                 else:
@@ -1830,11 +1869,12 @@ class Runtime:
 
     def progress(self, row: dict) -> dict:
         """What a session is doing now and what it said last: progress at a glance."""
-        since, step = self.states[row["id"]].step()
+        since, step, command = self.states[row["id"]].current_step()
         said = json.loads(self.store.get(f"said:{row['id']}") or "{}")
         running = bool(since) and row["status"] == "working"
         return {
             "step": step if running else "",
+            "step_command": command if running else "",
             "step_since": datetime.fromtimestamp(since, UTC).isoformat() if running else "",
             "said": said.get("text", ""),
             "said_at": said.get("at", ""),
@@ -1869,6 +1909,7 @@ class Runtime:
             "sessions": [self.view(row) for row in self.store.open_sessions()],
             "drafts": self.store.drafts(),
             "uncertain": self.store.drafts("uncertain"),
+            "questions": self.asks.owner_questions(),
             "tasks": [
                 self.task_actions.view(task)
                 for task in self.tasks.listed(include_ended_since=hours_ago(TASKS_SHOWN_HOURS))

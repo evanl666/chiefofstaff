@@ -108,7 +108,7 @@ async def u2_cancel_then_retry(app: App, project: Path):
 
     async def sleeping():
         row = await app.get(f"/api/sessions/{worker}")
-        return row if "sleep 120" in (row.get("step") or "") else None
+        return row if "sleep 120" in (row.get("step_command") or "") else None
 
     await wait_for("the slow command runs", sleeping, 300, app)
     cancelled = await app.post(f"/api/tasks/{task['id']}/cancel", {"text": "too slow"})

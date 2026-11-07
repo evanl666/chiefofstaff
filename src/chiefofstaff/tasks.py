@@ -48,9 +48,9 @@ def task_id() -> str:
     return "t" + uuid4().hex[:7]
 
 
-# Chief of Staff's own helper workers (learning, checks, profile, connector): not the owner's
-# tasks, never listed with them.
-HELPER_KINDS = ("learner", "checker", "distill", "connector")
+# Chief of Staff's own helper workers (learning, checks, profile, connector, messenger): not the
+# owner's tasks, never listed with them.
+HELPER_KINDS = ("learner", "checker", "distill", "connector", "messenger")
 HELPERS = " UNION ".join(
     f"SELECT substr(key, {len(kind) + 2}) FROM kv WHERE key >= '{kind}:' AND key < '{kind}:\uffff'"
     for kind in HELPER_KINDS
@@ -241,6 +241,8 @@ class TaskBook:
         if status in {"done", "cancelled"}:
             # Settled (accepted, merged, cancelled): an earlier question to its worker is moot.
             self.store.delete(f"followup:{task_id}")
+        if status in {"review", "done", "cancelled"}:
+            self.store.delete(f"reopened:{task_id}")  # Its follow-up is over.
         if status == "running" and task["session_id"]:
             # The worker is on this task now.
             self.store.execute(

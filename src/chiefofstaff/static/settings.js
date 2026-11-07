@@ -1,6 +1,6 @@
 // The settings and usage dialogs.
 
-import { $, api, el, toast } from "./dom.js";
+import { $, api, el, submits, toast } from "./dom.js";
 import { lines, plural, since } from "./text.js";
 import { closedWorkers, HOME, loadState, sessions, state } from "./state.js";
 import { renderSidebar } from "./sidebar.js";
@@ -37,6 +37,12 @@ export function openSettings(tab = "") {
 }
 export function bindSettings() {
   const dialog = $("#settings-dialog");
+  $("#lesson-save").addEventListener("click", addLesson);
+  $("#lesson-text").addEventListener("keydown", (event) => {
+    if (!submits(event)) return;
+    event.preventDefault();  // Not the settings form's submit.
+    addLesson();
+  });
   for (const button of document.querySelectorAll("#settings-tabs button")) {
     button.addEventListener("click", () => showSettingsTab(button.dataset.tab));
   }
@@ -106,9 +112,16 @@ export function bindSettings() {
     }
     const row = watchRow({ what: "", how: "", enabled: true });
     $("#watch-list").append(row);
+    watchSummary();
     row.querySelector(".what").focus();
   });
-  $("#watch-scan").addEventListener("click", () => settingsAction("/api/watch/scan", "Scanning now."));
+  // Scanning uses the watches as written here: saved first (a watch just added counts).
+  $("#watch-scan").addEventListener("click", async () => {
+    if (!(await saveWatches())) return;
+    await settingsAction("/api/watch/scan", "Scanning now.");
+  });
+  $("#watch-list").addEventListener("input", watchSummary);
+  $("#watch-list").addEventListener("change", watchSummary);
   $("#away-test").addEventListener("click", () => settingsAction("/api/away/test", ""));
   for (const [id, find] of [
     ["#watch-activity", () => state.snapshot.connector?.session_id],
@@ -318,6 +331,7 @@ export function fillSettings() {
   form.mcp_servers.value = Object.keys(servers).length ? JSON.stringify(servers, null, 2) : "";
   $("#mcp-error").hidden = true;
   $("#watch-list").replaceChildren(...(settings.watches || []).map(watchRow));
+  watchSummary();
   const [from, to] = (settings.watch_hours || "09:00-18:00").split("-");
   $("#watch-from").value = from;
   $("#watch-to").value = to;
@@ -342,7 +356,10 @@ function watchRow(watch) {
     el("input", { class: "what", value: watch.what, placeholder: "What to look out for, e.g. “questions about the release in #eng”", "aria-label": "What to watch for" }),
     el("input", { class: "how", value: watch.how || "", placeholder: "How (optional): e.g. Glean search", "aria-label": "How to look" }),
     el("label", { class: "check", title: "On" }, el("input", { class: "on", type: "checkbox", checked: watch.enabled !== false, "aria-label": "On" })),
-    el("button", { type: "button", class: "link remove", text: "×", title: "Remove", "aria-label": "Remove watch", onclick: (event) => event.currentTarget.closest("li").remove() }),
+    el("button", { type: "button", class: "link remove", text: "×", title: "Remove", "aria-label": "Remove watch", onclick: (event) => {
+      event.currentTarget.closest("li").remove();
+      watchSummary();
+    } }),
   );
 }
 function mcpServers() {
@@ -422,15 +439,13 @@ export function renderConnections() {
   );
   $("#plugins-retry").hidden = !plugins.some(([, status]) => status.state === "failed");
   const connector = snap.connector || {};
-  const watches = settings.watches || [];
-  const on = watches.filter((watch) => watch.enabled !== false).length;
   const last = connector.last || {};
   const scanned = connector.scanning
     ? "Scanning now…"
     : connector.scanned_at
       ? `Scanned ${since(connector.scanned_at)}${last.found !== undefined ? ` · ${last.found} found` : ""}${last.problems?.length ? ` · ${last.problems.join("; ")}` : ""}`
       : "";
-  $("#watches-summary").textContent = watches.length ? [`${on} on`, connector.scanned_at ? `scanned ${since(connector.scanned_at)}` : ""].filter(Boolean).join(" · ") : "None";
+  watchSummary();
   $("#watch-state").textContent = scanned;
   $("#watch-state").classList.toggle("error", Boolean(last.problems?.length));
   $("#watch-scan").disabled = Boolean(connector.scanning);
@@ -564,17 +579,44 @@ export function renderLearning() {
     if (!checks.sandbox) $("#checks").append(el("li", { class: "empty-note", text: "Needs a sandbox (macOS sandbox-exec, or bwrap on Linux)." }));
     showList("#checks", $("#checks").children.length);
   }
+  renderLessonForm();
   // Nothing learned yet: one line says so, not three empty lists.
   const empty = ["#styles", "#lessons", "#checks"].every((id) => !$(id).children.length);
   $("#learned-nothing").hidden = !empty;
   renderLearnRow();
 }
-// A list and its heading, shown only when there is something in it.
+// A list and its heading, shown only when there is something in it (Habits always: the owner
+// adds their own there).
 function showList(id, count) {
   const list = $(id);
   list.hidden = !count;
-  list.previousElementSibling.hidden = !count;
-  list.previousElementSibling.dataset.count = count;
+  const heading = list.previousElementSibling;
+  heading.hidden = !count && !heading.classList.contains("always");
+  heading.dataset.count = count;
+}
+// A habit the owner writes down themselves: everywhere, in Slack replies, or in one project.
+function renderLessonForm() {
+  const scope = $("#lesson-scope");
+  const projects = state.snapshot.settings.projects || [];
+  const chosen = scope.value;
+  scope.replaceChildren(el("option", { value: "", text: "Everywhere" }), el("option", { value: "slack", text: "Slack replies" }), ...projects.map((path) => el("option", { value: path, text: `In ${path.split("/").pop()}` })));
+  scope.value = [...scope.options].some((option) => option.value === chosen) ? chosen : "";
+}
+async function addLesson() {
+  const input = $("#lesson-text");
+  const text = input.value.trim();
+  if (!text) {
+    input.focus();
+    return;
+  }
+  try {
+    state.snapshot = { ...state.snapshot, ...(await api("/api/lessons", { method: "POST", body: { text, scope: $("#lesson-scope").value } })) };
+    input.value = "";
+    renderLearning();
+    toast("Habit added: your sessions use it from their next message.");
+  } catch (error) {
+    settingsError(error.message);
+  }
 }
 // What the owner's words were read from, as counted.
 const OBSERVED = {
@@ -641,12 +683,7 @@ async function saveSettings(event) {
     skill_folders: lines(form.skill_folders.value),
     plugins: lines(form.plugins.value),
     mcp_servers: {},
-    watches: [...document.querySelectorAll("#watch-list li")]
-      .map((row) => ({ what: row.querySelector(".what").value.trim(), how: row.querySelector(".how").value.trim(), enabled: row.querySelector(".on").checked }))
-      .filter((watch) => watch.what),
-    watch_hours: `${$("#watch-from").value || "09:00"}-${$("#watch-to").value || "18:00"}`,
-    watch_minutes: Number(form.watch_minutes.value || 5),
-    watch_after_hours_minutes: Number(form.watch_after_hours_minutes.value || 0),
+    ...watchFields(),
     away_notify: form.away_notify.checked,
     away_minutes: Number(form.away_minutes.value || 10),
     away_how: form.away_how.value.trim(),
@@ -677,6 +714,48 @@ async function saveSettings(event) {
   } catch (error) {
     settingsError(error.message);
   }
+}
+// The watches as written in the form, with when they run.
+function watchFields() {
+  const form = $("#settings-form");
+  return {
+    watches: [...document.querySelectorAll("#watch-list li")]
+      .map((row) => ({ what: row.querySelector(".what").value.trim(), how: row.querySelector(".how").value.trim(), enabled: row.querySelector(".on").checked }))
+      .filter((watch) => watch.what),
+    watch_hours: `${$("#watch-from").value || "09:00"}-${$("#watch-to").value || "18:00"}`,
+    watch_minutes: Number(form.watch_minutes.value || 5),
+    watch_after_hours_minutes: Number(form.watch_after_hours_minutes.value || 0),
+  };
+}
+const sameWatches = (a, b) => JSON.stringify(a.map(({ what, how, enabled }) => [what, how || "", enabled !== false])) === JSON.stringify(b.map(({ what, how, enabled }) => [what, how || "", enabled !== false]));
+// Only the watches, saved: the rest of the form stays as the owner left it, unsaved.
+async function saveWatches() {
+  settingsError("");
+  const fields = watchFields();
+  const settings = state.snapshot.settings;
+  if (!fields.watches.length) {
+    settingsError("Write what to watch for first (+ Add watch).");
+    return false;
+  }
+  const saved = { watches: settings.watches || [], watch_hours: settings.watch_hours, watch_minutes: settings.watch_minutes, watch_after_hours_minutes: settings.watch_after_hours_minutes };
+  if (sameWatches(fields.watches, saved.watches) && fields.watch_hours === saved.watch_hours && fields.watch_minutes === saved.watch_minutes && fields.watch_after_hours_minutes === saved.watch_after_hours_minutes) return true;
+  try {
+    state.snapshot = { ...state.snapshot, ...(await api("/api/settings", { method: "POST", body: { ...settings, ...fields } })) };
+    renderConnections();
+    return true;
+  } catch (error) {
+    settingsError(error.message);
+    return false;
+  }
+}
+// How many watches are on, as written now; "not saved" until they are.
+function watchSummary() {
+  const snap = state.snapshot;
+  const connector = snap.connector || {};
+  const written = watchFields().watches;
+  const on = written.filter((watch) => watch.enabled !== false).length;
+  const unsaved = !sameWatches(written, snap.settings.watches || []);
+  $("#watches-summary").textContent = written.length ? [`${on} on`, unsaved ? "not saved yet" : connector.scanned_at ? `scanned ${since(connector.scanned_at)}` : "not scanned yet"].filter(Boolean).join(" · ") : "None";
 }
 export async function saveToken() {
   const form = $("#settings-form");

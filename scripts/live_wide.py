@@ -1,4 +1,4 @@
-"""A wide live suite: 85 scenarios of a working day, in seven shards that run in parallel
+"""A wide live suite: 90 scenarios of a working day, in eight shards that run in parallel
 (each its own Chief of Staff, fake Slack, company search and company bot). B, E and G set
 checks on the same test PR: run them one after the other.
 
@@ -106,14 +106,22 @@ G5  the owner posts a drafted reply themself, edited a little: the draft settles
 G6  a worker given a second task while on its first: one card, a line per task; its menu
     reads; Settings closes with a click around it
 
+Shard H, round three:
+H1  a worker asks, its task is cancelled: the question stays under Needs you until answered
+H2  the owner's PR GitHub would merge now: a card; Merge merges it on GitHub, its task done
+H3  away notifications through a command-line tool, run outside the connector's sandbox
+H4  a step on a worker's card says what it is for, not the raw command
+H5  thanks for an accepted task: it stays done, nothing starts
+
 All shards:
 W52 no Router reply names a worker by its session id
 
-    uv run python scripts/live_wide.py A|B|C|D|E|F|G [W1 E1 …]  (E needs --with playwright)
+    uv run python scripts/live_wide.py A|B|C|D|E|F|G|H [W1 E1 …]  (E needs --with playwright)
 """
 
 import asyncio
 import base64
+import contextlib
 import csv
 import json
 import os
@@ -136,7 +144,7 @@ from live_parity import COPILOT, setup, write
 
 SHARDS = {
     "A": (18781, 18911), "B": (18782, 18912), "C": (18783, 18913), "D": (18784, 18914),
-    "E": (18785, 18915), "F": (18786, 18916), "G": (18787, 18917),
+    "E": (18785, 18915), "F": (18786, 18916), "G": (18787, 18917), "H": (18788, 18918),
 }  # fmt: skip
 MODEL = "claude-sonnet-5.5"
 CJK = re.compile(r"[\u4e00-\u9fff]")
@@ -376,7 +384,7 @@ async def w2_progress(ctx: Ctx):
     async def both_sleeping():
         snap = await state(ctx)
         mine = [t for t in snap["tasks"] if t["created_at"] > since and t["status"] == "running"]
-        steps = [s for s in snap["sessions"] if "sleep" in (s.get("step") or "")]
+        steps = [s for s in snap["sessions"] if "sleep" in (s.get("step_command") or "")]
         return (len(mine) >= 2 and len(steps) >= 2) or None
 
     await wait_for("both sleeping", both_sleeping, 300, ctx.app)
@@ -703,7 +711,11 @@ async def w13_stop_and_go_on(ctx: Ctx):
         mine = set(await task_sessions(ctx, since))
         snap = await state(ctx)
         return next(
-            (s for s in snap["sessions"] if s["id"] in mine and "sleep" in (s.get("step") or "")),
+            (
+                s
+                for s in snap["sessions"]
+                if s["id"] in mine and "sleep" in (s.get("step_command") or "")
+            ),
             None,
         )
 
@@ -1170,7 +1182,7 @@ async def w57_reply_to_your_comment(ctx: Ctx):
         rows = await ctx.app.get(f"/api/sessions/{router}/messages?after={mark}")
         news = [m for m in rows if m["kind"] == "inbound" and m["meta"].get("from") == reviewer]
         snap = await state(ctx)
-        asking = [d for d in snap["drafts"] if d["session_id"] == reviewer]
+        asking = [d for d in snap["drafts"] if d["session_id"] == reviewer and d["kind"] != "merge"]
         waiting = [
             t for t in snap["tasks"] if t["session_id"] == reviewer and t["status"] == "waiting"
         ]
@@ -1413,7 +1425,11 @@ async def w60_followed_pr_news(ctx: Ctx):
                 m["text"] for m in rows
                 if m["kind"] == "inbound" and m["meta"].get("from") == reviewer
             ]  # fmt: skip
-            said += [d["text"] for d in (await state(ctx))["drafts"] if d["session_id"] == reviewer]
+            # Not a Ready-to-merge card: the PR's author is signed in here too, so it is "mine".
+            said += [
+                d["text"] for d in (await state(ctx))["drafts"]
+                if d["session_id"] == reviewer and d["kind"] != "merge"
+            ]  # fmt: skip
             return said or None
 
         said = " ".join(await wait_for("the owner hears", told, 400, ctx.app))
@@ -1812,13 +1828,21 @@ async def w37_scan(ctx: Ctx):
 
 async def w38_drafted_replies(ctx: Ctx):
     answered: set[str] = set()
+    since = now()
 
     async def drafts():
         snap = await state(ctx)
-        found = [d for d in snap["drafts"] if d["kind"] == "reply"]
+        # It may ask first what it cannot find out (whether the date still holds), or ask and
+        # draft at once: the owner answers before sending anything.
+        asking = {t["session_id"] for t in snap["tasks"] if t["status"] == "waiting"}
+        asking |= {c["session_id"] for c in snap["drafts"] if c["kind"] in {"decision", "question"}}
+        busy = {s["id"] for s in snap["sessions"] if s["status"] == "working"}
+        found = [
+            d for d in snap["drafts"]
+            if d["kind"] == "reply" and d["session_id"] not in asking | busy
+        ]  # fmt: skip
         if found:
             return found
-        # It may ask first what it cannot find out (whether the date still holds).
         for card in snap["drafts"]:
             if card["kind"] in {"decision", "question"} and card["id"] not in answered:
                 answered.add(card["id"])
@@ -1831,14 +1855,17 @@ async def w38_drafted_replies(ctx: Ctx):
                 log(f"W38: it asks {task['progress'][:200]!r}")
                 body = {"text": "Yes, Nov 20 still holds."}
                 await ctx.app.post(f"/api/tasks/{task['id']}/follow-up", body)
-        # Or the Router asks it in the chat, once for both.
+        # Or the Router asks it in the chat, once for both ("Tell me yes or no …" too: it
+        # said something and started no one).
         router = snap["router_id"]
         if "router" not in answered and (await session(ctx, router))["status"] == "idle":
             rows = await messages(ctx, router)
             owner = max((m["id"] for m in rows if m["kind"] == "owner"), default=0)
+            waits = not await tasks_since(ctx, since)
             asked = [
                 m for m in rows
-                if m["id"] > owner and m["kind"] in {"assistant", "update"} and "?" in m["text"]
+                if m["id"] > owner and m["kind"] in {"assistant", "update"}
+                and ("?" in m["text"] or waits)
             ]  # fmt: skip
             if asked:
                 answered.add("router")
@@ -1849,7 +1876,10 @@ async def w38_drafted_replies(ctx: Ctx):
     found = await wait_for("replies drafted", drafts, 900, ctx.app)
     await asyncio.sleep(20)  # The rest of its drafts.
     draft = found[0]
-    mine = [d for d in (await state(ctx))["drafts"] if d["session_id"] == draft["session_id"]]
+    mine = [
+        d for d in (await state(ctx))["drafts"]
+        if d["session_id"] == draft["session_id"] and d["kind"] == "reply"
+    ]  # fmt: skip
     log(f"W38: {len(mine)} draft(s): {[(d['target'], d['text']) for d in mine]}")
     assert re.search(r"nov|20|date|ship|launch", draft["text"], re.IGNORECASE)
     for each in mine:
@@ -2217,7 +2247,11 @@ async def peers_ok(ctx: Ctx, since: str, giver: dict, takers: list[dict], value:
         log(f"  {taker['title']}: told={taker['session_id'] in told} "
             f"from={[m['meta'].get('told_by', '')[:8] for m in inbound]} relayed={len(relayed)} "
             f"waiting-reports={len(waited)}")  # fmt: skip
-        assert inbound and all(m["meta"].get("told_by") == giver["session_id"] for m in inbound)
+        # From the giver itself; a finished taker's result (which names the value) may follow
+        # to the others still at work: workers of the same request, never the Router.
+        group = {giver["session_id"], *(t["session_id"] for t in takers)}
+        assert any(m["meta"].get("told_by") == giver["session_id"] for m in inbound)
+        assert all(m["meta"].get("told_by") in group for m in inbound)
         assert not relayed, "the Router did not relay it"
         assert not waited, "waiting for a peer needs no report"
     assert told >= {t["session_id"] for t in takers}, "told with tell_session"
@@ -2822,9 +2856,14 @@ async def g5_owner_posted_it(ctx: Ctx):
         f"On https://github.com/{APPROVE_REPO}/pull/1, draft a reply to evan666-lgtm's comment "
         f"{comment['id']}: yes, a README note follows in this PR. Do not send it; I will.",
     )
-    # As an answer to that comment, or as a comment on the PR that names its author.
-    draft = await drafted(ctx, "the reply", lambda d: d["kind"] == "github" and (
-        d["target"].get("reply_to_comment") == comment["id"] or "README" in d["text"]))  # fmt: skip
+    # As an answer to that comment, as a comment on the PR that names its author, or as a reply
+    # to copy aimed at the PR: whichever, what the owner posts there settles it.
+    draft = await drafted(ctx, "the reply", lambda d: (
+        d["kind"] == "github" and (
+            d["target"].get("reply_to_comment") == comment["id"] or "README" in d["text"])
+    ) or (
+        d["kind"] == "reply" and int(d["target"].get("number") or 0) == 1 and "README" in d["text"]
+    ))  # fmt: skip
     log(f"G5: drafted {draft['text']!r} as {sorted(draft['target'])}")
     posted = json.loads(owner_gh(
         "api", f"repos/{APPROVE_REPO}/issues/1/comments", "-f", f"body={draft['text']} Thanks!",
@@ -2836,9 +2875,13 @@ async def g5_owner_posted_it(ctx: Ctx):
         return None if still else True
 
     await wait_for("the draft is settled", settled, 420, ctx.app)
-    told = [
-        m["text"] for m in await messages(ctx, draft["session_id"]) if "posted draft" in m["text"]
-    ]
+
+    async def worker_told():
+        rows = await messages(ctx, draft["session_id"])
+        return [m["text"] for m in rows if "posted draft" in m["text"]] or None
+
+    # Told once its task is settled too (that reads the PR first).
+    told = await wait_for("its worker is told", worker_told, 120, ctx.app)
     log(f"G5: told {told}")
     assert told and posted["html_url"] in told[-1]
     for item in (posted["id"],):
@@ -2857,7 +2900,7 @@ async def g6_two_tasks_one_worker(ctx: Ctx):
 
     async def sleeping():
         row = await session(ctx, first["session_id"])
-        return row if "sleep" in (row.get("step") or "") else None
+        return row if "sleep" in (row.get("step_command") or "") else None
 
     await wait_for("it sleeps", sleeping, 300, ctx.app)
     later = now()
@@ -2889,7 +2932,7 @@ async def g6_two_tasks_one_worker(ctx: Ctx):
         if len(open_now) >= 2:
             await expect(group.locator(".task-row")).to_have_count(len(open_now), timeout=20000)
             # Still in the sleep it began before the second task came: on the first one.
-            if "sleep" in ((await session(ctx, first["session_id"])).get("step") or ""):
+            if "sleep" in ((await session(ctx, first["session_id"])).get("step_command") or ""):
                 await expect(group.locator(".task-row.now .title")).to_have_text("Twin Tasks")
             await group.screenshot(path=SCRIPTS.parent / "browser-shots" / "live-g-group.png")
             row = group.locator(".task-row").first
@@ -2910,6 +2953,156 @@ async def g6_two_tasks_one_worker(ctx: Ctx):
     await finished(ctx, since, 2, "both tasks", 900)
     assert other["session_id"] == first["session_id"]
     log("G6 passed")
+
+
+# Shard H, round three
+
+
+async def h1_question_survives_cancel(ctx: Ctx):
+    """A worker asks; its task is cancelled before the owner answers: the question stays under
+    Needs you; answered, it goes, and the worker has the answer."""
+    since = now()
+    await say(
+        ctx,
+        "Start a worker for this: before doing anything, ask me whether port.txt should say 8080 "
+        "or 9090 (a question to me), then write my choice into port.txt.",
+    )
+    waiting = await waiting_on_owner(ctx, since, "its question", 600)
+    task = waiting.get("task") or {}
+    if not task:  # Asked on a card: the card is the question; cancel its task all the same.
+        task = (await tasks_since(ctx, since))[0]
+    worker = task["session_id"]
+    await ctx.app.post(f"/api/tasks/{task['id']}/cancel", {"text": ""})
+
+    async def kept():
+        snap = await state(ctx)
+        return [q for q in snap["questions"] if q["session_id"] == worker] or None
+
+    [question] = await wait_for("the question stays under Needs you", kept, 120, ctx.app)
+    log(f"H1: kept {question['text'][:160]!r} ({question['task_status']})")
+    assert question["task_status"] == "cancelled"
+    # Answered on its card: the owner wants the work after all, and its task goes on.
+    await ctx.app.post(f"/api/questions/{worker}/answer", {"text": "9090"})
+    assert not [q for q in (await state(ctx))["questions"] if q["session_id"] == worker]
+    resumed = await task_status(ctx, task["id"], FINISHED, "its task goes on and finishes", 600)
+    written = await file_of(ctx, since, "port.txt", "port.txt written", 120)
+    log(f"H1: {resumed['status']}; port.txt says {written.read_text().strip()!r}")
+    assert "9090" in written.read_text()
+    log("H1 passed")
+
+
+async def h2_ready_to_merge(ctx: Ctx):
+    """A worker opens a PR for the owner; once GitHub would merge it, it comes as a card, and
+    Merge merges it on GitHub: its task is done."""
+    branch = f"cos-live-merge-{int(time.time())}"
+    number = 0
+    try:
+        since = now()
+        await say(
+            ctx,
+            f"In {APPROVE_REPO}, add a file notes/{branch}.md with the line 'live merge test' "
+            f"on a new branch {branch} (the GitHub API is fine, no clone needed) and open a PR "
+            "from it to main titled 'Add a merge-test note'. Report done with the PR link. "
+            "Don't merge it.",
+        )
+        [task] = await finished(ctx, since, 1, "the PR opened", 900)
+        found = re.search(rf"{APPROVE_REPO}/pull/(\d+)", task["result"] or "")
+        assert found, task["result"]
+        number = int(found.group(1))
+
+        async def card():
+            for draft in (await state(ctx))["drafts"]:
+                if draft["kind"] == "merge" and int(draft["target"]["number"]) == number:
+                    return draft
+            return None
+
+        # GitHub works out whether a fresh PR can merge in a while: it is read every 3 minutes.
+        draft = await wait_for("the ready-to-merge card", card, 720, ctx.app)
+        log(f"H2: {draft['target']['label']} head {draft['target']['head'][:7]}")
+        assert draft["target"]["task_id"] == task["id"]
+        merged = await ctx.app.post(f"/api/drafts/{draft['id']}", {"action": "send"})
+        assert merged["status"] == "sent", merged
+        log(f"H2: {merged['outcome']}")
+        pull = json.loads(author_gh("api", f"repos/{APPROVE_REPO}/pulls/{number}"))
+        assert pull["merged"], "merged on GitHub"
+        done = await task_status(ctx, task["id"], {"done"}, "its task done", 300)
+        log(f"H2: task {done['status']}")
+        log("H2 passed")
+    finally:
+        if number:
+            with contextlib.suppress(subprocess.CalledProcessError):
+                author_gh(
+                    "api", f"repos/{APPROVE_REPO}/pulls/{number}", "-X", "PATCH",
+                    "-f", "state=closed",
+                )  # fmt: skip
+        with contextlib.suppress(subprocess.CalledProcessError):
+            author_gh("api", f"repos/{APPROVE_REPO}/git/refs/heads/{branch}", "-X", "DELETE")
+
+
+async def h3_away_through_a_cli(ctx: Ctx):
+    """Away notifications go out through a command-line tool (as a company bot's CLI would):
+    the messenger runs it outside the connector's sandbox, and says how it did it."""
+    sent = ctx.root / "phone.log"
+    script = ctx.root / "notify-phone"
+    script.write_text(f'#!/bin/sh\ncat "$1" >> {sent}\necho "delivered"\n')
+    script.chmod(0o755)
+    await settings(
+        ctx, away_notify=True,
+        away_how=f"Run {script} with the message file's path as its only argument: it sends it "
+        "to my phone.",
+    )  # fmt: skip
+    await ctx.app.post("/api/away/test")
+
+    async def arrived():
+        return sent.read_text() if sent.exists() and sent.read_text().strip() else None
+
+    text = await wait_for("the notification through the CLI", arrived, 400, ctx.app)
+    log(f"H3: {text[:200]!r}")
+    assert "Test from Chief of Staff" in text
+
+    async def reported():
+        last = (await state(ctx))["connector"].get("away", {}).get("last") or {}
+        return last if last.get("at") else None
+
+    last = await wait_for("its report", reported, 200, ctx.app)
+    assert last["ok"], last
+    await settings(ctx, away_notify=False)
+    log("H3 passed")
+
+
+async def h4_steps_read_as_what_they_do(ctx: Ctx):
+    """A worker's step on its card says what it is for, not the raw command."""
+    since = now()
+    await say(ctx, "Run `sleep 40 && echo napped` in a shell, then tell me it napped.")
+
+    async def stepping():
+        for worker in await workers_since(ctx, since):
+            step = (await session(ctx, worker["id"])).get("step") or ""
+            if step:
+                return step
+        return None
+
+    step = await wait_for("a step shown", stepping, 300, ctx.app)
+    log(f"H4: the card says {step!r}")
+    assert not step.startswith(("bash ", "shell ")), step
+    await finished(ctx, since, 1, "the nap", 400)
+    log("H4 passed")
+
+
+async def h5_thanks_do_not_reopen(ctx: Ctx):
+    """Thanks for an accepted task do not reopen it, and start nothing."""
+    since = now()
+    await ask(ctx, "Write the single word kiwi into fruit.txt.")
+    [task] = await finished(ctx, since, 1, "the fruit file", 600)
+    if task["status"] == "review":
+        await ctx.app.post(f"/api/tasks/{task['id']}/accept")
+    said = await ask(ctx, "Thanks, that fruit file is all I needed!")
+    log(f"H5: {said[:200]!r}")
+    await asyncio.sleep(20)
+    after = await ctx.app.get(f"/api/tasks/{task['id']}")
+    assert after["status"] == "done", after["status"]
+    assert len(await tasks_since(ctx, since)) == 1, "nothing new started"
+    log("H5 passed")
 
 
 SCENARIOS = {
@@ -2951,6 +3144,10 @@ SCENARIOS = {
         g1_sub_agent_runs_again, g2_news_stays_in_sight, g3_answer_names_the_commenter,
         g4_reply_resolves, g5_owner_posted_it, g6_two_tasks_one_worker, w52_no_ids,
     ],
+    "H": [
+        h1_question_survives_cancel, h2_ready_to_merge, h3_away_through_a_cli,
+        h4_steps_read_as_what_they_do, h5_thanks_do_not_reopen, w52_no_ids,
+    ],
 }  # fmt: skip
 
 
@@ -2976,7 +3173,9 @@ async def main():
             "CHIEFOFSTAFF_IDLE_FILE": str(root / "idle"),
             # E: quiet workers let go of their sessions after a minute; F: memory is low.
             **({"CHIEFOFSTAFF_RELEASE_IDLE_MINUTES": "1"} if shard == "E" else {}),
-            **({"CHIEFOFSTAFF_MIN_FREE_MEMORY": "101"} if shard == "F" else {}),
+            # F: memory is low. The others run side by side and use up this computer's memory:
+            # the guard would hold their work back, which is F's to test.
+            "CHIEFOFSTAFF_MIN_FREE_MEMORY": "101" if shard == "F" else "0",
         }
         app = App(root / "data", root / "log", env)
         ctx = Ctx(app, root, home, project, truth, workspace)

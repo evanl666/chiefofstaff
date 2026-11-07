@@ -143,13 +143,11 @@ async def test_shell_commands_ask_for_permission_first(backend, tmp_path):
 
     session, turn = await open_session(backend, tmp_path, on_permission_request=deny)
     await session.send(
-        "Run the shell command `echo contract-check` and then reply with just: finished"
+        "Run the shell command `mkdir contract-check` and then reply with just: finished"
     )
     await turn.wait()
     assert any(kind == "shell" and "contract-check" in command for kind, command in asked), asked
-    assert "contract-check\n" not in " ".join(
-        getattr(getattr(e.data, "result", None), "content", "") or "" for e in turn.events
-    ), "a denied command does not run"
+    assert not (tmp_path / "contract-check").exists(), "a denied command does not run"
 
 
 async def test_a_session_resumes_with_its_conversation(backend, tmp_path):

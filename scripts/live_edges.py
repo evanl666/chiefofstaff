@@ -170,7 +170,7 @@ async def scenario_d_stop_and_go_on(app: App, project: Path):
 
     async def sleeping():
         row = await app.get(f"/api/sessions/{worker}")
-        return row if "sleep 45" in (row.get("step") or "") else None
+        return row if "sleep 45" in (row.get("step_command") or "") else None
 
     await wait_for("the worker is in the long command", sleeping, 300, app)
     await app.post(f"/api/sessions/{worker}/stop")

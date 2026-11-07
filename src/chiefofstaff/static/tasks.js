@@ -1,11 +1,11 @@
 // Task cards on Home: what runs and what it does now, what waits, what is ready to review.
 
 import { api, el, foldable, moreMenu, submits, toast } from "./dom.js";
-import { ago, compactPaths, markdown, plural, since } from "./text.js";
-import { byId, closedWorkers, sessions, state, tasks } from "./state.js";
+import { ago, compactPaths, gist, markdown, plural, since } from "./text.js";
+import { byId, closedWorkers, ownerQuestions, pendingDrafts, sessions, state, tasks } from "./state.js";
 import { renderSidebar } from "./sidebar.js";
 import { select } from "./session.js";
-import { scheduleHome } from "./inbox.js";
+import { focusDraft, focusQuestion, scheduleHome } from "./inbox.js";
 import { showChanges } from "./diff.js";
 // Chief of Staff's own helpers (learning how the owner works, checks, the profile): their
 // results come as cards to approve; the work itself is not the owner's.
@@ -58,7 +58,7 @@ export function terminalItem(session) {
 // Workers at work whose task is finished (news on a PR they follow, a question about it): they
 // are running too, and say on what.
 export function followUpItem(session) {
-  const line = () => compactPaths((session.step || session.activity || "Working…").replace(/^(bash|shell|powershell) /, "$ "), session.cwd);
+  const line = () => stepText(session.step || session.activity || "Working…", session.cwd);
   const about = session.task ? `following up on “${session.task.title}”` : "working";
   return {
     key: `followup:${session.id}`,
@@ -71,7 +71,7 @@ export function followUpItem(session) {
           "div",
           { class: "head" },
           el("span", { class: "dot working", title: "Working" }),
-          el("button", { type: "button", class: "title", text: session.title, title: "Open its worker", onclick: () => select(session.id) }),
+          el("button", { type: "button", class: "title", text: session.title, title: "Open its worker", onclick: () => select(session.id, { task: session.task?.task_id }) }),
           el("span", { class: "meta", text: about }),
         ),
         el("div", { class: "task-body" }, el("div", { class: "activity", text: line() })),
@@ -90,7 +90,7 @@ export function taskItem(task) {
     key: `task:${task.id}:${task.status}:${task.blocked ? 1 : 0}:${createsPr(task) ? 1 : 0}:${task.asking ? 1 : 0}:${task.news?.at || ""}`,
     id: task.id,
     // For running cards the minute too: "6m" and "3m ago" move on by themselves.
-    version: `${task.updated_at}:${task.title}:${worker?.status || ""}:${worker?.activity || ""}:${worker?.said_at || ""}:${worker?.step_since || ""}:${worker?.task?.task_id || ""}:${task.credits}:${task.runs}:${task.status === "review" ? JSON.stringify(task.receipts || null) : ""}:${live ? `${Math.floor(Date.now() / 60000)}:${queuedKey()}` : ""}`,
+    version: `${task.updated_at}:${task.title}:${worker?.status || ""}:${worker?.activity || ""}:${worker?.step || ""}:${worker?.step_since || ""}:${worker?.task?.task_id || ""}:${task.credits}:${task.runs}:${JSON.stringify(task.receipts?.prs || null)}:${task.status === "review" ? JSON.stringify(task.receipts || null) : ""}:${live ? `${Math.floor(Date.now() / 60000)}:${queuedKey()}` : ""}:${waitsOnOwner(task, worker)}:${(worker?.follows || []).join(",")}`,
     build: () => taskCard(task),
     refresh: (node) => refreshTaskCard(node, task),
   };
@@ -156,6 +156,10 @@ function taskCard(task) {
   const actions = el("div", { class: "actions" });
   const [meta, help] = taskMeta(task);
   const open = task.session_id ? () => select(task.session_id) : null;
+  // The title opens its worker at this task's report: it may be on other work since.
+  const openAt = task.session_id ? () => select(task.session_id, { task: task.id }) : null;
+  const worker = byId(task.session_id);
+  const named = worker && worker.title !== task.title ? `\nWorker: ${worker.title}` : "";
   const node = el(
     "div",
     { class: `card task ${task.status}${task.blocked ? " blocked" : ""}`, "data-session": task.session_id || undefined, "data-task": task.id },
@@ -163,7 +167,7 @@ function taskCard(task) {
       "div",
       { class: "head" },
       el("span", { class: `dot ${task.blocked ? "waiting" : DOT[task.status]}` }),
-      el("button", { type: "button", class: "title", text: task.title, title: open ? "Open its worker" : task.goal || "", onclick: open, disabled: !open }),
+      el("button", { type: "button", class: "title", text: task.title, title: openAt ? `Open its worker at this task${named}` : task.goal || "", onclick: openAt, disabled: !openAt }),
       task.asking ? el("span", { class: "chip waiting", text: "Needs you", title: "Its worker waits for you on a card under Needs you" }) : null,
       el("span", { class: "meta", text: meta, title: help }),
     ),
@@ -289,26 +293,113 @@ function taskBody(task) {
   if (task.status === "running") return runningBody(task, worker);
   if (task.status === "done" || task.status === "cancelled") return null;
   if (task.status === "review") {
-    // One line of what came out; the whole report on demand.
-    const text = task.result || task.progress || "";
-    const first = text.split("\n").map((line) => line.replace(/^[#>*\-\s]+/, "").replace(/[*_`]/g, "").trim()).find(Boolean);
+    // What came out, in its first sentences (past a "## Summary" title); the report on demand.
+    const first = gist(task.result || task.progress || "");
     return first ? el("div", { class: "task-body" }, el("div", { class: "outcome", text: first, title: first })) : null;
   }
   const text = task.progress || (task.blocked ? "It waits for a task that ended without finishing." : "");
-  if (!text) return null;
+  const found = artifacts(task, worker);
+  if (!text && !found) return null;
   const wrapper = el("div", { class: "task-body" });
-  foldable(wrapper, el("div", { class: "body markdown", html: markdown(text) }), text, { chars: 360, lines: 5 });
+  if (text) foldable(wrapper, el("div", { class: "body markdown", html: markdown(text) }), text, { chars: 360, lines: 5 });
+  if (found) wrapper.append(found);
   return wrapper;
+}
+// A step as a line on a card: what it is for (a command's description, when it gave one), or
+// the command without the "cd" into its own folder.
+function stepText(text, cwd) {
+  let line = text.replace(/^(bash|shell|powershell|zsh) /, "$ ");
+  if (cwd) line = line.replace(`cd ${cwd} && `, "").replace(`cd "${cwd}" && `, "");
+  return compactPaths(line, cwd);
+}
+// Its latest report on this task, in its first sentences: two lines, the rest on a click.
+function progressLine(text, at) {
+  const words = gist(text);
+  if (!words) return null;
+  const node = el("div", { class: "progress-line", title: "Its latest report on this task · click to read it all" }, el("span", { class: "words", text: words }), at ? el("span", { class: "when", text: ` · ${since(at)}` }) : "");
+  node.addEventListener("click", () => node.classList.toggle("open"));
+  return node;
+}
+// What a task has made or points to, as chips: its PRs (with GitHub's state once read), docs,
+// runs, tickets and files it linked; the threads its worker watches; what waits for the owner.
+const LINK = /https?:\/\/[^\s<>()[\]`'"，。、；！？）]+/g;
+function linkKind(url) {
+  let match;
+  if ((match = /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/.exec(url))) return { kind: "pr", label: `${match[2]}#${match[3]}`, key: `${match[1]}/${match[2]}#${match[3]}`.toLowerCase() };
+  if ((match = /^https:\/\/github\.com\/[^/]+\/([^/]+)\/issues\/(\d+)/.exec(url))) return { kind: "issue", label: `${match[1]}#${match[2]}` };
+  if ((match = /^https:\/\/github\.com\/[^/]+\/([^/]+)\/actions\/runs\//.exec(url))) return { kind: "run", label: `CI run · ${match[1]}` };
+  if (/^https:\/\/github\.com\/[^/]+\/[^/]+\/(blob|tree)\//.test(url)) return { kind: "file", label: decodeURIComponent(url.split(/[?#]/)[0].split("/").pop()) || "File" };
+  if (/docs\.google\.com\/spreadsheets/.test(url)) return { kind: "doc", label: "Sheet" };
+  if (/docs\.google\.com\/presentation/.test(url)) return { kind: "doc", label: "Slides" };
+  if (/docs\.google\.com\//.test(url)) return { kind: "doc", label: "Google Doc" };
+  if (/\.slack\.com\/archives\//.test(url)) return { kind: "slack", label: "Slack message" };
+  if ((match = /atlassian\.net\/browse\/([A-Z][A-Z0-9]+-\d+)/.exec(url))) return { kind: "ticket", label: match[1] };
+  if (/notion\.so\//.test(url)) return { kind: "doc", label: "Notion" };
+  if (/airflow/i.test(url)) return { kind: "run", label: "Airflow run" };
+  if (/flyte/i.test(url)) return { kind: "run", label: "Flyte run" };
+  try {
+    return { kind: "link", label: new URL(url).hostname.replace(/^www\./, "") };
+  } catch {
+    return null;
+  }
+}
+function linkChips(task, shown) {
+  const chipsFound = [];
+  const seen = new Set();
+  for (const raw of [task.progress, task.result].filter(Boolean).join("\n").match(LINK) || []) {
+    const url = raw.replace(/[.,;:!?'"]+$/, "");
+    const found = linkKind(url);
+    if (!found || seen.has(url) || (found.key && shown.has(found.key))) continue;
+    seen.add(url);
+    if (found.key) shown.add(found.key);
+    chipsFound.push(el("a", { class: `receipt artifact ${found.kind}`, href: url, target: "_blank", rel: "noreferrer", title: url, text: found.label }));
+    if (chipsFound.length >= 6) break;
+  }
+  return chipsFound;
+}
+const WAITS_WORDS = { github: "Reply draft", slack: "Slack draft", reply: "Reply draft", merge: "Ready to merge", question: "Question", form: "Form", link: "Link to open", signin: "Sign-in", workspace: "Where to work" };
+// Cards under Needs you from this task's worker about this task (one it names, else the task it
+// is on now).
+function ownerItems(task, worker) {
+  const about = (taskId) => (taskId ? taskId === task.id : worker?.task?.task_id === task.id);
+  const drafts = pendingDrafts().filter((draft) => draft.session_id === task.session_id && draft.kind !== "decision" && about(draft.target?.task_id));
+  const questions = ownerQuestions().filter((question) => question.session_id === task.session_id && about(question.task_id));
+  return { drafts, questions };
+}
+const waitsOnOwner = (task, worker) => {
+  const { drafts, questions } = ownerItems(task, worker);
+  return [...drafts.map((draft) => draft.id), ...questions.map((question) => question.at)].join(",");
+};
+export function artifacts(task, worker = byId(task.session_id), { active = true, prs = true } = {}) {
+  const items = [];
+  const shown = new Set();
+  for (const pr of task.receipts?.prs || []) {
+    shown.add(pr.label.toLowerCase());
+    if (prs) items.push(prChip(pr));
+  }
+  items.push(...linkChips(task, shown));
+  if (active && worker && ["running", "waiting"].includes(task.status)) {
+    for (const key of worker.follows || []) {
+      const pr = /^github:(.+)$/.exec(key)?.[1];
+      if (pr && shown.has(pr.toLowerCase())) continue;
+      const label = pr ? pr.replace(/^[^/]+\//, "") : key.startsWith("slack:") ? "a Slack thread" : key;
+      items.push(el("span", { class: "receipt watching", title: `It follows ${key}: what happens there comes to it`, text: `Watching ${label}` }));
+    }
+  }
+  const { drafts, questions } = ownerItems(task, worker);
+  for (const draft of drafts) items.push(el("button", { type: "button", class: "receipt needs", title: "Waiting for you under Needs you", text: `${WAITS_WORDS[draft.kind] || "Draft"} · Needs you`, onclick: () => focusDraft(draft.id) }));
+  for (const question of questions) items.push(el("button", { type: "button", class: "receipt needs", title: question.text, text: "Question · Needs you", onclick: () => focusQuestion(question.session_id) }));
+  return items.length ? el("div", { class: "artifacts receipts" }, ...items) : null;
 }
 // A worker with several open tasks, as one card: the worker and what it does now, then each of
 // its tasks a line: where it stands (on it now, waiting its turn, waiting for you, queued), for
 // how long, and its own latest progress. The owner sees at once which task moves.
 export function workerGroupItem(worker, list) {
-  const rows = list.map((task) => `${task.id}:${task.status}:${task.updated_at}:${task.progress?.length || 0}`).join(",");
+  const rows = list.map((task) => `${task.id}:${task.status}:${task.updated_at}:${task.progress?.length || 0}:${JSON.stringify(task.receipts?.prs || null)}:${waitsOnOwner(task, worker)}`).join(",");
   return {
     key: `worker:${worker.id}:${list.map((task) => task.id).join(",")}`,
     id: worker.id,
-    version: `${worker.status}:${worker.step || ""}:${worker.activity || ""}:${worker.said_at || ""}:${worker.step_since || ""}:${worker.task?.task_id || ""}:${rows}:${Math.floor(Date.now() / 60000)}`,
+    version: `${worker.status}:${worker.step || ""}:${worker.activity || ""}:${worker.step_since || ""}:${worker.task?.task_id || ""}:${(worker.follows || []).join(",")}:${rows}:${Math.floor(Date.now() / 60000)}`,
     build: () => workerGroupCard(worker, list),
     refresh: (node) => node.replaceChildren(...workerGroupCard(worker, list).childNodes),
   };
@@ -333,7 +424,8 @@ function taskState(task, worker, active) {
   if (!current) return ["‖", "paused", "waits its turn"];
   const started = ago(task.created_at);
   if (worker.status === "working") return ["●", "now", `on it now${started === "now" ? "" : ` · ${started}`}`];
-  return ["●", "now", worker.activity?.startsWith("waiting for") ? worker.activity : "between turns"];
+  if (worker.activity?.startsWith("waiting for")) return ["●", "now", worker.activity];
+  return ["○", "now", (worker.follows || []).length ? "waiting on others" : "between turns"];
 }
 function workerGroupCard(worker, list) {
   const order = { running: 0, waiting: 1, queued: 2 };
@@ -341,12 +433,8 @@ function workerGroupCard(worker, list) {
   const current = (task) => (active === task.id ? -1 : 0);
   const sorted = [...list].sort((a, b) => current(a) - current(b) || order[a.status] - order[b.status] || a.created_at.localeCompare(b.created_at));
   const working = worker.status === "working";
-  const line = worker.step || worker.activity || (working ? "Working…" : quiet(worker));
-  const long = worker.step_since && ago(worker.step_since) !== "now";
   const rows = sorted.map((task) => {
     const [mark, kind, words] = taskState(task, worker, active);
-    const said = task.progress || (kind === "now" ? worker.said : "") || "";
-    const at = task.progress ? task.updated_at : worker.said_at;
     const confirmCancel = async () => {
       if (!confirm(`Cancel “${task.title}”? Its worker stops working on it.`)) return;
       try {
@@ -362,46 +450,50 @@ function workerGroupCard(worker, list) {
       el("span", { class: "mark", text: mark, title: words }),
       el("div", { class: "row-main" },
         el("div", { class: "row-head" },
-          el("button", { type: "button", class: "title link", text: task.title, title: task.goal || task.title, onclick: () => select(worker.id) }),
-          el("span", { class: "state", text: words }),
-          moreMenu([{ text: "Open worker", onclick: () => select(worker.id) }, { text: "Cancel task…", onclick: confirmCancel, danger: true }])),
-        said ? el("div", { class: "said", title: said }, `“${said.replace(/\s+/g, " ").trim()}”`, at ? el("span", { class: "when", text: ` · ${since(at)}` }) : "") : null),
+          el("button", { type: "button", class: "title link", text: task.title, title: `${task.goal || task.title}\n\nOpen its worker at this task`, onclick: () => select(worker.id, { task: task.id }) }),
+          el("span", { class: "state", text: words, title: words }),
+          moreMenu([{ text: "Open worker", onclick: () => select(worker.id, { task: task.id }) }, { text: "Cancel task…", onclick: confirmCancel, danger: true }])),
+        progressLine(task.progress, task.updated_at),
+        artifacts(task, worker, { active: kind === "now" })),
     );
   });
   return el(
     "div",
     { class: "card task worker-group running", "data-session": worker.id },
     el("div", { class: "head" },
-      el("span", { class: `dot ${working ? "working" : "done"}` }),
+      el("span", { class: `dot ${working ? "working" : "watching"}`, title: working ? "Working now" : "Between steps" }),
       el("button", { type: "button", class: "title", text: worker.title, title: "Open the worker", onclick: () => select(worker.id) }),
       el("span", { class: "meta", text: plural(list.length, "task") })),
-    el("div", { class: "task-body" },
-      el("div", { class: "activity", title: line }, worker.step ? "Now: " : "", compactPaths(line.replace(/^(bash|shell|powershell) /, "$ "), worker.cwd), long ? el("span", { class: "when", text: ` · ${ago(worker.step_since)}` }) : "")),
+    el("div", { class: "task-body" }, activityLine(worker)),
     el("ol", { class: "task-rows" }, ...rows),
   );
+}
+// What a worker does right now: the step it is in and for how long, or how long it has been
+// quiet and what it watches meanwhile. What it said last is in the tooltip.
+function activityLine(worker) {
+  const working = worker?.status === "working";
+  const raw = worker?.step || worker?.activity || "";
+  const line = raw ? stepText(raw, worker?.cwd) : working ? "Thinking…" : quiet(worker);
+  const long = worker?.step_since && ago(worker.step_since) !== "now";
+  const said = worker?.said ? `\n\nSaid last: ${worker.said.replace(/\s+/g, " ").slice(0, 400)}` : "";
+  // What it runs, in the tooltip: the line says what it is for.
+  const command = worker?.step_command && worker.step_command !== raw ? `\n${worker.step_command}` : "";
+  return el("div", { class: "activity", title: `${raw || line}${command}${said}` }, worker?.step ? "Now: " : "", line, long ? el("span", { class: "when", text: ` · ${ago(worker.step_since)}` }) : "");
 }
 // A running task at a glance: which worker has it and whether that worker is on it right now
 // (a worker with several tasks works on one at a time); the step it is in and for how long, or
 // how long it has been quiet and what it waits for; and this task's own latest progress.
 function runningBody(task, worker) {
   const nodes = [];
-  const named = worker && worker.title !== task.title;
   // Its newest task done or in review: it is back on this one.
   const current = !worker?.task || worker.task.task_id === task.id || worker.task.status !== "running";
-  if (!current) {
-    nodes.push(el("div", { class: "reason", text: `Waiting: its worker “${worker.title}” is on “${worker.task.title}” now` }));
-  } else {
-    const working = worker?.status === "working";
-    const line = worker?.step || worker?.activity || (working ? "Working…" : quiet(worker));
-    const command = compactPaths(line.replace(/^(bash|shell|powershell) /, "$ "), worker?.cwd);
-    const long = worker?.step_since && ago(worker.step_since) !== "now";
-    nodes.push(el("div", { class: "activity", title: line }, worker?.step ? "Now: " : "", command, long ? el("span", { class: "when", text: ` · ${ago(worker.step_since)}` }) : ""));
-  }
-  if (named && current) nodes.push(el("div", { class: "worker-line", text: `Worker: ${worker.title}` }));
-  // Its own progress: what it last reported on this task, else (on it now) what it said last.
-  const said = task.progress ? task.progress : current && worker?.said ? worker.said : "";
-  const at = task.progress ? task.updated_at : worker?.said_at;
-  if (said) nodes.push(el("div", { class: "said", title: said }, `“${said.replace(/\s+/g, " ").trim()}”`, at ? el("span", { class: "when", text: ` · ${since(at)}` }) : ""));
+  if (!current) nodes.push(el("div", { class: "reason", text: `Waits its turn: its worker is on “${worker.task.title}” now` }));
+  else nodes.push(activityLine(worker));
+  // Its own progress: what it last reported on this task (not its asides while it works).
+  const progress = progressLine(task.progress, task.updated_at);
+  if (progress) nodes.push(progress);
+  const found = artifacts(task, worker, { active: current });
+  if (found) nodes.push(found);
   return el("div", { class: "task-body" }, ...nodes);
 }
 // A worker between turns on a running task: how long it has been quiet, and what it follows.
@@ -422,12 +514,15 @@ function prChip(pr) {
   const short = pr.label.replace(/^[^/]+\//, "");
   const ci = { passing: "✓ CI", failing: "✗ CI", pending: "CI running" }[pr.checks] || "";
   const state = pr.state === "MERGED" ? "merged" : pr.state === "CLOSED" ? "closed" : "";
+  // An approval gate (an "Owner Approval" check) waits for a person, not for CI.
+  const awaiting = !state && pr.awaiting?.length ? "awaiting approval" : "";
+  const ready = !state && !awaiting && pr.checks !== "failing" && ["CLEAN", "HAS_HOOKS"].includes(pr.merge_state) && !pr.draft ? "ready to merge" : "";
   const review = { APPROVED: "approved", CHANGES_REQUESTED: "changes requested" }[pr.review] || "";
   const failing = pr.checks === "failing" && pr.failing?.length ? `\nFailing: ${pr.failing.join(", ")}` : "";
   const ciWords = { passing: "Checks pass", failing: "Checks fail", pending: "Checks are running", none: "No checks" }[pr.checks] || "";
   const seen = pr.at ? `\nAs of ${new Date(pr.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` : "";
-  const title = [pr.label, ciWords + failing, review && `Review: ${review}`, state && `PR ${state}`].filter(Boolean).join("\n") + seen;
-  return el("a", { class: `receipt pr ${state || pr.checks}`, href: pr.url, target: "_blank", rel: "noreferrer", title, text: [short, state || ci, !state && review].filter(Boolean).join(" · ") });
+  const title = [pr.label, pr.title ? `“${pr.title}”` : "", ciWords + failing, awaiting && `Waiting for approval: ${pr.awaiting.join(", ")}`, review && `Review: ${review}`, ready && "GitHub would merge it now", state && `PR ${state}`].filter(Boolean).join("\n") + seen;
+  return el("a", { class: `receipt pr ${state || pr.checks}`, href: pr.url, target: "_blank", rel: "noreferrer", title, text: [short, state || ci, !state && (awaiting || review), ready].filter(Boolean).join(" · ") });
 }
 // What was observed while it worked, at a glance: the verdict, tests, changes and PRs.
 function chips(task) {
@@ -458,6 +553,8 @@ function chips(task) {
   const changed = receipts?.changed || {};
   if (changed.files) items.push(el("button", { type: "button", class: "receipt changes", title: "See the changes and comment on them", text: `+${changed.insertions} −${changed.deletions} in ${plural(changed.files, "file")}`, onclick: () => showChanges(task, upsertTask) }));
   for (const pr of receipts?.prs || []) items.push(prChip(pr));
+  const prs = new Set((receipts?.prs || []).map((pr) => pr.label.toLowerCase()));
+  items.push(...linkChips(task, prs));
   const flags = (receipts?.flags || []).map((flag) => el("div", { class: "flag", text: flag }));
   const toggle = el("button", { type: "button", class: "expand link", text: "Show report", onclick: (event) => expandTask(event.currentTarget.closest(".card")) });
   return el("div", { class: "chips" }, el("div", { class: "receipts", title: "Observed while it worked, not just reported" }, ...items, toggle), ...flags);
