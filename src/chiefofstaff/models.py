@@ -102,6 +102,9 @@ class Settings(StrictModel):
     learn_from_work: bool = True
     learn_checks: bool = True
     worker_idle_hours: int = Field(default=24, ge=1, le=720)
+    # A running task with no activity, nothing it waits on and no check-back for this long is
+    # stalled: its worker is asked once where it stands, and the owner sees it under Stalled.
+    stall_hours: int = Field(default=4, ge=1, le=168)
     # Workers act without permission checks, as the owner's own Copilot sessions do; they still
     # follow their instructions. Workers that read Slack keep the checks unless set per worker.
     worker_yolo: bool = True

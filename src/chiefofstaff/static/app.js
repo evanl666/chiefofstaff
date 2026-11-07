@@ -1,6 +1,6 @@
 // Chief of Staff's web UI: starts the page and wires its controls.
 
-import { $, api, closeMenus, closeOnBackdrop, submits, toast } from "./dom.js";
+import { $, api, closeMenus, closeOnBackdrop, rememberKey, submits, toast } from "./dom.js";
 import { byId, connectEvents, current, HOME, loadModels, loadState, markRead, routerId, state, viewedId } from "./state.js";
 import { externalItem, loadExternal } from "./sidebar.js";
 import { appendMessages, renderHeader, scrollToBottom, select } from "./session.js";
@@ -137,7 +137,8 @@ function bindUi() {
 async function boot() {
   const token = new URLSearchParams(location.hash.slice(1)).get("token");
   if (token) {
-    await fetch("/api/auth", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token }) });
+    const response = await fetch("/api/auth", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token }) });
+    if (response.ok) rememberKey(token);
     history.replaceState(null, "", "/");
   }
   try {

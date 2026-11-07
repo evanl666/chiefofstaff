@@ -36,7 +36,7 @@ PNG = base64.b64decode(
 # Every field Settings saves, as the page posts them: a tab layout must not lose one.
 SETTINGS_FIELDS = {
     "projects", "code_folder", "scratch_directory", "max_workers", "worker_yolo",
-    "worker_sandbox", "shared_caches", "sandbox_writable", "worker_idle_hours",
+    "worker_sandbox", "shared_caches", "sandbox_writable", "worker_idle_hours", "stall_hours",
     "mac_notifications", "watchdog_enabled", "slack_enabled", "slack_poll_seconds",
     "slack_delegate_emoji", "github_enabled", "github_repos", "copilot_command", "model",
     "role_models", "role_efforts", "worker_credit_limit", "digest_time", "learn_from_work",
@@ -492,7 +492,7 @@ async def home(runtime, browser, failures: list[str]):
 
     # Every worker at work shows under Running: one whose task is finished, handling news on
     # a PR it follows; and one at work whose card waits for the owner, marked so.
-    running = page.locator("#tasks-running .card")
+    running = page.locator("#tasks-running .card.task")
 
     async def spawn(title):
         made = await call_tool(
@@ -506,14 +506,14 @@ async def home(runtime, browser, failures: list[str]):
     await call_tool(runtime, "report", follow_up, status="done", summary="Reviewed.")
     runtime.update_session(follow_up, status="working", activity="reading the reply")
     card = running.filter(has_text="Review api PR #12")
-    await expect(card).to_contain_text("following up on “Review api PR #12”")
+    await expect(card).to_contain_text("Following up on your message")
     worker = await spawn("Ship the docs")
     runtime.update_session(worker, status="working")
     card_draft = store.create_draft(worker, "reply", {"to": "Al", "where": "email"}, "Hi")
     runtime.bus.publish("draft", store.draft(card_draft["id"]))
     shown = running.filter(has_text="Ship the docs")
     await expect(shown).to_have_count(1)
-    await expect(shown.locator(".chip", has_text="Needs you")).to_be_visible()
+    await expect(shown.locator(".receipt.needs", has_text="Needs you")).to_be_visible()
     log("Running shows every worker at work: a follow-up on finished work, one waiting on a card")
     await context.close()
 
@@ -732,41 +732,38 @@ async def round_two(runtime, browser, failures: list[str]):
     def titled(title):
         return board.locator(".card.task").filter(has=page.locator(".head .title", has_text=title))
 
-    # One card for the worker, a line per task: the new one it is on first, the earlier one
-    # waiting its turn.
-    group = board.locator(".card.worker-group").filter(
-        has=page.locator(".head .title", has_text="Editor event paths")
+    # A worker with two tasks: the one it is on under Running, the other under Queued, waiting
+    # its turn; the worker's box in each.
+    running_box = board.locator(f'#tasks-running .card.worker-box[data-session="{first}"]')
+    queued_box = board.locator(f'#tasks-queued .card.worker-box[data-session="{first}"]')
+    await expect(running_box.locator(".card.task")).to_have_count(1, timeout=15000)
+    await expect(running_box.locator(".card.task .head .title")).to_have_text(
+        "Fix review comments on lms"
     )
-    rows = group.locator(".task-row")
-    await expect(rows).to_have_count(2, timeout=15000)
-    await expect(group.locator(".head .meta")).to_have_text("2 tasks")
-    await expect(rows.nth(0).locator(".title")).to_have_text("Fix review comments on lms")
-    await expect(rows.nth(0)).to_have_class(re.compile(r"\bnow\b"))
-    await expect(rows.nth(0).locator(".state")).to_contain_text("on it now")
-    await expect(rows.nth(1).locator(".title")).to_have_text("Editor event paths")
-    await expect(rows.nth(1).locator(".state")).to_have_text("waits its turn")
-    await expect(group.locator(".activity")).to_have_count(1)
-    assert await titled("Fix review comments on lms").count() == 0, "not a card of its own too"
-    await group.screenshot(path=SHOTS / "ui-edges-worker-group.png")
-    # A step it began before the newer task came (a long sleep) is about the earlier task.
-    newer = next(t for t in runtime.tasks.for_session(first) if t["title"].startswith("Fix"))
-    store.execute("UPDATE tasks SET created_at=? WHERE id=?",
-                  ("2099-01-01T00:00:00+00:00", newer["id"]))  # fmt: skip
+    await expect(running_box.locator(".box-head .meta")).to_contain_text("also: Queued")
+    await expect(queued_box.locator(".card.task .head .title")).to_have_text("Editor event paths")
+    await expect(queued_box.locator(".reason")).to_contain_text("Waits its turn")
+    await expect(running_box.locator(".activity")).to_have_count(1)
+    await running_box.screenshot(path=SHOTS / "ui-edges-worker-group.png")
+    # Its conversation takes up the earlier task again: that one runs now, the newer waits.
+    earlier = next(
+        task for task in runtime.tasks.for_session(first) if task["title"] == "Editor event paths"
+    )
     runtime.states.handle(first).emit(
-        "tool.execution_start", tool_name="bash", tool_call_id="sleep-1",
-        arguments={"command": "sleep 150"},
-    )  # fmt: skip
-    runtime.task_actions.publish(runtime.tasks.get(newer["id"]))
-    await expect(rows.nth(0).locator(".title")).to_have_text("Editor event paths", timeout=10000)
-    await expect(rows.nth(1).locator(".state")).to_have_text("waits its turn")
-    runtime.states.handle(first).emit("tool.execution_complete", tool_call_id="sleep-1",
-                                      success=True)  # fmt: skip
-    store.execute("UPDATE tasks SET created_at=? WHERE id=?",
-                  (newer["created_at"], newer["id"]))  # fmt: skip
-    runtime.task_actions.publish(runtime.tasks.get(newer["id"]))
+        "user.message",
+        content=f'<message from="owner" type="message" task="{earlier["id"]}">\nGo on\n</message>',
+    )
+    await settle(runtime)
+    runtime.publish_session(store.session(first))
+    await expect(running_box.locator(".card.task .head .title")).to_have_text(
+        "Editor event paths", timeout=10000
+    )
+    await expect(queued_box.locator(".card.task .head .title")).to_have_text(
+        "Fix review comments on lms"
+    )
     idle = titled("Buyer Group Graph 7-pager")
     await expect(idle.locator(".activity")).to_contain_text("Quiet since")
-    log("a worker with two tasks: the one it is on, and the next; a quiet one says since when")
+    log("a worker with two tasks: the one it is on runs, the next waits; a quiet one says since")
 
     update = page.locator("#tasks-review .card.task", has_text="Filter opt-outs before inference")
     await expect(update.locator(".news")).to_contain_text("approved and ready to merge")
@@ -788,7 +785,7 @@ async def round_two(runtime, browser, failures: list[str]):
     await line_reply.screenshot(path=SHOTS / "ui-edges-reply-resolve.png")
     log("a reply on a line can resolve its conversation; one in the conversation names its author")
 
-    card = rows.nth(0)
+    card = running_box.locator(".card.task").first
     await card.locator(".more-button").click()
     danger = card.locator(".menu button.danger")
     await expect(danger).to_have_text("Cancel task…")
@@ -912,23 +909,26 @@ async def round_three(runtime, browser, failures: list[str]):
     await expect(dot("Count the orders")).to_have_class(re.compile(r"\bdone\b"))
     await expect(dot("CoS bug bash")).to_have_class(re.compile(r"\bworking\b"))
     await page.locator("#session-list .legend-toggle").click()
-    await expect(page.locator("#session-list .legend .legend-row")).to_have_count(8)
+    await expect(page.locator("#session-list .legend .legend-row")).to_have_count(9)
     await page.locator("#session-list .legend-toggle").click()
     await expect(page.locator("#session-list .legend")).to_have_count(0)
     log("sidebar dots follow Home (needs you, working, waiting on others, review), with a legend")
 
-    group = page.locator("#tasks-running .card.worker-group", has_text="CoS bug bash")
-    await expect(group.locator(".task-row")).to_have_count(2)
-    card_box = await group.bounding_box()
-    for index in range(2):
-        row = group.locator(".task-row").nth(index)
-        box = await row.bounding_box()
-        assert box["width"] <= card_box["width"], (box, card_box)
-        state_box = await row.locator(".state").bounding_box()
-        assert state_box["x"] + state_box["width"] <= card_box["x"] + card_box["width"] + 1
+    group = page.locator(f'#tasks-running .card.worker-box[data-session="{busy}"]')
+    waits = page.locator(f'#tasks-queued .card.worker-box[data-session="{busy}"]')
+    await expect(group.locator(".card.task")).to_have_count(1)
+    await expect(group.locator(".card.task .head .title")).to_have_text("CoS bug bash")
+    await expect(waits.locator(".card.task .head .title")).to_have_text("Research the Slack bot")
+    for box in (group, waits):
+        card_box = await box.bounding_box()
+        row = box.locator(".card.task").first
+        row_box = await row.bounding_box()
+        assert row_box["width"] <= card_box["width"], (row_box, card_box)
+        meta_box = await row.locator(".head .meta").bounding_box()
+        assert meta_box["x"] + meta_box["width"] <= card_box["x"] + card_box["width"] + 1
         menu_box = await row.locator(".more-button").bounding_box()
         assert menu_box["x"] + menu_box["width"] <= card_box["x"] + card_box["width"] + 1
-    assert not await group.evaluate(OVERFLOWS), await group.evaluate(OVERFLOWS)
+        assert not await box.evaluate(OVERFLOWS), await box.evaluate(OVERFLOWS)
     progress = group.locator(".progress-line").first
     await expect(progress).not_to_contain_text("**")
     await expect(progress).to_contain_text("Status: fixed B16")
@@ -936,29 +936,38 @@ async def round_three(runtime, browser, failures: list[str]):
     height = await progress.evaluate("n => n.getBoundingClientRect().height")
     line = await progress.evaluate("n => parseFloat(getComputedStyle(n).lineHeight)")
     assert height <= line * 2.2, (height, line)
+    # When it reported is on its own line, never cut off with the words.
+    when = group.locator(".progress > .when").first
+    await expect(when).to_contain_text("Reported")
+    when_box, line_box = await when.bounding_box(), await progress.bounding_box()
+    assert when_box["y"] >= line_box["y"] + line_box["height"] - 1, (when_box, line_box)
     await group.screenshot(path=SHOTS / "ui-edges-worker-card.png")
     await progress.click()
     assert await progress.evaluate("n => n.getBoundingClientRect().height") > height * 2
+    # Redrawn (a new step), the report it opened stays open.
+    runtime.update_session(busy, status="working", activity="Measure the row overflow again")
+    await expect(group.locator(".activity")).to_contain_text("again")
+    assert await progress.evaluate("n => n.classList.contains('open')")
     await progress.click()
-    chips_now = group.locator(".task-row").first.locator(".artifacts")
+    chips_now = group.locator(".card.task").first.locator(".artifacts")
     await expect(chips_now.locator(".receipt", has_text="Google Doc")).to_be_visible()
     await expect(chips_now.locator(".receipt", has_text="app#592")).to_be_visible()
     await expect(group.locator(".activity")).to_contain_text("Measure the row overflow")
-    log("a worker's card: each task a row in the card, its progress in two clean lines, its links")
+    log("a worker's box per section: its task there, two clean lines, when apart, its links")
 
     asking_card = page.locator("#tasks .card.task", has_text="Answer Carol")
     if await asking_card.count():
         await expect(asking_card.locator(".receipt.needs")).to_be_visible()
-    watching = page.locator("#tasks-watching .card.task", has_text="Watch CI on #12")
+    watching = page.locator("#tasks-monitoring .card.task", has_text="Watch CI on #12")
     await expect(watching).to_be_visible()
     await expect(watching.locator(".receipt.watching")).to_have_text("Watching app#12")
     counts = await page.evaluate("""() => {
       const n = (id) => Number(document.querySelector(`#${id} .count`)?.textContent || 0);
-      return [n("tasks"), n("tasks-running") + n("tasks-watching") + n("tasks-queued")
-              + n("tasks-review")];
+      return [n("tasks"), n("tasks-running") + n("tasks-monitoring") + n("tasks-stalled")
+              + n("tasks-queued") + n("tasks-review")];
     }""")
     assert counts[0] == counts[1], counts
-    log("waiting on others has its own group; the Tasks count is the sum of its groups")
+    log("monitoring has its own group; the Tasks count is the sum of its groups")
 
     rendered = page.locator("#timeline .markdown .table").last
     await expect(rendered.locator("tbody tr")).to_have_count(2)

@@ -1,7 +1,7 @@
 // The main pane: Home or one session, with its header, model settings and timeline.
 
-import { $, api, el, foldable, toast } from "./dom.js";
-import { clock, compactPaths, markdown, threadLabel } from "./text.js";
+import { $, api, el, foldable, toast, withKey } from "./dom.js";
+import { clock, compactPaths, firstLine, markdown, threadLabel } from "./text.js";
 import { byId, current, HOME, markRead, pendingDrafts, routerId, state, STATUS_TEXT, upsertSession, viewedId } from "./state.js";
 import { renderSidebar } from "./sidebar.js";
 import { focusDraft, focusTask, renderHome, renderHomeHeader, showHomeTab, welcomeCard, workerStates } from "./inbox.js";
@@ -321,12 +321,6 @@ function card({ label, body, className = "", status, time, open }) {
   }
   return node;
 }
-// The first line of a text, without its Markdown: what a one-line entry shows.
-function firstLine(text) {
-  const lines = text.split("\n").map((line) => line.replace(/^[#>*\-\s\d.]+/, "").replace(/[*_`]/g, "").trim()).filter(Boolean);
-  // Not a lead-in like "Results:" when something follows it.
-  return lines.find((line) => !/^[\p{L}\s]{1,24}:$/u.test(line)) || lines[0] || "";
-}
 // One line in the Home chat: a mark, what happened, a link to where it is; with `body`, it opens
 // in place to read it all.
 function eventLine({ mark = "·", kind = "", text, time, view = null, viewText = "View", body = "" }) {
@@ -492,8 +486,8 @@ function ownerMessage(text, meta = {}, time = "") {
         ...files.map((file) =>
           el(
             "a",
-            { href: file.url, target: "_blank", rel: "noreferrer", title: file.name },
-            file.type?.startsWith("image/") ? el("img", { src: file.url, alt: file.name, loading: "lazy" }) : el("span", { class: "file", text: file.name }),
+            { href: withKey(file.url), target: "_blank", rel: "noreferrer", title: file.name },
+            file.type?.startsWith("image/") ? el("img", { src: withKey(file.url), alt: file.name, loading: "lazy" }) : el("span", { class: "file", text: file.name }),
           ),
         ),
       ),

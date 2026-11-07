@@ -17,9 +17,9 @@ from typing import TYPE_CHECKING, Any
 
 from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
 
-from . import prompts, receipts
+from . import prompts, receipts, threads
 from .delivery import digest
-from .envelope import from_owner, wrap
+from .envelope import from_owner, task_named, wrap
 from .policy import permission_denial, written_file
 from .roles import ROUTER, SLACK, WORKER
 from .store import now
@@ -57,17 +57,50 @@ def describe_tool(name: str, arguments: Any) -> str:
     return f"{name} {detail}".strip()[:200]
 
 
+# Copilot's own tools, as what they do: "Reading app.py", not "view /w/app.py".
+STEP_WORDS = {
+    "view": "Reading {path}", "read": "Reading {path}", "read_file": "Reading {path}",
+    "edit": "Editing {path}", "str_replace": "Editing {path}", "apply_patch": "Editing files",
+    "str_replace_editor": "Editing {path}", "create": "Writing {path}", "write": "Writing {path}",
+    "grep": "Searching the code for “{pattern}”", "rg": "Searching the code for “{pattern}”",
+    "glob": "Finding files ({pattern})", "read_bash": "Reading a command's output",
+    "read_powershell": "Reading a command's output", "write_bash": "Typing into a command",
+    "write_powershell": "Typing into a command", "stop_bash": "Stopping a command",
+    "stop_powershell": "Stopping a command", "list_bash": "Checking its commands",
+    "web_fetch": "Reading {host}", "web_search": "Searching the web for “{query}”",
+    "task": "Running a helper agent", "read_agent": "Reading a helper agent's result",
+    "skill": "Loading a skill", "sql": "Updating its notes", "store_memory": "Saving a note",
+    "fetch_copilot_cli_documentation": "Reading Copilot's docs",
+}  # fmt: skip
+
+
 def describe_step(name: str, arguments: Any) -> str:
     """A step as the owner reads it on a card: what it is for when the call says so (a shell
-    command's description), else what it runs."""
+    command's description), else what the tool does in words (the command line for a shell
+    command without a description)."""
     if isinstance(arguments, str):
         try:
             arguments = json.loads(arguments)
         except json.JSONDecodeError:
             arguments = {}
-    described = arguments.get("description") if isinstance(arguments, dict) else None
+    arguments = arguments if isinstance(arguments, dict) else {}
+    described = arguments.get("description")
     if isinstance(described, str) and described.strip():
         return " ".join(described.split())[:200]
+    if words := STEP_WORDS.get(name):
+        path = str(arguments.get("path") or arguments.get("file_path") or "")
+        url = str(arguments.get("url") or "")
+        found = {
+            "path": os.path.basename(path.rstrip("/")) or "a file",
+            "pattern": " ".join(str(arguments.get("pattern") or "").split())[:60],
+            "query": " ".join(str(arguments.get("query") or "").split())[:60],
+            "host": re.sub(r"^https?://([^/]+).*", r"\1", url) or "a web page",
+        }
+        return words.format(**found).replace(" ()", "").replace("“”", "…")[:200]
+    if name.startswith("slack_"):
+        return "Searching Slack" if "search" in name else "Reading Slack"
+    if name.startswith(("github-", "github_")) or "github" in name:
+        return "Reading GitHub"
     return describe_tool(name, arguments)
 
 
@@ -82,6 +115,8 @@ TRANSIENT = re.compile(
     re.IGNORECASE,
 )
 RETRIES = 2
+# A shell command that opens a PR (its URL is in the output).
+OPENS_PR = re.compile(r"\bgh\s+pr\s+create\b|\bhub\s+pull-request\b")
 RETRY_WINDOW = 600
 RETRY_DELAY = float(os.environ.get("CHIEFOFSTAFF_RETRY_DELAY", "8"))
 # Copilot will not run the model asked for (a model or option the company does not allow).
@@ -122,8 +157,17 @@ class Events:
         command = str(arguments.get("command") or "").strip()
         if not command:
             return
-        # A worker may go on after reporting (a final push): that still belongs to its task.
-        run = self.tasks.run(session_id) or self.tasks.latest_run(session_id)
+        # The run of the task its turn is on (a task given meanwhile is not what it runs); a
+        # worker may go on after reporting (a final push): that still belongs to its task.
+        turn = self.runtime.turn_task(session_id)
+        run = (
+            self.store.one(
+                "SELECT * FROM runs WHERE task_id=? ORDER BY started_at DESC LIMIT 1", (turn,)
+            )
+            if turn
+            else None
+        )
+        run = run or self.tasks.run(session_id) or self.tasks.latest_run(session_id)
         self.store.execute(
             """INSERT INTO commands(session_id, run_id, call_id, command, kind, started_at)
             VALUES (?,?,?,?,?,?)""",
@@ -186,6 +230,13 @@ class Events:
             (kind, code, output[-600:], ran["ended_at"] or now(), ran["id"]),
         )
         self.runtime.checks.on_command(session_id, ran["call_id"])
+        if code == 0 and ran["run_id"] and OPENS_PR.search(ran["command"]):
+            # The PR it opened is its task's own work (not one its report only mentions).
+            run = self.store.one("SELECT task_id FROM runs WHERE id=?", (ran["run_id"],))
+            if run and (urls := threads.PR_URL.findall(output)):
+                self.runtime.task_actions.record_opened(
+                    run["task_id"], [f"https://github.com/{r}/pull/{n}" for r, n in urls[:3]]
+                )
         self.command_changed({**ran, "kind": kind})
 
     def command_changed(self, ran: dict):
@@ -258,6 +309,8 @@ class Events:
     def user_message(self, row: dict, event: Any):
         state = self.states[row["id"]]
         state.echoes = True
+        if row["role"] == WORKER and (named := task_named(getattr(event.data, "content", ""))):
+            self.store.set(f"turntask:{row['id']}", named)  # What its turn is about now.
         if state.unread:
             # It sees a message now: that one (or, changed on the way, the oldest).
             seen = digest(getattr(event.data, "content", "") or "")
@@ -267,6 +320,7 @@ class Events:
         state.event_turn = not owner
         state.owner_reply = bool(owner)
         state.turn_decisions, state.turn_tasks = [], []
+        state.turn_check_backs = set()
         state.turn_tools = 0
 
     def assistant_message(self, row: dict, event: Any):
@@ -404,11 +458,15 @@ class Events:
         status = row["status"]
         if status == "working":
             status = state.pop_resting("idle")
-            task = self.tasks.current(session_id) if row["role"] == WORKER else None
-            if task and task["status"] == "running":
-                # Its task is open (given or reopened during the turn): it reports, or its
-                # answer is filed as its report. Never "done" with the task left running.
-                status = "idle"
+        if (
+            status == "done"
+            and row["role"] == WORKER
+            and any(task["status"] == "running" for task in self.tasks.for_session(session_id))
+        ):
+            # One of its tasks is open (given or reopened during the turn, or one it did not
+            # report on): it reports, or its answer is filed as its report. Never "done" with a
+            # task left running.
+            status = "idle"
         self.runtime.update_session(session_id, status=status, activity="")
         if (
             state.close_after_turn

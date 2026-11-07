@@ -25,8 +25,17 @@ function errorText(data, status) {
   }
   return `Request failed (${status})`;
 }
+// The launch token, kept in this origin's storage (a cookie would reach every local server).
+const KEY = "cos.key";
+export const launchKey = () => localStorage.getItem(KEY) || "";
+export const rememberKey = (key) => localStorage.setItem(KEY, key);
+// A URL of ours the browser loads itself (an image, the event stream): with the token.
+export function withKey(url) {
+  if (!url || !url.startsWith("/api/")) return url;
+  return `${url}${url.includes("?") ? "&" : "?"}key=${encodeURIComponent(launchKey())}`;
+}
 export async function api(path, { method = "GET", body } = {}) {
-  const init = { method, headers: {}, credentials: "same-origin" };
+  const init = { method, headers: { "X-Chief-Key": launchKey() }, credentials: "omit" };
   if (body !== undefined) {
     init.headers["Content-Type"] = "application/json";
     init.body = JSON.stringify(body);

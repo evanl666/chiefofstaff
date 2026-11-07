@@ -338,8 +338,10 @@ class SlackSource:
                         # thread reply, say): it goes to the followers, not the Router.
                         bucket = for_followers.setdefault(hit, ([], []))
                         if key not in bucket[0]:
+                            # Only its own messages: the page has other conversations too.
                             bucket[0].append(key)
-                            bucket[1].append(text[:MAX_RESULT_CHARS])
+                            stamp_text = key.removeprefix("slack:")
+                            bucket[1].append(threads.slack_entries(text, {stamp_text}))
                         continue
                     fresh.append(key)
                     thread_keys += keys

@@ -54,6 +54,7 @@ async def test_router_routes_work_and_worker_reports_back(harness):
         "report",
         "follow_thread",
         "unfollow_thread",
+        "check_back",
         "draft_reply",
         "draft_github_review",
         "find_sessions",
@@ -418,7 +419,12 @@ async def test_slack_session_drafts_and_owner_decides(tmp_path):
     harness.mcp.fail_send = True
     with pytest.raises(RuntimeError, match="Sending failed"):
         await runtime.drafts.resolve(third["id"], DraftDecision(action="send"))
-    assert harness.store.draft(third["id"])["status"] == "failed"
+    kept = harness.store.draft(third["id"])
+    assert kept["status"] == "pending", "the card stays to send again"
+    assert kept["outcome"].startswith("Sending failed")
+    harness.mcp.fail_send = False
+    await runtime.drafts.resolve(third["id"], DraftDecision(action="send"))
+    assert harness.store.draft(third["id"])["status"] == "sent"
 
     fourth = await draft("Thanks!")
     harness.mcp.fail_send = False

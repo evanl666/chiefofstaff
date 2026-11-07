@@ -30,7 +30,7 @@ tool allowlist, permission and request callbacks, sandbox, model.
 
 | Module | Responsibility |
 | --- | --- |
-| `__main__.py`, `web.py` | Command line; HTTP API, auth (launch token cookie, same-origin writes, CSP), SSE. |
+| `__main__.py`, `web.py` | Command line; HTTP API, auth (the launch key kept by the page and sent as an `X-Chief-Key` header, or `?key=` where a header cannot go: SSE, images; same-origin writes, CSP), SSE. |
 | `runtime.py` | `Runtime`: the Copilot connection, each session's lifecycle (create, resume, rotate), session options, external events and threads, the UI snapshot. It creates the parts below; each keeps a reference to it. |
 | `events.py` | What sessions report as they work: one small handler per event type. |
 | `delivery.py` | Messages to sessions: stored, batched, sent, checked after a restart. |
@@ -51,7 +51,7 @@ tool allowlist, permission and request callbacks, sandbox, model.
 | `decisions.py` | Decision cards; the owner's decisions and the tasks that rely on them; telling those tasks when one changes. |
 | `learning.py` | The owner's feedback; lessons a learning worker proposes and the owner approves; how often the owner agrees. |
 | `habits.py` | The owner's own words, read from Slack, GitHub, git and their Copilot sessions; the style learned from them (versioned, undoable) and which sessions get it. |
-| `connector.py` | The connector: one helper worker that reaches the owner's world with whatever tools Copilot has (Slack, Glean, mail). Runs the owner's watches on a schedule and hands findings to the Router as `watch` events; collects the owner's own words for `habits.py`; when the owner is away (idle keyboard), tells them what needs them, with codes, and applies their answers. It reads untrusted content, so it is sandboxed like a Slack reader (network to GitHub only); the away message itself goes through a separate `messenger` helper, given only Chief of Staff's text in a file and sandboxed as the owner's workers are, so a company bot's CLI can send it. |
+| `connector.py` | The connector: one helper worker that reaches the owner's world with whatever tools Copilot has (Slack, Glean, mail). Runs the owner's watches on a schedule and hands findings to the Router as `watch` events; collects the owner's own words for `habits.py`; when the owner is away (idle keyboard), tells them what needs them (a gist of up to five items, each with a random single-use code), and applies their answers. It reads untrusted content, so it is sandboxed like a Slack reader (network to GitHub only); the away message itself goes through a separate `messenger` helper, given only Chief of Staff's text in a file and sandboxed as the owner's workers are, so a company bot's CLI can send it; the messenger alone reports that it sent (`report_notified`) and reads the owner's answers the same way (`report_owner_replies`). |
 | `abilities.py` | Skills the owner uploads or names, Copilot plugins installed from Settings (`copilot plugin install`), and MCP servers from Settings, added to workers' options. |
 | `checks.py` | Failure cases kept from workers' test runs; checks proposed from them, proven in a sandbox on both versions, approved, then run when a worker reports done. |
 | `envelope.py` | The envelope every message to a session is wrapped in. |
@@ -164,7 +164,11 @@ both Copilot sessions to the same Router.
 The UI is plain ES modules in `static/`, with no build step: `app.js` starts the page;
 `state.js` loads a snapshot (`/api/state`) and applies SSE events (`message`, `session`, `task`,
 `draft`, `toast`, `state`, `focus_summary`); `inbox.js` renders Home (the Router's chat beside
-Needs you and the task board in `tasks.js`), and `session.js`, `sidebar.js`, `drafts.js`,
+Needs you and the task board). `board.js` (pure, tested with node) places each task in a section
+(running, monitoring, stalled, queued, review, finished, or needs you) from its status, its
+worker's state, the task its worker's turn is on (`turn_task`), `check_back`, the threads it
+watches and when it was last active; `tasks.js` draws a box per worker per section with its task
+cards. `session.js`, `sidebar.js`, `drafts.js`,
 `composer.js` (the message box, with images) and `settings.js` render their parts; `dom.js` and `text.js` are helpers (the Markdown subset is
 escaped first). Writes are REST calls. Cards are reconciled by key and refreshed in place, so a
 half-typed reply survives updates. ESLint checks the modules in CI.

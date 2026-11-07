@@ -11,6 +11,7 @@ import os
 import re
 from collections.abc import Sequence
 from contextlib import suppress
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
@@ -31,6 +32,7 @@ from .policy import within
 from .roles import ROUTER, SLACK, WATCHDOG, WORKER
 from .sources.github import NO_ACCESS, diff_lines, snippet
 from .store import ago_minutes, now
+from .tasks import OPEN
 from .workspaces import resolve_project
 
 if TYPE_CHECKING:
@@ -151,6 +153,35 @@ class AddRepo(BaseModel):
     )
 
 
+ACK_WORDS = {
+    "thanks", "thank", "thx", "ty", "received", "noted", "ok", "okay", "great", "perfect",
+    "cool", "nice", "got", "acknowledged", "lgtm", "awesome", "appreciated", "cheers",
+}  # fmt: skip
+ACK_FILLER = {
+    "you", "it", "this", "that", "a", "lot", "so", "much", "very", "for", "the", "update",
+    "report", "work", "looks", "good", "all", "and", "job", "well", "done", "nice", "will",
+    "take", "look", "i", "we", "have", "has", "been", "is",
+}  # fmt: skip
+ACK_CJK = re.compile(
+    r"谢谢|感谢|多谢|收到|好的|明白了?|了解|辛苦了?|知道了|没问题|很好|不错|嗯|好|啦|了"
+)
+
+
+def acknowledgement(text: str) -> bool:
+    """Whether a message only acknowledges (“Thanks, received.”, “收到 谢谢”): nothing to do."""
+    text = text.strip().lower()
+    if not text or len(text) > 80 or "?" in text or "\uff1f" in text:
+        return False
+    words = re.findall(r"[a-z']+", text)
+    cjk = re.findall(r"[\u4e00-\u9fff]+", text)
+    if any(ACK_CJK.sub("", run) for run in cjk):
+        return False
+    if re.search(r"\d", text):
+        return False
+    acked = any(word in ACK_WORDS for word in words) or bool(cjk)
+    return acked and all(word in ACK_WORDS | ACK_FILLER for word in words)
+
+
 class MessageSession(BaseModel):
     session_id: str = Field(
         description="Target session id: from list_sessions, or the short id in a message's "
@@ -167,6 +198,11 @@ class MessageSession(BaseModel):
         "a new task in the same session, reusing its context (give a title; also for another "
         "subject, and for more work on a task the owner accepted), or note: tell it something "
         "without changing any task (an answer to its question, an acknowledgement, an FYI)",
+    )
+    task_id: str = Field(
+        default="",
+        description="For continue or note: the id (t…) of the worker's task this is about. "
+        "Needed when it has several open tasks; default its current task",
     )
     title: str = Field(default="", description="Title of the new task when task='new'")
     done_when: list[str] = Field(
@@ -318,6 +354,20 @@ class FollowThread(BaseModel):
     )
 
 
+class CheckBack(BaseModel):
+    minutes: int = Field(
+        ge=5,
+        le=7 * 24 * 60,
+        description="When to be woken, in minutes from now (5 minutes to 7 days)",
+    )
+    what: str = Field(
+        description="What to check then, in a line the owner reads on the task's card, e.g. "
+        "'whether Flyte execution f3a9 finished'"
+    )
+    url: str = Field(default="", description="A link to what you will check (a run, a page)")
+    task_id: str = Field(default="", description="The task it is for; empty for your current task")
+
+
 class AssessWorker(BaseModel):
     session_id: str = Field(description="The reviewed worker: the review's worker attribute")
     verdict: Literal["on_track", "stuck", "looping", "off_track"]
@@ -386,13 +436,17 @@ class DraftGitHubReview(BaseModel):
 # What a request asks for that a one-line report cannot be.
 # A table to read, not a database's ("add the orders table").
 ASKS_TABLE = re.compile(
-    r"\bmarkdown tables?\b|\b(?:in|as|into) an? (?:\w+ )?table\b|\bsummary table\b|\btabular\b|"
-    r"\btable (?:of|with|summari[sz]ing|comparing)\b|表格",
+    r"\bmarkdown tables?\b|\bsummary table\b|\b(?:in|as) (?:a )?tabular (?:form|format)\b|"
+    r"\b(?:show|give|present|format|put|summari[sz]e|list|compare|answer|reply|report|lay out|"
+    r"tabulate|organi[sz]e)\b[^.\n]{0,40}\b(?:in|as|into) an? (?:\w+ )?table\b|"
+    r"\b(?:give|show|make|send|want|need)\b[^.\n]{0,20}\ban? (?:\w+ )?table (?:of|summari[sz]ing|"
+    r"comparing)\b|(?:用|做|列|整理|给我|以|画)[^。\uff0c,\n]{0,12}表格|表格(?:形式|展示|列出|汇总)",
     re.IGNORECASE,
 )
 ASKS_EXPLANATION = re.compile(
-    r"\bexplain|step[- ]by[- ]step|walk me through|\bhow you|\bin detail|讲清楚|解释|一步一步|"
-    r"详细|怎么算",
+    r"\bexplain\b(?! (?:analy[sz]e|plan|query|output|select)\b)(?!ed)|step[- ]by[- ]step|"
+    r"walk me through|\bhow you\b|\bexplain in detail\b|讲清楚|解释一下|解释清楚|一步一步|"
+    r"详细(?:说明|解释|讲|介绍|分析)|怎么算",
     re.IGNORECASE,
 )
 
@@ -400,10 +454,12 @@ ASKS_EXPLANATION = re.compile(
 # A report that leaves part of the answer out for its length ("too large to paste here").
 CUT_FOR_LENGTH = re.compile(
     r"\btoo (?:large|long|big) to (?:paste|include|show|list|put|fit|reproduce)|"
-    r"\b(?:omitted|truncated|abridged|shortened) (?:here |)for (?:brevity|length|space)|"
-    r"\b(?:would )?exceeds? (?:the |a )?(?:report(?:'s)? |message(?:'s)? )?(?:size|length|limit)|"
-    r"\bwould exceed (?:the |a )?(?:report|message)\b|\bfor brevity\b|"
-    r"太长|篇幅|超出(?:报告|长度|篇幅)",
+    r"\b(?:omitted|truncated|abridged|shortened|left out|not shown|not included|cut) "
+    r"(?:here )?(?:for|due to) (?:brevity|length|space)|"
+    r"\b(?:would )?exceeds? (?:the |a )?(?:report(?:'s)?|message(?:'s)?|reply(?:'s)?) "
+    r"(?:size|length|limit)|\bwould exceed (?:the |a )?(?:report|message)\b|\bfor brevity\b|"
+    r"太长[^。\n]{0,6}(?:没|不|无法|只|仅)(?:贴|放|列|展示|给)|篇幅(?:有限|所限|原因)|"
+    r"超出(?:报告|长度|篇幅)",
     re.IGNORECASE,
 )
 # "The full table is saved at …", "is in the file below": the answer itself left in a file.
@@ -825,6 +881,14 @@ class Tools:
                 self.t_follow_thread,
             ),
             (
+                "check_back",
+                "Be woken later to check on something with no thread to follow (a run, a deploy, "
+                "a scheduled job); then end your turn at once (do not do the check now, nor "
+                "report it done): you are woken at that time to check it.",
+                CheckBack,
+                self.t_check_back,
+            ),
+            (
                 "unfollow_thread",
                 "Stop following a thread that is unrelated or finished.",
                 FollowThread,
@@ -1121,14 +1185,14 @@ class Tools:
         return result
 
     async def follow_own_pulls(self, caller: str, text: str, task: dict | None):
-        """Follow the PRs a report names that are this worker's own: on its branch, or opened
-        by the owner's account since its task began."""
+        """Follow the PRs a report names that are this worker's own (see TaskActions.pr_roles):
+        on its branch, or opened by the owner's account since its task began and first brought
+        up by it. Not another worker's PR it mentions."""
         followed = set(self.store.follows(caller))
         row = self.store.session(caller)
-        branches = {c.get("branch") or "" for c in self.workspaces.checkouts(row)}
-        branches = {branch for branch in branches | {row["branch"] or ""} if branch}
-        mine = await self.runtime.github.logins()
-        began = (task or {}).get("created_at") or row["created_at"]
+        about = task or {
+            "id": "", "session_id": caller, "created_at": row["created_at"], "title": "", "goal": ""
+        }  # fmt: skip
         own = []
         for key in threads.pull_requests(text):
             if key in followed:
@@ -1137,13 +1201,22 @@ class Tools:
             try:
                 pull = await self.runtime.github.pull(repo, int(number))
             except Exception:
-                own.append(key)  # It can't tell: following too much beats missing its own PR.
+                # GitHub can't say whose it is: only one it opened itself.
+                if task and key.removeprefix("github:") in self.runtime.task_actions.opened_prs(
+                    task["id"]
+                ):
+                    own.append(key)
                 continue
-            author = ((pull.get("user") or {}).get("login") or "").lower()
-            created = (pull.get("created_at") or "").replace("Z", "+00:00")
-            if (pull.get("head") or {}).get("ref") in branches or (
-                author in mine and created >= began
-            ):
+            label = f"{repo}#{number}"
+            if pull.get("title"):
+                self.runtime.remember_pr_title(label, pull["title"])
+            seen = {
+                "label": label,
+                "author": ((pull.get("user") or {}).get("login") or "").lower(),
+                "created": pull.get("created_at") or "",
+                "branch": (pull.get("head") or {}).get("ref") or "",
+            }
+            if (await self.runtime.task_actions.pr_roles(about, [seen]))[0]:
                 own.append(key)
         if own:
             self.runtime.follow(caller, own, given=False)
@@ -1213,6 +1286,22 @@ class Tools:
             raise ValueError("That is Chief of Staff's own helper, not a worker to give work to.")
         self.runtime.check_follow(target, [threads.normalize(key) for key in params.follow])
         task = self.tasks.current(target["id"]) if target["role"] == WORKER else None
+        if params.task_id and params.task != "new":
+            named = self.tasks.find(params.task_id.strip())
+            if not named or named["session_id"] != target["id"]:
+                raise ValueError(f"That worker has no task {params.task_id}.")
+            task = named
+        elif target["role"] == WORKER and params.task == "continue":
+            open_ = [t for t in self.tasks.for_session(target["id"]) if t["status"] in OPEN]
+            if len(open_) > 1:
+                listed = "; ".join(f"{t['id']} “{t['title']}” ({t['status']})" for t in open_)
+                raise ValueError(
+                    f"That worker has {len(open_)} open tasks ({listed}): give task_id, or "
+                    "task='new' for another subject."
+                )
+        if task and params.task == "continue" and acknowledgement(params.text):
+            # “Thanks, received.”: nothing more to do on it, so nothing reopens.
+            params = params.model_copy(update={"task": "note"})
         # Checked before anything changes (a closed worker is not reopened for nothing).
         if task and params.task == "continue" and task["status"] == "cancelled":
             raise ValueError(
@@ -1231,9 +1320,16 @@ class Tools:
             )  # A follow-up on an earlier task: same worker.
             target = self.store.session(target["id"])
         if target["role"] == WORKER and params.task in {"continue", "note"}:
-            # The Router answers or redirects its question (a new task does not answer it).
-            self.runtime.asks.answered(target["id"])
-        if task and task["status"] == "queued" and self.tasks.deps(task["id"]):
+            # The Router answers or redirects the question of the task it writes about (a new
+            # task does not answer it; another task's question stays).
+            self.runtime.asks.answered(target["id"], task["id"] if task else "")
+            self.runtime.asks.answered(target["id"], "")
+        if (
+            task
+            and params.task == "continue"
+            and task["status"] == "queued"
+            and self.tasks.deps(task["id"])
+        ):
             self.store.set(f"released:{task['id']}", "1")  # The Router decides to go ahead.
             self.runtime.background(self.runtime.workers.pump())
         pulls = named_pulls(params.text) if target["role"] == WORKER else []
@@ -1246,6 +1342,8 @@ class Tools:
                 display=params.text,
             )
             return "Delivered."
+        # The worker as the owner knows it now, before a new task renames it.
+        worker_name = self.runtime.display_title(target)
         if params.task == "new":
             title = clean_title(params.title or params.text.splitlines()[0][:60])
             criteria = clean_criteria(params.done_when)
@@ -1265,7 +1363,7 @@ class Tools:
             )
             if note := self.report_language(params.text):
                 prompt += "\n\n" + wrap("system", "context", note)
-            notice = f"New task “{title}” for “{target['title']}”"
+            notice = f"New task “{title}” for “{worker_name}”"
         elif params.task == "note":
             prompt = wrap(
                 "router",
@@ -1274,7 +1372,7 @@ class Tools:
                 task=task["id"] if task else None,
                 reply_in=self.store.get("owner_language"),
             )
-            notice = f"Told “{target['title']}”"
+            notice = f"Told “{self.runtime.display_title(target)}”"
         else:
             if task and task["status"] in {"review", "failed"}:
                 # Reopened for a follow-up: cancelling that follow-up gives the finished result
@@ -1288,7 +1386,7 @@ class Tools:
                 task=task["id"] if task else None,
                 reply_in=self.store.get("owner_language"),
             )
-            notice = f"Continued in “{target['title']}”"
+            notice = f"Continued in “{self.runtime.display_title(target)}”"
         meta: dict[str, Any] = {"task_id": task["id"]} if task else {}
         if images := self.runtime.attachments_in(params.text):
             meta["attachments"] = images  # The owner's images it names come with it.
@@ -1710,6 +1808,22 @@ class Tools:
         if (
             task
             and params.status == "done"
+            and task["id"] in self.states[caller].turn_check_backs
+            and not self.store.get(f"checkback_done:{task['id']}")
+        ):
+            # It said it looks again later, and reports done in the same turn: what it waits
+            # for cannot have been checked yet. Asked once.
+            self.store.set(f"checkback_done:{task['id']}", "1")
+            found = self.runtime.task_actions.check_back(task) or {}
+            raise ValueError(
+                f"Not reported: you set a check-back on this task in this turn ("
+                f"{found.get('what', 'what you wait for')}), so it has not been checked yet. End "
+                "your turn now: you are woken then, and report what you find. If it really is "
+                "finished already, call report again."
+            )
+        if (
+            task
+            and params.status == "done"
             # Its first answer: not a follow-up's news, nor a cancelled task's.
             and task["status"] == "running"
             and not task["result"]
@@ -1825,11 +1939,15 @@ class Tools:
             # Under Needs you until answered, whatever becomes of the task.
             self.runtime.asks.record_question(caller, params.summary, task["id"] if task else "")
         elif row["role"] == WORKER:
-            self.runtime.asks.answered(caller)  # It went on: its question is behind it.
+            # It went on with this task: its question is behind it (another task's stays).
+            self.runtime.asks.answered(caller, task["id"] if task else "")
         if row["role"] == WORKER and params.status in {"progress", "done"}:
             # A PR it delivers is its PR: reviews, comments and CI come back to it. Not every
             # PR it mentions (stale CI news of others' PRs would follow).
             self.runtime.background(self.follow_own_pulls(caller, params.summary, task))
+        if row["role"] == WORKER:
+            # The PRs it names are shown with their titles.
+            self.runtime.background(self.runtime.task_actions.learn_pr_titles(params.summary))
         if row["role"] == WORKER:
             self.runtime.watchdog.save(caller, nudges=0)
         if settled and task and params.status in {"question", "blocked"}:
@@ -1845,6 +1963,10 @@ class Tools:
         values: dict[str, Any] = {"report": params.summary[:4000]}
         if row["role"] == WORKER and params.status in REPORT_STATUS:
             values["status"] = REPORT_STATUS[params.status]
+            if values["status"] == "done" and any(
+                other["status"] in OPEN for other in self.tasks.for_session(caller)
+            ):
+                values["status"] = "idle"  # Another of its tasks is still open: not done.
         self.runtime.update_session(caller, **values)
         if params.status == "done":
             self.runtime.background(
@@ -1858,7 +1980,9 @@ class Tools:
         if news and params.status == "progress":
             # News on a PR it follows, for work already finished: the owner reads it.
             self.runtime.alert(
-                f"Update on “{row['title']}”", session_id=caller, needs_action=False,
+                f"Update on “{task['title'] if task else self.runtime.display_title(row)}”",
+                session_id=caller,
+                needs_action=False,
                 title="PR update",
             )  # fmt: skip
         return "Reported to the Router."
@@ -2217,6 +2341,26 @@ class Tools:
         self.caller(caller, WORKER, SLACK)
         followed = self.runtime.follow(caller, [params.thread], given=False)
         return f"Following {', '.join(followed)}."
+
+    async def t_check_back(self, params: CheckBack, caller: str):
+        self.caller(caller, WORKER)
+        task = self.runtime.task_actions.report_task(caller, params.task_id)
+        if not task or task["status"] not in {"running", "waiting"}:
+            raise ValueError("check_back is for a task you are still on.")
+        what = " ".join(params.what.split())[:300]
+        if not what:
+            raise ValueError("Say what you will check.")
+        url = params.url.strip()
+        if url and not re.match(r"^https?://\S+$", url):
+            raise ValueError("url must be an http(s) link, or empty.")
+        at = datetime.now(UTC) + timedelta(minutes=params.minutes)
+        self.runtime.task_actions.set_check_back(task, at.isoformat(), what, url)
+        self.states[caller].turn_check_backs.add(task["id"])
+        clock = at.astimezone().strftime("%H:%M")
+        return (
+            f"You are woken at {clock} ({params.minutes} minutes) to check {what}. End your turn "
+            "now; do not wait in a shell."
+        )
 
     async def t_unfollow_thread(self, params: FollowThread, caller: str):
         self.caller(caller, WORKER, SLACK)

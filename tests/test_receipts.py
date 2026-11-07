@@ -508,3 +508,83 @@ async def test_a_reconnect_ends_the_commands_left_running(harness):
     await runtime.reconnect()
     await settle(runtime)
     assert observed_tests(runtime, worker) is None, "no result, and not running"
+
+
+@pytest.mark.parametrize(
+    "command, expected",
+    [
+        ("# run the suite\npytest -q", "test"),
+        ("cd svc  # the service\nuv run pytest -q", "test"),
+        ("pytest \\\n  -q tests/", "test"),
+        ("cat > notes.md <<'EOF'\npytest -q\nEOF", ""),
+        ("python - <<EOF\nimport os\nEOF\nruff check .", "check"),
+        ("make -C services/api test", "test"),
+        ("mvn -B -pl core clean test", "test"),
+        ("./gradlew -p app clean :core:test", "test"),
+        ("pnpm -r test", "test"),
+        ("yarn workspace web test", "test"),
+        ("npm -w pkg run test:unit", "test"),
+        ("npm install test-utils", ""),
+    ],
+)
+def test_command_kinds_across_lines_and_runners(command, expected):
+    assert receipts.kind(command) == expected
+
+
+@pytest.mark.parametrize(
+    "output, expected",
+    [
+        ("TAP version 13\nok 1 - adds\nnot ok 2 - subtracts\n1..2\n# pass 1\n# fail 1", "failed"),
+        ("TAP version 13\nok 1 - adds\nok 2 - subtracts\n1..2\n# pass 2\n# fail 0", "passed"),
+        ("ok  \tgithub.com/acme/app\t0.012s", "passed"),
+        ("Tests:       1 skipped, 5 passed, 6 total", "passed"),
+        ("Tests:       1 skipped, 1 failed, 4 passed, 6 total", "failed"),
+        ("  5 passing (20ms)", "passed"),
+        ("  5 passing (20ms)\n  1 failing", "failed"),
+        ("[INFO] Tests run: 12, Failures: 0, Errors: 0, Skipped: 1", "passed"),
+        ("[ERROR] Tests run: 12, Failures: 2, Errors: 0, Skipped: 0", "failed"),
+        ("[ERROR] Tests run: 12, Failures: 0, Errors: 1, Skipped: 0", "failed"),
+    ],
+)
+def test_runner_summaries(output, expected):
+    assert receipts.last_summary(output) == expected
+
+
+@pytest.mark.parametrize(
+    "report, expected",
+    [
+        ("All tests pass.", True),
+        ("Tests do not pass yet: two fail on the new schema.", False),
+        ("The tests never passed on this branch.", False),
+        ("Tests pass locally; CI is still running.", True),
+        ("Tests pass on CI.", False),
+        ("CI checks are green.", False),
+    ],
+)
+def test_what_a_report_says_about_tests(report, expected):
+    assert receipts.says_tests_pass(report) is expected
+
+
+@pytest.mark.parametrize(
+    "report, expected",
+    [
+        ("I fixed the null check.", True),
+        ("Nothing to change: it was already fixed upstream.", False),
+        ("The crash was fixed by Bob in #12, so no change here.", False),
+        ("No files were changed.", False),
+    ],
+)
+def test_what_a_report_says_about_changes(report, expected):
+    assert receipts.says_changed(report) is expected
+
+
+def test_a_check_not_finished_yet_is_not_the_oldest_run():
+    rollup = [
+        {"name": "tests", "conclusion": "FAILURE", "startedAt": "2026-01-01T00:00:00Z",
+         "completedAt": "2026-01-01T00:05:00Z"},
+        {"name": "tests", "status": "IN_PROGRESS", "startedAt": "2026-01-01T01:00:00Z",
+         "completedAt": "0001-01-01T00:00:00Z"},
+    ]  # fmt: skip
+    assert receipts.checks_state(rollup) == "pending", "the rerun is the latest"
+    done = [{**rollup[1], "conclusion": "SUCCESS", "completedAt": "0001-01-01T00:00:00Z"}]
+    assert receipts.checks_started(done) == "2026-01-01T01:00:00Z"

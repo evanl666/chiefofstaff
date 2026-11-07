@@ -125,3 +125,16 @@ def clean_title(title: str) -> str:
     """A title safe for an envelope attribute and a session name."""
     text = " ".join("".join(c for c in title if unicodedata.category(c)[0] != "C").split())
     return text.replace('"', "'")[:80] or "Task"
+
+
+# An instruction about a task, in a message to a worker (not the note that one was cancelled).
+TASK_NAMED = re.compile(
+    r'<message from="(?:router|owner|system)" type="(?!cancelled")[\w-]+"'
+    r'[^>]*?\btask="(t[0-9a-f]+)"'
+)
+
+
+def task_named(text: str) -> str:
+    """The task the last instruction in a message to a worker is about ("" for none)."""
+    found = TASK_NAMED.findall(text or "")
+    return found[-1] if found else ""

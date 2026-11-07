@@ -246,6 +246,24 @@ async def test_followed_dm_is_read_as_a_conversation(source):
     assert source.host.thread_calls[0][:2] == ("slack:D0ALICE01", ["slack:1712345650.000100"])
 
 
+async def test_a_followed_dm_gets_only_its_own_entries_from_a_search_page(source):
+    await source.poll_once()
+    source.host.subscriptions = [{"thread": "slack:D0ALICE01", "since": 1712345600.0}]
+    source.mcp.reads["D0ALICE01"] = ""
+    source.mcp.results["to:me"] = (
+        "DM <#D0ALICE01> ts: 1712345700.000400\nText: from Alice\n"
+        "Permalink: https://acme.slack.com/archives/D0ALICE01/p1712345700000400\n"
+        "DM <#D0BOB0001> ts: 1712345710.000500\nText: private from Bob\n"
+        "Permalink: https://acme.slack.com/archives/D0BOB0001/p1712345710000500"
+    )
+    await source.poll_once()
+    [(thread, keys, text)] = source.host.thread_calls
+    assert thread == "slack:D0ALICE01" and keys == ["slack:1712345700.000400"]
+    assert "from Alice" in text and "Bob" not in text
+    [(_name, routed, _text, _display)] = source.calls
+    assert routed == ["slack:1712345710.000500"]
+
+
 async def test_an_unreadable_followed_thread_does_not_block_dms(source):
     await source.poll_once()
     source.host.subscriptions = [{"thread": THREAD, "since": 1712345680.0}]

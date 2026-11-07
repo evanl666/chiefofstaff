@@ -19,6 +19,7 @@ import logging
 import os
 from typing import TYPE_CHECKING
 
+from .envelope import task_named
 from .roles import ROUTER, SLACK, WORKER
 from .sources.slack import describe
 
@@ -150,6 +151,24 @@ class Delivery:
             if "prompt" in message["meta"] and not message["meta"].get("deferred"):
                 self.store.update_message_meta(message["id"], {**message["meta"], "deferred": True})
 
+    def drop_pending(self, session_id: str, task_id: str = "") -> bool:
+        """What it has not received yet is not sent at all (its task was cancelled, or it was
+        closed); `task_id`: only what is about that task. Whether it had received anything
+        about that task before."""
+        mark = int(self.store.get(f"sent:{session_id}") or 0)
+        received = False
+        for message in self.store.messages(session_id):
+            if "prompt" not in message["meta"]:
+                continue
+            if task_id and message["meta"].get("task_id") != task_id:
+                continue
+            if message["id"] <= mark:
+                received = True
+                continue
+            kept = {k: v for k, v in message["meta"].items() if k != "prompt"}
+            self.store.update_message_meta(message["id"], {**kept, "dropped": True})
+        return received
+
     def has_unsent(self, session_id: str) -> bool:
         """Whether it has messages to receive that are worth a turn (a deferred note, such as
         a cancellation, only rides along with the next one)."""
@@ -197,6 +216,9 @@ class Delivery:
                 raise
             if row["role"] == WORKER and any(m["meta"].get("thread") for m in pending):
                 state.thread_turn, state.thread_nudged = True, False
+            if row["role"] == WORKER and not mid_turn and (named := task_named(text)):
+                # A turn on it starts now; mid-turn, once its conversation shows it.
+                self.store.set(f"turntask:{session_id}", named)
             if mid_turn:
                 # It sees this once its conversation shows it (events.user_message): a report
                 # before that is about the work without it.
@@ -244,8 +266,8 @@ class Delivery:
     async def resume(self, session_id: str):
         """Send what an idle session was given but never received (after a restart)."""
         row = self.store.session(session_id)
-        if row["closed_at"] or row["status"] in {"queued", "starting", "working"}:
-            return
+        if row["closed_at"] or row["status"] in {"queued", "starting", "working", "failed"}:
+            return  # A failed one gets what it missed with the owner's next message.
         if not self.has_unsent(session_id):
             return  # Only deferred notes: they wait for its next message.
         if row["role"] in {ROUTER, SLACK}:

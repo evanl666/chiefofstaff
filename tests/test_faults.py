@@ -148,6 +148,80 @@ async def test_cancelling_a_running_task_frees_its_slot(tmp_path):
     assert task_of(harness, waiting["session_id"]) == waiting["task_id"]
 
 
+async def test_cancelling_one_of_a_workers_tasks_leaves_its_other_task_running(harness):
+    runtime = await harness.connect()
+    result = await call_tool(
+        runtime, "spawn_worker", harness.router_id, title="Build", instructions="Build"
+    )
+    build = json.loads(result.text_result_for_llm)
+    worker = build["session_id"]
+    await call_tool(
+        runtime,
+        "message_session",
+        harness.router_id,
+        session_id=worker,
+        text="Also update the docs",
+        task="new",
+        title="Docs",
+    )
+    docs = task_of(harness, worker)
+    await runtime.task_actions.cancel(docs, "Not needed")
+    await settle(runtime)
+    assert not harness.session(worker).aborted, "its turn on the other task goes on"
+    assert harness.store.one("SELECT status FROM tasks WHERE id=?", (build["task_id"],)) == {
+        "status": "running"
+    }
+    assert task_of(harness, worker) == build["task_id"]
+    assert harness.store.session(worker)["status"] == "working"
+    told = harness.session(worker).sent[-1]
+    assert 'type="cancelled"' in told and docs in told, "it hears of it within its turn"
+    session = harness.session(worker)
+    session.emit("assistant.message", content="Still building.")
+    session.emit("session.idle")
+    await settle(runtime)
+    assert "report-missing" in session.sent[-1], "it still owes a report on its build"
+
+
+async def test_cancelling_a_queued_workers_new_task_drops_only_that_instruction(tmp_path):
+    harness = Harness(tmp_path / "data", Settings(max_workers=1))
+    runtime = await harness.connect()
+
+    async def spawn(title):
+        result = await call_tool(
+            runtime,
+            "spawn_worker",
+            harness.router_id,
+            title=title,
+            instructions=title,
+            why_new="separate",
+        )
+        return json.loads(result.text_result_for_llm)
+
+    first, second = await spawn("Long build"), await spawn("Migrate")
+    assert second["status"] == "queued"
+    worker = second["session_id"]
+    await call_tool(
+        runtime,
+        "message_session",
+        harness.router_id,
+        session_id=worker,
+        text="Then rename the table",
+        task="new",
+        title="Rename",
+    )
+    rename = task_of(harness, worker)
+    await runtime.task_actions.cancel(rename, "Keep the name")
+    await settle(runtime)
+    assert harness.store.session(worker)["status"] == "queued", "it still waits for a slot"
+    assert task_of(harness, worker) == second["task_id"]
+    await call_tool(runtime, "report", first["session_id"], status="done", summary="Built")
+    harness.session(first["session_id"]).emit("session.idle")
+    await settle(runtime)
+    started = harness.session(worker).sent
+    assert len(started) == 1 and "Migrate" in started[0]
+    assert "rename the table" not in started[0] and 'type="cancelled"' not in started[0]
+
+
 async def test_drafts_interrupted_while_sending_are_checked_before_anything_is_resent(tmp_path):
     harness = Harness(tmp_path / "data", Settings(slack_enabled=True))
     runtime = await harness.connect()
@@ -183,6 +257,28 @@ async def test_drafts_interrupted_while_sending_are_checked_before_anything_is_r
     assert not [call for call in harness.mcp.calls if call[0] == "slack_send_message"]
 
 
+async def test_an_interrupted_approval_without_a_body_is_found_not_reposted(harness):
+    runtime = await harness.connect()
+    target = {"repo": "acme/app", "number": 7, "head_sha": "abc", "verdict": "approve"}
+    bare = harness.store.create_draft(harness.router_id, "github", target, "")
+    other = harness.store.create_draft(harness.router_id, "github", {**target, "number": 8}, "")
+    harness.store.execute("UPDATE drafts SET status='uncertain'")
+    harness.gh_replies["auth status --json hosts"] = json.dumps(
+        {"hosts": {"github.com": [{"login": "Evan", "active": True, "state": "success"}]}}
+    )
+    harness.gh_replies["api repos/acme/app/pulls/7/reviews"] = json.dumps(
+        [{"user": {"login": "evan"}, "state": "APPROVED", "commit_id": "abc", "body": "",
+          "submitted_at": "2999-01-01T00:00:00Z", "html_url": "https://x/pull/7#r9"}]
+    )  # fmt: skip
+    harness.gh_replies["api repos/acme/app/pulls/8/reviews"] = json.dumps(
+        [{"user": {"login": "bob"}, "state": "APPROVED", "commit_id": "abc", "body": "",
+          "submitted_at": "2999-01-01T00:00:00Z", "html_url": "https://x/pull/8#r1"}]
+    )  # fmt: skip
+    await runtime.drafts.check_uncertain()
+    assert harness.store.draft(bare["id"])["status"] == "sent"
+    assert harness.store.draft(other["id"])["status"] == "pending", "Bob's approval is not ours"
+
+
 async def test_the_owner_can_settle_a_draft_while_it_is_being_checked(tmp_path):
     harness = Harness(tmp_path / "data", Settings(slack_enabled=True))
     runtime = await harness.connect()
@@ -196,7 +292,7 @@ async def test_the_owner_can_settle_a_draft_while_it_is_being_checked(tmp_path):
     looking = asyncio.Event()
     answer = asyncio.Event()
 
-    async def slow(target, text):
+    async def slow(target, text, since=""):
         looking.set()
         await answer.wait()
         return ""

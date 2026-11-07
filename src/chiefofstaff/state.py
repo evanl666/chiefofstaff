@@ -48,6 +48,8 @@ class SessionState:
     # message decided and asked for together belongs together.
     turn_decisions: list[str] = field(default_factory=list)
     turn_tasks: list[str] = field(default_factory=list)
+    # Tasks a worker set a check-back on in its current turn: it waits for it, not in this turn.
+    turn_check_backs: set[str] = field(default_factory=set)
     # Open cards for the owner: draft id -> text.
     asking: dict[str, str] = field(default_factory=dict)
     # Messages sent to it that its conversation has not shown it yet (sent while it was

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import re
 
@@ -328,6 +329,22 @@ class Harness:
 
     def kinds(self, session_id):
         return [(m["kind"], m["text"]) for m in self.store.messages(session_id)]
+
+    def own_pull(self, repo: str, number: int, **extra):
+        """A PR the owner's account opened just now (as a worker pushing as the owner does)."""
+        self.gh_replies["auth status --json hosts"] = json.dumps(
+            {"hosts": {"github.com": [{"login": "me", "active": True, "state": "success"}]}}
+        )
+        pull = {
+            "number": number,
+            "title": f"PR {number}",
+            "state": "open",
+            "user": {"login": "me"},
+            "created_at": "2999-01-01T00:00:00Z",
+            "head": {"ref": "feature", "sha": "abc"},
+            "html_url": f"https://github.com/{repo}/pull/{number}",
+        } | extra
+        self.gh_replies[f"api repos/{repo}/pulls/{number}"] = json.dumps(pull)
 
 
 @pytest.fixture(autouse=True)

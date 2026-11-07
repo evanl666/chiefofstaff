@@ -69,6 +69,8 @@ function decider(draft, node, error, failed = null) {
       node.classList.remove("leaving");
       if (failed) failed(failure.message);
       else error.textContent = failure.message;
+      // Said where it cannot be missed too: a card that cannot be sent again leaves.
+      toast(failure.message, "error");
       renderSidebar();
       scheduleHome();
       return false;
@@ -171,7 +173,7 @@ function requestCard(draft) {
       node.append(el("div", { class: "choices" }, ...target.choices.map((choice) => el("button", { type: "button", class: "secondary", text: choice, onclick: () => answer(choice) }))));
     }
     const field = () => {
-      const input = el("input", { placeholder: "Your answer", autocomplete: "off", "aria-label": "Your answer" });
+      const input = keepTyped(el("input", { placeholder: "Your answer", autocomplete: "off", "aria-label": "Your answer" }), `${draft.id}:answer`);
       input.addEventListener("keydown", (event) => submits(event) && answer(input.value));
       return [input, el("button", { type: "button", class: target.choices?.length ? "secondary" : "", text: "Answer", onclick: () => answer(input.value) })];
     };
@@ -192,7 +194,15 @@ function requestCard(draft) {
   return node;
 }
 // Cards change as workers join a decision or confirm a changed one.
-export const draftKey = (draft) => `draft:${draft.id}:${draft.kind === "decision" ? draft.target.askers.length : draft.kind === "change" ? draft.target.tasks.map((task) => (task.ack ? 1 : 0)).join("") : ""}`;
+export const draftKey = (draft) => `draft:${draft.id}:${draft.kind === "decision" ? draft.target.askers.length : draft.kind === "change" ? draft.target.tasks.map((task) => (task.ack ? 1 : 0)).join("") : draft.kind === "lessons" ? draft.target.lessons.map((lesson) => lesson.id).join(",") : ""}:${draft.outcome || ""}`;
+// What the owner typed on a card, by card and field: a card drawn again (another worker joins
+// a decision, a lesson is added) keeps it.
+const typed = new Map();
+function keepTyped(input, key) {
+  if (typed.has(key)) input.value = typed.get(key);
+  input.addEventListener("input", () => typed.set(key, input.value));
+  return input;
+}
 const taskLink = (item) => el("button", { type: "button", class: "link", text: item.title, onclick: () => select(item.session_id) });
 // A decision that is the owner's: why it comes up, the options and what each means, and what
 // the worker recommends. Workers that hit the same question wait on the same card.
@@ -237,11 +247,13 @@ function decisionCard(draft) {
   }
   if (target.precedents?.length) node.append(el("div", { class: "precedents", text: `You decided before: ${target.precedents.join(" · ")}` }));
   const field = () => {
-    const input = el("input", { placeholder: "Your decision", autocomplete: "off", "aria-label": "Your decision" });
+    const input = keepTyped(el("input", { placeholder: "Your decision", autocomplete: "off", "aria-label": "Your decision" }), `${draft.id}:decision`);
     input.addEventListener("keydown", (event) => submits(event) && answer(input.value));
     return [input, el("button", { type: "button", class: "secondary", text: "Decide", onclick: () => answer(input.value) })];
   };
-  node.append(actionRow(error, null, [{ text: "Not now", onclick: () => decide({ action: "reject" }, "Left for later.") }], target.options?.length ? later("Something else…", field) : field()));
+  // Typed into before it was drawn again: the field is open with it.
+  const open = target.options?.length && !typed.get(`${draft.id}:decision`) ? later("Something else…", field) : field();
+  node.append(actionRow(error, null, [{ text: "Not now", onclick: () => decide({ action: "reject" }, "Left for later.") }], ...[open].flat()));
   return node;
 }
 // The owner changed a decision: which tasks it affects, and which workers confirmed.
@@ -276,8 +288,9 @@ function changeCard(draft) {
 function lessonsCard(draft) {
   const error = el("span", { class: "error" });
   const rows = draft.target.lessons.map((lesson) => {
-    const keep = el("input", { type: "checkbox", checked: true, "aria-label": "Keep" });
-    const text = el("input", { value: lesson.text, "aria-label": "Lesson" });
+    const keep = el("input", { type: "checkbox", checked: typed.get(`${draft.id}:keep:${lesson.id}`) !== "0", "aria-label": "Keep" });
+    keep.addEventListener("change", () => typed.set(`${draft.id}:keep:${lesson.id}`, keep.checked ? "1" : "0"));
+    const text = keepTyped(el("input", { value: lesson.text, "aria-label": "Lesson" }), `${draft.id}:lesson:${lesson.id}`);
     const because = lesson.because.map((item) => `${item.owner}`.trim()).filter(Boolean);
     const where = !lesson.scope ? "everywhere" : lesson.scope === "slack" ? "Slack replies" : `in ${lesson.scope.replace("project:", "").split("/").pop()}`;
     const node = el(
@@ -298,7 +311,9 @@ function lessonsCard(draft) {
   const decide = decider(draft, node, error);
   // Every lesson shown, an unticked one as "": lessons added to the card meanwhile come back.
   const keep = () => decide({ action: "answer", content: Object.fromEntries(rows.map((row) => [row.lesson.id, row.keep.checked ? row.text.value : ""])) }, "Kept.");
-  node.append(actionRow(error, el("button", { type: "button", text: "Keep ticked", onclick: keep }), [{ text: "Drop all", onclick: () => decide({ action: "reject" }, "Dropped.") }]));
+  // Only those shown: one added meanwhile comes back on the card.
+  const dropAll = () => decide({ action: "answer", content: Object.fromEntries(rows.map((row) => [row.lesson.id, ""])) }, "Dropped.");
+  node.append(actionRow(error, el("button", { type: "button", text: "Keep ticked", onclick: keep }), [{ text: "Drop all", onclick: dropAll }]));
   return node;
 }
 // A check learned from a mistake a worker fixed, with the proof that it catches it.

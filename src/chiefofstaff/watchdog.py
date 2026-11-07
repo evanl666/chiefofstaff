@@ -150,8 +150,10 @@ class Watchdog:
                 continue  # Chief of Staff's own: a run ends without a report.
             if self.states[row["id"]].close_after_turn:
                 continue  # It is done and closes after this turn.
+            # A task it said when to look at again (check_back) is not owed until then.
             running = any(
-                task["status"] == "running" for task in self.runtime.tasks.for_session(row["id"])
+                task["status"] == "running" and not self.store.get(f"checkback:{task['id']}")
+                for task in self.runtime.tasks.for_session(row["id"])
             )
             if row["status"] == "idle" and not running:
                 continue  # Between turns with nothing it owes: finished, waiting or cancelled.

@@ -35,12 +35,21 @@ def app_client(tmp_path):
 
 
 def sign_in(http):
+    """As the page does: the token checked, then sent with every request."""
     assert http.post("/api/auth", json={"token": TOKEN}, headers=ORIGIN).status_code == 200
+    http.headers["X-Chief-Key"] = TOKEN
 
 
-def test_api_needs_the_launch_cookie_and_a_trusted_origin(app_client):
+def test_api_needs_the_launch_token_and_a_trusted_origin(app_client):
     assert app_client.get("/api/state").status_code == 401
     assert app_client.post("/api/auth", json={"token": "nope"}, headers=ORIGIN).status_code == 401
+    signed = app_client.post("/api/auth", json={"token": TOKEN}, headers=ORIGIN)
+    assert signed.status_code == 200 and TOKEN not in signed.headers.get("set-cookie", ""), (
+        "never a cookie: a browser sends those to every local server"
+    )
+    assert app_client.get("/api/state").status_code == 401, "the token comes with each request"
+    assert app_client.get("/api/state", cookies={"chiefofstaff_8765": TOKEN}).status_code == 401
+    assert app_client.get(f"/api/state?key={TOKEN}").status_code == 200, "an image, the stream"
     sign_in(app_client)
     state = app_client.get("/api/state").json()
     assert state["runtime"]["state"] == "ready"

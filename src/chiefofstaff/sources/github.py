@@ -368,8 +368,10 @@ class GitHubSource:
         if not (settings.github_enabled or followed):
             self.status.update(connected=False, error="")
             return
+        errors = []
         if settings.github_enabled:
-            await self.poll_review_requests(settings, {sub["thread"] for sub in followed})
+            # Its failure (one owner's search, say) must not stop the followed PRs.
+            errors = await self.poll_review_requests(settings, {sub["thread"] for sub in followed})
         for sub in followed:
             thread = sub["thread"]
             failures = int(self.store.get(f"ghfail:{thread}") or 0)
@@ -385,16 +387,19 @@ class GitHubSource:
                 logger.warning("Could not read followed %s (%s): %s", thread, failures + 1, exc)
                 continue
             self.store.set(f"ghfail:{thread}", "0")
-        self.status.update(connected=True, error="", last_checked=now())
+        self.status.update(connected=True, error="; ".join(errors)[:500], last_checked=now())
 
-    async def poll_review_requests(self, settings, followed: set[str]):
+    async def poll_review_requests(self, settings, followed: set[str]) -> list[str]:
+        """Review requests in the owner's repositories become triggers. What failed, said (one
+        owner's search or one PR failing does not stop the others)."""
         # One search per owner: each runs as the account that sees that owner's repositories
         # (@me is that account).
         owners: dict[str, list[str]] = {}
         for repo in settings.github_repos:
             owners.setdefault(repo.split("/")[0], []).append(repo)
         requests = []
-        for repos in owners.values():
+        errors = []
+        for owner, repos in owners.items():
             arguments = [
                 "search",
                 "prs",
@@ -404,12 +409,20 @@ class GitHubSource:
                 "--json=number,title,repository,url,author,isDraft",
                 *(f"--repo={repo}" for repo in repos),
             ]
-            requests += json.loads(await self.gh(*arguments))
+            try:
+                requests += json.loads(await self.gh(*arguments))
+            except Exception as exc:
+                logger.warning("Could not search review requests in %s: %s", owner, exc)
+                errors.append(f"Review requests in {owner}: {str(exc)[:200]}")
         for request in requests:
             repo = request["repository"]["nameWithOwner"].lower()
             if repo not in settings.github_repos or request.get("isDraft"):
                 continue
-            pull = await self.pull(repo, request["number"])
+            try:
+                pull = await self.pull(repo, request["number"])
+            except Exception as exc:
+                logger.warning("Could not read %s#%s: %s", repo, request["number"], exc)
+                continue
             if pull["state"] != "open":
                 continue
             sha = pull["head"]["sha"]
@@ -433,6 +446,7 @@ class GitHubSource:
                 f"{request['title']}\nAuthor: {author}\nURL: {request['url']}\nHead: {sha[:12]}\n"
                 f"Thread key: github:{repo}#{request['number']}",
             )
+        return errors
 
     async def poll_pull(self, thread: str, since: float):
         """New comments, reviews, CI results and the end of a followed PR go to its followers."""
@@ -443,6 +457,8 @@ class GitHubSource:
         started = github_time(datetime.now(UTC).timestamp() - 60)
         after = self.store.get(f"ghsince:{thread}") or github_time(since)
         pull = await self.pull(repo, int(number))
+        if title := " ".join((pull.get("title") or "").split())[:200]:
+            self.store.set(f"prtitle:{repo.lower()}#{number}", title)  # Shown with its number.
         base = f"repos/{repo}"
         items: list[tuple[str, str]] = []
         # Every page: GitHub lists oldest first, so on a busy PR the new ones are on the last.
@@ -629,18 +645,34 @@ class GitHubSource:
             raise ValueError(f"{repo}#{number} is not open.")
         return pull["head"]["sha"]
 
-    async def find_review(self, target: dict, body: str) -> str:
-        """The URL of a published review with this body on the target PR, or "" (also for a
-        review with line comments only: nothing tells it apart)."""
-        if not body.strip():
-            return ""
+    async def find_review(self, target: dict, body: str, since: str = "") -> str:
+        """The URL of a published review with this body on the target PR, or "". One without a
+        body (a bare approval, line comments only) is told by who submitted it, on which
+        commit, with which verdict, and when (`since`, ISO: when it was drafted)."""
         reviews = pages(
             await self.gh(
                 "api", f"repos/{target['repo']}/pulls/{int(target['number'])}/reviews", "--paginate"
             )
         )
+        if body.strip():
+            for review in reviews:
+                if (review.get("body") or "").strip() == body.strip():
+                    return review.get("html_url") or "Review published."
+            return ""
+        login = await self.acting_login(target["repo"])
+        event = REVIEW_EVENTS.get(target.get("verdict", ""), "COMMENT")
+        state = {"APPROVE": "APPROVED", "REQUEST_CHANGES": "CHANGES_REQUESTED"}.get(
+            event, "COMMENTED"
+        )
         for review in reviews:
-            if (review.get("body") or "").strip() == body.strip():
+            author = ((review.get("user") or {}).get("login") or "").lower()
+            if (
+                (not login or author == login)
+                and review.get("state") == state
+                and review.get("commit_id") == target.get("head_sha")
+                and not (review.get("body") or "").strip()
+                and (not since or (review.get("submitted_at") or "") >= since[:19])
+            ):
                 return review.get("html_url") or "Review published."
         return ""
 

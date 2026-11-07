@@ -55,6 +55,7 @@ async def test_router_hands_threads_to_the_worker_it_starts(harness):
     assert harness.store.follows(worker_id) == ["github:acme/app#7"]
     assert runtime.view(harness.store.session(worker_id))["follows"] == ["github:acme/app#7"]
 
+    harness.own_pull("a/b", 3)
     await call_tool(
         runtime, "report", worker_id, status="progress", summary="https://github.com/a/b/pull/3"
     )
@@ -276,6 +277,7 @@ async def test_a_done_worker_woken_by_a_follow_up_stays_done(harness):
         runtime, "spawn_worker", harness.router_id, title="A", instructions="a"
     )
     worker_id = json.loads(result.text_result_for_llm)["session_id"]
+    harness.own_pull("a/b", 1)
     await call_tool(
         runtime, "report", worker_id, status="done", summary="https://github.com/a/b/pull/1"
     )

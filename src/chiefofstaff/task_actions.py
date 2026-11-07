@@ -11,7 +11,7 @@ import os
 import re
 import time
 from contextlib import suppress
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -20,7 +20,15 @@ from .envelope import wrap
 from .roles import WORKER
 from .store import hours_ago, now
 from .tasks import ENDED, OPEN
-from .workspaces import base_of, changes, diff, git, same_version, version
+from .workspaces import (
+    base_of,
+    changes,
+    checkout_git,
+    diff,
+    same_version,
+    version,
+    worth_committing,
+)
 
 if TYPE_CHECKING:
     from .runtime import Runtime
@@ -109,6 +117,10 @@ class TaskActions:
             (task["id"],),
         )
         evidence = json.loads(latest["evidence"]) if latest and latest["evidence"] else None
+        if evidence and evidence.get("prs"):
+            # Only the PRs it is about: one its report merely mentions (another worker's) is a
+            # link in its report, not one of its chips or flags.
+            evidence["prs"] = [pr for pr in evidence["prs"] if pr.get("about", True)]
         criteria = self.tasks.criteria(task)
         # A check learned from a mistake that still fails when the worker said done.
         failing = self.runtime.checks.flags(task["id"])
@@ -254,7 +266,72 @@ class TaskActions:
                     "at": now(),
                 }
             )
+            if view.get("title"):
+                self.runtime.remember_pr_title(f"{repo}#{number}", view["title"])
+        own, about = await self.pr_roles(task, prs)
+        for pr in prs:
+            pr["own"] = pr["label"].lower() in own
+            pr["about"] = pr["label"].lower() in about
         return prs
+
+    def set_check_back(self, task: dict, at: str, what: str, url: str):
+        """The worker is woken at `at` (ISO) to check `what`; one per task, the latest."""
+        value = {"at": at, "what": what, "url": url, "session_id": task["session_id"]}
+        self.store.set(f"checkback:{task['id']}", json.dumps(value))
+        self.publish(self.tasks.get(task["id"]))
+
+    def check_back(self, task: dict) -> dict | None:
+        found = self.store.get(f"checkback:{task['id']}")
+        return json.loads(found) if found and task["status"] in {"running", "waiting"} else None
+
+    async def wake_check_backs(self, moment: datetime | None = None):
+        """Workers whose check-back time came are woken with what they wanted to check."""
+        moment = moment or datetime.now(UTC)
+        for task_id, raw in self.store.items("checkback:").items():
+            found = json.loads(raw)
+            if datetime.fromisoformat(found["at"]) > moment:
+                continue
+            self.store.delete(f"checkback:{task_id}")
+            task = self.tasks.find(task_id)
+            if not task or task["status"] not in {"running", "waiting"}:
+                continue
+            row = self.store.find_session(task["session_id"])
+            if not row:
+                continue
+            if row["closed_at"]:
+                await self.runtime.workers.reopen(row["id"])
+            link = f" ({found['url']})" if found.get("url") else ""
+            text = (
+                f"Time to check {found['what']}{link} for task {task_id} “{task['title']}”. "
+                "Check it now. Done: report. Not yet: check_back again, or report what blocks it."
+            )
+            await self.delivery.deliver(
+                row["id"],
+                wrap("system", "check-back", text, task=task_id),
+                kind="router",
+                display=f"Check back: {found['what']}{link}",
+                meta={"task_id": task_id, "check_back": True},
+            )
+            self.publish(self.tasks.get(task_id))
+
+    async def learn_pr_titles(self, text: str):
+        """The titles of the PRs a text names, read from GitHub once (a few at a time)."""
+        learned = False
+        for key in threads.pull_requests(text)[:5]:
+            label = key.removeprefix("github:")
+            if self.store.get(f"prtitle:{label}"):
+                continue
+            repo, number = label.rsplit("#", 1)
+            try:
+                pull = await self.runtime.github.pull(repo, int(number))
+            except Exception:
+                logger.info("Could not read the title of %s.", label, exc_info=True)
+                continue
+            if pull.get("title"):
+                self.runtime.remember_pr_title(label, pull["title"])
+                learned = True
+        if learned:
+            self.runtime.publish_state()
 
     def reviewed_prs(self, session_id: str) -> set[str]:
         """The PRs a worker reviewed or replied on ("owner/repo#n"): others' work, not its own."""
@@ -266,12 +343,36 @@ class TaskActions:
             if (target := json.loads(row["target"])).get("repo") and target.get("number")
         }
 
-    async def own_prs(self, task: dict, prs: list[dict]) -> set[str]:
-        """Which of these PRs ("owner/repo#n", lowercase) are the task's own work: opened with
-        Create PR, from its worker's branch, or opened by the owner's account since the task
-        began. Not one its report only mentions, nor one its worker reviewed."""
-        opened = json.loads(self.store.get(f"prs:{task['id']}") or "[]")
-        opened = {key.removeprefix("github:") for key in threads.pull_requests(" ".join(opened))}
+    def first_reporter(self, label: str) -> str:
+        """The task ("session_id|task_id") whose report named this PR ("owner/repo#n") first:
+        the work that brought it up. Several workers push as the owner, so a PR another worker
+        brought up is that one's. Read once from the reports, then kept; "" when none did."""
+        key = f"prfirst:{label.lower()}"
+        if found := self.store.get(key):
+            return found
+        repo, number = label.lower().rsplit("#", 1)
+        named = re.compile(rf"github\.com/{re.escape(repo)}/pull/{number}(?!\d)", re.IGNORECASE)
+        for row in self.store.all(
+            "SELECT session_id, text, meta FROM messages WHERE kind='report' AND text LIKE ? "
+            "ORDER BY id",
+            (f"%/pull/{number}%",),
+        ):
+            if named.search(row["text"]):
+                task_id = json.loads(row["meta"] or "{}").get("task_id") or ""
+                found = f"{row['session_id']}|{task_id}"
+                self.store.set(key, found)
+                return found
+        return ""
+
+    async def pr_roles(self, task: dict, prs: list[dict]) -> tuple[set[str], set[str]]:
+        """Which of these PRs ("owner/repo#n", lowercase) are the task's own work, and which it
+        is about. Own: opened with Create PR, from its worker's branch, or opened by the owner's
+        account since the task began and first brought up by this task. About: those, the PRs
+        its worker reviewed or was given to follow, and those its title or instructions name.
+        A PR its report only mentions (another worker's) is neither."""
+        from .tools import names_pr
+
+        opened = self.opened_prs(task["id"])
         row = self.store.find_session(task["session_id"])
         branches = {c.get("branch") or "" for c in self.workspaces.checkouts(row)} if row else set()
         branches = {branch for branch in branches | {(row or {}).get("branch") or ""} if branch}
@@ -280,18 +381,39 @@ class TaskActions:
         except Exception:
             mine = set()
         reviewed = self.reviewed_prs(task["session_id"])
-        own = set()
+        asked = f"{task.get('title') or ''}\n{task.get('goal') or ''}"
+        own: set[str] = set()
+        about: set[str] = set()
         for pr in prs:
             label = pr["label"].lower()
-            if label in reviewed:
-                continue
-            if (
+            repo, number = label.rsplit("#", 1)
+            first = self.first_reporter(label)
+            # Several workers push as the owner: only the task that brought it up first.
+            brought = first == f"{task['session_id']}|{task['id']}" or (
+                first == f"{task['session_id']}|" and not task["id"]
+            )
+            if label not in reviewed and (
                 label in opened
-                or pr.get("branch") in branches
-                or (pr.get("author") in mine and not_before(pr.get("created"), task["created_at"]))
+                or (pr.get("branch") and pr.get("branch") in branches)
+                or (
+                    pr.get("author") in mine
+                    and not_before(pr.get("created"), task["created_at"])
+                    and brought
+                )
             ):
                 own.add(label)
-        return own
+            if (
+                label in own
+                or label in reviewed
+                or self.store.get(f"given:{task['session_id']}:github:{label}")
+                or names_pr(asked, repo, int(number))
+                or (first and brought)
+            ):
+                about.add(label)
+        return own, about
+
+    async def own_prs(self, task: dict, prs: list[dict]) -> set[str]:
+        return (await self.pr_roles(task, prs))[0]
 
     async def offer_merge(self, task: dict, prs: list[dict]):
         """A PR the task delivered for the owner that can be merged now (open, not a draft, CI
@@ -303,7 +425,7 @@ class TaskActions:
         except Exception:
             return
         cards = [draft for draft in self.store.drafts() if draft["kind"] == "merge"]
-        own = await self.own_prs(task, prs)
+        own = {pr["label"].lower() for pr in prs if pr.get("own")}
         for pr in prs:
             label = pr["label"].lower()
             mergeable = (
@@ -386,14 +508,11 @@ class TaskActions:
             return False
         task = self.tasks.get(task_id)
         await self.offer_merge(task, prs)
-        own = await self.own_prs(task, prs)
         # Its own PR merged: what it delivers is in. Not a PR its report only mentions.
-        merged = [
-            pr["label"] for pr in prs if pr.get("state") == "MERGED" and pr["label"].lower() in own
-        ]
+        merged = [pr["label"] for pr in prs if pr.get("state") == "MERGED" and pr.get("own")]
         if merged and task["status"] == "review":
             for label in merged:
-                self.pr_merged(task["session_id"], f"github:{label.lower()}")
+                self.pr_merged(task["session_id"], f"github:{label.lower()}", task["id"])
         shown = [{k: v for k, v in pr.items() if k != "at"} for pr in evidence["prs"]]
         changed = shown != [{k: v for k, v in pr.items() if k != "at"} for pr in prs]
         evidence |= {"prs": prs, "prs_at": time.time()}
@@ -425,6 +544,27 @@ class TaskActions:
             except Exception:
                 logger.info("Could not refresh the PRs of %s.", task["id"], exc_info=True)
 
+    def record_opened(self, task_id: str, urls: list[str]):
+        """PRs this task's worker opened (Create PR, or `gh pr create` in its shell): its own
+        work, which a merge settles."""
+        known = json.loads(self.store.get(f"prs:{task_id}") or "[]")
+        self.store.set(f"prs:{task_id}", json.dumps(list(dict.fromkeys(known + urls))))
+
+    def opened_prs(self, task_id: str) -> set[str]:
+        """Those PRs, as "owner/repo#n" (lowercase)."""
+        opened = json.loads(self.store.get(f"prs:{task_id}") or "[]")
+        return {key.removeprefix("github:") for key in threads.pull_requests(" ".join(opened))}
+
+    def owns_pr(self, task: dict, label: str) -> bool:
+        """Whether a PR ("owner/repo#n") is this task's own work by what is known without
+        GitHub: it opened it, or it first brought it up and no other task opened it."""
+        label = label.lower()
+        if label in self.opened_prs(task["id"]):
+            return True
+        if self.first_reporter(label) != f"{task['session_id']}|{task['id']}":
+            return False
+        return not any(label in self.opened_prs(other) for other in self.store.items("prs:"))
+
     def pr_urls(self, task: dict) -> list[str]:
         """The task's PRs: those opened with Create PR, and those any of its reports linked to."""
         opened = json.loads(self.store.get(f"prs:{task['id']}") or "[]")
@@ -444,12 +584,16 @@ class TaskActions:
         if found:
             self.store.set(f"cited:{task_id}", json.dumps(list(dict.fromkeys(cited + found))))
 
-    def pr_merged(self, session_id: str, thread: str):
-        """A worker's PR was merged: the task it delivers is done."""
+    def pr_merged(self, session_id: str, thread: str, task_id: str = ""):
+        """A worker's PR was merged: the task that delivers it is done (`task_id`, when known
+        already). Not a task whose report only mentions it."""
+        label = thread.removeprefix("github:")
         for task in self.tasks.for_session(session_id):
-            if task["status"] == "review" and thread in threads.pull_requests(
-                " ".join(self.pr_urls(task))
-            ):
+            if task["status"] != "review" or (task_id and task["id"] != task_id):
+                continue
+            if not task_id and not self.owns_pr(task, label):
+                continue
+            if thread in threads.pull_requests(" ".join(self.pr_urls(task))):
                 self.tasks.move(task["id"], "done")
                 self.runtime.background(self.runtime.workers.pump())
 
@@ -480,13 +624,13 @@ class TaskActions:
             for checkout in self.workspaces.checkouts(row):
                 if not (checkout.get("repo") and checkout.get("branch")):
                     continue  # A shared project folder has no branch of its own.
-                plans.append(await self.pr_plan(checkout))
-            plans = [plan for plan in plans if plan]
+                if plan := await self.pr_plan(checkout):
+                    plans.append((checkout, *plan))
             if not plans:
                 raise ValueError("Nothing to open a PR from: the worker committed nothing.")
-            for repo, slug, branch in plans:
-                await git(
-                    "-C", repo, "push", "--quiet", "origin",
+            for checkout, repo, slug, branch in plans:
+                await checkout_git(
+                    checkout, repo, "push", "--quiet", "origin",
                     f"refs/heads/{branch}:refs/heads/{branch}", limit=180,
                 )  # fmt: skip
                 listed = await gh(
@@ -503,8 +647,7 @@ class TaskActions:
                 if not (found := threads.PR_URL.search(created)):
                     raise ValueError(f"GitHub did not say which PR it opened: {created[:300]}")
                 opened.append(found.group(0))
-        known = json.loads(self.store.get(f"prs:{task_id}") or "[]")
-        self.store.set(f"prs:{task_id}", json.dumps(list(dict.fromkeys(known + opened))))
+        self.record_opened(task_id, opened)
         if not row["closed_at"]:
             # Its reviews, comments and CI come to the worker; merged, the task is done.
             followed = self.runtime.follow(row["id"], threads.pull_requests(" ".join(opened)))
@@ -527,18 +670,21 @@ class TaskActions:
         name = Path(repo).name
         tree = checkout.get("worktree") or checkout["path"]
         live = await asyncio.to_thread(os.path.isdir, tree)
-        if live and (await git("-C", tree, "status", "--porcelain")).strip():
+        status = await checkout_git(checkout, tree, "status", "--porcelain") if live else ""
+        if worth_committing(status):
             raise ValueError(
                 f"{name} has uncommitted changes. Follow up and ask the worker to commit "
                 "them, then create the PR."
             )
-        commits = await git(
-            "-C", repo, "rev-list", "--count", f"{base_of(checkout)}..refs/heads/{branch}"
+        commits = await checkout_git(
+            checkout, repo, "rev-list", "--count", f"{base_of(checkout)}..refs/heads/{branch}"
         )
         if not int(commits.strip() or 0):
             return None
         try:
-            remote = (await git("-C", repo, "config", "--get", "remote.origin.url")).strip()
+            remote = (
+                await checkout_git(checkout, repo, "config", "--get", "remote.origin.url")
+            ).strip()
         except ValueError:
             remote = ""
         match = GITHUB_REMOTE.search(remote)
@@ -612,13 +758,18 @@ class TaskActions:
         return "\n".join(lines).strip() + "\n"
 
     def fail(self, session_id: str, message: str):
-        task = self.tasks.current(session_id)
-        if task and task["status"] in OPEN:
-            self.tasks.move(task["id"], "failed", progress=message[:500])
+        """Its session failed: none of its open tasks goes on."""
+        for task in self.tasks.for_session(session_id):
+            if task["status"] in OPEN:
+                self.tasks.move(task["id"], "failed", progress=message[:500])
 
     def report_task(self, caller: str, reference: str) -> dict | None:
+        """The task a report is about: the one it names; else its only open task (not the one
+        given last, which may be finished); else the task it is on."""
         if not reference:
             open_ = [task for task in self.tasks.for_session(caller) if task["status"] in OPEN]
+            if len(open_) == 1:
+                return open_[0]
             if len(open_) > 1:
                 # Filed against whichever was given last, it would be another task's report.
                 listed = "; ".join(f"{task['id']} “{task['title']}”" for task in open_)
@@ -665,7 +816,48 @@ class TaskActions:
             task = self.tasks.move(task_id, was, progress=f"Follow-up cancelled ({why})")
         else:
             task = self.tasks.move(task_id, "cancelled", progress=why)
-        if row and not row["closed_at"]:
+        others = [
+            other
+            for other in self.tasks.for_session(task["session_id"])
+            if other["id"] != task_id and other["status"] in OPEN
+        ]
+        note = (
+            f"The follow-up on task {task_id} “{task['title']}” was cancelled: stop that work. "
+            "Its earlier result stands; no report."
+            if was
+            else f"Task {task_id} “{task['title']}” was cancelled. Stop work on it; no report."
+        )
+        if row and not row["closed_at"] and others:
+            # Its other tasks go on: its turn is not stopped (it may be on another task), only
+            # this task's instructions it has not received are dropped, and it hears of the
+            # cancellation within its turn, if it knew of the task at all.
+            received = self.delivery.drop_pending(row["id"], task_id)
+            if row["task_id"] == task_id:
+                self.store.execute(
+                    "UPDATE sessions SET task_id=? WHERE id=?", (others[-1]["id"], row["id"])
+                )
+            if received and row["status"] == "working" and self.states.is_live(row["id"]):
+                # Not "stopped": its turn goes on, and it still owes a report on its other task.
+                await self.delivery.deliver(
+                    row["id"],
+                    wrap("system", "cancelled", note, task=task_id),
+                    kind="notice",
+                    display=why,
+                    meta={"task_id": task_id},
+                    steer=True,
+                )
+            elif received:
+                self.runtime.add_message(
+                    row["id"],
+                    "notice",
+                    why,
+                    {
+                        "prompt": wrap("system", "cancelled", note, task=task_id),
+                        "deferred": True,
+                        "task_id": task_id,
+                    },
+                )
+        elif row and not row["closed_at"]:
             if on_it:
                 self.runtime.asks.cancel_requests(row["id"], why, keep_questions=task_id)
                 if handle := self.states.handle(row["id"]):
@@ -676,12 +868,6 @@ class TaskActions:
                 self.delivery.defer_pending(row["id"])  # Its task, if it never started.
                 if row["status"] in {"working", "queued", "starting", "waiting"}:
                     self.runtime.update_session(row["id"], status="idle", activity="")
-            note = (
-                f"The follow-up on task {task_id} “{task['title']}” was cancelled: stop that work. "
-                "Its earlier result stands; no report."
-                if was
-                else f"Task {task_id} “{task['title']}” was cancelled. Stop work on it; no report."
-            )
             # Pending, not sent: it reaches the worker with its next message, not as a new turn.
             self.runtime.add_message(
                 row["id"],
@@ -727,15 +913,18 @@ class TaskActions:
         self.runtime.learning.record("accept", context=task["title"], scope=scope, agreed=True)
         return task
 
-    async def answer_question(self, session_id: str, text: str) -> dict:
-        """The owner answers a worker's question kept under Needs you. Answering it, they want
-        the work: a task cancelled or finished meanwhile goes on with the answer."""
-        question = self.runtime.asks.owner_question(session_id)
+    async def answer_question(self, question_id: str, text: str) -> dict:
+        """The owner answers a worker's question kept under Needs you (by its id, or by its
+        worker's). Answering it, they want the work: a task cancelled or finished meanwhile
+        goes on with the answer."""
+        question = self.runtime.asks.owner_question(question_id)
         if not question:
             raise ValueError("That question was answered or dismissed already.")
+        session_id = question.get("id", question_id).split(":", 1)[0]
         task = self.tasks.find(question["task_id"]) if question["task_id"] else None
         if not task:
-            await self.runtime.owner_send(session_id, text)
+            self.runtime.asks.answered(session_id, "")
+            await self.runtime.owner_send(session_id, text, clear_questions=False)
             return {"session_id": session_id}
         return await self.follow_up(task["id"], text, resume=True)
 
@@ -749,7 +938,7 @@ class TaskActions:
         if row["closed_at"]:
             await self.runtime.workers.reopen(row["id"])
         self.store.delete(f"news:{task_id}")  # Answering it, the owner has seen its news.
-        self.runtime.asks.answered(task["session_id"])
+        self.runtime.asks.answered(task["session_id"], task_id)
         before = task["status"]
         self.runtime.learning.record(
             "follow-up",
@@ -760,15 +949,35 @@ class TaskActions:
             agreed=False if before in {"review", "done"} else None,
             untrusted=bool(row["slack"]),
         )
+        if before == "cancelled":
+            # Answered after it was cancelled: the owner wants it after all. The note that it
+            # was cancelled, not sent yet, is moot.
+            mark = int(self.store.get(f"sent:{row['id']}") or 0)
+            for message in self.store.messages(row["id"], after=mark):
+                prompt = message["meta"].get("prompt", "")
+                if 'type="cancelled"' in prompt and f'task="{task_id}"' in prompt:
+                    kept = {k: v for k, v in message["meta"].items() if k != "prompt"}
+                    self.store.update_message_meta(message["id"], {**kept, "dropped": True})
         if before in {"review", "done", "failed", "cancelled"}:
+            # Cancelling this follow-up gives the finished result back.
+            self.store.set(f"reopened:{task_id}", before)
             task = self.tasks.move(task_id, "running", reason="follow-up")
         elif before == "waiting":
             # The owner answered what it waited for: it goes on (and asks again if need be).
             task = self.tasks.move(task_id, "running", progress="")
+        prompt = wrap("owner", "message", text, task=task_id, reply_in=self.runtime.heard(text))
+        if before == "cancelled":
+            prompt += "\n\n" + wrap(
+                "system",
+                "context",
+                f"Task {task_id} “{task['title']}” was cancelled before; with this answer the "
+                "owner wants it after all, and it is running again. Do it now with their "
+                "answer, and report.",
+            )
         try:
             await self.delivery.deliver(
                 row["id"],
-                wrap("owner", "message", text, task=task_id, reply_in=self.runtime.heard(text)),
+                prompt,
                 kind="owner",
                 display=text,
                 meta={"task_id": task_id},
@@ -776,6 +985,7 @@ class TaskActions:
             )
         except Exception:
             if task["status"] != before:
+                self.store.delete(f"reopened:{task_id}")
                 self.tasks.move(task_id, before)  # The follow-up never reached its worker.
             raise
         self.runtime.owner_told(row, text)
@@ -799,6 +1009,7 @@ class TaskActions:
                 owner=text,
                 scope=self.runtime.learning.scope_of(task["session_id"]),
             )
+        self.store.set(f"reopened:{task_id}", before["status"])
         task = self.tasks.move(task_id, "running", reason="retry", progress="")
         body = f"The owner asks you to try task {task_id} “{task['title']}” again."
         if text.strip():
@@ -818,16 +1029,44 @@ class TaskActions:
                 meta={"task_id": task_id},
             )
         except Exception:
+            self.store.delete(f"reopened:{task_id}")
             self.tasks.move(task_id, before["status"], progress=before["progress"])
             raise
         self.runtime.owner_told(row, body)
         return task
 
+    def watching(self, task: dict, follows: list[str]) -> list[str]:
+        """The threads and PRs its worker follows for this task: its PRs, those its title or
+        instructions name; all of them when the worker has no other open task."""
+        from .tools import names_pr
+
+        if task["status"] not in OPEN or not follows:
+            return []
+        others = [
+            other
+            for other in self.tasks.for_session(task["session_id"])
+            if other["id"] != task["id"] and other["status"] in OPEN
+        ]
+        if not others:
+            return follows
+        mine = set(threads.pull_requests(" ".join(self.pr_urls(task))))
+        asked = f"{task['title']}\n{task['goal'] or ''}"
+        current = self.tasks.current(task["session_id"])
+        found = []
+        for key in follows:
+            pr = threads.GITHUB_PR.fullmatch(key)
+            if key in mine or (pr and names_pr(asked, pr.group(1), int(pr.group(2)))):
+                found.append(key)
+            elif not pr and current and current["id"] == task["id"]:
+                found.append(key)  # A Slack thread: the task it was on.
+        return found
+
     def view(self, task: dict) -> dict:
         row = self.store.find_session(task["session_id"]) or {}
+        follows = self.store.follows(row["id"]) if row else []
         return {
             **task,
-            "worker": row.get("title", ""),
+            "worker": self.runtime.display_title(row) if row else "",
             "worker_status": row.get("status", ""),
             "worker_closed": bool(row.get("closed_at")),
             "cwd": row.get("cwd", ""),
@@ -839,7 +1078,83 @@ class TaskActions:
             "receipts": self.receipts(task),
             "decisions": self.runtime.decisions.for_task(task["id"]),
             "news": json.loads(self.store.get(f"news:{task['id']}") or "null"),
+            # What tells a running task's state apart: woken later to check something, the
+            # threads it waits on, and when its worker last did anything.
+            "check_back": self.check_back(task),
+            "watching": self.watching(task, follows),
+            "active_at": self.active_at(task, row) if row else task["updated_at"],
         }
+
+    def active_at(self, task: dict, row: dict) -> str:
+        """When anything last happened on this task: its own progress or messages, and its
+        worker's steps while its turn was on it."""
+        about = self.store.value(
+            "SELECT max(created_at) FROM messages WHERE session_id=? "
+            "AND json_extract(meta, '$.task_id')=?",
+            (row["id"], task["id"]),
+        )
+        stamps = [task["updated_at"], about or ""]
+        if self.runtime.turn_task(row["id"]) == task["id"]:
+            last = "SELECT max(created_at) FROM messages WHERE session_id=?"
+            stamps.append(self.store.value(last, (row["id"],)) or "")
+        return max(stamp for stamp in stamps if stamp is not None)
+
+    def stalled(self, task: dict, now: datetime | None = None) -> float:
+        """Hours a running task has been stalled (0 when not): its worker is not at work, it
+        waits on nothing it follows and has no check-back, and nothing happened on it for
+        stall_hours."""
+        if task["status"] != "running":
+            return 0
+        row = self.store.find_session(task["session_id"])
+        if not row or row["closed_at"] or row["status"] in {"working", "starting", "queued"}:
+            return 0
+        if self.check_back(task) or self.watching(task, self.store.follows(row["id"])):
+            return 0
+        now = now or datetime.now(UTC)
+        idle = (now - datetime.fromisoformat(self.active_at(task, row))).total_seconds() / 3600
+        return idle if idle >= self.store.settings().stall_hours else 0
+
+    async def nudge(self, task_id: str, by: str = "you") -> dict:
+        """Ask a stalled task's worker where it stands: it goes on, reports, or says what it
+        waits on (check_back) or what blocks it."""
+        task = self.tasks.get(task_id)
+        if task["status"] not in {"running", "waiting"}:
+            raise ValueError(f"Task {task_id} is {task['status']}: nothing to nudge.")
+        row = self.store.session(task["session_id"])
+        if row["closed_at"]:
+            await self.runtime.workers.reopen(row["id"])
+        asker = "The owner asks" if by == "you" else "Chief of Staff asks"
+        text = (
+            f"{asker} where task {task_id} “{task['title']}” stands: nothing has happened on it "
+            f"for a while. Go on with it now; or report it (done, or a question); or, if it waits "
+            "for something outside (a run, a review), check_back when to look again."
+        )
+        await self.delivery.deliver(
+            row["id"],
+            wrap("system", "nudge", text, task=task_id),
+            kind="notice",
+            display="Asked where it stands." if by == "you" else "Stalled: asked where it stands.",
+            meta={"task_id": task_id},
+            steer=True,
+        )
+        self.store.set(f"stallnudge:{task_id}", now())  # After it: the nudge is not activity.
+        return self.view(self.tasks.get(task_id))
+
+    async def nudge_stalled(self, moment: datetime | None = None):
+        """Each stalled task's worker is asked once where it stands (again only after more
+        activity and another stall)."""
+        for task in self.store.all("SELECT * FROM tasks WHERE status='running'"):
+            if not self.stalled(task, moment):
+                continue
+            nudged = self.store.get(f"stallnudge:{task['id']}") or ""
+            row = self.store.find_session(task["session_id"])
+            if not row or (nudged and nudged >= self.active_at(task, row)):
+                continue
+            try:
+                await self.nudge(task["id"], by="watchdog")
+            except Exception:
+                logger.warning("Could not nudge stalled task %s.", task["id"], exc_info=True)
+            self.publish(self.tasks.get(task["id"]))
 
     def publish(self, task: dict):
         self.bus.publish("task", self.view(task))

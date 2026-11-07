@@ -23,6 +23,7 @@ async def spawn(runtime, router, title, **extra):
 async def test_a_worker_closes_itself_when_its_pr_is_finished(harness):
     runtime = await harness.connect()
     worker_id = (await spawn(runtime, harness.router_id, "Fix"))["session_id"]
+    harness.own_pull("acme/app", 7)
     await call_tool(
         runtime, "report", worker_id, status="done", summary="https://github.com/acme/app/pull/7"
     )
@@ -46,6 +47,7 @@ async def test_quiet_finished_workers_are_tidied_up(harness):
     done = (await spawn(runtime, harness.router_id, "Done"))["session_id"]
     following = (await spawn(runtime, harness.router_id, "Following"))["session_id"]
     asking = (await spawn(runtime, harness.router_id, "Asking"))["session_id"]
+    harness.own_pull("a/b", 1)
     await call_tool(runtime, "report", done, status="done", summary="ok")
     await call_tool(
         runtime, "report", following, status="done", summary="https://github.com/a/b/pull/1"
@@ -698,4 +700,8 @@ def test_a_step_reads_as_what_it_is_for():
     arguments = {"command": "cd /w && rm -f cos.db", "description": "Reset the test database"}
     assert describe_step("bash", arguments) == "Reset the test database"
     assert describe_tool("bash", arguments) == "bash cd /w && rm -f cos.db"
-    assert describe_step("view", {"path": "/w/app.py"}) == "view /w/app.py"
+    assert describe_step("view", {"path": "/w/app.py"}) == "Reading app.py"
+    assert describe_step("grep", {"pattern": "def main"}) == "Searching the code for “def main”"
+    assert describe_step("read_bash", {"shellId": "3"}) == "Reading a command's output"
+    assert describe_step("web_fetch", {"url": "https://docs.x.com/a"}) == "Reading docs.x.com"
+    assert describe_step("bash", {"command": "make"}) == "bash make", "the command, as it runs"

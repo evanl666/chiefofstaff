@@ -560,3 +560,27 @@ async def test_a_new_review_on_a_busy_pr_is_seen(tmp_path):
     await GitHubSource(store, host, gh_command=busy).poll_once()
     [(_, keys, text)] = host.deliveries
     assert "github:review:500" in keys and "carol approved: Ship it" in text
+
+
+async def test_a_failing_review_request_search_does_not_stop_followed_prs(tmp_path):
+    store = Store(tmp_path / "data")
+    store.save_settings(Settings(github_enabled=True, github_repos=["acme/app", "other/lib"]))
+    state = {
+        "state": "open",
+        "merged": False,
+        "comments": [{"id": 12, "user": {"login": "bob"}, "body": "Nit", "html_url": "u12"}],
+    }
+    pulls = fake_gh(state)
+
+    async def gh(*arguments, payload=None):
+        if arguments[0] == "search":
+            if "--repo=other/lib" in arguments:
+                raise RuntimeError("HTTP 403: SAML enforcement")
+            return "[]"
+        return await pulls(*arguments, payload=payload)
+
+    host = Host(store)
+    source = GitHubSource(store, host, gh_command=gh)
+    await source.poll_once()
+    assert [thread for thread, _, _ in host.deliveries] == [THREAD]
+    assert source.status["connected"] and "other" in source.status["error"]
