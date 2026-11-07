@@ -37,14 +37,15 @@ On the right, everything has one place:
 
 | Section | What is there |
 | --- | --- |
-| **Needs you** | Questions and forms from workers, sign-ins, decisions, a folder to pick, Slack replies, PR reviews and replies to approve, sends a restart interrupted, failed or blocked tasks. Each card has one main action (*Send*, *Answer*, *Accept*…); the rest is behind **⋯**. A card leaves as soon as you act and a short note confirms it; if that did not work, it comes back with the reason. |
-| **Tasks** | *Running*: each task at a glance, with the step its worker is in now and for how long, and what it said last; a worker with several tasks is one card, with a line per task: the one it is on now, the ones waiting their turn, for you or for a slot, each with its own latest progress. *Queued*: why it waits (*Waiting for “…”*, or *Waiting for a worker slot · 3 of 3 busy* when *Parallel workers* are all in use). *Ready to review*: the outcome in a line and the [receipts](#receipts); *Show report* opens the whole report. Finished work its worker has news about (its PR approved or merged, a reply handled) is back here too, marked *Update*, until you press *Got it* (or answer it). *Accept*, or under **⋯** *Follow up*, *Copy report* (markdown for a PR description) and *Create PR* (for work on a branch of its own). *Recently finished* keeps finished and cancelled tasks for three days. |
+| **Needs you** | Questions and forms from workers, sign-ins, decisions, a folder to pick, Slack replies, PR reviews and replies to approve, PRs of yours ready to merge (*Merge* merges it as shown; anything pushed since stops it), sends a restart interrupted, failed or blocked tasks. A worker's question stays here until you answer or dismiss it, also when its task was cancelled or finished meanwhile: answering means you want the work, and that task goes on with your answer. Each card has one main action (*Send*, *Answer*, *Accept*…); the rest is behind **⋯**. A card leaves as soon as you act and a short note confirms it; if that did not work, it comes back with the reason. |
+| **Tasks** | *Running*: each task at a glance, with the step its worker is in now (what it is for, as the command describes itself) and for how long, its latest report in two lines (click for all of it), and what it made or points to: its PRs with GitHub's state (*awaiting approval* for a check that waits for a person, *ready to merge*), docs, runs, tickets, the threads its worker watches, a draft or question waiting for you. A worker with several tasks is one card, with a line per task: the one it is on now, the ones waiting their turn, for you or for a slot, each with its own progress and links. *Waiting on others*: running tasks whose worker is between turns, watching a PR or a thread (CI, a review or a reply comes next). Every count counts tasks. *Queued*: why it waits (*Waiting for “…”*, or *Waiting for a worker slot · 3 of 3 busy* when *Parallel workers* are all in use). *Ready to review*: the outcome in a line and the [receipts](#receipts); *Show report* opens the whole report. Finished work its worker has news about (its PR approved or merged, a reply handled) is back here too, marked *Update*, until you press *Got it* (or answer it). *Accept*, or under **⋯** *Follow up*, *Copy report* (markdown for a PR description) and *Create PR* (for work on a branch of its own). *Recently finished* keeps finished and cancelled tasks for three days. |
 
 When a finished task's worker drafted something for you (a Slack reply, a PR review), the draft
 is the one card: it shows the task's result, and sending it accepts the task.
 
-Click a task's title (or *Open worker*) to see its worker's full timeline, every step, report
-and message, and to talk to it directly; **← Home** goes back. *Stop*, next to *Thinking…* at
+Click a task's title (or *Open worker*) to see its worker's full timeline at that task's report
+(the worker may have gone on to other work since), every step, report and message, and to talk
+to it directly; **← Home** goes back. *Stop*, next to *Thinking…* at
 the end of a timeline, interrupts what a session is doing; a worker's **⋯** (top right) has its
 model, its permission checks, its folder and *Close worker*. On a narrow window Home shows
 *Chat*, *Needs you* and *Tasks* one at a time. The sidebar has Home (its count is what needs
@@ -54,9 +55,11 @@ sessions*; Settings and Usage are the icons at the bottom.
 A file path in a report or message opens the file when it is in a worker's folders (a
 walkthrough, results, a log): Markdown shows formatted. Other paths are copied.
 
-The dot next to each worker shows its state (hover it for the words): pulsing blue, working;
-amber, waiting for your answer; green, done; red, failed; hollow grey, queued; grey, idle; a
-blue ring, open in a terminal right now.
+The dot next to each worker says where it stands, in the same terms as Home (hover it for the
+words, or click *?* beside *Workers*): amber, it needs you (*Needs you*); red, a task failed;
+pulsing blue, working now; a blue ring, running but between steps, waiting on CI, a review or a
+reply; a grey ring, queued; green, ready to review; grey, nothing open. A worker is listed by the
+task it is on now, its first title in the tooltip.
 
 Until you set your code folder (see [Where workers work](#where-workers-work)), Home asks for
 it; *Not now* hides that card, and Settings still has it.
@@ -395,7 +398,8 @@ migration* or *Run a small smoke job before the full one*, each with where it ap
 shows them: keep, reword or untick each. Only what you keep goes into your sessions'
 instructions; habits learned while the card waits join it.
 
-Settings → *You* lists the habits in use (remove any) and shows how close the sessions
+Settings → *You* lists the habits in use (remove any, or add your own: they apply from your
+sessions' next message) and shows how close the sessions
 get to you: the share of recommendations you took, drafts you sent as written and results you
 accepted as they were, over the last 30 days and the 30 before. Usage shows what a result you
 accepted cost, by model.
@@ -508,14 +512,16 @@ what: "Glean search", "the Slack MCP server", your company's own search. Chief o
 connector checks them on a schedule (every 5 minutes in work hours, every 30 after; both
 settable, 0 turns after-hours checks off) with whatever MCP servers, skills and CLIs your
 Copilot has here, so it works without a Slack token wherever your company gives Copilot a
-search. *Scan now* checks at once.
+search. *Scan now* saves the watches as written and checks at once.
 
 What needs you (a question, a request, a mention that expects your answer) goes to the Router,
 like a Slack event. It has a worker look into it, read the conversation and draft the reply in
 your voice. Where Chief of Staff can send it (Slack connected), you approve and it is sent;
 otherwise approving copies it for you to paste. Bots, FYIs and what you already answered are
-left alone, and nothing is handed over twice. A watch whose tool is missing here says so under
-*Watches*. The connector only looks: it never posts, replies or reacts.
+left alone (the connector reads a message's thread and leaves out what you answered there), and
+nothing is handed over twice. A watch whose tool is missing here says so under *Watches*. The
+connector only looks: it never posts, replies or reacts. It reads other people's messages, so
+it runs sandboxed with network to GitHub only, whatever the worker sandbox setting.
 
 It also collects what you write there (your own messages only), so *How you work* learns your
 voice even where Slack is reached through another tool.
@@ -531,6 +537,12 @@ use port 9090" answers a question, "K3XQ7 retry" retries a failed task. The conn
 your answers on its next check, and the chat notes each one. *Send a test* tries the way you
 gave. Without a bot that can message you, say "send it to my own Slack DM": you see it there,
 without a phone notification.
+
+The notifications are sent by a messenger of their own, not the connector: it is given only
+Chief of Staff's message, in a file, and follows your worker sandbox setting, so a company bot's
+command-line tool works (with the sandbox off, it runs as in your own sessions). It says how it
+sent the message, and the next one goes the same way. When sending fails, the chat says so once
+and Settings shows the latest attempt.
 
 ## Abilities: skills, plugins and MCP servers
 

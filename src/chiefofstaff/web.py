@@ -17,6 +17,7 @@ from .bus import Bus
 from .models import (
     DraftDecision,
     FocusRequest,
+    NewLesson,
     OpenFolder,
     OwnerMessage,
     ProfileText,
@@ -258,6 +259,11 @@ def create_app(
         runtime.checks.turn(check_id, action == "enable")
         return runtime.snapshot()
 
+    @app.post("/api/lessons")
+    async def add_lesson(payload: NewLesson):
+        await runtime.learning.add(payload.text, payload.scope)
+        return runtime.snapshot()
+
     @app.post("/api/lessons/{lesson_id}/remove")
     async def remove_lesson(lesson_id: str):
         await runtime.learning.remove(lesson_id)
@@ -298,6 +304,20 @@ def create_app(
     @app.post("/api/tasks/{task_id}/accept")
     async def accept_task(task_id: str):
         return runtime.task_actions.view(runtime.task_actions.accept(task_id))
+
+    @app.post("/api/questions/{session_id}/answer")
+    async def answer_question(session_id: str, payload: OwnerMessage):
+        store.session(session_id)
+        if not payload.text.strip():
+            raise ValueError("Write your answer.")
+        await runtime.task_actions.answer_question(session_id, payload.text)
+        return runtime.snapshot()
+
+    @app.post("/api/questions/{session_id}/dismiss")
+    async def dismiss_question(session_id: str):
+        store.session(session_id)
+        runtime.asks.answered(session_id)
+        return runtime.snapshot()
 
     @app.post("/api/tasks/{task_id}/news-seen")
     async def task_news_seen(task_id: str):

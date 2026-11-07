@@ -270,8 +270,13 @@
             <p id="learned-nothing" class="hint" hidden>Nothing learned yet. What it learns shows here, and new habits and checks come to Needs you first.</p>
             <h4>Writing styles</h4>
             <ul id="styles" class="memory"></ul>
-            <h4>Habits</h4>
+            <h4 class="always">Habits</h4>
             <ul id="lessons" class="memory"></ul>
+            <div id="lesson-add" class="lesson-add">
+              <input id="lesson-text" maxlength="300" placeholder="Add a habit, e.g. “Run the linter before every commit”" aria-label="New habit" />
+              <select id="lesson-scope" aria-label="Where it applies"></select>
+              <button id="lesson-save" type="button" class="secondary">Add</button>
+            </div>
             <h4>Checks</h4>
             <ul id="checks" class="memory"></ul>
             <p id="agreement" class="hint"></p>

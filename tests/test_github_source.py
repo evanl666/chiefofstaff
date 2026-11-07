@@ -164,6 +164,31 @@ async def test_followed_pr_activity_reaches_its_followers(tmp_path):
     assert host.unfollowed == [(THREAD, True, True)], "it was merged while followed"
 
 
+async def test_ci_that_ended_before_a_pr_was_followed_is_not_news(tmp_path):
+    store = Store(tmp_path / "data")
+    store.save_settings(Settings())
+    state = {
+        "state": "open",
+        "merged": False,
+        "comments": [],
+        "runs": [
+            {"name": "tests", "status": "completed", "conclusion": "failure",
+             "completed_at": "2020-01-01T00:00:00Z"},
+        ],
+    }  # fmt: skip
+    host = Host(store)
+    source = GitHubSource(store, host, gh_command=fake_gh(state))
+    await source.poll_once()
+    assert not any("CI on" in text for _, _, text in host.deliveries), "old CI is where it stands"
+    state["sha"] = "def5678"
+    state["compare"] = {"status": "ahead", "commits": []}
+    state["runs"] = [
+        {"name": "tests", "status": "completed", "conclusion": "failure", "completed_at": "2999"}
+    ]
+    await source.poll_once()
+    assert "CI on def5678: failed: tests" in host.deliveries[-1][2], "new CI is news"
+
+
 async def test_new_commits_on_a_followed_pr_are_news_unless_its_own(tmp_path):
     store = Store(tmp_path / "data")
     store.save_settings(Settings())

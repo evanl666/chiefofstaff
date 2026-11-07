@@ -411,9 +411,38 @@ export function draftCard(draft) {
   if (draft.kind === "change") return changeCard(draft);
   if (draft.kind === "workspace") return workspaceCard(draft);
   if (draft.kind === "reply") return replyCard(draft);
+  if (draft.kind === "merge") return mergeCard(draft);
   if (REQUEST_LABELS[draft.kind]) return requestCard(draft);
   if (draft.kind === "github" && !draft.target.in_reply_to && !draft.target.reply_to_comment) return reviewCard(draft);
   return messageCard(draft);
+}
+// A PR of the owner's that GitHub would merge now (checks pass, nothing blocking): merge it
+// from here, as it was when offered (anything pushed since stops the merge).
+function mergeCard(draft) {
+  const target = draft.target;
+  const error = el("span", { class: "error" });
+  const link = el("a", { href: target.url, target: "_blank", rel: "noreferrer", title: "Open on GitHub", text: target.label.replace(/^[^/]+\//, "") });
+  const review = { APPROVED: "Approved", REVIEW_REQUIRED: "No review yet" }[target.review] || "";
+  const node = card(
+    draft,
+    "merge",
+    ["Ready to merge · ", link],
+    target.title ? el("div", { class: "note strong", text: `“${target.title}”` }) : null,
+    el("div", { class: "note", text: ["Checks pass", review, `head ${String(target.head || "").slice(0, 7)}`].filter(Boolean).join(" · ") }),
+    draft.outcome ? el("div", { class: "note", text: draft.outcome }) : null,
+  );
+  const decide = decider(draft, node, error);
+  node.append(
+    actionRow(
+      error,
+      el("button", { type: "button", text: "Merge", onclick: () => decide({ action: "send" }, `Merging ${target.label}…`) }),
+      [
+        { text: "Open PR", onclick: () => window.open(target.url, "_blank", "noreferrer") },
+        { text: "Not now", onclick: () => decide({ action: "reject" }, "Not merged.") },
+      ],
+    ),
+  );
+  return node;
 }
 // A Slack reply, or a reply to a comment on a PR: the text to send, edited in place.
 function messageCard(draft) {

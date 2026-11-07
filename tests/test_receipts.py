@@ -173,6 +173,24 @@ def test_git_and_gh_output_is_read():
     )
     assert receipts.checks_state([{"status": "IN_PROGRESS", "conclusion": ""}]) == "pending"
     assert receipts.checks_state([]) == "none"
+    # An approval gate waits for a person: CI itself has passed.
+    gated = [
+        {"name": "build", "conclusion": "SUCCESS"},
+        {"name": "Owner Approval", "status": "IN_PROGRESS", "conclusion": ""},
+    ]
+    assert receipts.checks_state(gated) == "passing"
+    assert receipts.awaiting_approval(gated) == ["Owner Approval"]
+
+
+def test_only_the_workers_own_word_counts_as_saying_tests_pass():
+    assert receipts.says_tests_pass("Fixed it. All tests pass.")
+    for report in (
+        "Megha said all 33 checks passed.",
+        "> all tests passed",
+        "The log reads “tests pass” but it hangs.",
+        "CI is green: all 33 checks passed.",
+    ):
+        assert not receipts.says_tests_pass(report), report
 
 
 async def test_a_failing_test_run_piped_into_tail_is_seen_failing(harness):
@@ -415,6 +433,14 @@ async def test_the_tests_pass_when_a_later_part_of_the_line_fails(harness):
     assert observed_tests(runtime, worker)["passed"] is True
     run(session, "c2", "uv run pytest -q && git push", "F.\n1 failed, 1 passed in 0.2s\n"
         "<shellId: 2 completed with exit code 1>")  # fmt: skip
+    await settle(runtime)
+    assert observed_tests(runtime, worker)["passed"] is False
+
+
+async def test_tests_that_fail_before_other_commands_on_the_line_failed(harness):
+    runtime, worker, session = await worker_with_task(harness)
+    run(session, "c1", "uv run pytest -q local_fail; rm -rf .venv uv.lock; git status --short",
+        "F\n1 failed in 0.05s\n?? notes.txt\n<shellId: 1 completed with exit code 0>")  # fmt: skip
     await settle(runtime)
     assert observed_tests(runtime, worker)["passed"] is False
 

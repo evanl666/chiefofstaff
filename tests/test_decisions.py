@@ -168,3 +168,27 @@ async def test_a_decision_and_a_task_from_one_message_are_linked_whatever_the_or
     await owner_says("Write notes.md")
     notes = await spawn(runtime, harness.router_id, "Write notes.md", why_new="other")
     assert notes["task_id"] not in runtime.decisions.linked(second["id"]), "a later message"
+
+
+async def test_a_changed_decision_that_changes_nothing_gives_the_result_back(harness):
+    runtime = await harness.connect()
+    api = await spawn(runtime, harness.router_id, "Login API")
+    await call_tool(runtime, "ask_decision", api["session_id"], question="SMS login in v1?")
+    [card] = harness.store.drafts()
+    await runtime.drafts.resolve(card["id"], DraftDecision(action="answer", text="Email only"))
+    await settle(runtime)
+    [first] = runtime.decisions.active()
+    await call_tool(runtime, "report", api["session_id"], status="done", summary="Email login.")
+    await call_tool(
+        runtime, "record_decision", harness.router_id, decision="Login v1: email, no SSO",
+        replaces=[first["id"]],
+    )  # fmt: skip
+    assert runtime.tasks.get(api["task_id"])["status"] == "running", "reopened to check"
+    [new] = runtime.decisions.active()
+    await call_tool(
+        runtime, "ack_decision", api["session_id"], decision=new["id"],
+        plan="Nothing to change: there was no SSO", changes=False,
+    )  # fmt: skip
+    task = runtime.tasks.get(api["task_id"])
+    assert task["status"] == "review" and task["result"] == "Email login."
+    assert not (runtime.task_actions.receipts(task) or {}).get("stale")

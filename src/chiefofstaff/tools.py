@@ -160,11 +160,13 @@ class MessageSession(BaseModel):
         description=f"The message for that session. {OWNER_WORDS} stands for the owner's message "
         "with that ref attribute, exactly as written"
     )
-    task: Literal["continue", "new"] = Field(
+    task: Literal["continue", "new", "note"] = Field(
         default="continue",
-        description="For a worker: continue its current task (a follow-up or more information; "
-        "a finished task reopens), or start a new task in the same session, reusing its context "
-        "(give a title)",
+        description="For a worker: continue its current task (more on the same subject: a "
+        "correction, more information, a follow-up question; a task in review reopens), start "
+        "a new task in the same session, reusing its context (give a title; also for another "
+        "subject, and for more work on a task the owner accepted), or note: tell it something "
+        "without changing any task (an answer to its question, an acknowledgement, an FYI)",
     )
     title: str = Field(default="", description="Title of the new task when task='new'")
     done_when: list[str] = Field(
@@ -236,7 +238,11 @@ class CriterionResult(BaseModel):
 
 class Report(NestedArguments):
     status: Literal["progress", "question", "blocked", "done"]
-    summary: str = Field(description="What happened, or the one concrete question")
+    summary: str = Field(
+        description="What happened, or the one concrete question. With status done: the whole "
+        "answer the owner reads (tables, lists, every row asked for), up to 30,000 characters; "
+        "never only a pointer to a file"
+    )
     task_id: str = Field(
         default="",
         description="The task this report is about (the task attribute of its message); "
@@ -395,8 +401,26 @@ ASKS_EXPLANATION = re.compile(
 CUT_FOR_LENGTH = re.compile(
     r"\btoo (?:large|long|big) to (?:paste|include|show|list|put|fit|reproduce)|"
     r"\b(?:omitted|truncated|abridged|shortened) (?:here |)for (?:brevity|length|space)|"
-    r"\bfor brevity\b|太长|篇幅",
+    r"\b(?:would )?exceeds? (?:the |a )?(?:report(?:'s)? |message(?:'s)? )?(?:size|length|limit)|"
+    r"\bwould exceed (?:the |a )?(?:report|message)\b|\bfor brevity\b|"
+    r"太长|篇幅|超出(?:报告|长度|篇幅)",
     re.IGNORECASE,
+)
+# "The full table is saved at …", "is in the file below": the answer itself left in a file.
+POINTS_TO_FILE = re.compile(
+    r"\b(?:full|whole|complete|entire)\b[^.\n]{0,100}?\b(?:saved|written|stored)\s+(?:at|to|in)\b|"
+    r"\b(?:full|whole|complete|entire)\b[^.\n]{0,100}?\b(?:is|are)\s+in\s+(?:the\s+|a\s+)?file\b|"
+    r"\b(?:saved|wrote|written|stored)\s+(?:the\s+)?(?:full|whole|complete|entire)\b|"
+    r"完整[^。\n]{0,40}(?:保存|写入|存|在文件)",
+    re.IGNORECASE,
+)
+ASKS_ALL = re.compile(
+    r"\b(?:every|all)\b[^.\n]{0,40}\b(?:rows?|lines?|items?|entries|records)\b|所有|全部|每一",
+    re.IGNORECASE,
+)
+# The owner asked for a file: one that holds the answer is what they wanted.
+ASKS_FILE = re.compile(
+    r"\b(?:save|write|export|dump)\b[^.\n]{0,80}\b(?:to|into)\b|保存到|写入|导出", re.IGNORECASE
 )
 
 
@@ -410,6 +434,16 @@ def short_of(goal: str, summary: str) -> str:
         return (
             f"the whole answer: a report holds up to {MAX_RESULT:,} characters, so nothing has "
             "to be left out for its length"
+        )
+    if (
+        (ASKS_TABLE.search(goal) or ASKS_ALL.search(goal))
+        and not ASKS_FILE.search(goal)
+        and POINTS_TO_FILE.search(summary)
+        and len(summary) < MAX_RESULT // 2
+    ):
+        return (
+            f"the whole answer in the report itself, not only in a file (a report holds up to "
+            f"{MAX_RESULT:,} characters)"
         )
     return ""
 
@@ -958,6 +992,13 @@ class Tools:
                 )
         session_id = str(uuid4())
         slack = (params.slack and self.runtime.slack.configured()) or untrusted
+        if params.slack and not slack and any(key.startswith("slack:") for key in follow):
+            raise ValueError(
+                "Slack is not connected (Settings → Connections → Slack), so no session can "
+                f"follow {', '.join(k for k in follow if k.startswith('slack:'))}. Start the "
+                "worker without those threads: it reads the conversation with the tools it "
+                "has (a company search such as Glean), and drafts with draft_reply."
+            )
         self.runtime.check_follow({"role": WORKER, "slack": slack}, follow)
         workspace, checkouts = await self.workspaces.prepare_directory(
             session_id,
@@ -1079,6 +1120,48 @@ class Tools:
             result["note"] = "Queued until a worker slot frees up."
         return result
 
+    async def follow_own_pulls(self, caller: str, text: str, task: dict | None):
+        """Follow the PRs a report names that are this worker's own: on its branch, or opened
+        by the owner's account since its task began."""
+        followed = set(self.store.follows(caller))
+        row = self.store.session(caller)
+        branches = {c.get("branch") or "" for c in self.workspaces.checkouts(row)}
+        branches = {branch for branch in branches | {row["branch"] or ""} if branch}
+        mine = await self.runtime.github.logins()
+        began = (task or {}).get("created_at") or row["created_at"]
+        own = []
+        for key in threads.pull_requests(text):
+            if key in followed:
+                continue
+            repo, number = key.removeprefix("github:").rsplit("#", 1)
+            try:
+                pull = await self.runtime.github.pull(repo, int(number))
+            except Exception:
+                own.append(key)  # It can't tell: following too much beats missing its own PR.
+                continue
+            author = ((pull.get("user") or {}).get("login") or "").lower()
+            created = (pull.get("created_at") or "").replace("Z", "+00:00")
+            if (pull.get("head") or {}).get("ref") in branches or (
+                author in mine and created >= began
+            ):
+                own.append(key)
+        if own:
+            self.runtime.follow(caller, own, given=False)
+        followed |= set(own)
+        delivered = [key for key in threads.pull_requests(text) if key in followed]
+        task = self.tasks.find(task["id"]) if task else None
+        if task and task["status"] == "running" and delivered:
+            # Its PR while it is still at it: on its card with GitHub's state, refreshed every
+            # few minutes, and offered to merge once it is ready.
+            self.runtime.task_actions.remember_prs(
+                task["id"],
+                " ".join(
+                    "https://github.com/" + key.removeprefix("github:").replace("#", "/pull/")
+                    for key in delivered
+                ),
+            )
+            await self.runtime.task_actions.collect_evidence(task["id"])
+
     def failed_tests(self, task: dict) -> str:
         """The task's last test run, when it failed: "`command` exited 1" ("" otherwise)."""
         found = (self.runtime.task_actions.receipts(task) or {}).get("tests") or {}
@@ -1129,12 +1212,27 @@ class Tools:
         if self.runtime.special(target):
             raise ValueError("That is Chief of Staff's own helper, not a worker to give work to.")
         self.runtime.check_follow(target, [threads.normalize(key) for key in params.follow])
+        task = self.tasks.current(target["id"]) if target["role"] == WORKER else None
+        # Checked before anything changes (a closed worker is not reopened for nothing).
+        if task and params.task == "continue" and task["status"] == "cancelled":
+            raise ValueError(
+                f"Its task {task['id']} was cancelled. For new work in this worker use "
+                "task='new' with a title; to only tell it something, task='note'."
+            )
+        if task and params.task == "continue" and task["status"] == "done":
+            raise ValueError(
+                f"Its task {task['id']} “{task['title']}” was accepted by the owner and is done. "
+                "More work, or another subject: task='new' with a title. Only telling it "
+                "something (an answer, an acknowledgement): task='note'."
+            )
         if target["closed_at"]:
             await self.runtime.workers.reopen(
                 target["id"]
             )  # A follow-up on an earlier task: same worker.
             target = self.store.session(target["id"])
-        task = self.tasks.current(target["id"]) if target["role"] == WORKER else None
+        if target["role"] == WORKER and params.task in {"continue", "note"}:
+            # The Router answers or redirects its question (a new task does not answer it).
+            self.runtime.asks.answered(target["id"])
         if task and task["status"] == "queued" and self.tasks.deps(task["id"]):
             self.store.set(f"released:{task['id']}", "1")  # The Router decides to go ahead.
             self.runtime.background(self.runtime.workers.pump())
@@ -1168,13 +1266,20 @@ class Tools:
             if note := self.report_language(params.text):
                 prompt += "\n\n" + wrap("system", "context", note)
             notice = f"New task “{title}” for “{target['title']}”"
+        elif params.task == "note":
+            prompt = wrap(
+                "router",
+                "note",
+                params.text,
+                task=task["id"] if task else None,
+                reply_in=self.store.get("owner_language"),
+            )
+            notice = f"Told “{target['title']}”"
         else:
-            if task and task["status"] == "cancelled":
-                raise ValueError(
-                    f"Its task {task['id']} was cancelled. For new work in this worker use "
-                    "task='new' with a title."
-                )
-            if task and task["status"] in {"review", "done", "failed"}:
+            if task and task["status"] in {"review", "failed"}:
+                # Reopened for a follow-up: cancelling that follow-up gives the finished result
+                # back, rather than losing it.
+                self.store.set(f"reopened:{task['id']}", task["status"])
                 task = self.tasks.move(task["id"], "running", reason="follow-up")
             prompt = wrap(
                 "router",
@@ -1194,7 +1299,7 @@ class Tools:
             display=params.text,
             meta=meta or None,
             # More on the task it is working on reaches it within its turn; a new task waits.
-            steer=params.task == "continue",
+            steer=params.task in {"continue", "note"},
         )
         self.runtime.add_message(caller, "notice", notice, {"session_id": target["id"]})
         return f"Delivered (task {task['id']})." if task else "Delivered."
@@ -1716,11 +1821,25 @@ class Tools:
             else:
                 task = self.tasks.update(task["id"], progress=params.summary[:6000])
         self.states[caller].resting = ""
+        if row["role"] == WORKER and params.status in {"question", "blocked"}:
+            # Under Needs you until answered, whatever becomes of the task.
+            self.runtime.asks.record_question(caller, params.summary, task["id"] if task else "")
+        elif row["role"] == WORKER:
+            self.runtime.asks.answered(caller)  # It went on: its question is behind it.
         if row["role"] == WORKER and params.status in {"progress", "done"}:
-            # A PR it delivers is its PR: reviews, comments and CI come back to it.
-            self.runtime.follow(caller, threads.pull_requests(params.summary), given=False)
+            # A PR it delivers is its PR: reviews, comments and CI come back to it. Not every
+            # PR it mentions (stale CI news of others' PRs would follow).
+            self.runtime.background(self.follow_own_pulls(caller, params.summary, task))
         if row["role"] == WORKER:
             self.runtime.watchdog.save(caller, nudges=0)
+        if settled and task and params.status in {"question", "blocked"}:
+            # A cancelled task's worker still needs the owner: the question shows under Needs
+            # you, and the Router hears of it.
+            await self.runtime.tell_router(row, params.status, params.summary, task)
+            return (
+                f"Task {task['id']} was cancelled, but your question reaches the owner: it is "
+                "under Needs you."
+            )
         if settled and task:
             return f"Task {task['id']} was cancelled: this report stays in your session only."
         values: dict[str, Any] = {"report": params.summary[:4000]}

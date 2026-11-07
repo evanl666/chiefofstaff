@@ -2,38 +2,50 @@
 
 import { $, api, el, toast } from "./dom.js";
 import { ago, shortPath, since } from "./text.js";
-import { closedWorkers, DOT_HELP, HOME, loadState, sessions, state, STATUS_ORDER, STATUS_TEXT } from "./state.js";
+import { closedWorkers, DOT_HELP, HOME, loadState, sessions, state, workerTitle } from "./state.js";
 import { IN_TERMINAL, readOnlyTimeline, scrollToBottom, select, setComposer, setLayout } from "./session.js";
-import { homeItem, needsCount } from "./inbox.js";
+import { homeItem, needsCount, WORKER_STATES, workerStates } from "./inbox.js";
 import { closeMentions, setRecipient } from "./mention.js";
-// One count in the whole sidebar, on Home: what needs the owner. Sessions show only their dot.
-function sessionItem(session, label) {
-  // A session open in another Copilot window shows that, whatever Chief of Staff last saw it do.
-  const dot = session.elsewhere ? `open${session.terminal?.working ? " busy" : ""}` : session.status;
+import { openSettings } from "./settings.js";
+// One count in the whole sidebar, on Home: what needs the owner. Workers show only their dot,
+// which says where each stands as Home does (Needs you, Running, Queued, Ready to review).
+function sessionItem(session, label, where) {
+  const dot = where?.dot || "idle";
+  const named = label !== session.title ? `\nWorker: ${session.title}` : "";
   return el(
     "button",
     {
       type: "button",
-      class: `item ${session.status}${state.selected === session.id ? " selected" : ""}`,
-      title: [session.elsewhere ? DOT_HELP.open : STATUS_TEXT[session.status] || session.status, session.activity].filter(Boolean).join(" · "),
+      class: `item ${dot.split(" ")[0]}${state.selected === session.id ? " selected" : ""}`,
+      title: [where?.text, session.activity].filter(Boolean).join(" · ") + named,
       "data-id": session.id,
       onclick: () => select(session.id),
     },
-    el("span", { class: `dot ${dot}`, title: DOT_HELP[dot.split(" ")[0]] || "" }),
+    el("span", { class: `dot ${dot}`, title: where?.text || "" }),
     el("span", { class: "label", text: label }),
   );
+}
+const ORDER = Object.fromEntries([...WORKER_STATES.map(([dot]) => dot), "open"].map((dot, index) => [dot, index]));
+// What the dots mean, under "Workers" when asked.
+function legend() {
+  return el("div", { class: "legend" }, ...WORKER_STATES.map(([dot, text]) => el("div", { class: "legend-row" }, el("span", { class: `dot ${dot}` }), el("span", { text }))), el("div", { class: "legend-row" }, el("span", { class: "dot open" }), el("span", { text: DOT_HELP.open })));
 }
 export function renderSidebar() {
   const list = $("#session-list");
   const all = sessions();
+  const where = workerStates();
+  const rank = (session) => ORDER[(where.get(session.id)?.dot || "idle").split(" ")[0]] ?? 9;
   // Chief of Staff's own helpers (learning, checks, the profile) are not the owner's workers.
-  const workers = all
-    .filter((session) => session.role === "worker" && !session.helper)
-    .sort((a, b) => (STATUS_ORDER[a.status] ?? 9) - (STATUS_ORDER[b.status] ?? 9) || b.created_at.localeCompare(a.created_at));
+  const workers = all.filter((session) => session.role === "worker" && !session.helper).sort((a, b) => rank(a) - rank(b) || b.created_at.localeCompare(a.created_at));
   const nodes = [homeItem()];
   if (workers.length) {
-    nodes.push(el("div", { class: "group", text: "Workers" }));
-    nodes.push(...workers.map((worker) => sessionItem(worker, worker.title)));
+    const toggle = el("button", { type: "button", class: "link legend-toggle", text: "?", title: "What the dots mean", "aria-expanded": String(Boolean(state.legend)), onclick: () => {
+      state.legend = !state.legend;
+      renderSidebar();
+    } });
+    nodes.push(el("div", { class: "group" }, el("span", { text: "Workers" }), toggle));
+    if (state.legend) nodes.push(legend());
+    nodes.push(...workers.map((worker) => sessionItem(worker, workerTitle(worker), where.get(worker.id))));
   }
   list.replaceChildren(...nodes);
   const count = needsCount();
@@ -79,10 +91,31 @@ export function renderStatusLine() {
   const until = snap.focus?.until && new Date(snap.focus.until) > new Date() ? new Date(snap.focus.until) : null;
   if (until) nodes.push(el("div", { class: "demo", text: `Focusing until ${until.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}: notifications wait` }));
   if (snap.runtime.warning) nodes.push(el("div", { class: "bad", text: snap.runtime.warning }));
-  if (snap.settings.slack_enabled && snap.slack.error) nodes.push(el("div", { class: "bad", text: `Slack: ${snap.slack.error}` }));
+  if (snap.settings.slack_enabled && snap.slack.error) {
+    // What to do about it, here: fix it in Settings, or stop watching Slack.
+    nodes.push(
+      el(
+        "div",
+        { class: "bad" },
+        `Slack: ${snap.slack.error} `,
+        el("button", { type: "button", class: "link", text: "Settings", onclick: () => openSettings("connections") }),
+        " · ",
+        el("button", { type: "button", class: "link", text: "Turn off", title: "Stop watching Slack (turn it on again in Settings → Connections)", onclick: turnOffSlack }),
+      ),
+    );
+  }
   if (snap.settings.github_enabled && snap.github.error) nodes.push(el("div", { class: "bad", text: `GitHub: ${snap.github.error}` }));
   if (snap.settings.paused) nodes.push(el("div", { text: "Watchers paused" }));
   line.replaceChildren(...nodes);
+}
+async function turnOffSlack() {
+  try {
+    state.snapshot = { ...state.snapshot, ...(await api("/api/settings", { method: "POST", body: { ...state.snapshot.settings, slack_enabled: false } })) };
+    renderStatusLine();
+    toast("Slack watching is off. Turn it on in Settings → Connections.");
+  } catch (error) {
+    toast(error.message, "error");
+  }
 }
 async function reconnect() {
   try {

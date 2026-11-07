@@ -2,26 +2,67 @@
 
 import { $, api, el, keepingFocus, moreMenu, reconcile, submits, toast } from "./dom.js";
 import { markdown, shortPath } from "./text.js";
-import { byId, HOME, loadState, pendingDrafts, routerId, sessions, state, uncertainDrafts } from "./state.js";
+import { byId, DOT_HELP, HOME, loadState, ownerQuestions, pendingDrafts, routerId, sessions, state, uncertainDrafts } from "./state.js";
 import { renderStatusLine } from "./sidebar.js";
 import { renderHeader, scrollToBottom, select } from "./session.js";
 import { draftCard, draftKey, uncertainCard } from "./drafts.js";
 import { expandTask, followUpItem, inTerminal, ownTasks, taskItem, terminalItem, workerGroupItem } from "./tasks.js";
-// What waits for the owner. A task whose worker asks something on a card shows as that card.
+// What waits for the owner: cards to approve or answer, tasks waiting for an answer or failed,
+// and a worker's question whose task does not show it (cancelled, finished, or none). A task
+// waiting on a decision card shows as that card.
 export function needsYou() {
   const drafts = pendingDrafts();
   const deciding = new Set(drafts.filter((draft) => draft.kind === "decision").flatMap((draft) => draft.target.askers.map((asker) => asker.task_id)));
-  const asking = askingSessions();
-  const waiting = ownTasks().filter((task) => (task.status === "waiting" && !deciding.has(task.id) && !asking.has(task.session_id)) || task.status === "failed" || task.blocked);
-  return { drafts, uncertain: uncertainDrafts(), tasks: waiting };
+  const waiting = ownTasks().filter((task) => (task.status === "waiting" && !deciding.has(task.id)) || task.status === "failed" || task.blocked);
+  const shownTasks = new Set(waiting.map((task) => task.id));
+  const questions = ownerQuestions().filter((question) => !shownTasks.has(question.task_id));
+  return { drafts, uncertain: uncertainDrafts(), tasks: waiting, questions };
 }
 // What the badge counts: not the cards the owner just acted on.
 export function needsCount() {
   const items = needsYou();
   const shown = (key) => !state.leaving.has(key);
-  return items.drafts.filter((draft) => shown(`draft:${draft.id}`)).length + items.uncertain.filter((draft) => shown(`draft:${draft.id}`)).length + items.tasks.filter((task) => shown(`task:${task.id}`)).length;
+  return items.drafts.filter((draft) => shown(`draft:${draft.id}`)).length + items.uncertain.filter((draft) => shown(`draft:${draft.id}`)).length + items.tasks.filter((task) => shown(`task:${task.id}`)).length + items.questions.filter((question) => shown(`question:${question.session_id}`)).length;
+}
+// Where a worker stands, as its sidebar dot says and as Home shows it: the same words in both.
+export const WORKER_STATES = [
+  ["waiting", "Needs you: it waits for your answer or approval (Home → Needs you)"],
+  ["failed", "A task failed (Home → Needs you)"],
+  ["working", "Working now (Home → Running)"],
+  ["watching", "Running, between steps: waiting on CI, a review or a reply (Home → Running or Waiting on others)"],
+  ["queued", "Queued: waits for a free slot or another task (Home → Queued)"],
+  ["done", "Finished: ready to review (Home → Ready to review)"],
+  ["idle", "Nothing open: its work is accepted, or it has none"],
+];
+export function workerStates() {
+  const needs = needsYou();
+  const asking = new Set([...needs.drafts.map((draft) => draft.session_id), ...needs.questions.map((question) => question.session_id), ...needs.tasks.filter((task) => task.status !== "failed").map((task) => task.session_id)]);
+  const failed = new Set(needs.tasks.filter((task) => task.status === "failed").map((task) => task.session_id));
+  const open = new Map();
+  for (const task of ownTasks()) open.set(task.session_id, [...(open.get(task.session_id) || []), task]);
+  const found = new Map();
+  for (const session of sessions()) {
+    const list = open.get(session.id) || [];
+    let dot = "idle";
+    if (session.elsewhere) dot = `open${session.terminal?.working ? " busy" : ""}`;
+    else if (asking.has(session.id)) dot = "waiting";
+    else if (failed.has(session.id)) dot = "failed";
+    else if (["working", "starting"].includes(session.status)) dot = "working";
+    else if (list.some((task) => task.status === "running")) dot = "watching";
+    else if (list.some((task) => task.status === "queued")) dot = "queued";
+    else if (list.some((task) => task.status === "review" || (task.status === "done" && task.news))) dot = "done";
+    found.set(session.id, { dot, text: session.elsewhere ? DOT_HELP.open : Object.fromEntries(WORKER_STATES)[dot] });
+  }
+  return found;
 }
 const askingSessions = () => new Set(pendingDrafts().map((draft) => draft.session_id));
+// A running task whose worker is between turns, watching a PR or a thread: it waits on others
+// (CI, a review, a reply), not on its worker.
+function waitsOnOthers(task) {
+  const worker = byId(task.session_id);
+  if (!worker || ["working", "starting"].includes(worker.status) || worker.elsewhere || !(worker.follows || []).length) return false;
+  return !worker.task || worker.task.task_id === task.id || worker.task.status !== "running";
+}
 // The task board: each group newest first; queued in the order they will start.
 function board() {
   const asking = askingSessions();
@@ -35,19 +76,28 @@ function board() {
   // A worker with several open tasks (at work on one, the others waiting their turn, for the
   // owner or queued) is one card with a line per task.
   const open = mine.filter((task) => ["running", "waiting", "queued"].includes(task.status));
+  // A result its worker drafted something for (a reply, a review) is reviewed on that card.
+  // Not a Ready-to-merge card: merging is its own decision, and the result's receipts (tests,
+  // CI) are what to look at before it.
+  const onCards = new Set(pendingDrafts().filter((draft) => draft.kind !== "merge").map(draftTask).filter((task) => task?.status === "review").map((task) => task.id));
   const perWorker = new Map();
   for (const task of open) perWorker.set(task.session_id, [...(perWorker.get(task.session_id) || []), task]);
   const grouped = new Set([...perWorker].filter(([id, list]) => list.length > 1 && list.some((task) => task.status === "running") && byId(id)).map(([id]) => id));
+  const workers = [...grouped].map((id) => [byId(id), perWorker.get(id)]);
+  const quiet = ([worker, list]) => !["working", "starting"].includes(worker.status) && (worker.follows || []).length && list.some((task) => task.status === "running");
+  const single = running.filter((task) => !grouped.has(task.session_id));
   return {
-    running: running.filter((task) => !grouped.has(task.session_id)),
-    workers: [...grouped].map((id) => [byId(id), perWorker.get(id)]),
+    running: single.filter((task) => !waitsOnOthers(task)),
+    watching: single.filter(waitsOnOthers),
+    workers: workers.filter((entry) => !quiet(entry)),
+    watchingWorkers: workers.filter(quiet),
     terminal,
     followUps,
     queued: mine.filter((task) => task.status === "queued" && !grouped.has(task.session_id)).sort((a, b) => a.created_at.localeCompare(b.created_at)),
     // A result whose worker drafted something for the owner (a reply, a review) is reviewed on
     // that card: it shows the task, and sending it accepts the task.
     // With them, finished work its worker has news about (its PR approved or merged) until seen.
-    review: mine.filter((task) => (task.status === "review" || (task.status === "done" && task.news)) && !asking.has(task.session_id)).sort(newest),
+    review: mine.filter((task) => (task.status === "review" || (task.status === "done" && task.news)) && !onCards.has(task.id)).sort(newest),
     finished: mine.filter((task) => (task.status === "done" && !task.news) || task.status === "cancelled").sort((a, b) => (b.ended_at || "").localeCompare(a.ended_at || "")),
   };
 }
@@ -164,20 +214,32 @@ function renderPanel() {
     ...items.drafts.map((draft) => draftItem(draft)),
     ...items.uncertain.map((draft) => ({ key: `uncertain:${draft.id}:${draft.outcome}`, build: () => uncertainCard(draft) })),
     ...items.tasks.map((task) => taskItem(task)),
+    ...items.questions.map(questionItem),
   ], editing);
 
   const taskBox = document.getElementById("tasks") || el("section", { id: "tasks", class: "panel-section" }, el("h2", {}, el("span", { text: "Tasks" }), el("span", { class: "count" })), el("p", { class: "empty-hint", text: "Nothing running. Ask for anything — e.g. “fix the flaky login test in api”." }));
-  const active = tasks.running.length + tasks.workers.reduce((sum, [, list]) => sum + list.filter((task) => task.status !== "waiting").length, 0) + tasks.terminal.length + tasks.followUps.length + tasks.queued.length + tasks.review.length;
+  // Counted by task everywhere: a worker's card counts its tasks here (those waiting for the
+  // owner count under Needs you).
+  const inGroup = (list) => list.filter((task) => task.status !== "waiting").length;
+  const counts = {
+    running: tasks.running.length + tasks.workers.reduce((sum, [, list]) => sum + inGroup(list), 0) + tasks.terminal.length + tasks.followUps.length,
+    watching: tasks.watching.length + tasks.watchingWorkers.reduce((sum, [, list]) => sum + inGroup(list), 0),
+    queued: tasks.queued.length,
+    review: tasks.review.length,
+  };
+  const active = counts.running + counts.watching + counts.queued + counts.review;
   counted(taskBox, active);
   taskBox.querySelector(".empty-hint").hidden = Boolean(active || tasks.finished.length || ownTasks().some((task) => !["done", "cancelled"].includes(task.status)));
   const groups = [
-    ["tasks-running", "Running", [...tasks.terminal.map(terminalItem), ...tasks.workers.map(([worker, list]) => workerGroupItem(worker, list)), ...tasks.running.map(taskItem), ...tasks.followUps.map(followUpItem)]],
-    ["tasks-queued", "Queued", tasks.queued.map(taskItem)],
-    ["tasks-review", "Ready to review", tasks.review.map(taskItem)],
+    ["tasks-running", "Running", counts.running, [...tasks.terminal.map(terminalItem), ...tasks.workers.map(([worker, list]) => workerGroupItem(worker, list)), ...tasks.running.map(taskItem), ...tasks.followUps.map(followUpItem)], ""],
+    ["tasks-watching", "Waiting on others", counts.watching, [...tasks.watchingWorkers.map(([worker, list]) => workerGroupItem(worker, list)), ...tasks.watching.map(taskItem)], "Its worker is between steps, watching a PR or a thread: CI, a review or a reply comes next."],
+    ["tasks-queued", "Queued", counts.queued, tasks.queued.map(taskItem), ""],
+    ["tasks-review", "Ready to review", counts.review, tasks.review.map(taskItem), ""],
   ];
-  for (const [id, title, list] of groups) {
+  for (const [id, title, count, list, help] of groups) {
     const group = section(taskBox, id, title);
-    counted(group, list.length);
+    if (help) group.firstElementChild.title = help;
+    counted(group, count);
     group.hidden = !list.length;
     reconcile(group.querySelector(".items"), list, editing);
   }
@@ -196,7 +258,11 @@ function renderPanel() {
 // The task a card is about: the one its worker is on (a decision card lists its own).
 function draftTask(draft) {
   if (draft.kind === "decision") return null;
-  return ownTasks().find((task) => task.session_id === draft.session_id && ["running", "waiting", "review", "queued"].includes(task.status));
+  const mine = ownTasks().filter((task) => task.session_id === draft.session_id);
+  if (draft.target?.task_id) return mine.find((task) => task.id === draft.target.task_id) || null;
+  const worker = byId(draft.session_id);
+  // The task it is on now, else one still open.
+  return mine.find((task) => task.id === worker?.task?.task_id && ["running", "waiting", "review", "queued"].includes(task.status)) || mine.find((task) => ["running", "waiting", "review", "queued"].includes(task.status));
 }
 function draftItem(draft) {
   const task = draftTask(draft);
@@ -247,6 +313,93 @@ export async function focusDraft(draftId) {
   if (state.selected !== HOME) await select(HOME);
   const node = document.querySelector(`#needs .card[data-id="${draftId}"]`);
   if (node) bringIntoView(node);
+}
+export async function focusQuestion(sessionId) {
+  if (state.selected !== HOME) await select(HOME);
+  const node = document.querySelector(`#needs .card.question-card[data-session="${sessionId}"]`) || document.querySelector(`#needs .card.task[data-session="${sessionId}"]`);
+  if (node) bringIntoView(node);
+}
+// A worker's question to the owner, kept here until answered: its task may have been cancelled
+// or finished meanwhile (the task card shows it otherwise).
+function questionItem(question) {
+  return {
+    key: `question:${question.session_id}:${question.at}`,
+    version: `${question.task_status}:${question.closed}`,
+    build: () => questionCard(question),
+    refresh: (node) => {
+      const meta = node.querySelector(".head .meta");
+      if (meta) meta.textContent = questionMeta(question);
+    },
+  };
+}
+const questionMeta = (question) => [question.task_status && question.task_status !== "running" ? `task ${question.task_status}` : "", question.closed ? "worker closed" : ""].filter(Boolean).join(" · ");
+function questionCard(question) {
+  const key = `question:${question.session_id}`;
+  const error = el("span", { class: "error" });
+  const actions = el("div", { class: "actions" });
+  const worker = byId(question.session_id);
+  const node = el(
+    "div",
+    { class: "card question-card", "data-session": question.session_id, "data-task": question.task_id || undefined },
+    el(
+      "div",
+      { class: "head" },
+      el("span", { class: "dot waiting" }),
+      el("button", { type: "button", class: "title", text: question.task_title || worker?.title || question.worker, title: `Open “${question.worker}” at its question`, onclick: () => select(question.session_id, { task: question.task_id }) }),
+      el("span", { class: "chip question", text: "Question" }),
+      el("span", { class: "meta", text: questionMeta(question) }),
+    ),
+    el("div", { class: "body markdown", html: markdown(question.text) }),
+    actions,
+  );
+  async function act(run, done) {
+    error.textContent = "";
+    for (const button of actions.querySelectorAll("button")) button.disabled = true;
+    state.leaving.add(key);
+    node.classList.add("leaving");
+    renderStatusLine();
+    scheduleHome();
+    try {
+      await run();
+      if (done) toast(done);
+      await loadState();
+    } catch (failure) {
+      state.leaving.delete(key);
+      node.classList.remove("leaving");
+      error.textContent = failure.message;
+      for (const button of actions.querySelectorAll("button")) button.disabled = false;
+      scheduleHome();
+    }
+    state.leaving.delete(key);
+  }
+  function show() {
+    delete actions.dataset.editing;
+    actions.replaceChildren(
+      error,
+      moreMenu([
+        { text: "Open worker", onclick: () => select(question.session_id, { task: question.task_id }) },
+        { text: "Dismiss", onclick: () => act(() => api(`/api/questions/${question.session_id}/dismiss`, { method: "POST" }), "Dismissed.") },
+      ]) || "",
+      el("button", { type: "button", text: "Reply", onclick: reply }),
+    );
+  }
+  function reply() {
+    const ended = ["cancelled", "done", "review", "failed"].includes(question.task_status);
+    const input = el("textarea", { rows: 2, placeholder: ended ? `Your answer (its ${question.task_status} task goes on with it)` : "Your answer (goes to the worker)" });
+    // Answered, its task goes on, also one cancelled or finished meanwhile (Dismiss if not).
+    const send = () => input.value.trim() && act(() => api(`/api/questions/${question.session_id}/answer`, { method: "POST", body: { text: input.value.trim() } }), ended ? "Sent: its task goes on." : "Sent to the worker.");
+    input.addEventListener("keydown", (event) => {
+      if (submits(event) && !event.shiftKey) {
+        event.preventDefault();
+        send();
+      }
+    });
+    actions.replaceChildren(input, error, el("button", { type: "button", class: "text", text: "Cancel", onclick: show }), el("button", { type: "button", text: "Send", onclick: send }));
+    actions.dataset.editing = "1";
+    input.focus();
+  }
+  show();
+  return node;
 }
 function bringIntoView(node) {
   if (narrow()) showHomeTab(node.closest("#needs") ? "needs" : "tasks");

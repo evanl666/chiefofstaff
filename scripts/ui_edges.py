@@ -820,6 +820,206 @@ async def round_two(runtime, browser, failures: list[str]):
     await context.close()
 
 
+async def round_three(runtime, browser, failures: list[str]):
+    """A worker's question stays under Needs you whatever became of its task, beside its drafts;
+    a PR ready to merge is a card; sidebar dots say what Home says, with a legend; a worker's
+    card lists its tasks with their progress and what they made, without overflowing; tasks
+    waiting on others have their group and counts agree; a title opens the worker at that
+    task; tables render; habits can be added; watches save before a scan; menus and the Slack
+    problem line can be closed."""
+    store = runtime.store
+    router = store.get("router_id")
+
+    async def start(title, **extra):
+        result = await call_tool(runtime, "spawn_worker", router, title=title,
+                                 instructions=title, why_new="test", **extra)  # fmt: skip
+        assert result.result_type == "success", result.text_result_for_llm
+        return json.loads(result.text_result_for_llm)["session_id"]
+
+    # A question whose task was cancelled meanwhile.
+    asker = await start("Pick the database")
+    await call_tool(runtime, "report", asker, status="question", summary="Postgres or SQLite?")
+    await runtime.task_actions.cancel(runtime.tasks.current(asker)["id"])
+    # A task waiting for an answer, its worker with a draft too: both show.
+    both = await start("Answer Carol")
+    draft = store.create_draft(both, "reply", {"to": "Carol", "where": "email"}, "Friday works")
+    runtime.bus.publish("draft", draft)
+    await call_tool(runtime, "report", both, status="question", summary="Which Friday?")
+    # A PR ready to merge.
+    merger = await start("Ship the login fix")
+    merge = store.create_draft(merger, "merge", {
+        "label": "acme/app#7", "repo": "acme/app", "number": 7, "title": "Fix login",
+        "url": "https://github.com/acme/app/pull/7", "head": "abc1234def", "review": "APPROVED",
+        "task_id": runtime.tasks.current(merger)["id"],
+    }, "Fix login")  # fmt: skip
+    runtime.bus.publish("draft", merge)
+    # A worker with two tasks, long markdown progress and links.
+    busy = await start("Research the Slack bot")
+    await call_tool(runtime, "message_session", router, session_id=busy, task="new",
+                    title="CoS bug bash", text="Now the bug bash")  # fmt: skip
+    long = ("**Status:** fixed `B16`; see [the doc](https://docs.google.com/document/d/abc) and "
+            "https://github.com/acme/app/pull/592 — " + "more words here " * 120)  # fmt: skip
+    for task in runtime.tasks.for_session(busy):
+        runtime.tasks.move(task["id"], "running")
+        runtime.task_actions.publish(runtime.tasks.update(task["id"], progress=long))
+    runtime.update_session(busy, status="working", activity="Measure the row overflow")
+    # Running, between turns, watching a PR: waiting on others.
+    watcher = await start("Watch CI on #12")
+    runtime.follow(watcher, ["github:acme/app#12"])
+    runtime.update_session(watcher, status="idle", activity="")
+    # A finished task whose worker went on: its title opens it at the report.
+    done = await start("Count the orders")
+    done_task = runtime.tasks.current(done)
+    await call_tool(runtime, "report", done, status="done", summary="There are 412 orders.")
+    for number in range(40):
+        runtime.add_message(done, "assistant", f"Later remark {number}. " * 6)
+    # A table with a pipe in code, an empty row and a blank line inside.
+    table = ("| name | value | note |\n|---|:-:|---:|\n| a | `x|y` | c\\|d |\n|  |  |  |\n\n"
+             "| b | 2 | " + "long-cell-" * 30 + " |")  # fmt: skip
+    runtime.add_message(router, "assistant", table)
+    await settle(runtime)
+    runtime.publish_state()
+
+    context = await browser.new_context(viewport={"width": 1400, "height": 900})
+    page = await context.new_page()
+    page.on("pageerror", lambda error: failures.append(str(error)))
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    needs = page.locator("#needs")
+
+    question = needs.locator(".card.question-card", has_text="Postgres or SQLite?")
+    await expect(question).to_be_visible(timeout=15000)
+    await expect(question.locator(".head .meta")).to_contain_text("task cancelled")
+    await expect(needs.locator(".card.draft", has_text="Carol")).to_be_visible()
+    await expect(needs.locator(".card.task", has_text="Which Friday?")).to_be_visible()
+    log("a question stays under Needs you after its task is cancelled; a task and its draft both")
+
+    merge_card = needs.locator(".card.draft.merge")
+    await expect(merge_card).to_contain_text("Ready to merge · app#7")
+    await expect(merge_card.get_by_role("button", name="Merge")).to_be_visible()
+    await merge_card.locator(".more-button").click()
+    await merge_card.get_by_role("menuitem", name="Not now").click()
+    await expect(merge_card).to_have_count(0, timeout=10000)
+    assert store.draft(merge["id"])["status"] == "rejected"
+    log("a PR ready to merge is a card: Merge, or not now")
+
+    # The sidebar says what Home says.
+    def dot(title):
+        return page.locator("#session-list .item", has_text=title).locator(".dot")
+
+    await expect(dot("Pick the database")).to_have_class(re.compile(r"\bwaiting\b"))
+    await expect(dot("Answer Carol")).to_have_class(re.compile(r"\bwaiting\b"))
+    await expect(dot("Watch CI on #12")).to_have_class(re.compile(r"\bwatching\b"))
+    await expect(dot("Count the orders")).to_have_class(re.compile(r"\bdone\b"))
+    await expect(dot("CoS bug bash")).to_have_class(re.compile(r"\bworking\b"))
+    await page.locator("#session-list .legend-toggle").click()
+    await expect(page.locator("#session-list .legend .legend-row")).to_have_count(8)
+    await page.locator("#session-list .legend-toggle").click()
+    await expect(page.locator("#session-list .legend")).to_have_count(0)
+    log("sidebar dots follow Home (needs you, working, waiting on others, review), with a legend")
+
+    group = page.locator("#tasks-running .card.worker-group", has_text="CoS bug bash")
+    await expect(group.locator(".task-row")).to_have_count(2)
+    card_box = await group.bounding_box()
+    for index in range(2):
+        row = group.locator(".task-row").nth(index)
+        box = await row.bounding_box()
+        assert box["width"] <= card_box["width"], (box, card_box)
+        state_box = await row.locator(".state").bounding_box()
+        assert state_box["x"] + state_box["width"] <= card_box["x"] + card_box["width"] + 1
+        menu_box = await row.locator(".more-button").bounding_box()
+        assert menu_box["x"] + menu_box["width"] <= card_box["x"] + card_box["width"] + 1
+    assert not await group.evaluate(OVERFLOWS), await group.evaluate(OVERFLOWS)
+    progress = group.locator(".progress-line").first
+    await expect(progress).not_to_contain_text("**")
+    await expect(progress).to_contain_text("Status: fixed B16")
+    await expect(progress).to_contain_text("app#592 — more words")
+    height = await progress.evaluate("n => n.getBoundingClientRect().height")
+    line = await progress.evaluate("n => parseFloat(getComputedStyle(n).lineHeight)")
+    assert height <= line * 2.2, (height, line)
+    await group.screenshot(path=SHOTS / "ui-edges-worker-card.png")
+    await progress.click()
+    assert await progress.evaluate("n => n.getBoundingClientRect().height") > height * 2
+    await progress.click()
+    chips_now = group.locator(".task-row").first.locator(".artifacts")
+    await expect(chips_now.locator(".receipt", has_text="Google Doc")).to_be_visible()
+    await expect(chips_now.locator(".receipt", has_text="app#592")).to_be_visible()
+    await expect(group.locator(".activity")).to_contain_text("Measure the row overflow")
+    log("a worker's card: each task a row in the card, its progress in two clean lines, its links")
+
+    asking_card = page.locator("#tasks .card.task", has_text="Answer Carol")
+    if await asking_card.count():
+        await expect(asking_card.locator(".receipt.needs")).to_be_visible()
+    watching = page.locator("#tasks-watching .card.task", has_text="Watch CI on #12")
+    await expect(watching).to_be_visible()
+    await expect(watching.locator(".receipt.watching")).to_have_text("Watching app#12")
+    counts = await page.evaluate("""() => {
+      const n = (id) => Number(document.querySelector(`#${id} .count`)?.textContent || 0);
+      return [n("tasks"), n("tasks-running") + n("tasks-watching") + n("tasks-queued")
+              + n("tasks-review")];
+    }""")
+    assert counts[0] == counts[1], counts
+    log("waiting on others has its own group; the Tasks count is the sum of its groups")
+
+    rendered = page.locator("#timeline .markdown .table").last
+    await expect(rendered.locator("tbody tr")).to_have_count(2)
+    await expect(rendered.locator("thead th")).to_have_count(3)
+    await expect(rendered.locator("tbody tr").first.locator("td").nth(1)).to_have_text("x|y")
+    await expect(rendered.locator("tbody tr").first.locator("td").nth(2)).to_have_text("c|d")
+    message = rendered.locator("xpath=ancestor::*[contains(@class,'msg')][1]")
+    table_box, message_box = await rendered.bounding_box(), await message.bounding_box()
+    assert table_box["width"] <= message_box["width"] + 1, (table_box, message_box)
+    log("a table: no blank row or column, a pipe in code stays, it fits its message")
+
+    await (
+        page.locator("#tasks-review .card.task", has_text="Count the orders")
+        .locator(".head .title")
+        .click()
+    )
+    report = page.locator(f'#timeline [data-kind="report"][data-task="{done_task["id"]}"]')
+    await expect(report).to_be_in_viewport(timeout=10000)
+    await expect(page.locator("#timeline > *").last).not_to_be_in_viewport()
+    log("a title opens its worker at that task's report, not at its latest message")
+
+    await page.locator("#session-more-button").click()
+    await expect(page.locator("#session-more")).to_be_visible()
+    await page.mouse.click(700, 500)
+    await expect(page.locator("#session-more")).to_be_hidden()
+    await page.locator("#back-home").click()
+    log("the session's ⋯ menu closes on a click elsewhere")
+
+    await page.locator("#settings-button").click()
+    await page.locator('#settings-tabs [data-tab="you"]').click()
+    await page.locator("#lesson-text").fill("Run the linter before every commit")
+    await page.locator("#lesson-text").press("Enter")
+    await expect(page.locator("#lessons")).to_contain_text("Run the linter before every commit")
+    await expect(page.locator("#settings-dialog")).to_be_visible()
+    log("a habit added by hand shows at once; Enter does not submit Settings")
+
+    await page.locator('#settings-tabs [data-tab="connections"]').click()
+    watches = page.locator("#conn-watches")
+    await watches.locator("summary").click()
+    await expect(page.locator("#watches-summary")).to_have_text("None")
+    await page.locator("#watch-add").click()
+    await page.locator("#watch-list li .what").last.fill("Questions for me in #eng")
+    await expect(page.locator("#watches-summary")).to_have_text("1 on · not saved yet")
+    await page.locator("#watch-scan").click()
+    await expect(page.locator(".toast", has_text="Scanning now.")).to_be_visible(timeout=10000)
+    assert [w.what for w in store.settings().watches] == ["Questions for me in #eng"]
+    await page.keyboard.press("Escape")
+    log("Scan now saves the watch just written first; the summary counts what is written")
+
+    store.save_settings(store.settings().model_copy(update={"slack_enabled": True}))
+    runtime.slack.status["error"] = "Add your Slack user token in Settings."
+    runtime.publish_state()
+    line = page.locator("#status-line .bad", has_text="Slack:")
+    await expect(line).to_be_visible(timeout=10000)
+    await line.get_by_role("button", name="Turn off").click()
+    await expect(line).to_have_count(0, timeout=10000)
+    assert not store.settings().slack_enabled
+    log("the Slack problem line can turn Slack watching off")
+    await context.close()
+
+
 async def main():
     with tempfile.TemporaryDirectory(prefix="cos-ui-") as temporary:
         holder: dict = {}
@@ -1128,6 +1328,7 @@ async def main():
             await memory(runtime, browser, failures)
             await this_round(runtime, browser, failures)
             await round_two(runtime, browser, failures)
+            await round_three(runtime, browser, failures)
             await browser.close()
         server.should_exit = True
         await serving

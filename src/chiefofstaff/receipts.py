@@ -80,6 +80,30 @@ SAYS_TESTS_PASS = re.compile(
     r"\b(pass(ed|ing|es)?|green|succeed(ed)?)|\b\d+ (tests? )?passed\b",
     re.IGNORECASE,
 )
+# Words that are not the worker's own claim: quoted, or what someone else said or reported.
+CITED = re.compile(r"“[^”\n]*”|\"[^\"\n]*\"|「[^」\n]*」|`[^`\n]*`|^\s*>.*$", re.MULTILINE)
+HEARSAY = re.compile(
+    r"\b(said|says|reports?|reported|according to|claims?|claimed|wrote|mentioned)\b|说|表示|提到",
+    re.IGNORECASE,
+)
+# A claim about CI (a PR's checks), which the PR's own state shows, not about a local run.
+ABOUT_CI = re.compile(r"\b(CI|checks?|workflows?|actions|pipelines?|builds? on)\b", re.IGNORECASE)
+
+
+def says_tests_pass(report: str) -> bool:
+    """Whether the worker itself says its tests pass: not in a quote, not someone else's word,
+    not about a PR's CI checks."""
+    text = CITED.sub(" ", report or "")
+    for sentence in re.split(r"(?<=[.!?;\u3002\uff01\uff1f\uff1b])\s+|\n", text):
+        if (
+            SAYS_TESTS_PASS.search(sentence)
+            and not HEARSAY.search(sentence)
+            and not ABOUT_CI.search(sentence)
+        ):
+            return True
+    return False
+
+
 SAYS_CHANGED = re.compile(
     r"\b(added|fixed|implemented|changed|updated|refactored|created|removed|renamed|committed)\b",
     re.IGNORECASE,
@@ -220,10 +244,11 @@ TESTS_PASSED = re.compile(
 
 
 def masked_failure(command: str, output: str) -> bool:
-    """A test run piped into another command (`pytest | tail`) exits with that command's code:
-    its own summary says whether the tests failed. The last summary counts: a command that runs
-    the tests twice (the new test failing before the fix, then passing) passed."""
-    if "|" not in command or not output:
+    """A test run piped into another command (`pytest | tail`), or followed by others
+    (`pytest; git status`), exits with the last command's code: its own summary says whether
+    the tests failed. The last summary counts: a command that runs the tests twice (the new test
+    failing before the fix, then passing) passed."""
+    if not output or ("|" not in command and len(simple_commands(command)) < 2):
         return False
     return last_summary(output) == "failed"
 
@@ -274,7 +299,7 @@ def test_exit(command: str, output: str, code: int | None) -> int | None:
     if code is None:
         return None
     summary = last_summary(output)
-    if code == 0 and "|" in command and summary == "failed":
+    if code == 0 and summary == "failed" and masked_failure(command, output):
         return 1
     if code != 0 and summary == "passed":
         parts = simple_commands(command)
@@ -497,7 +522,7 @@ def summarize(
                      "pass now.")  # fmt: skip
     elif tests and tests["running"] and tests["passed"] is not True:
         pass  # Its tests are running again: their result is not in yet.
-    elif SAYS_TESTS_PASS.search(report or ""):
+    elif says_tests_pass(report or ""):
         if not tests:
             flags.append("Says tests pass, but no test run was observed.")
         elif tests["passed"] is False:
@@ -508,7 +533,8 @@ def summarize(
     if checkouts and says_changed(report or "") and not any(changed.values()):
         flags.append("Says it made changes, but its checkouts have none.")
     for pr in prs:
-        if pr.get("checks") == "failing":
+        # A closed or merged PR's checks are history: nothing to fix there now.
+        if pr.get("checks") == "failing" and pr.get("state") not in {"CLOSED", "MERGED"}:
             names = ", ".join(pr.get("failing") or [])
             flags.append(f"Checks are failing on {pr['label']}" + (f": {names}." if names else "."))
     results = criteria_results(criteria or [], claims or [], commands)
@@ -592,6 +618,23 @@ FAILED = {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STAR
 PENDING = {"PENDING", "IN_PROGRESS", "QUEUED", "EXPECTED", "WAITING", ""}
 
 
+# Checks that wait for a person, not for CI: "Owner Approval", "Code owner review", sign-offs.
+APPROVAL = re.compile(r"approv|code.?owner|owner.?review|sign.?off|review.?required", re.I)
+
+
+def check_name(item: dict) -> str:
+    return item.get("name") or item.get("context") or "a check"
+
+
+def awaiting_approval(rollup: list[dict]) -> list[str]:
+    """The checks still waiting for someone's approval (by each check's latest run)."""
+    return [
+        check_name(item)
+        for item in latest_checks(rollup)
+        if outcome(item) in PENDING and APPROVAL.search(check_name(item))
+    ]
+
+
 def failing_checks(rollup: list[dict]) -> list[str]:
     """The names of the checks whose latest run failed."""
     return [
@@ -603,10 +646,17 @@ def failing_checks(rollup: list[dict]) -> list[str]:
 
 def checks_state(rollup: list[dict]) -> str:
     """passing, failing, pending or none, from gh's statusCheckRollup, by each check's latest
-    run."""
+    run. A check waiting for a person's approval is not CI still running (awaiting_approval
+    names it)."""
     if not rollup:
         return "none"
-    states = {outcome(item) for item in latest_checks(rollup)}
+    states = {
+        outcome(item)
+        for item in latest_checks(rollup)
+        if not (outcome(item) in PENDING and APPROVAL.search(check_name(item)))
+    }
+    if not states:
+        return "passing"
     if states & FAILED:
         return "failing"
     if states & PENDING:
@@ -617,7 +667,11 @@ def checks_state(rollup: list[dict]) -> str:
 def checks_started(rollup: list[dict]) -> str:
     """When the latest run of the PR's checks started (ISO, the earliest of them; "" while one
     is still running): what they tested was pushed before then."""
-    latest = latest_checks(rollup)
+    latest = [
+        item
+        for item in latest_checks(rollup)
+        if not (outcome(item) in PENDING and APPROVAL.search(check_name(item)))
+    ]
     if not latest or any(outcome(item) in PENDING for item in latest):
         return ""
     return min(

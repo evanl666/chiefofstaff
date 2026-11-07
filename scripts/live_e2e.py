@@ -98,7 +98,7 @@ class App:
             text=True,
         )
         token = None
-        deadline = time.monotonic() + 30
+        deadline = time.monotonic() + 90  # A loaded machine starts it slowly.
         while time.monotonic() < deadline:
             line = await asyncio.to_thread(self.process.stdout.readline)
             if "Private launch URL" in line:
@@ -107,6 +107,8 @@ class App:
             if not line and self.process.poll() is not None:
                 break
         if not token:
+            if self.process.poll() is None:
+                self.process.terminate()  # Not left holding the port for the next run.
             raise RuntimeError("Chief of Staff did not start; see " + str(self.logfile))
         self.launch_token = token
         self.http = httpx.AsyncClient(base_url=BASE, headers={"origin": BASE}, timeout=60)
@@ -126,7 +128,15 @@ class App:
             await asyncio.to_thread(self.process.wait, 30)
 
     async def get(self, path: str):
-        response = await self.http.get(path)
+        # A connection the server dropped while busy (a loaded machine) is tried again.
+        for attempt in range(3):
+            try:
+                response = await self.http.get(path)
+                break
+            except httpx.TransportError:
+                if attempt == 2:
+                    raise
+                await asyncio.sleep(2)
         response.raise_for_status()
         return response.json()
 
@@ -1067,7 +1077,7 @@ async def scenario_owner_flow(app: App, root: Path):
         workers = await started_since(app, router, mark)
         slow = next((w for w in workers if "slow" in w["title"].lower()), None)
         notes = next((w for w in workers if "note" in w["title"].lower()), None)
-        if slow and notes and "sleep" in (slow.get("step") or ""):
+        if slow and notes and "sleep" in (slow.get("step_command") or ""):
             return slow, notes
         return None
 

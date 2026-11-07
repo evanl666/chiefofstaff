@@ -136,6 +136,52 @@ class Asks:
         self.signin_pending: dict[str, asyncio.Event] = {}
         self.signin_declined: dict[str, float] = {}
 
+    # A worker's question to the owner (report "question" or "blocked"): it stays under Needs
+    # you until the owner answers or dismisses it, whatever becomes of its task meanwhile (its
+    # PR merged, the task cancelled or given more work).
+
+    def record_question(self, session_id: str, text: str, task_id: str = ""):
+        self.store.set(
+            f"ownerq:{session_id}",
+            json.dumps({"text": text.strip()[:6000], "task_id": task_id, "at": now()}),
+        )
+        self.runtime.publish_state()
+
+    def owner_question(self, session_id: str) -> dict | None:
+        return json.loads(self.store.get(f"ownerq:{session_id}") or "null")
+
+    def answered(self, session_id: str):
+        """The owner answered it (or someone did for them), or the worker moved on."""
+        if self.store.get(f"ownerq:{session_id}"):
+            self.store.delete(f"ownerq:{session_id}")
+            self.runtime.publish_state()
+
+    def owner_questions(self) -> list[dict]:
+        """Open questions of workers whose task does not show them already (a task waiting for
+        the owner is its own card under Needs you)."""
+        found = []
+        for key in self.store.keys("ownerq:"):
+            session_id = key.split(":", 1)[1]
+            row = self.store.find_session(session_id)
+            question = self.owner_question(session_id)
+            if not row or not question:
+                continue
+            task = self.runtime.tasks.find(question["task_id"]) if question["task_id"] else None
+            if task and task["status"] == "waiting":
+                continue
+            found.append(
+                {
+                    "session_id": session_id,
+                    "worker": row["title"],
+                    "closed": bool(row["closed_at"]),
+                    "task_id": task["id"] if task else "",
+                    "task_title": task["title"] if task else "",
+                    "task_status": task["status"] if task else "",
+                    **question,
+                }
+            )
+        return sorted(found, key=lambda item: item["at"])
+
     # Requests
 
     def expire_requests(self, reason: str = "Chief of Staff restarted before an answer."):
@@ -200,10 +246,21 @@ class Asks:
             if row := self.store.find_session(session_id):
                 self.runtime.publish_session(row)
 
-    def cancel_requests(self, session_id: str, reason: str):
-        """The session is closed or stopped: its open cards end and it stops waiting."""
+    def cancel_requests(self, session_id: str, reason: str, keep_questions: str | None = None):
+        """The session is closed or stopped: its open cards end and it stops waiting.
+        `keep_questions` (a task id, or "" for none): its task was cancelled, but a question it
+        asked the owner still waits for them, as a question kept under Needs you (the answer
+        then reaches the worker as a message)."""
         for draft_id in list(self.states[session_id].asking):
             draft = self.store.draft(draft_id)
+            if (
+                keep_questions is not None
+                and draft["kind"] == "question"
+                and draft["status"] == "pending"
+            ):
+                choices = draft["target"].get("choices") or []
+                listed = f"\n\nChoices: {', '.join(map(str, choices))}" if choices else ""
+                self.record_question(session_id, draft["text"] + listed, keep_questions)
             if (answer := self.requests.get(draft_id)) and not answer.done():
                 answer.set_result(
                     {"action": "closed"} if draft["kind"] == "signin" else DECLINED[draft["kind"]]

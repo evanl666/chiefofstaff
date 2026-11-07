@@ -64,8 +64,9 @@ class SessionState:
     thread_nudged: bool = False
     # The tail of the latest tool output, for the Watchdog.
     last_output: str = ""
-    # The steps (tool calls) it is in now, by call id: when each started and what it is.
-    steps: dict[str, tuple[float, str]] = field(default_factory=dict)
+    # The steps (tool calls) it is in now, by call id: when each started, what it is for and
+    # what it runs.
+    steps: dict[str, tuple[float, str, str]] = field(default_factory=dict)
     # Its calls that read, type into or stop a shell, by call id: (tool, shell id).
     shell_calls: dict[str, tuple[str, str]] = field(default_factory=dict)
     lifecycle: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -74,9 +75,14 @@ class SessionState:
     checkouts: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     def step(self) -> tuple[float, str]:
-        """The longest-running step it is in now: when it started and what it is; (0, "")
+        """The longest-running step it is in now: when it started and what it is for; (0, "")
         between steps. Several run at once when it calls tools in parallel."""
-        return min(self.steps.values()) if self.steps else (0.0, "")
+        since, described, _ = self.current_step()
+        return since, described
+
+    def current_step(self) -> tuple[float, str, str]:
+        """The same, with what it runs (the command)."""
+        return min(self.steps.values()) if self.steps else (0.0, "", "")
 
     def pop_resting(self, default: str) -> str:
         status, self.resting = self.resting or default, ""

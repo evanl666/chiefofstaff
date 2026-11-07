@@ -87,6 +87,8 @@ class Drafts:
             return await self.runtime.toolset.review_profile(draft, decision)
         if draft["kind"] == "adopt":
             return await self.runtime.toolset.answer_adopt(draft, decision)
+        if draft["kind"] == "merge":
+            return await self.merge(draft, decision)
         if decision.action == "revise":
             return await self.revise(draft, decision.reason or decision.text)
         if decision.action not in {"send", "reject"}:
@@ -411,14 +413,7 @@ class Drafts:
             return
         receipts = self.runtime.task_actions.receipts(task) or {}
         # Its own work, not the PR it reviewed (its report links to that one too).
-        reviewed = {
-            f"{target['repo']}#{target['number']}".lower()
-            for row in self.store.all(
-                "SELECT target FROM drafts WHERE session_id=? AND kind='github'",
-                (task["session_id"],),
-            )
-            if (target := json.loads(row["target"])).get("repo")
-        }
+        reviewed = self.runtime.task_actions.reviewed_prs(task["session_id"])
         changed = any(
             pr.get("label", "").lower() not in reviewed for pr in receipts.get("prs") or []
         ) or any(
@@ -429,6 +424,41 @@ class Drafts:
         if not changed and not pending:
             self.store.delete(f"draft_sent:{task_id}")
             self.runtime.task_actions.accept(task_id)
+
+    async def merge(self, draft: dict, decision: DraftDecision) -> dict:
+        """The owner's answer to a PR that is ready to merge: merge it (its head as shown on the
+        card, so nothing pushed since goes in unseen), or not now."""
+        if decision.action == "reject":
+            draft = self.store.update_draft(
+                draft["id"], status="rejected", outcome="Not now.", resolved_at=now()
+            )
+            self.bus.publish("draft", draft)
+            await self.tell_drafter(
+                draft, f"The owner chose not to merge {draft['target']['label']} now."
+            )
+            return draft
+        if decision.action != "send":
+            raise ValueError("Merge it, or not now.")
+        target = draft["target"]
+        try:
+            outcome = await self.runtime.github.merge(target)
+        except Exception as exc:
+            error = describe(exc)[:600]
+            draft = self.store.update_draft(draft["id"], outcome=f"Not merged: {error}")
+            self.bus.publish("draft", draft)
+            raise RuntimeError(f"Not merged: {error}") from exc
+        draft = self.store.update_draft(
+            draft["id"], status="sent", outcome=outcome, resolved_at=now()
+        )
+        self.bus.publish("draft", draft)
+        await self.tell_drafter(draft, f"The owner merged {target['label']}: {outcome}")
+        # The PR merged: its task is done now, not at the next read of the PR (and the worker
+        # closes if nothing else of it is open).
+        thread = f"github:{target['label'].lower()}"
+        self.runtime.task_actions.pr_merged(draft["session_id"], thread)
+        self.runtime.unfollow(thread, finished=True, merged=True)
+        self.runtime.background(self.runtime.task_actions.refresh_open_prs(target["label"]))
+        return draft
 
     async def resolve_conversation(self, draft: dict) -> str:
         """After a reply on a line: its conversation resolved, as the owner chose. The reply is
@@ -517,6 +547,19 @@ class Drafts:
         row = self.store.find_session(draft["session_id"])
         if not row or row["closed_at"]:
             return
+        task = self.runtime.tasks.current(row["id"])
+        if (
+            not wake
+            and row["role"] == WORKER
+            and task
+            and task["status"] == "running"
+            and not self.runtime.states[row["id"]].busy
+            and row["status"] != "working"
+        ):
+            # Its task waited for this (it drafted, then ended its turn): it goes on, or reports
+            # that it is done. Otherwise the task would stay "running" with nothing at work.
+            wake = True
+            text += " Go on with your task, or report it done if this was the last of it."
         if not wake:
             # Not worth a turn of its own, but it must know (or it asks about the draft again):
             # it reads this with its next message.

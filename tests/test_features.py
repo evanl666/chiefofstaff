@@ -5,10 +5,12 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from conftest import Harness, call_tool, env, said, settle, task_of
 
 from chiefofstaff import catalog
 from chiefofstaff.digest import digest
+from chiefofstaff.events import describe_step, describe_tool
 from chiefofstaff.models import DraftDecision, Settings
 
 
@@ -24,6 +26,7 @@ async def test_a_worker_closes_itself_when_its_pr_is_finished(harness):
     await call_tool(
         runtime, "report", worker_id, status="done", summary="https://github.com/acme/app/pull/7"
     )
+    await settle(runtime)  # It follows the PR in the background.
     await runtime.on_thread(
         "github", "github:acme/app#7", ["github:state:merged"], "The PR was merged."
     )
@@ -48,6 +51,7 @@ async def test_quiet_finished_workers_are_tidied_up(harness):
         runtime, "report", following, status="done", summary="https://github.com/a/b/pull/1"
     )
     await call_tool(runtime, "report", asking, status="question", summary="which db?")
+    await settle(runtime)
     assert await runtime.workers.tidy(time.time() + 3600) == []
     assert await runtime.workers.tidy(time.time() + 2 * 86400) == [done]
 
@@ -469,10 +473,17 @@ async def test_a_worker_whose_conversation_is_gone_is_not_reopened(harness):
     await runtime.workers.close(worker_id)
     del harness.client.sessions[worker_id]
     result = await call_tool(
-        runtime, "message_session", harness.router_id, session_id=worker_id, text="again"
-    )
+        runtime, "message_session", harness.router_id, session_id=worker_id, text="again",
+        task="new", title="Again",
+    )  # fmt: skip
     assert "no longer has that conversation" in result.text_result_for_llm
     assert harness.store.session(worker_id)["closed_at"]
+    # Its task was cancelled when it closed: refused before anything is reopened.
+    cancelled = await call_tool(
+        runtime, "message_session", harness.router_id, session_id=worker_id, text="again"
+    )
+    assert "was cancelled" in cancelled.text_result_for_llm
+    assert harness.store.session(worker_id)["closed_at"], "not reopened for nothing"
 
 
 async def test_find_sessions_by_task_file_pr_and_id(harness):
@@ -661,3 +672,30 @@ async def test_a_model_copilot_refuses_falls_back_and_the_message_is_sent_again(
     session.emit("session.error", message=refused)
     await settle(runtime)
     assert runtime.tasks.current(worker)["status"] == "failed", "nothing left: it fails"
+
+
+async def test_the_same_answer_twice_in_a_minute_shows_once(harness):
+    runtime = await harness.connect()
+    worker = (await spawn(runtime, harness.router_id, "Answer"))["session_id"]
+    session = harness.session(worker)
+    for _ in range(3):
+        session.emit("assistant.message", content="The answer is 42.")
+    await settle(runtime)
+    said = [m for m in harness.store.messages(worker) if m["text"] == "The answer is 42."]
+    assert len(said) == 1
+
+
+async def test_the_owner_adds_a_habit_of_their_own(harness):
+    runtime = await harness.connect()
+    await runtime.learning.add("Run the linter before every commit", "everywhere")
+    [lesson] = runtime.learning.lessons()
+    assert lesson["text"] == "Run the linter before every commit" and lesson["scope"] == ""
+    with pytest.raises(ValueError):
+        await runtime.learning.add("   ")
+
+
+def test_a_step_reads_as_what_it_is_for():
+    arguments = {"command": "cd /w && rm -f cos.db", "description": "Reset the test database"}
+    assert describe_step("bash", arguments) == "Reset the test database"
+    assert describe_tool("bash", arguments) == "bash cd /w && rm -f cos.db"
+    assert describe_step("view", {"path": "/w/app.py"}) == "view /w/app.py"

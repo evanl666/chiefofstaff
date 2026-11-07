@@ -146,8 +146,15 @@ class Watchdog:
                 continue
             if self.runtime.copilot_id(row["id"]) in self.runtime.elsewhere:
                 continue  # Its owner is working with it in a terminal.
-            if self.runtime.special(row) == "connector":
+            if self.runtime.special(row) in {"connector", "messenger"}:
                 continue  # Chief of Staff's own: a run ends without a report.
+            if self.states[row["id"]].close_after_turn:
+                continue  # It is done and closes after this turn.
+            running = any(
+                task["status"] == "running" for task in self.runtime.tasks.for_session(row["id"])
+            )
+            if row["status"] == "idle" and not running:
+                continue  # Between turns with nothing it owes: finished, waiting or cancelled.
             messages = self.store.messages(row["id"])
             mark = messages[-1]["id"] if messages else 0
             state = self.state(row["id"])

@@ -36,7 +36,7 @@ tool allowlist, permission and request callbacks, sandbox, model.
 | `delivery.py` | Messages to sessions: stored, batched, sent, checked after a restart. |
 | `workers.py` | The worker queue (`max_workers`, dependencies), starting, closing, reopening, interrupting. |
 | `tasks.py` | Tasks, runs and dependencies as records; status transitions. |
-| `task_actions.py` | What happens to tasks: reports, cancel, accept, retry, follow-up; receipts and the shareable report. |
+| `task_actions.py` | What happens to tasks: reports, cancel (a cancelled follow-up gives the earlier result back), accept, retry, follow-up; receipts, PR state (refreshed every few minutes) and the *Ready to merge* card; the shareable report. |
 | `tools.py` | Every tool a session can call, with its argument model; which role gets which. |
 | `drafts.py` | Drafts the owner approves (Slack replies, PR reviews, a task's folder); interrupted sends. |
 | `focus.py` | Focus Shield. |
@@ -46,12 +46,12 @@ tool allowlist, permission and request callbacks, sandbox, model.
 | `policy.py` | Pure permission rules for actions without the sandbox. |
 | `backend.py` | The `AgentBackend`/`AgentSession` protocols, Copilot backend, sandbox policy. |
 | `scripted.py` | A backend without a model (scripts); runs `demo.py` and contract tests. |
-| `asks.py` | Cards for the owner (questions, forms, sign-ins), questions between sessions, environment notes. |
+| `asks.py` | Cards for the owner (questions, forms, sign-ins); workers' questions to the owner, kept under *Needs you* until answered whatever becomes of their task; questions between sessions; environment notes. |
 | `peers.py` | Workers that work together (`works_with`): told about each other, passing information straight to each other (`tell_session`), a copy for the Router riding along with its next turn, a finished one's result for the others. |
 | `decisions.py` | Decision cards; the owner's decisions and the tasks that rely on them; telling those tasks when one changes. |
 | `learning.py` | The owner's feedback; lessons a learning worker proposes and the owner approves; how often the owner agrees. |
 | `habits.py` | The owner's own words, read from Slack, GitHub, git and their Copilot sessions; the style learned from them (versioned, undoable) and which sessions get it. |
-| `connector.py` | The connector: one helper worker that reaches the owner's world with whatever tools Copilot has (Slack, Glean, mail). Runs the owner's watches on a schedule and hands findings to the Router as `watch` events; collects the owner's own words for `habits.py`; when the owner is away (idle keyboard), tells them what needs them, with codes, and applies their answers. |
+| `connector.py` | The connector: one helper worker that reaches the owner's world with whatever tools Copilot has (Slack, Glean, mail). Runs the owner's watches on a schedule and hands findings to the Router as `watch` events; collects the owner's own words for `habits.py`; when the owner is away (idle keyboard), tells them what needs them, with codes, and applies their answers. It reads untrusted content, so it is sandboxed like a Slack reader (network to GitHub only); the away message itself goes through a separate `messenger` helper, given only Chief of Staff's text in a file and sandboxed as the owner's workers are, so a company bot's CLI can send it. |
 | `abilities.py` | Skills the owner uploads or names, Copilot plugins installed from Settings (`copilot plugin install`), and MCP servers from Settings, added to workers' options. |
 | `checks.py` | Failure cases kept from workers' test runs; checks proposed from them, proven in a sandbox on both versions, approved, then run when a worker reports done. |
 | `envelope.py` | The envelope every message to a session is wrapped in. |

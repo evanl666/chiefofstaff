@@ -204,7 +204,7 @@ class Workers:
         task = self.tasks.current(session_id)
         if row["status"] != "idle" or row["closed_at"] or not task or task["status"] != "running":
             return
-        if self.runtime.special(row) == "connector":
+        if self.runtime.special(row) in {"connector", "messenger"}:
             # It reports through its own tools: a run that ended is done.
             self.tasks.move(task["id"], "done", result="Run finished.")
             return
@@ -219,9 +219,8 @@ class Workers:
         if not recent or not instruction(recent[0]):
             return
         asked = recent[0]
-        if asked["meta"].get("report_nudge") or (
-            asked["kind"] == "owner" and not asked["meta"].get("task_id")
-        ):
+        nudged = bool(asked["meta"].get("report_nudge"))
+        if asked["kind"] == "owner" and not asked["meta"].get("task_id"):
             return
         if any(m["kind"] == "report" or m["meta"].get("stopped") for m in recent):
             return
@@ -242,6 +241,31 @@ class Workers:
             names = ", ".join(f"“{peer['title']}”" for peer in peers)
             self.runtime.update_session(session_id, activity=f"waiting for {names}")
             return
+        if nudged:
+            if waiting:
+                return  # It says what it waits for; the Watchdog follows it up.
+            # Asked once already and it still did not report: its last words are its report,
+            # so the task leaves Running (the owner reviews what it said).
+            from .tools import Report
+
+            summary = answer or "It stopped without a report and said nothing more."
+            # report() turns some reports back once each (a short answer, failing tests): the
+            # owner judges it now, so it is filed all the same.
+            for _ in range(4):
+                try:
+                    await self.runtime.toolset.t_report(
+                        Report(status="done", summary=summary, task_id=task["id"]), session_id
+                    )
+                except ValueError:
+                    continue
+                except Exception:
+                    logger.warning("Could not file %s's last words.", session_id, exc_info=True)
+                    return
+                self.runtime.add_message(
+                    session_id, "notice", "It stopped again without a report: filed as one."
+                )
+                return
+            return
         text = (
             "Your turn ended without report(). The owner sees only reports: call report now "
             "with your full result (status done), or question or blocked if you need something, "
@@ -251,9 +275,11 @@ class Workers:
             from .tools import Report
 
             status = "question" if answer.endswith("?") else "done"
+            # The task its last instruction was about, when it has several open.
+            about = asked["meta"].get("task_id") or task["id"]
             try:
                 await self.runtime.toolset.t_report(
-                    Report(status=status, summary=answer), session_id
+                    Report(status=status, summary=answer, task_id=about), session_id
                 )
             except ValueError as exc:
                 # Not taken as it is (a check fails, an asked-for table is missing): the worker
@@ -403,6 +429,15 @@ class Workers:
         if current and not current["closed_at"] and current["status"] in {"starting", "working"}:
             self.runtime.update_session(session_id, status="queued", activity="")
         self.runtime.background(self.pump())  # Does nothing until Copilot is ready again.
+
+    def finished(self, session_id: str) -> bool:
+        """Nothing of it is open: no task at work, waiting or queued, no card for the owner,
+        no question of it unanswered. Only then may it close by itself."""
+        if any(task["status"] in OPEN for task in self.tasks.for_session(session_id)):
+            return False
+        if any(draft["session_id"] == session_id for draft in self.store.drafts()):
+            return False
+        return not self.runtime.asks.owner_question(session_id)
 
     async def close(self, session_id: str):
         row = self.store.session(session_id)

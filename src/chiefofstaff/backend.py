@@ -158,7 +158,7 @@ COPILOT = Capabilities(
     sandbox=True,
 )
 # The Copilot CLI versions this release was tested with (live end-to-end and contract tests).
-TESTED_CLI = "1.0.105"
+TESTED_CLI = "1.0.107"
 OLDEST_CLI = "1.0.100"
 
 
