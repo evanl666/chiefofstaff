@@ -271,7 +271,8 @@ class Peers:
             caller, "tell", text, {"target": target["id"], "title": target["title"]}
         )
         self.copy_to_router(
-            f"“{teller['title']}” told “{target['title']}”: {clip(text, ROUTER_COPY_CHARS)}",
+            f"“{self.runtime.display_title(teller)}” told "
+            f"“{self.runtime.display_title(target)}”: {clip(text, ROUTER_COPY_CHARS)}",
             {"peer_from": caller, "peer_to": target["id"]},
         )
         return outcome

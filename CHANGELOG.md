@@ -1,5 +1,75 @@
 # Changelog
 
+## 0.1.24 (2026-11-08)
+
+- **Home, task by task**: *Running*, *Monitoring*, *Stalled*, *Queued*, *Ready to review* and
+  *Recently finished* hold tasks; in each, a box per worker with its tasks there, so a worker
+  whose tasks stand differently shows in each section (and says where else). *Running* is only
+  the task its worker is on now; another of its tasks *waits its turn* under *Queued*. A result
+  you asked more about is under *Running* (*Following up*) while its worker is at it. Fewer
+  colors: amber needs you, blue at work, a blue ring monitoring, green to review, red failed,
+  gray otherwise. When a task last reported is on its own line, never cut off, and old progress
+  is gray. Steps read as what they do (*Reading app.py*, *Searching the code for “…”*), the
+  command in the tooltip. Opening a report or a menu survives the card being redrawn.
+- **Monitoring and stalled tasks**: a worker waiting on a long run says when to look again
+  (`check_back`): the task is under *Monitoring* until then and the worker is woken at that time.
+  A running task with no activity for *Stalled after* hours (4 by default, Settings → General)
+  that waits on nothing is *Stalled*: its worker is asked once where it stands, and *Nudge* asks
+  again. A worker waiting on its check-back is not asked to report meanwhile, nor flagged by the
+  Watchdog; one that reports done in the turn it set its check-back is asked to wait for it.
+- **Workers named by their work** everywhere (sidebar, Home, notices, away messages): the task
+  they are on, not the first thing they were asked.
+- **PR titles**: a PR shows as `repo#12 · its title` on chips and in links; links to Spark,
+  Flyte, Airflow, rdev and Darwin say which run or page they are; *Watching* chips are links.
+- **A PR belongs to the task that made it**: one a worker opened (*Create PR*, or `gh pr create`
+  in its shell) is its task's; a PR a report only mentions is a reference. A merge settles only
+  the task that made the PR; a PR GitHub cannot read is not followed unless its task opened it;
+  ready-to-merge cards and receipts are only for a task's own PRs.
+- **Messages to workers**: the Router names which of a worker's tasks a message is about
+  (`task_id`), and must when it has several open; "Thanks, received." no longer reopens a
+  finished task (an acknowledgement is a note).
+- **Tasks keep their state** (found by QA and review): cancelling one of a worker's tasks no
+  longer stops its other task or drops its other instructions; a dependency is waited for also
+  when the worker got newer work meanwhile; a worker's chat answer completes the report of the
+  task it reported, not the one it is on now; cancelling the owner's follow-up or retry, or
+  closing the worker during it, gives the earlier result back; a closed worker reopened does
+  not get instructions it never received; a failed worker does not start a turn after a
+  restart; a task left running by an old "decision changed" that its worker confirmed goes back
+  to where it was, once, at startup; a sent draft settles the task it was drafted for; a PR a
+  worker opens is its turn's task's, not a task given meanwhile.
+- **Questions per task**: each of a worker's questions is kept on its own (with its own id);
+  another task's report no longer clears it. Questions kept by 0.1.23 move over at startup.
+  Answering the question of a task cancelled meanwhile tells its worker plainly that the task is
+  back on (the note that it was cancelled no longer arrives with the answer).
+- **Away notifications, rewritten**: a short gist of up to five items, each with a random
+  single-use code for that item only (a week); only what was notified can be answered; an item
+  counts as sent once the messenger says so, and a failed send is retried; the messenger also
+  reads the answers, the way it sent, for a day; codes are no longer given to the connector;
+  Slack formatting and Block Kit files are offered. Watches remember where each scan got to and
+  read again from a little before.
+- **Security**: the app's key is no longer a cookie (sent as a header; links carry it); git
+  commands Chief of Staff runs in workers' checkouts ignore a `.git` pointer, `commondir`, hooks
+  or fsmonitor a worker planted, and a cloned repository whose config would run code is refused.
+  A project folder that is itself a git worktree is read as itself.
+- **GitHub and Slack**: one owner's failing review-request search no longer stops following
+  PRs; a followed Slack DM gets only its own messages from a search page; an interrupted bare
+  approval is found on GitHub instead of being posted again.
+- **Receipts**: a comment line no longer hides the commands after it; here-document bodies are
+  not commands; TAP `not ok`, Maven `Tests run:`, mocha *passing* and Jest with skipped tests
+  are read; `make -C dir test`, `mvn -pl x clean test`, `gradle -p x :m:test`, `pnpm -r test`,
+  `yarn workspace x test` and `npm -w x run test:unit` are test runs; "tests did not pass" and
+  "already fixed upstream" are not claims; a change made in a commit and again since counts
+  once, and new files count (not what running code leaves behind: `__pycache__/`,
+  `.pytest_cache/`, `node_modules/`, a `uv.lock` that `uv run` wrote, which no longer block
+  *Create PR* or make results look out of date); a check still running is the latest run. A report is no longer
+  sent back for a "table" (a database's), "EXPLAIN", or "exceeds the rate limit".
+- **Cards**: a send that fails keeps its card with why (send again, redo or drop); text typed
+  on a card survives it being redrawn; every worker waiting on a decision shows it; lessons
+  added to a card show, and *Drop all* drops only those shown. Settings opens even when a
+  setting it shows cannot be read; *Show report* no longer overflows its card.
+- Markdown: `<https://…>` and Slack's `<https://…|label>` are links, a link with `&amp;` works,
+  any code fence info string (`c#`) is a fence, and a one-line entry keeps its leading number.
+
 ## 0.1.23 (2026-11-07)
 
 - **A worker's question is never lost**: a question (or a blocker) stays under *Needs you*

@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from conftest import FakeSession, Harness, call_tool, env, settle
+from conftest import FakeSession, Harness, call_tool, env, settle, task_of
 
 from chiefofstaff.models import DraftDecision, Settings
 
@@ -592,6 +592,7 @@ async def test_a_blocker_on_finished_work_needs_the_owner(harness):
 async def test_a_merged_pr_settles_its_task_after_later_reports(harness):
     runtime = await harness.connect()
     worker = await spawn(runtime, harness.router_id, "Login")
+    harness.own_pull("acme/app", 7)
     await call_tool(
         runtime, "report", worker, status="done", summary="Done: https://github.com/acme/app/pull/7"
     )
@@ -604,6 +605,76 @@ async def test_a_merged_pr_settles_its_task_after_later_reports(harness):
     assert runtime.tasks.get(task["id"])["status"] == "review"
     runtime.unfollow("github:acme/app#7", finished=True, merged=True)
     assert runtime.tasks.get(task["id"])["status"] == "done"
+
+
+async def test_a_merge_settles_only_the_task_that_opened_the_pr(harness):
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Survey")
+    survey = runtime.tasks.current(worker)
+    await call_tool(
+        runtime, "report", worker, status="done", task_id=survey["id"],
+        summary="Related: https://github.com/acme/app/pull/9 is how others did it.",
+    )  # fmt: skip
+    await call_tool(
+        runtime, "message_session", harness.router_id, session_id=worker, text="Fix it",
+        task="new", title="Fix",
+    )  # fmt: skip
+    fix = runtime.tasks.current(worker)
+    session = harness.session(worker)
+    session.emit("tool.execution_start", tool_name="bash", tool_call_id="pr",
+                 arguments={"command": "gh pr create --fill"})  # fmt: skip
+    session.emit("tool.execution_complete", tool_call_id="pr", success=True,
+                 result=SimpleNamespace(content="https://github.com/acme/app/pull/9\n"
+                                        "<exited with exit code 0>"))  # fmt: skip
+    await settle(runtime)
+    await call_tool(
+        runtime, "report", worker, status="done", task_id=fix["id"],
+        summary="Fixed in https://github.com/acme/app/pull/9",
+    )  # fmt: skip
+    runtime.task_actions.pr_merged(worker, "github:acme/app#9")
+    assert runtime.tasks.get(fix["id"])["status"] == "done"
+    assert runtime.tasks.get(survey["id"])["status"] == "review", "it only mentioned it"
+
+
+async def test_a_pr_github_cannot_read_is_followed_only_when_it_opened_it(harness):
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Look around")
+    harness.gh_replies["api repos/acme/app/pulls/5"] = RuntimeError("HTTP 502")
+    await call_tool(
+        runtime, "report", worker, status="progress",
+        summary="See https://github.com/acme/app/pull/5 for context.",
+    )  # fmt: skip
+    await settle(runtime)
+    assert "github:acme/app#5" not in harness.store.follows(worker)
+
+
+async def test_another_tasks_pr_on_the_owners_account_is_not_this_ones(harness):
+    runtime = await harness.connect()
+    maker = await spawn(runtime, harness.router_id, "Make it")
+    harness.own_pull("acme/app", 11)
+    await call_tool(
+        runtime,
+        "report",
+        maker,
+        status="progress",
+        summary="Opened https://github.com/acme/app/pull/11",
+    )
+    reader = await spawn(runtime, harness.router_id, "Read up", why_new="separate")
+    await call_tool(
+        runtime,
+        "report",
+        reader,
+        status="done",
+        summary="Builds on https://github.com/acme/app/pull/11",
+    )
+    await settle(runtime)
+    assert "github:acme/app#11" in harness.store.follows(maker)
+    assert "github:acme/app#11" not in harness.store.follows(reader)
+    task = runtime.tasks.current(reader)
+    own, about = await runtime.task_actions.pr_roles(
+        task, [{"label": "acme/app#11", "author": "me", "created": "2999-01-01T00:00:00Z"}]
+    )
+    assert not own and not about
 
 
 async def test_list_sessions_stays_readable_with_many_sessions(tmp_path):
@@ -1016,6 +1087,32 @@ async def test_a_one_line_report_gets_the_answer_its_worker_wrote(harness):
     assert any(kind == "inbound" and answer.strip() in text for kind, text in inbound)
 
 
+async def test_the_answer_goes_to_the_report_of_the_task_it_was_on(harness):
+    """It reported one task done while it has another one now: that report gets the answer."""
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Analyze sales")
+    first = task_of(harness, worker)
+    session = harness.session(worker)
+    await call_tool(
+        runtime,
+        "message_session",
+        harness.router_id,
+        session_id=worker,
+        text="Then chart it",
+        task="new",
+        title="Chart",
+    )
+    await call_tool(
+        runtime, "report", worker, status="done", summary="Analysis complete.", task_id=first
+    )
+    answer = "Revenue per region: north 27,760.50; south 25,846.00; west 24,635.00. " * 4
+    session.emit("assistant.message", content=answer)
+    session.emit("session.idle")
+    await settle(runtime)
+    done = harness.store.one("SELECT result FROM tasks WHERE id=?", (first,))
+    assert answer.strip() in done["result"]
+
+
 async def test_review_cards_when_the_owner_drops_everything_or_the_pr_moves(harness):
     runtime = await harness.connect()
     worker = await spawn(runtime, harness.router_id, "Review tscp-targeting PR #1529")
@@ -1210,6 +1307,11 @@ async def test_a_decision_recorded_again_in_the_same_words_changes_nothing(harne
             "the whole answer",
         ),
         ("Profile the import job", "Peak memory would exceed 2 GB with 10x data.", ""),
+        ("Store the results in a table in Postgres", "Done.", ""),
+        ("Fix the EXPLAIN ANALYZE output parsing", "Fixed.", ""),
+        ("Check how your service handles retries", "It retries 3 times.", ""),
+        ("Back off when calls exceed the rate limit", "Done: it backs off past the limit.", ""),
+        ("详细检查一下登录流程", "没有问题。", ""),
     ],
 )
 def test_what_a_one_line_report_cannot_answer(goal, summary, missing):
@@ -1590,8 +1692,29 @@ async def test_a_draft_the_owner_posted_themself_is_settled(harness):
     assert settled["status"] == "sent" and settled["outcome"].endswith("u8")
     told = harness.store.messages(worker)[-1]
     assert told["meta"]["deferred"], "with its next message: no turn of its own"
-    assert '<message from="system" type="draft-outcome">' in told["meta"]["prompt"]
+    assert '<message from="system" type="draft-outcome"' in told["meta"]["prompt"]
     assert "Do not ask about sending it again" in told["text"]
+
+
+async def test_a_sent_draft_settles_the_task_it_was_drafted_for(harness):
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Reply to Ann")
+    reply = runtime.tasks.current(worker)
+    draft = harness.store.create_draft(
+        worker, "slack", {"channel_id": "C1", "thread_ts": "", "to": "Ann"}, "On it!"
+    )
+    assert draft["target"]["task_id"] == reply["id"]
+    await call_tool(runtime, "report", worker, status="done", summary="Drafted the reply.")
+    await call_tool(
+        runtime, "message_session", harness.router_id, session_id=worker, text="Now the docs",
+        task="new", title="Docs",
+    )  # fmt: skip
+    docs = runtime.tasks.current(worker)
+    await runtime.drafts.copied(harness.store.draft(draft["id"]), "On it!")
+    await settle(runtime)
+    assert runtime.tasks.get(reply["id"])["status"] == "done", "sent: the reply task is settled"
+    assert runtime.tasks.get(docs["id"])["status"] == "running"
+    assert not harness.store.get(f"draft_sent:{docs['id']}")
 
 
 async def test_news_on_finished_work_stays_in_sight_until_seen(harness):
@@ -1743,7 +1866,9 @@ async def test_a_question_stays_under_needs_you_until_answered(harness):
     await runtime.task_actions.answer_question(worker, "Postgres")
     assert runtime.snapshot()["questions"] == [], "answered"
     assert runtime.tasks.get(task["id"])["status"] == "running", "answered, it goes on"
-    assert "Postgres" in harness.session(worker).sent[-1]
+    sent = harness.session(worker).sent[-1]
+    assert "Postgres" in sent and "running again" in sent
+    assert 'type="cancelled"' not in sent, "not told to stop and go on at once"
 
 
 async def test_an_ended_task_is_not_reopened_by_a_message(harness):
@@ -1762,16 +1887,51 @@ async def test_an_ended_task_is_not_reopened_by_a_message(harness):
     await call_tool(runtime, "report", accepted, status="done", summary="Done.")
     runtime.task_actions.accept(task["id"])
     refused = await call_tool(
-        runtime, "message_session", harness.router_id, session_id=accepted, text="thanks!"
+        runtime, "message_session", harness.router_id, session_id=accepted, text="Add March"
     )
     assert refused.result_type == "failure" and "task='note'" in refused.text_result_for_llm
     told = await call_tool(
-        runtime, "message_session", harness.router_id, session_id=accepted, text="thanks!",
-        task="note",
-    )  # fmt: skip
-    assert told.result_type == "success"
+        runtime, "message_session", harness.router_id, session_id=accepted, text="thanks!"
+    )
+    assert told.result_type == "success", "an acknowledgement is a note"
     assert runtime.tasks.get(task["id"])["status"] == "done"
     assert 'type="note"' in harness.session(accepted).sent[-1]
+
+
+async def test_an_acknowledgement_does_not_reopen_a_task_in_review(harness):
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Report")
+    task = runtime.tasks.current(worker)
+    await call_tool(runtime, "report", worker, status="done", summary="The numbers.")
+    for text in ["Thanks, received.", "收到\uff0c谢谢"]:
+        await call_tool(runtime, "message_session", harness.router_id, session_id=worker, text=text)
+        assert runtime.tasks.get(task["id"])["status"] == "review"
+        assert 'type="note"' in harness.session(worker).sent[-1]
+
+
+async def test_a_message_names_which_of_several_open_tasks_it_is_about(harness):
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "First")
+    first = runtime.tasks.current(worker)
+    await call_tool(
+        runtime, "message_session", harness.router_id, session_id=worker, text="Also this",
+        task="new", title="Second",
+    )  # fmt: skip
+    vague = await call_tool(
+        runtime, "message_session", harness.router_id, session_id=worker, text="Use Postgres"
+    )
+    assert vague.result_type == "failure" and "task_id" in vague.text_result_for_llm
+    named = await call_tool(
+        runtime, "message_session", harness.router_id, session_id=worker, text="Use Postgres",
+        task_id=first["id"],
+    )  # fmt: skip
+    assert named.result_type == "success" and first["id"] in named.text_result_for_llm
+    assert f'task="{first["id"]}"' in harness.session(worker).sent[-1]
+    wrong = await call_tool(
+        runtime, "message_session", harness.router_id, session_id=worker, text="x",
+        task_id="tnope",
+    )  # fmt: skip
+    assert wrong.result_type == "failure"
 
 
 async def test_cancelling_a_follow_up_keeps_the_finished_result(harness):
@@ -1787,6 +1947,75 @@ async def test_cancelling_a_follow_up_keeps_the_finished_result(harness):
     after = runtime.tasks.get(task["id"])
     assert after["status"] == "review" and after["result"] == "The numbers."
     assert "Follow-up cancelled" in after["progress"]
+
+
+async def test_the_owners_follow_up_or_retry_cancelled_or_closed_gives_the_result_back(harness):
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Report")
+    task = runtime.tasks.current(worker)
+    await call_tool(runtime, "report", worker, status="done", summary="The numbers.")
+    harness.session(worker).emit("session.idle")
+    await settle(runtime)
+    await runtime.task_actions.follow_up(task["id"], "Add March")
+    await runtime.task_actions.cancel(task["id"])
+    after = runtime.tasks.get(task["id"])
+    assert after["status"] == "review" and after["result"] == "The numbers."
+
+    await runtime.task_actions.follow_up(task["id"], "Add April")
+    await runtime.workers.close(worker)
+    after = runtime.tasks.get(task["id"])
+    assert after["status"] == "review" and after["result"] == "The numbers."
+
+    runtime.tasks.move(task["id"], "failed", progress="Crashed")
+    await runtime.task_actions.retry(task["id"], "Once more")
+    await runtime.task_actions.cancel(task["id"])
+    assert runtime.tasks.get(task["id"])["status"] == "failed"
+
+
+async def test_a_closed_worker_reopened_does_not_get_what_it_never_received(tmp_path):
+    harness = Harness(tmp_path / "data", Settings(max_workers=1))
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Old")
+    await call_tool(runtime, "report", worker, status="done", summary="Done")
+    harness.session(worker).emit("session.idle")
+    await settle(runtime)
+    busy = await spawn(runtime, harness.router_id, "Busy", why_new="separate")
+    await call_tool(
+        runtime,
+        "message_session",
+        harness.router_id,
+        session_id=worker,
+        text="Old plan",
+        task="new",
+        title="Plan",
+    )
+    assert harness.store.session(worker)["status"] == "queued"
+    plan = runtime.tasks.current(worker)
+    await runtime.workers.close(worker)
+    await call_tool(runtime, "report", busy, status="done", summary="Done")
+    harness.session(busy).emit("session.idle")
+    await settle(runtime)
+    before = len(harness.session(worker).sent)
+    await runtime.task_actions.retry(plan["id"], "New plan")
+    await settle(runtime)
+    sent = harness.session(worker).sent[before:]
+    assert any("New plan" in text for text in sent)
+    assert not any("Old plan" in text for text in sent), "its cancelled instruction is dropped"
+
+
+async def test_a_failed_worker_does_not_start_a_turn_on_restart(harness):
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Build")
+    session = harness.session(worker)
+    session.emit("session.idle")
+    await settle(runtime)
+    runtime.add_message(worker, "router", "More", {"prompt": "More"})
+    runtime.fail(harness.store.session(worker), "Copilot crashed")
+    sent = len(session.sent)
+    await runtime.resume_working()
+    await settle(runtime)
+    assert len(session.sent) == sent, "a failed worker waits for the owner"
+    assert harness.store.session(worker)["status"] == "failed"
 
 
 async def test_a_worker_with_several_open_tasks_names_the_one_it_reports(harness):
@@ -2003,3 +2232,122 @@ async def test_two_cancellations_in_a_minute_both_reach_the_worker(harness):
         await settle(runtime)
     said = [m for m in harness.store.messages(harness.router_id) if m["kind"] == "assistant"]
     assert [m["text"] for m in said].count("All three are on it.") == 1
+
+
+async def test_another_tasks_report_leaves_an_open_question_alone(harness):
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Pick a db")
+    first = runtime.tasks.current(worker)
+    await call_tool(runtime, "report", worker, status="question", summary="Postgres or SQLite?")
+    await runtime.task_actions.cancel(first["id"])
+    await call_tool(
+        runtime, "message_session", harness.router_id, session_id=worker, text="Also the cache",
+        task="new", title="Cache",
+    )  # fmt: skip
+    second = runtime.tasks.current(worker)
+    runtime.tasks.move(second["id"], "running")
+    await call_tool(
+        runtime, "report", worker, status="progress", summary="Cache half done.",
+        task_id=second["id"],
+    )  # fmt: skip
+    [question] = runtime.snapshot()["questions"]
+    assert question["task_id"] == first["id"], "task B's progress does not answer task A"
+    await call_tool(runtime, "report", worker, status="question", summary="Redis or memcached?",
+                    task_id=second["id"])  # fmt: skip
+    assert len(runtime.asks.session_questions(worker)) == 2, "one per task"
+    await runtime.task_actions.answer_question(question["id"], "Postgres")
+    left = runtime.asks.session_questions(worker)
+    assert [q["task_id"] for q in left] == [second["id"]]
+
+
+async def test_a_stalled_task_is_asked_once_where_it_stands(harness):
+    from datetime import UTC, datetime, timedelta
+
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "SLM eval")
+    task = runtime.tasks.current(worker)
+    session = harness.session(worker)
+    await call_tool(runtime, "report", worker, status="progress", summary="Started the run.")
+    session.emit("session.idle")
+    await settle(runtime)
+    later = datetime.now(UTC) + timedelta(hours=5)
+    assert runtime.task_actions.stalled(runtime.tasks.get(task["id"]), later) >= 4
+    nudges = lambda: [text for text in session.sent if 'type="nudge"' in text]  # noqa: E731
+    await runtime.task_actions.nudge_stalled(later)
+    await settle(runtime)
+    assert len(nudges()) == 1
+    await runtime.task_actions.nudge_stalled(later)
+    await settle(runtime)
+    assert len(nudges()) == 1, "once, until something happens on it again"
+
+    await call_tool(runtime, "check_back", worker, minutes=60, what="the Flyte run",
+                    task_id=task["id"])  # fmt: skip
+    assert not runtime.task_actions.stalled(runtime.tasks.get(task["id"]), later), "it waits"
+
+
+async def test_a_worker_that_checks_back_is_not_asked_to_report_meanwhile(harness):
+    from datetime import UTC, datetime, timedelta
+
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Nightly check")
+    task = runtime.tasks.current(worker)
+    session = harness.session(worker)
+    await call_tool(runtime, "check_back", worker, minutes=30, what="the nightly run")
+    session.emit("assistant.message", content="I'll look again in 30 minutes.")
+    session.emit("session.idle")
+    await settle(runtime)
+    assert not [text for text in session.sent if "report-missing" in text], "it said when"
+    assert runtime.tasks.get(task["id"])["status"] == "running"
+    assert await runtime.watchdog.check(datetime.now(UTC).timestamp() + 5000) == []
+    await runtime.task_actions.wake_check_backs(datetime.now(UTC) + timedelta(minutes=31))
+    await settle(runtime)
+    assert 'type="check-back"' in session.sent[-1]
+
+
+async def test_a_pr_opened_in_a_turn_belongs_to_the_task_that_turn_is_on(harness):
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Fix login")
+    fix = runtime.tasks.current(worker)
+    session = harness.session(worker)
+    session.emit("user.message", content=harness.session(worker).sent[0])
+    await call_tool(
+        runtime, "message_session", harness.router_id, session_id=worker, text="Then the docs",
+        task="new", title="Docs",
+    )  # fmt: skip
+    docs = runtime.tasks.current(worker)
+    session.emit("tool.execution_start", tool_name="bash", tool_call_id="pr",
+                 arguments={"command": "gh pr create --fill"})  # fmt: skip
+    session.emit("tool.execution_complete", tool_call_id="pr", success=True,
+                 result=SimpleNamespace(content="https://github.com/acme/app/pull/9\n"
+                                        "<exited with exit code 0>"))  # fmt: skip
+    await settle(runtime)
+    assert runtime.task_actions.opened_prs(fix["id"]) == {"acme/app#9"}
+    assert not runtime.task_actions.opened_prs(docs["id"]), "given meanwhile, not what it ran"
+
+
+async def test_a_question_kept_by_an_older_version_is_cleared_by_its_answer(tmp_path):
+    harness = Harness(tmp_path / "data")
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Pick a DB")
+    task = runtime.tasks.current(worker)
+    harness.store.set(
+        f"ownerq:{worker}",
+        json.dumps({"text": "Postgres or SQLite?", "task_id": task["id"], "at": "2026-11-01"}),
+    )
+    runtime.asks.migrate_questions()  # At startup.
+    [question] = runtime.asks.owner_questions()
+    assert question["id"] == f"{worker}:{task['id']}"
+    await runtime.task_actions.follow_up(task["id"], "Postgres")
+    assert runtime.asks.owner_questions() == []
+
+
+async def test_a_done_report_in_the_turn_that_set_a_check_back_is_refused_once(harness):
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Nightly check")
+    task = runtime.tasks.current(worker)
+    await call_tool(runtime, "check_back", worker, minutes=5, what="the nightly run")
+    early = await call_tool(runtime, "report", worker, status="done", summary="Woken; all good.")
+    assert early.result_type == "failure" and "End your turn" in early.text_result_for_llm
+    assert runtime.tasks.get(task["id"])["status"] == "running"
+    again = await call_tool(runtime, "report", worker, status="done", summary="It had finished.")
+    assert again.result_type == "success", "said twice: taken"

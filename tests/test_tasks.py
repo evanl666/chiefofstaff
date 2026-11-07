@@ -5,7 +5,7 @@ import sqlite3
 from conftest import Harness, call_tool, settle, task_of
 
 from chiefofstaff.store import Store
-from chiefofstaff.tasks import settle_adopted
+from chiefofstaff.tasks import settle_adopted, settle_decision_changes
 
 
 async def spawn(runtime, router_id, title, **extra):
@@ -54,6 +54,35 @@ async def test_a_dependency_waits_for_the_new_work_of_a_reused_worker(harness):
     assert task(harness, login["task_id"])["result"] == "Login fixed", "each task keeps its result"
     started = harness.session(docs["session_id"]).sent[0]
     assert f"- Task {captcha} “Add captcha” (review): Captcha added" in started
+
+
+async def test_a_queued_worker_given_more_work_still_waits_for_its_first_tasks_deps(harness):
+    runtime = await harness.connect()
+    schema = await spawn(runtime, harness.router_id, "Schema")
+    later = await spawn(runtime, harness.router_id, "Backfill", after=[schema["task_id"]])
+    worker = later["session_id"]
+    await call_tool(
+        runtime,
+        "message_session",
+        harness.router_id,
+        session_id=worker,
+        text="Also add a metric",
+        task="new",
+        title="Metric",
+    )
+    metric = task_of(harness, worker)
+    await runtime.workers.pump()
+    row = harness.store.session(worker)
+    assert row["status"] == "queued" and row["activity"] == "waiting for “Schema”"
+    assert worker not in harness.client.sessions, "its backfill does not start before the schema"
+
+    await call_tool(runtime, "report", schema["session_id"], status="done", summary="Schema in")
+    await settle(runtime)
+    [started] = harness.session(worker).sent
+    assert "Backfill" in started and "Also add a metric" in started
+    assert f"- Task {schema['task_id']} “Schema” (review): Schema in" in started
+    assert task(harness, later["task_id"])["status"] == "running"
+    assert task_of(harness, worker) == metric, "it is on the newest task"
 
 
 async def test_reports_runs_and_usage_belong_to_the_task(harness):
@@ -254,3 +283,38 @@ async def test_a_session_adopted_before_tasks_is_not_shown_as_running(harness):
     settle_adopted(store)
     assert harness.runtime.tasks.current("adopted")["status"] == "done"
     assert harness.runtime.tasks.current("busy")["status"] == "running", "a real task stays"
+
+
+async def test_a_task_left_running_by_an_old_decision_change_goes_back_once(harness):
+    runtime = await harness.connect()
+    kept = await spawn(runtime, harness.router_id, "Away notices")
+    other = await spawn(runtime, harness.router_id, "Unanswered")
+    for made in (kept, other):
+        await call_tool(runtime, "report", made["session_id"], status="done", summary="Not now.")
+        harness.session(made["session_id"]).emit("session.idle")
+    await settle(runtime)
+    for made in (kept, other):
+        runtime.tasks.move(made["task_id"], "running", reason="decision changed")
+    harness.store.create_draft(
+        harness.router_id,
+        "change",
+        {
+            "decision": {"id": "dec1", "text": "Skip it"},
+            "before": [],
+            "tasks": [
+                {"task_id": kept["task_id"], "was": "review", "ack": "Nothing to change."},
+                {"task_id": other["task_id"], "was": "review", "ack": ""},
+            ],
+        },
+        "Decision changed: Skip it",
+    )
+    harness.store.delete("settled_decision_changes")
+    settle_decision_changes(harness.store)
+    restored = task(harness, kept["task_id"])
+    assert restored["status"] == "review" and restored["result"] == "Not now."
+    assert "Nothing to change." in restored["progress"]
+    assert runtime.tasks.runs(kept["task_id"])[-1]["ended_at"]
+    assert task(harness, other["task_id"])["status"] == "running", "not answered: left alone"
+    runtime.tasks.move(kept["task_id"], "running", reason="decision changed")
+    settle_decision_changes(harness.store)
+    assert task(harness, kept["task_id"])["status"] == "running", "only once"

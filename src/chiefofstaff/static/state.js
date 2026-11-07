@@ -1,6 +1,6 @@
 // What the page knows, and the server events that keep it current.
 
-import { $, api, el } from "./dom.js";
+import { $, api, el, withKey } from "./dom.js";
 import { renderSidebar } from "./sidebar.js";
 import { appendMessages, renderHeader, replaceMessage, select, updateDraftRecords, updateWorkingLine } from "./session.js";
 import { scheduleHome } from "./inbox.js";
@@ -102,7 +102,7 @@ function scheduleReload() {
   state.reloadTimer = setTimeout(() => loadState().catch(() => {}), 150);
 }
 export function connectEvents() {
-  const source = new EventSource("/api/events");
+  const source = new EventSource(withKey("/api/events"));
   source.onmessage = (event) => handleEvent(JSON.parse(event.data));
 }
 async function resync() {

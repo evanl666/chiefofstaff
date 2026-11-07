@@ -121,6 +121,7 @@
             <div class="row">
               <label><span>Parallel workers</span><input name="max_workers" type="number" min="1" max="1000" /></label>
               <label><span>Close idle after (h)</span><input name="worker_idle_hours" type="number" min="1" max="720" /></label>
+              <label title="A running task with no activity and nothing it waits on for this long shows under Stalled, and its worker is asked once where it stands"><span>Stalled after (h)</span><input name="stall_hours" type="number" min="1" max="168" /></label>
               <label><span>Daily summary at</span><input name="digest_time" type="time" /></label>
             </div>
             <small>More tasks wait in the queue, and new work also waits while this computer is low on memory. Idle finished workers close; you can reopen them.</small>

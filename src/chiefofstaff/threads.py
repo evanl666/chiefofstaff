@@ -52,6 +52,24 @@ def slack_messages(text: str) -> dict[str, list[str]]:
     return found
 
 
+def slack_entries(text: str, stamps: set[str]) -> str:
+    """Only the entries of a Slack search result whose permalink is one of these messages
+    ("1712345700.000400"): each entry ends with its permalink line."""
+    entries: list[list[str]] = [[]]
+    for line in text.splitlines():
+        entries[-1].append(line)
+        if PERMALINK.search(line):
+            entries.append([])
+    kept = []
+    for entry in entries:
+        found = {
+            f"{seconds}.{micros}" for _, seconds, micros, _ in PERMALINK.findall("\n".join(entry))
+        }
+        if found & stamps:
+            kept.append("\n".join(entry).strip())
+    return "\n".join(kept)
+
+
 def slack_follow_key(channel: str, thread_ts: str, sent: str) -> str | None:
     """What to follow after replying: the thread, the DM, or the thread under the reply."""
     links = slack_messages(sent)

@@ -18,10 +18,16 @@ export function showSettingsTab(tab) {
   $("#settings-pane").scrollTop = 0;
 }
 export function openSettings(tab = "") {
-  fillSettings();
-  showSettingsTab(tab || localStorage.getItem(TAB) || "general");
   const dialog = $("#settings-dialog");
+  // Opened first: a part that fails to render must not keep Settings shut.
   if (!dialog.open) dialog.showModal();
+  try {
+    fillSettings();
+  } catch (error) {
+    console.error(error);
+    settingsError(`Part of Settings could not be shown: ${error.message}`);
+  }
+  showSettingsTab(tab || localStorage.getItem(TAB) || "general");
   // Feedback, the owner's words and checks come in all the time; what was learned is read fresh.
   api("/api/state")
     .then((data) => {
@@ -33,7 +39,7 @@ export function openSettings(tab = "") {
       renderLearning();
       renderConnections();
     })
-    .catch(() => {});
+    .catch((error) => console.error(error));
 }
 export function bindSettings() {
   const dialog = $("#settings-dialog");
@@ -284,6 +290,7 @@ export function fillSettings() {
   $("#sandbox-hint").textContent = hint;
   $("#sandbox-hint").hidden = !hint;
   form.worker_idle_hours.value = settings.worker_idle_hours;
+  form.stall_hours.value = settings.stall_hours ?? 4;
   form.mac_notifications.checked = settings.mac_notifications;
   form.watchdog_enabled.checked = settings.watchdog_enabled;
   form.slack_enabled.checked = settings.slack_enabled;
@@ -440,14 +447,16 @@ export function renderConnections() {
   $("#plugins-retry").hidden = !plugins.some(([, status]) => status.state === "failed");
   const connector = snap.connector || {};
   const last = connector.last || {};
+  // What the last scan could not do: one line (saved as text; a list from older versions).
+  const problems = (Array.isArray(last.problems) ? last.problems.join("; ") : String(last.problems || "")).trim();
   const scanned = connector.scanning
     ? "Scanning now…"
     : connector.scanned_at
-      ? `Scanned ${since(connector.scanned_at)}${last.found !== undefined ? ` · ${last.found} found` : ""}${last.problems?.length ? ` · ${last.problems.join("; ")}` : ""}`
+      ? `Scanned ${since(connector.scanned_at)}${last.found !== undefined ? ` · ${last.found} found` : ""}${problems ? ` · ${problems}` : ""}`
       : "";
   watchSummary();
   $("#watch-state").textContent = scanned;
-  $("#watch-state").classList.toggle("error", Boolean(last.problems?.length));
+  $("#watch-state").classList.toggle("error", Boolean(problems));
   $("#watch-scan").disabled = Boolean(connector.scanning);
   $("#watch-activity").hidden = !connector.session_id;
   const away = connector.away || {};
@@ -660,6 +669,7 @@ async function saveSettings(event) {
     shared_caches: form.shared_caches.checked,
     sandbox_writable: lines(form.sandbox_writable.value),
     worker_idle_hours: Number(form.worker_idle_hours.value || 24),
+    stall_hours: Number(form.stall_hours.value || 4),
     mac_notifications: form.mac_notifications.checked,
     watchdog_enabled: form.watchdog_enabled.checked,
     slack_enabled: form.slack_enabled.checked,

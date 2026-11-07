@@ -389,6 +389,13 @@ class Store:
         )
         return [row["key"] for row in rows]
 
+    def items(self, prefix: str) -> dict[str, str]:
+        """The values under a key prefix, by key without the prefix."""
+        rows = self.all(
+            "SELECT key, value FROM kv WHERE key >= ? AND key < ?", (prefix, prefix + "\uffff")
+        )
+        return {row["key"][len(prefix) :]: row["value"] for row in rows}
+
     def create_session(
         self,
         session_id: str,
@@ -504,6 +511,17 @@ class Store:
         self, session_id: str, kind: str, target: dict, text: str, note: str = ""
     ) -> dict:
         draft_id = "d" + identifier()[:8]
+        if kind in {"slack", "github", "reply"} and "task_id" not in target:
+            # The worker's task it drafted for: its only open task, else the one it is on.
+            row = self.one("SELECT role, task_id FROM sessions WHERE id=?", (session_id,))
+            if row and row["role"] == "worker":
+                open_ = self.all(
+                    "SELECT id FROM tasks WHERE session_id=? "
+                    "AND status IN ('queued', 'running', 'waiting')",
+                    (session_id,),
+                )
+                found = open_[0]["id"] if len(open_) == 1 else row["task_id"] or ""
+                target = {**target, "task_id": found}
         self.execute(
             """INSERT INTO drafts(id,session_id,kind,target,text,note,created_at)
             VALUES(?,?,?,?,?,?,?)""",

@@ -156,14 +156,16 @@ class Workers:
     def complete_report(self, session_id: str):
         """A worker that reported done in a line ("Analysis complete") and wrote the answer
         itself in its chat: the owner reads reports, so the report gets that answer."""
-        task = self.tasks.current(session_id)
-        if not task or task["status"] not in {"review", "done"}:
-            return
         recent = since_last_instruction(self.store.messages(session_id, limit=400))
         reports = [m for m in recent if m["kind"] == "report" and m["meta"].get("status") == "done"]
         if not reports or not self.states.handle(session_id):
             return
         report = reports[-1]
+        # The task that report was on (it may have moved on to another one since).
+        task_id = report["meta"].get("task_id")
+        task = self.tasks.find(task_id) if task_id else self.tasks.current(session_id)
+        if not task or task["status"] not in {"review", "done"}:
+            return
         answers = [
             m["text"].strip()
             for m in recent
@@ -201,9 +203,13 @@ class Workers:
         chat with it (they read its answer there), nor after that request (the Watchdog
         follows it up)."""
         row = self.store.session(session_id)
-        task = self.tasks.current(session_id)
-        if row["status"] != "idle" or row["closed_at"] or not task or task["status"] != "running":
+        running = [t for t in self.tasks.for_session(session_id) if t["status"] == "running"]
+        current = self.tasks.current(session_id)
+        if row["status"] != "idle" or row["closed_at"] or not running:
             return
+        # The task its turn was about: the one it is on when that is running; else the one its
+        # last instruction named; else its newest running one.
+        task = current if current and current["status"] == "running" else running[-1]
         if self.runtime.special(row) in {"connector", "messenger"}:
             # It reports through its own tools: a run that ended is done.
             self.tasks.move(task["id"], "done", result="Run finished.")
@@ -219,9 +225,15 @@ class Workers:
         if not recent or not instruction(recent[0]):
             return
         asked = recent[0]
+        named = next((t for t in running if t["id"] == asked["meta"].get("task_id")), None)
+        if named:
+            task = named
+        if self.store.get(f"checkback:{task['id']}"):
+            return  # It said when it looks again: woken then, it reports.
         nudged = bool(asked["meta"].get("report_nudge"))
-        if asked["kind"] == "owner" and not asked["meta"].get("task_id"):
-            return
+        chat = asked["meta"].get("chat") or not asked["meta"].get("task_id")
+        if asked["kind"] == "owner" and chat:
+            return  # The owner's own chat with it: they read its answer there.
         if any(m["kind"] == "report" or m["meta"].get("stopped") for m in recent):
             return
         if self.states[session_id].busy or not self.states.handle(session_id):
@@ -326,11 +338,16 @@ class Workers:
             await self.start(row)
 
     def waiting_for(self, row: dict) -> list[dict]:
-        """Tasks a worker's queued task still waits for; shown as the worker's activity."""
-        task = self.tasks.current(row["id"])
-        if not task or task["status"] != "queued" or self.store.get(f"released:{task['id']}"):
-            return []
-        waiting = self.tasks.unmet(task)
+        """Tasks a worker's queued tasks still wait for (any of them: what it has not received
+        goes out together); shown as the worker's activity."""
+        queued = [
+            task
+            for task in self.tasks.for_session(row["id"])
+            if task["status"] == "queued" and not self.store.get(f"released:{task['id']}")
+        ]
+        waiting = list(
+            {dep["id"]: dep for task in queued for dep in self.tasks.unmet(task)}.values()
+        )
         names = ", ".join(
             f"your review of “{d['title']}”" if d["status"] == "review" else f"“{d['title']}”"
             for d in waiting
@@ -340,8 +357,10 @@ class Workers:
             not waiting and row["activity"].startswith(MEMORY_WAIT)
         ):
             self.runtime.update_session(row["id"], activity=activity)
-        broken = self.tasks.broken(task)
-        if broken and not self.store.get(f"depblocked:{task['id']}"):
+        for task in queued:
+            broken = self.tasks.broken(task)
+            if not broken or self.store.get(f"depblocked:{task['id']}"):
+                continue
             self.store.set(f"depblocked:{task['id']}", "1")
             names = ", ".join(f"“{d['title']}” ({d['id']}, {d['status']})" for d in broken)
             self.runtime.background(
@@ -357,7 +376,7 @@ class Workers:
                         title=task["title"],
                     ),
                     kind="inbound",
-                    display=f"“{row['title']}” waits for {names}, which ended without finishing.",
+                    display=f"“{task['title']}” waits for {names}, which ended without finishing.",
                     meta={
                         "from": row["id"],
                         "title": task["title"],
@@ -370,22 +389,23 @@ class Workers:
 
     async def start(self, row: dict):
         session_id = row["id"]
-        task = self.tasks.current(session_id)
-        done = self.tasks.deps(task["id"]) if task else []
-        if task and done and not self.store.get(f"handed:{task['id']}"):
+        for task in self.tasks.for_session(session_id):
+            done = self.tasks.deps(task["id"]) if task["status"] == "queued" else []
+            if not done or self.store.get(f"handed:{task['id']}"):
+                continue
             results = "\n".join(
                 f"- Task {d['id']} “{d['title']}” ({d['status']}): {d['result'] or 'no report'}"
                 for d in done
             )
+            text = (
+                f"Results of the tasks this one waited for (task {task['id']} “{task['title']}”):"
+                f"\n{results}"
+            )
             self.runtime.add_message(
                 session_id,
                 "router",
-                f"Results of the tasks this one waited for:\n{results}",
-                {
-                    "prompt": wrap(
-                        "router", "results", f"Results of the tasks this one waited for:\n{results}"
-                    )
-                },
+                text,
+                {"prompt": wrap("router", "results", text, task=task["id"]), "task_id": task["id"]},
             )
             self.store.set(f"handed:{task['id']}", "1")
         connection = self.runtime.connections
@@ -404,9 +424,16 @@ class Workers:
                 self.runtime.background(self.pump())
                 return
             self.runtime.update_session(session_id, status="working")
-            task = self.tasks.current(session_id)
-            if task and task["status"] == "queued":
-                self.tasks.move(task["id"], "running")
+            current = self.tasks.current(session_id)
+            for task in self.tasks.for_session(session_id):
+                if task["status"] == "queued" and (not current or task["id"] != current["id"]):
+                    self.tasks.move(task["id"], "running")  # Its instructions go out now too.
+            if current and current["status"] == "queued":
+                self.tasks.move(current["id"], "running")  # Last: the one it is on.
+            elif current:
+                self.store.execute(
+                    "UPDATE sessions SET task_id=? WHERE id=?", (current["id"], session_id)
+                )
             # Flushing now includes messages that arrived while the session was being created.
             if not await self.delivery.flush(session_id, session):
                 self.states[session_id].busy = False
@@ -437,7 +464,7 @@ class Workers:
             return False
         if any(draft["session_id"] == session_id for draft in self.store.drafts()):
             return False
-        return not self.runtime.asks.owner_question(session_id)
+        return not self.runtime.asks.session_questions(session_id)
 
     async def close(self, session_id: str):
         row = self.store.session(session_id)
@@ -460,8 +487,15 @@ class Workers:
         self.states[session_id].close_after_turn = False
         self.runtime.asks.cancel_requests(session_id, "The session was closed.")
         await self.runtime.asks.cancel_questions(session_id)
+        self.delivery.drop_pending(session_id)  # A reopened worker does not get them.
         for task in self.tasks.for_session(session_id):
-            if task["status"] in OPEN:
+            if task["status"] not in OPEN:
+                continue
+            if was := self.store.get(f"reopened:{task['id']}"):
+                # Only its follow-up ends: the result it had stands.
+                self.store.delete(f"reopened:{task['id']}")
+                self.tasks.move(task["id"], was, progress="Follow-up ended: its worker was closed.")
+            else:
                 self.tasks.move(task["id"], "cancelled", progress="Its worker was closed.")
         # Not "stopped without reporting": the Watchdog leaves a reopened worker alone until told.
         self.runtime.add_message(session_id, "notice", "Closed.", {"stopped": True})
@@ -475,7 +509,7 @@ class Workers:
                 self.runtime.add_message(
                     self.runtime.router_id(),
                     "notice",
-                    f"Closed “{row['title']}”",
+                    f"Closed “{self.runtime.display_title(row)}”",
                     {"session_id": session_id},
                 )
         self.runtime.background(self.pump())
@@ -606,7 +640,7 @@ class Workers:
             self.runtime.add_message(
                 self.runtime.router_id(),
                 "notice",
-                f"Reopened “{row['title']}”",
+                f"Reopened “{self.runtime.display_title(row)}”",
                 {"session_id": session_id},
             )
         return self.runtime.view(row)

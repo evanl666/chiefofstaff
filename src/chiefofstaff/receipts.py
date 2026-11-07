@@ -32,8 +32,9 @@ KINDS = [
         "test",
         re.compile(
             r"^(pytest|py\.test|unittest|tox|nox|jest|vitest|mocha|rspec|phpunit|ctest|"
-            r"go test|cargo (test|nextest)|mvnw?( -\S+)* (test|verify)|(li)?gradlew?( -\S+)* "
-            r"(\S*:)?(test|check)\b|(npm|pnpm|yarn|bun)( run)? test|make( -\S+)* (test|check)|"
+            r"go test|cargo (test|nextest)|mvnw?( \S+)*? (test|verify)|(li)?gradlew?( \S+)*? "
+            r"(\S*:)?(test|check)\b|(npm|pnpm|yarn|bun)( \S+)*? (run )?test(:\S+)?(?=\s|$)|"
+            r"make( \S+)*? (test|check)|"
             r"swift test|dotnet test|mix test|bazel test|deno test|playwright test)\b"
         ),
     ),
@@ -90,17 +91,31 @@ HEARSAY = re.compile(
 ABOUT_CI = re.compile(r"\b(CI|checks?|workflows?|actions|pipelines?|builds? on)\b", re.IGNORECASE)
 
 
+# "Tests do not pass yet", "tests never passed", "tests failed to pass".
+NOT_PASSING = re.compile(
+    r"\b(not|never|no longer|didn't|don't|doesn't|won't|aren't|isn't|fail(ed|s)? to|yet to)\b",
+    re.IGNORECASE,
+)
+# The claim is about CI when CI is its subject or where it passed ("pass on CI").
+CI_CLAIM = re.compile(
+    r"\b(CI|checks?|workflows?|actions|pipelines?)\b|\b(on|in) (the )?(CI|GitHub|PR)\b",
+    re.IGNORECASE,
+)
+
+
 def says_tests_pass(report: str) -> bool:
     """Whether the worker itself says its tests pass: not in a quote, not someone else's word,
-    not about a PR's CI checks."""
+    not negated, not about a PR's CI checks."""
     text = CITED.sub(" ", report or "")
     for sentence in re.split(r"(?<=[.!?;\u3002\uff01\uff1f\uff1b])\s+|\n", text):
-        if (
-            SAYS_TESTS_PASS.search(sentence)
-            and not HEARSAY.search(sentence)
-            and not ABOUT_CI.search(sentence)
-        ):
-            return True
+        for match in SAYS_TESTS_PASS.finditer(sentence):
+            claim = sentence[match.start() : match.end() + 16]
+            if (
+                not HEARSAY.search(sentence)
+                and not NOT_PASSING.search(match.group(0))
+                and not CI_CLAIM.search(claim)
+            ):
+                return True
     return False
 
 
@@ -115,19 +130,46 @@ NEGATED = re.compile(r"(\b(no|not|nothing|never|none|neither|nor)\b|n't)(\W+\w+)
 NOTHING_AFTER = re.compile(r"\s+(nothing|none|no\s)", re.I)
 
 
+# Changed by someone else, or before: "it was already fixed upstream", "fixed by Bob in #12".
+NOT_ITS_OWN = re.compile(r"\balready\b|\bupstream\b|\bby (someone|another|other|@?[A-Z]\w+)\b")
+
+
 def says_changed(report: str) -> bool:
-    """Whether a report claims changes: "I added a test", not "No files were changed"."""
+    """Whether a report claims changes: "I added a test", not "No files were changed" or
+    "it was already fixed upstream"."""
     for match in SAYS_CHANGED.finditer(report):
         clause = re.split(r"[.!?;:,\n]", report[max(0, match.start() - 80) : match.start()])[-1]
-        if not NEGATED.search(clause) and not NOTHING_AFTER.match(report, match.end()):
-            return True
+        rest = re.split(r"[.!?;:,\n]", report[match.end() : match.end() + 60])[0]
+        if NEGATED.search(clause) or NOTHING_AFTER.match(report, match.end()):
+            continue
+        if NOT_ITS_OWN.search(clause[-20:]) or NOT_ITS_OWN.match(rest.strip()):
+            continue
+        if re.match(r"\s+(by|in) ", rest) and NOT_ITS_OWN.search(rest):
+            continue
+        return True
     return False
+
+
+def drop_heredocs(command: str) -> str:
+    """A command line without the bodies of its here-documents (text, not commands)."""
+    lines, kept, until = command.split("\n"), [], None
+    for line in lines:
+        if until is not None:
+            if line.strip() == until:
+                until = None
+            continue
+        kept.append(line)
+        if found := re.search(r"<<-?\s*(['\"]?)([A-Za-z_][\w-]*)\1", line):
+            until = found.group(2)
+    return "\n".join(kept)
 
 
 def simple_commands(command: str, depth: int = 0) -> list[list[str]]:
     """The simple commands in a shell command line, as words (quotes respected); those in a
     `bash -c "…"` script count as its own."""
-    lexer = shlex.shlex(command.replace("\n", " ; "), posix=True, punctuation_chars=True)
+    # A comment ends at its line: each line is its own command (not swallowed by one).
+    lines = drop_heredocs(command.replace("\\\n", " ")).replace("\n", " ;\n; ")
+    lexer = shlex.shlex(lines, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
     try:
         words = list(lexer)
@@ -220,11 +262,14 @@ TESTS_FAILED = re.compile(
     r"^=* ?(\d+ \w+, )*[1-9]\d* (failed|errors?)\b.* in [\d.]+s( \([\d:]+\))?( =+)?$"
     r"|^(FAILED|ERROR) \S+(::|\.py\b)"
     r"|^FAILED \("
-    r"|^\s*Tests:?\s+[1-9]\d* failed\b"
+    r"|^\s*Tests:?\s+(\d+ \w+, )*[1-9]\d* failed\b"
     r"|^\s*[1-9]\d* failing$"
     r"|^(--- FAIL: |FAIL(\s|$))"
     r"|^test result: FAILED"
-    r"|^(\[INFO\] )?BUILD FAIL(ED|URE)\b",
+    r"|^(\[\w+\] )?BUILD FAIL(ED|URE)\b"
+    r"|^not ok \d+"
+    r"|^# fail\s+[1-9]"
+    r"|^(\[\w+\] )?Tests run: \d+, Failures: (\d+, Errors: [1-9]|[1-9])",
     re.MULTILINE,
 )
 
@@ -235,10 +280,13 @@ TESTS_FAILED = re.compile(
 TESTS_PASSED = re.compile(
     r"^=* ?[1-9]\d* passed(, \d+ (skipped|deselected|xfailed|xpassed|warnings?))* in [\d.]+s"
     r"|^OK( \(|$)"
-    r"|^\s*Tests:?\s+[1-9]\d* passed\b(?!.*failed)"
-    r"|^ok\s+\S+"
+    r"|^\s*Tests:?\s+(\d+ (skipped|todo|pending), )*[1-9]\d* passed\b(?!.*failed)"
+    r"|^\s*[1-9]\d* passing \("
+    r"|^ok\s+\S+\s+(\(cached\)|[\d.]+s)"
+    r"|^# pass\s+[1-9]\d*\s*$(?![\s\S]*^# fail\s+[1-9])"
     r"|^test result: ok\b"
-    r"|^(\[INFO\] )?BUILD SUCCESS(FUL)?\b",
+    r"|^(\[\w+\] )?BUILD SUCCESS(FUL)?\b"
+    r"|^(\[\w+\] )?Tests run: [1-9]\d*, Failures: 0, Errors: 0\b",
     re.MULTILINE,
 )
 
@@ -271,7 +319,9 @@ TEST_SUMMARY = re.compile(
     r"|^\s*Tests:?\s+\d+ (passed|failed)\b"
     r"|^\s*\d+ passing \("
     r"|^(ok|FAIL)\s+\S+\t[\d.]+s"
-    r"|^test result: (ok|FAILED)\.",
+    r"|^test result: (ok|FAILED)\."
+    r"|^(\[\w+\] )?Tests run: \d+, Failures: \d+"
+    r"|^1\.\.\d+$",
     re.MULTILINE,
 )
 # Programs that show or search text: a test summary in what they print is an old run's.
@@ -598,14 +648,22 @@ def shortstat(text: str) -> dict:
     }
 
 
+def when(item: dict, *keys: str) -> str:
+    """The first of these times a check has; gh gives "0001-01-01T00:00:00Z" for none yet."""
+    for key in keys:
+        if (value := item.get(key) or "") and not value.startswith("0001-"):
+            return value
+    return ""
+
+
 def latest_checks(rollup: list[dict]) -> list[dict]:
     """Each check's latest run: one that failed and passed when run again has passed."""
     latest: dict[tuple, dict] = {}
     for item in rollup:
         key = (item.get("workflowName") or "", item.get("name") or item.get("context") or "")
-        when = item.get("completedAt") or item.get("startedAt") or item.get("createdAt") or ""
+        stamp = when(item, "completedAt", "startedAt", "createdAt")
         seen = latest.get(key)
-        if not seen or when >= (seen.get("completedAt") or seen.get("startedAt") or ""):
+        if not seen or stamp >= when(seen, "completedAt", "startedAt"):
             latest[key] = item
     return list(latest.values())
 
@@ -674,7 +732,4 @@ def checks_started(rollup: list[dict]) -> str:
     ]
     if not latest or any(outcome(item) in PENDING for item in latest):
         return ""
-    return min(
-        item.get("startedAt") or item.get("createdAt") or item.get("completedAt") or ""
-        for item in latest
-    )
+    return min(when(item, "startedAt", "createdAt", "completedAt") for item in latest)

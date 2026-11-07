@@ -55,7 +55,140 @@ async def command(
 
 
 async def git(*arguments: str, limit: float = 60, input: bytes | None = None) -> str:
-    return await command("git", *arguments, limit=limit, input=input)
+    return await command("git", *SAFE_GIT, *arguments, limit=limit, input=input)
+
+
+# Chief of Staff's own git runs outside any sandbox: nothing in a repository's config may run
+# code for it (a file-system monitor, hooks).
+SAFE_GIT = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null")
+# What running code leaves behind in a project without a .gitignore for it: not work to commit,
+# review or count (`__pycache__/`, `.pytest_cache/`, `node_modules/`, `*.pyc`, and a `uv.lock`
+# that `uv run` wrote where the project keeps none). Only new files: a tracked one that changed
+# is work.
+GENERATED = re.compile(
+    r"(^|/)(__pycache__|\.pytest_cache|\.mypy_cache|\.ruff_cache|\.hypothesis|\.tox|\.nox|"
+    r"\.venv|venv|node_modules|\.gradle|\.next|\.turbo|\.cache|\.coverage|htmlcov|"
+    r"[^/]+\.egg-info)(/|$)|\.(pyc|pyo|class|o)$|(^|/)(\.DS_Store|uv\.lock)$"
+)
+
+
+def untracked_work(names: list[str]) -> list[str]:
+    """New files that are work, not what running it left behind."""
+    return [name for name in names if name and not GENERATED.search(name.rstrip("/"))]
+
+
+def worth_committing(status: str) -> list[str]:
+    """The lines of `git status --porcelain` that are work: changed files, and new ones that
+    are not generated."""
+    return [
+        line
+        for line in status.splitlines()
+        if line.strip() and not (line.startswith("?? ") and not untracked_work([line[3:]]))
+    ]
+
+
+# Config that runs a program or sends git elsewhere: not allowed in a repository a worker can
+# write the config of (a clone in its own folder), when Chief of Staff runs git there.
+RUNS_CODE = re.compile(
+    r"^(core\.(fsmonitor|hookspath|sshcommand|pager|editor|askpass|gitproxy|worktree|"
+    r"alternaterefscommand)|credential\..*|filter\..*|diff\..*\.(command|textconv)|"
+    r"merge\..*\.driver|include\..*|includeif\..*|url\..*|gpg\..*|sequence\.editor|"
+    r"uploadpack\..*|receive\..*|remote\..*\.(uploadpack|receivepack|proxy|vcs))$",
+    re.IGNORECASE,
+)
+
+
+def admin_dir(common: str, tree: str) -> str:
+    """A linked worktree's own folder in its repository (.git/worktrees/<name>), found from the
+    repository's side, not from the worktree's .git file (which its worker can rewrite)."""
+    root = Path(common) / "worktrees"
+    target = (Path(tree) / ".git").resolve()
+    with suppress(OSError):
+        for child in sorted(root.iterdir()):
+            with suppress(OSError):
+                if Path((child / "gitdir").read_text().strip()).resolve() == target:
+                    return str(child)
+    return ""
+
+
+def linked_tree(common: str, path: Path) -> tuple[str, str] | None:
+    """The linked worktree of this repository that holds `path` (the owner's project folder may
+    be one), as (its admin folder, its root), read from the repository's side; None if `path`
+    is in no linked worktree."""
+    best: tuple[str, str] | None = None
+    with suppress(OSError):
+        for child in sorted((Path(common) / "worktrees").iterdir()):
+            with suppress(OSError):
+                root = Path((child / "gitdir").read_text().strip()).resolve().parent
+                if path.is_relative_to(root) and (not best or len(str(root)) > len(best[1])):
+                    best = (str(child), str(root))
+    return best
+
+
+def git_pins(checkout: dict, path: str) -> dict[str, str] | None:
+    """Where git finds the repository of one of a worker's checkouts, fixed by the environment:
+    the pointer files a sandboxed worker can rewrite (its worktree's .git, commondir) are not
+    read, so they cannot send Chief of Staff's git to a config the worker wrote. None when the
+    checkout's repository cannot be told apart safely."""
+    common = checkout.get("git_dir") or (
+        str(Path(checkout["repo"]) / ".git") if checkout.get("repo") else ""
+    )
+    if not common or not os.path.isdir(common):
+        return {}
+    planted = Path(common) / "commondir"
+    if Path(common).name == ".git" and planted.exists():
+        # A repository's own .git never has one: a worker made it to send git elsewhere.
+        logger.warning("Removed %s, which pointed git at another repository.", planted)
+        with suppress(OSError):
+            planted.unlink()
+    tree = checkout.get("worktree")
+    resolved = Path(path).resolve()
+    if tree and os.path.isdir(tree) and resolved.is_relative_to(Path(tree).resolve()):
+        admin = checkout.get("admin") or ""
+        if not admin or not os.path.isdir(admin):
+            admin = admin_dir(common, tree)  # Made again when the worker was reopened.
+        if not admin:
+            return None
+        return {"GIT_DIR": admin, "GIT_COMMON_DIR": common, "GIT_WORK_TREE": tree}
+    if found := linked_tree(common, resolved):
+        # The owner's project folder is itself a linked worktree: its own HEAD, index, files.
+        admin, root = found
+        return {"GIT_DIR": admin, "GIT_COMMON_DIR": common, "GIT_WORK_TREE": root}
+    top = Path(common).parent
+    if Path(common).name == ".git" and resolved.is_relative_to(top.resolve()):
+        return {"GIT_DIR": common, "GIT_COMMON_DIR": common, "GIT_WORK_TREE": str(top)}
+    return {}
+
+
+def config_runs_code(common: str) -> list[str]:
+    """Keys in a repository's own config that would run code or send git elsewhere."""
+    found = []
+    with suppress(OSError):
+        text = (Path(common) / "config").read_text(errors="replace")
+        section = ""
+        for line in text.splitlines():
+            line = line.strip()
+            if match := re.match(r'^\[\s*([\w.-]+)(?:\s+"([^"]*)")?\s*\]', line):
+                section = match.group(1) + (f".{match.group(2)}" if match.group(2) else "")
+            elif section and (key := re.match(r"^([\w-]+)\s*(=|$)", line)):
+                name = f"{section}.{key.group(1)}"
+                if RUNS_CODE.match(name):
+                    found.append(name)
+    return found
+
+
+async def checkout_git(checkout: dict, path: str, *arguments: str, limit: float = 60) -> str:
+    """git in one of a worker's checkouts, as Chief of Staff: the repository pinned (git_pins),
+    nothing in its config run, and a clone in the worker's own folder (whose config it can
+    write) refused if its config would run code."""
+    pins = await asyncio.to_thread(git_pins, checkout, path)
+    if pins is None:
+        raise ValueError(f"Not reading {path}: its worktree cannot be found in its repository.")
+    if checkout.get("remote") and (found := await asyncio.to_thread(
+        config_runs_code, pins.get("GIT_COMMON_DIR") or str(Path(path) / ".git")
+    )):  # fmt: skip
+        raise ValueError(f"Not reading {path}: its git config was changed ({', '.join(found)}).")
+    return await command("git", *SAFE_GIT, "-C", path, *arguments, limit=limit, env=pins)
 
 
 # Repository -> when its default branch was last fetched; parallel workers fetch once.
@@ -319,7 +452,16 @@ def protected_git_paths(git_dir: str, checkouts: list[dict]) -> list[str]:
         with suppress(OSError, ValueError):
             if pointer.is_file() and (text := pointer.read_text()).startswith("gitdir:"):
                 own.add(Path(text.removeprefix("gitdir:").strip()).resolve())
-    paths = [root / "hooks", root / "config"]
+    # Pointers that tell git where a repository is: a worker that rewrites them sends git (the
+    # owner's, or Chief of Staff's) to a config it wrote. A repository's own .git has no
+    # commondir; a worker must not make one.
+    paths = [root / "hooks", root / "config", root / "commondir"]
+    for admin in sorted(own):
+        paths += [admin / "commondir", admin / "gitdir"]
+    for checkout in checkouts:
+        pointer = Path(checkout.get("worktree") or "") / ".git"
+        if checkout.get("worktree") and pointer.is_file():
+            paths.append(pointer)
     if not shared:
         # The owner's own checkout: its branch and staged changes are theirs. (A worker that
         # works in the owner's checkout itself needs them.)
@@ -353,25 +495,31 @@ async def version(checkout: dict) -> dict | None:
     none). Evidence is about one version; when this changes, the evidence is out of date."""
     path, head, live = await asyncio.to_thread(locate, checkout)
     try:
-        commit = (await git("-C", path, "rev-parse", head)).strip()
+        commit = (await checkout_git(checkout, path, "rev-parse", head)).strip()
     except ValueError:
         return None
     edits = ""
     if live:
         with suppress(ValueError):
-            edits = await git("-C", path, "status", "--porcelain")
+            status = await checkout_git(checkout, path, "status", "--porcelain")
+            edits = "\n".join(worth_committing(status))
             if edits.strip():
-                edits += await git("-C", path, "diff", "--no-color", "--no-ext-diff", "HEAD")
-                # New files show in the status by name only: their contents count too.
-                others = await git("-C", path, "ls-files", "--others", "--exclude-standard", "-z")
-                names = [name for name in others.split("\0") if name][:MAX_NEW_FILES]
+                edits += await checkout_git(
+                    checkout, path, "diff", "--no-color", "--no-ext-diff", "--no-textconv", "HEAD"
+                )
+                # New files show in the status by name only: their contents count too (not a
+                # test run's caches, which change with every run).
+                others = await checkout_git(
+                    checkout, path, "ls-files", "--others", "--exclude-standard", "-z"
+                )
+                names = untracked_work(others.split("\0"))[:MAX_NEW_FILES]
                 edits += await asyncio.to_thread(file_digest, Path(path), names)
     digest = hashlib.sha1(edits.encode()).hexdigest()[:12] if edits.strip() else ""
     return {"commit": commit, "edits": digest, "digest": DIGEST}
 
 
 # How `edits` is computed: digests of different kinds are not compared (see same_version).
-DIGEST = 2
+DIGEST = 3
 
 
 def same_version(recorded: dict, current: dict) -> bool:
@@ -401,7 +549,7 @@ async def changes(checkout: dict) -> dict | None:
     the version (commit and edits) this describes."""
     path, head, live = await asyncio.to_thread(locate, checkout)
     try:
-        await git("-C", path, "rev-parse", "--git-dir")
+        await checkout_git(checkout, path, "rev-parse", "--git-dir")
     except ValueError:
         return None
     result = {"path": checkout["path"], "branch": checkout.get("branch", ""), "commits": 0}
@@ -409,27 +557,57 @@ async def changes(checkout: dict) -> dict | None:
         # The branch it is on now: a PR it checked out to review is someone else's, not one
         # to open a PR from.
         with suppress(ValueError):
-            current = (await git("-C", path, "rev-parse", "--abbrev-ref", "HEAD")).strip()
+            current = (
+                await checkout_git(checkout, path, "rev-parse", "--abbrev-ref", "HEAD")
+            ).strip()
             if current and current != "HEAD":
                 result["branch"] = current
-    committed = {"files": 0, "insertions": 0, "deletions": 0}
+    # One count of what differs from where its branch started, committed or not (a file
+    # changed in a commit and again since counts once), and its new files.
+    total = {"files": 0, "insertions": 0, "deletions": 0}
+    since = "HEAD" if live else ""
     if base := base_of(checkout):
         with suppress(ValueError):
-            committed = receipts.shortstat(
-                await git("-C", path, "diff", "--shortstat", f"{base}...{head}")
+            result["commits"] = int(
+                await checkout_git(checkout, path, "rev-list", "--count", f"{base}..{head}")
             )
-            result["commits"] = int(await git("-C", path, "rev-list", "--count", f"{base}..{head}"))
-    uncommitted = {"files": 0, "insertions": 0, "deletions": 0}
+        with suppress(ValueError):
+            since = (await checkout_git(checkout, path, "merge-base", base, head)).strip()
+        if since and not live:
+            since = f"{since}..{head}"
+    if since:
+        with suppress(ValueError):
+            diffed = await checkout_git(checkout, path, "diff", "--shortstat", since)
+            total = receipts.shortstat(diffed)
     if live:
         with suppress(ValueError):
-            uncommitted = receipts.shortstat(await git("-C", path, "diff", "--shortstat", "HEAD"))
+            status = await checkout_git(checkout, path, "status", "--porcelain")
+            result["uncommitted"] = len(worth_committing(status))
+    if live and not checkout.get("shared"):  # The owner's own folder has their files too.
         with suppress(ValueError):
-            status = await git("-C", path, "status", "--porcelain")
-            result["uncommitted"] = len([line for line in status.splitlines() if line.strip()])
-    for key in ("files", "insertions", "deletions"):
-        result[key] = committed[key] + uncommitted[key]
+            listed = await checkout_git(
+                checkout, path, "ls-files", "--others", "--exclude-standard", "-z"
+            )
+            new = untracked_work(listed.split("\0"))
+            total["files"] += len(new)
+            total["insertions"] += await asyncio.to_thread(count_lines, Path(path), new)
+    result.update(total)
     result.update(await version(checkout) or {})
     return result
+
+
+def count_lines(root: Path, names: list[str]) -> int:
+    """The lines of new (untracked) text files, as git would count them added."""
+    lines = 0
+    for name in names[:MAX_NEW_FILES]:
+        with suppress(OSError):
+            file = root / name
+            if file.is_symlink() or not file.is_file() or file.stat().st_size > MAX_NEW_FILE:
+                continue
+            data = file.read_bytes()
+            if b"\0" not in data[:8000]:
+                lines += data.count(b"\n") + (1 if data and not data.endswith(b"\n") else 0)
+    return lines
 
 
 MAX_DIFF = 2_000_000
@@ -463,16 +641,18 @@ async def diff(checkout: dict) -> dict:
     """The full diff of a worker's work in one checkout, from where it started: commits,
     uncommitted edits and new files (for a shared project folder: its uncommitted edits)."""
     path, head, live = await asyncio.to_thread(locate, checkout)
-    top = (await git("-C", path, "rev-parse", "--show-toplevel")).strip()
+    top = (await checkout_git(checkout, path, "rev-parse", "--show-toplevel")).strip()
     base = base_of(checkout) or "HEAD"
     if live:
-        text = await git("-C", top, *PLAIN_DIFF, base, limit=60)
-        others = await git("-C", top, "ls-files", "--others", "--exclude-standard", "-z")
+        text = await checkout_git(checkout, top, *PLAIN_DIFF, base, limit=60)
+        others = await checkout_git(
+            checkout, top, "ls-files", "--others", "--exclude-standard", "-z"
+        )
         names = [name for name in others.split("\0") if name][:MAX_NEW_FILES]
         for name in names:
             text += await asyncio.to_thread(new_file_diff, Path(top), name)
     else:
-        text = await git("-C", top, *PLAIN_DIFF, f"{base}...{head}", limit=60)
+        text = await checkout_git(checkout, top, *PLAIN_DIFF, f"{base}...{head}", limit=60)
     return {
         "name": Path(checkout.get("repo") or top).name,
         "path": checkout["path"],
@@ -495,8 +675,8 @@ async def kept_ignored(checkout: dict) -> list[str]:
     outside folders an install or a build makes, and copied-in files it changed (an .env)."""
     tree = Path(checkout["worktree"])
     try:
-        listed = await git(
-            "-C", str(tree), "ls-files", "--others", "--ignored", "--exclude-standard",
+        listed = await checkout_git(
+            checkout, str(tree), "ls-files", "--others", "--ignored", "--exclude-standard",
             "--directory", "-z",
         )  # fmt: skip
     except ValueError:
@@ -668,7 +848,9 @@ class Workspaces:
                 logger.info("Kept %s: it has ignored files: %s", tree, ", ".join(kept[:5]))
                 continue
             try:
-                await git("-C", checkout["repo"], "worktree", "remove", checkout["worktree"])
+                await checkout_git(
+                    checkout, checkout["repo"], "worktree", "remove", checkout["worktree"]
+                )
                 removed.append(checkout["worktree"])
             except ValueError:
                 logger.info("Kept %s: it has uncommitted changes.", checkout["worktree"])
@@ -748,6 +930,9 @@ class Workspaces:
         # --no-track: the branch must never push to the default branch it started from.
         start = (await git("-C", str(top), "rev-parse", ref)).strip()  # Fixed, unlike ref.
         await git("-C", str(top), "worktree", "add", "--no-track", "-b", branch, str(tree), start)
+        # Its own folder in the repository, read now, before a worker could change where its
+        # .git points.
+        admin = (await git("-C", str(tree), "rev-parse", "--absolute-git-dir")).strip()
         repos.add(str(top))
         return {
             "project": str(path),
@@ -758,6 +943,7 @@ class Workspaces:
             "base": base,
             "base_ref": start,
             "git_dir": await common_git_dir(top) or str(top / ".git"),
+            "admin": admin,
             "carried": await carry_ignored_files(top, tree) if carry else [],
         }
 

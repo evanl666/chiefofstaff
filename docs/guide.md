@@ -38,7 +38,7 @@ On the right, everything has one place:
 | Section | What is there |
 | --- | --- |
 | **Needs you** | Questions and forms from workers, sign-ins, decisions, a folder to pick, Slack replies, PR reviews and replies to approve, PRs of yours ready to merge (*Merge* merges it as shown; anything pushed since stops it), sends a restart interrupted, failed or blocked tasks. A worker's question stays here until you answer or dismiss it, also when its task was cancelled or finished meanwhile: answering means you want the work, and that task goes on with your answer. Each card has one main action (*Send*, *Answer*, *Accept*…); the rest is behind **⋯**. A card leaves as soon as you act and a short note confirms it; if that did not work, it comes back with the reason. |
-| **Tasks** | *Running*: each task at a glance, with the step its worker is in now (what it is for, as the command describes itself) and for how long, its latest report in two lines (click for all of it), and what it made or points to: its PRs with GitHub's state (*awaiting approval* for a check that waits for a person, *ready to merge*), docs, runs, tickets, the threads its worker watches, a draft or question waiting for you. A worker with several tasks is one card, with a line per task: the one it is on now, the ones waiting their turn, for you or for a slot, each with its own progress and links. *Waiting on others*: running tasks whose worker is between turns, watching a PR or a thread (CI, a review or a reply comes next). Every count counts tasks. *Queued*: why it waits (*Waiting for “…”*, or *Waiting for a worker slot · 3 of 3 busy* when *Parallel workers* are all in use). *Ready to review*: the outcome in a line and the [receipts](#receipts); *Show report* opens the whole report. Finished work its worker has news about (its PR approved or merged, a reply handled) is back here too, marked *Update*, until you press *Got it* (or answer it). *Accept*, or under **⋯** *Follow up*, *Copy report* (markdown for a PR description) and *Create PR* (for work on a branch of its own). *Recently finished* keeps finished and cancelled tasks for three days. |
+| **Tasks** | Task by task, in sections; in each, a box per worker with its tasks there, so a worker whose tasks stand differently shows in each of those sections (*also: Queued* says where else). *Running*: the task its worker is on now (a worker does one task at a time), with the step it is in (what it is for: *Reading app.py*, *Searching the code for “…”*, or the command's own description) and for how long, its latest report in two lines (click for all of it; when it reported is on its own line below) and what it made or points to: its PRs with GitHub's number, title and state (*awaiting approval* for a check that waits for a person, *ready to merge*), docs, runs, tickets, the threads it watches for this task, a draft or question waiting for you. *Monitoring*: running tasks waiting on something outside: a PR or thread it follows (CI, a review, a reply), or a time it checks back (`check_back`, for a long run: *Checks back at 3:15 PM: the Flyte run*). *Stalled*: a running task with no activity for *Stalled after* hours (Settings → General, 4 by default) that waits on nothing: its worker is asked once where it stands; *Nudge* asks again, **⋯** *Cancel task*. *Queued*: why it waits (*Waiting for “…”*, *Waiting for a worker slot · 3 of 3 busy*, or *Waits its turn* while its worker is on another of its tasks). *Ready to review*: the outcome in a line and the [receipts](#receipts); *Show report* opens the whole report. A result you asked more about shows under *Running* (*Following up*) while its worker is at it, and stays yours to review. Finished work its worker has news about (its PR approved or merged, a reply handled) is back here too, marked *Update*, until you press *Got it* (or answer it). *Accept*, or under **⋯** *Follow up*, *Copy report* (markdown for a PR description) and *Create PR* (for work on a branch of its own). *Recently finished* keeps finished and cancelled tasks for three days. Every count counts tasks. |
 
 When a finished task's worker drafted something for you (a Slack reply, a PR review), the draft
 is the one card: it shows the task's result, and sending it accepts the task.
@@ -531,18 +531,22 @@ voice even where Slack is reached through another tool.
 Turn on Settings → Connections → *When you're away* and say how to reach you, for example
 "DM me on Slack through the acmebot plugin". After that many minutes without keyboard or mouse,
 what needs you (cards, questions from workers, a question the Router asked you in the chat,
-failed tasks) is sent to you that way, once, each with a five-letter code. Answer where you got
-it with the code: "K3XQ7 send" sends a draft, "K3XQ7 2" picks option 2 of a decision, "K3XQ7
-use port 9090" answers a question, "K3XQ7 retry" retries a failed task. The connector reads
-your answers on its next check, and the chat notes each one. *Send a test* tries the way you
-gave. Without a bot that can message you, say "send it to my own Slack DM": you see it there,
-without a phone notification.
+failed tasks) is sent to you that way, once: a short gist of up to five items (*and 3 more*),
+each with a code of its own (random, five letters, for that item only, valid for a week). Answer
+where you got it with the code: "K3XQ7 send" sends a draft, "K3XQ7 2" picks option 2 of a
+decision, "K3XQ7 use port 9090" answers a question, "K3XQ7 retry" retries a failed task. A code
+works once, and only for what it was sent with. A question that comes up again (its task asked
+something new) is sent again. *Send a test* tries the way you gave. Without a bot that can
+message you, say "send it to my own Slack DM": you see it there, without a phone notification.
 
 The notifications are sent by a messenger of their own, not the connector: it is given only
-Chief of Staff's message, in a file, and follows your worker sandbox setting, so a company bot's
-command-line tool works (with the sandbox off, it runs as in your own sessions). It says how it
-sent the message, and the next one goes the same way. When sending fails, the chat says so once
-and Settings shows the latest attempt.
+Chief of Staff's message, in a file (plain text, Slack formatting and Block Kit to choose from),
+and follows your worker sandbox setting, so a company bot's command-line tool works (with the
+sandbox off, it runs as in your own sessions). An item counts as sent only once the messenger
+says it went out; a failed send is tried again ten minutes later. The messenger also reads your
+answers, the way it sent (the bot's DM, your own DM), every few minutes while you are away and
+for a day after; the chat notes each one. When sending fails, the chat says so once and Settings
+shows the latest attempt.
 
 ## Abilities: skills, plugins and MCP servers
 

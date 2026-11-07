@@ -8,8 +8,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from . import threads
@@ -27,6 +28,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 STYLE_EXAMPLES = 50
+
+
+# A draft that cannot be sent as written: what it answers changed meanwhile.
+STALE_DRAFT = re.compile(r"changed after the draft was written|no longer connected", re.IGNORECASE)
 
 
 class Drafts:
@@ -156,11 +161,27 @@ class Drafts:
                     outcome += await self.resolve_conversation(draft)
         except Exception as exc:
             error = describe(exc)[:1000]
-            draft = self.store.update_draft(
-                draft_id, status="failed", outcome=error, resolved_at=now()
-            )
-            self.bus.publish("draft", draft)
-            await self.tell_drafter(draft, f"Sending draft {draft_id} failed: {error[:400]}", True)
+            if STALE_DRAFT.search(error):
+                # It cannot go as it is (the PR moved on): its session drafts it again.
+                draft = self.store.update_draft(
+                    draft_id, status="failed", outcome=error, resolved_at=now()
+                )
+                self.bus.publish("draft", draft)
+                await self.tell_drafter(
+                    draft, f"Sending draft {draft_id} failed: {error[:400]}", True
+                )
+            else:
+                # The card stays, with why: the owner sends it again, has it redone, or drops it.
+                draft = self.store.update_draft(
+                    draft_id, status="pending", outcome=f"Sending failed: {error}"
+                )
+                self.bus.publish("draft", draft)
+                await self.tell_drafter(
+                    draft,
+                    f"Sending draft {draft_id} failed: {error[:400]}. It waits on its card for "
+                    "the owner to send again, have redone or drop; do not draft it again unless "
+                    "asked.",
+                )
             raise RuntimeError(f"Sending failed: {error}. Check before retrying.") from exc
         draft = self.store.update_draft(
             draft_id, status="sent", outcome=(outcome or "")[:1000], resolved_at=now()
@@ -287,7 +308,9 @@ class Drafts:
                 elif draft["kind"] == "github" and draft["target"].get("reply_to_comment"):
                     found = await self.runtime.github.find_conversation_reply(draft["target"], text)
                 elif draft["kind"] == "github":
-                    found = await self.runtime.github.find_review(draft["target"], text)
+                    # A few minutes early: GitHub's clock and this machine's may differ.
+                    since = datetime.fromtimestamp(created - 300, UTC).strftime("%Y-%m-%dT%H:%M:%S")
+                    found = await self.runtime.github.find_review(draft["target"], text, since)
                 else:
                     continue
             except Exception:
@@ -323,6 +346,14 @@ class Drafts:
             )
         self.bus.publish("draft", draft)
 
+    def task_of(self, draft: dict) -> dict | None:
+        """The task its session drafted it for (not whichever it is on now)."""
+        task_id = (draft.get("target") or {}).get("task_id") or ""
+        task = self.runtime.tasks.find(task_id) if task_id else None
+        if task and task["session_id"] == draft["session_id"]:
+            return task
+        return self.runtime.tasks.current(draft["session_id"])
+
     async def revise(self, draft: dict, reason: str) -> dict:
         """The owner wants the draft done again: its session drafts a new one, as they ask."""
         tools = {
@@ -350,10 +381,8 @@ class Drafts:
             agreed=False,
             untrusted=True,
         )
-        if (task := self.runtime.tasks.current(draft["session_id"])) and task["status"] in {
-            "review",
-            "done",
-        }:
+        if (task := self.task_of(draft)) and task["status"] in {"review", "done"}:
+            self.store.set(f"reopened:{task['id']}", task["status"])
             self.runtime.tasks.move(task["id"], "running", reason="redo")
         await self.tell_drafter(
             draft,
@@ -396,7 +425,7 @@ class Drafts:
         it: one approval, not a second one for the task. Not one that also changed code: that
         is still for the owner to review. Sent before the worker reported: settled when it
         reports (settle_reported)."""
-        task = self.runtime.tasks.current(draft["session_id"])
+        task = self.task_of(draft)
         if task and task["status"] in {"running", "queued"}:
             self.store.set(f"draft_sent:{task['id']}", "1")
             return
@@ -455,7 +484,9 @@ class Drafts:
         # The PR merged: its task is done now, not at the next read of the PR (and the worker
         # closes if nothing else of it is open).
         thread = f"github:{target['label'].lower()}"
-        self.runtime.task_actions.pr_merged(draft["session_id"], thread)
+        self.runtime.task_actions.pr_merged(
+            draft["session_id"], thread, target.get("task_id") or ""
+        )
         self.runtime.unfollow(thread, finished=True, merged=True)
         self.runtime.background(self.runtime.task_actions.refresh_open_prs(target["label"]))
         return draft
@@ -547,7 +578,7 @@ class Drafts:
         row = self.store.find_session(draft["session_id"])
         if not row or row["closed_at"]:
             return
-        task = self.runtime.tasks.current(row["id"])
+        task = self.task_of(draft)
         if (
             not wake
             and row["role"] == WORKER
@@ -560,16 +591,13 @@ class Drafts:
             # that it is done. Otherwise the task would stay "running" with nothing at work.
             wake = True
             text += " Go on with your task, or report it done if this was the last of it."
+        prompt = wrap("system", "draft-outcome", text, task=task["id"] if task else None)
         if not wake:
             # Not worth a turn of its own, but it must know (or it asks about the draft again):
             # it reads this with its next message.
-            self.delivery.hold(
-                row["id"], wrap("system", "draft-outcome", text), kind="notice", display=text
-            )
+            self.delivery.hold(row["id"], prompt, kind="notice", display=text)
             return
         try:
-            await self.delivery.deliver(
-                row["id"], wrap("system", "draft-outcome", text), kind="notice", display=text
-            )
+            await self.delivery.deliver(row["id"], prompt, kind="notice", display=text)
         except Exception:
             logger.warning("Could not tell the drafting session about its draft.", exc_info=True)

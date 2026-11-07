@@ -54,7 +54,6 @@ def create_app(
     store = Store(directory)
     bus = Bus()
     runtime = runtime_factory(store, bus)
-    cookie_name = f"chiefofstaff_{port}"
     origins = {f"http://127.0.0.1:{port}", f"http://localhost:{port}"}
 
     @asynccontextmanager
@@ -81,8 +80,11 @@ def create_app(
         ):
             return JSONResponse({"detail": "Untrusted request origin."}, status_code=403)
         if path.startswith("/api/") and path not in {"/api/auth", "/api/health"}:
-            candidate = request.cookies.get(cookie_name, "")
-            if not secrets.compare_digest(candidate, token):
+            # The launch token, sent by the page in a header (or, where a browser cannot send
+            # one: the event stream, an image, in the query). Never a cookie: a browser sends
+            # cookies for 127.0.0.1 to every port on it, to any other local server too.
+            candidate = request.headers.get("x-chief-key") or request.query_params.get("key", "")
+            if not secrets.compare_digest(candidate.encode(), token.encode()):
                 return JSONResponse({"detail": "Open the private launch URL to sign in."}, 401)
         response = await call_next(request)
         response.headers["Cache-Control"] = "no-store"
@@ -114,9 +116,12 @@ def create_app(
 
     @app.post("/api/auth")
     async def login(payload: Login, response: Response):
-        if not secrets.compare_digest(payload.token, token):
+        """Checks the launch token; the page keeps it (in this origin's storage) and sends it
+        with every request."""
+        if not secrets.compare_digest(payload.token.encode(), token.encode()):
             raise HTTPException(401, "Invalid launch token.")
-        response.set_cookie(cookie_name, token, httponly=True, samesite="strict", max_age=86400)
+        # An earlier version's cookie, which other local servers could read, is removed.
+        response.delete_cookie(f"chiefofstaff_{port}")
         return {"ok": True}
 
     @app.get("/api/health")
@@ -305,18 +310,18 @@ def create_app(
     async def accept_task(task_id: str):
         return runtime.task_actions.view(runtime.task_actions.accept(task_id))
 
-    @app.post("/api/questions/{session_id}/answer")
-    async def answer_question(session_id: str, payload: OwnerMessage):
-        store.session(session_id)
+    @app.post("/api/questions/{question_id}/answer")
+    async def answer_question(question_id: str, payload: OwnerMessage):
+        store.session(question_id.split(":", 1)[0])
         if not payload.text.strip():
             raise ValueError("Write your answer.")
-        await runtime.task_actions.answer_question(session_id, payload.text)
+        await runtime.task_actions.answer_question(question_id, payload.text)
         return runtime.snapshot()
 
-    @app.post("/api/questions/{session_id}/dismiss")
-    async def dismiss_question(session_id: str):
-        store.session(session_id)
-        runtime.asks.answered(session_id)
+    @app.post("/api/questions/{question_id}/dismiss")
+    async def dismiss_question(question_id: str):
+        store.session(question_id.split(":", 1)[0])
+        runtime.asks.dismiss(question_id)
         return runtime.snapshot()
 
     @app.post("/api/tasks/{task_id}/news-seen")
@@ -330,6 +335,10 @@ def create_app(
     @app.post("/api/tasks/{task_id}/retry")
     async def retry_task(task_id: str, payload: TaskNote):
         return runtime.task_actions.view(await runtime.task_actions.retry(task_id, payload.text))
+
+    @app.post("/api/tasks/{task_id}/nudge")
+    async def nudge_task(task_id: str):
+        return await runtime.task_actions.nudge(task_id)
 
     @app.post("/api/tasks/{task_id}/follow-up")
     async def follow_up_task(task_id: str, payload: OwnerMessage):

@@ -2,11 +2,12 @@
 
 import { $, api, el, keepingFocus, moreMenu, reconcile, submits, toast } from "./dom.js";
 import { markdown, shortPath } from "./text.js";
-import { byId, DOT_HELP, HOME, loadState, ownerQuestions, pendingDrafts, routerId, sessions, state, uncertainDrafts } from "./state.js";
+import { byId, closedWorkers, DOT_HELP, HOME, loadState, ownerQuestions, pendingDrafts, routerId, sessions, state, uncertainDrafts } from "./state.js";
+import { boardOf, countOf, SECTIONS } from "./board.js";
 import { renderStatusLine } from "./sidebar.js";
 import { renderHeader, scrollToBottom, select } from "./session.js";
 import { draftCard, draftKey, uncertainCard } from "./drafts.js";
-import { expandTask, followUpItem, inTerminal, ownTasks, taskItem, terminalItem, workerGroupItem } from "./tasks.js";
+import { expandTask, followUpItem, inTerminal, ownTasks, terminalItem, workerBoxItem } from "./tasks.js";
 // What waits for the owner: cards to approve or answer, tasks waiting for an answer or failed,
 // and a worker's question whose task does not show it (cancelled, finished, or none). A task
 // waiting on a decision card shows as that card.
@@ -22,84 +23,66 @@ export function needsYou() {
 export function needsCount() {
   const items = needsYou();
   const shown = (key) => !state.leaving.has(key);
-  return items.drafts.filter((draft) => shown(`draft:${draft.id}`)).length + items.uncertain.filter((draft) => shown(`draft:${draft.id}`)).length + items.tasks.filter((task) => shown(`task:${task.id}`)).length + items.questions.filter((question) => shown(`question:${question.session_id}`)).length;
+  return items.drafts.filter((draft) => shown(`draft:${draft.id}`)).length + items.uncertain.filter((draft) => shown(`draft:${draft.id}`)).length + items.tasks.filter((task) => shown(`task:${task.id}`)).length + items.questions.filter((question) => shown(`question:${question.id}`)).length;
 }
 // Where a worker stands, as its sidebar dot says and as Home shows it: the same words in both.
 export const WORKER_STATES = [
   ["waiting", "Needs you: it waits for your answer or approval (Home → Needs you)"],
   ["failed", "A task failed (Home → Needs you)"],
   ["working", "Working now (Home → Running)"],
-  ["watching", "Running, between steps: waiting on CI, a review or a reply (Home → Running or Waiting on others)"],
+  ["watching", "Between steps: waiting on CI, a review, a reply or a run (Home → Monitoring)"],
+  ["stalled", "Stalled: nothing has happened on its task for a while (Home → Stalled)"],
   ["queued", "Queued: waits for a free slot or another task (Home → Queued)"],
   ["done", "Finished: ready to review (Home → Ready to review)"],
   ["idle", "Nothing open: its work is accepted, or it has none"],
 ];
 export function workerStates() {
   const needs = needsYou();
-  const asking = new Set([...needs.drafts.map((draft) => draft.session_id), ...needs.questions.map((question) => question.session_id), ...needs.tasks.filter((task) => task.status !== "failed").map((task) => task.session_id)]);
+  // Every worker a decision card waits for, not only the first that asked.
+  const askers = needs.drafts.flatMap((draft) => (draft.kind === "decision" ? (draft.target.askers || []).map((asker) => asker.session_id) : []));
+  const asking = new Set([...needs.drafts.map((draft) => draft.session_id), ...askers, ...needs.questions.map((question) => question.session_id), ...needs.tasks.filter((task) => task.status !== "failed").map((task) => task.session_id)]);
   const failed = new Set(needs.tasks.filter((task) => task.status === "failed").map((task) => task.session_id));
-  const open = new Map();
-  for (const task of ownTasks()) open.set(task.session_id, [...(open.get(task.session_id) || []), task]);
+  // Its tasks' sections, as Home shows them (board.js).
+  const mine = ownTasks();
+  const { phases } = boardOf(mine, new Map(sessions().map((session) => [session.id, session])), { stallHours: state.snapshot.settings.stall_hours || 4 });
+  const sectionsOf = new Map();
+  for (const task of mine) sectionsOf.set(task.session_id, new Set([...(sectionsOf.get(task.session_id) || []), phases.get(task.id)?.section]));
   const found = new Map();
   for (const session of sessions()) {
-    const list = open.get(session.id) || [];
+    const has = sectionsOf.get(session.id) || new Set();
     let dot = "idle";
     if (session.elsewhere) dot = `open${session.terminal?.working ? " busy" : ""}`;
     else if (asking.has(session.id)) dot = "waiting";
     else if (failed.has(session.id)) dot = "failed";
     else if (["working", "starting"].includes(session.status)) dot = "working";
-    else if (list.some((task) => task.status === "running")) dot = "watching";
-    else if (list.some((task) => task.status === "queued")) dot = "queued";
-    else if (list.some((task) => task.status === "review" || (task.status === "done" && task.news))) dot = "done";
+    else if (has.has("running") || has.has("monitoring")) dot = "watching";
+    else if (has.has("stalled")) dot = "stalled";
+    else if (has.has("queued")) dot = "queued";
+    else if (has.has("review")) dot = "done";
     found.set(session.id, { dot, text: session.elsewhere ? DOT_HELP.open : Object.fromEntries(WORKER_STATES)[dot] });
   }
   return found;
 }
-const askingSessions = () => new Set(pendingDrafts().map((draft) => draft.session_id));
-// A running task whose worker is between turns, watching a PR or a thread: it waits on others
-// (CI, a review, a reply), not on its worker.
-function waitsOnOthers(task) {
-  const worker = byId(task.session_id);
-  if (!worker || ["working", "starting"].includes(worker.status) || worker.elsewhere || !(worker.follows || []).length) return false;
-  return !worker.task || worker.task.task_id === task.id || worker.task.status !== "running";
-}
-// The task board: each group newest first; queued in the order they will start.
+// The task board, task by task: each section holds a box per worker with its tasks there (a
+// worker shows in every section one of its tasks is in). See board.js.
 function board() {
-  const asking = askingSessions();
-  const mine = ownTasks().filter((task) => !task.blocked);
-  const newest = (a, b) => b.updated_at.localeCompare(a.updated_at);
-  // Every task at work shows, even when its worker also waits on a card (marked so).
-  const running = mine.filter((task) => task.status === "running").map((task) => (asking.has(task.session_id) ? { ...task, asking: true } : task)).sort(newest);
-  const terminal = inTerminal().filter((session) => !running.some((task) => task.session_id === session.id));
-  // At work, though its task is finished: news on a PR it follows, a question about its work.
-  const followUps = sessions().filter((session) => session.role === "worker" && !session.helper && !session.closed_at && session.status === "working" && !running.some((task) => task.session_id === session.id) && !terminal.some((other) => other.id === session.id));
-  // A worker with several open tasks (at work on one, the others waiting their turn, for the
-  // owner or queued) is one card with a line per task.
-  const open = mine.filter((task) => ["running", "waiting", "queued"].includes(task.status));
+  const mine = ownTasks();
   // A result its worker drafted something for (a reply, a review) is reviewed on that card.
   // Not a Ready-to-merge card: merging is its own decision, and the result's receipts (tests,
   // CI) are what to look at before it.
   const onCards = new Set(pendingDrafts().filter((draft) => draft.kind !== "merge").map(draftTask).filter((task) => task?.status === "review").map((task) => task.id));
-  const perWorker = new Map();
-  for (const task of open) perWorker.set(task.session_id, [...(perWorker.get(task.session_id) || []), task]);
-  const grouped = new Set([...perWorker].filter(([id, list]) => list.length > 1 && list.some((task) => task.status === "running") && byId(id)).map(([id]) => id));
-  const workers = [...grouped].map((id) => [byId(id), perWorker.get(id)]);
-  const quiet = ([worker, list]) => !["working", "starting"].includes(worker.status) && (worker.follows || []).length && list.some((task) => task.status === "running");
-  const single = running.filter((task) => !grouped.has(task.session_id));
-  return {
-    running: single.filter((task) => !waitsOnOthers(task)),
-    watching: single.filter(waitsOnOthers),
-    workers: workers.filter((entry) => !quiet(entry)),
-    watchingWorkers: workers.filter(quiet),
-    terminal,
-    followUps,
-    queued: mine.filter((task) => task.status === "queued" && !grouped.has(task.session_id)).sort((a, b) => a.created_at.localeCompare(b.created_at)),
-    // A result whose worker drafted something for the owner (a reply, a review) is reviewed on
-    // that card: it shows the task, and sending it accepts the task.
-    // With them, finished work its worker has news about (its PR approved or merged) until seen.
-    review: mine.filter((task) => (task.status === "review" || (task.status === "done" && task.news)) && !onCards.has(task.id)).sort(newest),
-    finished: mine.filter((task) => (task.status === "done" && !task.news) || task.status === "cancelled").sort((a, b) => (b.ended_at || "").localeCompare(a.ended_at || "")),
-  };
+  const workers = new Map([...sessions(), ...closedWorkers()].map((session) => [session.id, session]));
+  const stallHours = state.snapshot.settings.stall_hours || 4;
+  const found = boardOf(mine, workers, { stallHours, onCards });
+  const running = new Set(found.sections.running.map((entry) => entry.sessionId));
+  const terminal = inTerminal().filter((session) => !running.has(session.id));
+  // At work, though none of its tasks is (news on a PR it follows, a question about its work).
+  const followUps = sessions().filter((session) => session.role === "worker" && !session.helper && !session.closed_at && session.status === "working" && !running.has(session.id) && !terminal.some((other) => other.id === session.id));
+  return { ...found, terminal, followUps };
+}
+// The sections a worker's other tasks are in, for its box.
+function elsewhereOf(sections, section, sessionId) {
+  return SECTIONS.filter(([key]) => key !== section && key !== "finished" && (sections[key] || []).some((entry) => entry.sessionId === sessionId)).map(([, title]) => title);
 }
 export function homeItem() {
   const count = needsCount();
@@ -210,45 +193,56 @@ function renderPanel() {
   const needCount = needsCount();
   counted(needs, needCount);
   needs.querySelector(".empty-hint").hidden = Boolean(needCount);
+  // Its tasks that wait for the owner (an answer, a retry), in a box per worker.
+  const needBoxes = new Map();
+  for (const task of items.tasks) needBoxes.set(task.session_id, [...(needBoxes.get(task.session_id) || []), task]);
   reconcile(needs.querySelector(".items"), [
     ...items.drafts.map((draft) => draftItem(draft)),
     ...items.uncertain.map((draft) => ({ key: `uncertain:${draft.id}:${draft.outcome}`, build: () => uncertainCard(draft) })),
-    ...items.tasks.map((task) => taskItem(task)),
+    ...[...needBoxes].map(([sessionId, list]) => workerBoxItem("needs", sessionId, list, tasks.phases, editing, elsewhereOf(tasks.sections, "needs", sessionId))),
     ...items.questions.map(questionItem),
   ], editing);
 
   const taskBox = document.getElementById("tasks") || el("section", { id: "tasks", class: "panel-section" }, el("h2", {}, el("span", { text: "Tasks" }), el("span", { class: "count" })), el("p", { class: "empty-hint", text: "Nothing running. Ask for anything — e.g. “fix the flaky login test in api”." }));
-  // Counted by task everywhere: a worker's card counts its tasks here (those waiting for the
-  // owner count under Needs you).
-  const inGroup = (list) => list.filter((task) => task.status !== "waiting").length;
-  const counts = {
-    running: tasks.running.length + tasks.workers.reduce((sum, [, list]) => sum + inGroup(list), 0) + tasks.terminal.length + tasks.followUps.length,
-    watching: tasks.watching.length + tasks.watchingWorkers.reduce((sum, [, list]) => sum + inGroup(list), 0),
-    queued: tasks.queued.length,
-    review: tasks.review.length,
-  };
-  const active = counts.running + counts.watching + counts.queued + counts.review;
+  // Counted by task everywhere (a box counts its tasks), each task in one section.
+  const boxes = (section) => tasks.sections[section].map((entry) => workerBoxItem(section, entry.sessionId, entry.tasks, tasks.phases, editing, elsewhereOf(tasks.sections, section, entry.sessionId)));
+  const counts = Object.fromEntries(SECTIONS.map(([key]) => [key, countOf(tasks.sections[key])]));
+  counts.running += tasks.terminal.length + tasks.followUps.length;
+  const active = counts.running + counts.monitoring + counts.stalled + counts.queued + counts.review;
   counted(taskBox, active);
-  taskBox.querySelector(".empty-hint").hidden = Boolean(active || tasks.finished.length || ownTasks().some((task) => !["done", "cancelled"].includes(task.status)));
-  const groups = [
-    ["tasks-running", "Running", counts.running, [...tasks.terminal.map(terminalItem), ...tasks.workers.map(([worker, list]) => workerGroupItem(worker, list)), ...tasks.running.map(taskItem), ...tasks.followUps.map(followUpItem)], ""],
-    ["tasks-watching", "Waiting on others", counts.watching, [...tasks.watchingWorkers.map(([worker, list]) => workerGroupItem(worker, list)), ...tasks.watching.map(taskItem)], "Its worker is between steps, watching a PR or a thread: CI, a review or a reply comes next."],
-    ["tasks-queued", "Queued", counts.queued, tasks.queued.map(taskItem), ""],
-    ["tasks-review", "Ready to review", counts.review, tasks.review.map(taskItem), ""],
-  ];
-  for (const [id, title, count, list, help] of groups) {
-    const group = section(taskBox, id, title);
-    if (help) group.firstElementChild.title = help;
-    counted(group, count);
+  taskBox.querySelector(".empty-hint").hidden = Boolean(active || counts.finished || ownTasks().some((task) => !["done", "cancelled"].includes(task.status)));
+  const HELP = {
+    running: "At work now: its worker is on it (a worker does one task at a time)",
+    monitoring: "Between steps, waiting on something outside: a PR's CI or review, a thread, a run it checks back on",
+    stalled: `Nothing has happened on it for ${state.snapshot.settings.stall_hours || 4}h and it waits on nothing: nudge its worker, or cancel it`,
+    queued: "Waits for a worker slot, a task it depends on, or its worker's turn",
+    review: "Finished: its result waits for your review",
+  };
+  const groupNodes = [];
+  for (const [id, title] of SECTIONS.filter(([key]) => !["needs", "finished"].includes(key))) {
+    const list = id === "running" ? [...tasks.terminal.map(terminalItem), ...boxes("running"), ...tasks.followUps.map(followUpItem)] : boxes(id);
+    const group = section(taskBox, `tasks-${id}`, title);
+    groupNodes.push(group);
+    group.firstElementChild.title = HELP[id] || "";
+    counted(group, counts[id]);
     group.hidden = !list.length;
     reconcile(group.querySelector(".items"), list, editing);
   }
   const recent = section(taskBox, "tasks-recent", "Recently finished", { tag: "details" });
-  counted(recent, tasks.finished.length);
-  recent.hidden = !tasks.finished.length;
-  reconcile(recent.querySelector(".items"), tasks.finished.slice(0, 30).map(taskItem), editing);
-  // The recent group stays last as groups are added.
-  if (taskBox.lastElementChild !== recent) taskBox.append(recent);
+  counted(recent, counts.finished);
+  recent.hidden = !counts.finished;
+  // The newest 30 finished tasks, in their workers' boxes.
+  let room = 30;
+  const finished = [];
+  for (const entry of tasks.sections.finished) {
+    if (room <= 0) break;
+    finished.push({ ...entry, tasks: entry.tasks.slice(0, room) });
+    room -= entry.tasks.length;
+  }
+  reconcile(recent.querySelector(".items"), finished.map((entry) => workerBoxItem("finished", entry.sessionId, entry.tasks, tasks.phases, editing)), editing);
+  // The groups stay in order as they are added, the recent one last.
+  const order = [...groupNodes, recent];
+  if (order.some((node, index) => taskBox.children[index + 2] !== node)) taskBox.append(...order);
 
   if (panel.children[0] !== needs || panel.children[1] !== taskBox) panel.replaceChildren(needs, taskBox);
   const tabs = document.querySelectorAll("#home-tabs .count");
@@ -314,16 +308,17 @@ export async function focusDraft(draftId) {
   const node = document.querySelector(`#needs .card[data-id="${draftId}"]`);
   if (node) bringIntoView(node);
 }
-export async function focusQuestion(sessionId) {
+export async function focusQuestion(questionId) {
   if (state.selected !== HOME) await select(HOME);
-  const node = document.querySelector(`#needs .card.question-card[data-session="${sessionId}"]`) || document.querySelector(`#needs .card.task[data-session="${sessionId}"]`);
+  const sessionId = String(questionId).split(":")[0];
+  const node = [...document.querySelectorAll("#needs .card.question-card")].find((card) => card.dataset.question === questionId) || document.querySelector(`#needs .card.task[data-session="${CSS.escape(sessionId)}"]`);
   if (node) bringIntoView(node);
 }
 // A worker's question to the owner, kept here until answered: its task may have been cancelled
 // or finished meanwhile (the task card shows it otherwise).
 function questionItem(question) {
   return {
-    key: `question:${question.session_id}:${question.at}`,
+    key: `question:${question.id}:${question.at}`,
     version: `${question.task_status}:${question.closed}`,
     build: () => questionCard(question),
     refresh: (node) => {
@@ -334,13 +329,13 @@ function questionItem(question) {
 }
 const questionMeta = (question) => [question.task_status && question.task_status !== "running" ? `task ${question.task_status}` : "", question.closed ? "worker closed" : ""].filter(Boolean).join(" · ");
 function questionCard(question) {
-  const key = `question:${question.session_id}`;
+  const key = `question:${question.id}`;
   const error = el("span", { class: "error" });
   const actions = el("div", { class: "actions" });
   const worker = byId(question.session_id);
   const node = el(
     "div",
-    { class: "card question-card", "data-session": question.session_id, "data-task": question.task_id || undefined },
+    { class: "card question-card", "data-session": question.session_id, "data-question": question.id, "data-task": question.task_id || undefined },
     el(
       "div",
       { class: "head" },
@@ -378,7 +373,7 @@ function questionCard(question) {
       error,
       moreMenu([
         { text: "Open worker", onclick: () => select(question.session_id, { task: question.task_id }) },
-        { text: "Dismiss", onclick: () => act(() => api(`/api/questions/${question.session_id}/dismiss`, { method: "POST" }), "Dismissed.") },
+        { text: "Dismiss", onclick: () => act(() => api(`/api/questions/${encodeURIComponent(question.id)}/dismiss`, { method: "POST" }), "Dismissed.") },
       ]) || "",
       el("button", { type: "button", text: "Reply", onclick: reply }),
     );
@@ -387,7 +382,7 @@ function questionCard(question) {
     const ended = ["cancelled", "done", "review", "failed"].includes(question.task_status);
     const input = el("textarea", { rows: 2, placeholder: ended ? `Your answer (its ${question.task_status} task goes on with it)` : "Your answer (goes to the worker)" });
     // Answered, its task goes on, also one cancelled or finished meanwhile (Dismiss if not).
-    const send = () => input.value.trim() && act(() => api(`/api/questions/${question.session_id}/answer`, { method: "POST", body: { text: input.value.trim() } }), ended ? "Sent: its task goes on." : "Sent to the worker.");
+    const send = () => input.value.trim() && act(() => api(`/api/questions/${encodeURIComponent(question.id)}/answer`, { method: "POST", body: { text: input.value.trim() } }), ended ? "Sent: its task goes on." : "Sent to the worker.");
     input.addEventListener("keydown", (event) => {
       if (submits(event) && !event.shiftKey) {
         event.preventDefault();

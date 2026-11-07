@@ -5,6 +5,22 @@ import { state } from "./state.js";
 // Markdown: a small, safe subset. Text is escaped first; only these tags are produced.
 
 const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+// A URL ends at whitespace, brackets, quotes, Markdown marks or punctuation (Western or CJK):
+// "…/pull/1068：head", "…/pull/79”" and "…/repo**" are the URL without what follows. One rule
+// for links in text and for the chips on cards.
+const URL_CHARS = "[^\\s<>()\\[\\]{}`'\"*|，。、；：！？（）「」『』【】“”‘’《》〈〉…]+";
+export const URL_RE = new RegExp(`https?:\\/\\/${URL_CHARS}`, "g");
+const URL_TRAIL = /(?:[.,;:!?'"_~\])]|&quot;|&#39;)+$/;
+// A URL and the sentence punctuation after it: ["https://x/y", "."].
+export function trimUrl(raw) {
+  const trail = raw.match(URL_TRAIL)?.[0] || "";
+  return [trail ? raw.slice(0, -trail.length) : raw, trail];
+}
+// Every URL in a text, in order, each once.
+// Slack writes "&" in a link as "&amp;": the link has "&".
+export function findUrls(text) {
+  return [...new Set(((text || "").match(URL_RE) || []).map((raw) => trimUrl(raw.replace(/&amp;/g, "&"))[0]).filter((url) => /^https?:\/\/[^/\s]+\.[^/\s]/.test(url)))];
+}
 // A path segment ends at whitespace, punctuation (Western or CJK) or markup.
 const SEGMENT = "[^\\s/,，。;；:：()（）\\[\\]{}<>`'\"、|&*!?！？]+";
 function inlinePattern() {
@@ -22,7 +38,9 @@ function inlinePattern() {
         "~~([^~\\n]+)~~",
         "(?<![\\w*])\\*([^*\\s](?:[^*\\n]*[^*\\s])?)\\*(?![\\w*])",
         "\\[([^\\]\\n]+)\\]\\((https?:\\/\\/[^\\s)]+)\\)",
-        "(https?:\\/\\/[^\\s<)，。、；：！？）」』】]+)",
+        // <https://…> and Slack's <https://…|label>, escaped.
+        "&lt;(https?:\\/\\/[^\\s|]+?)(?:\\|([^\\n]+?))?&gt;",
+        `(https?:\\/\\/${URL_CHARS})`,
         `(${path})`,
       ].join("|"),
       "g",
@@ -34,9 +52,60 @@ function inlinePattern() {
 }
 // Trailing punctuation belongs to the sentence, not to a URL or path.
 const TRAILING = /(?:[.,;:!?'"]|&quot;|&#39;)+$/;
+const unescapeHtml = (text) => text.replace(/&(amp|lt|gt|quot|#39);/g, (_, name) => ({ amp: "&", lt: "<", gt: ">", quot: '"', "#39": "'" })[name]);
+export const shorten = (text, max) => (text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text);
+// A PR's title as GitHub has it ("owner/repo#n", any case), once Chief of Staff read it.
+export function prTitle(key) {
+  return state.snapshot?.pr_titles?.[String(key).toLowerCase()] || "";
+}
+// What a link is, for a chip or a link's text: { kind, label, key (PRs), title (PRs) }.
+export function linkKind(url) {
+  let match;
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  const host = parsed.hostname.replace(/^www\./, "");
+  const path = decodeURIComponent(parsed.pathname);
+  const last = path.split("/").filter(Boolean).pop() || "";
+  if ((match = /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/.exec(url))) {
+    const key = `${match[1]}/${match[2]}#${match[3]}`.toLowerCase();
+    return { kind: "pr", label: `${match[2]}#${match[3]}`, key, title: prTitle(key) };
+  }
+  if ((match = /^https:\/\/github\.com\/[^/]+\/([^/]+)\/issues\/(\d+)/.exec(url))) return { kind: "issue", label: `${match[1]}#${match[2]}` };
+  if ((match = /^https:\/\/github\.com\/[^/]+\/([^/]+)\/actions\/runs\//.exec(url))) return { kind: "run", label: `CI run · ${match[1]}` };
+  if (/^https:\/\/github\.com\/[^/]+\/[^/]+\/(blob|tree)\//.test(url)) return { kind: "file", label: last || "File" };
+  if (/docs\.google\.com\/spreadsheets/.test(url)) return { kind: "doc", label: "Sheet" };
+  if (/docs\.google\.com\/presentation/.test(url)) return { kind: "doc", label: "Slides" };
+  if (/docs\.google\.com\//.test(url)) return { kind: "doc", label: "Google Doc" };
+  if (/\.slack\.com\/archives\//.test(url)) return { kind: "slack", label: "Slack message" };
+  if ((match = /atlassian\.net\/browse\/([A-Z][A-Z0-9]+-\d+)/.exec(url)) || (match = /\/browse\/([A-Z][A-Z0-9]+-\d+)/.exec(url))) return { kind: "ticket", label: match[1] };
+  if (/notion\.so$/.test(host)) return { kind: "doc", label: "Notion" };
+  // Spark History: its application; Flyte and Airflow: the execution or DAG; rdev and Darwin:
+  // which one. Anything else: the host and the last part of the path.
+  if ((match = /(application_\d+_\d+)/.exec(url)) && /spark|shs|history/i.test(host + path)) return { kind: "run", label: `Spark · ${match[1]}` };
+  if (/spark|shs-/i.test(host)) return { kind: "run", label: `Spark history${last ? ` · ${shorten(last, 28)}` : ""}` };
+  if (/flyte/i.test(host)) {
+    const execution = /\/executions?\/([^/?#]+)/.exec(path)?.[1] || /\/(?:executions?|exec)\/[^/]+\/[^/]+\/([^/?#]+)/.exec(path)?.[1] || "";
+    return { kind: "run", label: `Flyte${execution ? ` · ${shorten(execution, 24)}` : " run"}` };
+  }
+  if (/airflow/i.test(host)) {
+    const dag = parsed.searchParams.get("dag_id") || /\/dags\/([^/?#]+)/.exec(path)?.[1] || "";
+    return { kind: "run", label: `Airflow${dag ? ` · ${shorten(dag, 28)}` : " run"}` };
+  }
+  if (/(^|[.-])rdev([.-]|$)/i.test(host)) return { kind: "run", label: `rdev · ${shorten(host.split(".")[0], 28)}` };
+  if (/darwin/i.test(host)) return { kind: "doc", label: `Darwin${last ? ` · ${shorten(last, 28)}` : ""}` };
+  return { kind: "link", label: last && !/^[\w-]{32,}$/.test(last) ? `${shorten(host, 28)} · ${shorten(last, 24)}` : shorten(host, 40) };
+}
+// A link's text in a message: a PR by its number and title; a Slack message as one.
 function linkLabel(url) {
   let match;
-  if ((match = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/(?:pull|issues)\/(\d+)(?:[/?#].*)?$/.exec(url))) return `${match[1]}#${match[2]}`;
+  if ((match = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/(?:pull|issues)\/(\d+)(?:[/?#].*)?$/.exec(url))) {
+    const title = /\/pull\//.test(url) ? prTitle(`${match[1]}#${match[2]}`) : "";
+    return title ? `${match[1].split("/")[1]}#${match[2]} · ${shorten(title, 50)}` : `${match[1]}#${match[2]}`;
+  }
   if (/^https:\/\/[^/]+\.slack\.com\/archives\//.test(url)) return "Slack message";
   const plain = url.replace(/^https?:\/\/(www\.)?/, "");
   return plain.length > 64 ? `${plain.slice(0, 61)}…` : plain;
@@ -58,16 +127,22 @@ function pathChip(path) {
   return `<span class="path" data-path="${path}" title="${path}\nClick to open (or copy)">${escapeHtml(displayPath(path))}</span>`;
 }
 function inlineEscaped(escaped) {
-  return escaped.replace(inlinePattern(), (match, code, bold, strike, italic, label, href, bare, path) => {
+  return escaped.replace(inlinePattern(), (match, code, bold, strike, italic, label, href, angled, angledLabel, bare, path) => {
     if (code !== undefined) return inlinePattern.path.test(code) ? pathChip(code) : `<code>${code}</code>`;
     if (bold !== undefined) return `<strong>${inlineEscaped(bold)}</strong>`;
     if (strike !== undefined) return `<s>${inlineEscaped(strike)}</s>`;
     if (italic !== undefined) return `<em>${inlineEscaped(italic)}</em>`;
-    const raw = href ?? bare ?? path;
-    const trail = href ? "" : raw.match(TRAILING)?.[0] || "";
-    const value = trail ? raw.slice(0, -trail.length) : raw;
-    if (path !== undefined) return pathChip(value) + trail;
-    return `<a href="${value}" target="_blank" rel="noreferrer">${label ?? escapeHtml(linkLabel(value))}</a>${trail}`;
+    if (path !== undefined) {
+      const trail = path.match(TRAILING)?.[0] || "";
+      return pathChip(trail ? path.slice(0, -trail.length) : path) + trail;
+    }
+    let [value, trail] = href ? [href, ""] : angled ? [angled, ""] : trimUrl(bare);
+    // Not past an escaped "<" or ">" ("https://x>" in a sentence), and Slack's "&amp;" is "&".
+    const cut = value.search(/&(gt|lt);/);
+    if (cut > 0) [value, trail] = [value.slice(0, cut), value.slice(cut) + trail];
+    value = value.replace(/&amp;amp;/g, "&amp;");
+    const text = label ?? angledLabel ?? escapeHtml(linkLabel(unescapeHtml(value)));
+    return `<a href="${value}" title="${value}" target="_blank" rel="noreferrer">${text}</a>${trail}`;
   });
 }
 // "Label: rest" at the start of a line: a short key (at most three words) is set in bold.
@@ -80,7 +155,8 @@ function inline(text, keyed = false) {
   }
   return inlineEscaped(escapeHtml(text));
 }
-const FENCE = /^\s*(```+|~~~+)\s*[\w+-]*\s*$/;
+// Any info string ("python", "c#", "objective-c", "shell title=x"), not a backtick in it.
+const FENCE = /^\s*(```+|~~~+)[^`]*$/;
 const HEADING = /^\s*(#{1,6})\s+(.*)$/;
 const QUOTE_DEPTH = 6;
 const RULE = /^\s*([-*_])(\s*\1){2,}\s*$/;
@@ -274,4 +350,11 @@ export function plural(count, word) {
 }
 export function lines(value) {
   return value.split("\n").map((line) => line.trim()).filter(Boolean);
+}
+// The first line of a text, without its Markdown: what a one-line entry shows.
+export function firstLine(text) {
+  // Without its list mark or heading ("1. ", "- ", "## "), not its own numbers ("3 tests").
+  const lines = text.split("\n").map((line) => line.replace(/^\s*(?:(?:#{1,6}|>|[-*•+]|\d+[.)])\s+)+/, "").replace(/\*\*|__|`/g, "").trim()).filter(Boolean);
+  // Not a lead-in like "Results:" when something follows it.
+  return lines.find((line) => !/^[\p{L}\s]{1,24}:$/u.test(line)) || lines[0] || "";
 }

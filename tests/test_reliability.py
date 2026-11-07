@@ -3,6 +3,7 @@ and the boundaries that keep Slack content and the owner's checkout safe."""
 
 import asyncio
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -10,7 +11,7 @@ import pytest
 from conftest import Harness, call_tool, settle
 
 from chiefofstaff.models import DraftDecision, Settings
-from chiefofstaff.workspaces import protected_git_paths
+from chiefofstaff.workspaces import changes, checkout_git, protected_git_paths
 
 
 async def spawn(runtime, router, title, **extra):
@@ -180,6 +181,56 @@ def test_the_owners_checkout_head_and_index_are_protected(tmp_path):
     assert f"{git_dir}/HEAD" not in protected_git_paths(git_dir, shared), "it works right there"
 
 
+async def test_a_worker_cannot_point_chief_of_staffs_git_at_its_own_config(tmp_path):
+    """A sandboxed worker can write its worktree's .git file and its commondir: Chief of Staff's
+    own git (unsandboxed) must not follow them to a config the worker wrote."""
+
+    def run(*args, cwd=tmp_path):
+        return subprocess.run(args, cwd=cwd, check=True, capture_output=True, text=True).stdout
+
+    repo, tree = tmp_path / "app", tmp_path / "work" / "app"
+    run("git", "init", "-q", "-b", "main", str(repo))
+    run("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty",
+        "-m", "init", cwd=repo)  # fmt: skip
+    run("git", "worktree", "add", "-q", "-b", "chief/x", str(tree), cwd=repo)
+    checkout = {
+        "repo": str(repo), "worktree": str(tree), "path": str(tree), "branch": "chief/x",
+        "git_dir": str(repo / ".git"), "admin": str(repo / ".git" / "worktrees" / "app"),
+        "base_ref": "HEAD",
+    }  # fmt: skip
+    evil = tmp_path / "evil"
+    run("git", "init", "-q", str(evil))
+    run("git", "config", "probe.owner", "attacker", cwd=evil)
+    fake = tmp_path / "fake-admin"
+    shutil.copytree(repo / ".git" / "worktrees" / "app", fake)
+    (fake / "commondir").write_text(str(evil / ".git"))
+    (tree / ".git").write_text(f"gitdir: {fake}\n")  # What the worker rewrote.
+    (repo / ".git" / "commondir").write_text(str(evil / ".git"))  # And planted here.
+    assert run("git", "config", "--get", "probe.owner", cwd=tree).strip() == "attacker"
+
+    with pytest.raises(ValueError):  # Not found: the worker's config is not read.
+        await checkout_git(checkout, str(tree), "config", "--get", "probe.owner")
+    with pytest.raises(ValueError):
+        await checkout_git(checkout, str(repo), "config", "--get", "probe.owner")
+    assert not (repo / ".git" / "commondir").exists(), "the planted pointer is removed"
+    assert (await changes(checkout))["branch"] == "chief/x", "its work is still read"
+    paths = protected_git_paths(str(repo / ".git"), [checkout])
+    assert str(repo / ".git" / "commondir") in paths
+
+
+async def test_a_clone_whose_config_would_run_code_is_not_read(tmp_path):
+    clone = tmp_path / "clone"
+
+    def made():
+        subprocess.run(["git", "init", "-q", str(clone)], check=True)
+        subprocess.run(["git", "config", "filter.x.clean", "touch pwned"], cwd=clone, check=True)
+
+    await asyncio.to_thread(made)
+    checkout = {"repo": str(clone), "path": str(clone), "remote": "acme/x", "branch": "b"}
+    with pytest.raises(ValueError, match=r"filter\.x\.clean"):
+        await checkout_git(checkout, str(clone), "status", "--porcelain")
+
+
 async def test_closing_keeps_a_worktree_with_ignored_work(tmp_path):
     code = tmp_path / "code"
     app = code / "app"
@@ -215,3 +266,59 @@ async def test_closing_keeps_a_worktree_with_ignored_work(tmp_path):
     assert not (await close_after(installed)).exists(), "dependencies come back with an install"
     assert (await close_after(reported)).exists(), "an ignored report is not deleted"
     assert (await close_after(edited)).exists(), "an edited .env is not replaced by the owner's"
+
+
+async def test_changes_count_each_file_once_and_new_files(tmp_path):
+    def run(*args, cwd=tmp_path):
+        return subprocess.run(args, cwd=cwd, check=True, capture_output=True, text=True).stdout
+
+    repo, tree = tmp_path / "app", tmp_path / "work" / "app"
+    run("git", "init", "-q", "-b", "main", str(repo))
+    (repo / "a.py").write_text("one\n")
+    run("git", "add", ".", cwd=repo)
+    run("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init",
+        cwd=repo)  # fmt: skip
+    run("git", "worktree", "add", "-q", "-b", "chief/x", str(tree), cwd=repo)
+    (tree / "a.py").write_text("one\ntwo\n")
+    run("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qam", "two",
+        cwd=tree)  # fmt: skip
+    (tree / "a.py").write_text("one\ntwo\nthree\n")  # Changed again, not committed.
+    (tree / "new.py").write_text("x = 1\ny = 2\n")  # New, never added.
+    (tree / "__pycache__").mkdir()
+    (tree / "__pycache__" / "a.cpython-313.pyc").write_bytes(b"\0junk")  # Left by a test run.
+    (tree / "uv.lock").write_text("version = 1\n")  # Written by `uv run`.
+    checkout = {
+        "repo": str(repo), "worktree": str(tree), "path": str(tree), "branch": "chief/x",
+        "git_dir": str(repo / ".git"), "admin": str(repo / ".git" / "worktrees" / "app"),
+        "base_ref": "main",
+    }  # fmt: skip
+    found = await changes(checkout)
+    assert found["commits"] == 1
+    assert (found["files"], found["insertions"]) == (2, 4), "a.py once (+2), new.py (+2)"
+    assert found["uncommitted"] == 2, "a.py and new.py; not the cache"
+    (tree / "new.py").unlink()
+    run("git", "checkout", "--", "a.py", cwd=tree)
+    assert (await changes(checkout))["uncommitted"] == 0, "only the cache is left: nothing"
+
+
+async def test_a_project_folder_that_is_a_linked_worktree_is_read_as_itself(tmp_path):
+    def run(*args, cwd=tmp_path):
+        return subprocess.run(args, cwd=cwd, check=True, capture_output=True, text=True).stdout
+
+    repo, feature = tmp_path / "app", tmp_path / "app-feature"
+    run("git", "init", "-q", "-b", "main", str(repo))
+    (repo / "a.py").write_text("one\n")
+    run("git", "add", ".", cwd=repo)
+    run("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init",
+        cwd=repo)  # fmt: skip
+    run("git", "worktree", "add", "-q", "-b", "feature", str(feature), cwd=repo)
+    (repo / "main-only.txt").write_text("x\n")  # An edit in the main checkout, not this one.
+    (feature / "a.py").write_text("one\ntwo\n")
+    shared = {"project": str(feature), "path": str(feature), "branch": "", "shared": True,
+              "git_dir": str(repo / ".git")}  # fmt: skip
+    status = await checkout_git(shared, str(feature), "status", "--porcelain")
+    assert status.strip() == "M a.py", status
+    top = await checkout_git(shared, str(feature), "rev-parse", "--abbrev-ref", "HEAD")
+    assert top.strip() == "feature"
+    main = {**shared, "project": str(repo), "path": str(repo)}
+    assert "main-only.txt" in await checkout_git(main, str(repo), "status", "--porcelain")

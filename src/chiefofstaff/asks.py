@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import time
+from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -140,30 +141,80 @@ class Asks:
     # you until the owner answers or dismisses it, whatever becomes of its task meanwhile (its
     # PR merged, the task cancelled or given more work).
 
+    # One per task (a worker with several tasks may have a question on each): its id is
+    # "<session id>:<task id>" ("-" for none).
+
+    def migrate_questions(self):
+        """Questions kept by 0.1.23 and before, one per worker ("ownerq:<session>"): under the
+        task they were asked on, so answering that task clears them."""
+        for key, raw in self.store.items("ownerq:").items():
+            if ":" in key:
+                continue
+            with suppress(ValueError, TypeError):
+                question = json.loads(raw)
+                task = question.get("task_id") or ""
+                target = f"ownerq:{key}:{task or '-'}"
+                if not self.store.get(target):
+                    self.store.set(target, json.dumps({**question, "task_id": task}))
+            self.store.delete(f"ownerq:{key}")
+
     def record_question(self, session_id: str, text: str, task_id: str = ""):
         self.store.set(
-            f"ownerq:{session_id}",
+            f"ownerq:{session_id}:{task_id or '-'}",
             json.dumps({"text": text.strip()[:6000], "task_id": task_id, "at": now()}),
         )
         self.runtime.publish_state()
 
-    def owner_question(self, session_id: str) -> dict | None:
-        return json.loads(self.store.get(f"ownerq:{session_id}") or "null")
+    def owner_question(self, question_id: str) -> dict | None:
+        """A question by its id; by a worker's id, its only one (or its newest)."""
+        if found := self.store.get(f"ownerq:{question_id}"):
+            return json.loads(found)
+        mine = self.session_questions(question_id)
+        return mine[-1] if mine else None
 
-    def answered(self, session_id: str):
-        """The owner answered it (or someone did for them), or the worker moved on."""
-        if self.store.get(f"ownerq:{session_id}"):
-            self.store.delete(f"ownerq:{session_id}")
+    def session_questions(self, session_id: str) -> list[dict]:
+        found = []
+        for key in self.store.keys(f"ownerq:{session_id}"):
+            rest = key.removeprefix(f"ownerq:{session_id}")
+            if rest and not rest.startswith(":"):
+                continue  # Another session whose id starts the same.
+            question = json.loads(self.store.get(key) or "null")
+            if question:
+                found.append({**question, "id": key.removeprefix("ownerq:")})
+        return sorted(found, key=lambda question: question["at"])
+
+    def answered(self, session_id: str, task_id: str | None = None):
+        """The owner answered (or someone did for them), or the worker moved on: the question
+        of that task, or (no task named) all of the worker's."""
+        keys = (
+            [f"ownerq:{session_id}:{task_id or '-'}"]
+            if task_id is not None
+            else [f"ownerq:{question['id']}" for question in self.session_questions(session_id)]
+        )
+        gone = False
+        for key in keys:
+            if self.store.get(key):
+                self.store.delete(key)
+                gone = True
+        if gone:
             self.runtime.publish_state()
+
+    def dismiss(self, question_id: str):
+        if self.store.get(f"ownerq:{question_id}"):
+            self.store.delete(f"ownerq:{question_id}")
+            self.runtime.publish_state()
+        elif ":" not in question_id:
+            self.answered(question_id)
 
     def owner_questions(self) -> list[dict]:
         """Open questions of workers whose task does not show them already (a task waiting for
         the owner is its own card under Needs you)."""
         found = []
         for key in self.store.keys("ownerq:"):
-            session_id = key.split(":", 1)[1]
+            question_id = key.removeprefix("ownerq:")
+            session_id = question_id.split(":", 1)[0]
             row = self.store.find_session(session_id)
-            question = self.owner_question(session_id)
+            question = json.loads(self.store.get(key) or "null")
             if not row or not question:
                 continue
             task = self.runtime.tasks.find(question["task_id"]) if question["task_id"] else None
@@ -172,12 +223,13 @@ class Asks:
             found.append(
                 {
                     "session_id": session_id,
-                    "worker": row["title"],
+                    "worker": self.runtime.display_title(row),
                     "closed": bool(row["closed_at"]),
                     "task_id": task["id"] if task else "",
                     "task_title": task["title"] if task else "",
                     "task_status": task["status"] if task else "",
                     **question,
+                    "id": question_id,
                 }
             )
         return sorted(found, key=lambda item: item["at"])
@@ -217,7 +269,7 @@ class Asks:
             session_id, "draft", text, {"draft_id": draft["id"], "label": LABELS[kind]}
         )
         self.bus.publish("draft", draft)
-        who = "Chief of Staff" if row["role"] != "worker" else row["title"]
+        who = "Chief of Staff" if row["role"] != "worker" else self.runtime.display_title(row)
         self.runtime.alert(
             text, session_id=session_id, needs_action=True, title=f"{LABELS[kind]} · {who}"
         )
@@ -622,7 +674,8 @@ class Asks:
         )
         if row["role"] == "worker" and asker["role"] == "worker":
             self.runtime.peers.copy_to_router(
-                f"“{row['title']}” answered “{asker['title']}”: {clip(params.answer, 600)}",
+                f"“{self.runtime.display_title(row)}” answered "
+                f"“{self.runtime.display_title(asker)}”: {clip(params.answer, 600)}",
                 {"peer_from": caller, "peer_to": asker["id"]},
             )
         return "Delivered."

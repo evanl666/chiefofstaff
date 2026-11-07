@@ -113,10 +113,17 @@ H3  away notifications through a command-line tool, run outside the connector's 
 H4  a step on a worker's card says what it is for, not the raw command
 H5  thanks for an accepted task: it stays done, nothing starts
 
+Shard I, round four (tasks task by task):
+I1  a worker waiting on a long run checks back later: Monitoring until then, woken on time
+I2  one of a worker's two tasks cancelled mid-step: the other goes on and finishes
+I3  thanks for a result in review: it stays in review, nothing starts
+I4  a running task whose worker went quiet: Nudge, and it says where it stands
+I5  Stalled after (h) is saved
+
 All shards:
 W52 no Router reply names a worker by its session id
 
-    uv run python scripts/live_wide.py A|B|C|D|E|F|G|H [W1 E1 …]  (E needs --with playwright)
+    uv run python scripts/live_wide.py A|B|C|D|E|F|G|H|I [W1 E1 …]  (E needs --with playwright)
 """
 
 import asyncio
@@ -145,6 +152,7 @@ from live_parity import COPILOT, setup, write
 SHARDS = {
     "A": (18781, 18911), "B": (18782, 18912), "C": (18783, 18913), "D": (18784, 18914),
     "E": (18785, 18915), "F": (18786, 18916), "G": (18787, 18917), "H": (18788, 18918),
+    "I": (18799, 18929),
 }  # fmt: skip
 MODEL = "claude-sonnet-5.5"
 CJK = re.compile(r"[\u4e00-\u9fff]")
@@ -2608,7 +2616,10 @@ async def e15_browser(ctx: Ctx):
         title = (await ctx.app.get(f"/api/tasks/{ctx.notes['e13_task']}"))["title"]
         card = page.locator(".card.task", has_text=title).first
         await card.scroll_into_view_if_needed(timeout=20000)
-        await expect(card.locator(".receipt.pr")).to_contain_text("cos-approve-test#1 · ✓ CI")
+        # Its number and title, then where it stands.
+        await expect(card.locator(".receipt.pr")).to_contain_text(
+            re.compile(r"cos-approve-test#1 · .+ · ✓ CI")
+        )
         await expect(card.locator(".receipt.warn", has_text="✗ tests locally")).to_be_visible()
         await card.screenshot(path=SCRIPTS.parent / "browser-shots" / "live-e-ci-card.png")
         lines = page.locator("#timeline .event", has_text="told")
@@ -2923,19 +2934,24 @@ async def g6_two_tasks_one_worker(ctx: Ctx):
         errors: list[str] = []
         page.on("pageerror", lambda error: errors.append(str(error)))
         await page.goto(f"{ctx.app_base}/#token={ctx.app.launch_token}")
-        group = page.locator(".card.worker-group").filter(
-            has=page.locator(".head .title", has_text="Twin Tasks")
-        )
-        open_now = [t for t in (await state(ctx))["tasks"] if t["session_id"] == first["session_id"]
+        worker_id = first["session_id"]
+        running = page.locator(f'#tasks-running .card.worker-box[data-session="{worker_id}"]')
+        queued = page.locator(f'#tasks-queued .card.worker-box[data-session="{worker_id}"]')
+        open_now = [t for t in (await state(ctx))["tasks"] if t["session_id"] == worker_id
                     and t["status"] in {"running", "queued", "waiting"}]  # fmt: skip
         log(f"G6: open tasks {[(t['title'], t['status']) for t in open_now]}")
         if len(open_now) >= 2:
-            await expect(group.locator(".task-row")).to_have_count(len(open_now), timeout=20000)
+            # A box per section: the task it is on under Running, the other waiting its turn.
+            await expect(running.locator(".card.task")).to_have_count(1, timeout=20000)
+            await expect(queued.locator(".card.task")).to_have_count(1, timeout=20000)
             # Still in the sleep it began before the second task came: on the first one.
-            if "sleep" in ((await session(ctx, first["session_id"])).get("step_command") or ""):
-                await expect(group.locator(".task-row.now .title")).to_have_text("Twin Tasks")
-            await group.screenshot(path=SCRIPTS.parent / "browser-shots" / "live-g-group.png")
-            row = group.locator(".task-row").first
+            if "sleep" in ((await session(ctx, worker_id)).get("step_command") or ""):
+                await expect(running.locator(".card.task .head .title")).to_have_text(
+                    re.compile("Twin Tasks", re.IGNORECASE)
+                )
+                await expect(queued.locator(".reason")).to_contain_text("Waits its turn")
+            await running.screenshot(path=SCRIPTS.parent / "browser-shots" / "live-g-group.png")
+            row = running.locator(".card.task").first
             await row.locator(".more-button").click()
             danger = row.locator(".menu button.danger")
             colors = await danger.evaluate(
@@ -3105,6 +3121,127 @@ async def h5_thanks_do_not_reopen(ctx: Ctx):
     log("H5 passed")
 
 
+# Shard I, round four
+
+
+async def i1_check_back(ctx: Ctx):
+    """A worker that waits on a long run says when to look again: the task is under
+    Monitoring until then, and the worker is woken at that time and finishes."""
+    since = now()
+    await say(
+        ctx,
+        "Start a worker titled 'Nightly check' (no project). Its job: a long nightly run has "
+        "just been started elsewhere and takes a while. It should not wait in a shell: it calls "
+        "check_back to look again in 5 minutes (what: 'the nightly run'), and ends its turn. When "
+        "it is woken to check, it writes the word checked into checked.txt in its folder and "
+        "reports done.",
+    )
+    task = await titled(ctx, since, "nightly")
+
+    async def monitoring():
+        found = await ctx.app.get(f"/api/tasks/{task['id']}")
+        return found if found.get("check_back") else None
+
+    found = await wait_for("its check-back", monitoring, 400, ctx.app)
+    log(f"I1: checks back {found['check_back']}")
+    [done] = await finished(ctx, since, 1, "the check", 600)
+    row = await session(ctx, done["session_id"])
+    checked = Path(row["workspace"]) / "checked.txt"
+    assert checked.exists() and "checked" in checked.read_text(), checked
+    woke = [m for m in await messages(ctx, done["session_id"]) if m["meta"].get("check_back")]
+    assert woke, "woken by its check-back"
+    log("I1 passed")
+
+
+async def i2_cancel_one_of_two(ctx: Ctx):
+    """Cancelling one of a worker's two tasks while it is in a step of the other: that step is
+    not stopped, the other task finishes, the cancelled one stays cancelled."""
+    since = now()
+    await say(ctx, "Start a worker titled 'Pair Work' (no project): run `sleep 90`, then write "
+              "first into first.txt in its folder and report 'first done'.")  # fmt: skip
+    first = await titled(ctx, since, "pair")
+
+    async def sleeping():
+        row = await session(ctx, first["session_id"])
+        return row if "sleep" in (row.get("step_command") or "") else None
+
+    await wait_for("it sleeps", sleeping, 300, ctx.app)
+    later = now()
+    await say(
+        ctx,
+        "Give the Pair Work worker a second, separate task (a new task for that same worker, not "
+        "a new worker): write the word second into second.txt in its folder.",
+    )
+
+    async def second():
+        found = [t for t in await tasks_since(ctx, later) if t["session_id"] == first["session_id"]]
+        return found[0] if found else None
+
+    other = await wait_for("its second task", second, 300, ctx.app)
+    await ctx.app.post(f"/api/tasks/{other['id']}/cancel", {"text": "Not needed after all"})
+    row = await session(ctx, first["session_id"])
+    log(f"I2: after cancelling, the worker is {row['status']}, step {row.get('step_command')!r}")
+    done = await task_status(ctx, first["id"], FINISHED, "the first task", 600)
+    workspace = Path((await session(ctx, first["session_id"]))["workspace"])
+    assert (workspace / "first.txt").exists(), "its first task went on"
+    assert (await ctx.app.get(f"/api/tasks/{other['id']}"))["status"] == "cancelled"
+    log(f"I2: first {done['status']}; second.txt there: {(workspace / 'second.txt').exists()}")
+    log("I2 passed")
+
+
+async def i3_thanks_for_a_result_in_review(ctx: Ctx):
+    """Thanks for a result still in review: it stays in review, and nothing starts."""
+    since = now()
+    await ask(ctx, "Write the single word plum into plum.txt.")
+    [task] = await finished(ctx, since, 1, "the plum file", 600)
+    assert task["status"] == "review", task["status"]
+    said = await ask(ctx, "Thanks, received.")
+    log(f"I3: {said[:200]!r}")
+    await asyncio.sleep(20)
+    after = await ctx.app.get(f"/api/tasks/{task['id']}")
+    assert after["status"] == "review", after["status"]
+    assert len(await tasks_since(ctx, since)) == 1, "nothing new started"
+    log("I3 passed")
+
+
+async def i4_nudge_a_quiet_task(ctx: Ctx):
+    """A running task whose worker stopped between steps: Nudge asks it where it stands, and it
+    says (a report after the nudge)."""
+    since = now()
+    await say(
+        ctx,
+        "Start a worker titled 'Two Steps' (no project): step one, write a into a.txt in its "
+        "folder, then report progress (not done) saying step one is done, and end its turn "
+        "without doing step two until asked. Step two: write b into b.txt and report done.",
+    )
+    task = await titled(ctx, since, "two steps")
+
+    async def paused():
+        found = await ctx.app.get(f"/api/tasks/{task['id']}")
+        row = await session(ctx, task["session_id"])
+        return found if found["progress"] and row["status"] != "working" else None
+
+    await wait_for("step one reported", paused, 600, ctx.app)
+    nudged = now()
+    await ctx.app.post(f"/api/tasks/{task['id']}/nudge")
+
+    async def answered():
+        rows = await messages(ctx, task["session_id"])
+        return [m for m in rows if m["kind"] == "report" and m["created_at"] > nudged] or None
+
+    reports = await wait_for("its answer to the nudge", answered, 600, ctx.app)
+    log(f"I4: {[m['text'][:120] for m in reports]}")
+    log("I4 passed")
+
+
+async def i5_stall_setting(ctx: Ctx):
+    saved = await settings(ctx, stall_hours=6)
+    assert saved["settings"]["stall_hours"] == 6, saved["settings"]
+    assert (await state(ctx))["settings"]["stall_hours"] == 6
+    await settings(ctx, stall_hours=4)
+    log("I5 passed")
+
+
 SCENARIOS = {
     "A": [
         w1_ask, w2_progress, w3_answered_directly, w4_pasted_orders, w5_chinese_log,
@@ -3147,6 +3284,10 @@ SCENARIOS = {
     "H": [
         h1_question_survives_cancel, h2_ready_to_merge, h3_away_through_a_cli,
         h4_steps_read_as_what_they_do, h5_thanks_do_not_reopen, w52_no_ids,
+    ],
+    "I": [
+        i5_stall_setting, i1_check_back, i2_cancel_one_of_two, i3_thanks_for_a_result_in_review,
+        i4_nudge_a_quiet_task, w52_no_ids,
     ],
 }  # fmt: skip
 

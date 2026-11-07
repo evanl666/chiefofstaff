@@ -71,7 +71,14 @@ from .sources.slack import SlackSource, describe
 from .state import SessionStates
 from .store import Store, ago_minutes, hours_ago, now
 from .task_actions import TaskActions
-from .tasks import HELPER_KINDS, TaskBook, settle_adopted, settle_followups
+from .tasks import (
+    HELPER_KINDS,
+    OPEN,
+    TaskBook,
+    settle_adopted,
+    settle_decision_changes,
+    settle_followups,
+)
 from .tasks import migrate as migrate_tasks
 from .tools import Tools
 from .watchdog import WatchConfig, Watchdog
@@ -145,7 +152,9 @@ ATTACHMENT_NAME = re.compile(r"\b([0-9a-f]{32}\.(?:png|jpg|gif|webp))\b")
 # quoted data (the owner's words, test output) and propose; they run nothing.
 TOOLLESS = {"learner": ["update_style", "propose_lessons"], "checker": ["propose_checks"]}
 SPECIALS = HELPER_KINDS
-CONNECTOR_TOOLS = ["report_found", "report_owner_words", "report_notified", "report_owner_replies"]
+CONNECTOR_TOOLS = ["report_found", "report_owner_words"]
+# The messenger sends away notifications and reads the owner's replies to them.
+MESSENGER_TOOLS = ["report_notified", "report_owner_replies"]
 # Owner messages at least this long are instructions the learner looks at ("progress?" is not).
 INSTRUCTION_CHARS = 25
 # A message to a worker this long into a step gets a note that it waits for the step to end.
@@ -270,6 +279,7 @@ class Runtime:
         migrate_tasks(store)
         settle_adopted(store)
         settle_followups(store)
+        settle_decision_changes(store)
         self.delivery = Delivery(self)
         # The parts, by responsibility; each keeps a reference to this runtime.
         self.events = Events(self)
@@ -277,6 +287,7 @@ class Runtime:
         self.task_actions = TaskActions(self)
         self.drafts = Drafts(self)
         self.asks = Asks(self)
+        self.asks.migrate_questions()
         self.decisions = Decisions(self)
         self.peers = Peers(self)
         self.learning = Learning(self)
@@ -642,12 +653,19 @@ class Runtime:
         if special == "connector":
             return CONNECTOR_TOOLS
         if special == "messenger":
-            return ["report_notified"]
+            return MESSENGER_TOOLS
         if row["role"] == WATCHDOG:
             return ["assess_worker"]
         names = ["report", "follow_thread", "unfollow_thread"]
         if row["role"] == WORKER:
-            names += ["find_sessions", "ask_session", "answer_session", "tell_session", "add_repo"]
+            names += [
+                "check_back",
+                "find_sessions",
+                "ask_session",
+                "answer_session",
+                "tell_session",
+                "add_repo",
+            ]
             # Questions it writes reach other workers' prompts: not from Slack content.
             names += ["ack_decision"] if row["slack"] else ["ask_decision", "ack_decision"]
             if not row["slack"]:
@@ -1401,6 +1419,7 @@ class Runtime:
         self.states[row["id"]].busy = False
         self.add_message(row["id"], "error", message)
         self.update_session(row["id"], status="failed", activity="")
+        self.delivery.defer_pending(row["id"])  # Not a turn by itself after a restart.
         self.task_actions.fail(row["id"], message)
         if row["role"] == WORKER:
             self.background(self.workers.pump())  # Its slot is free for a queued worker.
@@ -1456,6 +1475,7 @@ class Runtime:
         learn: bool = True,
         tell_router: bool = True,
         attachments: Sequence[Attachment] = (),
+        clear_questions: bool = True,
     ) -> dict:
         """`learn`: the owner typed it (not a message the app sends for them). A message to a
         worker is also noted for the Router (`tell_router`), which must know what the owner
@@ -1463,8 +1483,11 @@ class Runtime:
         row = self.store.session(session_id)
         if row["closed_at"] and row["role"] == WORKER:
             await self.workers.reopen(session_id)
-        if row["role"] == WORKER:
-            self.asks.answered(session_id)  # The owner answers it.
+        if row["role"] == WORKER and clear_questions:
+            # The owner answers what it asked on the task it is on (others' questions stay).
+            current = self.tasks.current(session_id)
+            self.asks.answered(session_id, current["id"] if current else "")
+            self.asks.answered(session_id, "")
         # Answers come in the language of this message, whatever the conversation used before.
         spoken = self.heard(text) if learn else language(text)
         prompt = wrap("owner", "message", text, reply_in=spoken)
@@ -1492,6 +1515,9 @@ class Runtime:
         context = [wrap("system", "context", note) for note in notes if note]
         prompt = "\n\n".join([prompt, *context])
         task = self.tasks.current(session_id) if row["role"] == WORKER else None
+        if task:
+            # What its turn is about now; a chat with it, not a task card's follow-up.
+            meta |= {"task_id": task["id"], "chat": True}
         if task and task["status"] in {"review", "done", "failed", "cancelled"}:
             # A question changes nothing, but new work it reports comes back for review.
             self.store.set(f"followup:{task['id']}", "1")
@@ -1742,7 +1768,7 @@ class Runtime:
                     display=(display or text)[:2000],
                     meta={"source": source, "thread": thread},
                 )
-                delivered.append(self.store.session(session_id)["title"])
+                delivered.append(self.thread_task_title(session_id, thread))
             except Exception:
                 # A follower that cannot take messages stops following; others still get them.
                 logger.warning("Could not deliver a thread follow-up.", exc_info=True)
@@ -1789,6 +1815,8 @@ class Runtime:
                 self.workers.tidy,
                 self.workers.release_idle,
                 self.drafts.check_posted_by_owner,
+                self.task_actions.wake_check_backs,
+                self.task_actions.nudge_stalled,
                 # Queued work starts once memory frees up, not only when a turn ends.
                 self.workers.pump,
                 self.digest_once,
@@ -1851,6 +1879,9 @@ class Runtime:
                 "SELECT coalesce(sum(credits), 0) AS c FROM usage WHERE session_id=?", (row["id"],)
             ),
             "task": self.toolset.task_brief(self.tasks.current(row["id"])),
+            # The task its current (or last) turn is about: what its steps are for.
+            "turn_task": self.turn_task(row["id"]) if row["role"] == WORKER else "",
+            "display_title": self.display_title(row),
             "elsewhere": self.copilot_id(row["id"]) in self.elsewhere and not row["closed_at"],
             "terminal": self.terminal.get(row["id"]),
             **(self.progress(row) if row["role"] == WORKER else {}),
@@ -1866,6 +1897,19 @@ class Runtime:
             root for item in rows for root in self.workspaces.writable(item)
         ]
         return await asyncio.to_thread(read_text_file, raw, row["cwd"] if row else "", roots)
+
+    def turn_task(self, session_id: str) -> str:
+        """The task its current (or last) turn is about: named by the latest instruction its
+        conversation took up (one sent mid-turn waits until then)."""
+        if known := self.store.get(f"turntask:{session_id}"):
+            return known
+        found = self.store.one(
+            """SELECT json_extract(meta, '$.task_id') AS task FROM messages WHERE session_id=?
+            AND kind IN ('router', 'owner') AND json_extract(meta, '$.prompt') IS NOT NULL
+            AND json_extract(meta, '$.task_id') IS NOT NULL ORDER BY id DESC LIMIT 1""",
+            (session_id,),
+        )
+        return found["task"] if found else ""
 
     def progress(self, row: dict) -> dict:
         """What a session is doing now and what it said last: progress at a glance."""
@@ -1897,6 +1941,45 @@ class Runtime:
     def publish_session(self, row: dict):
         self.bus.publish("session", self.view(row))
 
+    def remember_pr_title(self, label: str, title: str):
+        """A PR's title ("owner/repo#n"), shown with its number wherever the PR is named."""
+        title = " ".join((title or "").split())[:200]
+        key = f"prtitle:{label.lower()}"
+        if title and self.store.get(key) != title:
+            self.store.set(key, title)
+
+    def display_title(self, row: dict) -> str:
+        """A worker by what it is on: its current task while that is open, else its newest open
+        task, else its newest task; the title it was started with when it has none. The same
+        name everywhere: sidebar, Home, notices and away messages."""
+        if row["role"] != WORKER:
+            return row["title"]
+        tasks = self.tasks.for_session(row["id"])
+        if not tasks:
+            return row["title"]
+        current = self.tasks.current(row["id"])
+        if current and current["status"] in OPEN:
+            return current["title"]
+        if open_ := [task for task in tasks if task["status"] in OPEN]:
+            return open_[-1]["title"]
+        return tasks[-1]["title"]
+
+    def thread_task_title(self, session_id: str, thread: str) -> str:
+        """Which of a worker's tasks a followed thread is about, by its title: the task whose
+        PRs or instructions name it, else the worker's display title."""
+        from .tools import names_pr
+
+        row = self.store.session(session_id)
+        found = threads.GITHUB_PR.fullmatch(thread)
+        for task in reversed(self.tasks.for_session(session_id)):
+            if found:
+                repo, number = found.groups()
+                if thread in threads.pull_requests(
+                    " ".join(self.task_actions.pr_urls(task))
+                ) or names_pr(f"{task['title']}\n{task['goal'] or ''}", repo, int(number)):
+                    return task["title"]
+        return self.display_title(row)
+
     def publish_state(self):
         self.bus.publish("state")
 
@@ -1909,6 +1992,9 @@ class Runtime:
             "sessions": [self.view(row) for row in self.store.open_sessions()],
             "drafts": self.store.drafts(),
             "uncertain": self.store.drafts("uncertain"),
+            # PRs by "owner/repo#n" with their titles; followed threads with a link to them.
+            "pr_titles": self.store.items("prtitle:"),
+            "thread_links": self.store.items("threadlink:"),
             "questions": self.asks.owner_questions(),
             "tasks": [
                 self.task_actions.view(task)

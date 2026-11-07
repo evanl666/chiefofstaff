@@ -241,8 +241,10 @@ class TaskBook:
         if status in {"done", "cancelled"}:
             # Settled (accepted, merged, cancelled): an earlier question to its worker is moot.
             self.store.delete(f"followup:{task_id}")
-        if status in {"review", "done", "cancelled"}:
+        if status in {"review", "done", "failed", "cancelled"}:
             self.store.delete(f"reopened:{task_id}")  # Its follow-up is over.
+        if status in {"review", "done", "failed", "cancelled"}:
+            self.store.delete(f"checkback:{task_id}")  # Nothing to check back on.
         if status == "running" and task["session_id"]:
             # The worker is on this task now.
             self.store.execute(
@@ -324,6 +326,45 @@ def settle_followups(store: Store):
         stamp = now()
         store.execute(
             "UPDATE tasks SET status='review', updated_at=? WHERE id=?", (stamp, task["id"])
+        )
+        store.execute(
+            "UPDATE runs SET status='succeeded', ended_at=? WHERE task_id=? AND ended_at IS NULL",
+            (stamp, task["id"]),
+        )
+
+
+def settle_decision_changes(store: Store):
+    """Before 0.1.24 a finished task reopened by a changed decision stayed "running" after its
+    worker confirmed it, when the marker of where it was had been lost. Its change card still
+    says where it was and what the worker answered: back there, its result kept. Only those
+    (not every quiet task), once, and not while its worker is at work."""
+    if store.get("settled_decision_changes"):
+        return
+    store.set("settled_decision_changes", "1")
+    acked: dict[str, tuple[str, str]] = {}
+    for card in store.all("SELECT target FROM drafts WHERE kind='change' ORDER BY created_at"):
+        for item in json.loads(card["target"]).get("tasks") or []:
+            if item.get("was") in {"review", "done"} and (item.get("ack") or "").strip():
+                acked[item["task_id"]] = (item["was"], item["ack"].strip())
+    for task in store.all(
+        """SELECT t.id FROM tasks t JOIN sessions s ON s.id=t.session_id
+        WHERE t.status='running' AND s.status IN ('done', 'idle') AND s.closed_at IS NULL
+        AND (SELECT reason FROM runs r WHERE r.task_id=t.id ORDER BY r.started_at DESC LIMIT 1)
+            = 'decision changed'"""
+    ):
+        if task["id"] not in acked or store.get(f"decision_was:{task['id']}"):
+            continue
+        was, ack = acked[task["id"]]
+        stamp = now()
+        store.execute(
+            "UPDATE tasks SET status=?, progress=?, ended_at=?, updated_at=? WHERE id=?",
+            (
+                was,
+                f"Unchanged by the new decision: {ack}"[:500],
+                stamp if was == "done" else None,
+                stamp,
+                task["id"],
+            ),
         )
         store.execute(
             "UPDATE runs SET status='succeeded', ended_at=? WHERE task_id=? AND ended_at IS NULL",

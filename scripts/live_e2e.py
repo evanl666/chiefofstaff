@@ -115,6 +115,7 @@ class App:
         for _ in range(100):
             try:
                 if (await self.http.post("/api/auth", json={"token": token})).status_code == 200:
+                    self.http.headers["X-Chief-Key"] = token  # As the page sends it.
                     return
             except httpx.ConnectError:
                 await asyncio.sleep(0.2)
