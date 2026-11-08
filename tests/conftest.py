@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import os
 import re
@@ -364,6 +365,31 @@ class Harness:
             "html_url": f"https://github.com/{repo}/pull/{number}",
         } | extra
         self.gh_replies[f"api repos/{repo}/pulls/{number}"] = json.dumps(pull)
+
+
+@pytest.fixture
+async def end_background_work():
+    """What a test left running (a git command a runtime started) is cancelled before its loop
+    closes, leaving asyncio's own pipe setup to finish: on Python 3.11 a process start whose pipe
+    setup is cancelled with it never ends (the loop's close cancels both)."""
+    yield
+    me = asyncio.current_task()
+    left = [
+        task
+        for task in asyncio.all_tasks()
+        if task is not me
+        and not getattr(task.get_coro(), "__qualname__", "").endswith("._connect_pipes")
+    ]
+    for task in left:
+        task.cancel()
+    if left:
+        await asyncio.wait(left, timeout=10)
+
+
+def pytest_collection_modifyitems(items):
+    for item in items:
+        if inspect.iscoroutinefunction(getattr(item, "function", None)):
+            item.fixturenames.append("end_background_work")
 
 
 @pytest.fixture(autouse=True)
