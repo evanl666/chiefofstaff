@@ -342,6 +342,28 @@ async def test_a_task_is_renamed_and_keeps_its_earlier_names(harness):
         runtime, "rename_task", harness.router_id, task_id=made["task_id"], title="  "
     )
     assert refused.result_type == "failure"
+    # The owner's title as they wrote it: quotes, joined emoji and Persian words kept; a long
+    # one cut at a word and marked (bug bash 5, A9).
+    family = "\U0001f468\u200d\U0001f469\u200d\U0001f467"
+    title = f'Ask "Bob" about {family} and \u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645'
+    await call_tool(runtime, "rename_task", harness.router_id, task_id=made["task_id"],
+                    title=title + "\u202e")  # fmt: skip
+    assert runtime.tasks.get(made["task_id"])["title"] == title
+    await call_tool(runtime, "rename_task", harness.router_id, task_id=made["task_id"],
+                    title="Compare the parallel get latency " * 4)  # fmt: skip
+    long = runtime.tasks.get(made["task_id"])["title"]
+    assert len(long) <= 80 and long.endswith(" the\u2026"), long
+
+
+async def test_a_worker_with_quotes_in_its_title_starts(harness):
+    """Live (bug bash 5): titles keep the owner's quotes now; Copilot refuses a session name
+    with a double quote, and the worker never started."""
+    runtime = await harness.connect()
+    made = await spawn(runtime, harness.router_id, 'Write "outside" to note.txt')
+    row = harness.store.session(made["session_id"])
+    assert row["title"] == 'Write "outside" to note.txt'
+    assert harness.client.names[made["session_id"]].endswith("Write 'outside' to note.txt")
+    assert row["status"] != "failed"
 
 
 async def test_a_task_that_drifted_is_split_with_each_result_its_own(harness):
@@ -542,7 +564,39 @@ async def test_cancelling_work_that_had_finished_keeps_its_result_and_says_so(ha
     assert "had finished already" in result.text_result_for_llm
     found = task(harness, made["task_id"])
     assert found["status"] == "done" and found["result"] == report
-    assert found["progress"].startswith("Cancelled by the Router: Not needed any more")
+    assert found["progress"].startswith("Cancelled by the Router: Not needed any more. It had")
+    assert runtime.task_actions.view(found)["set_aside"], "done, but never accepted"
+
+
+async def test_cancelling_a_finished_reply_task_stops_following_its_thread(harness):
+    """Bug bash 5 (L8, W8): cancelled after it finished, its reply withdrawn, it still showed
+    as "Delivered; still following a Slack thread", and as Done like an accepted result."""
+    runtime = await harness.connect()
+    made = await spawn(runtime, harness.router_id, "Answer Alice in her thread")
+    worker, thread = made["session_id"], "slack:C0DEPLOYS:1712345600.000100"
+    harness.store.execute("UPDATE sessions SET slack=1 WHERE id=?", (worker,))  # Reads Slack.
+    other = runtime.tasks.create(worker, "Watch the deploy thread", "x", status="running")
+    runtime.follow(worker, [thread], task_id=made["task_id"])
+    runtime.follow(worker, ["slack:C0OTHER01:1712345600.000200"], task_id=made["task_id"])
+    runtime.follow(worker, ["slack:C0OTHER01:1712345600.000200"], task_id=other["id"])
+    await call_tool(runtime, "report", worker, status="done", task_id=made["task_id"],
+                    summary="Drafted the answer to Alice.")  # fmt: skip
+    # Its result landed as the owner cancelled (bug bash 5, A2): kept for review, said once.
+    with pytest.raises(ValueError, match="finished just now"):
+        await runtime.task_actions.cancel(made["task_id"], "Alice no longer needs it")
+    assert task(harness, made["task_id"])["status"] == "review"
+    await runtime.task_actions.cancel(made["task_id"], "Alice no longer needs it")
+    found = task(harness, made["task_id"])
+    assert found["status"] == "done"
+    assert found["progress"].startswith("Cancelled by you: Alice no longer needs it. It had")
+    assert runtime.task_actions.view(found)["set_aside"]
+    assert thread not in harness.store.follows(worker), "followed for it only: no longer"
+    assert harness.store.follow_tasks(worker, "slack:C0OTHER01:1712345600.000200") == [
+        other["id"]
+    ], "another task still follows that one"
+    # Asked more about it after all: no longer set aside.
+    await runtime.task_actions.follow_up(found["id"], "Actually, send it after all.")
+    assert not harness.store.get(f"setaside:{made['task_id']}")
 
 
 async def test_more_on_a_reported_result_is_reported_whole_not_as_an_addendum(harness):

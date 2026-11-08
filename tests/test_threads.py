@@ -1,5 +1,6 @@
 import json
 import time
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -458,6 +459,21 @@ async def test_a_follow_that_cannot_be_read_shows_as_failing_not_waiting(harness
     assert any("Stopped following github:acme/app#7" in note for note in notes)
 
 
+async def test_a_slack_conversation_it_follows_says_when_it_last_changed(tmp_path):
+    """L6: a task delivered in Slack and still following the DM moves on with the finished ones
+    after a quiet day: when that conversation last had news is its watch_changed_at."""
+    harness = Harness(tmp_path / "data", Settings(slack_enabled=True))
+    runtime = await harness.connect()
+    worker = await spawn_with(runtime, harness, "Answer Bob", slack=True,
+                              follow=["slack:D0BOB0001"])  # fmt: skip
+    task = runtime.tasks.current(worker)
+    quiet = time.time() - 2 * 86400
+    harness.store.execute("UPDATE subscriptions SET touched=? WHERE session_id=?", (quiet, worker))
+    view = runtime.task_actions.view(task)
+    assert view["watching"] == ["slack:D0BOB0001"]
+    assert abs(datetime.fromisoformat(view["watch_changed_at"]).timestamp() - quiet) < 1
+
+
 async def spawn_with(runtime, harness, title, **extra):
     result = await call_tool(
         runtime, "spawn_worker", harness.router_id, title=title, instructions=title, **extra
@@ -496,6 +512,12 @@ def test_a_slack_thread_is_named_by_its_conversation_when_known():
     assert threads.label("slack:C0DEPLOYS:1712345600.000100", names) == "Slack thread in #deploys"
     assert threads.label("slack:D0ALICE01", names) == "Slack DM with Alice Chen"
     assert threads.label("slack:C0OTHER01:1712345600.000100") == "Slack thread in C0OTHER01"
+    # A DM whose name already says so is not "DM with DM with Bob".
+    named = {"D0BOB0001": "DM with Bob", "D0CAROL01": "@carol"}
+    ts = "1712345600.000100"
+    assert threads.label("slack:D0BOB0001", named) == "Slack DM with Bob"
+    assert threads.label(f"slack:D0BOB0001:{ts}", named) == "Slack thread in DM with Bob"
+    assert threads.label("slack:D0CAROL01", named) == "Slack DM with carol"
 
 
 async def test_who_asked_for_a_review_in_slack_is_told_once_it_is_posted(tmp_path):

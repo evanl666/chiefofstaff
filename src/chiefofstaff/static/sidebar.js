@@ -63,9 +63,43 @@ export function renderSidebar() {
   list.replaceChildren(...nodes);
   const count = needsCount();
   document.title = count ? `(${count}) Chief of Staff` : "Chief of Staff";
+  // Folded away on a narrow window: its button says what needs the owner, as Home does here.
+  const badge = document.querySelector("#sidebar-toggle .badge");
+  if (badge) {
+    badge.textContent = count ? String(count) : "";
+    badge.hidden = !count;
+  }
   renderClosed();
   renderExternal();
   renderStatusLine();
+}
+// On a narrow window the sidebar folds away behind a button at the start of the header: it
+// opens over the page, and closes once one of its items is picked, on Escape (the focus back on
+// the button) or on a click beside it.
+export const NARROW = "(max-width: 760px)";
+export function bindSidebarToggle() {
+  const application = $("#application");
+  const sidebar = $("#sidebar");
+  const toggle = el("button", { type: "button", id: "sidebar-toggle", class: "icon", title: "Workers, Settings and Usage", "aria-label": "Workers, Settings and Usage", "aria-controls": "sidebar", "aria-expanded": "false" }, el("span", { class: "bars", "aria-hidden": "true", text: "☰" }), el("span", { class: "badge amber", hidden: true }));
+  const show = (open, focus = false) => {
+    application.classList.toggle("sidebar-open", open);
+    toggle.setAttribute("aria-expanded", String(open));
+    if (focus) (open ? sidebar.querySelector("button.item") : toggle)?.focus();
+  };
+  const opened = () => application.classList.contains("sidebar-open");
+  toggle.addEventListener("click", () => show(!opened(), true));
+  $("#session-header").prepend(toggle);
+  sidebar.addEventListener("click", (event) => {
+    if (event.target.closest("button.item, #settings-button, #usage-button")) show(false);
+  });
+  document.addEventListener("click", (event) => {
+    if (opened() && !sidebar.contains(event.target) && !toggle.contains(event.target)) show(false);
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && opened() && !event.target.closest?.("dialog")) show(false, true);
+  });
+  window.matchMedia(NARROW).addEventListener("change", (event) => event.matches || show(false));
+  renderSidebar();
 }
 function renderClosed() {
   const closed = closedWorkers().filter((session) => !session.helper);
@@ -136,7 +170,7 @@ export function renderStatusLine() {
 }
 async function turnOffSlack() {
   try {
-    state.snapshot = { ...state.snapshot, ...(await api("/api/settings", { method: "POST", body: { ...state.snapshot.settings, slack_enabled: false } })) };
+    state.snapshot = { ...state.snapshot, ...(await api("/api/settings", { method: "POST", body: { slack_enabled: false } })) };
     renderStatusLine();
     toast("Slack watching is off. Turn it on in Settings → Connections.");
   } catch (error) {

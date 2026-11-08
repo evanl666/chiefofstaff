@@ -158,6 +158,7 @@ def test_the_board_places_each_task_by_where_it_stands():
         task("v", "w3", "review", receipts=CHANGED),  # Changed code: to review.
         task("r", "w4", "review", follow_up=True),  # The owner asked more; its worker is at it.
         task("g", "w3", "done", ended_at="2026-11-07T10:00:00Z"),
+        task("s", "w3", "done", set_aside=True),  # Cancelled after it finished: not accepted.
         task("h", "w2", "done", watching=["github:o/r#8"]),  # Delivered, still followed.
         task("n", "w2", "done", news={"at": "2026-11-07T11:55:00Z", "text": "merged"}),
         task("x", "w2", "failed"),
@@ -169,7 +170,8 @@ def test_the_board_places_each_task_by_where_it_stands():
         "k": "monitoring/check-back",
         "q": "needs/question", "c": "monitoring/check-back", "d": "monitoring/watching",
         "e": "monitoring/overdue", "f": "finished/report", "v": "needs/review",
-        "r": "running/following", "g": "finished/done", "h": "monitoring/delivered",
+        "r": "running/following", "g": "finished/done", "s": "finished/set-aside",
+        "h": "monitoring/delivered",
         "n": "needs/update", "x": "needs/failed", "y": "needs/check-failed",
     }  # fmt: skip
     boxes = found["boxes"]
@@ -225,9 +227,37 @@ def test_a_task_on_a_card_or_quiet_briefly_stays_put():
     ]
     found = board(tasks, workers, onCards=["r"])
     assert found["phases"]["a"] == "monitoring/idle", "2h quiet: says it waits on nothing"
-    assert found["phases"]["r"] == "", "on its card, not again"
+    assert found["phases"]["r"] == "review", "on its card, not again: a result to accept there"
     assert found["boxes"]["needs"] == []
     assert board(tasks, workers, stallHours=1)["phases"]["a"] == "monitoring/overdue"
+
+
+def test_news_on_a_result_with_a_draft_card_shows_on_that_card():
+    """W3: its worker answered a follow-up with news while a draft for it waits: the news shows
+    as an Update on that card (the task's card goes in it), not hidden and not twice."""
+    workers = [{"id": "w1", "status": "idle"}]
+    news = {"at": "2026-11-07T11:55:00Z", "text": "Answered: the flag is on"}
+    tasks = [
+        task("r", "w1", "review", receipts=CHANGED, news=news),
+        task("p", "w1", "review"),  # A report that only informs, with a reply drafted.
+    ]
+    found = board(tasks, workers, onCards=["r", "p"])
+    assert found["phases"] == {"r": "update", "p": "report"}
+    assert found["boxes"]["needs"] == [], "on the draft's card only"
+
+
+def test_a_follow_up_behind_another_task_is_up_next_not_waiting_on_its_pr():
+    """L5: the owner followed up on finished A (it follows PR #59) while its worker runs B: A
+    waits its turn after B, not on its PR. The worker's current task may say A already: its
+    turn is what counts."""
+    workers = [{"id": "w1", "status": "working", "turn_task": "b", "task": {"task_id": "a"}}]
+    tasks = [
+        task("a", "w1", result="Opened #59", started=True, watching=["github:o/app#59"]),
+        task("b", "w1", started=True, at="2026-11-07T11:40:00Z"),
+    ]
+    found = board(tasks, workers)
+    assert found["phases"] == {"a": "monitoring/turn", "b": "running"}
+    assert found["whys"]["a"] == "Up next: following up after “b”"
 
 
 def test_no_answer_to_a_nudge_brings_a_stalled_task_to_the_owner():
@@ -697,3 +727,119 @@ def test_queued_rows_in_start_order_and_a_follow_up_is_up_next():
     assert found["whys"]["again"] == "Up next: following up after “on”"
     assert found["phases"]["left"] == "monitoring/paused"
     assert found["monitoring"]["waiting"] == ["again", "left", "q1", "q2", "q3"]
+
+
+def tasks_js(body: str):
+    """Run `body` against tasks.js (`k`), text.js (`t`) and state.js (`s`)."""
+    return run_js(f"const k = await import({json.dumps((STATIC / 'tasks.js').as_uri())});\n{body}")
+
+
+def test_slack_conversations_it_follows_are_named_once():
+    """L6/A7: a worker following two DMs showed "Watching a Slack thread" twice, and a DM with a
+    thread in it read "a Slack thread; a Slack thread": each by its name, once."""
+    found = tasks_js(
+        """
+        s.state.snapshot = { slack_names: { D0BOB0001: "Bob", D0ANN0001: "Ann",
+          C0DEPLOYS: "deploys" } };
+        const keys = ["slack:D0BOB0001:1712345678.000100", "slack:D0BOB0001", "slack:D0ANN0001",
+          "slack:C0DEPLOYS:1712345600.000100", "slack:C0DEPLOYS:1712345700.000100",
+          "github:o/app#7", "slack:D0NONAME1"];
+        return k.followedOnce(keys).map(k.threadWords);
+        """
+    )
+    assert found == ["DM with Bob", "DM with Ann", "a thread in #deploys", "app#7", "a Slack DM"]
+
+
+def test_a_ci_run_shows_where_its_checks_stand_not_its_task():
+    """S19: a failed CI run its report linked read "to review" (its task's state) in Artifacts;
+    a result set aside reads so, not "delivered"."""
+    found = run_js(
+        f"const a = await import({json.dumps((STATIC / 'artifacts.js').as_uri())});\n"
+        """
+        s.state.snapshot = { pr_titles: {} };
+        const run = (n) => `https://github.com/o/cos-approve-test/actions/runs/${n}`;
+        const doc = "https://docs.google.com/document/d/1SetAsideDoc/edit";
+        const pr = { label: "o/cos-approve-test#62", url: "https://github.com/o/cos-approve-test/pull/62",
+          state: "OPEN", checks: "failing", own: true, at: "2026-11-07T11:00:00Z" };
+        const tasks = [
+          { id: "t1", status: "review", title: "Probe CI", updated_at: "2026-11-07T11:30:00Z",
+            receipts: { prs: [pr] }, made_links: [run(1)], result: `Run: ${run(1)}` },
+          { id: "t2", status: "review", title: "Other", updated_at: "2026-11-07T11:20:00Z",
+            made_links: [run(2)], result: `Run: ${run(2)}` },
+          { id: "t3", status: "done", title: "Not wanted", updated_at: "2026-11-07T11:10:00Z",
+            made_links: [doc], result: `Wrote ${doc}` },
+        ];
+        const phases = new Map([["t1", { section: "needs", marker: "review" }],
+          ["t2", { section: "needs", marker: "review" }],
+          ["t3", { section: "finished", marker: "set-aside" }]]);
+        return a.collectArtifacts(tasks, phases).filter((i) => i.kind !== "PR")
+          .map((i) => [i.task.id, i.status, i.tone]);
+        """
+    )
+    assert found == [
+        ["t1", "failed", "bad"],
+        ["t2", "to review", "wait"],  # No PR of its own there: as its task stands.
+        ["t3", "set aside", "muted"],
+    ]
+
+
+def test_the_diff_reads_names_git_quotes_and_says_large_new_files():
+    """S8: a name git quotes ("it's \\"quoted\\" ü") read as the quoted pair in the diff's
+    header. S9: a new file too large to show was missing from the diff: said with its size."""
+    found = run_js(
+        f"const d = await import({json.dumps((STATIC / 'diff.js').as_uri())});\n"
+        r"""
+        const quoted = '"b/docs/it\'s \\"quoted\\" (draft) \\303\\274.md"';
+        const diff = [
+          `diff --git ${quoted.replace('"b/', '"a/')} ${quoted}`,
+          "new file mode 100644", "--- /dev/null",
+          `+++ ${quoted}`, "@@ -0,0 +1 @@", "+hi",
+          'diff --git a/tab\there.txt "b/tab\\there.txt"', "deleted file mode 100644",
+          "diff --git a/plain name.txt b/plain name.txt", "--- a/plain name.txt",
+          "+++ b/plain name.txt", "@@ -1 +1 @@", "-a", "+b",
+          'diff --git a/old.md "b/new \\"one\\".md"', "rename from old.md",
+          'rename to "new \\"one\\".md"',
+        ].join("\n");
+        return [d.parseDiff(diff).map((f) => [f.name, f.note, f.added, f.removed]),
+          d.largeWords({ name: "data/huge.bin", size: 21 * 1024 * 1024 }),
+          d.largeWords({ name: "x.csv", size: 300 * 1024 })];
+        """
+    )
+    assert found[0] == [
+        ['docs/it\'s "quoted" (draft) ü.md', "", 1, 0],
+        ["tab\there.txt", "Deleted", 0, 0],
+        ["plain name.txt", "", 1, 1],
+        ['new "one".md', "Renamed from old.md", 0, 0],
+    ]
+    assert found[1:] == ["New file, 21 MB, not shown", "New file, 300 KB, not shown"]
+
+
+def test_a_draft_on_the_owners_own_pr_is_a_reply_not_a_review():
+    """S16: comments answering the reviewer on the owner's own PR read "Review of …#58"."""
+    found = run_js(
+        f"const d = await import({json.dumps((STATIC / 'drafts.js').as_uri())});\n"
+        "return [d.reviewWords({ own: true }), d.reviewWords({ own: false })];"
+    )
+    assert found[0] == {"label": "Reply on ", "open": "Reply…", "send": "Send reply"}
+    assert found[1]["label"] == "Review of " and found[1]["open"] == "Review…"
+
+
+def test_what_cancelling_came_to_and_a_cancelled_line_said_once():
+    """A2: cancelling a task that had finished sets it aside: the toast says so, not "Task
+    cancelled.". A6: "Cancelled: Cancelled by you." said "Cancelled" twice."""
+    found = tasks_js(
+        """
+        const cancelled = (progress) => k.finishedWords(
+          { status: "cancelled", result: "", progress }, { section: "finished" });
+        return [k.cancelledWords({ status: "done", set_aside: true }),
+          k.cancelledWords({ status: "cancelled" }),
+          cancelled("Cancelled by you."), cancelled("The bucket is gone."), cancelled("")];
+        """
+    )
+    assert found == [
+        "It had finished: set aside, its result is kept.",
+        "Task cancelled.",
+        "Cancelled by you.",
+        "Cancelled: The bucket is gone.",
+        "Cancelled",
+    ]

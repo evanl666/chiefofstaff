@@ -63,9 +63,9 @@ export function workerStates() {
 // worker shows in every section one of its tasks is in). See board.js.
 function board() {
   const mine = ownTasks();
-  // A result its worker drafted something for (a reply, a review) is reviewed on that card.
-  // Not a Ready-to-merge card: merging is its own decision, and the result's receipts (tests,
-  // CI) are what to look at before it.
+  // A result its worker drafted something for (a reply, a review) is reviewed on that card: its
+  // task's card goes in it (the first one about it). Not a Ready-to-merge card: merging is its
+  // own decision, and the result's receipts (tests, CI) are what to look at before it.
   const onCards = new Set(pendingDrafts().filter((draft) => draft.kind !== "merge").map(draftTask).filter((task) => task?.status === "review").map((task) => task.id));
   const workers = new Map([...sessions(), ...closedWorkers()].map((session) => [session.id, session]));
   const stallHours = state.snapshot.settings.stall_hours || 4;
@@ -241,9 +241,10 @@ function renderPanel() {
   // worker.
   const needBoxes = new Map();
   for (const task of items.tasks) needBoxes.set(task.session_id, [...(needBoxes.get(task.session_id) || []), task]);
+  const embedded = new Set();
   const needItems = [
     ...items.updates.map(updateItem),
-    ...items.drafts.map((draft) => draftItem(draft)),
+    ...items.drafts.map((draft) => draftItem(draft, tasks.phases, embedded)),
     ...items.uncertain.map((draft) => ({ key: `uncertain:${draft.id}:${draft.outcome}`, build: () => uncertainCard(draft) })),
     ...[...needBoxes].map(([sessionId, list]) => workerBoxItem("needs", sessionId, list, tasks.phases, editing, elsewhereOf(tasks.sections, "needs", sessionId))),
     ...items.questions.map(questionItem),
@@ -316,18 +317,39 @@ function draftTask(draft) {
   // The task it is on now, else one still open.
   return mine.find((task) => task.id === worker?.task?.task_id && ["running", "waiting", "review", "queued"].includes(task.status)) || mine.find((task) => ["running", "waiting", "review", "queued"].includes(task.status));
 }
-function draftItem(draft) {
+function draftItem(draft, phases, embedded = new Set()) {
   const task = draftTask(draft);
+  // A result shown on this card only (board.js: on its card): its own card goes in it, with its
+  // receipts, its news and its actions (Accept, Create PR…); once, on the first card about it.
+  const phase = task && !embedded.has(task.id) && phases.get(task.id);
+  const inner = phase && !phase.section && phase.marker ? taskItem(task, { ...phase, section: phase.marker === "report" ? "" : "needs" }) : null;
+  if (inner) embedded.add(task.id);
   return {
     key: draftKey(draft),
-    version: task ? `${task.id}:${task.status}:${task.updated_at}` : "",
-    build: () => withTask(draftCard(draft), task, draft),
-    refresh: (node) => withTask(node, task, draft),
+    version: task ? `${task.id}:${task.status}:${task.updated_at}${inner ? `:${inner.key}=${inner.version}` : ""}` : "",
+    build: () => withTask(draftCard(draft), task, draft, inner),
+    refresh: (node) => withTask(node, task, draft, inner),
   };
 }
-// Which task the card is about, with what it found folded under its title.
-function withTask(node, task, draft) {
-  const old = node.querySelector(":scope > .context");
+// Which task the card is about, with what it found folded under its title; a result it is the
+// only card of, as that task's card (`inner`), redrawn in place (a form open on it stays).
+function withTask(node, task, draft, inner = null) {
+  const old = node.querySelector(":scope > .context, :scope > .card.task");
+  if (task && inner) {
+    if (old?.dataset.key === inner.key) {
+      if (old.dataset.version !== inner.version) inner.refresh(old);
+      old.dataset.version = inner.version;
+    } else {
+      const result = inner.build();
+      result.classList.add("in-draft");
+      result.querySelector(":scope > .head .title")?.before(el("span", { class: "of", text: "Result of" }));
+      Object.assign(result.dataset, { key: inner.key, version: inner.version });
+      if (old) old.replaceWith(result);
+      else (node.querySelector(":scope > .pr-line") || node.querySelector(":scope > .head")).after(result);
+    }
+    node.dataset.task = task.id;
+    return node;
+  }
   if (!task) {
     // Not about a task: which worker asks, when it is one (a decision names its tasks itself).
     const worker = byId(draft.session_id);
@@ -454,6 +476,13 @@ function questionCard(question) {
       if (submits(event) && !event.shiftKey) {
         event.preventDefault();
         send();
+      }
+      // Escape closes it, as Cancel does.
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        show();
+        actions.querySelector("button")?.focus();
       }
     });
     actions.replaceChildren(input, error, el("button", { type: "button", class: "text", text: "Cancel", onclick: show }), el("button", { type: "button", text: "Send", onclick: send }));

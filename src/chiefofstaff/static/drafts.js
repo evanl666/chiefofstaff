@@ -183,7 +183,8 @@ function formFields(schema) {
 function requestCard(draft) {
   const target = draft.target;
   const error = el("span", { class: "error" });
-  const node = card(draft, `request ${draft.kind}`, REQUEST_LABELS[draft.kind], el("div", { class: "body markdown", html: markdown(draft.text) }));
+  const label = draft.kind === "form" && draft.target?.watch ? "New watch" : REQUEST_LABELS[draft.kind];
+  const node = card(draft, `request ${draft.kind}`, label, el("div", { class: "body markdown", html: markdown(draft.text) }));
   const decide = decider(draft, node, error);
   const decline = (text) => ({ text, onclick: () => decide({ action: "reject" }, "Declined.") });
   const link = (url, text) => (/^https?:\/\//.test(url) ? el("a", { class: "button", href: url, target: "_blank", rel: "noreferrer", text }) : null);
@@ -567,6 +568,9 @@ function prLine(pr) {
   return `${pr.title ? `“${pr.title}”` : "This PR"}${pr.author ? ` by @${pr.author}` : ""}${size}`;
 }
 const VERDICT_CHIP = { comment: "", approve: "done", request_changes: "waiting" };
+// What a review's card and view say: a review of someone's PR; on the owner's own PR, a reply to
+// its reviewers (comments only, no verdict).
+export const reviewWords = (target) => (target.own ? { label: "Reply on ", open: "Reply…", send: "Send reply" } : { label: "Review of ", open: "Review…", send: "" });
 // What a review with no summary posts: its line comments, the approval alone, or nothing (then
 // it needs one). `asked`: as the summary box's placeholder, what to do.
 function emptySummary(review, asked = false) {
@@ -593,7 +597,7 @@ function reviewCard(draft) {
   const node = card(
     draft,
     "github pr-review",
-    ["Review of ", pr],
+    [reviewWords(target).label, pr],
     target.pr ? el("div", { class: "pr-line", title: target.pr.about || "", text: prLine(target.pr) }) : null,
     draft.outcome ? el("div", { class: "note", text: draft.outcome }) : null,
     preview,
@@ -628,7 +632,7 @@ function reviewCard(draft) {
         { text: "Ask to redo…", onclick: () => redoForm(actions, decide, show) },
         { text: "Reject…", onclick: () => rejectForm(actions, decide, show) },
       ]),
-      el("button", { type: "button", text: "Review…", onclick: open }),
+      el("button", { type: "button", text: reviewWords(target).open, onclick: open }),
     );
   show();
   refresh();
@@ -663,7 +667,7 @@ function reviewView(draft, review, { decide, refresh }) {
   if (verdict) verdict.value = review.verdict;
   const send = el("button", { type: "button", class: "send" });
   const named = () => {
-    send.textContent = VERDICTS[review.verdict][1];
+    send.textContent = reviewWords(target).send || VERDICTS[review.verdict][1];
   };
   verdict?.addEventListener("change", () => {
     review.verdict = verdict.value;
@@ -685,11 +689,11 @@ function reviewView(draft, review, { decide, refresh }) {
   }
   const dialog = el(
     "dialog",
-    { class: "review-dialog", "data-draft": draft.id, "aria-label": `Review of ${target.repo}#${target.number}` },
+    { class: "review-dialog", "data-draft": draft.id, "aria-label": `${reviewWords(target).label}${target.repo}#${target.number}` },
     el(
       "header",
       {},
-      el("div", { class: "title" }, el("h2", {}, el("span", { text: "Review of" }), el("a", { href: target.url, target: "_blank", rel: "noreferrer", title: "Open on GitHub", text: `${target.repo}#${target.number} ↗` })), close),
+      el("div", { class: "title" }, el("h2", {}, el("span", { text: reviewWords(target).label.trim() }), el("a", { href: target.url, target: "_blank", rel: "noreferrer", title: "Open on GitHub", text: `${target.repo}#${target.number} ↗` })), close),
       target.pr ? el("p", { class: "pr-line", text: prLine(target.pr) }) : null,
       about,
     ),

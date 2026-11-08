@@ -2,7 +2,7 @@
 
 import { api, el, foldable, moreMenu, once, reconcile, submits, toast } from "./dom.js";
 import { MARKERS, SECTION_DOT, SECTIONS, taskPhase, workerContext } from "./board.js";
-import { ago, changesText, compactPaths, displayPath, gist, linkName, markdown, notCountedText, plural, prTitle, shorten, since, taskLinks } from "./text.js";
+import { ago, changesText, compactPaths, displayPath, gist, linkName, markdown, notCountedText, plural, prTitle, shorten, since, taskLinks, threadLabel } from "./text.js";
 import { isHidden, prStatus, setHidden, toneOf } from "./artifacts.js";
 import { openFile } from "./files.js";
 import { byId, closedWorkers, ownerQuestions, pendingDrafts, sessions, state, tasks } from "./state.js";
@@ -100,6 +100,11 @@ const undoUntil = (task) => (task.split_from?.until && Date.parse(task.split_fro
 // A report that only informs, not read yet.
 const unread = (task, phase) => phase.marker === "report" && !task.read;
 const REPORT_HELP = "Only a report: nothing to accept. Done once read.";
+// The longest title the server keeps (clean_title).
+const TITLE_MAX = 80;
+// What cancelling came to, as the server has the task after it: one that had finished is set
+// aside (its result kept), not cancelled.
+export const cancelledWords = (view) => (view?.set_aside ? "It had finished: set aside, its result is kept." : "Task cancelled.");
 // The key covers what changes a card's actions and layout; the version, what only its text.
 // `phase`: where it is on the board ({section, marker, why}: see board.js).
 export function taskItem(task, phase = phaseOf(task)) {
@@ -292,11 +297,16 @@ function taskCard(task, phase = phaseOf(task)) {
       upsertTask(view);
       // After the board is redrawn: a card that moved is gone by then; one that stays shows.
       requestAnimationFrame(() => requestAnimationFrame(() => node.classList.remove("leaving")));
-      if (done) toast(done);
+      // What it came to, as the server has it now (a cancelled task that had finished is set
+      // aside, say), when `done` asks.
+      const said = typeof done === "function" ? done(view) : done;
+      if (said) toast(said);
     } catch (failure) {
       state.leaving.delete(key);
       node.classList.remove("leaving");
       error.textContent = failure.message;
+      // Redrawn meanwhile (it finished as the owner cancelled it, say): why, where it is seen.
+      if (!error.isConnected) toast(failure.message, "error");
       for (const button of actions.querySelectorAll("button")) button.disabled = false;
       renderSidebar();
       scheduleHome();
@@ -314,6 +324,14 @@ function taskCard(task, phase = phaseOf(task)) {
     place();
     input.focus();
   }
+  // Escape closes a form opened on it (an answer, why to cancel, a new title), as Cancel does.
+  actions.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || !actions.dataset.editing) return;
+    event.preventDefault();
+    event.stopPropagation();
+    showActions();
+    actions.querySelector("button:not(:disabled)")?.focus();
+  });
   // Live and finished cards keep their "⋯" in the head, on one line with the title; a form
   // the owner opens takes a line of its own.
   function place() {
@@ -329,12 +347,13 @@ function taskCard(task, phase = phaseOf(task)) {
   }
   function confirmCancel() {
     const reason = el("input", { placeholder: "Why? (optional)" });
-    form(reason, "Cancel task", () => act(`/api/tasks/${task.id}/cancel`, { text: reason.value.trim() }, "Task cancelled."));
+    form(reason, "Cancel task", () => act(`/api/tasks/${task.id}/cancel`, { text: reason.value.trim() }, cancelledWords));
     actions.lastElementChild.className = "danger";
     actions.querySelector(".text").textContent = "Keep it";
   }
   function rename() {
-    const input = el("input", { value: task.title, "aria-label": "Title", placeholder: "What it delivers · repo#PR" });
+    // As long as the server keeps a title: not cut off there mid-word.
+    const input = el("input", { value: task.title, "aria-label": "Title", placeholder: "What it delivers · repo#PR", maxlength: TITLE_MAX, title: `At most ${TITLE_MAX} characters` });
     form(input, "Rename", () => input.value.trim() && act(`/api/tasks/${task.id}/rename`, { text: input.value.trim() }, "Renamed.", false));
     input.select();
   }
@@ -565,12 +584,12 @@ const waitsOnOwner = (task, worker) => {
   const { drafts, questions } = ownerItems(task, worker);
   return [...drafts.map((draft) => draft.id), ...questions.map((question) => question.at)].join(",");
 };
-// A thread its worker follows, as a link to it: a PR on GitHub, a Slack thread when its link is
-// known.
+// A thread its worker follows, as a link to it: a PR on GitHub, a Slack conversation when its
+// link is known.
 function watchingChip(key) {
   const pr = /^github:([^/#]+\/[^#]+)#(\d+)$/.exec(key);
   const title = pr ? prTitle(`${pr[1]}#${pr[2]}`) : "";
-  const label = pr ? `${pr[1].split("/")[1]}#${pr[2]}${title ? ` · ${shorten(title, 36)}` : ""}` : key.startsWith("slack:") ? "a Slack thread" : key;
+  const label = pr ? `${pr[1].split("/")[1]}#${pr[2]}${title ? ` · ${shorten(title, 36)}` : ""}` : threadWords(key);
   const href = pr ? `https://github.com/${pr[1]}/pull/${pr[2]}` : state.snapshot?.thread_links?.[key] || "";
   const help = `It follows ${key}${title ? ` (“${title}”)` : ""}: what happens there comes to it`;
   if (!href) return el("span", { class: "receipt watching", title: help, text: `Watching ${label}` });
@@ -584,14 +603,14 @@ export function artifacts(task, worker = byId(task.session_id), { active = true 
   items.push(...links.main);
   if (active && worker) {
     const onChips = new Set((task.receipts?.prs || []).filter((pr) => pr.own || pr.reviewed).map((pr) => pr.label.toLowerCase()));
-    for (const key of task.watching || []) {
+    for (const key of followedOnce(task.watching || [])) {
       const pr = /^github:(.+)$/.exec(key)?.[1];
       if (pr && onChips.has(pr.toLowerCase())) continue;
       items.push(watchingChip(key));
     }
   }
   // A thread it cannot read is not something it waits on: said, with a way to let it go.
-  for (const key of task.watch_failing || []) items.push(failingChip(key, task));
+  for (const key of followedOnce(task.watch_failing || [])) items.push(failingChip(key, task));
   const { drafts, questions } = ownerItems(task, worker);
   for (const draft of drafts) items.push(el("button", { type: "button", class: "receipt needs", title: "Waiting for you under Needs you", text: `${WAITS_WORDS[draft.kind] || "Draft"} · Needs you`, onclick: () => focusDraft(draft.id) }));
   for (const question of questions) items.push(el("button", { type: "button", class: "receipt needs", title: question.text, text: "Question · Needs you", onclick: () => focusQuestion(question.id) }));
@@ -611,7 +630,7 @@ function prChips(task) {
   return { shown, own, mentioned };
 }
 function failingChip(key, task) {
-  const label = key.replace(/^github:[^/]+\//, "").replace(/^slack:.*/, "a Slack thread");
+  const label = threadWords(key);
   const chip = el("span", { class: "receipt warn failing", title: `It follows ${key} for this task, but it could not be read several times in a row: nothing there reaches it` }, `Can't read ${label} · `);
   chip.append(
     el("button", {
@@ -717,7 +736,7 @@ function waitWords(task, worker, phase) {
     if (back.error) text += ` · could not wake it last time (${back.error}); trying again`;
     help = "It said when to look again; it is woken then";
   } else if (["watching", "delivered", "reviewed"].includes(marker) && (task.watching || []).length) {
-    const what = task.watching.map((key) => watchedWords(key, task)).join("; ");
+    const what = followedOnce(task.watching).map((key) => watchedWords(key, task)).join("; ");
     text = `${marker === "watching" ? "Waiting on" : marker === "reviewed" ? "Reviewed; following" : "Delivered; still following"} ${what}`;
     help = marker === "reviewed" ? "A PR you reviewed: its author's next push or reply wakes its worker" : "News there (a review, CI, a reply, the merge) wakes its worker";
   } else if (marker === "queued") {
@@ -748,11 +767,11 @@ function rowLine(task, worker, phase) {
 }
 // What a row says on its second line: what it waits on, or what it came to.
 const rowWhy = (task, worker, phase) => (phase.section === "monitoring" ? waitWords(task, worker, phase) : { text: finishedWords(task, phase), help: "" });
-// What a finished task came to, in its first words.
-function finishedWords(task, phase) {
+// What a finished task came to, in its first words ("Cancelled by you." is not said twice).
+export function finishedWords(task, phase) {
   if (phase.marker === "still-following") return phase.why;
   const said = gist(task.result || task.progress || "");
-  if (task.status === "cancelled") return said ? `Cancelled: ${said}` : "Cancelled";
+  if (task.status === "cancelled") return !said ? "Cancelled" : /^cancel/i.test(said) ? said : `Cancelled: ${said}`;
   return said || phase.why || "";
 }
 // The main thing a task made, in a word or two: its PR, else the PR it follows, else the first
@@ -766,10 +785,11 @@ function mainArtifact(task) {
   const made = taskLinks(task).find((link) => ["output", "run"].includes(link.role) && !isHidden(link.key, toneOf(link.said?.status)));
   return made ? shorten(linkName(made), 32) : "";
 }
-// A thread it follows, in words: "app#594 · Fix the Spark dependency (awaiting approval)".
+// A thread it follows, in words: "app#594 · Fix the Spark dependency (awaiting approval)"; a
+// Slack conversation by its name.
 function watchedWords(key, task) {
   const match = /^github:([^/#]+\/[^#]+)#(\d+)$/.exec(key);
-  if (!match) return key.startsWith("slack:") ? "a Slack thread" : key;
+  if (!match) return threadWords(key);
   const label = `${match[1]}#${match[2]}`.toLowerCase();
   const pr = (task.receipts?.prs || []).find((item) => item.label.toLowerCase() === label);
   const title = pr?.title || prTitle(label);
@@ -780,8 +800,29 @@ function watchedWords(key, task) {
 // A worker between turns on a running task: how long it has been quiet, and what it follows.
 function quiet(worker) {
   if (!worker) return "Starting…";
-  const follows = (worker.follows || []).map((key) => key.replace(/^github:[^/]+\//, "").replace(/^slack:.*/, "a Slack thread"));
+  const follows = followedOnce(worker.follows || []).map(threadWords);
   return [`Quiet since ${since(worker.updated_at)}`, follows.length ? `follows ${follows.slice(0, 2).join(", ")}` : ""].filter(Boolean).join(" · ");
+}
+// A thread it follows in a few words: a PR as "app#7"; a Slack conversation by its name, as
+// Slack shows it ("DM with Bob", "a thread in #eng").
+export function threadWords(key) {
+  if (!key.startsWith("slack:")) return key.replace(/^github:[^/]+\//, "");
+  const label = threadLabel(key);
+  return label === "Slack DM" ? "a Slack DM" : label.replace(/^Slack thread in /, "a thread in ").replace(/^Slack /, "");
+}
+// The threads it follows, each once: a thread in a Slack conversation it follows as a whole is
+// that conversation, and two Slack threads that read the same are one.
+export function followedOnce(keys) {
+  const whole = new Set(keys.filter((key) => /^slack:[^:]+$/.test(key)));
+  const seen = new Set();
+  return keys.filter((key) => {
+    const conversation = /^slack:([^:]+):/.exec(key)?.[1];
+    if (conversation && whole.has(`slack:${conversation}`)) return false;
+    const words = key.startsWith("slack:") ? threadWords(key) : key;
+    if (seen.has(words)) return false;
+    seen.add(words);
+    return true;
+  });
 }
 // News about finished work (its PR approved or merged, a reply handled), in sight until seen.
 function newsBlock(task) {

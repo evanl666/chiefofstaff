@@ -76,6 +76,85 @@ SLACK_DM_HINT = (
 SEND_WORDS = {"send", "ok", "okay", "yes", "y", "approve", "lgtm", "发", "发送", "好", "可以"}
 REJECT_WORDS = {"reject", "no", "n", "skip", "don't", "dont", "不", "不要", "拒绝"}
 GO_ON_WORDS = {"go on", "go", "continue", "resume", "继续"}
+# What else a short send may say ("yes, send it", "go ahead and send", "好的 发吧").
+SEND_FILLER = {
+    "it", "pls", "please", "plz", "now", "go", "ahead", "and", "sure", "yep", "yeah", "yup",
+    "thanks", "thx", "ty", "just", "this", "that", "one", "reply", "out", "send it",
+}  # fmt: skip
+SEND_PHRASES = {"发吧", "发送吧", "发出去", "发了吧", "好的", "可以发", "行", "没问题", "嗯"}
+# Words that hold a send back ("do not send", "ok wait", "not yet, send later").
+HOLD_WORDS = {
+    "not", "no", "don't", "dont", "never", "nope", "wait", "hold", "later", "yet", "stop",
+    "until", "tomorrow", "before", "after",
+}  # fmt: skip
+# A short "don't send": nothing but a no and a send (dropped, as "no" is).
+NO_SEND_WORDS = {"do", "not", "don't", "dont", "never", "no", "send", "it", "this", "please", "pls"}
+# Chinese, written without spaces ("好的发吧", "可以发了"): read by its parts, not by words.
+CJK_HOLDS = ("先别", "先不", "别", "不", "等", "稍后", "晚点", "暂", "慢")  # "先别发": not yet.
+CJK_NO = {
+    "别发",
+    "不要发",
+    "不发",
+    "不用发",
+    "别发了",
+    "不用了",
+    "不要了",
+    "别",
+    "不要",
+    "不",
+    "算了",
+}
+CJK_SENDS = ("没问题", "可以", "发送", "发出去", "发", "好", "行", "嗯", "对")
+CJK_FILLER = ("吧", "了", "的", "啊", "呀", "哈", "吗", "就", "直接", "出去", "一下")
+CJK = re.compile(r"[\u3400-\u9fff]")
+
+
+def cjk_answer(text: str) -> str:
+    """send_answer for an answer in Chinese."""
+    plain = re.sub(r"[\W_]+", "", text)
+    if not plain or len(plain) > 8:
+        return ""
+    if plain in CJK_NO:
+        return "no"
+    if any(hold in plain for hold in CJK_HOLDS):
+        rest = plain
+        for part in (*CJK_HOLDS, *CJK_SENDS, *CJK_FILLER):
+            rest = rest.replace(part, "")
+        return "" if rest else "unclear"  # "先别发", "等等": held; more words: what to change.
+    rest, sends = plain, False
+    for part in CJK_SENDS:
+        sends = sends or part in rest
+        rest = rest.replace(part, "")
+    for part in CJK_FILLER:
+        rest = rest.replace(part, "")
+    return "send" if sends and not rest else ""
+
+
+def send_answer(word: str) -> str:
+    """What a short answer to a draft says: "send", "no", "unclear" (a send held back:
+    "ok wait", "not yet, send later", "先别发"), or "" (something else: what to change)."""
+    word = word.replace("\u2019", "'")  # A phone's "don\u2019t".
+    if word in REJECT_WORDS:
+        return "no"
+    if CJK.search(word) and not re.search(r"[A-Za-z]", word):
+        return cjk_answer(word)
+    said = re.findall(r"[\w']+", word)
+    if not said or len(said) > 5:
+        return ""
+    tokens = set(said)
+    plain = SEND_WORDS | SEND_PHRASES | SEND_FILLER | {"send"}
+    if tokens & HOLD_WORDS:
+        if tokens <= NO_SEND_WORDS and "send" in tokens:
+            return "no"
+        # Nothing in it but a send and a hold: not a send, and nothing to change either.
+        if all(token in plain | HOLD_WORDS for token in tokens):
+            return "unclear"
+        return ""
+    if tokens & (SEND_WORDS | SEND_PHRASES) and tokens <= plain:
+        return "send"
+    return ""
+
+
 CANCEL_WORDS = {"cancel", "取消"}
 HID_IDLE = re.compile(r'"HIDIdleTime" = (\d+)')
 
@@ -1192,10 +1271,12 @@ class Connector:
                     return "left as it is"
                 raise ValueError('answer "merge" or "no"')
             if kind in {"slack", "github", "reply"}:
-                said = set(re.findall(r"[\w']+", word))
-                # "yes, send it", "send pls", "ok 👍": a send in a few words.
-                if said & SEND_WORDS and not said & REJECT_WORDS and len(said) <= 4:
-                    word = "send"
+                # "yes, send it", "send pls", "ok 👍", "好的 发吧": a send in a few words; "do not
+                # send" is a no; "ok wait", "not yet, send later" are not a send.
+                meant = send_answer(word)
+                if meant == "unclear":
+                    raise ValueError('not sent: answer "send" when it should go, or "no"')
+                word = {"send": "send", "no": "no"}.get(meant, word)
                 if word in SEND_WORDS:
                     await drafts.resolve(draft["id"], DraftDecision(action="send"))
                     return "sent" if kind != "reply" else "marked as sent"

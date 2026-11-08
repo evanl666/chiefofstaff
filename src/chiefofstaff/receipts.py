@@ -132,15 +132,36 @@ NOTHING_AFTER = re.compile(r"\s+(nothing|none|no\s)", re.I)
 
 # Changed by someone else, or before: "it was already fixed upstream", "fixed by Bob in #12".
 NOT_ITS_OWN = re.compile(r"\balready\b|\bupstream\b|\bby (someone|another|other|@?[A-Z]\w+)\b")
+# What it heard or believes was done (to a library, in a release), not what it did: "I believe
+# the pure-Python mode was removed", "it seems it was renamed in v2".
+HEDGED = re.compile(
+    r"\b(believe|think|seems?|apparently|reportedly|according|probably|likely|docs|changelog)\b"
+    r"|\b(in|since) (v\d|version|release)",
+    re.I,
+)
+PASSIVE = re.compile(r"\b(was|were|been|is|are|got)\s+(\w+\s+)?$", re.I)
+# A report that says outright it changed nothing (whatever its prose mentions as changed).
+CHANGED_NOTHING = re.compile(
+    r"\b(no (code|files?|changes?) (was|were|has been|have been) (written|changed|modified|made)"
+    r"|nothing (was|has been) (changed|modified|written|edited)"
+    r"|(did not|didn't|have not|haven't) (change|modify|write|edit|touch) "
+    r"(anything|any (code|files?))"
+    r"|made no changes|no changes (were )?made)\b",
+    re.I,
+)
 
 
 def says_changed(report: str) -> bool:
     """Whether a report claims changes: "I added a test", not "No files were changed" or
     "it was already fixed upstream"."""
+    if CHANGED_NOTHING.search(report):
+        return False
     for match in SAYS_CHANGED.finditer(report):
         clause = re.split(r"[.!?;:,\n]", report[max(0, match.start() - 80) : match.start()])[-1]
         rest = re.split(r"[.!?;:,\n]", report[match.end() : match.end() + 60])[0]
         if NEGATED.search(clause) or NOTHING_AFTER.match(report, match.end()):
+            continue
+        if PASSIVE.search(clause) and HEDGED.search(f"{clause} {rest}"):
             continue
         if NOT_ITS_OWN.search(clause[-20:]) or NOT_ITS_OWN.match(rest.strip()):
             continue
@@ -254,7 +275,7 @@ def shown_command(command: str, name: str) -> str:
         (i for i, words in enumerate(parts) if pattern and pattern.search(program(words))), -1
     )
     if at < 0:
-        return command[:200]
+        return shown(command)
     words, kept = parts[at], []
     skip = False
     for index, word in enumerate(words):
@@ -270,7 +291,7 @@ def shown_command(command: str, name: str) -> str:
     where = next((ws[1] for ws in reversed(parts[:at]) if len(ws) == 2 and ws[0] == "cd"), "")
     if where:
         text = f"cd {shlex.quote(where)} && {text}"
-    return text[:200]
+    return shown(text)
 
 
 def kind(command: str) -> str:
@@ -484,24 +505,52 @@ def failed_there(evidence: str, command: str) -> bool:
     return any(words(snippet) == last for snippet in quoted)
 
 
-def criteria_results(criteria: list[str], claims: list[dict], commands: list[dict]) -> list[dict]:
+def claimed(criteria: list[str], claims: list[dict]) -> list[dict | None]:
+    """Each criterion's claim: the one naming it, else the one reported in its place (in its
+    own words)."""
+
+    def plain(text: object) -> str:
+        return " ".join(str(text).lower().split())
+
+    by_text = {plain(claim.get("criterion", "")): index for index, claim in enumerate(claims)}
+    chosen = [by_text.get(plain(criterion)) for criterion in criteria]
+    for index, found in enumerate(chosen):
+        if found is None and index < len(claims) and index not in chosen:
+            chosen[index] = index  # Reported in order, in its own words.
+    return [claims[found] if found is not None else None for found in chosen]
+
+
+def shown(command: str, limit: int = 200) -> str:
+    """A command line cut to `limit` characters, the cut marked."""
+    return command if len(command) <= limit else command[: limit - 1].rstrip() + "\u2026"
+
+
+def criteria_results(
+    criteria: list[str],
+    claims: list[dict],
+    commands: list[dict],
+    earlier: list[dict] | None = None,
+    since: str = "",
+) -> list[dict]:
     """Each acceptance criterion with what the worker reported and what backs it.
 
     state: verified (met, and an observed command shows it), contradicted (met, but that command
     failed), claimed (met, with nothing observed to show it), not_met or not_checked.
+    `earlier`: an earlier result's claims, for the criteria the latest report left out or did
+    not check (a follow-up's): one met stands, marked `earlier`, verified only while what backs
+    it holds (it passed as last run, after `since` when the code changed since then).
     """
-
-    def words(text: object) -> str:
-        return " ".join(str(text).lower().split())
-
-    by_text = {words(claim.get("criterion", "")): index for index, claim in enumerate(claims)}
-    chosen = [by_text.get(words(criterion)) for criterion in criteria]
-    for index, found in enumerate(chosen):
-        if found is None and index < len(claims) and index not in chosen:
-            chosen[index] = index  # Reported in order, in its own words.
     results = []
-    for criterion, found in zip(criteria, chosen, strict=True):
-        claim = claims[found] if found is not None else None
+    for criterion, claim, before in zip(
+        criteria, claimed(criteria, claims), claimed(criteria, earlier or []), strict=True
+    ):
+        carried = bool(
+            before
+            and before.get("result") == "met"
+            and (not claim or (claim.get("result") or "not_checked") == "not_checked")
+        )
+        if carried:
+            claim = before
         result = (claim or {}).get("result") or "not_checked"
         proof = (claim or {}).get("evidence", "")
         observed = backing(proof, commands) if result == "met" else None
@@ -518,14 +567,23 @@ def criteria_results(criteria: list[str], claims: list[dict], commands: list[dic
             else:
                 failed = failed_there(proof, observed["command"]) if observed else False
                 state = "contradicted" if failed else "claimed"
+        if (
+            carried
+            and state == "verified"
+            and since
+            and observed
+            and not after(observed.get("ended_at") or "", since)
+        ):
+            state = "claimed"  # Checked on the code as it was before.
         results.append(
             {
                 "criterion": criterion,
                 "result": result,
                 "evidence": proof[:500],
                 "state": state,
-                "command": observed["command"][:200] if observed else "",
+                "command": shown(observed["command"]) if observed else "",
                 "exit_code": observed["exit_code"] if observed else None,
+                "earlier": carried,
             }
         )
     return results
@@ -566,9 +624,11 @@ def summarize(
     report: str,
     criteria: list[str] | None = None,
     claims: list[dict] | None = None,
+    earlier: list[dict] | None = None,
+    since: str = "",
 ) -> dict:
     """The receipts for a task: observed commands, changes and PRs, the acceptance criteria and
-    what backs them, and what disagrees."""
+    what backs them, and what disagrees. `earlier`, `since`: see criteria_results."""
     commands = list(commands)
     evidence = evidence or {}
     by_kind: dict[str, list[dict]] = {}
@@ -648,7 +708,7 @@ def summarize(
         if pr.get("checks") == "failing" and pr.get("state") not in {"CLOSED", "MERGED"}:
             names = ", ".join(pr.get("failing") or [])
             flags.append(f"Checks are failing on {pr['label']}" + (f": {names}." if names else "."))
-    results = criteria_results(criteria or [], claims or [], commands)
+    results = criteria_results(criteria or [], claims or [], commands, earlier, since)
     for item in results:
         if item["state"] == "contradicted":
             flags.append(

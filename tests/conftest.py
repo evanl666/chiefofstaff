@@ -167,6 +167,9 @@ class FakeClient:
         return login.authorization_url
 
     async def create_session(self, *, session_id, name, **options):
+        if '"' in (name or ""):  # As Copilot does.
+            raise RuntimeError("session construction failed: Session name must not contain "
+                               "double quotes.")  # fmt: skip
         session = FakeSession(session_id, options)
         self.sessions[session_id] = session
         self.created.append(session_id)

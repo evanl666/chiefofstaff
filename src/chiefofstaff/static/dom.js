@@ -3,27 +3,48 @@
 import { byId } from "./state.js";
 import { select } from "./session.js";
 export const $ = (selector) => document.querySelector(selector);
+// Controls that reorder the text after them (embeddings, overrides and isolates: U+202A–U+202E,
+// U+2066–U+2069): "\u202Eoverride" would read "edirrevo". Shown text goes without them;
+// right-to-left letters, marks (U+200E, U+200F) and joiners (U+200C, U+200D) stay.
+const BIDI_CONTROLS = /[\u202A-\u202E\u2066-\u2069]/g;
+export const withoutBidi = (text) => String(text ?? "").replace(BIDI_CONTROLS, "");
+const SHOWN = new Set(["title", "data-tip", "placeholder"]);
 export function el(tag, props = {}, ...children) {
   const node = document.createElement(tag);
   for (const [key, value] of Object.entries(props)) {
     if (value === undefined || value === null || value === false) continue;
     if (key === "class") node.className = value;
-    else if (key === "text") node.textContent = value;
-    else if (key === "html") node.innerHTML = value;
+    else if (key === "text") node.textContent = withoutBidi(value);
+    else if (key === "html") node.innerHTML = withoutBidi(value);
     else if (key.startsWith("on")) node.addEventListener(key.slice(2), value);
-    else node.setAttribute(key, value === true ? "" : value);
+    else node.setAttribute(key, value === true ? "" : SHOWN.has(key) ? withoutBidi(value) : value);
   }
   for (const child of children.flat()) {
-    if (child !== null && child !== undefined && child !== false) node.append(child);
+    if (child !== null && child !== undefined && child !== false) node.append(typeof child === "string" ? withoutBidi(child) : child);
   }
   return node;
 }
 function errorText(data, status) {
   if (typeof data.detail === "string") return data.detail;
   if (Array.isArray(data.detail)) {
-    return data.detail.map((item) => (item.type === "string_too_long" && item.ctx?.max_length ? tooLongText(item) : String(item.msg).replace(/^Value error, /, ""))).join("; ");
+    return data.detail.map((item) => (item.type === "string_too_long" && item.ctx?.max_length ? tooLongText(item) : problemText(item))).join("; ");
   }
   return `Request failed (${status})`;
+}
+// One of the server's validation problems, with the field it is about as the page names it
+// ("Parallel workers: Input should be greater than or equal to 1"). A problem the server worded
+// itself ("Value error, …") says what it is about.
+function problemText(item) {
+  const text = String(item.msg).replace(/^Value error, /, "");
+  const name = (Array.isArray(item.loc) ? item.loc : []).find((part, index) => typeof part === "string" && !(index === 0 && ["body", "query", "path"].includes(part)));
+  if (!name || item.type === "value_error") return text;
+  return `${fieldLabel(name)}: ${text}`;
+}
+function fieldLabel(name) {
+  const field = /^[\w-]+$/.test(name) ? document.querySelector(`[name="${name}"]`) : null;
+  const label = field?.closest?.("label");
+  const shown = (label?.querySelector("span") || label)?.textContent?.trim() || field?.getAttribute?.("aria-label") || "";
+  return shown || `${name[0].toUpperCase()}${name.slice(1).replace(/_/g, " ")}`;
 }
 // The server's "String should have at most 20000 characters", in words.
 function tooLongText({ input, ctx }) {

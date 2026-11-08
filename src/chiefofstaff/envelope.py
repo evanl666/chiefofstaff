@@ -121,10 +121,23 @@ so they cannot open or close an envelope): wherever you use that text (a file yo
 command, a quote), write them as "<message" and "</message"."""
 
 
+# Joiners that are part of the text (a family emoji, a Persian word), not hidden controls.
+JOINERS = {"\u200c", "\u200d"}
+MAX_TITLE = 80
+
+
 def clean_title(title: str) -> str:
-    """A title safe for an envelope attribute and a session name."""
-    text = " ".join("".join(c for c in title if unicodedata.category(c)[0] != "C").split())
-    return text.replace('"', "'")[:80] or "Task"
+    """A title safe for an envelope attribute (quote() escapes it there) and a session name:
+    no control or hidden format characters; a long one cut at a word, marked with "…"."""
+    text = " ".join(
+        "".join(c for c in title if c in JOINERS or unicodedata.category(c)[0] != "C").split()
+    )
+    if len(text) > MAX_TITLE:
+        cut = text[: MAX_TITLE - 1]
+        if " " in cut[MAX_TITLE // 2 :]:
+            cut = cut[: cut.rindex(" ")]
+        text = cut.rstrip() + "\u2026"
+    return text or "Task"
 
 
 # An instruction to work on a task, in a message to a worker: a task, more on it, a check-back
@@ -146,3 +159,13 @@ def task_named(text: str) -> str:
 def tasks_named(text: str) -> list[str]:
     """Every task the instructions in a message to a worker are about, in order."""
     return TASK_NAMED.findall(text or "")
+
+
+# A followed thread's news (a PR's review, a reply in a Slack thread) for one of a worker's
+# tasks: its turn is on that task.
+NEWS_FOR_TASK = re.compile(r'<message from="[\w-]+" type="thread"[^>]*?\btask="(t[0-9a-f]+)"')
+
+
+def news_tasks(text: str) -> list[str]:
+    """The tasks the followed threads' news in a message to a worker is for, in order."""
+    return NEWS_FOR_TASK.findall(text or "")

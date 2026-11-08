@@ -2,7 +2,7 @@
 
 import { $, api, closeMenus, closeOnBackdrop, rememberKey, submits, toast } from "./dom.js";
 import { byId, connectEvents, current, HOME, loadModels, loadState, markRead, routerId, state, viewedId } from "./state.js";
-import { externalItem, loadExternal } from "./sidebar.js";
+import { externalItem, bindSidebarToggle, loadExternal } from "./sidebar.js";
 import { appendMessages, renderHeader, scrollToBottom, select } from "./session.js";
 import { closeMentions, mention, onComposerInput, onMentionKey, routerSide, setRecipient } from "./mention.js";
 import { openFile } from "./files.js";
@@ -106,6 +106,7 @@ function bindUi() {
     const session = chip.closest("[data-session]")?.dataset.session || viewedId() || "";
     openFile(chip.dataset.path, session);
   });
+  bindMenuKeys();
   $("#settings-button").addEventListener("click", () => openSettings());
   $("#back-home").addEventListener("click", () => select(HOME));
   $("#session-more-button").addEventListener("click", (event) => {
@@ -141,6 +142,47 @@ function bindUi() {
   // Running cards say how long a step has taken: refreshed while Home is shown.
   setInterval(scheduleHome, 30000);
 }
+// The "⋯" menus (dom.js moreMenu) from the keyboard: opened with Enter, Space or an arrow key,
+// the focus is on an item; arrow keys, Home and End move among them; Escape closes it with the
+// focus back on its button, Tab closes it and goes on.
+const MENU_BUTTON = ".menu-wrap > button[aria-haspopup]";
+const menuItems = (menu) => (menu && !menu.hidden ? [...menu.querySelectorAll('[role="menuitem"]:not(:disabled)')] : []);
+function bindMenuKeys() {
+  // Before the button's own click (which stops it there), then once its menu shows.
+  document.addEventListener("click", (event) => {
+    const button = event.target.closest?.(MENU_BUTTON);
+    if (button && event.detail === 0) requestAnimationFrame(() => menuItems(button.nextElementSibling)[0]?.focus());
+  }, true);
+  document.addEventListener("keydown", (event) => {
+    const button = event.target.closest?.(MENU_BUTTON);
+    if (button && ["ArrowDown", "ArrowUp"].includes(event.key)) {
+      event.preventDefault();
+      if (button.nextElementSibling?.hidden) button.click();
+      const items = menuItems(button.nextElementSibling);
+      items[event.key === "ArrowUp" ? items.length - 1 : 0]?.focus();
+      return;
+    }
+    const menu = event.target.closest?.('[role="menu"]');
+    if (!menu) return;
+    const items = menuItems(menu);
+    const opener = menu.parentElement?.querySelector(`:scope > button[aria-haspopup]`);
+    if (event.key === "Escape") {
+      event.preventDefault();
+      menu.hidden = true;
+      opener?.focus();
+      return;
+    }
+    if (event.key === "Tab") {
+      menu.hidden = true;
+      return;
+    }
+    const at = items.indexOf(event.target);
+    const next = { ArrowDown: at + 1, ArrowUp: at - 1, Home: 0, End: items.length - 1 }[event.key];
+    if (next === undefined || !items.length) return;
+    event.preventDefault();
+    items[(next + items.length) % items.length].focus();
+  });
+}
 async function boot() {
   const token = new URLSearchParams(location.hash.slice(1)).get("token");
   if (token) {
@@ -155,6 +197,7 @@ async function boot() {
   }
   $("#application").hidden = false;
   bindUi();
+  bindSidebarToggle();
   bindSplitter();
   closeOnBackdrop();
   connectEvents();

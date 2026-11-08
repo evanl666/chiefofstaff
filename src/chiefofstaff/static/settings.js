@@ -104,8 +104,9 @@ export function bindSettings() {
   $("#plugins-retry").addEventListener("click", () => settingsAction("/api/plugins/retry", "Retrying the plugins that failed."));
   $("#settings-form").mcp_servers.addEventListener("input", () => {
     try {
-      mcpServers();
-      $("#mcp-error").hidden = true;
+      const note = mcpNote(mcpServers());
+      $("#mcp-error").textContent = note;
+      $("#mcp-error").hidden = !note;
     } catch (error) {
       $("#mcp-error").textContent = error.message;
       $("#mcp-error").hidden = false;
@@ -276,6 +277,7 @@ export function slackStatusText() {
 export function fillSettings() {
   const form = $("#settings-form");
   const settings = state.snapshot.settings;
+  shown = JSON.parse(JSON.stringify(settings));
   form.projects.value = settings.projects.join("\n");
   form.code_folder.value = settings.code_folder;
   form.scratch_directory.value = settings.scratch_directory;
@@ -338,9 +340,11 @@ export function fillSettings() {
   form.report_footer.closest("label").hidden = !("report_footer" in settings);
   form.skill_folders.value = (settings.skill_folders || []).join("\n");
   form.plugins.value = (settings.plugins || []).join("\n");
-  const servers = settings.mcp_servers || {};
+  // Those off (saved, but Copilot would refuse them) are shown with the others, to be fixed.
+  const servers = { ...(settings.mcp_servers || {}), ...(settings.mcp_servers_off || {}) };
   form.mcp_servers.value = Object.keys(servers).length ? JSON.stringify(servers, null, 2) : "";
-  $("#mcp-error").hidden = true;
+  $("#mcp-error").textContent = mcpNote(servers);
+  $("#mcp-error").hidden = !$("#mcp-error").textContent;
   $("#watch-list").replaceChildren(...(settings.watches || []).map(watchRow));
   watchSummary();
   const [from, to] = (settings.watch_hours || "09:00-18:00").split("-");
@@ -373,7 +377,7 @@ function watchRow(watch) {
     } }),
   );
 }
-function mcpServers() {
+export function mcpServers() {
   const text = $("#settings-form").mcp_servers.value.trim();
   if (!text) return {};
   let value;
@@ -384,27 +388,57 @@ function mcpServers() {
   }
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("MCP servers: write an object, {\"name\": {…}}.");
   for (const [name, config] of Object.entries(value)) {
-    if (!config || typeof config !== "object" || !(typeof config.command === "string" || typeof config.url === "string")) {
-      throw new Error(`MCP server ${name}: give a command (local) or a url (remote).`);
-    }
-    // As Copilot checks them (one wrong field and it never starts on a message): see models.py.
-    const texts = (v) => Array.isArray(v) && v.every((item) => typeof item === "string");
-    const table = (v) => !!v && typeof v === "object" && !Array.isArray(v) && Object.values(v).every((item) => typeof item === "string");
-    const string = (v) => typeof v === "string";
-    const checks = {
-      type: [(v) => ["local", "stdio", "http", "sse"].includes(v), "local, stdio, http or sse"],
-      tools: [texts, 'a list of tool names in quotes (["*"] for all)'],
-      args: [texts, "a list of strings"],
-      env: [table, "an object of strings"],
-      headers: [table, "an object of strings"],
-      cwd: [string, "a string"],
-      working_directory: [string, "a string"],
-      timeout: [(v) => Number.isInteger(v) && v > 0, "a whole number of milliseconds"],
-    };
-    const bad = Object.entries(checks).find(([key, [fits]]) => key in config && !fits(config[key]));
-    if (bad) throw new Error(`MCP server ${name}: ${bad[0]} must be ${bad[1][1]}.`);
+    // One saved before and still off, as it was: kept off (the server says so), not refused.
+    if (keptOff(name, config)) continue;
+    const problem = mcpProblem(config);
+    if (problem) throw new Error(`MCP server ${name}: ${problem}`);
   }
   return value;
+}
+// A key order of its own: the same configuration however its fields are ordered.
+const canonical = (value) => JSON.stringify(value, (_, part) => (part && typeof part === "object" && !Array.isArray(part) ? Object.fromEntries(Object.entries(part).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) : part));
+function keptOff(name, config) {
+  const off = state.snapshot.settings.mcp_servers_off || {};
+  return name in off && canonical(off[name]) === canonical(config);
+}
+// What is off of the servers written, and why: saved before, they are kept for the owner to
+// fix, and workers do not get them until then.
+export function mcpNote(servers) {
+  return Object.entries(servers)
+    .filter(([name, config]) => keptOff(name, config))
+    .map(([name, config]) => `MCP server ${name} is off (workers do not get it) until fixed: ${mcpProblem(config) || "Copilot would refuse it."}`)
+    .join(" ");
+}
+// What Copilot would refuse in one server's configuration, as models.py's mcp_problem says it
+// (one wrong field and it never starts on a message).
+function mcpProblem(config) {
+  if (!config || typeof config !== "object" || Array.isArray(config)) return 'write an object such as {"command": "…"} or {"url": "…"}.';
+  const filled = (key) => typeof config[key] === "string" && Boolean(config[key].trim());
+  const lacking = (key) => (key in config ? "empty" : "missing");
+  const kind = config.type;
+  if ("type" in config && !["local", "stdio", "http", "sse"].includes(kind)) return "type must be local, stdio, http or sse.";
+  // A local server runs a command; a remote one (http when no type is given) has a url.
+  if (kind === undefined && !filled("command") && !filled("url")) return "give a command (local) or a url (remote).";
+  if (["http", "sse"].includes(kind) || (kind === undefined && !filled("command"))) {
+    if (!filled("url")) return `url is ${lacking("url")}: type "${kind}" needs one (https://…).`;
+    if (!/^https?:\/\/[^\s/?#]+\S*$/i.test(config.url.trim())) return "url must be an http:// or https:// address.";
+  } else if (!filled("command")) {
+    return `command is ${lacking("command")}: type "${kind}" needs the program to run.`;
+  }
+  const texts = (v) => Array.isArray(v) && v.every((item) => typeof item === "string");
+  const table = (v) => !!v && typeof v === "object" && !Array.isArray(v) && Object.values(v).every((item) => typeof item === "string");
+  const string = (v) => typeof v === "string";
+  const checks = {
+    tools: [texts, 'a list of tool names in quotes (["*"] for all)'],
+    args: [texts, "a list of strings"],
+    env: [table, "an object of strings"],
+    headers: [table, "an object of strings"],
+    cwd: [string, "a string"],
+    working_directory: [string, "a string"],
+    timeout: [(v) => Number.isInteger(v) && v > 0, "a whole number of milliseconds"],
+  };
+  const bad = Object.entries(checks).find(([key, [fits]]) => key in config && !fits(config[key]));
+  return bad ? `${bad[0]} must be ${bad[1][1]}.` : "";
 }
 async function addSkill(content) {
   settingsError("");
@@ -450,7 +484,8 @@ export function renderConnections() {
   $("#github-summary").textContent = settings.github_enabled ? `${repos} ${repos === 1 ? "repository" : "repositories"}` : "Off";
   const abilities = snap.abilities || { skills: [], plugins: {} };
   const servers = Object.keys(settings.mcp_servers || {}).length;
-  $("#abilities-summary").textContent = [abilities.skills.length ? plural(abilities.skills.length, "skill") : "", (settings.plugins || []).length ? plural(settings.plugins.length, "plugin") : "", servers ? plural(servers, "MCP server") : ""].filter(Boolean).join(" · ") || "None added";
+  const off = Object.keys(settings.mcp_servers_off || {}).length;
+  $("#abilities-summary").textContent = [abilities.skills.length ? plural(abilities.skills.length, "skill") : "", (settings.plugins || []).length ? plural(settings.plugins.length, "plugin") : "", servers + off ? `${plural(servers + off, "MCP server")}${off ? ` (${off} off)` : ""}` : ""].filter(Boolean).join(" · ") || "None added";
   $("#skills").replaceChildren(
     ...abilities.skills.map((skill) =>
       el(
@@ -715,27 +750,28 @@ export function settingsError(message) {
   node.textContent = message;
   node.hidden = !message;
 }
-async function saveSettings(event) {
-  event.preventDefault();
+// What Save sends: the settings as the form has them, every other one as it is, and `base`.
+export function settingsBody() {
   const form = $("#settings-form");
   const settings = state.snapshot.settings;
+  const number = (name, fallback = settings[name]) => numberField(form[name], fallback);
   const body = {
     // Settings this page does not show are sent back as they are, not reset.
     ...settings,
     projects: lines(form.projects.value),
     code_folder: form.code_folder.value.trim(),
     scratch_directory: form.scratch_directory.value.trim(),
-    max_workers: Number(form.max_workers.value),
+    max_workers: number("max_workers"),
     worker_yolo: form.worker_yolo.checked,
     worker_sandbox: form.worker_sandbox.checked,
     shared_caches: form.shared_caches.checked,
     sandbox_writable: lines(form.sandbox_writable.value),
-    worker_idle_hours: Number(form.worker_idle_hours.value || 24),
-    stall_hours: Number(form.stall_hours.value || 4),
+    worker_idle_hours: number("worker_idle_hours"),
+    stall_hours: number("stall_hours", settings.stall_hours ?? 4),
     mac_notifications: form.mac_notifications.checked,
     watchdog_enabled: form.watchdog_enabled.checked,
     slack_enabled: form.slack_enabled.checked,
-    slack_poll_seconds: Number(form.slack_poll_seconds.value),
+    slack_poll_seconds: number("slack_poll_seconds"),
     slack_delegate_emoji: form.slack_delegate_emoji.value.trim(),
     github_enabled: form.github_enabled.checked,
     github_repos: lines(form.github_repos.value),
@@ -755,12 +791,22 @@ async function saveSettings(event) {
     skill_folders: lines(form.skill_folders.value),
     plugins: lines(form.plugins.value),
     mcp_servers: {},
+    // Those off are in the MCP servers box with the others: what it has is what is kept.
+    mcp_servers_off: {},
     ...watchFields(),
     away_notify: form.away_notify.checked,
-    away_minutes: Number(form.away_minutes.value || 10),
+    away_minutes: number("away_minutes", settings.away_minutes ?? 10),
     away_how: form.away_how.value.trim(),
+    // As this dialog showed them: a setting another tab changed since stays as that tab left it.
+    base: shown,
   };
   if ("report_footer" in settings) body.report_footer = form.report_footer.checked;
+  return body;
+}
+async function saveSettings(event) {
+  event.preventDefault();
+  const form = $("#settings-form");
+  const body = settingsBody();
   try {
     body.mcp_servers = mcpServers();
   } catch (error) {
@@ -790,14 +836,26 @@ async function saveSettings(event) {
 // The watches as written in the form, with when they run.
 function watchFields() {
   const form = $("#settings-form");
+  const settings = state.snapshot.settings;
   return {
     watches: [...document.querySelectorAll("#watch-list li")]
       .map((row) => ({ what: row.querySelector(".what").value.trim(), how: row.querySelector(".how").value.trim(), enabled: row.querySelector(".on").checked }))
       .filter((watch) => watch.what),
     watch_hours: `${$("#watch-from").value || "09:00"}-${$("#watch-to").value || "18:00"}`,
-    watch_minutes: Number(form.watch_minutes.value || 5),
-    watch_after_hours_minutes: Number(form.watch_after_hours_minutes.value || 0),
+    watch_minutes: numberField(form.watch_minutes, settings.watch_minutes ?? 5),
+    watch_after_hours_minutes: numberField(form.watch_after_hours_minutes, settings.watch_after_hours_minutes ?? 30),
   };
+}
+// A number field left empty keeps its saved value (Number("") is 0, which no field means).
+function numberField(input, saved) {
+  return input.value.trim() === "" ? saved : Number(input.value);
+}
+// The settings as this dialog showed them when it opened (and as its own saves left them): what
+// a save goes from (`base`), so it does not undo what another tab changed since.
+let shown = {};
+// After a save from inside the dialog: those fields are as saved now.
+function savedHere(fields) {
+  shown = { ...shown, ...Object.fromEntries(Object.keys(fields).map((key) => [key, state.snapshot.settings[key]])) };
 }
 const sameWatches = (a, b) => JSON.stringify(a.map(({ what, how, enabled }) => [what, how || "", enabled !== false])) === JSON.stringify(b.map(({ what, how, enabled }) => [what, how || "", enabled !== false]));
 // Only the watches, saved: the rest of the form stays as the owner left it, unsaved.
@@ -805,10 +863,11 @@ async function saveAway() {
   settingsError("");
   const form = $("#settings-form");
   const settings = state.snapshot.settings;
-  const fields = { away_notify: form.away_notify.checked, away_minutes: Number(form.away_minutes.value || 10), away_how: form.away_how.value.trim() };
+  const fields = { away_notify: form.away_notify.checked, away_minutes: numberField(form.away_minutes, settings.away_minutes ?? 10), away_how: form.away_how.value.trim() };
   if (fields.away_notify === Boolean(settings.away_notify) && fields.away_minutes === (settings.away_minutes ?? 10) && fields.away_how === (settings.away_how || "")) return true;
   try {
-    state.snapshot = { ...state.snapshot, ...(await api("/api/settings", { method: "POST", body: { ...settings, ...fields } })) };
+    state.snapshot = { ...state.snapshot, ...(await api("/api/settings", { method: "POST", body: { ...fields, base: shown } })) };
+    savedHere(fields);
     renderConnections();
     return true;
   } catch (error) {
@@ -827,7 +886,8 @@ async function saveWatches() {
   const saved = { watches: settings.watches || [], watch_hours: settings.watch_hours, watch_minutes: settings.watch_minutes, watch_after_hours_minutes: settings.watch_after_hours_minutes };
   if (sameWatches(fields.watches, saved.watches) && fields.watch_hours === saved.watch_hours && fields.watch_minutes === saved.watch_minutes && fields.watch_after_hours_minutes === saved.watch_after_hours_minutes) return true;
   try {
-    state.snapshot = { ...state.snapshot, ...(await api("/api/settings", { method: "POST", body: { ...settings, ...fields } })) };
+    state.snapshot = { ...state.snapshot, ...(await api("/api/settings", { method: "POST", body: { ...fields, base: shown } })) };
+    savedHere(fields);
     renderConnections();
     return true;
   } catch (error) {

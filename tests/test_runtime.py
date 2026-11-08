@@ -452,7 +452,9 @@ async def test_slack_session_drafts_and_owner_decides(tmp_path):
     before = len(slack.sent)
     await runtime.drafts.resolve(fourth["id"], DraftDecision(action="send"))
     assert len(slack.sent) == before, "an unedited approval must not wake the session"
-    assert harness.kinds(slack_row["id"])[-1][1].endswith("it was sent.")
+    assert harness.store.messages(slack_row["id"])[-1]["meta"]["prompt"].endswith(
+        "it was sent.\n</message>"
+    )
 
 
 async def test_worker_without_slack_access_cannot_draft(harness):
@@ -555,7 +557,7 @@ async def test_a_draft_sent_before_the_report_settles_the_task_when_it_reports(t
     await runtime.drafts.resolve(draft["id"], DraftDecision(action="send", text="friday works!"))
     task = runtime.tasks.current(worker_id)
     assert task["status"] == "running"
-    told = [m["text"] for m in harness.store.messages(worker_id)]
+    told = [m["meta"].get("prompt", "") for m in harness.store.messages(worker_id)]
     assert any("sends it themself" in text for text in told)
     await call_tool(runtime, "report", worker_id, status="done", summary="Drafted the reply.")
     await settle(runtime)
@@ -734,9 +736,10 @@ async def test_an_edit_to_finished_works_draft_waits_for_its_next_message(tmp_pa
     await runtime.drafts.resolve(draft["id"], DraftDecision(action="send", content=approve))
     await settle(runtime)
     assert len(harness.session(worker).sent) == sent, "not woken"
-    [held] = [m for m in harness.store.messages(worker) if "edited draft" in m["text"]]
-    assert held["meta"]["deferred"] and "an approval with no text" in held["text"]
-    assert "line comments were posted" not in held["text"]
+    [held] = [m for m in harness.store.messages(worker)
+              if "edited draft" in m["meta"].get("prompt", "")]  # fmt: skip
+    assert held["meta"]["deferred"] and "an approval with no text" in held["meta"]["prompt"]
+    assert "line comments were posted" not in held["meta"]["prompt"]
     assert runtime.tasks.get(task["id"])["result"] == "Review drafted."
 
 
@@ -1342,11 +1345,18 @@ async def test_a_fresh_router_remembers_what_the_owner_said_long_ago(harness):
     handover = runtime.handover()
     assert "BLUE-HERON-7" in handover, "the owner's words are kept, not only the last 30"
     assert "Question 79" in handover and len(handover) < 80_000
-    assert "The owner writes in English" in handover, "learned from what they wrote"
+    assert "The owner has been writing in English" in handover, "learned from what they wrote"
     harness.store.set("owner_language", "Chinese")
-    assert "The owner writes in Chinese: write everything for them in Chinese" in (
+    assert "The owner has been writing in Chinese: write for them in Chinese" in (
         runtime.handover()
     ), "a fresh Router answered in English"
+    # Bug bash 5 (live W5): rotated just before a message in another language, the handover's
+    # language must not outweigh that message's reply_in.
+    assert "whose reply_in names another language is answered in that one" in runtime.handover()
+    # Live W51: Chief of Staff's own helpers are not among the owner's sessions it lists.
+    harness.store.create_session("helper01", "worker", "Watch for you", "idle")
+    harness.store.set("connector:helper01", "1")
+    assert "Watch for you" not in runtime.handover()
 
 
 async def test_a_fresh_router_that_fails_hands_back_to_the_earlier_one(harness):
@@ -1385,7 +1395,14 @@ async def test_the_router_rotates_when_its_context_grows(harness):
     await call_tool(runtime, "report", worker_id, status="done", summary="Fixed in PR #7")
     await runtime.owner_send(router_id, "Thanks, what is open?")
     old.emit("assistant.message", content="Nothing else is open.", tool_requests=None)
-    old.emit("assistant.usage", model="m", input_tokens=150_000, cache_read_tokens=60_000)
+    # Copilot's input count includes the cached part: 120k in all is not 180k (bug bash 5:
+    # counted twice, a fresh Router handed over again after every turn).
+    old.emit("assistant.usage", model="m", input_tokens=120_000, cache_read_tokens=60_000)
+    old.emit("session.idle")
+    await settle(runtime)
+    assert harness.store.get(f"copilot:{router_id}") in (None, router_id), "not long yet"
+    assert int(harness.store.get(f"context:{router_id}")) == 120_000
+    old.emit("assistant.usage", model="m", input_tokens=160_000, cache_read_tokens=60_000)
     old.emit("session.idle")
     await settle(runtime)
 
@@ -1757,7 +1774,7 @@ async def test_pr_news_goes_to_the_task_that_made_it_not_a_later_one_nor_a_reade
                     earlier="keep", follow=["github:acme/app#7"])  # fmt: skip
     explain = runtime.tasks.current(maker)["id"]
     assert explain != fix and fix in harness.store.follow_tasks(maker, "github:acme/app#7")
-    reader, _ = await spawn("Report on #7", f"Tell me what {pr} is about")
+    reader, _ = await spawn("Report on #7", f"Look at {pr} and tell me what it is about")
     reviewer, review = await spawn("Review #7", f"Review {pr}")
     assert "github:acme/app#7" in harness.store.follows(reader)
 
@@ -1874,4 +1891,4 @@ async def test_the_router_knows_what_waits_for_the_owner_and_what_became_of_it(h
     assert note["meta"]["deferred"], "held: it rides along with the Router's next message"
     assert "Rejected by the owner. Reason: Not yet Nothing was sent." in note["meta"]["prompt"]
     assert "Alice Chen" in note["meta"]["prompt"] and worker["task_id"] in note["meta"]["prompt"]
-    assert note["text"].startswith("Rejected by the owner: Slack reply to Alice Chen")
+    assert note["text"].startswith("Rejected: your reply to Alice Chen")

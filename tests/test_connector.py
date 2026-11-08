@@ -8,7 +8,7 @@ import pytest
 from conftest import Harness, call_tool, settle
 
 from chiefofstaff.connector import after_hours, in_hours
-from chiefofstaff.models import Settings, Watch
+from chiefofstaff.models import DraftDecision, Settings, Watch
 from chiefofstaff.runtime import CONNECTOR_TOOLS
 from chiefofstaff.store import now
 
@@ -253,6 +253,27 @@ async def test_away_a_draft_answered_in_words_is_redone_and_a_bad_answer_is_said
     item = {"id": f"draft:{again['id']}", "draft": again}
     assert await runtime.connector.apply(item, "QQQQQ yes, send it", "QQQQQ") == "marked as sent"
     assert harness.store.draft(again["id"])["status"] == "sent"
+    # A no, or a send held back, never sends; a short Chinese yes does.
+    for said, outcome in (
+        ("do not send", "dropped"),
+        ("ok wait", None),
+        ("not yet, send later", None),
+        ("\u597d\u7684\uff0c\u53d1\u5427", "marked as sent"),
+        ("\u53ef\u4ee5\u53d1\u4e86", "marked as sent"),  # No comma: "can send it".
+        ("\u5148\u522b\u53d1", None),  # "Don't send it yet": kept.
+        ("don\u2019t send it", "dropped"),  # A phone's apostrophe.
+    ):
+        await call_tool(runtime, "draft_reply", writer, text=f"re: {said}", to="Carol",
+                        where="email")  # fmt: skip
+        [one] = [d for d in harness.store.drafts() if d["status"] == "pending"]
+        item = {"id": f"draft:{one['id']}", "draft": one}
+        if outcome is None:
+            with pytest.raises(ValueError, match="not sent"):
+                await runtime.connector.apply(item, f"QQQQQ {said}", "QQQQQ")
+            assert harness.store.draft(one["id"])["status"] == "pending"
+            await runtime.drafts.resolve(one["id"], DraftDecision(action="reject"))
+        else:
+            assert await runtime.connector.apply(item, f"QQQQQ {said}", "QQQQQ") == outcome
 
 
 async def test_only_the_messenger_reports_how_it_reached_the_owner_and_what_they_said(tmp_path):

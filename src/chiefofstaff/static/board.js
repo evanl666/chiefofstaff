@@ -39,6 +39,7 @@ export const MARKERS = {
   "still-following": "Still following",
   report: "Report",
   done: "Done",
+  "set-aside": "Set aside",
   cancelled: "Cancelled",
 };
 
@@ -88,7 +89,8 @@ export function workerContext(worker, list) {
 }
 // One task's place: { section, marker, why }. `active`, `activeTitle`, `stoppedTitle`: see
 // workerContext; `onCard`: shown on a card under Needs you already (a draft for it), so not
-// again.
+// again: in no section, its marker says what that card shows of it (news on it, a result to
+// accept, a report).
 export function taskPhase(task, worker, { active = "", activeTitle = "", stoppedTitle = "", now = Date.now(), stallHours = 4, onCard = false } = {}) {
   const at = (section, marker, why = "") => ({ section, marker, why });
   const watching = task.watching || [];
@@ -101,7 +103,7 @@ export function taskPhase(task, worker, { active = "", activeTitle = "", stopped
   if (checkBack?.attempts >= 3) return at("needs", "check-failed", `Its check-back could not wake its worker: ${checkBack.error || "unknown error"}`);
   const finished = task.status === "review" || task.status === "done";
   if (finished) {
-    if (onCard) return at("", "", "On its card under Needs you");
+    if (onCard) return at("", task.news ? "update" : task.status === "review" && needsAcceptance(task) ? "review" : "report", "On its card under Needs you");
     // The owner asked more about it, and its worker is at it now.
     if (working(worker) && active === task.id && task.follow_up) return at("running", "following", "Following up on your message; its result stays yours to review");
     if (task.news) return at("needs", "update", "");
@@ -114,6 +116,7 @@ export function taskPhase(task, worker, { active = "", activeTitle = "", stopped
       if (task.watch_changed_at && quiet >= QUIET_HOURS) return at("finished", "still-following", `Still following; nothing new there for ${howLong(quiet)}`);
       return at("monitoring", task.watch_kind === "reviewed" ? "reviewed" : "delivered", "");
     }
+    if (task.set_aside) return at("finished", "set-aside", "Cancelled after it finished: not accepted");
     return at("finished", task.status === "review" ? "report" : "done");
   }
   if (task.status === "queued") return at("monitoring", "queued", "");
@@ -123,16 +126,16 @@ export function taskPhase(task, worker, { active = "", activeTitle = "", stopped
   if (working(worker) && active === task.id) return at("running", "", "");
   // Waiting on something registered for this task: whatever its worker does meanwhile.
   if (checkBack) return at("monitoring", "check-back", "");
-  if (watching.length) return at("monitoring", "watching", "");
-  if (["queued", "starting"].includes(worker.status)) return at("monitoring", "queued", "");
   // Its worker is on another task: this one waits its turn when it was not taken up yet, or when
   // it was finished and the owner followed up on it (it runs again, its worker gets to it after
-  // the task it is on); taken up and left, it is paused (it may be delivered, or wait on the
-  // owner).
+  // the task it is on: not the PR it followed for its result); taken up and left, it is paused
+  // (it may be delivered, or wait on the owner).
   const on = activeTitle ? `“${activeTitle}”` : "another task";
+  if (working(worker) && (task.result || task.follow_up)) return at("monitoring", "turn", `Up next: following up after ${on}`);
+  if (watching.length) return at("monitoring", "watching", "");
+  if (["queued", "starting"].includes(worker.status)) return at("monitoring", "queued", "");
   if (working(worker)) {
     if (task.started === false) return at("monitoring", "turn", `Up next: its worker is on ${on} now`);
-    if (task.result) return at("monitoring", "turn", `Up next: following up after ${on}`);
     return at("monitoring", "paused", `Paused: its worker is on ${on} now`);
   }
   // Its worker was stopped on another task: this one comes once the owner says go on there.

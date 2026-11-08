@@ -1,6 +1,6 @@
 // Text for display: a safe Markdown subset, links and short paths.
 
-import { escapeHtml } from "./dom.js";
+import { escapeHtml, withoutBidi } from "./dom.js";
 import { state } from "./state.js";
 // Markdown: a small, safe subset. Text is escaped first; only these tags are produced.
 
@@ -257,9 +257,31 @@ function inlineEscaped(escaped) {
     const cut = value.search(/&(gt|lt|quot|#39);/);
     if (cut > 0) [value, trail] = [value.slice(0, cut), value.slice(cut) + trail];
     value = value.replace(/&amp;amp;/g, "&amp;");
-    const text = label ?? angledLabel ?? escapeHtml(linkLabel(unescapeHtml(value)));
+    const named = label ?? angledLabel;
+    const text = named === undefined ? escapeHtml(linkLabel(unescapeHtml(value))) : named + elsewhere(named, value);
     return `<a href="${value}" title="${value}" target="_blank" rel="noreferrer">${text}</a>${trail}`;
   });
+}
+// Words of a link that read as another address (Slack's <https://evil.example.com|https://
+// github.com/…>, or [github.com](https://evil.example.com)): where it really goes, after them.
+// Both are escaped HTML.
+function elsewhere(words, href) {
+  const said = addressHost(unescapeHtml(words).trim());
+  const real = addressHost(unescapeHtml(href));
+  return said && real && said !== real ? ` (${escapeHtml(real)})` : "";
+}
+// The site an address names: "https://github.com/x", "www.github.com", "github.com/x" or a bare
+// "github.com" (with a site's ending: "README.md" is a file); "" for other words.
+const SITE_ENDING = /\.(?:com|org|net|io|dev|app|ai|co|gov|edu|me|info|biz|xyz|cloud|site|us|uk|de|cn)$/i;
+function addressHost(text) {
+  if (!text || /\s/.test(text)) return "";
+  const scheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(text);
+  if (!scheme && !/^www\./i.test(text) && !/^[^/]+\.[^/]+\//.test(text) && !SITE_ENDING.test(text)) return "";
+  try {
+    return new URL(scheme ? text : `https://${text}`).hostname.replace(/^www\./, "").toLowerCase();
+  } catch {
+    return "";
+  }
 }
 // "Label: rest" at the start of a line: a short key (at most three words) is set in bold.
 const KEY = /^([\p{L}\p{N}][\p{L}\p{N}\p{M} _-]{0,15}?)\s*([:：])(?!:|\/\/|\d)\s*/u;
@@ -325,7 +347,7 @@ function renderList(items) {
   return html;
 }
 export function markdown(text, depth = 0) {
-  const lines = text.replace(/\r\n?/g, "\n").split("\n");
+  const lines = withoutBidi(text).replace(/\r\n?/g, "\n").split("\n");
   const out = [];
   let i = 0;
   while (i < lines.length) {
@@ -495,7 +517,7 @@ export function slackText(text) {
   // "DM <#D0BOB0001>" is "DM with Bob", not "DM DM with Bob".
   const named = (dm, mark, id, said) => (dm && !id.startsWith("D") ? dm : "") + slackName(mark, id, said);
   const markOf = (id) => (/^[UW]/.test(id) ? "@" : "#");
-  return String(text || "")
+  return withoutBidi(text || "")
     .replace(/[ \t]*\([ \t]*ts:?[ \t]*\d{9,}\.\d+[ \t]*\)/g, "")
     .replace(/[ \t]*[|,]?[ \t]*\bts:?[ \t]*\d{9,}\.\d+/g, "")
     .replace(/\b(thread[ \t]+)?slack:([A-Z][A-Z0-9]{2,})(?::\d{9,}\.\d+)?/g, (_, thread, id) => `${thread ? "thread in " : ""}${slackName("#", id)}`)

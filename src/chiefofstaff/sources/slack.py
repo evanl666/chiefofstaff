@@ -192,6 +192,34 @@ THREAD_STAMP = re.compile(r"thread_ts[:=] ?(\d{10}\.\d{6})")
 # "<@U0BOB001|bob>".
 NAMED = re.compile(r"<([@#])([UWCDG][A-Z0-9]{2,})(?:\|([^>\n]{1,80}))?>(?: \(([^)\n]{1,80})\))?")
 MAX_NAMES = 2000
+# Someone a message mentions ("<@U0ALICE1>"), and who they are by their Slack profile.
+MENTION = re.compile(r"<@([UW][A-Z0-9]{2,})(?:\|[^>\n]*)?>")
+PROFILE_TOOL = "slack_read_user_profile"
+PROFILE_NAME = re.compile(
+    r"^[\s*\-]*(real[ _]name|full[ _]name|display[ _]name|name)\W{0,3}[:=]\s*\"?([^\"\n]{1,80})",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def profile_name(profile: str) -> str:
+    """A person's name in what Slack's profile tool returned: JSON ({"real_name": …}, under
+    "user" or "profile" too) or lines ("Real name: Alice Chen"); "" when none."""
+    try:
+        found = json.loads(profile)
+    except ValueError:
+        found = None
+    if isinstance(found, dict):
+        user = found.get("user")
+        user = user if isinstance(user, dict) else {}
+        for holder in (found, found.get("profile"), user, user.get("profile")):
+            for key in ("real_name", "display_name", "name"):
+                if isinstance(holder, dict) and (value := str(holder.get(key) or "").strip()):
+                    return value[:80]
+    lines = {
+        key.lower().replace("_", " "): value.strip() for key, value in PROFILE_NAME.findall(profile)
+    }
+    keys = ("real name", "full name", "display name", "name")
+    return next((lines[key] for key in keys if lines.get(key)), "")
 
 
 def entities(text: str) -> str:
@@ -582,6 +610,7 @@ class SlackSource:
                 if float(key.removeprefix("slack:")) >= oldest and not self.seen(key)
             ]
             if fresh:
+                await self.learn_mentions(text)
                 newest = max(float(key.removeprefix("slack:")) for key in fresh)
                 await self.host.on_thread(
                     "slack",
@@ -642,6 +671,8 @@ class SlackSource:
         text = await asyncio.wait_for(self.mcp.call(tool, arguments), 20)
         self.learn_names(text)
         if found := messages(text):
+            # Who its messages mention, by name on the card that quotes them.
+            await self.learn_mentions(" ".join(entry["text"] for entry in found))
             return found
         said = " ".join((text or "").split())[:200]
         raise SlackError(f"Slack showed no message there ({said or 'nothing'}).")
@@ -708,6 +739,26 @@ class SlackSource:
         known.update(found)
         kept = dict(list(known.items())[-MAX_NAMES:])
         self.store.set("slacknames", json.dumps(kept, ensure_ascii=False))
+
+    async def learn_mentions(self, text: str, limit: int = 3):
+        """Names for the people a text mentions ("<@U0ALICE1>") that no listing named yet (only
+        senders are named there): from their Slack profile, asked at most once a day each."""
+        if PROFILE_TOOL not in self.read_tools:
+            return
+        known = self.display_names()
+        wanted = [user for user in dict.fromkeys(MENTION.findall(text or "")) if user not in known]
+        for user in wanted[:limit]:
+            if time.time() - float(self.store.get(f"slackwho:{user}") or 0) < 86400:
+                continue
+            self.store.set(f"slackwho:{user}", str(time.time()))
+            try:
+                profile = await asyncio.wait_for(self.mcp.call(PROFILE_TOOL, {"user_id": user}), 10)
+            except Exception as exc:
+                logger.info("Could not read the Slack profile of %s: %s", user, describe(exc))
+                continue
+            self.learn_names(profile)
+            if user not in self.display_names() and (name := profile_name(profile)):
+                self.learn_names(f"<@{user}> ({name})")
 
     def display_names(self) -> dict[str, str]:
         """Slack ids -> names, as read in what Slack listed: users (U…, W…) and conversations

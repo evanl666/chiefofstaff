@@ -160,7 +160,7 @@ async def run(page, app: App, project: Path, workspace: Workspace, errors: list[
     if not await page.locator("#conn-slack").evaluate("section => section.open"):
         await page.locator("#conn-slack summary").click()
     await page.locator("#slack-activity").click()
-    await expect(page.locator("#timeline")).to_contain_text("edited draft", timeout=30000)
+    await expect(page.locator("#timeline")).to_contain_text("Sent with your edits", timeout=30000)
     await page.locator("#external summary").click()
     await expect(page.locator("#external-list .item").first).to_be_visible(timeout=30000)
     await page.screenshot(path=SHOTS / "7-slack.png")

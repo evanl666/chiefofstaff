@@ -53,7 +53,7 @@ from .checks import Checks
 from .connector import Connector
 from .decisions import Decisions
 from .delivery import Delivery
-from .digest import digest
+from .digest import digest, needs, task_words
 from .drafts import Drafts
 from .envelope import (
     UNTRUSTED,
@@ -1057,7 +1057,8 @@ class Runtime:
             await self.available_models()  # Efforts and context tiers depend on the model.
         options = self.options(row)
         copilot_id = copilot or self.copilot_id(row["id"])
-        name = ("Chief of Staff · " + clean_title(row["title"]))[:100]
+        # Copilot refuses a session name with a double quote ("Write "x" to y").
+        name = ("Chief of Staff · " + clean_title(row["title"]).replace('"', "'"))[:100]
         connection = self.connections
         if create:
             session = await self.without_unsupported_effort(
@@ -1286,10 +1287,16 @@ class Runtime:
         if spoken := self.store.get("owner_language"):
             # Without the conversation that set it, a fresh session would answer in English.
             lines.append(
-                f"The owner writes in {spoken}: write everything for them in {spoken}, also "
-                "short remarks after a report."
+                f"The owner has been writing in {spoken}: write for them in {spoken}, also short "
+                "remarks after a report, except that a message of theirs whose reply_in names "
+                "another language is answered in that one (they switched)."
             )
-        sessions = [row for row in self.store.open_sessions() if row["role"] != ROUTER]
+        helpers = self.helper_ids()  # Chief of Staff's own: not the owner's work.
+        sessions = [
+            row
+            for row in self.store.open_sessions()
+            if row["role"] != ROUTER and row["id"] not in helpers
+        ]
         lines.append("\nOpen sessions:" if sessions else "\nOpen sessions: none.")
         for row in sessions:
             lines.append(
@@ -1297,13 +1304,15 @@ class Runtime:
                 + (f" task: {clip(row['task'], 160)}" if row["task"] else "")
                 + (f" | last report: {clip(row['report'], 200)}" if row["report"] else "")
             )
+        home = needs(self)
         if tasks := self.tasks.listed():
             lines.append(
-                "\nTasks not done yet (review: finished; “to accept” waits for the owner, "
-                "“report” only informed them and waits for nothing):"
+                "\nTasks not done yet, as Home shows them (“to review” waits for the owner's "
+                "Accept; one on its draft's card is reviewed on that card; “report” only "
+                "informed them and waits for nothing):"
             )
             lines += [
-                f"- {t['id']} “{t['title']}” ({self.task_actions.status_words(t)}, worker "
+                f"- {t['id']} “{t['title']}” ({task_words(t, home)}, worker "
                 f"{short(t['session_id'])})"
                 + (
                     f" waits for {', '.join(d['id'] for d in deps)}"
@@ -1343,7 +1352,12 @@ class Runtime:
             lines += [
                 f"- {d['id']}: {self.drafts.line(d)}. Text: {clip(d['text'])}" for d in drafts
             ]
-        if owner_questions := self.toolset.needs_owner()["questions"]:
+        waiting = self.toolset.needs_owner(home)
+        lines.append(
+            f"\nUnder the owner's Needs you now (Home's count): {waiting['count']}: "
+            f"{waiting['summary']}."
+        )
+        if owner_questions := waiting["questions"]:
             lines.append("\nQuestions workers asked the owner, not answered yet:")
             lines += [
                 f"- “{q['worker']}”"
@@ -1677,7 +1691,7 @@ class Runtime:
             else []
         )
         # Answers come in the language of this message, whatever the conversation used before.
-        spoken = self.heard(text) if learn else language(text)
+        spoken = self.heard(text, home=row["role"] == ROUTER) if learn else language(text)
         prompt = wrap("owner", "message", text, reply_in=spoken)
         meta: dict[str, Any] = {}
         switched = self.switched_language(session_id, spoken)
@@ -1747,11 +1761,12 @@ class Runtime:
             self.add_message(session_id, "notice", note, {"progress": True})
         return message
 
-    def heard(self, text: str) -> str:
-        """The language of what the owner wrote, remembered when clear: what they read next
-        (reports, the Router's notes about them, new tasks) is in it."""
+    def heard(self, text: str, home: bool = False) -> str:
+        """The language of what the owner wrote. Written to the Router (`home`), it is
+        remembered when clear: what the Router tells them next and new tasks' reports are in it.
+        Not what they write to one worker: that worker answers in it, nothing else changes."""
         spoken = language(text)
-        if spoken:
+        if spoken and home:
             self.store.set("owner_language", spoken)
         return spoken
 
@@ -2288,20 +2303,24 @@ class Runtime:
             return self.tasks.find(on)
         return self.tasks.current(session_id)
 
-    def took_up(self, session_id: str, tasks: list[str], switch: bool = True):
+    def took_up(self, session_id: str, tasks: list[str], switch: bool = True, news: bool = False):
         """Its conversation shows instructions on these tasks: its turn is on the last; each has
         been taken up (one given while it was on another waited its turn until now).
         `switch=False`: taken up, but its turn stays on the task it is on (a message about
-        another task steered into its turn: an answer it asked for, say)."""
+        another task steered into its turn: an answer it asked for, say). `news`: a followed
+        thread's news for them (a PR's review): one the owner stopped stays stopped."""
         fresh = [task_id for task_id in tasks if not self.store.get(f"started:{task_id}")]
+        turn = self.turn_task(session_id)
         for task_id in tasks:
-            # Taken up again after its result: other work may have come in between.
+            # Taken up again after its result: other work may have come in between. Back to it
+            # from another task: what it changes from here starts where its checkouts are now.
             again = task_id not in fresh and self.store.get(f"taskend:{task_id}")
             if again and (task := self.tasks.find(task_id)):
-                self.background(self.task_actions.record_restart(task))
+                resumed = turn != task_id
+                self.background(self.task_actions.record_restart(task, resumed=resumed))
         for task_id in tasks:
             self.store.set(f"started:{task_id}", "1")
-            if self.store.get(f"stopped:{task_id}"):
+            if self.store.get(f"stopped:{task_id}") and not news:
                 # Told to go on with a task the owner stopped: once it works, it runs again.
                 self.store.set(f"goingon:{task_id}", "1")
         if fresh:
@@ -2481,7 +2500,15 @@ class Runtime:
         """Of the workers following a PR, those with a task that made it (any of their tasks,
         not only the newest that names it): its news is theirs to act on (a worker that only
         reviewed, read or reported on it would ask the owner the same). Everyone following it
-        when none made it."""
+        when none made it. Of a Slack thread's followers, the workers: one that follows it took
+        it over from the Slack session (one reply per message, not one from each)."""
+        if thread.startswith("slack:"):
+            workers = [
+                session_id
+                for session_id in followers
+                if (row := self.store.find_session(session_id)) and row["role"] == WORKER
+            ]
+            return workers or followers
         if not threads.GITHUB_PR.fullmatch(thread):
             return followers
         owners = [session_id for session_id in followers if self.pr_maker(session_id, thread)]

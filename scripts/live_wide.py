@@ -166,7 +166,7 @@ SHARDS = {
     "A": (18781, 18911), "B": (18782, 18912), "C": (18783, 18913), "D": (18784, 18914),
     "E": (18785, 18915), "F": (18786, 18916), "G": (18787, 18917), "H": (18788, 18918),
     "I": (18799, 18929), "J": (18800, 18930), "K": (18801, 18931),
-    "L": (18802, 18932), "M": (18803, 18933), "N": (18804, 18934),
+    "L": (18802, 18932), "M": (18803, 18933), "N": (18804, 18934), "O": (18805, 18935),
 }  # fmt: skip
 MODEL = "claude-sonnet-5.5"
 CJK = re.compile(r"[\u4e00-\u9fff]")
@@ -2924,7 +2924,7 @@ async def g5_owner_posted_it(ctx: Ctx):
 
     async def worker_told():
         rows = await messages(ctx, draft["session_id"])
-        return [m["text"] for m in rows if "posted draft" in m["text"]] or None
+        return [m["text"] for m in rows if "on GitHub yourself" in m["text"]] or None
 
     # Told once its task is settled too (that reads the PR first).
     told = await wait_for("its worker is told", worker_told, 120, ctx.app)
@@ -3578,7 +3578,15 @@ async def k3_answer_goes_to_the_task_that_asked(ctx: Ctx):
               "the color into color.txt in its folder and report done.")  # fmt: skip
     color = await titled(ctx, since, "pick color")
     worker = color["session_id"]
-    await task_status(ctx, color["id"], {"waiting"}, "it asks", 400)
+
+    async def asks():
+        # A question report (the task waits), or Copilot's ask_user card (its session waits).
+        task = await ctx.app.get(f"/api/tasks/{color['id']}")
+        cards = [d for d in (await state(ctx))["drafts"]
+                 if d["session_id"] == worker and d["kind"] == "question"]  # fmt: skip
+        return True if task["status"] == "waiting" or cards else None
+
+    await wait_for("it asks", asks, 400, ctx.app)
     later = now()
     await ask(ctx, "Give the Pick Color worker a second, separate task (a new task for that same "
               "worker): write hello into hello.txt in its folder and report done. Its color "
@@ -3808,7 +3816,8 @@ async def receipts_changed(ctx: Ctx, task_id: str, after: str = "", timeout: int
 
     async def check():
         found = (await ctx.app.get(f"/api/tasks/{task_id}")).get("receipts") or {}
-        if not found.get("changed") or (after and (found.get("at") or "") <= after):
+        # Receipts show its commands at once; its changes once its checkouts were looked at.
+        if not found.get("changed") or not found.get("at") or (after and found["at"] <= after):
             return None
         return found["changed"]
 
@@ -4043,6 +4052,113 @@ async def n3_a_removed_worktree_is_back(ctx: Ctx):
     log("N3 passed")
 
 
+async def o1_a_branch_from_main_counts_only_its_own(ctx: Ctx):
+    """Bug bash 5 (L2): one worker, its second task on a branch made from main: its changes
+    counted the first task's lines as removed."""
+    since = now()
+    await say(ctx, "Start a worker titled 'Slug Branch' in the textkit project, in a worktree: "
+              "add a function `slugify(text)` (lowercase, spaces to dashes) at the end of "
+              "textkit/__init__.py and commit it. Report done.")  # fmt: skip
+    first = await titled(ctx, since, "slug branch")
+    await task_status(ctx, first["id"], FINISHED, "slugify", 400)
+    later = now()
+    await ctx.app.post("/api/tasks/" + first["id"] + "/accept", {})
+    await say(ctx, f"Give the worker of “{first['title']}” a NEW task titled 'Camel Branch': "
+              "in its worktree run `git checkout -b chief/camel-o1 main`, then add a function "
+              "`camel_to_snake(name)` at the end of textkit/__init__.py and commit it there. "
+              "Report done.")  # fmt: skip
+    second = await titled(ctx, later, "camel branch")
+    await task_status(ctx, second["id"], FINISHED, "camel", 400)
+    changed = await receipts_changed(ctx, second["id"])
+    diff = json.dumps(await ctx.app.get(f"/api/tasks/{second['id']}/diff"))
+    log(f"O1: {changed}")
+    assert "camel_to_snake" in diff and "-def slugify" not in diff, diff[:800]
+    assert changed["commits"] == 1 and changed["deletions"] <= 1, changed
+    log("O1 passed")
+
+
+async def o2_a_follow_up_in_english_is_answered_in_english(ctx: Ctx):
+    """Bug bash 5 (W4): an English follow-up on a task that was in Chinese came back in
+    Chinese."""
+    since = now()
+    await say(ctx, "\u5f00\u4e00\u4e2a\u65b0\u7684 worker\uff0c\u6807\u9898\u53eb "
+              "'Kit Count'\uff1a\u5728 textkit \u9879\u76ee\u91cc\u6570\u4e00\u4e0b "
+              "textkit/__init__.py \u91cc\u6709\u51e0\u4e2a\u51fd\u6570\uff0c\u7528"
+              "\u4e2d\u6587\u4e00\u53e5\u8bdd\u56de\u7b54\uff0c\u4e0d\u8981\u6539"
+              "\u4efb\u4f55\u6587\u4ef6\u3002")  # fmt: skip
+    task = await titled(ctx, since, "kit count")
+    first = await task_status(ctx, task["id"], FINISHED, "counted", 400)
+    log(f"O2 first: {first['result'][:120]!r}")
+    await ctx.app.post(
+        f"/api/tasks/{task['id']}/follow-up",
+        {"text": "Thanks. Now also list their names, one line each, briefly."},
+    )
+    await asyncio.sleep(5)
+    again = await task_status(ctx, task["id"], FINISHED, "listed", 400)
+    prose_only = prose(again["result"])
+    log(f"O2 again: {again['result'][:160]!r}")
+    assert len(CJK.findall(prose_only)) <= 3, again["result"][:400]
+    log("O2 passed")
+
+
+async def o3_a_cancel_as_it_finishes_keeps_the_result(ctx: Ctx):
+    """Bug bash 5 (A2): cancelled as its result landed, a task became Done (as if accepted),
+    its result never reviewed."""
+    since = now()
+    await say(ctx, "Start a worker titled 'Quick Sum' (no project): what is 17 + 25? Answer "
+              "in one line.")  # fmt: skip
+    task = await titled(ctx, since, "quick sum")
+    await task_status(ctx, task["id"], {"review"}, "summed", 300)
+    try:
+        await ctx.app.post(f"/api/tasks/{task['id']}/cancel", {"text": "changed my mind"})
+        raise AssertionError("cancelled a result that had just landed")
+    except RuntimeError as error:
+        assert "finished just now" in str(error), error
+    found = await ctx.app.get(f"/api/tasks/{task['id']}")
+    assert found["status"] == "review", found["status"]
+    await ctx.app.post(f"/api/tasks/{task['id']}/cancel", {"text": "changed my mind"})
+    found = await ctx.app.get(f"/api/tasks/{task['id']}")
+    assert found["status"] == "done" and found.get("set_aside"), found
+    log("O3 passed")
+
+
+async def o4_a_clone_it_made_itself_counts(ctx: Ctx):
+    """Bug bash 5 (L11): work in a repository the worker cloned itself showed as a report
+    with no changes."""
+    since = now()
+    await say(ctx, f"Start a worker titled 'Own Clone' with no project: in its own folder run "
+              f"`git clone {ctx.project} kitcopy`, then in kitcopy create NOTES.md with the line "
+              "'cloned notes' and commit it (git add NOTES.md && git commit -m notes). "
+              "Report done.")  # fmt: skip
+    task = await titled(ctx, since, "own clone")
+    await task_status(ctx, task["id"], FINISHED, "cloned", 400)
+    changed = await receipts_changed(ctx, task["id"])
+    log(f"O4: {changed}")
+    assert changed["commits"] >= 1 and changed["files"] >= 1, changed
+    log("O4 passed")
+
+
+async def o5_research_prose_is_not_a_change_claim(ctx: Ctx):
+    """Bug bash 5 (L3): a research answer saying a library's mode "was removed" (and that it
+    changed nothing) was flagged "Says it made changes"."""
+    since = now()
+    await say(ctx, "Start a worker titled 'Fuzzy Pick' (no project, change no files): in two "
+              "sentences, say whether difflib is fine for fuzzy matching in pure Python. Use "
+              "this sentence word for word: 'I believe the old pure-Python mode was removed in "
+              "v3.' End with: 'No code was written and nothing was changed.'")  # fmt: skip
+    task = await titled(ctx, since, "fuzzy pick")
+    await task_status(ctx, task["id"], FINISHED, "answered", 300)
+
+    async def receipts():
+        found = (await ctx.app.get(f"/api/tasks/{task['id']}")).get("receipts") or {}
+        return found if found.get("at") else None
+
+    found = await wait_for("its receipts", receipts, 120, ctx.app)
+    log(f"O5: {found.get('flags')}")
+    assert not any("made changes" in flag for flag in found.get("flags") or []), found
+    log("O5 passed")
+
+
 SCENARIOS = {
     "A": [
         w1_ask, w2_progress, w3_answered_directly, w4_pasted_orders, w5_chinese_log,
@@ -4110,6 +4226,11 @@ SCENARIOS = {
     "N": [
         n1_glob_edits_count_and_a_read_file_does_not,
         n2_quoted_names_and_a_search_that_finds_nothing, n3_a_removed_worktree_is_back, w52_no_ids,
+    ],
+    "O": [
+        o1_a_branch_from_main_counts_only_its_own, o2_a_follow_up_in_english_is_answered_in_english,
+        o3_a_cancel_as_it_finishes_keeps_the_result, o4_a_clone_it_made_itself_counts,
+        o5_research_prose_is_not_a_change_claim, w52_no_ids,
     ],
 }  # fmt: skip
 

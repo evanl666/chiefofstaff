@@ -20,7 +20,7 @@ import os
 from contextlib import suppress
 from typing import TYPE_CHECKING
 
-from .envelope import tasks_named
+from .envelope import news_tasks, tasks_named
 from .roles import ROUTER, SLACK, WORKER
 from .sources.slack import describe
 
@@ -304,6 +304,14 @@ class Delivery:
                 # A turn on it starts now; sent while it works, once its conversation shows it
                 # (a connection that shows none: when its turn on it comes, see working_on).
                 self.runtime.took_up(session_id, named)
+            elif (
+                row["role"] == WORKER
+                and not mid_turn
+                and not busy
+                and (named := news_tasks(fresh or text))
+            ):
+                # News on a thread it follows for a task: its turn is on that task.
+                self.runtime.took_up(session_id, named, news=True)
             if row["role"] == WORKER:
                 # The owner's chat about a task they stopped (its prompt names no task): once
                 # it works on it, it runs again (TaskActions.resume_stopped).
