@@ -75,10 +75,28 @@ async def test_the_owners_own_words_are_collected_where_they_wrote_them(tmp_path
         ("C0DEPLOYS", "U0ALICE1", "1790000004.000100", "not the owner's"),
     )
     harness.gh_replies["auth status"] = json.dumps(
-        {"hosts": {"github.com": [{"login": "owner", "state": "success", "active": True}]}}
+        {
+            "hosts": {
+                "github.com": [
+                    {"login": "owner", "state": "success", "active": True},
+                    {"login": "test-bot", "state": "success", "active": False},
+                ]
+            }
+        }
     )
     harness.gh_replies["auth token"] = "tok"
     reviews = [
+        {  # Posted from Chief of Staff on another install: carries its mark.
+            "id": "R3",
+            "url": "https://github.com/a/b/pull/1#pullrequestreview-444444",
+            "body": "Looks good.\n\n<!-- chief-of-staff -->",
+            "comments": {
+                "nodes": [
+                    {"id": "C3", "url": "https://github.com/a/b/pull/1#discussion_r555555",
+                     "body": "Rename this.\n\n<!-- chief-of-staff -->", "path": "r.py"},
+                ]
+            },
+        },
         {
             "id": "R1",
             "url": "https://github.com/a/b/pull/1#pullrequestreview-111111",
@@ -136,6 +154,10 @@ async def test_the_owners_own_words_are_collected_where_they_wrote_them(tmp_path
         ("instruction", "Always answer me in Chinese, briefly."),
     }, "only the owner's own words; not sent drafts, Copilot's commits or a worker's"
     assert added == 7
+    searched = [" ".join(call) for call, _ in harness.gh_calls if "graphql" in call]
+    assert searched and all("reviewed-by:owner" in call for call in searched), (
+        "only the owner's active account; not another signed in for tests"
+    )
     assert await runtime.habits.collect() == 0, "read once"
     assert runtime.habits.view()["observed"]["pr_review"] == 2
 

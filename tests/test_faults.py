@@ -12,6 +12,7 @@ from conftest import Harness, call_tool, settle, task_of
 
 from chiefofstaff.delivery import digest
 from chiefofstaff.models import DraftDecision, Settings
+from chiefofstaff.sources.github import marked
 
 
 def interrupt_after_send(harness, session_id, status="idle"):
@@ -256,6 +257,28 @@ async def test_drafts_interrupted_while_sending_are_checked_before_anything_is_r
     assert harness.store.draft(lost["id"])["status"] == "uncertain", "Slack search may lag"
     assert "Send it again" in harness.store.draft(lost["id"])["outcome"]
     assert not [call for call in harness.mcp.calls if call[0] == "slack_send_message"]
+
+
+async def test_an_interrupted_review_and_reply_posted_with_the_mark_are_found(harness):
+    """Code review: what Chief of Staff posts carries its mark; after a restart, the review and
+    the reply it posted must be found as posted, not offered to post again."""
+    runtime = await harness.connect()
+    target = {"repo": "acme/app", "number": 7, "head_sha": "abc"}
+    review = harness.store.create_draft(harness.router_id, "github", target, "Looks good.")
+    reply = harness.store.create_draft(
+        harness.router_id, "github", {**target, "in_reply_to": 21}, "Fixed in f61047fa."
+    )
+    harness.store.execute("UPDATE drafts SET status='uncertain'")
+    harness.gh_replies["api repos/acme/app/pulls/7/reviews"] = json.dumps(
+        [{"body": marked("Looks good."), "html_url": "https://github.com/acme/app/pull/7#r1"}]
+    )
+    harness.gh_replies["api repos/acme/app/pulls/7/comments"] = json.dumps(
+        [{"in_reply_to_id": 21, "body": marked("Fixed in f61047fa."),
+          "html_url": "https://github.com/acme/app/pull/7#discussion_r2"}]
+    )  # fmt: skip
+    await runtime.drafts.check_uncertain()
+    assert harness.store.draft(review["id"])["status"] == "sent"
+    assert harness.store.draft(reply["id"])["status"] == "sent"
 
 
 async def test_an_interrupted_approval_without_a_body_is_found_not_reposted(harness):

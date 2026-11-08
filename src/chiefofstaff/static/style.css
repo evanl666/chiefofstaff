@@ -386,7 +386,8 @@ summary { min-height: 28px; }
 .markdown th.align-center, .markdown td.align-center { text-align: center; }
 .markdown th.align-right, .markdown td.align-right { text-align: right; }
 .markdown table { border-collapse: collapse; font-size: var(--body); }
-.markdown th, .markdown td { padding: 5px 14px 5px 0; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; min-width: 4ch; max-width: 36ch; overflow-wrap: anywhere; }
+/* A cell wraps between words only: a narrow table scrolls sideways (its box) rather than breaking "4,020.50" or a header in two. */
+.markdown th, .markdown td { padding: 5px 14px 5px 0; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; min-width: 4ch; max-width: 36ch; overflow-wrap: break-word; word-break: normal; }
 .markdown th { font-weight: 600; color: var(--soft); }
 .markdown tr:last-child td { border-bottom: 0; }
 .path {
@@ -997,7 +998,6 @@ details.task-group > summary:hover { color: var(--text); }
 .card.worker-box > .box-tasks > .card.task:first-child { border-top: 0; }
 .card.worker-box.in-finished { background: none; box-shadow: none; border-color: transparent; padding-top: 2px; padding-bottom: 2px; }
 .task-body .artifacts { margin-top: 6px; }
-.receipt.artifact { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .receipt.watching { background: none; border: 1px solid var(--line); color: var(--muted); line-height: 20px; }
 button.receipt.needs { background: var(--amber-soft); color: var(--amber); }
 
@@ -1062,23 +1062,23 @@ button.receipt.needs { background: var(--amber-soft); color: var(--amber); }
 .show-more { margin: 4px 0 0 16px; }
 /* Artifacts: one row each, where it stands in sight; the list scrolls on its own. */
 #tasks-artifacts > .items { max-height: 280px; overflow-y: auto; display: grid; gap: 2px; padding-right: 2px; }
-.artifact { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; column-gap: 8px; padding: 5px 8px; border-radius: 6px; background: var(--card, var(--hover)); font-size: var(--small); min-width: 0; }
-.artifact .a-kind { font: 600 10px var(--mono); color: var(--muted); text-transform: uppercase; letter-spacing: 0.02em; min-width: 5.5ch; }
-.artifact .a-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); text-decoration: none; font-weight: 500; }
-.artifact .a-name:hover { text-decoration: underline; }
-.artifact .a-status { padding: 0 8px; line-height: 20px; border-radius: 10px; white-space: nowrap; background: var(--hover); color: var(--soft); max-width: 12em; overflow: hidden; text-overflow: ellipsis; }
-.artifact .a-status.derived { font-style: italic; }
-.artifact.tone-good .a-status { background: var(--green-soft); color: var(--green); }
-.artifact.tone-bad .a-status { background: var(--red-soft); color: var(--red); }
-.artifact.tone-wait .a-status { background: var(--amber-soft); color: var(--amber); }
-.artifact.tone-active .a-status { background: var(--accent-soft); color: var(--accent); }
-.artifact.tone-muted .a-status { color: var(--muted); }
-.artifact .a-hide { min-height: 0; padding: 0 4px; background: none; color: var(--muted); font-weight: 400; }
-.artifact .a-hide:hover { color: var(--text); }
-.artifact .a-meta { grid-column: 2 / -1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
-.artifact .a-task { padding: 0; min-height: 0; font: inherit; color: inherit; background: none; text-align: left; max-width: 70%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
-.artifact .a-task:hover { color: var(--text); text-decoration: underline; }
-.artifact.hidden-artifact { opacity: 0.6; }
+#tasks-artifacts .artifact { display: grid; grid-template-columns: 6.5ch minmax(0, 1fr) auto auto; align-items: center; column-gap: 8px; padding: 5px 8px; border-radius: 6px; background: var(--card, var(--hover)); font-size: var(--small); min-width: 0; }
+#tasks-artifacts .artifact .a-kind { font: 600 10px var(--mono); color: var(--muted); text-transform: uppercase; letter-spacing: 0.02em; min-width: 5.5ch; }
+#tasks-artifacts .artifact .a-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); text-decoration: none; font-weight: 500; }
+#tasks-artifacts .artifact .a-name:hover { text-decoration: underline; }
+#tasks-artifacts .artifact .a-status { padding: 0 8px; line-height: 20px; border-radius: 10px; white-space: nowrap; background: var(--hover); color: var(--soft); max-width: 12em; overflow: hidden; text-overflow: ellipsis; }
+#tasks-artifacts .artifact .a-status.derived { font-style: italic; }
+#tasks-artifacts .artifact.tone-good .a-status { background: var(--green-soft); color: var(--green); }
+#tasks-artifacts .artifact.tone-bad .a-status { background: var(--red-soft); color: var(--red); }
+#tasks-artifacts .artifact.tone-wait .a-status { background: var(--amber-soft); color: var(--amber); }
+#tasks-artifacts .artifact.tone-active .a-status { background: var(--accent-soft); color: var(--accent); }
+#tasks-artifacts .artifact.tone-muted .a-status { color: var(--muted); }
+#tasks-artifacts .artifact .a-hide { min-height: 0; padding: 0 4px; background: none; color: var(--muted); font-weight: 400; }
+#tasks-artifacts .artifact .a-hide:hover { color: var(--text); }
+#tasks-artifacts .artifact .a-meta { grid-column: 2 / -1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+#tasks-artifacts .artifact .a-task { padding: 0; min-height: 0; font: inherit; color: inherit; background: none; text-align: left; max-width: 70%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+#tasks-artifacts .artifact .a-task:hover { color: var(--text); text-decoration: underline; }
+#tasks-artifacts .artifact.hidden-artifact { opacity: 0.6; }
 #tasks-artifacts .show-hidden { justify-self: start; margin: 2px 0 0 8px; font-size: var(--small); }
 #session-list .idle-workers > summary { cursor: pointer; list-style: none; font-size: var(--small); color: var(--muted); padding: 6px 12px; }
 #session-list .idle-workers > summary::-webkit-details-marker { display: none; }
@@ -1349,3 +1349,10 @@ dialog .row label.hours:not(.grow) { width: auto; flex: none; }
 .away-can { list-style: none; margin: 4px 0 0; padding: 0; font-size: var(--small); color: var(--muted); display: grid; gap: 2px; }
 .away-can li::before { content: "– "; }
 .away-can li.ok::before { content: "✓ "; color: var(--green); }
+
+/* Chips for what a task made or points to: a declared status shows its tone. */
+.receipt.link-chip { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; vertical-align: bottom; }
+.receipt.link-chip.tone-good { background: var(--green-soft); color: var(--green); }
+.receipt.link-chip.tone-bad { background: var(--red-soft); color: var(--red); }
+.receipt.link-chip.tone-wait { background: var(--amber-soft); color: var(--amber); }
+.receipt.link-chip.tone-active { background: var(--accent-soft); color: var(--accent); }

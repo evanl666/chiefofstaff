@@ -1,6 +1,57 @@
 # Changelog
 
-## 0.1.25 (2026-11-09)
+## 0.1.26 (2026-11-07)
+
+Fixes from a live bug bash (three instances driven like an owner would), and four suspicions it
+raised, each confirmed and fixed.
+
+- **Stop stops the task at work**: *Stop* (or the Watchdog) stops the task its worker is on, not
+  the one given last; it waits under *Needs you* as *Stopped* (*Stopped by you*) with *Go on*,
+  *Go on with a note…* or cancel (until it reports on it again). What the worker
+  was sent during the stopped turn (Copilot drops it with the turn: a new task, a message) goes
+  out again with its next message. Cancelling the task a worker is at while it has others open
+  stops that work at once and tells it to go on with the others (what it never saw about the
+  cancelled task is not sent).
+- **Which task**: a task sent to a busy worker is its current task only once it takes it up; a
+  steering message does not switch tasks; a restarted worker takes up the task its unanswered
+  message was about. Workers are named by the task they are on. The Router uses your title as
+  you wrote it. A worker that fails is reported to the Router (and you).
+- **Chatting with a worker** about finished work no longer reopens it or rewrites its result:
+  what it says is an *Update* on the task. What you write in its chat answers the task that
+  asked you (the newest open question), not the newest task. Asked from Home (@), its answer
+  shows on Home too. One answer covering two reported tasks is added to neither.
+- **Receipts per task**: on a worker's branch only the commits since the task began; in your own
+  folder only the files its edits touched. A question after code work shows no changes to
+  accept; commits a merge brought in from the default branch are not the task's; every file in
+  a new folder is counted and in the diff.
+- **Answers you can see**: *Recently finished* is open by default; a finished report's line in
+  the chat says its gist and opens to the whole report; a folded Router remark shows its gist.
+  *View* on *Started*, *New task* and *Told* opens that task's card, not its worker's first.
+- **Artifacts**: PRs a task made (not those it mentions); docs and runs it declared or linked in
+  any report (one a later report does not repeat stays); links you or the Router gave it are
+  references, not output (its own doc pasted back to it stays its own). The same doc linked two
+  ways is one row, two runs told apart by their address (`?dag_id=…`, `#job/2/run/3`) are two,
+  the newest status wins, *timed out* and *fails* are red, and *not failed* is not. One taken off comes back when it goes wrong. Cards show declared
+  artifacts with their status (*N more made* past the first); Google docs are told apart by
+  their id; the kind column lines up; long names end in "…".
+- **Text**: `__init__.py` and other underscores show as in the message; images are links
+  (🖼); a bare link ends before "'s"; table cells wrap between words; links in code blocks are
+  not artifacts; a Flyte execution is known by its path on any host.
+- **Times**: *scanned* is when a watch scan finished (*scanning now…* while it runs); a PR's
+  time is when it last changed, not when it was read. A draft you post yourself the same
+  second it was written is recognised as posted (GitHub's times are whole seconds).
+- **Router**: told when a task blocked on another can go on (so it can withdraw what it asked
+  you); keeps your language after a handover; matches a project by its package name (a folder
+  called `project` holding `textkit`). Workers answer questions about a project from its
+  default branch, not an unmerged one.
+- **Learning** reads reviews of your active `gh` account only (not a test account signed in
+  beside it), and never what Chief of Staff posted: everything it posts on GitHub carries an
+  invisible `<!-- chief-of-staff -->` mark (and a review or reply it posted just before a
+  restart is still found as posted, not offered again).
+- **Slack**: *Send a test* uses what the form says (saved first); a thread's latest message is
+  quoted whole from its start, with "…" when cut.
+
+## 0.1.25 (2026-11-07)
 
 - **Four places, task by task**: Home and the sidebar put every task in one of *Needs you*,
   *Running*, *Monitoring* or *Recently finished*, by one rule (`board.js`); the rest are
@@ -53,7 +104,7 @@
 - **Away notifications**: Settings says what works: sending, last delivered, reading replies
   (verified), new requests.
 
-## 0.1.24 (2026-11-08)
+## 0.1.24 (2026-11-07)
 
 - **Home, task by task**: *Running*, *Monitoring*, *Stalled*, *Queued*, *Ready to review* and
   *Recently finished* hold tasks; in each, a box per worker with its tasks there, so a worker

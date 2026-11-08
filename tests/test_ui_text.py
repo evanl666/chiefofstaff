@@ -307,27 +307,119 @@ def test_artifacts_in_one_list_with_where_each_stands():
         s.state.snapshot = { pr_titles: {} };
         const pr = (n, extra) => ({ label: `acme/app#${n}`, url: `https://github.com/acme/app/pull/${n}`,
           state: "OPEN", checks: "passing", at: "2026-11-07T11:00:00Z", ...extra });
+        const sheet = "https://docs.google.com/spreadsheets/d/1SheetABC_x/edit";
         const tasks = [
           { id: "t1", status: "running", title: "Run the ICP flow",
             updated_at: "2026-11-07T11:30:00Z",
             receipts: { prs: [pr(1, { own: true, checks: "failing" }), pr(2, { own: false })] },
-            artifacts: [{ url: "https://flyte.example.com/console/projects/p/domains/d/executions/abc",
-              name: "ICP flow", status: "running", at: "2026-11-07T11:20:00Z" }],
-            progress: "Doc: https://docs.google.com/document/d/x/edit and the Spark app "
-              + "https://shs.example.com/history/application_1700000000000_0042/jobs/" },
+            artifacts: [
+              { url: "https://flyte.example.com/console/projects/p/domains/d/executions/abc",
+                name: "ICP flow", status: "running", at: "2026-11-07T11:20:00Z" },
+              { url: sheet, name: "Weekly sheet", status: "draft", at: "2026-11-07T11:00:00Z" },
+            ],
+            // A doc an earlier report gave (the latest does not repeat it), the same document
+            // again with a query, a Spark application under the run, a link in code.
+            links: ["https://docs.google.com/document/d/1DocMadeEarly/edit"],
+            progress: "Doc: https://docs.google.com/document/d/1DocMadeEarly/edit?usp=sharing "
+              + "Spark https://shs.example.com/history/application_1700000000000_0042/jobs/\\n"
+              + "```\\nhttps://not-a-link.example.com/x\\n```" },
           { id: "t2", status: "done", title: "Review #2", updated_at: "2026-11-07T10:00:00Z",
-            receipts: { prs: [pr(2, { own: true, state: "MERGED" }), pr(3, { draft: true })] },
-            result: "Given https://docs.google.com/document/d/given/edit", goal: "See "
-              + "https://docs.google.com/document/d/given/edit" },
+            receipts: { prs: [pr(2, { own: true, state: "MERGED" }),
+              pr(3, { draft: true, own: true })] },
+            artifacts: [{ url: sheet + "?usp=sharing", name: "Weekly sheet", status: "final",
+              at: "2026-11-07T11:10:00Z" }],
+            // Given to it to work from: not its output.
+            given_links: ["https://docs.google.com/document/d/1GivenDocC"],
+            result: "Read https://docs.google.com/document/d/1GivenDocC/edit?usp=sharing",
+            goal: "See https://docs.google.com/document/d/1GivenDocC" },
         ];
         return a.collectArtifacts(tasks).map((i) => [i.kind, i.name, i.status, i.tone, i.task.id]);
         """
     )
     assert found == [
         ["PR", "app#1", "CI failing", "bad", "t1"],
-        ["Doc", "Google Doc", "in progress", "active", "t1"],
+        ["Doc", "1DocMade", "in progress", "active", "t1"],
         ["Flyte", "ICP flow", "running", "active", "t1"],
         ["PR", "app#3", "draft", "active", "t2"],
+        ["Sheet", "Weekly sheet", "final", "good", "t2"],
         ["PR", "app#2", "merged", "good", "t2"],
-    ], "worst first, then newest; a PR two tasks share is the one that made it; not Spark under "
-    "a run, nor a doc it was given"
+    ], "worst first, then newest; own PRs only; one row per document, the newer word on it"
+
+
+def test_a_status_in_words_has_its_tone_negations_too():
+    tones = run_js(
+        f"const a = await import({json.dumps((STATIC / 'artifacts.js').as_uri())});\n"
+        """
+        return ["no errors", "0 failures", "error-free", "incomplete", "not ready",
+          "unpublished", "partially complete", "ready for review", "cancelled", "aborted",
+          "failed", "succeeded", "running", "final", "paused", "awaiting approval",
+          "timed out after 2h", "Timed_out", "fails on CI", "crash", "OOM killed", "not failed",
+          "did not fail", "failed: not found", "0 errors, 2 failures", "no errors; 3 tests failed",
+          "Not failed yet, still running", "didn't fail", "no errors but 2 warnings"]
+          .map((s) => [s, a.toneOf(s)]);
+        """
+    )
+    assert dict(tones) == {
+        "no errors": "good", "0 failures": "good", "error-free": "good",
+        "incomplete": "active", "not ready": "active", "unpublished": "active",
+        "partially complete": "active", "ready for review": "wait", "cancelled": "muted",
+        "aborted": "muted", "failed": "bad", "succeeded": "good", "running": "active",
+        "final": "good", "paused": "active", "awaiting approval": "wait",
+        "timed out after 2h": "bad", "Timed_out": "bad", "fails on CI": "bad", "crash": "bad",
+        "OOM killed": "bad", "not failed": "good", "did not fail": "good",
+        "failed: not found": "bad", "0 errors, 2 failures": "bad",
+        "no errors; 3 tests failed": "bad", "Not failed yet, still running": "active",
+        "didn't fail": "good", "no errors but 2 warnings": "neutral",
+    }  # fmt: skip
+
+
+def test_lines_keep_code_and_underscores_as_the_message_shows_them():
+    """Bug bash #18-#21: a card's line said "init.py" for `__init__.py`; images showed as "!";
+    a bare link took the "'s" after it; two Google docs had the same label."""
+    found = run_js(
+        """
+        return {
+          first: t.firstLine("**Fixed** `__init__.py` and __init__.py"),
+          plain: t.plainText("Edit `__init__.py`, format_money; **bold** ![chart](https://x.com/a.png)"),
+          image: t.markdown("![chart](https://x.com/a.png)"),
+          apostrophe: t.markdown("see https://x.com/abc's page"),
+          urls: t.findUrls("it's https://x.com/a'b here"),
+          keys: [
+            t.linkKey("https://docs.google.com/document/d/ABCDEFGH123/edit?usp=sharing"),
+            t.linkKey("https://docs.google.com/document/d/ABCDEFGH123/view#h"),
+            t.linkKey("https://www.X.com/a/b/?q=1#f"),
+            t.linkKey("https://airflow.corp/graph?dag_id=a&utm_source=x"),
+            t.linkKey("https://airflow.corp/graph?dag_id=b"),
+            t.linkKey("https://acme.cloud.databricks.com/?o=1#job/2/run/3"),
+            t.linkKey("https://acme.cloud.databricks.com/?o=1#job/2/run/4"),
+          ],
+          flyte: t.linkKind("https://example.com/console/projects/p/domains/d/executions/abc123"),
+          docs: [
+            t.linkKind("https://docs.google.com/document/d/ABCDEFGH123/edit").label,
+            t.linkKind("https://docs.google.com/document/d/ZYXWVUT9876/edit").label,
+          ],
+        };
+        """
+    )
+    assert found["first"] == "Fixed __init__.py and __init__.py"
+    assert found["plain"] == "Edit __init__.py, format_money; bold chart"
+    assert ">\U0001f5bc chart</a>" in found["image"] and "<img" not in found["image"]
+    assert (
+        'href="https://x.com/abc"' in found["apostrophe"]
+        and "</a>&#39;s page" in found["apostrophe"]
+    )
+    assert found["urls"] == ["https://x.com/a"]
+    assert found["keys"][0] == found["keys"][1] == "gdoc:ABCDEFGH123"
+    assert found["keys"][2] == "x.com/a/b?q=1", "what tells it apart stays; a place in it not"
+    assert found["keys"][3] == "airflow.corp/graph?dag_id=a" != found["keys"][4]
+    assert found["keys"][5] != found["keys"][6]
+    assert found["flyte"]["label"] == "Flyte · abc123" and found["flyte"]["role"] == "run"
+    assert found["docs"] == ["Google Doc · ABCDEFGH", "Google Doc · ZYXWVUT9"]
+
+
+def test_a_stopped_task_waits_for_the_owner():
+    found = board(
+        [task("s", "w1", "waiting", stopped="owner"), task("o", "w1", started=True)],
+        [{"id": "w1", "status": "working", "turn_task": "o"}],
+    )
+    assert found["phases"] == {"s": "needs/stopped", "o": "running"}

@@ -130,6 +130,22 @@ MODEL_REFUSED = re.compile(
 ROUTER_CONTEXT = int(os.environ.get("CHIEFOFSTAFF_ROUTER_CONTEXT", "150000"))
 
 
+# Copilot's tools that write files, by the argument naming the file.
+EDIT_TOOLS = {"edit", "str_replace", "str_replace_editor", "create", "write", "write_file"}
+
+
+def edited_paths(name: str, arguments: Any) -> list[str]:
+    """The files a tool call writes (an edit, a new file, a patch)."""
+    if not isinstance(arguments, dict):
+        return []
+    if name in EDIT_TOOLS and (path := arguments.get("path") or arguments.get("file_path")):
+        return [str(path)]
+    if name == "apply_patch":
+        patch = str(arguments.get("input") or arguments.get("patch") or "")
+        return re.findall(r"^\*\*\* (?:Add|Update|Delete) File: (.+)$", patch, re.MULTILINE)
+    return []
+
+
 class Events:
     """Turns session events into state, timeline entries, commands and usage."""
 
@@ -322,7 +338,9 @@ class Events:
         state = self.states[row["id"]]
         state.echoes = True
         if row["role"] == WORKER and (named := tasks_named(getattr(event.data, "content", ""))):
-            self.runtime.took_up(row["id"], named)  # What its turn is about now.
+            # What its turn is about now; steered into a turn on another task, it stays on that.
+            delivery = getattr(getattr(event.data, "delivery", None), "value", "")
+            self.runtime.took_up(row["id"], named, switch=delivery != "steering")
         if state.unread:
             # It sees a message now: that one (or, changed on the way, the oldest).
             seen = digest(getattr(event.data, "content", "") or "")
@@ -380,6 +398,11 @@ class Events:
             return  # Chief of Staff's own tools show as what they did.
         if row["role"] == WORKER and OPENS_PR_TOOL.search(name):
             self.states[row["id"]].pr_calls.add(call)
+        if row["role"] == WORKER and (paths := edited_paths(name, arguments)):
+            task = self.runtime.turn_task(row["id"]) or (
+                (self.tasks.current(row["id"]) or {}).get("id") or ""
+            )
+            self.runtime.task_actions.touched(task, paths)
         summary = describe_tool(name, arguments)
         self.runtime.add_message(row["id"], "tool", summary)
         step = describe_step(name, arguments)

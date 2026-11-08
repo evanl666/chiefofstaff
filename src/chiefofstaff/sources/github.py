@@ -24,6 +24,19 @@ NOT_FOUND = re.compile(
     r"HTTP 404\b|\bgh: Not Found\b|Could not resolve to a (?:Repository|PullRequest)\b"
 )
 FAILED = {"failure", "timed_out", "cancelled", "action_required", "startup_failure"}
+# Under what Chief of Staff posts for the owner, unseen on GitHub: learning how the owner writes
+# leaves it out (it is drafted text), whichever install of Chief of Staff posted it.
+POSTED_MARK = "<!-- chief-of-staff -->"
+
+
+def marked(text: str) -> str:
+    """The text as posted: with the mark (none on an empty review summary: nothing to learn)."""
+    return f"{text.rstrip()}\n\n{POSTED_MARK}" if text.strip() else text
+
+
+def unmarked(text: str | None) -> str:
+    """What was posted, without the mark: to compare with the draft."""
+    return (text or "").replace(POSTED_MARK, "").strip()
 
 
 def github_time(moment: float) -> str:
@@ -31,7 +44,7 @@ def github_time(moment: float) -> str:
 
 
 def body(item: dict) -> str:
-    return " ".join((item.get("body") or "").split())[:1500] or "(no text)"
+    return " ".join(unmarked(item.get("body")).split())[:1500] or "(no text)"
 
 
 logger = logging.getLogger(__name__)
@@ -681,7 +694,7 @@ class GitHubSource:
         )
         if body.strip():
             for review in reviews:
-                if (review.get("body") or "").strip() == body.strip():
+                if unmarked(review.get("body")) == body.strip():
                     return review.get("html_url") or "Review published."
             return ""
         login = await self.acting_login(target["repo"])
@@ -742,7 +755,7 @@ class GitHubSource:
                 f"repos/{repo}/issues/{number}/comments",
                 "--method=POST",
                 "--input=-",
-                payload={"body": text},
+                payload={"body": marked(text)},
             )
         )
         if posted.get("id"):
@@ -754,7 +767,7 @@ class GitHubSource:
         """The URL of a published comment with this text on the target PR, or ""."""
         path = f"repos/{target['repo']}/issues/{int(target['number'])}/comments"
         for comment in pages(await self.gh("api", path, "--paginate")):
-            if (comment.get("body") or "").strip() == text.strip():
+            if unmarked(comment.get("body")) == text.strip():
                 return comment.get("html_url") or "Reply published."
         return ""
 
@@ -844,7 +857,8 @@ class GitHubSource:
             path = f"repos/{repo}/pulls/{number}/reviews"
             for item in pages(await self.gh("api", path, "--paginate")):
                 candidates.append((f"github:review:{item.get('id')}", item))
-        start = datetime.fromisoformat(since) if since else None
+        # GitHub's times are whole seconds: one posted the second the draft was written counts.
+        start = datetime.fromisoformat(since).replace(microsecond=0) if since else None
         for key, item in candidates:
             if ((item.get("user") or {}).get("login") or "").lower() not in mine:
                 continue
@@ -863,7 +877,7 @@ class GitHubSource:
         comments = pages(await self.gh("api", path, "--paginate"))
         for comment in comments:
             if comment.get("in_reply_to_id") == target["in_reply_to"] and (
-                (comment.get("body") or "").strip() == text.strip()
+                unmarked(comment.get("body")) == text.strip()
             ):
                 return comment.get("html_url") or "Reply published."
         return ""
@@ -876,7 +890,7 @@ class GitHubSource:
                 f"repos/{repo}/pulls/{number}/comments/{int(target['in_reply_to'])}/replies",
                 "--method=POST",
                 "--input=-",
-                payload={"body": text},
+                payload={"body": marked(text)},
             )
         )
         if reply.get("id"):
@@ -896,14 +910,14 @@ class GitHubSource:
         if await self.head(repo, target["number"]) != target["head_sha"]:
             raise ValueError("The PR changed after the draft was written; nothing was published.")
         event = REVIEW_EVENTS.get(target.get("verdict", ""), "COMMENT")
-        payload = {"event": event, "commit_id": target["head_sha"], "body": body}
+        payload = {"event": event, "commit_id": target["head_sha"], "body": marked(body)}
         if comments := target.get("comments"):
             payload["comments"] = [
                 {
                     "path": comment["path"],
                     "line": comment["line"],
                     "side": comment.get("side", "RIGHT"),
-                    "body": comment["body"],
+                    "body": marked(comment["body"]),
                 }
                 | (
                     {

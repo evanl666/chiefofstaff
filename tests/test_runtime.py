@@ -17,6 +17,7 @@ from chiefofstaff.backend import USAGE_RECORD, read_log, scan_log, sessions_in_u
 from chiefofstaff.models import DraftDecision, Settings
 from chiefofstaff.policy import permission_denial
 from chiefofstaff.runtime import ROUTER_TOOLS
+from chiefofstaff.sources.github import marked
 from chiefofstaff.tasks import settle_followups
 
 
@@ -92,7 +93,7 @@ async def test_router_routes_work_and_worker_reports_back(harness):
     assert harness.store.session(harness.router_id)["unread"] == 1
     await settle(runtime)
     assert harness.notifications == [
-        ("Ready to review", "“Fix flaky login test” is ready to review"),  # The task itself.
+        ("Finished", "“Fix flaky login test” finished"),  # The task itself.
         ("Chief of Staff", "Login test fixed: PR #7"),
     ]
 
@@ -477,7 +478,7 @@ async def test_github_review_draft_is_published_on_approval(tmp_path):
     assert published["outcome"] == "https://github.com/acme/app/pull/7#review-1"
     arguments, payload = harness.gh_calls[-1]
     assert arguments[1] == "repos/acme/app/pulls/7/reviews"
-    assert payload == {"event": "COMMENT", "commit_id": "abc123", "body": "Looks good"}
+    assert payload == {"event": "COMMENT", "commit_id": "abc123", "body": marked("Looks good")}
 
 
 async def test_an_approval_is_published_as_one_and_settles_the_review_task(tmp_path):
@@ -679,7 +680,9 @@ async def test_the_owner_can_post_the_line_comments_alone(tmp_path):
     )
     await runtime.drafts.resolve(draft["id"], DraftDecision(action="send", content={"body": ""}))
     [payload] = [payload for _, payload in harness.gh_calls if payload]
-    assert payload["body"] == "" and payload["comments"][0]["body"] == "Say why it is empty."
+    assert payload["body"] == "" and payload["comments"][0]["body"] == marked(
+        "Say why it is empty."
+    )
     assert "only the line comments were posted" in harness.session(worker).sent[-1]
     assert runtime.github.seen("github:reviewcomment:77"), "our own comments are not PR news"
 
@@ -1108,6 +1111,11 @@ async def test_a_fresh_router_remembers_what_the_owner_said_long_ago(harness):
     handover = runtime.handover()
     assert "BLUE-HERON-7" in handover, "the owner's words are kept, not only the last 30"
     assert "Question 79" in handover and len(handover) < 80_000
+    assert "The owner writes in English" in handover, "learned from what they wrote"
+    harness.store.set("owner_language", "Chinese")
+    assert "The owner writes in Chinese: write everything for them in Chinese" in (
+        runtime.handover()
+    ), "a fresh Router answered in English"
 
 
 async def test_a_fresh_router_that_fails_hands_back_to_the_earlier_one(harness):
@@ -1297,11 +1305,12 @@ async def test_a_worker_used_in_a_terminal_meanwhile_catches_up_before_it_resume
     runtime.task_actions.accept(task["id"])
     await runtime.owner_send(worker, "Who are you?")
     assert runtime.tasks.get(task["id"])["status"] == "done", "a question reopens nothing"
-    await call_tool(runtime, "report", worker, status="done", summary="Shipped.")
-    assert runtime.tasks.get(task["id"])["status"] == "review", "new work comes back for review"
+    done = await call_tool(runtime, "report", worker, status="done", summary="Shipped.")
+    assert "update" in done.text_result_for_llm
+    after = runtime.task_actions.view(runtime.tasks.get(task["id"]))
+    assert after["status"] == "done", "accepted stays accepted: what came of the chat is news"
+    assert after["news"]["text"] == "Shipped." and after["result"] != "Shipped."
     await call_tool(runtime, "report", worker, status="done", summary="The PR was merged.")
-    runtime.task_actions.accept(task["id"])
-    await call_tool(runtime, "report", worker, status="done", summary="Noted the merge.")
     assert runtime.tasks.get(task["id"])["status"] == "done", "news on accepted work stays done"
 
 

@@ -2,7 +2,7 @@ import pytest
 from conftest import FakeSlackMcp, FakeTokens, slack_tool
 
 from chiefofstaff.models import Settings
-from chiefofstaff.sources.slack import SlackError, SlackSource, message_keys
+from chiefofstaff.sources.slack import SlackError, SlackSource, message_keys, newest_message
 from chiefofstaff.store import Store
 
 RESULT = """Results:
@@ -296,3 +296,20 @@ async def test_dm_thread_replies_found_by_search_reach_the_follower(source):
     await source.poll_once()
     assert source.calls == []
     assert source.host.thread_calls[-1][:2] == ("slack:D0ALICE01", ["slack:1712345700.000400"])
+
+
+def test_the_newest_message_is_quoted_whole_not_cut_mid_sentence():
+    """Bug bash #13: the thread quote kept the listing's last 400 characters, starting mid-word
+    of an older message and cutting a long one without saying so."""
+    listed = "\n\n".join(
+        f"Channel: <#C1> (x) | From: <@U{n}> ({who}) | ts: 17000000{n}.0\nText: {text}\n"
+        f"Permalink: https://acme.slack.com/archives/C1/p17000000{n}0"
+        for n, (who, text) in enumerate(
+            [("Bob", "older " * 80), ("Alice", "Ship it &lt;today&gt; &amp; tell\n  me.")]
+        )
+    )
+    assert newest_message(listed, last=True) == "Alice: Ship it <today> & tell me."
+    assert newest_message(listed, last=False).startswith("Bob: older older")
+    long = newest_message(listed.replace("Ship it", "word " * 200), last=True)
+    assert len(long) == 400 and long.endswith("\u2026") and long.startswith("Alice: word")
+    assert newest_message("plain " * 100, last=True).startswith("\u2026")

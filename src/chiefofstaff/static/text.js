@@ -107,9 +107,12 @@ export function linkKind(url) {
   if ((match = /^https:\/\/github\.com\/[^/]+\/([^/]+)\/issues\/(\d+)/.exec(url))) return is("issue", `${match[1]}#${match[2]}`, "reference");
   if ((match = /^https:\/\/github\.com\/[^/]+\/([^/]+)\/actions\/runs\//.exec(url))) return is("run", `CI run · ${match[1]}`, "diagnostic");
   if (/^https:\/\/github\.com\/[^/]+\/[^/]+\/(blob|tree)\//.test(url)) return is("file", last || "File", "reference");
-  if (/docs\.google\.com\/spreadsheets/.test(url)) return is("doc", "Sheet", "output");
-  if (/docs\.google\.com\/presentation/.test(url)) return is("doc", "Slides", "output");
-  if (/docs\.google\.com\//.test(url)) return is("doc", "Google Doc", "output");
+  // Google's documents by their id too: several are told apart.
+  const docId = /\/d\/(?:e\/)?([\w-]{6,})/.exec(parsed.pathname)?.[1] || "";
+  const doc = (label) => is("doc", docId ? `${label} · ${docId.slice(0, 8)}` : label, "output", { id: docId });
+  if (/docs\.google\.com\/spreadsheets/.test(url)) return doc("Sheet");
+  if (/docs\.google\.com\/presentation/.test(url)) return doc("Slides");
+  if (/docs\.google\.com\//.test(url)) return doc("Google Doc");
   if (/\.slack\.com\/archives\//.test(url)) return is("slack", "Slack message", "reference");
   if ((match = /atlassian\.net\/browse\/([A-Z][A-Z0-9]+-\d+)/.exec(url)) || (match = /\/browse\/([A-Z][A-Z0-9]+-\d+)/.exec(url))) return is("ticket", match[1], "reference");
   if (/notion\.so$/.test(host)) return is("doc", "Notion", "output");
@@ -120,7 +123,7 @@ export function linkKind(url) {
   if (/airflow/i.test(host) || dag) {
     return is("run", `Airflow${dag ? ` · ${shorten(dag, 28)}` : " run"}`, underRun ? "diagnostic" : "run");
   }
-  if (/flyte/i.test(host)) {
+  if (/flyte/i.test(host) || /\/console\/projects\/[^/]+\/domains\/[^/]+\/executions?\//.test(path)) {
     const execution = /\/executions?\/([^/?#]+)/.exec(path)?.[1] || /\/(?:executions?|exec)\/[^/]+\/[^/]+\/([^/?#]+)/.exec(path)?.[1] || "";
     return is("run", `Flyte${execution ? ` · ${shorten(execution, 24)}` : " run"}`, underRun ? "diagnostic" : "run");
   }
@@ -130,6 +133,23 @@ export function linkKind(url) {
   if (/(^|[.-])rdev([.-]|$)/i.test(host)) return is("run", `rdev · ${shorten(host.split(".")[0], 28)}`, "diagnostic", { id: host.split(".")[0] });
   if (/darwin/i.test(host)) return is("doc", `Darwin${last ? ` · ${shorten(last, 28)}` : ""}`, "output");
   return is("link", last && !/^[\w-]{32,}$/.test(last) ? `${shorten(host, 28)} · ${shorten(last, 24)}` : shorten(host, 40), "reference");
+}
+// One key for one thing linked in different ways: a Google document by its id; else the
+// address without what only says how it was shared ("?usp=sharing", "utm_…") or a place in the
+// page ("#L10"). What tells runs apart stays: "?dag_id=a", "#job/2/run/3".
+const SHARING = /^(usp|utm_\w+|ref|ref_src|fbclid|gclid|si|authuser|ouid|rtpof|sd)$/i;
+export function linkKey(url) {
+  try {
+    const parsed = new URL(url);
+    const doc = /docs\.google\.com$/.test(parsed.hostname) && /\/d\/(?:e\/)?([\w-]{6,})/.exec(parsed.pathname);
+    if (doc) return `gdoc:${doc[1]}`;
+    const query = [...parsed.searchParams].filter(([name]) => !SHARING.test(name)).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    const search = query.length ? `?${new URLSearchParams(query)}` : "";
+    const route = parsed.hash.includes("/") ? parsed.hash : "";
+    return `${parsed.hostname.replace(/^www\./, "").toLowerCase()}${parsed.pathname.replace(/\/+$/, "")}${search}${route}`;
+  } catch {
+    return url;
+  }
 }
 // A link's text in a message: a PR by its number and title; a Slack message as one.
 function linkLabel(url) {
@@ -159,7 +179,9 @@ function pathChip(path) {
   return `<span class="path" data-path="${path}" title="${path}\nClick to open (or copy)">${escapeHtml(displayPath(path))}</span>`;
 }
 function inlineEscaped(escaped) {
-  return escaped.replace(inlinePattern(), (match, code, bold, strike, italic, label, href, angled, angledLabel, bare, path) => {
+  // An image is a link to it (nothing loads from elsewhere by itself).
+  const images = escaped.replace(/!\[([^\]\n]*)\]\((https?:\/\/[^\s()]+)\)/g, (_, alt, href) => `[🖼 ${alt || "image"}](${href})`);
+  return images.replace(inlinePattern(), (match, code, bold, strike, italic, label, href, angled, angledLabel, bare, path) => {
     if (code !== undefined) return inlinePattern.path.test(code) ? pathChip(code) : `<code>${code}</code>`;
     if (bold !== undefined) return `<strong>${inlineEscaped(bold)}</strong>`;
     if (strike !== undefined) return `<s>${inlineEscaped(strike)}</s>`;
@@ -170,7 +192,7 @@ function inlineEscaped(escaped) {
     }
     let [value, trail] = href ? [href, ""] : angled ? [angled, ""] : trimUrl(bare);
     // Not past an escaped "<" or ">" ("https://x>" in a sentence), and Slack's "&amp;" is "&".
-    const cut = value.search(/&(gt|lt);/);
+    const cut = value.search(/&(gt|lt|quot|#39);/);
     if (cut > 0) [value, trail] = [value.slice(0, cut), value.slice(cut) + trail];
     value = value.replace(/&amp;amp;/g, "&amp;");
     const text = label ?? angledLabel ?? escapeHtml(linkLabel(unescapeHtml(value)));
@@ -311,12 +333,16 @@ export function markdown(text, depth = 0) {
 }
 // Markdown as plain words, for a line on a card: no marks, links as their text, code as is.
 export function plainText(text) {
+  // Code as it is, and underscores as markdown() shows them: `__init__.py`, __init__.py.
+  const codes = [];
   return (text || "")
     .replace(/```[\s\S]*?(```|$)/g, " ")
+    .replace(/`([^`\n]+)`/g, (_, code) => `\u0000${codes.push(code) - 1}\u0000`)
+    .replace(/!\[([^\]\n]*)\]\((https?:[^\s)]+)\)/g, "$1")
     .replace(/\[([^\]\n]+)\]\((https?:[^\s)]+)\)/g, "$1")
-    .replace(/(\*\*|__|~~)(.+?)\1/g, "$2")
+    .replace(/(\*\*|~~)(.+?)\1/g, "$2")
     .replace(/(?<![\w*])\*([^*\s][^*\n]*?)\*(?![\w*])/g, "$1")
-    .replace(/`([^`\n]+)`/g, "$1")
+    .replace(/\u0000(\d+)\u0000/g, (_, index) => codes[Number(index)])
     .replace(/^\s*(#{1,6}|>+|[-*•+]|\d+[.)])\s+/gm, "")
     .replace(/^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?\s*$/gm, "")
     .replace(/^[ \t]*\|[ \t]*|[ \t]*\|[ \t]*$/gm, "")
@@ -386,7 +412,7 @@ export function lines(value) {
 // The first line of a text, without its Markdown: what a one-line entry shows.
 export function firstLine(text) {
   // Without its list mark or heading ("1. ", "- ", "## "), not its own numbers ("3 tests").
-  const lines = text.split("\n").map((line) => line.replace(/^\s*(?:(?:#{1,6}|>|[-*•+]|\d+[.)])\s+)+/, "").replace(/\*\*|__|`/g, "").trim()).filter(Boolean);
+  const lines = text.split("\n").map((line) => line.replace(/^\s*(?:(?:#{1,6}|>|[-*•+]|\d+[.)])\s+)+/, "").replace(/\*\*|`/g, "").trim()).filter(Boolean);
   // Not a lead-in like "Results:" when something follows it.
   return lines.find((line) => !/^[\p{L}\s]{1,24}:$/u.test(line)) || lines[0] || "";
 }

@@ -160,6 +160,8 @@ class Workers:
         reports = [m for m in recent if m["kind"] == "report" and m["meta"].get("status") == "done"]
         if not reports or not self.states.handle(session_id):
             return
+        if len({m["meta"].get("task_id") for m in reports}) > 1:
+            return  # Several tasks reported in one turn: its answer is about them all.
         report = reports[-1]
         # The task that report was on (it may have moved on to another one since).
         task_id = report["meta"].get("task_id")
@@ -196,6 +198,38 @@ class Workers:
         self.tasks.update(task["id"], result=clip_report(full))
         self.runtime.update_session(session_id, report=full[:4000])
 
+    def answer_on_home(self, session_id: str):
+        """The owner wrote to a worker on Home (@): its answer shows there too, once, as a line
+        that opens the worker (its report, if it made one, is on the task's card)."""
+        recent = since_last_instruction(self.store.messages(session_id, limit=400))
+        if not recent or recent[0]["kind"] != "owner" or not recent[0]["meta"].get("home"):
+            return
+        asked = recent[0]
+        if self.store.get(f"answered_home:{asked['id']}"):
+            return
+        said = [
+            m
+            for m in recent[1:]
+            if m["kind"] == "report"
+            or (m["kind"] == "assistant" and not m["meta"].get("narration"))
+        ]
+        if not said:
+            return
+        self.store.set(f"answered_home:{asked['id']}", "1")
+        row = self.store.session(session_id)
+        with suppress(RuntimeError):
+            self.runtime.add_message(
+                self.runtime.router_id(),
+                "answer",
+                said[-1]["text"][:4000],
+                {
+                    "session_id": session_id,
+                    "task_id": asked["meta"].get("task_id") or "",
+                    "from_title": self.runtime.display_title(row),
+                },
+                unread=True,
+            )
+
     async def ask_for_report(self, session_id: str):
         """A turn that ended on its task without report(): the owner sees only reports. Its
         final answer, when it wrote one, becomes the report as written (at once, and nothing is
@@ -203,6 +237,8 @@ class Workers:
         chat with it (they read its answer there), nor after that request (the Watchdog
         follows it up)."""
         row = self.store.session(session_id)
+        if row["status"] not in {"working", "starting", "queued"} and not row["closed_at"]:
+            self.answer_on_home(session_id)  # Its turn is over: what it answered is all.
         running = [t for t in self.tasks.for_session(session_id) if t["status"] == "running"]
         current = self.tasks.current(session_id)
         if row["status"] != "idle" or row["closed_at"] or not running:
@@ -406,6 +442,30 @@ class Workers:
             self.runtime.update_session(row["id"], activity=activity)
         for task in queued:
             broken = self.tasks.broken(task)
+            if not broken and self.store.get(f"depblocked:{task['id']}"):
+                # Blocked no more (what it waits for was retried, or finished after all): what
+                # the Router asked the owner about it is moot.
+                self.store.delete(f"depblocked:{task['id']}")
+                self.runtime.background(
+                    self.delivery.deliver(
+                        self.runtime.router_id(),
+                        wrap(
+                            "system",
+                            "unblocked",
+                            f"Task {task['id']} is no longer blocked: what it waits for is "
+                            "running again or finished, and it starts after it. Nothing for the "
+                            "owner to decide about it: if you asked them, say it is settled.",
+                            worker=short(row["id"]),
+                            task=task["id"],
+                            title=task["title"],
+                        ),
+                        kind="inbound",
+                        display=f"“{task['title']}” is no longer blocked.",
+                        meta={"from": row["id"], "title": task["title"], "task_id": task["id"]},
+                        batch=True,
+                    )
+                )
+                continue
             if not broken or self.store.get(f"depblocked:{task['id']}"):
                 continue
             self.store.set(f"depblocked:{task['id']}", "1")
@@ -702,16 +762,22 @@ class Workers:
             # (nor a silent stall for the Watchdog).
             self.runtime.update_session(session_id, status="idle", activity="")
             self.runtime.add_message(session_id, "notice", f"Stopped by {by}.", {"stopped": True})
-            task = self.tasks.current(session_id)
+            # The task it was on (not one given last that it has not started): stopped, waiting
+            # for the owner to say go on or cancel it.
+            on = self.runtime.working_on(session_id) if row["role"] == WORKER else ""
+            task = self.tasks.find(on) if on else None
             if task and task["status"] in {"queued", "running"}:
+                self.store.set(f"stopped:{task['id']}", by)
                 self.tasks.move(task["id"], "waiting", progress=f"Stopped by {by}.")
         if session := self.states.handle(session_id):
             await session.abort()
         self.states[session_id].busy = False
         self.states[session_id].steps.clear()
         if row["role"] == WORKER:
-            # Its task, given and not received, is for its next message, not a turn now. Events
+            # What it was sent during the turn and never saw (Copilot drops it with the turn),
+            # and its task given and not received: for its next message, not a turn now. Events
             # held for the Router or the Slack session still go out when it is idle.
+            self.delivery.unsee(session_id)
             self.delivery.defer_pending(session_id)
         self.runtime.background(self.pump())
 

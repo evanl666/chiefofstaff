@@ -42,6 +42,8 @@ async def test_a_scan_hands_what_needs_the_owner_to_the_router_once(tmp_path):
     assert [tool.name for tool in session.options["tools"]] == CONNECTOR_TOOLS
     assert row["slack"], "it reads untrusted content: sandboxed like a Slack reader"
     assert "Slack DMs and mentions of me (use: Glean search)" in session.sent[-1]
+    shown = connector.view()
+    assert shown["scanning"] and not shown["scanned_at"], "not 'scanned just now' while it runs"
     with pytest.raises(ValueError, match="running already"):
         await connector.scan()
 
@@ -56,6 +58,7 @@ async def test_a_scan_hands_what_needs_the_owner_to_the_router_once(tmp_path):
         runtime, "report_found", row["id"], items=[item], methods="glean search from:@bob"
     )
     assert found.text_result_for_llm.startswith("1 new item")
+    assert connector.view()["scanned_at"], "scanned when it reported"
     await settle(runtime)
     router = harness.session(harness.router_id).sent[-1]
     assert 'from="watch" type="event"' in router and "can you review my PR today?" in router

@@ -8,7 +8,7 @@ import { homeItem, needsCount, WORKER_STATES, workerStates } from "./inbox.js";
 import { closeMentions, setRecipient } from "./mention.js";
 import { openSettings } from "./settings.js";
 // One count in the whole sidebar, on Home: what needs the owner. Workers show only their dot,
-// which says where each stands as Home does (Needs you, Running, Queued, Ready to review).
+// which says where each stands as Home does (Needs you, Running, Monitoring).
 function sessionItem(session, label, where) {
   const dot = where?.dot || "idle";
   const named = label !== session.title ? `\nStarted as “${session.title}”` : "";

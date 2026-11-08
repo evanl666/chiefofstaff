@@ -1213,7 +1213,9 @@ class Tools:
         self.runtime.add_message(session_id, "router", params.instructions, meta)
         if not special:  # Chief of Staff's own helpers come and go quietly.
             notice = f"Started “{title}”" + (f" · new because {why_new}" if why_new else "")
-            self.runtime.add_message(caller, "notice", notice, {"session_id": session_id})
+            self.runtime.add_message(
+                caller, "notice", notice, {"session_id": session_id, "task_id": task["id"]}
+            )
         if peers:
             try:
                 await self.runtime.peers.introduce(self.store.session(session_id), peers)
@@ -1506,7 +1508,12 @@ class Tools:
             # More on the task it is working on reaches it within its turn; a new task waits.
             steer=params.task in {"continue", "note"},
         )
-        self.runtime.add_message(caller, "notice", notice, {"session_id": target["id"]})
+        self.runtime.add_message(
+            caller,
+            "notice",
+            notice,
+            {"session_id": target["id"], **({"task_id": task["id"]} if task else {})},
+        )
         return f"Delivered (task {task['id']})." if task else "Delivered."
 
     async def settle_earlier(self, earlier: list[dict], how: str, new: dict) -> list[str]:
@@ -1942,6 +1949,8 @@ class Tools:
             self.runtime.task_actions.declare_artifacts(
                 task["id"], [item.model_dump() for item in params.artifacts]
             )
+        if task:
+            self.runtime.task_actions.reported_links(task["id"], params.summary)
         if (
             task
             and params.status == "done"
@@ -1978,7 +1987,7 @@ class Tools:
         unread = (
             [
                 text
-                for text, about in self.states[caller].unread.values()
+                for text, about, _ in self.states[caller].unread.values()
                 if task["id"] in about or "" in about
             ]
             if task
@@ -2035,8 +2044,10 @@ class Tools:
                 self.store.execute(
                     "UPDATE runs SET criteria=? WHERE id=?", (json.dumps(claims), run["id"])
                 )
-        settled = False
+        settled = chat_news = False
         if task:
+            # It reports on it: whatever it says next (a question, say), it is not "stopped".
+            self.store.delete(f"stopped:{task['id']}")
             asked = bool(self.store.get(f"followup:{task['id']}"))
             if task["status"] == "cancelled" and not asked:
                 # Cancelled (a report already on its way, say): it stays cancelled.
@@ -2066,6 +2077,21 @@ class Tools:
                     f"Task {task['id']}'s report is updated. It was reported already: the "
                     "Router is not told again."
                 )
+            elif params.status == "done" and asked and task["status"] in {"review", "done"}:
+                # The owner's chat about finished work: what it says is news on that task. The
+                # result the owner reviews (or accepted) stays as it is.
+                self.store.delete(f"followup:{task['id']}")
+                self.runtime.task_actions.remember_prs(task["id"], params.summary)
+                self.runtime.task_actions.news(task["id"], params.summary)
+                others = [
+                    other
+                    for other in self.tasks.for_session(caller)
+                    if other["status"] in OPEN and other["id"] != task["id"]
+                ]
+                self.runtime.update_session(
+                    caller, report=params.summary[:4000], status="idle" if others else "done"
+                )
+                chat_news = True
             elif params.status == "done" and task["status"] == "done" and not asked:
                 # Accepted, or its PR merged: news about it does not reopen the review.
                 self.runtime.task_actions.remember_prs(task["id"], params.summary)
@@ -2086,11 +2112,13 @@ class Tools:
                 else:
                     self.runtime.background(self.runtime.task_actions.collect_evidence(task["id"]))
                     # The one notification a finished task gets (the Router does not retell it).
+                    # Whether it is to accept (it changed code…) shows on Home once its
+                    # receipts are in; the notification says it is finished.
                     self.runtime.alert(
-                        f"“{task['title']}” is ready to review",
+                        f"“{task['title']}” finished",
                         session_id=caller,
                         needs_action=False,
-                        title="Ready to review",
+                        title="Finished",
                     )
             elif params.status in {"question", "blocked"}:
                 task = self.tasks.move(task["id"], "waiting", progress=params.summary[:6000])
@@ -2114,6 +2142,15 @@ class Tools:
             self.runtime.background(self.runtime.task_actions.learn_pr_titles(params.summary))
         if row["role"] == WORKER:
             self.runtime.watchdog.save(caller, nudges=0)
+        if chat_news and task:
+            # A PR it opened as asked shows on the card (what was checked stays as it was).
+            self.runtime.background(
+                self.runtime.task_actions.collect_evidence(task["id"], keep_stale=True)
+            )
+            return (
+                f"Noted as an update on task {task['id']} (the owner asked in chat; its "
+                "result stays as it is)."
+            )
         if settled and task and params.status in {"question", "blocked"}:
             # A cancelled task's worker still needs the owner: the question shows under Needs
             # you, and the Router hears of it.

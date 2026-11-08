@@ -13,6 +13,7 @@ import pytest
 from conftest import FakeSession, Harness, call_tool, env, settle, task_of
 
 from chiefofstaff.models import DraftDecision, Settings
+from chiefofstaff.sources.github import marked
 
 
 async def spawn(runtime, router, title, **extra):
@@ -292,7 +293,7 @@ async def test_a_long_report_reaches_the_owner_whole(harness):
     await call_tool(runtime, "report", worker, status="done", summary=summary)
     assert runtime.tasks.current(worker)["result"] == summary
     huge = "line\n" * 8000
-    await runtime.owner_send(worker, "again please, with everything")
+    await runtime.task_actions.follow_up(runtime.tasks.current(worker)["id"], "again, all of it")
     await call_tool(runtime, "report", worker, status="done", summary=huge)
     result = runtime.tasks.current(worker)["result"]
     assert len(result) <= 30100 and result.endswith("the whole report is in the worker's session)")
@@ -402,7 +403,7 @@ async def test_replies_to_review_comments_on_the_workers_own_pr(harness):
     assert sent["outcome"] == "https://github.com/acme/model/pull/1043#discussion_r99"
     arguments, payload = harness.gh_calls[-1]
     assert arguments[1] == "repos/acme/model/pulls/1043/comments/21/replies"
-    assert payload == {"body": "Fixed in f61047fa: opted-out titles are removed first."}
+    assert payload == {"body": marked("Fixed in f61047fa: opted-out titles are removed first.")}
     assert "github:acme/model#1043" in harness.store.follows(worker)
 
 
@@ -829,14 +830,14 @@ async def test_reviews_a_company_pr_with_inline_comments(harness):
     )
     [(arguments, payload)] = [call for call in harness.gh_calls if call[1]]
     assert arguments[1] == f"repos/{repo}/pulls/1529/reviews"
-    assert payload["commit_id"] == "c0ffee" and payload["body"] == "Summary"
+    assert payload["commit_id"] == "c0ffee" and payload["body"] == marked("Summary")
     assert payload["comments"] == [
-        {"path": "model/train.py", "line": 11, "side": "RIGHT", "body": "Why 3?"},
+        {"path": "model/train.py", "line": 11, "side": "RIGHT", "body": marked("Why 3?")},
         {
             "path": "model/train.py",
             "line": 12,
             "side": "RIGHT",
-            "body": "Please add a test",
+            "body": marked("Please add a test"),
             "start_line": 10,
             "start_side": "RIGHT",
         },
@@ -1659,7 +1660,7 @@ async def test_an_answer_to_a_conversation_comment_names_its_author(harness):
     assert sent["outcome"] == "https://github.com/acme/model/pull/1043#issuecomment-501"
     arguments, payload = harness.gh_calls[-1]
     assert arguments[1] == "repos/acme/model/issues/1043/comments"
-    assert payload == {"body": "@ckrsek Documented it in README.md, see 3b6c1e0."}
+    assert payload == {"body": marked("@ckrsek Documented it in README.md, see 3b6c1e0.")}
     both = await call_tool(runtime, "draft_github_review", worker, repo="acme/model",
                            number=1043, body="x", in_reply_to=21, reply_to_comment=55)  # fmt: skip
     assert "not both" in both.text_result_for_llm
@@ -1819,6 +1820,15 @@ async def test_only_what_the_owner_posted_after_the_draft_in_its_thread_settles_
     ])  # fmt: skip
     await runtime.drafts.check_posted_by_owner(every=0)
     assert harness.store.draft(draft["id"])["status"] == "pending"
+    # Live: posted the second the draft was written (GitHub's times are whole seconds).
+    harness.store.execute("UPDATE drafts SET created_at=? WHERE id=?",
+                          ("2026-11-06T10:07:00.600000+00:00", draft["id"]))  # fmt: skip
+    harness.gh_replies["api repos/acme/model/pulls/1043/comments"] = json.dumps(
+        [comment(13, "2026-11-06T10:07:00Z", 21)]
+    )
+    harness.store.delete(f"postcheck:{draft['id']}")
+    await runtime.drafts.check_posted_by_owner(every=0)
+    assert harness.store.draft(draft["id"])["status"] == "sent"
     from chiefofstaff.sources.github import same_text
 
     # A short reply is the same words, or another reply.
@@ -2111,6 +2121,40 @@ async def test_the_owners_pr_ready_to_merge_comes_as_a_card_once(harness):
     assert runtime.tasks.get(task["id"])["status"] == "done", "merged: its task is done at once"
     merge = [args for args, _ in harness.gh_calls if args[:2] == ("pr", "merge")]
     assert merge and "--match-head-commit" in merge[0] and "abc1234" in merge[0]
+
+
+async def test_a_prs_time_is_when_it_last_changed_not_when_it_was_read(harness, monkeypatch):
+    """Suspected in the bug bash: every refresh made each PR row "just now"."""
+    clock = iter(f"2026-11-08T10:{minute:02d}:00+00:00" for minute in range(60))
+    monkeypatch.setattr("chiefofstaff.task_actions.now", lambda: next(clock))
+    runtime = await harness.connect()
+    harness.gh_replies["auth status --json hosts"] = json.dumps(
+        {"hosts": {"github.com": [{"login": "me", "state": "success", "active": True}]}}
+    )
+    pr = "pr view https://github.com/acme/app/pull/7"
+    harness.gh_replies[pr] = pr_view(mergeStateStatus="BLOCKED")
+    worker = await spawn(runtime, harness.router_id, "Fix login")
+    task = runtime.tasks.current(worker)
+    await call_tool(runtime, "report", worker, status="done",
+                    summary="Opened https://github.com/acme/app/pull/7")  # fmt: skip
+    await settle(runtime)
+
+    def shown():
+        [found] = runtime.task_actions.view(runtime.tasks.get(task["id"]))["receipts"]["prs"]
+        return found
+
+    first = shown()
+    assert first["changed_at"] == first["at"]
+    await runtime.task_actions.refresh_prs(task["id"])
+    again = shown()
+    assert again["at"] > first["at"] and again["changed_at"] == first["changed_at"]
+    harness.gh_replies[pr] = pr_view(
+        mergeStateStatus="BLOCKED", statusCheckRollup=[{"name": "tests", "conclusion": "FAILURE"}]
+    )
+    await runtime.task_actions.refresh_prs(task["id"])
+    failed = shown()
+    assert failed["checks"] != again["checks"] and failed["changed_at"] == failed["at"]
+    assert failed["changed_at"] > again["changed_at"]
 
 
 async def test_a_ready_to_merge_card_goes_when_the_pr_moves_on(harness):
@@ -2675,3 +2719,257 @@ async def test_a_new_task_sent_while_its_worker_finishes_does_not_hold_back_the_
     held = await call_tool(runtime, "report", worker, status="done", summary="Built.",
                            task_id=build["id"])  # fmt: skip
     assert held.result_type == "failure" and "Use the release config" in held.text_result_for_llm
+
+
+async def busy_worker(runtime, harness, title):
+    """A worker in a turn on its first task (its conversation shows what it is sent)."""
+    worker = await spawn(runtime, harness.router_id, title)
+    session = harness.session(worker)
+    session.emit("user.message", content=session.sent[0])
+    session.emit("assistant.turn_start")
+    await settle(runtime)
+    runtime.update_session(worker, status="working")
+    return worker, session, runtime.tasks.current(worker)
+
+
+async def test_stop_stops_the_task_at_work_and_resends_what_it_never_saw(harness):
+    """B1/B3: a task given while it works, then Stop: the task it was on is stopped (not the
+    new one, which is no question), and the new task's instruction it never saw goes out with
+    its next message."""
+    runtime = await harness.connect()
+    worker, session, sleep = await busy_worker(runtime, harness, "Sleep A")
+    await call_tool(runtime, "message_session", harness.router_id, session_id=worker, task="new",
+                    earlier="keep", title="Write B", text="Write B into b.txt")  # fmt: skip
+    write_b = runtime.tasks.current(worker)
+    assert runtime.states[worker].unread, "sent within its turn, not seen yet"
+    await runtime.workers.interrupt(worker)
+    assert session.aborted
+    stopped = runtime.task_actions.view(runtime.tasks.get(sleep["id"]))
+    assert stopped["status"] == "waiting" and stopped["stopped"] == "you"
+    assert runtime.tasks.get(write_b["id"])["status"] == "running", "not started: no question"
+    assert not runtime.task_actions.view(runtime.tasks.get(write_b["id"]))["stopped"]
+    await runtime.task_actions.follow_up(sleep["id"], "Go on where you stopped.")
+    assert "Write B into b.txt" in session.sent[-1], "what it never saw comes with it"
+    assert runtime.tasks.get(sleep["id"])["status"] == "running"
+    assert not runtime.task_actions.view(runtime.tasks.get(sleep["id"]))["stopped"]
+
+
+async def test_cancelling_the_task_at_work_stops_it_and_it_goes_on_with_the_other(harness):
+    runtime = await harness.connect()
+    worker, session, sleep = await busy_worker(runtime, harness, "Sleep A")
+    await call_tool(runtime, "message_session", harness.router_id, session_id=worker, task="new",
+                    earlier="keep", title="Write B", text="Write B into b.txt")  # fmt: skip
+    write_b = runtime.tasks.current(worker)
+    await call_tool(runtime, "message_session", harness.router_id, session_id=worker,
+                    task=sleep["id"], text="Also sleep 5 more")  # fmt: skip
+    await runtime.task_actions.cancel(sleep["id"], "Not needed")
+    await settle(runtime)
+    assert session.aborted, "its work on the cancelled task stops now"
+    told = session.sent[-1]
+    assert 'type="cancelled"' in told and write_b["id"] in told and "Write B into b.txt" in told
+    assert "Also sleep 5 more" not in told, "what it never saw about the cancelled task is dropped"
+    assert runtime.tasks.get(write_b["id"])["status"] == "running"
+
+
+async def test_the_owners_chat_answers_the_task_that_asked(harness):
+    """Its question was on A; B is newer: the owner's answer in chat is A's."""
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Pick a number")
+    ask = runtime.tasks.current(worker)
+    await call_tool(runtime, "report", worker, status="question", summary="1 or 2?",
+                    task_id=ask["id"])  # fmt: skip
+    await call_tool(runtime, "message_session", harness.router_id, session_id=worker, task="new",
+                    title="Write hello", text="Write hello")  # fmt: skip
+    hello = runtime.tasks.current(worker)
+    assert hello["id"] != ask["id"]
+    message = await runtime.owner_send(worker, "2")
+    assert message["meta"]["task_id"] == ask["id"]
+    assert not [q for q in runtime.asks.session_questions(worker) if q["task_id"] == ask["id"]]
+
+
+async def test_a_chat_about_finished_work_is_news_not_a_new_result(harness):
+    """B2: asked something in chat, an accepted task stays accepted and keeps its result;
+    what the worker says is an update on it. From Home (@), its answer shows there too."""
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Alpha file")
+    task = runtime.tasks.current(worker)
+    await call_tool(runtime, "report", worker, status="done", summary="alpha and beta written.")
+    runtime.task_actions.accept(task["id"])
+    await runtime.owner_send_to(harness.router_id, worker, "what is 17*3?")
+    result = await call_tool(runtime, "report", worker, status="done", summary="17*3 = 51.")
+    assert "update" in result.text_result_for_llm
+    after = runtime.task_actions.view(runtime.tasks.get(task["id"]))
+    assert after["status"] == "done" and after["result"] == "alpha and beta written."
+    assert after["news"]["text"] == "17*3 = 51."
+    session = harness.session(worker)
+    session.emit("assistant.message", content="It is 51.")
+    session.emit("session.idle")
+    await settle(runtime)
+    answers = [m for m in harness.store.messages(harness.router_id) if m["kind"] == "answer"]
+    assert len(answers) == 1 and answers[0]["text"] == "It is 51."
+    assert answers[0]["meta"]["from_title"] == "Alpha file"
+    session.emit("session.idle")
+    await settle(runtime)
+    assert len([m for m in harness.store.messages(harness.router_id) if m["kind"] == "answer"]) == 1
+
+
+async def test_a_pr_opened_as_asked_in_chat_is_followed(harness):
+    """Code review: the chat's update returned before following the PR it opened."""
+    runtime = await harness.connect()
+    harness.own_pull("acme/app", 7)
+    worker = await spawn(runtime, harness.router_id, "Fix login")
+    task = runtime.tasks.current(worker)
+    await call_tool(runtime, "report", worker, status="done", summary="Fixed on a branch.")
+    await runtime.owner_send(worker, "Looks good, open a PR")
+    await call_tool(runtime, "report", worker, status="done",
+                    summary="Opened https://github.com/acme/app/pull/7")  # fmt: skip
+    await settle(runtime)
+    assert "github:acme/app#7" in harness.store.follows(worker)
+    assert runtime.tasks.get(task["id"])["result"] == "Fixed on a branch."
+    assert harness.store.session(worker)["status"] == "done", "done again, so it is let go"
+
+
+async def test_a_stopped_task_is_stopped_until_its_worker_reports_on_it(harness):
+    """Code review: "Stopped" stayed after the worker went on and asked a question; a chat
+    with it must not restart the task (the Watchdog would resume stopped work)."""
+    runtime = await harness.connect()
+    worker, _session, task = await busy_worker(runtime, harness, "Measure")
+    await runtime.workers.interrupt(worker)
+    await settle(runtime)
+    assert runtime.task_actions.view(runtime.tasks.get(task["id"]))["stopped"] == "you"
+    await runtime.owner_send(worker, "What were you about to change?")
+    shown = runtime.task_actions.view(runtime.tasks.get(task["id"]))
+    assert shown["status"] == "waiting" and shown["stopped"] == "you", "only a chat"
+    await call_tool(runtime, "report", worker, status="question", summary="Which DB?")
+    shown = runtime.task_actions.view(runtime.tasks.get(task["id"]))
+    assert shown["status"] == "waiting" and not shown["stopped"], "a question, not Stopped"
+
+
+async def test_one_answer_about_two_reported_tasks_is_added_to_neither(harness):
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Alpha")
+    alpha = runtime.tasks.current(worker)
+    await call_tool(runtime, "message_session", harness.router_id, session_id=worker, task="new",
+                    earlier="keep", title="Count", text="Count rows")  # fmt: skip
+    count = runtime.tasks.current(worker)
+    await call_tool(runtime, "report", worker, status="done", summary="Alpha done.",
+                    task_id=alpha["id"])  # fmt: skip
+    await call_tool(runtime, "report", worker, status="done", summary="540 rows.",
+                    task_id=count["id"])  # fmt: skip
+    session = harness.session(worker)
+    session.emit("assistant.message", content="Both tasks are done. " + "Alpha: wrote it. " * 40)
+    runtime.workers.complete_report(worker)
+    assert runtime.tasks.get(count["id"])["result"] == "540 rows."
+
+
+async def test_a_worker_that_cannot_resume_is_failed_and_the_router_hears_it(harness):
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Resume me")
+    task = runtime.tasks.current(worker)
+    runtime.fail(harness.store.session(worker), "Session not found")
+    await settle(runtime)
+    assert runtime.tasks.get(task["id"])["status"] == "failed"
+    told = [
+        m for m in harness.store.messages(harness.router_id)
+        if m["kind"] == "inbound" and m["meta"].get("status") == "failed"
+    ]  # fmt: skip
+    assert told and told[-1]["meta"]["task_id"] == task["id"]
+
+
+async def test_a_message_steered_into_a_turn_on_another_task_keeps_the_turn(harness):
+    """B7: answering A's question while its worker is at work on B: B stays what it is on."""
+    runtime = await harness.connect()
+    worker, session, first = await busy_worker(runtime, harness, "Write hello")
+    other = runtime.tasks.create(worker, "Pick a number", "pick", status="running")
+    steered = env("owner", "message", "42", task=other["id"])
+    session.emit("user.message", content=steered, delivery=SimpleNamespace(value="steering"))
+    await settle(runtime)
+    assert runtime.turn_task(worker) == first["id"]
+    assert runtime.task_actions.view(runtime.tasks.get(other["id"]))["started"]
+
+
+async def test_tasks_quoted_after_a_restart_are_taken_up(harness):
+    runtime = await harness.connect()
+    worker, _session, alpha = await busy_worker(runtime, harness, "Alpha")
+    await call_tool(runtime, "message_session", harness.router_id, session_id=worker, task="new",
+                    earlier="keep", title="Count", text="Count rows")  # fmt: skip
+    count = runtime.tasks.current(worker)
+    runtime.states[worker].unread.clear()
+    await runtime.resume_working()
+    await settle(runtime)
+    assert runtime.task_actions.view(runtime.tasks.get(count["id"]))["started"]
+    assert runtime.turn_task(worker) == alpha["id"], "it goes on with what it was on"
+
+
+async def test_the_router_hears_when_a_blocked_task_is_unblocked(harness):
+    runtime = await harness.connect()
+    first = await spawn(runtime, harness.router_id, "Build")
+    build = runtime.tasks.current(first)
+    result = await call_tool(runtime, "spawn_worker", harness.router_id, title="Deploy",
+                             instructions="Deploy it", after=[build["id"]],
+                             why_new="separate")  # fmt: skip
+    deploy = json.loads(result.text_result_for_llm)
+    await runtime.task_actions.cancel(build["id"])
+    await runtime.workers.pump()
+    await settle(runtime)
+    blocked = [m for m in harness.store.messages(harness.router_id) if "type=\"blocked\"" in
+               m["meta"].get("prompt", "")]  # fmt: skip
+    assert blocked
+    await runtime.task_actions.retry(build["id"])
+    await runtime.workers.pump()
+    await settle(runtime)
+    unblocked = [m for m in harness.store.messages(harness.router_id)
+                 if "type=\"unblocked\"" in m["meta"].get("prompt", "")]  # fmt: skip
+    assert unblocked and deploy["task_id"] in unblocked[-1]["meta"]["prompt"]
+
+
+async def test_notices_of_new_tasks_say_which_task(harness):
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Fix login")
+    first = runtime.tasks.current(worker)
+    await call_tool(runtime, "report", worker, status="done", summary="Fixed.")
+    await call_tool(runtime, "message_session", harness.router_id, session_id=worker, task="new",
+                    title="Then the docs", text="Then the docs")  # fmt: skip
+    docs = runtime.tasks.current(worker)
+    notices = [m for m in harness.store.messages(harness.router_id) if m["kind"] == "notice"]
+    started = next(m for m in notices if m["text"].startswith("Started"))
+    new = next(m for m in notices if m["text"].startswith("New task"))
+    assert started["meta"]["task_id"] == first["id"] and new["meta"]["task_id"] == docs["id"]
+
+
+async def test_a_worker_is_named_by_the_task_it_is_on(harness):
+    runtime = await harness.connect()
+    worker, _session, _check = await busy_worker(runtime, harness, "Check the totals")
+    await call_tool(runtime, "message_session", harness.router_id, session_id=worker, task="new",
+                    earlier="keep", title="Save monthly.csv", text="Save it")  # fmt: skip
+    row = harness.store.session(worker)
+    assert runtime.display_title(row) == "Check the totals", "not the one given last"
+    await runtime.owner_send_to(harness.router_id, worker, "how far?")
+    to = [m for m in harness.store.messages(harness.router_id) if m["meta"].get("to")][-1]
+    assert to["meta"]["to_title"] == "Check the totals"
+
+
+async def test_links_a_task_reported_stay_on_it_and_links_it_was_given_are_told_apart(harness):
+    """Bug bash #9/#10: a doc vanished from the task (and Artifacts) once a later report did not
+    repeat it; a doc the owner gave counted as one it made."""
+    runtime = await harness.connect()
+    given = "https://docs.google.com/document/d/GIVEN123456/edit"
+    made = "https://docs.google.com/document/d/MADE7654321/edit"
+    worker = await spawn(runtime, harness.router_id, "Write the plan", instructions=f"Use {given}")
+    task = runtime.tasks.current(worker)
+    summary = f"Drafted {made}. Read {given}.\n```\ncurl https://example.com/x\n```"
+    await call_tool(runtime, "report", worker, status="progress", summary=summary)
+    await call_tool(runtime, "report", worker, status="done", summary="Plan written.")
+    shown = runtime.task_actions.view(runtime.tasks.get(task["id"]))
+    assert made in shown["links"] and "https://example.com/x" not in shown["links"]
+    assert given in shown["given_links"] and made not in shown["given_links"]
+    await runtime.owner_send(worker, f"Add a summary to {made.replace('/edit', '/view')}")
+    shown = runtime.task_actions.view(runtime.tasks.get(task["id"]))
+    assert made not in shown["given_links"], "its own doc, pasted back: still its own"
+    assert not any("MADE7654321" in url for url in shown["given_links"])
+    run = "https://airflow.corp/dags/x/grid?dag_run_id=new"
+    await call_tool(runtime, "report", worker, status="progress", summary=f"Ran {run}")
+    baseline = "https://airflow.corp/dags/x/grid?dag_run_id=baseline"
+    await runtime.owner_send(worker, f"Compare with {baseline}")
+    shown = runtime.task_actions.view(runtime.tasks.get(task["id"]))
+    assert baseline in shown["given_links"], "another run of the same DAG: given"
