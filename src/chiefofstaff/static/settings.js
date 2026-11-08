@@ -387,6 +387,22 @@ function mcpServers() {
     if (!config || typeof config !== "object" || !(typeof config.command === "string" || typeof config.url === "string")) {
       throw new Error(`MCP server ${name}: give a command (local) or a url (remote).`);
     }
+    // As Copilot checks them (one wrong field and it never starts on a message): see models.py.
+    const texts = (v) => Array.isArray(v) && v.every((item) => typeof item === "string");
+    const table = (v) => !!v && typeof v === "object" && !Array.isArray(v) && Object.values(v).every((item) => typeof item === "string");
+    const string = (v) => typeof v === "string";
+    const checks = {
+      type: [(v) => ["local", "stdio", "http", "sse"].includes(v), "local, stdio, http or sse"],
+      tools: [texts, 'a list of tool names in quotes (["*"] for all)'],
+      args: [texts, "a list of strings"],
+      env: [table, "an object of strings"],
+      headers: [table, "an object of strings"],
+      cwd: [string, "a string"],
+      working_directory: [string, "a string"],
+      timeout: [(v) => Number.isInteger(v) && v > 0, "a whole number of milliseconds"],
+    };
+    const bad = Object.entries(checks).find(([key, [fits]]) => key in config && !fits(config[key]));
+    if (bad) throw new Error(`MCP server ${name}: ${bad[0]} must be ${bad[1][1]}.`);
   }
   return value;
 }

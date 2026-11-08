@@ -64,6 +64,10 @@ class SessionState:
     # Every message sent to it that its conversation has not shown yet, even one that starts a
     # turn: digest -> the first message's id. A stop before it saw them sends them again.
     unseen: dict[str, int] = field(default_factory=dict)
+    # A message sent to start a turn, until its conversation shows one (backends that echo):
+    # its digest and the sent mark before it. Copilot can take a message and never start (it
+    # gave up on the session's queue): see Delivery.check_started.
+    awaiting: tuple[str, int] | None = None
     # It was stopped and its turn aborted: the next message steers (until a turn ends or
     # starts, Copilot may still hold the session busy). Its first steps after the stop are not
     # work on the stopped task until a new message started a turn.
@@ -142,4 +146,5 @@ class SessionStates:
             state.retuned = False
             state.stale = False
             state.after_refresh = ""
+            state.awaiting = None
             state.steps.clear()

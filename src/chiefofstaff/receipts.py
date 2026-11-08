@@ -449,6 +449,26 @@ def backing(evidence: str, commands: list[dict]) -> dict | None:
     return None
 
 
+# Programs whose exit 1 means "no match" or "differs", not an error: a search that finds
+# nothing (what proves "no X remains"), a comparison, a test of a condition.
+NO_MATCH_EXIT = re.compile(r"^(grep|egrep|fgrep|rg|ag|ack|git grep|diff|cmp|test|\[)\b")
+
+
+FOUND_NOTHING = re.compile(
+    r"\b(no (matches|match|results?|output|occurrences?|hits?)|nothing|none (left|remain)|"
+    r"not found|found no|finds no|0 (matches|results|hits|occurrences)|no longer|empty|"
+    r"exit(s|ed)? (code )?1)\b|\u6ca1\u6709|\u65e0\u5339\u914d",
+    re.IGNORECASE,
+)
+
+
+def no_match(command: str, code: int | None) -> bool:
+    """Whether a command's exit code says only that its search found nothing (or what it
+    compared differed): grep's 1, not its 2."""
+    parts = [part for part in simple_commands(command) if part]
+    return code == 1 and bool(parts) and bool(NO_MATCH_EXIT.match(program(parts[-1])))
+
+
 def failed_there(evidence: str, command: str) -> bool:
     """Whether a failed command line failed in what the evidence names. In `a && b && c` an
     exit code is the last part's that ran: a part before the last may have passed. And the
@@ -492,6 +512,9 @@ def criteria_results(criteria: list[str], claims: list[dict], commands: list[dic
                 state = "claimed"
             elif code == 0:
                 state = "verified"
+            elif observed and no_match(observed["command"], code):
+                # It found nothing: what proves "no `hello` remains", not "it is there".
+                state = "verified" if FOUND_NOTHING.search(proof) else "claimed"
             else:
                 failed = failed_there(proof, observed["command"]) if observed else False
                 state = "contradicted" if failed else "claimed"

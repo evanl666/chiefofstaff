@@ -270,7 +270,8 @@ async def s6_cannot_as_asked(app: App, project: Path):
         ]  # fmt: skip
         if cards:
             return ("card", task, cards[0])
-        if task["status"] in {"waiting", *FINISHED}:
+        # It asks, reports what it found, or reports it failed (it cannot, as asked).
+        if task["status"] in {"waiting", "failed", *FINISHED}:
             return ("task", task, None)
         return None
 

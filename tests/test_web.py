@@ -172,8 +172,10 @@ def test_the_owner_reviews_and_follows_up_on_tasks(app_client):
         f"/api/tasks/{task_id}/follow-up", json={"text": "Add a FAQ"}, headers=ORIGIN
     )
     assert followed.status_code == 200 and followed.json()["status"] == "running"
-    assert app_client.fake.sessions[worker].sent[-1] == env(
-        "owner", "message", "Add a FAQ", task=task_id
+    assert (
+        app_client.fake.sessions[worker]
+        .sent[-1]
+        .startswith(env("owner", "message", "Add a FAQ", task=task_id))
     )
     app_client.portal.call(
         lambda: call_tool(runtime, "report", worker, status="done", summary="FAQ added")
@@ -257,3 +259,35 @@ def test_an_artifact_is_taken_off_the_list_and_brought_back(app_client):
     assert back.json()["hidden"] == []
     blank = app_client.post("/api/artifacts/hide", json={"key": "  "}, headers=ORIGIN)
     assert blank.status_code == 400
+
+
+def test_a_router_note_that_needs_the_owner_stays_until_seen(app_client):
+    sign_in(app_client)
+    runtime = app_client.app.state.runtime
+    router = app_client.get("/api/state").json()["router_id"]
+    notes = [
+        {"text": "Alice asks for the release date.", "needs_action": True},
+        {"text": "The deploy is down.", "urgent": True},
+        {"text": "Two PRs merged."},
+    ]
+    for note in notes:
+        app_client.portal.call(lambda note=note: call_tool(runtime, "notify_owner", router, **note))
+    runtime.add_message(router, "update", "Daily summary\n…", {"digest": True})
+    updates = app_client.get("/api/state").json()["updates"]
+    assert [(u["text"], u["urgent"]) for u in updates] == [
+        ("Alice asks for the release date.", False),
+        ("The deploy is down.", True),
+    ], "only what needs the owner"
+
+    seen = app_client.post(f"/api/messages/{updates[0]['id']}/seen", headers=ORIGIN)
+    assert seen.status_code == 200
+    left = app_client.get("/api/state").json()["updates"]
+    assert [u["text"] for u in left] == ["The deploy is down."]
+    runtime.add_message(router, "owner", "Use the cache", {"to": "w1", "to_title": "Cache"})
+    assert app_client.get("/api/state").json()["updates"] == left, "told a worker, not the Router"
+    wrote = {"text": "On it"}
+    owner = app_client.post(f"/api/sessions/{router}/messages", json=wrote, headers=ORIGIN)
+    for message_id, status in [(owner.json()["id"], 400), (999999, 404)]:
+        refused = app_client.post(f"/api/messages/{message_id}/seen", headers=ORIGIN)
+        assert refused.status_code == status, "only the Router's updates"
+    assert app_client.get("/api/state").json()["updates"] == [], "the owner wrote after it"

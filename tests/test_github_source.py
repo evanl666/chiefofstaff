@@ -250,6 +250,81 @@ async def test_new_commits_on_a_followed_pr_are_news_unless_its_own(tmp_path):
     assert "force-pushed" in host.deliveries[-1][2]
 
 
+async def test_a_worker_bringing_its_pr_up_to_date_with_a_moved_base_is_not_news(tmp_path):
+    """Bug bash 4 (R3): a worker rebased its PR onto a base someone else had moved and
+    force-pushed; its followers were told "The branch was rewritten". The base's commits are not
+    the PR's, and the checkout's reflog says the rebased ones were made there, whatever the
+    rebase was called ("pull -q --rebase origin main (pick)", "rebase (continue)")."""
+    import subprocess
+
+    from chiefofstaff.sources.github import made_locally
+
+    def git(folder, *arguments):
+        return subprocess.run(
+            ["git", "-C", str(folder), "-c", "user.email=w@w", "-c", "user.name=W",
+             "-c", "commit.gpgsign=false", *arguments],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()  # fmt: skip
+
+    def add(folder, name):
+        (folder / name).write_text(name)
+        git(folder, "add", "-A")
+        git(folder, "commit", "-qm", f"Add {name}")
+        return git(folder, "rev-parse", "HEAD")
+
+    upstream, checkout = tmp_path / "upstream", tmp_path / "checkout"
+    upstream.mkdir()
+    git(upstream, "init", "-q", "-b", "main")
+    start = add(upstream, "base")
+    git(tmp_path, "clone", "-q", str(upstream), str(checkout))
+    git(checkout, "checkout", "-qb", "feature")
+    add(checkout, "one")
+    old = add(checkout, "two")
+    theirs = add(upstream, "theirs")  # Someone else moves the base.
+    git(checkout, "pull", "-q", "--rebase", "origin", "main")
+    picked, new = git(checkout, "rev-parse", "HEAD~1"), git(checkout, "rev-parse", "HEAD")
+    later = add(upstream, "later")
+    git(checkout, "fetch", "-q", "origin")
+    git(checkout, "merge", "-q", "--no-edit", "origin/main")
+    merged = git(checkout, "rev-parse", "HEAD")
+
+    store = Store(tmp_path / "data")
+    store.save_settings(Settings())
+    store.create_session("w1", "worker", "Feature", "idle", cwd=str(checkout))
+
+    def commit(sha, login, message):
+        return {"sha": sha, "author": {"login": login} if login else None,
+                "commit": {"message": message, "author": {"name": login or "W"}}}  # fmt: skip
+
+    compares = {
+        f"{old}...{new}": {"status": "diverged", "commits": [commit(theirs, "lead", "Add theirs"),
+            commit(picked, "", "Add one"), commit(new, "", "Add two")]},
+        f"{new}...{merged}": {"status": "ahead", "commits": [
+            commit(later, "lead", "Add later"), commit(merged, "", "Merge")]},
+        f"main...{new}": {"total_commits": 2, "commits": [
+            commit(picked, "", "Add one"), commit(new, "", "Add two")]},
+        f"main...{merged}": {"total_commits": 3, "commits": [
+            commit(picked, "", "Add one"), commit(new, "", "Add two"), commit(merged, "", "M")]},
+    }  # fmt: skip
+
+    async def gh(*arguments, payload=None):
+        return json.dumps(compares[arguments[1].split("/compare/")[1]])
+
+    async def acting_login(repo):
+        return "me"
+
+    source = GitHubSource(store, Host(store), gh_command=gh)
+    source.acting_login = acting_login
+    assert await source.pushed("acme/app", old, new, "main") == "", "its own rebase"
+    assert await source.pushed("acme/app", new, merged, "main") == "", "its merge of the base"
+    assert "lead: Add later" in await source.pushed("acme/app", new, merged), "no base: theirs"
+
+    # A rebase that only fast-forwarded made nothing there.
+    git(checkout, "checkout", "-qb", "follow", start)
+    git(checkout, "rebase", "-q", "origin/main")
+    assert await made_locally([str(checkout)], [later, theirs]) == set()
+
+
 async def test_one_broken_pr_does_not_stop_the_others(tmp_path):
     store = Store(tmp_path / "data")
     store.save_settings(Settings())

@@ -10,12 +10,13 @@ import logging
 import os
 import re
 import time
+from collections.abc import Coroutine
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from . import receipts, threads
+from . import prompts, receipts, threads
 from .backend import stop_background
 from .envelope import wrap
 from .policy import within
@@ -25,12 +26,15 @@ from .sources.slack import describe
 from .store import hours_ago, now
 from .tasks import ENDED, OPEN
 from .workspaces import (
+    CommandRun,
     Scope,
     base_of,
     changes,
     checkout_git,
     checkout_top,
     diff,
+    file_times,
+    package_name,
     same_version,
     share_files,
     snapshot,
@@ -130,15 +134,16 @@ SPLIT_UNDO_MINUTES = 10
 
 def deliverable_title(title: str) -> str:
     """A task's title as the owner gives it: it must say what the task delivers ("111" does
-    not). Chinese, Japanese and Korean say it in fewer characters: each counts as a word."""
+    not). Chinese, Japanese and Korean say it in fewer characters: two different ones are
+    already a word ("改日期", "登录页")."""
     from .envelope import clean_title
 
     title = clean_title(title.strip())
     letters = sum(char.isalpha() for char in title)
-    words = len(CJK.findall(title))
-    if title == "Task" or (words < 4 and (len(title) < 8 or letters < 3)):
+    words = len(set(CJK.findall(title)))
+    if title == "Task" or (words < 2 and (len(title) < 8 or letters < 3)):
         raise ValueError(
-            "Give it a title saying what it delivers, in words (at least 8 characters, or 4 "
+            "Give it a title saying what it delivers, in words (at least 8 characters, or 2 "
             "Chinese, Japanese or Korean ones), e.g. “Add a retry to the upload step”."
         )
     return title
@@ -286,7 +291,7 @@ class TaskActions:
         evidence = json.loads(run["evidence"])
         if evidence.get("stale"):
             return
-        evidence["stale"] = reason
+        evidence |= {"stale": reason, "stale_at": now()}
         self.store.execute(
             "UPDATE runs SET evidence=? WHERE id=?", (json.dumps(evidence), run["id"])
         )
@@ -300,14 +305,22 @@ class TaskActions:
             (task_id,),
         )
         if run and (evidence := json.loads(run["evidence"])).pop("stale", None):
+            evidence.pop("stale_at", None)
             self.store.execute(
                 "UPDATE runs SET evidence=? WHERE id=?", (json.dumps(evidence), run["id"])
             )
 
-    async def collect_evidence(self, task_id: str, keep_stale: bool = False, ended: bool = False):
+    def collect_evidence(
+        self, task_id: str, keep_stale: bool = False, ended: bool = False
+    ) -> Coroutine[Any, Any, None]:
         """After a task is reported done: its checkouts' changes and its PRs' state.
         `keep_stale`: not after a report (a PR opened), so what was checked did not change.
-        `ended`: its result was just reported: what its checkouts hold now is what it made."""
+        `ended`: its result was just reported: what its checkouts hold now is what it made.
+        Asked for now (it may run later, in the background): found out of date after this
+        call (a decision changed), it stays out of date."""
+        return self.collected(task_id, keep_stale, ended, now())
+
+    async def collected(self, task_id: str, keep_stale: bool, ended: bool, started: str):
         task = self.tasks.get(task_id)
         row = self.store.find_session(task["session_id"])
         if not row:
@@ -331,6 +344,11 @@ class TaskActions:
             if reason := before.get("stale") or moved(before.get("checkouts", []), checkouts):
                 # The checks were about the code as it was then, not as it is now.
                 evidence |= {"checkouts": before["checkouts"], "stale": reason}
+            there = self.store.value("SELECT evidence FROM runs WHERE id=?", (run["id"],))
+            latest = json.loads(there) if there else {}
+            if latest.get("stale") and latest.get("stale_at", "") >= started:
+                # Found out of date while this looked (a decision changed): that still holds.
+                evidence |= {"stale": latest["stale"], "stale_at": latest["stale_at"]}
             self.store.execute(
                 "UPDATE runs SET evidence=? WHERE id=?", (json.dumps(evidence), run["id"])
             )
@@ -349,7 +367,7 @@ class TaskActions:
         ended = json.loads(self.store.get(f"taskend:{task['id']}") or "{}")
         end = ended.get(checkout["path"]) if task["status"] not in OPEN else None
         others: set[str] = set()
-        commands = self.shell_text(task) if checkout.get("shared") else ""
+        commands = self.shell_runs(task) if checkout.get("shared") else []
         if checkout.get("shared"):
             for row in self.store.all(
                 "SELECT key, value FROM kv WHERE key LIKE 'touched:%' AND key!=?",
@@ -366,6 +384,7 @@ class TaskActions:
             head=base.get("heads", {}).get(checkout["path"], ""),
             large=set(base.get("large", {}).get(checkout["path"], [])),
             commands=commands,
+            mtimes=(end or {}).get("mtimes"),
             gaps=[
                 (
                     gap["end"][checkout["path"]],
@@ -407,14 +426,23 @@ class TaskActions:
             self.store.set(f"taskgaps:{task['id']}", json.dumps(gaps))
         self.store.set(f"restarted:{task['id']}", json.dumps({"result": result, "at": at}))
 
-    def shell_text(self, task: dict, since: str = "") -> str:
-        """The shell commands its worker ran for this task (since a time)."""
+    def shell_runs(self, task: dict, since: str = "") -> list[CommandRun]:
+        """The shell commands its worker ran for this task (since a time), with when."""
         rows = self.store.all(
-            "SELECT c.command FROM commands c JOIN runs r ON r.id=c.run_id WHERE r.task_id=? "
-            "AND c.started_at>=? ORDER BY c.id",
+            "SELECT c.command, c.started_at, c.ended_at FROM commands c JOIN runs r "
+            "ON r.id=c.run_id WHERE r.task_id=? AND c.started_at>=? ORDER BY c.id",
             (task["id"], since),
         )
-        return "\n".join(row["command"] for row in rows)
+
+        def stamp(value: str | None) -> float:
+            with suppress(ValueError, TypeError):
+                return datetime.fromisoformat(value or "").timestamp()
+            return 0.0
+
+        return [
+            CommandRun(row["command"], stamp(row["started_at"]), stamp(row["ended_at"]))
+            for row in rows
+        ]
 
     async def record_chat_base(self, task: dict):
         """Its checkouts when the owner asks about a finished task in chat: what changes from
@@ -461,7 +489,7 @@ class TaskActions:
                 names = [n for n, status in differ.items() if status != "A" or untracked_work([n])]
                 if checkout.get("shared"):
                     # In a folder of the owner's: only what its edits wrote or its commands named.
-                    commands = self.shell_text(task, chat.get("at", ""))
+                    commands = self.shell_runs(task, chat.get("at", ""))
                     scope = Scope(touched=touched, commands=commands)
                     names = [n for n in names if scope.wrote(top, n) or scope.named(top, n)]
                 if names:
@@ -475,12 +503,22 @@ class TaskActions:
         if not row or not self.store.get(f"taskbase:{task['id']}"):
             return
         ended = {}
+        base = json.loads(self.store.get(f"taskbase:{task['id']}") or "{}")
         for checkout in self.workspaces.checkouts(row):
             with suppress(Exception):
                 if (found := await snapshot(checkout)) and found["tree"]:
+                    if checkout.get("shared") and (
+                        start := base.get("trees", {}).get(checkout["path"])
+                    ):
+                        # When each file it changed was last written, as of its result: a
+                        # later task writing it again does not move it out of this one's time.
+                        top = await checkout_top(checkout)
+                        names = list(await tree_names(checkout, top, start, found["tree"]))
+                        found["mtimes"] = await asyncio.to_thread(file_times, top, names[:2000])
                     ended[checkout["path"]] = found
         if ended:
             self.store.set(f"taskend:{task['id']}", json.dumps(ended))
+            self.store.delete(f"restarted:{task['id']}")  # A new result: checked again.
             # Each result's end, kept: a split gives each result its own share.
             history = json.loads(self.store.get(f"taskends:{task['id']}") or "[]")
             history = [*history, {"at": now(), "ended": ended}][-6:]
@@ -529,6 +567,8 @@ class TaskActions:
         touched = self.store.get(f"touched:{task['id']}")
         if touched:
             self.store.set(f"touched:{made['id']}", touched)
+        # Their ends moved: a follow-up on either is checked again for work in between.
+        self.store.delete(f"restarted:{task['id']}")
         self.runtime.background(self.collect_evidence(made["id"]))
         self.runtime.background(self.collect_evidence(task["id"]))
         return undo
@@ -1211,13 +1251,15 @@ class TaskActions:
     async def pr_plan(self, checkout: dict) -> tuple[str, str, str] | None:
         """(repository, GitHub owner/name, branch) to open a PR from, or None: no commits."""
         repo, branch = checkout["repo"], checkout["branch"]
-        name = Path(repo).name
+        # As the owner knows it: its package's name ("textkit"), else its folder's.
+        name = await asyncio.to_thread(package_name, Path(repo)) or Path(repo).name
         tree = checkout.get("worktree") or checkout["path"]
         live = await asyncio.to_thread(os.path.isdir, tree)
         status = await checkout_git(checkout, tree, "status", "--porcelain") if live else ""
         if worth_committing(status):
             raise ValueError(
-                f"{name} has uncommitted changes. Follow up and ask the worker to commit "
+                f"The {name} repository has uncommitted changes. Follow up and ask the worker to "
+                "commit "
                 "them, then create the PR."
             )
         if live:
@@ -1242,7 +1284,10 @@ class TaskActions:
             remote = ""
         match = GITHUB_REMOTE.search(remote)
         if not match:
-            raise ValueError(f"{name} has no GitHub origin to open a PR on.")
+            raise ValueError(
+                f"The {name} repository has no GitHub remote (origin) to open a PR on: push its "
+                "branch somewhere first, or open the PR yourself."
+            )
         return repo, match.group(1), branch
 
     def report_markdown(self, task_id: str) -> str:
@@ -1384,11 +1429,19 @@ class TaskActions:
                 scope=self.runtime.learning.scope_of(task["session_id"]),
             )
         was_stopped = bool(self.store.get(f"stopped:{task_id}"))
+        if task["status"] == "review":
+            # Finished already: nothing to stop, its result stands.
+            return self.set_aside(task, why, reason, by)
         if was := self.store.get(f"reopened:{task_id}"):
             # Only the follow-up on finished work is cancelled: its result stands.
             self.store.delete(f"reopened:{task_id}")
+            started = self.store.value(
+                "SELECT max(started_at) FROM runs WHERE task_id=?", (task_id,)
+            )
+            self.withdraw_drafts(task, why, since=started or "")
             task = self.tasks.move(task_id, was, progress=f"Follow-up cancelled ({why})")
         else:
+            self.withdraw_drafts(task, why)
             task = self.tasks.move(task_id, "cancelled", progress=why)
         others = [
             other
@@ -1528,6 +1581,58 @@ class TaskActions:
             self.runtime.workers.pump()
         )  # Tasks that depended on it are now blocked.
         return task
+
+    def set_aside(self, task: dict, why: str, reason: str, by: str) -> dict:
+        """Cancelling a task whose result was reported already: nothing is stopped, its result
+        stands (done, not "Cancelled: <its report>"), and whoever cancelled it hears it had
+        finished. Its drafts still waiting for the owner go."""
+        withdrawn = self.withdraw_drafts(task, why)
+        task = self.tasks.move(
+            task["id"], "done", progress=f"{why} It had finished: its result stands."
+        )
+        self.publish(task)
+        told = (
+            f"Task {task['id']} “{task['title']}” had finished already (its result was "
+            "reported): nothing was stopped, and it is done with its result as it was."
+        )
+        if withdrawn:
+            told += f" Its {len(withdrawn)} draft(s) waiting for the owner were withdrawn."
+        with suppress(RuntimeError):
+            router = self.runtime.router_id()
+            display = f"“{task['title']}” had finished: set aside, its result stands"
+            meta = {"session_id": task["session_id"], "task_id": task["id"]}
+            if by.lower().removeprefix("the ") == "router":
+                self.runtime.add_message(router, "notice", display, meta)
+            else:
+                who = "The owner" if by == "you" else by[:1].upper() + by[1:]
+                note = f"{who} cancelled it. {told}"
+                note += f" Reason: {reason.strip()}" if reason.strip() else ""
+                self.delivery.hold(
+                    router,
+                    wrap("system", "cancelled", note, task=task["id"], title=task["title"]),
+                    kind="notice",
+                    display=display,
+                    meta=meta,
+                )
+        self.runtime.background(self.runtime.workers.pump())
+        return task
+
+    def withdraw_drafts(self, task: dict, why: str, since: str = "") -> list[dict]:
+        """Its replies and reviews still waiting for the owner go with it (`since`: only those
+        drafted from then on, for a follow-up); not those of its worker's other tasks."""
+        gone = []
+        for draft in self.store.drafts():
+            if draft["kind"] not in {"slack", "github", "reply"} or draft["created_at"] < since:
+                continue
+            found = self.runtime.drafts.task_of(draft)
+            if draft["session_id"] != task["session_id"] or not found or found["id"] != task["id"]:
+                continue
+            draft = self.store.update_draft(
+                draft["id"], status="rejected", outcome=f"Withdrawn: {why}", resolved_at=now()
+            )
+            self.bus.publish("draft", draft)
+            gone.append(draft)
+        return gone
 
     def rename(self, task_id: str, title: str, by: str = "you") -> dict:
         """A task named for what it delivers; its earlier names are kept (shown on hover)."""
@@ -1749,15 +1854,18 @@ class TaskActions:
         self.publish(task)
         return task
 
-    def accept(self, task_id: str) -> dict:
+    def accept(self, task_id: str, as_is: bool = True) -> dict:
+        """The owner accepts its result. `as_is=False`: settled by sending a draft the owner
+        edited first (what they changed is learned from that draft, not as agreement)."""
         task = self.tasks.get(task_id)
         if task["status"] != "review":
             raise ValueError(f"Task {task_id} is {task['status']}, not ready for review.")
         self.store.delete(f"news:{task_id}")  # Seen with the result.
         task = self.tasks.move(task_id, "done")
         self.runtime.background(self.runtime.workers.pump())  # Tasks waiting for its check.
-        scope = self.runtime.learning.scope_of(task["session_id"])
-        self.runtime.learning.record("accept", context=task["title"], scope=scope, agreed=True)
+        if as_is:
+            scope = self.runtime.learning.scope_of(task["session_id"])
+            self.runtime.learning.record("accept", context=task["title"], scope=scope, agreed=True)
         return task
 
     async def answer_question(self, question_id: str, text: str) -> dict:
@@ -1770,7 +1878,16 @@ class TaskActions:
         session_id = question.get("id", question_id).split(":", 1)[0]
         task = self.tasks.find(question["task_id"]) if question["task_id"] else None
         if not task:
-            self.runtime.asks.answered(session_id, "")
+            self.runtime.asks.dismiss(question["id"])  # That one: its others stay.
+            if self.runtime.asks.session_questions(session_id):
+                # It asked several: which one this answers rides along.
+                said = " ".join(question["text"].split())[:1500]
+                self.delivery.hold(
+                    session_id,
+                    wrap("system", "context", f"The owner's next message answers: {said}"),
+                    kind="notice",
+                    display=f"Answering: {said[:200]}",
+                )
             await self.runtime.owner_send(session_id, text, clear_questions=False)
             return {"session_id": session_id}
         return await self.follow_up(task["id"], text, resume=True)
@@ -1813,6 +1930,10 @@ class TaskActions:
             # The owner answered what it waited for: it goes on (and asks again if need be).
             task = self.tasks.move(task_id, "running", progress="")
         prompt = wrap("owner", "message", text, task=task_id, reply_in=self.runtime.heard(text))
+        if before in {"review", "done"} and task["result"]:
+            # More on a result it reported: its next report replaces that result.
+            prompt += "\n\n" + wrap("system", "context", prompts.RESTATE)
+            self.store.set(f"morefor:{task_id}", "1")  # Its next report is checked (Tools).
         if before == "cancelled":
             prompt += "\n\n" + wrap(
                 "system",

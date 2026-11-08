@@ -180,7 +180,7 @@ async def run(scheme: str):
 
             await fix.locator(".actions .more-button").click()
             await fix.get_by_role("menuitem", name="Create PR").click()
-            await expect(fix.locator(".error")).to_contain_text("no GitHub origin")
+            await expect(fix.locator(".error")).to_contain_text("has no GitHub remote")
             log("Create PR explains why the demo project cannot have one")
 
             await fix.locator("button.receipt.changes").click()

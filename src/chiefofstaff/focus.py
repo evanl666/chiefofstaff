@@ -9,10 +9,18 @@ from contextlib import suppress
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from .digest import finished_tasks, needs_you
 from .envelope import wrap
 
 if TYPE_CHECKING:
     from .runtime import Runtime
+
+
+def duration(minutes: int) -> str:
+    """45 min, 1h, 1h 30m."""
+    if minutes < 60:
+        return f"{minutes} min"
+    return f"{minutes // 60}h" + (f" {minutes % 60}m" if minutes % 60 else "")
 
 
 class Focus:
@@ -36,11 +44,13 @@ class Focus:
         self.store.set("focus_started", str(started))
         self.store.set("focus_until", str(until))
         clock = datetime.fromtimestamp(until).astimezone().strftime("%H:%M")
+        # How long, not until when: the page shows the time in the owner's own clock style.
+        length = duration(minutes)
         note = (
-            f"The owner is focusing until {clock}. Handle what you can without them: forward "
-            "Slack messages that need a reply to the Slack session (drafts wait for their "
-            "approval), give code work to workers, ignore noise. Use notify_owner(urgent=true) "
-            "only for what cannot wait until then."
+            f"The owner is focusing for {length} (until {clock}). Handle what you can without "
+            "them: forward Slack messages that need a reply to the Slack session (drafts wait "
+            "for their approval), give code work to workers, ignore noise. Use "
+            "notify_owner(urgent=true) only for what cannot wait until then."
         )
         with suppress(RuntimeError):
             await self.delivery.deliver(
@@ -48,7 +58,7 @@ class Focus:
                 wrap("system", "focus", note),
                 batch=True,
                 kind="notice",
-                display=f"Focusing until {clock}",
+                display=f"Focusing for {length}",
             )
         self.runtime.publish_state()
         return self.state()
@@ -70,26 +80,25 @@ class Focus:
         return self.state()
 
     def summary(self, started: float) -> str:
+        """What came in, what was drafted and finished, and what needs the owner now: as Home
+        counts it under Needs you."""
         since = datetime.fromtimestamp(started, UTC).isoformat()
-        minutes = max(1, round((time.time() - started) / 60))
-        length = f"{minutes // 60}h {minutes % 60}m" if minutes >= 60 else f"{minutes} min"
+        length = duration(max(1, round((time.time() - started) / 60)))
+        # What reached Chief of Staff from outside (each Slack message, PR comment, CI result,
+        # watch finding once), not the batches the Router got them in.
         handled = self.store.value(
-            """SELECT count(*) AS n FROM messages WHERE kind='inbound' AND created_at>=?
-            AND (json_extract(meta, '$.source') IS NOT NULL)""",
+            """SELECT count(*) AS n FROM triggers WHERE source IN ('slack', 'github', 'watch')
+            AND text!='' AND created_at>=?""",
             (since,),
         )
+        # Drafts that wait for the owner or went out: not those replaced or withdrawn since.
         drafted = self.store.value(
-            "SELECT count(*) AS n FROM drafts WHERE kind IN ('slack','github') AND created_at>=?",
+            """SELECT count(*) AS n FROM drafts WHERE kind IN ('slack','github') AND created_at>=?
+            AND status IN ('pending', 'uncertain', 'sent')""",
             (since,),
         )
-        finished = self.store.value(
-            """SELECT count(DISTINCT task_id) AS n FROM runs WHERE status='succeeded'
-            AND ended_at>=?""",
-            (since,),
-        )
-        needs = len(self.store.drafts()) + self.store.value(
-            "SELECT count(*) AS n FROM tasks WHERE status IN ('waiting','failed')"
-        )
+        finished = len(finished_tasks(self.store, started, time.time() + 1))
+        needs = needs_you(self.runtime)
         parts = [
             f"{handled} message{'s' if handled != 1 else ''} handled" if handled else "",
             f"{drafted} repl{'ies' if drafted != 1 else 'y'} drafted for you" if drafted else "",

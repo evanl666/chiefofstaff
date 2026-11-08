@@ -483,9 +483,33 @@ def test_slack_ids_read_as_names():
     )
     assert found == [
         "Channel: #deploys | From: @Bob\nText: hi @Evan",
-        "DM DM with Bob #eng (see above) @U0NOBODY",
+        "DM with Bob #eng (see above) @U0NOBODY",
         "Slack DM with Bob", "Slack thread in #eng", "Slack DM",
     ]  # fmt: skip
+
+
+def test_what_a_slack_session_writes_reads_without_ids_and_stamps():
+    found = run_js(
+        """
+        s.state.snapshot = { slack_names: { D0ALICE01: "DM with Alice", U0ALICE1: "Alice Chen",
+          U0OWNER1: "you", C0ENG: "eng" } };
+        return [
+          t.slackText('Slack event (DM with Alice Chen, thread slack:D0ALICE01:1794141072.949527)'
+            + ': "hey <@U0OWNER1>, ping <@U0BOB001>" (ts 1794141072.949527). Please look.'),
+          t.slackText("Alice Chen (DM D0ALICE01, ts 1794141072.949527) asked her and Bob "
+            + "(U0BOB001). Alice Chen (U0ALICE1) and Alice (U0ALICE1) in C0ENG."),
+          t.slackText("https://acme.slack.com/archives/D0ALICE01/p1794141072949527 (UTF16LE) "
+            + "W3C U2 C0FFEE1 parts 1794141072.949527"),
+        ];
+        """
+    )
+    assert found == [
+        'Slack event (DM with Alice Chen, thread in DM with Alice): "hey @you, ping @U0BOB001". '
+        "Please look.",
+        "Alice Chen (DM with Alice) asked her and Bob. Alice Chen and Alice (@Alice Chen) in #eng.",
+        "https://acme.slack.com/archives/D0ALICE01/p1794141072949527 (UTF16LE) W3C U2 C0FFEE1 "
+        "parts 1794141072.949527",
+    ], "links, words and ids no name is known for stay"
 
 
 def test_a_status_in_words_has_its_tone_negations_too():

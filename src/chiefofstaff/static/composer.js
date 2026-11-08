@@ -4,6 +4,9 @@ import { $, el, toast } from "./dom.js";
 const TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
 const MAX_FILES = 5;
 const MAX_BYTES = 5 * 1024 * 1024;
+// What one message may hold (as the server counts: characters, not bytes); the count shows near it.
+export const MAX_CHARS = 20000;
+const NEAR_CHARS = 18000;
 const pending = [];  // { name, type, url }: url is a data: URL, for the thumbnail and the upload.
 
 const composer = () => $("#composer");
@@ -67,6 +70,21 @@ function render() {
   );
 }
 export const hasAttachments = () => pending.length > 0 && attachable();
+const number = (count) => count.toLocaleString("en-US");
+// Over the limit: what to say instead of sending (the text stays in the box).
+export function tooLong(text) {
+  const count = [...text].length;
+  return count > MAX_CHARS ? `Too long: ${number(count)} characters, the limit is ${number(MAX_CHARS)}` : "";
+}
+// Near the limit, how much it holds; over it, by how much (sending is refused).
+export function showLength() {
+  const node = $("#composer-count");
+  const text = $("#composer-input").value.trim();
+  const count = text.length >= NEAR_CHARS ? [...text].length : 0;
+  node.hidden = count < NEAR_CHARS;
+  node.classList.toggle("over", count > MAX_CHARS);
+  node.textContent = node.hidden ? "" : tooLong(text) || `${number(count)} of ${number(MAX_CHARS)} characters`;
+}
 // What goes with the message now; put back with restoreAttachments if sending fails.
 export function takeAttachments() {
   if (!attachable()) return [];

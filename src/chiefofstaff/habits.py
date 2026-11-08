@@ -346,11 +346,22 @@ class Habits:
             )
             entries = slack_entries(text)
             owner = slack.status.get("user_id")
+            away = json.loads(self.store.get("away_slack_dm") or "null") or {}
             for entry in entries:
                 if owner and entry["user"] != owner:
                     continue
                 if plain(entry["text"]) in sent:
                     continue  # A reply Chief of Staff drafted: learned from as feedback.
+                if self.store.one(
+                    "SELECT id FROM triggers WHERE key=? AND source='slack-sent'",
+                    (f"slack:{entry['ts']}",),
+                ):
+                    continue  # Chief of Staff sent it as the owner (an away notification).
+                if entry["channel"] in {away.get("channel"), owner}:
+                    continue  # Their own DM: notifications and code answers, not their writing.
+                first = (entry["text"].split() or [""])[0].strip("[]:,.").upper()
+                if self.store.get(f"awaycode:{first}") or self.store.get(f"awayused:{first}"):
+                    continue  # An answer by code to a notification.
                 kind = "slack_dm" if entry["channel"].startswith("D") else "slack_channel"
                 ref = f"slack:{entry['channel']}:{entry['ts']}"
                 if self.add("slack", kind, ref, entry["text"], {"link": entry["link"]}):

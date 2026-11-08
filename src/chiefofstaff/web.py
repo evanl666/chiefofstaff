@@ -182,6 +182,11 @@ def create_app(
             runtime.update_session(session_id, unread=0)
         return {"ok": True}
 
+    @app.post("/api/messages/{message_id}/seen")
+    async def message_seen(message_id: int):
+        runtime.update_seen(message_id)
+        return {"ok": True}
+
     @app.post("/api/sessions/{session_id}/model")
     async def session_model(session_id: str, payload: SessionModel):
         return await runtime.set_session_model(

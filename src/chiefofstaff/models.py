@@ -145,6 +145,42 @@ McpName = Annotated[str, Field(pattern=r"^[A-Za-z0-9_-]{1,40}$")]
 HourRange = Annotated[str, Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$")]
 
 
+def mcp_problem(config: object) -> str:
+    """What in an MCP server's configuration Copilot would refuse ("" when nothing): it takes
+    the session, then gives up on every message to it, with no error the session sees."""
+    if not isinstance(config, dict):
+        return 'write an object such as {"command": "…"} or {"url": "…"}.'
+    if not (isinstance(config.get("command"), str) or isinstance(config.get("url"), str)):
+        return "give a command (local) or a url (remote)."
+
+    def texts(value: object) -> bool:
+        return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+    def table(value: object) -> bool:
+        return isinstance(value, dict) and all(isinstance(item, str) for item in value.values())
+
+    checks = {
+        "type": (
+            lambda value: value in {"local", "stdio", "http", "sse"},
+            "local, stdio, http or sse",
+        ),
+        "tools": (texts, 'a list of tool names in quotes (["*"] for all)'),
+        "args": (texts, "a list of strings"),
+        "env": (table, "an object of strings"),
+        "headers": (table, "an object of strings"),
+        "cwd": (lambda value: isinstance(value, str), "a string"),
+        "working_directory": (lambda value: isinstance(value, str), "a string"),
+        "timeout": (
+            lambda value: isinstance(value, int) and not isinstance(value, bool) and value > 0,
+            "a whole number of milliseconds",
+        ),
+    }
+    for key, (fits, what) in checks.items():
+        if key in config and not fits(config[key]):
+            return f"{key} must be {what}."
+    return ""
+
+
 class Watch(StrictModel):
     """Something to look out for on the owner's behalf, with whatever tools work on this
     machine (Slack, Glean, a company search, mail, docs…)."""
@@ -227,8 +263,8 @@ class Settings(StrictModel):
     @classmethod
     def mcp_config(cls, value: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
         for name, config in value.items():
-            if not (isinstance(config.get("command"), str) or isinstance(config.get("url"), str)):
-                raise ValueError(f"MCP server {name}: give a command (local) or a url (remote).")
+            if problem := mcp_problem(config):
+                raise ValueError(f"MCP server {name}: {problem}")
             config.setdefault("tools", ["*"])
         return value
 

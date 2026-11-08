@@ -75,6 +75,8 @@ SLACK_DM_HINT = (
 )
 SEND_WORDS = {"send", "ok", "okay", "yes", "y", "approve", "lgtm", "发", "发送", "好", "可以"}
 REJECT_WORDS = {"reject", "no", "n", "skip", "don't", "dont", "不", "不要", "拒绝"}
+GO_ON_WORDS = {"go on", "go", "continue", "resume", "继续"}
+CANCEL_WORDS = {"cancel", "取消"}
 HID_IDLE = re.compile(r'"HIDIdleTime" = (\d+)')
 
 
@@ -463,7 +465,13 @@ class Connector:
                 if part
             )
             display = f"{item.source} · {item.sender}: {' '.join(item.text.split())[:300]}"
-            if await self.runtime.on_trigger("watch", [key], text, display=display):
+            # A Slack message is known by its own key too: the Slack source (a followed thread,
+            # a DM) does not hand it over again, nor this one what it handed over already.
+            slack_keys = [f"slack:{stamp}" for stamp in threads.slack_messages(item.link)]
+            if any(self.store.one("SELECT id FROM triggers WHERE key=?", (k,)) for k in slack_keys):
+                self.store.add_trigger("watch", key, text[:4000])
+                continue
+            if await self.runtime.on_trigger("watch", [key, *slack_keys], text, display=display):
                 new += 1
         self.runtime.publish_state()
         skipped = f" {answered} the owner already answered were left out." if answered else ""
@@ -612,11 +620,16 @@ class Connector:
         reached it after the owner's last message and before it asked, in much the same words.
         The owner is told it once, as the task's."""
         waiting = {task["id"]: task for task in tasks if task["status"] == "waiting"}
+        asked = words_of(ask["text"])
+        # A question a session asked the owner with no task (the Slack session's), retold.
+        for question in self.runtime.asks.owner_questions():
+            theirs = words_of(question.get("text") or "")
+            if asked and theirs and len(asked & theirs) >= 0.4 * len(asked):
+                return True
         if not waiting:
             return False
         latest = self.store.messages(self.runtime.router_id(), limit=40)
         owner = max((m["id"] for m in latest if m["kind"] == "owner"), default=0)
-        asked = words_of(ask["text"])
         for message in latest:
             task = waiting.get(message["meta"].get("task_id") or "")
             if not (owner < message["id"] < ask["id"] and message["kind"] == "inbound" and task):
@@ -643,7 +656,27 @@ class Connector:
         latest = self.store.messages(self.runtime.router_id(), limit=40)
         owner = max((m["id"] for m in latest if m["kind"] == "owner"), default=0)
         asks = [m for m in self.router_asks(latest) if m["id"] > owner]
-        return asks[-1] if asks else None
+        if not asks or self.settled(asks[-1]):
+            return None
+        return asks[-1]
+
+    def settled(self, ask: dict) -> bool:
+        """Whether what the Router said needs the owner was dealt with since, on Home: the
+        drafts it names are no longer waiting; or, when it asks nothing (it points at a card:
+        "resend the draft"), the owner decided a card after it."""
+        named = set(re.findall(r"\bd[0-9a-f]{8}\b", ask["text"]))
+        if named:
+            pending = {draft["id"] for draft in self.store.drafts()}
+            return not (named & pending)
+        if asks_owner(ask["text"]):
+            return False  # A question is answered by the owner, not by a card.
+        return bool(
+            self.store.one(
+                "SELECT id FROM drafts WHERE resolved_at>? AND status IN ('sent', 'answered') "
+                "LIMIT 1",
+                (ask["created_at"],),
+            )
+        )
 
     def told_router_questions(self) -> list[dict]:
         """The Router's questions the owner was told of while away: each can be answered by its
@@ -764,6 +797,10 @@ class Connector:
         task = item["task"]
         if task["status"] == "failed":
             return f"Failed · “{task['title']}”", gist(task.get("progress") or ""), "retry"
+        if self.store.get(f"stopped:{task['id']}"):
+            # Stopped mid-work: it asks nothing, it waits for Go on or Cancel.
+            said = gist(task.get("progress") or "")
+            return f"Stopped · “{task['title']}”", said, "go on · cancel"
         return f"“{task['title']}” asks", gist(task.get("progress") or ""), "<your answer>"
 
     def render(self, items: list[dict], more: int, codes: bool) -> tuple[str, dict]:
@@ -1095,7 +1132,14 @@ class Connector:
                     self.store.set(f"awayused:{code}", str(time.time()))
                 except (ValueError, LookupError, RuntimeError) as exc:
                     outcome = f"not done: {exc}"
-                done.append(f"{code}: {outcome}")
+                    done.append(f"{code}: {outcome}")
+                    # The same reply read again (each time it looks) is said once.
+                    said = hashlib.sha256(reply.text.strip().encode()).hexdigest()[:16]
+                    if self.store.get(f"awayfailed:{code}") == said:
+                        continue
+                    self.store.set(f"awayfailed:{code}", said)
+                else:
+                    done.append(f"{code}: {outcome}")
             self.runtime.add_message(
                 self.runtime.router_id(),
                 "notice",
@@ -1148,6 +1192,10 @@ class Connector:
                     return "left as it is"
                 raise ValueError('answer "merge" or "no"')
             if kind in {"slack", "github", "reply"}:
+                said = set(re.findall(r"[\w']+", word))
+                # "yes, send it", "send pls", "ok 👍": a send in a few words.
+                if said & SEND_WORDS and not said & REJECT_WORDS and len(said) <= 4:
+                    word = "send"
                 if word in SEND_WORDS:
                     await drafts.resolve(draft["id"], DraftDecision(action="send"))
                     return "sent" if kind != "reply" else "marked as sent"
@@ -1156,7 +1204,11 @@ class Connector:
                         draft["id"], DraftDecision(action="reject", reason="From away")
                     )
                     return "dropped"
-                raise ValueError('answer "send" or "no"')
+                if not answer:
+                    raise ValueError('answer "send" or "no", or say what to change')
+                # Anything else is what to change: it is drafted again that way.
+                await drafts.resolve(draft["id"], DraftDecision(action="revise", reason=answer))
+                return "to be drafted again as you say"
             if kind == "decision":
                 options = draft["target"].get("options") or []
                 if word.isdigit() and 1 <= int(word) <= len(options):
@@ -1183,6 +1235,19 @@ class Connector:
                 raise ValueError('answer "retry"')
             await self.runtime.task_actions.retry(task["id"])
             return "retrying"
+        if task["status"] == "waiting" and self.store.get(f"stopped:{task['id']}"):
+            # Stopped mid-work: Go on (with a note, if they wrote one) or Cancel, as on Home.
+            if word in CANCEL_WORDS:
+                await self.runtime.task_actions.cancel(task["id"])
+                return "cancelled"
+            if word in GO_ON_WORDS:
+                answer = "Go on where you stopped."
+            elif not answer or word in REJECT_WORDS:
+                raise ValueError('answer "go on" or "cancel"')
+            await self.runtime.task_actions.follow_up(task["id"], answer)
+            return "going on"
+        if not answer:
+            raise ValueError("write your answer after the code")
         await self.runtime.task_actions.follow_up(task["id"], answer)
         return "sent to the worker"
 

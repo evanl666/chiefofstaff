@@ -359,14 +359,20 @@ const SAYS_WHY = new Set(["done", "blocked", "failed"]);
 // Where something that reached the Router came from: a watch's finding is the watch's, whatever
 // source it found it in.
 const SOURCES = { slack: "Slack", github: "GitHub", watch: "a watch" };
-// Slack's text with names for its ids (from Slack, a thread followed, a watch finding there).
-const readable = (meta, text) => (meta.source === "slack" || meta.source === "watch" || meta.thread?.startsWith("slack:") ? slackText(text) : text);
+// Slack's text with names for its ids (from Slack, a thread followed, a watch finding there, the
+// Slack session or what was sent to it).
+const SENDERS = ["from", "told_by", "asked_by", "answered_by", "target", "session_id"];
+const slackish = (meta) => meta.source === "slack" || meta.source === "watch" || meta.thread?.startsWith("slack:") || SENDERS.some((key) => meta[key] && byId(meta[key])?.role === "slack");
+const readable = (meta, text) => (slackish(meta) ? slackText(text) : text);
+// The Slack session's own timeline reads as Slack does, whoever wrote it (the Router, the session
+// itself): names for ids, no message stamps. Its steps stay as they ran.
+const asShown = (message) => (message.kind !== "tool" && byId(message.session_id)?.role === "slack" ? { ...message, text: slackText(message.text) } : message);
 // Home's conversation is the owner and the Router. Everything else that reaches the Router is
 // one line: a task's news points at its card beside the chat; the rest opens in place.
 function homeEntry(message) {
   const meta = message.meta || {};
   const time = message.created_at;
-  const text = message.kind === "inbound" ? readable(meta, message.text || "") : message.text || "";
+  const text = ["inbound", "ask", "answer"].includes(message.kind) ? readable(meta, message.text || "") : message.text || "";
   switch (message.kind) {
     case "inbound": {
       if (meta.from && meta.status?.startsWith("watchdog")) {
@@ -400,7 +406,7 @@ function homeEntry(message) {
       return eventLine({ mark: "↩", text: `${meta.from_title}: ${gist(text) || firstLine(text)}`, time, body: text, view: () => select(meta.session_id, meta.task_id ? { task: meta.task_id } : {}), viewText: "Open" });
     case "update":
       if (meta.digest) return null;
-      return eventLine({ mark: meta.needs_action ? "!" : "·", kind: meta.needs_action ? "waiting" : "", text: firstLine(text), time, body: text.includes("\n") || text.length > 140 ? text : "" });
+      return eventLine({ mark: meta.needs_action || meta.urgent ? "!" : "·", kind: meta.needs_action || meta.urgent ? "waiting" : "", text: firstLine(text), time, body: text.includes("\n") || text.length > 140 ? text : "" });
     case "draft": {
       const node = eventLine({ mark: "✎", text: `${meta.label || "Draft"}: ${firstLine(text)}`, time, body: text });
       node.classList.add("draft-record");
@@ -421,7 +427,8 @@ function homeEntry(message) {
       return null;
   }
 }
-function renderMessage(message) {
+function renderMessage(original) {
+  const message = asShown(original);
   const meta = message.meta || {};
   const time = message.created_at;
   if (state.selected === HOME && message.session_id === routerId()) {
@@ -586,7 +593,7 @@ export function appendMessages(messages) {
     if (message.id <= state.lastId || message.session_id !== viewed) return;
     state.lastId = message.id;
     if (message.kind === "tool" || narration(message, messages[index + 1], worker)) {
-      addWork(timeline, message.kind === "tool" ? "tool" : "narration", message.text, shown?.cwd);
+      addWork(timeline, message.kind === "tool" ? "tool" : "narration", asShown(message).text, shown?.cwd);
       return;
     }
     const node = renderMessage(message);

@@ -605,3 +605,21 @@ def test_a_receipt_shows_the_test_run_of_a_compound_command():
     line = "cat >> kit.py <<'EOF'\ndef x(): pass\nEOF\ncd /w/app && uv run pytest -q 2>&1 | tail -3"
     assert shown_command(line, "test") == "cd /w/app && uv run pytest -q"
     assert shown_command("ruff check . && pytest -k 'a or b'", "test") == "pytest -k 'a or b'"
+
+
+def test_a_search_that_finds_nothing_backs_a_claim_that_nothing_remains():
+    """Bug bash 4: `grep -rn hello .` exiting 1 ("no match") marked "no hello remains" Not met."""
+    from chiefofstaff.receipts import criteria_results
+
+    grep = {"command": "grep -rn hello . --exclude-dir=.git", "exit_code": 1, "kind": ""}
+    gone = {"criterion": "No `hello` remains", "result": "met",
+            "evidence": "`grep -rn hello . --exclude-dir=.git` found nothing"}  # fmt: skip
+    [result] = criteria_results(["No `hello` remains"], [gone], [grep])
+    assert result["state"] == "verified", result
+    there = {"criterion": "greet() exists", "result": "met",
+             "evidence": "`grep -rn hello . --exclude-dir=.git`"}  # fmt: skip
+    [result] = criteria_results(["greet() exists"], [there], [grep])
+    assert result["state"] == "claimed", "exit 1 does not show it is there"
+    broken = {**grep, "exit_code": 2}
+    [result] = criteria_results(["No `hello` remains"], [gone], [broken])
+    assert result["state"] == "contradicted", "2 is grep's error"

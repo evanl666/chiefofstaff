@@ -793,6 +793,28 @@ async def test_a_question_from_the_slack_session_is_under_needs_you(tmp_path):
     assert "Yes, briefly" in harness.session(slack).sent[-1]
 
 
+async def test_each_question_of_the_slack_session_is_its_own(tmp_path):
+    """Bug bash 4 (D5): the Slack session's questions shared one id, so its next question
+    silently replaced the one before under Needs you. Each stays until it is answered; the
+    answer says which one it answers."""
+    harness = Harness(tmp_path / "data", Settings(slack_enabled=True))
+    runtime = await harness.connect()
+    await runtime.slack.discover()
+    slack = harness.store.open_sessions("slack")[0]["id"]
+    bridge, pto = "Bob asks you onto the bridge call: join?", "Alice asks for PTO: approve?"
+    for asked in (bridge, pto, pto):  # The same question twice is one.
+        await call_tool(runtime, "report", slack, status="question", summary=asked)
+    asked = [bridge, pto]
+    bridge, pto = runtime.asks.owner_questions()
+    assert [bridge["text"], pto["text"]] == asked
+    assert bridge["id"] != pto["id"] and bridge["id"].startswith(f"{slack}:")
+    assert runtime.asks.owner_question(f"{slack}:-") is None, "which one is not known"
+    await runtime.task_actions.answer_question(pto["id"], "Approve it")
+    assert [q["id"] for q in runtime.asks.owner_questions()] == [bridge["id"]]
+    sent = harness.session(slack).sent[-1]
+    assert "Approve it" in sent and "answers: Alice asks for PTO" in sent
+
+
 async def test_external_sessions_can_be_adopted(harness, tmp_path):
     runtime = await harness.connect()
     harness.client.metas = [
@@ -1074,6 +1096,122 @@ async def test_new_settings_wait_for_a_worker_to_finish_its_turn(tmp_path):
     assert worker.disconnected and runtime.workers.running() == 0
 
 
+def test_mcp_servers_copilot_would_refuse_are_refused_in_settings():
+    """Bug bash 4 (E2): one wrong field (tools not a list) was saved, and Copilot then gave up
+    on every worker's messages without an error."""
+    import pytest
+    from pydantic import ValidationError
+
+    bad = {
+        "tools": {"command": "probe", "tools": "*"},
+        "args": {"command": "probe", "args": "--fast"},
+        "env": {"command": "probe", "env": {"PORT": 8080}},
+        "headers": {"url": "https://mcp.example.com", "headers": ["x"]},
+        "type": {"type": "remote", "url": "https://mcp.example.com"},
+        "timeout": {"command": "probe", "timeout": "5000"},
+        "cwd": {"command": "probe", "cwd": 5},
+    }
+    for field, config in bad.items():
+        with pytest.raises(ValidationError, match=f"MCP server probe: {field} must be"):
+            Settings(mcp_servers={"probe": config})
+    fine = {"command": "probe", "args": ["--fast"], "env": {"PORT": "8080"}, "timeout": 5000}
+    assert Settings(mcp_servers={"probe": fine}).mcp_servers["probe"]["tools"] == ["*"]
+
+
+async def test_a_follow_up_while_its_worker_finishes_its_turn_is_not_failed(tmp_path, monkeypatch):
+    """Code review: a follow-up sent right after a worker reported, while its turn went on (a
+    final push), was checked as if it started a turn: Copilot keeps it queued until the turn
+    ends, and the worker and its tasks were failed."""
+    from dataclasses import replace
+
+    from chiefofstaff import delivery as delivery_module
+
+    monkeypatch.setattr(delivery_module, "START_CHECK", 0.01)
+    harness = Harness(tmp_path / "data")
+    harness.client.capabilities = replace(harness.client.capabilities, echoes=True)
+    runtime = await harness.connect()
+    result = await call_tool(runtime, "spawn_worker", harness.router_id, title="Push it",
+                             instructions="Push the fix")  # fmt: skip
+    found = json.loads(result.text_result_for_llm)
+    worker, task_id = found["session_id"], found["task_id"]
+    session = harness.session(worker)
+    session.emit("user.message", content=session.sent[-1])  # It took it up.
+    session.emit("assistant.turn_start")
+    await settle(runtime)
+    await call_tool(runtime, "report", worker, status="done", summary="Fixed; pushing.")
+    session.emit("tool.execution_start", tool_call_id="p", tool_name="bash",
+                 arguments={"command": "git push"})  # fmt: skip
+    await settle(runtime)
+
+    async def nothing_new():
+        return []
+
+    session.get_events = nothing_new  # Queued: not in its conversation until the turn ends.
+    await runtime.task_actions.follow_up(task_id, "Also add a changelog line")
+    await asyncio.sleep(0.05)
+    await settle(runtime)
+    assert harness.store.session(worker)["status"] != "failed"
+    assert runtime.tasks.get(task_id)["status"] == "running"
+
+
+async def test_a_message_copilot_never_starts_on_fails_its_task_and_goes_out_again(
+    tmp_path, monkeypatch
+):
+    """Bug bash 4 (E2): Copilot took the worker's task and gave up on its queue (an MCP server
+    it could not load), with no error: the worker showed working forever, and neither a fixed
+    setting nor Stop and Go on reached it on a new connection."""
+    from dataclasses import replace
+
+    from chiefofstaff import delivery as delivery_module
+
+    monkeypatch.setattr(delivery_module, "START_CHECK", 0.01)
+    harness = Harness(tmp_path / "data")
+    harness.client.capabilities = replace(harness.client.capabilities, echoes=True)
+    runtime = await harness.connect()
+    result = await call_tool(runtime, "spawn_worker", harness.router_id, title="Check MCP",
+                             instructions="Run the probe")  # fmt: skip
+    found = json.loads(result.text_result_for_llm)
+    worker, task_id = found["session_id"], found["task_id"]
+    stuck = harness.session(worker)
+
+    async def nothing_written():
+        return []
+
+    stuck.get_events = nothing_written
+    await asyncio.sleep(0.05)
+    await settle(runtime)
+    assert harness.store.session(worker)["status"] == "failed"
+    assert runtime.tasks.get(task_id)["status"] == "failed"
+    assert "never started on it" in harness.kinds(worker)[-1][1]
+    assert stuck.disconnected, "the next message goes on a new connection"
+    await runtime.task_actions.retry(task_id)
+    assert harness.session(worker) is not stuck
+    assert "Run the probe" in harness.session(worker).sent[-1], "its task goes out again"
+
+    # Stuck again: a settings change sends it again on a new connection at once.
+    again = harness.session(worker)
+    monkeypatch.setattr(delivery_module, "START_CHECK", 60)
+    await runtime.owner_send(worker, "And the second probe")
+    old = harness.store.settings()
+    fixed = {"probe": {"command": "probe", "tools": ["*"]}}
+    new = old.model_copy(update={"mcp_servers": fixed})
+    harness.store.save_settings(new)
+    await runtime.settings_changed(old, new)
+    await settle(runtime)
+    assert again.disconnected and harness.session(worker) is not again
+    assert harness.session(worker).options["mcp_servers"]["probe"] == fixed["probe"]
+    assert "And the second probe" in harness.session(worker).sent[-1]
+
+    # Stuck again: Stop, then Go on, reaches it on a new connection.
+    third = harness.session(worker)
+    await runtime.owner_send(worker, "And the third probe")
+    await runtime.workers.interrupt(worker)
+    assert third.disconnected
+    await runtime.task_actions.follow_up(task_id, "Go on where you stopped.")
+    assert harness.session(worker) is not third
+    assert "And the third probe" in harness.session(worker).sent[-1]
+
+
 async def test_tools_take_the_short_ids_sessions_see(harness):
     runtime = await harness.connect()
     result = await call_tool(
@@ -1088,7 +1226,9 @@ async def test_tools_take_the_short_ids_sessions_see(harness):
         task_id=task,
     )  # fmt: skip
     assert reply.text_result_for_llm == f"Delivered (task {task})."
-    assert harness.session(worker_id).sent[-1] == env("router", "message", "More", task=task)
+    assert (
+        harness.session(worker_id).sent[-1].startswith(env("router", "message", "More", task=task))
+    )
     missing = await call_tool(
         runtime, "message_session", harness.router_id, session_id="ffffffff", text="x"
     )
@@ -1567,7 +1707,7 @@ async def test_quiet_workers_let_go_of_their_copilot_session(harness):
     await runtime.task_actions.follow_up(runtime.tasks.current(quiet)["id"], "One more thing.")
     await settle(runtime)
     assert runtime.states.is_live(quiet), "its next message resumes it"
-    assert harness.session(quiet).sent[-1].endswith("One more thing.\n</message>")
+    assert "One more thing.\n</message>" in harness.session(quiet).sent[-1]
 
 
 async def test_every_tool_a_prompt_tells_a_session_to_use_is_one_it_has(harness):
@@ -1693,3 +1833,45 @@ async def test_a_merge_refused_as_new_commits_came_says_so_and_shows_the_pr_as_i
     assert refused["status"] == "rejected" and "GraphQL" not in refused["outcome"]
     [again] = [d for d in harness.store.drafts() if d["kind"] == "merge"]
     assert again["target"]["head"] == "def5678", "the PR as it is now, at once"
+
+
+async def test_the_router_knows_what_waits_for_the_owner_and_what_became_of_it(harness):
+    """Bug bash 4 (D1): the Router misreported what needed the owner: its handover listed cards
+    without whom they were for or what they answered; list_sessions had no drafts or owner
+    questions; it never heard that a draft was sent or rejected."""
+    runtime = await harness.connect()
+    result = await call_tool(runtime, "spawn_worker", harness.router_id, title="Answer Alice",
+                             instructions="Answer Alice in #deploys", slack=True)  # fmt: skip
+    worker = json.loads(result.text_result_for_llm)
+    target = {
+        "channel_id": "C0DEPLOYS",
+        "thread_ts": "1794138887.017740",
+        "to": "Alice Chen",
+        "latest": "Alice Chen: can we deploy calc 1.2 now?",
+        "task_id": worker["task_id"],
+    }
+    draft = harness.store.create_draft(worker["session_id"], "slack", target, "Yes, go ahead.")
+    await call_tool(runtime, "report", worker["session_id"], status="question",
+                    summary="Should it wait for the review?")  # fmt: skip
+
+    listed = json.loads(
+        (await call_tool(runtime, "list_sessions", harness.router_id)).text_result_for_llm
+    )["needs_owner"]
+    [card] = listed["cards"]
+    assert card["kind"] == "Slack reply" and card["to"].startswith("Alice Chen")
+    assert card["answers"] == "Alice Chen: can we deploy calc 1.2 now?"
+    assert card["task"] == f"{worker['task_id']} “Answer Alice”"
+    assert [q["question"] for q in listed["questions"]] == ["Should it wait for the review?"]
+    handover = runtime.handover()
+    assert "Slack reply to Alice Chen" in handover and "can we deploy calc 1.2" in handover
+    assert "Should it wait for the review?" in handover
+
+    await runtime.drafts.resolve(draft["id"], DraftDecision(action="reject", reason="Not yet"))
+    [note] = [
+        m for m in harness.store.messages(harness.router_id) if "draft-outcome" in
+        m["meta"].get("prompt", "")
+    ]  # fmt: skip
+    assert note["meta"]["deferred"], "held: it rides along with the Router's next message"
+    assert "Rejected by the owner. Reason: Not yet Nothing was sent." in note["meta"]["prompt"]
+    assert "Alice Chen" in note["meta"]["prompt"] and worker["task_id"] in note["meta"]["prompt"]
+    assert note["text"].startswith("Rejected by the owner: Slack reply to Alice Chen")

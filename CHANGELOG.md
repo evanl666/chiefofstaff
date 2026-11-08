@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.1.29 (2026-11-08)
+
+A fourth live bug bash on real Copilot (a busy workday, robustness and restarts, the fixes in
+0.1.28, Slack with GitHub and learning) and a code review, all fixed.
+
+- **Restarts and broken settings**: a restart right after a worker was started no longer cuts its
+  instructions short (what Copilot never received goes out again in full); an MCP server set up
+  wrongly (a tools list that is not a list) is refused in Settings, and a session Copilot gives up
+  on shows an error instead of working forever; Stop and Go on reconnect it with the current
+  settings.
+- **What the Router knows**: it knows which cards wait for you (each draft's recipient and what it
+  answers, the questions asked of you) and hears what became of each draft, so "what needs me?"
+  matches Home; cancelling a task withdraws its drafts; it says something once (not as a note and an
+  answer).
+- **Each task's changes** in a folder of yours: a file counts when it changed while one of the
+  task's commands ran that names it or writes files it does not name (a glob loop, `$f`, a script),
+  so those edits count and your concurrent edit to a file it only read does not; names with quotes
+  or backslashes are counted; an amended start commit no longer counts the branch's earlier commits;
+  a worktree removed under a worker is back before its next message; a `grep` that found nothing
+  backs "none remains".
+- **Drafts and reviews**: a draft is the task's that answers that thread or PR (not the worker's
+  newest task), and sending it settles that task even when another task's draft still waits; your
+  edit stays when a Slack reply is held (*Send anyway* sends it); a teammate who asked for a review
+  in Slack hears when it is posted; an edited draft is not counted as accepted as it was, and your
+  rewritten line comments are learned from.
+- **GitHub**: a worker bringing its PR up to date with a moved base (rebase, force-push) is not
+  news.
+- **Away**: a stopped task is told as stopped (`go on · cancel`); words after a draft's code redo it
+  as you say; a code with nothing after it is refused, and an answer that cannot be applied is said
+  once; what you already handled on Home is not told again; a question is told once (not again as
+  the Router's); notifications in your own DM are not learned as your writing; a message a Watch
+  found is handed over once.
+- **Focus and the daily summary** count what Home shows (results to accept, questions, the Router's
+  notes; drafts still waiting or sent; the messages that came in), not helper or cancelled tasks.
+- **Home**: toasts show (urgent ones always; during Focus only those), and the Router's notes that
+  need you are under *Needs you* until *Got it*; each question from the Slack session is its own
+  card; Slack text in the Slack session reads with names (`#deploys`, *DM with Alice*, *you*), and
+  chat lines name threads that way; @ finds workers by several words; a message over 20,000
+  characters says so and keeps your text.
+- **Results**: a follow-up's result keeps the whole answer (not only what it added) and is written
+  in the language of your latest message; cancelling work that had already finished keeps it as
+  done with its result; a decision card is not closed by a question about it; a result's changed
+  files stay counted after a later task edits the same files, and a split or a new result clears
+  "restarted".
+- **Smaller fixes**: the start check no longer fails a worker still finishing its turn; reopening a
+  closed worker names who closed it; a Watch question that expired on a restart is told to the
+  Router once; short Chinese split titles (2-3 characters) are allowed; away "yes, send it" sends
+  the draft as it is.
+
 ## 0.1.28 (2026-11-08)
 
 A third live bug bash (four instances on real Copilot: lifecycle, the UI and Slack, GitHub, and the

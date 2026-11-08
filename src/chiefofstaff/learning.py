@@ -271,7 +271,8 @@ class Learning:
             # What the learning worker was given: one at a time (see busy).
             self.store.set("learning_feedback", json.dumps([item["id"] for item in items]))
             self.store.set("learning_observations", json.dumps([row["id"] for row in observed]))
-            self.runtime.habits.mark_learned(observed)
+            # Learned once it reports (propose_lessons): a learning worker that never got its
+            # prompt (a restart right after it started) leaves them for the next one.
             return await self.runtime.toolset.start_special(
                 "learner", "Learn how you work", "\n\n".join(lines)
             )
@@ -299,6 +300,13 @@ class Learning:
         if given:
             marks = ",".join("?" * len(given))
             self.store.execute(f"UPDATE feedback SET learned=1 WHERE id IN ({marks})", tuple(given))
+        if seen:
+            marks = ",".join("?" * len(seen))
+            self.runtime.habits.mark_learned(
+                self.store.all(
+                    f"SELECT id, kind FROM observations WHERE id IN ({marks})", tuple(seen)
+                )
+            )
         if proposed:
             items = [self.card_item(identifier) for identifier in proposed]
             if pending := self.pending_card():

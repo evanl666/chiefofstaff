@@ -15,9 +15,9 @@ from typing import TYPE_CHECKING
 
 from . import threads
 from .asks import REQUEST_KINDS
-from .envelope import wrap
+from .envelope import short, wrap
 from .models import DraftDecision
-from .roles import SLACK, WORKER
+from .roles import ROUTER, SLACK, WORKER
 from .sources.github import REVIEW_EVENTS, merge_refusal
 from .sources.slack import describe, message_keys
 from .store import now
@@ -33,6 +33,25 @@ STYLE_EXAMPLES = 50
 
 # A draft that cannot be sent as written: what it answers changed meanwhile.
 STALE_DRAFT = re.compile(r"changed after the draft was written|no longer connected", re.IGNORECASE)
+
+# Cards for the owner, in words (for the Router).
+CARD_WORDS = {
+    "slack": "Slack reply",
+    "github": "PR review",
+    "reply": "reply the owner sends themself",
+    "decision": "decision",
+    "change": "changed decision to confirm",
+    "question": "question",
+    "form": "form",
+    "link": "link to open",
+    "signin": "sign-in",
+    "merge": "PR ready to merge",
+    "workspace": "folder to choose",
+    "lessons": "lessons to review",
+    "check": "check to approve",
+    "profile": "profile to review",
+    "adopt": "session to take over",
+}
 
 
 class Drafts:
@@ -127,6 +146,7 @@ class Drafts:
             await self.tell_drafter(
                 draft, f"The owner rejected draft {draft_id}.{reason} Do not send it.", True
             )
+            self.tell_router(draft, "Rejected by the owner.", f"{reason.strip()} Nothing was sent.")
             return draft
         final = decision.text.strip() if "text" in decision.model_fields_set else draft["text"]
         if draft["kind"] == "github" and "body" in decision.content:
@@ -158,7 +178,14 @@ class Drafts:
             if not kept and (verdict or target.get("verdict")) != "approve":
                 raise ValueError("Nothing to post: write a summary or keep a line comment.")
         if draft["kind"] == "slack" and decision.content.get("send_anyway") is not True:
-            await self.check_conversation(draft)
+            try:
+                await self.check_conversation(draft)
+            except ValueError:
+                # Held: the owner's edit stays the card's text (Send anyway sends it).
+                if final and final != draft["text"]:
+                    self.store.update_draft(draft_id, final_text=final)
+                    self.bus.publish("draft", self.store.draft(draft_id))
+                raise
         comments_edited = ""
         if draft["kind"] == "github" and target.get("comments"):
             draft, comments_edited = self.edit_comments(draft, decision.content)
@@ -207,17 +234,38 @@ class Drafts:
         self.bus.publish("draft", draft)
         self.after_sent(draft, outcome or "")
         self.settle_question(draft)
+        if comments_edited and (task := self.task_of(draft)):
+            # Its line comments or verdict changed: not accepted as it was.
+            self.store.set(f"draft_edited:{task['id']}", "1")
         await self.settle_task(draft)
         edited = final != draft["text"] or bool(comments_edited)
         self.runtime.learning.record(
             "draft-edited" if edited else "draft-sent",
             context=self.about(draft),
             proposed=draft["text"],
-            owner=final if edited else "",
+            # What they wrote: the summary only when they changed it (their line comments and
+            # verdict are learned from one by one below).
+            owner=final if final != draft["text"] else "",
             scope="slack" if draft["kind"] == "slack" else "",
             agreed=not edited,
             untrusted=True,  # Written from Slack messages or a PR.
         )
+        # Each line comment the owner rewrote or left out, and the verdict they changed: their
+        # way of reviewing, learned from one by one (what the session drafted from the PR is not
+        # kept: untrusted).
+        changed = []
+        for index, comment in enumerate(target.get("comments") or []):
+            text = decision.content.get(f"comment:{index}", comment["body"])
+            text = (text if isinstance(text, str) else comment["body"]).strip()
+            if text != comment["body"].strip():
+                where = f"line comment on {comment.get('path', '')[:200]}:{comment.get('line')}"
+                changed.append((where, f"Rewrote it: {text}" if text else "Left it out."))
+        if verdict and verdict != target.get("verdict"):
+            changed.append(("verdict", f"Posted it as {verdict}, not {target.get('verdict')}."))
+        for about, owner in changed:
+            self.runtime.learning.record(
+                "review-edited", context=f"{self.about(draft)}: {about}", owner=owner
+            )
         if final != draft["text"] and draft["kind"] == "slack":
             await self.learn_style(draft["text"], sent=final)
         if edited:
@@ -234,9 +282,17 @@ class Drafts:
             # Finished work is not reopened by it: it reads this with its next message (woken,
             # it would answer with a report that replaces the task's result).
             task = self.task_of(draft)
-            await self.tell_drafter(draft, "\n\n".join(parts), not task or task["status"] in OPEN)
+            asked = self.asked_in_thread(draft)
+            await self.tell_drafter(
+                draft,
+                "\n\n".join([*parts, asked] if asked else parts),
+                not task or task["status"] in OPEN or bool(asked),
+            )
         else:
-            await self.tell_drafter(draft, f"The owner approved draft {draft_id}; it was sent.")
+            asked = self.asked_in_thread(draft)
+            told = f"The owner approved draft {draft_id}; it was sent."
+            await self.tell_drafter(draft, f"{told} {asked}" if asked else told, bool(asked))
+        self.tell_router(draft, "Sent by the owner" + (", edited." if edited else "."))
         return draft
 
     def edit_comments(self, draft: dict, content: dict) -> tuple[dict, str]:
@@ -349,6 +405,7 @@ class Drafts:
                 draft["id"], status="rejected", outcome=f"Withdrawn: {reason}", resolved_at=now()
             )
         self.bus.publish("draft", draft)
+        self.tell_router(draft, "Withdrawn by the session that drafted it.", f"Why: {reason}")
         return draft
 
     async def answer_workspace(self, draft: dict, decision: DraftDecision) -> dict:
@@ -445,6 +502,7 @@ class Drafts:
             )
             self.after_sent(draft, found)
             await self.tell_drafter(draft, f"Draft {draft['id']} was sent.")
+            self.tell_router(draft, "Sent (confirmed after a restart).")
         elif draft["kind"] == "github":
             # GitHub lists reviews at once: it was not published, so it can be approved again.
             draft = self.store.update_draft(
@@ -507,6 +565,7 @@ class Drafts:
             f"{tools[draft['kind']]}, changed as they ask; this one is not sent.",
             True,
         )
+        self.tell_router(draft, "The owner asked for it again.", f"What to change: {reason}")
         return draft
 
     async def copied(self, draft: dict, final: str) -> dict:
@@ -533,7 +592,9 @@ class Drafts:
         told = f"The owner approved draft {draft['id']} and sends it themself."
         if edited:
             told += f" They changed it to:\n{final}"
-        await self.tell_drafter(draft, told)
+        asked = self.asked_in_thread(draft)
+        await self.tell_drafter(draft, f"{told} {asked}" if asked else told, bool(asked))
+        self.tell_router(draft, "Approved for the owner to send themself.")
         return draft
 
     def settle_question(self, draft: dict):
@@ -557,6 +618,9 @@ class Drafts:
         is still for the owner to review. Sent before the worker reported: settled when it
         reports (settle_reported)."""
         task = self.task_of(draft)
+        sent = (draft.get("final_text") or draft["text"]).strip()
+        if task and sent != (draft["text"] or "").strip():
+            self.store.set(f"draft_edited:{task['id']}", "1")  # Not accepted as it was.
         if task and task["status"] in {"running", "queued"}:
             self.store.set(f"draft_sent:{task['id']}", "1")
             return
@@ -582,10 +646,17 @@ class Drafts:
             checkout.get("commits") or checkout.get("uncommitted")
             for checkout in receipts.get("checkouts") or []
         )
-        pending = any(other["session_id"] == task["session_id"] for other in self.store.drafts())
+        # Another of its own drafts still waits (not one its worker wrote for another task).
+        pending = any(
+            other["session_id"] == task["session_id"]
+            and (self.task_of(other) or {}).get("id") == task_id
+            for other in self.store.drafts()
+        )
         if not changed and not pending:
             self.store.delete(f"draft_sent:{task_id}")
-            self.runtime.task_actions.accept(task_id)
+            edited = bool(self.store.get(f"draft_edited:{task_id}"))
+            self.store.delete(f"draft_edited:{task_id}")
+            self.runtime.task_actions.accept(task_id, as_is=not edited)
 
     async def merge(self, draft: dict, decision: DraftDecision) -> dict:
         """The owner's answer to a PR that is ready to merge: merge it (its head as shown on the
@@ -679,11 +750,49 @@ class Drafts:
             self.bus.publish("draft", draft)
             self.after_sent(draft, found)
             await self.settle_task(draft)
-            await self.tell_drafter(
-                draft,
+            told = (
                 f"The owner posted draft {draft['id']} on GitHub themself ({found}): it is sent. "
-                "Do not ask about sending it again.",
+                "Do not ask about sending it again."
             )
+            asked = self.asked_in_thread(draft)
+            await self.tell_drafter(draft, f"{told} {asked}" if asked else told, bool(asked))
+            self.tell_router(draft, "Posted by the owner on GitHub themself.")
+
+    def asked_in_thread(self, draft: dict) -> str:
+        """A review or reply the owner sent for a task whose worker follows the Slack thread
+        someone asked for it in: they are told there (its worker drafts the reply). What to
+        tell the worker; "" when nobody there waits for it."""
+        row = self.store.find_session(draft["session_id"])
+        task = self.task_of(draft)
+        if draft["kind"] not in {"github", "reply"} or not row or not row["slack"] or not task:
+            return ""
+        for key in self.store.follows(row["id"]):
+            if not key.startswith("slack:") or task["id"] not in self.store.follow_tasks(
+                row["id"], key
+            ):
+                continue
+            answered = any(
+                other["kind"] == "slack"
+                and other["session_id"] == row["id"]
+                and other["created_at"] >= draft["created_at"]
+                and key.startswith(f"slack:{other['target'].get('channel_id')}")
+                for status in ("pending", "sent")
+                for other in self.store.drafts(status)
+            )
+            if answered:
+                continue  # It drafted the answer there already.
+            where = threads.label(key, self.runtime.slack.display_names())
+            then = (
+                "Then go on with your task, or report it done if this was the last of it."
+                if task["status"] in OPEN
+                else "No new report on the task."
+            )
+            return (
+                f"It was asked for in a Slack thread you follow for task {task['id']} ({where}, "
+                f"{key}): draft a short reply there with draft_slack_reply telling them it is "
+                f"done, with its link, in the owner's voice. {then}"
+            )
+        return ""
 
     def after_sent(self, draft: dict, outcome: str):
         """The drafting session now owns the conversation: it follows the thread or PR."""
@@ -719,6 +828,78 @@ class Drafts:
         if draft["kind"] == "slack":
             return "A Slack reply"  # Who it was for was written by the session: not kept.
         return f"A review of {target.get('repo', '')}#{target.get('number', '')}"
+
+    def brief(self, draft: dict) -> dict:
+        """A card waiting for the owner as the Router sees it: what it is, to whom, what it
+        answers, the task and session it is for (list_sessions, the handover, outcomes)."""
+        target = draft["target"] or {}
+        kind = CARD_WORDS.get(draft["kind"], draft["kind"])
+        to = answers = ""
+        if draft["kind"] == "slack":
+            channel, ts = target.get("channel_id") or "", target.get("thread_ts") or ""
+            key = f"slack:{channel}:{ts}" if ts else f"slack:{channel}"
+            names = self.runtime.slack.display_names()
+            to = ", ".join(x for x in (target.get("to"), threads.label(key, names)) if x)
+            answers = target.get("latest") or ""
+        elif draft["kind"] == "github":
+            to = f"{target.get('repo', '')}#{target.get('number', '')}"
+            comment = target.get("comment") or {}
+            if target.get("in_reply_to") or target.get("reply_to_comment"):
+                kind = "reply on a PR"
+                to += f" (to {comment.get('author') or 'a comment'})"
+                answers = comment.get("body") or ""
+            elif target.get("verdict"):
+                kind = f"PR review ({str(target['verdict']).replace('_', ' ')})"
+        elif draft["kind"] == "reply":
+            to = " ".join(x for x in (target.get("to"), target.get("where")) if x)
+        elif draft["kind"] == "decision":
+            answers = target.get("question") or ""
+        entry: dict = {"id": draft["id"], "kind": kind}
+        if to:
+            entry["to"] = to[:200]
+        if answers:
+            entry["answers"] = " ".join(str(answers).split())[:300]
+        entry["text"] = " ".join((draft["text"] or "").split())[:300]
+        row = self.store.find_session(draft["session_id"])
+        if row and row["role"] != ROUTER:
+            entry["from"] = f"{self.runtime.display_title(row)} ({short(row['id'])})"
+        if row and row["role"] == WORKER and (task := self.task_of(draft)):
+            entry["task"] = f"{task['id']} “{task['title']}”"
+        return entry
+
+    def line(self, draft: dict) -> str:
+        """The same in a line."""
+        found = self.brief(draft)
+        parts = [found["kind"] + (f" to {found['to']}" if found.get("to") else "")]
+        if found.get("answers"):
+            parts.append(f"answering “{found['answers'][:160]}”")
+        if found.get("task"):
+            parts.append(f"for task {found['task']}")
+        if found.get("from"):
+            parts.append(f"from {found['from']}")
+        return ", ".join(parts)
+
+    def tell_router(self, draft: dict, outcome: str, detail: str = ""):
+        """What became of a reply or review the owner was shown (sent, rejected, withdrawn):
+        the Router hears it with its next message, so it never says it still waits."""
+        if draft["kind"] not in {"slack", "github", "reply"}:
+            return
+        try:
+            router = self.runtime.router_id()
+        except RuntimeError:
+            return
+        found = self.brief(draft)
+        what = found["kind"] + (f" to {found['to']}" if found.get("to") else "")
+        text = f"Draft {draft['id']} ({self.line(draft)}): {outcome}" + (
+            f" {detail}" if detail else ""
+        )
+        self.delivery.hold(
+            router,
+            wrap("system", "draft-outcome", text, draft=draft["id"]),
+            kind="notice",
+            display=f"{outcome.rstrip('.')}: {what}"[:300],
+            meta={"session_id": draft["session_id"], "draft_id": draft["id"]},
+        )
 
     async def tell_drafter(self, draft: dict, text: str, wake: bool = False):
         row = self.store.find_session(draft["session_id"])

@@ -142,8 +142,9 @@ class Asks:
     # you until the owner answers or dismisses it, whatever becomes of its task meanwhile (its
     # PR merged, the task cancelled or given more work).
 
-    # One per task (a worker with several tasks may have a question on each): its id is
-    # "<session id>:<task id>" ("-" for none).
+    # One per task (a worker with several tasks may have a question on each; a new one on a task
+    # replaces its last): its id is "<session id>:<task id>". Each question without a task (the
+    # Slack session's, about different conversations) is one of its own: "<session id>:-:<n>".
 
     def migrate_questions(self):
         """Questions kept by 0.1.23 and before, one per worker ("ownerq:<session>"): under the
@@ -160,17 +161,32 @@ class Asks:
             self.store.delete(f"ownerq:{key}")
 
     def record_question(self, session_id: str, text: str, task_id: str = ""):
-        self.store.set(
-            f"ownerq:{session_id}:{task_id or '-'}",
-            json.dumps({"text": text.strip()[:6000], "task_id": task_id, "at": now()}),
-        )
+        text = text.strip()[:6000]
+        key = f"ownerq:{session_id}:{task_id}"
+        if not task_id:
+            # Not the one it asked before (that one stays), unless it asks the same again.
+            same = [
+                question["id"]
+                for question in self.session_questions(session_id)
+                if not question.get("task_id") and question.get("text") == text
+            ]
+            key = f"ownerq:{same[-1]}" if same else f"ownerq:{session_id}:-:{uuid4().hex[:8]}"
+        self.store.set(key, json.dumps({"text": text, "task_id": task_id, "at": now()}))
         self.runtime.publish_state()
 
     def owner_question(self, question_id: str) -> dict | None:
-        """A question by its id; by a worker's id, its only one (or its newest)."""
+        """A question by its id; by "<session id>:-", that session's question without a task
+        when it has one only (of several, which one is meant is not known); by a worker's id,
+        its only one (or its newest)."""
         if found := self.store.get(f"ownerq:{question_id}"):
-            return json.loads(found)
-        mine = self.session_questions(question_id)
+            return {**json.loads(found), "id": question_id}
+        session_id, _, task = question_id.partition(":")
+        mine = self.session_questions(session_id)
+        if task == "-":
+            loose = [question for question in mine if not question.get("task_id")]
+            return loose[0] if len(loose) == 1 else None
+        if task:
+            return None
         return mine[-1] if mine else None
 
     def session_questions(self, session_id: str) -> list[dict]:
@@ -186,12 +202,13 @@ class Asks:
 
     def answered(self, session_id: str, task_id: str | None = None):
         """The owner answered (or someone did for them), or the worker moved on: the question
-        of that task, or (no task named) all of the worker's."""
-        keys = (
-            [f"ownerq:{session_id}:{task_id or '-'}"]
-            if task_id is not None
-            else [f"ownerq:{question['id']}" for question in self.session_questions(session_id)]
-        )
+        of that task ("": those it asked with no task), or (no task named) all of the
+        worker's."""
+        keys = [
+            f"ownerq:{question['id']}"
+            for question in self.session_questions(session_id)
+            if task_id is None or (question.get("task_id") or "") == task_id
+        ]
         gone = False
         for key in keys:
             if self.store.get(key):
@@ -257,6 +274,21 @@ class Asks:
     # Requests
 
     def expire_requests(self, reason: str = "Chief of Staff restarted before an answer."):
+        # A watch the Router proposed (Asks.offer) waits for nothing: it would never hear that
+        # its card went. It does, with its next message, and may propose it again.
+        for draft in self.store.drafts():
+            if draft["kind"] == "form" and (what := draft["target"].get("watch")):
+                text = (
+                    f"Your proposed watch card {draft['id']} ({what}) expired unanswered: "
+                    "Chief of Staff restarted. Nothing was added; propose it again with "
+                    "add_watch if it is still wanted."
+                )
+                self.delivery.hold(
+                    draft["session_id"],
+                    wrap("system", "draft-outcome", text),
+                    kind="notice",
+                    display=f"Watch not added (its card expired at a restart): {what}"[:300],
+                )
         kinds = ",".join(f"'{kind}'" for kind in sorted(REQUEST_KINDS))
         self.store.execute(
             f"UPDATE drafts SET status='expired', outcome=?, resolved_at=? "

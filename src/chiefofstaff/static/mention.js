@@ -3,13 +3,15 @@
 import { $, el } from "./dom.js";
 import { HOME, sessions, state, workerTitle } from "./state.js";
 
-export const mention = { to: null, options: [], active: 0 };
+export const mention = { to: null, options: [], active: 0, dismissed: -1 };
 
 export const routerSide = () => state.selected === HOME;
 
+// "@" and what follows it up to the cursor: a name may have spaces ("@Fix ch"), not a line break
+// or another "@", and does not start with a space ("@ " is not a mention).
 function query(input) {
   const before = input.value.slice(0, input.selectionStart);
-  const match = /(^|\s)@([^\s@]*)$/.exec(before);
+  const match = /(^|\s)@((?:[^\s@][^@\n]*)?)$/.exec(before);
   return match ? { text: match[2], start: before.length - match[2].length - 1 } : null;
 }
 
@@ -45,13 +47,23 @@ export function closeMentions() {
 export function onComposerInput() {
   const input = $("#composer-input");
   const found = routerSide() ? query(input) : null;
-  if (!found) {
+  // Escape closed the list for this "@": typing on does not bring it back (a fresh "@" does).
+  if (found && !found.text) mention.dismissed = -1;
+  if (!found || found.start === mention.dismissed) {
+    if (!found) mention.dismissed = -1;
     closeMentions();
     return;
   }
-  // By the name it shows now (the task it is on), or the one it started with.
-  const text = found.text.toLowerCase();
-  const named = (session) => [workerTitle(session), session.title].some((name) => (name || "").toLowerCase().includes(text));
+  mention.dismissed = -1;
+  // By the name it shows now (the task it is on), or the one it started with: every word typed
+  // is in it ("fix ch" finds "Fix the checkout test").
+  const text = found.text.toLowerCase().trim();
+  const words = text.split(/\s+/);
+  const named = (session) =>
+    [workerTitle(session), session.title].some((name) => {
+      const lower = (name || "").toLowerCase();
+      return lower.includes(text) || words.every((word) => lower.includes(word));
+    });
   mention.options = sessions()
     .filter((session) => session.role === "worker" && !session.helper && !session.closed_at && named(session))
     .slice(0, 8);
@@ -104,6 +116,7 @@ export function onMentionKey(event) {
   } else if (event.key === "Enter" || event.key === "Tab") {
     choose(mention.options[mention.active]);
   } else if (event.key === "Escape") {
+    mention.dismissed = query($("#composer-input"))?.start ?? -1;
     closeMentions();
   } else {
     return false;

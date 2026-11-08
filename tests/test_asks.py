@@ -119,6 +119,28 @@ async def test_requests_do_not_survive_a_restart(harness):
     asking.cancel()
 
 
+async def test_a_watch_card_lost_at_a_restart_is_told_and_a_watch_is_added_once(harness):
+    """Bug bash 4 (R9): the Router's proposed watch expired at a restart and it never heard;
+    the same watch confirmed twice was added twice."""
+    runtime = await harness.connect()
+    router = harness.router_id
+    what = "Deploy questions in #deploys"
+    await call_tool(runtime, "add_watch", router, what=what)
+    again = await call_tool(runtime, "add_watch", router, what=what.upper())
+    assert "proposed this watch already" in again.text_result_for_llm
+    [card] = [d for d in harness.store.drafts() if d["kind"] == "form"]
+    runtime.asks.expire_requests()  # As at a restart.
+    assert harness.store.draft(card["id"])["status"] == "expired"
+    [told] = [m for m in harness.store.messages(router)
+              if "expired unanswered" in m["meta"].get("prompt", "")]  # fmt: skip
+    assert told["meta"]["deferred"] and what in told["meta"]["prompt"]
+
+    accepted = {"action": "accept", "content": {"what": what, "how": ""}}
+    await runtime.toolset.watch_answered(router, accepted)
+    await runtime.toolset.watch_answered(router, accepted)
+    assert [watch.what for watch in harness.store.settings().watches] == [what]
+
+
 async def test_environment_notes_are_shared(harness):
     runtime = await harness.connect()
     router = harness.router_id

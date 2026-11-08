@@ -626,6 +626,9 @@ a.button:hover { text-decoration: none; opacity: 0.88; }
   color: var(--muted);
 }
 #composer-to strong { color: var(--text); font-weight: 600; }
+/* How long the message is, near the limit; over it, in red (it is not sent). */
+#composer-count { flex-basis: 100%; font-size: var(--small); color: var(--muted); font-variant-numeric: tabular-nums; }
+#composer-count.over { color: var(--red); }
 #composer #composer-to .clear {
   width: 28px;
   height: 28px;
@@ -867,6 +870,8 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
   animation: rise 0.2s var(--ease);
 }
 .toast.error::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 8px; border-radius: 50%; background: var(--red); vertical-align: 1px; }
+/* What needs the owner (a question, a card to approve, the Router's urgent note). */
+.toast.attention::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 8px; border-radius: 50%; background: var(--badge); vertical-align: 1px; }
 @keyframes rise { from { transform: translateY(8px); opacity: 0; } }
 
 /* Model picker, usage */
@@ -1355,11 +1360,14 @@ dialog .row label.hours:not(.grow) { width: auto; flex: none; }
   .review-comment .where .dir { display: none; }
 }
 
-/* A worker's question kept under Needs you until answered. */
-.card.question-card .head { display: flex; gap: 8px; align-items: center; }
+/* A worker's question kept under Needs you until answered; the Router's note until seen. */
+.card:is(.question-card, .update-card) .head { display: flex; gap: 8px; align-items: center; }
 .card.question-card .head .title { flex: 1; min-width: 0; text-align: left; padding: 0; background: none; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card.question-card .head .meta { color: var(--muted); font-size: var(--small); }
-.card.question-card > .body { margin-top: 6px; max-height: 240px; overflow-y: auto; }
+.card:is(.question-card, .update-card) > .body { margin-top: 6px; max-height: 240px; overflow-y: auto; }
+.card.update-card .head .title { flex: 1; min-width: 0; font-weight: 600; }
+.card.update-card > .actions { margin-top: 8px; }
+.card.update-card.urgent { background: var(--amber-soft); border-color: transparent; }
 .card.draft.merge .note.strong { color: var(--text); font-weight: 500; }
 
 /* What the away channel can do, as tried. */

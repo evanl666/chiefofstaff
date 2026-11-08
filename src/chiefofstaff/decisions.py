@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import Callable
 from contextlib import suppress
 from typing import TYPE_CHECKING
@@ -105,6 +106,16 @@ def decision_id() -> str:
 
 def clean(text: str, limit: int) -> str:
     return " ".join(text.split())[:limit]
+
+
+# A message that ends asking something ("before I pick: what does B change?"), whatever closes
+# it (quotes, brackets, an emoji).
+ASKS_BACK = re.compile(r"[?\uff1f][\s\"'\u201d\u2019)\]\u3009\u300b\u300d\u300f\uff09]*\W{0,3}\s*$")
+
+
+def asks_back(text: str) -> bool:
+    """A question back is no answer to a decision."""
+    return bool(ASKS_BACK.search(text.strip()))
 
 
 class Decisions:
@@ -343,14 +354,32 @@ class Decisions:
 
     def answered_in_chat(self, session_id: str, task: dict | None, text: str) -> list[dict]:
         """The owner wrote to a worker that waits on its decision card: that is their answer to
-        it, for that worker (the card leaves once nobody else waits on it). The cards."""
+        it, for that worker (the card leaves once nobody else waits on it). The cards. Not a
+        question back ("before I pick: what does B change?"): the card stays (`asked_back`)."""
+        if asks_back(text):
+            return []
+        return self.drop_askers(
+            lambda asker: self.asker_of(asker, session_id, task),
+            "answered",
+            f"Answered in chat: {clean(text, 300)}",
+        )
 
-        def mine(asker: dict) -> bool:
-            return asker["session_id"] == session_id and (
-                not task or not asker.get("task_id") or asker["task_id"] == task["id"]
-            )
+    def asked_back(self, session_id: str, task: dict | None, text: str) -> list[dict]:
+        """The decision cards this worker waits on that the owner's message asks about instead
+        of answering."""
+        if not asks_back(text):
+            return []
+        return [
+            card
+            for card in self.open_cards("decision")
+            if any(self.asker_of(a, session_id, task) for a in card["target"]["askers"])
+        ]
 
-        return self.drop_askers(mine, "answered", f"Answered in chat: {clean(text, 300)}")
+    @staticmethod
+    def asker_of(asker: dict, session_id: str, task: dict | None) -> bool:
+        return asker["session_id"] == session_id and (
+            not task or not asker.get("task_id") or asker["task_id"] == task["id"]
+        )
 
     def drop_askers(self, gone: Callable[[dict], bool], status: str, outcome: str) -> list[dict]:
         """Askers that no longer wait leave their cards; a card nobody waits for ends with

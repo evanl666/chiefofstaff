@@ -344,6 +344,7 @@ class Events:
     def user_message(self, row: dict, event: Any):
         state = self.states[row["id"]]
         state.echoes = True
+        state.awaiting = None  # It took up what it was sent.
         if row["role"] == WORKER and (named := tasks_named(getattr(event.data, "content", ""))):
             # What its turn is about now; steered into a turn on another task, it stays on that.
             delivery = getattr(getattr(event.data, "delivery", None), "value", "")
@@ -390,6 +391,7 @@ class Events:
             )
 
     def turn_start(self, row: dict, event: Any):
+        self.states[row["id"]].awaiting = None  # It started.
         if row["role"] == WORKER:
             self.states[row["id"]].busy = True
         if row["status"] == "idle":
@@ -585,6 +587,7 @@ class Events:
             return
         self.states[session_id].busy = False
         self.states[session_id].retuned = False
+        self.states[session_id].awaiting = None  # Copilot said what went wrong.
         self.states[session_id].steps.clear()
         if MODEL_REFUSED.search(message):
             # The company's policy, say: it recovers on another model instead of failing again

@@ -145,6 +145,7 @@ import csv
 import json
 import os
 import re
+import shutil
 import struct
 import subprocess
 import sys
@@ -165,7 +166,7 @@ SHARDS = {
     "A": (18781, 18911), "B": (18782, 18912), "C": (18783, 18913), "D": (18784, 18914),
     "E": (18785, 18915), "F": (18786, 18916), "G": (18787, 18917), "H": (18788, 18918),
     "I": (18799, 18929), "J": (18800, 18930), "K": (18801, 18931),
-    "L": (18802, 18932), "M": (18803, 18933),
+    "L": (18802, 18932), "M": (18803, 18933), "N": (18804, 18934),
 }  # fmt: skip
 MODEL = "claude-sonnet-5.5"
 CJK = re.compile(r"[\u4e00-\u9fff]")
@@ -3945,6 +3946,103 @@ async def m4_a_follow_up_after_another_task(ctx: Ctx):
     log("M4 passed")
 
 
+async def n1_glob_edits_count_and_a_read_file_does_not(ctx: Ctx):
+    """Bug bash 4: in the owner's folder, edits made with a glob loop were "not counted"; a file
+    the task only read (cat) and the owner edited while it slept was counted as its change."""
+    since = now()
+    await say(ctx, f"Start a worker titled 'Glob Stamp' working directly in my project folder "
+              f"{ctx.project} (no worktree, no commit): first run `cat textkit/__init__.py`, then "
+              "`sleep 40`, then run exactly `for f in tests/*.py; do echo '# reviewed' >> $f; "
+              "done`. Report done.")  # fmt: skip
+    task = await titled(ctx, since, "glob stamp")
+
+    async def sleeping():
+        row = await session(ctx, task["session_id"])
+        return row if "sleep" in (row.get("step_command") or "") else None
+
+    await wait_for("it sleeps", sleeping, 300, ctx.app)
+    owners = ctx.project / "textkit" / "__init__.py"
+    with owners.open("a") as file:
+        file.write("# the owner's own line\n")
+    try:
+        await task_status(ctx, task["id"], FINISHED, "stamped", 400)
+        changed = await receipts_changed(ctx, task["id"])
+        diff = json.dumps(await ctx.app.get(f"/api/tasks/{task['id']}/diff"))
+        log(f"N1: {changed}")
+        assert "# reviewed" in diff and "tests/" in diff, diff[:600]
+        # The owner's edit must not overlap a command that may write files it does not name
+        # (a worker may run its sleep in the background and go on): then nothing tells them
+        # apart, and that case is not this check's.
+        db = str(ctx.app.data / "chiefofstaff.db")
+        loops = subprocess.run(
+            ["sqlite3", db, "select started_at from commands where command like '%for f in%'"],
+            capture_output=True, text=True, check=False,
+        ).stdout.split()  # fmt: skip
+        edited = owners.stat().st_mtime
+        began = min((datetime.fromisoformat(s).timestamp() for s in loops), default=edited + 99)
+        if edited < began - 3:
+            assert "the owner's own line" not in diff, "it only read that file"
+            assert changed["files"] >= 1 and changed.get("not_counted", 0) >= 1, changed
+        else:
+            log(f"N1: the owner's edit came as the loop ran ({began - edited:.1f}s): not judged")
+        log("N1 passed")
+    finally:
+        subprocess.run(["git", "-C", str(ctx.project), "checkout", "--", "."], check=False)
+
+
+async def n2_quoted_names_and_a_search_that_finds_nothing(ctx: Ctx):
+    """Bug bash 4: a file named with quotes was left out of the changes; a grep that found
+    nothing (exit 1) marked "no hello remains" Not met."""
+    since = now()
+    await say(ctx, "Start a worker titled 'Quote Names' in the textkit project, in a worktree, "
+              "with this done-when criterion: `grep -rn zzhello textkit` finds nothing. Create "
+              "the file `docs/release notes \"v2\".md` with the line 'v2 notes', commit it, then "
+              "check the criterion with exactly `grep -rn zzhello textkit` and report it as met "
+              "with that command as its evidence (it finds nothing).")  # fmt: skip
+    task = await titled(ctx, since, "quote names")
+    await task_status(ctx, task["id"], FINISHED, "named", 400)
+    found = None
+
+    async def receipts():
+        nonlocal found
+        found = (await ctx.app.get(f"/api/tasks/{task['id']}")).get("receipts") or {}
+        return found if (found.get("changed") or {}).get("files") else None
+
+    await wait_for("its receipts", receipts, 120, ctx.app)
+    states = [(c["state"], c["command"]) for c in found["criteria"]]
+    log(f"N2: {found['changed']}; criteria {states}")
+    diff = json.dumps(await ctx.app.get(f"/api/tasks/{task['id']}/diff"))
+    assert "v2 notes" in diff, diff[:600]
+    states = [c["state"] for c in found["criteria"]]
+    assert "contradicted" not in states and "not_met" not in states, found["criteria"]
+    ctx.notes["quote"] = task
+    log("N2 passed")
+
+
+async def n3_a_removed_worktree_is_back(ctx: Ctx):
+    """Bug bash 4: a worker's worktree deleted under it stayed gone until Close and Reopen."""
+    task = ctx.notes["quote"]
+    row = await session(ctx, task["session_id"])
+    tree = Path(row["cwd"])
+    assert tree.exists(), tree
+    shutil.rmtree(tree)
+    mark = max(m["id"] for m in await messages(ctx, task["session_id"]))
+    await ctx.app.post(
+        f"/api/sessions/{task['session_id']}/messages",
+        {"text": "List the files in docs/ (ls docs) and tell me what is there. Change nothing."},
+    )
+
+    async def answered():
+        rows = await messages(ctx, task["session_id"])
+        return [m for m in rows if m["id"] > mark and m["kind"] in {"assistant", "report"}] or None
+
+    said = await wait_for("its answer", answered, 300, ctx.app)
+    text = " ".join(m["text"] for m in said)
+    log(f"N3: {text[:200]!r}")
+    assert tree.exists() and "release notes" in text, text[:400]
+    log("N3 passed")
+
+
 SCENARIOS = {
     "A": [
         w1_ask, w2_progress, w3_answered_directly, w4_pasted_orders, w5_chinese_log,
@@ -4008,6 +4106,10 @@ SCENARIOS = {
     "M": [
         m1_owners_edits_in_their_folder_are_not_the_tasks, m2_a_question_in_chat_stays_news,
         m3_a_split_result_keeps_its_changes, m4_a_follow_up_after_another_task, w52_no_ids,
+    ],
+    "N": [
+        n1_glob_edits_count_and_a_read_file_does_not,
+        n2_quoted_names_and_a_search_that_finds_nothing, n3_a_removed_worktree_is_back, w52_no_ids,
     ],
 }  # fmt: skip
 

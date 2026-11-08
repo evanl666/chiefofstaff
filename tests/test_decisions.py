@@ -117,6 +117,23 @@ async def test_a_decision_answered_in_chat_or_whose_task_ended_leaves_needs_you(
     assert harness.store.draft(card["id"])["status"] == "expired"
 
 
+async def test_a_question_back_in_chat_does_not_answer_a_decision_card(harness):
+    """Bug bash 4 (R-s1): "before I pick: what does B change?" closed the decision card."""
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Format money")
+    await call_tool(runtime, "ask_decision", worker["session_id"],
+                    question="Symbol before or after?")  # fmt: skip
+    [card] = harness.store.drafts()
+    await runtime.owner_send(worker["session_id"], "Before I pick: what does “after” break?")
+    assert harness.store.draft(card["id"])["status"] == "pending", "the card stays"
+    assert runtime.tasks.get(worker["task_id"])["status"] == "waiting"
+    sent = harness.session(worker["session_id"]).sent[-1]
+    assert "what does “after” break?" in sent and "This answers your decision card" not in sent
+    assert "stays open for their decision" in sent
+    await runtime.owner_send(worker["session_id"], "OK, before then.")
+    assert harness.store.draft(card["id"])["status"] == "answered"
+
+
 async def test_claims_on_an_earlier_task_and_a_bad_decision_id(harness):
     runtime = await harness.connect()
     first = await spawn(runtime, harness.router_id, "API", done_when=["`make test` passes"])
