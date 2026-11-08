@@ -23,6 +23,7 @@ from . import prompts, receipts, threads
 from .asks import AnswerSession, AskSession, RecordSetup
 from .checks import ProposeChecks
 from .decisions import AckDecision, AskDecision, RecordDecision
+from .digest import NEEDS_WORDS, Needs, needs, task_words, waiting_parts
 from .envelope import clean_title, language, short, wrap
 from .habits import UpdateStyle
 from .learning import ProposeLessons
@@ -147,7 +148,9 @@ class SpawnWorker(BaseModel):
     follow: list[str] = Field(
         default_factory=list,
         description="Thread keys from the event (slack:<channel>:<ts>, slack:<D…>, "
-        "github:<owner/repo>#<n>); later messages there go straight to this session",
+        "github:<owner/repo>#<n>); later messages there go straight to this session. A PR the "
+        "instructions ask to act on (review, fix, merge…) is followed too; one they only "
+        "mention for context is not",
     )
     why_new: str = Field(
         default="",
@@ -709,7 +712,7 @@ def shortened(listed: dict) -> dict:
     listed["tasks"] = [
         task
         for task in listed["tasks"]
-        if task["status"] in {"queued", "running", "waiting", "review"}
+        if task["status"] not in {"done", "cancelled"} and not task["status"].startswith("failed")
     ]
     listed["recently_closed"] = listed["recently_closed"][:3]
     for limit in (100, 0):
@@ -725,8 +728,10 @@ def shortened(listed: dict) -> dict:
         listed["projects"] = [{"path": card["path"]} for card in listed["projects"]]
         listed["recently_closed"] = []
     if size() > LISTED_BYTES:
-        # Each session already names its current task.
-        listed["tasks"] = [task for task in listed["tasks"] if task["status"] != "review"]
+        # Each session already names its current task; needs_owner lists results to review.
+        listed["tasks"] = [
+            task for task in listed["tasks"] if not task["status"].startswith(("review", "done"))
+        ]
     if size() > LISTED_BYTES and "needs_owner" in listed:
         for card in listed["needs_owner"]["cards"]:
             card.pop("text", None)  # What it is, to whom and what it answers stay.
@@ -759,6 +764,70 @@ def named_pulls(text: str) -> list[str]:
 
 GITHUB_KEY = re.compile(r"\bgithub:([\w.-]+/[\w.-]+)#(\d+)")
 
+# What makes a PR a task names the task's to act on (review it, fix it, merge it, its CI…), not
+# one it only mentions (notes that live in it, an example to follow).
+ACTS_ON = re.compile(
+    r"\b(?:review|fix|merg|land|address|rebas|resolv|approv|follow|watch|monitor|check|"
+    r"look\s+(?:at|into|over)|investigat|debug|updat|finish|respond|repl|answer|comment|test|"
+    r"ship|unblock|babysit|shepherd|triag|close|reopen|push|continu|take\s+over|handl|"
+    r"summari[sz]|go\s+through|keep\s+an\s+eye|fail|green|conflict|feedback|notif|alert|ping|"
+    r"mov(?:e|es|ing)\b|tell\s+(?:me|us)\s+(?:if|when|once)|let\s+(?:me|us)\s+know|"
+    r"keep\s+(?:me|us)\s+posted)\w*"
+    r"|\b(?:ci|checks?)\b|审|修|合并|看|检查|跟进|处理|回复|评论|关注|盯",
+    re.I,
+)
+NOT_ACTING = re.compile(r"\b(?:not|don't|dont|never|without|no)\b|不要|别|不用|勿|无需", re.I)
+# Right before a PR: an example or a source, not what to act on ("see #60", "like #60").
+ONLY_MENTIONED = re.compile(
+    r"(?:\b(?:like|see|cf|per|unlike|from|similar\s+to|as\s+in)\W*|参考|参见|类似)$", re.I
+)
+# A word of the next sentence that points back at the PR ("… #5 from Bob. Review it.").
+POINTS_BACK = re.compile(r"\b(?:it|its|this|that|them|these|those|the\s+prs?)\b|它|这个|该", re.I)
+QUOTED = re.compile(r"\"[^\"\n]*\"|“[^”\n]*”|「[^」\n]*」")
+SENTENCE = re.compile(r"(?<=[.!?;])\s+|\n+|\s+but\s+|[\u3002\uff01\uff1f\uff1b]")
+MENTION = re.compile(rf"{threads.PR_URL.pattern}|{GITHUB_KEY.pattern}")
+# Names, paths and links: "fix-tool", "cos-approve-test" say nothing about what to do.
+IDENTIFIER = re.compile(r"https?://[!-~]+|[\w./#-]*[A-Za-z0-9][/#_.-][A-Za-z0-9][\w./#-]*", re.A)
+
+
+def acting(clause: str) -> bool:
+    """Whether a sentence asks to act (not "do not touch it")."""
+    clause = IDENTIFIER.sub(" ", clause)
+    for match in ACTS_ON.finditer(clause):
+        before = re.split(r"[,:;()]", clause[: match.start()])[-1]
+        if not NOT_ACTING.search(" ".join(before.split()[-3:])):
+            return True
+    return False
+
+
+def acted_pulls(text: str, title: str = "") -> list[str]:
+    """The PRs a task's text names that the task is to act on (review, fix, merge, follow, its
+    CI…), as thread keys; not one it only mentions for context (a link to write into a file, an
+    example: "see #60"). What a quoted text says is its own sentence. Named in its title, a PR is
+    what the task is about."""
+    found = named_pulls(title)
+    quoted = [match.group(0)[1:-1] for match in QUOTED.finditer(text or "")]
+    sentences = [
+        sentence
+        for part in [QUOTED.sub(" ", text or ""), *quoted]
+        for sentence in SENTENCE.split(part)
+        if sentence.strip()
+    ]
+    for index, sentence in enumerate(sentences):
+        mentions = list(MENTION.finditer(sentence))
+        if not mentions:
+            continue
+        after = sentences[index + 1] if index + 1 < len(sentences) else ""
+        if not acting(sentence) and not (POINTS_BACK.search(after) and acting(after)):
+            continue
+        found += [
+            key
+            for match in mentions
+            if not ONLY_MENTIONED.search(sentence[: match.start()])
+            for key in named_pulls(match.group(0))
+        ]
+    return list(dict.fromkeys(found))
+
 
 class Tools:
     """Builds the tool definitions and runs their handlers."""
@@ -771,6 +840,12 @@ class Tools:
         self.tasks = runtime.tasks
         self.delivery = runtime.delivery
         self.workspaces = runtime.workspaces
+        # What the Router last saw of each task (list_sessions, read_session): its status and
+        # result, and how it was put.
+        self.looked: dict[str, tuple[tuple[str, int], str]] = {}
+        # The Router's notes refused as asking a worker's open question again (shown when sent
+        # again unchanged).
+        self.refused_notes: set[str] = set()
 
     async def t_add_repo(self, params: AddRepo, caller: str):
         self.caller(caller, WORKER)
@@ -1296,27 +1371,29 @@ class Tools:
             self.states[caller].turn_tasks.append(task["id"])
         if special:  # Its own tools: see Runtime.tool_names.
             self.store.set(f"{special}:{session_id}", "1")
-        # A PR the task is about is followed: its reviews, replies and CI come to the worker.
+        # A PR the task is to act on is followed: its reviews, replies and CI come to the worker
+        # (not one its instructions only mention: news there is not this task's).
         self.runtime.follow(
             session_id,
-            list(dict.fromkeys(follow + named_pulls(params.instructions))),
+            list(dict.fromkeys(follow + acted_pulls(params.instructions, title))),
             task_id=task["id"],
             asked=follow,
         )
+        spoken, note = self.report_language(caller, params.instructions)
         prompt = wrap(
             "router",
             "task",
             task_text(params.instructions, criteria, decisions),
             title=title,
             task=task["id"],
-            # The owner reads its report as written: in the language they last wrote in.
-            reply_in=self.store.get("owner_language"),
+            # The owner reads its report as written: in the language of the request it serves.
+            reply_in=spoken,
         )
         if context_from:
             prompt += "\n\n" + wrap("system", "context", self.tasks.briefing(context_from))
         if introduction := self.runtime.peers.introduction(session_id):
             prompt += "\n\n" + wrap("system", "peers", introduction)
-        if note := self.report_language(params.instructions):
+        if note:
             prompt += "\n\n" + wrap("system", "context", note)
         meta: dict[str, Any] = {"prompt": prompt, "task_id": task["id"]}
         if images := self.runtime.attachments_in(params.instructions):
@@ -1421,14 +1498,30 @@ class Tools:
         command = " ".join(found.get("command", "").split())[:160]
         return f"`{command}` exited {found.get('exit_code')}"
 
-    def report_language(self, instructions: str) -> str:
-        """A note when the Router wrote a task in another language than the owner's: the owner
-        reads the report as written."""
+    def told_line(self, done: str, target: dict, task: dict | None) -> str:
+        """'Told “Fix login”', or, for a task the worker is not on now, 'Told the worker of
+        “Add tests” about “Fix login”' (its name is that of its current work)."""
+        name = self.runtime.display_title(target)
+        if task and task["title"] != name:
+            if done == "Told":
+                return f"Told the worker of “{name}” about “{task['title']}”"
+            return f"Continued “{task['title']}” in the worker of “{name}”"
+        return f"{done} “{name}”"
+
+    def report_language(self, caller: str, instructions: str) -> tuple[str, str]:
+        """The language a new task reports in, and a note when its instructions are in another:
+        that of the request it serves. The owner's (as they write to the Router) in a turn with
+        their message; in a turn without one (a Slack message, a PR's news), that of its
+        instructions, which hand that request on; the owner's when they say nothing."""
         spoken = self.store.get("owner_language") or ""
         written = language(instructions)
+        if written and self.states[caller].event_turn:
+            return written, ""
         if not spoken or not written or written == spoken:
-            return ""
-        return f"Write your report in {spoken}: the owner reads it, and wrote to us in {spoken}."
+            return spoken, ""
+        return spoken, (
+            f"Write your report in {spoken}: the owner reads it, and wrote to us in {spoken}."
+        )
 
     def with_turn_decisions(self, caller: str, identifiers: list[str]) -> list[dict]:
         """The decisions a task relies on: those named, and those recorded in this turn (the
@@ -1480,6 +1573,12 @@ class Tools:
         if task and params.task == "continue" and acknowledgement(params.text):
             # “Thanks, received.”: nothing more to do on it, so nothing reopens.
             params = params.model_copy(update={"task": "note"})
+        if (
+            task
+            and params.task == "continue"
+            and (stale := self.changed_since_looked(caller, task))
+        ):
+            raise ValueError(stale)
         # Checked before anything changes (a closed worker is not reopened for nothing).
         if task and params.task == "continue" and task["status"] == "cancelled":
             raise ValueError(
@@ -1541,8 +1640,8 @@ class Tools:
         if target["role"] == WORKER and params.task in {"continue", "note"}:
             # The Router answers or redirects the question of the task it writes about (a new
             # task does not answer it; another task's question stays).
-            self.runtime.asks.answered(target["id"], task["id"] if task else "")
-            self.runtime.asks.answered(target["id"], "")
+            self.runtime.asks.answered(target["id"], task["id"] if task else "", by="router")
+            self.runtime.asks.answered(target["id"], "", by="router")
         if (
             task
             and params.task == "continue"
@@ -1551,7 +1650,7 @@ class Tools:
         ):
             self.store.set(f"released:{task['id']}", "1")  # The Router decides to go ahead.
             self.runtime.background(self.runtime.workers.pump())
-        pulls = named_pulls(params.text) if target["role"] == WORKER else []
+        pulls = acted_pulls(params.text, params.title) if target["role"] == WORKER else []
         to_follow = list(dict.fromkeys(params.follow + pulls))
         if target["role"] != WORKER:
             self.runtime.follow(target["id"], to_follow, asked=params.follow)
@@ -1576,15 +1675,16 @@ class Tools:
             self.link_decisions(task["id"], decisions)
             await self.replace(replaced, task)
             self.states[caller].turn_tasks.append(task["id"])
+            spoken, note = self.report_language(caller, params.text)
             prompt = wrap(
                 "router",
                 "task",
                 task_text(params.text, criteria, decisions),
                 title=title,
                 task=task["id"],
-                reply_in=self.store.get("owner_language"),
+                reply_in=spoken,
             )
-            if note := self.report_language(params.text):
+            if note:
                 prompt += "\n\n" + wrap("system", "context", note)
             prompt += "".join(
                 "\n\n" + wrap("system", "context", text)
@@ -1599,7 +1699,7 @@ class Tools:
                 task=task["id"] if task else None,
                 reply_in=self.store.get("owner_language"),
             )
-            notice = f"Told “{self.runtime.display_title(target)}”"
+            notice = self.told_line("Told", target, task)
         else:
             # More on a result it reported: its next report replaces that result.
             restate = bool(task and task["status"] in {"review", "done"} and task["result"])
@@ -1616,9 +1716,10 @@ class Tools:
                 reply_in=self.store.get("owner_language"),
             )
             if restate and task:
-                prompt += "\n\n" + wrap("system", "context", prompts.RESTATE)
+                text = prompts.restate(self.tasks.criteria(task))
+                prompt += "\n\n" + wrap("system", "context", text)
                 self.store.set(f"morefor:{task['id']}", "1")  # Its next report is checked.
-            notice = f"Continued in “{self.runtime.display_title(target)}”"
+            notice = self.told_line("Continued in", target, task)
         # Followed for the task this is about (a new one, or the one it continues).
         self.runtime.follow(
             target["id"], to_follow, task_id=task["id"] if task else "", asked=params.follow
@@ -1820,6 +1921,7 @@ class Tools:
         task = self.tasks.current(row["id"])
         brief = self.task_brief(task, router=True)
         if task and brief:
+            self.looked_at(task, brief.get("stands") or task["status"])
             # Its PRs as GitHub has them now, not as its report put them.
             with suppress(Exception):
                 await asyncio.wait_for(self.runtime.task_actions.refresh_prs(task["id"]), 30)
@@ -1923,6 +2025,7 @@ class Tools:
             for row in self.store.open_sessions()
             if row["role"] != ROUTER and row["id"] not in helpers
         ]
+        found = needs(self.runtime)
         listed = {
             # The owner's own sessions and standing decisions first: they are short.
             "terminal_sessions": await self.terminal_sessions(),
@@ -1935,7 +2038,8 @@ class Tools:
                 {
                     "task_id": task["id"],
                     "title": task["title"],
-                    "status": task["status"],
+                    # As Home shows it: "review, to review (needs you)", "review, report…"
+                    "status": self.looked_at(task, task_words(task, found)),
                     "worker": short(task["session_id"]),
                     **({"prs": prs} if (prs := self.runtime.task_actions.pr_urls(task)) else {}),
                     **(
@@ -1946,9 +2050,10 @@ class Tools:
                 }
                 for task in self.tasks.listed()
             ],
-            # What waits for the owner now: their cards (what each is, to whom, what it
-            # answers, for which task) and the questions workers asked them.
-            "needs_owner": self.needs_owner(),
+            # What waits for the owner now, item by item as Home's Needs you lists it: their
+            # cards (what each is, to whom, what it answers, for which task), results to
+            # review, the questions workers asked them, your notes they have not seen.
+            "needs_owner": self.needs_owner(found),
             "projects": await self.workspaces.project_cards(),
             "models": models,
             "default_worker_model": settings.role_models.get(WORKER) or settings.model or "auto",
@@ -1964,9 +2069,25 @@ class Tools:
         }
         return shortened(listed)
 
-    def needs_owner(self) -> dict:
-        """The cards waiting for the owner and the questions workers asked them (a task that
-        waits for its answer, or for Go on after a stop, too), for the Router."""
+    def needs_owner(self, found: Needs | None = None) -> dict:
+        """What waits for the owner, item by item as Home's Needs you lists it (digest.needs),
+        for the Router: `count` is Home's count and each item is in it once (a result reviewed
+        on its draft's card is that card)."""
+        found = found or needs(self.runtime)
+
+        def named(task: dict) -> str:
+            return f"{task['id']} “{task['title']}”"
+
+        def worker(session_id: str) -> str:
+            row = self.store.find_session(session_id)
+            return self.runtime.display_title(row) if row else ""
+
+        cards = []
+        for item in found.of("card"):
+            card = self.runtime.drafts.brief(item["draft"])
+            if task := item.get("task"):
+                card["result_to_review"] = f"{named(task)}: its result is reviewed on this card"
+            cards.append(card)
         questions = [
             {
                 "worker": question["worker"],
@@ -1977,25 +2098,46 @@ class Tools:
                     else {}
                 ),
             }
-            for question in self.runtime.asks.owner_questions()
+            for question in (item["question"] for item in found.of("question"))
         ]
-        for task in self.tasks.listed():
-            if task["status"] != "waiting":
+        tasks = []
+        for item in found.of("task"):
+            task = item["task"]
+            if item["marker"] in {"question", "stopped"}:
+                questions.append(
+                    {
+                        "worker": worker(task["session_id"]),
+                        "question": "Stopped: waits for the owner's Go on (or Cancel)."
+                        if item["marker"] == "stopped"
+                        else " ".join((task["progress"] or "").split())[:300],
+                        "task": named(task),
+                    }
+                )
                 continue
-            row = self.store.find_session(task["session_id"])
-            stopped = self.store.get(f"stopped:{task['id']}")
-            questions.append(
-                {
-                    "worker": self.runtime.display_title(row) if row else "",
-                    "question": "Stopped: waits for the owner's Go on (or Cancel)."
-                    if stopped
-                    else " ".join((task["progress"] or "").split())[:300],
-                    "task": f"{task['id']} “{task['title']}”",
-                }
-            )
+            entry = {
+                "task": named(task),
+                "worker": worker(task["session_id"]),
+                "needs": NEEDS_WORDS[item["marker"]],
+            }
+            if item["marker"] in {"failed", "blocked", "update"} and task["progress"]:
+                entry["why"] = " ".join(task["progress"].split())[:200]
+            tasks.append(entry)
+        failed = found.tasks("failed")
+        summary = waiting_parts(found) + ([f"{len(failed)} failed"] if failed else [])
         return {
-            "cards": [self.runtime.drafts.brief(draft) for draft in self.store.drafts()],
+            "count": len(found.items),
+            "summary": " · ".join(summary) or "nothing",
+            "cards": cards,
+            "sends_to_check": [
+                {**self.runtime.drafts.brief(item["draft"]), "outcome": item["draft"]["outcome"]}
+                for item in found.of("send")
+            ],
+            "tasks": tasks,
             "questions": questions,
+            "your_notes": [
+                {"id": item["note"]["id"], "text": item["note"]["text"][:300]}
+                for item in found.of("note")
+            ],
         }
 
     def session_entry(self, row: dict) -> dict:
@@ -2029,6 +2171,46 @@ class Tools:
         if working and (now := self.runtime.progress_line(row, brief=True)):
             entry["now"] = now
         return entry
+
+    def looked_at(self, task: dict, words: str) -> str:
+        """The Router sees a task as it is now (`words`, as it was put to it)."""
+        self.looked[task["id"]] = ((task["status"], hash(task["result"] or "")), words)
+        return words
+
+    def changed_since_looked(self, caller: str, task: dict) -> str:
+        """Why acting on a task now would be acting on old news: its status or result changed
+        since the Router last looked, by what it has not heard of yet (the owner retried it, its
+        worker reported). "" when it did not, or the Router changed it itself. Said once: the
+        Router knows now."""
+        seen = self.looked.get(task["id"])
+        if not seen or seen[0] == (task["status"], hash(task["result"] or "")):
+            return ""
+        mark = int(self.store.get(f"sent:{caller}") or 0)
+        news = []
+        for message in self.store.messages(caller, after=mark):
+            meta = message["meta"]
+            if "prompt" not in meta or meta.get("task_id") not in {None, "", task["id"]}:
+                continue
+            if task["session_id"] not in {meta.get("to"), meta.get("from"), meta.get("session_id")}:
+                continue
+            text = " ".join(message["text"].split())[:200]
+            if message["kind"] == "owner":
+                news.append(f"the owner told its worker: “{text}”")
+            elif message["kind"] == "inbound" and meta.get("status"):
+                news.append(f"its worker reported ({meta['status']}): “{text}”")
+            else:
+                news.append(text)
+        if not news:
+            return ""
+        now_words = self.runtime.task_actions.status_words(task)
+        self.looked_at(task, now_words)
+        return (
+            f"Not done: task {task['id']} “{task['title']}” changed since you looked (it was "
+            f"{seen[1]}; it is {now_words} now). Since then, not in your messages yet: "
+            + "; ".join(news[-3:])
+            + ". Look again (read_session) before you act on it; if it still needs this, call "
+            "again."
+        )
 
     def task_brief(self, task: dict | None, router: bool = False) -> dict | None:
         if not task:
@@ -2118,13 +2300,94 @@ class Tools:
         ]
         return {"matches": peers, "router_id": self.runtime.router_id()}
 
+    def asked_already(self, caller: str, text: str) -> list[dict]:
+        """The workers' questions under the owner's Needs you that a note of the Router's is
+        about: those it names (by their task's or worker's id or title); naming none, nor any
+        other task or worker, those whose reports were all this turn brought."""
+        pending, theirs = [], set()
+        for key in self.store.keys("ownerq:"):
+            question = json.loads(self.store.get(key) or "null")
+            row = self.store.find_session(key.removeprefix("ownerq:").split(":", 1)[0])
+            if not question or not row:
+                continue
+            task = self.tasks.find(question.get("task_id") or "")
+            if task and task["status"] == "waiting" and self.store.get(f"stopped:{task['id']}"):
+                continue
+            pending.append(
+                {
+                    "id": key.removeprefix("ownerq:"),
+                    "session_id": row["id"],
+                    "task_id": task["id"] if task else "",
+                    "worker": self.runtime.display_title(row),
+                    "task": f"{task['id']} “{task['title']}”" if task else "",
+                    "text": question.get("text") or "",
+                    "names": [short(row["id"]), self.runtime.display_title(row), row["title"]]
+                    + ([task["id"], task["title"]] if task else []),
+                }
+            )
+            theirs |= {row["id"], task["id"] if task else ""}
+        if not pending:
+            return []
+        said = text.lower()
+
+        def named(names: list[str]) -> bool:
+            # Short names ("Fix") would be found in any text.
+            return any(len(name) >= 6 and name.lower() in said for name in names)
+
+        if found := [question for question in pending if named(question["names"])]:
+            return found
+        others = [
+            [task["id"], task["title"]]
+            for task in self.tasks.listed()
+            if task["id"] not in theirs and task["session_id"] not in theirs
+        ] + [
+            [short(row["id"]), self.runtime.display_title(row)]
+            for row in self.store.open_sessions(WORKER)
+            if row["id"] not in theirs
+        ]
+        if any(named(names) for names in others):
+            return []
+        sent = int(self.store.get(f"sent:{caller}") or 0)
+        batch = [
+            message["meta"]
+            for message in self.store.messages(
+                caller, after=int(self.store.get(f"prevsent:{caller}") or 0)
+            )
+            if message["id"] <= sent and message["kind"] in {"inbound", "owner"}
+        ]
+        if any(meta.get("status") not in {"question", "blocked"} for meta in batch):
+            return []  # The note may be about anything else this turn brought.
+        reported = {(meta.get("from"), meta.get("task_id") or "") for meta in batch}
+        return [q for q in pending if (q["session_id"], q["task_id"]) in reported]
+
     async def t_notify_owner(self, params: NotifyOwner, caller: str):
         self.caller(caller, ROUTER)
         if self.states[caller].owner_reply and not params.urgent:
             # One message per answer: the owner reads the reply of this turn (a decision they
             # must make too: said there, it is not said twice).
             return "Not sent: the owner wrote to you, so say this in your reply instead."
-        meta = {"needs_action": params.needs_action, "urgent": params.urgent}
+        asked = self.asked_already(caller, params.text) if params.needs_action else []
+        if asked and params.text in self.refused_notes:
+            asked = []  # Sent again unchanged: about something else.
+        self.refused_notes.discard(params.text)
+        if asked and not params.urgent:
+            # Asked once: a note about something else is shown when it is sent again.
+            self.refused_notes.add(params.text)
+            listed = "; ".join(
+                f"“{question['worker']}”"
+                + (f" on task {question['task']}" if question["task"] else "")
+                + f": “{' '.join(question['text'].split())[:160]}”"
+                for question in asked
+            )
+            return (
+                "Not shown: the owner has this under Needs you already, as the worker's own "
+                f"question ({listed}). Do not ask it again: you hear when they answer it. If you "
+                "can answer it from what the owner said, message_session(task='note'). If your "
+                "note is about something else, call notify_owner again with it unchanged."
+            )
+        meta: dict[str, Any] = {"needs_action": params.needs_action, "urgent": params.urgent}
+        if asked:
+            meta["questions"] = [question["id"] for question in asked]  # Gone once answered.
         self.runtime.add_message(caller, "update", params.text, meta, unread=True)
         self.runtime.alert(
             params.text,
@@ -2189,16 +2452,59 @@ class Tools:
                 "step, the numbers, and the table if one was asked for. If this already is the "
                 "whole answer, call report again with it unchanged."
             )
+        finished = bool(
+            task
+            and (
+                task["status"] in {"review", "done"}
+                or (task["status"] == "waiting" and self.store.get(f"askedafter:{task['id']}"))
+            )
+        )
+        chat = bool(task and self.store.get(f"followup:{task['id']}") == "chat")
+        own = [
+            pr
+            for pr in (self.runtime.task_actions.previous_prs(task["id"]) if task else [])
+            if pr.get("own")
+        ]
+        # Its PRs merged or closed: what it does in its checkout now (a pull) is not more work.
+        landed = bool(own) and all(pr.get("state") in {"MERGED", "CLOSED"} for pr in own)
+        # Finished work taken up again (the owner's chat or answer, its PR's review comments):
+        # what it changed for it since is a new result to review, not news on the old one.
+        changed = bool(
+            task
+            and finished
+            and params.status in {"progress", "done"}
+            and (chat or (self.runtime.turn_task(caller) == task["id"] and not landed))
+            and await self.runtime.task_actions.changed_since_result(task)
+        )
+        if (
+            task
+            and changed
+            and params.status == "progress"
+            and not self.store.get(f"newresult:{task['id']}")
+        ):
+            # Asked once: it may still be at it.
+            self.store.set(f"newresult:{task['id']}", "1")
+            raise ValueError(
+                "Not reported yet: you changed this task's code since its result, so this is a "
+                "new result for the owner to review, not news on the old one. Once it is "
+                'finished, call report(status="done") with the whole result, updated (what still '
+                "holds from before, what changed, what is new). If you are still at it, call "
+                "report again unchanged."
+            )
+        more = self.store.get(f"morefor:{task['id']}") if task else None
         if (
             task
             and params.status == "done"
             and task["result"]
-            and self.store.get(f"morefor:{task['id']}")
+            and (more or changed)
+            and (changed or not (chat and finished))  # News on it: its result stays.
         ):
-            # More was asked of a result it reported: this report replaces that result. Asked
-            # once, when it leaves out most of what the earlier one said (only the addition).
+            # This report replaces the result it reported (more was asked of it, or it changed
+            # its code since). Asked once, when it leaves out most of what the earlier one said
+            # (only the addition).
             self.store.delete(f"morefor:{task['id']}")
-            if dropped := left_out(task["result"], params.summary):
+            if more != "asked" and (dropped := left_out(task["result"], params.summary)):
+                self.store.set(f"morefor:{task['id']}", "asked")
                 raise ValueError(
                     "Not reported yet: this report replaces the task's result, and it leaves out "
                     f"most of the earlier one ({', '.join(dropped[:6])}…). The owner reads only "
@@ -2267,15 +2573,6 @@ class Tools:
                     "UPDATE runs SET criteria=? WHERE id=?", (json.dumps(claims), run["id"])
                 )
         settled = chat_news = False
-        # Asked in chat about finished work, it changed code: that is a new result to review,
-        # not news on the old one.
-        changed = bool(
-            task
-            and params.status == "done"
-            and task["status"] in {"review", "done"}
-            and self.store.get(f"followup:{task['id']}") == "chat"
-            and await self.runtime.task_actions.changed_since_result(task)
-        )
         if task:
             # It reports on it: whatever it says next (a question, say), it is not "stopped".
             self.store.delete(f"stopped:{task['id']}")
@@ -2292,6 +2589,7 @@ class Tools:
                 and (was := self.store.get(f"askedafter:{task['id']}"))
                 and params.status in {"progress", "done"}
                 and not asked
+                and not (changed and params.status == "done")
             ):
                 # Finished work it asked the owner about (news on its PR): answered, it goes
                 # back where it was, and what it says now is news; its result stays.
@@ -2329,6 +2627,7 @@ class Tools:
                 # The owner's chat about finished work: what it says is news on that task. The
                 # result the owner reviews (or accepted) stays as it is.
                 self.store.delete(f"followup:{task['id']}")
+                self.store.delete(f"morefor:{task['id']}")
                 self.runtime.task_actions.remember_prs(task["id"], params.summary)
                 self.runtime.task_actions.news(task["id"], params.summary)
                 others = [
@@ -2347,6 +2646,7 @@ class Tools:
                 task = self.tasks.update(task["id"], result=clip_report(params.summary))
             elif params.status == "done":
                 self.store.delete(f"followup:{task['id']}")
+                self.store.delete(f"newresult:{task['id']}")
                 self.store.delete(f"read:{task['id']}")  # A new result, not read yet.
                 self.states[caller].turn_reported.add(task["id"])
                 self.runtime.task_actions.remember_prs(task["id"], params.summary)
@@ -2412,7 +2712,7 @@ class Tools:
             self.runtime.asks.record_question(caller, params.summary, task["id"] if task else "")
         else:
             # It went on with this task: its question is behind it (another task's stays).
-            self.runtime.asks.answered(caller, task["id"] if task else "")
+            self.runtime.asks.answered(caller, task["id"] if task else "", by="worker")
         if row["role"] == WORKER and params.status in {"progress", "done"}:
             # A PR it delivers is its PR: reviews, comments and CI come back to it. Not every
             # PR it mentions (stale CI news of others' PRs would follow).
@@ -2475,9 +2775,10 @@ class Tools:
 
     async def t_cancel_task(self, params: CancelTask, caller: str):
         self.caller(caller, ROUTER)
-        task = await self.runtime.task_actions.cancel(
-            self.runtime.task_actions.task_for(params.task_id)["id"], params.reason, "the Router"
-        )
+        found = self.runtime.task_actions.task_for(params.task_id)
+        if stale := self.changed_since_looked(caller, found):
+            raise ValueError(stale)
+        task = await self.runtime.task_actions.cancel(found["id"], params.reason, "the Router")
         if task["status"] == "done":
             return (
                 f"Task {task['id']} “{task['title']}” had finished already: its result was "

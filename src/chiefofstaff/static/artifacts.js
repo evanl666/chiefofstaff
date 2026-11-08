@@ -52,8 +52,17 @@ const BY_TASK = {
   done: ["delivered", "good"],
   failed: ["task failed", "bad"],
   cancelled: ["task cancelled", "muted"],
+  "set-aside": ["set aside", "muted"],
 };
-const byTask = (task, phase) => BY_TASK[task.status === "review" && phase && phase.section !== "needs" ? "reported" : task.status] || ["", "neutral"];
+const byTask = (task, phase) => BY_TASK[phase?.marker === "set-aside" ? "set-aside" : task.status === "review" && phase && phase.section !== "needs" ? "reported" : task.status] || ["", "neutral"];
+// A CI run on GitHub its worker said nothing about: as the checks of its task's PR in that
+// repository stand (failed, passed, running), not as its task does.
+const CI_RUN = { failing: ["failed", "bad"], passing: ["passed", "good"], pending: ["running", "active"] };
+function ciRun(task, url) {
+  const repo = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/actions\/runs\//.exec(url)?.[1]?.toLowerCase();
+  const prs = repo ? (task.receipts?.prs || []).filter((pr) => pr.label.toLowerCase().startsWith(`${repo}#`) && CI_RUN[pr.checks]) : [];
+  return prs.length ? CI_RUN[prs[0].checks] : null;
+}
 const RANK = { bad: 0, wait: 1, active: 2, neutral: 3, good: 4, muted: 5 };
 // What kind of thing a link is, in a word.
 const KINDS = { pr: "PR", issue: "Issue", ticket: "Ticket", file: "File", slack: "Slack", link: "Link" };
@@ -99,8 +108,9 @@ export function collectArtifacts(tasks, phases = new Map()) {
       if (link.said) {
         add({ key: link.key, kind: kindOf(link.found), name: nameOf(link), url: link.url, path: link.path, status: link.said.status || "linked", tone: toneOf(link.said.status), at: link.said.at, said: true, task }, true);
       } else if (!link.file && ["output", "run"].includes(link.role)) {
-        // Named only in its reports: as its task stands.
-        add({ key: link.key, kind: kindOf(link.found), name: nameOf(link), url: link.url, path: link.path, status, tone, at: task.updated_at, said: false, task });
+        // Named only in its reports: as its task stands (a CI run: as its PR's checks do).
+        const ci = ciRun(task, link.url);
+        add({ key: link.key, kind: kindOf(link.found), name: nameOf(link), url: link.url, path: link.path, status: ci ? ci[0] : status, tone: ci ? ci[1] : tone, at: task.updated_at, said: Boolean(ci), ci: Boolean(ci), task });
       }
     }
   }
@@ -151,7 +161,7 @@ export async function setHidden(key, hidden, tone = "") {
 }
 function artifactRow(item, hidden, focusTask) {
   const when = item.at ? ago(item.at) : "";
-  const help = item.said ? (item.kind === "PR" ? "As GitHub has it" : "As its worker last said") : "As its task stands: its worker has not said where this stands";
+  const help = item.said ? (item.kind === "PR" ? "As GitHub has it" : item.ci ? "As GitHub has its PR's checks" : "As its worker last said") : "As its task stands: its worker has not said where this stands";
   return {
     key: `art:${item.key}:${hidden ? 1 : 0}`,
     version: `${item.name}:${item.status}:${item.tone}:${when}:${item.task.id}:${item.task.title}`,

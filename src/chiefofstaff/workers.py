@@ -1278,15 +1278,24 @@ class Workers:
         return released
 
     async def tidy(self, moment: float | None = None) -> list[str]:
-        """Close finished workers that follow nothing and have been quiet for a day."""
+        """Close finished workers that follow nothing and have been quiet for a day; not one
+        with something under the owner's Needs you (a result to review, news, a question, a
+        failed task, a card): it stays in the sidebar and the @ list until that is settled."""
+        from .digest import needs
+
         moment = time.time() if moment is None else moment
         idle = self.store.settings().worker_idle_hours * 3600
         closed = []
+        waiting: set[str] | None = None
         for row in self.store.open_sessions(WORKER):
             if self.runtime.copilot_id(row["id"]) in self.runtime.elsewhere:
                 continue  # Someone is using it in a terminal.
             quiet = moment - timestamp(row["updated_at"]) >= idle
             if row["status"] in {"done", "failed"} and quiet and not self.store.follows(row["id"]):
+                if waiting is None:
+                    waiting = needs(self.runtime).sessions()
+                if row["id"] in waiting:
+                    continue
                 await self.close(row["id"])
                 closed.append(row["id"])
         return closed

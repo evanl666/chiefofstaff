@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.1.30 (2026-11-08)
+
+A fifth live bug bash on real Copilot (the 0.1.29 features, several days of use, code work and
+PRs, adversarial use and regressions) and a code review, all fixed.
+
+- **Away replies**: "do not send", "not yet", "ok wait" never send a draft ("do not send" drops
+  it; a send held back is refused); a short Chinese yes ("好的，发吧") sends it.
+- **One reply per message**: a Slack thread a worker took over is that worker's (the Slack
+  session no longer drafts there too), and a reply sent or drafted there withdraws other
+  sessions' waiting ones ("answered by …"); a draft you edited is never withdrawn by its worker
+  (it drafts anew from your words); a task's Slack reply waits until its PR review is posted;
+  merging a PR from its card withdraws the task's drafts on that PR and tells its worker.
+- **What needs you** is counted one way everywhere: the Router's answer, Home, Focus and the daily
+  summary (results to accept apart from read-only reports, updates, failures, questions, stalled
+  tasks, sends to check, the Router's own notes); the Router hears when you answer a worker's
+  question, does not ask it again in a note, and does not act on a task that changed since it
+  looked (a Retry you pressed meanwhile); a cancel you make during its turn reaches that turn.
+- **Results**: an answer to a finished task's question, in chat or on its card, that leads to new
+  code makes a new result to review (the whole result restated, its criteria reported again;
+  what was verified before stays so while it still holds), not news; fixes for review comments
+  too; replies come in the language you wrote in; Create PR's title says what changed and its
+  text leaves out "not pushed"; a research answer about what others changed is not "says it made
+  changes"; cancelling a result that landed as you pressed Cancel asks once; one cancelled after
+  it finished shows as *Set aside* (not accepted) and stops following its threads.
+- **Each task's changes**: a task on a branch made from main (or from another branch) counts only
+  its own commits; rebased onto a newer main, not what was merged there; in a folder of yours,
+  its file stays its own when you edit it later, two tasks at once do not count each other's
+  files, its commits count, and another worker's edit marks its result out of date; a file moved
+  counts once; generated files it committed count; work in a repository the worker cloned itself
+  counts.
+- **Home**: a narrow window folds the sidebar behind ☰; a draft card about a result holds
+  that task's card (receipts, Create PR, Accept); a follow-up waiting behind another task says
+  so; Slack follows are named ("DM with Bob") and move to finished after a quiet day; workers
+  whose results wait for you are not closed when idle; the diff shows quoted names and large new
+  files; a reply on your own PR is not called a review; CI runs show their own state; *New watch*
+  cards; menus work with the keyboard and Escape closes a card's form.
+- **Settings and safety**: an MCP server Copilot cannot start is refused (one saved before is kept,
+  turned off and shown in Settings, not lost with the others); an emptied number keeps
+  its value and errors name the field; a save changes only what it sends, and a stale tab does
+  not undo another's change; *Go on* from two tabs goes once; titles keep quotes, joined emoji
+  and Persian words (a long one is cut at a word); a link whose text is another address shows
+  where it goes; direction overrides cannot reverse text; Slack mentions show names.
+- **The Router's context** is counted as Copilot reports it (its input count includes what came
+  from the cache): it was counted twice, so the Router handed over to a fresh session at half
+  the intended size, and with a small limit after every turn.
+- **Also**: a fresh Router (after a long conversation) answers a message in the language it is
+  written in and does not list Chief of Staff's own helpers as your workers; news on a finished
+  task's PR puts its worker on that task, and another task's work in the same worktree is not
+  that task's change; two workers answering one thread both reach you; finished work is checked
+  for changes once at a time (closed workers left out); "好的发吧" sends and "先别发" waits.
+
 ## 0.1.29 (2026-11-08)
 
 A fourth live bug bash on real Copilot (a busy workday, robustness and restarts, the fixes in

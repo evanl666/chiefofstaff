@@ -130,18 +130,23 @@ def normalize(key: str) -> str:
     )
 
 
+def dm_with(name: str) -> str:
+    """A DM by its name: "DM with Bob"; a name that already says DM ("DM with Bob") as it is."""
+    return name if re.search(r"\bDM\b|direct", name, re.I) else f"DM with {name.lstrip('@')}"
+
+
 def label(key: str, names: dict[str, str] | None = None) -> str:
     """A thread as the owner reads it; Slack conversations by name when known (`names`)."""
     names = names or {}
     if match := SLACK_THREAD.fullmatch(key):
         channel = match.group(1)
         if name := names.get(channel):
-            where = f"DM with {name}" if channel.startswith("D") else f"#{name.lstrip('#')}"
+            where = dm_with(name) if channel.startswith("D") else f"#{name.lstrip('#')}"
             return f"Slack thread in {where}"
         return f"Slack thread in {channel}"
     if match := SLACK_CONVERSATION.fullmatch(key):
         if name := names.get(match.group(1)):
-            return f"Slack DM with {name}"
+            return f"Slack {dm_with(name)}"
         return f"Slack DM {match.group(1)}"
     if match := GITHUB_PR.fullmatch(key):
         return f"{match.group(1)}#{match.group(2)}"

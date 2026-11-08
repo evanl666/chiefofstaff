@@ -1029,6 +1029,24 @@ button.receipt.needs { background: var(--amber-soft); color: var(--amber); }
   #notices { padding: 12px 20px 0; }
   #composer { width: calc(100% - 40px); margin-bottom: 20px; }
 }
+/* Narrow (a phone, a side-by-side window): the sidebar folds away behind ☰ in the header and
+   opens over the page; the page has the whole width. Keep NARROW in sidebar.js in step. */
+#sidebar-toggle { display: none; position: relative; flex: none; margin-left: -6px; }
+#sidebar-toggle .bars { font-size: 18px; line-height: 1; }
+#sidebar-toggle .badge { position: absolute; top: -6px; right: -10px; min-width: 16px; height: 16px; padding: 0 4px; font-size: 10px; }
+@media (max-width: 760px) {
+  #application { grid-template-columns: minmax(0, 1fr); }
+  #sidebar-toggle { display: grid; }
+  #sidebar { position: fixed; inset: 0 auto 0 0; z-index: 40; width: min(280px, 85vw); visibility: hidden; transform: translateX(-100%); transition: transform 0.15s var(--ease), visibility 0s 0.15s; }
+  #application.sidebar-open #sidebar { visibility: visible; transform: none; box-shadow: var(--shadow-pop); transition: transform 0.15s var(--ease); }
+  #application.sidebar-open::after { content: ""; position: fixed; inset: 0; z-index: 39; background: rgb(0 0 0 / 0.32); }
+  #session-header { padding-left: 16px; padding-right: 12px; gap: 8px; }
+  #scroller { padding-left: 16px; padding-right: 16px; }
+  #notices { padding: 12px 16px 0; }
+  #composer { width: calc(100% - 24px); margin-bottom: 12px; }
+  #home-tabs { padding: 8px 12px; overflow-x: auto; }
+  #main.home #panel { padding: 12px 12px 24px; }
+}
 
 .card.task .head { gap: 8px; }
 .card.task .head .dot { margin-left: -1px; }
@@ -1138,6 +1156,14 @@ button.receipt.needs { background: var(--amber-soft); color: var(--amber); }
 .card details.context > summary::before { content: "▸"; color: var(--muted); width: 10px; }
 .card details.context[open] > summary::before { content: "▾"; }
 .card details.context > .markdown { margin-top: 4px; padding: 8px 12px; background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius); max-height: 280px; overflow-y: auto; font-size: var(--body); color: var(--text); }
+/* The result a draft is about, as its own card inside the draft's: its receipts and actions. */
+#panel .card.draft > .card.task.in-draft { margin: -4px 0 8px; padding: 6px 10px; background: var(--bg); box-shadow: none; border-radius: var(--radius); }
+.card.task.in-draft > .head .of { flex: none; font-size: var(--small); color: var(--muted); }
+/* The draft's own action is the card's main one: the result's are quieter. */
+.card.task.in-draft .actions > button:not(.more-button, .text, .link) { background: var(--hover); color: var(--text); }
+.card.task.in-draft .actions > button:not(.more-button, .text, .link, :disabled):hover { background: var(--active); opacity: 1; }
+/* Its title keeps the room: the task id and since when are in the meta's tooltip. */
+.card.task.in-draft > .head :is(.tid, .meta .when) { display: none; }
 select.verdict { min-height: 28px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); color: var(--text); font-size: var(--body); padding: 0 8px; }
 .card.task.done, .card.task.cancelled { background: none; box-shadow: none; border-color: transparent; }
 .card.task:is(.done, .cancelled) .title { font-weight: 500; color: var(--soft); }
@@ -1240,8 +1266,9 @@ button.receipt.changes:hover { text-decoration: underline; }
 .diff-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 4px 18px 14px; }
 .diff-body h3 { font-size: var(--body); margin: 14px 0 0; }
 .diff-file { border: 1px solid var(--line); border-radius: 8px; margin-top: 10px; overflow: hidden; }
-.diff-file summary { display: flex; gap: 8px; padding: 6px 10px; background: var(--side); cursor: pointer; font: var(--small)/1.6 var(--mono); }
-.diff-file summary .name { font-weight: 600; overflow-wrap: anywhere; }
+.diff-file summary, .diff-file .summary { display: flex; gap: 8px; padding: 6px 10px; background: var(--side); cursor: pointer; font: var(--small)/1.6 var(--mono); }
+.diff-file .summary { cursor: default; flex-wrap: wrap; }
+.diff-file :is(summary, .summary) .name { font-weight: 600; overflow-wrap: anywhere; }
 .diff-file summary .added { color: var(--green); }
 .diff-file summary .removed { color: var(--red); }
 .diff-lines { font: var(--small)/1.55 var(--mono); border-top: 1px solid var(--line); }

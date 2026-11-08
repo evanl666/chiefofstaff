@@ -36,18 +36,18 @@ tool allowlist, permission and request callbacks, sandbox, model.
 | `delivery.py` | Messages to sessions: stored, batched, sent, checked after a restart. |
 | `workers.py` | The worker queue (`max_workers`, dependencies), starting, closing (open tasks are cancelled; the owner's *Reopen* brings back those it had started, stopped: `closedtask:` keys), reopening, interrupting. |
 | `tasks.py` | Tasks, runs and dependencies as records; status transitions. |
-| `task_actions.py` | What happens to tasks: reports, cancel (a cancelled follow-up gives the earlier result back; a task whose result was reported stays done with it; its drafts still waiting for the owner are withdrawn), accept, retry, follow-up (its worker told that its report replaces the result: the whole result, updated); receipts (per task: between snapshots of its checkouts taken when it was taken up and when it reported its result, written to the repository's objects through an index of their own; on a branch, its own commits; in a shared folder, the files its own edits wrote or its own commands named, not what commits older than the task brought in, a pull or another branch checked out; a follow-up after other work leaves out what changed in between; each result's end is kept, so a split gives each result its share), PR state (refreshed every few minutes) and the *Ready to merge* card; the shareable report. |
+| `task_actions.py` | What happens to tasks: reports, cancel (a cancelled follow-up gives the earlier result back; a task whose result was reported stays done with it; its drafts still waiting for the owner are withdrawn), accept, retry, follow-up (its worker told that its report replaces the result: the whole result, updated, with its criteria; criteria a later report leaves out keep what the earlier result showed, verified only while what backs them holds); finished work its worker changes again (asked in chat, its question answered, its PR's review comments) is a new result to review, not news; receipts (per task: between snapshots of its checkouts taken when it was taken up and when it reported its result, written to the repository's objects through an index of their own; on a branch, its own commits; in a shared folder, the files its own edits wrote or its own commands named, not what commits older than the task brought in, a pull or another branch checked out; a follow-up after other work leaves out what changed in between; each result's end is kept, so a split gives each result its share), PR state (refreshed every few minutes) and the *Ready to merge* card; the shareable report. |
 | `tools.py` | Every tool a session can call, with its argument model; which role gets which. |
-| `drafts.py` | Drafts the owner approves (Slack replies, PR reviews, a task's folder); interrupted sends; what each draft is for the Router (recipient, what it answers, its task) and what became of it (a held note); a worker following the Slack thread a sent review or reply was asked for in is woken to answer there. |
+| `drafts.py` | Drafts the owner approves (Slack replies, PR reviews, a task's folder); interrupted sends; what each draft is for the Router (recipient, what it answers, its task) and what became of it (a held note); a worker following the Slack thread a sent review or reply was asked for in is woken to answer there. One reply per message: a worker's reply sent or drafted in a conversation settles the Slack session's replies waiting there (other workers' stay: they may answer another question); a card the owner edited is never withdrawn by its session (it is given their text), and a newer draft replacing it shows their text. A task's Slack reply waits until its review is posted; a merged PR takes its task's waiting drafts on it along. |
 | `focus.py` | Focus Shield; its summary counts what needs the owner as Home does (`digest.needs_you`). |
-| `digest.py` | The daily digest, from the record; what needs the owner, counted as *Needs you* counts it. |
+| `digest.py` | The daily digest, from the record; what needs the owner, item by item as *Needs you* lists it (`digest.needs`: the board's rules, a result reviewed on its draft's card once), shared by the Router's `list_sessions`, the handover, the focus and daily summaries and tidying. |
 | `state.py` | Per-session in-memory state (connection, turn flags) and the lock order. |
 | `receipts.py` | Observed commands, changes and PR checks next to a report; acceptance criteria as verified, claimed or not met; a test run's outcome from its runner's summary (piped, chained, run by a script). |
 | `workspaces.py` | The code folder (its repositories, clones into it), each worker's task folder and worktrees (removed on close, restored on reopen), change stats. |
 | `policy.py` | Pure permission rules for actions without the sandbox. |
 | `backend.py` | The `AgentBackend`/`AgentSession` protocols, Copilot backend, sandbox policy. |
 | `scripted.py` | A backend without a model (scripts); runs `demo.py` and contract tests. |
-| `asks.py` | Cards for the owner (questions, forms, sign-ins); workers' (and the Slack session's) questions to the owner, kept under *Needs you* until answered whatever becomes of their task (one per task; each of a session's questions without a task on its own); a task whose question or decision the owner answered goes on at once (`Asks.go_on`); cards applied whenever they are answered, with nothing waiting (`Asks.offer`: a watch the Router proposes); questions between sessions; environment notes. |
+| `asks.py` | Cards for the owner (questions, forms, sign-ins); workers' (and the Slack session's) questions to the owner, kept under *Needs you* until answered whatever becomes of their task (one per task; each of a session's questions without a task on its own); a task whose question or decision the owner answered goes on at once (`Asks.go_on`; finished work it asked about goes back where it was, and its worker restates the whole result in its next report); cards applied whenever they are answered, with nothing waiting (`Asks.offer`: a watch the Router proposes); questions between sessions; environment notes. |
 | `peers.py` | Workers that work together (`works_with`): told about each other, passing information straight to each other (`tell_session`), a copy for the Router riding along with its next turn, a finished one's result for the others. |
 | `decisions.py` | Decision cards (answered on the card or in the asking worker's chat, not by a question back; closed once the tasks that asked ended); the owner's decisions and the tasks that rely on them; telling those tasks when one changes. |
 | `learning.py` | The owner's feedback; lessons a learning worker proposes and the owner approves; how often the owner agrees. |
@@ -107,7 +107,9 @@ Sessions never talk directly. A session calls a tool, and the runtime delivers t
   When a linked worker reports done, the others still at work get its result.
 - **Routing of external events.** Watchers turn new Slack messages and GitHub activity into
   events with stable keys (`triggers`, never twice). Activity in a followed thread or PR goes
-  straight to its followers (`subscriptions`); the rest goes to the Router. A PR's news goes to
+  straight to its followers (`subscriptions`); the rest goes to the Router. A Slack thread a
+  worker follows is that worker's (it took it over): the Slack session no longer gets it too
+  (`Runtime.thread_owners`). A PR's news goes to
   the workers with a task that made it (`Runtime.pr_maker`), as that task's
   (`Runtime.thread_task`), not to those that only read or reviewed it, except replies to a
   comment one of them posted (`ghby:` keys); everyone following it when no task made it.
@@ -136,7 +138,7 @@ to the handler for its type:
 
 | Event | Effect |
 | --- | --- |
-| `user.message` | Whether this turn includes the owner (else the Router's closing words are a footnote); the task a worker sees now is taken up (its turn task, unless the message steered the turn in progress). A message sent while a worker works is only taken up here, when it sees it; if the turn is stopped first (Copilot drops it), it is sent again with the next message. |
+| `user.message` | Whether this turn includes the owner (else the Router's closing words are a footnote); the task a worker sees now is taken up (its turn task, unless the message steered the turn in progress; a followed thread's news, the task it is for, which a stop does not resume; back on a finished task from other work, what it changes counts from there). A message sent while a worker works is only taken up here, when it sees it; if the turn is stopped first (Copilot drops it), it is sent again with the next message. |
 | `assistant.message` | The session's words, into its timeline (the Router's closing words in a turn without the owner are a footnote; none when they only say it has nothing to say). |
 | `assistant.turn_start` | A worker's slot is busy; status `working`. |
 | `tool.execution_start` | A step in the timeline and the session's activity; shell commands are recorded for receipts; files an edit tool writes count as the turn task's (in a folder shared with the owner, only those are its changes). |
@@ -177,9 +179,12 @@ takes over while it is idle. The handover is written from the records (open task
 cards with their recipient, what they answer and their task, the questions workers asked the
 owner, tasks cancelled or failed in the last three days, the recent conversation),
 so no model turn is spent on it; `alias:` keys map both Copilot sessions to the same Router.
-What the owner cancels, closes or reopens, and what became of each draft (sent, rejected,
-withdrawn), reaches the Router as a held system note
-(`Delivery.hold`) with its next message, so it does not start that work again by itself.
+What the owner cancels, closes or reopens, what became of each draft (sent, rejected,
+withdrawn), and a worker's question the owner answered or dismissed reach the Router as a held
+system note (`Delivery.hold`) with its next message, so it does not start that work again by
+itself or call the question open; a cancel during a Router turn is steered into that turn. A
+Router about to continue or cancel a task that changed since it looked (`list_sessions`,
+`read_session`), by what it has not received yet, is told what changed instead.
 
 ## The UI
 

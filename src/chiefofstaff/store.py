@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from pydantic import ValidationError
 
-from .models import Settings
+from .models import AS_SAVED, Settings
 
 DB_NAME = "chiefofstaff.db"
 # Earlier names of the same database (the project was called Work Buddy).
@@ -78,7 +78,7 @@ def rename_database(directory: Path):
 
 def valid(values: dict) -> bool:
     try:
-        Settings.model_validate(values)
+        Settings.model_validate(values, context=AS_SAVED)
     except ValidationError:
         return False
     return True
@@ -342,7 +342,8 @@ class Store:
         if not row:
             return Settings()
         try:
-            return Settings.model_validate_json(row["value"])
+            # As saved: an MCP server Copilot would refuse stays, off (Settings.mcp_off).
+            return Settings.model_validate_json(row["value"], context=AS_SAVED)
         except ValidationError:
             # A project directory may have been deleted since it was saved.
             values = json.loads(row["value"])
@@ -351,7 +352,7 @@ class Store:
             if not Path(values.get("code_folder") or "/nonexistent").is_dir():
                 values["code_folder"] = ""
             try:
-                return Settings.model_validate(values)
+                return Settings.model_validate(values, context=AS_SAVED)
             except ValidationError:
                 # Still invalid (the code folder became a repository, say): keep what is valid,
                 # so Chief of Staff runs and Settings can fix the rest. In rounds, as some fields
@@ -364,7 +365,7 @@ class Store:
                             kept[key] = value
                     if len(kept) == before:
                         break
-                return Settings.model_validate(kept)
+                return Settings.model_validate(kept, context=AS_SAVED)
 
     def save_settings(self, settings: Settings):
         self.execute("INSERT OR REPLACE INTO settings VALUES (1, ?)", (settings.model_dump_json(),))

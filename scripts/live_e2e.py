@@ -57,7 +57,7 @@ WATCHDOG_ENV = {
     "CHIEFOFSTAFF_WATCHDOG_STALL": "30",
     "CHIEFOFSTAFF_WATCHDOG_COOLDOWN": "600",
     # A low limit, so the Router is rotated during the run and the scenarios after it must pass.
-    "CHIEFOFSTAFF_ROUTER_CONTEXT": "45000",
+    "CHIEFOFSTAFF_ROUTER_CONTEXT": "36000",
 }
 
 

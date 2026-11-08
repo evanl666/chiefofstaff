@@ -93,6 +93,14 @@ def test_claims_are_checked_against_what_was_observed():
     for nothing in ("The failure is expected; I changed nothing.", "I updated no files."):
         assert not receipts.says_changed(nothing), nothing
     assert receipts.says_changed("I added no-cache headers to the responses.")
+    # Prose about what others did, in a report that says it changed nothing: not a claim.
+    research = (
+        "rapidfuzz is still the pick. I believe the pure-Python mode was removed in v3, so "
+        "difflib is the fallback. No code was written and nothing was changed in the project."
+    )
+    assert not receipts.says_changed(research)
+    assert not receipts.says_changed("It seems the flag was renamed upstream-side last year.")
+    assert receipts.says_changed("The failing test was fixed by updating the fixture.")
     failing = receipts.summarize([command("npm test", 1)], None, "Done.")
     assert failing["flags"] == ["The last test run failed (exit 1)."]
     red = receipts.summarize(

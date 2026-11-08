@@ -5,12 +5,13 @@ import secrets
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Any, Literal
 
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import Body, FastAPI, HTTPException, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .bus import Bus
@@ -43,6 +44,20 @@ class Login(BaseModel):
 
 
 ATTACHMENT_FILE = re.compile(r"[0-9a-f]{32}\.(?:png|jpg|gif|webp)")
+
+
+def settings_from(values: dict[str, Any], old: Settings) -> Settings:
+    """Settings from what was saved (`old`) and what the page sent: one invalid is answered as
+    FastAPI answers an invalid body (422, each problem with its field). A saved MCP server
+    Copilot would refuse, sent back as it was, stays off (Settings.mcp_off), not refused."""
+    context = {"mcp_saved": {**old.mcp_servers, **old.mcp_servers_off}}
+    try:
+        return Settings.model_validate(values, context=context)
+    except ValidationError as error:
+        problems = error.errors(include_url=False)
+        raise RequestValidationError(
+            [{**problem, "loc": ("body", *problem["loc"])} for problem in problems]
+        ) from None
 
 
 def create_app(
@@ -431,16 +446,42 @@ def create_app(
     async def resolve(draft_id: str, decision: DraftDecision):
         return await runtime.drafts.resolve(draft_id, decision)
 
+    # One save at a time: each merges into what the one before saved.
+    settings_lock = asyncio.Lock()
+
     @app.post("/api/settings")
-    async def save_settings(settings: Settings):
-        if any(directory.is_relative_to(Path(project)) for project in settings.projects):
-            raise ValueError("A project must not contain Chief of Staff's private data directory.")
-        for folder in map(Path, settings.sandbox_writable):
-            if directory.is_relative_to(folder) or folder.is_relative_to(directory):
-                raise ValueError("Workers must not write Chief of Staff's private data directory.")
-        await asyncio.to_thread(runtime.workspaces.check_scratch, settings)
-        old = store.settings()
-        store.save_settings(settings)
+    async def save_settings(changes: Annotated[dict[str, Any], Body()]):
+        """Saves the settings sent; those not sent keep their saved values. `base`: the settings
+        as the page showed them when the owner began: one changed since (in another tab) stays
+        as it is now unless the owner changed it here too, which is refused, not overwritten."""
+        base = changes.pop("base", None)
+        async with settings_lock:
+            old = store.settings()
+            saved = old.model_dump(mode="json")
+            settings = settings_from({**saved, **changes}, old)
+            if isinstance(base, dict):
+                new = settings.model_dump(mode="json")
+                moved = [key for key in changes if key in base and base[key] != saved.get(key)]
+                if clashes := [key for key in moved if new[key] not in (base[key], saved[key])]:
+                    names = ", ".join(key.replace("_", " ") for key in clashes)
+                    raise HTTPException(
+                        409,
+                        f"Settings changed in another tab ({names}): reopen Settings to see "
+                        "the change, then make yours.",
+                    )
+                if kept := {key: saved[key] for key in moved if new[key] == base[key]}:
+                    settings = settings_from({**saved, **changes, **kept}, old)
+            if any(directory.is_relative_to(Path(project)) for project in settings.projects):
+                raise ValueError(
+                    "A project must not contain Chief of Staff's private data directory."
+                )
+            for folder in map(Path, settings.sandbox_writable):
+                if directory.is_relative_to(folder) or folder.is_relative_to(directory):
+                    raise ValueError(
+                        "Workers must not write Chief of Staff's private data directory."
+                    )
+            await asyncio.to_thread(runtime.workspaces.check_scratch, settings)
+            store.save_settings(settings)
         await runtime.settings_changed(old, settings)
         return runtime.snapshot()
 

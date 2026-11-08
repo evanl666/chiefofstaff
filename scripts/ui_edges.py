@@ -1,7 +1,7 @@
 """Browser test of edge cases in the UI, with no accounts: the real web app runs in this process
 on a fake Copilot, so the test can create cards and events and check what the page shows.
 
-    uv run --with playwright python scripts/ui_edges.py
+    uv run --with playwright python scripts/ui_edges.py [round_nine …]
 """
 
 import asyncio
@@ -348,7 +348,9 @@ async def home(runtime, browser, failures: list[str]):
     async with page.expect_request("**/api/settings") as request:
         await page.locator("#settings-form footer button[type=submit]").click()
     body = (await request.value).post_data_json
-    # What the form shows, and every other setting as it was: a save resets nothing.
+    # What the form shows, and every other setting as it was: a save resets nothing. `base`:
+    # the settings as the dialog showed them, so a change from another tab is not undone.
+    assert body.pop("base") == settings, "base"
     assert SETTINGS_FIELDS <= set(body) == set(settings), set(body) ^ set(settings)
     for key in set(settings) - {"role_models", "role_efforts", "slack_delegate_emoji"}:
         assert body[key] == settings[key], (key, body[key], settings[key])
@@ -2632,6 +2634,195 @@ async def round_eight(runtime, browser, failures: list[str]):
     await context.close()
 
 
+async def round_nine(runtime, browser, failures: list[str]):
+    """The 0.1.29 bug bash, round 5 (UI): a draft for a result keeps that result's own card in
+    it, with its receipts, Accept and Create PR (S6), and its news (W3); a narrow window folds
+    the sidebar away behind a button, nothing past the edge (L12); the ⋯ menus from the
+    keyboard, and Escape out of a card's form (A12); a title no longer than the server keeps
+    (A9); what cancelling came to, in words (A2)."""
+    store = runtime.store
+    router = store.get("router_id")
+    stamp = datetime.now(UTC).isoformat()
+
+    async def start(title):
+        result = await call_tool(runtime, "spawn_worker", router, title=title,
+                                 instructions=title, why_new="test")  # fmt: skip
+        assert result.result_type == "success", result.text_result_for_llm
+        await settle(runtime)
+        return json.loads(result.text_result_for_llm)["session_id"]
+
+    def finish(worker, result):
+        task = runtime.tasks.current(worker)
+        runtime.tasks.move(task["id"], "review", result=result)
+        runtime.update_session(worker, status="idle", activity="")
+        return task
+
+    committer = await start("Commit notes on r9-cpr")
+    committed = finish(committer, "Committed notes/r9.md on r9-cpr. The PR text is on a card.")
+    pr_text = store.create_draft(committer, "reply", {"to": "Owner", "where": "PR description",
+                                                      "task_id": committed["id"]},
+                                 "Title: Add notes/r9.md")  # fmt: skip
+    answerer = await start("Answer Bob on r9 flags")
+    answered = finish(answerer, "Bob's flag is off by default.")
+    to_bob = store.create_draft(answerer, "reply", {"to": "Bob", "where": "email",
+                                                    "task_id": answered["id"]},
+                                "Hi Bob, it is off by default.")  # fmt: skip
+    for draft in (pr_text, to_bob):
+        runtime.bus.publish("draft", store.draft(draft["id"]))
+    nightly = await start("Watch the r9 nightly run")
+    runtime.update_session(nightly, status="idle", activity="")
+    await settle(runtime)
+    runtime.publish_state()
+    patches = {
+        "Commit notes on r9-cpr": {"receipts": {
+            "checkouts": [{"path": "/tmp/r9", "branch": "r9-cpr", "commits": 1, "files": 1,
+                           "insertions": 2, "deletions": 0}],
+            "changed": {"files": 1, "insertions": 2, "deletions": 0, "commits": 1}, "prs": []}},
+        "Answer Bob on r9 flags": {"news": {"at": stamp, "text": "Bob says the flag is on now."}},
+    }  # fmt: skip
+
+    context = await browser.new_context(viewport={"width": 1280, "height": 900})
+    page = await context.new_page()
+    page.on("pageerror", lambda error: failures.append(str(error)))
+    await patch_state(page, patches)
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    needs = page.locator("#needs")
+    await expect(page.locator(".home-item.selected")).to_be_visible(timeout=15000)
+
+    # S6: the PR text's card keeps its result's card, with what the owner decides on.
+    card = needs.locator(f'.card.draft[data-id="{pr_text["id"]}"]')
+    inner = card.locator(".card.task.in-draft")
+    await expect(inner.locator(".head .of")).to_have_text("Result of")
+    await expect(inner.locator(".head .title")).to_have_text("Commit notes on r9-cpr")
+    await expect(inner.locator(".receipt.changes")).to_have_text("+2 −0 in 1 file")
+    await expect(inner.get_by_role("button", name="Accept")).to_be_visible()
+    await expect(card.get_by_role("button", name="Copy & mark sent")).to_be_visible()
+    await expect(needs.locator(".card.task", has_text="Commit notes on r9-cpr")).to_have_count(1)
+    # W3: news on a result a draft is for shows on that card, once.
+    news = needs.locator(f'.card.draft[data-id="{to_bob["id"]}"] .card.task.in-draft')
+    await expect(news.locator(".news")).to_contain_text("Bob says the flag is on now.")
+    await expect(news.get_by_role("button", name="Got it")).to_be_visible()
+    await expect(needs.locator(".news", has_text="Bob says the flag")).to_have_count(1)
+    await card.screenshot(path=SHOTS / "ui-edges-r9-draft-result.png")
+    log("S6/W3: a draft's card holds its result's card: changes, Accept, its news, once")
+
+    # A12: its ⋯ from the keyboard: Enter opens it on its first item; arrows, Home and End
+    # move (round); Escape closes it, back on ⋯.
+    more = inner.locator(".actions .more-button")
+    items = inner.locator('.menu [role="menuitem"]')
+    await more.focus()
+    await page.keyboard.press("Enter")
+    await expect(items.first).to_be_focused()
+    await page.keyboard.press("ArrowDown")
+    await expect(items.nth(1)).to_be_focused()
+    await page.keyboard.press("End")
+    await expect(items.last).to_be_focused()
+    await page.keyboard.press("ArrowDown")
+    await expect(items.first).to_be_focused()
+    await page.keyboard.press("ArrowUp")
+    await expect(items.last).to_be_focused()
+    await page.keyboard.press("Home")
+    await expect(items.first).to_be_focused()
+    await expect(inner.get_by_role("menuitem", name="Create PR")).to_be_visible()
+    await page.keyboard.press("Escape")
+    await expect(inner.locator(".menu")).to_be_hidden()
+    await expect(more).to_be_focused()
+    # A9: Rename… keeps a title as long as the server does. A12: Escape closes the form.
+    await page.keyboard.press("ArrowDown")
+    await inner.get_by_role("menuitem", name="Rename…").click()
+    title = inner.get_by_role("textbox", name="Title")
+    await expect(title).to_have_attribute("maxlength", "80")
+    await expect(title).to_be_focused()
+    await page.keyboard.press("Escape")
+    await expect(title).to_have_count(0)
+    await expect(inner.get_by_role("button", name="Accept")).to_be_visible()
+    await expect(card).to_be_visible()
+    log("A12: ⋯ menus by arrow keys, Home, End and Escape; Escape closes a card's form; A9")
+
+    # A2: refused (it finished meanwhile), the server's words; set aside, said so.
+    row = page.locator("#tasks-monitoring .card.task", has_text="Watch the r9 nightly run")
+    replies = []
+    view = json.loads(json.dumps(runtime.task_actions.view(runtime.tasks.current(nightly)),
+                                 default=str))  # fmt: skip
+    set_aside = {**view, "status": "done", "set_aside": True, "ended_at": stamp,
+                 "result": "The nightly run passed.", "updated_at": stamp}  # fmt: skip
+
+    async def cancelling(route):
+        replies.append(route.request.url)
+        if len(replies) == 1:
+            refused = "It finished just now: its result is under Recently finished."
+            await route.fulfill(status=409, json={"detail": refused})
+        else:
+            await route.fulfill(json=set_aside)
+
+    await page.route("**/api/tasks/*/cancel", cancelling)
+    await row.click()
+    await row.locator(".actions .more-button").click()
+    await row.get_by_role("menuitem", name="Cancel task…").click()
+    await row.get_by_role("button", name="Cancel task").click()
+    await expect(row.locator(".actions .error")).to_have_text(
+        "It finished just now: its result is under Recently finished."
+    )
+    await row.get_by_role("button", name="Cancel task").click()
+    await expect(page.locator(".toast", has_text="It had finished: set aside, its result is "
+                              "kept.")).to_be_visible()  # fmt: skip
+    finished = page.locator("#tasks-recent .card.task", has_text="Watch the r9 nightly run")
+    await expect(finished.locator(".head .meta")).to_contain_text("Set aside")
+    log("A2: a refused cancel says why; one that came after the result says it was set aside")
+
+    # L12: narrow, the sidebar folds away behind ☰; nothing runs past the right edge.
+    toggle, sidebar = page.locator("#sidebar-toggle"), page.locator("#sidebar")
+    for scheme in ("light", "dark"):
+        await page.emulate_media(color_scheme=scheme)
+        for width in (352, 400):
+            await page.set_viewport_size({"width": width, "height": 800})
+            await expect(toggle).to_be_visible()
+            await expect(sidebar).to_be_hidden()
+            for tab in ("needs", "tasks", "chat"):
+                await page.locator(f"#home-tabs [data-tab={tab}]").click()
+                past = await page.evaluate(
+                    "() => document.documentElement.scrollWidth - innerWidth"
+                )
+                assert past <= 0, (scheme, width, tab, past)
+                for part in await page.locator("#home-tabs button, #session-header > *").all():
+                    if await part.is_visible():
+                        box = await part.bounding_box()
+                        assert box["x"] + box["width"] <= width + 1, (width, tab, box)
+            composer = await page.locator("#composer").bounding_box()
+            assert composer["width"] >= width - 32, (width, composer)
+            await page.screenshot(path=SHOTS / f"ui-edges-r9-narrow-{width}-{scheme}.png")
+        # From the keyboard: opens on Home, Escape closes it back on ☰.
+        await toggle.focus()
+        await page.keyboard.press("Enter")
+        await expect(sidebar).to_be_visible()
+        await expect(toggle).to_have_attribute("aria-expanded", "true")
+        await expect(sidebar.locator(".home-item")).to_be_focused()
+        assert (await sidebar.bounding_box())["width"] <= 352
+        await page.wait_for_timeout(300)  # Slid in.
+        await page.screenshot(path=SHOTS / f"ui-edges-r9-sidebar-open-{scheme}.png")
+        await page.keyboard.press("Escape")
+        await expect(sidebar).to_be_hidden()
+        await expect(toggle).to_be_focused()
+        # A worker picked there: the sidebar folds, its page shows.
+        await toggle.click()
+        await sidebar.locator(".item", has_text="Answer Bob on r9 flags").click()
+        await expect(sidebar).to_be_hidden()
+        await expect(page.locator("#session-title")).to_have_text("Answer Bob on r9 flags")
+        await toggle.click()
+        await page.mouse.click(345, 400)  # Beside it: it folds.
+        await expect(sidebar).to_be_hidden()
+        await page.locator("#back-home").click()
+    await page.emulate_media(color_scheme="light")
+    # Wider, as it was: the sidebar in its column, no ☰.
+    for width, column in ((800, 210), (1280, 252)):
+        await page.set_viewport_size({"width": width, "height": 900})
+        await expect(toggle).to_be_hidden()
+        await expect(sidebar).to_be_visible()
+        assert round((await sidebar.bounding_box())["width"]) == column, width
+    log("L12: at 352-400px the sidebar folds behind ☰ (keyboard, Escape, a pick closes it)")
+    await context.close()
+
+
 async def main():
     with tempfile.TemporaryDirectory(prefix="cos-ui-") as temporary:
         holder: dict = {}
@@ -2838,14 +3029,16 @@ async def main():
 
             await call_tool(runtime, "report", worker, status="done", summary="Review done.")
             await settle(runtime)
-            # Done, with its review still to approve: one card (the draft), not two.
+            # Done, with its review still to approve: one card (the draft), its result's own card
+            # in it (what it came to, its actions), not a card of its own beside it.
             plain_card = page.locator(f'#needs .card.draft[data-id="{plain["id"]}"]')
-            await expect(plain_card.locator(".context")).to_contain_text(
-                "Result of Review the exports PR", timeout=10000
+            result = plain_card.locator(".card.task.in-draft")
+            await expect(result.locator(".head")).to_contain_text("Result of", timeout=10000)
+            await expect(result.locator(".head .title")).to_have_text("Review the exports PR")
+            await expect(result.locator(".outcome")).to_have_text("Review done.")
+            reviewing = page.locator(
+                "#panel .card.task:not(.in-draft)", has_text="Review the exports PR"
             )
-            await plain_card.locator(".context summary").click()
-            await expect(plain_card.locator(".context .markdown")).to_contain_text("Review done.")
-            reviewing = page.locator("#panel .card.task", has_text="Review the exports PR")
             await expect(reviewing).to_have_count(0)
             # Its verdict can change before it is sent, in the review view.
             await plain_card.get_by_role("button", name="Review…").click()
@@ -2962,16 +3155,12 @@ async def main():
             assert runtime.tasks.get(task["id"])["status"] == "done"
             await context.close()
 
-            await home(runtime, browser, failures)
-            await memory(runtime, browser, failures)
-            await this_round(runtime, browser, failures)
-            await round_two(runtime, browser, failures)
-            await round_three(runtime, browser, failures)
-            await round_four(runtime, browser, failures)
-            await round_five(runtime, browser, failures)
-            await round_six(runtime, browser, failures)
-            await round_seven(runtime, browser, failures)
-            await round_eight(runtime, browser, failures)
+            # `python scripts/ui_edges.py round_nine …`: only those, after the checks above.
+            only = set(sys.argv[1:])
+            for check in (home, memory, this_round, round_two, round_three, round_four,
+                          round_five, round_six, round_seven, round_eight, round_nine):  # fmt: skip
+                if not only or check.__name__ in only:
+                    await check(runtime, browser, failures)
             await browser.close()
         server.should_exit = True
         await serving

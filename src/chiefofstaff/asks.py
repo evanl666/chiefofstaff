@@ -22,7 +22,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
-from .envelope import sender, wrap
+from .envelope import sender, short, wrap
 from .models import DraftDecision
 from .peers import clip
 from .store import now
@@ -200,28 +200,72 @@ class Asks:
                 found.append({**question, "id": key.removeprefix("ownerq:")})
         return sorted(found, key=lambda question: question["at"])
 
-    def answered(self, session_id: str, task_id: str | None = None):
+    def answered(self, session_id: str, task_id: str | None = None, by: str = "owner"):
         """The owner answered (or someone did for them), or the worker moved on: the question
         of that task ("": those it asked with no task), or (no task named) all of the
-        worker's."""
-        keys = [
-            f"ownerq:{question['id']}"
+        worker's. `by`: "owner" (the Router hears it is no longer open), "router" or
+        "worker"."""
+        questions = [
+            question
             for question in self.session_questions(session_id)
             if task_id is None or (question.get("task_id") or "") == task_id
         ]
-        gone = False
-        for key in keys:
-            if self.store.get(key):
-                self.store.delete(key)
-                gone = True
+        gone = []
+        for question in questions:
+            if self.store.get(f"ownerq:{question['id']}"):
+                self.store.delete(f"ownerq:{question['id']}")
+                gone.append(question)
         if gone:
+            self.closed(session_id, gone, "answered" if by == "owner" else "")
             self.runtime.publish_state()
 
-    def go_on(self, task: dict, chat: bool = True) -> dict:
+    def closed(self, session_id: str, questions: list[dict], how: str):
+        """A session's questions are no longer under Needs you: the Router's notes about them
+        go with them. `how` the owner settled them ("answered", "dismissed"; "" when the Router
+        or the worker did): the Router hears it with its next message (not a turn of its own),
+        so it never calls them open."""
+        ids = {question["id"] for question in questions}
+        router = self.store.get("router_id") or ""
+        for message in self.store.all(
+            "SELECT id, meta FROM messages WHERE session_id=? AND kind='update' "
+            "AND json_extract(meta, '$.questions') IS NOT NULL",
+            (router,),
+        ):
+            if ids & set(json.loads(message["meta"]).get("questions") or []):
+                self.store.set(f"updateseen:{message['id']}", now())
+        row = self.store.find_session(session_id)
+        if not how or not router or not row:
+            return
+        name = self.runtime.display_title(row)
+        for question in questions:
+            task = self.runtime.tasks.find(question.get("task_id") or "")
+            on = f" on task {task['id']} “{task['title']}”" if task else ""
+            asked = " ".join(question["text"].split())[:300]
+            self.delivery.hold(
+                router,
+                wrap(
+                    "system",
+                    "question-closed",
+                    f"The owner {how} “{name}”'s question{on} (“{asked}”): it is no longer open "
+                    "under Needs you. Do not ask it again or call it open.",
+                    worker=short(session_id),
+                    task=task["id"] if task else None,
+                ),
+                kind="notice",
+                display=f"The owner {how} “{name}”'s question"[:300],
+                meta={"session_id": session_id, **({"task_id": task["id"]} if task else {})},
+            )
+
+    def go_on(self, task: dict, chat: bool = True, told: bool = False) -> dict:
         """The owner answered what a task waited for (its question, its decision): it goes on
         now, not only once its worker reports again. Finished work it asked about goes back
-        where it was (`chat`: what its worker says next is news on it, its result stays). A task
-        stopped (by the owner or the Router) stays stopped: only Go on resumes it."""
+        where it was (`chat`: what its worker says next is news on it, its result stays, unless
+        it changes the task's code from here: then a new result). Its worker is told to restate
+        the whole result in its next report, which is checked for it (`morefor`). `told`: the
+        caller recorded where its checkouts are and tells its worker so itself. A task stopped
+        (by the owner or the Router) stays stopped: only Go on resumes it."""
+        from .prompts import restate
+
         tasks = self.runtime.tasks
         task = tasks.find(task["id"]) or task
         if task["status"] != "waiting" or self.store.get(f"stopped:{task['id']}"):
@@ -230,18 +274,52 @@ class Asks:
             task = tasks.move(task["id"], was)
             if chat:
                 self.store.set(f"followup:{task['id']}", "chat")
+            if task["result"]:
+                self.store.set(f"morefor:{task['id']}", "1")  # Its next report is checked (Tools).
+            if task["result"] and not told:
+                # Its checkouts now: what it changes from here is a new result.
+                self.runtime.background(self.runtime.task_actions.record_chat_base(task))
+                note = wrap(
+                    "system",
+                    "context",
+                    f"About task {task['id']} “{task['title']}”, which the owner's answer is "
+                    f"for: {restate(tasks.criteria(task))}",
+                )
+                shown = f"Its next report on “{task['title']}” restates the whole result."
+                row = self.store.find_session(task["session_id"])
+                if row and row["status"] == "working":
+                    # The answer reached it already: this goes into the same turn.
+                    self.runtime.background(
+                        self.delivery.deliver(
+                            row["id"],
+                            note,
+                            kind="notice",
+                            display=shown,
+                            meta={"task_id": task["id"]},
+                            steer=True,
+                        )
+                    )
+                else:
+                    # With the answer, which is sent next.
+                    self.delivery.hold(
+                        task["session_id"], note, kind="notice", display=shown,
+                        meta={"task_id": task["id"]},
+                    )  # fmt: skip
         else:
             task = tasks.move(task["id"], "running", reason="answer", progress="")
         if row := self.store.find_session(task["session_id"]):
             self.delivery.rest_after(row)  # A turn on it now: it reports, not rests.
         return task
 
-    def dismiss(self, question_id: str):
-        if self.store.get(f"ownerq:{question_id}"):
+    def dismiss(self, question_id: str, how: str = "dismissed"):
+        if found := self.store.get(f"ownerq:{question_id}"):
             self.store.delete(f"ownerq:{question_id}")
+            question = {**json.loads(found), "id": question_id}
+            self.closed(question_id.split(":", 1)[0], [question], how)
             self.runtime.publish_state()
         elif ":" not in question_id:
-            self.answered(question_id)
+            for question in self.session_questions(question_id):
+                self.dismiss(question["id"], how)
 
     def owner_questions(self) -> list[dict]:
         """Open questions of workers whose task does not show them already (a task waiting for

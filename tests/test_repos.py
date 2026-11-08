@@ -737,7 +737,7 @@ async def test_create_pr_pushes_the_branch_and_the_worker_follows_the_pr(tmp_pat
     created = next(call for call in calls if call[:2] == ("pr", "create"))
     assert created[created.index("--repo") + 1] == "acme/app"
     assert created[created.index("--head") + 1] == branch
-    assert created[created.index("--title") + 1] == "Fix login"
+    assert created[created.index("--title") + 1] == "add login.py", "what its commit says"
     body = created[created.index("--body") + 1]
     assert "Fixed the login." in body and "<!-- chief-of-staff -->" in body
     assert "credits" not in body and "**Goal**" not in body, "not the worker's instructions"
@@ -1442,6 +1442,7 @@ async def test_a_later_task_keeps_its_start_when_its_files_are_too_big_to_copy(
     [found] = await runtime.task_actions.diff(second)
     assert "second.py" in found["diff"] and "first.py" not in found["diff"]
     assert "data.bin" not in found["diff"]
+    assert found["large"] == [{"name": "more.bin", "size": 100}], "said, though not shown"
     changed = (await receipts_of(runtime, second))["changed"]
     assert changed["large"] == 1 and changed["files"] == 2 and changed["commits"] == 1, changed
 
@@ -1639,3 +1640,237 @@ async def test_a_follow_up_after_a_split_and_another_task_leaves_out_that_tasks_
     await settle(runtime)
     [diff] = await runtime.task_actions.diff(task)
     assert "BASE" in diff["diff"] and "truncate" not in diff["diff"], diff["diff"]
+
+
+def dated(repo: Path, name: str, text: str, at: int, message: str = ""):
+    """A commit made at a given time (author and committer)."""
+    (repo / name).parent.mkdir(parents=True, exist_ok=True)
+    (repo / name).write_text(text)
+    run("git", "add", "-A", cwd=repo)
+    stamp = f"@{at} +0000"
+    environment = {**os.environ, "GIT_AUTHOR_DATE": stamp, "GIT_COMMITTER_DATE": stamp}
+    run("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm",
+        message or f"add {name}", cwd=repo, env=environment)  # fmt: skip
+
+
+async def test_a_task_on_a_branch_made_from_elsewhere_counts_only_its_own_commits(tmp_path):
+    """Bug bash 5 (L2): one worker, tasks on separate branches: a task that made a branch from
+    main after the previous task's branch counted that task's lines as removed; one that
+    branched from the previous task's branch counted its commits too."""
+    _, app = published(tmp_path, "app")
+    run("git", "pull", "-q", "--ff-only", cwd=app)
+    t0 = int(time.time()) - 1000
+    run("git", "checkout", "-q", "-b", "chief/slug", cwd=app)
+    dated(app, "kit.py", "def slug():\n    return 1\n" * 8, t0 + 10)  # The first task's.
+    slug_head = run("git", "rev-parse", "HEAD", cwd=app).strip()
+    tree = run("git", "rev-parse", "HEAD^{tree}", cwd=app).strip()
+    # The second task, taken up on chief/slug, makes its branch from main.
+    run("git", "checkout", "-q", "-b", "chief/camel", "main", cwd=app)
+    dated(app, "kit.py", "def camel():\n    return 2\n", t0 + 200)
+    checkout = {"path": str(app), "branch": "chief/camel", "base_ref": "origin/main"}
+    scope = workspaces_module.Scope(slug_head, t0 + 100, start=tree, head=slug_head)
+    found = await workspaces_module.changes(checkout, scope)
+    assert found and found["commits"] == 1, found
+    assert (found["insertions"], found["deletions"]) == (2, 0), found
+    # A third, taken up on chief/camel, branches from chief/slug: not slug's commit.
+    camel_head = run("git", "rev-parse", "HEAD", cwd=app).strip()
+    camel_tree = run("git", "rev-parse", "HEAD^{tree}", cwd=app).strip()
+    run("git", "checkout", "-q", "-b", "chief/bench", "chief/slug", cwd=app)
+    dated(app, "bench.py", "import kit\n" * 5, t0 + 400)
+    checkout["branch"] = "chief/bench"
+    scope = workspaces_module.Scope(camel_head, t0 + 300, start=camel_tree, head=camel_head)
+    found = await workspaces_module.changes(checkout, scope)
+    assert found and found["commits"] == 1 and found["files"] == 1, found
+    assert (found["insertions"], found["deletions"]) == (5, 0), found
+
+
+async def test_rebased_onto_a_newer_main_a_task_does_not_count_its_commits(tmp_path):
+    """Bug bash 5 (S3): rebased onto the latest origin/main, a task's changes took in what was
+    merged there meanwhile (another PR's files)."""
+    _, app = published(tmp_path, "app")
+    run("git", "pull", "-q", "--ff-only", cwd=app)
+    base = run("git", "rev-parse", "HEAD", cwd=app).strip()
+    run("git", "checkout", "-q", "-b", "chief/notes", cwd=app)
+    commit(app, "notes.md", "notes\n")
+    # Another PR merged into main meanwhile.
+    other = tmp_path / "app-other"
+    run("git", "pull", "-q", "--ff-only", cwd=other)
+    commit(other, "calc.py", "def pct(): ...\n")
+    commit(other, "test_calc.py", "def test_pct(): ...\n")
+    run("git", "push", "-q", "origin", "main", cwd=other)
+    run("git", "fetch", "-q", "origin", cwd=app)
+    run("git", "-c", "user.email=t@t", "-c", "user.name=t", "rebase", "-q", "origin/main",
+        cwd=app)  # fmt: skip
+    checkout = {"path": str(app), "branch": "chief/notes", "base_ref": base}
+    found = await workspaces_module.changes(checkout, workspaces_module.Scope())
+    assert found and found["commits"] == 1 and found["files"] == 1, found
+    # A later task whose start commit was rebased with it: from that commit as it is now.
+    start = run("git", "rev-parse", "HEAD", cwd=app).strip()
+    run("git", "checkout", "-q", "-b", "chief/older", base, cwd=app)
+    dated(app, "notes2.md", "older\n", int(time.time()) - 50, "older start")
+    older = run("git", "rev-parse", "HEAD", cwd=app).strip()
+    commit(app, "mine.md", "mine\n")
+    run("git", "-c", "user.email=t@t", "-c", "user.name=t", "rebase", "-q", start, cwd=app)
+    checkout = {"path": str(app), "branch": "chief/older", "base_ref": base}
+    found = await workspaces_module.changes(
+        checkout, workspaces_module.Scope(older, time.time() - 40)
+    )
+    assert found and found["commits"] == 1 and found["files"] == 1, found
+
+
+async def test_generated_files_a_task_committed_are_in_its_changes(tmp_path):
+    """Bug bash 5 (S7): a commit of `.pyc` files and a uv.lock showed as "2 files": a PR would
+    carry all 5."""
+    _, app = published(tmp_path, "app")
+    run("git", "pull", "-q", "--ff-only", cwd=app)
+    run("git", "checkout", "-q", "-b", "chief/kit", cwd=app)
+    start = run("git", "rev-parse", "HEAD", cwd=app).strip()
+    tree = run("git", "rev-parse", "HEAD^{tree}", cwd=app).strip()
+    (app / "__pycache__").mkdir()
+    (app / "__pycache__" / "kit.cpython-313.pyc").write_bytes(b"\0compiled")
+    (app / "uv.lock").write_text("version = 1\n")
+    commit(app, "kit.py", "kit = 1\n")
+    (app / "__pycache__" / "new.cpython-313.pyc").write_bytes(b"\0not committed")
+    checkout = {"path": str(app), "branch": "chief/kit", "base_ref": "origin/main"}
+    found = await workspaces_module.changes(
+        checkout, workspaces_module.Scope(start, time.time() - 60, start=tree, head=start)
+    )
+    assert found and found["files"] == 3 and found["commits"] == 1, found
+
+
+def test_a_file_stays_a_tasks_own_when_other_work_writes_it_later():
+    """Bug bash 5 (S1, S2): in a folder of the owner's, the task's own file left its changes
+    once the owner wrote to it later; a script running as another task's command wrote a file
+    that command names took that file in."""
+    now = time.time()
+    top = Path("/nowhere")
+    loop = workspaces_module.CommandRun("for f in tests/*.py; do echo x >> $f; done", now - 100,
+                                        now - 99)  # fmt: skip
+    nap = workspaces_module.CommandRun("sleep 60", now - 98, now - 38)
+    scope = workspaces_module.Scope(commands=[loop, nap], mtimes={"tests/t.py": now - 50})
+    assert not scope.named(top, "tests/t.py"), "written last by the owner, as it slept"
+    scope.earlier = {"tests/t.py": [now - 99.5]}
+    assert scope.named(top, "tests/t.py"), "its own at its earlier result"
+    # Two tasks at once: its script ran as another task's command wrote test_shout.py.
+    script = workspaces_module.CommandRun("python3 -c 'stamp()'", now - 30, now - 29.9)
+    shout = "printf 'x' > tests/test_shout.py && uv run pytest -q"
+    theirs = workspaces_module.CommandRun(shout, now - 30, now - 29)
+    scope = workspaces_module.Scope(commands=[script], mtimes={"tests/test_shout.py": now - 29.5})
+    assert scope.named(top, "tests/test_shout.py"), "nothing else names it"
+    scope.other_runs = [theirs]
+    assert not scope.named(top, "tests/test_shout.py"), "the other task's command names it"
+    # Seconds apart are apart: a file written 1.4 s before a command started is not its.
+    scope = workspaces_module.Scope(commands=[theirs], mtimes={"CHANGES.md": now - 31.4})
+    assert not scope.named(top, "CHANGES.md")
+
+
+async def test_in_the_owners_folder_a_tasks_commit_counts_and_another_worker_dates_it(tmp_path):
+    """Bug bash 5 (S14, S15): in a folder of the owner's, a task's commit counted as 0 commits;
+    and a finished task there never became out of date when another worker changed its file."""
+    _, app = published(tmp_path, "app")
+    (app / "kit.py").write_text("def base():\n    return 1\n")
+    run("git", "add", ".", cwd=app)
+    run("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "kit", cwd=app)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(app)]))
+    runtime = await harness.connect()
+
+    async def started(title):
+        worker = await spawn(runtime, harness.router_id, title=title, instructions="x",
+                             project=str(app))  # fmt: skip
+        await settle(runtime)
+        for _ in range(50):
+            if runtime.store.get(f"taskbase:{task_of(harness, worker['session_id'])}"):
+                break
+            await asyncio.sleep(0.05)
+        return worker["session_id"]
+
+    mine = await started("Add shout")
+    with (app / "kit.py").open("a") as file:
+        file.write("\n\ndef shout(text):\n    return text.upper()\n")
+    run("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qam", "shout", cwd=app)
+    shell(harness, mine, "c1", "printf 'def shout' >> kit.py && git commit -qam shout")
+    await settle(runtime)
+    await call_tool(runtime, "report", mine, status="done", summary="Added shout, committed.")
+    shout = task_of(harness, mine)
+    changed = (await receipts_of(runtime, shout))["changed"]
+    assert changed["commits"] == 1 and changed["files"] == 1, changed
+    # Another worker in the same folder changes that file: its result is out of date.
+    theirs = await started("Add whisper")
+    with (app / "kit.py").open("a") as file:
+        file.write("\n\ndef whisper(text):\n    return text.lower()\n")
+    shell(harness, theirs, "w1", "printf 'def whisper' >> kit.py")
+    await settle(runtime)
+    await runtime.task_actions.check_fresh(theirs)
+    found = await receipts_of(runtime, shout, lambda found: bool(found["stale"]))
+    assert found["stale"] == "Out of date: its files changed since it was checked (kit.py)."
+
+
+async def test_a_file_a_task_moved_counts_once(tmp_path):
+    """Bug bash 5 (S10): a rename counted as 2 files (git and GitHub count 1)."""
+    _, app = published(tmp_path, "app")
+    run("git", "pull", "-q", "--ff-only", cwd=app)
+    commit(app, "notes.md", "".join(f"line {n}\n" for n in range(40)))
+    run("git", "checkout", "-q", "-b", "chief/move", cwd=app)
+    start = run("git", "rev-parse", "HEAD", cwd=app).strip()
+    tree = run("git", "rev-parse", "HEAD^{tree}", cwd=app).strip()
+    (app / "docs").mkdir()
+    run("git", "mv", "notes.md", "docs/notes.md", cwd=app)
+    commit(app, "docs/index.md", "# Docs\n")
+    checkout = {"path": str(app), "branch": "chief/move", "base_ref": "origin/main"}
+    found = await workspaces_module.changes(
+        checkout, workspaces_module.Scope(start, time.time() - 60, start=tree, head=start)
+    )
+    assert found and found["files"] == 2, found
+
+
+async def test_work_in_a_clone_the_worker_made_itself_is_its_tasks_change(tmp_path):
+    """Bug bash 5 (L11): a worker that cloned a repository in its shell and pushed a fix there
+    showed a "Report" with no files: that clone was no checkout of its."""
+    origin, _ = published(tmp_path, "app")
+    harness = Harness(tmp_path / "data", Settings())
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, title="Fix the docs", instructions="x")
+    session_id, task = worker["session_id"], worker["task_id"]
+    await settle(runtime)
+    for _ in range(50):
+        if runtime.store.get(f"taskbase:{task}"):
+            break
+        await asyncio.sleep(0.05)
+    folder = runtime.workspaces.workspace(harness.store.session(session_id))
+    folder.mkdir(parents=True, exist_ok=True)
+    run("git", "clone", "-q", str(origin), str(folder / "app"))
+    run("git", "checkout", "-q", "-b", "fix-docs", cwd=folder / "app")
+    commit(folder / "app", "docs.md", "fixed\n")
+    shell(harness, session_id, "c1", f"git clone {origin} app && cd app && git commit -am fix")
+    await settle(runtime)
+    await call_tool(runtime, "report", session_id, status="done", summary="Fixed the docs.")
+    changed = (await receipts_of(runtime, task))["changed"]
+    assert changed["commits"] == 1 and changed["files"] == 1, changed
+    [found] = await runtime.task_actions.diff(task)
+    assert "+fixed" in found["diff"]
+
+
+async def test_finished_work_is_checked_once_at_a_time_and_closed_workers_are_left_out(tmp_path):
+    """Code review (round 5): every turn end in a folder of the owner's re-checked every worker
+    that ever used it, closed ones too, and checks piled up."""
+    _, app = published(tmp_path, "app")
+    harness = Harness(tmp_path / "data", Settings(projects=[str(app)]))
+    runtime = await harness.connect()
+    actions = runtime.task_actions
+    first = await spawn(runtime, harness.router_id, title="One", instructions="x", project=str(app))
+    second = await spawn(runtime, harness.router_id, title="Two", instructions="x",
+                         project=str(app))  # fmt: skip
+    await settle(runtime)
+    assert set(actions.sharing(str(app))) == {first["session_id"], second["session_id"]}
+    await runtime.workers.close(second["session_id"])
+    assert actions.sharing(str(app)) == [first["session_id"]], "not a closed worker"
+    assert second["session_id"] in actions.sharing(str(app), closed=True)
+    calls = []
+
+    async def slow(row):
+        calls.append(row["id"])
+        await asyncio.sleep(0.05)
+
+    actions.check_own = slow
+    await asyncio.gather(*(actions.check_fresh(first["session_id"]) for _ in range(5)))
+    assert calls == [first["session_id"]] * 2, "one at a time, once more for what came after"

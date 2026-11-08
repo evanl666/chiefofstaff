@@ -306,6 +306,13 @@ def gallery(runtime, seeded: dict) -> list[dict]:
             compare, "signin", {"url": "https://login.example.com/authorize", "server": "Jira"},
             "Jira needs you to sign in.",
         ),
+        store.create_draft(
+            seeded["router"], "form",
+            {"schema": {"type": "object", "properties": {"days": {"type": "string",
+                                                                  "title": "Which days"}}},
+             "source": "Chief of Staff", "watch": "DMs from Ann"},
+            "Watch DMs from Ann? Choose when.",
+        ),
     ]  # fmt: skip
     for draft in drafts:
         runtime.bus.publish("draft", store.draft(draft["id"]))
@@ -465,7 +472,12 @@ async def cards(runtime, seeded, browser, quality: Quality, phase: str):
         )
         page = await context.new_page()
         await page.goto(f"{BASE}/#token={TOKEN}")
-        await expect(page.locator("#needs .card")).to_have_count(8, timeout=15000)
+        # A card each (a result a draft is for is a card inside that draft's card).
+        await expect(page.locator("#needs > .items > .card")).to_have_count(9, timeout=15000)
+        # A watch the Router proposes says so (not "Form").
+        await expect(page.locator("#needs .card.request.form .head .label")).to_have_text(
+            "New watch"
+        )
         # Each card says once what it is about: a decision names its task in its label only.
         decision = page.locator("#needs .card.decision")
         await expect(decision.locator(".head .label")).to_contain_text(f"Decision for {LIMIT}")
@@ -504,7 +516,7 @@ async def cards(runtime, seeded, browser, quality: Quality, phase: str):
         await page.keyboard.press("Escape")
         await expect(view).to_be_hidden()
         await page.set_viewport_size({"width": 1280, "height": 900})
-        for index, card in enumerate(await page.locator("#needs .card").all()):
+        for index, card in enumerate(await page.locator("#needs > .items > .card").all()):
             await card.scroll_into_view_if_needed()
             await card.screenshot(path=SHOTS / f"quality-{phase}-card-{index}-{scheme}.png")
         await context.close()

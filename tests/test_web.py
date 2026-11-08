@@ -97,6 +97,102 @@ def test_settings_are_validated(app_client, tmp_path):
     assert missing.status_code == 422
 
 
+def test_a_settings_save_changes_only_what_it_sends(app_client, tmp_path):
+    """Bug bash 5 (A13): `POST /api/settings {}` reset every setting (projects emptied)."""
+    sign_in(app_client)
+    project = tmp_path / "project"
+    project.mkdir()
+    first = {"projects": [str(project)], "max_workers": 3}
+    assert app_client.post("/api/settings", json=first, headers=ORIGIN).status_code == 200
+    kept = app_client.post("/api/settings", json={}, headers=ORIGIN).json()["settings"]
+    assert kept["projects"] == [str(project.resolve())] and kept["max_workers"] == 3
+    paused = app_client.post("/api/settings", json={"paused": True}, headers=ORIGIN).json()
+    assert paused["settings"]["paused"] and paused["settings"]["projects"] == kept["projects"]
+    wrong = app_client.post("/api/settings", json={"max_workers": 0}, headers=ORIGIN)
+    assert wrong.status_code == 422, "an invalid value still names its field"
+    assert wrong.json()["detail"][0]["loc"] == ["body", "max_workers"]
+
+
+def test_a_stale_settings_tab_keeps_what_another_tab_changed(app_client, tmp_path):
+    """Bug bash 5 (A13): with Settings open in two tabs, the one saved last put back every
+    setting as it showed them, undoing the other's change."""
+    sign_in(app_client)
+    project = tmp_path / "project"
+    project.mkdir()
+    opened = app_client.get("/api/state").json()["settings"]  # Both tabs show these.
+    first = {**opened, "projects": [str(project)], "base": opened}
+    assert app_client.post("/api/settings", json=first, headers=ORIGIN).status_code == 200
+    second = {**opened, "max_workers": 7, "base": opened}
+    saved = app_client.post("/api/settings", json=second, headers=ORIGIN).json()["settings"]
+    assert saved["projects"] == [str(project.resolve())], "the other tab's change stays"
+    assert saved["max_workers"] == 7
+    other = tmp_path / "other"
+    other.mkdir()
+    clash = {**opened, "projects": [str(other)], "base": opened}
+    refused = app_client.post("/api/settings", json=clash, headers=ORIGIN)
+    assert refused.status_code == 409 and "another tab" in refused.json()["detail"]
+    assert app_client.get("/api/state").json()["settings"]["projects"] == saved["projects"]
+
+
+def test_mcp_servers_copilot_cannot_start_are_refused(app_client):
+    """Bug bash 5 (A3): an http server without a url, empty fields, an ftp:// url were saved,
+    and every new worker then showed working for 90 s before failing."""
+    sign_in(app_client)
+    bad = {
+        '"type": "http"': ({"type": "http", "command": "echo"}, "url is missing"),
+        "empty": ({"url": "", "command": ""}, "give a command (local) or a url"),
+        "ftp": ({"url": "ftp://x"}, "url must be an http:// or https:// address"),
+        "local": ({"type": "local", "url": "https://x.example.com"}, "command is missing"),
+    }
+    for case, (config, problem) in bad.items():
+        refused = app_client.post(
+            "/api/settings", json={"mcp_servers": {"probe": config}}, headers=ORIGIN
+        )
+        assert refused.status_code == 422, case
+        assert f"MCP server probe: {problem}" in refused.json()["detail"][0]["msg"], case
+    fine = {
+        "local": {"command": "npx", "args": ["-y", "jira-mcp"]},
+        "stdio": {"type": "stdio", "command": "probe"},
+        "remote": {"url": "https://mcp.example.com/mcp"},
+        "http": {"type": "http", "url": "https://mcp.example.com/mcp", "headers": {"A": "b"}},
+        "sse": {"type": "sse", "url": "http://127.0.0.1:3000/sse"},
+    }
+    saved = app_client.post("/api/settings", json={"mcp_servers": fine}, headers=ORIGIN)
+    assert saved.status_code == 200 and set(saved.json()["settings"]["mcp_servers"]) == set(fine)
+
+
+def test_saved_mcp_servers_copilot_would_refuse_are_kept_off_not_lost(app_client):
+    """Code review (A3): a server an earlier version saved that the stricter check refuses made
+    loading drop every MCP server, the valid ones too, and the next save wrote that to disk."""
+    sign_in(app_client)
+    store = app_client.app.state.store
+    good = {"command": "npx", "args": ["-y", "jira-mcp"], "tools": ["*"]}
+    bad = {"type": "http", "command": "npx srv", "tools": ["*"]}
+    saved_before = {"max_workers": 2, "mcp_servers": {"jira": good, "old": bad}}
+    store.execute("INSERT OR REPLACE INTO settings VALUES (1, ?)", (json.dumps(saved_before),))
+    shown = app_client.get("/api/state").json()["settings"]
+    assert shown["mcp_servers"] == {"jira": good}, "the valid one is used"
+    assert shown["mcp_servers_off"] == {"old": bad} and shown["max_workers"] == 2
+    other = app_client.post("/api/settings", json={"max_workers": 3}, headers=ORIGIN).json()
+    saved = other["settings"]
+    assert saved["mcp_servers"] == {"jira": good} and saved["mcp_servers_off"] == {"old": bad}
+    on_disk = json.loads(store.one("SELECT value FROM settings WHERE id=1")["value"])
+    assert on_disk["mcp_servers"] == {"jira": good} and on_disk["mcp_servers_off"] == {"old": bad}
+    # As the Settings dialog saves: every server in its box, the one off as it was.
+    page = {**saved, "mcp_servers": {"jira": good, "old": bad}, "mcp_servers_off": {}}
+    again = app_client.post("/api/settings", json={**page, "base": saved}, headers=ORIGIN)
+    assert again.status_code == 200, again.json()
+    assert again.json()["settings"]["mcp_servers_off"] == {"old": bad}
+    # Changed and still wrong: refused, naming it. Fixed: on.
+    changed = {**page, "mcp_servers": {"jira": good, "old": {**bad, "timeout": 5000}}}
+    refused = app_client.post("/api/settings", json=changed, headers=ORIGIN)
+    assert refused.status_code == 422
+    assert "MCP server old: url is missing" in refused.json()["detail"][0]["msg"]
+    fixed = {**page, "mcp_servers": {"jira": good, "old": {"url": "https://mcp.example.com"}}}
+    on = app_client.post("/api/settings", json=fixed, headers=ORIGIN).json()["settings"]
+    assert set(on["mcp_servers"]) == {"jira", "old"} and on["mcp_servers_off"] == {}
+
+
 def test_slack_token_must_be_a_user_token(app_client):
     sign_in(app_client)
     bot = app_client.post("/api/slack/token", json={"token": "xoxb-123"}, headers=ORIGIN)

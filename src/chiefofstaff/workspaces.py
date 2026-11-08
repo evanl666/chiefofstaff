@@ -610,6 +610,16 @@ class CommandRun:
 
 
 OPEN_RUN_SECONDS = 600
+# How far a file's write time may lie outside a command's start and end (the times are those of
+# its events; a file system may keep whole seconds).
+RUN_SLACK_SECONDS = 1.0
+
+
+def ran_then(run: CommandRun, when: float) -> bool:
+    """Whether a command ran when a file was written (one that never ended, a server or a
+    watcher, counts for a while, not for good)."""
+    end = run.end or min(time.time(), run.start + OPEN_RUN_SECONDS)
+    return run.start - RUN_SLACK_SECONDS <= when <= end + RUN_SLACK_SECONDS
 
 
 def written_at(path: Path) -> float | None:
@@ -652,6 +662,8 @@ class Scope:
         commands: str | list[CommandRun] = "",
         gaps: list[tuple[str, str, str, str, float]] | None = None,
         mtimes: dict[str, float | None] | None = None,
+        earlier: dict[str, list[float]] | None = None,
+        other_runs: list[CommandRun] | None = None,
     ):
         self.base, self.since, self.touched = base, since, touched or set()
         # The commit the checkout was on when it was taken up (`start`'s): what commits made
@@ -670,6 +682,12 @@ class Scope:
         # When each file it changed was last written as of its result (a finished task's): a
         # later write by other work does not count against it.
         self.mtimes = mtimes or {}
+        # When its earlier results found each file last written: a file that was its own then
+        # stays its own when other work (the owner) writes it again later.
+        self.earlier = earlier or {}
+        # Other tasks' commands in the same folder of the owner's: a file one of them names,
+        # changed as it ran, is not this task's for running a script then.
+        self.other_runs = other_runs or []
         # Between a result and its follow-up, other work may have changed the checkout (a later
         # task): (tree at its result, tree when it was taken up again, their commits, and when
         # it was taken up again: a commit after that is its own, however late the snapshot).
@@ -689,16 +707,25 @@ class Scope:
             return False
         # None: deleted, by a command that names it, or one that may write unnamed ones.
         changed = self.mtimes[name] if name in self.mtimes else written_at(top / name)
+        times = [changed, *self.earlier.get(name, [])]
+        unnamed_only = False
         for run in candidates:
             if not run.start or changed is None:
                 if run.names(top, name) or (changed is None and run.start):
                     return True
                 continue
-            # One that never ended (a server, a watcher) counts for a while, not for good.
-            end = run.end or min(time.time(), run.start + OPEN_RUN_SECONDS)
-            if run.start - 2 <= changed <= end + 2:
-                return True
-        return False
+            if any(when is not None and ran_then(run, when) for when in times):
+                if run.names(top, name):
+                    return True
+                unnamed_only = True
+        if not unnamed_only:
+            return False
+        # Only a command that may write files it does not name ran then: not when another
+        # task's command that names this file ran then too.
+        return not any(
+            other.names(top, name) and any(w is not None and ran_then(other, w) for w in times)
+            for other in self.other_runs
+        )
 
     def wrote(self, top: Path, name: str) -> bool:
         """Whether its own edits wrote this file."""
@@ -869,21 +896,84 @@ async def changes(checkout: dict, scope: Scope | None = None) -> dict | None:
     return result
 
 
-async def scope_base(checkout: dict, path: str, head: str, scope: Scope) -> str:
-    """Where this task's share starts: its own base when that commit is in the history; when
-    it was rewritten since (amended, rebased), where it and the history meet; else where the
-    branch started."""
-    if scope.base:
+async def scope_base(checkout: dict, path: str, head: str, scope: Scope) -> tuple[str, str]:
+    """Where this task's share starts, and the commit to count its files from when the start
+    snapshot no longer applies (else ""): its own base when that commit is in the history;
+    amended since, where it and the history meet (its snapshot still applies); rebased, the
+    rewritten start commit; on another line of history (a branch made from elsewhere), the
+    newest commit made before it was taken up. Else where the branch started, or where the
+    default branch now meets it when the branch was rebased onto a newer one."""
+    start = scope.base or (scope.head if checkout.get("shared") else "")
+    if start:
         with suppress(ValueError):
-            await checkout_git(checkout, path, "merge-base", "--is-ancestor", scope.base, head)
-            return scope.base
+            await checkout_git(checkout, path, "merge-base", "--is-ancestor", start, head)
+            return start, ""
         with suppress(ValueError):
-            if met := (await checkout_git(checkout, path, "merge-base", scope.base, head)).strip():
-                return met
+            if met := (await checkout_git(checkout, path, "merge-base", start, head)).strip():
+                again = await rewritten(checkout, path, start, met, head)
+                if again and await parent_of(checkout, path, again) == await parent_of(
+                    checkout, path, start
+                ):
+                    return met, ""  # Amended: its start snapshot is still what came before.
+                if again:
+                    return again, again  # Rebased: from the start commit as it is now.
+                if scope.since:
+                    since = f"--before=@{int(scope.since)}"
+                    listed = await checkout_git(
+                        checkout, path, "rev-list", "-1", "--first-parent", since, head
+                    )
+                    if before := listed.strip():
+                        return before, before
+                return met, met
     if base := base_of(checkout):
         with suppress(ValueError):
-            return (await checkout_git(checkout, path, "merge-base", base, head)).strip()
+            met = (await checkout_git(checkout, path, "merge-base", base, head)).strip()
+            return await newer_base(checkout, path, head, met), ""
+    return "", ""
+
+
+async def rewritten(checkout: dict, path: str, commit: str, met: str, head: str) -> str:
+    """The commit in met..head that is `commit` rewritten (amended, rebased: the same author
+    time and subject), or ""."""
+    with suppress(ValueError):
+        own = (await checkout_git(checkout, path, "log", "-1", "--format=%at %s", commit)).strip()
+        listed = await checkout_git(
+            checkout, path, "log", "--format=%H %at %s", "-n", "500", f"{met}..{head}"
+        )
+        for line in listed.splitlines():
+            sha, _, rest = line.partition(" ")
+            if own and rest.strip() == own:
+                return sha
     return ""
+
+
+async def parent_of(checkout: dict, path: str, commit: str) -> str:
+    with suppress(ValueError):
+        return (await checkout_git(checkout, path, "rev-parse", f"{commit}^")).strip()
+    return ""
+
+
+async def newer_base(checkout: dict, path: str, head: str, base: str) -> str:
+    """Where a branch starts now: rebased onto a newer default branch, where they meet now
+    (that branch's newer commits are others' work); else `base`. Not when the default branch
+    has the branch's own work in it (merged): then that work is still the branch's."""
+    if not base or checkout.get("shared"):
+        return base
+    with suppress(ValueError):
+        top = (await checkout_git(checkout, path, "rev-parse", "--show-toplevel")).strip()
+        default = await default_branch(Path(top))
+        if not default:
+            return base
+        try:
+            await checkout_git(checkout, path, "merge-base", "--is-ancestor", head, default)
+            return base  # Its work is in the default branch already.
+        except ValueError:
+            pass
+        met = (await checkout_git(checkout, path, "merge-base", default, head)).strip()
+        if met and met != base:
+            await checkout_git(checkout, path, "merge-base", "--is-ancestor", base, met)
+            return met
+    return base
 
 
 class Share:
@@ -981,12 +1071,12 @@ async def tree_share(
     wrote; on a branch, what a merge brought in."""
     top = share.top
     uncommitted = await tree_names(checkout, top, end["commit"], end["tree"])
-    # Not what running it left behind (`__pycache__/`, a `uv.lock` it wrote): new files, or
-    # ones never committed, that only running code makes.
+    # Not what running it left behind (`__pycache__/`, a `uv.lock` it wrote): files never
+    # committed that only running code makes. Committed, they are its work (a PR carries them).
     window = {
         name: status
         for name, status in (await tree_names(checkout, top, start, end["tree"])).items()
-        if (status != "A" and uncommitted.get(name) != "A") or untracked_work([name])
+        if uncommitted.get(name) != "A" or untracked_work([name])
     }
     if scope.gaps:
         # Reopened after other work: what changed only in between is not its own.
@@ -1063,8 +1153,9 @@ async def scope_files(
 ) -> Share:
     """This task's share of a checkout."""
     top = Path((await checkout_git(checkout, path, "rev-parse", "--show-toplevel")).strip())
-    share = Share(await scope_base(checkout, path, head, scope), top)
-    start = scope.start or share.base
+    base, moved = await scope_base(checkout, path, head, scope)
+    share = Share(base, top)
+    start = moved or scope.start or share.base
     end = scope.end or (await snapshot(checkout) if start else None)
     if start and end and end["tree"]:
         with suppress(ValueError):
@@ -1156,6 +1247,14 @@ async def scoped_changes(
                 total["files"] = len(keep)
         elif keep:
             await own_lines(checkout, share, total)
+        if keep:
+            # A file moved is one file changed, as git and GitHub count it (not two).
+            with suppress(ValueError):
+                listed = await checkout_git(
+                    checkout, top, "diff", "-M", "--name-status", share.start, share.end, "--",
+                    *keep,
+                )  # fmt: skip
+                total["files"] -= sum(1 for line in listed.splitlines() if line[:1] == "R")
         total["files"] += len(share.large)
         total["uncommitted"] += len(share.large)
         return total
@@ -1280,7 +1379,9 @@ async def diff(checkout: dict, scope: Scope | None = None) -> dict:
                 )
         for name in share.fresh[:MAX_NEW_FILES]:
             text += await asyncio.to_thread(new_file_diff, share.top, name)
+        large = await asyncio.to_thread(file_sizes, share.top, share.large)
     else:
+        large = []
         base = base_of(checkout) or "HEAD"
         if live:
             text = await checkout_git(checkout, top, *PLAIN_DIFF, base, limit=60)
@@ -1298,7 +1399,20 @@ async def diff(checkout: dict, scope: Scope | None = None) -> dict:
         "branch": checkout.get("branch", ""),
         "diff": text[:MAX_DIFF],
         "truncated": len(text) > MAX_DIFF,
+        # Its new files too large to show (left out of the diff): by name and size.
+        "large": large,
     }
+
+
+def file_sizes(top: Path, names: list[str]) -> list[dict]:
+    """These files by name and size in bytes (0 when it cannot be read)."""
+    found = []
+    for name in names[:MAX_NEW_FILES]:
+        size = 0
+        with suppress(OSError):
+            size = (top / name).stat().st_size
+        found.append({"name": name, "size": size})
+    return found
 
 
 # Ignored folders that are made again by an install or a build: no reason to keep a worktree.
@@ -1532,6 +1646,43 @@ class Workspaces:
         if row["role"] == WORKER and row.get("project"):
             return [{"project": row["project"], "path": row["cwd"], "branch": row["branch"]}]
         return []
+
+    async def own_clones(self, row: dict) -> list[dict]:
+        """Repositories a worker cloned itself into its folder (`git clone` in its shell), not
+        yet among its checkouts: what it does there is counted and shown like a checkout's,
+        not lost as a report's. Not one whose git config would run code."""
+        workspace = self.workspace(row)
+        keys = ("path", "repo", "worktree")
+        paths = [c[key] for c in self.checkouts(row) for key in keys if c.get(key)]
+
+        def unknown() -> list[str]:
+            if not workspace.is_dir():
+                return []
+            known = {os.path.realpath(path) for path in paths}
+            return [
+                repo
+                for repo in find_repositories(workspace, set())
+                if os.path.realpath(repo) not in known
+                and not config_runs_code(str(Path(repo) / ".git"))
+            ]
+
+        made = []
+        for repo in await asyncio.to_thread(unknown):
+            checkout = {"project": "", "repo": repo, "path": repo, "branch": "", "base_ref": "",
+                        "base": "a clone it made itself", "remote": repo}  # fmt: skip
+            with suppress(ValueError):
+                url = await checkout_git(checkout, repo, "remote", "get-url", "origin")
+                checkout["remote"] = url.strip() or repo
+            with suppress(ValueError):
+                branch = await checkout_git(checkout, repo, "rev-parse", "--abbrev-ref", "HEAD")
+                checkout["branch"] = branch.strip().removesuffix("HEAD")
+            for ref in ("origin/HEAD", "origin/main", "origin/master"):
+                with suppress(ValueError):
+                    await checkout_git(checkout, repo, "rev-parse", "--verify", "--quiet", ref)
+                    checkout["base_ref"] = ref
+                    break
+            made.append(checkout)
+        return made
 
     def writable(self, row: dict) -> list[str]:
         if row["role"] != WORKER:

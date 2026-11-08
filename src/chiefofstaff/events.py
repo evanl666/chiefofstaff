@@ -19,7 +19,7 @@ from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecis
 
 from . import prompts, receipts, threads
 from .delivery import digest
-from .envelope import from_owner, tasks_named, wrap
+from .envelope import from_owner, news_tasks, tasks_named, wrap
 from .policy import permission_denial, written_file
 from .roles import ROUTER, SLACK, WORKER
 from .store import now
@@ -349,6 +349,10 @@ class Events:
             # What its turn is about now; steered into a turn on another task, it stays on that.
             delivery = getattr(getattr(event.data, "delivery", None), "value", "")
             self.runtime.took_up(row["id"], named, switch=delivery != "steering")
+        elif row["role"] == WORKER and (named := news_tasks(getattr(event.data, "content", ""))):
+            # News on a thread it follows for a task: its turn is on that task.
+            delivery = getattr(getattr(event.data, "delivery", None), "value", "")
+            self.runtime.took_up(row["id"], named, switch=delivery != "steering", news=True)
         seen = digest(getattr(event.data, "content", "") or "")
         if state.unread:
             # It sees a message now: that one (or, changed on the way, the oldest).
@@ -474,10 +478,14 @@ class Events:
             data, "parent_tool_call_id", None
         )
         if own and row["role"] == ROUTER:
-            context = sum(
-                getattr(data, name, 0) or 0
-                for name in ("input_tokens", "cache_read_tokens", "cache_write_tokens")
+            # How much the conversation holds: Copilot's input count includes what came from
+            # the cache (19,334 with 7,694 read and 11,636 written); a count without it (the
+            # model's own API) is added to it.
+            given = getattr(data, "input_tokens", 0) or 0
+            cached = sum(
+                getattr(data, name, 0) or 0 for name in ("cache_read_tokens", "cache_write_tokens")
             )
+            context = given if given >= cached else given + cached
             self.store.set(f"context:{session_id}", str(context))
         if (
             model

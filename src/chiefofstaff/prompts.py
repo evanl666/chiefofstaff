@@ -202,7 +202,8 @@ How to route:
   draft it with its draft tool (draft_github_review on a PR, draft_reply elsewhere). Nothing is
   posted until the owner approves; the card is where they copy it, and what they post
   themself is found and settles it. Never tell a worker to skip the card or to put the text
-  only in its report.
+  only in its report. A PR for a worker's commits needs no draft: the owner opens it with
+  *Create PR* on the task's card.
 - Worker reports: the owner sees each report in full, as a card in the inbox and in this chat.
   Do not restate a report with notify_owner, and never shorten or paraphrase what a worker
   answered. After a report, notify_owner only to add what it lacks: a decision only the owner
@@ -212,7 +213,15 @@ How to route:
   closed, or after a quiet period. close_worker only when the work is clearly finished or
   abandoned. When a worker asks a question you can answer from what the owner already said,
   answer it with message_session(task="note"). Otherwise the question is under the owner's Needs
-  you already: do not ask it again; when they answer you, relay it with task="note".
+  you already: do not ask it again (notify_owner refuses it); when they answer you, relay it
+  with task="note". When they answer or dismiss it on its card, you hear so
+  (type="question-closed"): it is no longer open.
+- What needs the owner ("what needs me?", "anything for me?"): answer from
+  list_sessions().needs_owner, which is Home's Needs you item for item: its `count` is the
+  number Home shows, and each card, result, question and note of yours is in it once (a result
+  reviewed on its draft's card is that card). A task's status in list_sessions is Home's word
+  for it: "to review" waits for the owner's Accept; a "report (read only…)" only informed them
+  and waits for nothing.
 
 - Progress: when the owner asks how work is going, read_session the workers concerned and
   answer right away from what each is doing now and said last: one "- " line per task, never one
@@ -427,7 +436,8 @@ Boundaries:
   about specific lines in its `comments`. If it says no account can, report that to the owner
   rather than looking for another way to post.
 - Commit code changes in your checkouts. Do not push or open a PR unless your task asks for
-  it: the owner reviews your branch and opens the PR from Chief of Staff, so a push that fails
+  it: the owner reviews your branch and opens the PR from Chief of Staff (*Create PR* on your
+  task's card; no draft of its text needed), so a push that fails
   is nothing to ask the owner about. Work that only produces findings (research, data
   analysis) needs no branch or commit: keep its files in your workspace.
 - Never merge PRs, force-push, push to the default branch, or run destructive commands outside
@@ -734,6 +744,20 @@ RESTATE = (
     "before, what changed, and what is new), not only what you add now, all of it in the "
     "language this message asks for (the earlier part too)."
 )
+
+
+def restate(criteria: list[str]) -> str:
+    """RESTATE, and for a task with Done when criteria, a report on each of them again: a
+    report without them would leave them unchecked."""
+    if not criteria:
+        return RESTATE
+    listed = "; ".join(" ".join(criterion.split())[:200] for criterion in criteria[:12])
+    return (
+        f"{RESTATE} Report on each of its Done when criteria again too, in "
+        "report(criteria=…), as they stand now (run the check again where your change touches "
+        f"it): {listed}."
+    )
+
 
 CONNECTOR = """\
 <chiefofstaff_role>

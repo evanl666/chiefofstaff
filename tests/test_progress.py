@@ -944,7 +944,7 @@ async def test_reviews_a_company_pr_with_inline_comments(harness):
             "start_side": "RIGHT",
         },
     ]
-    told = harness.store.messages(worker)[-1]["text"]
+    told = harness.store.messages(worker)[-1]["meta"]["prompt"]
     assert "data/huge.sql:1: left out (not posted)" in told
     assert "model/train.py:12: posted as the owner rewrote it: Please add a test" in told
     # Bug bash 4 (X13): only the summary was learned from, and as the owner's own words though
@@ -1572,6 +1572,45 @@ async def test_answers_follow_the_language_the_owner_just_wrote_in(harness):
     assert 'reply_in="English"' in report
 
 
+async def test_a_follow_up_or_redo_in_another_language_is_answered_in_it(harness):
+    runtime = await harness.connect()
+    worker = await spawn(
+        runtime, harness.router_id, "\u6570\u4e00\u4e0b\u6709\u51e0\u4e2a\u6587\u4ef6"
+    )
+    session = harness.session(worker)
+    await call_tool(runtime, "report", worker, status="done",
+                    summary="\u4e00\u5171\u6709\u4e09\u4e2a\u6587\u4ef6\u3002")  # fmt: skip
+    session.emit("session.idle")
+    await settle(runtime)
+    task = task_of(harness, worker)
+    await runtime.task_actions.follow_up(task, "Yes: also count the hidden ones please.")
+    assert 'reply_in="English"' in session.sent[-1]
+    assert "answer in English, not Chinese" in session.sent[-1], "said outright: it switched"
+    await call_tool(
+        runtime,
+        "report",
+        worker,
+        status="done",
+        summary="There are four files in total, and one of them is hidden.",
+    )
+    session.emit("session.idle")
+    await settle(runtime)
+    # A draft done again with the owner's words in Chinese, after an English conversation.
+    await call_tool(runtime, "draft_reply", worker, text="Four files.", to="Carol", where="email")
+    [draft] = [d for d in harness.store.drafts() if d["kind"] == "reply"]
+    await runtime.drafts.resolve(
+        draft["id"],
+        DraftDecision(
+            action="revise", reason="\u8bf4\u660e\u4e00\u4e0b\u54ea\u4e2a\u662f\u9690\u85cf\u7684"
+        ),
+    )
+    told = [p for p in session.sent if "done again" in p][-1]
+    assert 'reply_in="Chinese"' in told and "answer in Chinese, not English" in told
+    [held] = [m for m in harness.store.messages(harness.router_id)
+              if "asked for it again" in m["text"]]  # fmt: skip
+    assert "do not relay it" in held["meta"]["prompt"], "its session redrafts it already"
+
+
 async def test_a_new_task_answered_without_a_report_is_filed_not_left_running(harness):
     runtime = await harness.connect()
     worker = await spawn(runtime, harness.router_id, "Analyze sales.csv")
@@ -1625,7 +1664,10 @@ async def test_a_task_reopened_after_its_message_is_still_reported(harness):
     assert runtime.tasks.get(task["id"])["status"] == "review"
 
 
-async def test_a_follow_up_on_a_task_card_sets_the_owners_language(harness):
+async def test_a_follow_up_on_a_task_card_is_answered_in_its_language_only(harness):
+    """Bug bash 5 (W11): one Chinese follow-up to one worker set the owner's language for
+    everything, so new tasks for English requests reported in Chinese. It is that worker's
+    answer that comes in Chinese; the Router and new tasks keep the owner's language with it."""
     runtime = await harness.connect()
     await runtime.owner_send(harness.router_id, "Count the files in the project please")
     worker = await spawn(runtime, harness.router_id, "Count files")
@@ -1633,7 +1675,7 @@ async def test_a_follow_up_on_a_task_card_sets_the_owners_language(harness):
     await call_tool(runtime, "report", worker, status="done", summary="3 files.")
     await runtime.task_actions.follow_up(task["id"], "再把每个文件的行数也列出来")
     assert 'reply_in="Chinese"' in harness.session(worker).sent[-1]
-    assert harness.store.get("owner_language") == "Chinese", "what the Router tells them next"
+    assert harness.store.get("owner_language") == "English", "as they write to the Router"
 
 
 async def test_answering_a_task_that_needs_you_takes_it_out_of_needs_you(harness):
@@ -1817,7 +1859,7 @@ async def test_a_draft_the_owner_posted_themself_is_settled(harness):
     told = harness.store.messages(worker)[-1]
     assert told["meta"]["deferred"], "with its next message: no turn of its own"
     assert '<message from="system" type="draft-outcome"' in told["meta"]["prompt"]
-    assert "Do not ask about sending it again" in told["text"]
+    assert "Do not ask about sending it again" in told["meta"]["prompt"]
 
 
 async def test_a_sent_draft_settles_the_task_it_was_drafted_for(harness):
@@ -1909,7 +1951,8 @@ async def test_a_reply_to_copy_the_owner_posted_on_the_pr_is_settled(harness):
     await runtime.drafts.check_posted_by_owner(every=0)
     settled = harness.store.draft(draft["id"])
     assert settled["status"] == "sent" and settled["outcome"].endswith("u9")
-    told = [m["text"] for m in harness.store.messages(worker) if "posted draft" in m["text"]]
+    told = [m["meta"].get("prompt", "") for m in harness.store.messages(worker)
+            if "posted draft" in m["meta"].get("prompt", "")]  # fmt: skip
     assert told and "u9" in told[-1], "its worker is told"
 
 
@@ -2715,6 +2758,11 @@ async def test_a_note_about_a_finished_task_does_not_move_its_worker_off_the_one
                     task_id=spec["id"], text="FYI: the spec was delivered already.")  # fmt: skip
     note = harness.store.messages(worker)[-1]["meta"]["prompt"]
     assert 'type="note"' in note and spec["id"] in note
+    told = [m["text"] for m in harness.store.messages(harness.router_id) if m["kind"] == "notice"]
+    assert told[-1] == (
+        "Told the worker of “Test the AI interviewer end to end” about "
+        "“Write the AI interviewer spec”"
+    ), "names the task the note is about, not only the one the worker is on"
     session.emit("user.message", content=note)
     await settle(runtime)
     assert runtime.turn_task(worker) == e2e["id"], "a note does not change what it works on"

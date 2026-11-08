@@ -703,9 +703,27 @@ async def s23_diffs(app: App, project: Path):
     log("S23 passed")
 
 
+def to_accept(task: dict) -> bool:
+    """A result Home lists under Needs you to review (board.js needsAcceptance), not a report
+    that only informed the owner."""
+    if task.get("review_required"):
+        return True
+    receipts = task.get("receipts") or {}
+    changed = receipts.get("changed") or {}
+    if changed.get("files") or changed.get("commits") or changed.get("uncommitted"):
+        return True
+    if any(pr.get("own") and pr.get("state") not in {"MERGED", "CLOSED"}
+           for pr in receipts.get("prs") or []):  # fmt: skip
+        return True
+    if receipts.get("criteria") and receipts.get("verdict") != "verified":
+        return True
+    return bool(receipts.get("flags"))
+
+
 async def s24_what_waits(app: App):
     state = await app.get("/api/state")
-    waiting = [t["title"] for t in state["tasks"] if t["status"] == "review"]
+    # What Home shows as waiting for review (read-only reports are not: the Router says so).
+    waiting = [t["title"] for t in state["tasks"] if t["status"] == "review" and to_accept(t)]
     router, mark = await say(app, "Which of my tasks are waiting for my review? Just the titles.")
     said = await router_said(app, router, mark)
     log(f"S24: {len(waiting)} in review; the Router: {said[:300]!r}")

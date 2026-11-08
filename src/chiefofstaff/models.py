@@ -4,7 +4,14 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypeVar, cast, get_origin
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 Repository = Annotated[str, Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")]
 Role = Literal["router", "worker", "slack", "watchdog"]
@@ -143,6 +150,8 @@ PluginSource = Annotated[
 ]
 McpName = Annotated[str, Field(pattern=r"^[A-Za-z0-9_-]{1,40}$")]
 HourRange = Annotated[str, Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$")]
+# Validating settings as they were saved (by this version or an earlier one): see mcp_off.
+AS_SAVED = {"mcp_saved": True}
 
 
 def mcp_problem(config: object) -> str:
@@ -150,8 +159,27 @@ def mcp_problem(config: object) -> str:
     the session, then gives up on every message to it, with no error the session sees."""
     if not isinstance(config, dict):
         return 'write an object such as {"command": "…"} or {"url": "…"}.'
-    if not (isinstance(config.get("command"), str) or isinstance(config.get("url"), str)):
+
+    def filled(key: str) -> bool:
+        return isinstance(config.get(key), str) and bool(config[key].strip())
+
+    def lacking(key: str) -> str:
+        return "empty" if key in config else "missing"
+
+    kinds = ("local", "stdio", "http", "sse")
+    kind = config.get("type")
+    if "type" in config and kind not in kinds:
+        return "type must be local, stdio, http or sse."
+    # A local server runs a command; a remote one (http when no type is given) has a url.
+    if kind is None and not filled("command") and not filled("url"):
         return "give a command (local) or a url (remote)."
+    if kind in ("http", "sse") or (kind is None and not filled("command")):
+        if not filled("url"):
+            return f'url is {lacking("url")}: type "{kind}" needs one (https://…).'
+        if not re.fullmatch(r"https?://[^\s/?#]+\S*", config["url"].strip(), re.IGNORECASE):
+            return "url must be an http:// or https:// address."
+    elif not filled("command"):
+        return f'command is {lacking("command")}: type "{kind}" needs the program to run.'
 
     def texts(value: object) -> bool:
         return isinstance(value, list) and all(isinstance(item, str) for item in value)
@@ -160,10 +188,6 @@ def mcp_problem(config: object) -> str:
         return isinstance(value, dict) and all(isinstance(item, str) for item in value.values())
 
     checks = {
-        "type": (
-            lambda value: value in {"local", "stdio", "http", "sse"},
-            "local, stdio, http or sse",
-        ),
         "tools": (texts, 'a list of tool names in quotes (["*"] for all)'),
         "args": (texts, "a list of strings"),
         "env": (table, "an object of strings"),
@@ -247,6 +271,9 @@ class Settings(StrictModel):
     skill_folders: list[str] = Field(default_factory=list, max_length=20)
     plugins: list[PluginSource] = Field(default_factory=list, max_length=20)
     mcp_servers: dict[McpName, dict[str, Any]] = Field(default_factory=dict, max_length=10)
+    # Saved MCP servers Copilot would refuse (an earlier version's looser checks took them): kept
+    # as written, for the owner to fix in Settings; workers do not get them (see mcp_off).
+    mcp_servers_off: dict[McpName, dict[str, Any]] = Field(default_factory=dict, max_length=10)
     # Watches run in work hours every watch_minutes, otherwise every watch_after_hours_minutes
     # (0: not after hours), in the machine's time zone.
     watches: list[Watch] = Field(default_factory=list, max_length=10)
@@ -258,6 +285,30 @@ class Settings(StrictModel):
     away_notify: bool = False
     away_minutes: int = Field(default=10, ge=1, le=240)
     away_how: str = Field(default="", max_length=500)
+
+    @model_validator(mode="before")
+    @classmethod
+    def mcp_off(cls, data: Any, info: ValidationInfo) -> Any:
+        """Settings as saved (context `mcp_saved`: True, or the servers saved now by name): a
+        saved MCP server Copilot would refuse is kept off, not refused, so loading or saving
+        another setting never loses it (nor the others); one the owner adds or changes is
+        checked (mcp_config). A server in mcp_servers replaces its copy that was off."""
+        saved = (info.context or {}).get("mcp_saved")
+        if saved is None or not isinstance(data, dict):
+            return data
+        servers, off = data.get("mcp_servers") or {}, data.get("mcp_servers_off") or {}
+        if not isinstance(servers, dict) or not isinstance(off, dict):
+            return data
+        servers, off = dict(servers), dict(off)
+        for name, config in list(servers.items()):
+            if mcp_problem(config) and (saved is True or saved.get(name) == config):
+                off[name] = servers.pop(name)
+        for name, config in list(off.items()):
+            if name in servers:
+                del off[name]
+            elif not mcp_problem(config):
+                servers[name] = off.pop(name)
+        return {**data, "mcp_servers": servers, "mcp_servers_off": off}
 
     @field_validator("mcp_servers")
     @classmethod

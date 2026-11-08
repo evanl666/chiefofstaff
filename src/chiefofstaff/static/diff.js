@@ -6,6 +6,34 @@ import { plural } from "./text.js";
 const OPEN_LINES = 400; // Larger files start folded.
 const MAX_LINES = 5000; // Shown per file.
 
+// A path as git wrote it: one with a `"`, a `\` or a control character comes quoted, with C-style
+// escapes (octal bytes for UTF-8: "\303\274" is "ü"), as workspaces.git_path reads it.
+const GIT_ESCAPES = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13 };
+export function gitPath(name) {
+  if (name.length < 2 || !name.startsWith('"') || !name.endsWith('"')) return name;
+  const encoder = new window.TextEncoder();
+  const body = name.slice(1, -1);
+  const bytes = [];
+  let at = 0;
+  for (const match of body.matchAll(/\\([0-7]{3}|.)/gsu)) {
+    bytes.push(...encoder.encode(body.slice(at, match.index)));
+    const code = match[1];
+    if (code.length === 3) bytes.push(parseInt(code, 8));
+    else if (code in GIT_ESCAPES) bytes.push(GIT_ESCAPES[code]);
+    else bytes.push(...encoder.encode(code));
+    at = match.index + match[0].length;
+  }
+  bytes.push(...encoder.encode(body.slice(at)));
+  return new window.TextDecoder().decode(new Uint8Array(bytes));
+}
+// The new name on a "diff --git a/… b/…" line, each side quoted or not.
+const QUOTED = String.raw`"(?:[^"\\]|\\.)*"`;
+const GIT_NAMES = new RegExp(String.raw`^diff --git (${QUOTED}|a/.*) (${QUOTED}|b/.*)$`);
+function newName(line) {
+  const names = GIT_NAMES.exec(line);
+  return names ? gitPath(names[2]).replace(/^b\//, "") : line.slice(11);
+}
+
 export function parseDiff(text) {
   const files = [];
   let file = null;
@@ -13,8 +41,7 @@ export function parseDiff(text) {
   let newLine = 0;
   for (const line of text.split("\n")) {
     if (line.startsWith("diff --git ")) {
-      const names = /^diff --git a\/(.*) b\/(.*)$/.exec(line);
-      file = { name: names ? names[2] : line.slice(11), lines: [], added: 0, removed: 0, note: "" };
+      file = { name: newName(line), lines: [], added: 0, removed: 0, note: "" };
       files.push(file);
     } else if (!file) {
       continue;
@@ -26,10 +53,10 @@ export function parseDiff(text) {
       file.lines.push({ kind: "hunk", text: line });
     } else if (!file.lines.length) {
       // The file's header, before its first hunk.
-      if (line.startsWith("+++ b/")) file.name = line.slice(6);
+      if (line.startsWith("+++ ") && gitPath(line.slice(4)).startsWith("b/")) file.name = gitPath(line.slice(4)).slice(2);
       else if (line.startsWith("Binary files")) file.note = "Binary file changed";
       else if (line.startsWith("deleted file")) file.note = "Deleted";
-      else if (line.startsWith("rename from ")) file.note = `Renamed from ${line.slice(12)}`;
+      else if (line.startsWith("rename from ")) file.note = `Renamed from ${gitPath(line.slice(12))}`;
     } else if (line.startsWith("+")) {
       file.lines.push({ kind: "add", text: line.slice(1), line: newLine++ });
       file.added++;
@@ -51,6 +78,23 @@ export function reviewText(comments) {
     return `- ${where}${code ? ` \`${code}\`` : ""}: ${comment.body}`;
   });
   return `Review comments on your changes:\n\n${items.join("\n")}`;
+}
+
+// A new file too large to show in the diff: its name, that it is new, and its size.
+export const largeWords = (file) => `New file, ${sizeText(file.size)}, not shown`;
+function sizeText(bytes) {
+  if (!bytes) return "too large";
+  const units = ["bytes", "KB", "MB", "GB"];
+  let size = bytes;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit++;
+  }
+  return `${unit ? Math.round(size * 10) / 10 : size} ${units[unit]}`;
+}
+function largeFile(file) {
+  return el("div", { class: "diff-file large-file" }, el("div", { class: "summary" }, el("span", { class: "name", text: file.name }), el("span", { class: "muted", text: largeWords(file) })));
 }
 
 export function showChanges(task, onSent) {
@@ -172,9 +216,11 @@ export function showChanges(task, onSent) {
       const parts = [];
       for (const checkout of checkouts) {
         const files = parseDiff(checkout.diff);
-        if (!files.length) continue;
+        // New files too large to show: said, not left out.
+        const large = checkout.large || [];
+        if (!files.length && !large.length) continue;
         if (checkouts.length > 1) parts.push(el("h3", { text: checkout.branch ? `${checkout.name} · ${checkout.branch}` : checkout.name }));
-        parts.push(...files.map(fileView));
+        parts.push(...files.map(fileView), ...large.map(largeFile));
         if (checkout.truncated) parts.push(el("p", { class: "muted", text: "The diff is too large to show in full." }));
       }
       body.replaceChildren(...(parts.length ? parts : [el("p", { class: "muted", text: "No changes." })]));
