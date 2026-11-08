@@ -348,7 +348,11 @@ def create_app(
     @app.post("/api/artifacts/hide")
     async def hide_artifact(payload: ArtifactHide):
         """Off the owner's Artifacts list (or back on it): the task keeps it."""
-        return {"hidden": runtime.hide_artifact(payload.key, payload.hidden)}
+        return {
+            "hidden": runtime.hide_artifact(
+                payload.key, payload.hidden, payload.tone, also=payload.also
+            )
+        }
 
     @app.post("/api/sessions/{session_id}/unfollow")
     async def unfollow_session_thread(session_id: str, payload: TaskNote):

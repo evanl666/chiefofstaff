@@ -55,7 +55,16 @@ from .decisions import Decisions
 from .delivery import Delivery
 from .digest import digest
 from .drafts import Drafts
-from .envelope import UNTRUSTED, clean_title, language, sender, short, task_named, wrap
+from .envelope import (
+    UNTRUSTED,
+    clean_title,
+    language,
+    sender,
+    short,
+    task_named,
+    tasks_named,
+    wrap,
+)
 from .events import ROUTER_CONTEXT, Events
 from .focus import Focus
 from .habits import Habits
@@ -1211,6 +1220,12 @@ class Runtime:
             "You take over as the owner's Router from an earlier Router session whose context "
             "had grown long. This is what it knew; list_sessions has the current details."
         ]
+        if spoken := self.store.get("owner_language"):
+            # Without the conversation that set it, a fresh session would answer in English.
+            lines.append(
+                f"The owner writes in {spoken}: write everything for them in {spoken}, also "
+                "short remarks after a report."
+            )
         sessions = [row for row in self.store.open_sessions() if row["role"] != ROUTER]
         lines.append("\nOpen sessions:" if sessions else "\nOpen sessions: none.")
         for row in sessions:
@@ -1351,6 +1366,11 @@ class Runtime:
             # Messages it never received go out as they are, with the note; only the rest
             # are quoted.
             unhandled = [message["meta"]["prompt"] for message in since if message["id"] <= sent]
+            # Quoted, their tasks are taken up (their instructions show only as quotes).
+            if row["role"] == WORKER and (
+                named := [task for prompt in unhandled for task in tasks_named(prompt)]
+            ):
+                self.took_up(row["id"], named, switch=False)
             if any(message["kind"] == "owner" for message in since):
                 self.states[row["id"]].owner_turn = True
             note = "Chief of Staff restarted while you were working. Continue where you left off."
@@ -1424,9 +1444,19 @@ class Runtime:
         self.add_message(row["id"], "error", message)
         self.update_session(row["id"], status="failed", activity="")
         self.delivery.defer_pending(row["id"])  # Not a turn by itself after a restart.
+        task = self.tasks.find(self.working_on(row["id"]) or "") if row["role"] == WORKER else None
         self.task_actions.fail(row["id"], message)
         if row["role"] == WORKER:
             self.background(self.workers.pump())  # Its slot is free for a queued worker.
+            if not self.special(row):
+                # As when Copilot fails a turn: the Router and the owner hear of it.
+                self.background(self.tell_router(row, "failed", message, task))
+                self.alert(
+                    f"“{self.display_title(row)}” failed: {message[:160]}",
+                    session_id=row["id"],
+                    needs_action=True,
+                    title="Failed",
+                )
 
     @property
     def attachments_dir(self) -> Path:
@@ -1480,17 +1510,19 @@ class Runtime:
         tell_router: bool = True,
         attachments: Sequence[Attachment] = (),
         clear_questions: bool = True,
+        from_home: bool = False,
     ) -> dict:
         """`learn`: the owner typed it (not a message the app sends for them). A message to a
         worker is also noted for the Router (`tell_router`), which must know what the owner
-        asked for."""
+        asked for. `from_home`: written on Home (@ a worker), where its answer is shown too."""
         row = self.store.session(session_id)
         if row["closed_at"] and row["role"] == WORKER:
             await self.workers.reopen(session_id)
+        # The task this is about: the one whose question it answers, else the one it is on.
+        about = self.chat_task(session_id) if row["role"] == WORKER else None
         if row["role"] == WORKER and clear_questions:
-            # The owner answers what it asked on the task it is on (others' questions stay).
-            current = self.tasks.current(session_id)
-            self.asks.answered(session_id, current["id"] if current else "")
+            # The owner answers what it asked on that task (others' questions stay).
+            self.asks.answered(session_id, about["id"] if about else "")
             self.asks.answered(session_id, "")
         # Answers come in the language of this message, whatever the conversation used before.
         spoken = self.heard(text) if learn else language(text)
@@ -1518,13 +1550,15 @@ class Runtime:
             notes += [self.projects_note(), self.toolset.related_hint(text)]
         context = [wrap("system", "context", note) for note in notes if note]
         prompt = "\n\n".join([prompt, *context])
-        task = self.tasks.current(session_id) if row["role"] == WORKER else None
+        task = about
         if task:
             # What its turn is about now; a chat with it, not a task card's follow-up.
             meta |= {"task_id": task["id"], "chat": True}
+        if from_home:
+            meta["home"] = True  # Asked on Home: its answer is shown there too.
         if task and task["status"] in {"review", "done", "failed", "cancelled"}:
-            # A question changes nothing, but new work it reports comes back for review.
-            self.store.set(f"followup:{task['id']}", "1")
+            # A question about finished work changes nothing: what it reports is news on it.
+            self.store.set(f"followup:{task['id']}", "chat")
         message = await self.delivery.deliver(
             session_id,
             prompt,
@@ -1586,7 +1620,7 @@ class Runtime:
         row = self.store.session(worker_id)
         if row["role"] != WORKER:
             raise ValueError("Address a worker.")
-        message = await self.owner_send(row["id"], text, attachments=attachments)
+        message = await self.owner_send(row["id"], text, attachments=attachments, from_home=True)
         note = self.busy_note(row["id"])
         if note:  # Where the owner is: Chat or the inbox.
             self.add_message(router_id, "notice", note, {"session_id": row["id"]})
@@ -1602,7 +1636,7 @@ class Runtime:
                 text,
                 {
                     "to": row["id"],
-                    "to_title": row["title"],
+                    "to_title": self.display_title(row),
                     # Not a turn of its own: it goes with the Router's next message.
                     "prompt": wrap(
                         "system",
@@ -1962,26 +1996,58 @@ class Runtime:
         )
         return next((named for row in rows if (named := task_named(row["prompt"]))), "")
 
-    def hidden_artifacts(self) -> list[str]:
-        return json.loads(self.store.get("artifacts_hidden") or "[]")
+    def hidden_artifacts(self) -> list[dict]:
+        """What the owner took off their Artifacts list, each with how it stood then (one
+        that fails since comes back)."""
+        found = json.loads(self.store.get("artifacts_hidden") or "[]")
+        return [item if isinstance(item, dict) else {"key": item, "tone": ""} for item in found]
 
-    def hide_artifact(self, key: str, hidden: bool = True) -> list[str]:
-        """The owner's Artifacts list without (or again with) this one: a PR's key or a link."""
-        key = key.strip()[:600]
+    def hide_artifact(
+        self, key: str, hidden: bool = True, tone: str = "", also: Sequence[str] = ()
+    ) -> list[dict]:
+        """The owner's Artifacts list without (or again with) this one: a PR's key or a link.
+        `also`: the keys an earlier version gave the same one, replaced by this."""
+        key = key.strip()
         if not key:
             raise ValueError("Which artifact?")
-        found = [item for item in self.hidden_artifacts() if item != key]
+        gone = {key, *(old.strip() for old in also)}
+        found = [item for item in self.hidden_artifacts() if item["key"] not in gone]
         if hidden:
-            found = [*found, key][-500:]
+            found = [*found, {"key": key, "tone": tone[:20]}][-500:]
         self.store.set("artifacts_hidden", json.dumps(found))
         self.publish_state()
         return found
 
-    def took_up(self, session_id: str, tasks: list[str]):
+    def chat_task(self, session_id: str) -> dict | None:
+        """The task the owner's chat with a worker is about: the one with its question to the
+        owner (the newest asked), else the one it is on, else the one given last."""
+        asking = [q for q in self.asks.session_questions(session_id) if q.get("task_id")]
+        for question in reversed(asking):
+            task = self.tasks.find(question["task_id"])
+            if task and task["session_id"] == session_id and task["status"] in OPEN:
+                return task
+        waiting = [t for t in self.tasks.for_session(session_id) if t["status"] == "waiting"]
+        if waiting:
+            return waiting[-1]
+        if on := self.working_on(session_id):
+            return self.tasks.find(on)
+        return self.tasks.current(session_id)
+
+    def took_up(self, session_id: str, tasks: list[str], switch: bool = True):
         """Its conversation shows instructions on these tasks: its turn is on the last; each has
-        been taken up (one given while it was on another waited its turn until now)."""
+        been taken up (one given while it was on another waited its turn until now).
+        `switch=False`: taken up, but its turn stays on the task it is on (a message about
+        another task steered into its turn: an answer it asked for, say)."""
+        fresh = [task_id for task_id in tasks if not self.store.get(f"started:{task_id}")]
         for task_id in tasks:
             self.store.set(f"started:{task_id}", "1")
+        if fresh:
+            # Where its checkouts are now: what comes after is this task's (see Scope).
+            self.background(self.task_actions.record_base(session_id, fresh, time.time()))
+        if not switch:
+            on = self.tasks.find(self.turn_task(session_id))
+            if on and on["session_id"] == session_id and on["status"] in OPEN_WORK:
+                return
         self.store.set(f"turntask:{session_id}", tasks[-1])
 
     def working_on(self, session_id: str) -> str:
@@ -2040,17 +2106,17 @@ class Runtime:
             self.store.set(key, title)
 
     def display_title(self, row: dict) -> str:
-        """A worker by what it is on: its current task while that is open, else its newest open
-        task, else its newest task; the title it was started with when it has none. The same
-        name everywhere: sidebar, Home, notices and away messages."""
+        """A worker by what it is on: the task it works on now (see working_on), else its newest
+        open task, else its newest task; the title it was started with when it has none. The
+        same name everywhere: sidebar, Home, notices and away messages."""
         if row["role"] != WORKER:
             return row["title"]
         tasks = self.tasks.for_session(row["id"])
         if not tasks:
             return row["title"]
-        current = self.tasks.current(row["id"])
-        if current and current["status"] in OPEN:
-            return current["title"]
+        # The task it works on now (not one given last that waits its turn).
+        if (on := self.working_on(row["id"])) and (task := self.tasks.find(on)):
+            return task["title"]
         if open_ := [task for task in tasks if task["status"] in OPEN]:
             return open_[-1]["title"]
         return tasks[-1]["title"]

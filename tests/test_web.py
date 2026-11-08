@@ -241,9 +241,16 @@ def test_the_owner_attaches_an_image_and_the_router_hands_it_on(app_client):
 def test_an_artifact_is_taken_off_the_list_and_brought_back(app_client):
     sign_in(app_client)
     key = "https://flyte.example.com/console/projects/p/domains/d/executions/abc123"
-    taken = app_client.post("/api/artifacts/hide", json={"key": key}, headers=ORIGIN)
-    assert taken.status_code == 200 and taken.json()["hidden"] == [key]
-    assert app_client.get("/api/state").json()["artifacts_hidden"] == [key]
+    taken = app_client.post(
+        "/api/artifacts/hide", json={"key": key, "tone": "active"}, headers=ORIGIN
+    )
+    assert taken.status_code == 200 and taken.json()["hidden"] == [{"key": key, "tone": "active"}]
+    assert app_client.get("/api/state").json()["artifacts_hidden"] == [
+        {"key": key, "tone": "active"}
+    ]
+    long = "https://dash.example.com/" + "x" * 1500
+    assert app_client.post("/api/artifacts/hide", json={"key": long}, headers=ORIGIN).is_success
+    app_client.post("/api/artifacts/hide", json={"key": long, "hidden": False}, headers=ORIGIN)
     back = app_client.post(
         "/api/artifacts/hide", json={"key": key, "hidden": False}, headers=ORIGIN
     )

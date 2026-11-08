@@ -464,12 +464,14 @@ class Connector:
 
     def view(self) -> dict:
         settings = self.store.settings()
-        last = float(self.store.get("watch_scanned_at") or 0)
         row = self.runtime.toolset.last_special(SPECIAL)
+        finished = json.loads(self.store.get("watch_last") or "{}")
         return {
             "every": self.interval(),
-            "scanned_at": datetime.fromtimestamp(last).astimezone().isoformat() if last else "",
-            "last": json.loads(self.store.get("watch_last") or "{}"),
+            # When the last scan finished (its report), not when one started: "scanned just
+            # now" is about what it found.
+            "scanned_at": finished.get("at", ""),
+            "last": finished,
             "scanning": self.busy(),
             "session_id": row["id"] if row else "",
             "away": {

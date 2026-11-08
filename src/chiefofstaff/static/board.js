@@ -17,6 +17,7 @@ export const SECTION_DOT = { needs: "waiting", running: "working", monitoring: "
 // Markers, in words: what kind of "needs you", "monitoring" or "finished" it is.
 export const MARKERS = {
   blocked: "Blocked",
+  stopped: "Stopped",
   question: "Question",
   failed: "Failed",
   review: "To review",
@@ -75,6 +76,7 @@ export function taskPhase(task, worker, { active = "", activeTitle = "", now = D
   const watching = task.watching || [];
   const checkBack = task.check_back;
   if (task.blocked) return at("needs", "blocked", "It waits for a task that ended without finishing");
+  if (task.status === "waiting" && task.stopped) return at("needs", "stopped", `Stopped by ${task.stopped}: tell it to go on, or cancel it`);
   if (task.status === "waiting") return at("needs", "question", "It waits for your answer");
   if (task.status === "failed") return at("needs", "failed", "");
   if (task.status === "cancelled") return at("finished", "cancelled");

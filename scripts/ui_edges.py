@@ -74,6 +74,16 @@ OVERFLOWS = """root => [root, ...root.querySelectorAll("*")].filter((node) => {
 }).map((node) => `${node.className || node.tagName}: ${node.scrollWidth}/${node.clientWidth}`)"""
 
 
+def take_up(runtime, session_id: str, title: str):
+    """A worker at work sees a task sent meanwhile (after its turn) and takes it up."""
+    task = next(t for t in runtime.tasks.for_session(session_id) if t["title"] == title)
+    runtime.states.handle(session_id).emit(
+        "user.message",
+        content=f'<message from="router" type="task" task="{task["id"]}">\n{title}\n</message>',
+    )
+    return task
+
+
 def review(repo: str, comments: list[dict]) -> dict:
     target = {"repo": repo, "number": 7, "url": f"https://github.com/{repo}/pull/7",
               "via": "task", "head_sha": "c0ffee", "verdict": "comment",
@@ -705,6 +715,7 @@ async def round_two(runtime, browser, failures: list[str]):
                              text="Also fix the review comments", task="new",
                              title="Fix review comments on lms", earlier="keep")  # fmt: skip
     assert second.result_type == "success", second.text_result_for_llm
+    take_up(runtime, first, "Fix review comments on lms")  # Seen once its turn is over.
     quiet = await start("Buyer Group Graph 7-pager")
     await settle(runtime)
     runtime.update_session(quiet, status="idle", activity="")  # Between turns, its task on.
@@ -865,6 +876,7 @@ async def round_three(runtime, browser, failures: list[str]):
     busy = await start("Research the Slack bot")
     await call_tool(runtime, "message_session", router, session_id=busy, task="new",
                     title="CoS bug bash", text="Now the bug bash", earlier="keep")  # fmt: skip
+    take_up(runtime, busy, "CoS bug bash")
     long = ("**Status:** fixed `B16`; see [the doc](https://docs.google.com/document/d/abc) and "
             "https://github.com/acme/app/pull/592 — " + "more words here " * 120)  # fmt: skip
     for task in runtime.tasks.for_session(busy):
@@ -1070,6 +1082,7 @@ async def round_four(runtime, browser, failures: list[str]):
         result = await call_tool(runtime, "message_session", router, session_id=worker,
                                  task="new", title=title, text=title, earlier="keep")  # fmt: skip
         assert result.result_type == "success", result.text_result_for_llm
+        take_up(runtime, worker, title)
         await settle(runtime)
         return next(t for t in runtime.tasks.for_session(worker) if t["title"] == title)
 
@@ -1174,7 +1187,7 @@ async def round_four(runtime, browser, failures: list[str]):
     await expect(review.locator(".head .meta")).to_contain_text("To review")
     await expect(review.locator(".receipt.pr .pr-state")).to_have_text(" · ✓ CI")
     await expect(review.locator(".receipt.changes")).to_have_text("+40 −12 in 3 files")
-    main = review.locator(".chips > .receipts > .receipt.artifact")
+    main = review.locator(".chips > .receipts > .receipt.link-chip")
     await expect(main).to_have_text(["Flyte · abc123"])
     folded = review.locator(".chips .more-links")
     await expect(folded.locator("summary")).to_have_text("More links: 2 for diagnosis")
@@ -1308,7 +1321,10 @@ async def round_four(runtime, browser, failures: list[str]):
     await run_row.get_by_role("button", name="Take Weekly embeddings run off this list").click()
     await expect(rows).to_have_count(before - 1)
     await expect(page.locator(".toast", has_text="Taken off Artifacts")).to_be_visible()
-    assert json.loads(store.get("artifacts_hidden")) == [weekly_run]
+    # Kept with how it stood: should it go wrong later, it comes back on its own.
+    assert json.loads(store.get("artifacts_hidden")) == [
+        {"key": weekly_run.removeprefix("https://"), "tone": "active"}
+    ], store.get("artifacts_hidden")
     await made.get_by_role("button", name="Show 1 taken off").click()
     await expect(run_row).to_have_class(re.compile(r"\bhidden-artifact\b"))
     await run_row.get_by_role("button", name="Bring back").click()
@@ -1363,6 +1379,124 @@ async def round_four(runtime, browser, failures: list[str]):
     log(f"recently finished: newest first across workers, 30 of {total}, then more")
 
     assert not errors, errors
+    await context.close()
+
+
+async def round_five(runtime, browser, failures: list[str]):
+    """The bug bash's fixes in the browser: a stopped task waits for the owner to say go on; a
+    worker's answer to the owner's @ on Home is on Home; View on a notice opens that task, not
+    its worker's first; two Google docs are told apart; a table's long cell stays in its box;
+    Recently finished is open; Artifacts' kinds line up."""
+    store = runtime.store
+    router = store.get("router_id")
+
+    async def start(title):
+        result = await call_tool(runtime, "spawn_worker", router, title=title,
+                                 instructions=title, why_new="test")  # fmt: skip
+        assert result.result_type == "success", result.text_result_for_llm
+        await settle(runtime)
+        return json.loads(result.text_result_for_llm)["session_id"]
+
+    stopper = await start("Measure the cache hit rate")
+    stopped_task = runtime.tasks.current(stopper)
+    runtime.update_session(stopper, status="working", activity="Reading the logs")
+    await runtime.workers.interrupt(stopper)
+    await settle(runtime)
+    assert runtime.tasks.get(stopped_task["id"])["status"] == "waiting"
+
+    asked = await start("Count the tests")
+    await call_tool(runtime, "report", asked, status="done", summary="There are 12 tests.")
+    runtime.task_actions.accept(runtime.tasks.current(asked)["id"])
+    await runtime.owner_send_to(router, asked, "and how many of them are slow?")
+    answering = runtime.states.handle(asked)
+    answering.emit("assistant.message", content="3 of them are slow: the e2e ones.")
+    answering.emit("session.idle")
+
+    planner = await start("Write the first plan")
+    await call_tool(runtime, "message_session", router, session_id=planner, task="new",
+                    title="Write the second plan", text="Write the second plan",
+                    earlier="keep")  # fmt: skip
+    second = take_up(runtime, planner, "Write the second plan")
+    plans = ("Plans: https://docs.google.com/document/d/PLANAAAA1111/edit and "
+             "https://docs.google.com/document/d/PLANBBBB2222/edit")  # fmt: skip
+    await call_tool(runtime, "report", planner, status="progress", summary=plans,
+                    task_id=second["id"])  # fmt: skip
+    long_cell = "averyveryverylongidentifierwithoutanyspaces" * 4
+    runtime.add_message(
+        router, "assistant", f"| step | detail |\n|---|---|\n| 1 | {long_cell} |\n| 2 | ok |"
+    )
+    await settle(runtime)
+    runtime.publish_state()
+
+    context = await browser.new_context(viewport={"width": 1400, "height": 900})
+    page = await context.new_page()
+    page.on("pageerror", lambda error: failures.append(str(error)))
+    await page.goto(f"{BASE}/#token={TOKEN}")
+
+    card = page.locator("#needs .card.task", has_text="Measure the cache hit rate")
+    await expect(card.locator(".head .meta")).to_contain_text("Stopped", timeout=15000)
+    await expect(card).to_contain_text("Stopped by you")
+    await card.get_by_role("button", name="Go on", exact=True).click()
+    await expect(page.locator(".toast", has_text="Sent to the worker.")).to_be_visible()
+    await expect(card).to_have_count(0, timeout=10000)
+    assert runtime.tasks.get(stopped_task["id"])["status"] == "running"
+    log("a stopped task waits under Needs you, says who stopped it; Go on sends it back")
+
+    timeline = page.locator("#timeline")
+    answer = timeline.locator(".event", has_text="3 of them are slow")
+    await expect(answer).to_contain_text("Count the tests: 3 of them are slow", timeout=10000)
+    log("a worker's answer to the owner's @ from Home is on Home")
+
+    told = timeline.locator(".event", has_text="Write the second plan").first
+    await told.get_by_role("button", name="View").click()
+    flashed = page.locator(f'#panel .card.task.flash[data-id="{second["id"]}"]')
+    await expect(flashed).to_have_count(1, timeout=5000)
+    await expect(page.locator("#panel .card.task.flash")).to_have_count(1)
+    chips = flashed.locator(".receipt.link-chip")
+    await expect(chips.filter(has_text="Google Doc")).to_have_text(
+        ["Google Doc · PLANAAAA", "Google Doc · PLANBBBB"]
+    )
+    log("View on a notice opens that task; two docs are told apart")
+
+    table = timeline.locator(".markdown .table", has_text="averyvery")
+    await expect(table).to_be_visible()
+    bubble = await table.evaluate(
+        "n => [n.getBoundingClientRect().right, n.closest('.message, .bubble, .event, #timeline')"
+        ".getBoundingClientRect().right]"
+    )
+    assert bubble[0] <= bubble[1] + 1, bubble
+    ok_cell = table.locator("td", has_text="ok")
+    assert (await ok_cell.evaluate("n => n.getClientRects().length")) == 1
+    await table.screenshot(path=SHOTS / "ui-edges-table.png")
+    log("a table's long cell stays in its box; short cells are whole")
+
+    recent = page.locator("#tasks-recent")
+    await expect(recent).to_have_attribute("open", "")
+    kinds = await page.locator("#tasks-artifacts .artifact .a-kind").evaluate_all(
+        "ns => [...new Set(ns.map((n) => Math.round(n.getBoundingClientRect().width)))]"
+    )
+    assert len(kinds) <= 1, kinds
+    log("Recently finished is open; Artifacts' kind column lines up")
+
+    # Taken off by 0.1.25, under its address: still off; brought back, gone from the list.
+    plan_a = "https://docs.google.com/document/d/PLANAAAA1111/edit"
+    store.set("artifacts_hidden", json.dumps([plan_a]))
+    runtime.publish_state()
+    made = page.locator("#tasks-artifacts")
+    await expect(made.locator(".artifact", has_text="PLANAAAA")).to_have_count(0, timeout=10000)
+    await made.get_by_role("button", name="Show 1 taken off").click()
+    await (
+        made.locator(".artifact", has_text="PLANAAAA")
+        .get_by_role("button", name="Bring back")
+        .click()
+    )
+    await expect(made.locator(".artifact.hidden-artifact")).to_have_count(0)
+    for _ in range(50):
+        if json.loads(store.get("artifacts_hidden") or "[]") == []:
+            break
+        await asyncio.sleep(0.1)
+    assert json.loads(store.get("artifacts_hidden")) == [], store.get("artifacts_hidden")
+    log("one taken off by an earlier version stays off, and comes back")
     await context.close()
 
 
@@ -1630,10 +1764,9 @@ async def main():
             await expect(page.locator("#tasks-recent")).to_contain_text("Review the exports PR")
             await expect(reviewing.locator(".head .meta")).to_contain_text("Report")
             await expect(reviewing.get_by_role("button", name="Accept")).to_have_count(0)
-            # In the chat, the report is one line pointing at the task's card.
+            # In the chat, the report is one line with its gist, pointing at the task's card.
             reported = page.locator("#timeline .event.done", has_text="Review the exports PR")
-            await expect(reported).to_contain_text("finished")
-            await expect(page.locator("#timeline")).not_to_contain_text("Review done.")
+            await expect(reported).to_contain_text("finished: Review done.")
             await reported.get_by_role("button", name="View").click()
             await expect(reviewing).to_have_class(re.compile(r"\bexpanded\b"))
             await expect(reviewing.locator(".report")).to_contain_text("Review done.")
@@ -1690,6 +1823,7 @@ async def main():
             await round_two(runtime, browser, failures)
             await round_three(runtime, browser, failures)
             await round_four(runtime, browser, failures)
+            await round_five(runtime, browser, failures)
             await browser.close()
         server.should_exit = True
         await serving

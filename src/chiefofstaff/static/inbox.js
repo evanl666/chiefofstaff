@@ -235,7 +235,13 @@ function renderPanel() {
     reconcile(group.querySelector(".items"), list, editing);
   }
   // Recently finished: the newest first across all workers, a page at a time.
+  const firstRecent = !document.getElementById("tasks-recent");
   const recent = section(taskBox, "tasks-recent", "Recently finished", { tag: "details" });
+  if (firstRecent) {
+    // Open until the owner closes it: answers that only inform are here, read, not accepted.
+    recent.open = localStorage.getItem("cos.recentOpen") !== "0";
+    recent.addEventListener("toggle", () => localStorage.setItem("cos.recentOpen", recent.open ? "1" : "0"));
+  }
   const shown = Math.min(state.finishedShown || FINISHED_PAGE, counts.finished);
   recent.querySelector(".count").textContent = !counts.finished ? "" : shown < counts.finished ? `${shown} of ${counts.finished}` : String(counts.finished);
   recent.hidden = !counts.finished;

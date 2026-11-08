@@ -1,7 +1,7 @@
 // The main pane: Home or one session, with its header, model settings and timeline.
 
 import { $, api, el, foldable, toast, withKey } from "./dom.js";
-import { clock, compactPaths, firstLine, markdown, threadLabel } from "./text.js";
+import { clock, compactPaths, firstLine, gist, markdown, threadLabel } from "./text.js";
 import { byId, current, HOME, markRead, pendingDrafts, routerId, state, STATUS_TEXT, upsertSession, viewedId, workerTitle } from "./state.js";
 import { renderSidebar } from "./sidebar.js";
 import { focusDraft, focusTask, renderHome, renderHomeHeader, showHomeTab, welcomeCard, workerStates } from "./inbox.js";
@@ -358,7 +358,9 @@ function homeEntry(message) {
       }
       if (meta.from && meta.status) {
         const [mark, kind, what] = REPORTED[meta.status] || ["·", "", meta.status];
-        return eventLine({ mark, kind, text: `${meta.title} ${what}`, time, view: () => focusTask(meta.task_id, meta.from) });
+        // What it found, in a line (the whole report opens here; its card has the receipts).
+        const said = meta.status === "done" ? gist(text) : "";
+        return eventLine({ mark, kind, text: `${meta.title} ${what}${said ? `: ${said}` : ""}`, time, body: said ? text : "", view: () => focusTask(meta.task_id, meta.from) });
       }
       if (meta.asked_by) return eventLine({ mark: "?", text: `Question from “${meta.title}”: ${firstLine(text)}`, time, body: text, view: () => select(meta.asked_by), viewText: "Open" });
       if (meta.answered_by) return eventLine({ mark: "↩", text: `Answer from ${meta.title}: ${firstLine(text)}`, time, body: text, view: () => select(meta.answered_by), viewText: "Open" });
@@ -376,6 +378,9 @@ function homeEntry(message) {
       const verdict = { stuck: "looks stuck", looping: "looks like it is looping", off_track: "looks off track" }[meta.verdict];
       return eventLine({ mark: "⚠", kind: "waiting", text: `Watchdog${verdict ? ` · ${verdict}` : ""}: ${firstLine(text)}`, time, body: `${text}${meta.reason ? `\n\nWhy it stepped in: ${meta.reason}` : ""}` });
     }
+    case "answer":
+      // A worker's answer to what the owner wrote it on Home (@): there too, in a line.
+      return eventLine({ mark: "↩", text: `${meta.from_title}: ${gist(text) || firstLine(text)}`, time, body: text, view: () => select(meta.session_id, meta.task_id ? { task: meta.task_id } : {}), viewText: "Open" });
     case "update":
       if (meta.digest) return null;
       return eventLine({ mark: meta.needs_action ? "!" : "·", kind: meta.needs_action ? "waiting" : "", text: firstLine(text), time, body: text.includes("\n") || text.length > 140 ? text : "" });
@@ -391,7 +396,7 @@ function homeEntry(message) {
       if (meta.away_reply) return eventLine({ mark: "↩", text, time });
       // "Started “X” · new because …": the why is on hover.
       const started = /^(Started|New task|Continued)/.test(text);
-      const node = eventLine({ mark: started ? "" : "·", kind: started ? "started" : "", text: text.split(" · ")[0], time, view: meta.session_id ? () => focusTask("", meta.session_id) : null });
+      const node = eventLine({ mark: started ? "" : "·", kind: started ? "started" : "", text: text.split(" · ")[0], time, view: meta.session_id ? () => focusTask(meta.task_id || "", meta.session_id) : null });
       node.querySelector(".what").title = text;
       return node;
     }
@@ -455,6 +460,8 @@ function renderMessage(message) {
     }
     case "report":
       return card({ label: "Report", body: message.text, className: `report ${meta.status}`, status: meta.status, time });
+    case "answer":
+      return card({ label: `Answer from “${meta.from_title}”`, body: message.text, className: "inbound answer", time, open: () => select(meta.session_id) });
     case "draft": {
       const node = card({ label: meta.label || "Draft", body: message.text, className: "draft-record", time });
       node.dataset.draftId = meta.draft_id;
@@ -514,7 +521,8 @@ function addWork(container, kind, text, cwd) {
   } else {
     group.append(el("div", { class: "narration markdown", html: markdown(text) }));
     latest = text.split("\n").find((line) => line.trim()) || text;
-    group.dataset.said = latest.replace(/[`*_#>]/g, "").trim();
+    // Its words in a line, without markup (and past a lead-in like "Done:").
+    group.dataset.said = gist(text) || firstLine(text);
   }
   const count = group.querySelectorAll(".step").length;
   const said = group.dataset.said;

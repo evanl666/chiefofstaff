@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, Field
 
 from .roles import ROUTER, SLACK, WATCHDOG, WORKER
-from .sources.github import github_time
+from .sources.github import POSTED_MARK, github_time
 from .sources.slack import SEARCH_TOOL
 from .store import now
 from .workspaces import git
@@ -339,7 +339,9 @@ class Habits:
         if getattr(self.runtime, "demo", False):
             return 0  # The demo has no accounts: never this machine's real ones.
         github = self.runtime.github
-        accounts = await github.signed_in()
+        # The owner's own account (gh's active one): not another signed in for tests or a bot.
+        signed = await github.signed_in()
+        accounts = [account for account in signed if account.get("active")] or signed[:1]
         sent = {
             row["key"].rsplit(":", 1)[-1]
             for row in self.store.all("SELECT key FROM triggers WHERE source='github-sent'")
@@ -369,7 +371,7 @@ class Habits:
                     # Reviews Chief of Staff published: drafts, learned from as feedback.
                     if url_id(review.get("url", "")) in sent:
                         continue
-                    if review.get("body"):
+                    if review.get("body") and POSTED_MARK not in review["body"]:
                         ref = f"github:{review['id']}"
                         meta = {**meta, "url": review.get("url", "")}
                         added += self.add("github", "pr_review", ref, review["body"], meta)
@@ -377,6 +379,8 @@ class Habits:
                         comment = comment or {}
                         if not comment.get("body") or url_id(comment.get("url", "")) in sent:
                             continue
+                        if POSTED_MARK in comment["body"]:
+                            continue  # Drafted for the owner by Chief of Staff (any install).
                         text = f"{comment.get('path', '')}: {comment['body']}"
                         added += self.add(
                             "github", "pr_review", f"github:{comment['id']}", text, meta

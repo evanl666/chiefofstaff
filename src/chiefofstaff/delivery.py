@@ -88,7 +88,9 @@ class Delivery:
             "immediate" if steer and working and not self.states[session_id].retuned else "enqueue"
         )
         try:
-            sent = await self.flush(session_id, await self.runtime.session_for(session_id), mode)
+            sent = await self.flush(
+                session_id, await self.runtime.session_for(session_id), mode, busy=working
+            )
         except asyncio.CancelledError:
             if claimed:
                 self.states[session_id].busy = False
@@ -151,6 +153,19 @@ class Delivery:
             if "prompt" in message["meta"] and not message["meta"].get("deferred"):
                 self.store.update_message_meta(message["id"], {**message["meta"], "deferred": True})
 
+    def unsee(self, session_id: str) -> bool:
+        """Its turn was stopped (Copilot drops what it queued for that turn): what it was sent
+        and never saw is sent again, with its next message."""
+        state = self.states[session_id]
+        firsts = [entry[2] for entry in state.unread.values()]
+        state.unread.clear()
+        if not firsts:
+            return False
+        mark = int(self.store.get(f"sent:{session_id}") or 0)
+        if min(firsts) - 1 < mark:
+            self.store.set(f"sent:{session_id}", str(min(firsts) - 1))
+        return True
+
     def drop_pending(self, session_id: str, task_id: str = "") -> bool:
         """What it has not received yet is not sent at all (its task was cancelled, or it was
         closed); `task_id`: only what is about that task. Whether it had received anything
@@ -178,8 +193,11 @@ class Delivery:
             for m in self.store.messages(session_id, after=mark)
         )
 
-    async def flush(self, session_id: str, session, mode: SendMode = "enqueue") -> bool:
-        """Send every prompt this session has not received yet, as one message."""
+    async def flush(
+        self, session_id: str, session, mode: SendMode = "enqueue", busy: bool = False
+    ) -> bool:
+        """Send every prompt this session has not received yet, as one message. `busy`: it is
+        in a turn, which this joins or follows (not a turn of its own starting now)."""
         async with self.states[session_id].sending:
             # The Router's Copilot session may have been replaced while this waited.
             session = self.states.handle(session_id) or session
@@ -216,8 +234,9 @@ class Delivery:
                 raise
             if row["role"] == WORKER and any(m["meta"].get("thread") for m in pending):
                 state.thread_turn, state.thread_nudged = True, False
-            if row["role"] == WORKER and not mid_turn and (named := tasks_named(text)):
-                # A turn on it starts now; mid-turn, once its conversation shows it.
+            if row["role"] == WORKER and not mid_turn and not busy and (named := tasks_named(text)):
+                # A turn on it starts now; sent while it works, once its conversation shows it
+                # (a connection that shows none: when its turn on it comes, see working_on).
                 self.runtime.took_up(session_id, named)
             if mid_turn:
                 # It sees this once its conversation shows it (events.user_message): a report
@@ -225,6 +244,7 @@ class Delivery:
                 state.unread[marker["digest"]] = (
                     pending[-1]["text"][:300],
                     tuple(m["meta"].get("task_id") or "" for m in pending),
+                    pending[0]["id"],
                 )
             self.store.set(f"prevsent:{session_id}", str(mark))  # To send again after a failure.
             self.store.set(f"sent:{session_id}", str(pending[-1]["id"]))

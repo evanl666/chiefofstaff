@@ -825,3 +825,135 @@ async def test_receipts_name_the_branch_a_worker_is_on_now(git_repo):
     run("git", "checkout", "-q", "-b", "their-feature", cwd=git_repo)  # A PR checked out to review.
     found = await workspaces_module.changes({"path": str(git_repo), "branch": "chief/fix"})
     assert found and found["branch"] == "their-feature", "not one of its own to open a PR from"
+
+
+async def test_a_later_task_on_the_same_branch_shows_only_its_own_changes(tmp_path):
+    """Bug bash #3: a worker's second task on its branch claimed the first one's commit; a
+    read-only question after them showed both and asked to be accepted."""
+    _, app = published(tmp_path, "app")
+    harness = Harness(tmp_path / "data", Settings(projects=[str(app)]))
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, title="Docstring", instructions="x",
+                         project=str(app), isolate=True)  # fmt: skip
+    tree, session_id = Path(worker["cwd"]), worker["session_id"]
+    commit(tree, "doc.py", "doc = True\n")
+    await call_tool(runtime, "report", session_id, status="done", summary="Docstring added.")
+    await call_tool(runtime, "message_session", harness.router_id, session_id=session_id,
+                    task="new", title="Fix chunk", text="Fix chunk")  # fmt: skip
+    chunk = task_of(harness, session_id)
+    await settle(runtime)
+    for _ in range(50):
+        if runtime.store.get(f"taskbase:{chunk}"):
+            break
+        await asyncio.sleep(0.05)
+    commit(tree, "chunk.py", "chunk = True\n")
+    await call_tool(runtime, "report", session_id, status="done", summary="Fixed chunk.")
+    changed = (await receipts_of(runtime, chunk))["changed"]
+    assert changed["commits"] == 1 and changed["files"] == 1, changed
+    [found] = await runtime.task_actions.diff(chunk)
+    assert "+chunk = True" in found["diff"] and "doc = True" not in found["diff"]
+    await call_tool(runtime, "message_session", harness.router_id, session_id=session_id,
+                    task="new", title="Count tests", text="How many tests?")  # fmt: skip
+    question = task_of(harness, session_id)
+    await settle(runtime)
+    for _ in range(50):
+        if runtime.store.get(f"taskbase:{question}"):
+            break
+        await asyncio.sleep(0.05)
+    await call_tool(runtime, "report", session_id, status="done", summary="2 tests.")
+    changed = (await receipts_of(runtime, question))["changed"]
+    assert not (changed["commits"] or changed["files"] or changed["uncommitted"]), changed
+
+
+async def test_in_the_owners_folder_only_files_its_edits_touched_are_its_changes(tmp_path):
+    _, app = published(tmp_path, "app")
+    harness = Harness(tmp_path / "data", Settings(projects=[str(app)]))
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, title="Note", instructions="x",
+                         project=str(app))  # fmt: skip
+    session_id = worker["session_id"]
+    await settle(runtime)
+    for _ in range(50):
+        if runtime.store.get(f"taskbase:{task_of(harness, session_id)}"):
+            break
+        await asyncio.sleep(0.05)
+    (app / "theirs.txt").write_text("another worker's file\n")
+    (app / "mine.txt").write_text("this task's file\n")
+    harness.session(session_id).emit(
+        "tool.execution_start", tool_call_id="e1", tool_name="create",
+        arguments={"path": str(app / "mine.txt"), "file_text": "x"},
+    )  # fmt: skip
+    await call_tool(runtime, "report", session_id, status="done", summary="Wrote mine.txt.")
+    task = task_of(harness, session_id)
+    changed = (await receipts_of(runtime, task))["changed"]
+    assert changed["files"] == 1 and changed["uncommitted"] == 1, changed
+    [found] = await runtime.task_actions.diff(task)
+    assert "mine.txt" in found["diff"] and "theirs.txt" not in found["diff"]
+
+
+async def test_a_project_is_also_known_by_its_package_name(tmp_path):
+    """Bug bash #35: asked about "textkit", the Router asked which folder (it was "project")."""
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "pyproject.toml").write_text('[build-system]\nx = 1\n[project]\nname = "textkit"\n')
+    same = tmp_path / "web"
+    same.mkdir()
+    (same / "package.json").write_text('{"name": "@acme/web", "version": "1"}')
+    plain = tmp_path / "notes"
+    plain.mkdir()
+    harness = Harness(tmp_path / "data", Settings(projects=[str(project), str(same), str(plain)]))
+    runtime = await harness.connect()
+    cards = {card["name"]: card for card in await runtime.workspaces.project_cards()}
+    assert cards["project"]["package"] == "textkit"
+    assert "package" not in cards["web"] and "package" not in cards["notes"]
+
+
+async def test_a_tasks_new_folder_and_merged_upstream_work_are_counted_right(tmp_path):
+    """Code review: a new folder's files were missing from a task's diff; commits merged in
+    from origin counted as the task's own, and so did a teammate's lines merged into a file the
+    task changed too."""
+    origin, app = published(tmp_path, "app")
+    teammate = tmp_path / "teammate"
+    run("git", "clone", "-q", str(origin), str(teammate))
+    lines = [f"setting_{n} = {n}" for n in range(12)]
+    commit(teammate, "config.py", "\n".join(lines) + "\n")
+    run("git", "push", "-q", "origin", "main", cwd=teammate)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(app)]))
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, title="First", instructions="x",
+                         project=str(app), isolate=True)  # fmt: skip
+    tree, session_id = Path(worker["cwd"]), worker["session_id"]
+    assert (tree / "config.py").exists()
+    commit(tree, "first.py", "first = True\n")
+    await call_tool(runtime, "report", session_id, status="done", summary="First.")
+    await call_tool(runtime, "message_session", harness.router_id, session_id=session_id,
+                    task="new", title="Feature", text="Add the feature")  # fmt: skip
+    feature = task_of(harness, session_id)
+    await settle(runtime)
+    for _ in range(50):
+        if runtime.store.get(f"taskbase:{feature}"):
+            break
+        await asyncio.sleep(0.05)
+    for n in range(3):
+        commit(teammate, f"team{n}.py", f"team = {n}\n")
+    commit(teammate, "config.py", "\n".join(["setting_0 = 'team'", *lines[1:]]) + "\n")
+    run("git", "push", "-q", "origin", "main", cwd=teammate)
+    commit(tree, "config.py", "\n".join([*lines[:-1], "setting_11 = 'mine'"]) + "\n")
+    run("git", "fetch", "-q", "origin", cwd=tree)
+    run("git", "-c", "user.email=t@t", "-c", "user.name=t", "merge", "-q", "--no-edit",
+        "origin/main", cwd=tree)  # fmt: skip
+    assert "setting_0 = 'team'" in (tree / "config.py").read_text()
+    commit(tree, "feature.py", "feature = True\n")
+    (tree / "newpkg").mkdir()
+    (tree / "newpkg" / "__init__.py").write_text("")
+    (tree / "newpkg" / "core.py").write_text("core = 1\nmore = 2\n")
+    await call_tool(runtime, "report", session_id, status="done", summary="Feature added.")
+    changed = (await receipts_of(runtime, feature))["changed"]
+    assert changed["commits"] == 2, changed
+    assert changed["files"] == 4 and changed["uncommitted"] == 2, changed
+    assert changed["insertions"] == 4 and changed["deletions"] == 1, changed
+    [found] = await runtime.task_actions.diff(feature)
+    diff = found["diff"]
+    assert "+feature = True" in diff and "+core = 1" in diff and "newpkg/__init__.py" in diff
+    assert "+setting_11 = 'mine'" in diff and "setting_0 = 'team'" not in diff
+    assert "team0.py" not in diff and "first.py" not in diff

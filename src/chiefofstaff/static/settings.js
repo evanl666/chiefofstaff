@@ -128,7 +128,11 @@ export function bindSettings() {
   });
   $("#watch-list").addEventListener("input", watchSummary);
   $("#watch-list").addEventListener("change", watchSummary);
-  $("#away-test").addEventListener("click", () => settingsAction("/api/away/test", ""));
+  // The test uses how to reach the owner as written here: saved first, as Scan now does.
+  $("#away-test").addEventListener("click", async () => {
+    if (!(await saveAway())) return;
+    await settingsAction("/api/away/test", "");
+  });
   for (const [id, find] of [
     ["#watch-activity", () => state.snapshot.connector?.session_id],
     ["#slack-activity", () => sessions().find((session) => session.role === "slack")?.id],
@@ -758,6 +762,21 @@ function watchFields() {
 }
 const sameWatches = (a, b) => JSON.stringify(a.map(({ what, how, enabled }) => [what, how || "", enabled !== false])) === JSON.stringify(b.map(({ what, how, enabled }) => [what, how || "", enabled !== false]));
 // Only the watches, saved: the rest of the form stays as the owner left it, unsaved.
+async function saveAway() {
+  settingsError("");
+  const form = $("#settings-form");
+  const settings = state.snapshot.settings;
+  const fields = { away_notify: form.away_notify.checked, away_minutes: Number(form.away_minutes.value || 10), away_how: form.away_how.value.trim() };
+  if (fields.away_notify === Boolean(settings.away_notify) && fields.away_minutes === (settings.away_minutes ?? 10) && fields.away_how === (settings.away_how || "")) return true;
+  try {
+    state.snapshot = { ...state.snapshot, ...(await api("/api/settings", { method: "POST", body: { ...settings, ...fields } })) };
+    renderConnections();
+    return true;
+  } catch (error) {
+    settingsError(error.message);
+    return false;
+  }
+}
 async function saveWatches() {
   settingsError("");
   const fields = watchFields();
@@ -784,7 +803,8 @@ function watchSummary() {
   const written = watchFields().watches;
   const on = written.filter((watch) => watch.enabled !== false).length;
   const unsaved = !sameWatches(written, snap.settings.watches || []);
-  $("#watches-summary").textContent = written.length ? [`${on} on`, unsaved ? "not saved yet" : connector.scanned_at ? `scanned ${since(connector.scanned_at)}` : "not scanned yet"].filter(Boolean).join(" · ") : "None";
+  const scanned = connector.scanning ? "scanning now…" : connector.scanned_at ? `scanned ${since(connector.scanned_at)}` : "not scanned yet";
+  $("#watches-summary").textContent = written.length ? [`${on} on`, unsaved ? "not saved yet" : scanned].filter(Boolean).join(" · ") : "None";
 }
 export async function saveToken() {
   const form = $("#settings-form");

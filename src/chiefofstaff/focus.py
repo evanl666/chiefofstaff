@@ -93,7 +93,7 @@ class Focus:
         parts = [
             f"{handled} message{'s' if handled != 1 else ''} handled" if handled else "",
             f"{drafted} repl{'ies' if drafted != 1 else 'y'} drafted for you" if drafted else "",
-            f"{finished} task{'s' if finished != 1 else ''} ready to review" if finished else "",
+            f"{finished} task{'s' if finished != 1 else ''} finished" if finished else "",
             f"{needs} need{'s' if needs == 1 else ''} you" if needs else "",
         ]
         done = " · ".join(part for part in parts if part) or "nothing came up"

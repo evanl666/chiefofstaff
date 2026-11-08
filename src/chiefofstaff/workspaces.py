@@ -396,6 +396,22 @@ def resolve_project(project: str, projects: list[str]) -> Path:
     return path
 
 
+def package_name(root: Path) -> str:
+    """The name its manifest gives the project (pyproject, package.json, Cargo, go.mod)."""
+    patterns = [
+        ("pyproject.toml", r'(?ms)^\[(?:project|tool\.poetry)\][^\[]*?^name\s*=\s*["\']([^"\']+)'),
+        ("package.json", r'"name"\s*:\s*"([^"]+)"'),
+        ("Cargo.toml", r'(?ms)^\[package\][^\[]*?^name\s*=\s*"([^"]+)"'),
+        ("go.mod", r"(?m)^module\s+(\S+)"),
+    ]
+    for name, pattern in patterns:
+        with suppress(OSError):
+            text = (root / name).read_text(errors="replace")[:20000]
+            if match := re.search(pattern, text):
+                return match.group(1).rsplit("/", 1)[-1][:60]
+    return ""
+
+
 def readme_line(project: Path) -> str:
     """The first meaningful line of a project's README, as a hint of what the project is."""
     for name in ("README.md", "README.rst", "README.txt", "README"):
@@ -544,9 +560,42 @@ def file_digest(top: Path, names: list[str]) -> str:
     return found.hexdigest()
 
 
-async def changes(checkout: dict) -> dict | None:
+class Scope:
+    """One task's share of a checkout a worker kept using for several tasks: what it committed
+    since `base` (the commit the checkout was at when the task was taken up), and of what is
+    not committed, the files it changed: in a folder of the owner's (shared), those its own
+    edits touched; elsewhere, those changed after `since` (when the task was taken up)."""
+
+    def __init__(self, base: str = "", since: float = 0, touched: set[str] | None = None):
+        self.base, self.since, self.touched = base, since, touched or set()
+
+    def wrote(self, top: Path, name: str) -> bool:
+        """Whether its own edits wrote this file."""
+        return os.path.realpath(top / name) in self.touched
+
+    def keeps(self, top: Path, name: str, shared: bool, committed: set[str]) -> bool:
+        if name in committed:
+            return True
+        path = top / name
+        if shared:
+            return self.wrote(top, name)
+        if not self.since:
+            return True
+        try:
+            return path.lstat().st_mtime >= self.since - 1
+        except OSError:
+            return True  # Deleted: a change all the same.
+
+
+def status_name(line: str) -> str:
+    """The file a `git status --porcelain` line is about (a rename's new name)."""
+    name = line[3:]
+    return name.split(" -> ", 1)[-1].strip('"')
+
+
+async def changes(checkout: dict, scope: Scope | None = None) -> dict | None:
     """What a worker changed in one checkout: commits on its branch and uncommitted edits, and
-    the version (commit and edits) this describes."""
+    the version (commit and edits) this describes. With a `scope`, one task's share of it."""
     path, head, live = await asyncio.to_thread(locate, checkout)
     try:
         await checkout_git(checkout, path, "rev-parse", "--git-dir")
@@ -562,6 +611,11 @@ async def changes(checkout: dict) -> dict | None:
             ).strip()
             if current and current != "HEAD":
                 result["branch"] = current
+    shared = bool(checkout.get("shared"))
+    if scope is not None:
+        result.update(await scoped_changes(checkout, path, head, live, shared, scope))
+        result.update(await version(checkout) or {})
+        return result
     # One count of what differs from where its branch started, committed or not (a file
     # changed in a commit and again since counts once), and its new files.
     total = {"files": 0, "insertions": 0, "deletions": 0}
@@ -583,7 +637,7 @@ async def changes(checkout: dict) -> dict | None:
         with suppress(ValueError):
             status = await checkout_git(checkout, path, "status", "--porcelain")
             result["uncommitted"] = len(worth_committing(status))
-    if live and not checkout.get("shared"):  # The owner's own folder has their files too.
+    if live and not shared:  # The owner's own folder has their files too.
         with suppress(ValueError):
             listed = await checkout_git(
                 checkout, path, "ls-files", "--others", "--exclude-standard", "-z"
@@ -594,6 +648,146 @@ async def changes(checkout: dict) -> dict | None:
     result.update(total)
     result.update(await version(checkout) or {})
     return result
+
+
+async def scope_base(checkout: dict, path: str, head: str, scope: Scope) -> str:
+    """Where this task's share starts: its own base when that commit is in the history, else
+    where the branch started."""
+    if scope.base:
+        with suppress(ValueError):
+            await checkout_git(checkout, path, "merge-base", "--is-ancestor", scope.base, head)
+            return scope.base
+    if base := base_of(checkout):
+        with suppress(ValueError):
+            return (await checkout_git(checkout, path, "merge-base", base, head)).strip()
+    return ""
+
+
+class Share:
+    """One task's share of a checkout (see Scope)."""
+
+    def __init__(self, base: str, top: Path):
+        self.base, self.top = base, top
+        self.own: dict[str, list[str]] = {}  # Its commits, newest first, and their files.
+        # Whether base..head is its commits alone (no merge brought others' in, none left out):
+        # then one diff from its base is its share; else its commits' own patches are.
+        self.exact = True
+        self.committed: set[str] = set()
+        self.keep: list[str] = []  # Changed files it keeps, committed or not.
+        self.fresh: list[str] = []  # Its new untracked files.
+
+
+async def own_commits(checkout: dict, path: str, head: str, shared: bool, share: Share, scope):
+    """The task's own commits since its base and the files each changed: those on its branch's
+    own line (not ones a merge brought in from where its branch comes from); in a folder of the
+    owner's, only those touching files its edits wrote (the owner's own commits are theirs)."""
+    try:
+        listed = await checkout_git(
+            checkout, path, "-c", "core.quotePath=false", "log", "--first-parent",
+            "--format=%x00%H %P", "--name-only", f"{share.base}..{head}",
+        )  # fmt: skip
+    except ValueError:
+        return
+    for entry in listed.split("\0"):
+        line, _, names = entry.strip().partition("\n")
+        if not line:
+            continue
+        sha, *parents = line.split()
+        if len(parents) > 1:
+            share.exact = False  # A merge: what it brought in is not this task's.
+            continue
+        files = [name for name in names.splitlines() if name]
+        if shared and not any(scope.wrote(share.top, name) for name in files):
+            share.exact = False  # The owner's own commit (or one they pulled).
+            continue
+        share.own[sha] = files
+
+
+async def scope_files(
+    checkout: dict, path: str, head: str, live: bool, shared: bool, scope: Scope
+) -> Share:
+    """This task's share of a checkout."""
+    top = Path((await checkout_git(checkout, path, "rev-parse", "--show-toplevel")).strip())
+    share = Share(await scope_base(checkout, path, head, scope), top)
+    if share.base:
+        await own_commits(checkout, path, head, shared, share, scope)
+        committed = {name for names in share.own.values() for name in names}
+        if shared:
+            if any(not scope.wrote(top, name) for name in committed):
+                share.exact = False
+            committed = {name for name in committed if scope.wrote(top, name)}
+        share.committed = committed
+    changed = set(share.committed)
+    new: list[str] = []
+    if live:
+        with suppress(ValueError):
+            # One line per new file (not one per new folder).
+            status = await checkout_git(
+                checkout, path, "-c", "core.quotePath=false", "status", "--porcelain",
+                "--untracked-files=all",
+            )  # fmt: skip
+            for line in worth_committing(status):
+                name = status_name(line)
+                if line.startswith("?? "):
+                    new.append(name)
+                else:
+                    changed.add(name)
+    share.keep = [
+        name for name in sorted(changed) if scope.keeps(top, name, shared, share.committed)
+    ]
+    share.fresh = [
+        name for name in untracked_work(new) if scope.keeps(top, name, shared, share.committed)
+    ]
+    return share
+
+
+MAX_OWN_COMMITS = 200
+
+
+async def scoped_changes(
+    checkout: dict, path: str, head: str, live: bool, shared: bool, scope: Scope
+) -> dict:
+    share = await scope_files(checkout, path, head, live, shared, scope)
+    top, keep = str(share.top), share.keep
+    total = {"files": 0, "insertions": 0, "deletions": 0, "commits": len(share.own)}
+    total["uncommitted"] = 0
+    if share.exact and keep and (share.base or live):
+        against = share.base if live else f"{share.base}..{head}"
+        with suppress(ValueError):
+            diffed = await checkout_git(
+                checkout, top, "diff", "--shortstat", against or "HEAD", "--", *keep
+            )
+            total |= receipts.shortstat(diffed)
+    elif keep:
+        # Its commits' own lines (not a merged-in teammate's in the same file), then its edits
+        # since the last commit.
+        total["files"] = len(keep)
+        if share.own and share.committed:
+            shas = list(share.own)[:MAX_OWN_COMMITS]
+            with suppress(ValueError):
+                counted = await checkout_git(
+                    checkout, top, "show", "--numstat", "--format=", *shas, "--",
+                    *sorted(share.committed),
+                )  # fmt: skip
+                for line in counted.splitlines():
+                    added, removed, *_ = [*line.split("\t"), "", ""]
+                    if added.isdigit() and removed.isdigit():
+                        total["insertions"] += int(added)
+                        total["deletions"] += int(removed)
+        if live:
+            with suppress(ValueError):
+                edits = receipts.shortstat(
+                    await checkout_git(checkout, top, "diff", "--shortstat", "HEAD", "--", *keep)
+                )
+                total["insertions"] += edits.get("insertions", 0)
+                total["deletions"] += edits.get("deletions", 0)
+    if live:
+        total["uncommitted"] = len([name for name in keep if name not in share.committed]) + len(
+            share.fresh
+        )
+        total["files"] += len(share.fresh)
+        total["insertions"] += await asyncio.to_thread(count_lines, share.top, share.fresh)
+    return total
 
 
 def count_lines(root: Path, names: list[str]) -> int:
@@ -618,6 +812,10 @@ PLAIN_DIFF = (
     "-c", "core.quotePath=false", "diff", "--no-color", "--no-ext-diff", "--no-textconv",
     "--src-prefix=a/", "--dst-prefix=b/",
 )  # fmt: skip
+PLAIN_SHOW = (
+    "-c", "core.quotePath=false", "show", "--format=", "--no-color", "--no-ext-diff",
+    "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/",
+)  # fmt: skip
 
 
 def new_file_diff(top: Path, name: str) -> str:
@@ -637,22 +835,45 @@ def new_file_diff(top: Path, name: str) -> str:
     return f"{header}--- /dev/null\n+++ b/{name}\n@@ -0,0 +1,{len(lines)} @@\n{body}"
 
 
-async def diff(checkout: dict) -> dict:
+async def diff(checkout: dict, scope: Scope | None = None) -> dict:
     """The full diff of a worker's work in one checkout, from where it started: commits,
-    uncommitted edits and new files (for a shared project folder: its uncommitted edits)."""
+    uncommitted edits and new files (for a shared project folder: its uncommitted edits). With a
+    `scope`, one task's share of it (see Scope)."""
     path, head, live = await asyncio.to_thread(locate, checkout)
     top = (await checkout_git(checkout, path, "rev-parse", "--show-toplevel")).strip()
-    base = base_of(checkout) or "HEAD"
-    if live:
-        text = await checkout_git(checkout, top, *PLAIN_DIFF, base, limit=60)
-        others = await checkout_git(
-            checkout, top, "ls-files", "--others", "--exclude-standard", "-z"
-        )
-        names = [name for name in others.split("\0") if name][:MAX_NEW_FILES]
-        for name in names:
-            text += await asyncio.to_thread(new_file_diff, Path(top), name)
+    if scope is not None:
+        share = await scope_files(checkout, path, head, live, bool(checkout.get("shared")), scope)
+        text = ""
+        if share.exact and share.keep:
+            against = (share.base or "HEAD") if live else f"{share.base}...{head}"
+            text = await checkout_git(
+                checkout, top, *PLAIN_DIFF, against, "--", *share.keep, limit=60
+            )
+        elif share.keep:
+            # Its commits' own patches, oldest first, then its edits since the last commit.
+            if share.own and share.committed:
+                shas = list(reversed(list(share.own)[:MAX_OWN_COMMITS]))
+                text = await checkout_git(
+                    checkout, top, *PLAIN_SHOW, *shas, "--", *sorted(share.committed), limit=60
+                )
+            if live:
+                text += await checkout_git(
+                    checkout, top, *PLAIN_DIFF, "HEAD", "--", *share.keep, limit=60
+                )
+        for name in share.fresh[:MAX_NEW_FILES]:
+            text += await asyncio.to_thread(new_file_diff, share.top, name)
     else:
-        text = await checkout_git(checkout, top, *PLAIN_DIFF, f"{base}...{head}", limit=60)
+        base = base_of(checkout) or "HEAD"
+        if live:
+            text = await checkout_git(checkout, top, *PLAIN_DIFF, base, limit=60)
+            others = await checkout_git(
+                checkout, top, "ls-files", "--others", "--exclude-standard", "-z"
+            )
+            names = [name for name in others.split("\0") if name][:MAX_NEW_FILES]
+            for name in names:
+                text += await asyncio.to_thread(new_file_diff, Path(top), name)
+        else:
+            text = await checkout_git(checkout, top, *PLAIN_DIFF, f"{base}...{head}", limit=60)
     return {
         "name": Path(checkout.get("repo") or top).name,
         "path": checkout["path"],
@@ -1032,6 +1253,10 @@ class Workspaces:
                 remote = await git("-C", project, "config", "--get", "remote.origin.url")
                 card["remote"] = remote.strip()
             card["about"] = await asyncio.to_thread(readme_line, Path(project))
+            # What the owner may call it: its package's name ("textkit" in a folder "project").
+            package = await asyncio.to_thread(package_name, Path(project))
+            if package and package != card["name"]:
+                card["package"] = package
             self.project_cache[project] = (time.monotonic(), card)
             cards.append(card)
         return cards

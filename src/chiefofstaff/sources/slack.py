@@ -176,6 +176,32 @@ class SlackMcp:
         return text
 
 
+# One message as Slack's MCP server lists it: who, then its text (then its permalink).
+MESSAGE = re.compile(
+    r"From: <@[A-Z0-9]+>(?: \((?P<name>[^)\n]*)\))?[^\n]*\nText: (?P<text>.*?)"
+    r"(?:\nPermalink: \S+|(?=\n\S[^\n]*\| From: )|$)",
+    re.DOTALL,
+)
+
+
+def newest_message(listed: str, last: bool) -> str:
+    """The newest message of what Slack listed, as "Who: text", shortened at its end (a cut
+    says so); the listing itself, shortened, when it is not in that form."""
+    found = list(MESSAGE.finditer(listed or ""))
+    if not found:
+        text = (listed or "").strip()
+        if len(text) <= LATEST_CHARS:
+            return text
+        return "…" + text[-LATEST_CHARS:].lstrip() if last else text[:LATEST_CHARS].rstrip() + "…"
+    entry = found[-1] if last else found[0]
+    who = (entry["name"] or "").strip()
+    # Slack writes "&", "<" and ">" in a message's text as entities.
+    text = " ".join(entry["text"].split()).replace("&lt;", "<").replace("&gt;", ">")
+    text = text.replace("&amp;", "&")
+    said = f"{who}: {text}" if who and who != "?" else text
+    return said if len(said) <= LATEST_CHARS else said[: LATEST_CHARS - 1].rstrip() + "…"
+
+
 class SlackSource:
     name = "slack"
 
@@ -528,10 +554,10 @@ class SlackSource:
             if thread_ts:
                 arguments = {"channel_id": channel_id, "message_ts": thread_ts}
                 text = await asyncio.wait_for(self.mcp.call("slack_read_thread", arguments), 20)
-                return text.strip()[-LATEST_CHARS:]  # Oldest first: the newest is at the end.
+                return newest_message(text, last=True)  # Oldest first: the newest at the end.
             arguments = {"channel_id": channel_id, "limit": 1}
             text = await asyncio.wait_for(self.mcp.call("slack_read_channel", arguments), 20)
-            return text.strip()[:LATEST_CHARS]
+            return newest_message(text, last=False)
         except Exception as exc:
             logger.info("Could not read %s for a draft: %s", channel_id, describe(exc))
             return ""

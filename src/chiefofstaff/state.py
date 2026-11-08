@@ -55,9 +55,10 @@ class SessionState:
     # Open cards for the owner: draft id -> text.
     asking: dict[str, str] = field(default_factory=dict)
     # Messages sent to it that its conversation has not shown it yet (sent while it was
-    # finishing a turn, say): digest of what was sent -> the newest message's text and the
-    # tasks they are about ("" for a message about none).
-    unread: dict[str, tuple[str, tuple[str, ...]]] = field(default_factory=dict)
+    # finishing a turn, say): digest of what was sent -> the newest message's text, the tasks
+    # they are about ("" for a message about none) and the first message's id (to send them
+    # again if its turn is stopped before it saw them).
+    unread: dict[str, tuple[str, tuple[str, ...], int]] = field(default_factory=dict)
     # Its connection has shown a message it received (so unread ones can be told apart).
     echoes: bool = False
     # Tools it called in its current turn: a turn that failed after acting is not sent again.

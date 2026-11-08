@@ -36,7 +36,7 @@ tool allowlist, permission and request callbacks, sandbox, model.
 | `delivery.py` | Messages to sessions: stored, batched, sent, checked after a restart. |
 | `workers.py` | The worker queue (`max_workers`, dependencies), starting, closing, reopening, interrupting. |
 | `tasks.py` | Tasks, runs and dependencies as records; status transitions. |
-| `task_actions.py` | What happens to tasks: reports, cancel (a cancelled follow-up gives the earlier result back), accept, retry, follow-up; receipts, PR state (refreshed every few minutes) and the *Ready to merge* card; the shareable report. |
+| `task_actions.py` | What happens to tasks: reports, cancel (a cancelled follow-up gives the earlier result back), accept, retry, follow-up; receipts (per task: on a branch, the commits since it began; in a shared folder, the files it edited), PR state (refreshed every few minutes) and the *Ready to merge* card; the shareable report. |
 | `tools.py` | Every tool a session can call, with its argument model; which role gets which. |
 | `drafts.py` | Drafts the owner approves (Slack replies, PR reviews, a task's folder); interrupted sends. |
 | `focus.py` | Focus Shield. |
@@ -121,10 +121,10 @@ to the handler for its type:
 
 | Event | Effect |
 | --- | --- |
-| `user.message` | Whether this turn includes the owner (else the Router's closing words are a footnote). |
+| `user.message` | Whether this turn includes the owner (else the Router's closing words are a footnote); the task a worker sees now is taken up (its turn task, unless the message steered the turn in progress). A message sent while a worker works is only taken up here, when it sees it; if the turn is stopped first (Copilot drops it), it is sent again with the next message. |
 | `assistant.message` | The session's words, into its timeline. |
 | `assistant.turn_start` | A worker's slot is busy; status `working`. |
-| `tool.execution_start` | A step in the timeline and the session's activity; shell commands are recorded for receipts. |
+| `tool.execution_start` | A step in the timeline and the session's activity; shell commands are recorded for receipts; files an edit tool writes count as the turn task's (in a folder shared with the owner, only those are its changes). |
 | `tool.execution_complete` | Exit code for receipts (a command left running keeps its shell id; reading or stopping that shell settles it); last output for the Watchdog. |
 | `system.notification` | A command left running ended (`shell_completed`): its exit code. |
 | `assistant.usage` | Credits and tokens per run; the Router's context size. |
@@ -171,8 +171,9 @@ state, the task the worker is on (`turn_task`: its turn's task while open or fol
 owner, else its current open one; only instructions set it, not notes), whether it was taken up
 (`started`), `check_back`, the threads it watches and when it was last active. Home, the
 sidebar's dots and the cards all use it. `tasks.js` draws a box per worker per place with its
-task cards; `artifacts.js` the Artifacts list (PRs from their receipts, docs and runs as their
-workers declared them with `report(artifacts=…)`, kept per task). `session.js`, `sidebar.js`,
+task cards; `artifacts.js` the Artifacts list (the PRs a task owns, from their receipts; docs and runs as
+their workers declared them with `report(artifacts=…)` or linked in any report, kept per task;
+links the task was given are references, not output). `session.js`, `sidebar.js`,
 `drafts.js`,
 `composer.js` (the message box, with images) and `settings.js` render their parts; `dom.js` and `text.js` are helpers (the Markdown subset is
 escaped first). Writes are REST calls. Cards are reconciled by key and refreshed in place, so a

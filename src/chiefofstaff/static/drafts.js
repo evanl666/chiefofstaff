@@ -480,7 +480,8 @@ function messageCard(draft) {
     draft,
     draft.kind,
     label,
-    draft.kind === "slack" && target.latest ? el("div", { class: "quoted", text: target.latest }) : null,
+    // The newest message where it goes, as Slack writes it (its links and names readable).
+    draft.kind === "slack" && target.latest ? el("div", { class: "quoted markdown", html: markdown(target.latest) }) : null,
     comment ? el("div", { class: "quoted" }, el("strong", { title: comment.path || "", text: `${comment.author}${comment.path ? ` on ${basename(comment.path)}${comment.line ? `:${comment.line}` : ""}` : ""}: ` }), comment.body) : null,
     about ? el("div", { class: "note", text: about }) : null,
     // Not published after an interrupted send: what happened, and the owner's edit kept.

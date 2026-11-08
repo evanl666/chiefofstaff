@@ -646,7 +646,7 @@ async def test_focus_holds_notifications_and_ends_with_one_summary(harness):
     summary = harness.store.messages(harness.router_id)[-1]
     assert summary["meta"].get("focus_summary")
     assert summary["text"].startswith("While you focused (")
-    assert "1 task ready to review" in summary["text"]
+    assert "1 task finished" in summary["text"]
 
 
 async def test_a_model_copilot_refuses_falls_back_and_the_message_is_sent_again(tmp_path):

@@ -295,8 +295,11 @@ class TaskNote(StrictModel):
 
 
 class ArtifactHide(StrictModel):
-    key: str = Field(max_length=600)
+    key: str = Field(max_length=2100)
     hidden: bool = True
+    tone: str = Field(default="", max_length=20)
+    # The same one under the key an earlier version gave it (its address): replaced.
+    also: list[Annotated[str, Field(max_length=2100)]] = Field(default_factory=list, max_length=20)
 
 
 # Under GitHub's 65536 characters for a review and Slack's 40000 for a message.

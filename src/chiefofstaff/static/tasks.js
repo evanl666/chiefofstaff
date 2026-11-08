@@ -1,8 +1,9 @@
-// Task cards on Home: what runs and what it does now, what waits, what is ready to review.
+// Task cards on Home: what runs and what it does now, what waits, what is finished.
 
 import { api, el, foldable, moreMenu, reconcile, submits, toast } from "./dom.js";
 import { activeTaskId, MARKERS, SECTION_DOT, SECTIONS, taskPhase } from "./board.js";
-import { ago, compactPaths, findUrls, gist, linkKind, markdown, plural, prTitle, shorten, since } from "./text.js";
+import { ago, compactPaths, findUrls, gist, linkKey, linkKind, markdown, plural, prTitle, shorten, since } from "./text.js";
+import { toneOf } from "./artifacts.js";
 import { byId, closedWorkers, ownerQuestions, pendingDrafts, sessions, state, tasks } from "./state.js";
 import { renderSidebar } from "./sidebar.js";
 import { select } from "./session.js";
@@ -98,7 +99,7 @@ export function taskItem(task, phase = phaseOf(task)) {
   const worker = byId(task.session_id);
   const live = ["running", "queued"].includes(task.status);
   return {
-    key: `task:${task.id}:${task.status}:${phase.section}:${phase.marker}:${task.blocked ? 1 : 0}:${createsPr(task) ? 1 : 0}:${task.news?.at || ""}`,
+    key: `task:${task.id}:${task.status}:${phase.section}:${phase.marker}:${task.stopped ? 1 : 0}:${task.blocked ? 1 : 0}:${createsPr(task) ? 1 : 0}:${task.news?.at || ""}`,
     id: task.id,
     // For running cards the minute too: "6m" and "3m ago" move on by themselves.
     version: `${task.updated_at}:${task.title}:${phase.why}:${worker?.status || ""}:${worker?.activity || ""}:${worker?.step || ""}:${worker?.step_since || ""}:${worker?.turn_task || ""}:${task.credits}:${task.runs}:${JSON.stringify(task.receipts?.prs || null)}:${task.status === "review" ? JSON.stringify(task.receipts || null) : ""}:${live ? `${Math.floor(Date.now() / 60000)}:${queuedKey()}` : ""}:${waitsOnOwner(task, worker)}:${(task.watching || []).join(",")}:${(task.watch_failing || []).join(",")}:${JSON.stringify(task.check_back || null)}:${task.nudged_at || ""}:${JSON.stringify(task.receipts?.changed || null)}`,
@@ -293,6 +294,10 @@ function taskCard(task, phase = phaseOf(task)) {
     } else if (task.status === "review") {
       // A report to read (or one still followed): done when read; accepting it is optional.
       more = [{ text: "Mark done", onclick: () => act(`/api/tasks/${task.id}/accept`, {}, "Marked done.") }, followUp, copy, pr, named, splitOff, worker];
+    } else if (task.status === "waiting" && task.stopped) {
+      // Stopped mid-work: go on where it stopped, or with a word on what to do instead.
+      main = el("button", { type: "button", text: "Go on", onclick: () => act(`/api/tasks/${task.id}/follow-up`, { text: "Go on where you stopped." }, "Sent to the worker.") });
+      more = [{ text: "Go on with a note…", onclick: () => reply("What should it do now?", "Sent to the worker.") }, worker, cancel];
     } else if (task.status === "waiting") {
       main = el("button", { type: "button", text: "Reply", onclick: () => reply("Your answer", "Sent to the worker.") });
       more = [worker, cancel];
@@ -379,26 +384,36 @@ function progressLine(text, at, taskId = "", stale = false) {
 // what it is about: shown.
 function linkGroups(task, shown) {
   const main = [];
-  const more = { diagnostic: [], reference: [] };
+  const more = { made: [], diagnostic: [], reference: [] };
   const seen = new Set();
   const asked = `${task.title}\n${task.goal || ""}`;
-  for (const url of findUrls([task.result, task.progress].filter(Boolean).join("\n"))) {
+  const given = new Set((task.given_links || []).map(linkKey));
+  const declared = new Map((task.artifacts || []).map((item) => [linkKey(item.url), item]));
+  const text = [task.result, task.progress].filter(Boolean).join("\n").replace(/```[\s\S]*?(```|$)/g, " ");
+  // What its worker said it made (with where each stands) first, then every link its reports
+  // gave (not only its latest).
+  const urls = [...new Set([...(task.artifacts || []).map((item) => item.url), ...(task.links || []), ...findUrls(text)])];
+  for (const url of urls) {
     const found = linkKind(url);
-    if (!found || seen.has(url) || (found.key && shown.has(found.key))) continue;
-    seen.add(url);
+    const key = linkKey(url);
+    if (!found || seen.has(key) || (found.key && shown.has(found.key))) continue;
+    seen.add(key);
     if (found.key) shown.add(found.key);
+    const said = declared.get(key);
     let role = found.role;
     if (role === "diagnostic" && found.id && asked.includes(found.id)) role = "run";
     if (role === "pr") role = "reference";  // Not its own: the PRs it made are on their own chips.
-    if (role === "output" && (task.goal || "").includes(url)) role = "reference";  // Given to it.
-    const label = found.title ? `${found.label} · ${shorten(found.title, 40)}` : found.label;
-    const chip = el("a", { class: `receipt artifact ${found.kind} ${role}`, href: url, target: "_blank", rel: "noreferrer", title: [found.title, url].filter(Boolean).join("\n"), text: label });
-    if ((role === "output" || role === "run") && main.length < 3) main.push(chip);
+    if (said && role === "reference") role = "output";  // Its worker says it made it.
+    if (!said && given.has(key)) role = "reference";  // Given to it to work from.
+    const name = said?.name || (found.title ? `${found.label} · ${shorten(found.title, 40)}` : found.label);
+    const label = said?.status ? `${name} · ${said.status}` : name;
+    const chip = el("a", { class: `receipt link-chip kind-${found.kind} ${role}${said ? ` tone-${toneOf(said.status)}` : ""}`, href: url, target: "_blank", rel: "noreferrer", title: [said ? `${said.name} · ${said.status}` : found.title, url].filter(Boolean).join("\n"), text: label });
+    if (role === "output" || role === "run") (main.length < 3 ? main : more.made).push(chip);
     else (more[role] || more.reference).push(chip);
   }
-  const folded = [...more.diagnostic, ...more.reference];
+  const folded = [...more.made, ...more.diagnostic, ...more.reference];
   if (!folded.length) return { main, more: null };
-  const words = [more.diagnostic.length ? `${more.diagnostic.length} for diagnosis` : "", more.reference.length ? `${more.reference.length} referenced` : ""].filter(Boolean).join(" · ");
+  const words = [more.made.length ? `${more.made.length} more made` : "", more.diagnostic.length ? `${more.diagnostic.length} for diagnosis` : "", more.reference.length ? `${more.reference.length} referenced` : ""].filter(Boolean).join(" · ");
   const details = el("details", { class: "more-links" }, el("summary", { text: `More links: ${words}` }), el("div", { class: "receipts" }, ...folded));
   return { main, more: details };
 }
