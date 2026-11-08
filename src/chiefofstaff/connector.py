@@ -79,6 +79,11 @@ def later(first: str, second: str) -> bool:
         return False
 
 
+def watch_key(what: str) -> str:
+    """A watch by what it watches (renumbering or reordering watches does not reset it)."""
+    return hashlib.sha256(" ".join(what.lower().split()).encode()).hexdigest()[:16]
+
+
 def without_code(text: str, code: str) -> str:
     """An answer without its code (any case, with or without brackets): "URN2F drop them" and
     "[urn2f] drop them" are both "drop them"."""
@@ -109,6 +114,14 @@ class FoundItem(BaseModel):
     )
 
 
+class Incomplete(BaseModel):
+    watch: int = Field(description="The number of the watch")
+    reason: str = Field(
+        description="What it could not cover: a search that returns only some results (the "
+        "newest few threads), a tool that failed, a source it cannot reach"
+    )
+
+
 class ReportFound(NestedArguments):
     items: list[FoundItem] = Field(
         default_factory=list,
@@ -123,6 +136,11 @@ class ReportFound(NestedArguments):
     methods: str = Field(
         default="",
         description="How you ran each watch (which tool and query), for the next scan",
+    )
+    incomplete: list[Incomplete] = Field(
+        default_factory=list,
+        description="Every watch whose search could not cover all that is new since its time, "
+        "and why. A watch left out here counts as fully covered; its next scan starts later.",
     )
 
 
@@ -296,23 +314,25 @@ class Connector:
                 raise ValueError("Add a watch first.")
             if self.busy():
                 raise ValueError("A scan is running already.")
-            # From the last scan that reported back (a little before it: what came in while
-            # it ran), not the last one started: one that failed leaves its window to the next.
-            done = float(self.store.get("watch_done_at") or 0)
-            since = max(done - OVERLAP_SECONDS, time.time() - LOOKBACK_HOURS * 3600) if done else 0
             self.store.set("watch_scanned_at", str(time.time()))  # When the next one is due.
             self.store.set("watch_started_at", str(time.time()))
-            lines = ["Scan now. The owner's watches:"]
+            # Each watch from where it was last covered in full (a little before: what came in
+            # while that scan ran), not from the last scan started: one that failed, or could
+            # see only part of its source, leaves its window to the next.
+            self.store.set("watch_scan", json.dumps([watch_key(w.what) for w in watches]))
+            lines = ["Scan now. The owner's watches, each with the time to look from:"]
             for number, watch in enumerate(watches, 1):
-                lines.append(
-                    f"{number}. {watch.what}" + (f" (use: {watch.how})" if watch.how else "")
+                since = self.watch_since(watch.what)
+                start = (
+                    datetime.fromtimestamp(since).astimezone().isoformat(timespec="minutes")
+                    if since
+                    else f"the last {LOOKBACK_HOURS} hours"
                 )
-            start = (
-                datetime.fromtimestamp(since).astimezone().isoformat(timespec="minutes")
-                if since
-                else f"the last {LOOKBACK_HOURS} hours"
-            )
-            lines.append(f"Look at what is new since {start}.")
+                lines.append(
+                    f"{number}. {watch.what}"
+                    + (f" (use: {watch.how})" if watch.how else "")
+                    + f": new since {start}"
+                )
             if methods := self.store.get("watch_methods"):
                 lines.append(
                     f"How you ran them before (use it again if it still works):\n{methods}"
@@ -323,16 +343,47 @@ class Connector:
             if by_owner:
                 self.runtime.publish_state()
 
+    def watch_since(self, what: str) -> float:
+        """Where a watch's next scan starts: a little before the last scan that covered it in
+        full (at most LOOKBACK_HOURS back); 0 for a new one."""
+        done = float(
+            self.store.get(f"watchdone:{watch_key(what)}") or self.store.get("watch_done_at") or 0
+        )
+        return max(done - OVERLAP_SECONDS, time.time() - LOOKBACK_HOURS * 3600) if done else 0
+
     async def t_report_found(self, params: ReportFound, caller: str):
         self.check(caller)
-        # Its window is covered: the next scan reads on from when this one began.
-        self.store.set("watch_done_at", self.store.get("watch_started_at") or str(time.time()))
+        started = self.store.get("watch_started_at") or str(time.time())
+        scanned = json.loads(self.store.get("watch_scan") or "[]")
+        # A watch it could not run (problems) and said nothing more about: not covered.
+        partial = {item.watch: item.reason.strip()[:300] for item in params.incomplete}
+        if params.problems.strip() and not partial:
+            partial = dict.fromkeys(range(1, len(scanned) + 1), params.problems.strip()[:300])
+        incomplete = []
+        for number, key in enumerate(scanned, 1):
+            if number in partial:
+                # Its window stays open: the next scan looks from where it was last covered.
+                self.store.set(
+                    f"watchpartial:{key}",
+                    json.dumps({"reason": partial[number], "at": now()}),
+                )
+                incomplete.append({"watch": number, "reason": partial[number]})
+            else:
+                self.store.set(f"watchdone:{key}", started)
+                self.store.delete(f"watchpartial:{key}")
+        if not incomplete:
+            self.store.set("watch_done_at", started)
         if params.methods.strip():
             self.store.set("watch_methods", params.methods.strip()[:2000])
         self.store.set(
             "watch_last",
             json.dumps(
-                {"at": now(), "found": len(params.items), "problems": params.problems[:500]}
+                {
+                    "at": now(),
+                    "found": len(params.items),
+                    "problems": params.problems[:500],
+                    "incomplete": incomplete,
+                }
             ),
         )
         new = 0
@@ -425,6 +476,7 @@ class Connector:
                 "enabled": settings.away_notify,
                 "last": json.loads(self.store.get("away_last") or "{}"),
                 "where": self.store.get("away_where") or "",
+                "can": self.capabilities(),
             },
         }
 
@@ -756,8 +808,13 @@ class Connector:
             if params.method.strip():
                 self.store.set("away_method", params.method.strip()[:1000])
             if params.where.strip():
+                if params.where.strip()[:300] != (self.store.get("away_where") or ""):
+                    self.store.delete("away_reply_verified")  # Another way: not tried yet.
                 self.store.set("away_where", params.where.strip()[:300])
-            self.store.set("away_replies", params.replies.strip()[:1000])
+            replies = params.replies.strip()[:1000]
+            if replies != (self.store.get("away_replies") or ""):
+                self.store.delete("away_reply_verified")
+            self.store.set("away_replies", replies)
             self.store.delete("away_retry_at")
             if pending and pending.get("test"):
                 [item] = pending["items"]
@@ -812,10 +869,12 @@ class Connector:
                 self.store.delete(f"awaycode:{code}")
                 done.append(f"{code}: your answer came back")
                 outcome = "your answers come back: replies here work"
+                self.verified_replies()
             elif not (item := items.get(item_id)):
                 done.append(f"{code}: nothing waits for that code (answered already?)")
                 continue
             else:
+                self.verified_replies()  # A code it sent came back: replies are read.
                 try:
                     outcome = await self.apply(item, reply.text.strip(), code)
                     self.store.delete(f"awaycode:{code}")  # Used once.
@@ -831,6 +890,26 @@ class Connector:
             )
         self.runtime.publish_state()
         return "\n".join(done) or "Nothing to apply."
+
+    def verified_replies(self):
+        self.store.set(
+            "away_reply_verified",
+            json.dumps({"at": now(), "where": self.store.get("away_where") or ""}),
+        )
+
+    def capabilities(self) -> dict:
+        """What the way the owner is reached can do, as tried, not as claimed: messages went
+        out (the messenger said so), replies are read (it says how), a reply came back (a code
+        returned), and new requests by reply (no: codes answer what was sent)."""
+        last = json.loads(self.store.get("away_last") or "{}")
+        verified = json.loads(self.store.get("away_reply_verified") or "null")
+        return {
+            "sends": bool(last.get("ok")),
+            "sent_at": last.get("at", "") if last.get("ok") else "",
+            "reads_replies": bool(self.store.get("away_replies")),
+            "replies_verified_at": (verified or {}).get("at", ""),
+            "new_requests": False,
+        }
 
     async def apply(self, item: dict, text: str, code: str) -> str:
         """The owner's answer to one card, from elsewhere: what follows its code (any case)."""

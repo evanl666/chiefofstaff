@@ -106,9 +106,15 @@ async def test_reports_runs_and_usage_belong_to_the_task(harness):
     usage = harness.store.all("SELECT run_id FROM usage WHERE session_id=?", (worker,))
     assert [row["run_id"] for row in usage] == [runs[0]["id"]]
 
-    await call_tool(
+    vague = await call_tool(
         runtime, "message_session", harness.router_id, session_id=worker, text="Also add an index"
     )
+    assert vague.result_type == "failure" and "task_id=" in vague.text_result_for_llm
+    assert task(harness, first["task_id"])["status"] == "review", "nothing reopened by it"
+    await call_tool(
+        runtime, "message_session", harness.router_id, session_id=worker, text="Also add an index",
+        task_id=first["task_id"],
+    )  # fmt: skip
     reopened = task(harness, first["task_id"])
     assert reopened["status"] == "running", "a follow-up reopens the finished task"
     assert [run["reason"] for run in runtime.tasks.runs(first["task_id"])] == ["start", "follow-up"]
@@ -318,3 +324,86 @@ async def test_a_task_left_running_by_an_old_decision_change_goes_back_once(harn
     runtime.tasks.move(kept["task_id"], "running", reason="decision changed")
     settle_decision_changes(harness.store)
     assert task(harness, kept["task_id"])["status"] == "running", "only once"
+
+
+async def test_a_task_is_renamed_and_keeps_its_earlier_names(harness):
+    runtime = await harness.connect()
+    made = await spawn(runtime, harness.router_id, "Handle the new Slack message")
+    result = await call_tool(
+        runtime, "rename_task", harness.router_id, task_id=made["task_id"],
+        title="Answer Jingtao: why two parallel gets are slow",
+    )  # fmt: skip
+    assert result.result_type == "success"
+    view = runtime.task_actions.view(runtime.tasks.get(made["task_id"]))
+    assert view["title"] == "Answer Jingtao: why two parallel gets are slow"
+    assert [item["title"] for item in view["earlier_titles"]] == ["Handle the new Slack message"]
+    refused = await call_tool(
+        runtime, "rename_task", harness.router_id, task_id=made["task_id"], title="  "
+    )
+    assert refused.result_type == "failure"
+
+
+async def test_a_task_that_drifted_is_split_with_each_result_its_own(harness):
+    runtime = await harness.connect()
+    made = await spawn(runtime, harness.router_id, "Schedule BG features weekly")
+    worker = made["session_id"]
+    await call_tool(runtime, "report", worker, status="done", summary="Scheduled for Mondays.")
+    await call_tool(
+        runtime, "message_session", harness.router_id, session_id=worker,
+        text="Does Qwen need a weekly rerun?", task_id=made["task_id"],
+    )  # fmt: skip
+    await call_tool(runtime, "report", worker, status="done", summary="No: vectors are built in.")
+    early = await call_tool(
+        runtime, "split_task", harness.router_id, task_id=made["task_id"], title="x"
+    )
+    assert early.result_type == "success"
+    [split] = [t for t in runtime.tasks.for_session(worker) if t["id"] != made["task_id"]]
+    assert split["title"] == "x" and split["result"] == "No: vectors are built in."
+    kept = runtime.tasks.get(made["task_id"])
+    assert kept["result"] == "Scheduled for Mondays." and kept["status"] == "review"
+    moved = [
+        m for m in harness.store.messages(worker)
+        if m["kind"] == "report" and m["text"].startswith("No:")
+    ]  # fmt: skip
+    assert moved[0]["meta"]["task_id"] == split["id"], "its report is the new task's"
+    assert len(runtime.tasks.runs(split["id"])) == 1
+    # Split while its worker is on other work: that stays its current task.
+    await call_tool(runtime, "report", worker, status="done", summary="Also: Qwen is fine.",
+                    task_id=split["id"])  # fmt: skip
+    other = await call_tool(
+        runtime, "message_session", harness.router_id, session_id=worker, task="new",
+        title="Backfill the BG table", text="Backfill it",
+    )  # fmt: skip
+    assert other.result_type == "success", other.text_result_for_llm
+    busy = runtime.tasks.current(worker)
+    assert busy["title"] == "Backfill the BG table"
+    await call_tool(runtime, "split_task", harness.router_id, task_id=split["id"], title="Qwen")
+    assert runtime.tasks.current(worker)["id"] == busy["id"]
+    single = await spawn(runtime, harness.router_id, "One result", why_new="separate")
+    await call_tool(runtime, "report", single["session_id"], status="done", summary="Done.")
+    refused = await call_tool(
+        runtime, "split_task", harness.router_id, task_id=single["task_id"], title="y"
+    )
+    assert refused.result_type == "failure" and "rename" in refused.text_result_for_llm
+
+
+async def test_a_worker_says_what_its_task_made_and_where_each_stands(harness):
+    runtime = await harness.connect()
+    worker = (await spawn(runtime, harness.router_id, "Run the ICP flow"))["session_id"]
+    task = runtime.tasks.current(worker)
+    flow = "https://flyte.example.com/console/projects/p/domains/d/executions/abc123"
+    doc = "https://docs.google.com/document/d/abc/edit"
+    await call_tool(runtime, "report", worker, status="progress", summary="Started the run.",
+                    artifacts=[{"url": flow, "name": "ICP flow, full run", "status": "running"},
+                               {"url": "https://github.com/acme/app/pull/7", "name": "PR",
+                                "status": "open"},
+                               {"url": "not a link", "name": "x", "status": "y"}])  # fmt: skip
+    await call_tool(runtime, "report", worker, status="done", summary="Ran it; results in the doc.",
+                    artifacts=[{"url": doc, "name": "ICP results", "status": "final"},
+                               {"url": flow, "name": "ICP flow, full run",
+                                "status": "succeeded"}])  # fmt: skip
+    found = runtime.task_actions.view(runtime.tasks.get(task["id"]))["artifacts"]
+    assert [(item["url"], item["name"], item["status"]) for item in found] == [
+        (doc, "ICP results", "final"),
+        (flow, "ICP flow, full run", "succeeded"),
+    ], "kept by link, the latest word on each; PRs come from GitHub; not a link: dropped"

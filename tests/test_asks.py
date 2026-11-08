@@ -487,3 +487,33 @@ async def test_a_question_card_outlives_its_cancelled_task(harness):
     [question] = runtime.snapshot()["questions"]
     assert "8080 or 9090?" in question["text"] and "Choices: 8080, 9090" in question["text"]
     assert question["task_status"] == "cancelled"
+
+
+async def test_a_peer_waited_for_by_its_name_or_id_under_a_long_title(harness):
+    """Titles say what a task delivers ("Token Scout: generate a token into token.txt"); a
+    worker waiting for it names it shortly, or by its id: still a peer it waits for, so no
+    report is asked for meanwhile."""
+    runtime = await harness.connect()
+    router = harness.router_id
+    scout = await spawn(runtime, router, "Token Scout: generate a token into token.txt")
+    scout_task = runtime.tasks.current(scout)["id"]
+    for said in (
+        "Waiting for the Token Scout worker's token.",
+        f"Waiting for the token from worker:{scout[:8]}.",
+    ):
+        writer = await spawn(
+            runtime, router, "Token Writer: write the token into result.txt",
+            works_with=[scout_task],
+        )  # fmt: skip
+        session = harness.session(writer)
+        session.emit("assistant.message", content=said)
+        session.emit("session.idle")
+        await settle(runtime)
+        assert not any("report-missing" in sent for sent in session.sent), said
+        assert harness.store.session(writer)["activity"].startswith("waiting for “Token Scout")
+    from chiefofstaff.peers import mentions
+
+    assert not mentions("Fix the bug", "Fix: the login bug", by_name=True), "one word: no name"
+    assert not mentions("Token Scout", "Token Scout: generate"), (
+        "only when it says whom it waits for"
+    )

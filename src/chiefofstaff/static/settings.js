@@ -448,7 +448,8 @@ export function renderConnections() {
   const connector = snap.connector || {};
   const last = connector.last || {};
   // What the last scan could not do: one line (saved as text; a list from older versions).
-  const problems = (Array.isArray(last.problems) ? last.problems.join("; ") : String(last.problems || "")).trim();
+  const partial = (last.incomplete || []).map((item) => `watch ${item.watch} only partly covered: ${item.reason}`);
+  const problems = [(Array.isArray(last.problems) ? last.problems.join("; ") : String(last.problems || "")).trim(), ...partial].filter(Boolean).join(" · ");
   const scanned = connector.scanning
     ? "Scanning now…"
     : connector.scanned_at
@@ -464,6 +465,24 @@ export function renderConnections() {
   $("#away-summary").textContent = settings.away_notify ? `On${away.where ? ` · ${away.where}` : ""}` : "Off";
   $("#away-state").textContent = tried.at ? (tried.ok ? `Reached you${tried.where ? ` via ${tried.where}` : ""} ${since(tried.at)}` : `Could not reach you ${since(tried.at)}: ${tried.error || "unknown error"}`) : "";
   $("#away-state").classList.toggle("error", Boolean(tried.at && !tried.ok));
+  // What this way can do, as tried: sending, reading your replies, new requests.
+  const can = away.can || {};
+  const rows = !settings.away_notify || !tried.at
+    ? []
+    : [
+        [can.sends, can.sends ? `Sends: yes, last ${since(can.sent_at)}` : "Sends: not working now"],
+        [
+          can.reads_replies,
+          !can.reads_replies
+            ? "Reads your replies: no — answer in Chief of Staff"
+            : can.replies_verified_at
+              ? `Reads your replies: yes (a reply came back ${since(can.replies_verified_at)})`
+              : "Reads your replies: said so, not tried yet — Send a test and answer it",
+        ],
+        [false, "New requests by reply: no — a reply answers what was sent, by its code"],
+      ];
+  $("#away-can").replaceChildren(...rows.map(([ok, text]) => el("li", { class: ok ? "ok" : "no", text })));
+  $("#away-can").hidden = !rows.length;
   $("#slack-activity").hidden = !sessions().some((session) => session.role === "slack");
   $("#watchdog-activity").hidden = !sessions().some((session) => session.role === "watchdog");
 }

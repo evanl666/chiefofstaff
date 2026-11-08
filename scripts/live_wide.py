@@ -98,7 +98,7 @@ F1  new work waits and says why; nothing starts; the Router tells the owner
 
 Shard G, round two:
 G1  a failing run, the fix, the same tests run again by a sub-agent: the card says passed
-G2  news on a followed PR for an accepted task: under Ready to review (Update) until Got it
+G2  news on a followed PR for an accepted task: under Needs you (Update) until Got it
 G3  an answer to an overall PR comment starts with @ its author; posted in the conversation
 G4  a reply on a line sent with "resolve": the conversation is resolved on GitHub
 G5  the owner posts a drafted reply themself, edited a little: the draft settles, its worker
@@ -120,10 +120,22 @@ I3  thanks for a result in review: it stays in review, nothing starts
 I4  a running task whose worker went quiet: Nudge, and it says where it stands
 I5  Stalled after (h) is saved
 
+Shard J, round five (one worker, several tasks; artifacts):
+J1  a worker that needs the owner's key asks (question or blocked): under Needs you, not
+    Running with a progress report
+J2  a second task for a worker still on its first: the Router says what becomes of the first;
+    the second is up next, then runs; a note about the first, reported, does not move the
+    worker off the second: it stays under Running, no "following up" for the first, no
+    follow-up card; the worker is named by its latest task in the sidebar
+J3  a worker lists what its task made (a doc, a run) with their status: one list on Home,
+    where each stands; one taken off and brought back
+J4  a new task that replaces the running one: the first is cancelled as superseded
+J5  the Router renames a task when asked: the new title, the earlier one kept
+
 All shards:
 W52 no Router reply names a worker by its session id
 
-    uv run python scripts/live_wide.py A|B|C|D|E|F|G|H|I [W1 E1 …]  (E needs --with playwright)
+    uv run python scripts/live_wide.py A|…|J [W1 E1 …]  (E, G, J need --with playwright)
 """
 
 import asyncio
@@ -152,7 +164,7 @@ from live_parity import COPILOT, setup, write
 SHARDS = {
     "A": (18781, 18911), "B": (18782, 18912), "C": (18783, 18913), "D": (18784, 18914),
     "E": (18785, 18915), "F": (18786, 18916), "G": (18787, 18917), "H": (18788, 18918),
-    "I": (18799, 18929),
+    "I": (18799, 18929), "J": (18800, 18930),
 }  # fmt: skip
 MODEL = "claude-sonnet-5.5"
 CJK = re.compile(r"[\u4e00-\u9fff]")
@@ -2218,11 +2230,15 @@ def calc_project(root: Path) -> Path:
 async def titled(ctx: Ctx, since: str, word: str, timeout=300) -> dict:
     """The task given since then whose title has the word, and its worker."""
 
+    def head(title: str) -> str:
+        return re.split(r"[:·(]", title, maxsplit=1)[0].lower()
+
     async def check():
-        for task in await tasks_since(ctx, since):
-            if word.lower() in task["title"].lower():
-                return task
-        return None
+        found = [t for t in await tasks_since(ctx, since) if word.lower() in t["title"].lower()]
+        # Titles say what a task delivers and to whom ("Token Scout: … pass to Token Writer"):
+        # the one named so first.
+        named = [t for t in found if word.lower() in head(t["title"])]
+        return (named or found or [None])[0]
 
     return await wait_for(f"the task “{word}”", check, timeout, ctx.app)
 
@@ -2746,7 +2762,7 @@ async def g1_sub_agent_runs_again(ctx: Ctx):
 
 
 async def g2_news_stays_in_sight(ctx: Ctx):
-    """News on a followed PR, for a task already accepted, waits under Ready to review (or as
+    """News on a followed PR, for a task already accepted, waits under Needs you (or as
     a question under Needs you) until the owner has seen it."""
     set_check("success")
     since = now()
@@ -2774,7 +2790,7 @@ async def g2_news_stays_in_sight(ctx: Ctx):
             browser = await playwright.chromium.launch()
             page = await browser.new_page(viewport={"width": 1400, "height": 900})
             await page.goto(f"{ctx.app_base}/#token={ctx.app.launch_token}")
-            card = page.locator("#tasks-review .card.task").filter(
+            card = page.locator("#needs .card.task").filter(
                 has=page.locator(".head .title", has_text=news["title"])
             )
             await expect(card.locator(".news .chip")).to_have_text("Update", timeout=20000)
@@ -2936,12 +2952,13 @@ async def g6_two_tasks_one_worker(ctx: Ctx):
         await page.goto(f"{ctx.app_base}/#token={ctx.app.launch_token}")
         worker_id = first["session_id"]
         running = page.locator(f'#tasks-running .card.worker-box[data-session="{worker_id}"]')
-        queued = page.locator(f'#tasks-queued .card.worker-box[data-session="{worker_id}"]')
+        queued = page.locator(f'#tasks-monitoring .card.worker-box[data-session="{worker_id}"]')
         open_now = [t for t in (await state(ctx))["tasks"] if t["session_id"] == worker_id
                     and t["status"] in {"running", "queued", "waiting"}]  # fmt: skip
         log(f"G6: open tasks {[(t['title'], t['status']) for t in open_now]}")
         if len(open_now) >= 2:
-            # A box per section: the task it is on under Running, the other waiting its turn.
+            # A box per section: the task it is on under Running, the other under Monitoring,
+            # up next.
             await expect(running.locator(".card.task")).to_have_count(1, timeout=20000)
             await expect(queued.locator(".card.task")).to_have_count(1, timeout=20000)
             # Still in the sleep it began before the second task came: on the first one.
@@ -2949,7 +2966,9 @@ async def g6_two_tasks_one_worker(ctx: Ctx):
                 await expect(running.locator(".card.task .head .title")).to_have_text(
                     re.compile("Twin Tasks", re.IGNORECASE)
                 )
-                await expect(queued.locator(".reason")).to_contain_text("Waits its turn")
+                await expect(queued.locator(".reason")).to_contain_text(
+                    re.compile(r"Up next: its worker is on “Twin Tasks", re.IGNORECASE)
+                )
             await running.screenshot(path=SCRIPTS.parent / "browser-shots" / "live-g-group.png")
             row = running.locator(".card.task").first
             await row.locator(".more-button").click()
@@ -3242,6 +3261,202 @@ async def i5_stall_setting(ctx: Ctx):
     log("I5 passed")
 
 
+async def j1_waiting_on_the_owner(ctx: Ctx):
+    since = now()
+    await say(
+        ctx,
+        "Start a worker titled 'Key Needed' (no project): it will call a paid API that needs my "
+        "API key, which only I have. It writes its plan into plan.txt in its folder, then needs "
+        "the key from me before it can go on.",
+    )
+    task = await titled(ctx, since, "key")
+    found = await task_status(ctx, task["id"], {"waiting"}, "it asks for the key", 600)
+    log(f"J1: {found['status']}: {found['progress'][:160]!r}")
+    from playwright.async_api import async_playwright, expect
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch()
+        page = await browser.new_page(viewport={"width": 1400, "height": 900})
+        await page.goto(f"{ctx.app_base}/#token={ctx.app.launch_token}")
+        mine = page.locator("#needs .card.task").filter(
+            has=page.locator(".head .title", has_text=found["title"])
+        )
+        await expect(mine).to_have_count(1, timeout=20000)
+        await expect(
+            page.locator("#tasks-running .card.task", has_text=found["title"])
+        ).to_have_count(0)
+        await browser.close()
+    await ctx.app.post(f"/api/tasks/{task['id']}/cancel", {"text": "Test over"})
+    log("J1 passed")
+
+
+async def j2_second_task_and_a_note(ctx: Ctx):
+    from playwright.async_api import async_playwright, expect
+
+    since = now()
+    await say(ctx, "Start a worker titled 'Twin Spec' (no project): run `sleep 100`, then write "
+              "spec into spec.txt in its folder and report done.")  # fmt: skip
+    first = await titled(ctx, since, "twin spec")
+    worker = first["session_id"]
+
+    async def step(word):
+        async def check():
+            row = await session(ctx, worker)
+            return row if word in (row.get("step_command") or "") else None
+
+        return check
+
+    await wait_for("it sleeps", await step("sleep 100"), 300, ctx.app)
+    later = now()
+    said = await ask(
+        ctx,
+        "Give the Twin Spec worker a second, separate task (a new task for that same worker, "
+        "not a new worker): run `sleep 75`, then write build into build.txt in its folder. Its "
+        "first task goes on and finishes first.",
+    )
+    log(f"J2: the Router said {said[:200]!r}")
+
+    async def second():
+        found = [t for t in await tasks_since(ctx, later) if t["session_id"] == worker]
+        return found[0] if found else None
+
+    other = await wait_for("its second task", second, 300, ctx.app)
+    assert (await ctx.app.get(f"/api/tasks/{first['id']}"))["status"] == "running", "kept"
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch()
+        page = await browser.new_page(viewport={"width": 1400, "height": 900})
+        errors: list[str] = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        await page.goto(f"{ctx.app_base}/#token={ctx.app.launch_token}")
+        running = page.locator(f'#tasks-running .card.worker-box[data-session="{worker}"]')
+        waiting = page.locator(f'#tasks-monitoring .card.worker-box[data-session="{worker}"]')
+        if "sleep 100" in ((await session(ctx, worker)).get("step_command") or ""):
+            await expect(running.locator(".card.task .head .title")).to_have_text(
+                first["title"], timeout=20000
+            )
+            await expect(waiting.locator(".reason")).to_contain_text("Up next")
+            await page.screenshot(path=SCRIPTS.parent / "browser-shots" / "live-j2-up-next.png")
+        # The worker on the second (the first reported or not yet): a note about the first.
+        await wait_for("on the second", await step("sleep 75"), 400, ctx.app)
+        then = await ctx.app.get(f"/api/tasks/{first['id']}")
+        log(f"J2: first is {then['status']}")
+        await ask(ctx, "Tell the Twin Spec worker, as a note about its first (spec) task only, "
+                  "no new work: the spec is approved as it is.")  # fmt: skip
+        row = await session(ctx, worker)
+        log(f"J2: after the note, turn {row['turn_task']}, step {row.get('step_command')!r}")
+        if "sleep 75" in (row.get("step_command") or ""):
+            assert row["turn_task"] == other["id"], (row["turn_task"], other["id"], first["id"])
+            await expect(running.locator(".card.task .head .title")).to_have_text(
+                other["title"], timeout=20000
+            )
+            stale = page.locator(
+                "#tasks-running .card.task.marker-following", has_text=first["title"]
+            )
+            await expect(stale).to_have_count(0)
+            await expect(
+                page.locator(f'.card.followup[data-key="followup:{worker}"]')
+            ).to_have_count(0)
+            await page.screenshot(path=SCRIPTS.parent / "browser-shots" / "live-j2-after-note.png")
+        await task_status(ctx, other["id"], FINISHED, "the second task", 600)
+        await task_status(ctx, first["id"], FINISHED, "the first task", 600)
+        router = (await state(ctx))["router_id"]
+        heard = [m for m in await messages(ctx, router) if m["kind"] == "inbound"
+                 and m["meta"].get("from") == worker]  # fmt: skip
+        log(f"J2: the Router heard {len(heard)} reports from the worker")
+        row = await session(ctx, worker)
+        assert row["display_title"] == (await ctx.app.get(f"/api/tasks/{other['id']}"))["title"]
+        await page.reload()
+        item = page.locator(f'#session-list .item[data-id="{worker}"] .label')
+        await expect(item).to_have_text(row["display_title"], timeout=20000)
+        await browser.close()
+        assert not errors, errors
+    workspace = Path(row["workspace"])
+    assert (workspace / "spec.txt").exists() and (workspace / "build.txt").exists()
+    log("J2 passed")
+
+
+async def j3_artifacts(ctx: Ctx):
+    from playwright.async_api import async_playwright, expect
+
+    stamp = int(time.time())
+    doc = f"https://docs.google.com/document/d/live{stamp}/edit"
+    run = f"https://flyte.example.com/console/projects/p/domains/d/executions/live{stamp}"
+    since = now()
+    await say(
+        ctx,
+        "Start a worker titled 'Artifact Check' (no project): write notes into notes.md in its "
+        f"folder. Then report done, and in the report list what it made: the doc {doc} (name "
+        f"'Live test doc', final) and the run {run} (name 'Live test run', succeeded).",
+    )
+    task = await titled(ctx, since, "artifact")
+    done = await task_status(ctx, task["id"], FINISHED, "the artifacts reported", 600)
+    said = {item["url"]: item for item in done.get("artifacts") or []}
+    log(f"J3: artifacts {list(said.values())}")
+    assert doc in said and run in said, said
+    assert "final" in said[doc]["status"].lower() and "succe" in said[run]["status"].lower()
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch()
+        page = await browser.new_page(viewport={"width": 1400, "height": 900})
+        errors: list[str] = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        await page.goto(f"{ctx.app_base}/#token={ctx.app.launch_token}")
+        rows = page.locator("#tasks-artifacts .artifact")
+        made = rows.filter(has=page.locator(f'a[href="{run}"]'))
+        await expect(made.locator(".a-status")).to_contain_text("succe", timeout=20000)
+        await expect(made).to_have_class(re.compile(r"\btone-good\b"))
+        await expect(rows.filter(has=page.locator(f'a[href="{doc}"]'))).to_have_count(1)
+        await page.locator("#tasks-artifacts").screenshot(
+            path=SCRIPTS.parent / "browser-shots" / "live-j3-artifacts.png"
+        )
+        await made.locator(".a-hide").click()
+        await expect(made).to_have_count(0)
+        assert run in (await state(ctx))["artifacts_hidden"]
+        await page.locator("#tasks-artifacts .show-hidden").click()
+        await made.get_by_role("button", name="Bring back").click()
+        await expect(made).not_to_have_class(re.compile(r"\bhidden-artifact\b"))
+        assert run not in (await state(ctx))["artifacts_hidden"]
+        await browser.close()
+        assert not errors, errors
+    log("J3 passed")
+
+
+async def j4_superseded(ctx: Ctx):
+    since = now()
+    await say(ctx, "Start a worker titled 'Plan One' (no project): run `sleep 120`, then write "
+              "v1 into plan.txt in its folder and report done.")  # fmt: skip
+    first = await titled(ctx, since, "plan one")
+
+    async def sleeping():
+        row = await session(ctx, first["session_id"])
+        return row if "sleep" in (row.get("step_command") or "") else None
+
+    await wait_for("it sleeps", sleeping, 300, ctx.app)
+    later = now()
+    await ask(
+        ctx,
+        "Replace what the Plan One worker is doing with a new task for that same worker: write "
+        "v2 into plan.txt in its folder. The v1 task is superseded by it: drop v1.",
+    )
+    gone = await task_status(ctx, first["id"], {"cancelled"}, "the first superseded", 300)
+    found = [t for t in await tasks_since(ctx, later) if t["session_id"] == first["session_id"]]
+    assert found, "a new task for the same worker"
+    log(f"J4: first {gone['status']} ({gone.get('result', '')[:80]!r}); new {found[0]['title']!r}")
+    await task_status(ctx, found[0]["id"], FINISHED, "v2", 600)
+    log("J4 passed")
+
+
+async def j5_rename(ctx: Ctx):
+    since = now()
+    await ask(ctx, "Write the single word fig into fig.txt.")
+    [task] = await finished(ctx, since, 1, "the fig file", 600)
+    title = "Write fig.txt · rename check"
+    await ask(ctx, f"Rename the task “{task['title']}” to “{title}”.")
+    after = await ctx.app.get(f"/api/tasks/{task['id']}")
+    assert after["title"] == title, after["title"]
+    assert task["title"] in [item["title"] for item in after["earlier_titles"]], after
+    log("J5 passed")
+
+
 SCENARIOS = {
     "A": [
         w1_ask, w2_progress, w3_answered_directly, w4_pasted_orders, w5_chinese_log,
@@ -3288,6 +3503,10 @@ SCENARIOS = {
     "I": [
         i5_stall_setting, i1_check_back, i2_cancel_one_of_two, i3_thanks_for_a_result_in_review,
         i4_nudge_a_quiet_task, w52_no_ids,
+    ],
+    "J": [
+        j1_waiting_on_the_owner, j2_second_task_and_a_note, j3_artifacts, j4_superseded,
+        j5_rename, w52_no_ids,
     ],
 }  # fmt: skip
 

@@ -256,3 +256,29 @@ def last_commit(checkout) -> str:
     return subprocess.run(
         ["git", "log", "-1", "--format=%s"], cwd=checkout, capture_output=True, text=True
     ).stdout.strip()
+
+
+async def test_a_message_enqueued_mid_turn_shows_as_a_user_message(backend, tmp_path):
+    """Chief of Staff learns which task a worker's turn is on from the user.message events: a
+    message sent while it works ("enqueue") shows as one, with its text, when it is taken up
+    (after the work in progress, not in the middle of it)."""
+    session, turn = await open_session(backend, tmp_path)
+    await session.send("Run the shell command `sleep 6` and then reply with just: first")
+    for _ in range(600):
+        if "tool.execution_start" in turn.kinds():
+            break
+        await asyncio.sleep(0.1)
+    await session.send("Marker q7z: reply with just: second", mode="enqueue")
+
+    def users():
+        return [
+            getattr(e.data, "content", "") or ""
+            for e in turn.events
+            if e.type.value == "user.message"
+        ]
+
+    for _ in range(900):
+        if any("q7z" in content for content in users()) and turn.kinds()[-1] == "session.idle":
+            break
+        await asyncio.sleep(0.2)
+    assert any("q7z" in content for content in users()), users()

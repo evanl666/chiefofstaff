@@ -3,21 +3,24 @@
 import { $, api, el, keepingFocus, moreMenu, reconcile, submits, toast } from "./dom.js";
 import { markdown, shortPath } from "./text.js";
 import { byId, closedWorkers, DOT_HELP, HOME, loadState, ownerQuestions, pendingDrafts, routerId, sessions, state, uncertainDrafts } from "./state.js";
-import { boardOf, countOf, SECTIONS } from "./board.js";
+import { boardOf, countOf, finishedBoxes, followingUp, SECTIONS, workerSection } from "./board.js";
 import { renderStatusLine } from "./sidebar.js";
 import { renderHeader, scrollToBottom, select } from "./session.js";
 import { draftCard, draftKey, uncertainCard } from "./drafts.js";
 import { expandTask, followUpItem, inTerminal, ownTasks, terminalItem, workerBoxItem } from "./tasks.js";
-// What waits for the owner: cards to approve or answer, tasks waiting for an answer or failed,
-// and a worker's question whose task does not show it (cancelled, finished, or none). A task
-// waiting on a decision card shows as that card.
+import { artifactItems } from "./artifacts.js";
+// What waits for the owner: cards to approve or answer, and the tasks the board puts under
+// Needs you (waiting for an answer, failed, a result to review, news, no progress); a
+// worker's question whose task does not show it (cancelled, finished, or none). A task waiting
+// on a decision card shows as that card.
 export function needsYou() {
   const drafts = pendingDrafts();
+  const found = board();
   const deciding = new Set(drafts.filter((draft) => draft.kind === "decision").flatMap((draft) => draft.target.askers.map((asker) => asker.task_id)));
-  const waiting = ownTasks().filter((task) => (task.status === "waiting" && !deciding.has(task.id)) || task.status === "failed" || task.blocked);
+  const waiting = found.sections.needs.flatMap((entry) => entry.tasks).filter((task) => !(task.status === "waiting" && deciding.has(task.id)));
   const shownTasks = new Set(waiting.map((task) => task.id));
   const questions = ownerQuestions().filter((question) => !shownTasks.has(question.task_id));
-  return { drafts, uncertain: uncertainDrafts(), tasks: waiting, questions };
+  return { drafts, uncertain: uncertainDrafts(), tasks: waiting, questions, board: found };
 }
 // What the badge counts: not the cards the owner just acted on.
 export function needsCount() {
@@ -25,41 +28,34 @@ export function needsCount() {
   const shown = (key) => !state.leaving.has(key);
   return items.drafts.filter((draft) => shown(`draft:${draft.id}`)).length + items.uncertain.filter((draft) => shown(`draft:${draft.id}`)).length + items.tasks.filter((task) => shown(`task:${task.id}`)).length + items.questions.filter((question) => shown(`question:${question.id}`)).length;
 }
-// Where a worker stands, as its sidebar dot says and as Home shows it: the same words in both.
+// Where a worker stands, as its sidebar dot says and as Home shows it: the same four places.
 export const WORKER_STATES = [
-  ["waiting", "Needs you: it waits for your answer or approval (Home → Needs you)"],
-  ["failed", "A task failed (Home → Needs you)"],
-  ["working", "Working now (Home → Running)"],
-  ["watching", "Between steps: waiting on CI, a review, a reply or a run (Home → Monitoring)"],
-  ["stalled", "Stalled: nothing has happened on its task for a while (Home → Stalled)"],
-  ["queued", "Queued: waits for a free slot or another task (Home → Queued)"],
-  ["done", "Finished: ready to review (Home → Ready to review)"],
-  ["idle", "Nothing open: its work is accepted, or it has none"],
+  ["waiting", "Needs you: one of its tasks waits for your answer, approval or review (Home → Needs you)"],
+  ["working", "Running: at work on a task now (Home → Running)"],
+  ["watching", "Monitoring: waiting on CI, a review, a reply, a run, a slot or its turn (Home → Monitoring)"],
+  ["idle", "Nothing open: its tasks are finished"],
 ];
+const MARKED = { queued: "queued", turn: "up next", paused: "paused", overdue: "overdue", idle: "nothing to wait on", "check-back": "checks back" };
 export function workerStates() {
   const needs = needsYou();
+  const { phases } = needs.board;
   // Every worker a decision card waits for, not only the first that asked.
   const askers = needs.drafts.flatMap((draft) => (draft.kind === "decision" ? (draft.target.askers || []).map((asker) => asker.session_id) : []));
-  const asking = new Set([...needs.drafts.map((draft) => draft.session_id), ...askers, ...needs.questions.map((question) => question.session_id), ...needs.tasks.filter((task) => task.status !== "failed").map((task) => task.session_id)]);
-  const failed = new Set(needs.tasks.filter((task) => task.status === "failed").map((task) => task.session_id));
-  // Its tasks' sections, as Home shows them (board.js).
-  const mine = ownTasks();
-  const { phases } = boardOf(mine, new Map(sessions().map((session) => [session.id, session])), { stallHours: state.snapshot.settings.stall_hours || 4 });
-  const sectionsOf = new Map();
-  for (const task of mine) sectionsOf.set(task.session_id, new Set([...(sectionsOf.get(task.session_id) || []), phases.get(task.id)?.section]));
+  const asking = new Set([...needs.drafts.map((draft) => draft.session_id), ...askers, ...needs.questions.map((question) => question.session_id), ...needs.tasks.map((task) => task.session_id)]);
+  const mine = new Map();
+  for (const task of ownTasks()) mine.set(task.session_id, [...(mine.get(task.session_id) || []), task]);
   const found = new Map();
   for (const session of sessions()) {
-    const has = sectionsOf.get(session.id) || new Set();
+    const list = mine.get(session.id) || [];
+    const section = workerSection(phases, list);
     let dot = "idle";
     if (session.elsewhere) dot = `open${session.terminal?.working ? " busy" : ""}`;
     else if (asking.has(session.id)) dot = "waiting";
-    else if (failed.has(session.id)) dot = "failed";
-    else if (["working", "starting"].includes(session.status)) dot = "working";
-    else if (has.has("running") || has.has("monitoring")) dot = "watching";
-    else if (has.has("stalled")) dot = "stalled";
-    else if (has.has("queued")) dot = "queued";
-    else if (has.has("review")) dot = "done";
-    found.set(session.id, { dot, text: session.elsewhere ? DOT_HELP.open : Object.fromEntries(WORKER_STATES)[dot] });
+    else if (["working", "starting"].includes(session.status) || section === "running") dot = "working";
+    else if (section === "monitoring") dot = "watching";
+    // A marker in words, not a color of its own: queued, overdue, checks back…
+    const markers = [...new Set(list.map((task) => MARKED[phases.get(task.id)?.marker]).filter(Boolean))];
+    found.set(session.id, { dot, sub: dot === "watching" ? markers[0] || "" : "", text: session.elsewhere ? DOT_HELP.open : Object.fromEntries(WORKER_STATES)[dot] });
   }
   return found;
 }
@@ -76,8 +72,9 @@ function board() {
   const found = boardOf(mine, workers, { stallHours, onCards });
   const running = new Set(found.sections.running.map((entry) => entry.sessionId));
   const terminal = inTerminal().filter((session) => !running.has(session.id));
-  // At work, though none of its tasks is (news on a PR it follows, a question about its work).
-  const followUps = sessions().filter((session) => session.role === "worker" && !session.helper && !session.closed_at && session.status === "working" && !running.has(session.id) && !terminal.some((other) => other.id === session.id));
+  // At work, though none of its tasks is open (news on a PR it follows, a question about it).
+  const own = sessions().filter((session) => session.role === "worker" && !session.helper && !session.closed_at);
+  const followUps = followingUp(own, mine, running, new Set(terminal.map((session) => session.id)));
   return { ...found, terminal, followUps };
 }
 // The sections a worker's other tasks are in, for its box.
@@ -187,13 +184,14 @@ function renderPanel() {
   const panel = $("#panel");
   const editing = openForms();
   const items = needsYou();
-  const tasks = board();
+  const tasks = items.board;
 
   const needs = document.getElementById("needs") || el("section", { id: "needs", class: "panel-section" }, el("h2", {}, el("span", { text: "Needs you" }), el("span", { class: "count" })), el("div", { class: "items" }), el("p", { class: "empty-hint", text: "Nothing needs you." }));
   const needCount = needsCount();
   counted(needs, needCount);
   needs.querySelector(".empty-hint").hidden = Boolean(needCount);
-  // Its tasks that wait for the owner (an answer, a retry), in a box per worker.
+  // Its tasks that wait for the owner (an answer, a retry, a result to review), in a box per
+  // worker.
   const needBoxes = new Map();
   for (const task of items.tasks) needBoxes.set(task.session_id, [...(needBoxes.get(task.session_id) || []), task]);
   reconcile(needs.querySelector(".items"), [
@@ -204,51 +202,58 @@ function renderPanel() {
   ], editing);
 
   const taskBox = document.getElementById("tasks") || el("section", { id: "tasks", class: "panel-section" }, el("h2", {}, el("span", { text: "Tasks" }), el("span", { class: "count" })), el("p", { class: "empty-hint", text: "Nothing running. Ask for anything — e.g. “fix the flaky login test in api”." }));
-  // Counted by task everywhere (a box counts its tasks), each task in one section.
+  // Counted by task everywhere (a box counts its tasks), each task in one place.
   const boxes = (section) => tasks.sections[section].map((entry) => workerBoxItem(section, entry.sessionId, entry.tasks, tasks.phases, editing, elsewhereOf(tasks.sections, section, entry.sessionId)));
-  const counts = Object.fromEntries(SECTIONS.map(([key]) => [key, countOf(tasks.sections[key])]));
-  counts.running += tasks.terminal.length + tasks.followUps.length;
-  const active = counts.running + counts.monitoring + counts.stalled + counts.queued + counts.review;
+  const counts = { running: countOf(tasks.sections.running) + tasks.terminal.length + tasks.followUps.length, monitoring: countOf(tasks.sections.monitoring), finished: tasks.finished.length };
+  const active = counts.running + counts.monitoring;
   counted(taskBox, active);
-  taskBox.querySelector(".empty-hint").hidden = Boolean(active || counts.finished || ownTasks().some((task) => !["done", "cancelled"].includes(task.status)));
+  taskBox.querySelector(".empty-hint").hidden = Boolean(active || counts.finished || needCount);
   const HELP = {
-    running: "At work now: its worker is on it (a worker does one task at a time)",
-    monitoring: "Between steps, waiting on something outside: a PR's CI or review, a thread, a run it checks back on",
-    stalled: `Nothing has happened on it for ${state.snapshot.settings.stall_hours || 4}h and it waits on nothing: nudge its worker, or cancel it`,
-    queued: "Waits for a worker slot, a task it depends on, or its worker's turn",
-    review: "Finished: its result waits for your review",
+    running: "Being worked on now: its worker is on it (a worker does one task at a time)",
+    monitoring: "Not being worked on now; waiting on something that wakes it: a PR's CI or review, a thread, a time it checks back, a slot or its turn. Overdue and queued ones are marked so.",
   };
-  const groupNodes = [];
-  for (const [id, title] of SECTIONS.filter(([key]) => !["needs", "finished"].includes(key))) {
+  // What the tasks made or run, in one list with where each stands (open until closed).
+  const fresh = !document.getElementById("tasks-artifacts");
+  const made = section(taskBox, "tasks-artifacts", "Artifacts", { tag: "details" });
+  if (fresh) {
+    made.open = localStorage.getItem("cos.artifactsOpen") !== "0";
+    made.firstElementChild.title = "What your tasks made or run (PRs, docs, flows), with where each stands now: a PR as GitHub has it, the rest as its worker last said";
+    made.addEventListener("toggle", () => localStorage.setItem("cos.artifactsOpen", made.open ? "1" : "0"));
+  }
+  const artifacts = artifactItems(ownTasks(), focusTask);
+  counted(made, artifacts.shown);
+  made.hidden = !artifacts.rows.length;
+  reconcile(made.querySelector(".items"), artifacts.rows, editing);
+  const groupNodes = [made];
+  for (const id of ["running", "monitoring"]) {
     const list = id === "running" ? [...tasks.terminal.map(terminalItem), ...boxes("running"), ...tasks.followUps.map(followUpItem)] : boxes(id);
-    const group = section(taskBox, `tasks-${id}`, title);
+    const group = section(taskBox, `tasks-${id}`, SECTIONS.find(([key]) => key === id)[1]);
     groupNodes.push(group);
-    group.firstElementChild.title = HELP[id] || "";
+    group.firstElementChild.title = HELP[id];
     counted(group, counts[id]);
     group.hidden = !list.length;
     reconcile(group.querySelector(".items"), list, editing);
   }
+  // Recently finished: the newest first across all workers, a page at a time.
   const recent = section(taskBox, "tasks-recent", "Recently finished", { tag: "details" });
-  counted(recent, counts.finished);
+  const shown = Math.min(state.finishedShown || FINISHED_PAGE, counts.finished);
+  recent.querySelector(".count").textContent = !counts.finished ? "" : shown < counts.finished ? `${shown} of ${counts.finished}` : String(counts.finished);
   recent.hidden = !counts.finished;
-  // The newest 30 finished tasks, in their workers' boxes.
-  let room = 30;
-  const finished = [];
-  for (const entry of tasks.sections.finished) {
-    if (room <= 0) break;
-    finished.push({ ...entry, tasks: entry.tasks.slice(0, room) });
-    room -= entry.tasks.length;
-  }
-  reconcile(recent.querySelector(".items"), finished.map((entry) => workerBoxItem("finished", entry.sessionId, entry.tasks, tasks.phases, editing)), editing);
+  const more = shown < counts.finished
+    ? [{ key: `more:${shown}:${counts.finished}`, build: () => el("button", { type: "button", class: "link show-more", text: `Show ${Math.min(FINISHED_PAGE, counts.finished - shown)} more`, onclick: () => { state.finishedShown = shown + FINISHED_PAGE; renderHome(); } }) }]
+    : [];
+  reconcile(recent.querySelector(".items"), [...finishedBoxes(tasks.finished, shown).map((box) => workerBoxItem("finished", box.sessionId, box.tasks, tasks.phases, editing, [], box.key)), ...more], editing);
   // The groups stay in order as they are added, the recent one last.
   const order = [...groupNodes, recent];
   if (order.some((node, index) => taskBox.children[index + 2] !== node)) taskBox.append(...order);
+  for (const stale of ["tasks-queued", "tasks-review", "tasks-stalled"]) document.getElementById(stale)?.remove();
 
   if (panel.children[0] !== needs || panel.children[1] !== taskBox) panel.replaceChildren(needs, taskBox);
   const tabs = document.querySelectorAll("#home-tabs .count");
   tabs[0].textContent = needCount ? String(needCount) : "";
   tabs[1].textContent = active ? String(active) : "";
 }
+const FINISHED_PAGE = 30;
 // The task a card is about: the one its worker is on (a decision card lists its own).
 function draftTask(draft) {
   if (draft.kind === "decision") return null;
@@ -273,7 +278,7 @@ function withTask(node, task, draft) {
   if (!task) {
     // Not about a task: which worker asks, when it is one (a decision names its tasks itself).
     const worker = byId(draft.session_id);
-    const from = draft.kind !== "decision" && worker?.role === "worker" && !worker.helper ? el("div", { class: "context" }, el("span", { class: "muted", text: "From " }), el("strong", { text: worker.title })) : null;
+    const from = draft.kind !== "decision" && worker?.role === "worker" && !worker.helper ? el("div", { class: "context" }, el("span", { class: "muted", text: "From " }), el("strong", { text: worker.display_title || worker.title })) : null;
     if (old && from) old.replaceWith(from);
     else if (old) old.remove();
     else if (from) node.querySelector(":scope > .head").after(from);
@@ -294,7 +299,14 @@ const narrow = () => window.matchMedia("(max-width: 1099px)").matches;
 // From the chat: the task's card in the panel, brought into view (its report open), or the
 // card that asks the owner about it. Not on the board any more: its worker.
 export function focusTask(taskId, sessionId = "") {
-  const node = (taskId && (document.querySelector(`#panel .card.task[data-id="${taskId}"]`) || document.querySelector(`#panel .card[data-task="${taskId}"]`))) || (sessionId && document.querySelector(`#panel .card.task[data-session="${sessionId}"]`));
+  const find = () => taskId && (document.querySelector(`#panel .card.task[data-id="${taskId}"]`) || document.querySelector(`#panel .card[data-task="${taskId}"]`));
+  // A finished one further down than the page shows: the page grows to it.
+  const index = taskId && !find() ? board().finished.findIndex((task) => task.id === taskId) : -1;
+  if (index >= (state.finishedShown || FINISHED_PAGE)) {
+    state.finishedShown = Math.ceil((index + 1) / FINISHED_PAGE) * FINISHED_PAGE;
+    renderHome();
+  }
+  const node = find() || (sessionId && document.querySelector(`#panel .card.task[data-session="${sessionId}"]`));
   if (!node) {
     if (sessionId) select(sessionId);
     return;
@@ -340,7 +352,7 @@ function questionCard(question) {
       "div",
       { class: "head" },
       el("span", { class: "dot waiting" }),
-      el("button", { type: "button", class: "title", text: question.task_title || worker?.title || question.worker, title: `Open “${question.worker}” at its question`, onclick: () => select(question.session_id, { task: question.task_id }) }),
+      el("button", { type: "button", class: "title", text: question.task_title || worker?.display_title || question.worker, title: `Open “${question.worker}” at its question`, onclick: () => select(question.session_id, { task: question.task_id }) }),
       el("span", { class: "chip question", text: "Question" }),
       el("span", { class: "meta", text: questionMeta(question) }),
     ),

@@ -57,7 +57,11 @@ async def test_router_hands_threads_to_the_worker_it_starts(harness):
 
     harness.own_pull("a/b", 3)
     await call_tool(
-        runtime, "report", worker_id, status="progress", summary="https://github.com/a/b/pull/3"
+        runtime,
+        "report",
+        worker_id,
+        status="progress",
+        summary="Opened https://github.com/a/b/pull/3",
     )
     await settle(runtime)
     assert "github:a/b#3" in harness.store.follows(worker_id)
@@ -279,7 +283,7 @@ async def test_a_done_worker_woken_by_a_follow_up_stays_done(harness):
     worker_id = json.loads(result.text_result_for_llm)["session_id"]
     harness.own_pull("a/b", 1)
     await call_tool(
-        runtime, "report", worker_id, status="done", summary="https://github.com/a/b/pull/1"
+        runtime, "report", worker_id, status="done", summary="Opened https://github.com/a/b/pull/1"
     )
     harness.session(worker_id).emit("session.idle")
     await settle(runtime)
@@ -415,3 +419,47 @@ async def test_the_watchdog_leaves_finished_workers_alone(harness):
     harness.session(worker_id).emit("session.idle")
     await settle(runtime)
     assert await runtime.watchdog.check(time.time() + 3 * 3600) == []
+
+
+async def test_a_follow_belongs_to_the_task_it_was_made_for(harness):
+    runtime = await harness.connect()
+    worker = await spawn_with(runtime, harness, "Review #5", follow=["github:acme/app#5"])
+    review = runtime.tasks.current(worker)
+    await call_tool(
+        runtime, "message_session", harness.router_id, session_id=worker, text="Then the docs",
+        task="new", earlier="keep", title="Write the docs",
+    )  # fmt: skip
+    docs = runtime.tasks.current(worker)
+    follows = harness.store.follows(worker)
+    assert runtime.task_actions.watching(review, follows) == ["github:acme/app#5"]
+    assert runtime.task_actions.watching(docs, follows) == [], "not every follow of its worker"
+
+
+async def test_a_follow_from_before_is_not_given_to_whichever_task_is_open(harness):
+    runtime = await harness.connect()
+    worker = await spawn_with(runtime, harness, "CoS bug report")
+    harness.store.follow("github:acme/app#42", worker)  # Made by an old version: no task.
+    task = runtime.tasks.current(worker)
+    assert runtime.task_actions.watching(task, harness.store.follows(worker)) == []
+
+
+async def test_a_follow_that_cannot_be_read_shows_as_failing_not_waiting(harness):
+    runtime = await harness.connect()
+    worker = await spawn_with(runtime, harness, "Watch #7", follow=["github:acme/app#7"])
+    task = runtime.tasks.current(worker)
+    harness.store.set("ghfail:github:acme/app#7", "3")
+    view = runtime.task_actions.view(task)
+    assert view["watching"] == [] and view["watch_failing"] == ["github:acme/app#7"]
+    assert runtime.view(harness.store.session(worker))["follow_health"] == {"github:acme/app#7": 3}
+    runtime.missing("github:acme/app#7", "GitHub has no such pull request")
+    assert harness.store.follows(worker) == []
+    assert not harness.store.get(f"followtask:{worker}:github:acme/app#7")
+    notes = [text for kind, text in harness.kinds(worker) if kind == "notice"]
+    assert any("Stopped following github:acme/app#7" in note for note in notes)
+
+
+async def spawn_with(runtime, harness, title, **extra):
+    result = await call_tool(
+        runtime, "spawn_worker", harness.router_id, title=title, instructions=title, **extra
+    )
+    return json.loads(result.text_result_for_llm)["session_id"]

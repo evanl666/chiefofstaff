@@ -116,9 +116,20 @@ export function reconcile(container, items, editing = new Map()) {
   const existing = new Map([...container.children].map((node) => [node.dataset.key, node]));
   const nodes = items.map(({ key, id, version, build, refresh }) => {
     let node = existing.get(key);
-    if (node && refresh && node.dataset.version !== version) refresh(node);
+    // One card that cannot be drawn (a malformed link in it, say) must not stop the rest.
+    if (node && refresh && node.dataset.version !== version) {
+      try {
+        refresh(node);
+      } catch (error) {
+        node = broken(error);
+      }
+    }
     if (!node) {
-      node = build();
+      try {
+        node = build();
+      } catch (error) {
+        node = broken(error);
+      }
       const form = id && editing.get(id);
       if (form) {
         const fresh = node.querySelector(":scope > .actions");
@@ -134,6 +145,10 @@ export function reconcile(container, items, editing = new Map()) {
   if (nodes.length !== container.children.length || nodes.some((node, index) => container.children[index] !== node)) {
     container.replaceChildren(...nodes);
   }
+}
+function broken(error) {
+  console.error(error);
+  return el("div", { class: "card broken", text: `This card could not be shown: ${error?.message || error}` });
 }
 // Moving a focused field in the page blurs it: put the focus and cursor back afterwards.
 export function keepingFocus(change) {

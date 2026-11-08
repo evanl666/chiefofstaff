@@ -11,7 +11,7 @@ import { openSettings } from "./settings.js";
 // which says where each stands as Home does (Needs you, Running, Queued, Ready to review).
 function sessionItem(session, label, where) {
   const dot = where?.dot || "idle";
-  const named = label !== session.title ? `\nWorker: ${session.title}` : "";
+  const named = label !== session.title ? `\nStarted as “${session.title}”` : "";
   return el(
     "button",
     {
@@ -23,6 +23,8 @@ function sessionItem(session, label, where) {
     },
     el("span", { class: `dot ${dot}`, title: where?.text || "" }),
     el("span", { class: "label", text: label }),
+    // A marker in words (queued, overdue…), not a color of its own.
+    where?.sub ? el("span", { class: "sub", text: where.sub }) : null,
   );
 }
 const ORDER = Object.fromEntries([...WORKER_STATES.map(([dot]) => dot), "open"].map((dot, index) => [dot, index]));
@@ -45,7 +47,18 @@ export function renderSidebar() {
     } });
     nodes.push(el("div", { class: "group" }, el("span", { text: "Workers" }), toggle));
     if (state.legend) nodes.push(legend());
-    nodes.push(...workers.map((worker) => sessionItem(worker, workerTitle(worker), where.get(worker.id))));
+    // Workers with nothing open fold away: the ones that need you, work or wait come first.
+    const idle = (worker) => (where.get(worker.id)?.dot || "idle") === "idle" && state.selected !== worker.id;
+    const busy = workers.filter((worker) => !idle(worker));
+    const resting = workers.filter(idle);
+    nodes.push(...busy.map((worker) => sessionItem(worker, workerTitle(worker), where.get(worker.id))));
+    if (resting.length) {
+      const fold = el("details", { class: "idle-workers", open: Boolean(state.idleOpen) }, el("summary", { text: `Nothing open · ${resting.length}`, title: "Workers whose tasks are all finished" }), ...resting.map((worker) => sessionItem(worker, workerTitle(worker), where.get(worker.id))));
+      fold.addEventListener("toggle", () => {
+        state.idleOpen = fold.open;
+      });
+      nodes.push(fold);
+    }
   }
   list.replaceChildren(...nodes);
   const count = needsCount();
@@ -65,11 +78,11 @@ function renderClosed() {
         {
           type: "button",
           class: `item${state.selected === session.id ? " selected" : ""}`,
-          title: session.report || session.title,
+          title: [workerTitle(session) !== session.title ? `Started as “${session.title}”` : "", session.report].filter(Boolean).join("\n\n") || session.title,
           onclick: () => select(session.id),
         },
         el("span", { class: "dot" }),
-        el("span", { class: "label", text: session.title }),
+        el("span", { class: "label", text: workerTitle(session) }),
         el("span", { class: "sub", text: ago(session.closed_at) }),
       ),
     ),
@@ -105,6 +118,18 @@ export function renderStatusLine() {
     );
   }
   if (snap.settings.github_enabled && snap.github.error) nodes.push(el("div", { class: "bad", text: `GitHub: ${snap.github.error}` }));
+  // A watch whose last scan could not see all of its source: "0 found" means nothing there.
+  const partial = snap.connector?.last?.incomplete || [];
+  if (partial.length) {
+    nodes.push(
+      el(
+        "div",
+        { class: "bad", title: partial.map((item) => `Watch ${item.watch}: ${item.reason}`).join("\n") },
+        `Watches: ${partial.length === 1 ? "one was" : `${partial.length} were`} only partly covered `,
+        el("button", { type: "button", class: "link", text: "Settings", onclick: () => openSettings("connections") }),
+      ),
+    );
+  }
   if (snap.settings.paused) nodes.push(el("div", { text: "Watchers paused" }));
   line.replaceChildren(...nodes);
 }

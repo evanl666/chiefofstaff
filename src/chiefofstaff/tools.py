@@ -54,7 +54,10 @@ logger = logging.getLogger(__name__)
 
 
 class SpawnWorker(BaseModel):
-    title: str = Field(description="Short task title shown to the owner (under 60 characters)")
+    title: str = Field(
+        description="What the task delivers, under 60 characters: a verb, the object and where "
+        "(repo#PR, flow), e.g. 'Fix the Spark 3.5 dependency · ranking-data#594'"
+    )
     instructions: str = Field(
         description="The task in the owner's words, plus the context the worker needs. "
         f"{OWNER_WORDS} stands for the owner's message with that ref attribute, exactly as "
@@ -204,7 +207,11 @@ class MessageSession(BaseModel):
         description="For continue or note: the id (t…) of the worker's task this is about. "
         "Needed when it has several open tasks; default its current task",
     )
-    title: str = Field(default="", description="Title of the new task when task='new'")
+    title: str = Field(
+        default="",
+        description="Required when task='new': what the new task delivers (a verb, the object "
+        "and where: repo#PR, flow), under 60 characters",
+    )
     done_when: list[str] = Field(
         default_factory=list,
         description="For task='new': its acceptance criteria, as for spawn_worker",
@@ -212,6 +219,13 @@ class MessageSession(BaseModel):
     decisions: list[str] = Field(
         default_factory=list,
         description="For task='new': ids (dec…) of decisions it relies on, as for spawn_worker",
+    )
+    earlier: Literal["", "finish", "keep", "superseded"] = Field(
+        default="",
+        description="For task='new' when the worker still has a running task: what becomes of "
+        "it. finish: what it delivers is delivered, or it waits on the owner; its worker "
+        "reports it (done, blocked or question) before starting the new one. keep: it goes on "
+        "after the new one. superseded: the new task replaces it, and it is cancelled",
     )
     follow: list[str] = Field(
         default_factory=list,
@@ -272,6 +286,19 @@ class CriterionResult(BaseModel):
     )
 
 
+class ArtifactState(BaseModel):
+    url: str = Field(description="Its link")
+    name: str = Field(
+        description="A short name the owner knows it by, under 40 characters: 'Interviewer "
+        "spec', 'ICP flow, full run', 'BG embeddings DAG'"
+    )
+    status: str = Field(
+        description="Where it stands now, in a word or two: a doc or sheet 'draft', 'in "
+        "review', 'final'; a flow, DAG run or job 'queued', 'running', 'succeeded', 'failed'; "
+        "a dashboard or table 'live', 'updated'"
+    )
+
+
 class Report(NestedArguments):
     status: Literal["progress", "question", "blocked", "done"]
     summary: str = Field(
@@ -288,6 +315,14 @@ class Report(NestedArguments):
         default_factory=list,
         description="With status done, for a task with Done when criteria: each one's result "
         "and its evidence",
+    )
+    artifacts: list[ArtifactState] = Field(
+        default_factory=list,
+        max_length=12,
+        description="What this task made or runs that the owner follows (a doc, a sheet, a "
+        "Flyte or Airflow run, a job, a dashboard, a table), each with a short name and its "
+        "status now; whenever one is made or its status changes. Not PRs: their status comes "
+        "from GitHub",
     )
 
 
@@ -314,6 +349,19 @@ def clean_criteria(criteria: list[str]) -> list[str]:
 class CancelTask(BaseModel):
     task_id: str = Field(description="Task id (t…), or a worker id for its current task")
     reason: str = Field(default="", description="Why, in a few words (the owner sees it)")
+
+
+class RenameTask(BaseModel):
+    task_id: str = Field(description="Task id (t…)")
+    title: str = Field(
+        description="What it delivers: a verb, the object and where (repo#PR, flow), under 60 "
+        "characters"
+    )
+
+
+class SplitTask(BaseModel):
+    task_id: str = Field(description="The finished task (t…) that holds two deliverables")
+    title: str = Field(description="Title of the new task for its latest result")
 
 
 class DraftSlackReply(BaseModel):
@@ -836,6 +884,21 @@ class Tools:
                 self.t_cancel_task,
             ),
             (
+                "rename_task",
+                "Rename a task whose title does not say what it delivers (its earlier names are "
+                "kept).",
+                RenameTask,
+                self.t_rename_task,
+            ),
+            (
+                "split_task",
+                "A finished task whose latest result is another deliverable than its title: that "
+                "result becomes a task of its own with this title; the task keeps its earlier "
+                "result.",
+                SplitTask,
+                self.t_split_task,
+            ),
+            (
                 "close_worker",
                 "Close a worker whose task is finished or no longer needed.",
                 CloseWorker,
@@ -1125,7 +1188,9 @@ class Tools:
             self.store.set(f"{special}:{session_id}", "1")
         # A PR the task is about is followed: its reviews, replies and CI come to the worker.
         self.runtime.follow(
-            session_id, list(dict.fromkeys(follow + named_pulls(params.instructions)))
+            session_id,
+            list(dict.fromkeys(follow + named_pulls(params.instructions))),
+            task_id=task["id"],
         )
         prompt = wrap(
             "router",
@@ -1219,7 +1284,7 @@ class Tools:
             if (await self.runtime.task_actions.pr_roles(about, [seen]))[0]:
                 own.append(key)
         if own:
-            self.runtime.follow(caller, own, given=False)
+            self.runtime.follow(caller, own, given=False, task_id=task["id"] if task else None)
         followed |= set(own)
         delivered = [key for key in threads.pull_requests(text) if key in followed]
         task = self.tasks.find(task["id"]) if task else None
@@ -1314,6 +1379,41 @@ class Tools:
                 "More work, or another subject: task='new' with a title. Only telling it "
                 "something (an answer, an acknowledgement): task='note'."
             )
+        if (
+            task
+            and params.task == "continue"
+            and task["status"] in {"review", "failed"}
+            and params.task_id.strip() != task["id"]
+        ):
+            # Reopening finished work is a choice: the same deliverable, named by its id.
+            raise ValueError(
+                f"Its task {task['id']} “{task['title']}” is finished ({task['status']}). More "
+                f"of the same deliverable (a correction, a missing piece): call again with "
+                f"task_id='{task['id']}'. Another deliverable or subject (another PR, question "
+                "or flow): task='new' with a title saying what it delivers. Only telling it "
+                "something: task='note'."
+            )
+        if params.task == "new" and not params.title.strip():
+            raise ValueError(
+                "A new task needs a title saying what it delivers: a verb, the object and where "
+                "(repo#PR, flow), e.g. 'Fix the Spark 3.5 dependency · repo#594'."
+            )
+        # A running task left behind by a new one would show as waiting its turn though it was
+        # delivered or waits on the owner: the Router says what becomes of it.
+        earlier = (
+            [t for t in self.tasks.for_session(target["id"]) if t["status"] == "running"]
+            if target["role"] == WORKER and params.task == "new"
+            else []
+        )
+        if earlier and not params.earlier:
+            listed = "; ".join(f"{t['id']} “{t['title']}”" for t in earlier)
+            raise ValueError(
+                f"That worker still has a running task ({listed}). Say what becomes of it with "
+                "earlier=: 'finish' when what it delivers is delivered or it waits on the owner "
+                "(its worker reports it first: done, or blocked/question), 'keep' when it goes "
+                "on after the new one, 'superseded' when the new task replaces it (it is "
+                "cancelled)."
+            )
         if target["closed_at"]:
             await self.runtime.workers.reopen(
                 target["id"]
@@ -1333,8 +1433,9 @@ class Tools:
             self.store.set(f"released:{task['id']}", "1")  # The Router decides to go ahead.
             self.runtime.background(self.runtime.workers.pump())
         pulls = named_pulls(params.text) if target["role"] == WORKER else []
-        self.runtime.follow(target["id"], list(dict.fromkeys(params.follow + pulls)))
+        to_follow = list(dict.fromkeys(params.follow + pulls))
         if target["role"] != WORKER:
+            self.runtime.follow(target["id"], to_follow)
             await self.delivery.deliver(
                 target["id"],
                 wrap("router", "message", params.text),
@@ -1345,7 +1446,7 @@ class Tools:
         # The worker as the owner knows it now, before a new task renames it.
         worker_name = self.runtime.display_title(target)
         if params.task == "new":
-            title = clean_title(params.title or params.text.splitlines()[0][:60])
+            title = clean_title(params.title)
             criteria = clean_criteria(params.done_when)
             decisions = self.with_turn_decisions(caller, params.decisions)
             task = self.tasks.create(
@@ -1363,6 +1464,10 @@ class Tools:
             )
             if note := self.report_language(params.text):
                 prompt += "\n\n" + wrap("system", "context", note)
+            prompt += "".join(
+                "\n\n" + wrap("system", "context", text)
+                for text in await self.settle_earlier(earlier, params.earlier, task)
+            )
             notice = f"New task “{title}” for “{worker_name}”"
         elif params.task == "note":
             prompt = wrap(
@@ -1387,6 +1492,8 @@ class Tools:
                 reply_in=self.store.get("owner_language"),
             )
             notice = f"Continued in “{self.runtime.display_title(target)}”"
+        # Followed for the task this is about (a new one, or the one it continues).
+        self.runtime.follow(target["id"], to_follow, task_id=task["id"] if task else "")
         meta: dict[str, Any] = {"task_id": task["id"]} if task else {}
         if images := self.runtime.attachments_in(params.text):
             meta["attachments"] = images  # The owner's images it names come with it.
@@ -1401,6 +1508,31 @@ class Tools:
         )
         self.runtime.add_message(caller, "notice", notice, {"session_id": target["id"]})
         return f"Delivered (task {task['id']})." if task else "Delivered."
+
+    async def settle_earlier(self, earlier: list[dict], how: str, new: dict) -> list[str]:
+        """What a worker is told about its running tasks when it gets a new one: report them
+        first, go back to them after, or nothing (they are cancelled: superseded)."""
+        notes = []
+        for task in earlier:
+            named = f"task {task['id']} “{task['title']}”"
+            if how == "superseded":
+                with suppress(ValueError):
+                    await self.runtime.task_actions.cancel(
+                        task["id"], f"Superseded by “{new['title']}”.", by="router"
+                    )
+            elif how == "finish":
+                notes.append(
+                    f"Before you start this, report {named}: done if what it delivers is "
+                    "delivered; blocked or question with exactly what you need if it waits on "
+                    "the owner (a key, access, a decision); check_back if it waits on something "
+                    "outside. Then start this task."
+                )
+            else:
+                notes.append(
+                    f"{named[0].upper()}{named[1:]} stays open: when this one is reported, go on "
+                    "with it (or report it)."
+                )
+        return notes
 
     async def ask_to_continue(self, params: MessageSession) -> str:
         reference = params.session_id
@@ -1805,6 +1937,11 @@ class Tools:
             if row["role"] == WORKER
             else None
         )
+        if task and params.artifacts:
+            # What they are and where they stand is a fact, whatever becomes of the report.
+            self.runtime.task_actions.declare_artifacts(
+                task["id"], [item.model_dump() for item in params.artifacts]
+            )
         if (
             task
             and params.status == "done"
@@ -1838,17 +1975,27 @@ class Tools:
                 "step, the numbers, and the table if one was asked for. If this already is the "
                 "whole answer, call report again with it unchanged."
             )
+        unread = (
+            [
+                text
+                for text, about in self.states[caller].unread.values()
+                if task["id"] in about or "" in about
+            ]
+            if task
+            else []
+        )
         if (
             task
             and params.status == "done"
             and task["status"] == "running"
-            and (unread := self.states[caller].unread)
+            and unread
             and not self.store.get(f"unread_report:{task['id']}")
         ):
-            # Sent while it was finishing: a report now would be without it, and whoever sent
-            # it would send it again. Once: it may be lost on the way.
+            # Sent while it was finishing, about this task: a report now would be without it,
+            # and whoever sent it would send it again. Once: it may be lost on the way. A new
+            # task, or more on another, does not hold this one's report back.
             self.store.set(f"unread_report:{task['id']}", "1")
-            newest = list(unread.values())[-1]
+            newest = unread[-1]
             raise ValueError(
                 "Not reported yet: a newer message for this task arrived while you were "
                 f"finishing (“{newest[:200]}”). It reaches you next: handle it, then report once, "
@@ -1903,6 +2050,22 @@ class Tools:
                 # question needs the owner, and shows as such.
                 self.runtime.task_actions.news(task["id"], params.summary)
                 task = self.tasks.update(task["id"], progress=params.summary[:6000])
+            elif (
+                params.status == "done"
+                and task["status"] == "review"
+                and task["id"] in self.states[caller].turn_reported
+                and not asked
+            ):
+                # Reported again in the same turn (with its criteria, say): the report is
+                # amended in place; the owner and the Router heard of it once.
+                self.runtime.task_actions.remember_prs(task["id"], params.summary)
+                task = self.tasks.update(task["id"], result=clip_report(params.summary))
+                self.runtime.task_actions.publish(task)
+                self.runtime.update_session(caller, report=params.summary[:4000])
+                return (
+                    f"Task {task['id']}'s report is updated. It was reported already: the "
+                    "Router is not told again."
+                )
             elif params.status == "done" and task["status"] == "done" and not asked:
                 # Accepted, or its PR merged: news about it does not reopen the review.
                 self.runtime.task_actions.remember_prs(task["id"], params.summary)
@@ -1910,6 +2073,7 @@ class Tools:
                 task = self.tasks.update(task["id"], result=clip_report(params.summary))
             elif params.status == "done":
                 self.store.delete(f"followup:{task['id']}")
+                self.states[caller].turn_reported.add(task["id"])
                 self.runtime.task_actions.remember_prs(task["id"], params.summary)
                 task = self.tasks.move(task["id"], "review", result=clip_report(params.summary))
                 # The workers it works with that are still at it get its result.
@@ -1993,6 +2157,18 @@ class Tools:
             self.runtime.task_actions.task_for(params.task_id)["id"], params.reason, "the Router"
         )
         return f"Cancelled task {task['id']}."
+
+    async def t_rename_task(self, params: RenameTask, caller: str):
+        self.caller(caller, ROUTER)
+        task = self.runtime.task_actions.task_for(params.task_id)
+        renamed = self.runtime.task_actions.rename(task["id"], params.title, "the Router")
+        return f"Renamed task {renamed['id']} to “{renamed['title']}”."
+
+    async def t_split_task(self, params: SplitTask, caller: str):
+        self.caller(caller, ROUTER)
+        task = self.runtime.task_actions.task_for(params.task_id)
+        made = self.runtime.task_actions.split(task["id"], params.title, "the Router")
+        return f"Split off task {made['id']} “{made['title']}” ({made['status']})."
 
     async def t_draft_slack_reply(self, params: DraftSlackReply, caller: str):
         row = self.caller(caller, WORKER, SLACK)

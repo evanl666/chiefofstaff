@@ -236,3 +236,17 @@ def test_the_owner_attaches_an_image_and_the_router_hands_it_on(app_client):
     )
     worker = json.loads(result.text_result_for_llm)["session_id"]
     assert app_client.fake.sessions[worker].attachments[-1][0]["path"] == saved["path"]
+
+
+def test_an_artifact_is_taken_off_the_list_and_brought_back(app_client):
+    sign_in(app_client)
+    key = "https://flyte.example.com/console/projects/p/domains/d/executions/abc123"
+    taken = app_client.post("/api/artifacts/hide", json={"key": key}, headers=ORIGIN)
+    assert taken.status_code == 200 and taken.json()["hidden"] == [key]
+    assert app_client.get("/api/state").json()["artifacts_hidden"] == [key]
+    back = app_client.post(
+        "/api/artifacts/hide", json={"key": key, "hidden": False}, headers=ORIGIN
+    )
+    assert back.json()["hidden"] == []
+    blank = app_client.post("/api/artifacts/hide", json={"key": "  "}, headers=ORIGIN)
+    assert blank.status_code == 400

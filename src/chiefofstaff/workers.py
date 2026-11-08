@@ -234,8 +234,14 @@ class Workers:
         chat = asked["meta"].get("chat") or not asked["meta"].get("task_id")
         if asked["kind"] == "owner" and chat:
             return  # The owner's own chat with it: they read its answer there.
-        if any(m["kind"] == "report" or m["meta"].get("stopped") for m in recent):
+        if any(m["meta"].get("stopped") for m in recent):
             return
+        reports = [m for m in recent if m["kind"] == "report"]
+        if reports:
+            await self.ask_what_it_waits_for(session_id, task, asked, reports[-1])
+            return
+        if asked["meta"].get("wait_nudge"):
+            return  # Asked what it waits for and silent: the stall check follows it up.
         if self.states[session_id].busy or not self.states.handle(session_id):
             return  # Working again, or being closed or reattached.
         answers = [m for m in recent if m["kind"] == "assistant" and not m["meta"].get("narration")]
@@ -280,8 +286,9 @@ class Workers:
             return
         text = (
             "Your turn ended without report(). The owner sees only reports: call report now "
-            "with your full result (status done), or question or blocked if you need something, "
-            "or progress if you are waiting for something. Do not redo the work."
+            "with your full result (status done), or question or blocked if you need something "
+            "from the owner; if you wait for something outside (a run, a deploy, a reply), call "
+            "check_back with when to look again. Do not redo the work."
         )
         if not waiting and len(answer) >= FILED_ANSWER_CHARS:
             from .tools import Report
@@ -311,6 +318,46 @@ class Workers:
                 kind="notice",
                 display="It stopped without a report: asked for one.",
                 meta={"report_nudge": True},
+            )
+
+    async def ask_what_it_waits_for(
+        self, session_id: str, task: dict, asked: dict, report: dict
+    ) -> None:
+        """Its turn ended after a progress report on a task that is still running, with
+        nothing that will wake it (no check-back, no thread or PR followed for it, no card or
+        question for the owner): it is asked once what it waits for, so the task does not sit
+        under Running with nobody on it. Not after that question itself."""
+        status = report["meta"].get("status")
+        about = report["meta"].get("task_id") or task["id"]
+        task = self.tasks.find(about) or task
+        if status != "progress" or task["status"] != "running" or asked["meta"].get("wait_nudge"):
+            return
+        if self.states[session_id].busy or not self.states.handle(session_id):
+            return
+        follows = self.store.follows(session_id)
+        if (
+            self.runtime.task_actions.check_back(task)
+            or self.runtime.task_actions.watching(task, follows)
+            or self.runtime.asks.open_questions(session_id)
+            or any(d["session_id"] == session_id for d in self.store.drafts("pending"))
+            or self.runtime.peers.waiting_on(session_id, report["text"])
+        ):
+            return
+        text = (
+            f"Your turn ended after a progress report, and task {task['id']} “{task['title']}” "
+            "is still running with nothing that will wake you: no check-back, and no thread or "
+            "PR you follow for it. Say what happens next. If you need something from the owner "
+            "(a key, access, a choice), report blocked or question with exactly what. If you "
+            "wait for something outside (a run, a deploy, a reply), call check_back with when "
+            "to look again. If it is finished, report done. Otherwise go on with it now."
+        )
+        with suppress(Exception):
+            await self.delivery.deliver(
+                session_id,
+                wrap("system", "wait-missing", text, task=task["id"]),
+                kind="notice",
+                display="It stopped on a running task with nothing to wait for: asked what next.",
+                meta={"wait_nudge": True, "task_id": task["id"]},
             )
 
     async def pump(self):

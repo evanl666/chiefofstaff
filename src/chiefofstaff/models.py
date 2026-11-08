@@ -294,6 +294,11 @@ class TaskNote(StrictModel):
     text: str = Field(default="", max_length=20000)
 
 
+class ArtifactHide(StrictModel):
+    key: str = Field(max_length=600)
+    hidden: bool = True
+
+
 # Under GitHub's 65536 characters for a review and Slack's 40000 for a message.
 MAX_DRAFT = 39000
 

@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.1.25 (2026-11-09)
+
+- **Four places, task by task**: Home and the sidebar put every task in one of *Needs you*,
+  *Running*, *Monitoring* or *Recently finished*, by one rule (`board.js`); the rest are
+  markers in words, not colors: *Queued*, *Up next*, *Paused*, *Checks back*, *Waiting on*,
+  *Delivered*, *Overdue*, *To review*, *Update*, *Report*. A result that changed code, opened
+  a PR, has unverified criteria or a flag is *To review* under *Needs you*; a report that only
+  informs goes with the finished ones (*Mark done* is optional); one still followed is
+  *Monitoring · Delivered*. A task waiting on its check-back or a PR is *Monitoring* whatever
+  else its worker does, and says what it waits on and what wakes it. A task its worker took up
+  and left for another is *Paused*, not *Up next*. No answer an hour after a nudge brings a
+  stalled task to *Needs you*. Workers with nothing open fold away in the sidebar; the legend
+  has four dots.
+- **Which task a worker is on** (D1–D3): a note about a task (an FYI, a decision changed) no
+  longer makes it the worker's current task, and a task it reported is not; *Following up* is
+  only for a result the owner asked more about. A new task for a worker whose task still runs
+  says what becomes of that one (`earlier`: finish, keep or superseded). Workers waiting on
+  the owner report a question or blocked, not progress; one that stops with nothing to wait
+  on is asked what next. A new task sent while a worker finishes another no longer holds that
+  one's report back (the worker used to do the new one first, and its card showed the wrong
+  task as running); a task reported again in the same turn (with its criteria, say) is
+  amended in place instead of being announced twice. The Router can rename and split tasks
+  (the tools were described to it but not given).
+- **Artifacts**: one list on Home (Tasks → *Artifacts*) of every PR, doc and run the tasks made,
+  with where each stands now: a PR as GitHub has it (draft, in review, CI failing, awaiting
+  approval, approved, merged…), a doc or run as its worker last said (`report(artifacts=…)`:
+  draft, running, succeeded, failed…), else as its task stands. The list scrolls on its own;
+  take one off it (✕) and bring it back.
+- **Names**: workers are named by their work in the sidebar, the worker's header, *Closed* and
+  follow-up cards (the first prompt is in the tooltip, "started as…"). New tasks need a title
+  saying what they deliver; the Router can rename a task or split its latest result off
+  (also on a card's ⋯ menu); a task keeps its earlier names.
+- **Cards fit** at 352–400px: a review card's PR chip, changes and runs; a follow-up card's
+  title (its meta short, shrinking first); a narrow box hides the task id and time (both in
+  the tooltip). A card that cannot be drawn shows so, and the rest of Home goes on.
+- **Links**: the run a task made and what it delivered on the card; Spark applications, logs,
+  debug pages and PRs it only mentions fold under *More links*. URLs keep a trailing `_` and
+  their parentheses; a link with a bad `%` escape no longer stops Home.
+- **Recently finished**: the newest first across workers, 30 at a time (*Show more*); the count
+  says how many are shown.
+- **PRs**: a PR belongs to the task with evidence it opened it (its tool or *Create PR*, its
+  branch, its report saying it opened it); the first task to mention one does not own it.
+  Ready-to-merge cards go only to the task that made the PR.
+- **Following threads**: a follow is for the task it was made for; a thread that cannot be read
+  three times in a row shows as *Can't read* with *stop following*; a PR GitHub says is gone is
+  let go after three reads.
+- **Check-backs** are kept until their worker is woken: a failed wake-up is retried (five
+  minutes later), and after three failures the task asks you.
+- **Watches** say when a scan could not see all of a source (Settings, the sidebar): *0 found*
+  is not *nothing new* then; each watch has its own "since".
+- **Away notifications**: Settings says what works: sending, last delivered, reading replies
+  (verified), new requests.
+
 ## 0.1.24 (2026-11-08)
 
 - **Home, task by task**: *Running*, *Monitoring*, *Stalled*, *Queued*, *Ready to review* and

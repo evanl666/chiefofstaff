@@ -33,6 +33,10 @@ class Host:
         self.subscriptions = [s for s in self.subscriptions if s["thread"] != thread]
         self.unfollowed.append((thread, finished, merged))
 
+    def missing(self, thread, why):
+        self.subscriptions = [s for s in self.subscriptions if s["thread"] != thread]
+        self.unfollowed.append((thread, "missing", why))
+
 
 def fake_gh(state):
     async def gh(*arguments, payload=None):
@@ -238,7 +242,7 @@ async def test_one_broken_pr_does_not_stop_the_others(tmp_path):
 
     async def with_missing(*arguments, payload=None):
         if "acme/gone" in arguments[1]:
-            raise RuntimeError("HTTP 404")
+            raise RuntimeError("HTTP 502: Bad Gateway")
         return await gh(*arguments, payload=payload)
 
     calls = []
@@ -253,6 +257,42 @@ async def test_one_broken_pr_does_not_stop_the_others(tmp_path):
     assert host.deliveries and host.deliveries[0][0] == THREAD
     assert len(host.subscriptions) == 2, "failures never drop a follow (or close a worker)"
     assert sum("acme/gone" in call for call in calls) == 5, "then it backs off"
+    assert store.get("ghfail:github:acme/gone#1") == "5", "reads that failed, not polls"
+
+
+async def test_a_followed_pr_that_does_not_exist_is_let_go(tmp_path):
+    store = Store(tmp_path / "data")
+    store.save_settings(Settings())
+    host = Host(store)
+    host.subscriptions = [{"thread": "github:acme/app#42", "since": 1793500000.0}]
+
+    async def gh(*arguments, payload=None):
+        raise RuntimeError("gh: Not Found (HTTP 404)")
+
+    source = GitHubSource(store, host, gh_command=gh)
+    for _ in range(2):
+        await source.poll_once()
+    assert host.subscriptions, "a PR not found twice may be a hiccup"
+    await source.poll_once()
+    assert host.subscriptions == []
+    assert host.unfollowed[-1][:2] == ("github:acme/app#42", "missing")
+
+
+async def test_gh_missing_from_this_computer_lets_no_pr_go(tmp_path):
+    store = Store(tmp_path / "data")
+    store.save_settings(Settings())
+    host = Host(store)
+    host.subscriptions = [{"thread": "github:acme/app#42", "since": 1793500000.0}]
+
+    async def gh(*arguments, payload=None):
+        raise RuntimeError(
+            "GitHub CLI not found. Install gh and sign in before connecting reviews."
+        )
+
+    source = GitHubSource(store, host, gh_command=gh)
+    for _ in range(5):
+        await source.poll_once()
+    assert host.subscriptions, "gh missing here is not a PR that is gone"
 
 
 async def test_a_re_requested_review_goes_to_the_follower(tmp_path):

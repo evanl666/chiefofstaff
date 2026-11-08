@@ -2,13 +2,14 @@
 
 import { $, api, el, foldable, toast, withKey } from "./dom.js";
 import { clock, compactPaths, firstLine, markdown, threadLabel } from "./text.js";
-import { byId, current, HOME, markRead, pendingDrafts, routerId, state, STATUS_TEXT, upsertSession, viewedId } from "./state.js";
+import { byId, current, HOME, markRead, pendingDrafts, routerId, state, STATUS_TEXT, upsertSession, viewedId, workerTitle } from "./state.js";
 import { renderSidebar } from "./sidebar.js";
 import { focusDraft, focusTask, renderHome, renderHomeHeader, showHomeTab, welcomeCard, workerStates } from "./inbox.js";
 import { closeMentions, setRecipient } from "./mention.js";
 import { openSettings } from "./settings.js";
 // A worker's state in the header, as its sidebar dot and Home have it.
-const SHORT_STATE = { waiting: "Needs you", failed: "Failed", working: "Working", watching: "Running · between steps", queued: "Queued", done: "Ready to review", idle: "Idle" };
+// The four places, as the sidebar dot and Home say them.
+const SHORT_STATE = { waiting: "Needs you", working: "Running", watching: "Monitoring", idle: "Nothing open" };
 const ROUTER_PLACEHOLDER = "Ask for anything… (@ to message one worker)";
 // Every view but Home has "← Home" at the top left.
 function backHome(shown) {
@@ -56,8 +57,9 @@ export function renderHeader() {
     // Its state and branch; the folders it works in are in the tooltip and its ⋯ menu.
     const repos = session.checkouts?.length || 0;
     // Where it stands, in the words of its sidebar dot and of Home.
-    const where = workerStates().get(session.id)?.dot || "idle";
-    meta = [SHORT_STATE[where] || STATUS_TEXT[session.status], session.status === "queued" ? session.activity : "", session.branch, repos > 1 ? `${repos} repos` : ""];
+    const found = workerStates().get(session.id);
+    const where = (found?.dot || "idle").split(" ")[0];
+    meta = [SHORT_STATE[where] || STATUS_TEXT[session.status], found?.sub || "", session.status === "queued" ? session.activity : "", session.branch, repos > 1 ? `${repos} repos` : ""];
     if (session.elsewhere) {
       // What it does in the terminal, read from its log; Chief of Staff does not drive it now.
       const terminal = session.terminal || {};
@@ -68,7 +70,8 @@ export function renderHeader() {
   const follows = session.follows || [];
   if (follows.length && !session.closed_at) meta.push(`following ${follows.length}`);
   const titles = { router: "Chat with your chief of staff", slack: "Slack", watchdog: "Watchdog" };
-  $("#session-title").textContent = titles[session.role] || session.title;
+  $("#session-title").textContent = titles[session.role] || workerTitle(session);
+  $("#session-title").title = session.role === "worker" && session.title !== workerTitle(session) ? `Started as “${session.title}”` : "";
   $("#session-meta").textContent = meta.filter(Boolean).join(" · ");
   const where = session.role === "worker" ? (session.checkouts?.length ? session.checkouts.map((checkout) => `${checkout.path}${checkout.branch ? ` (${checkout.branch})` : ""}`) : [session.cwd]) : [];
   $("#session-meta").title = [...where, ...follows.map(threadLabel)].filter(Boolean).join("\n");

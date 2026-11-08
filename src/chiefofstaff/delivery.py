@@ -19,7 +19,7 @@ import logging
 import os
 from typing import TYPE_CHECKING
 
-from .envelope import task_named
+from .envelope import tasks_named
 from .roles import ROUTER, SLACK, WORKER
 from .sources.slack import describe
 
@@ -216,13 +216,16 @@ class Delivery:
                 raise
             if row["role"] == WORKER and any(m["meta"].get("thread") for m in pending):
                 state.thread_turn, state.thread_nudged = True, False
-            if row["role"] == WORKER and not mid_turn and (named := task_named(text)):
+            if row["role"] == WORKER and not mid_turn and (named := tasks_named(text)):
                 # A turn on it starts now; mid-turn, once its conversation shows it.
-                self.store.set(f"turntask:{session_id}", named)
+                self.runtime.took_up(session_id, named)
             if mid_turn:
                 # It sees this once its conversation shows it (events.user_message): a report
                 # before that is about the work without it.
-                state.unread[marker["digest"]] = pending[-1]["text"][:300]
+                state.unread[marker["digest"]] = (
+                    pending[-1]["text"][:300],
+                    tuple(m["meta"].get("task_id") or "" for m in pending),
+                )
             self.store.set(f"prevsent:{session_id}", str(mark))  # To send again after a failure.
             self.store.set(f"sent:{session_id}", str(pending[-1]["id"]))
             self.store.delete(f"sending:{session_id}")

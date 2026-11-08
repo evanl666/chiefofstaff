@@ -25,7 +25,11 @@ async def test_a_worker_closes_itself_when_its_pr_is_finished(harness):
     worker_id = (await spawn(runtime, harness.router_id, "Fix"))["session_id"]
     harness.own_pull("acme/app", 7)
     await call_tool(
-        runtime, "report", worker_id, status="done", summary="https://github.com/acme/app/pull/7"
+        runtime,
+        "report",
+        worker_id,
+        status="done",
+        summary="Opened https://github.com/acme/app/pull/7",
     )
     await settle(runtime)  # It follows the PR in the background.
     await runtime.on_thread(
@@ -50,7 +54,7 @@ async def test_quiet_finished_workers_are_tidied_up(harness):
     harness.own_pull("a/b", 1)
     await call_tool(runtime, "report", done, status="done", summary="ok")
     await call_tool(
-        runtime, "report", following, status="done", summary="https://github.com/a/b/pull/1"
+        runtime, "report", following, status="done", summary="Opened https://github.com/a/b/pull/1"
     )
     await call_tool(runtime, "report", asking, status="question", summary="which db?")
     await settle(runtime)
@@ -442,8 +446,9 @@ async def test_closed_workers_come_back_with_their_conversation(harness):
     assert [card["session_id"] for card in listed["recently_closed"]] == [worker_id]
 
     result = await call_tool(
-        runtime, "message_session", harness.router_id, session_id=worker_id, text="Also the logout"
-    )
+        runtime, "message_session", harness.router_id, session_id=worker_id,
+        text="Also the logout", task_id=task_of(harness, worker_id),
+    )  # fmt: skip
     assert result.result_type == "success"
     row = harness.store.session(worker_id)
     assert not row["closed_at"] and row["status"] == "working"

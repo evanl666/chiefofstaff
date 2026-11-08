@@ -554,7 +554,10 @@ class Drafts:
             thread = f"github:{target['repo']}#{target['number']}"
         if thread:
             try:
-                self.runtime.follow(draft["session_id"], [thread])
+                task = self.task_of(draft)
+                self.runtime.follow(
+                    draft["session_id"], [thread], task_id=task["id"] if task else None
+                )
             except ValueError:
                 # Following is a convenience; it must never turn a sent message into an error.
                 logger.warning("Could not follow %s after sending.", thread)

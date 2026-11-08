@@ -988,10 +988,11 @@ async def test_tools_take_the_short_ids_sessions_see(harness):
     worker_id = json.loads(result.text_result_for_llm)["session_id"]
     await call_tool(runtime, "report", worker_id, status="done", summary="ok")
     assert f'from="worker:{worker_id[:8]}"' in harness.session(harness.router_id).sent[-1]
-    reply = await call_tool(
-        runtime, "message_session", harness.router_id, session_id=worker_id[:8], text="More"
-    )
     task = task_of(harness, worker_id)
+    reply = await call_tool(
+        runtime, "message_session", harness.router_id, session_id=worker_id[:8], text="More",
+        task_id=task,
+    )  # fmt: skip
     assert reply.text_result_for_llm == f"Delivered (task {task})."
     assert harness.session(worker_id).sent[-1] == env("router", "message", "More", task=task)
     missing = await call_tool(
@@ -1467,3 +1468,27 @@ async def test_quiet_workers_let_go_of_their_copilot_session(harness):
     await settle(runtime)
     assert runtime.states.is_live(quiet), "its next message resumes it"
     assert harness.session(quiet).sent[-1].endswith("One more thing.\n</message>")
+
+
+async def test_every_tool_a_prompt_tells_a_session_to_use_is_one_it_has(harness):
+    """A tool named in a session's instructions is one it was given (the Router was told to
+    rename_task and split_task, and had neither)."""
+    runtime = await harness.connect()
+    defined = set(runtime.toolset.definitions())
+    router = harness.session(harness.router_id).options
+    told = set(re.findall(r"\b([a-z]+(?:_[a-z]+)+)\b", router["system_message"]["content"]))
+    assert {"rename_task", "split_task", "message_session"} <= told
+    result = await call_tool(runtime, "spawn_worker", harness.router_id, title="Docs",
+                             instructions="Write the docs")  # fmt: skip
+    worker = harness.session(json.loads(result.text_result_for_llm)["session_id"]).options
+    # Its own custom tools (and every built-in); what its workers do, the Router is told about.
+    given = {tool.name for tool in worker["tools"]}
+    # Given when Slack is connected (not in this test).
+    slack = {name for row in harness.store.all("SELECT * FROM sessions WHERE role='slack'")
+             for name in runtime.tool_names(row)} | {"draft_slack_reply"}  # fmt: skip
+    missing = sorted((told & defined) - set(router["available_tools"]) - given - slack)
+    assert not missing, missing
+    said = set(re.findall(r"\b([a-z]+(?:_[a-z]+)+)\b", worker["system_message"]["content"]))
+    assert {"check_back", "unfollow_thread"} <= said
+    missing = sorted((said & defined) - given - {"draft_slack_reply"})
+    assert not missing, missing
