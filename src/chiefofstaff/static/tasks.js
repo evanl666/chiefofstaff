@@ -586,14 +586,30 @@ const waitsOnOwner = (task, worker) => {
 };
 // A thread its worker follows, as a link to it: a PR on GitHub, a Slack conversation when its
 // link is known.
-function watchingChip(key) {
+function watchingChip(key, task) {
   const pr = /^github:([^/#]+\/[^#]+)#(\d+)$/.exec(key);
   const title = pr ? prTitle(`${pr[1]}#${pr[2]}`) : "";
   const label = pr ? `${pr[1].split("/")[1]}#${pr[2]}${title ? ` · ${shorten(title, 36)}` : ""}` : threadWords(key);
   const href = pr ? `https://github.com/${pr[1]}/pull/${pr[2]}` : state.snapshot?.thread_links?.[key] || "";
   const help = `It follows ${key}${title ? ` (“${title}”)` : ""}: what happens there comes to it`;
-  if (!href) return el("span", { class: "receipt watching", title: help, text: `Watching ${label}` });
-  return el("a", { class: "receipt watching", href, target: "_blank", rel: "noreferrer", title: help, text: `Watching ${label}` });
+  const name = href ? el("a", { class: "watch-name", href, target: "_blank", rel: "noreferrer", text: `Watching ${label}` }) : el("span", { class: "watch-name", text: `Watching ${label}` });
+  // Any thread or PR it follows can be let go (not only one it cannot read).
+  const stop = el("button", {
+    type: "button",
+    class: "link unfollow",
+    text: "✕",
+    title: `Stop following ${label}`,
+    "aria-label": `Stop following ${label}`,
+    onclick: async () => {
+      try {
+        await api(`/api/sessions/${task.session_id}/unfollow`, { method: "POST", body: { text: key } });
+        toast(`Stopped following ${label}: new messages there go to the Router.`);
+      } catch (error) {
+        toast(error.message, "error");
+      }
+    },
+  });
+  return el("span", { class: "receipt watching", title: help }, name, stop);
 }
 export function artifacts(task, worker = byId(task.session_id), { active = true } = {}) {
   const items = [];
@@ -606,7 +622,7 @@ export function artifacts(task, worker = byId(task.session_id), { active = true 
     for (const key of followedOnce(task.watching || [])) {
       const pr = /^github:(.+)$/.exec(key)?.[1];
       if (pr && onChips.has(pr.toLowerCase())) continue;
-      items.push(watchingChip(key));
+      items.push(watchingChip(key, task));
     }
   }
   // A thread it cannot read is not something it waits on: said, with a way to let it go.
@@ -678,7 +694,6 @@ function boxHead(section, worker, sessionId, list, elsewhere) {
   const name = worker?.display_title || worker?.title || "";
   // Its name only when it says more than its tasks' titles below it.
   const named = name && !list.some((task) => task.title === name) ? name : "";
-  const short = sessionId.slice(0, 6);
   const working = worker && ["working", "starting"].includes(worker.status);
   const status = !worker ? "" : worker.closed_at ? "closed" : working ? "working" : worker.elsewhere ? "in a terminal" : BOX_STATUS[worker.status] || "idle";
   const also = elsewhere.length ? `also: ${elsewhere.join(", ")}` : "";
@@ -689,7 +704,7 @@ function boxHead(section, worker, sessionId, list, elsewhere) {
         "div",
         { class: "box-head", title: SECTIONS.find(([key]) => key === section)?.[1] || "" },
         el("span", { class: "who", text: "Worker" }),
-        el("button", { type: "button", class: "title", text: named ? `${short} · ${named}` : short, title: `Open the worker${name ? ` “${name}”` : ""}${worker?.title && worker.title !== name ? ` (started as “${worker.title}”)` : ""}`, onclick: () => worker && select(worker.id), disabled: !worker }),
+        el("button", { type: "button", class: "title", text: named || "Open", title: `Open the worker${name ? ` “${name}”` : ""}${worker?.title && worker.title !== name ? ` (started as “${worker.title}”)` : ""}`, onclick: () => worker && select(worker.id), disabled: !worker }),
         el("span", { class: "meta", text: [status, also].filter(Boolean).join(" · "), title: also ? "Its other tasks are in these sections" : "" }),
       ),
   };

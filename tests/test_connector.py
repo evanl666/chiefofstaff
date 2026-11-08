@@ -262,6 +262,16 @@ async def test_away_a_draft_answered_in_words_is_redone_and_a_bad_answer_is_said
         ("\u53ef\u4ee5\u53d1\u4e86", "marked as sent"),  # No comma: "can send it".
         ("\u5148\u522b\u53d1", None),  # "Don't send it yet": kept.
         ("don\u2019t send it", "dropped"),  # A phone's apostrophe.
+        ("send now?", None),  # A question back (bug bash 6, G5), not a send.
+        ("\u53ef\u4ee5\u5417", None),  # "Is it ok?"
+        ("never mind", None),
+        ("\u7b49\u4e00\u4e0b\u518d\u53d1", None),  # "Send it in a bit."
+        ("send it after lunch", None),  # A send held back (bug bash 6, N6): not redrafted.
+        ("ok, send it once bob confirms", None),
+        ("\u6682\u65f6\u4e0d\u8981", None),  # "Not for now."
+        ("\u4e0d\u8981\u53d1\u9001", "dropped"),  # "Don't send it."
+        ("\u4e00\u4f1a\u518d\u53d1", None),  # "Send it in a bit" (code review, round 6).
+        ("\u518d\u53d1\u5427", None),
     ):
         await call_tool(runtime, "draft_reply", writer, text=f"re: {said}", to="Carol",
                         where="email")  # fmt: skip

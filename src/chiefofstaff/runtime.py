@@ -44,7 +44,9 @@ from .backend import (
     AgentBackend,
     SandboxPolicy,
     copilot_backend,
+    copilot_tree,
     copilot_trusts,
+    end_processes,
     older,
     sandbox_supported,
 )
@@ -65,11 +67,11 @@ from .envelope import (
     tasks_named,
     wrap,
 )
-from .events import ROUTER_CONTEXT, Events
+from .events import MODEL_REFUSED, ROUTER_CONTEXT, Events
 from .focus import Focus
 from .habits import Habits
 from .learning import Learning
-from .models import Attachment, Settings
+from .models import AS_SAVED, Attachment, Settings
 from .notify import mac_notification
 from .peers import Peers
 from .policy import GITHUB_MCP, within
@@ -105,6 +107,17 @@ from .workspaces import (
 
 logger = logging.getLogger(__name__)
 
+
+def clip_words(text: str, size: int) -> str:
+    """Text cut to `size` at a word, marked with "…" (not cut mid-word without a sign)."""
+    if len(text) <= size:
+        return text
+    cut = text[: size - 1]
+    if (space := max(cut.rfind(" "), cut.rfind("\n"))) > size - 200:
+        cut = cut[:space]
+    return cut.rstrip() + "\u2026"
+
+
 # A repository's own Copilot configuration that Copilot loads only in a trusted folder.
 TRUST_GATED = (".mcp.json", ".github/mcp.json", ".github/hooks", ".github/copilot")
 
@@ -137,6 +150,7 @@ ROUTER_TOOLS = [
     "answer_session",
     "cancel_task",
     "stop_worker",
+    "stop_following",
     "add_watch",
     "rename_task",
     "split_task",
@@ -189,6 +203,28 @@ GITHUB_HOSTS = (
     "codeload.github.com",
     "objects.githubusercontent.com",
 )
+# How a configured project whose folder is gone is named to the Router: it is not "not a
+# configured project".
+MISSING_PROJECT = (
+    "(configured, but its folder is not on disk: moved or deleted? Tell the owner; they "
+    "restore it or remove it in Settings)"
+)
+# Copilot will not start a session on the model named in its error ('Model "x.y" is not
+# available': a model id has dots, which MODEL_REFUSED's pattern does not cross).
+MODEL_NOT_OFFERED = re.compile(r"\bnot (?:available|supported|enabled|allowed)\b", re.IGNORECASE)
+# How often the Copilot CLI is checked to still run (seconds), and how long reconnecting waits
+# after a failure (doubling up to the most).
+PROCESS_CHECK = float(os.environ.get("CHIEFOFSTAFF_PROCESS_CHECK", "2"))
+RECONNECT_DELAY = float(os.environ.get("CHIEFOFSTAFF_RECONNECT_DELAY", "3"))
+RECONNECT_MOST = 300.0
+
+
+class OpenElsewhere(RuntimeError):
+    """A session is open in another Copilot window (a terminal): `pid` runs it."""
+
+    def __init__(self, message: str, pid: int):
+        super().__init__(message)
+        self.pid = pid
 
 
 def span(iso: str) -> str:
@@ -272,6 +308,11 @@ class Runtime:
         # More event sources (see sources/__init__.py); Slack and GitHub are built in.
         self.sources: list[Source] = []
         self.watch_job: asyncio.Task | None = None
+        # Watches that Copilot's CLI still runs; reconnects after it stopped by itself, or once
+        # the Router is no longer open in a terminal.
+        self.process_job: asyncio.Task | None = None
+        self.recovery: asyncio.Task | None = None
+        self.stopping = False
         self.backend: AgentBackend | None = None
         self.connections = 0  # Counts disconnects: a session opened before one is not usable.
         self.states = SessionStates()
@@ -322,6 +363,7 @@ class Runtime:
     # Lifecycle
 
     async def start(self):
+        self.stopping = False
         self.loop = asyncio.get_running_loop()
         self.bus.bind(self.loop)
         self.store.execute(
@@ -344,7 +386,8 @@ class Runtime:
         return [self.slack, self.github, *self.sources]
 
     async def stop(self):
-        for job in (self.watch_job, self.mirror_job):
+        self.stopping = True
+        for job in (self.recovery, self.process_job, self.watch_job, self.mirror_job):
             if job:
                 job.cancel()
                 await asyncio.gather(job, return_exceptions=True)
@@ -365,9 +408,17 @@ class Runtime:
             self.status = {"state": "starting", "error": ""}
             self.publish_state()
             try:
+                # Copilot CLIs started before that outlived their connection (orphaned when
+                # their loader was killed, or this app stopped abruptly) hold sessions open.
+                if started := self.own_processes():
+                    await asyncio.to_thread(lambda: end_processes(copilot_tree(started)))
                 self.backend = self.backend_factory(self.store.settings())
                 await self.backend.start()
                 auth = await self.backend.get_auth_status()
+                # It answered: its processes run now. Remembered, so they never count as the
+                # owner's terminal (even orphaned) and are stopped when they outlive it.
+                pids = await asyncio.to_thread(self.backend.processes)
+                self.store.set("copilot_pids", json.dumps(pids))
                 if not auth.isAuthenticated:
                     raise RuntimeError("Copilot is not signed in. Run `copilot login`.")
                 warning = await self.version_warning()
@@ -390,11 +441,21 @@ class Runtime:
                         f"The Slack session could not start: {describe(exc)[:200]}"
                     )
                 self.status = {"state": "ready", "error": "", "warning": warning}
+            except OpenElsewhere as exc:
+                # The Router waits until the owner exits it there: connecting again then.
+                self.status = {"state": "error", "error": str(exc)}
+                self.recover_later()
             except Exception as exc:
                 logger.exception("Copilot runtime failed to start")
                 self.status = {"state": "error", "error": describe(exc)[:500]}
+                if self.backend and not self.backend.alive():
+                    self.recover_later()  # Copilot stopped while connecting: again, later.
             self.publish_state()
         if self.ready():
+            # The one watching an earlier connection ends by itself.
+            self.process_job = asyncio.create_task(
+                self.watch_process(self.connected(), self.connections)
+            )
             self.background(self.workers.pump())
             self.background(self.workers.refresh_elsewhere())
             self.background(self.github.signed_in())  # Which GitHub accounts workers can use.
@@ -426,6 +487,68 @@ class Runtime:
     async def reconnect(self):
         await self.disconnect()
         await self.connect()
+
+    def own_processes(self) -> dict[int, str]:
+        """The processes of the Copilot CLI this app started last (see connect): pid ->
+        command line."""
+        try:
+            started = json.loads(self.store.get("copilot_pids") or "{}")
+            return {int(pid): str(command) for pid, command in started.items()}
+        except (ValueError, TypeError, AttributeError):
+            return {}
+
+    async def open_elsewhere(self) -> dict[str, int]:
+        """Sessions another program (a terminal) has open now: session id -> its pid. Never
+        those a Copilot CLI this app started has open, even one its loader no longer runs."""
+        found = await self.connected().open_elsewhere()
+        ours = self.own_processes()
+        return {session_id: pid for session_id, pid in found.items() if pid not in ours}
+
+    async def watch_process(self, backend: AgentBackend, connection: int):
+        """Copilot's CLI stopped by itself (crashed, killed): every request would fail, so the
+        owner sees it, and it connects again."""
+        while self.backend is backend and self.connections == connection:
+            if not backend.alive():
+                logger.warning("The Copilot CLI stopped by itself; connecting again.")
+                self.status = {
+                    "state": "error",
+                    "error": "Copilot stopped unexpectedly. Connecting again…",
+                }
+                self.publish_state()
+                self.recover_later(at_once=True)
+                return
+            await asyncio.sleep(PROCESS_CHECK)
+
+    def recover_later(self, at_once: bool = False):
+        if not self.stopping and not (self.recovery and not self.recovery.done()):
+            self.recovery = asyncio.ensure_future(self.recover(at_once))
+
+    async def recover(self, at_once: bool = False):
+        """Connect again until Copilot runs, waiting longer after each failure; while the Router
+        is open in a terminal, as soon as it is closed there."""
+        delay = RECONNECT_DELAY
+        wait = 0.0 if at_once else delay
+        while not self.ready() and not self.stopping:
+            await asyncio.sleep(wait)
+            if self.ready() or self.stopping:
+                return
+            if await self.router_elsewhere():
+                wait = RECONNECT_DELAY  # Looked at again shortly.
+                continue
+            try:
+                await self.reconnect()
+            except Exception:
+                logger.warning("Connecting to Copilot again failed.", exc_info=True)
+            wait, delay = delay, min(delay * 2, RECONNECT_MOST)
+
+    async def router_elsewhere(self) -> int:
+        """The process that has the Router open in another Copilot window, if one does."""
+        router_id = self.store.get("router_id")
+        if not router_id or not self.backend:
+            return 0
+        with suppress(Exception):
+            self.elsewhere = await self.open_elsewhere()
+        return self.elsewhere.get(self.copilot_id(router_id), 0)
 
     def ready(self) -> bool:
         return self.status["state"] == "ready" and self.backend is not None
@@ -640,7 +763,9 @@ class Runtime:
         if old.code_folder and old.code_folder != str(path):
             raise ValueError(f"Your code folder is {old.code_folder}; change it in Settings.")
         if old.code_folder != str(path):
-            new = Settings(**{**old.model_dump(), "code_folder": str(path)})
+            new = Settings.model_validate(
+                {**old.model_dump(), "code_folder": str(path)}, context=AS_SAVED
+            )
             self.store.save_settings(new)
             await self.settings_changed(old, new)
         repositories = [
@@ -667,7 +792,9 @@ class Runtime:
             return str(path)
         if self.store.directory.is_relative_to(path):
             raise ValueError("A project must not contain Chief of Staff's private data directory.")
-        new = Settings(**{**old.model_dump(), "projects": [*old.projects, str(path)]})
+        new = Settings.model_validate(
+            {**old.model_dump(), "projects": [*old.projects, str(path)]}, context=AS_SAVED
+        )
         self.store.save_settings(new)
         await self.settings_changed(old, new)
         return str(path)
@@ -770,6 +897,7 @@ class Runtime:
                 gradle=bool(sandbox) and (Path.home() / ".gradle" / "caches").is_dir(),
                 gh_accounts=self.github.accounts_cache[1],
                 gh_acting=self.store.items("ghaccount:"),
+                slack=bool(sandbox) and bool(row["slack"]),
             )
         if (profile := self.store.get("profile", "")) and row["role"] != WATCHDOG:
             prompt += f"\n<owner_profile>\n{profile}\n</owner_profile>"
@@ -854,10 +982,28 @@ class Runtime:
         options.update(self.tuning(row))
         return options
 
-    def model_for(self, row: dict) -> str:
+    def chosen_model(self, row: dict) -> str:
+        """The model chosen for the session: its own, its role's, or the default ("" for
+        Copilot's)."""
         settings = self.store.settings()
-        chosen = row.get("model") or settings.role_models.get(row["role"]) or settings.model
-        if row.get("id") and self.store.get(f"fallback:{row['id']}") == "model":
+        return row.get("model") or settings.role_models.get(row["role"]) or settings.model
+
+    def fallback(self, row: dict) -> str:
+        """How far Copilot's refusal took the session ("tuning": its model without the effort
+        and context chosen; "model": Copilot's default model), while its model is still the one
+        that was refused; "" otherwise."""
+        if not row.get("id") or not (stage := self.store.get(f"fallback:{row['id']}")):
+            return ""
+        refused = self.store.get(f"fallbackfor:{row['id']}")
+        return stage if refused is None or refused == self.chosen_model(row) else ""
+
+    def forget_fallback(self, session_id: str):
+        self.store.delete(f"fallback:{session_id}")
+        self.store.delete(f"fallbackfor:{session_id}")
+
+    def model_for(self, row: dict) -> str:
+        chosen = self.chosen_model(row)
+        if self.fallback(row) == "model":
             return ""  # Copilot refused it for this session: its default model instead.
         if chosen and chosen in self.refused_models():
             return ""
@@ -882,7 +1028,7 @@ class Runtime:
         """
         info = self.model_info(self.effective_model(row))
         effort = row.get("effort") or self.store.settings().role_efforts.get(row["role"], "")
-        if row.get("id") and self.store.get(f"fallback:{row['id']}"):
+        if self.fallback(row):
             # Copilot refused this session's model with these options: the model's own defaults.
             if not info:
                 return {}
@@ -913,12 +1059,11 @@ class Runtime:
         info = self.model_info(self.effective_model(row))
         return self.tuning(row).get("reasoning_effort") or (info or {}).get("default_effort", "")
 
-    async def recover_model(self, row: dict, error: str) -> bool:
-        """Copilot refused the session's model ("not supported"): first without the extra
-        options (thinking effort, long context), then on Copilot's default model. The turn that
-        failed is sent again. False when there is nothing left to fall back to."""
+    def fall_back(self, row: dict) -> str:
+        """Copilot refused the session's model: the next step back ("tuning", then "model"),
+        recorded with the model it is for; "" when nothing is left to fall back to."""
         session_id = row["id"]
-        stage = self.store.get(f"fallback:{session_id}") or ""
+        stage = self.fallback(row)
         tuned = bool(self.tuning(row))
         chosen = self.model_for(row)
         if not stage and tuned:
@@ -928,8 +1073,38 @@ class Runtime:
             refused = sorted(self.refused_models() | {chosen})
             self.store.set("refused_models", json.dumps(refused))
         else:
-            return False
+            return ""
         self.store.set(f"fallback:{session_id}", stage)
+        self.store.set(f"fallbackfor:{session_id}", self.chosen_model(row))
+        return stage
+
+    def refused_at_start(self, row: dict, error: str) -> bool:
+        """Copilot would not start the session on its model ("Model X is not available"): it
+        starts on Copilot's default model instead, and so do others given that model, and the
+        owner hears it in plain words. False when it had no model of its own to drop."""
+        if not (chosen := self.model_for(row)) or not (
+            MODEL_REFUSED.search(error) or (chosen in error and MODEL_NOT_OFFERED.search(error))
+        ):
+            return False
+        self.store.set("refused_models", json.dumps(sorted(self.refused_models() | {chosen})))
+        self.store.set(f"fallback:{row['id']}", "model")
+        self.store.set(f"fallbackfor:{row['id']}", self.chosen_model(row))
+        self.add_message(
+            row["id"],
+            "notice",
+            f"Copilot does not offer the model {chosen}, so this worker uses Copilot's default "
+            "model. Choose another in Settings (Models) or in this worker's header.",
+        )
+        return True
+
+    async def recover_model(self, row: dict, error: str) -> bool:
+        """Copilot refused the session's model ("not supported"): first without the extra
+        options (thinking effort, long context), then on Copilot's default model. The turn that
+        failed is sent again. False when there is nothing left to fall back to."""
+        session_id = row["id"]
+        chosen = self.model_for(row)
+        if not (stage := self.fall_back(row)):
+            return False
         what = (
             "the thinking effort and context size chosen for it"
             if stage == "tuning"
@@ -1037,8 +1212,17 @@ class Runtime:
         if context and not (info and info["long_context"]):
             raise ValueError("That model has no long-context option.")
         row = self.update_session(session_id, model=model, effort=effort, context=context)
+        # The owner's choice now: tried again, even if Copilot refused it (or another) before.
+        self.forget_fallback(session_id)
+        self.unrefuse(model)
         await self.apply_model(row)
         return self.view(row)
+
+    def unrefuse(self, *models: str):
+        """Models the owner chose again since Copilot refused them are tried again."""
+        refused = self.refused_models()
+        if refused & set(models):
+            self.store.set("refused_models", json.dumps(sorted(refused - set(models))))
 
     def copilot_id(self, row_id: str) -> str:
         """The Copilot session behind one of our sessions (the Router's changes when rotated)."""
@@ -1148,11 +1332,12 @@ class Runtime:
     async def refuse_if_open_elsewhere(self, row: dict):
         """Two programs writing to one Copilot session would interleave its history: a session
         open in a terminal is left alone until it is closed there."""
-        self.elsewhere = await self.connected().open_elsewhere()
+        self.elsewhere = await self.open_elsewhere()
         if pid := self.elsewhere.get(self.copilot_id(row["id"])):
-            raise RuntimeError(
+            raise OpenElsewhere(
                 f"“{row['title']}” is open in another Copilot window (process {pid}). Exit it "
-                "there (/exit), then try again."
+                "there (/exit), then try again.",
+                pid,
             )
 
     async def session_for(self, session_id: str):
@@ -1272,7 +1457,7 @@ class Runtime:
             window = info["long_context"]
         return max(ROUTER_CONTEXT, int(window * 0.8))
 
-    def handover(self) -> str:
+    def handover(self, why: str = "whose context had grown long") -> str:
         """What a new Router session needs to know, from Chief of Staff's records."""
 
         def clip(text: str, size: int = 240) -> str:
@@ -1281,8 +1466,8 @@ class Runtime:
 
         router = self.router_id()
         lines = [
-            "You take over as the owner's Router from an earlier Router session whose context "
-            "had grown long. This is what it knew; list_sessions has the current details."
+            f"You take over as the owner's Router from an earlier Router session {why}. This "
+            "is what it knew; list_sessions has the current details."
         ]
         if spoken := self.store.get("owner_language"):
             # Without the conversation that set it, a fresh session would answer in English.
@@ -1321,7 +1506,7 @@ class Runtime:
                 )
                 for t in tasks
             ]
-        if closed := self.workers.recently_closed(8):
+        if closed := [r for r in self.workers.recently_closed(20) if r["id"] not in helpers][:8]:
             lines.append("\nRecently closed workers (message_session reopens one):")
             lines += [
                 f"- {short(r['id'])} “{r['title']}”: {clip(r['report'], 160)}" for r in closed
@@ -1403,18 +1588,57 @@ class Runtime:
         router_id = self.store.get("router_id")
         row = self.store.find_session(router_id) if router_id else None
         if row and not row["closed_at"]:
-            try:
-                await self.open_live(row)
-                return
-            except Exception:
-                logger.warning("Router could not be resumed; starting a new one.", exc_info=True)
-                self.store.update_session(row["id"], closed_at=now())
+            # The Router is never replaced: its timeline, tasks and what the owner told it stay.
+            async with self.states[row["id"]].lifecycle:
+                if self.states.handle(row["id"]):
+                    return
+                backend, connection = self.connected(), self.connections
+                try:
+                    await self.open_live(row)
+                    return
+                except OpenElsewhere as exc:
+                    raise OpenElsewhere(
+                        f"The Router is open in another Copilot window (process {exc.pid}): "
+                        "exit it there (/exit). Chief of Staff connects again once it is closed.",
+                        exc.pid,
+                    ) from None
+                except Exception as exc:
+                    if self.connections != connection or not backend.alive():
+                        raise  # Copilot itself stopped: its session may well be fine.
+                    logger.warning("The Router's Copilot session could not be resumed; a fresh "
+                                   "one takes over.", exc_info=True)  # fmt: skip
+                    await self.renew_router(row, describe(exc))
+                    return
         session_id = str(uuid4())
         row = self.store.create_session(
             session_id, ROUTER, "Router", "idle", cwd=str(self.role_dir(ROUTER))
         )
         self.store.set("router_id", session_id)
         await self.open_live(row, create=True)
+
+    async def renew_router(self, row: dict, error: str):
+        """The Router's Copilot session cannot be resumed (Copilot no longer has it, say): a
+        fresh one takes over, with a handover, as rotate_router does. The caller holds the
+        Router's lifecycle lock."""
+        router_id = row["id"]
+        old, new = self.copilot_id(router_id), str(uuid4())
+        self.store.set(f"alias:{old}", router_id)
+        self.store.set(f"alias:{new}", router_id)
+        try:
+            await self.open_live(row, create=True, copilot=new)
+        except Exception:
+            self.store.delete(f"alias:{new}")
+            raise
+        self.store.set(f"copilot:{router_id}", new)
+        self.store.delete(f"rotated:{router_id}")  # Nothing to go back to.
+        self.store.set(f"preamble:{router_id}", self.handover("that could not be resumed"))
+        self.store.set(f"context:{router_id}", "0")
+        self.add_message(
+            router_id,
+            "notice",
+            f"The Router's Copilot session could not be resumed ({error.strip()[:160]}): a fresh "
+            "one took over with a summary of what it knew. Your conversation stays.",
+        )
 
     async def ensure_slack_session(self):
         if not self.slack.configured():
@@ -1424,7 +1648,11 @@ class Runtime:
             try:
                 await self.session_for(rows[0]["id"])
                 return
+            except OpenElsewhere:
+                raise  # Open in a terminal: it stays, and waits until it is closed there.
             except Exception:
+                if not self.connected().alive():
+                    raise  # Copilot itself stopped: its session may well be fine.
                 # Copilot may no longer have it (its session state was cleaned up).
                 logger.warning("The Slack session could not be resumed; starting a new one.",
                                exc_info=True)  # fmt: skip
@@ -1674,7 +1902,11 @@ class Runtime:
                     if tell_router:
                         self.owner_told(row, text)
                     return message
-        if row["role"] in {WORKER, SLACK} and clear_questions:
+        # Separate work asked for straight ("New, separate task: …"): a task of its own, not
+        # more on the one it is on (whose result and PR stay as they are).
+        separate = self.task_actions.open_separate(row, text) if row["role"] == WORKER else None
+        before, about = about, separate or about
+        if row["role"] in {WORKER, SLACK} and clear_questions and not separate:
             # The owner answers what it asked on that task (others' questions stay).
             self.asks.answered(session_id, about["id"] if about else "")
             self.asks.answered(session_id, "")
@@ -1682,12 +1914,12 @@ class Runtime:
         # they ask something back: then the card stays, and this is chat).
         decided = (
             self.decisions.answered_in_chat(session_id, about, text.strip())
-            if row["role"] == WORKER and clear_questions and text.strip()
+            if row["role"] == WORKER and clear_questions and text.strip() and not separate
             else []
         )
         asked_back = (
             self.decisions.asked_back(session_id, about, text.strip())
-            if row["role"] == WORKER and clear_questions
+            if row["role"] == WORKER and clear_questions and not separate
             else []
         )
         # Answers come in the language of this message, whatever the conversation used before.
@@ -1696,6 +1928,18 @@ class Runtime:
         meta: dict[str, Any] = {}
         switched = self.switched_language(session_id, spoken)
         notes = [switched]
+        if separate:
+            prompt = wrap("owner", "message", text, task=separate["id"], reply_in=spoken)
+            kept = (
+                f"; task {before['id']} \u201c{before['title']}\u201d keeps its result"
+                if before
+                else ""
+            )
+            notes.append(
+                f"The owner asks for this apart from what you were on: it is a task of its own, "
+                f"{separate['id']} \u201c{separate['title']}\u201d. Report it on that task "
+                f"(task_id={separate['id']}){kept}."
+            )
         notes += [f"This answers your decision card: {c['target']['question']}" for c in decided]
         notes += [
             f"The owner asks about your decision card before deciding: answer them. The card "
@@ -1740,11 +1984,12 @@ class Runtime:
             display=text,
             meta=meta,
             # Steered into a Router turn written in the other language, the answer stays in it;
-            # its own turn (Router turns are short) starts in the owner's.
-            steer=not (switched and row["role"] == ROUTER),
+            # its own turn (Router turns are short) starts in the owner's. A task of its own
+            # waits for the turn it may be in on another.
+            steer=not (switched and row["role"] == ROUTER) and not separate,
         )
         if row["role"] == WORKER and tell_router:
-            self.owner_told(row, text)
+            self.owner_told(row, text, made=separate)
         if about and about["status"] == "waiting" and clear_questions and not asked_back:
             # It has the owner's answer now: it goes on (not "waits for your answer" until its
             # next report).
@@ -1812,9 +2057,16 @@ class Runtime:
             self.add_message(router_id, "notice", note, {"session_id": row["id"]})
         return {**message, "note": note}
 
-    def owner_told(self, row: dict, text: str):
+    def owner_told(self, row: dict, text: str, made: dict | None = None):
         """What the owner told a worker directly (in its timeline, @ in Chat, on a task card):
-        the Router hears of it with its next message, so it never takes the result for drift."""
+        the Router hears of it with its next message, so it never takes the result for drift.
+        `made`: the task of its own that message became (separate work asked for)."""
+        said = f"The owner told this worker directly: {text}"
+        if made:
+            said += (
+                f"\n\nThat is a task of its own now, {made['id']} \u201c{made['title']}\u201d, "
+                "given to this worker: do not give it again."
+            )
         with suppress(RuntimeError):
             self.add_message(
                 self.router_id(),
@@ -1827,7 +2079,7 @@ class Runtime:
                     "prompt": wrap(
                         "system",
                         "to-worker",
-                        f"The owner told this worker directly: {text}",
+                        said,
                         worker=short(row["id"]),
                         title=row["title"],
                     ),
@@ -1877,8 +2129,12 @@ class Runtime:
         )
 
     def projects_note(self) -> str:
-        """Tell the Router when the configured projects changed since it last heard."""
-        projects = self.workspaces.projects()
+        """Tell the Router when the configured projects changed since it last heard (also when
+        a project's folder went missing, or came back)."""
+        projects = [
+            project if os.path.isdir(project) else f"{project} {MISSING_PROJECT}"
+            for project in self.workspaces.projects()
+        ]
         heard = self.store.get("router_projects")
         if heard == json.dumps(projects):
             return ""
@@ -1927,6 +2183,8 @@ class Runtime:
         if not fresh:
             return False
         meta = {"source": source, **({"delegated": True} if kind == "delegated" else {})}
+        if len(fresh) > 1:
+            meta["count"] = len(fresh)  # Its chat line says how many came (not only the first).
         try:
             await self.delivery.deliver(
                 self.router_id(),
@@ -1936,7 +2194,7 @@ class Runtime:
                 ),
                 batch=True,
                 kind="inbound",
-                display=(display or text)[:2000],
+                display=clip_words(display or text, 4000),
                 meta=meta,
             )
         except Exception:
@@ -1972,8 +2230,15 @@ class Runtime:
         (default: the one its turn is on, else its current one); a thread waited on is that
         task's, not every task of the worker. `asked`: those of them it was asked to follow
         (follow_thread, a `follow` the Router passed), not only named: a PR closed already
-        stays followed a while, so its reopening is news (GitHubSource.poll_pull)."""
+        stays followed a while, so its reopening is news (GitHubSource.poll_pull). One the Router
+        or the owner stopped it following stays stopped until they give it back: the session
+        does not follow it again by itself (a later report naming the PR)."""
         followed = [threads.normalize(key) for key in keys]
+        if given:
+            for key in followed:
+                self.store.delete(f"stopped:{session_id}:{key}")
+        else:
+            followed = [k for k in followed if not self.store.get(f"stopped:{session_id}:{k}")]
         wanted = {threads.normalize(key) for key in asked}
         row = self.store.session(session_id)
         self.check_follow(row, followed)
@@ -2603,6 +2868,10 @@ class Runtime:
                 for task in self.tasks.listed(include_ended_since=hours_ago(TASKS_SHOWN_HOURS))
             ],
             "settings": self.store.settings().model_dump(),
+            # Configured projects whose folder is gone: Settings says so.
+            "missing_projects": [
+                project for project in self.store.settings().projects if not os.path.isdir(project)
+            ],
             "slack": {**self.slack.status, "token_saved": bool(self.slack.tokens.get())},
             "github": self.github.status,
             "closed": [self.view(row) for row in self.workers.recently_closed(20)],
@@ -2621,11 +2890,21 @@ class Runtime:
         }
 
     async def settings_changed(self, old: Settings, new: Settings):
+        defaults = ("model", "role_models", "role_efforts")
+        if any(getattr(old, key) != getattr(new, key) for key in defaults):
+            # Models and efforts chosen now are tried, even where Copilot refused one before.
+            for key in self.store.keys("fallback:"):
+                row = self.store.find_session(key.removeprefix("fallback:"))
+                if not (row and row["model"] and row["effort"]):  # Settings choose for it.
+                    self.forget_fallback(key.removeprefix("fallback:"))
+            self.unrefuse(
+                *({new.model} - {old.model}),
+                *(m for role, m in new.role_models.items() if old.role_models.get(role) != m),
+            )
         if old.copilot_command != new.copilot_command or not self.ready():
             await self.reconnect()
         elif old.slack_enabled != new.slack_enabled:
             await self.refresh_slack()
-        defaults = ("model", "role_models", "role_efforts")
         if self.ready() and any(getattr(old, key) != getattr(new, key) for key in defaults):
             for session_id in self.states.live_ids():
                 row = self.store.find_session(session_id)

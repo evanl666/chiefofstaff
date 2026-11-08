@@ -907,7 +907,10 @@ async def scope_base(checkout: dict, path: str, head: str, scope: Scope) -> tupl
     if start:
         with suppress(ValueError):
             await checkout_git(checkout, path, "merge-base", "--is-ancestor", start, head)
-            return start, ""
+            # Rebased onto a newer main since: from where it meets main now (its snapshot was
+            # of the older one).
+            newer = await newer_base(checkout, path, head, start)
+            return (newer, newer) if newer != start else (start, "")
         with suppress(ValueError):
             if met := (await checkout_git(checkout, path, "merge-base", start, head)).strip():
                 again = await rewritten(checkout, path, start, met, head)
@@ -953,15 +956,27 @@ async def parent_of(checkout: dict, path: str, commit: str) -> str:
     return ""
 
 
+async def local_default(checkout: dict, path: str) -> str:
+    """Without an origin: the branch the owner's own checkout of the repository is on (their
+    main), when it is not the one this checkout is on."""
+    with suppress(ValueError):
+        owner = checkout.get("repo") or path
+        branch = (await checkout_git(checkout, owner, "symbolic-ref", "--short", "HEAD")).strip()
+        here = (await checkout_git(checkout, path, "symbolic-ref", "--short", "HEAD")).strip()
+        if branch and branch != here:
+            return f"refs/heads/{branch}"
+    return ""
+
+
 async def newer_base(checkout: dict, path: str, head: str, base: str) -> str:
     """Where a branch starts now: rebased onto a newer default branch, where they meet now
     (that branch's newer commits are others' work); else `base`. Not when the default branch
     has the branch's own work in it (merged): then that work is still the branch's."""
-    if not base or checkout.get("shared"):
+    if not base:
         return base
     with suppress(ValueError):
         top = (await checkout_git(checkout, path, "rev-parse", "--show-toplevel")).strip()
-        default = await default_branch(Path(top))
+        default = await default_branch(Path(top)) or await local_default(checkout, path)
         if not default:
             return base
         try:
@@ -995,6 +1010,10 @@ class Share:
         self.large: list[str] = []  # Its new files too large to count or show.
         # In a folder of the owner's: what changed there meanwhile that is not its own.
         self.not_counted: list[str] = []
+        # Kept files that other work changed between its result and a follow-up: counted and
+        # shown over its own stretches only (start to result, taken up again to end).
+        self.split: set[str] = set()
+        self.segments: list[tuple[str, str]] = []
 
 
 async def own_commits(checkout: dict, path: str, head: str, shared: bool, share: Share, scope):
@@ -1089,10 +1108,12 @@ async def tree_share(
         edges.append(end["tree"])
         for first, last in zip(edges[::2], edges[1::2], strict=True):
             own |= set(await tree_names(checkout, top, first, last))
+            share.segments.append((first, last))
         window = {
             name: status for name, status in window.items() if name in own or name not in between
         }
         share.exact = share.exact and not (between & own)
+        share.split = set(window) & between & own
     share.uncommitted = set(uncommitted)
     if share.base:
         await own_commits(checkout, path, end["commit"], False, share, scope)
@@ -1138,6 +1159,7 @@ async def tree_share(
     share.keep = sorted(keep)
     share.committed &= keep
     share.uncommitted &= keep
+    share.split &= keep
     share.start, share.end, share.end_commit = start, end["tree"], end["commit"]
     share.large = [
         name
@@ -1201,25 +1223,42 @@ async def own_lines(checkout: dict, share: Share, total: dict, edits_from: str =
     edits since the last commit (from the end snapshot's commit to its files, or from HEAD to
     the folder as it is)."""
     top = str(share.top)
-    if share.own and share.committed:
+    # Files others changed between its stretches are counted by stretch (split_lines), their
+    # committed part too: not again by commit.
+    committed = share.committed - share.split
+    if share.own and committed:
         shas = list(share.own)[:MAX_OWN_COMMITS]
         with suppress(ValueError):
             counted = await checkout_git(
                 checkout, top, "show", "--numstat", "--format=", *shas, "--",
-                *sorted(share.committed),
+                *sorted(committed),
             )  # fmt: skip
             for line in counted.splitlines():
                 added, removed, *_ = [*line.split("\t"), "", ""]
                 if added.isdigit() and removed.isdigit():
                     total["insertions"] += int(added)
                     total["deletions"] += int(removed)
-    edited = sorted(share.uncommitted) if share.end else share.keep
+    edited = sorted(share.uncommitted - share.split) if share.end else share.keep
     against = [share.end_commit, share.end] if share.end else [edits_from] if edits_from else []
     if edited and against:
         with suppress(ValueError):
             edits = receipts.shortstat(
                 await checkout_git(checkout, top, "diff", "--shortstat", *against, "--", *edited)
             )
+            total["insertions"] += edits.get("insertions", 0)
+            total["deletions"] += edits.get("deletions", 0)
+    if share.end:
+        await split_lines(checkout, share, total, share.split)
+
+
+async def split_lines(checkout: dict, share: Share, total: dict, names: set[str]):
+    """Lines it changed in files others changed between its stretches: each stretch's own."""
+    for first, last in share.segments if names else []:
+        with suppress(ValueError):
+            listed = await checkout_git(
+                checkout, str(share.top), "diff", "--shortstat", first, last, "--", *sorted(names)
+            )
+            edits = receipts.shortstat(listed)
             total["insertions"] += edits.get("insertions", 0)
             total["deletions"] += edits.get("deletions", 0)
 
@@ -1238,12 +1277,15 @@ async def scoped_changes(
         if share.not_counted:
             total["not_counted"] = len(share.not_counted)
         if keep and share.exact:
+            whole = [name for name in keep if name not in share.split]
             with suppress(ValueError):
-                total |= receipts.shortstat(
-                    await checkout_git(
-                        checkout, top, "diff", "--shortstat", share.start, share.end, "--", *keep
+                if whole:
+                    span = (share.start, share.end)
+                    listed = await checkout_git(
+                        checkout, top, "diff", "--shortstat", *span, "--", *whole
                     )
-                )
+                    total |= receipts.shortstat(listed)
+                await split_lines(checkout, share, total, share.split)
                 total["files"] = len(keep)
         elif keep:
             await own_lines(checkout, share, total)
@@ -1346,21 +1388,25 @@ async def diff(checkout: dict, scope: Scope | None = None) -> dict:
         text = ""
         if share.end and share.keep:
             if share.exact:
-                text = await checkout_git(
-                    checkout, top, *PLAIN_DIFF, share.start, share.end, "--", *share.keep, limit=60
-                )
+                whole = [name for name in share.keep if name not in share.split]
+                if whole:
+                    text = await checkout_git(
+                        checkout, top, *PLAIN_DIFF, share.start, share.end, "--", *whole, limit=60
+                    )
+                text += await split_diff(checkout, share, share.split)
             else:
-                if share.own and share.committed:
+                if share.own and share.committed - share.split:
                     shas = list(reversed(list(share.own)[:MAX_OWN_COMMITS]))
                     text = await checkout_git(
-                        checkout, top, *PLAIN_SHOW, *shas, "--", *sorted(share.committed),
-                        limit=60,
+                        checkout, top, *PLAIN_SHOW, *shas, "--",
+                        *sorted(share.committed - share.split), limit=60,
                     )  # fmt: skip
-                if share.uncommitted:
+                if share.uncommitted - share.split:
                     text += await checkout_git(
                         checkout, top, *PLAIN_DIFF, share.end_commit, share.end, "--",
-                        *sorted(share.uncommitted), limit=60,
+                        *sorted(share.uncommitted - share.split), limit=60,
                     )  # fmt: skip
+                text += await split_diff(checkout, share, share.split)
         elif share.exact and share.keep:
             against = (share.base or "HEAD") if live else f"{share.base}...{head}"
             text = await checkout_git(
@@ -1402,6 +1448,16 @@ async def diff(checkout: dict, scope: Scope | None = None) -> dict:
         # Its new files too large to show (left out of the diff): by name and size.
         "large": large,
     }
+
+
+async def split_diff(checkout: dict, share: Share, names: set[str]) -> str:
+    """The diff of files others changed between its stretches: each stretch's own part."""
+    text = ""
+    for first, last in share.segments if names else []:
+        text += await checkout_git(
+            checkout, str(share.top), *PLAIN_DIFF, first, last, "--", *sorted(names), limit=60
+        )
+    return text
 
 
 def file_sizes(top: Path, names: list[str]) -> list[dict]:
@@ -1813,6 +1869,19 @@ class Workspaces:
         """What the Router needs to match a request to a project."""
         cards = []
         for project in self.projects()[:60]:
+            if not await asyncio.to_thread(Path(project).is_dir):
+                # Still configured: its folder went away (moved, deleted, a drive not mounted).
+                cards.append(
+                    {
+                        "path": project,
+                        "name": Path(project).name,
+                        "remote": "",
+                        "about": "",
+                        "missing": "configured, but its folder is not on disk (moved or "
+                        "deleted?): tell the owner; they restore it or remove it in Settings",
+                    }
+                )
+                continue
             cached = self.project_cache.get(project)
             if cached and time.monotonic() - cached[0] < 600:
                 cards.append(cached[1])

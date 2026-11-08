@@ -31,13 +31,19 @@ uv run chiefofstaff --demo          # the whole product, scripted, no accounts
 | `uv run --with playwright python scripts/live_wide.py A\|B\|C\|D\|E\|F\|G\|H` | 90 scenarios of a working day in eight shards (B, E and G one after the other) | Copilot; a GitHub test repository |
 | `uv run python scripts/live_memory.py` | How you write is learned and used; a fixed mistake becomes a check that catches it again | Copilot; macOS or `bwrap` |
 
-Before a pull request:
+Before a pull request, run what CI runs:
 
 ```bash
-uv run ruff check . && uv run ruff format --check . && uv run pyright && uv run pytest -q
-npx eslint@10 src/chiefofstaff/static     # the web UI
+uv lock --check && uv run ruff check . && uv run ruff format --check . && uv run pyright
+uv run pytest -q --timeout 120 --cov=chiefofstaff --cov-branch --cov-fail-under=88
+npx eslint@10 --max-warnings 0 src/chiefofstaff/static     # the web UI
 ```
-CI runs those, the demo browser test and a secret scan on every push.
+
+Every pull request must pass all of CI before it can be merged: those checks; the tests on
+Python 3.11, 3.12 and 3.13 on Linux and macOS; a package build that installs and starts; the
+demo in a browser; workflow linting; a secret scan; and a review of new dependencies. It also
+needs an approving review from the maintainer (see `.github/CODEOWNERS`); a push after the
+approval needs a new one.
 
 Write tests for behavior, not for implementation: a scenario through `tests/conftest.py`'s
 `Harness` (a fake Copilot you drive with `session.emit(...)`) is usually right. Failures at the

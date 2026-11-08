@@ -361,6 +361,13 @@ class Report(NestedArguments):
         "status now; whenever one is made or its status changes. Not PRs: their status comes "
         "from GitHub",
     )
+    new_task_title: str = Field(
+        default="",
+        description="With status done, when this is work apart from the task's result (the "
+        "owner asked you straight for another deliverable: another branch, PR, question or "
+        "flow): a title saying what it delivers. It becomes a task of its own with this "
+        "result; the task keeps its result and PR",
+    )
 
 
 def task_text(instructions: str, criteria: list[str], decisions: Sequence[dict] = ()) -> str:
@@ -391,6 +398,17 @@ class CancelTask(BaseModel):
 class StopWorker(BaseModel):
     session_id: str = Field(
         description="The worker to stop (its id or short id), or a task id (t…) for its worker"
+    )
+
+
+class StopFollowing(BaseModel):
+    session_id: str = Field(
+        description="The worker that follows it (its id or short id), or a task id (t…)"
+    )
+    thread: str = Field(
+        default="",
+        description="slack:<channel_id>:<thread_ts>, slack:<D…> (a DM) or github:<owner/repo>#<n>; "
+        "empty: every thread and PR it follows for that task (or, given a worker, all of them)",
     )
 
 
@@ -725,7 +743,10 @@ def shortened(listed: dict) -> dict:
                 entry.pop("last_report", None)
                 entry.pop("now", None)
     if size() > LISTED_BYTES:
-        listed["projects"] = [{"path": card["path"]} for card in listed["projects"]]
+        listed["projects"] = [
+            {key: card[key] for key in ("path", "missing") if key in card}
+            for card in listed["projects"]
+        ]
         listed["recently_closed"] = []
     if size() > LISTED_BYTES:
         # Each session already names its current task; needs_owner lists results to review.
@@ -750,9 +771,95 @@ def clip_report(text: str) -> str:
 
 
 SLACK_ID = re.compile(r"[CDGUW][A-Z0-9]{2,}")
+# A Slack conversation (channel, DM or group) named in a text, also inside a thread key
+# (slack:C0DEPLOYS:<ts>): its id has digits, unlike a shouted word (DEPLOYMENT, CHANGELOG).
+SLACK_CONVERSATION = re.compile(r"\b[CDG](?=[A-Z0-9]*\d)[A-Z0-9]{7,}\b")
+# The Router passes on the owner's answer ("the owner answered: yes", "the owner says…").
+OWNER_ANSWER = re.compile(
+    r"\bowner(?:'s|\u2019s)?\s+(?:\w+\s+){0,3}?(?:answer\w*|said|says|repl\w*|confirm\w*|"
+    r"decid\w*|chose|choose\w*|approv\w*|agree\w*|declin\w*|accept\w*|refus\w*)\b",
+    re.IGNORECASE,
+)
+# What the Router must not ask a worker to do on the owner's behalf: merge, delete, force-push,
+# or skip the owner's card.
+RISKY = re.compile(
+    r"\bgh\s+pr\s+merge\b|\bgh\s+repo\s+delete\b|\bgit\s+push\s+(-f|--force)(?![\w-])"
+    r"|\bno (merge )?card (is )?needed\b|\b(skip|without) the (owner's )?(merge )?card\b",
+    re.I,
+)
+# "do not run gh pr merge", "never force-push": said so the worker does not.
+FORBIDS = re.compile(r"\b(do not|don't|dont|never|not to|must not|no)\W+(\w+\W+){0,2}$", re.I)
+
+
+def risky(text: str) -> re.Match | None:
+    """A request that a worker merge, delete or force-push, or skip the owner's card: not one
+    that tells it not to."""
+    for found in RISKY.finditer(text):
+        if not FORBIDS.search(text[max(0, found.start() - 40) : found.start()]):
+            return found
+    return None
+
+
+# A message that adds to what was just asked: "oh wait, one more thing", "also…", "\u8fd8\u6709".
+ADDS_TO = re.compile(
+    r"\b(one more thing|oh wait|wait,|forgot to (mention|say|add|ask)|one thing I forgot)\b"
+    r"|\u8fd8\u6709\u4e00(\u4ef6|\u70b9)|\u8865\u5145\u4e00\u4e0b|\u5bf9\u4e86|\u5fd8\u4e86\u8bf4",
+    re.I,
+)
+ADD_MINUTES = 30
+# Internal ids a worker may write in its report: a draft's ("d4d31ea2f"), a Slack message's
+# timestamp ("ts 1794157630.819867").
+DRAFT_ID = r"d[0-9a-f]{8}"
+# "(d4d31ea2f)", "(d4d31ea2f, d939522b7)": ids alone in brackets; "(d4d31ea2f, sent)"; one of
+# a list after a comma; "the draft d4d31ea2f" (the id after "draft").
+IDS_IN_BRACKETS = re.compile(rf"\s*\(\s*({DRAFT_ID}(?:\s*,\s*{DRAFT_ID})*)\s*\)")
+ID_FIRST = re.compile(rf"\(\s*({DRAFT_ID})\s*,\s*")
+ID_LISTED = re.compile(rf"\s*,\s*({DRAFT_ID})\b")
+DRAFT_NAMED = re.compile(rf"\b(?:(\w+)\s+)?draft\s+({DRAFT_ID})\b", re.I)
+TS_MENTION = re.compile(r"\s*\(?\b(?:ts|thread_ts|thread)\s*=?\s*\d{10}\.\d{6}\b\)?")
+NAMING = {"the", "a", "this", "that", "your", "my", "its", "slack", "review", "reply"}
+
+
+def owner_words(text: str, drafts: set[str]) -> str:
+    """A report as the owner reads it: without the ids of drafts (`drafts`, those that exist:
+    not a commit hash that looks like one) and Slack timestamps, which mean nothing to them.
+    Only where an id is: nothing else of the text changes (`main()` stays)."""
+
+    def ours(*found: str) -> bool:
+        return all(identifier in drafts for identifier in found)
+
+    def brackets(match: re.Match) -> str:
+        found = re.findall(DRAFT_ID, match.group(1))
+        return "" if ours(*found) else match.group(0)
+
+    def named(match: re.Match) -> str:
+        word, found = match.group(1) or "", match.group(2)
+        if not ours(found):
+            return match.group(0)
+        if word.lower() in NAMING:
+            return f"{word} draft"  # "the draft d4d31ea2f" -> "the draft"
+        return f"{word} the draft".lstrip() if word else "the draft"
+
+    text = IDS_IN_BRACKETS.sub(brackets, text)
+    text = ID_FIRST.sub(lambda m: "(" if ours(m.group(1)) else m.group(0), text)
+    text = ID_LISTED.sub(lambda m: "" if ours(m.group(1)) else m.group(0), text)
+    text = DRAFT_NAMED.sub(named, text)
+    return TS_MENTION.sub(lambda m: "" if "(" in m.group(0) else " the message", text)
 
 
 SLACK_TS = re.compile(r"\d{10}\.\d{6}")
+
+
+def same_conversation(asked: str, text: str) -> bool:
+    """Whether `text` names the Slack conversation a question is about: the same channel or DM
+    and, in a channel, the same thread or message when both name one."""
+    shared = set(SLACK_CONVERSATION.findall(asked)) & set(SLACK_CONVERSATION.findall(text))
+    if not shared:
+        return False
+    if all(conversation.startswith("D") for conversation in shared):
+        return True  # A DM is one conversation.
+    stamps, named = set(SLACK_TS.findall(asked)), set(SLACK_TS.findall(text))
+    return not stamps or not named or bool(stamps & named)
 
 
 def named_pulls(text: str) -> list[str]:
@@ -1047,6 +1154,14 @@ class Tools:
                 self.t_stop_worker,
             ),
             (
+                "stop_following",
+                "Stop a worker following a Slack thread, DM or PR (the owner's “stop following "
+                "…”, “ignore that thread”): new messages there come to you again. The worker, "
+                "its tasks, results and drafts stay; closing the worker is not how to do this.",
+                StopFollowing,
+                self.t_stop_following,
+            ),
+            (
                 "add_watch",
                 "Propose a watch for the owner to confirm: something Chief of Staff looks out "
                 "for on their behalf every few minutes in work hours (a channel, a topic, mail, "
@@ -1253,6 +1368,12 @@ class Tools:
         that reads Slack does, whether or not Slack is connected."""
         self.caller(caller, ROUTER)
         params = params.model_copy(update={"instructions": self.owner_words(params.instructions)})
+        if not special and (asked := risky(params.instructions)):
+            raise ValueError(
+                f"Not started: workers never do this for the owner ({asked.group(0)!r}). A merge "
+                "is the owner's click on the PR's Merge card on Home: tell them where it is. For "
+                "something destructive, give the owner the exact command to run themselves."
+            )
         title = clean_title(params.title)
         follow = [threads.normalize(key) for key in params.follow]
         after = [self.runtime.task_actions.task_for(reference) for reference in params.after]
@@ -1474,7 +1595,9 @@ class Tools:
             if (await self.runtime.task_actions.pr_roles(about, [seen]))[0]:
                 own.append(key)
         if own:
-            self.runtime.follow(caller, own, given=False, task_id=task["id"] if task else None)
+            own = self.runtime.follow(
+                caller, own, given=False, task_id=task["id"] if task else None
+            )
         followed |= set(own)
         delivered = [key for key in threads.pull_requests(text) if key in followed]
         task = self.tasks.find(task["id"]) if task else None
@@ -1541,8 +1664,20 @@ class Tools:
                 (task_id, decision["id"]),
             )
 
+    def answer_slack_question(self, session_id: str, text: str, quoted: bool):
+        """The Router passes the owner's answer on to the Slack session (it says so, or
+        `quoted` the owner's message): its questions about the conversation the message names
+        are no longer open. Not by any other message: the Router forwards it Slack events too,
+        which answer nothing."""
+        if not (quoted or OWNER_ANSWER.search(text)):
+            return
+        for question in self.runtime.asks.session_questions(session_id):
+            if same_conversation(question["text"], text):
+                self.runtime.asks.dismiss(question["id"], how="")
+
     async def t_message_session(self, params: MessageSession, caller: str):
         self.caller(caller, ROUTER)
+        quoted = bool(OWNER_REF.search(params.text))  # The owner's own words, passed on.
         params = params.model_copy(update={"text": self.owner_words(params.text)})
         try:
             target = self.store.session(params.session_id)
@@ -1615,6 +1750,27 @@ class Tools:
                 "replaces goes with task='new'. To try a failed task again in its own worker: "
                 "task='continue' with its task_id."
             )
+        if target["role"] == WORKER and (asked := risky(params.text)):
+            raise ValueError(
+                f"Not sent: workers never do this for the owner ({asked.group(0)!r}). A merge is "
+                "the owner's click on the PR's Merge card on Home (it checks nothing changed "
+                "since they looked): tell them where it is. For something destructive, give the "
+                "owner the exact command to run themselves."
+            )
+        if (
+            params.task == "new"
+            and target["role"] == WORKER
+            and (recent := self.addition_to(target["id"], params.text))
+        ):
+            # "Oh wait, one more thing: accents too" is more of the task just given, not a new
+            # one (two results to accept, two replies to the asker): asked once.
+            self.store.set(f"newasked:{recent['id']}", "1")
+            raise ValueError(
+                f"This reads like more on {recent['id']} “{recent['title']}”, given to that worker "
+                f"minutes ago: if it is the same deliverable (a correction, one more thing), call "
+                f"again with task='continue' and task_id='{recent['id']}'. If it truly is another "
+                "deliverable, call again with task='new'."
+            )
         replaced = self.replaced_tasks(params.replaces)
         # A running task left behind by a new one would show as waiting its turn though it was
         # delivered or waits on the owner: the Router says what becomes of it.
@@ -1642,6 +1798,8 @@ class Tools:
             # task does not answer it; another task's question stays).
             self.runtime.asks.answered(target["id"], task["id"] if task else "", by="router")
             self.runtime.asks.answered(target["id"], "", by="router")
+        elif target["role"] == SLACK:
+            self.answer_slack_question(target["id"], params.text, quoted)
         if (
             task
             and params.task == "continue"
@@ -2167,10 +2325,35 @@ class Tools:
             }
         if row["report"]:
             entry["last_report"] = " ".join(row["report"].split())[:200]
+            if since := self.drafts_since_report(row):
+                # Its report may say a draft "awaits approval" that was sent since.
+                entry["drafts_since_report"] = since
         working = row["role"] == WORKER and row["status"] == "working"
         if working and (now := self.runtime.progress_line(row, brief=True)):
             entry["now"] = now
         return entry
+
+    def drafts_since_report(self, row: dict) -> list[str]:
+        """What became of its replies and reviews since its last report: "sent", "rejected"…"""
+        reported = self.store.value(
+            "SELECT max(created_at) FROM messages WHERE session_id=? AND kind='report'",
+            (row["id"],),
+        )
+        if not reported:
+            return []
+        found = []
+        for draft in self.store.all(
+            "SELECT * FROM drafts WHERE session_id=? AND kind IN ('slack', 'github', 'reply') "
+            "AND resolved_at>=? ORDER BY resolved_at DESC LIMIT 5",
+            (row["id"], reported),
+        ):
+            draft = self.store.draft(draft["id"])
+            outcome = {"sent": "sent", "rejected": "not sent"}.get(draft["status"], draft["status"])
+            words = (draft.get("outcome") or "").split(":", 1)[0][:60]
+            found.append(
+                f"{self.runtime.drafts.line(draft)}: {outcome}" + (f" ({words})" if words else "")
+            )
+        return found
 
     def looked_at(self, task: dict, words: str) -> str:
         """The Router sees a task as it is now (`words`, as it was put to it)."""
@@ -2412,6 +2595,31 @@ class Tools:
             if row["role"] == WORKER
             else None
         )
+        split_note = ""
+        if task and params.status == "done" and task["result"] and task["status"] != "cancelled":
+            # Never the result of a task it is not: work apart from it (the worker says so, or
+            # it is on another branch than the task's open PR) is a task of its own.
+            title = params.new_task_title.strip()
+            off = None if title else await self.runtime.task_actions.off_branch(task)
+            if off and not self.store.get(f"offbranch:{task['id']}"):
+                self.store.set(f"offbranch:{task['id']}", "1")
+                label, branch, current = off
+                raise ValueError(
+                    f"Not reported: task {task['id']}'s PR {label} is on branch {branch}, and "
+                    f"this work is on {current}: another deliverable, so it becomes a task of "
+                    f"its own and {task['id']} keeps its result. Call report again with "
+                    "new_task_title (what this work delivers). Work for "
+                    f"{label} belongs on {branch}."
+                )
+            if title or off:
+                made = self.runtime.task_actions.split_off(
+                    task, title or f"Work on branch {off[2] if off else ''}"
+                )
+                split_note = (
+                    f" Filed as task {made['id']} \u201c{made['title']}\u201d, a task of its "
+                    f"own; {task['id']} keeps its result."
+                )
+                task = made
         if task and params.artifacts:
             # What they are and where they stand is a fact, whatever becomes of the report.
             self.runtime.task_actions.declare_artifacts(
@@ -2468,11 +2676,12 @@ class Tools:
         # Its PRs merged or closed: what it does in its checkout now (a pull) is not more work.
         landed = bool(own) and all(pr.get("state") in {"MERGED", "CLOSED"} for pr in own)
         # Finished work taken up again (the owner's chat or answer, its PR's review comments):
-        # what it changed for it since is a new result to review, not news on the old one.
+        # what it changed for it since is a new result to review, not news on the old one (a
+        # question about it too: once answered, its next report is that new result).
         changed = bool(
             task
             and finished
-            and params.status in {"progress", "done"}
+            and params.status in {"progress", "done", "question", "blocked"}
             and (chat or (self.runtime.turn_task(caller) == task["id"] and not landed))
             and await self.runtime.task_actions.changed_since_result(task)
         )
@@ -2561,7 +2770,11 @@ class Tools:
         ):
             raise ValueError(problem)
         meta = {"status": params.status, "task_id": task["id"] if task else None}
-        reported = self.runtime.add_message(caller, "report", params.summary, meta)
+        drafts = {
+            d["id"] for d in self.store.all("SELECT id FROM drafts WHERE session_id=?", (caller,))
+        }
+        shown = owner_words(params.summary, drafts)
+        reported = self.runtime.add_message(caller, "report", shown, meta)
         if task and params.status == "done" and params.criteria:
             run = self.store.one(
                 "SELECT * FROM runs WHERE task_id=? ORDER BY started_at DESC LIMIT 1",
@@ -2611,7 +2824,7 @@ class Tools:
                 # Reported again in the same turn (with its criteria, say): the report is
                 # amended in place; the owner and the Router heard of it once.
                 self.runtime.task_actions.remember_prs(task["id"], params.summary)
-                task = self.tasks.update(task["id"], result=clip_report(params.summary))
+                task = self.tasks.update(task["id"], result=clip_report(shown))
                 self.runtime.task_actions.publish(task)
                 self.runtime.update_session(caller, report=params.summary[:4000])
                 return (
@@ -2643,14 +2856,15 @@ class Tools:
                 # Accepted, or its PR merged: news about it does not reopen the review.
                 self.runtime.task_actions.remember_prs(task["id"], params.summary)
                 self.runtime.task_actions.news(task["id"], params.summary)
-                task = self.tasks.update(task["id"], result=clip_report(params.summary))
+                task = self.tasks.update(task["id"], result=clip_report(shown))
             elif params.status == "done":
                 self.store.delete(f"followup:{task['id']}")
                 self.store.delete(f"newresult:{task['id']}")
+                self.store.delete(f"ownchange:{task['id']}")
                 self.store.delete(f"read:{task['id']}")  # A new result, not read yet.
                 self.states[caller].turn_reported.add(task["id"])
                 self.runtime.task_actions.remember_prs(task["id"], params.summary)
-                task = self.tasks.move(task["id"], "review", result=clip_report(params.summary))
+                task = self.tasks.move(task["id"], "review", result=clip_report(shown))
                 # The workers it works with that are still at it get its result.
                 self.runtime.background(self.runtime.peers.finished(caller, task, params.summary))
                 if self.store.get(f"draft_sent:{task['id']}"):
@@ -2674,6 +2888,10 @@ class Tools:
             elif params.status in {"question", "blocked"}:
                 if task["status"] in {"review", "done"} and not asked:
                     self.store.set(f"askedafter:{task['id']}", task["status"])
+                if changed:
+                    # It changed its code since its result (fixes for its PR's review, say):
+                    # the owner's answer does not move where its next result starts past that.
+                    self.runtime.task_actions.keep_result_base(task)
                 task = self.tasks.move(task["id"], "waiting", progress=params.summary[:6000])
             elif params.status == "failed" and (
                 (
@@ -2771,7 +2989,7 @@ class Tools:
                 needs_action=False,
                 title="PR update",
             )  # fmt: skip
-        return "Reported to the Router."
+        return "Reported to the Router." + split_note
 
     async def t_cancel_task(self, params: CancelTask, caller: str):
         self.caller(caller, ROUTER)
@@ -2782,11 +3000,62 @@ class Tools:
         if task["status"] == "done":
             return (
                 f"Task {task['id']} “{task['title']}” had finished already: its result was "
-                "reported to the owner, so nothing was stopped, and it stays done with its result "
-                "(drafts of it still waiting for the owner were withdrawn). If the owner asked to "
-                "stop it, tell them it had finished."
+                "reported to the owner, so nothing was stopped: it is set aside, not accepted "
+                "(its result is kept for reference; drafts of it still waiting for the owner were "
+                "withdrawn). If the owner asked to stop it, tell them it had finished."
             )
         return f"Cancelled task {task['id']}."
+
+    def addition_to(self, session_id: str, text: str) -> dict | None:
+        """The worker's task given in the last half hour that this text adds to ("one more
+        thing", "also", "\u8fd8\u6709"), when the Router was not asked about it yet."""
+        if not ADDS_TO.search(text):
+            return None
+        since = (datetime.now(UTC) - timedelta(minutes=ADD_MINUTES)).isoformat()
+        for task in reversed(self.tasks.for_session(session_id)):
+            if task["created_at"] < since:
+                break
+            if task["status"] != "cancelled" and not self.store.get(f"newasked:{task['id']}"):
+                return task
+        return None
+
+    async def t_stop_following(self, params: StopFollowing, caller: str):
+        self.caller(caller, ROUTER)
+        reference = params.session_id.strip()
+        task = self.tasks.find(reference) if re.fullmatch(r"t[0-9a-f]{4,7}", reference) else None
+        try:
+            row = self.store.session(task["session_id"] if task else reference)
+        except LookupError:
+            raise ValueError(f"No worker or task {reference}; list_sessions lists them.") from None
+        follows = self.store.follows(row["id"])
+        if params.thread.strip():
+            wanted = [threads.normalize(params.thread)]
+        elif task:
+            wanted = self.runtime.task_actions.followed_for(task, follows)
+        else:
+            wanted = list(follows)
+        gone = [key for key in wanted if key in follows]
+        if not gone:
+            listed = ", ".join(follows) or "nothing"
+            raise ValueError(
+                f"“{self.runtime.display_title(row)}” does not follow that ({listed})."
+            )
+        for key in gone:
+            self.store.unfollow(key, row["id"])
+            self.store.set(f"stopped:{row['id']}:{key}", "1")
+        self.runtime.publish_session(self.store.session(row["id"]))
+        for item in self.tasks.for_session(row["id"]):
+            self.runtime.task_actions.publish(item)
+        names = self.runtime.slack.display_names()
+        said = ", ".join(threads.label(key, names) for key in gone)
+        self.runtime.add_message(
+            row["id"], "notice", f"No longer following {said} (the Router stopped it).",
+            {"threads": gone},
+        )  # fmt: skip
+        return (
+            f"“{self.runtime.display_title(row)}” no longer follows {said}: new messages there "
+            "come to you. Its tasks, results and drafts are as they were."
+        )
 
     async def t_stop_worker(self, params: StopWorker, caller: str):
         self.caller(caller, ROUTER)
@@ -2931,7 +3200,7 @@ class Tools:
         target = {
             "channel_id": params.channel_id,
             "thread_ts": place["thread_ts"],
-            "to": params.to,
+            "to": params.to.strip() or self.runtime.drafts.recipient(params.channel_id, place),
             "latest": place.get("quote", ""),
             "latest_ts": place.get("ts", ""),
         }
@@ -2962,6 +3231,7 @@ class Tools:
             )
         if replaced:
             result += f" It replaces your earlier draft {', '.join(replaced)} there."
+        result += self.runtime.drafts.beside_note(draft)
         if place.get("error"):
             result += (
                 f" Slack showed no message there ({place['error']}): check channel_id and "
@@ -3161,6 +3431,7 @@ class Tools:
             )
         self.runtime.add_message(caller, "draft", shown, {"draft_id": draft["id"], "label": label})
         self.bus.publish("draft", draft)
+        self.runtime.drafts.link_reviews()  # A Slack reply that may speak of it waits for it.
         self.runtime.alert(
             label, session_id=caller, needs_action=True, title="GitHub text to approve"
         )
@@ -3296,6 +3567,11 @@ class Tools:
     async def t_follow_thread(self, params: FollowThread, caller: str):
         self.caller(caller, WORKER, SLACK)
         followed = self.runtime.follow(caller, [params.thread], given=False, asked=[params.thread])
+        if not followed:
+            raise ValueError(
+                f"You were stopped following {threads.normalize(params.thread)}; only the "
+                "Router or the owner can give it back."
+            )
         return f"Following {', '.join(followed)}."
 
     async def t_check_back(self, params: CheckBack, caller: str):

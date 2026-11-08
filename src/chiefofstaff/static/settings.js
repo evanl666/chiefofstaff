@@ -279,6 +279,9 @@ export function fillSettings() {
   const settings = state.snapshot.settings;
   shown = JSON.parse(JSON.stringify(settings));
   form.projects.value = settings.projects.join("\n");
+  const missing = state.snapshot.missing_projects || [];
+  $("#projects-missing").textContent = missing.length ? `Folder not found: ${missing.join(", ")}. Restore it, or remove it here.` : "";
+  $("#projects-missing").hidden = !missing.length;
   form.code_folder.value = settings.code_folder;
   form.scratch_directory.value = settings.scratch_directory;
   form.scratch_directory.placeholder = settings.code_folder ? `${settings.code_folder}/.chief` : `${state.snapshot.data_directory}/work/workspaces`;

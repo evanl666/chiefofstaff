@@ -296,7 +296,13 @@ def gallery(runtime, seeded: dict) -> list[dict]:
              "choices": ["10 seats", "50 seats", "200 seats"], "allow_freeform": True},
             "Which seat count should the comparison price?",
         ),
-        store.create_draft(fix, "github", REVIEW, REVIEW_BODY),
+        review := store.create_draft(fix, "github", REVIEW, REVIEW_BODY),
+        store.create_draft(
+            fix, "slack",
+            {"channel_id": "C0DEPLOYS", "thread_ts": "1794157630.819840", "to": "Maya",
+             "after_review": {"id": review["id"], "label": "your review of acme/app#7"}},
+            "Reviewed: two small changes asked for.",
+        ),
         store.create_draft(
             compare, "reply",
             {"to": "Ann Lee", "where": "email", "link": "https://mail.example.com/t/1"},
@@ -473,7 +479,11 @@ async def cards(runtime, seeded, browser, quality: Quality, phase: str):
         page = await context.new_page()
         await page.goto(f"{BASE}/#token={TOKEN}")
         # A card each (a result a draft is for is a card inside that draft's card).
-        await expect(page.locator("#needs > .items > .card")).to_have_count(9, timeout=15000)
+        await expect(page.locator("#needs > .items > .card")).to_have_count(10, timeout=15000)
+        # Bug bash 6 (N10): a Slack reply about a review says it waits for that review.
+        await expect(page.locator("#needs .card .waits-review")).to_contain_text(
+            "Waits for your review of acme/app#7 to be posted first"
+        )
         # A watch the Router proposes says so (not "Form").
         await expect(page.locator("#needs .card.request.form .head .label")).to_have_text(
             "New watch"

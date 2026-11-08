@@ -1510,8 +1510,10 @@ async def test_the_router_hears_everything_the_owner_tells_a_worker_directly(har
 
 
 def test_a_credit_limit_under_copilots_minimum_is_raised_to_it():
-    """Copilot starts no session with a limit under 30 credits: every worker would fail."""
-    assert Settings(worker_credit_limit=5).worker_credit_limit == 30
+    """Copilot starts no session with a limit under 30 credits: every worker would fail. A new
+    one under it is refused (Bug bash 6, R10; one saved before is raised to it)."""
+    with pytest.raises(ValueError, match="at least 30"):
+        Settings(worker_credit_limit=5)
     assert Settings(worker_credit_limit=0).worker_credit_limit == 0
     assert Settings(worker_credit_limit=45).worker_credit_limit == 45
 

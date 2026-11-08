@@ -107,8 +107,13 @@ async def u2_cancel_then_retry(app: App, project: Path):
     )
 
     async def sleeping():
+        # In a step, or (Copilot moved it to the background) started while it is still at work.
         row = await app.get(f"/api/sessions/{worker}")
-        return row if "sleep 120" in (row.get("step_command") or "") else None
+        if "sleep 120" in (row.get("step_command") or ""):
+            return row
+        said = await app.get(f"/api/sessions/{worker}/messages")
+        started = any("sleep 120" in m["text"] for m in said if m["kind"] in {"tool", "command"})
+        return row if started and row.get("status") == "working" else None
 
     await wait_for("the slow command runs", sleeping, 300, app)
     cancelled = await app.post(f"/api/tasks/{task['id']}/cancel", {"text": "too slow"})
@@ -241,10 +246,16 @@ async def u6_rapid_requests(app: App, project: Path):
 
 
 async def u7_credit_limit(app: App, project: Path):
-    """A limit under Copilot's minimum (30 credits a session) is raised to it: before, every
-    worker failed to start ("minimum session limit is 30 ai credits")."""
+    """A limit under Copilot's minimum (30 credits a session) is refused with a reason (it was
+    saved, and then every worker failed to start: "minimum session limit is 30 ai credits");
+    at the minimum, workers run."""
     state = await app.get("/api/state")
-    saved = await app.post("/api/settings", {**state["settings"], "worker_credit_limit": 0.01})
+    try:
+        await app.post("/api/settings", {**state["settings"], "worker_credit_limit": 0.01})
+        raise AssertionError("a 0.01 credit limit was saved")
+    except RuntimeError as error:
+        assert "422" in str(error) and "at least 30" in str(error), error
+    saved = await app.post("/api/settings", {**state["settings"], "worker_credit_limit": 30})
     assert saved["settings"]["worker_credit_limit"] == 30, saved["settings"]
     worker, task = await ask(
         app, f"In {project}: how many Python files are in the repository? Do not change files."
@@ -252,7 +263,7 @@ async def u7_credit_limit(app: App, project: Path):
     current = await reaches(app, task["id"], {"review", "done"}, timeout=600)
     row = await app.get(f"/api/sessions/{worker}")
     assert row["status"] != "failed", row
-    log(f"U7: a 0.01 limit was saved as 30; the worker ran: {current['result'][:80]!r}")
+    log(f"U7: 0.01 was refused; at 30 the worker ran: {current['result'][:80]!r}")
     await app.post(
         "/api/settings", {**(await app.get("/api/state"))["settings"], "worker_credit_limit": 0}
     )

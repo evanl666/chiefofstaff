@@ -390,7 +390,8 @@ function homeEntry(message) {
       if (meta.review) return eventLine({ mark: "·", text: `Review · ${meta.title}: ${firstLine(text)}`, time, body: text, view: () => select(meta.review), viewText: "Open" });
       if (meta.thread) return eventLine({ mark: "↘", text: `${threadLabel(meta.thread)}: ${firstLine(text)}`, time, body: text });
       const source = SOURCES[meta.source] || "Event";
-      return eventLine({ mark: "↘", text: `${meta.delegated ? `Handed over from ${source}` : `From ${source}`}: ${firstLine(text)}`, time, body: text });
+      const more = meta.count > 1 ? ` (+${meta.count - 1} more)` : "";
+      return eventLine({ mark: "↘", text: `${meta.delegated ? `Handed over from ${source}` : `From ${source}`}: ${firstLine(text)}${more}`, time, body: text });
     }
     case "ask":
       return eventLine({ mark: "→", text: `Asked ${meta.title}: ${firstLine(text)}`, time, body: text, view: () => select(meta.target), viewText: "Open" });

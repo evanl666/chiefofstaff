@@ -481,7 +481,13 @@ async def s13_receipts(app: App, project: Path):
         "passes. Commit.",
     )
     [task] = (await all_finished(app, since, 1, "the title_case task reports"))[:1]
-    receipts = task["receipts"] or {}
+
+    async def collected():
+        # Its checkouts are read after the report, in the background.
+        found = (await app.get(f"/api/tasks/{task['id']}")).get("receipts") or {}
+        return found if found.get("checkouts") else None
+
+    receipts = await wait_for("its checkouts are read", collected, 120, app)
     tests = receipts.get("tests") or {}
     log(f"S13: tests {tests}; verdict {receipts.get('verdict')!r}; flags {receipts.get('flags')}")
     assert tests.get("passed"), "a passing test run was observed"

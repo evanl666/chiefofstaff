@@ -324,6 +324,9 @@ async def test_workers_run_sandboxed_in_their_own_folders(tmp_path, git_repo):
     assert harness.session(slack["session_id"]).options["sandbox_config"].allowed_hosts == (
         GITHUB_HOSTS
     ), "what a Slack reader read can only go to GitHub"
+    said = harness.session(slack["session_id"]).options["system_message"]["content"]
+    assert "You read Slack, so your sandbox is stricter" in said, "said why (bug bash 6, T4)"
+    assert "You read Slack" not in prompt
 
     harness.store.save_settings(
         Settings(projects=[str(git_repo)], worker_sandbox=False, worker_yolo=True)
@@ -1874,3 +1877,119 @@ async def test_finished_work_is_checked_once_at_a_time_and_closed_workers_are_le
     actions.check_own = slow
     await asyncio.gather(*(actions.check_fresh(first["session_id"]) for _ in range(5)))
     assert calls == [first["session_id"]] * 2, "one at a time, once more for what came after"
+
+
+async def test_rebased_onto_the_owners_newer_main_without_an_origin(tmp_path):
+    """Bug bash 6 (G3): a worktree of a repository with no origin, rebased onto the owner's
+    newer main, counted main's new commit as the task's."""
+    repo = tmp_path / "kit"
+    repo.mkdir()
+    run("git", "init", "-q", "-b", "main", cwd=repo)
+    commit(repo, "kit.py", "kit = 1\n")
+    start = run("git", "rev-parse", "HEAD", cwd=repo).strip()
+    tree = tmp_path / "work"
+    run("git", "worktree", "add", "-q", "-b", "chief/notes", str(tree), start, cwd=repo)
+    commit(tree, "notes.py", "notes = 1\n")
+    commit(tree, "more.py", "more = 1\n")
+    commit(repo, "NOTES.md", "the owner's\n")  # The owner's commit on main.
+    run("git", "-c", "user.email=t@t", "-c", "user.name=t", "rebase", "-q", "main", cwd=tree)
+    checkout = {"path": str(tree), "repo": str(repo), "worktree": str(tree),
+                "branch": "chief/notes", "base_ref": start}  # fmt: skip
+    found = await workspaces_module.changes(checkout, workspaces_module.Scope())
+    assert found and found["commits"] == 2 and found["files"] == 2, found
+    # Its start recorded at main's commit then (a task taken up there), still in the history.
+    first_tree = run("git", "rev-parse", f"{start}^{{tree}}", cwd=repo).strip()
+    scope = workspaces_module.Scope(start, time.time() - 60, start=first_tree, head=start)
+    found = await workspaces_module.changes(checkout, scope)
+    assert found and found["commits"] == 2 and found["files"] == 2, found
+
+
+async def test_a_follow_up_counts_only_its_own_edit_of_a_file_another_task_made(tmp_path):
+    """Bug bash 6 (G4): in a folder of the owner's, a follow-up that changed a file another
+    task had made (and the owner had added to) counted that whole file as its new file."""
+    _, app = published(tmp_path, "app")
+    run("git", "pull", "-q", "--ff-only", cwd=app)
+    checkout = {"path": str(app), "branch": "", "shared": True}
+    head = run("git", "rev-parse", "HEAD", cwd=app).strip()
+    start = await workspaces_module.snapshot(checkout)
+    (app / "beta.py").write_text("def beta():\n    return 2\n")
+    first = await workspaces_module.snapshot(checkout)  # Its result.
+    # Between: another task makes alpha.py; the owner adds a line to it.
+    (app / "alpha.py").write_text('def alpha():\n    """Alpha."""\n    return 1\n# owner note\n')
+    again = await workspaces_module.snapshot(checkout)  # Taken up again.
+    (app / "alpha.py").write_text(
+        'def alpha():\n    """Return one."""\n    return 1\n# owner note\n'
+    )
+    end = await workspaces_module.snapshot(checkout)
+    assert start and first and again and end
+    touched = {str((app / name).resolve()) for name in ("beta.py", "alpha.py")}
+    scope = workspaces_module.Scope(
+        "", time.time() - 60, touched, start=start["tree"], end=end, head=head,
+        gaps=[(first["tree"], again["tree"], first["commit"], again["commit"], time.time())],
+    )  # fmt: skip
+    found = await workspaces_module.changes(checkout, scope)
+    assert found and found["files"] == 2, found
+    assert (found["insertions"], found["deletions"]) == (3, 1), found
+    shown = (await workspaces_module.diff(checkout, scope))["diff"]
+    assert '+    """Return one."""' in shown and "+# owner note" not in shown, shown
+
+
+async def test_a_result_is_not_out_of_date_because_its_worker_moved_to_another_branch(tmp_path):
+    """Bug bash 5 (L2), left over: a worker's next task on a branch made from main marked the
+    earlier result "Out of date: its files changed", though its commit is untouched."""
+    _, app = published(tmp_path, "app")
+    harness = Harness(tmp_path / "data", Settings(projects=[str(app)]))
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, title="Slugify", instructions="x",
+                         project=str(app), isolate=True)  # fmt: skip
+    tree, session_id, first = Path(worker["cwd"]), worker["session_id"], worker["task_id"]
+    for _ in range(50):
+        if runtime.store.get(f"taskbase:{first}"):
+            break
+        await asyncio.sleep(0.05)
+    commit(tree, "slug.py", "def slugify(): ...\n")
+    await call_tool(runtime, "report", session_id, status="done", summary="Slugify.")
+    await receipts_of(runtime, first)
+    run("git", "checkout", "-q", "-b", "chief/camel", "origin/main", cwd=tree)
+    commit(tree, "camel.py", "def camel(): ...\n")
+    await runtime.task_actions.check_fresh(session_id)
+    assert not (await receipts_of(runtime, first))["stale"]
+    # Its own branch moved (its file changed there): out of date.
+    run("git", "checkout", "-q", worker["branch"], cwd=tree)
+    commit(tree, "slug.py", "def slugify(): return 1\n")
+    await runtime.task_actions.check_fresh(session_id)
+    found = await receipts_of(runtime, first, lambda found: bool(found["stale"]))
+    assert "slug.py" in found["stale"]
+
+
+async def test_a_file_it_committed_then_changed_after_others_counts_once(tmp_path):
+    """Code review (round 6): a file a task committed, that other work changed before its
+    follow-up changed it again, was counted (and shown) twice."""
+    _, app = published(tmp_path, "app")
+    run("git", "pull", "-q", "--ff-only", cwd=app)
+    (app / "kit.py").write_text("a = 1\n")
+    run("git", "add", ".", cwd=app)
+    run("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "kit", cwd=app)
+    checkout = {"path": str(app), "branch": "", "shared": True}
+    head = run("git", "rev-parse", "HEAD", cwd=app).strip()
+    start = await workspaces_module.snapshot(checkout)
+    (app / "kit.py").write_text("a = 1\nb = 2\nc = 3\n")  # Its own: two lines, committed.
+    run("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qam", "b c", cwd=app)
+    first = await workspaces_module.snapshot(checkout)
+    with (app / "kit.py").open("a") as file:
+        file.write("# someone else's\n")
+    again = await workspaces_module.snapshot(checkout)
+    with (app / "kit.py").open("a") as file:
+        file.write("d = 4\n")  # Its follow-up: one more line, not committed.
+    end = await workspaces_module.snapshot(checkout)
+    assert start and first and again and end
+    scope = workspaces_module.Scope(
+        head, time.time() - 60, {str((app / "kit.py").resolve())}, start=start["tree"],
+        end=end, head=head,
+        gaps=[(first["tree"], again["tree"], first["commit"], again["commit"], time.time())],
+    )  # fmt: skip
+    found = await workspaces_module.changes(checkout, scope)
+    assert found and found["files"] == 1, found
+    assert (found["insertions"], found["deletions"]) == (3, 0), found
+    shown = (await workspaces_module.diff(checkout, scope))["diff"]
+    assert shown.count("+b = 2") == 1 and "+d = 4" in shown and "+# someone else" not in shown

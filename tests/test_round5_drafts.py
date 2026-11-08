@@ -69,9 +69,7 @@ async def test_one_reply_per_message_the_worker_that_took_over_answers(tmp_path)
     answer = await draft(runtime, harness, worker, "C0DEPLOYS", TS, "It merges Thursday.")
     gone = harness.store.draft(holding["id"])
     assert gone["status"] == "rejected"
-    assert (
-        gone["outcome"] == f"Replaced by \u201cMerge date for Bob\u201d's draft ({answer['id']})."
-    )
+    assert gone["outcome"] == "Replaced by \u201cMerge date for Bob\u201d's draft.", "no id"
     refused = await call_tool(runtime, "draft_slack_reply", slack, channel_id="C0DEPLOYS",
                               thread_ts=TS, text="No date yet.")  # fmt: skip
     assert refused.result_type == "failure"
@@ -128,10 +126,13 @@ async def test_the_owners_edit_of_a_held_reply_is_not_withdrawn_by_its_worker(tm
     assert refused.result_type == "failure" and mine in refused.text_result_for_llm
     kept = harness.store.draft(card["id"])
     assert kept["status"] == "pending" and kept["final_text"] == mine
-    # Drafted again from their words: the new card shows what they had written.
+    # Drafted again: their card stays (G6, round 6), the new one says it waits beside it.
     again = await draft(runtime, harness, worker, "C0DEPLOYS", TS, "OK, after 3pm then.")
-    assert harness.store.draft(card["id"])["status"] == "rejected"
-    assert again["outcome"] == f"It replaces a reply you edited: \u201c{mine}\u201d"
+    assert harness.store.draft(card["id"])["status"] == "pending"
+    assert (
+        again["outcome"]
+        == f"Your edited reply there still waits on its own card: \u201c{mine}\u201d"
+    )
 
 
 async def test_a_reply_for_a_task_waits_for_its_review_to_be_posted(tmp_path):

@@ -345,9 +345,10 @@ class Store:
             # As saved: an MCP server Copilot would refuse stays, off (Settings.mcp_off).
             return Settings.model_validate_json(row["value"], context=AS_SAVED)
         except ValidationError:
-            # A project directory may have been deleted since it was saved.
+            # A skill folder may have been deleted since it was saved (a project whose folder is
+            # gone stays: Settings shows it as not found).
             values = json.loads(row["value"])
-            for key in ("projects", "skill_folders"):
+            for key in ("skill_folders",):
                 values[key] = [path for path in values.get(key, []) if Path(path).is_dir()]
             if not Path(values.get("code_folder") or "/nonexistent").is_dir():
                 values["code_folder"] = ""

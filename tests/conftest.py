@@ -129,9 +129,17 @@ class FakeClient:
         self.logs: dict[str, list[dict]] = {}  # Their logs (events as the CLI writes them).
         self.log_changed: dict[str, float] = {}
         self.cli_version = TESTED_CLI
+        self.pids: set[int] = set()  # Its CLI's processes.
+        self.crashed = False  # Its CLI exited by itself.
 
     async def start(self):
         pass
+
+    def processes(self):
+        return dict.fromkeys(self.pids, "copilot --headless")
+
+    def alive(self):
+        return not self.crashed
 
     async def stop(self):
         # Like Copilot: a session that never had a message is not kept.

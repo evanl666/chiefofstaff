@@ -13,8 +13,10 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
@@ -127,6 +129,16 @@ class AgentBackend(Protocol):
         """Sessions another program has open right now (a terminal): session id -> its pid."""
         ...
 
+    def processes(self) -> dict[int, str]:
+        """The processes running the backend (Copilot's CLI and the program it starts), with
+        their command lines; empty when nothing runs apart from this process. Blocking: call
+        it in a thread."""
+        ...
+
+    def alive(self) -> bool:
+        """False once the backend's process has exited by itself (crashed, killed)."""
+        ...
+
     async def read_history(self, session_id: str, offset: int) -> tuple[list[dict], int, float]:
         """A session's events after `offset` (its latest ones when offset is 0) without
         attaching to it, the offset to read from next time, and when it last changed."""
@@ -173,12 +185,38 @@ class CopilotBackend:
     def __init__(self, client: CopilotClient, command: str = "copilot"):
         self.client = client
         self.command = command
+        # The CLI's process and those it started (the npm loader runs Copilot's own program,
+        # which outlives the loader when only that is killed), as last seen: pid -> command.
+        self.started: dict[int, str] = {}
 
     async def start(self) -> None:
         await self.client.start()
 
+    def cli_process(self) -> subprocess.Popen | None:
+        return getattr(self.client, "_cli_process", None)
+
+    def processes(self) -> dict[int, str]:
+        if process := self.cli_process():
+            table = process_table()
+            self.started |= {
+                pid: table[pid][1] for pid in descendants(table, process.pid) if pid in table
+            }
+        return dict(self.started)
+
+    def alive(self) -> bool:
+        process = self.cli_process()
+        return process is None or process.poll() is None
+
     async def stop(self) -> Any:
-        return await self.client.stop()
+        tree = await asyncio.to_thread(lambda: copilot_tree(self.processes()))
+        if not self.alive():
+            # The loader is gone, but the program it ran still holds the pipes: it goes first.
+            await asyncio.to_thread(end_processes, tree)
+        try:
+            return await self.client.stop()
+        finally:
+            # What Copilot left running (a shell's server), or Copilot itself if it hangs.
+            await asyncio.to_thread(end_processes, tree)
 
     async def version(self) -> str:
         return (await self.client.get_status()).version
@@ -308,26 +346,81 @@ def copilot_trusts(path: str) -> bool:
     return any(target.is_relative_to(folder) for folder in folders)
 
 
-def own_processes() -> set[int]:
-    """This process and its descendants (the Copilot CLI it runs)."""
+def process_table() -> dict[int, tuple[int, str]]:
+    """Every process: pid -> (parent pid, command line)."""
     try:
         table = subprocess.run(
-            ["ps", "-axo", "pid=,ppid="], capture_output=True, text=True, check=True, timeout=5
+            ["ps", "-axo", "pid=,ppid=,command="],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=5,
         ).stdout
     except (OSError, subprocess.SubprocessError):
-        return {os.getpid()}
-    children: dict[int, list[int]] = {}
+        return {}
+    found = {}
     for line in table.splitlines():
-        pid, _, ppid = line.strip().partition(" ")
-        if pid.isdigit() and ppid.strip().isdigit():
-            children.setdefault(int(ppid.strip()), []).append(int(pid))
-    found, todo = set(), [os.getpid()]
+        parts = line.split(None, 2)
+        if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+            found[int(parts[0])] = (int(parts[1]), parts[2] if len(parts) > 2 else "")
+    return found
+
+
+def descendants(table: dict[int, tuple[int, str]], root: int) -> set[int]:
+    """`root` and every process it started, and they started (while `root` runs)."""
+    children: dict[int, list[int]] = {}
+    for pid, (ppid, _) in table.items():
+        children.setdefault(ppid, []).append(pid)
+    found, todo = set(), [root]
     while todo:
         pid = todo.pop()
         if pid not in found:
             found.add(pid)
             todo += children.get(pid, [])
     return found
+
+
+def own_processes() -> set[int]:
+    """This process and its descendants (the Copilot CLI it runs)."""
+    table = process_table()
+    return descendants(table, os.getpid()) if table else {os.getpid()}
+
+
+def copilot_tree(known: dict[int, str]) -> dict[int, str]:
+    """Of these processes a Copilot CLI this app started ran (pid -> command line), those that
+    still run the same command (a pid can be reused), wherever they are now (orphaned when
+    their loader was killed), and everything they started (shells, MCP servers)."""
+    table = process_table()
+    tops = [
+        pid
+        for pid, command in known.items()
+        if pid in table and pid != os.getpid() and table[pid][1] == command
+    ]
+    tree = {pid: table[pid][1] for pid in tops}
+    for pid in tops:
+        tree |= {child: table[child][1] for child in descendants(table, pid) if child in table}
+    tree.pop(os.getpid(), None)
+    return tree
+
+
+def end_processes(tree: dict[int, str], wait: float = 3.0):
+    """Stop a copilot_tree: asked to end, then killed if they do not. A process whose command
+    changed since is another one, left alone."""
+
+    def same(table: dict[int, tuple[int, str]]) -> list[int]:
+        return [pid for pid, command in tree.items() if pid in table and table[pid][1] == command]
+
+    for signum in (signal.SIGTERM, signal.SIGKILL):
+        left = same(process_table())
+        for pid in left:
+            with suppress(OSError):
+                os.kill(pid, signum)
+        deadline = time.monotonic() + wait
+        while left and time.monotonic() < deadline:
+            time.sleep(0.05)
+            left = [pid for pid in left if running(pid)]
+        if not left:
+            return
 
 
 def running(pid: int) -> bool:

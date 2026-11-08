@@ -124,6 +124,7 @@ RETRY_DELAY = float(os.environ.get("CHIEFOFSTAFF_RETRY_DELAY", "8"))
 # Copilot will not run the model asked for (a model or option the company does not allow).
 MODEL_REFUSED = re.compile(
     r"requested model is not supported|model[^.\n]{0,60}not (?:supported|available|enabled)|"
+    r"model \"[\w.:/-]{1,80}\" is not (?:supported|available|enabled)|"
     r"not allowed to use (?:the )?model|context tier[^.\n]{0,40}not supported",
     re.IGNORECASE,
 )

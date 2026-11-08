@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "chiefofstaff"
-version = "0.1.30"
+version = "0.1.31"
 description = "One inbox for all your GitHub Copilot sessions: tasks and follow-ups go to the right session, Slack replies wait for your approval, and finished work waits for your review."
 license = "MIT"
 dynamic = ["readme"]
@@ -43,6 +43,8 @@ Issues = "https://github.com/evanl666/chiefofstaff/issues"
 dev = [
     "pytest>=8,<10",
     "pytest-asyncio>=0.25,<2",
+    "pytest-cov>=6,<8",
+    "pytest-timeout>=2.3,<3",
     "httpx>=0.28,<1",
     "ruff>=0.11,<1",
     "pyright==1.1.414",

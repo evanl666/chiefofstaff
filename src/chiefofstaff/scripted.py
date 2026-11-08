@@ -401,6 +401,12 @@ class ScriptedBackend:
     async def open_elsewhere(self) -> dict[str, int]:
         return {other["meta"].session_id: 1 for other in self.others if other.get("open")}
 
+    def processes(self) -> dict[int, str]:
+        return {}
+
+    def alive(self) -> bool:
+        return True
+
     async def read_usage(self, session_id: str, offset: int) -> tuple[list[dict], int]:
         return [], offset
 

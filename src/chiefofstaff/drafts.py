@@ -20,7 +20,7 @@ from .models import DraftDecision
 from .roles import ROUTER, SLACK, WORKER
 from .sources.github import REVIEW_EVENTS, merge_refusal
 from .sources.slack import describe, message_keys
-from .store import now
+from .store import hours_ago, now
 from .tasks import OPEN
 
 if TYPE_CHECKING:
@@ -33,6 +33,14 @@ STYLE_EXAMPLES = 50
 
 # A draft that cannot be sent as written: what it answers changed meanwhile.
 STALE_DRAFT = re.compile(r"changed after the draft was written|no longer connected", re.IGNORECASE)
+
+# A question that asks the owner to decide a draft of its own: "approve the draft, or hold it",
+# "send the Slack reply?".
+DRAFT_DECISION = re.compile(
+    r"\b(?:approve|send|post|publish|hold|reject)\s+(?:the|this|that|my|its|both)\s+"
+    r"(?:[\w-]+\s+){0,3}?(?:draft|review|reply|replies|approval)s?\b",
+    re.IGNORECASE,
+)
 
 # Cards for the owner, in words (for the Router).
 CARD_WORDS = {
@@ -87,9 +95,13 @@ class Drafts:
     async def resolve(self, draft_id: str, decision: DraftDecision) -> dict:
         async with self.draft_lock:
             draft = self.store.draft(draft_id)
-            if draft["status"] == "uncertain":
-                return await self.settle_uncertain(draft, decision)
-            return await self.decide(draft_id, decision)
+            try:
+                if draft["status"] == "uncertain":
+                    return await self.settle_uncertain(draft, decision)
+                return await self.decide(draft_id, decision)
+            finally:
+                if draft["kind"] == "github":
+                    self.link_reviews()  # Replies that waited for it may go now.
 
     async def decide(self, draft_id: str, decision: DraftDecision) -> dict:
         """The owner's decision on a pending draft; the caller holds draft_lock."""
@@ -186,14 +198,14 @@ class Drafts:
             ]
             if not kept and (verdict or target.get("verdict")) != "approve":
                 raise ValueError("Nothing to post: write a summary or keep a line comment.")
-        if draft["kind"] == "slack" and (review := self.review_waiting(draft)):
-            # Its task's review goes first: the reply may say it is posted, or approved.
+        if draft["kind"] == "slack" and (review := self.review_waiting(draft, final)):
+            # The review goes first: the reply may say it is posted, or approved.
             if final and final != draft["text"]:
                 self.store.update_draft(draft_id, final_text=final)
                 self.bus.publish("draft", self.store.draft(draft_id))
             raise ValueError(
-                f"Not sent yet: post {self.shown(review)} first, or reject it. This reply is for "
-                "the same task and may say it is done."
+                f"Not sent yet: post {self.shown(review)} first, or reject it. This reply may "
+                "speak of it as posted."
             )
         if draft["kind"] == "slack" and decision.content.get("send_anyway") is not True:
             try:
@@ -364,6 +376,16 @@ class Drafts:
         since = float(seen) if seen else datetime.fromisoformat(draft["created_at"]).timestamp()
         if float(stamp) <= since or latest.get("user") == slack.status.get("user_id"):
             return
+        if any(
+            other["id"] != draft["id"]
+            and other["kind"] == "slack"
+            and other["session_id"] == draft["session_id"]
+            and other["target"].get("latest_ts") == stamp
+            and self.same_conversation(target, other["target"])
+            for status in ("pending", "sending", "sent")
+            for other in self.store.drafts(status)
+        ):
+            return  # What they wrote since is answered by another reply of its session's.
         who = latest.get("name") or "Someone"
         said = latest.get("text") or latest.get("quote") or ""
         said = said if len(said) <= 200 else said[:199].rstrip() + "\u2026"
@@ -398,32 +420,44 @@ class Drafts:
         )
 
     @staticmethod
-    def conversation_keys(target: dict) -> set[str]:
-        """The thread keys a session following a Slack reply's conversation follows it by."""
-        channel, ts = target.get("channel_id") or "", target.get("thread_ts") or ""
-        keys = {f"slack:{channel}:{ts}"} if ts else set()
-        return keys | ({f"slack:{channel}"} if channel.startswith("D") else set())
-
-    @staticmethod
     def owner_edited(draft: dict) -> str:
         """The owner's own text on a card still waiting (held, or its sending failed) when they
         changed the drafted one; "" when they did not."""
         final = (draft.get("final_text") or "").strip()
         return final if final and final != (draft["text"] or "").strip() else ""
 
+    def beside(self, draft: dict) -> list[dict]:
+        """Its session's other Slack replies still waiting in the same conversation."""
+        return [
+            other
+            for other in self.store.drafts("pending")
+            if other["id"] != draft["id"]
+            and other["kind"] == "slack"
+            and other["session_id"] == draft["session_id"]
+            and self.same_conversation(draft["target"], other["target"])
+        ]
+
+    def kept_beside(self, draft: dict, older: dict) -> bool:
+        """An older reply a newer one does not replace: one the owner edited (their words stay
+        sendable), or one for another task (it answers another question)."""
+        mine, theirs = self.task_of(draft), self.task_of(older)
+        return bool(self.owner_edited(older)) or bool(
+            mine and theirs and mine["id"] != theirs["id"]
+        )
+
     async def supersede(self, draft: dict) -> list[str]:
-        """A newer Slack reply its session drafted for the same conversation replaces the older
-        ones still waiting: the owner gets one card, the latest. In a DM, a reply in the DM and
-        one in a thread of it are the same conversation; two threads are not. A worker's reply
-        settles the Slack session's waiting there (settle_others); the Slack session's is
-        refused where a worker that follows the conversation (took it over) has one waiting.
-        The owner's own edit of a card it replaces shows on the new card, so their words are
-        not lost."""
+        """A newer Slack reply its session drafted for the same task and conversation replaces
+        the older ones still waiting: the owner gets one card, the latest. In a DM, a reply in
+        the DM and one in a thread of it are the same conversation; two threads are not. Not one
+        for another of its tasks, nor one the owner edited: both cards stay (beside_note tells
+        the session). A worker's reply settles the Slack session's waiting there
+        (settle_others); the Slack session's is refused where a worker follows the conversation
+        (took it over)."""
         replaced, edits = [], []
         async with self.draft_lock:
-            if owned := self.taken_over(draft):
-                row = self.store.find_session(owned["session_id"])
-                name = self.runtime.display_title(row) if row else "a worker"
+            if owner := self.taken_over(draft):
+                worker, task = owner
+                name = self.runtime.display_title(worker)
                 gone = self.store.update_draft(
                     draft["id"],
                     status="rejected",
@@ -432,26 +466,24 @@ class Drafts:
                 )
                 self.bus.publish("draft", gone)
                 raise ValueError(
-                    f"\u201c{name}\u201d took this conversation over: its reply there (draft "
-                    f"{owned['id']}) waits for the owner, so yours ({draft['id']}) was not kept. "
-                    "Leave this conversation to it."
+                    f"\u201c{name}\u201d (worker {short(worker['id'])}) took this conversation "
+                    f"over: it follows it for task {task['id']} \u201c{task['title']}\u201d and "
+                    f"answers there, so your draft {draft['id']} was not kept. Leave this "
+                    "conversation to it: if something there needs an answer, say so in your "
+                    "report, and the Router passes it to that worker with message_session."
                 )
-            for older in self.store.drafts("pending"):
-                if (
-                    older["id"] == draft["id"]
-                    or older["kind"] != "slack"
-                    or older["session_id"] != draft["session_id"]
-                    or not self.same_conversation(draft["target"], older["target"])
-                ):
+            for older in self.beside(draft):
+                if self.kept_beside(draft, older):
+                    if edited := self.owner_edited(older):
+                        edits.append(edited)
                     continue
-                if edited := self.owner_edited(older):
-                    edits.append(edited)
                 older = self.store.update_draft(
                     older["id"],
                     status="rejected",
-                    outcome=f"Replaced by a newer draft ({draft['id']}).",
+                    outcome="Replaced by a newer draft.",
                     resolved_at=now(),
                 )
+                self.store.set(f"replacedby:{older['id']}", draft["id"])
                 self.bus.publish("draft", older)
                 replaced.append(older["id"])
             if edits:
@@ -459,32 +491,75 @@ class Drafts:
                 # In place: the caller publishes this card.
                 draft.update(
                     self.store.update_draft(
-                        draft["id"], outcome=f"It replaces a reply you edited: \u201c{said}\u201d"
+                        draft["id"],
+                        outcome="Your edited reply there still waits on its own card: "
+                        f"\u201c{said}\u201d",
                     )
                 )
             await self.settle_others(draft, sent=False)
+        self.link_reviews()
+        draft.update(self.store.draft(draft["id"]))  # In place: the caller publishes this card.
         return replaced
 
-    def taken_over(self, draft: dict) -> dict | None:
-        """For a reply the Slack session drafts: a worker's reply waiting in the same
-        conversation, which that worker follows (it took it over, and answers there)."""
+    def beside_note(self, draft: dict) -> str:
+        """For the session that drafted it: its replies still waiting in the same conversation
+        that it did not replace (see kept_beside); "" when none."""
+        notes = []
+        for older in self.beside(draft):
+            if self.owner_edited(older):
+                notes.append(
+                    f" Your draft {older['id']} there, which the owner edited, still waits on "
+                    "its card with their text: yours waits beside it, and the owner chooses."
+                )
+            elif task := self.task_of(older):
+                notes.append(
+                    f" Your draft {older['id']} there, for task {task['id']} "
+                    f"\u201c{task['title']}\u201d, still waits too: both cards stay, and the "
+                    "owner may send both. If one message should answer both, make sure this "
+                    f"one also says what {older['id']} says, then withdraw_draft {older['id']} "
+                    '(reason: "merged into the newer reply").'
+                )
+        return "".join(notes)
+
+    def in_conversation(self, target: dict, key: str) -> bool:
+        """Whether a followed Slack key is the conversation a reply's target goes to."""
+        parts = key.split(":")
+        if len(parts) not in {2, 3} or parts[0] != "slack":
+            return False
+        where = {"channel_id": parts[1], "thread_ts": parts[2] if len(parts) == 3 else ""}
+        return self.same_conversation(target, where)
+
+    def taken_over(self, draft: dict) -> tuple[dict, dict] | None:
+        """For a reply the Slack session drafts: the worker that took the conversation over (it
+        follows it for a task still open, or finished lately: its news goes to that worker,
+        Runtime.thread_owners), and that task."""
+        from .runtime import TASKS_SHOWN_HOURS
+
         row = self.store.find_session(draft["session_id"])
         if draft["kind"] != "slack" or not row or row["role"] != SLACK:
             return None
-        for other in self.store.drafts("pending"):
-            worker = self.store.find_session(other["session_id"])
-            if (
-                other["kind"] == "slack"
-                and worker
-                and worker["role"] == WORKER
-                and self.same_conversation(draft["target"], other["target"])
-                and (
-                    self.conversation_keys(draft["target"])
-                    | self.conversation_keys(other["target"])
-                )
-                & set(self.store.follows(worker["id"]))
-            ):
-                return other
+        recent = hours_ago(TASKS_SHOWN_HOURS)
+        channel = draft["target"].get("channel_id") or ""
+        for found in self.store.followed(f"slack:{channel}"):
+            key = found["thread"]
+            if not self.in_conversation(draft["target"], key):
+                continue
+            for session_id in self.store.followers(key):
+                worker = self.store.find_session(session_id)
+                if not worker or worker["role"] != WORKER:
+                    continue
+                bound = [
+                    self.runtime.tasks.find(t) for t in self.store.follow_tasks(worker["id"], key)
+                ]
+                tasks = [task for task in bound if task] or [
+                    task for task in [self.runtime.thread_task(worker["id"], key)] if task
+                ]
+                for task in reversed(tasks):
+                    ended = task.get("ended_at") or task["updated_at"]
+                    if task["status"] in OPEN | {"review"} or (
+                        task["status"] == "done" and ended >= recent
+                    ):
+                        return worker, task
         return None
 
     async def settle_others(self, draft: dict, sent: bool) -> list[str]:
@@ -511,11 +586,13 @@ class Drafts:
             outcome = (
                 f"Withdrawn: answered by \u201c{name}\u201d."
                 if sent
-                else f"Replaced by \u201c{name}\u201d's draft ({draft['id']})."
+                else f"Replaced by \u201c{name}\u201d's draft."
             )
             other = self.store.update_draft(
                 other["id"], status="rejected", outcome=outcome, resolved_at=now()
             )
+            if not sent:
+                self.store.set(f"replacedby:{other['id']}", draft["id"])
             self.bus.publish("draft", other)
             settled.append(other)
         for other in settled:
@@ -543,7 +620,8 @@ class Drafts:
         text = (
             f"The owner edited draft {draft['id']} and sent it, but it was held: someone wrote "
             "in the conversation since. It waits on their card with their text (they may send "
-            f"it anyway); do not withdraw it. Their text:\n{final}"
+            "it anyway); do not withdraw it. A new draft of yours there does not replace it: "
+            f"both wait, and the owner chooses. Their text:\n{final}"
         )
         self.delivery.hold(
             row["id"],
@@ -552,21 +630,75 @@ class Drafts:
             display=f"You edited {self.shown(draft)}: it waits for you (someone wrote since).",
         )
 
-    def review_waiting(self, draft: dict) -> dict | None:
-        """A GitHub review or reply of the same task that is not posted yet: a Slack reply for
-        that task goes after it (it may say the review is posted, or approved)."""
-        task = self.task_of(draft)
-        if not task:
-            return None
+    def review_waiting(self, draft: dict, text: str = "") -> dict | None:
+        """A GitHub review or reply not posted yet that a Slack reply (its text: `text`) may
+        speak of as posted, or approved: the reply goes after it (see speaks_of)."""
         for status in ("pending", "sending", "uncertain"):
             for other in self.store.drafts(status):
-                if (
-                    other["kind"] == "github"
-                    and other["session_id"] == draft["session_id"]
-                    and (self.task_of(other) or {}).get("id") == task["id"]
-                ):
+                if self.speaks_of(draft, other, text):
                     return other
         return None
+
+    def speaks_of(self, draft: dict, review: dict, text: str = "") -> bool:
+        """Whether a Slack reply may speak of a GitHub review or reply: its own session's for
+        the same task, on a PR the reply names (by number will do), on one its task names or
+        follows, or whose task follows the conversation the reply goes to (a worker is one
+        subject: its review may be filed under another task); another session's on a PR the
+        reply or its task names or follows."""
+        from .tools import names_pr
+
+        target = review["target"] or {}
+        if review["kind"] != "github" or draft["kind"] != "slack" or not target.get("repo"):
+            return False
+        session_id = draft["session_id"]
+        task = self.task_of(draft)
+        text = f"{text}\n{draft['text']}"
+        repo, number = str(target["repo"]).lower(), int(target.get("number") or 0)
+        about = f"{task['title']}\n{task['goal'] or ''}" if task else ""
+        if (
+            names_pr(text, repo, number)
+            or (about and names_pr(about, repo, number))
+            or (
+                task
+                and task["id"] in self.store.follow_tasks(session_id, f"github:{repo}#{number}")
+            )
+        ):
+            return True
+        if review["session_id"] != session_id:
+            return False
+        theirs = self.task_of(review)
+        return bool(
+            (task and theirs and theirs["id"] == task["id"])
+            or re.search(rf"(?:#|\bPR\s*#?\s*|/pull/){number}(?!\d)", text, re.I)
+            or (theirs and self.follows_there(session_id, theirs["id"], draft["target"]))
+        )
+
+    def link_reviews(self):
+        """Each Slack reply waiting for the owner says on its card which review it waits for
+        (`after_review`: its id, and what it is in the owner's words); the page shows it while
+        that draft is not posted yet (pending, sending, uncertain)."""
+        for draft in self.store.drafts("pending"):
+            if draft["kind"] != "slack":
+                continue
+            review = self.review_waiting(draft, draft.get("final_text") or "")
+            found = {"id": review["id"], "label": self.shown(review)} if review else None
+            if (draft["target"] or {}).get("after_review") == found:
+                continue
+            target = {key: value for key, value in draft["target"].items() if key != "after_review"}
+            self.bus.publish(
+                "draft",
+                self.store.update_draft_target(
+                    draft["id"], {**target, "after_review": found} if found else target
+                ),
+            )
+
+    def follows_there(self, session_id: str, task_id: str, target: dict) -> bool:
+        """Whether a session follows the conversation a Slack reply goes to for that task."""
+        return any(
+            self.in_conversation(target, key)
+            and task_id in self.store.follow_tasks(session_id, key)
+            for key in self.store.follows(session_id)
+        )
 
     async def withdraw(self, session_id: str, draft_id: str, reason: str) -> dict:
         """A session takes back a draft of its own still waiting for the owner (the
@@ -591,8 +723,8 @@ class Drafts:
                 )
             if edited := self.owner_edited(draft):
                 again = (
-                    "draft the reply again from their words with draft_slack_reply: it replaces "
-                    "this card (which then shows their text)"
+                    "draft a new reply with draft_slack_reply: it does not replace their card, "
+                    "both wait and the owner chooses"
                     if draft["kind"] == "slack"
                     else "draft it again from their words; the owner then chooses"
                 )
@@ -602,7 +734,10 @@ class Drafts:
                     f"If it no longer fits what was said since, {again}."
                 )
             draft = self.store.update_draft(
-                draft["id"], status="rejected", outcome=f"Withdrawn: {reason}", resolved_at=now()
+                draft["id"],
+                status="rejected",
+                outcome=f"Withdrawn: {self.owner_text(reason)}",
+                resolved_at=now(),
             )
         self.bus.publish("draft", draft)
         self.tell_router(
@@ -611,6 +746,8 @@ class Drafts:
             f"Why: {reason}",
             display="Withdrawn",
         )
+        if draft["kind"] == "github":
+            self.link_reviews()
         return draft
 
     async def answer_workspace(self, draft: dict, decision: DraftDecision) -> dict:
@@ -831,17 +968,68 @@ class Drafts:
     def settle_question(self, draft: dict):
         """The owner decided a draft (sent, rejected, to redo) that its session then asked them
         about (send it? approve it?): that question is answered. It leaves Needs you, and the
-        task goes on (finished work it asked about goes back where it was)."""
+        task goes on (finished work it asked about goes back where it was). A Slack reply sent
+        also answers what its session asked the owner about that same DM or thread, whenever it
+        asked (before drafting the reply: "are you joining? then I draft it")."""
+        if draft["kind"] == "slack" and draft["status"] == "sent":
+            target = draft["target"]
+            stamps = {target.get("thread_ts"), target.get("latest_ts")} - {"", None}
+            for asked in self.runtime.asks.session_questions(draft["session_id"]):
+                text = asked.get("text") or ""
+                if asked.get("task_id") or target.get("channel_id") not in re.findall(
+                    r"\b[CDG][A-Z0-9]{6,}\b", text
+                ):
+                    continue
+                # In a DM outside a thread, the whole DM is one conversation.
+                dm = target.get("channel_id", "").startswith("D") and not target.get("thread_ts")
+                named = set(re.findall(r"\d{10}\.\d{6}", text))
+                if dm or not named or named & stamps:
+                    self.runtime.asks.dismiss(asked["id"], "answered")
         task = self.task_of(draft)
         if task and (task["status"] != "waiting" or self.store.get(f"stopped:{task['id']}")):
             return
         key = f"{draft['session_id']}:{task['id'] if task else '-'}"
         question = self.runtime.asks.owner_question(key)
-        if not question or question.get("at", "") < draft["created_at"]:
+        if not question or (
+            question.get("at", "") < draft["created_at"]
+            and not self.about_draft(question.get("text") or "", draft)
+        ):
             return  # None, or asked before the draft: about something else.
         self.runtime.asks.answered(draft["session_id"], task["id"] if task else "")
         if task:
             self.runtime.asks.go_on(task)
+
+    @staticmethod
+    def about_draft(text: str, draft: dict) -> bool:
+        """Whether a question asks the owner to decide this draft: it names it, or asks them to
+        approve, send or post the draft (a review, a reply)."""
+        return draft["id"] in text or bool(DRAFT_DECISION.search(text))
+
+    def question_draft(self, task: dict, text: str | None = None) -> dict | None:
+        """The task's own reply or review still waiting for the owner that its question (its
+        progress while waiting, or `text`) is about: one decision, told and counted once, as
+        that draft's card (deciding the draft answers the question: settle_question)."""
+        text = (task.get("progress") or "") if text is None else text
+        if not text.strip():
+            return None
+        mine = [
+            draft
+            for draft in self.store.drafts("pending")
+            if draft["kind"] in {"slack", "github", "reply"}
+            and draft["session_id"] == task["session_id"]
+            and (self.task_of(draft) or {}).get("id") == task["id"]
+        ]
+        named = [draft for draft in mine if draft["id"] in text]
+        if named or not mine:
+            return named[-1] if named else None
+        return mine[-1] if DRAFT_DECISION.search(text) else None
+
+    def owner_text(self, text: str) -> str:
+        """Text as the owner reads it: without the ids of drafts and Slack timestamps."""
+        from .tools import owner_words
+
+        ids = {row["id"] for row in self.store.all("SELECT id FROM drafts")}
+        return owner_words(text, ids)
 
     async def settle_task(self, draft: dict):
         """A task whose result was this text (a reply, a review) is done once the owner sent
@@ -982,7 +1170,9 @@ class Drafts:
                 resolved_at=now(),
             )
             self.bus.publish("draft", draft)
-            self.tell_router(draft, "Withdrawn: the PR was merged.", display="PR merged")
+            self.tell_router(
+                draft, "Withdrawn: the PR was merged.", display="Withdrawn (the PR was merged)"
+            )
             gone.append(draft["id"])
         for task in made:
             if self.store.get(f"mergednews:{task['id']}:{label}"):
@@ -1068,7 +1258,66 @@ class Drafts:
                 display="You posted it on GitHub yourself",
             )
 
+    def recipient(self, channel: str, place: dict) -> str:
+        """Who a Slack reply goes to when its session did not say: the author of the message
+        it answers (not the owner), and the conversation by its name ("Bob (DM)", "Dave
+        (#deploys)", "DM with Bob"); "" when nothing is known (never a raw id)."""
+        slack = self.runtime.slack
+        name = slack.display_names().get(channel, "")
+        name = "" if channel and channel in name else name
+        user = place.get("user") or ""
+        who = (place.get("name") or "") if user and user != slack.status.get("user_id") else ""
+        who = "" if user and user in who else who
+        if channel.startswith("D"):
+            return f"{who} (DM)" if who else threads.dm_with(name) if name else ""
+        where = f"#{name.lstrip('#')}" if name else ""
+        return f"{who} ({where})" if who and where else who or where
+
+    @staticmethod
+    def posted_as(draft: dict) -> str:
+        """What a GitHub draft went out as, in words for its session."""
+        target = draft["target"] or {}
+        if target.get("in_reply_to") or target.get("reply_to_comment"):
+            return "a reply to a comment"
+        posted = {
+            "approve": "an approval",
+            "request_changes": "a review requesting changes",
+        }.get(target.get("verdict") or "", "a comment (no approval, no changes requested)")
+        if target.get("own"):
+            posted += ", as the PR is the owner's own: GitHub takes only comments there"
+        return posted
+
+    def replies_to_check(self, draft: dict, told: str) -> str:
+        """After a review was posted: its session's Slack replies still waiting that may speak
+        of it (speaks_of), which `told` (asked_in_thread) did not name: what it went out as, to
+        check they say so."""
+        if draft["kind"] != "github":
+            return ""
+        waiting = [
+            other["id"]
+            for other in self.store.drafts("pending")
+            if other["session_id"] == draft["session_id"]
+            and other["id"] not in told
+            and self.speaks_of(other, draft, other.get("final_text") or "")
+        ]
+        if not waiting:
+            return ""
+        return (
+            f"It was posted as {self.posted_as(draft)}. Your Slack "
+            f"{'reply' if len(waiting) == 1 else 'replies'} {', '.join(waiting)} still "
+            f"{'waits' if len(waiting) == 1 else 'wait'} for the owner and may speak of it: check "
+            "that it says what was posted (not an approval or changes requested when it went as "
+            "a comment); if not, withdraw_draft it and draft it again."
+        )
+
     def asked_in_thread(self, draft: dict) -> str:
+        """What to tell a worker whose review or reply the owner sent: asked_there, and its Slack
+        replies still waiting that may speak of it (replies_to_check); "" when neither."""
+        asked = self.asked_there(draft)
+        check = self.replies_to_check(draft, asked)
+        return " ".join(part for part in (asked, check) if part)
+
+    def asked_there(self, draft: dict) -> str:
         """A review or reply the owner sent for a task whose worker follows the Slack thread
         someone asked for it in: they are told there (its worker drafts the reply). What to
         tell the worker; "" when nobody there waits for it."""
@@ -1106,11 +1355,12 @@ class Drafts:
                 and key.startswith(f"slack:{other['target'].get('channel_id')}")
             ]
             if waiting:
+                posted = f" (as {self.posted_as(draft)})" if draft["kind"] == "github" else ""
                 return (
                     f"It was asked for in a Slack thread you follow for task {task['id']} "
                     f"({where}, {key}): your reply there, draft {waiting[-1]}, waits for the "
-                    "owner and goes only now that this is posted. Check that it says what was "
-                    "posted (as above); if not, draft it again with draft_slack_reply (it "
+                    f"owner and goes only now that this is posted{posted}. Check that it says "
+                    "what was posted; if not, draft it again with draft_slack_reply (it "
                     f"replaces {waiting[-1]}). {then}"
                 )
             return (
@@ -1235,15 +1485,19 @@ class Drafts:
         if draft["kind"] == "slack":
             channel, ts = target.get("channel_id") or "", target.get("thread_ts") or ""
             name = self.runtime.slack.display_names().get(channel, "")
+            if channel and channel in name:
+                name = ""  # A raw id is no name: never shown to the owner.
             if channel.startswith("D"):
+                place = f"your {threads.dm_with(name)}" if name else "a DM"
                 # "to Alice Chen (DM)" says where already.
                 said = bool(to) and re.search(r"\bDM\b|direct", to, re.I) is not None
-                where = (
-                    "" if said else "a DM" if to or not name else f"your {threads.dm_with(name)}"
-                )
+                where = "" if said else "a DM" if to else place
             else:
-                where = f"#{name.lstrip('#')}" if name else "a channel"
-            if ts:
+                place = f"#{name.lstrip('#')}" if name else ""
+                # "to Dave (#deploys)" too.
+                said = bool(to) and (place.lower() in to.lower() if place else "#" in to)
+                where = "" if said else place or "a channel"
+            if ts and not (said and "thread" in to.lower()):
                 where = "a thread" if where in {"", "a channel"} else f"a thread in {where}"
             return "your reply" + (f" to {to}" if to else "") + (f" in {where}" if where else "")
         if draft["kind"] == "github":
@@ -1251,6 +1505,8 @@ class Drafts:
             if target.get("in_reply_to") or target.get("reply_to_comment"):
                 author = (target.get("comment") or {}).get("author") or ""
                 return f"your reply{f' to {author}' if author else ''} on {pr}"
+            if target.get("own"):
+                return f"your reply on {pr}"  # The owner's own PR: its card says "Reply on".
             return f"your review of {pr}"
         if draft["kind"] == "reply":
             where = " ".join(str(target.get("where") or "").split())[:80]

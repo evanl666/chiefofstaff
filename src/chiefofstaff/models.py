@@ -150,8 +150,9 @@ PluginSource = Annotated[
 ]
 McpName = Annotated[str, Field(pattern=r"^[A-Za-z0-9_-]{1,40}$")]
 HourRange = Annotated[str, Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$")]
-# Validating settings as they were saved (by this version or an earlier one): see mcp_off.
-AS_SAVED = {"mcp_saved": True}
+# Validating settings as they were saved (by this version or an earlier one): see mcp_off,
+# copilot_minimum and validate_paths.
+AS_SAVED = {"mcp_saved": True, "saved": True}
 
 
 def mcp_problem(config: object) -> str:
@@ -332,9 +333,15 @@ class Settings(StrictModel):
 
     @field_validator("worker_credit_limit")
     @classmethod
-    def copilot_minimum(cls, value: float) -> float:
-        # Copilot starts no session with less; a lower limit (saved before, say) is raised.
-        return MIN_CREDIT_LIMIT if 0 < value < MIN_CREDIT_LIMIT else value
+    def copilot_minimum(cls, value: float, info: ValidationInfo) -> float:
+        if 0 < value < MIN_CREDIT_LIMIT:
+            if (info.context or {}).get("saved"):
+                return MIN_CREDIT_LIMIT  # Saved before this was checked: Copilot's minimum.
+            raise ValueError(
+                f"Credit limit per worker: at least {MIN_CREDIT_LIMIT} (Copilot starts no "
+                "session with less), or 0 for no limit."
+            )
+        return value
 
     @field_validator("slack_delegate_emoji", mode="before")
     @classmethod
@@ -342,11 +349,15 @@ class Settings(StrictModel):
         return value.strip().strip(":").lower() if isinstance(value, str) else value
 
     @model_validator(mode="after")
-    def validate_paths(self):
+    def validate_paths(self, info: ValidationInfo):
+        # A saved project whose folder is gone (moved, deleted, a drive not mounted) stays, shown
+        # as not found, until the owner removes it; a new one must exist.
+        context = info.context or {}
+        saved = set(context.get("projects_saved") or ())
         projects = []
         for raw in self.projects:
             path = Path(raw).expanduser().resolve()
-            if not path.is_dir():
+            if not path.is_dir() and not (context.get("saved") or {raw, str(path)} & saved):
                 raise ValueError(f"Project is not an existing directory: {raw}")
             if path == Path.home() or path == Path(path.anchor):
                 raise ValueError("Choose project directories, not your home or filesystem root.")

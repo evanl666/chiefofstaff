@@ -1084,6 +1084,10 @@ button.receipt.needs { background: var(--amber-soft); color: var(--amber); }
 .more-links[open] > summary::before { content: "▾ "; }
 .more-links > .receipts { margin-top: 4px; }
 .receipt.failing .link { padding: 0; min-height: 0; color: inherit; text-decoration: underline; }
+.receipt.watching { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
+.receipt.watching .watch-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: inherit; }
+.receipt.watching .unfollow { padding: 0 2px; min-height: 0; color: inherit; flex: none; opacity: 0.7; }
+.receipt.watching .unfollow:hover, .receipt.watching .unfollow:focus-visible { opacity: 1; }
 .card.broken { color: var(--red); font-size: var(--small); }
 .show-more { margin: 4px 0 0 16px; }
 /* Artifacts: one row each, where it stands in sight; the list scrolls on its own. */

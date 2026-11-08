@@ -246,6 +246,19 @@ def test_news_on_a_result_with_a_draft_card_shows_on_that_card():
     assert found["boxes"]["needs"] == [], "on the draft's card only"
 
 
+def test_a_question_about_its_own_draft_is_decided_on_that_card():
+    """Bug bash 6 (T6): "approve the draft, or hold it" showed as a Question card beside the
+    draft's card: two cards for one decision."""
+    workers = [{"id": "w1", "status": "idle"}]
+    tasks = [
+        task("q", "w1", "waiting", question_draft="d1"),
+        task("o", "w1", "waiting"),  # Another question: under Needs you as it was.
+    ]
+    found = board(tasks, workers, onCards=["q"])
+    assert found["phases"] == {"q": "", "o": "needs/question"}
+    assert found["boxes"]["needs"] == [["w1", ["o"]]]
+
+
 def test_a_follow_up_behind_another_task_is_up_next_not_waiting_on_its_pr():
     """L5: the owner followed up on finished A (it follows PR #59) while its worker runs B: A
     waits its turn after B, not on its PR. The worker's current task may say A already: its
