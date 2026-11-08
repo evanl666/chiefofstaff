@@ -394,7 +394,8 @@ async def test_a_scan_that_finds_nothing_new_says_none_found(tmp_path):
 
 
 async def test_away_each_refused_reply_is_said_once(tmp_path):
-    """N2: "IHXYQ not yet" and "IHXYQ ok wait" were said again at every read."""
+    """N2: "IHXYQ not yet" and "IHXYQ ok wait" were said again at every read. Round 7: a
+    code's newest reply is what counts; the earlier one is not applied, nor said."""
     harness = Harness(tmp_path / "data", Settings(away_notify=True, away_how="DM me"))
     runtime = await away(harness)
     worker, _task = await spawn(runtime, harness, "Answer Carol")
@@ -409,7 +410,7 @@ async def test_away_each_refused_reply_is_said_once(tmp_path):
     for _read in range(3):
         await call_tool(runtime, "report_owner_replies", messenger["id"], replies=replies)
     notes = [m for m in harness.store.messages(harness.router_id or "") if f"[{code}]" in m["text"]]
-    assert len(notes) == 2, [m["text"] for m in notes]
+    assert len(notes) == 1 and "ok wait" in notes[0]["text"], [m["text"] for m in notes]
 
 
 async def test_away_a_failed_task_the_router_retells_is_told_once(tmp_path):

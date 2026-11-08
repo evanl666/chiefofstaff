@@ -96,6 +96,8 @@ def test_a_cited_test_command_is_shown_without_its_redirections():
     assert cited_part("ran `uv run --with pytest pytest -q`", line) == (
         "uv run --with pytest pytest -q"
     )
+    # Code review: a file after ">&" is where it writes, not an argument.
+    assert cited_part("ran `pytest -q`", "pytest -q >& out.log; tail out.log") == "pytest -q"
 
 
 async def test_stopping_a_follow_for_one_task_names_that_task(tmp_path):
@@ -240,3 +242,31 @@ async def test_news_held_for_a_terminal_goes_out_after_a_restart_too(tmp_path):
     await settle(runtime)
     assert any("bob commented" in sent for sent in harness.session(worker).sent)
     assert not harness.store.get(f"heldnews:{worker}")
+
+
+async def test_a_pr_two_tasks_follow_is_counted_once_as_home_shows_it(tmp_path):
+    """Code review: Home shows one row for a PR two delivered tasks of a worker follow; the
+    Router, Focus and the summary counted both."""
+    from chiefofstaff.digest import needs
+
+    harness = Harness(tmp_path / "data")
+    runtime = await harness.connect()
+    made = await spawn(runtime, harness.router_id, "Add cube")
+    worker, first = made["session_id"], made["task_id"]
+    await call_tool(runtime, "report", worker, status="done", summary="Opened the PR.")
+    await settle(runtime)
+    second = runtime.tasks.create(worker, "Answer the review", "x", status="running")["id"]
+    await call_tool(runtime, "report", worker, status="done", summary="Pushed.", task_id=second)
+    await settle(runtime)
+    pr = {"label": "acme/app#72", "own": True, "state": "OPEN", "checks": "failing", "about": True}
+    for task_id in (first, second):
+        runtime.tasks.move(task_id, "done")
+        runtime.follow(worker, [KEY], task_id=task_id)
+        run_id = runtime.store.value(
+            "SELECT id FROM runs WHERE task_id=? ORDER BY started_at DESC", (task_id,)
+        )
+        runtime.store.execute("UPDATE runs SET evidence=? WHERE id=?",
+                              (json.dumps({"checkouts": [], "prs": [pr]}), run_id))  # fmt: skip
+    found = needs(runtime)
+    rows = [item for item in found.items if item.get("marker") == "pr-failing"]
+    assert len(rows) == 1, [item["task"]["title"] for item in rows]

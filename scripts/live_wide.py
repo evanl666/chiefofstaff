@@ -3268,8 +3268,10 @@ async def i4_nudge_a_quiet_task(ctx: Ctx):
     await ctx.app.post(f"/api/tasks/{task['id']}/nudge")
 
     async def answered():
+        # It says where it stands: in a report, or in its reply (then it may check back).
         rows = await messages(ctx, task["session_id"])
-        return [m for m in rows if m["kind"] == "report" and m["created_at"] > nudged] or None
+        said = {"report", "assistant"}
+        return [m for m in rows if m["kind"] in said and m["created_at"] > nudged] or None
 
     reports = await wait_for("its answer to the nudge", answered, 600, ctx.app)
     log(f"I4: {[m['text'][:120] for m in reports]}")
@@ -3782,7 +3784,8 @@ async def l4_split_preview_and_undo(ctx: Ctx):
               "50 and report the number as its result.")  # fmt: skip
     task = await titled(ctx, since, "count primes")
     await task_status(ctx, task["id"], FINISHED, "counted", 300)
-    question = "Also: what is the sum of the squares of 1 to 10? One line."
+    # More of the same task (a separate question it would answer, or file on its own).
+    question = "Also count the primes below 100, and report both counts as your result."
     await ctx.app.post(f"/api/sessions/{task['session_id']}/messages", {"text": question})
 
     async def second_report():
@@ -3792,22 +3795,25 @@ async def l4_split_preview_and_undo(ctx: Ctx):
 
     await wait_for("its second result", second_report, 300, ctx.app)
     before = await ctx.app.get(f"/api/tasks/{task['id']}")
+    # Its second report settles the task a moment later (finished again, its result kept).
+    await task_status(ctx, task["id"], FINISHED, "finished again", 120)
     preview = await ctx.app.get(f"/api/tasks/{task['id']}/split-preview")
+    log(f"L4: preview {preview}")
     log(f"L4: preview allowed={preview['allowed']} moves {len(preview['moves']['messages'])}")
-    assert preview["allowed"] and "385" in preview["moves"]["result"]
+    assert preview["allowed"] and "25" in preview["moves"]["result"]
     try:
         await ctx.app.post(f"/api/tasks/{task['id']}/split", {"text": "111"})
         raise AssertionError("a title like 111 is refused")
     except RuntimeError as exc:
         assert ": 400 " in str(exc), exc
-    made = await ctx.app.post(f"/api/tasks/{task['id']}/split", {"text": "Sum of squares 1-10"})
+    made = await ctx.app.post(f"/api/tasks/{task['id']}/split", {"text": "Primes below 100"})
     worker = await session(ctx, task["session_id"])
-    assert worker["display_title"] != "Sum of squares 1-10", "a split does not rename the worker"
+    assert worker["display_title"] != "Primes below 100", "a split does not rename the worker"
     back = await ctx.app.post(f"/api/tasks/{made['id']}/merge-back", {})
     # Undone: the task as it was (its result), the moved report back on it, the new task gone.
     assert back["id"] == task["id"] and back["result"] == before["result"], back["result"]
     rows = await messages(ctx, task["session_id"])
-    moved = [m for m in rows if m["kind"] == "report" and "385" in m["text"]]
+    moved = [m for m in rows if m["kind"] == "report" and "25" in m["text"]]
     assert moved and all(m["meta"].get("task_id") == task["id"] for m in moved), moved
     assert made["id"] not in {t["id"] for t in (await state(ctx))["tasks"]}
     log("L4 passed")

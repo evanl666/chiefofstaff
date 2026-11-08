@@ -105,22 +105,70 @@ GO_ON_WORDS = {"go on", "go", "continue", "resume", "继续"}
 # owner is asked to answer "send" when it should go). Matching too much only asks once more.
 HOLDS_SEND = re.compile(
     r"[?\uff1f]"
-    r"|\b(?:wait|hold|later|yet|until|till|tomorrow|tonight|before|after|once|when|if|unless|"
-    r"not|don'?t|do not|never|no|nope|nah|stop|first|instead|but|except|hang on|one sec|"
-    r"never ?mind)\b"
+    r"|\b(?:wait|hold|later|yet|until|till|tomorrow|tmrw|tmr|tonight|eod|eow|before|after|"
+    r"once|when|if|unless|not|don'?t|do not|never|no|nope|nah|stop|first|instead|but|except|"
+    r"hang on|one sec|never ?mind|monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
+    r"next|this week|morning|afternoon|evening|noon|night|"
+    r"in (?:an?|\d+) (?:hour|hours|hr|hrs|min|mins|minutes|days?)|"
+    r"at \d{1,2}(?::\d\d)?|\d{1,2} ?(?:am|pm)|jk|kidding|joking|joke|sarcasm|/s|lol|lmao)\b"
     r"|n't\b"
-    r"|[\u5417\u4e48\u5462\u561b\u4e0d\u522b\u7b49\u6682\u6162\u518d\u5148\u4f46]"
-    r"|\u7a0d\u540e|\u665a\u70b9|\u4e00\u4f1a|\u5f85\u4f1a|\u56de\u5934|\u4e4b\u540e|\u4ee5\u540e",
+    r"|[\u5417\u4e48\u5462\u561b\u4e0d\u522b\u7b49\u6682\u6162\u518d\u4f46]"
+    r"|\u5148\u522b|\u5148\u4e0d|\u5148\u7b49|\u5148\u653e|\u7a0d\u540e|\u665a\u70b9|\u4e00\u4f1a|"
+    r"\u5f85\u4f1a|\u56de\u5934|\u4e4b\u540e|\u4ee5\u540e|\u660e\u5929|\u540e\u5929|\u4eca\u665a|"
+    r"\u665a\u4e0a|\u4e0a\u5348|\u4e0b\u5348|\u4e2d\u5348|\u65e9\u4e0a|\u5468[\u4e00\u4e8c\u4e09"
+    r"\u56db\u4e94\u516d\u65e5\u5929]|\u661f\u671f|\u793c\u62dc|\d+\s*\u70b9|\u5f00\u73a9\u7b11|"
+    r"\u9017\u4f60|\u54c8\u54c8|\u8fc7\u4f1a|\u4e0b\u73ed|\u5f00\u5b8c\u4f1a|\u4f1a\u540e|"
+    r"\u660e\u65e9|\u665a\u4e9b"
+    r"|[\U0001f644\U0001f60f\U0001f612\U0001f928]",
     re.IGNORECASE,
 )
+# Approval in words that hold a "no" or a "not" ("no changes needed", "not bad", and their
+# Chinese counterparts): not a hold.
+NOT_HOLDS = re.compile(
+    r"\b(?:no (?:changes?|edits?|notes?|problem|problems|issues?|comments?|worries)"
+    r"(?: (?:needed|required|from me))?|nothing (?:to|else to) (?:change|add|fix)|not bad)\b"
+    r"|\u4e0d\u9519|\u6ca1\u95ee\u9898|\u6ca1\u4ec0\u4e48\u95ee\u9898|\u4e0d\u7528\u6539|"
+    r"\u65e0\u9700\u4fee\u6539|\u4e0d\u9700\u8981\u6539",
+    re.IGNORECASE,
+)
+# A draft that still has blanks to fill ("[yes / no]", "___"): never sent as it is.
+BLANKS = re.compile(r"_{3,}|\[[^\[\]\n]{0,80}/[^\[\]\n]{0,80}\](?!\()")
+# Any code in a reply (several in one message: "UELNW ship it, B4XJT no").
+ANY_CODE = re.compile(r"\[?\b([A-Za-z2-7]{5})\b\]?")
+
+
 # What the messenger may say a reply to a draft (or a merge card) means.
 DRAFT_INTENTS = {"send", "no", "change", "unclear"}
 
 
 def holds_send(text: str) -> str:
     """What in a reply stops a send ("" when nothing does): see HOLDS_SEND."""
-    found = HOLDS_SEND.search(text.replace("\u2019", "'"))
+    found = HOLDS_SEND.search(NOT_HOLDS.sub(" ", text.replace("\u2019", "'")))
     return found.group(0) if found else ""
+
+
+def own_part(text: str, code: str, codes: set[str]) -> str:
+    """Of a message naming several codes, the part about `code`: from it to the next code
+    ("UELNW ship it, B4XJT no": "ship it, " for UELNW). Without its code (the messenger left it
+    out), the message up to the first other code."""
+    found = [
+        (match.start(), match.end(), match.group(1).upper())
+        for match in ANY_CODE.finditer(text)
+        if match.group(1).upper() in codes
+    ]
+    mine = [at for at in found if at[2] == code]
+    if not mine:
+        others = [at for at in found if at[2] != code]
+        return text[: others[0][0]] if others else text
+    after = [at for at in found if at[0] >= mine[0][1] and at[2] != code]
+    return text[mine[0][1] : after[0][0] if after else len(text)]
+
+
+def reply_key(code: str, text: str) -> str:
+    """A reply as judged: the same words for the same code are judged once, with or without
+    its code in them (the messenger passes what it reads each time it looks)."""
+    words = " ".join(without_code(text, code).casefold().split()).strip(" .!,;:-")
+    return hashlib.sha256(f"{code}\n{words}".encode()).hexdigest()[:16]
 
 
 CANCEL_WORDS = {"cancel", "取消"}
@@ -244,6 +292,10 @@ class ReadOwnerSlackDm(BaseModel):
 class OwnerReply(BaseModel):
     code: str = Field(description="The five-letter code the owner's reply names")
     text: str = Field(description="The owner's reply, exactly")
+    at: str = Field(
+        default="",
+        description="When the owner wrote it, as the conversation shows it (its timestamp)",
+    )
     intent: Literal["send", "no", "change", "unclear", "answer"] = Field(
         default="answer",
         description="What the reply means. For a code that is a draft or a PR to merge: "
@@ -873,6 +925,17 @@ class Connector:
             codes.append(test["code"])
         return codes
 
+    def used_codes(self) -> list[str]:
+        """Codes the owner answered with, while their replies are still read."""
+        found = []
+        for code, value in self.store.items("awayused:").items():
+            with suppress(ValueError, TypeError, KeyError):
+                used = json.loads(value)
+                at = used["at"] if isinstance(used, dict) else float(used)
+                if time.time() - at < READ_REPLIES_HOURS * 3600:
+                    found.append(code)
+        return found
+
     def told_codes(self) -> list[str]:
         """Every code the owner was sent and has not used (nor expired), whether or not its item
         still waits: a reply with one that no longer does is told so, not dropped."""
@@ -963,6 +1026,8 @@ class Connector:
         sections = []
         for item in items:
             what, said, hint = self.describe(item)
+            if reason := self.store.get(f"awayreask:{item['id']}"):
+                what, said = f"Not sent yet \u00b7 {what}", f"{reason}. {said}".strip()
             code = item["code"]
             head = f"*[{code}]* {mrkdwn(what)}" if codes else f"*{mrkdwn(what)}*"
             lines = [head]
@@ -1010,7 +1075,11 @@ class Connector:
         if not test and time.time() < float(self.store.get("away_retry_at") or 0):
             return  # The last one failed: not again at every tick.
         sent = set(json.loads(self.store.get("away_sent") or "[]"))
-        fresh = [item for item in self.waiting_items() if item["id"] not in sent]
+        fresh = [
+            item
+            for item in self.waiting_items()
+            if item["id"] not in sent or self.store.get(f"awayreask:{item['id']}")
+        ]
         if test:
             fresh = [{"id": f"test:{int(time.time())}", "test": True}]
         if not fresh:
@@ -1090,9 +1159,12 @@ class Connector:
         told = datetime.fromisoformat(last["at"]).timestamp()
         if time.time() - told > READ_REPLIES_HOURS * 3600:
             return
-        if not (codes := self.open_codes()):
-            return
+        codes = self.open_codes()
         codes += [code for code in self.told_codes() if code not in codes]
+        if not codes:
+            return
+        # Answered lately: a new reply to one is told what became of it.
+        codes += [code for code in self.used_codes() if code not in codes]
         read_at = float(self.store.get("away_read_at") or 0)
         if time.time() - read_at < max(1, settings.watch_minutes) * 60:
             return
@@ -1115,9 +1187,10 @@ class Connector:
         text = (
             f"Read the owner's replies to Chief of Staff's notifications in {where} with: {how}\n\n"
             f"Pass each reply that names one of these codes with report_owner_replies (the code, "
-            f"the reply exactly, and what it means as intent): {', '.join(listed)}. Only what "
-            "the owner themself wrote there; a reply you passed before is fine to pass again. "
-            "If there is none, end without calling it. Send nothing."
+            f"the reply exactly, when it was written, and what it means as intent): "
+            f"{', '.join(listed)}. Only what the owner themself wrote there. Each reply is judged "
+            "once, and a code's newest reply is the one that counts, so passing one again is "
+            "harmless. If there is none, end without calling it. Send nothing."
         )
         await self.runtime.toolset.start_special(MESSENGER, MESSENGER_TITLE, text)
 
@@ -1232,6 +1305,8 @@ class Connector:
             elif pending:
                 sent = json.loads(self.store.get("away_sent") or "[]")
                 self.store.set("away_sent", json.dumps((sent + pending["items"])[-200:]))
+                for item_id in pending["items"]:
+                    self.store.delete(f"awayreask:{item_id}")  # Asked again now.
         else:
             self.store.set("away_retry_at", str(time.time() + RETRY_SECONDS))
         self.store.set(
@@ -1294,45 +1369,74 @@ class Connector:
                 f"{', '.join(unsaid)}: a draft or a PR to merge: pass each reply again with "
                 "intent='send', 'no', 'change' or 'unclear' (what the owner means)."
             )
-        done = []
-        for reply in params.replies:
+        known = {*self.open_codes(), *self.told_codes(), *self.used_codes()}
+        if test:
+            known.add(test["code"])
+        # A code's newest reply is what it says (an earlier one may be a joke taken back);
+        # the others are judged as superseded, never applied later.
+        ordered = list(params.replies)
+        if all(reply.at for reply in ordered):
+            ordered.sort(key=lambda reply: reply.at)
+        newest = {reply.code.strip().upper(): reply for reply in ordered}
+        for reply in ordered:
             code = reply.code.strip().upper()
+            if reply is not newest[code]:
+                part = own_part(reply.text, code, known)
+                key = f"awayjudged:{reply_key(code, part)}"
+                if not self.store.get(key):
+                    self.store.set(key, "superseded by a later reply")
+        done = []
+        for code, reply in newest.items():
+            part = own_part(reply.text, code, known).strip(" :,;.-\t\n")
+            key = f"awayjudged:{reply_key(code, part)}"
+            if self.store.get(key):
+                continue  # Judged before: never again (a second reading could differ).
             item_id = self.code_item(code) if CODE.fullmatch(code) else ""
+            used = json.loads(self.store.get(f"awayused:{code}") or "null")
             if test and code == test["code"]:
                 self.store.delete("away_test")
                 self.store.delete(f"awaycode:{code}")
                 done.append(f"{code}: your answer came back")
                 outcome = "your answers come back: replies here work"
                 self.verified_replies()
+            elif used:
+                # Answered already: this reply changes nothing; said once.
+                became = self.what_became(used["item"]) if isinstance(used, dict) else ""
+                outcome = "not done: you answered this code already" + (
+                    f" ({became})" if became else ""
+                )
+                done.append(f"{code}: {outcome}")
             elif not (item := items.get(item_id)):
                 outcome = self.what_became(item_id) or (
                     "nothing waits for that code (answered already?)"
                 )
                 done.append(f"{code}: {outcome}")
-                if self.store.get(f"awayused:{code}") or self.store.get(f"awaynoted:{code}"):
-                    continue  # Applied before (passed again), or said once already.
+                if self.store.get(f"awaynoted:{code}"):
+                    self.store.set(key, outcome)
+                    continue  # Said once already.
                 self.store.set(f"awaynoted:{code}", str(time.time()))
             else:
                 self.verified_replies()  # A code it sent came back: replies are read.
                 try:
-                    outcome = await self.apply(item, reply.text.strip(), code, reply.intent)
+                    outcome = await self.apply(item, f"{code} {part}", code, reply.intent)
                     self.store.delete(f"awaycode:{code}")  # Used once.
-                    self.store.set(f"awayused:{code}", str(time.time()))
+                    self.store.set(
+                        f"awayused:{code}",
+                        json.dumps({"at": time.time(), "item": item_id, "outcome": outcome}),
+                    )
+                    self.store.delete(f"awayreask:{item_id}")
                 except (ValueError, LookupError, RuntimeError) as exc:
                     outcome = f"not done: {exc}"
-                    done.append(f"{code}: {outcome}")
-                    # The same reply read again (each time it looks) is said once, each reply.
-                    said = hashlib.sha256(reply.text.strip().encode()).hexdigest()[:16]
-                    if self.store.get(f"awayfailed:{code}:{said}"):
-                        continue
-                    self.store.set(f"awayfailed:{code}:{said}", str(time.time()))
-                else:
-                    done.append(f"{code}: {outcome}")
+                    if self.decides_draft(item):
+                        # Asked again where the owner is, not only here (see notify_away).
+                        self.store.set(f"awayreask:{item_id}", str(exc)[:200])
+                done.append(f"{code}: {outcome}")
+            self.store.set(key, outcome)
             self.runtime.add_message(
                 self.runtime.router_id(),
                 "notice",
                 f"You answered from {yours(self.store.get('away_where') or 'elsewhere')}: "
-                f"[{code}] {without_code(reply.text, code)[:200]} → {outcome}",
+                f"[{code}] {part[:200]} \u2192 {outcome}",
                 {"away_reply": True},
             )
         self.runtime.publish_state()
@@ -1422,7 +1526,12 @@ class Connector:
             kind = draft["kind"]
             drafts = self.runtime.drafts
             if kind == "merge":
-                if intent == "send" and not holds_send(answer):
+                if intent == "send" and (held := holds_send(answer)):
+                    raise ValueError(
+                        f'not merged: \u201c{held}\u201d sounds like not now: answer "merge" when '
+                        'it should be merged, or "no"'
+                    )
+                if intent == "send":
                     merged = await drafts.resolve(draft["id"], DraftDecision(action="send"))
                     return merged.get("outcome") or "merged"
                 if intent == "no":
@@ -1442,8 +1551,19 @@ class Connector:
                             'approval: answer "post" to post it as it is, or "no"'
                         )
                 # What it means is the messenger's reading; a send it holds back ("ok wait",
-                # "send it after lunch", "发吗") is not one.
-                if intent == "send" and not holds_send(answer):
+                # "send it after lunch", "发吗") is not one, nor a draft with blanks.
+                if intent == "send" and (held := holds_send(answer)):
+                    raise ValueError(
+                        f"not sent: \u201c{held}\u201d sounds like not now, or not as it is: "
+                        'answer "send" when it should go, or "no"'
+                    )
+                if intent == "send" and (blank := BLANKS.search(draft["text"])):
+                    raise ValueError(
+                        "not sent: the draft still has a blank to fill "
+                        f"(\u201c{blank.group(0)}\u201d): say the words to use instead, or edit "
+                        "it on Home"
+                    )
+                if intent == "send":
                     await drafts.resolve(draft["id"], DraftDecision(action="send"))
                     return "sent" if kind != "reply" else "marked as sent"
                 if intent == "no":

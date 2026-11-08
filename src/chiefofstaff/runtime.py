@@ -1972,6 +1972,9 @@ class Runtime:
             self.store.set(f"followup:{task['id']}", "chat")
             # Its checkouts now: what this task changes from here is a new result.
             await self.task_actions.record_chat_base(task)
+        elif task and task["status"] in OPEN_WORK and not task["result"]:
+            # Its checkouts now: separate work this asks for starts here (see split_off).
+            await self.task_actions.record_asked_base(task)
         message = await self.delivery.deliver(
             session_id,
             prompt,
@@ -2003,16 +2006,19 @@ class Runtime:
     @staticmethod
     def apart_note(task: dict) -> str:
         """For the owner's message to a worker: the task it is about, unless its worker finds
-        it asks for another deliverable; that work it reports as a task of its own (the worker
-        reads the message: no word list decides)."""
+        it asks for separate work with a result of its own; that work it reports as a task of
+        its own (the worker reads the message: no word list decides). A question is answered
+        in its reply, not reported."""
         kept = (
             "keeps its result" if task["result"] else "goes on: report it by itself when it is done"
         )
         return (
             f"This message is about task {task['id']} \u201c{task['title']}\u201d unless it asks "
-            "for a different deliverable (another branch, PR, question or flow). If it does, do "
-            "that work and report it with report(new_task_title=<what it delivers>, status=…): "
-            f"it becomes a task of its own, and task {task['id']} {kept}."
+            "for separate work with a result of its own (another branch, PR, document, run or "
+            "flow, a change, or what the owner asks to be a task of its own). A question (about "
+            "this task, or a quick one about anything else) you answer in your reply, without a "
+            "report. Separate work you do and report with report(new_task_title=<what it "
+            f"delivers>, status=…): it becomes a task of its own, and task {task['id']} {kept}."
         )
 
     def heard(self, text: str, home: bool = False) -> str:
@@ -2839,14 +2845,20 @@ class Runtime:
     def thread_task(self, session_id: str, thread: str) -> dict | None:
         """Which of a worker's tasks a followed thread is about: for a PR, the task that made
         it (its news is that work's, whichever later task of the worker follows or names it
-        too); else the newest one the follow was made for, else the newest whose PRs or
+        too), unless it no longer follows it (stopped for it, or followed for other tasks
+        only); else the newest one the follow was made for, else the newest whose PRs or
         instructions name it."""
         from .tools import names_pr
 
         maker = self.pr_maker(session_id, thread)
-        if maker and maker["status"] not in {"cancelled", "failed"}:
-            return maker
         bound = self.store.follow_tasks(session_id, thread)
+        if (
+            maker
+            and maker["status"] not in {"cancelled", "failed"}
+            and not self.store.get(f"stoppedfor:{maker['id']}:{thread}")
+            and (not bound or maker["id"] in bound)
+        ):
+            return maker
         for task in reversed(self.tasks.for_session(session_id)):
             if task["id"] in bound:
                 return task

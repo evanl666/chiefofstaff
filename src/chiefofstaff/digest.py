@@ -177,11 +177,16 @@ def needs(runtime: Runtime, moment: datetime | None = None) -> Needs:
         found.items.append(item)
     for draft in store.drafts("uncertain"):
         found.items.append({"kind": "send", "draft": draft, "session_id": draft["session_id"]})
+    # A PR two delivered tasks of one worker follow is one row on Home (board.js boardOf):
+    # counted once, for the newest of them.
+    pr_rows: list[tuple[dict, str]] = []
     for task in runtime.tasks.listed(include_ended_since=hours_ago(TASKS_SHOWN_HOURS)):
         if task["id"] in found.markers:
             continue
         marker = needs_marker(runtime, task, moment)
-        if marker == "question" and task["id"] in deciding:
+        if marker in {"pr-failing", "pr-changes"}:
+            pr_rows.append((task, marker))
+        elif marker == "question" and task["id"] in deciding:
             found.markers[task["id"]] = "decision"
         elif marker == "question" and runtime.drafts.question_draft(task):
             found.markers[task["id"]] = "card"  # It asks only about its draft: that card counts.
@@ -190,6 +195,17 @@ def needs(runtime: Runtime, moment: datetime | None = None) -> Needs:
             found.items.append(
                 {"kind": "task", "marker": marker, "task": task, "session_id": task["session_id"]}
             )
+    seen: set[tuple[str, tuple[str, ...]]] = set()
+    for task, marker in sorted(pr_rows, key=lambda row: row[0]["updated_at"], reverse=True):
+        follows = store.follows(task["session_id"])
+        key = (task["session_id"], tuple(sorted(runtime.task_actions.followed_for(task, follows))))
+        if key in seen:
+            continue
+        seen.add(key)
+        found.markers[task["id"]] = marker
+        found.items.append(
+            {"kind": "task", "marker": marker, "task": task, "session_id": task["session_id"]}
+        )
     for question in runtime.asks.owner_questions():
         if found.markers.get(question["task_id"]) not in NEEDS_WORDS:
             found.items.append(

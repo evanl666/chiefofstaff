@@ -156,7 +156,9 @@ class SpawnWorker(BaseModel):
         default="",
         description="Only after spawn_worker listed related workers: why none of them should "
         "take this (different subject, an independent change that needs its own PR, or work "
-        "that must run in parallel with theirs)",
+        "that must run in parallel with theirs). The owner reads it after “new because”: a "
+        "short reason in the owner's language, addressing them as “you” (“a different "
+        "repository”, “you asked for a separate PR”), not your reasoning",
     )
     replaces: list[str] = Field(
         default_factory=list,
@@ -264,7 +266,9 @@ class MessageSession(BaseModel):
         default="",
         description="For task='new' when the worker was given a task in the last half hour: "
         "why this is another deliverable, not more of that task (a correction, one more thing "
-        "is task='continue')",
+        "is task='continue'). The owner reads it after “new because”: a short reason in the "
+        "owner's language, addressing them as “you” (“a different repository”, “you asked "
+        "for a separate PR”), not your reasoning",
     )
     follow: list[str] = Field(
         default_factory=list,
@@ -367,13 +371,20 @@ class Report(NestedArguments):
         "status now; whenever one is made or its status changes. Not PRs: their status comes "
         "from GitHub",
     )
+    about_draft: bool = Field(
+        default=False,
+        description="With status question: true when the question only asks the owner to "
+        "decide a draft you made, or make in this same turn (send it, post it, approve it): "
+        "its card asks it, once. False for any other question, even one asked next to a draft",
+    )
     new_task_title: str = Field(
         default="",
         description="With status done, when this is work apart from the task (the owner asked "
-        "you straight for another deliverable: another branch, PR, question or flow), finished "
-        "or not: a title saying what it delivers. It becomes a task of its own with this "
-        "result; the task keeps its result and PR (one still at work goes on, reported by "
-        "itself). Never for the task's own result",
+        "you straight for separate work with a result of its own: another branch, PR, "
+        "document, run or flow, a change), finished or not: a title saying what it delivers. "
+        "It becomes a task of its own with this result; the task keeps its result and PR (one "
+        "still at work goes on, reported by itself). Never for the task's own result, nor for "
+        "an answer to a question (answer that in your reply)",
     )
     changed_code: bool | None = Field(
         default=None,
@@ -400,6 +411,19 @@ def task_text(instructions: str, criteria: list[str], decisions: Sequence[dict] 
 
 def clean_criteria(criteria: list[str]) -> list[str]:
     return [" ".join(text.split())[:300] for text in criteria if text.strip()][:8]
+
+
+def mid_sentence(text: str) -> str:
+    """A reason as it reads after "new because": no capital to start it (an acronym or a
+    name such as "PR" or "PRs" keeps its), no period to end it."""
+    if text.endswith("\u3002") or (text.endswith(".") and not text.endswith("..")):
+        text = text[:-1].rstrip()
+    first = text.split(maxsplit=1)[0] if text else ""
+    acronym = len(first) > 1 and first.isupper()
+    pronoun = first == "I" or first.startswith(("I'", "I\u2019"))
+    if text[:1].isupper() and not acronym and not text[1:2].isupper() and not pronoun:
+        text = text[0].lower() + text[1:]
+    return text
 
 
 class CancelTask(BaseModel):
@@ -1537,7 +1561,7 @@ class Tools:
         self.runtime.add_message(session_id, "router", params.instructions, meta)
         if not special:  # Chief of Staff's own helpers come and go quietly.
             # Not "Started" for work that waits: for the tasks it comes after, or for a slot.
-            waits = [dep["title"] for dep in after if dep["status"] not in {"done", "review"}]
+            waits = [dep["title"] for dep in self.tasks.unmet(task)]
             limit = self.store.settings().max_workers
             if waits:
                 said = f"Queued “{title}” · after " + ", ".join(f"“{t}”" for t in waits[:2])
@@ -1545,7 +1569,7 @@ class Tools:
                 said = f"Queued “{title}” · waits for a worker slot ({limit} busy)"
             else:
                 said = f"Started “{title}”"
-            notice = said + (f" · new because {why_new}" if why_new else "")
+            notice = said + (f" · new because {mid_sentence(why_new)}" if why_new else "")
             self.runtime.add_message(
                 caller, "notice", notice, {"session_id": session_id, "task_id": task["id"]}
             )
@@ -1881,7 +1905,7 @@ class Tools:
                 for text in await self.settle_earlier(earlier, params.earlier, task)
             )
             notice = f"New task “{title}” for the worker of “{worker_name}”" + (
-                f" · new because {why_new}" if why_new else ""
+                f" · new because {mid_sentence(why_new)}" if why_new else ""
             )
         elif params.task == "note":
             prompt = wrap(
@@ -2786,6 +2810,26 @@ class Tools:
             # task, or more on another, does not hold this one's report back.
             self.store.set(f"unread_report:{task['id']}", "1")
             newest = unread[-1]
+            first = min(entry[2] for entry in self.states[caller].unread.values())
+            owner_chat = self.store.value(
+                "SELECT count(*) FROM messages WHERE session_id=? AND id>=? AND kind='owner' "
+                "AND json_extract(meta, '$.task_id')=?",
+                (caller, first, task["id"]),
+            )
+            if owner_chat:
+                # The owner's chat may ask for separate work (its worker decides, see
+                # Runtime.apart_note): each deliverable is reported on its own, never with
+                # this task's result.
+                raise ValueError(
+                    "Not reported yet: a newer message from the owner about this task arrived "
+                    f"while you were finishing (“{newest[:200]}”). It reaches you next. Report "
+                    "each deliverable on its own, never two in one report: if it asks for "
+                    "separate work, do that and report it with report(new_task_title=…), then "
+                    f"report this task's own work with task_id='{task['id']}'; if it adds to "
+                    "this task, handle it, then report this task once, with it; a question, "
+                    "answer in your reply, then report this task as you were. If you see it "
+                    "nowhere after this, report again as you were."
+                )
             raise ValueError(
                 "Not reported yet: a newer message for this task arrived while you were "
                 f"finishing (“{newest[:200]}”). It reaches you next: handle it, then report once, "
@@ -2978,7 +3022,9 @@ class Tools:
         if params.status in {"question", "blocked"}:
             # Under Needs you until answered, whatever becomes of the task (the Slack
             # session's too: it has no task).
-            self.runtime.asks.record_question(caller, params.summary, task["id"] if task else "")
+            self.runtime.asks.record_question(
+                caller, params.summary, task["id"] if task else "", about_draft=params.about_draft
+            )
         else:
             # It went on with this task: its question is behind it (another task's stays).
             self.runtime.asks.answered(caller, task["id"] if task else "", by="worker")

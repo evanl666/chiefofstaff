@@ -240,9 +240,7 @@ def runs(words: list[str]) -> list[str]:
         if skip:
             skip = False
         elif re.fullmatch(r"\d*[<>]+&?|&>", word):
-            skip = not word.endswith("&")  # Its target follows, unless it is a descriptor.
-            if word.endswith("&") and index + 1 < len(words) and words[index + 1].isdigit():
-                skip = True  # "2>&1" split as "2", ">&", "1".
+            skip = True  # Its target follows: a file, a descriptor ("2>&1": "2", ">&", "1"), "-".
         elif word.isdigit() and index + 1 < len(words) and words[index + 1][:1] in "<>":
             continue
         else:

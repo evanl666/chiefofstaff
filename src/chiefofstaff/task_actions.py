@@ -2472,8 +2472,13 @@ class TaskActions:
             at, trees = latest, json.loads(self.store.get(f"taskend:{task['id']}") or "{}")
         if not at or not trees:
             return at, {}
+        return at, self.base_from(at, trees)
+
+    @staticmethod
+    def base_from(at: str, trees: dict) -> dict:
+        """A task's base (see record_base) from snapshots of its checkouts taken at `at`."""
         commits = {path: found["commit"] for path, found in trees.items() if found.get("commit")}
-        return at, {
+        return {
             "at": datetime.fromisoformat(at).timestamp(),
             "commits": commits,
             "trees": {path: found["tree"] for path, found in trees.items() if found.get("tree")},
@@ -2481,13 +2486,46 @@ class TaskActions:
             "large": {path: found.get("large", []) for path, found in trees.items()},
         }
 
+    async def record_asked_base(self, task: dict):
+        """Its checkouts when the owner writes in the chat of a task still at work: separate
+        work that message asks for (see split_off) starts there, not where the task did, so
+        the task keeps what it did before. One per message (the latest few)."""
+        row = self.store.find_session(task["session_id"])
+        if not row:
+            return
+        row = await self.adopt_clones(row)
+        trees = {}
+        for checkout in self.workspaces.checkouts(row):
+            with suppress(Exception):
+                if (taken := await snapshot(checkout)) and taken["tree"]:
+                    trees[checkout["path"]] = taken
+        found = json.loads(self.store.get(f"askedbase:{task['id']}") or "[]")
+        found = [*found, {"at": now(), "trees": trees}][-6:]
+        self.store.set(f"askedbase:{task['id']}", json.dumps(found))
+
+    def asked_base(self, task: dict, since: str) -> dict:
+        """Where separate work asked for at `since` in the chat of a task with no result yet
+        starts: its checkouts as that message came (see record_asked_base); {} when they were
+        not recorded since it was taken up."""
+        started = self.store.value(
+            "SELECT max(started_at) FROM runs WHERE task_id=?", (task["id"],)
+        )
+        found = [
+            taken
+            for taken in json.loads(self.store.get(f"askedbase:{task['id']}") or "[]")
+            if (started or "") <= taken["at"] <= since
+        ]
+        return self.base_from(found[-1]["at"], found[-1]["trees"]) if found else {}
+
     def split_off(self, task: dict, title: str) -> dict:
         """A report on work apart from a task's result (its worker says it is another
         deliverable, or it is on another branch than the task's open PR): a new task of the
         same worker gets it, with what asked for it since the task was taken up again (the
         owner's or the Router's messages, the commands run). The task keeps its result and PR,
         as it was before (a follow-up that was this other work is over). A task with no result
-        yet goes on as it was: what the owner asked in its chat moves (see asked_in_chat)."""
+        yet goes on as it was: the owner's chat message that asked for this work moves (see
+        asked_apart), and the new task's share starts where its checkouts were then (see
+        record_asked_base)."""
         title = deliverable_title(title)
         earlier = self.tasks.find(self.store.get(f"splitoff:{task['id']}") or "")
         if earlier and earlier["status"] == "running" and not earlier["result"]:
@@ -2505,8 +2543,11 @@ class TaskActions:
                 else []
             )
         else:
-            asked, base = self.asked_in_chat(task), {}
+            # Only what asked for this work, and its checkouts then: what the task did before
+            # (on what the owner wrote about it earlier) stays its own.
+            asked = self.asked_apart(task)
             since = asked[0]["created_at"] if asked else ""
+            base = self.asked_base(task, since) if since else {}
         made = self.tasks.create(
             task["session_id"], title, f"Split off task {task['id']}.", status="running"
         )
@@ -2559,6 +2600,17 @@ class TaskActions:
             "AND created_at>=? ORDER BY id",
             (task["session_id"], task["id"], started or ""),
         )
+
+    def asked_apart(self, task: dict) -> list[dict]:
+        """The owner's chat message that asked for the separate work its worker reports now,
+        on a task with no result yet: the latest one it has seen (one still on its way is not
+        what it reports). Only that one: what the owner wrote before it the worker may have
+        acted on for the task (unsure, fewer move)."""
+        asked = self.asked_in_chat(task)
+        if unread := self.states[task["session_id"]].unread:
+            first = min(entry[2] for entry in unread.values())
+            asked = [message for message in asked if message["id"] < first]
+        return asked[-1:]
 
     async def off_branch(self, task: dict) -> tuple[str, str, str] | None:
         """(its PR, that PR's branch, the branch it is on now) when the worker did code work for

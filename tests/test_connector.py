@@ -209,7 +209,14 @@ async def test_away_the_owner_is_told_where_they_are_and_answers_from_there(tmp_
         runtime, "report_owner_replies", messenger["id"],
         replies=[{"code": draft_code, "text": f"{draft_code} send", "intent": "send"}],
     )  # fmt: skip
-    assert "nothing waits" in again.text_result_for_llm, "a code is used once"
+    assert again.text_result_for_llm == "Nothing to apply.", "a reply is judged once"
+    # Round 7 (J9): another reply to a code already answered is told what it already did.
+    later = await call_tool(
+        runtime, "report_owner_replies", messenger["id"],
+        replies=[{"code": draft_code, "text": f"{draft_code} no wait", "intent": "no"}],
+    )  # fmt: skip
+    assert "you answered this code already" in later.text_result_for_llm
+    assert harness.store.draft(draft["id"])["status"] == "sent"
 
 
 async def test_away_a_draft_answered_in_words_is_redone_and_a_bad_answer_is_said_once(tmp_path):

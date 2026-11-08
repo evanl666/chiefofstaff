@@ -28,6 +28,12 @@
     following the PR), and the Router hears when it can reach it again; after Copilot itself
     restarts, a worker's note says so (not "Chief of Staff restarted") and what the cut-short
     turn used is counted at once.
+  - **Away replies**: each reply is judged once and a code's newest reply is the one that
+    counts (a joke read again later can no longer send a draft); a message answering two codes
+    gives each its own part; a draft with blanks left ("[yes / no]", "___") is never sent; a
+    reply that was not applied is asked again where you are, saying why ("“after lunch”
+    sounds like not now"); "不错，发吧" or "no changes needed" sends, "tmrw", "明天发", "jk"
+    or "🙄" do not; a new reply to a code you already answered says what it did.
   - **What you read**: "Queued" (after which task, or for a slot), not "Started", for work
     that waits; titles in the language of the request; a long step keeps how long it has run in
     sight; review drafts are not called reply drafts; a Merge card shows the task's result,
@@ -51,6 +57,13 @@
     "Decided: …", not "Needs your decision".
   - **Results**: a result is not *Out of date* because its worker went on, on a new branch
     built on it, while its own branch is unchanged.
+  - **Separate work asked in a worker's chat**: asked while a task is at work, it is reported
+    by itself, never in one report with that task's result, and counts only what was done after
+    you asked (the task keeps its own changes, test runs and your earlier messages); its work
+    in a worktree the worker made itself is counted; a quick question is answered in the chat,
+    not filed as a task; "new because …" reads as part of its sentence; news on a PR goes to
+    the task still following it once you stop following it on the task that made it; a task
+    that waits for a result you have not accepted yet says "Queued".
 
 ## 0.1.31 (2026-11-08)
 

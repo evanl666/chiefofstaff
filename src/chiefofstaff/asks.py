@@ -160,7 +160,11 @@ class Asks:
                     self.store.set(target, json.dumps({**question, "task_id": task}))
             self.store.delete(f"ownerq:{key}")
 
-    def record_question(self, session_id: str, text: str, task_id: str = ""):
+    def record_question(
+        self, session_id: str, text: str, task_id: str = "", about_draft: bool = False
+    ):
+        """`about_draft`: its session says it only asks the owner to decide its draft (see
+        Drafts.asked_with)."""
         text = text.strip()[:6000]
         key = f"ownerq:{session_id}:{task_id}"
         if not task_id:
@@ -171,7 +175,10 @@ class Asks:
                 if not question.get("task_id") and question.get("text") == text
             ]
             key = f"ownerq:{same[-1]}" if same else f"ownerq:{session_id}:-:{uuid4().hex[:8]}"
-        self.store.set(key, json.dumps({"text": text, "task_id": task_id, "at": now()}))
+        question: dict[str, str | bool] = {"text": text, "task_id": task_id, "at": now()}
+        if about_draft:
+            question["about_draft"] = True
+        self.store.set(key, json.dumps(question))
         self.runtime.publish_state()
 
     def owner_question(self, question_id: str) -> dict | None:

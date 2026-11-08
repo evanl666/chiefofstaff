@@ -1011,9 +1011,14 @@ class Drafts:
         return draft["id"] in text or bool(DRAFT_DECISION.search(text))
 
     def asked_with(self, question: dict, draft: dict) -> bool:
-        """Whether its session asked the owner `question` in the turn that made `draft`, just
-        before it, for the same task: seconds earlier, the owner telling it nothing between."""
+        """Whether `question` is about `draft`: its session said it only asks the owner to
+        decide its draft (report(about_draft=true)), and asked it in the turn that made the
+        draft, just before it, for the same task, the owner telling it nothing between. Asked
+        next to a draft without saying so, it is a question of its own (not hidden on a card,
+        nor answered by sending the draft)."""
         task = self.task_of(draft)
+        if not question.get("about_draft"):
+            return False
         if not task or (question.get("task_id") or "") != task["id"]:
             return False
         asked, made = question.get("at") or "", draft["created_at"]

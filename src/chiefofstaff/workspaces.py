@@ -268,8 +268,19 @@ MAX_REPOSITORIES = 100
 SKIPPED = {"node_modules", "venv", "__pycache__", "dist", "build", "target", "Library"}
 
 
-def find_repositories(folder: Path, skip: set[Path]) -> list[str]:
-    """Git repositories in a code folder, and in its folders up to CODE_FOLDER_DEPTH deep.
+def linked_worktree(path: Path) -> bool:
+    """Whether a folder is a linked worktree's: its `.git` a file pointing at a git dir."""
+    pointer = path / ".git"
+    with suppress(OSError):
+        if pointer.is_file() and not pointer.is_symlink():
+            with pointer.open("rb") as handle:
+                return handle.read(8) == b"gitdir: "
+    return False
+
+
+def find_repositories(folder: Path, skip: set[Path], worktrees: bool = False) -> list[str]:
+    """Git repositories in a code folder, and in its folders up to CODE_FOLDER_DEPTH deep
+    (`worktrees`: linked worktrees too, such as one a worker made in its folder).
 
     A repository's own subfolders are not searched (worktrees and submodules belong to it);
     hidden folders, dependencies and `skip` (Chief of Staff's own folders) are left out.
@@ -279,7 +290,7 @@ def find_repositories(folder: Path, skip: set[Path]) -> list[str]:
     for depth in range(CODE_FOLDER_DEPTH + 1):
         deeper = []
         for path in level:
-            if (path / ".git").is_dir():
+            if (path / ".git").is_dir() or (worktrees and linked_worktree(path)):
                 found.append(str(path))
                 continue
             if depth == CODE_FOLDER_DEPTH:
@@ -1717,9 +1728,10 @@ class Workspaces:
         return []
 
     async def own_clones(self, row: dict) -> list[dict]:
-        """Repositories a worker cloned itself into its folder (`git clone` in its shell), not
-        yet among its checkouts: what it does there is counted and shown like a checkout's,
-        not lost as a report's. Not one whose git config would run code."""
+        """Repositories a worker cloned itself into its folder (`git clone` in its shell), and
+        worktrees it made there (`git worktree add`, see own_worktree), not yet among its
+        checkouts: what it does there is counted and shown like a checkout's, not lost as a
+        report's. Not one whose git config would run code."""
         workspace = self.workspace(row)
         keys = ("path", "repo", "worktree")
         paths = [c[key] for c in self.checkouts(row) for key in keys if c.get(key)]
@@ -1730,18 +1742,25 @@ class Workspaces:
             known = {os.path.realpath(path) for path in paths}
             return [
                 repo
-                for repo in find_repositories(workspace, set())
+                for repo in find_repositories(workspace, set(), worktrees=True)
                 if os.path.realpath(repo) not in known
                 and not config_runs_code(str(Path(repo) / ".git"))
             ]
 
         made = []
-        for repo in await asyncio.to_thread(unknown):
-            checkout = {"project": "", "repo": repo, "path": repo, "branch": "", "base_ref": "",
-                        "base": "a clone it made itself", "remote": repo}  # fmt: skip
-            with suppress(ValueError):
-                url = await checkout_git(checkout, repo, "remote", "get-url", "origin")
-                checkout["remote"] = url.strip() or repo
+        found = await asyncio.to_thread(unknown)
+        for repo in found:
+            if await asyncio.to_thread(linked_worktree, Path(repo)):
+                if not (checkout := await self.own_worktree(row, repo, found)):
+                    continue
+            else:
+                checkout = {"project": "", "repo": repo, "path": repo, "branch": "",
+                            "base_ref": "", "base": "a clone it made itself",
+                            "remote": repo}  # fmt: skip
+            if checkout.get("remote"):
+                with suppress(ValueError):
+                    url = await checkout_git(checkout, repo, "remote", "get-url", "origin")
+                    checkout["remote"] = url.strip() or repo
             with suppress(ValueError):
                 branch = await checkout_git(checkout, repo, "rev-parse", "--abbrev-ref", "HEAD")
                 checkout["branch"] = branch.strip().removesuffix("HEAD")
@@ -1750,8 +1769,49 @@ class Workspaces:
                     await checkout_git(checkout, repo, "rev-parse", "--verify", "--quiet", ref)
                     checkout["base_ref"] = ref
                     break
+            if not checkout["base_ref"] and checkout["repo"] != repo:
+                # A worktree of a repository without an origin: from the owner's own branch.
+                checkout["base_ref"] = await local_default(checkout, repo)
             made.append(checkout)
         return made
+
+    async def own_worktree(self, row: dict, tree: str, found: list[str]) -> dict | None:
+        """A linked worktree a worker made itself in its folder, as a checkout: only of a
+        repository it works in or a clone it made in its folder (whose config it can write:
+        checked like a clone's). Which one is read from the repository's side (admin_dir), not
+        from the `.git` file the worker wrote."""
+        workspace = str(self.workspace(row))
+        commons = [
+            checkout.get("git_dir") or str(Path(checkout["repo"]) / ".git")
+            for checkout in self.checkouts(row)
+            if checkout.get("git_dir") or checkout.get("repo")
+        ]
+        commons += [str(Path(path) / ".git") for path in found]
+
+        def repository() -> str:
+            seen = set()
+            for common in commons:
+                real = os.path.realpath(common)
+                if real not in seen and os.path.isdir(real) and admin_dir(real, tree):  # noqa: PTH112
+                    return real
+                seen.add(real)
+            return ""
+
+        common = await asyncio.to_thread(repository)
+        if not common:
+            return None
+        own = within(common, workspace)
+        if own and await asyncio.to_thread(config_runs_code, common):
+            return None
+        checkout = {"project": "", "path": tree, "branch": "", "base_ref": "",
+                    "base": "a worktree it made itself"}  # fmt: skip
+        if Path(common).name == ".git":
+            checkout["repo"] = str(Path(common).parent)
+        else:
+            checkout |= {"repo": common, "git_dir": common}
+        if own:
+            checkout["remote"] = checkout["repo"]
+        return checkout
 
     def writable(self, row: dict) -> list[str]:
         if row["role"] != WORKER:

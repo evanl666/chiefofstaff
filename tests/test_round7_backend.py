@@ -162,7 +162,7 @@ async def test_a_question_asked_as_its_draft_was_made_is_one_card_the_draft_sett
     runtime.github.publish_review = publish_review
     made = await spawn(runtime, harness.router_id, "Review median() PR")
     worker, task = made["session_id"], made["task_id"]
-    await call_tool(runtime, "report", worker, status="question",
+    await call_tool(runtime, "report", worker, status="question", about_draft=True,
                     summary="I drafted an approval for you to send.")  # fmt: skip
     harness.session(worker).emit("session.idle")
     await settle(runtime)
@@ -294,3 +294,21 @@ async def test_a_task_at_work_after_its_decision_says_what_was_decided(harness):
     await runtime.drafts.resolve(card["id"], DraftDecision(action="answer", text="Email only"))
     task = runtime.tasks.get(made["task_id"])
     assert (task["status"], task["progress"]) == ("running", "Decided: Email only")
+
+
+async def test_a_question_asked_next_to_a_draft_is_its_own_unless_its_worker_says(harness):
+    """Round 7 (review of G6): "64 or 128 MB?" asked the moment before an unrelated Slack
+    draft was hidden on that draft's card, and sending the draft would have answered it. Only
+    a question its worker says is about its draft (about_draft) goes with it."""
+    runtime = await harness.connect()
+    made = await spawn(runtime, harness.router_id, "Pick the cache size")
+    worker, task = made["session_id"], made["task_id"]
+    await call_tool(runtime, "report", worker, status="question", summary="64 or 128 MB?")
+    harness.session(worker).emit("session.idle")
+    await settle(runtime)
+    await call_tool(runtime, "draft_reply", worker, to="Bob", where="mail", text="Sure, Friday.")
+    assert not runtime.task_actions.view(runtime.tasks.get(task))["question_draft"]
+    [draft] = harness.store.drafts()
+    await runtime.drafts.resolve(draft["id"], DraftDecision(action="send"))
+    await settle(runtime)
+    assert runtime.asks.owner_question(f"{worker}:{task}"), "its question still waits"
