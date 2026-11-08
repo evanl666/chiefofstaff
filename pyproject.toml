@@ -30,7 +30,7 @@ dependencies = [
   "pydantic>=2.10,<3",
   "platformdirs>=4,<5",
   "keyring>=25,<26",
-  "mcp>=1.24,<2",
+  "mcp>=1.24,<3",
   "github-copilot-sdk>=1.0.28,<1.1",
   "httpx>=0.28,<1",
 ]
