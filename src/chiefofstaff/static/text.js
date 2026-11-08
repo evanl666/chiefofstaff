@@ -153,17 +153,21 @@ export function linkKey(url) {
     return url;
   }
 }
-// The links of a report: not those in code (a block or `inline`), nor one cut short ("…").
+// The links of a report: not those in code (a block or `inline`), nor one cut short ("…" or
+// "...").
 export function reportUrls(text) {
-  return findUrls((text || "").replace(/```[\s\S]*?(```|$)/g, " ").replace(/`[^`\n]+`/g, " ").replace(/https?:\/\/\S*…\S*/g, " "));
+  return findUrls((text || "").replace(/```[\s\S]*?(```|$)/g, " ").replace(/`[^`\n]+`/g, " ").replace(/https?:\/\/\S*(?:…|\.{3})\S*/g, " "));
 }
+// Words that only point at a link ("here", "this doc", "链接"): not its name.
+const GENERIC_ANCHOR = /^(?:(?:click|see|open)\s+)?(?:(?:the|this|that)\s+)?(?:here|link|doc|docs|document|source|url|page)$|^(?:点击)?(?:这里|此处|链接|这个链接|文档|这个文档)$/i;
 // The words a task's reports linked each link with ("[qwen3 SFT 11-05](https://…)"), by its key:
 // its latest report's, then those the server kept from earlier ones (`link_names`).
 export function linkNames(task) {
   const names = new Map();
   const add = (url, words) => {
     const name = plainText(String(words || "")).replace(/\s+/g, " ").trim();
-    if (name && !/^https?:\/\//.test(name) && !names.has(linkKey(url))) names.set(linkKey(url), shorten(name, 80));
+    const bare = name.replace(/^[\s"'“‘(（]+|[\s"'”’)）.,:;!?。，：；！？]+$/g, "");
+    if (name && !/^https?:\/\//.test(name) && !GENERIC_ANCHOR.test(bare) && !names.has(linkKey(url))) names.set(linkKey(url), shorten(name, 80));
   };
   const text = [task.result, task.progress].filter(Boolean).join("\n").replace(/```[\s\S]*?(```|$)/g, " ").replace(/`[^`\n]+`/g, " ");
   for (const [, words, url] of text.matchAll(/(?<!!)\[([^\]\n]+)\]\((https?:\/\/(?:[^\s()]|\([^\s()]*\))+)\)/g)) add(url, words);
@@ -175,7 +179,8 @@ const fileUrl = (path) => `file://${path.split("/").map(encodeURIComponent).join
 // said (what its worker declared about it), file, name, path }. What it made is what its worker
 // declared (report(artifacts=…)), what its reports say it made (`made_links`) and the files it
 // wrote in its folder (`files`); a top-level run it gives is its run. A document it only
-// mentions, and anything it was given, is a reference.
+// mentions, and anything it was given, is a reference: a report saying it made a link it was
+// given does not make it its output (declared, or a file it wrote, does).
 export function taskLinks(task) {
   const given = new Set((task.given_links || []).map(linkKey));
   const made = new Set((task.made_links || []).map(linkKey));
@@ -196,7 +201,7 @@ export function taskLinks(task) {
     const file = files.get(key);
     let role = found.role;
     if (role === "diagnostic" && found.id && asked.includes(found.id)) role = "run";
-    if (said || file || made.has(key)) {
+    if (said || file || (made.has(key) && !given.has(key))) {
       if (!["pr", "run"].includes(role)) role = "output";
     } else if (role === "output" || given.has(key)) {
       role = "reference";
@@ -419,11 +424,28 @@ export function gist(text) {
     const plain = plainText(bare).replace(/[:：]$/, "");
     return !(plain.length <= 12 && plain.split(/\s+/).length <= 2 && (/[:：]$/.test(plainText(bare)) || /^\*\*.*\*\*$/.test(bare)));
   });
-  // Links as what they are, short: "app#592", "docs.google.com…".
+  // Links as what they are, short: "app#592", "docs.google.com…"; what follows a link (")", ".")
+  // stays the sentence's.
   return plainText(said.join("\n"))
     .replace(/\s*\n\s*/g, " ")
-    .replace(/https:\/\/github\.com\/[^/\s]+\/([^/\s]+)\/(?:pull|issues)\/(\d+)[^\s]*/g, "$1#$2")
-    .replace(/https?:\/\/(?:www\.)?([^/\s]+)\/[^\s]*/g, "$1…");
+    .replace(URL_RE, (raw) => {
+      const [url, trail] = trimUrl(raw);
+      const pr = /^https:\/\/github\.com\/[^/\s]+\/([^/\s]+)\/(?:pull|issues)\/(\d+)/.exec(url);
+      if (pr) return `${pr[1]}#${pr[2]}${trail}`;
+      const site = /^https?:\/\/(?:www\.)?([^/\s]+)\//.exec(url);
+      return site ? `${site[1]}…${trail.replace(/^\./, "")}` : raw;
+    });
+}
+// A notice's main part, without its aside: "Started “Benchmark words() · textkit”" of
+// "Started “Benchmark words() · textkit” · new because …" (a " · " inside quotes is the title's).
+export function headOf(text) {
+  let depth = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    if (text[i] === "“") depth += 1;
+    else if (text[i] === "”") depth = Math.max(0, depth - 1);
+    else if (!depth && text.startsWith(" · ", i)) return text.slice(0, i);
+  }
+  return text;
 }
 export function clock(iso) {
   const date = new Date(iso);
@@ -478,6 +500,17 @@ export function since(iso) {
 export function plural(count, word) {
   return `${count} ${word}${count === 1 ? "" : "s"}`;
 }
+// A task's changes in a chip: "+12 −3 in 2 files"; a new file too large to count lines in is
+// said as such, not as "+0 −0" ("1 large new file"; `large` may be missing).
+export function changesText(changed) {
+  const large = Math.min(Number(changed.large) || 0, changed.files || 0);
+  const counted = (changed.files || 0) - large;
+  const lines = counted ? `+${changed.insertions || 0} −${changed.deletions || 0} in ${plural(counted, "file")}` : "";
+  return [lines, large ? `${large} large new file${large === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · ");
+}
+// In a folder of the owner's, files changed during the task by others (the owner, a pull,
+// another task): not its own, so not counted ("not counted: 2 files"; may be missing).
+export const notCountedText = (changed) => (Number(changed.not_counted) > 0 ? `not counted: ${plural(Number(changed.not_counted), "file")}` : "");
 export function lines(value) {
   return value.split("\n").map((line) => line.trim()).filter(Boolean);
 }

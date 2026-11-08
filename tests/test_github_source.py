@@ -20,8 +20,9 @@ class Host:
     async def on_trigger(self, *args, **kwargs):
         raise AssertionError("followed PR activity must not go to the Router")
 
-    async def on_thread(self, source, thread, keys, text, display=None):
+    async def on_thread(self, source, thread, keys, text, display=None, replies=None):
         self.deliveries.append((thread, keys, text))
+        self.replies = replies
         for key in keys:
             self.store.add_trigger(source, key, text)
         return True
@@ -54,16 +55,19 @@ def fake_gh(state):
             return json.dumps(state["comments"])
         if path.startswith("repos/acme/app/pulls/7/comments"):
             return json.dumps(
-                [
-                    {
-                        "id": 21,
-                        "user": {"login": "carol"},
-                        "path": "app.py",
-                        "line": 12,
-                        "body": "Off by one?",
-                        "html_url": "u21",
-                    }
-                ]
+                state.get(
+                    "line_comments",
+                    [
+                        {
+                            "id": 21,
+                            "user": {"login": "carol"},
+                            "path": "app.py",
+                            "line": 12,
+                            "body": "Off by one?",
+                            "html_url": "u21",
+                        }
+                    ],
+                )
             )
         if path.startswith("repos/acme/app/pulls/7/reviews"):
             return json.dumps(
@@ -349,6 +353,34 @@ async def test_a_pr_cited_after_it_finished_is_just_unfollowed(tmp_path):
     assert host.unfollowed == [(THREAD, False, False)], "and its follower is not closed"
 
 
+async def test_a_closed_pr_followed_on_request_brings_its_reopening(tmp_path):
+    """Bug bash 3 (H8): asked to follow a PR closed already ("tell me if it is reopened"), the
+    worker said it would; the next poll unfollowed it silently and the reopening reached
+    nobody. It stays followed for two weeks; then its follower is told it no longer is."""
+    import time
+
+    store = Store(tmp_path / "data")
+    store.save_settings(Settings())
+    store.set(f"ghkeep:{THREAD}", str(time.time()))  # follow_thread, or the Router's `follow`.
+    state = {"state": "closed", "merged": False, "comments": [], "line_comments": []}
+    state["runs"] = [{"name": "tests", "status": "in_progress"}]
+    host = Host(store)
+    source = GitHubSource(store, host, gh_command=fake_gh(state))
+    await source.poll_once()
+    assert host.unfollowed == [] and [s["thread"] for s in host.subscriptions] == [THREAD]
+    assert not any("The PR was" in text for _, _, text in host.deliveries), "closed: not news"
+    state["state"] = "open"
+    await source.poll_once()
+    assert host.deliveries[-1][1] == [f"github:state:{THREAD}:reopened:2026-01-01T00:00:00Z"]
+    assert "The PR was reopened." in host.deliveries[-1][2]
+
+    state["state"] = "closed"
+    host.subscriptions = [{"thread": THREAD, "since": 1793500000.0}]
+    store.set(f"ghkeep:{THREAD}", str(time.time() - 15 * 86400))
+    await source.poll_once()
+    assert host.unfollowed[-1][:2] == (THREAD, "missing") and "14 days" in host.unfollowed[-1][2]
+
+
 async def test_a_pr_is_done_by_when_it_ended_not_by_what_a_poll_saw(tmp_path):
     store = Store(tmp_path / "data")
     store.save_settings(Settings())
@@ -450,6 +482,16 @@ def test_workers_learn_which_github_accounts_they_can_use():
     assert "GH_TOKEN=$(gh auth token --user evan-corp) gh" in text
     assert "Never run gh auth switch" in text
     assert "gh auth token" not in worker_context("/w", "/w", [], False, gh_accounts=accounts[:1])
+    # Bug bash 3 (H13): workers opened PRs as the other account, which the line named, though
+    # the active one reached the repository (and Chief of Staff acted as it there).
+    assert "every repository: as evanl666, gh as it is (no GH_TOKEN)" in text
+    assert "only when gh says such a repository is not found" in text.lower()
+    corp = worker_context("/w", "/w", [], False, gh_accounts=accounts,
+                          gh_acting={"corp": "evan-corp"})  # fmt: skip
+    assert "- corp/… repositories: as evan-corp, GH_TOKEN=$(gh auth token --user evan-corp)" in (
+        corp
+    )
+    assert "every other repository: as evanl666" in corp
 
 
 async def test_accounts_are_read_on_a_machine_that_just_booted(tmp_path, monkeypatch):
@@ -733,3 +775,90 @@ async def test_a_review_is_not_posted_on_the_commit_before_a_push(harness):
         "status"
     ] == "sent"
     assert posted(harness)[0]["commit_id"] == "c0ffee"
+
+
+async def test_a_reply_to_what_a_task_posted_on_a_pr_names_that_task(tmp_path):
+    """Bug bash 3 (H2): a reviewer that did not make the PR still hears what answers it: a
+    reply to its line comment, or in a conversation it replied in."""
+    store = Store(tmp_path / "data")
+    store.save_settings(Settings())
+
+    def comment(number, root, body):
+        return {"id": number, "in_reply_to_id": root, "user": {"login": "bob"},
+                "path": "app.py", "line": 3, "body": body, "html_url": f"u{number}"}  # fmt: skip
+
+    state = {"state": "open", "merged": False, "comments": [], "line_comments": [
+        comment(21, None, "Off by one?"), comment(41, 21, "Still off"), comment(52, 50, "Fixed"),
+    ]}  # fmt: skip
+    gh = fake_gh(state)
+
+    async def replying(*arguments, payload=None):
+        if arguments[1].endswith("/comments/21/replies"):
+            return json.dumps({"id": 40, "in_reply_to_id": 21, "html_url": "u40"})
+        return await gh(*arguments, payload=payload)
+
+    host = Host(store)
+    source = GitHubSource(store, host, gh_command=replying)
+    target = {"repo": "acme/app", "number": 7, "task_id": "treview"}
+    await source.publish_reply(target | {"in_reply_to": 21}, "Not off by one: see line 4.")
+    source.posted("github:reviewcomment:50", "Rename this.", target)  # Its review's comment.
+    await source.poll_once()
+    assert host.replies == {
+        "github:reviewcomment:41": ("treview", "bob on app.py:3: Still off (u41)"),
+        "github:reviewcomment:52": ("treview", "bob on app.py:3: Fixed (u52)"),
+    }
+
+
+async def test_a_workers_quiet_commit_is_not_news_on_its_pr(tmp_path, git_repo):
+    """Bug bash 3 (H3): `git commit -qm` says nothing, inside a command of another kind, and a
+    git email GitHub does not know shows no login: a worker's own push came back as news. Its
+    checkout's log says it made it; a teammate's commit fetched there is still news."""
+    import subprocess
+
+    def git(*arguments, cwd=git_repo):
+        return subprocess.run(
+            ["git", "-c", "user.email=w@example.com", "-c", "user.name=W", *arguments],
+            cwd=cwd, check=True, capture_output=True, text=True,
+        ).stdout.strip()  # fmt: skip
+
+    tree = tmp_path / "worker" / "repo"
+    git("worktree", "add", "-q", "-b", "chief/fix", str(tree))
+    (tree / "a.txt").write_text("a\n")
+    git("add", "a.txt", cwd=tree)
+    git("commit", "-qm", "Add a", cwd=tree)
+    mine = git("rev-parse", "HEAD", cwd=tree)
+    other = tmp_path / "teammate"
+    git("clone", "-q", str(git_repo), str(other))
+    git("commit", "-q", "--allow-empty", "-m", "Theirs", cwd=other)
+    theirs = git("rev-parse", "HEAD", cwd=other)
+    git("fetch", "-q", str(other), "main:refs/remotes/teammate/main")
+
+    store = Store(tmp_path / "data")
+    store.save_settings(Settings())
+    store.create_session("w1", "worker", "Fix", "done", cwd=str(tree))
+    checkout = {"repo": str(git_repo), "path": str(tree), "branch": "chief/fix"}
+    store.execute("UPDATE sessions SET repos=? WHERE id='w1'", (json.dumps([checkout]),))
+    state = {"state": "open", "merged": False, "comments": [], "line_comments": []}
+    state["runs"] = [{"name": "tests", "status": "in_progress"}]
+    host = Host(store)
+    source = GitHubSource(store, host, gh_command=fake_gh(state))
+
+    async def acting_login(repo):
+        return "me"
+
+    source.acting_login = acting_login
+    await source.poll_once()
+    seen = len(host.deliveries)
+
+    def anonymous(sha, message):
+        return {"sha": sha, "author": None, "commit": {"message": message, "author": {"name": "W"}}}
+
+    state |= {"sha": mine, "compare": {"status": "ahead", "commits": [anonymous(mine, "Add a")]}}
+    await source.poll_once()
+    assert len(host.deliveries) == seen, "its worker's own commit is not news"
+    state |= {
+        "sha": theirs,
+        "compare": {"status": "ahead", "commits": [anonymous(theirs, "Theirs")]},
+    }
+    await source.poll_once()
+    assert "1 new commit(s)" in host.deliveries[-1][2] and "W: Theirs" in host.deliveries[-1][2]

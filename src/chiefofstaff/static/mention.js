@@ -1,7 +1,7 @@
 // Addressing one worker from Home: "@" picks a worker, and the message goes straight to it. The
 // Router hears of it with its next message.
 import { $, el } from "./dom.js";
-import { HOME, sessions, state } from "./state.js";
+import { HOME, sessions, state, workerTitle } from "./state.js";
 
 export const mention = { to: null, options: [], active: 0 };
 
@@ -30,7 +30,7 @@ function render() {
           },
         },
         el("span", { class: `dot ${worker.status}` }),
-        el("span", { class: "name", text: worker.title }),
+        el("span", { class: "name", text: workerTitle(worker), title: worker.title !== workerTitle(worker) ? `Started as “${worker.title}”` : undefined }),
         el("span", { class: "status", text: worker.activity || worker.status }),
       ),
     ),
@@ -49,9 +49,11 @@ export function onComposerInput() {
     closeMentions();
     return;
   }
+  // By the name it shows now (the task it is on), or the one it started with.
   const text = found.text.toLowerCase();
+  const named = (session) => [workerTitle(session), session.title].some((name) => (name || "").toLowerCase().includes(text));
   mention.options = sessions()
-    .filter((session) => session.role === "worker" && !session.helper && !session.closed_at && session.title.toLowerCase().includes(text))
+    .filter((session) => session.role === "worker" && !session.helper && !session.closed_at && named(session))
     .slice(0, 8);
   mention.active = 0;
   render();
@@ -70,7 +72,7 @@ function choose(worker) {
 }
 
 export function setRecipient(worker) {
-  mention.to = worker ? { id: worker.id, title: worker.title } : null;
+  mention.to = worker ? { id: worker.id, title: workerTitle(worker) } : null;
   const chip = $("#composer-to");
   chip.hidden = !mention.to;
   chip.replaceChildren(

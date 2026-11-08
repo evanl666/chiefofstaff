@@ -26,7 +26,14 @@ from .decisions import AckDecision, AskDecision, RecordDecision
 from .envelope import clean_title, language, short, wrap
 from .habits import UpdateStyle
 from .learning import ProposeLessons
-from .models import MAX_DRAFT, DraftDecision, NestedArguments, WithdrawDraft, leak_proof
+from .models import (
+    MAX_DRAFT,
+    DraftDecision,
+    NestedArguments,
+    Watch,
+    WithdrawDraft,
+    leak_proof,
+)
 from .peers import TellSession
 from .policy import within
 from .roles import ROUTER, SLACK, WATCHDOG, WORKER
@@ -48,6 +55,13 @@ OWNER_REF = re.compile(r"\{owner:\s*([A-Za-z0-9]+)\}")  # Not {owner} (GitHub's 
 
 # Thinking efforts, least first.
 EFFORTS = ["none", "low", "medium", "high", "xhigh", "max"]
+
+REPLACES = (
+    "Ids (t…) of failed tasks (or tasks still open) that this new task does instead: they "
+    "are cancelled as replaced by it, so the owner is not also offered to retry them. To try "
+    "a failed task again in its own worker, message_session it with task='continue' and its "
+    "task_id instead"
+)
 
 
 logger = logging.getLogger(__name__)
@@ -140,6 +154,10 @@ class SpawnWorker(BaseModel):
         description="Only after spawn_worker listed related workers: why none of them should "
         "take this (different subject, an independent change that needs its own PR, or work "
         "that must run in parallel with theirs)",
+    )
+    replaces: list[str] = Field(
+        default_factory=list,
+        description=REPLACES,
     )
 
 
@@ -236,6 +254,9 @@ class MessageSession(BaseModel):
         "reports it (done, blocked or question) before starting the new one. keep: it goes on "
         "after the new one. superseded: the new task replaces it, and it is cancelled",
     )
+    replaces: list[str] = Field(
+        default_factory=list, description=f"For task='new': {REPLACES[0].lower()}{REPLACES[1:]}"
+    )
     follow: list[str] = Field(
         default_factory=list,
         description="Thread keys from the event (slack:<channel>:<ts>, slack:<D…>, "
@@ -312,11 +333,12 @@ class ArtifactState(BaseModel):
 
 
 class Report(NestedArguments):
-    status: Literal["progress", "question", "blocked", "done"]
+    status: Literal["progress", "question", "blocked", "done", "failed"]
     summary: str = Field(
         description="What happened, or the one concrete question. With status done: the whole "
         "answer the owner reads (tables, lists, every row asked for), up to 30,000 characters; "
-        "never only a pointer to a file"
+        "never only a pointer to a file. With status failed: why it cannot be done, and what "
+        "you tried"
     )
     task_id: str = Field(
         default="",
@@ -361,6 +383,25 @@ def clean_criteria(criteria: list[str]) -> list[str]:
 class CancelTask(BaseModel):
     task_id: str = Field(description="Task id (t…), or a worker id for its current task")
     reason: str = Field(default="", description="Why, in a few words (the owner sees it)")
+
+
+class StopWorker(BaseModel):
+    session_id: str = Field(
+        description="The worker to stop (its id or short id), or a task id (t…) for its worker"
+    )
+
+
+class AddWatch(BaseModel):
+    what: str = Field(
+        description="What to look out for, in the owner's words, with where: 'New messages in "
+        "#deploys about the payments service', 'Mail from Acme legal', 'Comments on my design "
+        "doc'"
+    )
+    how: str = Field(
+        default="",
+        description="Which tool or source to use when the owner said ('the Slack MCP', 'Glean "
+        "search'); empty otherwise",
+    )
 
 
 class RenameTask(BaseModel):
@@ -632,10 +673,12 @@ def misplaced(comments: list[InlineComment], lines: dict) -> list[str]:
     return problems
 
 
-REPORT_STATUS = {"question": "waiting", "blocked": "waiting", "done": "done"}
+REPORT_STATUS = {"question": "waiting", "blocked": "waiting", "done": "done", "failed": "failed"}
 MAX_RESULT = 30000
 # Copilot hands a tool output over 50 KB to the model as a file, which the Router cannot read.
 LISTED_BYTES = 32000
+# The most watches Settings holds.
+MAX_WATCHES = 10
 
 
 def shortened(listed: dict) -> dict:
@@ -901,6 +944,23 @@ class Tools:
                 self.t_cancel_task,
             ),
             (
+                "stop_worker",
+                "Stop a worker now, as the owner's Stop button does: its turn ends (the command "
+                "it runs too) and the task it is on waits, stopped, for the owner's Go on or "
+                "Cancel. Nothing is cancelled. For “stop”, “pause”, “hold on”.",
+                StopWorker,
+                self.t_stop_worker,
+            ),
+            (
+                "add_watch",
+                "Propose a watch for the owner to confirm: something Chief of Staff looks out "
+                "for on their behalf every few minutes in work hours (a channel, a topic, mail, "
+                "comments), with the tools this machine has; what needs them comes to you as "
+                'from="watch" events. Watches are listed in Settings → Connections → Watches.',
+                AddWatch,
+                self.t_add_watch,
+            ),
+            (
                 "rename_task",
                 "Rename a task whose title does not say what it delivers (its earlier names are "
                 "kept).",
@@ -923,7 +983,7 @@ class Tools:
             ),
             (
                 "report",
-                "Report to the Router: progress (rare), question, blocked or done.",
+                "Report to the Router: progress (rare), question, blocked, failed or done.",
                 Report,
                 self.t_report,
             ),
@@ -964,7 +1024,8 @@ class Tools:
             ),
             (
                 "follow_thread",
-                "Follow a Slack thread, DM or PR: its new messages come straight to you.",
+                "Follow a Slack thread, DM or PR: its new messages come straight to you (a PR "
+                "merged or closed already: its reopening, for 14 days).",
                 FollowThread,
                 self.t_follow_thread,
             ),
@@ -1100,6 +1161,7 @@ class Tools:
         title = clean_title(params.title)
         follow = [threads.normalize(key) for key in params.follow]
         after = [self.runtime.task_actions.task_for(reference) for reference in params.after]
+        replaced = self.replaced_tasks(params.replaces)
         context_from = [
             self.runtime.task_actions.task_for(reference)["id"] for reference in params.context_from
         ]
@@ -1197,6 +1259,7 @@ class Tools:
         if params.review:
             self.store.set(f"reviewreq:{task['id']}", "1")
         self.link_decisions(task["id"], decisions)
+        await self.replace(replaced, task)
         if not special:
             # Again now that it exists: another task started at the same time may exist now.
             self.runtime.peers.want(session_id, wanted)
@@ -1218,6 +1281,7 @@ class Tools:
             session_id,
             list(dict.fromkeys(follow + named_pulls(params.instructions))),
             task_id=task["id"],
+            asked=follow,
         )
         prompt = wrap(
             "router",
@@ -1427,6 +1491,12 @@ class Tools:
                 "A new task needs a title saying what it delivers: a verb, the object and where "
                 "(repo#PR, flow), e.g. 'Fix the Spark 3.5 dependency · repo#594'."
             )
+        if params.replaces and params.task != "new":
+            raise ValueError(
+                "replaces goes with task='new'. To try a failed task again in its own worker: "
+                "task='continue' with its task_id."
+            )
+        replaced = self.replaced_tasks(params.replaces)
         # A running task left behind by a new one would show as waiting its turn though it was
         # delivered or waits on the owner: the Router says what becomes of it.
         earlier = (
@@ -1464,7 +1534,7 @@ class Tools:
         pulls = named_pulls(params.text) if target["role"] == WORKER else []
         to_follow = list(dict.fromkeys(params.follow + pulls))
         if target["role"] != WORKER:
-            self.runtime.follow(target["id"], to_follow)
+            self.runtime.follow(target["id"], to_follow, asked=params.follow)
             await self.delivery.deliver(
                 target["id"],
                 wrap("router", "message", params.text),
@@ -1484,6 +1554,7 @@ class Tools:
             if params.review:
                 self.store.set(f"reviewreq:{task['id']}", "1")
             self.link_decisions(task["id"], decisions)
+            await self.replace(replaced, task)
             self.states[caller].turn_tasks.append(task["id"])
             prompt = wrap(
                 "router",
@@ -1524,7 +1595,9 @@ class Tools:
             )
             notice = f"Continued in “{self.runtime.display_title(target)}”"
         # Followed for the task this is about (a new one, or the one it continues).
-        self.runtime.follow(target["id"], to_follow, task_id=task["id"] if task else "")
+        self.runtime.follow(
+            target["id"], to_follow, task_id=task["id"] if task else "", asked=params.follow
+        )
         meta: dict[str, Any] = {"task_id": task["id"]} if task else {}
         if images := self.runtime.attachments_in(params.text):
             meta["attachments"] = images  # The owner's images it names come with it.
@@ -1569,6 +1642,43 @@ class Tools:
                     "with it (or report it)."
                 )
         return notes
+
+    def replaced_tasks(self, references: list[str]) -> list[dict]:
+        """The tasks a new one does instead (checked before anything changes)."""
+        found = []
+        for reference in references:
+            task = self.tasks.find(reference.strip())
+            if not task:
+                raise ValueError(f"No task {reference} to replace; list_sessions lists them.")
+            if task["status"] not in {"failed", *OPEN}:
+                raise ValueError(
+                    f"Task {task['id']} is {task['status']}: replaces is for a failed task (or "
+                    "one still open) that the new task does instead."
+                )
+            found.append(task)
+        return found
+
+    async def replace(self, old: list[dict], new: dict):
+        """Tasks a new one does instead are over: a failed one is not offered for a retry."""
+        why = f"Replaced by {new['id']} “{new['title']}”."
+        for task in old:
+            task = self.tasks.get(task["id"])
+            if task["status"] in OPEN:
+                with suppress(ValueError):
+                    await self.runtime.task_actions.cancel(task["id"], why, by="the Router")
+                continue
+            if task["status"] != "failed":
+                continue
+            self.tasks.move(task["id"], "cancelled", progress=why)
+            row = self.store.find_session(task["session_id"])
+            if (
+                row
+                and row["status"] == "failed"
+                and not any(
+                    t["status"] in {"failed", *OPEN} for t in self.tasks.for_session(row["id"])
+                )
+            ):
+                self.runtime.update_session(row["id"], status="done")  # Nothing of it is left.
 
     async def ask_to_continue(self, params: MessageSession) -> str:
         reference = params.session_id
@@ -1816,6 +1926,8 @@ class Tools:
             "default_worker_model": settings.role_models.get(WORKER) or settings.model or "auto",
             "slack_connected": self.runtime.slack.configured(),
             "github_repos": settings.github_repos if settings.github_enabled else [],
+            # What Chief of Staff looks out for on the owner's behalf (add_watch proposes more).
+            "watches": [watch.what for watch in settings.watches if watch.enabled],
             "recently_closed": [
                 self.runtime.workers.card(row)
                 for row in self.runtime.workers.recently_closed(8)
@@ -1964,7 +2076,7 @@ class Tools:
         row = self.store.session(params.session_id)
         if row["role"] != WORKER:
             raise ValueError("Only workers can be closed.")
-        await self.runtime.workers.close(row["id"])
+        await self.runtime.workers.close(row["id"], by="the Router")
         return "Closed."
 
     async def t_report(self, params: Report, caller: str):
@@ -2183,15 +2295,42 @@ class Tools:
                 if task["status"] in {"review", "done"} and not asked:
                     self.store.set(f"askedafter:{task['id']}", task["status"])
                 task = self.tasks.move(task["id"], "waiting", progress=params.summary[:6000])
+            elif params.status == "failed" and (
+                (
+                    was := self.store.get(f"reopened:{task['id']}")
+                    or self.store.get(f"askedafter:{task['id']}")
+                    or ""
+                )
+                in {"review", "done"}
+                or task["status"] in {"review", "done"}
+            ):
+                # More asked of finished work that it cannot do: what it had stands, and why is
+                # news on it.
+                self.runtime.task_actions.news(task["id"], params.summary)
+                task = (
+                    self.tasks.move(task["id"], was, progress=params.summary[:6000])
+                    if was
+                    else self.tasks.update(task["id"], progress=params.summary[:6000])
+                )
+            elif params.status == "failed":
+                # It cannot be done: under Needs you with why, for the owner to retry or drop.
+                task = self.tasks.move(task["id"], "failed", progress=params.summary[:6000])
+                self.runtime.alert(
+                    f"“{task['title']}” failed: {params.summary[:160]}",
+                    session_id=caller,
+                    needs_action=True,
+                    title="Failed",
+                )
             elif task["status"] != "running":
                 task = self.tasks.move(task["id"], "running", progress=params.summary[:6000])
             else:
                 task = self.tasks.update(task["id"], progress=params.summary[:6000])
         self.states[caller].resting = ""
-        if row["role"] == WORKER and params.status in {"question", "blocked"}:
-            # Under Needs you until answered, whatever becomes of the task.
+        if params.status in {"question", "blocked"}:
+            # Under Needs you until answered, whatever becomes of the task (the Slack
+            # session's too: it has no task).
             self.runtime.asks.record_question(caller, params.summary, task["id"] if task else "")
-        elif row["role"] == WORKER:
+        else:
             # It went on with this task: its question is behind it (another task's stays).
             self.runtime.asks.answered(caller, task["id"] if task else "")
         if row["role"] == WORKER and params.status in {"progress", "done"}:
@@ -2225,15 +2364,17 @@ class Tools:
         values: dict[str, Any] = {"report": params.summary[:4000]}
         if row["role"] == WORKER and params.status in REPORT_STATUS:
             values["status"] = REPORT_STATUS[params.status]
-            if values["status"] == "done" and any(
+            if params.status == "failed" and task and task["status"] != "failed":
+                values["status"] = "done"  # Its finished work stands.
+            if values["status"] in {"done", "failed"} and any(
                 other["status"] in OPEN for other in self.tasks.for_session(caller)
             ):
                 values["status"] = "idle"  # Another of its tasks is still open: not done.
         self.runtime.update_session(caller, **values)
-        if params.status == "done":
+        if params.status in {"done", "failed"}:
             self.runtime.background(
                 self.runtime.workers.pump()
-            )  # Tasks waiting for this one may start now.
+            )  # Tasks waiting for this one may start now (or are blocked).
         news = self.states[caller].thread_turn and (not task or task["status"] != "running")
         self.states[caller].thread_turn = False  # It told the owner.
         if params.status == "progress" and not news:
@@ -2258,6 +2399,96 @@ class Tools:
             self.runtime.task_actions.task_for(params.task_id)["id"], params.reason, "the Router"
         )
         return f"Cancelled task {task['id']}."
+
+    async def t_stop_worker(self, params: StopWorker, caller: str):
+        self.caller(caller, ROUTER)
+        reference = params.session_id.strip()
+        task = self.tasks.find(reference) if re.fullmatch(r"t[0-9a-f]{4,7}", reference) else None
+        try:
+            row = self.store.session(task["session_id"] if task else reference)
+        except LookupError:
+            raise ValueError(f"No worker or task {reference}; list_sessions lists them.") from None
+        if row["role"] != WORKER or row["closed_at"] or self.runtime.special(row):
+            raise ValueError(f"{reference} is not an open worker of the owner's.")
+        name = self.runtime.display_title(row)
+        if row["status"] not in {"working", "queued", "starting"}:
+            return f"“{name}” is not at work ({row['status']}): nothing to stop."
+        await self.runtime.workers.interrupt(row["id"], by="the Router")
+        stopped = [
+            f"{t['id']} “{t['title']}”"
+            for t in self.tasks.for_session(row["id"])
+            if t["status"] == "waiting" and self.store.get(f"stopped:{t['id']}")
+        ]
+        return f"Stopped “{name}”" + (
+            f": {', '.join(stopped)} waits for the owner's Go on (or Cancel)." if stopped else "."
+        )
+
+    async def t_add_watch(self, params: AddWatch, caller: str):
+        self.caller(caller, ROUTER)
+        what, how = " ".join(params.what.split())[:500], " ".join(params.how.split())[:300]
+        if len(what) < 3:
+            raise ValueError("Say what to look out for, and where.")
+        watches = self.store.settings().watches
+        if any(watch.what.lower() == what.lower() for watch in watches):
+            return "The owner has this watch already (Settings → Connections → Watches)."
+        if len(watches) >= MAX_WATCHES:
+            raise ValueError(
+                f"The owner has {MAX_WATCHES} watches, the most there can be: ask them to remove "
+                "one in Settings → Connections → Watches first."
+            )
+        schema = {
+            "type": "object",
+            "properties": {
+                "what": {"type": "string", "title": "Look out for", "default": what},
+                "how": {
+                    "type": "string",
+                    "title": "Using",
+                    "description": "A tool or source, if it matters (the Slack MCP, Glean…)",
+                    "default": how,
+                },
+            },
+            "required": ["what"],
+        }
+        draft = self.runtime.asks.offer(
+            caller,
+            "form",
+            {"schema": schema, "source": "Chief of Staff"},
+            f"Add a watch? Chief of Staff looks out for this every few minutes in work hours "
+            f"and tells you what needs you (Settings → Connections → Watches): {what}",
+            lambda result: self.watch_answered(caller, result),
+            title="New watch",
+        )
+        return (
+            f"Asked the owner to confirm the watch (card {draft['id']} under Needs you); what "
+            "they chose reaches you with your next message. Tell them it waits for their OK."
+        )
+
+    async def watch_answered(self, router: str, result: dict):
+        """The owner's answer to a watch the Router proposed."""
+        content = result.get("content") or {}
+        what = " ".join(str(content.get("what") or "").split())[:500]
+        how = " ".join(str(content.get("how") or "").split())[:300]
+        if result.get("action") != "accept" or not what:
+            text = "The owner did not add the watch you proposed."
+        else:
+            old = self.store.settings()
+            try:
+                if len(old.watches) >= MAX_WATCHES:
+                    raise ValueError(f"there are {MAX_WATCHES} watches already")
+                new = old.model_copy(update={"watches": [*old.watches, Watch(what=what, how=how)]})
+            except ValueError as exc:
+                text = f"The watch could not be added: {exc}"
+            else:
+                self.store.save_settings(new)
+                await self.runtime.settings_changed(old, new)
+                text = (
+                    f"The owner added the watch: {what}. What it finds comes to you as "
+                    'from="watch" events.'
+                )
+        with suppress(LookupError):
+            self.delivery.hold(
+                router, wrap("system", "draft-outcome", text), kind="notice", display=text
+            )
 
     async def t_rename_task(self, params: RenameTask, caller: str):
         self.caller(caller, ROUTER)
@@ -2649,7 +2880,7 @@ class Tools:
 
     async def t_follow_thread(self, params: FollowThread, caller: str):
         self.caller(caller, WORKER, SLACK)
-        followed = self.runtime.follow(caller, [params.thread], given=False)
+        followed = self.runtime.follow(caller, [params.thread], given=False, asked=[params.thread])
         return f"Following {', '.join(followed)}."
 
     async def t_check_back(self, params: CheckBack, caller: str):

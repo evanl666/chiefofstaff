@@ -18,9 +18,10 @@ from .asks import REQUEST_KINDS
 from .envelope import wrap
 from .models import DraftDecision
 from .roles import SLACK, WORKER
-from .sources.github import REVIEW_EVENTS
+from .sources.github import REVIEW_EVENTS, merge_refusal
 from .sources.slack import describe, message_keys
 from .store import now
+from .tasks import OPEN
 
 if TYPE_CHECKING:
     from .runtime import Runtime
@@ -116,6 +117,7 @@ class Drafts:
             if draft["kind"] == "slack":
                 await self.learn_style(draft["text"], reason=decision.reason or "(no reason)")
             reason = f" Reason: {decision.reason}" if decision.reason else " No reason given."
+            self.settle_question(draft)
             if (task := self.task_of(draft)) and task["status"] in {"review", "done"}:
                 # Its result said the draft waits for the owner: it does not any more.
                 self.runtime.task_actions.news(
@@ -204,6 +206,7 @@ class Drafts:
         )
         self.bus.publish("draft", draft)
         self.after_sent(draft, outcome or "")
+        self.settle_question(draft)
         await self.settle_task(draft)
         edited = final != draft["text"] or bool(comments_edited)
         self.runtime.learning.record(
@@ -219,15 +222,19 @@ class Drafts:
             await self.learn_style(draft["text"], sent=final)
         if edited:
             parts = [f"The owner edited draft {draft_id} before it was sent."]
-            if final != draft["text"]:
-                parts.append(
-                    f"The text sent instead of yours:\n{final}"
-                    if final
-                    else "The owner removed the summary: only the line comments were posted."
-                )
+            if final != draft["text"] and final:
+                parts.append(f"The text sent instead of yours:\n{final}")
+            elif final != draft["text"] and draft["target"].get("comments"):
+                parts.append("The owner removed the summary: only the line comments were posted.")
+            elif final != draft["text"]:
+                parts.append("The owner removed the summary: the review was posted as an approval "
+                             "with no text.")  # fmt: skip
             if comments_edited:
                 parts.append(comments_edited)
-            await self.tell_drafter(draft, "\n\n".join(parts), True)
+            # Finished work is not reopened by it: it reads this with its next message (woken,
+            # it would answer with a report that replaces the task's result).
+            task = self.task_of(draft)
+            await self.tell_drafter(draft, "\n\n".join(parts), not task or task["status"] in OPEN)
         else:
             await self.tell_drafter(draft, f"The owner approved draft {draft_id}; it was sent.")
         return draft
@@ -471,13 +478,15 @@ class Drafts:
         if draft["kind"] not in tools:
             raise ValueError("Only replies and reviews can be drafted again.")
         reason = " ".join(reason.split())[:2000]
+        if not reason:
+            # Without it the session would draft the same again.
+            raise ValueError("Say what to change, so it is drafted the way you want.")
         row = self.store.find_session(draft["session_id"])
         if row and row["closed_at"] and row["role"] == WORKER:
             await self.runtime.workers.reopen(row["id"])
         draft = self.store.update_draft(
-            draft["id"], status="rejected", outcome=f"Redo: {reason}" if reason else "Redo",
-            resolved_at=now(),
-        )  # fmt: skip
+            draft["id"], status="rejected", outcome=f"Redo: {reason}", resolved_at=now()
+        )
         self.bus.publish("draft", draft)
         self.runtime.learning.record(
             "draft-rejected",
@@ -488,15 +497,14 @@ class Drafts:
             agreed=False,
             untrusted=True,
         )
+        self.settle_question(draft)
         if (task := self.task_of(draft)) and task["status"] in {"review", "done"}:
             self.store.set(f"reopened:{task['id']}", task["status"])
             self.runtime.tasks.move(task["id"], "running", reason="redo")
         await self.tell_drafter(
             draft,
-            f"The owner wants draft {draft['id']} done again"
-            + (f": {reason}" if reason else ".")
-            + f" Draft it again with {tools[draft['kind']]}, changed as they ask; this one is "
-            "not sent.",
+            f"The owner wants draft {draft['id']} done again: {reason} Draft it again with "
+            f"{tools[draft['kind']]}, changed as they ask; this one is not sent.",
             True,
         )
         return draft
@@ -511,6 +519,7 @@ class Drafts:
             resolved_at=now(),
         )
         self.bus.publish("draft", draft)
+        self.settle_question(draft)
         await self.settle_task(draft)
         edited = final != draft["text"]
         self.runtime.learning.record(
@@ -526,6 +535,21 @@ class Drafts:
             told += f" They changed it to:\n{final}"
         await self.tell_drafter(draft, told)
         return draft
+
+    def settle_question(self, draft: dict):
+        """The owner decided a draft (sent, rejected, to redo) that its session then asked them
+        about (send it? approve it?): that question is answered. It leaves Needs you, and the
+        task goes on (finished work it asked about goes back where it was)."""
+        task = self.task_of(draft)
+        if task and (task["status"] != "waiting" or self.store.get(f"stopped:{task['id']}")):
+            return
+        key = f"{draft['session_id']}:{task['id'] if task else '-'}"
+        question = self.runtime.asks.owner_question(key)
+        if not question or question.get("at", "") < draft["created_at"]:
+            return  # None, or asked before the draft: about something else.
+        self.runtime.asks.answered(draft["session_id"], task["id"] if task else "")
+        if task:
+            self.runtime.asks.go_on(task)
 
     async def settle_task(self, draft: dict):
         """A task whose result was this text (a reply, a review) is done once the owner sent
@@ -581,10 +605,20 @@ class Drafts:
         try:
             outcome = await self.runtime.github.merge(target)
         except Exception as exc:
-            error = describe(exc)[:600]
-            draft = self.store.update_draft(draft["id"], outcome=f"Not merged: {error}")
+            reason, moved = merge_refusal(describe(exc)[:600])
+            if moved:
+                # Merge is only ever of the head the card shows: this card is done, and the PR
+                # is offered again once its new commits are ready.
+                draft = self.store.update_draft(
+                    draft["id"], status="rejected", outcome=reason, resolved_at=now()
+                )
+            else:
+                draft = self.store.update_draft(draft["id"], outcome=f"Not merged: {reason}")
             self.bus.publish("draft", draft)
-            raise RuntimeError(f"Not merged: {error}") from exc
+            # The PR as it is now (its new head, checks, mergeability) on its card and task,
+            # not at the next round.
+            self.runtime.background(self.runtime.task_actions.refresh_open_prs(target["label"]))
+            raise RuntimeError(f"Not merged: {reason}") from exc
         draft = self.store.update_draft(
             draft["id"], status="sent", outcome=outcome, resolved_at=now()
         )

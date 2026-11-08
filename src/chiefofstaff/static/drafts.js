@@ -4,7 +4,7 @@
 
 import { api, el, moreMenu, once, submits, toast } from "./dom.js";
 import { clock, displayPath, markdown, slackText } from "./text.js";
-import { applyDraft, state } from "./state.js";
+import { applyDraft, pendingDrafts, state } from "./state.js";
 import { select } from "./session.js";
 import { renderSidebar } from "./sidebar.js";
 import { scheduleHome } from "./inbox.js";
@@ -69,20 +69,38 @@ function decider(draft, node, error, failed = null) {
     } catch (failure) {
       state.leaving.delete(key);
       node.classList.remove("leaving");
-      if (failed) failed(failure.message);
-      else error.textContent = failure.message;
-      // Said where it cannot be missed too: a card that cannot be sent again leaves.
+      // Said where it cannot be missed first: a card that cannot be sent again leaves (and its
+      // view with it), so nothing after this may keep the toast from showing.
       toast(failure.message, "error");
-      renderSidebar();
-      scheduleHome();
+      try {
+        if (failed) failed(failure.message);
+        else error.textContent = failure.message;
+      } finally {
+        renderSidebar();
+        scheduleHome();
+      }
       return false;
     }
   }
 }
-// A one-line reason in place of a card's actions: to reject a draft, or to have it redone.
-function reasonForm(actions, { placeholder, label, className = "secondary", submit, back }) {
+// A one-line reason in place of a card's actions: to reject a draft, or to have it redone
+// (`required`: not without one).
+function reasonForm(actions, { placeholder, label, className = "secondary", required = false, submit, back }) {
   const reason = el("input", { placeholder, "aria-label": placeholder, autocomplete: "off" });
-  const go = () => submit(reason.value.trim());
+  const error = el("span", { class: "error", role: "alert" });
+  const go = () => {
+    if (required && !reason.value.trim()) {
+      error.textContent = "Say what should change.";
+      reason.setAttribute("aria-invalid", "true");
+      reason.focus();
+      return;
+    }
+    submit(reason.value.trim());
+  };
+  reason.addEventListener("input", () => {
+    error.textContent = "";
+    reason.removeAttribute("aria-invalid");
+  });
   reason.addEventListener("keydown", (event) => {
     if (submits(event)) go();
     if (event.key === "Escape") {
@@ -91,7 +109,7 @@ function reasonForm(actions, { placeholder, label, className = "secondary", subm
       back();
     }
   });
-  actions.replaceChildren(reason, el("button", { type: "button", class: "text", text: "Cancel", onclick: back }), el("button", { type: "button", class: className, text: label, onclick: go }));
+  actions.replaceChildren(error, reason, el("button", { type: "button", class: "text", text: "Cancel", onclick: back }), el("button", { type: "button", class: className, text: label, onclick: go }));
   reason.focus();
 }
 // What the owner does not like about a draft: dropped, or sent back to its session to redo.
@@ -99,7 +117,7 @@ function rejectForm(actions, decide, back) {
   reasonForm(actions, { placeholder: "Why? (optional, helps the next draft)", label: "Reject", back, submit: (reason) => decide({ action: "reject", reason }, "Dropped.") });
 }
 function redoForm(actions, decide, back) {
-  reasonForm(actions, { placeholder: "What should change?", label: "Send back", back, submit: (reason) => decide({ action: "revise", reason }, "Sent back to redo. The new draft comes here.") });
+  reasonForm(actions, { placeholder: "What should change?", label: "Send back", required: true, back, submit: (reason) => decide({ action: "revise", reason }, "Sent back to redo. The new draft comes here.") });
 }
 // The Router is not sure which folder a task belongs in: the owner picks one.
 function workspaceCard(draft) {
@@ -490,8 +508,9 @@ function messageCard(draft) {
     draft.kind === "slack" ? latestQuote(target) : null,
     comment ? el("div", { class: "quoted" }, el("strong", { title: comment.path || "", text: `${comment.author}${comment.path ? ` on ${basename(comment.path)}${comment.line ? `:${comment.line}` : ""}` : ""}: ` }), comment.body) : null,
     about ? el("div", { class: "note", text: about }) : null,
-    // Not published after an interrupted send: what happened, and the owner's edit kept.
-    draft.outcome ? el("div", { class: "note", text: draft.outcome }) : null,
+    // Not published after an interrupted send: what happened, and the owner's edit kept. Held
+    // because someone wrote since: that message is quoted above, not said again here.
+    draft.outcome && !(target.moved_on && /\bwrote since\b/.test(draft.outcome)) ? el("div", { class: "note", text: draft.outcome }) : null,
     text,
     resolve ? el("label", { class: "check resolve" }, resolve, " Resolve the conversation") : null,
     actions,
@@ -499,15 +518,18 @@ function messageCard(draft) {
   const decide = decider(draft, node, error);
   const sent = draft.kind === "slack" ? "Sent on Slack." : "Posted on GitHub.";
   // Not an empty reply: cleared, it is not the draft that goes.
-  const send = (more = {}) => {
+  const send = () => {
     if (!text.value.trim()) {
       error.textContent = "The reply is empty.";
       return;
     }
-    const content = { ...(resolve ? { resolve: resolve.checked } : {}), ...more };
-    decide({ action: "send", text: text.value, ...(Object.keys(content).length ? { content } : {}) }, resolve?.checked ? "Posted on GitHub; resolving the conversation." : sent);
+    const content = resolve ? { resolve: resolve.checked } : null;
+    decide({ action: "send", text: text.value, ...(content ? { content } : {}) }, resolve?.checked ? "Posted on GitHub; resolving the conversation." : sent);
   };
-  const anyway = sendAnyway(draft);
+  // Held because someone wrote there since it was drafted (`moved_on`): one action, Send anyway,
+  // now that the owner sees what they wrote. It is checked again on the way (the server knows
+  // that message now): held again only if someone wrote after it.
+  const held = draft.kind === "slack" && Boolean(target.moved_on);
   const show = () =>
     actions.replaceChildren(
       error,
@@ -515,26 +537,25 @@ function messageCard(draft) {
         { text: "Ask to redo…", onclick: () => redoForm(actions, decide, show) },
         { text: "Reject…", onclick: () => rejectForm(actions, decide, show) },
       ]),
-      anyway ? el("button", { type: "button", class: "secondary", text: "Send anyway", title: "Someone wrote there since it was drafted: send it as it is all the same", onclick: () => send(anyway) }) : "",
-      el("button", { type: "button", text: "Send", onclick: () => send() }),
+      el("button", { type: "button", text: held ? "Send anyway" : "Send", title: held ? "Send it as it is, now that you have seen what they wrote" : undefined, onclick: () => send() }),
     );
   show();
   return node;
 }
-// Someone wrote where a Slack reply goes since it was drafted (`moved_on`): the server did not
-// send it and said why on the card. What goes with Send to send it all the same.
-const sendAnyway = (draft) => (draft.kind === "slack" && draft.target?.moved_on ? { send_anyway: true } : null);
 // The newest message where a Slack reply goes, as Slack writes it (its links and names
-// readable); one written since the draft, marked new; or why it could not be read.
+// readable); one written since the draft, marked new (the reply waits for the owner to send it
+// anyway); or why it could not be read.
 function latestQuote(target) {
   if (target.latest_error) return el("div", { class: "note warn-note", text: `Could not read the conversation: ${target.latest_error}` });
-  if (!target.latest) return null;
-  const quote = el("div", { class: "quoted markdown", html: markdown(slackText(target.latest)) });
   const moved = target.moved_on;
+  // Its quote, else what the server kept of it.
+  const said = target.latest || (moved ? moved.text || "" : "");
+  if (!said) return null;
+  const quote = el("div", { class: "quoted markdown", html: markdown(slackText(said)) });
   if (!moved) return quote;
   quote.classList.add("fresh");
   const who = slackText(moved.who || "Someone");
-  return el("div", { class: "moved-on" }, el("div", { class: "fresh-label", text: `New since the draft: ${who} wrote${moved.at ? ` at ${clock(moved.at)}` : ""}` }), quote);
+  return el("div", { class: "moved-on" }, el("div", { class: "fresh-label", text: `New since the draft: ${who} wrote${moved.at ? ` at ${clock(moved.at)}` : ""} · not sent yet` }), quote);
 }
 const basename = (path) => path.split("/").pop();
 // A long name keeps its start and its end: "CompanyNa…Normalizer.scala".
@@ -546,6 +567,13 @@ function prLine(pr) {
   return `${pr.title ? `“${pr.title}”` : "This PR"}${pr.author ? ` by @${pr.author}` : ""}${size}`;
 }
 const VERDICT_CHIP = { comment: "", approve: "done", request_changes: "waiting" };
+// What a review with no summary posts: its line comments, the approval alone, or nothing (then
+// it needs one). `asked`: as the summary box's placeholder, what to do.
+function emptySummary(review, asked = false) {
+  if (review.comments.some((comment) => !comment.removed)) return asked ? "No summary: post the line comments only" : "No summary: the line comments only";
+  if (review.verdict === "approve") return asked ? "No summary: approve without a comment" : "No summary: the approval only";
+  return asked ? "What the review says (it needs a summary: no line comments)" : "No summary yet: it needs one";
+}
 // A PR review: compact here (what the PR is, the verdict, the summary's start, how many line
 // comments); read and edited in its own view, where it is sent from.
 function reviewCard(draft) {
@@ -580,7 +608,7 @@ function reviewCard(draft) {
     chip.className = `chip ${VERDICT_CHIP[review.verdict]}`;
     chip.hidden = review.verdict === "comment";
     const summary = review.summary.trim();
-    preview.textContent = summary || "No summary: the line comments only.";
+    preview.textContent = summary || `${emptySummary(review)}.`;
     preview.classList.toggle("empty", !summary);
     const kept = review.comments.filter((comment) => !comment.removed).length;
     count.textContent = !comments.length ? "No line comments" : kept === comments.length ? `${comments.length} line comment${comments.length === 1 ? "" : "s"}` : `${kept} of ${comments.length} line comments`;
@@ -620,12 +648,16 @@ function diffContext(context) {
 function reviewView(draft, review, { decide, refresh }) {
   const target = draft.target;
   const summary = fitting(review.summary, { label: "Summary", max: 14 });
-  summary.placeholder = "No summary: post the line comments only";
+  // What leaving it empty posts says what is there: the line comments, or the approval alone.
+  const changed = () => {
+    summary.placeholder = emptySummary(review, true);
+    refresh();
+  };
   summary.addEventListener("input", () => {
     review.summary = summary.value;
     refresh();
   });
-  const rows = review.comments.map((comment) => commentRow(comment, refresh));
+  const rows = review.comments.map((comment) => commentRow(comment, changed));
   const error = el("p", { class: "error", role: "alert" });
   const verdict = target.own ? null : el("select", { class: "verdict", "aria-label": "Verdict", title: "What the review says on GitHub" }, ...Object.entries(VERDICTS).map(([value, [, , text]]) => el("option", { value, text })));
   if (verdict) verdict.value = review.verdict;
@@ -636,8 +668,9 @@ function reviewView(draft, review, { decide, refresh }) {
   verdict?.addEventListener("change", () => {
     review.verdict = verdict.value;
     named();
-    refresh();
+    changed();
   });
+  summary.placeholder = emptySummary(review, true);
   named();
   const footer = el("footer");
   const close = el("button", { type: "button", class: "icon close", title: "Close (your changes are kept)", "aria-label": "Close", text: "✕" });
@@ -704,9 +737,19 @@ function reviewView(draft, review, { decide, refresh }) {
       send.focus();
     };
     const go = async () => {
+      if (!reason.value.trim()) {
+        error.textContent = "Say what should change.";
+        reason.setAttribute("aria-invalid", "true");
+        reason.focus();
+        return;
+      }
       dialog.close();
       await decide({ action: "revise", reason: reason.value.trim() }, "Sent back to redo. The new draft comes here.");
     };
+    reason.addEventListener("input", () => {
+      error.textContent = "";
+      reason.removeAttribute("aria-invalid");
+    });
     reason.addEventListener("keydown", (event) => {
       if (submits(event)) go();
       if (event.key === "Escape") {
@@ -727,9 +770,16 @@ function reviewView(draft, review, { decide, refresh }) {
       if (!dialog.open) dialog.showModal();
       summary.focus();
     },
+    // Not posted: the view comes back as the owner left it, with why; unless its draft is gone
+    // meanwhile (GitHub refused it for good: the toast says why, nothing to send again).
     failed(message) {
       actions();
       error.textContent = message;
+      if (!pendingDrafts().some((item) => item.id === draft.id)) {
+        dialog.remove();
+        return;
+      }
+      if (!dialog.isConnected) document.body.append(dialog);
       if (!dialog.open) dialog.showModal();
     },
   };

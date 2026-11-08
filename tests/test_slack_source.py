@@ -368,6 +368,17 @@ async def test_slack_news_reads_by_name_and_the_names_are_kept(source):
     assert later.display_names() == names, "kept for the page, across restarts"
 
 
+async def test_the_owners_own_mention_is_shown_by_name(tmp_path):
+    """Bug bash 3 (U14): "<@U0OWNER1>" in a Slack message showed as the raw id: Slack lists
+    the owner's own id without a name."""
+    harness = Harness(tmp_path / "data", Settings(slack_enabled=True))
+    runtime = await harness.connect()
+    await runtime.slack.discover()
+    assert runtime.snapshot()["slack_names"]["U0OWNER1"] == "you"
+    runtime.slack.learn_names("From: <@U0OWNER1> (Evan Li) | Text: hi")
+    assert runtime.snapshot()["slack_names"]["U0OWNER1"] == "Evan Li", "its name, once read"
+
+
 async def test_a_dm_message_in_no_thread_is_answered_in_the_dm(source):
     """Bug bash: a reply to a top-level DM was drafted "in a thread" under it."""
     asked = entry("D0ALICE01", "U0ALICE1", "Alice Chen", "1712345600.000100", "approve it?")

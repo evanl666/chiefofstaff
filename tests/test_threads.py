@@ -463,3 +463,28 @@ async def spawn_with(runtime, harness, title, **extra):
         runtime, "spawn_worker", harness.router_id, title=title, instructions=title, **extra
     )
     return json.loads(result.text_result_for_llm)["session_id"]
+
+
+@pytest.mark.parametrize(
+    ("line", "made"),
+    [
+        ("I checked the product spec https://docs.google.com/document/d/1Spec123/edit", False),
+        ("Read the doc you shared (https://docs.google.com/document/d/1Shared123/edit)", False),
+        ("Opened the address book https://docs.google.com/spreadsheets/d/1Addr1234/edit", True),
+        ("Created [the plan](https://docs.google.com/document/d/1Plan1234/edit)", True),
+        ("Added a sheet: https://docs.google.com/spreadsheets/d/1Sheet123/edit", True),
+        ("\u521b\u5efa\u4e86\u6587\u6863 https://docs.google.com/document/d/1Cn123456/edit", True),
+    ],
+)
+def test_a_link_is_made_only_when_the_line_says_it_made_it(line, made):
+    """Bug bash: "product", "shared", "new" made a link discussed count as made."""
+    assert bool(threads.made_links(line)) is made
+
+
+def test_a_link_cut_with_three_dots_or_named_here_is_not_taken_at_its_word():
+    """Bug bash: a link cut with "..." became a doc; docs were named "here" or "link"."""
+    assert threads.links("see https://docs.google.com/document/d/1OldRoadmapXyZ... (old)") == []
+    named = threads.named_links(
+        "[here](https://a.com/x), [Q3 plan](https://a.com/y), [link](https://a.com/z)"
+    )
+    assert named == {"https://a.com/y": "Q3 plan"}

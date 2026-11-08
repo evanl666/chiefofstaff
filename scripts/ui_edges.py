@@ -780,7 +780,8 @@ async def round_two(runtime, browser, failures: list[str]):
     await expect(queued_box.locator(".row-line .why")).to_contain_text(
         "Paused: its worker is on “Fix review comments on lms” now"
     )
-    await expect(queued_box.locator(".head .meta")).to_contain_text("Paused")
+    # Said on its second line, not again beside the title (U-s3).
+    await expect(queued_box.locator(".head .meta")).not_to_contain_text("Paused")
     await expect(running_box.locator(".activity")).to_have_count(1)
     await running_box.screenshot(path=SHOTS / "ui-edges-worker-group.png")
     # Its conversation takes up the earlier task again: that one runs now, the newer waits.
@@ -900,8 +901,9 @@ async def round_three(runtime, browser, failures: list[str]):
     await call_tool(runtime, "message_session", router, session_id=busy, task="new",
                     title="CoS bug bash", text="Now the bug bash", earlier="keep")  # fmt: skip
     take_up(runtime, busy, "CoS bug bash")
-    long = ("**Status:** fixed `B16`; see [the doc](https://docs.google.com/document/d/abc123) and "
-            "https://github.com/acme/app/pull/592 — " + "more words here " * 120)  # fmt: skip
+    long = ("**Status:** fixed `B16`; see [the B16 notes](https://docs.google.com/document/d/"
+            "abc123) and https://github.com/acme/app/pull/592 — "
+            + "more words here " * 120)  # fmt: skip
     for task in runtime.tasks.for_session(busy):
         runtime.tasks.move(task["id"], "running")
         runtime.task_actions.publish(runtime.tasks.update(task["id"], progress=long))
@@ -1006,7 +1008,7 @@ async def round_three(runtime, browser, failures: list[str]):
     # under "More links"; the doc named as the report linked it, its id on hover.
     await expect(chips_now.locator(".more-links summary")).to_have_text("More links: 2 referenced")
     await expect(chips_now.locator(".more-links .receipt", has_text="app#592")).to_have_count(1)
-    doc_chip = chips_now.locator(".more-links .receipt.link-chip", has_text="the doc")
+    doc_chip = chips_now.locator(".more-links .receipt.link-chip", has_text="the B16 notes")
     await expect(doc_chip.locator(".chip-link")).to_have_attribute(
         "title", re.compile("Google Doc abc123")
     )
@@ -1274,14 +1276,15 @@ async def round_four(runtime, browser, failures: list[str]):
     await expect(delivered.locator(".row-line .why")).to_contain_text(
         "Delivered; still following app#77"
     )
-    await expect(delivered.locator(".head .meta")).to_contain_text("Delivered")
+    await expect(delivered.locator(".head .meta")).not_to_contain_text("Delivered")
     # The owner's deliveries waiting on others: a group of their own, open.
     await expect(
         monitoring.locator("#tasks-monitoring-delivered[open] .card.task", has_text="Ship the")
     ).to_have_count(1)
     later = monitoring.locator(".card.task", has_text="Run the weekly embeddings")
     await expect(later.locator(".row-line .why")).to_contain_text("the Flyte run finishing")
-    await expect(later.locator(".head .meta")).to_contain_text("Checks back")
+    await expect(later.locator(".row-line .why")).to_contain_text("Checks back at")
+    await expect(later.locator(".head .meta")).not_to_contain_text("Checks back")
     await expect(running.locator(".card.task", has_text="Answer Jingtao")).to_have_count(1)
     weekly_box = running.locator(f'.card.worker-box[data-session="{weekly}"]')
     await expect(weekly_box.locator(".box-head .meta")).to_contain_text("also: Monitoring")
@@ -1813,7 +1816,7 @@ async def round_six(runtime, browser, failures: list[str]):
     await expect(reviewed.locator(".card.task")).to_have_count(1)
     await expect(recent.locator(".card.task.marker-still-following")).to_have_count(2)
     stale = recent.locator(".card.task", has_text="Investigate faro#1536")
-    await expect(stale.locator(".head .meta")).to_contain_text("Still following")
+    await expect(stale.locator(".head .meta")).not_to_contain_text("Still following")
     await expect(stale.locator(".row-line .why")).to_contain_text("nothing new there for 2d")
     await reviewed.locator(":scope > summary").click()
     await expect(reviewed).to_have_attribute("open", "")
@@ -1931,8 +1934,11 @@ async def round_six(runtime, browser, failures: list[str]):
     await expect(merge_card).to_contain_text("No checks")
     moved_card = needs.locator(f'.card.draft[data-id="{moved["id"]}"]')
     await expect(moved_card.locator(".fresh-label")).to_contain_text("New since the draft: @Bob")
+    await expect(moved_card.locator(".fresh-label")).to_contain_text("not sent yet")
     await expect(moved_card.locator(".quoted.fresh")).to_contain_text("never mind, fixed it")
-    await expect(moved_card.locator(".note")).to_contain_text("Not sent: Bob wrote since")
+    # What they wrote once (the quote), not again in a note; one action.
+    await expect(moved_card.locator(".note", has_text="never mind")).to_have_count(0)
+    await expect(moved_card.get_by_role("button", name="Send", exact=True)).to_have_count(0)
     await moved_card.screenshot(path=SHOTS / "ui-edges-slack-moved-on.png")
     posted_anyway: list[dict] = []
 
@@ -1943,9 +1949,8 @@ async def round_six(runtime, browser, failures: list[str]):
     await page.route(f"**/api/drafts/{moved['id']}", anyway)
     await moved_card.get_by_role("button", name="Send anyway").click()
     await expect(moved_card).to_have_count(0, timeout=5000)
-    assert posted_anyway == [
-        {"action": "send", "text": "I'll look now.", "content": {"send_anyway": True}}
-    ], posted_anyway
+    # Checked again on the way: held again only if someone wrote after the message shown.
+    assert posted_anyway == [{"action": "send", "text": "I'll look now."}], posted_anyway
     unread_card = needs.locator(f'.card.draft[data-id="{unread["id"]}"]')
     await expect(unread_card).to_contain_text("Could not read the conversation: channel_not_found")
     # Withdrawn by its worker: off Needs you, and its line in the chat says so.
@@ -1985,7 +1990,7 @@ async def round_six(runtime, browser, failures: list[str]):
     await expect(state_line).to_contain_text("watch 2 only partly covered: Only the newest 3 DMs")
     assert (await state_line.text_content()).count("Glean is not connected") == 1
     await expect(page.locator("#watch-resting")).to_have_text(
-        "Not scanning now: weekend (after-hours setting)"
+        "Weekend: every 30 min (after-hours setting)"
     )
     await page.locator("#settings-cancel").click()
     log("the chat says a watch found it, Slack by names; a watch not searched is said so, once")
@@ -2051,6 +2056,315 @@ async def round_six(runtime, browser, failures: list[str]):
     for draft in (slack, line, merge, lessons, unread, fresh):
         store.update_draft(draft["id"], status="rejected")
         runtime.bus.publish("draft", store.draft(draft["id"]))
+    await context.close()
+
+
+async def round_seven(runtime, browser, failures: list[str]):
+    """The 0.1.27 bug bash, round 3 (UI): a title with " · " whole in its chat line; workers by
+    the name they show in @ and the "To" chip; what Watches says after hours; a withdrawn
+    draft's line after a reload; a worker that could not go on says why and opens; a file's name
+    left in Artifacts; a redo needs a reason; rows fold from the keyboard; Rename on waiting and
+    failed tasks; "Checks back" once on a row; a review GitHub refused says so (no error); one
+    word for a PR; a line keeps the ")" after a link; a bare approval's wording; Create PR on a
+    branch the owner named; a large new file said so."""
+    store = runtime.store
+    router = store.get("router_id")
+    stamp = datetime.now(UTC).isoformat()
+
+    async def start(title):
+        result = await call_tool(runtime, "spawn_worker", router, title=title,
+                                 instructions=title, why_new="test")  # fmt: skip
+        assert result.result_type == "success", result.text_result_for_llm
+        await settle(runtime)
+        return json.loads(result.text_result_for_llm)["session_id"]
+
+    def finish(worker, status, result):
+        task = runtime.tasks.current(worker)
+        runtime.tasks.move(task["id"], status, result=result)
+        runtime.update_session(worker, status="idle", activity="")
+        return task
+
+    bench = await start("Benchmark words() · textkit")
+    finish(bench, "done", "#44 (https://github.com/acme/cos-approve-test/pull/44) is open.")
+    zebra = await start("Zebra cache question")
+    runtime.task_actions.rename(runtime.tasks.current(zebra)["id"], "Cache size for app")
+    runtime.update_session(zebra, status="idle", activity="")
+    asker = await start("Pick the queue size")
+    await call_tool(runtime, "report", asker, status="question", summary="10 or 20?")
+    runtime.update_session(asker, status="waiting", activity="Waiting for you")
+    failer = await start("Load the nightly data")
+    finish(failer, "failed", "The bucket is gone.")
+    exporter = await start("Fix the exporter PR")
+    runtime.update_session(exporter, status="idle", activity="")
+    named = await start("Add notes on a named branch")
+    finish(named, "review", "Committed notes on bb3-ideas.")
+    on_main = await start("Tidy the README on main")
+    finish(on_main, "review", "Committed on main.")
+    mocker = await start("Mock the Artifacts list")
+    finish(mocker, "review", "The mockup is mock7.html.")
+    # A worker that could not go on: why, in its line, and the whole report on a click.
+    runtime.add_message(router, "inbound", "Can't tell Bob whether 0.3 is safe: you decide.\n\n"
+                        "He needs a yes/no by 5pm.", {"from": asker, "title": "Slack",
+                                                      "status": "blocked"})  # fmt: skip
+    redo = store.create_draft(asker, "slack", {"channel_id": "C0REDO0001"}, "Sure.")
+    # Withdrawn before the page loads: only the state it loads says so.
+    gone = store.create_draft(asker, "slack", {"channel_id": "C0GONE0001"}, "Thanks!")
+    runtime.add_message(router, "draft", "Thanks!", {"draft_id": gone["id"],
+                                                     "label": "Slack reply"})  # fmt: skip
+    store.update_draft(gone["id"], status="rejected", outcome="Withdrawn: Bob solved it",
+                       resolved_at=stamp)  # fmt: skip
+    refused = store.create_draft(asker, "github", {**review("acme/refused", []),
+                                                   "verdict": "approve"}, "")  # fmt: skip
+    for draft in (redo, refused):
+        runtime.bus.publish("draft", store.draft(draft["id"]))
+    await settle(runtime)
+    runtime.publish_state()
+
+    soon = (datetime.now(UTC) + timedelta(hours=2)).isoformat()
+    pr21 = {"label": "acme/app#21", "url": "https://github.com/acme/app/pull/21",
+            "state": "OPEN", "checks": "failing", "failing": ["lint"], "title": "Export all rows",
+            "review": "CHANGES_REQUESTED", "own": True, "at": stamp}  # fmt: skip
+    patches = {
+        "Cache size for app": {"check_back": {"at": soon, "what": "the Flyte run"}},
+        "Fix the exporter PR": {"watching": ["github:acme/app#21"], "receipts": {"prs": [pr21]}},
+        "Add notes on a named branch": {"receipts": {
+            "checkouts": [{"path": "/tmp/notes", "branch": "bb3-ideas", "commits": 1,
+                           "files": 1, "insertions": 0, "deletions": 0, "large": 1}],
+            "changed": {"files": 1, "insertions": 0, "deletions": 0, "commits": 1,
+                        "uncommitted": 0, "large": 1}, "prs": []}},
+        "Tidy the README on main": {"receipts": {
+            "checkouts": [{"path": "/tmp/readme", "branch": "main", "commits": 1, "files": 1,
+                           "insertions": 2, "deletions": 0}],
+            "changed": {"files": 1, "insertions": 2, "deletions": 0, "commits": 1,
+                        "not_counted": 2}, "prs": []}},
+        "Mock the Artifacts list": {"artifacts": [{
+            "url": "file:///tmp/cos-scratch/mock7.html", "path": "/tmp/cos-scratch/mock7.html",
+            "name": "mock7.html", "status": "draft", "at": stamp}]},
+    }  # fmt: skip
+
+    context = await browser.new_context(viewport={"width": 1440, "height": 900})
+    page = await context.new_page()
+    page.on("pageerror", lambda error: failures.append(str(error)))
+    await patch_state(page, patches)
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    needs, monitoring = page.locator("#needs"), page.locator("#tasks-monitoring")
+    recent, made = page.locator("#tasks-recent"), page.locator("#tasks-artifacts")
+    timeline = page.locator("#timeline")
+
+    def card(title):
+        return page.locator("#panel .card.task").filter(
+            has=page.locator(".head .title", has_text=title)
+        )
+
+    # U7: a title with " · " in it is whole; the why is on hover.
+    started = timeline.locator(".event.started", has_text="Benchmark words()")
+    await expect(started.locator(".what")).to_have_text(
+        "Started “Benchmark words() · textkit”", timeout=15000
+    )
+    await expect(started.locator(".what")).to_have_attribute("title", re.compile("new because"))
+    # U15: why it could not go on, and the report on a click.
+    stuck = timeline.locator(".event", has_text="Slack couldn't go on")
+    await expect(stuck.locator(".what")).to_have_text(
+        "Slack couldn't go on: Can't tell Bob whether 0.3 is safe: you decide. He needs a yes/no "
+        "by 5pm."
+    )
+    await stuck.locator("button.line").click()
+    await expect(stuck.locator(".markdown")).to_contain_text("He needs a yes/no by 5pm.")
+    # U11: withdrawn before the page loaded: its line says so all the same.
+    record = timeline.locator(f'.draft-record[data-draft-id="{gone["id"]}"]')
+    await expect(record.locator(".outcome")).to_have_text("Withdrawn: Bob solved it")
+    log("chat: a title with “ · ” whole; why a worker could not go on; a withdrawn draft says so")
+
+    # U8: a worker by the name it shows (the task it is on), found by that or its first title.
+    composer = page.locator("#composer-input")
+    for typed in ("@size", "@zebra"):
+        await composer.fill("")
+        await composer.press_sequentially(typed)
+        await expect(page.locator("#mention-list li .name", has_text="Cache size for app")
+                     ).to_have_count(1)  # fmt: skip
+        await expect(page.locator("#mention-list")).not_to_contain_text("Zebra cache question")
+    await page.locator("#mention-list li", has_text="Cache size for app").click()
+    await expect(page.locator("#composer-to strong")).to_have_text("Cache size for app")
+    await page.locator("#composer-to .clear").click()
+    await composer.fill("")
+    log("@: workers by the name they show, found by their first title too")
+
+    # H10: a row's line keeps the ")" after a link. U-s1: a row folds from the keyboard.
+    row = card("Benchmark words() · textkit")
+    await expect(row.locator(".row-line .why")).to_have_text("#44 (cos-approve-test#44) is open.")
+    title = row.locator(".head .title")
+    await expect(title).to_have_attribute("aria-expanded", "false")
+    await title.focus()
+    await page.keyboard.press("Enter")
+    await expect(row).to_have_class(re.compile(r"\bunfolded\b"))
+    await expect(title).not_to_have_attribute("aria-expanded", "false")
+    await page.keyboard.press("Escape")
+    await expect(row).not_to_have_class(re.compile(r"\bunfolded\b"))
+    await expect(title).to_be_focused()
+    await page.keyboard.press("Enter")
+    fold = row.get_by_role("button", name="Fold")
+    await expect(fold).to_be_visible()
+    await fold.press("Enter")
+    await expect(row).not_to_have_class(re.compile(r"\bunfolded\b"))
+    log("a row keeps the “)” after a link; Enter shows it whole, Escape or Fold folds it")
+
+    # U-s2: Rename on a task waiting for an answer, and on a failed one.
+    for title_text in ("Pick the queue size", "Load the nightly data"):
+        waiting = needs.locator(".card.task", has_text=title_text)
+        await waiting.locator(".actions .more-button").click()
+        await expect(waiting.get_by_role("menuitem", name="Rename…")).to_be_visible()
+        await page.keyboard.press("Escape")
+    log("Rename… on a task waiting for an answer and on a failed one")
+
+    # U-s3: "Checks back" once on a row, the title keeps its room at 352 px.
+    later = card("Cache size for app")
+    await expect(later.locator(".row-line .why")).to_contain_text("Checks back at")
+    await expect(later.locator(".head .meta")).not_to_contain_text("Checks back")
+    # H9: changes requested wins over failing CI, in every place it is said.
+    waits = card("Fix the exporter PR")
+    await expect(waits.locator(".row-line .why")).to_contain_text("(changes requested)")
+    await expect(made.locator(".artifact", has_text="app#21").locator(".a-status")).to_have_text(
+        "changes requested"
+    )
+    await unfold(waits)
+    await expect(waits.locator(".receipt.pr")).to_have_text("app#21 · Export all rows · ✗ CI · "
+                                                            "changes requested")  # fmt: skip
+    log("Checks back said once on a row; changes requested wins everywhere, a word on the chip")
+
+    # U16b: a new file too large to count is said so. H4b: Create PR on a branch the owner
+    # named, not on main.
+    noted = needs.locator(".card.task", has_text="Add notes on a named branch")
+    await expect(noted.locator(".receipt.changes")).to_have_text("1 large new file")
+    await noted.locator(".actions .more-button").click()
+    await expect(noted.get_by_role("menuitem", name="Create PR")).to_be_visible()
+    await page.keyboard.press("Escape")
+    tidy = needs.locator(".card.task", has_text="Tidy the README on main")
+    await expect(tidy.locator(".receipt.changes")).to_have_text(
+        "+2 −0 in 1 file · not counted: 2 files"
+    )
+    await expect(tidy.locator(".receipt.changes")).to_have_attribute(
+        "title", re.compile("changed there meanwhile by you or other work")
+    )
+    await tidy.locator(".actions .more-button").click()
+    await expect(tidy.get_by_role("menuitem", name="Copy report")).to_be_visible()
+    await expect(tidy.get_by_role("menuitem", name="Create PR")).to_have_count(0)
+    await page.keyboard.press("Escape")
+    log("a large new file said so; Create PR on a branch of its own, not on main")
+
+    # U17: a file's name starts at the left of its row, as a link's does.
+    file_name = made.locator(".artifact", has_text="mock7.html").locator(".a-name")
+    gap = await file_name.evaluate(
+        "n => { const r = document.createRange(); r.selectNodeContents(n);"
+        " return r.getBoundingClientRect().left - n.getBoundingClientRect().left; }"
+    )
+    assert abs(gap) <= 1, gap
+    heights = [
+        await made.locator(".artifact", has_text=name).evaluate("n => n.offsetHeight")
+        for name in ("mock7.html", "app#21")
+    ]
+    assert abs(heights[0] - heights[1]) <= 1, heights
+
+    # U6b: Ask to redo needs a reason.
+    redo_card = needs.locator(f'.card.draft[data-id="{redo["id"]}"]')
+    asked: list[str] = []
+
+    async def asking(route):
+        asked.append(route.request.url)
+        await route.fulfill(json=store.draft(redo["id"]))
+
+    await page.route(f"**/api/drafts/{redo['id']}", asking)
+    await redo_card.locator(".actions .more-button").click()
+    await redo_card.get_by_role("menuitem", name="Ask to redo…").click()
+    await redo_card.get_by_role("button", name="Send back").click()
+    await expect(redo_card.locator(".actions .error")).to_have_text("Say what should change.")
+    await expect(redo_card.get_by_label("What should change?")).to_be_focused()
+    assert not asked, asked
+    await redo_card.get_by_role("button", name="Cancel").click()
+    log("a file's name on the left in Artifacts; Ask to redo needs what should change")
+
+    # H14: a bare approval says so. H6: GitHub refuses it (the draft fails): said, no error.
+    refused_card = needs.locator(f'.card.draft[data-id="{refused["id"]}"]')
+    await expect(refused_card.locator(".summary-preview")).to_have_text(
+        "No summary: the approval only."
+    )
+    await refused_card.get_by_role("button", name="Review…").click()
+    view = page.locator(f'.review-dialog[data-draft="{refused["id"]}"]')
+    await expect(view.get_by_label("Summary")).to_have_attribute(
+        "placeholder", "No summary: approve without a comment"
+    )
+    await expect(view.locator(".review-body .note")).to_have_text("No line comments.")
+    await view.screenshot(path=SHOTS / "ui-edges-bare-approval.png")
+
+    async def refuse(route):
+        store.update_draft(refused["id"], status="failed", resolved_at=stamp,
+                           outcome="GitHub refused it: the PR moved on.")  # fmt: skip
+        runtime.bus.publish("draft", store.draft(refused["id"]))
+        await asyncio.sleep(0.6)
+        await route.fulfill(status=409, json={"detail": "GitHub refused it: the PR moved on."})
+
+    await page.route(f"**/api/drafts/{refused['id']}", refuse)
+    errors = len(failures)
+    await view.get_by_role("button", name="Approve & send").click()
+    await expect(page.locator(".toast", has_text="GitHub refused it")).to_be_visible(timeout=5000)
+    await expect(view).to_have_count(0)
+    await expect(refused_card).to_have_count(0)
+    await page.wait_for_timeout(300)
+    assert len(failures) == errors, failures[errors:]
+    log("a bare approval says so; refused by GitHub, a toast says why and nothing breaks")
+
+    # U10: after hours, how often it scans (not "not scanning" while it scans or has no watch).
+    resting = """async ([connector, settings]) => {
+      const s = await import("/static/state.js");
+      const c = await import("/static/settings.js");
+      s.state.snapshot.connector = { ...s.state.snapshot.connector, ...connector };
+      s.state.snapshot.settings = { ...s.state.snapshot.settings, ...settings };
+      c.renderConnections();
+      const line = document.querySelector("#watch-resting");
+      return line.hidden ? null : line.textContent;
+    }"""
+    watch = [{"what": "Questions for me in #eng", "how": "", "enabled": True}]
+    cases = [
+        ({"after_hours_reason": "weekend", "scanning": False},
+         {"watches": watch, "watch_after_hours_minutes": 30},
+         "Weekend: every 30 min (after-hours setting)"),
+        ({"after_hours_reason": "outside_hours", "scanning": False},
+         {"watches": watch, "watch_after_hours_minutes": 15},
+         "Outside work hours: every 15 min (after-hours setting)"),
+        ({"after_hours_reason": "weekend", "scanning": False},
+         {"watches": watch, "watch_after_hours_minutes": 0},
+         "Not scanning now: weekend, and after hours is 0"),
+        ({"after_hours_reason": "weekend", "scanning": True},
+         {"watches": watch, "watch_after_hours_minutes": 30}, None),
+        ({"after_hours_reason": "weekend", "scanning": False},
+         {"watches": [], "watch_after_hours_minutes": 30}, None),
+        ({"after_hours_reason": "", "scanning": False},
+         {"watches": watch, "watch_after_hours_minutes": 30}, None),
+    ]  # fmt: skip
+    for connector, settings, said in cases:
+        assert await page.evaluate(resting, [connector, settings]) == said, (connector, settings)
+    log("Watches after hours: how often it scans; nothing while scanning or with no watch")
+
+    for scheme in ("light", "dark"):
+        await page.emulate_media(color_scheme=scheme)
+        for width in (352, 400):
+            await page.evaluate(
+                "w => document.querySelector('#panel').style.width = `${w}px`", width
+            )
+            for part in (monitoring, recent, made, needs):
+                found = await part.evaluate(OVERFLOWS)
+                assert not found, (scheme, width, found)
+            title_width = await later.locator(".head .title").evaluate(
+                "n => n.getBoundingClientRect().width"
+            )
+            assert title_width > 150, (width, title_width)
+            await monitoring.screenshot(path=SHOTS / f"ui-edges-r7-monitoring-{width}-{scheme}.png")
+            await noted.screenshot(path=SHOTS / f"ui-edges-r7-large-{width}-{scheme}.png")
+            await tidy.screenshot(path=SHOTS / f"ui-edges-r7-not-counted-{width}-{scheme}.png")
+            await made.screenshot(path=SHOTS / f"ui-edges-r7-artifacts-{width}-{scheme}.png")
+        await page.evaluate("document.querySelector('#panel').style.removeProperty('width')")
+        await page.set_viewport_size({"width": 1280, "height": 900})
+        await page.screenshot(path=SHOTS / f"ui-edges-r7-home-1280-{scheme}.png")
+        await page.set_viewport_size({"width": 1440, "height": 900})
     await context.close()
 
 
@@ -2392,6 +2706,7 @@ async def main():
             await round_four(runtime, browser, failures)
             await round_five(runtime, browser, failures)
             await round_six(runtime, browser, failures)
+            await round_seven(runtime, browser, failures)
             await browser.close()
         server.should_exit = True
         await serving

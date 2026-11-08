@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.1.28 (2026-11-08)
+
+A third live bug bash (four instances on real Copilot: lifecycle, the UI and Slack, GitHub, and the
+changes in 0.1.27) and a code review, all fixed.
+
+- **Each task's changes**: in a folder of yours (not a worktree) a task's changes are the files its
+  edits wrote or its own commands named: what you edited there meanwhile, a pull, or another task
+  working at the same time are not counted (the card says *not counted: 2 files*). A follow-up after
+  other work leaves out what changed in between; a split gives each result its own changes, tests
+  and Accept (undo puts them back); a new file too large to count no longer hides the task's other
+  changes (*1 large new file*); a finished task is *Out of date* only when its own files changed.
+- **Chat on finished work**: a question asked in chat stays news even when others changed the
+  folder; a change made in chat without a report is asked to be reported, as the task's new result
+  to review. A decision card is answered by what you write in the worker's chat, and goes when its
+  task ends; a task waiting on your answer goes on as soon as you answer.
+- **The Router**: hears when you cancel a task or close a worker (and a new Router after a hand-over
+  knows), so it no longer revives cancelled work; can stop a worker (Go on stays yours) instead of
+  cancelling; marks a failed task replaced when it does the work over (no second Retry), and names
+  the failed task; can add a Watch you confirm ("watch #deploys for X"); says nothing when it has
+  nothing to say; hears each question you asked a worker directly with its own answer.
+- **Workers**: can report a task as failed; closing a working worker and reopening it brings its
+  task back stopped (Go on or Cancel); splitting moves only the messages that asked for the latest
+  result; a short Chinese title is a title; declared files in a worker's own folder are artifacts,
+  and one declared again under a new link replaces the old. A sent or rejected draft answers the
+  question its worker asked about it; editing a draft of finished work does not wake its worker.
+- **GitHub**: PR news goes to the task that made the PR, not a later one that only asked about it,
+  nor every worker that read it (a reviewer still hears replies to its own comments); workers' own
+  pushes are not news (found in their checkouts, however they committed); a closed PR you asked to
+  follow stays followed for 14 days (its reopening is news); a merge refused because new commits
+  came says so and the card follows the PR; workers use the account you use on that repository;
+  *Create PR* works on a branch you named; a task with two PRs is done when the last is merged.
+- **Away and Slack**: away notifications include failed tasks; with Slack connected, notifications
+  reach your own Slack DM and your answers there are read; a failed test send is said as a test;
+  your own @mention shows as your name.
+- **Links**: a doc only discussed ("the product spec", "the doc you shared") is not one the task
+  made; a link cut with "..." is not a link; a doc linked as "here" is named by what it is; a card's
+  one-line summary keeps the ")" after a link.
+- **Home**: chat lines keep a title's " · repo"; @ names and the Usage dialog use workers' current
+  names; Watches say *Weekend: every 30 min* (not *not scanning*); withdrawn or replaced drafts keep
+  their outcome after a reload; *Slack couldn't go on* says why; a held Slack reply shows the new
+  message once, with one *Send anyway*; *Ask to redo* needs a reason; a review GitHub refuses says
+  so; PR states agree everywhere (*changes requested* first); queued rows in start order; a
+  follow-up not taken up yet is *Up next*; rows fold from the keyboard; *Rename…* on waiting and
+  failed tasks; no repeated *Checks back*; file artifacts left-aligned.
+
 ## 0.1.27 (2026-11-08)
 
 A second live bug bash (four instances: lifecycle, Slack and the UI, GitHub, and the changes in

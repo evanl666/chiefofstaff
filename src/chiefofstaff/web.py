@@ -194,7 +194,7 @@ def create_app(
 
     @app.get("/api/usage")
     async def usage(since: float, until: float | None = None):
-        return store.usage(since, time.time() + 1 if until is None else until)
+        return runtime.usage(since, time.time() + 1 if until is None else until)
 
     @app.post("/api/profile")
     async def save_profile(payload: ProfileText):
@@ -393,7 +393,7 @@ def create_app(
 
     @app.post("/api/sessions/{session_id}/reopen")
     async def reopen(session_id: str):
-        return await runtime.workers.reopen(session_id)
+        return await runtime.workers.reopen(session_id, restore=True)
 
     @app.post("/api/sessions/{session_id}/yolo")
     async def session_yolo(session_id: str, payload: SessionYolo):
@@ -405,7 +405,7 @@ def create_app(
 
     @app.post("/api/sessions/{session_id}/close")
     async def close(session_id: str):
-        await runtime.workers.close(session_id)
+        await runtime.workers.close(session_id, by="you")
         return {"ok": True}
 
     @app.get("/api/external")

@@ -1069,7 +1069,9 @@ button.receipt.needs { background: var(--amber-soft); color: var(--amber); }
 :is(#tasks-artifacts, #tasks-monitoring, #tasks-recent) > .items { max-height: min(40vh, 300px); overflow-y: auto; padding-right: 2px; }
 #tasks-artifacts .artifact { display: grid; grid-template-columns: 6.5ch minmax(0, 1fr) auto auto; align-items: center; column-gap: 8px; padding: 5px 8px; border-radius: 6px; background: var(--card, var(--hover)); font-size: var(--small); min-width: 0; }
 #tasks-artifacts .artifact .a-kind { font: 600 10px var(--mono); color: var(--muted); text-transform: uppercase; letter-spacing: 0.02em; min-width: 5.5ch; }
-#tasks-artifacts .artifact .a-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); text-decoration: none; font-weight: 500; }
+#tasks-artifacts .artifact .a-name { min-width: 0; padding: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); text-align: left; text-decoration: none; font-weight: 500; }
+/* A file's name opens it here (a button): a 28px target on the line of a link's. */
+#tasks-artifacts .artifact button.a-name { margin: -4px 0; }
 #tasks-artifacts .artifact .a-name:hover { text-decoration: underline; }
 #tasks-artifacts .artifact .a-status { padding: 0 8px; line-height: 20px; border-radius: 10px; white-space: nowrap; background: var(--hover); color: var(--soft); max-width: 12em; overflow: hidden; text-overflow: ellipsis; }
 #tasks-artifacts .artifact .a-status.derived { font-style: italic; }
@@ -1172,6 +1174,8 @@ button.receipt { min-height: 28px; margin: -3px 0; border: solid transparent; bo
 .receipt.pr.closed { color: var(--muted); }
 a.receipt:hover { text-decoration: underline; }
 button.receipt.changes { font-size: var(--small); color: var(--accent); background: var(--accent-soft); }
+/* Others' changes in the owner's folder, beside the task's own: quiet. */
+button.receipt.changes .not-counted { color: var(--muted); }
 .receipt.verdict { font-weight: 600; }
 .card.decision .question, .card.change .question, .card.check .question { font-weight: 600; margin: 0 0 4px; }
 .card.decision .why, .card.change .why { color: var(--soft); font-size: var(--small); }
@@ -1353,7 +1357,7 @@ dialog .row label.hours:not(.grow) { width: auto; flex: none; }
 
 /* A worker's question kept under Needs you until answered. */
 .card.question-card .head { display: flex; gap: 8px; align-items: center; }
-.card.question-card .head .title { flex: 1; min-width: 0; text-align: left; padding: 0; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card.question-card .head .title { flex: 1; min-width: 0; text-align: left; padding: 0; background: none; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card.question-card .head .meta { color: var(--muted); font-size: var(--small); }
 .card.question-card > .body { margin-top: 6px; max-height: 240px; overflow-y: auto; }
 .card.draft.merge .note.strong { color: var(--text); font-weight: 500; }
@@ -1388,7 +1392,8 @@ dialog .row label.hours:not(.grow) { width: auto; flex: none; }
 .card.task.row .head .meta { display: inline-flex; }
 .card.task.row .head .meta .marker { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .card.task.row .head .meta .when { flex: none; white-space: pre; }
-.card.task.row:not(.unfolded) > :not(.head, .row-line), .card.task.row:not(.unfolded) > .head > .actions { display: none; }
+.card.task.row:not(.unfolded) > :not(.head, .row-line), .card.task.row:not(.unfolded) > .head > :is(.actions, .fold) { display: none; }
+.card.task.row .head .fold { flex: none; font-size: var(--small); }
 .card.task.row.unfolded > .row-line { display: none; }
 .card.task .row-line { display: flex; gap: 8px; align-items: baseline; margin-left: 16px; min-width: 0; font-size: var(--small); line-height: 18px; color: var(--muted); }
 .card.task .row-line .why { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

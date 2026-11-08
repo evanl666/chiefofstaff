@@ -532,7 +532,8 @@ async def s16_missing_file(app: App, project: Path):
 
     async def answered():
         tasks = await tasks_since(app, since)
-        if tasks and tasks[0]["status"] in {"waiting", *FINISHED}:
+        # It asks for the right file, says so in a result, or reports it cannot be done.
+        if tasks and tasks[0]["status"] in {"waiting", "failed", *FINISHED}:
             return tasks[0]
         return None
 

@@ -245,6 +245,34 @@ def test_runs(command: str) -> list[str]:
     return [text for words in simple_commands(command) if test.search(text := program(words))]
 
 
+def shown_command(command: str, name: str) -> str:
+    """A command line as a receipt shows it: the part that is this kind of run (`uv run pytest
+    -q`, not the heredoc that wrote a file before it), after where it ran (`cd svc && …`)."""
+    pattern = dict(KINDS).get(name)
+    parts = simple_commands(command)
+    at = next(
+        (i for i, words in enumerate(parts) if pattern and pattern.search(program(words))), -1
+    )
+    if at < 0:
+        return command[:200]
+    words, kept = parts[at], []
+    skip = False
+    for index, word in enumerate(words):
+        if skip:
+            skip = False
+        elif re.fullmatch(r"\d*[<>]+&?|&>", word):
+            skip = True  # A redirection and its target: not what runs.
+        elif word.isdigit() and index + 1 < len(words) and words[index + 1][:1] in "<>":
+            continue
+        else:
+            kept.append(shlex.quote(word) if re.search(r"\s", word) else word)
+    text = " ".join(kept)
+    where = next((ws[1] for ws in reversed(parts[:at]) if len(ws) == 2 and ws[0] == "cd"), "")
+    if where:
+        text = f"cd {shlex.quote(where)} && {text}"
+    return text[:200]
+
+
 def kind(command: str) -> str:
     """test, check, build, pr, push, commit or "" for a shell command line."""
     programs = [program(words) for words in simple_commands(command)]
@@ -535,12 +563,13 @@ def summarize(
         if not runs:
             if not running:
                 return None
-            return {"command": every[-1]["command"][:200], "exit_code": None, "passed": None,
+            return {"command": shown_command(every[-1]["command"], name), "exit_code": None,
+                    "passed": None,
                     "runs": len(every), "failed_before": False, "running": True}  # fmt: skip
         final = runs[-1]
         ended[name] = final.get("ended_at") or ""
         return {
-            "command": final["command"][:200],
+            "command": shown_command(final["command"], name),
             "exit_code": final["exit_code"],
             "passed": final["exit_code"] == 0,
             "runs": len(every),
@@ -556,6 +585,10 @@ def summarize(
         "deletions": sum(c.get("deletions", 0) for c in checkouts),
         "commits": sum(c.get("commits", 0) for c in checkouts),
         "uncommitted": sum(c.get("uncommitted", 0) for c in checkouts),
+        # New files too large to count lines in (or to show): "1 large new file".
+        "large": sum(c.get("large", 0) for c in checkouts),
+        # In a folder of the owner's: files others changed there meanwhile (not its own).
+        "not_counted": sum(c.get("not_counted", 0) for c in checkouts),
     }
     flags = []
     tests = last("test")
@@ -610,6 +643,7 @@ def summarize(
         "criteria": results,
         "verdict": verdict(results),
         "stale": stale or "",
+        "at": evidence.get("at", ""),  # When its checkouts were last looked at.
         "version": [
             {
                 "branch": c.get("branch", ""),

@@ -431,6 +431,64 @@ async def test_a_split_off_task_worked_on_since_cannot_be_undone(harness):
     assert runtime.tasks.find(split["id"]), "the task and its follow-up stay"
 
 
+async def test_a_split_moves_only_what_asked_for_the_latest_result(harness):
+    """Bug bash 3: the preview moved the owner's earlier word on the first result too."""
+    runtime = await harness.connect()
+    made = await spawn(runtime, harness.router_id, "Schedule BG features weekly")
+    worker = made["session_id"]
+    await call_tool(runtime, "report", worker, status="done", summary="Scheduled for Mondays.")
+    await runtime.owner_send(worker, "Keep Mondays.")
+    harness.session(worker).emit("assistant.message", content="Noted: Mondays it stays.")
+    await settle(runtime)
+    await call_tool(
+        runtime, "message_session", harness.router_id, session_id=worker,
+        text="Does Qwen need a weekly rerun?", task_id=made["task_id"],
+    )  # fmt: skip
+    await call_tool(runtime, "report", worker, status="done", summary="No: vectors are built in.")
+    moves = runtime.task_actions.split_preview(made["task_id"])["moves"]["messages"]
+    assert [m["text"] for m in moves] == ["Does Qwen need a weekly rerun?",
+                                          "No: vectors are built in."]  # fmt: skip
+
+
+def test_a_short_title_in_chinese_says_what_it_delivers():
+    from chiefofstaff.task_actions import deliverable_title
+
+    assert deliverable_title("修复登录日期") == "修复登录日期"
+    for bad in ("111", "修复", "Fix it"):
+        with pytest.raises(ValueError, match="what it delivers"):
+            deliverable_title(bad)
+
+
+async def test_files_in_a_workers_own_folder_are_artifacts_and_a_name_said_again_replaces(
+    tmp_path, git_repo
+):
+    """Bug bash: mockups a worker made in its workspace (beside its checkout) and declared were
+    dropped; an artifact declared again under another link stayed twice."""
+    from chiefofstaff.models import Settings
+
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    runtime = await harness.connect()
+    made = await spawn(runtime, harness.router_id, "Mockups", project=str(git_repo), isolate=True)
+    row = harness.store.session(made["session_id"])
+    scratch = runtime.workspaces.workspace(row) / "scratch"
+    scratch.mkdir(parents=True, exist_ok=True)
+    (scratch / "mock-a.html").write_text("<p>a</p>")
+    (scratch / "job.sh").write_text("run")
+    (scratch / "done.txt").write_text("done")
+    runtime.task_actions.declare_artifacts(made["task_id"], [
+        {"url": str(scratch / "mock-a.html"), "name": "Mockup A", "status": "draft"},
+        {"url": str(scratch / "job.sh"), "name": "Nightly export job", "status": "running"},
+    ])  # fmt: skip
+    runtime.task_actions.declare_artifacts(made["task_id"], [
+        {"url": str(scratch / "done.txt"), "name": "Nightly export job", "status": "done"},
+    ])  # fmt: skip
+    found = runtime.task_actions.view(runtime.tasks.get(made["task_id"]))["artifacts"]
+    assert [(item["name"], item["status"]) for item in found] == [
+        ("Mockup A", "draft"), ("Nightly export job", "done"),
+    ]  # fmt: skip
+    assert found[0]["url"].startswith("file://") and found[0]["path"].endswith("mock-a.html")
+
+
 async def test_a_worker_says_what_its_task_made_and_where_each_stands(harness):
     runtime = await harness.connect()
     worker = (await spawn(runtime, harness.router_id, "Run the ICP flow"))["session_id"]

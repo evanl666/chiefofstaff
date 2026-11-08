@@ -244,6 +244,8 @@ class Workers:
         row = self.store.session(session_id)
         if row["status"] not in {"working", "starting", "queued"} and not row["closed_at"]:
             self.answer_on_home(session_id)  # Its turn is over: what it answered is all.
+        if row["status"] not in {"working", "starting", "queued"} and not row["closed_at"]:
+            await self.report_chat_change(session_id)
         running = [t for t in self.tasks.for_session(session_id) if t["status"] == "running"]
         current = self.tasks.current(session_id)
         if row["status"] != "idle" or row["closed_at"] or not running:
@@ -360,6 +362,41 @@ class Workers:
                 display="It stopped without a report: asked for one.",
                 meta={"report_nudge": True},
             )
+
+    async def report_chat_change(self, session_id: str):
+        """Asked in chat for a change to finished work, it changed its files and ended without
+        report(): asked once to report it, so the owner reviews it as the task's new result."""
+        for task in self.tasks.for_session(session_id):
+            if task["status"] not in {"review", "done"}:
+                continue
+            if self.store.get(f"followup:{task['id']}") != "chat":
+                continue
+            chat = json.loads(self.store.get(f"chatbase:{task['id']}") or "{}")
+            since = chat.get("at", "")
+            if not since or self.store.get(f"chatnudged:{task['id']}") == since:
+                continue
+            reported = self.store.value(
+                "SELECT count(*) FROM messages WHERE session_id=? AND kind='report' AND "
+                "json_extract(meta, '$.task_id')=? AND created_at>?",
+                (session_id, task["id"], since),
+            )
+            if reported or not await self.runtime.task_actions.changed_since_result(task):
+                continue
+            self.store.set(f"chatnudged:{task['id']}", since)
+            text = (
+                f"You changed files for task {task['id']} “{task['title']}” in this chat, after "
+                f"its result. Report it now with report(status='done', task_id='{task['id']}'): "
+                "it is its new result, for the owner to review."
+            )
+            with suppress(Exception):
+                await self.delivery.deliver(
+                    session_id,
+                    wrap("system", "report-missing", text, task=task["id"]),
+                    kind="notice",
+                    display="It changed finished work without a report: asked for one.",
+                    meta={"report_nudge": True, "task_id": task["id"]},
+                )
+            return
 
     async def ask_what_it_waits_for(
         self, session_id: str, task: dict, asked: dict, report: dict
@@ -578,7 +615,9 @@ class Workers:
             return False
         return not self.runtime.asks.session_questions(session_id)
 
-    async def close(self, session_id: str):
+    async def close(self, session_id: str, by: str = ""):
+        """`by`: who closed it ("you": the owner; "the Router"; "" for Chief of Staff, once
+        nothing of it is open). The Router hears of open work closed with it."""
         row = self.store.session(session_id)
         if row["role"] == ROUTER:
             raise ValueError("The Router cannot be closed.")
@@ -606,7 +645,14 @@ class Workers:
             keep_questions=self.runtime.working_on(session_id) if row["role"] == WORKER else None,
         )
         await self.runtime.asks.cancel_questions(session_id)
+        # What it had received of each open task: one it worked on comes back when it reopens.
+        received = {
+            task["id"]: self.delivery.drop_pending(session_id, task["id"])
+            for task in self.tasks.for_session(session_id)
+            if task["status"] in OPEN
+        }
         self.delivery.drop_pending(session_id)  # A reopened worker does not get them.
+        ended = []
         for task in self.tasks.for_session(session_id):
             if task["status"] not in OPEN:
                 continue
@@ -614,8 +660,20 @@ class Workers:
                 # Only its follow-up ends: the result it had stands.
                 self.store.delete(f"reopened:{task['id']}")
                 self.tasks.move(task["id"], was, progress="Follow-up ended: its worker was closed.")
+                ended.append(f"the follow-up on {task['id']} “{task['title']}” (its result stands)")
             else:
+                if received.get(task["id"]) or self.store.get(f"started:{task['id']}"):
+                    # Reopened by the owner, it is back where it was (a task at work: stopped).
+                    self.store.set(
+                        f"closedtask:{task['id']}",
+                        json.dumps({
+                            "by": by or "Chief of Staff", "status": task["status"],
+                            "progress": task["progress"],
+                            "stopped": self.store.get(f"stopped:{task['id']}") or "",
+                        }),
+                    )  # fmt: skip
                 self.tasks.move(task["id"], "cancelled", progress="Its worker was closed.")
+                ended.append(f"{task['id']} “{task['title']}”")
         # Not "stopped without reporting": the Watchdog leaves a reopened worker alone until told.
         self.runtime.add_message(session_id, "notice", "Closed.", {"stopped": True})
         self.runtime.update_session(session_id, closed_at=now(), activity="")
@@ -625,12 +683,27 @@ class Workers:
                 self.runtime.habits.summarize(session_id)
         else:
             with suppress(RuntimeError):
-                self.runtime.add_message(
-                    self.runtime.router_id(),
-                    "notice",
-                    f"Closed “{self.runtime.display_title(row)}”",
-                    {"session_id": session_id},
-                )
+                router = self.runtime.router_id()
+                title = self.runtime.display_title(row)
+                display, meta = f"Closed “{title}”", {"session_id": session_id}
+                if ended and by.lower().removeprefix("the ") != "router":
+                    # Held for the Router's next message: it must not start that work again.
+                    who = "The owner" if by == "you" else "Chief of Staff"
+                    text = (
+                        f"{who} closed worker {short(session_id)} “{title}” with open work: "
+                        f"{'; '.join(ended)}. Cancelled with it (if the owner reopens the worker, "
+                        "what it had started comes back). Do not start that work again (in this "
+                        "worker or another) unless the owner asks for it."
+                    )
+                    self.delivery.hold(
+                        router,
+                        wrap("system", "closed", text, worker=short(session_id), title=title),
+                        kind="notice",
+                        display=display,
+                        meta=meta,
+                    )
+                else:
+                    self.runtime.add_message(router, "notice", display, meta)
         self.runtime.background(self.pump())
         if row["role"] == WORKER:
             self.runtime.background(self.release(session_id))
@@ -732,8 +805,10 @@ class Workers:
                 cards.append({**self.card(rows[key]), "matched": matched})
         return cards[:limit]
 
-    async def reopen(self, session_id: str) -> dict:
-        """Bring a closed worker back with its conversation, worktree and branch."""
+    async def reopen(self, session_id: str, restore: bool = False) -> dict:
+        """Bring a closed worker back with its conversation, worktree and branch. `restore`:
+        the owner reopens it, and the tasks closing it cancelled that it had started are back
+        where they were: stopped, waiting for their Go on (or Cancel)."""
         row = self.store.session(session_id)
         if row["role"] != WORKER:
             raise ValueError("Only workers can be reopened.")
@@ -757,13 +832,45 @@ class Workers:
             row = self.runtime.update_session(
                 session_id, closed_at=None, status=status, activity=""
             )
-        with suppress(RuntimeError):
-            self.runtime.add_message(
-                self.runtime.router_id(),
-                "notice",
-                f"Reopened “{self.runtime.display_title(row)}”",
-                {"session_id": session_id},
+        restored = []
+        for task in self.tasks.for_session(session_id):
+            was = json.loads(self.store.get(f"closedtask:{task['id']}") or "null")
+            self.store.delete(f"closedtask:{task['id']}")
+            if not (restore and was and task["status"] == "cancelled"):
+                continue
+            if was["status"] == "waiting" and not was["stopped"]:
+                # It waited for the owner's answer: it does again.
+                restored.append(self.tasks.move(task["id"], "waiting", progress=was["progress"]))
+                continue
+            by = was["stopped"] or was["by"]
+            self.store.set(f"stopped:{task['id']}", by)
+            progress = f"Stopped when {by} closed its worker: Go on, or Cancel."
+            restored.append(self.tasks.move(task["id"], "waiting", progress=progress))
+        if restored:
+            self.store.execute(
+                "UPDATE sessions SET task_id=? WHERE id=?", (restored[-1]["id"], session_id)
             )
+            asking = any(not self.store.get(f"stopped:{t['id']}") for t in restored)
+            row = self.runtime.update_session(session_id, status="waiting" if asking else "idle")
+        with suppress(RuntimeError):
+            display = f"Reopened “{self.runtime.display_title(row)}”"
+            meta = {"session_id": session_id}
+            if restored:
+                listed = "; ".join(f"{t['id']} “{t['title']}”" for t in restored)
+                text = (
+                    f"The owner reopened worker {short(session_id)}: what closing it cancelled "
+                    f"is back where it was, waiting for the owner (to go on, or an answer): "
+                    f"{listed}."
+                )
+                self.delivery.hold(
+                    self.runtime.router_id(),
+                    wrap("system", "reopened", text, worker=short(session_id)),
+                    kind="notice",
+                    display=display,
+                    meta=meta,
+                )
+            else:
+                self.runtime.add_message(self.runtime.router_id(), "notice", display, meta)
         return self.runtime.view(row)
 
     async def interrupt(self, session_id: str, by: str = "you"):

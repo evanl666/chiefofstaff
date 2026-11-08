@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import time
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -199,6 +200,25 @@ class Asks:
         if gone:
             self.runtime.publish_state()
 
+    def go_on(self, task: dict, chat: bool = True) -> dict:
+        """The owner answered what a task waited for (its question, its decision): it goes on
+        now, not only once its worker reports again. Finished work it asked about goes back
+        where it was (`chat`: what its worker says next is news on it, its result stays). A task
+        stopped (by the owner or the Router) stays stopped: only Go on resumes it."""
+        tasks = self.runtime.tasks
+        task = tasks.find(task["id"]) or task
+        if task["status"] != "waiting" or self.store.get(f"stopped:{task['id']}"):
+            return task
+        if was := self.store.get(f"askedafter:{task['id']}"):
+            task = tasks.move(task["id"], was)
+            if chat:
+                self.store.set(f"followup:{task['id']}", "chat")
+        else:
+            task = tasks.move(task["id"], "running", reason="answer", progress="")
+        if row := self.store.find_session(task["session_id"]):
+            self.delivery.rest_after(row)  # A turn on it now: it reports, not rests.
+        return task
+
     def dismiss(self, question_id: str):
         if self.store.get(f"ownerq:{question_id}"):
             self.store.delete(f"ownerq:{question_id}")
@@ -297,6 +317,37 @@ class Asks:
             self.states[session_id].asking.pop(draft["id"], None)
             if row := self.store.find_session(session_id):
                 self.runtime.publish_session(row)
+
+    def offer(
+        self,
+        session_id: str,
+        kind: str,
+        target: dict,
+        text: str,
+        then: Callable[[dict], Awaitable[None]],
+        title: str = "",
+    ) -> dict:
+        """Show the owner a card whose answer is applied when it comes (`then`, in the
+        background); nothing waits for it meanwhile (a Router's turn goes on). Like every
+        request, it does not survive a restart."""
+        draft = self.store.create_draft(session_id, kind, target, text)
+        self.runtime.add_message(
+            session_id, "draft", text, {"draft_id": draft["id"], "label": title or LABELS[kind]}
+        )
+        self.bus.publish("draft", draft)
+        self.runtime.alert(
+            text, session_id=session_id, needs_action=True, title=title or LABELS[kind]
+        )
+        answer = asyncio.get_running_loop().create_future()
+        self.requests[draft["id"]] = answer
+
+        def answered(found: asyncio.Future):
+            self.requests.pop(draft["id"], None)
+            if not found.cancelled():
+                self.runtime.background(then(found.result()))
+
+        answer.add_done_callback(answered)
+        return draft
 
     def cancel_requests(self, session_id: str, reason: str, keep_questions: str | None = None):
         """The session is closed or stopped: its open cards end and it stops waiting.

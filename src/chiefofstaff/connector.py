@@ -32,7 +32,8 @@ from . import prompts, threads
 from .envelope import UNTRUSTED, wrap
 from .models import DraftDecision, NestedArguments
 from .roles import WORKER
-from .store import now
+from .sources.slack import PERMALINK_CHANNEL, message_keys, messages
+from .store import hours_ago, now
 
 if TYPE_CHECKING:
     from .runtime import Runtime
@@ -64,6 +65,14 @@ RETRY_SECONDS = 600
 PENDING_SECONDS = 900
 # The owner's replies are read for this long after the last notification.
 READ_REPLIES_HOURS = 24
+# The messenger's way to the owner when nothing else reaches them: their own Slack DM, through
+# Chief of Staff's own Slack connection (it gets no Slack tools of its own).
+SLACK_DM_HINT = (
+    "Chief of Staff's Slack connection reaches the owner's own Slack DM (a message to themself: "
+    "they see it there, without a phone notification): send_owner_slack_dm sends version A or "
+    "B there, and read_owner_slack_dm reads their replies there later. Use it when that is how "
+    'they want to get it ("my own Slack DM"), or when nothing else here reaches them.'
+)
 SEND_WORDS = {"send", "ok", "okay", "yes", "y", "approve", "lgtm", "发", "发送", "好", "可以"}
 REJECT_WORDS = {"reject", "no", "n", "skip", "don't", "dont", "不", "不要", "拒绝"}
 HID_IDLE = re.compile(r'"HIDIdleTime" = (\d+)')
@@ -167,6 +176,17 @@ class ReportNotified(BaseModel):
         "cannot (you sent the version without codes)",
     )
     error: str = Field(default="", description="Why it could not be sent")
+
+
+class SendOwnerSlackDm(BaseModel):
+    version: Literal["A", "B"] = Field(
+        description="A: the version with answer codes (you then read the owner's replies with "
+        "read_owner_slack_dm); B: the one without"
+    )
+
+
+class ReadOwnerSlackDm(BaseModel):
+    pass
 
 
 class OwnerReply(BaseModel):
@@ -565,7 +585,11 @@ class Connector:
                 # A PR offered again at the same commit is the same item: told once, one code.
                 key = f"merge:{draft['target']['label'].lower()}@{draft['target']['head']}"
             items.append({"id": f"draft:{key}", "draft": draft})
-        tasks = self.runtime.tasks.listed()
+        from .runtime import TASKS_SHOWN_HOURS
+
+        # Also those that ended lately: a failed task waits for the owner (Retry), as Home
+        # shows it under Needs you.
+        tasks = self.runtime.tasks.listed(include_ended_since=hours_ago(TASKS_SHOWN_HOURS))
         for question in self.runtime.asks.owner_questions():
             items.append(
                 {"id": f"question:{question['session_id']}:{question['at']}", "question": question}
@@ -806,7 +830,14 @@ class Connector:
         files = await asyncio.to_thread(self.write_notification, shown, more)
         self.store.set(
             "away_pending",
-            json.dumps({"at": time.time(), "items": [item["id"] for item in shown], "test": test}),
+            json.dumps(
+                {
+                    "at": time.time(),
+                    "items": [item["id"] for item in shown],
+                    "test": test,
+                    "files": files,
+                }
+            ),
         )
         settings = self.store.settings()
         how = settings.away_how.strip() or prompts.AWAY_DEFAULT
@@ -820,6 +851,8 @@ class Connector:
             f"B: {files['plain.txt']} or {files['plain.json']}",
             f"How the owner wants to get it: {how}",
         ]
+        if self.slack_dm():
+            lines.append(SLACK_DM_HINT)
         if method := self.store.get("away_method"):
             lines.append(f"What you used before: {method}")
         if replies := self.store.get("away_replies"):
@@ -883,6 +916,87 @@ class Connector:
         )
         await self.runtime.toolset.start_special(MESSENGER, MESSENGER_TITLE, text)
 
+    def slack_dm(self) -> bool:
+        """Whether Chief of Staff's own Slack connection can send to the owner's own DM."""
+        slack = self.runtime.slack
+        return slack.configured() and (slack.can_send or not slack.fingerprint)
+
+    async def owner_slack_id(self) -> str:
+        slack = self.runtime.slack
+        if not self.slack_dm():
+            raise ValueError(
+                "Slack is not connected to Chief of Staff (or its token cannot send): use another "
+                "way, or report_notified(ok=false) saying so."
+            )
+        if not slack.status.get("user_id"):
+            await slack.discover()  # Who the owner is on Slack: read with its tools.
+        if not (user := slack.status.get("user_id") or ""):
+            raise ValueError("Slack did not say who the owner is: use another way.")
+        return user
+
+    async def t_send_owner_slack_dm(self, params: SendOwnerSlackDm, caller: str):
+        """The notification being sent now, as it is, to the owner's own Slack DM: nothing
+        else, to nobody else."""
+        self.check(caller, (MESSENGER,))
+        pending = json.loads(self.store.get("away_pending") or "null")
+        if not pending or not pending.get("files"):
+            raise ValueError("No notification is being sent now.")
+        user = await self.owner_slack_id()
+        name = "codes.txt" if params.version == "A" else "plain.txt"
+        text = (await asyncio.to_thread(Path(pending["files"][name]).read_text, "utf-8")).strip()
+        result = await self.runtime.slack.send({"channel_id": user}, text)
+        keys = message_keys(result)
+        for key in keys:
+            # Not a message to the owner for the Slack watcher, nor a reply of theirs.
+            self.store.add_trigger("slack-sent", key, text)
+        sent = max((float(key.removeprefix("slack:")) for key in keys), default=time.time())
+        before = json.loads(self.store.get("away_slack_dm") or "null") or {}
+        recent = time.time() - before.get("after", 0) < READ_REPLIES_HOURS * 3600
+        self.store.set(
+            "away_slack_dm",
+            json.dumps(
+                {
+                    # The DM itself (D…), as Slack linked the message; else the owner's id.
+                    "channel": (PERMALINK_CHANNEL.findall(result) or [user])[0],
+                    # Replies to every notification still answerable are read.
+                    "after": min(before["after"], sent) if recent else sent,
+                }
+            ),
+        )
+        replies = "read_owner_slack_dm" if params.version == "A" else ""
+        return (
+            "Sent to the owner's own Slack DM. Now call report_notified(ok=true, where=\"your "
+            f'own Slack DM", method="send_owner_slack_dm", replies="{replies}").'
+        )
+
+    async def t_read_owner_slack_dm(self, params: ReadOwnerSlackDm, caller: str):
+        """What the owner wrote in their own Slack DM since a notification was sent there:
+        their own messages only, not the notifications."""
+        self.check(caller, (MESSENGER,))
+        dm = json.loads(self.store.get("away_slack_dm") or "null")
+        if not dm:
+            raise ValueError("Nothing was sent to the owner's own Slack DM.")
+        user = await self.owner_slack_id()
+        listed = await self.runtime.slack.mcp.call(
+            "slack_read_channel", {"channel_id": dm["channel"], "limit": 50}
+        )
+        found = [
+            entry
+            for entry in messages(listed)
+            if entry["user"] == user
+            and entry["ts"]
+            and float(entry["ts"]) > dm["after"]
+            and not self.store.one(
+                "SELECT id FROM triggers WHERE key=? AND source='slack-sent'",
+                (f"slack:{entry['ts']}",),
+            )
+        ]
+        if not found:
+            return "No reply from the owner there yet."
+        return "The owner wrote there (oldest first):\n" + "\n".join(
+            f"- {entry['text']}" for entry in sorted(found, key=lambda e: float(e["ts"]))
+        )
+
     async def t_report_notified(self, params: ReportNotified, caller: str):
         # Only the messenger: what the connector writes (it reads others' messages) must never
         # become a command the messenger runs.
@@ -923,8 +1037,20 @@ class Connector:
             ),
         )
         failing = self.store.get("away_failing") == "1"
-        self.store.set("away_failing", "0" if params.ok else "1")
-        if not params.ok and not failing:
+        test = bool(pending and pending.get("test"))
+        if not (test and not params.ok):
+            self.store.set("away_failing", "0" if params.ok else "1")
+        if test and not params.ok:
+            # The owner tried it themself just now: told each time, and not as a message that
+            # missed them while they were away.
+            self.runtime.add_message(
+                self.runtime.router_id(),
+                "notice",
+                f"The test notification did not reach you: {params.error[:300]}. Change how in "
+                "Settings → Connections, then send a test again.",
+                {"settings": "connections"},
+            )
+        elif not params.ok and not failing:
             # Said once, not after every attempt: Settings shows the latest until it works.
             self.runtime.add_message(
                 self.runtime.router_id(),
@@ -1086,6 +1212,19 @@ class Connector:
                 "Pass the owner's answers to Chief of Staff's notifications (by code).",
                 ReportOwnerReplies,
                 self.t_report_owner_replies,
+            ),
+            (
+                "send_owner_slack_dm",
+                "Send the notification to the owner's own Slack DM, through Chief of Staff's "
+                "Slack connection.",
+                SendOwnerSlackDm,
+                self.t_send_owner_slack_dm,
+            ),
+            (
+                "read_owner_slack_dm",
+                "Read the owner's replies in their own Slack DM, where send_owner_slack_dm sent.",
+                ReadOwnerSlackDm,
+                self.t_read_owner_slack_dm,
             ),
         ]
 

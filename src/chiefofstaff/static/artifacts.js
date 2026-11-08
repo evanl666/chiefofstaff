@@ -7,13 +7,15 @@ import { ago, linkKey, linkName, prTitle, shorten, taskLinks } from "./text.js";
 import { state } from "./state.js";
 import { openFile } from "./files.js";
 
-// What a PR's state comes to, in a word or two, worst first.
+// What a PR's state comes to, in a word or two, worst first: one rule for Artifacts, a card's
+// PR chip and what Monitoring says it waits on (changes requested wins over failing CI: the
+// author has to act on the review either way).
 export function prStatus(pr) {
   if (pr.state === "MERGED") return ["merged", "good"];
   if (pr.state === "CLOSED") return ["closed", "muted"];
   if (pr.draft) return ["draft", "active"];
-  if (pr.checks === "failing") return ["CI failing", "bad"];
   if (pr.review === "CHANGES_REQUESTED") return ["changes requested", "bad"];
+  if (pr.checks === "failing") return ["CI failing", "bad"];
   if (pr.awaiting?.length) return ["awaiting approval", "wait"];
   if (pr.checks === "pending") return ["CI running", "active"];
   // GitHub would merge it now (approved, or no review required): a Ready-to-merge card says so.
