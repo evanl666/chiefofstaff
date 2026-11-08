@@ -453,8 +453,10 @@ async def test_a_split_moves_only_what_asked_for_the_latest_result(harness):
 def test_a_short_title_in_chinese_says_what_it_delivers():
     from chiefofstaff.task_actions import deliverable_title
 
-    assert deliverable_title("修复登录日期") == "修复登录日期"
-    for bad in ("111", "修复", "Fix it"):
+    # Bug bash 4 (R-s2): three-character Chinese titles were refused.
+    for good in ("修复登录日期", "改日期", "登录页"):
+        assert deliverable_title(good) == good
+    for bad in ("111", "修", "哈哈", "Fix it"):
         with pytest.raises(ValueError, match="what it delivers"):
             deliverable_title(bad)
 
@@ -509,3 +511,59 @@ async def test_a_worker_says_what_its_task_made_and_where_each_stands(harness):
         (doc, "ICP results", "final"),
         (flow, "ICP flow, full run", "succeeded"),
     ], "kept by link, the latest word on each; PRs come from GitHub; not a link: dropped"
+
+
+async def test_a_cancelled_task_takes_its_waiting_drafts_with_it(harness):
+    """Bug bash 4 (D6): its reply stayed under Needs you after its task was cancelled."""
+    runtime = await harness.connect()
+    bob = await spawn(runtime, harness.router_id, "Reply to Bob about currencies")
+    other = await spawn(runtime, harness.router_id, "Reply to Carol", why_new="separate")
+
+    def reply(made, to):
+        target = {"to": to, "where": "email", "link": "", "task_id": made["task_id"]}
+        return harness.store.create_draft(made["session_id"], "reply", target, f"Hi {to}")
+
+    gone, kept = reply(bob, "Bob"), reply(other, "Carol")
+    await runtime.task_actions.cancel(bob["task_id"], "Answered him myself")
+    withdrawn = harness.store.draft(gone["id"])
+    assert withdrawn["status"] == "rejected" and withdrawn["outcome"].startswith("Withdrawn")
+    assert harness.store.draft(kept["id"])["status"] == "pending", "another task's stays"
+
+
+async def test_cancelling_work_that_had_finished_keeps_its_result_and_says_so(harness):
+    """Bug bash 4 (D-s3): the Router cancelled a research task after its report: Home said
+    "Cancelled: <the whole report>", and the Router never said it had been done."""
+    runtime = await harness.connect()
+    made = await spawn(runtime, harness.router_id, "Compare Python CLI frameworks")
+    report = "## Comparison\n\n| Framework | Stars |\n|---|---|\n| click | 16k |"
+    await call_tool(runtime, "report", made["session_id"], status="done", summary=report)
+    result = await call_tool(runtime, "cancel_task", harness.router_id, task_id=made["task_id"],
+                             reason="Not needed any more")  # fmt: skip
+    assert "had finished already" in result.text_result_for_llm
+    found = task(harness, made["task_id"])
+    assert found["status"] == "done" and found["result"] == report
+    assert found["progress"].startswith("Cancelled by the Router: Not needed any more")
+
+
+async def test_more_on_a_reported_result_is_reported_whole_not_as_an_addendum(harness):
+    """Bug bash 4 (D-s1): asked to add how RapidFuzz handles Chinese "and keep the comparison",
+    the worker reported only the addendum, which became the task's whole result."""
+    runtime = await harness.connect()
+    made = await spawn(runtime, harness.router_id, "Compare fuzzy matching libraries")
+    worker = made["session_id"]
+    first = (
+        "**Use RapidFuzz 3.14.6.** MIT licence, C++ speed; thefuzz 0.22.1 is GPL. Same API: "
+        "`process.extract`, `fuzz.ratio`, `token_set_ratio`, `WRatio`; needs Python 3.10."
+    )
+    await call_tool(runtime, "report", worker, status="done", summary=first)
+    await call_tool(runtime, "message_session", harness.router_id, session_id=worker,
+                    task_id=made["task_id"],
+                    text="Add how RapidFuzz handles Chinese; keep the comparison.")  # fmt: skip
+    assert "replaces its result" in harness.session(worker).sent[-1]
+    addendum = "## Chinese text\nSegment with `jieba` first: without spaces ratio is 80."
+    refused = await call_tool(runtime, "report", worker, status="done", summary=addendum)
+    assert refused.result_type == "failure"
+    assert "leaves out most of the earlier one" in refused.text_result_for_llm
+    whole = f"{first}\n\n{addendum}"
+    await call_tool(runtime, "report", worker, status="done", summary=whole)
+    assert task(harness, made["task_id"])["result"] == whole

@@ -73,7 +73,13 @@ async def test_the_owners_own_words_are_collected_where_they_wrote_them(tmp_path
         ("C0DEPLOYS", "U0OWNER1", "1790000002.000100", "Deploying now. Ping me if it breaks"),
         ("D0BOB0001", "U0OWNER1", "1790000003.000100", "Sure, on it"),
         ("C0DEPLOYS", "U0ALICE1", "1790000004.000100", "not the owner's"),
+        # Away: a notification sent to their own DM, and their answer by code there.
+        ("D0SELF001", "U0OWNER1", "1790000005.000100", "*Chief of Staff needs you (1)* ..."),
+        ("D0SELF001", "U0OWNER1", "1790000006.000100", "ZYF42 ok"),
     )
+    harness.store.add_trigger("slack-sent", "slack:1790000005.000100", "notification")
+    harness.store.set("away_slack_dm", json.dumps({"channel": "D0SELF001", "after": 0}))
+    harness.store.set("awayused:ZYF42", "1")
     harness.gh_replies["auth status"] = json.dumps(
         {
             "hosts": {
@@ -252,6 +258,18 @@ async def test_habits_join_the_lessons_card_the_owner_has_not_reviewed_yet(harne
     ]
     [again] = [d for d in harness.store.drafts() if d["kind"] == "lessons"]
     assert [item["text"] for item in again["target"]["lessons"]] == ["Write docs in English"]
+
+
+async def test_observations_count_as_learned_only_once_the_learning_worker_reports(harness):
+    """Bug bash 4 (E1): they were marked learned when the learning worker started; a restart
+    before its prompt reached it lost them for good."""
+    runtime = await harness.connect()
+    runtime.habits.add("copilot", "instruction", "o1", "smoke test first, then the full run")
+    await runtime.learning.learn()
+    learner = learner_of(harness)
+    assert runtime.habits.for_learning(), "not learned while it has not reported"
+    await call_tool(runtime, "propose_lessons", learner["id"], lessons=[])
+    assert not runtime.habits.for_learning()
 
 
 async def test_a_helper_that_stops_short_is_closed(harness):

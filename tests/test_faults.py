@@ -9,7 +9,7 @@ import json
 import time
 
 import pytest
-from conftest import Harness, call_tool, settle, task_of
+from conftest import FakeSession, Harness, call_tool, settle, task_of
 
 from chiefofstaff.delivery import digest
 from chiefofstaff.models import DraftDecision, Settings
@@ -30,8 +30,9 @@ def interrupt_after_send(harness, session_id, status="idle"):
         (session_id, last),
     )["id"]
     text = harness.session(session_id).sent[-1]
+    raw = harness.session(session_id).raw_sent[-1]
     harness.store.set(f"sent:{session_id}", str(before or 0))
-    harness.store.set(f"sending:{session_id}", json.dumps({"upto": last, "digest": digest(text)}))
+    harness.store.set(f"sending:{session_id}", json.dumps({"upto": last, "digest": digest(raw)}))
     harness.store.update_session(session_id, status=status)
     return text
 
@@ -67,6 +68,7 @@ async def test_a_send_that_did_not_arrive_goes_out_after_a_restart(tmp_path):
     await runtime.owner_send(worker, "Also B")
     text = interrupt_after_send(first, worker)
     first.session(worker).sent.pop()  # It never reached Copilot.
+    first.session(worker).raw_sent.pop()
     await runtime.stop()
 
     second = Harness(tmp_path / "data", client=first.client)
@@ -377,3 +379,49 @@ async def test_a_reply_cleared_on_its_card_is_refused_not_sent_as_drafted(tmp_pa
     assert (await runtime.drafts.resolve(copied["id"], DraftDecision(action="send")))[
         "final_text"
     ] == "Approved"
+
+
+async def test_instructions_copilot_never_wrote_down_go_out_in_full_after_a_restart(
+    tmp_path, monkeypatch
+):
+    """Bug bash 4 (E1): a restart right after a worker started: its send had returned, so its
+    instructions counted as received, but Copilot never wrote them down; it got them quoted
+    and cut at 1500 characters."""
+    first = Harness(tmp_path / "data")
+    runtime = await first.connect()
+    instructions = "Learn how the owner works." + " Observation." * 300
+    result = await call_tool(
+        runtime, "spawn_worker", first.router_id, title="Learn", instructions=instructions
+    )
+    worker = json.loads(result.text_result_for_llm)["session_id"]
+    await runtime.stop()
+
+    async def nothing_written(self):
+        return []
+
+    monkeypatch.setattr(FakeSession, "get_events", nothing_written)
+    second = Harness(tmp_path / "data", client=first.client)
+    restarted = await second.connect()
+    await settle(restarted)
+    sent = second.session(worker).sent[-1]
+    assert instructions in sent, "sent again in full"
+    assert sent.index(instructions) < sent.index('type="restart"'), "as itself, not quoted"
+    assert "before they reached you" in sent
+
+
+async def test_the_newest_message_a_worker_received_is_quoted_whole_after_a_restart(tmp_path):
+    first = Harness(tmp_path / "data")
+    runtime = await first.connect()
+    instructions = "Rename the columns." + " Column." * 300
+    result = await call_tool(
+        runtime, "spawn_worker", first.router_id, title="Rename", instructions=instructions
+    )
+    worker = json.loads(result.text_result_for_llm)["session_id"]
+    await runtime.stop()
+
+    second = Harness(tmp_path / "data", client=first.client)
+    await settle(await second.connect())
+    sent = second.session(worker).sent
+    assert sent[-1].startswith('<message from="system" type="restart">')
+    assert sent.count(sent[0]) == 1, "received: not sent again"
+    assert instructions in sent[-1], "quoted whole, not cut"

@@ -21,9 +21,15 @@ export function el(tag, props = {}, ...children) {
 function errorText(data, status) {
   if (typeof data.detail === "string") return data.detail;
   if (Array.isArray(data.detail)) {
-    return data.detail.map((item) => String(item.msg).replace(/^Value error, /, "")).join("; ");
+    return data.detail.map((item) => (item.type === "string_too_long" && item.ctx?.max_length ? tooLongText(item) : String(item.msg).replace(/^Value error, /, ""))).join("; ");
   }
   return `Request failed (${status})`;
+}
+// The server's "String should have at most 20000 characters", in words.
+function tooLongText({ input, ctx }) {
+  const count = typeof input === "string" ? [...input].length : 0;
+  const limit = Number(ctx.max_length).toLocaleString("en-US");
+  return count ? `Too long: ${count.toLocaleString("en-US")} characters, the limit is ${limit}` : `Too long: the limit is ${limit} characters`;
 }
 // The launch token, kept in this origin's storage (a cookie would reach every local server).
 const KEY = "cos.key";

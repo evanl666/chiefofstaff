@@ -1,8 +1,11 @@
 import asyncio
 import json
 import os
+import shutil
 import subprocess
 import tempfile
+import time
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -983,6 +986,12 @@ async def test_in_the_owners_folder_a_task_has_what_it_changed_not_another_tasks
     (app / "__pycache__").mkdir(exist_ok=True)
     (app / "__pycache__" / "kit.cpython-313.pyc").write_bytes(b"\0compiled")  # By running it.
     await call_tool(runtime, "report", mine, status="done", summary="Added whisper.")
+    for _ in range(50):
+        if runtime.store.get(f"taskend:{whisper}"):
+            break
+        await asyncio.sleep(0.05)
+    later = time.time() + 300  # Written again later (by other work): not when shout wrote it.
+    os.utime(app / "kit.py", (later, later))
     [found] = await runtime.task_actions.diff(whisper)
     assert "+def whisper(text):" in found["diff"] and "+def shout" not in found["diff"]
     assert "__pycache__" not in found["diff"]
@@ -1332,6 +1341,70 @@ def test_a_command_names_a_file_by_its_path_or_its_name():
     assert scope.named(top, "textkit/__init__.py") and scope.named(top, "notes.txt")
     assert scope.named(top, "lib/kit.py"), "by its name"
     assert not scope.named(top, "money.py") and not scope.named(top, "it.py")
+    runs = [workspaces_module.CommandRun(line) for line in (
+        "for f in textkit/*.py; do echo x >> $f; done", 'echo hi > "release notes.txt"',
+        "python3 fix.py", "sleep 50", "cat money.py | grep x", "./scripts/gen.sh out",
+    )]  # fmt: skip
+    assert [run.unnamed for run in runs] == [True, False, True, False, False, True]
+    assert "release notes.txt" in runs[1].words and "money.py" in runs[4].words
+
+
+async def test_in_the_owners_folder_glob_and_script_edits_count_and_reads_do_not(
+    tmp_path, monkeypatch
+):
+    """Bug bash 4: edits made with a glob loop, a script or into a quoted name with spaces were
+    "not counted"; a file the task only read (cat) and the owner edited while it slept was
+    counted as its change."""
+    # Times set by the test (os.utime): their write times (a real edit's ctime is its time).
+    monkeypatch.setattr(
+        workspaces_module,
+        "written_at",
+        lambda path: path.lstat().st_mtime if path.exists() else None,
+    )
+    _, app = published(tmp_path, "app")
+    (app / "textkit").mkdir()
+    for name in ("a.py", "b.py", "money.py"):
+        (app / "textkit" / name).write_text(f"# {name}\n")
+    run("git", "add", ".", cwd=app)
+    run("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "kit", cwd=app)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(app)]))
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, title="Review stamps", instructions="x",
+                         project=str(app))  # fmt: skip
+    session_id, task = worker["session_id"], worker["task_id"]
+    await settle(runtime)
+    for _ in range(50):
+        if runtime.store.get(f"taskbase:{task}"):
+            break
+        await asyncio.sleep(0.05)
+    # Minutes ago: it read money.py, then slept; the owner edited money.py meanwhile.
+    shell(harness, session_id, "r1", "cat textkit/money.py")
+    shell(harness, session_id, "s1", "sleep 50")
+    await settle(runtime)
+    ago = lambda seconds: datetime.fromtimestamp(time.time() - seconds, UTC).isoformat()  # noqa: E731
+    for call, start, end in (("r1", 200, 199), ("s1", 199, 140)):
+        harness.store.execute(
+            "UPDATE commands SET started_at=?, ended_at=? WHERE call_id=?",
+            (ago(start), ago(end), call),
+        )
+    owners = app / "textkit" / "money.py"
+    with owners.open("a") as file:
+        file.write("# the owner's own line\n")
+    os.utime(owners, (time.time() - 170, time.time() - 170))
+    # Now: a script stamps the two files (naming neither); a name in quotes, with a space.
+    for name in ("a.py", "b.py"):
+        with (app / "textkit" / name).open("a") as file:
+            file.write("# reviewed\n")
+    shell(harness, session_id, "g1", "python3 stamp.py")
+    (app / "release notes.txt").write_text("hello\n")
+    shell(harness, session_id, "q1", 'echo hello > "release notes.txt"')
+    await settle(runtime)
+    await call_tool(runtime, "report", session_id, status="done", summary="Stamped.")
+    changed = (await receipts_of(runtime, task))["changed"]
+    [diff] = await runtime.task_actions.diff(task)
+    assert "release notes.txt" in diff["diff"] and "textkit/a.py" in diff["diff"], diff["diff"]
+    assert "the owner's own line" not in diff["diff"], "it only read money.py"
+    assert changed["files"] == 3 and changed["not_counted"] == 1, changed
 
 
 async def test_a_later_task_keeps_its_start_when_its_files_are_too_big_to_copy(
@@ -1470,3 +1543,99 @@ async def test_a_change_asked_for_in_chat_is_a_new_result_not_news(tmp_path):
     await call_tool(runtime, "report", session_id, status="done", summary="Added the line more.")
     shown = runtime.tasks.get(task)
     assert shown["status"] == "review" and shown["result"] == "Added the line more."
+
+
+async def test_a_tasks_start_commit_amended_away_does_not_count_earlier_commits(tmp_path):
+    """Bug bash 4: after its start commit was amended, a task counted every commit on its
+    branch (an earlier task's too)."""
+    _, app = published(tmp_path, "app")
+    run("git", "pull", "-q", "--ff-only", cwd=app)
+    run("git", "checkout", "-q", "-b", "chief/work", cwd=app)
+    commit(app, "slug.py", "slug = 1\n")  # An earlier task's.
+    commit(app, "chunk.py", "chunk = 1\n")  # Where this task started.
+    start = run("git", "rev-parse", "HEAD", cwd=app).strip()
+    (app / "chunk.py").write_text("chunk = 2\n")
+    run("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qa", "--amend",
+        "--no-edit", cwd=app)  # fmt: skip
+    commit(app, "more.py", "more = 1\n")
+    checkout = {"path": str(app), "branch": "chief/work", "base_ref": "origin/main"}
+    found = await workspaces_module.changes(checkout, workspaces_module.Scope(start))
+    assert found and found["commits"] == 2, found
+
+
+async def test_files_named_with_quotes_and_backslashes_are_in_a_tasks_changes(tmp_path):
+    """Bug bash 4: git quotes a name with `"` even with core.quotePath off; such files were
+    left out of a task's changes ("+0 −0", an empty diff)."""
+    _, app = published(tmp_path, "app")
+    harness = Harness(tmp_path / "data", Settings(projects=[str(app)]))
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, title="Notes file", instructions="x",
+                         project=str(app), isolate=True)  # fmt: skip
+    tree, session_id, task = Path(worker["cwd"]), worker["session_id"], worker["task_id"]
+    (tree / "docs").mkdir()
+    (tree / "docs" / 'release notes "v2" \u8aaa\u660e.md').write_text("v2\nnotes\n")
+    commit(tree, 'notes "x" \u00fc.txt', "x\n")
+    await call_tool(runtime, "report", session_id, status="done", summary="Notes.")
+    changed = (await receipts_of(runtime, task))["changed"]
+    assert changed["files"] == 2 and changed["insertions"] == 3, changed
+    [diff] = await runtime.task_actions.diff(task)
+    assert "+v2" in diff["diff"] and "+x" in diff["diff"], diff["diff"]
+
+
+async def test_a_worktree_removed_under_a_worker_is_back_before_its_next_message(tmp_path):
+    """Bug bash 4: its worktree deleted, the worker said "recreate the worktree" to every
+    message; only Close and Reopen fixed it."""
+    _, app = published(tmp_path, "app")
+    harness = Harness(tmp_path / "data", Settings(projects=[str(app)]))
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, title="Sleepy", instructions="x",
+                         project=str(app), isolate=True)  # fmt: skip
+    tree = Path(worker["cwd"])
+    shutil.rmtree(tree)
+    await runtime.owner_send(worker["session_id"], "Try again")
+    assert (tree / "README.md").exists(), "restored on its branch"
+
+
+async def test_a_follow_up_after_a_split_and_another_task_leaves_out_that_tasks_work(tmp_path):
+    """Live M4: after a split, a later task's commit showed in a follow-up on the task it was
+    split from (its "checked for work in between" mark was from before the split)."""
+    _, app = published(tmp_path, "app")
+    harness = Harness(tmp_path / "data", Settings(projects=[str(app)]))
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, title="Currency", instructions="x",
+                         project=str(app), isolate=True)  # fmt: skip
+    tree, session_id, task = Path(worker["cwd"]), worker["session_id"], worker["task_id"]
+    commit(tree, "kit.py", "DEFAULT = 'USD'\n")
+    await call_tool(runtime, "report", session_id, status="done", summary="Currency.")
+    await receipts_of(runtime, task)
+    await call_tool(runtime, "message_session", harness.router_id, session_id=session_id,
+                    text="Also add units.py", task_id=task)  # fmt: skip
+    await restarted(runtime, task)
+    commit(tree, "units.py", "UNITS = {}\n")
+    await call_tool(runtime, "report", session_id, status="done", summary="Units.")
+    await receipts_of(runtime, task, lambda found: found["changed"]["commits"] == 2)
+    runtime.task_actions.split(task, "Add the units module")
+    await call_tool(runtime, "message_session", harness.router_id, session_id=session_id,
+                    task="new", title="Truncate", text="Add truncate")  # fmt: skip
+    other = task_of(harness, session_id)
+    await settle(runtime)
+    for _ in range(50):
+        if runtime.store.get(f"taskbase:{other}"):
+            break
+        await asyncio.sleep(0.05)
+    commit(tree, "trunc.py", "def truncate(): ...\n")
+    await call_tool(runtime, "report", session_id, status="done", summary="Truncate.")
+    await receipts_of(runtime, other)
+    await call_tool(runtime, "message_session", harness.router_id, session_id=session_id,
+                    text="Rename DEFAULT to BASE", task_id=task)  # fmt: skip
+    await restarted(runtime, task)
+    for _ in range(50):
+        if runtime.store.get(f"taskgaps:{task}"):
+            break
+        await asyncio.sleep(0.05)
+    commit(tree, "kit.py", "BASE = 'USD'\n")
+    await call_tool(runtime, "report", session_id, status="done", summary="Renamed.",
+                    task_id=task)  # fmt: skip
+    await settle(runtime)
+    [diff] = await runtime.task_actions.diff(task)
+    assert "BASE" in diff["diff"] and "truncate" not in diff["diff"], diff["diff"]

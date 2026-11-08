@@ -565,22 +565,71 @@ def file_digest(top: Path, names: list[str]) -> str:
     return found.hexdigest()
 
 
-# What separates the words of a command line that may name a file.
-COMMAND_WORD = re.compile(r"[^\s<>|;&()'\"`=,]+")
+# Programs that write files they do not name on their command line (a script, a build, a
+# git command that rewrites the tree): a file changed while one runs may be its work.
+WRITES_UNNAMED = re.compile(
+    r"^(python[\d.]*|py|node|deno|bun|ruby|perl|php|bash|sh|zsh|make|npm|npx|pnpm|yarn|uv|"
+    r"poetry|pip|cargo|go|gradlew?|mvnw?|java|dotnet|xargs|find|rsync|tar|unzip|patch|"
+    r"pytest|tox|nox|black|ruff|prettier|eslint|isort|gofmt|rustfmt|\./\S+|"
+    r"git (apply|am|pull|merge|rebase|stash|cherry-pick|reset|checkout|switch|restore|revert))\b"
+)
+
+
+class CommandRun:
+    """One of a task's shell commands, as far as files go: when it ran, the words that may name
+    files (quotes respected: "release notes.txt"), and whether it may write files it does not
+    name (a glob, a variable, a script)."""
+
+    def __init__(self, command: str, start: float = 0, end: float = 0):
+        self.start, self.end = start, end
+        words: set[str] = set()
+        unnamed = False
+        for parts in receipts.simple_commands(command):
+            program = receipts.program(parts)
+            first = next((w for w in parts if not re.fullmatch(r"\w+=.*", w)), "")
+            if WRITES_UNNAMED.match(program) or first.startswith(("./", "../", "/", "~/")):
+                unnamed = True  # A tool, or a script of the project's (`./gen.sh`).
+            for word in parts:
+                if any(mark in word for mark in "*?$`[{"):
+                    unnamed = True
+                word = word.removeprefix("./").rstrip("/:")
+                if word and not word.startswith("-"):
+                    words.add(word)
+                    if "/" in word:
+                        words.add(word.rsplit("/", 1)[-1])
+        self.words = frozenset(words)
+        self.unnamed = unnamed
+
+    def names(self, top: Path, name: str) -> bool:
+        base = os.path.basename(name)
+        return (
+            name in self.words
+            or str(top / name) in self.words
+            or (len(base) >= 3 and base in self.words)
+        )
+
+
+OPEN_RUN_SECONDS = 600
+
+
+def written_at(path: Path) -> float | None:
+    """When a file was last written or moved (a rename, `tar`/`cp -p` restoring an old time
+    still change its ctime); None when it is gone."""
+    try:
+        found = path.lstat()
+    except OSError:
+        return None
+    return max(found.st_mtime, found.st_ctime)
+
+
+def file_times(top: Path, names: list[str]) -> dict[str, float | None]:
+    """When each file was last written (None: it is gone)."""
+    return {name: written_at(top / name) for name in names}
 
 
 def command_words(commands: str) -> frozenset[str]:
-    """The words of shell commands that may name files: each as written (without a leading
-    "./"), and its last path part ("kit.py" in "textkit/kit.py")."""
-    words: set[str] = set()
-    for word in COMMAND_WORD.findall(commands or ""):
-        word = word.removeprefix("./").rstrip("/:")
-        if not word:
-            continue
-        words.add(word)
-        if "/" in word:
-            words.add(word.rsplit("/", 1)[-1])
-    return frozenset(words)
+    """The words of shell commands that may name files (see CommandRun)."""
+    return CommandRun(commands or "").words
 
 
 class Scope:
@@ -600,8 +649,9 @@ class Scope:
         others: set[str] | None = None,
         head: str = "",
         large: set[str] | None = None,
-        commands: str = "",
+        commands: str | list[CommandRun] = "",
         gaps: list[tuple[str, str, str, str, float]] | None = None,
+        mtimes: dict[str, float | None] | None = None,
     ):
         self.base, self.since, self.touched = base, since, touched or set()
         # The commit the checkout was on when it was taken up (`start`'s): what commits made
@@ -609,9 +659,17 @@ class Scope:
         self.head = head
         # New files too large for its start snapshot (left out of it): not its own later.
         self.large = large or set()
-        # Its own shell commands (in a folder of the owner's): a file one names is its work.
-        self.commands = commands
-        self.words = command_words(commands)
+        # Its own shell commands (in a folder of the owner's): a file that changed while one
+        # ran that names it, or one that writes files it does not name (a glob, a script), is
+        # its work; not a file the owner edited while it slept or only read it.
+        self.runs = (
+            [CommandRun(commands)] if isinstance(commands, str) and commands else
+            list(commands) if not isinstance(commands, str) else []
+        )  # fmt: skip
+        self.words = frozenset().union(*(run.words for run in self.runs))
+        # When each file it changed was last written as of its result (a finished task's): a
+        # later write by other work does not count against it.
+        self.mtimes = mtimes or {}
         # Between a result and its follow-up, other work may have changed the checkout (a later
         # task): (tree at its result, tree when it was taken up again, their commits, and when
         # it was taken up again: a commit after that is its own, however late the snapshot).
@@ -623,15 +681,24 @@ class Scope:
         self.start, self.end, self.others = start, end, others or set()
 
     def named(self, top: Path, name: str) -> bool:
-        """Whether one of its own shell commands names this file (its path, or its name)."""
-        if not self.words:
+        """Whether one of its own shell commands wrote this file, as far as can be told: the
+        file changed while a command ran that names it or writes files it does not name. A run
+        without times (a test) counts when it names it."""
+        candidates = [run for run in self.runs if run.unnamed or run.names(top, name)]
+        if not candidates:
             return False
-        base = os.path.basename(name)
-        return (
-            name in self.words
-            or str(top / name) in self.words
-            or (len(base) >= 3 and base in self.words)
-        )
+        # None: deleted, by a command that names it, or one that may write unnamed ones.
+        changed = self.mtimes[name] if name in self.mtimes else written_at(top / name)
+        for run in candidates:
+            if not run.start or changed is None:
+                if run.names(top, name) or (changed is None and run.start):
+                    return True
+                continue
+            # One that never ended (a server, a watcher) counts for a while, not for good.
+            end = run.end or min(time.time(), run.start + OPEN_RUN_SECONDS)
+            if run.start - 2 <= changed <= end + 2:
+                return True
+        return False
 
     def wrote(self, top: Path, name: str) -> bool:
         """Whether its own edits wrote this file."""
@@ -706,10 +773,34 @@ async def snapshot(checkout: dict) -> dict | None:
         return None
 
 
+# A C-style escape in a path git quoted: \" \\ \t \n, or a byte in octal.
+GIT_ESCAPE = re.compile(r"\\([0-7]{3}|.)")
+GIT_ESCAPES = {"a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13}
+
+
+def git_path(name: str) -> str:
+    """A path as git printed it, as it is: git quotes one with a `"`, a `\\` or a control
+    character ("docs/release \"v2\".md") even with core.quotePath off."""
+    if len(name) < 2 or not (name.startswith('"') and name.endswith('"')):
+        return name
+    out = bytearray()
+    at = 0
+    body = name[1:-1]
+    for match in GIT_ESCAPE.finditer(body):
+        out += body[at : match.start()].encode()
+        code = match.group(1)
+        if len(code) == 3:
+            out.append(int(code, 8))
+        else:
+            out.append(GIT_ESCAPES.get(code, ord(code)))
+        at = match.end()
+    out += body[at:].encode()
+    return out.decode(errors="replace")
+
+
 def status_name(line: str) -> str:
     """The file a `git status --porcelain` line is about (a rename's new name)."""
-    name = line[3:]
-    return name.split(" -> ", 1)[-1].strip('"')
+    return git_path(line[3:].split(" -> ", 1)[-1])
 
 
 async def share_files(checkout: dict, scope: Scope) -> set[str]:
@@ -779,12 +870,16 @@ async def changes(checkout: dict, scope: Scope | None = None) -> dict | None:
 
 
 async def scope_base(checkout: dict, path: str, head: str, scope: Scope) -> str:
-    """Where this task's share starts: its own base when that commit is in the history, else
-    where the branch started."""
+    """Where this task's share starts: its own base when that commit is in the history; when
+    it was rewritten since (amended, rebased), where it and the history meet; else where the
+    branch started."""
     if scope.base:
         with suppress(ValueError):
             await checkout_git(checkout, path, "merge-base", "--is-ancestor", scope.base, head)
             return scope.base
+        with suppress(ValueError):
+            if met := (await checkout_git(checkout, path, "merge-base", scope.base, head)).strip():
+                return met
     if base := base_of(checkout):
         with suppress(ValueError):
             return (await checkout_git(checkout, path, "merge-base", base, head)).strip()
@@ -831,7 +926,7 @@ async def own_commits(checkout: dict, path: str, head: str, shared: bool, share:
         if len(parents) > 1:
             share.exact = False  # A merge: what it brought in is not this task's.
             continue
-        files = [name for name in names.splitlines() if name]
+        files = [git_path(name) for name in names.splitlines() if name]
         if shared and not any(scope.wrote(share.top, name) for name in files):
             share.exact = False  # The owner's own commit (or one they pulled).
             continue
@@ -848,7 +943,7 @@ async def tree_names(checkout: dict, top: Path, old: str, new: str) -> dict[str,
     for line in listed.splitlines():
         status, _, name = line.partition("\t")
         if name:
-            found[name] = status[:1]
+            found[git_path(name)] = status[:1]
     return found
 
 
@@ -872,7 +967,7 @@ async def brought_in(checkout: dict, top: Path, scope: Scope, head: str) -> set[
     newer: set[str] = set()
     for block in listed.split("\0")[1:]:
         when, _, names = block.partition("\n")
-        files = {name for name in names.splitlines() if name}
+        files = {git_path(name) for name in names.splitlines() if name}
         made = int(when.strip() or 0)
         (older if made < scope.since - 1 else newer).update(files)
     return older - newer

@@ -488,3 +488,42 @@ def test_a_link_cut_with_three_dots_or_named_here_is_not_taken_at_its_word():
         "[here](https://a.com/x), [Q3 plan](https://a.com/y), [link](https://a.com/z)"
     )
     assert named == {"https://a.com/y": "Q3 plan"}
+
+
+def test_a_slack_thread_is_named_by_its_conversation_when_known():
+    """Bug bash 4: chat lines said "Slack thread in C0DEPLOYS"."""
+    names = {"C0DEPLOYS": "deploys", "D0ALICE01": "Alice Chen"}
+    assert threads.label("slack:C0DEPLOYS:1712345600.000100", names) == "Slack thread in #deploys"
+    assert threads.label("slack:D0ALICE01", names) == "Slack DM with Alice Chen"
+    assert threads.label("slack:C0OTHER01:1712345600.000100") == "Slack thread in C0OTHER01"
+
+
+async def test_who_asked_for_a_review_in_slack_is_told_once_it_is_posted(tmp_path):
+    """Bug bash 4 (X4): Alice asked for a review in a Slack thread; the review was posted, the
+    worker (its task finished) only heard of it with its next message, and Alice was never
+    told."""
+    harness = Harness(tmp_path / "data", Settings(slack_enabled=True))
+    runtime = await harness.connect()
+    thread = "slack:C0DEPLOYS:1794138887.017740"
+    result = await call_tool(runtime, "spawn_worker", harness.router_id, title="Review #7",
+                             instructions="Alice asked in #deploys: review acme/app#7",
+                             slack=True, follow=[thread, "github:acme/app#7"])  # fmt: skip
+    worker = json.loads(result.text_result_for_llm)
+    session = harness.session(worker["session_id"])
+    target = {"repo": "acme/app", "number": 7, "url": "https://github.com/acme/app/pull/7",
+              "via": "task", "head_sha": "c0ffee", "verdict": "comment",
+              "task_id": worker["task_id"]}  # fmt: skip
+    draft = harness.store.create_draft(worker["session_id"], "github", target, "Looks fine")
+    await call_tool(runtime, "report", worker["session_id"], status="done",
+                    summary="Reviewed acme/app#7: the review waits for your approval.")  # fmt: skip
+    session.emit("session.idle")
+    await settle(runtime)
+    harness.gh_replies["api repos/acme/app/pulls/7"] = json.dumps(
+        {"state": "open", "head": {"sha": "c0ffee", "ref": "feature"}}
+    )
+    harness.gh_replies["api repos/acme/app/pulls/7/reviews"] = json.dumps({"id": 9})
+    before = len(session.sent)
+    await runtime.drafts.resolve(draft["id"], DraftDecision(action="send"))
+    await settle(runtime)
+    assert len(session.sent) == before + 1, "woken, though its task had finished"
+    assert "draft_slack_reply" in session.sent[-1] and thread in session.sent[-1]

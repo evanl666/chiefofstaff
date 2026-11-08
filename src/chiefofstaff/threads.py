@@ -130,10 +130,18 @@ def normalize(key: str) -> str:
     )
 
 
-def label(key: str) -> str:
+def label(key: str, names: dict[str, str] | None = None) -> str:
+    """A thread as the owner reads it; Slack conversations by name when known (`names`)."""
+    names = names or {}
     if match := SLACK_THREAD.fullmatch(key):
-        return f"Slack thread in {match.group(1)}"
+        channel = match.group(1)
+        if name := names.get(channel):
+            where = f"DM with {name}" if channel.startswith("D") else f"#{name.lstrip('#')}"
+            return f"Slack thread in {where}"
+        return f"Slack thread in {channel}"
     if match := SLACK_CONVERSATION.fullmatch(key):
+        if name := names.get(match.group(1)):
+            return f"Slack DM with {name}"
         return f"Slack DM {match.group(1)}"
     if match := GITHUB_PR.fullmatch(key):
         return f"{match.group(1)}#{match.group(2)}"

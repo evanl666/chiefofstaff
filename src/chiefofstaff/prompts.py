@@ -194,7 +194,10 @@ How to route:
   matching project (isolate=true) asking it to review the PR and publish its review through
   draft_github_review (with verdict="approve" when the owner asked to approve it: the owner then
   approves on GitHub with one click on the card). Name the PR in the task by URL or
-  github:<owner/repo>#<n> when you know it, and pass that key in `follow`.
+  github:<owner/repo>#<n> when you know it, and pass that key in `follow`. When someone asked
+  for the review in Slack, the Slack rule above holds too: pass slack=true and that thread's
+  key in `follow` as well, and ask the worker to tell them in that thread once the review is
+  posted (draft_slack_reply); a review is no reason to leave them unanswered.
 - A reply the owner will post themself (on a PR, in Slack, by mail): still have the worker
   draft it with its draft tool (draft_github_review on a PR, draft_reply elsewhere). Nothing is
   posted until the owner approves; the card is where they copy it, and what they post
@@ -222,8 +225,8 @@ How to route:
   a worker that follows it: the one whose task it is (message_session with `follow`), or a new
   one (spawn_worker with `follow` set to its thread key, github:<owner/repo>#<n>). Its CI,
   reviews and replies then reach that worker, which tells the owner. You can do this: never
-  say you cannot watch something. A worker in a long step (a
-  query, a build, a job) reads messages only when that step ends, so message it for a report
+  say you cannot watch something. A message to a worker in a long step (a query, a build, a
+  job) interrupts it (Copilot moves the command to the background), so message it for a report
   only when read_session does not answer the question. Call a worker stopped, stuck or done
   only when read_session or list_sessions says so.
 - Watches: to look out for something over time that is not one thread or PR (a channel such as
@@ -360,7 +363,11 @@ Communicating:
   Write it in the language your task's reply_in attribute names (else that of the owner's
   request), and answer a message with reply_in in that language, whatever came before.
 - Always finish a task with report(status="done"), "blocked" or "failed", passing its id as
-  task_id when you have had more than one task. Never claim work you did not do: before you
+  task_id when you have had more than one task. A done report is the task's result, all the
+  owner reads on its card: reporting again on a task you reported before (more was asked of
+  it), give the whole result again, updated, not only what you added, all of it in the
+  language of the latest message (reply_in), the earlier part too. Never claim work you did
+  not do: before you
   report a change, check that it took effect (read the changed lines again, run the tests). A
   command can fail without you noticing, a follow-up's quick edit as much as the first one.
 - Decisions that are the owner's (scope, a trade-off, a risky or costly change such as a data
@@ -719,6 +726,14 @@ Something changed on a PR or thread you follow (the messages above), and the own
 heard of it. Tell them in one report: what happened in a line or two and what you propose.
 report(status="question") when they should decide how to go on (reply, re-review, approve,
 leave it), with your recommendation; report(status="progress") when it is news only."""
+
+# More asked of a result a worker reported: its next report is the task's result.
+RESTATE = (
+    "You reported this task before. Your report on this replaces its result, which is all the "
+    "owner reads on its card: report the whole result again, updated (what still holds from "
+    "before, what changed, and what is new), not only what you add now, all of it in the "
+    "language this message asks for (the earlier part too)."
+)
 
 CONNECTOR = """\
 <chiefofstaff_role>

@@ -13,6 +13,7 @@ import sys
 import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from uuid import uuid4
 
 import uvicorn
 from playwright.async_api import async_playwright, expect
@@ -2368,6 +2369,269 @@ async def round_seven(runtime, browser, failures: list[str]):
     await context.close()
 
 
+async def round_eight(runtime, browser, failures: list[str]):
+    """The 0.1.28 bug bash, round 4 (UI): notifications show while the page is open (during
+    Focus only urgent ones), and the Router's notes that need the owner wait under Needs you
+    until seen (D4); the Slack session's timeline, its question cards and its lines on Home read
+    without Slack's ids and stamps (R7, D8); "@" finds a worker by words with spaces (D10); a
+    message over the limit is refused with the limit in words and kept (E6)."""
+    store = runtime.store
+    router = store.get("router_id")
+    stamp = datetime.now(UTC).isoformat()
+
+    async def start(title):
+        result = await call_tool(runtime, "spawn_worker", router, title=title,
+                                 instructions=title, why_new="test")  # fmt: skip
+        assert result.result_type == "success", result.text_result_for_llm
+        await settle(runtime)
+        return json.loads(result.text_result_for_llm)["session_id"]
+
+    checkout = await start("Fix the checkout test")
+    cache = await start("Fix the cache size")
+    # The Slack session, as Slack's tools and the Router write to it: ids, stamps, thread keys.
+    slack = store.create_session(str(uuid4()), "slack", "Slack", "idle")["id"]
+    store.set("slacknames", json.dumps({"D0ALICE01": "DM with Alice", "U0ALICE1": "Alice Chen"}))
+    owner_id = runtime.slack.status.get("user_id")
+    runtime.slack.status["user_id"] = "U0OWNER1"  # No name read for it: "you".
+    to_slack = ('Slack event (DM with Alice Chen, thread slack:D0ALICE01:1794141072.949527): "hey '
+                '<@U0OWNER1>, can you ping <@U0BOB001> and me about the textkit release date?" '
+                "(ts 1794141072.949527). Draft a reply.")  # fmt: skip
+    runtime.add_message(slack, "router", to_slack)
+    asked = ("Alice Chen (DM D0ALICE01, ts 1794141072.949527) asked the owner to ping her "
+             "and Bob (U0BOB001) about the textkit release date. What should the reply "
+             "say?")  # fmt: skip
+    runtime.add_message(slack, "report", asked, {"status": "question", "task_id": None})
+    runtime.add_message(slack, "assistant", "Asked the Router; <@U0ALICE1> waits in D0ALICE01.")
+    store.set(f"ownerq:{slack}:-", json.dumps({"text": asked, "task_id": None, "at": stamp}))
+    runtime.add_message(router, "inbound", "Can't reply to <@U0ALICE1> in D0ALICE01 "
+                        "(ts 1794141072.949527): you decide.", {"from": slack, "title": "Slack",
+                                                                "status": "blocked"})  # fmt: skip
+    await settle(runtime)
+    runtime.publish_state()
+
+    context = await browser.new_context(viewport={"width": 1440, "height": 900})
+    page = await context.new_page()
+    page.on("pageerror", lambda error: failures.append(str(error)))
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    needs, timeline = page.locator("#needs"), page.locator("#timeline")
+    composer = page.locator("#composer-input")
+    await expect(page.locator(".home-item.selected")).to_be_visible(timeout=15000)
+
+    # R7/D8: the Slack session's question card and its line on Home, in names.
+    question = needs.locator(".card.question-card", has_text="textkit release date")
+    await expect(question.locator(".body")).to_have_text(
+        "Alice Chen (DM with Alice) asked the owner to ping her and Bob about the textkit "
+        "release date. What should the reply say?"
+    )
+    await expect(timeline.locator(".event", has_text="Can't reply to").locator(".what")
+                 ).to_have_text("Slack couldn't go on: Can't reply to @Alice Chen in DM with "
+                                "Alice: you decide.")  # fmt: skip
+    # E6 (any form): over the limit, the server's answer is said in words.
+    await question.get_by_role("button", name="Reply").click()
+    await question.locator("textarea").fill("x" * 20001)
+    await question.get_by_role("button", name="Send").click()
+    await expect(question.locator(".actions .error")).to_have_text(
+        "Too long: 20,001 characters, the limit is 20,000"
+    )
+    await question.get_by_role("button", name="Cancel").click()
+    await question.locator(".head .title").click()
+    await expect(page.locator("#session-title")).to_have_text("Slack")
+    for said in ('thread in DM with Alice): "hey @you, can you ping @U0BOB001 and me',
+                 "Alice Chen (DM with Alice) asked the owner to ping her and Bob about",
+                 "Asked the Router; @Alice Chen waits in DM with Alice."):  # fmt: skip
+        await expect(timeline).to_contain_text(said)
+    shown = await timeline.inner_text()
+    for raw in ("<@", "U0OWNER1", "ts 1794", "slack:D0ALICE01", "(U0BOB001)", "D0ALICE01"):
+        assert raw not in shown, (raw, shown)
+    for scheme in ("light", "dark"):
+        await page.emulate_media(color_scheme=scheme)
+        await page.set_viewport_size({"width": 1280, "height": 900})
+        await page.wait_for_timeout(300)  # Colors fade in: shot once they are there.
+        await page.screenshot(path=SHOTS / f"ui-edges-r8-slack-1280-{scheme}.png")
+    await page.emulate_media(color_scheme="light")
+    await page.set_viewport_size({"width": 1440, "height": 900})
+    await page.locator("#back-home").click()
+    log("Slack: its timeline, its question card and its line on Home in names, no stamps")
+
+    # D4: what needs the owner shows as a toast (news only away from Home, which says it in its
+    # chat); the Router's notes that need the owner wait under Needs you (urgent ones a toast
+    # too, and the badge counts them); one that only informs does not.
+    focused = await page.evaluate("document.hasFocus()")
+    badge = page.locator(".home-item .badge")
+    before = int(await badge.text_content() or 0)
+    runtime.alert("“Fix the checkout test” failed: the bucket is gone.", session_id=checkout,
+                  needs_action=True)  # fmt: skip
+    failed = page.locator(".toast.attention", has_text="“Fix the checkout test” failed")
+    await expect(failed).to_be_visible()
+    runtime.alert("“Fix the cache size” finished", session_id=cache, needs_action=False)
+    news = page.locator(".toast", has_text="“Fix the cache size” finished")
+    await page.wait_for_timeout(300)
+    await expect(news).to_have_count(0 if focused else 1)
+    # Away from Home, news shows too; not what the session in view says itself.
+    await page.locator("#session-list .item", has_text="Fix the cache size").click()
+    await expect(page.locator("#back-home")).to_be_visible()
+    runtime.alert("“Fix the cache size” has a question", session_id=cache, needs_action=True)
+    runtime.alert("“Fix the checkout test” finished", session_id=checkout, needs_action=False)
+    await expect(page.locator(".toast:not(.attention)", has_text="“Fix the checkout test” "
+                              "finished")).to_be_visible()  # fmt: skip
+    await page.locator(".toast", has_text="“Fix the checkout test” finished").click()
+    await expect(page.locator("#session-title")).to_have_text("Fix the checkout test")
+    await expect(page.locator(".toast", has_text="has a question")).to_have_count(
+        0 if focused else 1
+    )
+    await page.locator("#back-home").click()
+    await expect(page.locator(".home-item.selected")).to_be_visible()
+
+    def note(text, **flags):
+        meta = {"needs_action": False, "urgent": False, **flags}
+        message = runtime.add_message(router, "update", text, meta, unread=True)
+        runtime.alert(text, session_id=router, needs_action=meta["needs_action"],
+                      urgent=meta["urgent"])  # fmt: skip
+        return message
+
+    asks = note("Alice (DM) asked you for the textkit release date.\nTell me the date, or say if "
+                "I should draft a holding reply.", needs_action=True)  # fmt: skip
+    down = note("The deploy pipeline is down: Bob is blocked on you today.", urgent=True)
+    note("Two PRs merged overnight.")
+    cards = needs.locator(".card.update-card")
+    await expect(cards).to_have_count(2)
+    first = cards.filter(has_text="textkit release date")
+    await expect(first.locator(".head .title")).to_have_text("The Router")
+    await expect(first.locator(".chip")).to_have_count(0)
+    await expect(cards.filter(has_text="deploy pipeline").locator(".chip")).to_have_text("Urgent")
+    await expect(badge).to_have_text(str(before + 2))
+    await expect(page.locator(".toast.attention", has_text="deploy pipeline is down")
+                 ).to_be_visible()  # fmt: skip
+    # On Home its chat and Needs you show the Router's note already: no toast while looked at.
+    for text in ("textkit release date", "Two PRs merged"):
+        await expect(page.locator(".toast", has_text=text)).to_have_count(0 if focused else 1)
+    await page.reload()
+    await expect(cards).to_have_count(2, timeout=15000)
+    for scheme in ("light", "dark"):
+        await page.emulate_media(color_scheme=scheme)
+        await page.wait_for_timeout(300)
+        for width in (352, 400):
+            await page.evaluate(
+                "w => document.querySelector('#panel').style.width = `${w}px`", width
+            )
+            found = await needs.evaluate(OVERFLOWS)
+            assert not found, (scheme, width, found)
+            for index in range(2):
+                await cards.nth(index).screenshot(
+                    path=SHOTS / f"ui-edges-r8-note-{index}-{width}-{scheme}.png"
+                )
+        await page.evaluate("document.querySelector('#panel').style.removeProperty('width')")
+        await page.set_viewport_size({"width": 1280, "height": 900})
+        await page.screenshot(path=SHOTS / f"ui-edges-r8-home-1280-{scheme}.png")
+        await page.set_viewport_size({"width": 1440, "height": 900})
+    await page.emulate_media(color_scheme="light")
+    await first.get_by_role("button", name="Got it").click()
+    await expect(first).to_have_count(0)
+    assert store.get(f"updateseen:{asks['id']}"), "seen on the server"
+    urgent = cards.filter(has_text="deploy pipeline")
+    await urgent.get_by_role("button", name="Open").click()
+    await expect(urgent).to_have_count(0)
+    line = timeline.locator(f'[data-id="{down["id"]}"]')
+    await expect(line).to_have_class(re.compile(r"\bflash\b"))
+    await expect(line).to_be_in_viewport()
+    await page.reload()
+    await expect(page.locator(".home-item.selected")).to_be_visible(timeout=15000)
+    await expect(cards).to_have_count(0)
+    assert runtime.owner_updates() == []
+    log("D4: notifications show; the Router's notes wait under Needs you until Got it or Open")
+
+    # Narrow, Open shows the chat at the note's line.
+    asked_repo = note("Which repo should the release notes go to?", needs_action=True)
+    await page.set_viewport_size({"width": 700, "height": 800})
+    await page.locator("#home-tabs [data-tab=needs]").click()
+    await cards.first.get_by_role("button", name="Open").click()
+    await expect(page.locator("#main")).to_have_class(re.compile(r"\btab-chat\b"))
+    await expect(timeline.locator(f'[data-id="{asked_repo["id"]}"]')).to_be_in_viewport()
+    await expect(cards).to_have_count(0)
+    await page.set_viewport_size({"width": 1440, "height": 900})
+    # Writing to the Router after its note answers it.
+    note("Which branch should they go on?", needs_action=True)
+    await expect(cards).to_have_count(1)
+    await composer.fill("The textkit repo.")
+    await composer.press("Enter")
+    await expect(cards).to_have_count(0)
+    assert runtime.owner_updates() == []
+    # During Focus only urgent notifications show.
+    await page.get_by_role("button", name="Focus").click()
+    await page.get_by_role("menuitem", name="For 30 minutes").click()
+    await expect(page.get_by_role("button", name="End focus")).to_be_visible()
+    runtime.bus.publish("toast", {"text": "Held while focusing", "session_id": checkout,
+                                  "needs_action": True, "urgent": False})  # fmt: skip
+    runtime.alert("Prod is down", session_id=checkout, needs_action=True, urgent=True)
+    await expect(page.locator(".toast", has_text="Prod is down")).to_be_visible()
+    await expect(page.locator(".toast", has_text="Held while focusing")).to_have_count(0)
+    await page.get_by_role("button", name="End focus").click()
+    await expect(page.get_by_role("button", name="Focus")).to_be_visible()
+    log("D4: writing to the Router answers its note; during Focus only urgent ones show")
+
+    # D10: "@" with words and spaces; Enter picks, Escape closes for good.
+    items = page.locator("#mention-list li")
+    await composer.fill("")
+    await composer.press_sequentially("@Fix ch")
+    await expect(items.filter(has_text="Fix the checkout test")).to_have_count(1)
+    await expect(items.filter(has_text="Fix the cache size")).to_have_count(1)
+    await composer.press_sequentially("eck")
+    await expect(items).to_have_count(1)
+    await composer.press("Enter")
+    await expect(page.locator("#composer-to strong")).to_have_text("Fix the checkout test")
+    await expect(composer).to_have_value("")
+    await page.locator("#composer-to .clear").click()
+    await composer.press_sequentially("ask @Fix")
+    await expect(page.locator("#mention-list")).to_be_visible()
+    await composer.press("Escape")
+    await expect(page.locator("#mention-list")).to_be_hidden()
+    await composer.press_sequentially(" the cache")
+    await expect(page.locator("#mention-list")).to_be_hidden()
+    # Emptied as sending does (no input event): a fresh "@" opens the list again.
+    await composer.evaluate("(node) => { node.value = ''; }")
+    await composer.press_sequentially("@")
+    await expect(page.locator("#mention-list")).to_be_visible()
+    await composer.fill("")
+    await composer.press_sequentially("@nothing like this")
+    await expect(page.locator("#mention-list")).to_be_hidden()
+    await composer.fill("")
+    log("D10: @ finds “Fix the checkout test” by “Fix ch”; Enter picks, Escape closes for good")
+
+    # E6: the count near the limit; over it, refused with the limit in words, the text kept.
+    count = page.locator("#composer-count")
+    await expect(count).to_be_hidden()
+    await composer.fill("y" * 18500)
+    await expect(count).to_have_text("18,500 of 20,000 characters")
+    sent = store.value("SELECT count(*) FROM messages WHERE session_id=?", (router,))
+    await composer.fill("z" * 20512)
+    await expect(count).to_have_text("Too long: 20,512 characters, the limit is 20,000")
+    await expect(count).to_have_class(re.compile(r"\bover\b"))
+    for scheme in ("light", "dark"):
+        await page.emulate_media(color_scheme=scheme)
+        await page.evaluate("document.querySelectorAll('.toast').forEach((n) => n.remove())")
+        for width in (1440, 700):
+            await page.set_viewport_size({"width": width, "height": 900})
+            await page.wait_for_timeout(300)
+            found = await page.locator("#composer").evaluate(OVERFLOWS)
+            assert not found, (scheme, width, found)
+            await page.locator("#composer").screenshot(
+                path=SHOTS / f"ui-edges-r8-limit-{width}-{scheme}.png"
+            )
+    await page.emulate_media(color_scheme="light")
+    await page.set_viewport_size({"width": 1440, "height": 900})
+    await composer.press("Enter")
+    await expect(page.locator(".toast.error", has_text="Too long: 20,512 characters, the limit "
+                              "is 20,000")).to_be_visible()  # fmt: skip
+    assert await composer.input_value() == "z" * 20512, "the text stays"
+    assert store.value("SELECT count(*) FROM messages WHERE session_id=?", (router,)) == sent
+    await composer.fill("")
+    await expect(count).to_be_hidden()
+    log("E6: the count near 20,000; over it, “Too long: N characters, the limit is 20,000”")
+    store.update_session(slack, closed_at=stamp)
+    runtime.slack.status["user_id"] = owner_id
+    await context.close()
+
+
 async def main():
     with tempfile.TemporaryDirectory(prefix="cos-ui-") as temporary:
         holder: dict = {}
@@ -2707,6 +2971,7 @@ async def main():
             await round_five(runtime, browser, failures)
             await round_six(runtime, browser, failures)
             await round_seven(runtime, browser, failures)
+            await round_eight(runtime, browser, failures)
             await browser.close()
         server.should_exit = True
         await serving

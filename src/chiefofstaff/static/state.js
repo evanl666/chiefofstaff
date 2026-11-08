@@ -1,6 +1,7 @@
 // What the page knows, and the server events that keep it current.
 
-import { $, api, el, withKey } from "./dom.js";
+import { $, api, el, toast, withKey } from "./dom.js";
+import { firstLine, shorten } from "./text.js";
 import { renderSidebar } from "./sidebar.js";
 import { appendMessages, renderHeader, replaceMessage, select, updateDraftRecords, updateWorkingLine } from "./session.js";
 import { scheduleHome } from "./inbox.js";
@@ -64,6 +65,9 @@ export const pendingDrafts = () => state.snapshot?.drafts || [];
 export const uncertainDrafts = () => state.snapshot?.uncertain || [];
 export const tasks = () => state.snapshot?.tasks || [];
 export const ownerQuestions = () => state.snapshot?.questions || [];
+// The Router's notes that need the owner (notify_owner with needs_action or urgent), until seen.
+export const ownerUpdates = () => state.snapshot?.updates || [];
+export const focusing = () => new Date(state.snapshot?.focus?.until || 0) > new Date();
 // A worker by what it is on (the server's one rule: its current task while open, else its
 // newest open task, else its newest task); the first thing it was asked only when it has none.
 export function workerTitle(session) {
@@ -122,6 +126,7 @@ function handleEvent({ type, data }) {
     if (state.connectedOnce) resync().catch(() => {});
     state.connectedOnce = true;
   } else if (type === "message") {
+    noteUpdate(data);
     if (data.amended) {
       if (data.session_id === viewedId()) replaceMessage(data);
       return;
@@ -142,9 +147,36 @@ function handleEvent({ type, data }) {
     }, 5000);
   } else if (type === "draft") {
     applyDraft(data);
+  } else if (type === "toast") {
+    notify(data);
   } else if (type === "state") {
     scheduleReload();
   }
+}
+// A notification while the page is open: none while the owner focuses (unless urgent), nor where
+// the owner is looking and sees it already: the session it is from (on Home, the Router's: its
+// chat and Needs you), or Home's chat line for news that needs nothing of them.
+function notify({ text = "", session_id: sessionId, needs_action: needsAction, urgent }) {
+  const looking = document.hasFocus() && (sessionId === viewedId() || (state.selected === HOME && !needsAction));
+  if (!urgent && (focusing() || looking)) return;
+  toast(shorten(firstLine(text) || text, 200), needsAction || urgent ? "attention" : "", sessionId);
+}
+// A note of the Router's that needs the owner waits under Needs you; what the owner writes to
+// the Router after it answers it (as the server counts it; not what they told one worker).
+function noteUpdate(message) {
+  if (!state.snapshot || message.amended || message.session_id !== routerId()) return;
+  const meta = message.meta || {};
+  if (message.kind === "owner") {
+    if (meta.to || !ownerUpdates().length) return;
+    state.snapshot.updates = ownerUpdates().filter((update) => update.id > message.id);
+  } else if (message.kind === "update" && (meta.needs_action || meta.urgent)) {
+    const update = { id: message.id, text: message.text, urgent: Boolean(meta.urgent), at: message.created_at };
+    state.snapshot.updates = [...ownerUpdates().filter((item) => item.id !== message.id), update];
+  } else {
+    return;
+  }
+  renderSidebar();
+  scheduleHome();
 }
 // A draft as it is now (from an event, or the answer to the owner's decision on it).
 export function applyDraft(data) {

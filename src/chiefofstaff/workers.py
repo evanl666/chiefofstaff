@@ -844,7 +844,8 @@ class Workers:
                 continue
             by = was["stopped"] or was["by"]
             self.store.set(f"stopped:{task['id']}", by)
-            progress = f"Stopped when {by} closed its worker: Go on, or Cancel."
+            # Who closed it (not who had stopped it before).
+            progress = f"Stopped when {was['by']} closed its worker: Go on, or Cancel."
             restored.append(self.tasks.move(task["id"], "waiting", progress=progress))
         if restored:
             self.store.execute(
@@ -911,6 +912,15 @@ class Workers:
             # held for the Router or the Slack session still go out when it is idle.
             self.delivery.unsee(session_id)
             self.delivery.defer_pending(session_id)
+        if stuck := self.states[session_id].awaiting:
+            # It never started on what it was sent (Copilot may have given up on its queue, on
+            # settings it could not load): Go on reaches it on a new connection, with the
+            # settings as they are then.
+            if row["role"] != WORKER:
+                mark = int(self.store.get(f"sent:{session_id}") or 0)
+                self.store.set(f"sent:{session_id}", str(min(mark, stuck[1])))
+            await self.runtime.detach(session_id)
+            self.states[session_id].after_abort = False  # Nothing runs on a new connection.
         self.runtime.background(self.pump())
 
     async def external(self, refresh: bool = False) -> list[dict]:

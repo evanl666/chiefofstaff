@@ -90,11 +90,12 @@ class FakeSession:
         self.aborted = True
 
     async def get_events(self):
+        # What it was sent, as sent (an owner's ref and all).
         return [
             SimpleNamespace(
                 type=SimpleNamespace(value="user.message"), data=SimpleNamespace(content=p)
             )
-            for p in self.sent
+            for p in self.raw_sent
         ]
 
     async def disconnect(self):
@@ -176,6 +177,7 @@ class FakeClient:
             raise RuntimeError("Session not found")
         session = FakeSession(session_id, options)
         session.sent = self.sessions[session_id].sent
+        session.raw_sent = self.sessions[session_id].raw_sent
         self.sessions[session_id] = session
         self.resumed.append(session_id)
         return session

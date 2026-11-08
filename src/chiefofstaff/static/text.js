@@ -482,12 +482,31 @@ function slackName(mark, id, said = "") {
   if (id.startsWith("D")) return !name ? "DM" : /\bDM\b|direct/i.test(name) ? name : `DM with ${name.replace(/^@/, "")}`;
   return `#${name.replace(/^#/, "") || id}`;
 }
-// Slack's text as people read it: names for its ids ("<@U0BOB001> (Bob)", "<#C0ENG|eng>"), and
-// without the message stamps ("| ts: 1712345678.000100").
+// A Slack id written bare (by a session, from Slack's tools): a user's (U…, W…), a channel's
+// (C…, G…) or a DM's (D…), in capitals with a digit; not part of a word, a link or a path.
+const SLACK_ID = String.raw`(?<![\w/.:#@-])([UWCGD](?=[A-Z0-9]*\d)[A-Z0-9]{4,11})(?![\w/-])`;
+const SLACK_ID_IN_BRACKETS = new RegExp(String.raw`[ \t]*\(${SLACK_ID}\)`, "g");
+const SLACK_ID_BARE = new RegExp(String.raw`(\bDM[ \t]+)?${SLACK_ID}`, "g");
+// Slack's text as people read it: names for its ids ("<@U0BOB001> (Bob)", "<#C0ENG|eng>", a
+// thread's key, "Bob (U0BOB001)", an id with a name known), and without the message stamps
+// ("| ts: 1712345678.000100", "(ts 1712345678.000100)").
 export function slackText(text) {
+  const names = state.snapshot?.slack_names || {};
+  // "DM <#D0BOB0001>" is "DM with Bob", not "DM DM with Bob".
+  const named = (dm, mark, id, said) => (dm && !id.startsWith("D") ? dm : "") + slackName(mark, id, said);
+  const markOf = (id) => (/^[UW]/.test(id) ? "@" : "#");
   return String(text || "")
-    .replace(/[ \t]*\|?[ \t]*\bts:[ \t]*\d+\.\d+/g, "")
-    .replace(/<([@#])([A-Z0-9]{2,})(?:\|([^>\n]+))?>(?:[ \t]*\(([^()\n]{1,60})\)(?=[ \t]*(?:\||$)))?/gm, (_, mark, id, label, beside) => slackName(mark, id, label || beside));
+    .replace(/[ \t]*\([ \t]*ts:?[ \t]*\d{9,}\.\d+[ \t]*\)/g, "")
+    .replace(/[ \t]*[|,]?[ \t]*\bts:?[ \t]*\d{9,}\.\d+/g, "")
+    .replace(/\b(thread[ \t]+)?slack:([A-Z][A-Z0-9]{2,})(?::\d{9,}\.\d+)?/g, (_, thread, id) => `${thread ? "thread in " : ""}${slackName("#", id)}`)
+    .replace(/(\bDM[ \t]+)?<([@#])([A-Z0-9]{2,})(?:\|([^>\n]+))?>(?:[ \t]*\(([^()\n]{1,60})\)(?=[ \t]*(?:\||$)))?/gm, (_, dm, mark, id, label, beside) => named(dm, mark, id, label || beside))
+    .replace(SLACK_ID_IN_BRACKETS, (whole, id, offset, all) => {
+      const name = names[id];
+      // A user's id after their name says nothing more; one with no name known means nothing.
+      if (/^[UW]/.test(id) && id.length >= 8 && (!name || all.slice(0, offset).toLowerCase().endsWith(name.toLowerCase()))) return "";
+      return name ? ` (${named("", markOf(id), id)})` : whole;
+    })
+    .replace(SLACK_ID_BARE, (whole, dm, id) => (names[id] ? named(dm, markOf(id), id) : whole));
 }
 export function shortPath(path) {
   const home = state.snapshot?.home;

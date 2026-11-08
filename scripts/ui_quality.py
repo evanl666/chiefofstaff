@@ -285,7 +285,7 @@ REVIEW_BODY = (
 
 def gallery(runtime, seeded: dict) -> list[dict]:
     """Every other kind of card: a question, a PR review with a verdict and line comments, a
-    reply to send yourself, and a sign-in."""
+    reply to send yourself, a sign-in, and the Router's notes (one urgent)."""
     store = runtime.store
     compare = seeded["workers"][COMPARE]["session_id"]
     fix = seeded["workers"][FIX]["session_id"]
@@ -309,6 +309,14 @@ def gallery(runtime, seeded: dict) -> list[dict]:
     ]  # fmt: skip
     for draft in drafts:
         runtime.bus.publish("draft", store.draft(draft["id"]))
+    # The Router's notes that need the owner: one to answer, one urgent.
+    router = seeded["router"]
+    for text, urgent in [
+        ("Maya asks whether the login fix ships today.\nTell me, or say if I should draft a "
+         "holding reply.", False),
+        ("The staging deploy is down: Ann is blocked on you today.", True),
+    ]:  # fmt: skip
+        runtime.add_message(router, "update", text, {"needs_action": not urgent, "urgent": urgent})
     return drafts
 
 
@@ -457,7 +465,7 @@ async def cards(runtime, seeded, browser, quality: Quality, phase: str):
         )
         page = await context.new_page()
         await page.goto(f"{BASE}/#token={TOKEN}")
-        await expect(page.locator("#needs .card")).to_have_count(6, timeout=15000)
+        await expect(page.locator("#needs .card")).to_have_count(8, timeout=15000)
         # Each card says once what it is about: a decision names its task in its label only.
         decision = page.locator("#needs .card.decision")
         await expect(decision.locator(".head .label")).to_contain_text(f"Decision for {LIMIT}")
@@ -503,6 +511,8 @@ async def cards(runtime, seeded, browser, quality: Quality, phase: str):
     for draft in drafts:
         runtime.store.update_draft(draft["id"], status="rejected")
         runtime.bus.publish("draft", runtime.store.draft(draft["id"]))
+    for update in runtime.owner_updates():
+        runtime.update_seen(update["id"])
 
 
 async def main():

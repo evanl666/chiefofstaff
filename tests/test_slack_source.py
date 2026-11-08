@@ -452,6 +452,17 @@ async def test_a_reply_is_not_sent_into_a_conversation_that_moved_on(tmp_path):
         await runtime.drafts.resolve(third["id"], DraftDecision(action="send"))
     sent = await runtime.drafts.resolve(third["id"], DraftDecision(action="send"))
     assert sent["status"] == "sent" and sends()[-1]["message"] == "Holding off, then."
+    # An edit sent as it was held stays the card's text: Send anyway sends the edit.
+    edited, _ = await draft("Holding.")
+    harness.mcp.reads[dm] = entry(dm, "U0ALICE1", "Alice Chen", "1712345850.000100", "ok?")
+    with pytest.raises(ValueError, match="wrote since"):
+        await runtime.drafts.resolve(
+            edited["id"], DraftDecision(action="send", text="Held, sorry.")
+        )
+    assert harness.store.draft(edited["id"])["final_text"] == "Held, sorry."
+    anyway_edit = DraftDecision(action="send", text="Held, sorry.", content={"send_anyway": True})
+    await runtime.drafts.resolve(edited["id"], anyway_edit)
+    assert sends()[-1]["message"] == "Held, sorry."
     fourth, _ = await draft("Done.")
     harness.mcp.reads[dm] = entry(dm, "U0ALICE1", "Alice Chen", "1712345900.000100", "and?")
     anyway = DraftDecision(action="send", content={"send_anyway": True})

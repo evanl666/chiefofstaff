@@ -316,19 +316,66 @@ async def test_usage_is_recorded_per_call_and_summed_by_range(harness):
 async def test_daily_digest_once_a_day_and_only_when_useful(harness):
     runtime = await harness.connect()
     now = time.time()
-    assert digest(harness.store, now - 86400, now) == ""
+    assert digest(runtime, now - 86400, now) == ""
     worker = (await spawn(runtime, harness.router_id, "Ship notes"))["session_id"]
     await call_tool(runtime, "report", worker, status="done", summary="shipped")
     asking = (await spawn(runtime, harness.router_id, "Pick DB"))["session_id"]
     await call_tool(runtime, "report", asking, status="question", summary="postgres or mysql?")
-    text = digest(harness.store, now - 60, time.time() + 1)
+    text = digest(runtime, now - 60, time.time() + 1)
     assert "• Finished: “Ship notes”" in text
-    assert "• Waiting for you: 1 result to review · “Pick DB” asked a question" in text
+    assert "• Waiting for you: “Pick DB” asked a question" in text
 
     harness.store.save_settings(Settings(digest_time="00:00"))
     first = await runtime.digest_once(time.time() + 1)
     assert first and harness.kinds(harness.router_id)[-1] == ("update", first)
     assert await runtime.digest_once(time.time() + 2) is None, "once a day"
+
+
+async def test_the_daily_digest_counts_what_home_shows(harness):
+    """Bug bash 4 (D3): the digest said "7 results to review" when Home had one to accept (it
+    counted reports that only inform), listed Chief of Staff's helpers' and cancelled tasks as
+    finished, and said "0 workers running" while tasks ran (it counted sessions in a turn)."""
+    runtime = await harness.connect()
+    now = time.time()
+    workers = {}
+    for title in ("Compare libraries", "Fix the bug", "Learn checks from mistakes", "Draft"):
+        workers[title] = (await spawn(runtime, harness.router_id, title))["session_id"]
+        if title == "Draft":  # Cancelled before it finished: not finished work.
+            await runtime.task_actions.cancel(task_of(harness, workers[title]), "Not needed")
+            continue
+        await call_tool(runtime, "report", workers[title], status="done", summary="Done.")
+    harness.store.set(f"reviewreq:{task_of(harness, workers['Fix the bug'])}", "1")  # To accept.
+    harness.store.set(f"checker:{workers['Learn checks from mistakes']}", "1")  # A helper.
+    await spawn(runtime, harness.router_id, "Benchmark")
+    text = digest(runtime, now - 60, time.time() + 1)
+    assert "• Finished: “Compare libraries”, “Fix the bug”\n" in text
+    assert "• Waiting for you: 1 result to review\n" in text
+    assert "• 1 task running · " in text
+
+
+async def test_the_focus_summary_agrees_with_home(harness):
+    """Bug bash 4 (D2, D9): "While you focused" said 1 needs you while Home showed 3 (it left
+    out results to accept and questions without a task), counted a draft replaced since, and
+    counted the Router's batch of three Slack messages as one. "Focusing until 04:25" beside
+    the header's "4:25 AM": the line says how long instead."""
+    runtime = await harness.connect()
+    await runtime.focus.start(60)
+    started = [text for kind, text in harness.kinds(harness.router_id) if kind == "notice"]
+    assert started[-1] == "Focusing for 1h"
+    await runtime.on_trigger("slack", ["slack:C1:1", "slack:C1:2", "slack:C1:3"], "Three")
+    replaced = harness.store.create_draft(harness.router_id, "slack", {}, "Hi")
+    harness.store.update_draft(replaced["id"], status="replaced")
+    harness.store.create_draft(harness.router_id, "slack", {}, "Hi there")
+    for title in ("Compare libraries", "Fix the bug"):
+        worker = (await spawn(runtime, harness.router_id, title))["session_id"]
+        await call_tool(runtime, "report", worker, status="done", summary="Done.")
+    harness.store.set(f"reviewreq:{task_of(harness, worker)}", "1")  # A result to accept.
+    runtime.asks.record_question(worker, "Which port?")  # On no task: its own card.
+    await runtime.focus.check(time.time() + 3601)
+    summary = harness.store.messages(harness.router_id)[-1]["text"]
+    assert summary.endswith(
+        "3 messages handled · 1 reply drafted for you · 2 tasks finished · 3 need you."
+    ), summary
 
 
 async def test_profile_is_distilled_reviewed_and_used(tmp_path):
@@ -463,8 +510,10 @@ async def test_closed_workers_come_back_with_their_conversation(harness):
     assert result.result_type == "success"
     row = harness.store.session(worker_id)
     assert not row["closed_at"] and row["status"] == "working"
-    assert harness.session(worker_id).sent[-1] == env(
-        "router", "message", "Also the logout", task=task_of(harness, worker_id)
+    assert (
+        harness.session(worker_id)
+        .sent[-1]
+        .startswith(env("router", "message", "Also the logout", task=task_of(harness, worker_id)))
     )
 
     await runtime.workers.close(worker_id)

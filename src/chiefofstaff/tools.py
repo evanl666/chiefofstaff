@@ -610,6 +610,23 @@ def short_of(goal: str, summary: str) -> str:
     return ""
 
 
+def left_out(earlier: str, report: str) -> list[str]:
+    """What an earlier result is made of that a new report on the same task leaves out, when
+    that is most of it: code, links, versions and names (RapidFuzz, MIT), which survive a
+    translation. [] when the report keeps most of it, or there is too little to tell."""
+    found: set[str] = set()
+    found |= {item.lower() for item in re.findall(r"`([^`\n]{2,60})`", earlier)}
+    found |= {item.lower().rstrip(").,") for item in re.findall(r"https?://\S+", earlier)}
+    found |= set(re.findall(r"(?<![\w.])\d+(?:\.\d+){1,3}(?![\w.])", earlier))
+    found |= {
+        item.lower()
+        for item in re.findall(r"\b(?:[A-Z][a-z]+[A-Z]\w*|[A-Z]{2,}\w*|[a-z]+[A-Z]\w*)\b", earlier)
+    }
+    said = report.lower()
+    missing = sorted(item for item in found if item not in said)
+    return missing if len(found) >= 6 and len(missing) * 2 > len(found) else []
+
+
 def names_pr(text: str, repo: str, number: int) -> bool:
     """The text names the PR by URL or key, or by its repository's name and number (as in
     "review checkout-service PR #1529")."""
@@ -710,6 +727,9 @@ def shortened(listed: dict) -> dict:
     if size() > LISTED_BYTES:
         # Each session already names its current task.
         listed["tasks"] = [task for task in listed["tasks"] if task["status"] != "review"]
+    if size() > LISTED_BYTES and "needs_owner" in listed:
+        for card in listed["needs_owner"]["cards"]:
+            card.pop("text", None)  # What it is, to whom and what it answers stay.
     listed["note"] = "Shortened to fit: read_session and find_sessions give any session's details."
     return listed
 
@@ -1570,7 +1590,7 @@ class Tools:
                 "\n\n" + wrap("system", "context", text)
                 for text in await self.settle_earlier(earlier, params.earlier, task)
             )
-            notice = f"New task “{title}” for “{worker_name}”"
+            notice = f"New task “{title}” for the worker of “{worker_name}”"
         elif params.task == "note":
             prompt = wrap(
                 "router",
@@ -1581,6 +1601,8 @@ class Tools:
             )
             notice = f"Told “{self.runtime.display_title(target)}”"
         else:
+            # More on a result it reported: its next report replaces that result.
+            restate = bool(task and task["status"] in {"review", "done"} and task["result"])
             if task and task["status"] in {"review", "failed"}:
                 # Reopened for a follow-up: cancelling that follow-up gives the finished result
                 # back, rather than losing it.
@@ -1593,6 +1615,9 @@ class Tools:
                 task=task["id"] if task else None,
                 reply_in=self.store.get("owner_language"),
             )
+            if restate and task:
+                prompt += "\n\n" + wrap("system", "context", prompts.RESTATE)
+                self.store.set(f"morefor:{task['id']}", "1")  # Its next report is checked.
             notice = f"Continued in “{self.runtime.display_title(target)}”"
         # Followed for the task this is about (a new one, or the one it continues).
         self.runtime.follow(
@@ -1921,6 +1946,9 @@ class Tools:
                 }
                 for task in self.tasks.listed()
             ],
+            # What waits for the owner now: their cards (what each is, to whom, what it
+            # answers, for which task) and the questions workers asked them.
+            "needs_owner": self.needs_owner(),
             "projects": await self.workspaces.project_cards(),
             "models": models,
             "default_worker_model": settings.role_models.get(WORKER) or settings.model or "auto",
@@ -1935,6 +1963,40 @@ class Tools:
             ],
         }
         return shortened(listed)
+
+    def needs_owner(self) -> dict:
+        """The cards waiting for the owner and the questions workers asked them (a task that
+        waits for its answer, or for Go on after a stop, too), for the Router."""
+        questions = [
+            {
+                "worker": question["worker"],
+                "question": " ".join(question["text"].split())[:300],
+                **(
+                    {"task": f"{question['task_id']} “{question['task_title']}”"}
+                    if question["task_id"]
+                    else {}
+                ),
+            }
+            for question in self.runtime.asks.owner_questions()
+        ]
+        for task in self.tasks.listed():
+            if task["status"] != "waiting":
+                continue
+            row = self.store.find_session(task["session_id"])
+            stopped = self.store.get(f"stopped:{task['id']}")
+            questions.append(
+                {
+                    "worker": self.runtime.display_title(row) if row else "",
+                    "question": "Stopped: waits for the owner's Go on (or Cancel)."
+                    if stopped
+                    else " ".join((task["progress"] or "").split())[:300],
+                    "task": f"{task['id']} “{task['title']}”",
+                }
+            )
+        return {
+            "cards": [self.runtime.drafts.brief(draft) for draft in self.store.drafts()],
+            "questions": questions,
+        }
 
     def session_entry(self, row: dict) -> dict:
         """A session as list_sessions shows it: what tells it apart; read_session has the rest."""
@@ -2058,8 +2120,9 @@ class Tools:
 
     async def t_notify_owner(self, params: NotifyOwner, caller: str):
         self.caller(caller, ROUTER)
-        if self.states[caller].owner_reply and not (params.needs_action or params.urgent):
-            # One message per answer: the owner reads the reply of this turn.
+        if self.states[caller].owner_reply and not params.urgent:
+            # One message per answer: the owner reads the reply of this turn (a decision they
+            # must make too: said there, it is not said twice).
             return "Not sent: the owner wrote to you, so say this in your reply instead."
         meta = {"needs_action": params.needs_action, "urgent": params.urgent}
         self.runtime.add_message(caller, "update", params.text, meta, unread=True)
@@ -2126,6 +2189,23 @@ class Tools:
                 "step, the numbers, and the table if one was asked for. If this already is the "
                 "whole answer, call report again with it unchanged."
             )
+        if (
+            task
+            and params.status == "done"
+            and task["result"]
+            and self.store.get(f"morefor:{task['id']}")
+        ):
+            # More was asked of a result it reported: this report replaces that result. Asked
+            # once, when it leaves out most of what the earlier one said (only the addition).
+            self.store.delete(f"morefor:{task['id']}")
+            if dropped := left_out(task["result"], params.summary):
+                raise ValueError(
+                    "Not reported yet: this report replaces the task's result, and it leaves out "
+                    f"most of the earlier one ({', '.join(dropped[:6])}…). The owner reads only "
+                    "the latest: call report again with the whole result, updated (what still "
+                    "holds from before, what changed, what is new). If the earlier result no "
+                    "longer holds, call report again unchanged."
+                )
         unread = (
             [
                 text
@@ -2398,6 +2478,13 @@ class Tools:
         task = await self.runtime.task_actions.cancel(
             self.runtime.task_actions.task_for(params.task_id)["id"], params.reason, "the Router"
         )
+        if task["status"] == "done":
+            return (
+                f"Task {task['id']} “{task['title']}” had finished already: its result was "
+                "reported to the owner, so nothing was stopped, and it stays done with its result "
+                "(drafts of it still waiting for the owner were withdrawn). If the owner asked to "
+                "stop it, tell them it had finished."
+            )
         return f"Cancelled task {task['id']}."
 
     async def t_stop_worker(self, params: StopWorker, caller: str):
@@ -2431,6 +2518,19 @@ class Tools:
         watches = self.store.settings().watches
         if any(watch.what.lower() == what.lower() for watch in watches):
             return "The owner has this watch already (Settings → Connections → Watches)."
+        if proposed := next(
+            (
+                card
+                for card in self.store.drafts()
+                if card["kind"] == "form"
+                and str(card["target"].get("watch") or "").lower() == what.lower()
+            ),
+            None,
+        ):
+            return (
+                f"You proposed this watch already: card {proposed['id']} waits for the owner's "
+                "OK under Needs you."
+            )
         if len(watches) >= MAX_WATCHES:
             raise ValueError(
                 f"The owner has {MAX_WATCHES} watches, the most there can be: ask them to remove "
@@ -2452,7 +2552,8 @@ class Tools:
         draft = self.runtime.asks.offer(
             caller,
             "form",
-            {"schema": schema, "source": "Chief of Staff"},
+            # `watch`: the card is a watch (its expiry after a restart is told, see Asks).
+            {"schema": schema, "source": "Chief of Staff", "watch": what},
             f"Add a watch? Chief of Staff looks out for this every few minutes in work hours "
             f"and tells you what needs you (Settings → Connections → Watches): {what}",
             lambda result: self.watch_answered(caller, result),
@@ -2473,6 +2574,11 @@ class Tools:
         else:
             old = self.store.settings()
             try:
+                if any(
+                    " ".join(watch.what.split()).casefold() == what.casefold()
+                    for watch in old.watches
+                ):
+                    raise ValueError(f"the owner has this watch already ({what})")
                 if len(old.watches) >= MAX_WATCHES:
                     raise ValueError(f"there are {MAX_WATCHES} watches already")
                 new = old.model_copy(update={"watches": [*old.watches, Watch(what=what, how=how)]})
@@ -2530,6 +2636,8 @@ class Tools:
         }
         if place.get("error"):
             target["latest_error"] = place["error"]
+        if found := self.runtime.draft_task(caller, target):
+            target["task_id"] = found  # The task it answers for, not merely its newest.
         draft = self.store.create_draft(caller, "slack", target, params.text, params.note)
         replaced = await self.runtime.drafts.supersede(draft)
         self.runtime.add_message(caller, "draft", params.text, {"draft_id": draft["id"]})
@@ -2582,6 +2690,8 @@ class Tools:
             # On a PR: what the owner posts there themself settles it.
             repo, number = pulls[0]
             target |= {"repo": repo.lower(), "number": int(number), "anywhere": True}
+        if found := self.runtime.draft_task(caller, target):
+            target["task_id"] = found
         draft = self.store.create_draft(caller, "reply", target, text, params.note[:300])
         self.runtime.add_message(
             caller, "draft", text, {"draft_id": draft["id"], "label": f"Reply to {params.to}"}
@@ -2735,8 +2845,12 @@ class Tools:
             label = {"approve": "Approval", "request_changes": "Changes requested"}.get(
                 target["verdict"], "Review"
             ) + f" of {repo}#{params.number}"
+        if found := self.runtime.draft_task(caller, target):
+            target["task_id"] = found
         draft = self.store.create_draft(caller, "github", target, body)
-        if task := self.runtime.tasks.current(caller):
+        if task := self.runtime.tasks.find(draft["target"].get("task_id") or "") or (
+            self.runtime.tasks.current(caller)
+        ):
             # Its card shows the PR it is about, as GitHub has it.
             self.runtime.task_actions.remember_prs(task["id"], target["url"])
         shown = body

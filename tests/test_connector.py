@@ -10,6 +10,7 @@ from conftest import Harness, call_tool, settle
 from chiefofstaff.connector import after_hours, in_hours
 from chiefofstaff.models import Settings, Watch
 from chiefofstaff.runtime import CONNECTOR_TOOLS
+from chiefofstaff.store import now
 
 
 async def spawn(runtime, router, title):
@@ -64,6 +65,17 @@ async def test_a_scan_hands_what_needs_the_owner_to_the_router_once(tmp_path):
     assert 'from="watch" type="event"' in router and "can you review my PR today?" in router
     again = await call_tool(runtime, "report_found", row["id"], items=[item])
     assert again.text_result_for_llm.startswith("0 new item"), "seen before"
+    # A Slack message is the Slack source's too: handed over once, by whichever came first.
+    link = "https://acme.slack.com/archives/C0DEPLOYS/p1712345600000100"
+    deploys = {**item, "key": "deploys-q", "link": link, "text": "is the release out?"}
+    found = await call_tool(runtime, "report_found", row["id"], items=[deploys])
+    assert found.text_result_for_llm.startswith("1 new item")
+    assert harness.store.one("SELECT id FROM triggers WHERE key=?", ("slack:1712345600.000100",))
+    link2 = "https://acme.slack.com/archives/C0DEPLOYS/p1712345700000100"
+    harness.store.add_trigger("slack", "slack:1712345700.000100", "seen by the Slack source")
+    other = {**item, "key": "deploys-q2", "link": link2, "text": "and the notes?"}
+    found = await call_tool(runtime, "report_found", row["id"], items=[other])
+    assert found.text_result_for_llm.startswith("0 new item"), "the Slack source had it"
     session.emit("session.idle")
     await settle(runtime)
 
@@ -196,6 +208,51 @@ async def test_away_the_owner_is_told_where_they_are_and_answers_from_there(tmp_
         replies=[{"code": draft_code, "text": f"{draft_code} send"}],
     )  # fmt: skip
     assert "nothing waits" in again.text_result_for_llm, "a code is used once"
+
+
+async def test_away_a_draft_answered_in_words_is_redone_and_a_bad_answer_is_said_once(tmp_path):
+    """Bug bash 4: "AXD4W no, tell Bob…" was refused (send or no only), and a reply that could
+    not be applied was noted again each time the messenger read it."""
+    settings = Settings(away_notify=True, away_minutes=5, away_how="DM me via the acme bot")
+    harness = Harness(tmp_path / "data", settings)
+    runtime = await away(harness)
+    writer = await spawn(runtime, harness.router_id, "Answer Carol")
+    await call_tool(runtime, "draft_reply", writer, text="yes, friday works", to="Carol",
+                    where="email")  # fmt: skip
+    asker = await spawn(runtime, harness.router_id, "Pick a port")
+    await call_tool(runtime, "report", asker, status="question", summary="8080 or 9090?")
+    harness.session(asker).emit("session.idle")
+    await settle(runtime)
+    [draft] = [d for d in harness.store.drafts() if d["kind"] == "reply"]
+    await runtime.connector.tick()
+    await settle(runtime)
+    messenger = runtime.toolset.last_special("messenger")
+    body, _plain, _blocks = notification(harness, messenger)
+    draft_code, task_code = code_in(body, "friday works"), code_in(body, "8080 or 9090?")
+    await call_tool(
+        runtime, "report_notified", messenger["id"], ok=True, where="Slack DM",
+        method="acmebot send", replies="acmebot read",
+    )  # fmt: skip
+    for n in range(3):  # Read again each time it looks (minutes apart: other news between).
+        await call_tool(runtime, "report_owner_replies", messenger["id"],
+                        replies=[{"code": task_code, "text": task_code}])  # fmt: skip
+        runtime.add_message(harness.router_id, "notice", f"Something else {n}")
+    notes = [m["text"] for m in harness.store.messages(harness.router_id)
+             if m["kind"] == "notice" and task_code in m["text"]]  # fmt: skip
+    assert len(notes) == 1 and "not done" in notes[0], notes
+    redo = await call_tool(runtime, "report_owner_replies", messenger["id"], replies=[
+        {"code": draft_code, "text": f"{draft_code} no, say Thursday instead"},
+    ])  # fmt: skip
+    assert "drafted again" in redo.text_result_for_llm
+    assert harness.store.draft(draft["id"])["status"] != "pending"
+    assert "say Thursday instead" in harness.session(writer).sent[-1]
+    # A send in a few words is a send, not something to change.
+    await call_tool(runtime, "draft_reply", writer, text="thursday works", to="Carol",
+                    where="email")  # fmt: skip
+    [again] = [d for d in harness.store.drafts() if d["kind"] == "reply"]
+    item = {"id": f"draft:{again['id']}", "draft": again}
+    assert await runtime.connector.apply(item, "QQQQQ yes, send it", "QQQQQ") == "marked as sent"
+    assert harness.store.draft(again["id"])["status"] == "sent"
 
 
 async def test_only_the_messenger_reports_how_it_reached_the_owner_and_what_they_said(tmp_path):
@@ -609,6 +666,33 @@ async def test_only_a_real_question_of_the_routers_reaches_the_owner_away(tmp_pa
     assert item["ask"]["text"].endswith("Close the issue too?")
 
 
+async def test_a_router_ask_settled_on_home_or_a_retold_question_is_not_told_again(tmp_path):
+    """Bug bash 4: away, the owner was told "the reply to Alice was not posted, resend it"
+    after they had resent it; and the Slack session's question came twice, once as the
+    Router's retelling."""
+    harness = Harness(tmp_path / "data", Settings(away_notify=True))
+    runtime = await harness.connect()
+    connector = runtime.connector
+    await runtime.owner_send(harness.router_id, "Reply to Alice")
+    runtime.add_message(harness.router_id, "update",
+                        "Your reply to Alice was not posted. Resend the draft from its card.",
+                        {"needs_action": True})  # fmt: skip
+    assert [item["id"].split(":")[0] for item in connector.waiting_items()] == ["router"]
+    draft = harness.store.create_draft(harness.router_id, "reply", {}, "Sure")
+    harness.store.update_draft(draft["id"], status="sent", resolved_at=now())
+    assert connector.waiting_items() == [], "resent on Home: nothing to tell"
+    # A session's question with no task, and the Router retelling it.
+    harness.store.set(
+        f"ownerq:{harness.router_id}:slack1",
+        json.dumps({"text": "Should I tell Bob the deploy moved to Friday?", "task_id": "",
+                    "at": now()}),
+    )  # fmt: skip
+    runtime.add_message(harness.router_id, "assistant",
+                        "Slack asks: should I tell Bob the deploy moved to Friday?")  # fmt: skip
+    kinds = sorted(item["id"].split(":")[0] for item in connector.waiting_items())
+    assert kinds == ["question"], kinds
+
+
 async def test_an_away_answer_to_the_router_counts_after_the_owner_wrote_to_it(tmp_path):
     """Bug bash: told of the Router's question while away, the owner wrote to the Router about
     something else; their answer by code was then dropped without a word."""
@@ -685,6 +769,35 @@ async def test_away_a_failed_task_is_told_and_retried_by_its_code(tmp_path):
     body, _plain, _blocks = notification(harness, messenger)
     code = code_in(body, "Failed · “Build the release”")
     assert f"Reply: `{code} retry`" in body
+
+
+async def test_away_a_stopped_task_is_told_as_stopped_and_goes_on_or_is_cancelled(tmp_path):
+    """Bug bash 4 (R6): a task the owner stopped read "“X” asks … Reply: <your answer>" in the
+    away message: it asks nothing. It says so, and "go on" or "cancel" by its code do what Go on
+    and Cancel do on Home."""
+    harness = Harness(tmp_path / "data", Settings(away_notify=True, away_how="DM me"))
+    runtime = await away(harness)
+    going, cancelled = [await spawn(runtime, harness.router_id, t) for t in ("Sum it", "Sort it")]
+    tasks = [runtime.tasks.current(worker) for worker in (going, cancelled)]
+    for worker in (going, cancelled):
+        await runtime.workers.interrupt(worker)
+    assert all(harness.store.get(f"stopped:{task['id']}") for task in tasks)
+    await runtime.connector.notify_away()
+    await settle(runtime)
+    messenger = runtime.toolset.last_special("messenger")
+    body, _plain, _blocks = notification(harness, messenger)
+    go_on, cancel = code_in(body, "Stopped · “Sum it”"), code_in(body, "Stopped · “Sort it”")
+    assert f"Reply: `{go_on} go on · cancel`" in body and "asks" not in body
+    await call_tool(runtime, "report_notified", messenger["id"], ok=True, where="DM",
+                    method="send", replies="read")  # fmt: skip
+    applied = await call_tool(runtime, "report_owner_replies", messenger["id"], replies=[
+        {"code": go_on, "text": f"{go_on} go on"}, {"code": cancel, "text": f"{cancel} cancel"},
+    ])  # fmt: skip
+    text = applied.text_result_for_llm
+    assert f"{go_on}: going on" in text and f"{cancel}: cancelled" in text, text
+    assert runtime.tasks.get(tasks[0]["id"])["status"] == "running"
+    assert "Go on where you stopped." in harness.session(going).sent[-1]
+    assert runtime.tasks.get(tasks[1]["id"])["status"] == "cancelled"
 
 
 async def test_a_failed_test_send_is_said_as_the_test(tmp_path):

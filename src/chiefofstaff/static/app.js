@@ -7,7 +7,7 @@ import { appendMessages, renderHeader, scrollToBottom, select } from "./session.
 import { closeMentions, mention, onComposerInput, onMentionKey, routerSide, setRecipient } from "./mention.js";
 import { openFile } from "./files.js";
 import { scheduleHome, showHomeTab } from "./inbox.js";
-import { attachmentBody, bindAttachments, hasAttachments, restoreAttachments, takeAttachments } from "./composer.js";
+import { attachmentBody, bindAttachments, hasAttachments, restoreAttachments, showLength, takeAttachments, tooLong } from "./composer.js";
 import { bindSettings, openSettings, refreshUsageLink, showUsage } from "./settings.js";
 import { bindSplitter } from "./splitter.js";
 function bindUi() {
@@ -15,6 +15,7 @@ function bindUi() {
   const autosize = () => {
     input.style.height = "auto";
     input.style.height = `${input.scrollHeight}px`;
+    showLength();
   };
   input.addEventListener("input", () => {
     autosize();
@@ -37,6 +38,12 @@ function bindUi() {
     if ((!text && !hasAttachments()) || (sessionId !== HOME && !current() && !other)) return;
     if (sessionId === HOME && !routerId()) {
       toast("Your chief of staff starts once Copilot is ready.", "error");
+      return;
+    }
+    // Refused here, with the limit in words: the text stays to be shortened.
+    const over = tooLong(text);
+    if (over) {
+      toast(over, "error");
       return;
     }
     const files = takeAttachments();

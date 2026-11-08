@@ -522,11 +522,58 @@ class Runtime:
 
     async def refresh_session(self, row: dict):
         """The session picks up new instructions from its next turn."""
+        if self.states[row["id"]].awaiting and self.states.is_live(row["id"]):
+            # It has not started on what it was sent (Copilot may have given up on it, on the
+            # settings it had): sent again now, on a new connection with the new ones.
+            await self.send_again(row)
         # A worker that reported "done" may still be finishing its turn.
-        if row["status"] == "working" or self.states[row["id"]].busy:
+        elif row["status"] == "working" or self.states[row["id"]].busy:
             self.states[row["id"]].stale = True  # Refreshed once its current turn ends.
         else:
             await self.detach(row["id"])
+
+    async def send_again(self, row: dict):
+        """What it was sent and never started on goes out again on a new connection."""
+        state = self.states[row["id"]]
+        if not state.awaiting:
+            return
+        _, mark = state.awaiting
+        state.awaiting = None
+        self.store.set(f"sent:{row['id']}", str(mark))
+        await self.detach(row["id"])
+        if row["status"] == "working":
+            self.update_session(row["id"], status="idle", activity="")
+        self.background(self.delivery.resume(row["id"]))
+
+    async def not_started(self, session_id: str):
+        """Copilot took a message and never started on it: it gives up on a session whose
+        settings it cannot load (an MCP server's, say), with no error the session sees. The
+        session says so, instead of working forever; what it was sent goes out again on a new
+        connection, with the settings as they are then (Retry, or the next message)."""
+        state = self.states[session_id]
+        row = self.store.find_session(session_id)
+        if not row or row["closed_at"] or not state.awaiting:
+            return
+        _, mark = state.awaiting
+        state.awaiting = None
+        self.store.set(f"sent:{session_id}", str(mark))
+        await self.detach(session_id)
+        message = (
+            "Copilot took the message but never started on it. It does this when it cannot load "
+            "a session's settings, such as an MCP server in Settings → Connections: check them, "
+            + ("then Retry." if row["role"] == WORKER else "then write again.")
+        )
+        self.add_message(session_id, "error", message)
+        if row["role"] != WORKER:
+            self.update_session(session_id, status="idle", activity="")
+            return
+        self.update_session(session_id, status="failed", activity="")
+        task = self.tasks.current(session_id)
+        self.task_actions.fail(session_id, message)
+        if task:
+            task = self.tasks.get(task["id"])
+        self.background(self.tell_router(row, "failed", message, task))
+        self.background(self.workers.pump())
 
     async def add_repo(self, caller: str, repo: str):
         row = self.store.session(caller)
@@ -951,6 +998,7 @@ class Runtime:
         state.steps.clear()  # A disconnected session is in no step.
         state.unread.clear()  # What it was sent is resent or replayed, not waiting in a turn.
         state.unseen.clear()
+        state.awaiting = None
         state.echoes = False
         if state.busy:
             # A disconnected session ends no turn: free its worker slot.
@@ -1288,9 +1336,20 @@ class Runtime:
                     for t in found[-20:]
                 ]
         if drafts := self.store.drafts():
-            lines.append("\nCards waiting for the owner:")
+            lines.append(
+                "\nCards waiting for the owner (what each is, to whom, what it answers, for which "
+                "task; you hear when one is sent, rejected or withdrawn):"
+            )
             lines += [
-                f"- {d['kind']} from {short(d['session_id'])}: {clip(d['text'])}" for d in drafts
+                f"- {d['id']}: {self.drafts.line(d)}. Text: {clip(d['text'])}" for d in drafts
+            ]
+        if owner_questions := self.toolset.needs_owner()["questions"]:
+            lines.append("\nQuestions workers asked the owner, not answered yet:")
+            lines += [
+                f"- “{q['worker']}”"
+                + (f" (task {q['task']})" if q.get("task") else "")
+                + f": {clip(q['question'])}"
+                for q in owner_questions
             ]
         if questions := self.store.all(
             "SELECT * FROM questions WHERE target=? AND status='open'", (router,)
@@ -1400,21 +1459,38 @@ class Runtime:
                 for message in self.store.messages(row["id"], after=mark)
                 if "prompt" in message["meta"]
             ]
+            given = [message for message in since if message["id"] <= sent]
+            # Sent, but not in its conversation (Copilot stopped before it wrote them down):
+            # they go out again in full, as messages it never received.
+            received = await self.delivery.received(row["id"], given)
+            if resent := given[len(received) :]:
+                self.store.set(f"sent:{row['id']}", str(resent[0]["id"] - 1))
             # Messages it never received go out as they are, with the note; only the rest
             # are quoted.
-            unhandled = [message["meta"]["prompt"] for message in since if message["id"] <= sent]
+            unhandled = [message["meta"]["prompt"] for message in received]
             # Quoted, their tasks are taken up (their instructions show only as quotes).
             if row["role"] == WORKER and (
-                named := [task for prompt in unhandled for task in tasks_named(prompt)]
+                named := [task for m in given for task in tasks_named(m["meta"]["prompt"])]
             ):
                 self.took_up(row["id"], named, switch=False)
             if any(message["kind"] == "owner" for message in since):
                 self.states[row["id"]].owner_turn = True
             note = "Chief of Staff restarted while you were working. Continue where you left off."
             if unhandled:
+                # The newest whole (a task's instructions, say); older ones cut.
+                quoted = unhandled[-10:]
                 note += (
                     " Messages you received since you were last idle (some may already be "
-                    "handled), quoted:\n\n" + "\n\n".join(text[:1500] for text in unhandled[-10:])
+                    "handled), quoted:\n\n"
+                    + "\n\n".join([text[:1500] for text in quoted[:-1]] + quoted[-1:])
+                )
+            if resent:
+                note = (
+                    note + "\n\nThe message(s) before this note had not reached you yet: they "
+                    "are new to you."
+                    if unhandled
+                    else "Chief of Staff restarted just after sending you the message(s) above, "
+                    "before they reached you: they are new to you."
                 )
             prompt = wrap("system", "restart", note)
             try:
@@ -1588,10 +1664,16 @@ class Runtime:
             # The owner answers what it asked on that task (others' questions stay).
             self.asks.answered(session_id, about["id"] if about else "")
             self.asks.answered(session_id, "")
-        # Waiting on its decision card: what the owner writes it is their answer to it.
+        # Waiting on its decision card: what the owner writes it is their answer to it (unless
+        # they ask something back: then the card stays, and this is chat).
         decided = (
             self.decisions.answered_in_chat(session_id, about, text.strip())
             if row["role"] == WORKER and clear_questions and text.strip()
+            else []
+        )
+        asked_back = (
+            self.decisions.asked_back(session_id, about, text.strip())
+            if row["role"] == WORKER and clear_questions
             else []
         )
         # Answers come in the language of this message, whatever the conversation used before.
@@ -1601,6 +1683,11 @@ class Runtime:
         switched = self.switched_language(session_id, spoken)
         notes = [switched]
         notes += [f"This answers your decision card: {c['target']['question']}" for c in decided]
+        notes += [
+            f"The owner asks about your decision card before deciding: answer them. The card "
+            f"({c['target']['question']}) stays open for their decision."
+            for c in asked_back
+        ]
         if attachments:
             meta["attachments"] = self.save_attachments(attachments)
             paths = ", ".join(f"{a['path']} ({a['name']})" for a in meta["attachments"])
@@ -1644,7 +1731,7 @@ class Runtime:
         )
         if row["role"] == WORKER and tell_router:
             self.owner_told(row, text)
-        if about and about["status"] == "waiting" and clear_questions:
+        if about and about["status"] == "waiting" and clear_questions and not asked_back:
             # It has the owner's answer now: it goes on (not "waits for your answer" until its
             # next report).
             self.asks.go_on(about)
@@ -1683,12 +1770,18 @@ class Runtime:
         return f"The owner wrote this in {spoken}: answer in {spoken}, not {before}."
 
     def busy_note(self, session_id: str) -> str:
-        """For a message to a worker deep in a step: it reads it only when the step ends."""
+        """For a message to a worker deep in a step: it steers in at once (Copilot moves a
+        command it runs to the background, where it goes on), unless its model changed in this
+        turn (then it waits for the turn's end)."""
         row = self.store.session(session_id)
         since, _ = self.states[session_id].step()
         if row["role"] != WORKER or not since or time.time() - since < STEP_NOTE_SECONDS:
             return ""
-        return "It reads this when its current step ends. " + self.progress_line(row)
+        line = self.progress_line(row)
+        line = line[:1].upper() + line[1:]
+        if self.states[session_id].retuned:
+            return f"It reads this when its current turn ends. {line}"
+        return f"It reads this now; the step it is in goes on in the background. {line}"
 
     async def owner_send_to(
         self, router_id: str, worker_id: str, text: str, attachments: Sequence[Attachment] = ()
@@ -2026,7 +2119,8 @@ class Runtime:
             self.add_message(
                 self.router_id(),
                 "notice",
-                f"{threads.label(thread)} → {', '.join(f'“{t}”' for t in delivered)}",
+                f"{threads.label(thread, self.slack.display_names())} → "
+                f"{', '.join(f'“{t}”' for t in delivered)}",
                 {"session_id": followers[0]},
             )
         return True
@@ -2043,9 +2137,8 @@ class Runtime:
         """A toast and a desktop notification; held back while the owner focuses."""
         if self.focus.active() and not urgent:
             return  # It waits in the inbox; the focus summary counts it.
-        self.bus.publish(
-            "toast", {"text": text, "session_id": session_id, "needs_action": needs_action}
-        )
+        toast = {"text": text, "session_id": session_id, "needs_action": needs_action}
+        self.bus.publish("toast", {**toast, "urgent": urgent})
         if self.store.settings().mac_notifications:
             self.background(self.notifier(title, text))
 
@@ -2088,7 +2181,7 @@ class Runtime:
         self.store.set("digest_day", day)
         since = float(self.store.get("digest_at") or moment - 86400)
         self.store.set("digest_at", str(moment))
-        text = digest(self.store, since, moment)
+        text = digest(self, since, moment)
         if text:
             self.add_message(self.router_id(), "update", text, {"digest": True}, unread=True)
             self.alert(text.splitlines()[0], session_id=self.router_id(), needs_action=False)
@@ -2340,6 +2433,26 @@ class Runtime:
             made[0] if made else None,
         )
 
+    def draft_task(self, session_id: str, target: dict) -> str:
+        """The task a worker's draft is for: the one following the thread it answers (a Slack
+        thread, a PR), else the one its turn is on; "" when neither is known (see
+        Store.create_draft)."""
+        row = self.store.find_session(session_id)
+        if not row or row["role"] != WORKER:
+            return ""
+        thread = ""
+        if target.get("channel_id"):
+            channel, ts = target["channel_id"], target.get("thread_ts") or ""
+            thread = f"slack:{channel}:{ts}" if ts else f"slack:{channel}"
+        elif target.get("repo") and target.get("number"):
+            thread = f"github:{str(target['repo']).lower()}#{target['number']}"
+        if thread and (task := self.thread_task(session_id, thread)):
+            return task["id"]
+        turn = self.tasks.find(self.turn_task(session_id))
+        if turn and turn["session_id"] == session_id and turn["status"] != "cancelled":
+            return turn["id"]
+        return ""
+
     def thread_task(self, session_id: str, thread: str) -> dict | None:
         """Which of a worker's tasks a followed thread is about: for a PR, the task that made
         it (its news is that work's, whichever later task of the worker follows or names it
@@ -2404,6 +2517,34 @@ class Runtime:
             names = {**names, owner: names.get(owner) or "you"}
         return names
 
+    def owner_updates(self) -> list[dict]:
+        """The Router's notes that need the owner (needs_action or urgent) from the last three
+        days: under Needs you until the owner says they saw one or writes to the Router after it."""
+        router = self.store.get("router_id")
+        rows = self.store.all(
+            "SELECT id, text, meta, created_at FROM messages WHERE session_id=? AND kind='update'"
+            " AND created_at > ? AND id > coalesce((SELECT id FROM messages WHERE session_id=?"
+            " AND kind='owner' AND json_extract(meta, '$.to') IS NULL ORDER BY id DESC LIMIT 1),"
+            " 0) ORDER BY id",
+            (router, hours_ago(72), router),
+        )
+        seen = self.store.items("updateseen:")
+        updates = []
+        for row in rows:
+            meta = json.loads(row["meta"] or "{}")
+            if (meta.get("needs_action") or meta.get("urgent")) and str(row["id"]) not in seen:
+                found = {"id": row["id"], "text": row["text"], "at": row["created_at"]}
+                updates.append({**found, "urgent": bool(meta.get("urgent"))})
+        return updates
+
+    def update_seen(self, message_id: int):
+        """The owner saw a note of the Router's that needed them: it leaves Needs you."""
+        message = self.store.message(message_id)
+        if message["kind"] != "update" or message["session_id"] != self.store.get("router_id"):
+            raise ValueError("Only the Router's updates can be marked seen.")
+        self.store.set(f"updateseen:{message_id}", now())
+        self.publish_state()
+
     def snapshot(self) -> dict:
         return {
             "runtime": self.status,
@@ -2429,6 +2570,7 @@ class Runtime:
             "artifacts_hidden": self.hidden_artifacts(),
             "thread_links": self.store.items("threadlink:"),
             "questions": self.asks.owner_questions(),
+            "updates": self.owner_updates(),
             "tasks": [
                 self.task_actions.view(task)
                 for task in self.tasks.listed(include_ended_since=hours_ago(TASKS_SHOWN_HOURS))

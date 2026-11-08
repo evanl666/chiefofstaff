@@ -36,19 +36,20 @@ tool allowlist, permission and request callbacks, sandbox, model.
 | `delivery.py` | Messages to sessions: stored, batched, sent, checked after a restart. |
 | `workers.py` | The worker queue (`max_workers`, dependencies), starting, closing (open tasks are cancelled; the owner's *Reopen* brings back those it had started, stopped: `closedtask:` keys), reopening, interrupting. |
 | `tasks.py` | Tasks, runs and dependencies as records; status transitions. |
-| `task_actions.py` | What happens to tasks: reports, cancel (a cancelled follow-up gives the earlier result back), accept, retry, follow-up; receipts (per task: between snapshots of its checkouts taken when it was taken up and when it reported its result, written to the repository's objects through an index of their own; on a branch, its own commits; in a shared folder, the files its own edits wrote or its own commands named, not what commits older than the task brought in, a pull or another branch checked out; a follow-up after other work leaves out what changed in between; each result's end is kept, so a split gives each result its share), PR state (refreshed every few minutes) and the *Ready to merge* card; the shareable report. |
+| `task_actions.py` | What happens to tasks: reports, cancel (a cancelled follow-up gives the earlier result back; a task whose result was reported stays done with it; its drafts still waiting for the owner are withdrawn), accept, retry, follow-up (its worker told that its report replaces the result: the whole result, updated); receipts (per task: between snapshots of its checkouts taken when it was taken up and when it reported its result, written to the repository's objects through an index of their own; on a branch, its own commits; in a shared folder, the files its own edits wrote or its own commands named, not what commits older than the task brought in, a pull or another branch checked out; a follow-up after other work leaves out what changed in between; each result's end is kept, so a split gives each result its share), PR state (refreshed every few minutes) and the *Ready to merge* card; the shareable report. |
 | `tools.py` | Every tool a session can call, with its argument model; which role gets which. |
-| `drafts.py` | Drafts the owner approves (Slack replies, PR reviews, a task's folder); interrupted sends. |
-| `focus.py` | Focus Shield. |
+| `drafts.py` | Drafts the owner approves (Slack replies, PR reviews, a task's folder); interrupted sends; what each draft is for the Router (recipient, what it answers, its task) and what became of it (a held note); a worker following the Slack thread a sent review or reply was asked for in is woken to answer there. |
+| `focus.py` | Focus Shield; its summary counts what needs the owner as Home does (`digest.needs_you`). |
+| `digest.py` | The daily digest, from the record; what needs the owner, counted as *Needs you* counts it. |
 | `state.py` | Per-session in-memory state (connection, turn flags) and the lock order. |
 | `receipts.py` | Observed commands, changes and PR checks next to a report; acceptance criteria as verified, claimed or not met; a test run's outcome from its runner's summary (piped, chained, run by a script). |
 | `workspaces.py` | The code folder (its repositories, clones into it), each worker's task folder and worktrees (removed on close, restored on reopen), change stats. |
 | `policy.py` | Pure permission rules for actions without the sandbox. |
 | `backend.py` | The `AgentBackend`/`AgentSession` protocols, Copilot backend, sandbox policy. |
 | `scripted.py` | A backend without a model (scripts); runs `demo.py` and contract tests. |
-| `asks.py` | Cards for the owner (questions, forms, sign-ins); workers' (and the Slack session's) questions to the owner, kept under *Needs you* until answered whatever becomes of their task; a task whose question or decision the owner answered goes on at once (`Asks.go_on`); cards applied whenever they are answered, with nothing waiting (`Asks.offer`: a watch the Router proposes); questions between sessions; environment notes. |
+| `asks.py` | Cards for the owner (questions, forms, sign-ins); workers' (and the Slack session's) questions to the owner, kept under *Needs you* until answered whatever becomes of their task (one per task; each of a session's questions without a task on its own); a task whose question or decision the owner answered goes on at once (`Asks.go_on`); cards applied whenever they are answered, with nothing waiting (`Asks.offer`: a watch the Router proposes); questions between sessions; environment notes. |
 | `peers.py` | Workers that work together (`works_with`): told about each other, passing information straight to each other (`tell_session`), a copy for the Router riding along with its next turn, a finished one's result for the others. |
-| `decisions.py` | Decision cards (answered on the card or in the asking worker's chat; closed once the tasks that asked ended); the owner's decisions and the tasks that rely on them; telling those tasks when one changes. |
+| `decisions.py` | Decision cards (answered on the card or in the asking worker's chat, not by a question back; closed once the tasks that asked ended); the owner's decisions and the tasks that rely on them; telling those tasks when one changes. |
 | `learning.py` | The owner's feedback; lessons a learning worker proposes and the owner approves; how often the owner agrees. |
 | `habits.py` | The owner's own words, read from Slack, GitHub, git and their Copilot sessions; the style learned from them (versioned, undoable) and which sessions get it. |
 | `connector.py` | The connector: one helper worker that reaches the owner's world with whatever tools Copilot has (Slack, Glean, mail). Runs the owner's watches on a schedule and hands findings to the Router as `watch` events; collects the owner's own words for `habits.py`; when the owner is away (idle keyboard), tells them what needs them (a gist of up to five items, each with a random single-use code), and applies their answers. It reads untrusted content, so it is sandboxed like a Slack reader (network to GitHub only); the away message itself goes through a separate `messenger` helper, given only Chief of Staff's text in a file and sandboxed as the owner's workers are, so a company bot's CLI can send it; the messenger alone reports that it sent (`report_notified`) and reads the owner's answers the same way (`report_owner_replies`). With Slack connected it gets no Slack tools of its own: `send_owner_slack_dm` and `read_owner_slack_dm` send the notification being sent to the owner's own Slack DM through Chief of Staff's Slack connection, and read only the owner's own messages there since. |
@@ -90,7 +91,12 @@ Sessions never talk directly. A session calls a tool, and the runtime delivers t
 - **Outbox.** `Delivery.deliver` stores the message (its exact prompt in `messages.meta`) and
   `flush` sends everything after the session's `sent:` mark as one message. A `sending:`
   marker brackets each send; after a stop, the session's history (`get_events`) shows whether
-  it arrived, so nothing is sent twice.
+  it arrived, so nothing is sent twice. A message that starts a turn shows in the session's
+  history at once; one that does not within `CHIEFOFSTAFF_START_CHECK` seconds was never started
+  on (Copilot gives up on a session's queue when it cannot load its settings, an MCP server's,
+  with no error event): the session shows an error (a worker and its task fail, for *Retry*)
+  and what it was sent goes out again on a new connection (`Runtime.not_started`). A settings
+  change, or *Stop*, reconnects such a session at once.
 - **Modes.** The owner's messages steer a working session (`immediate`, within its turn).
   Events and reports for the Router are batched: held while it works and briefly after, so a
   burst becomes one turn. Everything else is queued (`enqueue`).
@@ -105,7 +111,10 @@ Sessions never talk directly. A session calls a tool, and the runtime delivers t
   the workers with a task that made it (`Runtime.pr_maker`), as that task's
   (`Runtime.thread_task`), not to those that only read or reviewed it, except replies to a
   comment one of them posted (`ghby:` keys); everyone following it when no task made it.
-  Commits made in a worker's checkout (its reflogs say so) are not news.
+  Commits made in a worker's checkout (its reflogs say so: commits, amends, a rebase's or a
+  `pull --rebase`'s picks, the commit a rebase goes on with after a conflict, merges) are not
+  news, nor are commits already on the PR's base (a rebase onto a base others moved brings them
+  in); a branch rewritten to a head made in a worker's checkout is that worker's own.
 
 ## Tasks
 
@@ -155,16 +164,21 @@ slot lock (`Workers.pump_lock`, never across a session lock).
 ## Restart
 
 On start, interrupted sends are checked against the sessions' histories; sessions that were mid
-turn continue with a note quoting what they had received, and get what they had not; drafts
-whose sending was interrupted are looked up in Slack or GitHub before anything is resent.
+turn continue with a note quoting what they had received (the newest whole), and get what they
+had not, in full: also what counted as sent but their history does not show (Copilot can lose
+what it took just before it stopped, `Delivery.received`). Drafts whose sending was interrupted
+are looked up in Slack or GitHub before anything is resent. Cards for the owner that wait on an
+answer in memory end; a watch the Router proposed that ended so is told to it.
 
 ## Router rotation
 
 When the Router's context passes `CHIEFOFSTAFF_ROUTER_CONTEXT` tokens, a fresh Copilot session
 takes over while it is idle. The handover is written from the records (open tasks, workers,
-cards, questions, tasks cancelled or failed in the last three days, the recent conversation),
+cards with their recipient, what they answer and their task, the questions workers asked the
+owner, tasks cancelled or failed in the last three days, the recent conversation),
 so no model turn is spent on it; `alias:` keys map both Copilot sessions to the same Router.
-What the owner cancels, closes or reopens reaches the Router as a held system note
+What the owner cancels, closes or reopens, and what became of each draft (sent, rejected,
+withdrawn), reaches the Router as a held system note
 (`Delivery.hold`) with its next message, so it does not start that work again by itself.
 
 ## The UI
@@ -172,7 +186,9 @@ What the owner cancels, closes or reopens reaches the Router as a held system no
 The UI is plain ES modules in `static/`, with no build step: `app.js` starts the page;
 `state.js` loads a snapshot (`/api/state`) and applies SSE events (`message`, `session`, `task`,
 `draft`, `toast`, `state`, `focus_summary`); `inbox.js` renders Home (the Router's chat beside
-Needs you and the task board). `board.js` (pure, tested with node) places each task in one of
+Needs you and the task board; Needs you also lists the Router's notes that need the owner,
+`updates` in the snapshot, until seen: `POST /api/messages/{id}/seen` or a later owner message
+to the Router). `board.js` (pure, tested with node) places each task in one of
 four places (needs you, running, monitoring, recently finished) with a marker in words (queued,
 up next, paused, checks back, delivered, overdue, to review…) from its status, its worker's
 state, the task the worker is on (`turn_task`: its turn's task while open or followed up by the

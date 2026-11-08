@@ -17,6 +17,7 @@ import hashlib
 import json
 import logging
 import os
+from contextlib import suppress
 from typing import TYPE_CHECKING
 
 from .envelope import tasks_named
@@ -34,6 +35,10 @@ EVENT_DEBOUNCE = float(os.environ.get("CHIEFOFSTAFF_EVENT_DEBOUNCE", "2"))
 
 # Held messages that could not be sent are retried after this, doubling up to a minute.
 RETRY_DELAY = 2.0
+
+# A message that starts a turn shows in the session's conversation at once (Copilot writes it
+# down before its first step). One that does not after this long was never started on.
+START_CHECK = float(os.environ.get("CHIEFOFSTAFF_START_CHECK", "90"))
 
 
 class Delivery:
@@ -73,6 +78,9 @@ class Delivery:
             {**(meta or {}), "prompt": prompt},
         )
         if row["role"] == WORKER:
+            # A worktree removed under it (by hand, a cleanup) is back before it reads this.
+            with suppress(Exception):
+                await self.runtime.workspaces.restore(row)
             self.rest_after(row)
         if batch and row["role"] in {ROUTER, SLACK}:
             if row["status"] == "working":
@@ -93,7 +101,13 @@ class Delivery:
             mode = "immediate"
         try:
             sent = await self.flush(
-                session_id, await self.runtime.session_for(session_id), mode, busy=working
+                session_id,
+                await self.runtime.session_for(session_id),
+                mode,
+                busy=working,
+                # In a turn still (it reported, its turn goes on: a final push): this waits for
+                # that turn's end, it does not start one (no check that it started).
+                joins=not claimed,
             )
         except asyncio.CancelledError:
             if claimed:
@@ -210,7 +224,12 @@ class Delivery:
         )
 
     async def flush(
-        self, session_id: str, session, mode: SendMode = "enqueue", busy: bool = False
+        self,
+        session_id: str,
+        session,
+        mode: SendMode = "enqueue",
+        busy: bool = False,
+        joins: bool = False,
     ) -> bool:
         """Send every prompt this session has not received yet, as one message. `busy`: it is
         in a turn, which this joins or follows (not a turn of its own starting now)."""
@@ -239,6 +258,18 @@ class Delivery:
                 for message in pending
                 for item in message["meta"].get("attachments") or []
             ]
+            # A turn starts on it now: its conversation shows it soon, or Copilot gave up on it.
+            # Marked before the send (its echo may come before the send returns).
+            starts = (
+                self.runtime.backend_echoes()
+                and not joins
+                and not mid_turn
+                and not (busy and state.echoes)
+                and not state.after_abort
+                and state.awaiting is None
+            )
+            if starts:
+                state.awaiting = (marker["digest"], mark)
             try:
                 if attachments:
                     await session.send(text, mode=mode, attachments=attachments)
@@ -247,7 +278,16 @@ class Delivery:
             except BaseException:
                 # The caller hears of the failure and the messages count as not delivered.
                 self.store.delete(f"sending:{session_id}")
+                if starts:
+                    state.awaiting = None
                 raise
+            if starts:
+                asyncio.get_running_loop().call_later(
+                    START_CHECK,
+                    lambda: self.runtime.background(
+                        self.check_started(session_id, session, marker["digest"])
+                    ),
+                )
             if row["role"] == WORKER and any(m["meta"].get("thread") for m in pending):
                 state.thread_turn, state.thread_nudged = True, False
             # What it is given now, not what rides along with it (instructions held back
@@ -310,6 +350,56 @@ class Delivery:
             self.store.set(f"sent:{session_id}", str(marker["upto"]))
         self.store.delete(f"sending:{session_id}")
         return arrived
+
+    async def received(self, session_id: str, messages: list[dict]) -> list[dict]:
+        """Of messages counted as sent (oldest first), those its conversation shows it received:
+        Copilot can lose what it took just before it stopped (send returned, nothing written).
+        Up to the last one it shows; all of them when its conversation cannot be read."""
+        if not messages:
+            return messages
+        try:
+            session = await self.runtime.session_for(session_id)
+            if not hasattr(session, "get_events"):
+                return messages
+            shown = "\n".join(
+                getattr(event.data, "content", "") or ""
+                for event in await session.get_events()
+                if getattr(event.type, "value", "") == "user.message"
+            )
+        except Exception:
+            logger.warning("Could not check what %s received.", session_id, exc_info=True)
+            return messages
+        last = -1
+        for index, message in enumerate(messages):
+            prompt = message["meta"]["prompt"]
+            if prompt in shown or self.runtime.told_prompt(message) in shown:
+                last = index
+        return messages[: last + 1]
+
+    async def check_started(self, session_id: str, session, sent: str):
+        """A message that should have started a turn a while ago. Unless its conversation shows
+        it, Copilot took it and gave up: a setting it cannot load (an MCP server's) stops every
+        message to the session, with no error event. The session says so (Runtime.not_started)
+        instead of working forever."""
+        state = self.states[session_id]
+        if not state.awaiting or state.awaiting[0] != sent:
+            return  # It started (events.user_message), or was sent again since.
+        if self.states.handle(session_id) is not session:
+            return
+        try:
+            events = await session.get_events()
+        except Exception:
+            logger.warning("Could not check whether %s started.", session_id, exc_info=True)
+            return
+        if any(
+            getattr(event.type, "value", "") == "user.message"
+            and digest(getattr(event.data, "content", "") or "") == sent
+            for event in events
+        ):
+            state.awaiting = None
+            return
+        if state.awaiting and state.awaiting[0] == sent:
+            await self.runtime.not_started(session_id)
 
     def rest_after(self, row: dict):
         """A done or waiting worker asked about its work returns to that state after a turn

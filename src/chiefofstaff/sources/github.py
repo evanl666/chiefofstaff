@@ -53,11 +53,13 @@ def worker_commits(store: Store) -> set[str]:
 
 
 # A reflog entry of a commit made in that checkout ("commit: …", "commit (amend): …", a
-# cherry-pick, a rebase's picks, a merge commit), not one a fetch, pull, reset or checkout
-# brought in.
+# cherry-pick, a rebase's picks and the commit it goes on with after a conflict, `git pull
+# --rebase`'s too, whatever its options: "pull -q --rebase origin main (pick): …", a merge
+# commit), not one a fetch, pull, reset or checkout brought in. Not a rebase's "(finish)": it
+# names the new head, someone else's commit when the rebase only fast-forwarded.
 MADE_HERE = re.compile(
     r"^(?:commit|cherry-pick|revert|am)\b"
-    r"|^(?:pull --rebase|rebase(?: -i)?) \((?:pick|reword|edit|squash|fixup|finish)\)"
+    r"|^(?:pull\b[^:(]*|rebase(?: -i)?) \((?:pick|reword|edit|squash|fixup|continue)\)"
     r"|^(?:merge|pull)\b.*: Merge made by"
 )
 
@@ -686,7 +688,7 @@ class GitHubSource:
             last
             and last != sha
             and not self.seen(f"github:{repo}#{number}@{sha}")
-            and (line := await self.pushed(repo, last, sha))
+            and (line := await self.pushed(repo, last, sha, (pull.get("base") or {}).get("ref")))
         ):
             items.append((f"github:head:{repo}#{number}@{sha}", line))
         ci = await self.ci_result(base, sha)
@@ -745,14 +747,25 @@ class GitHubSource:
         if state != "open" and not kept:
             self.host.unfollow(thread, finished=True, merged=state == "merged")
 
-    async def pushed(self, repo: str, old: str, new: str) -> str:
+    async def pushed(self, repo: str, old: str, new: str, base: str | None = None) -> str:
         """What was pushed between two heads, by whom; "" when only the account Chief of Staff
-        works as pushed (a worker's own commits are not news to it)."""
+        works as pushed (a worker's own commits are not news to it). Commits already on the PR's
+        base branch are not the PR's: a rebase onto a base others moved, or a merge of it,
+        brings theirs in."""
+        rewritten = f"The branch was rewritten (force-pushed): the head is now {new[:7]}."
         try:
             compare = json.loads(await self.gh("api", f"repos/{repo}/compare/{old}...{new}"))
         except RuntimeError:
-            return f"The branch was rewritten (force-pushed): the head is now {new[:7]}."
+            return rewritten
         commits = compare.get("commits") or []
+        if base and commits:
+            with suppress(RuntimeError, ValueError):
+                path = f"repos/{repo}/compare/{quote(base, safe='/')}...{new}"
+                own = json.loads(await self.gh("api", path))
+                listed = own.get("commits") or []
+                if len(listed) >= (own.get("total_commits") or 0):  # Not cut at 250.
+                    shas = {commit.get("sha") for commit in listed}
+                    commits = [commit for commit in commits if commit.get("sha") in shas]
 
         def login(commit: dict) -> str:
             return ((commit.get("author") or {}).get("login") or "").lower()
@@ -767,12 +780,18 @@ class GitHubSource:
             sha = commit.get("sha") or ""
             return login(commit) == acting or any(sha.startswith(short) for short in made)
 
-        if unknown := [c["sha"] for c in commits if c.get("sha") and not ours(c)]:
+        diverged = compare.get("status") == "diverged"
+        unknown = [c["sha"] for c in commits if c.get("sha") and not ours(c)]
+        if diverged and not any(new.startswith(short) for short in made):
+            unknown.append(new)
+        if unknown:
             made |= await made_locally(worker_folders(self.store), unknown)
         if commits and all(ours(commit) for commit in commits):
             return ""
-        if not commits or compare.get("status") in {"diverged", "behind"}:
-            return f"The branch was rewritten (force-pushed): the head is now {new[:7]}."
+        if diverged and any(new.startswith(short) for short in made):
+            return ""  # Rewritten in a worker's checkout (rebased, amended): its own head.
+        if not commits or diverged or compare.get("status") == "behind":
+            return rewritten
         shown = "; ".join(
             f"{login(c) or c['commit']['author']['name']}: "
             f"{(c['commit']['message'].splitlines() or [''])[0][:120]}"

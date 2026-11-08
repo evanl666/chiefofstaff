@@ -61,11 +61,14 @@ async def test_progress_shows_the_step_it_is_in_and_what_it_said_last(harness):
     [row] = [item for item in listed["sessions"] if item["session_id"] == worker]
     assert "in a step for 10 min" in row["now"]
 
-    # The owner asks it directly: it reads that only after the step, and is told so at once.
+    # The owner asks it directly: it steers in at once (the step goes on in the background), and
+    # the owner is told so.
     await runtime.owner_send(worker, "progress?")
     kinds = harness.kinds(worker)
     assert kinds[-2] == ("owner", "progress?")
-    assert kinds[-1][0] == "notice" and kinds[-1][1].startswith("It reads this when its current")
+    assert kinds[-1][0] == "notice" and kinds[-1][1].startswith(
+        "It reads this now; the step it is in goes on in the background. Now in a step"
+    ), "Bug bash 4 (D7): not after the step, and a sentence of its own"
     assert "in a step for 10 min" in kinds[-1][1]
     session.emit("tool.execution_complete", tool_call_id="c1", success=True)
     await settle(runtime)
@@ -127,7 +130,13 @@ async def test_one_message_per_answer_to_the_owner(harness):
     await settle(runtime)
     refused = await call_tool(runtime, "notify_owner", harness.router_id, text="Done: 10,756 rows")
     assert "say this in your reply" in refused.text_result_for_llm
-    assert not [m for m in harness.store.messages(harness.router_id) if m["kind"] == "update"]
+    # Bug bash 4 (R8): one that needs them is said in the reply too, not twice.
+    refused = await call_tool(runtime, "notify_owner", harness.router_id,
+                              text="Pick a filter", needs_action=True)  # fmt: skip
+    assert "say this in your reply" in refused.text_result_for_llm
+    await call_tool(runtime, "notify_owner", harness.router_id, text="Prod is down", urgent=True)
+    assert [m["text"] for m in harness.store.messages(harness.router_id)
+            if m["kind"] == "update"] == ["Prod is down"], "only what cannot wait"  # fmt: skip
     router.emit("user.message", content='<message from="worker:abc" type="report">\nx\n</message>')
     await settle(runtime)
     await call_tool(runtime, "notify_owner", harness.router_id, text="Needs you: pick a filter")
@@ -442,7 +451,7 @@ async def test_the_owner_sees_the_step_note_where_they_wrote(harness):
     )
     await runtime.owner_send_to(harness.router_id, worker, "progress?")
     kind, text = harness.kinds(harness.router_id)[-1]
-    assert kind == "notice" and "It reads this when its current step ends" in text
+    assert kind == "notice" and "It reads this now" in text
 
 
 async def test_a_question_about_a_cancelled_task_does_not_revive_it(harness):
@@ -478,10 +487,11 @@ async def test_a_needed_decision_still_reaches_the_owner_in_an_answer_turn(harne
     await runtime.owner_send(harness.router_id, "thanks")
     router.emit("user.message", content=router.sent[-1])
     await settle(runtime)
-    await call_tool(
+    # In its reply (bug bash 4, R8: a notification as well said the same thing twice).
+    refused = await call_tool(
         runtime, "notify_owner", harness.router_id, text="Drop the legacy table?", needs_action=True
     )
-    assert harness.kinds(harness.router_id)[-1] == ("update", "Drop the legacy table?")
+    assert "say this in your reply" in refused.text_result_for_llm
 
 
 async def test_a_worker_cannot_grant_itself_a_pr_to_draft_on(harness):
@@ -514,6 +524,43 @@ async def test_a_worker_cannot_grant_itself_a_pr_to_draft_on(harness):
         runtime, "draft_github_review", worker, repo="acme/app", number=123, body="Addressed"
     )
     assert given.result_type != "failure"
+
+
+async def test_a_review_draft_is_the_task_that_reviews_that_pr_and_sending_it_settles_it(
+    harness,
+):
+    """Bug bash 4: a worker with two review tasks: its #52 approval was filed as the newer
+    #53 task's, and sending one did not settle its task while the other waited."""
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Review acme/app#52",
+                         instructions="Review https://github.com/acme/app/pull/52")  # fmt: skip
+    first = runtime.tasks.current(worker)
+    for number in (52, 53):
+        harness.gh_replies[f"api repos/acme/app/pulls/{number}"] = json.dumps(
+            {"state": "open", "head": {"sha": "abc", "ref": f"b{number}"}}
+        )
+    await call_tool(runtime, "follow_thread", worker, thread="github:acme/app#52")
+    made = await call_tool(runtime, "message_session", harness.router_id, session_id=worker,
+                           task="new", title="Review acme/app#53", earlier="keep",
+                           text="Review https://github.com/acme/app/pull/53")  # fmt: skip
+    assert made.result_type == "success", made.text_result_for_llm
+    second = runtime.tasks.for_session(worker)[-1]
+    assert second["id"] != first["id"]
+    await call_tool(runtime, "report", worker, status="done", summary="#52 looks good.",
+                    task_id=first["id"])  # fmt: skip
+    await call_tool(runtime, "draft_github_review", worker, repo="acme/app", number=52,
+                    body="LGTM", verdict="approve")  # fmt: skip
+    await call_tool(runtime, "draft_github_review", worker, repo="acme/app", number=53,
+                    body="One nit.")  # fmt: skip
+    on52, on53 = harness.store.drafts()[-2:]
+    assert on52["target"]["task_id"] == first["id"], "the task that reviews #52"
+    assert on53["target"]["task_id"] == second["id"]
+    # The owner edited it, then sent it.
+    harness.store.update_draft(on52["id"], status="sent", final_text="LGTM, thanks!")
+    await runtime.drafts.settle_task(harness.store.draft(on52["id"]))
+    assert runtime.tasks.get(first["id"])["status"] == "done", "#53's draft is another task's"
+    accepted = harness.store.all("SELECT * FROM feedback WHERE kind='accept'")
+    assert not accepted, "an edited draft is not a result accepted as it was"
 
 
 async def test_a_session_started_in_home_never_gets_home_to_write(harness):
@@ -900,6 +947,22 @@ async def test_reviews_a_company_pr_with_inline_comments(harness):
     told = harness.store.messages(worker)[-1]["text"]
     assert "data/huge.sql:1: left out (not posted)" in told
     assert "model/train.py:12: posted as the owner rewrote it: Please add a test" in told
+    # Bug bash 4 (X13): only the summary was learned from, and as the owner's own words though
+    # they kept it; the line comments they rewrote were not.
+    feedback = harness.store.all("SELECT kind, context, owner, agreed FROM feedback ORDER BY id")
+    [summary] = [item for item in feedback if item["kind"].startswith("draft-")]
+    assert (summary["kind"], summary["owner"], summary["agreed"]) == ("draft-edited", "", 0)
+    about = f"A review of {repo}#1529: line comment on"
+    learned = [(i["context"], i["owner"]) for i in feedback if i["kind"] == "review-edited"]
+    assert learned == [
+        (f"{about} model/train.py:12", "Rewrote it: Please add a test"),
+        (f"{about} data/huge.sql:1", "Left it out."),
+    ]
+    # Its result, settled by that send, is not accepted "as it was".
+    await call_tool(runtime, "report", worker, status="done", summary="Reviewed #1529.")
+    await settle(runtime)
+    assert runtime.tasks.current(worker)["status"] == "done"
+    assert not harness.store.all("SELECT id FROM feedback WHERE kind='accept'")
 
 
 async def test_drafting_needs_a_pr_the_task_is_about_or_one_the_owner_reviews(harness):
@@ -3029,6 +3092,16 @@ async def test_tasks_quoted_after_a_restart_are_taken_up(harness):
     assert runtime.turn_task(worker) == alpha["id"], "it goes on with what it was on"
 
 
+async def test_a_new_task_notice_names_its_worker_as_a_worker(harness):
+    """Bug bash 4 (D12): "New task “Count rows” for “Alpha”" read like a task of a task."""
+    runtime = await harness.connect()
+    worker, _session, _alpha = await busy_worker(runtime, harness, "Alpha")
+    await call_tool(runtime, "message_session", harness.router_id, session_id=worker, task="new",
+                    earlier="keep", title="Count rows", text="Count rows")  # fmt: skip
+    notices = [text for kind, text in harness.kinds(harness.router_id) if kind == "notice"]
+    assert "New task “Count rows” for the worker of “Alpha”" in notices
+
+
 async def test_the_router_hears_when_a_blocked_task_is_unblocked(harness):
     runtime = await harness.connect()
     first = await spawn(runtime, harness.router_id, "Build")
@@ -3367,6 +3440,19 @@ async def test_closing_a_working_worker_tells_the_router_and_reopening_brings_it
     assert shown["status"] == "waiting" and shown["stopped"] == "you", "back, for Go on"
     await runtime.task_actions.follow_up(task["id"], "Go on where you stopped.")
     assert runtime.tasks.get(task["id"])["status"] == "running"
+
+
+async def test_a_reopened_worker_names_who_closed_it_not_who_stopped_it(harness):
+    """Bug bash 4 (R5): stopped by the owner, then closed by the Router; reopened, its task
+    said "Stopped when you closed its worker"."""
+    runtime = await harness.connect()
+    worker, _session, task = await busy_worker(runtime, harness, "Measure")
+    await runtime.workers.interrupt(worker)
+    await call_tool(runtime, "close_worker", harness.router_id, session_id=worker)
+    await runtime.workers.reopen(worker, restore=True)
+    shown = runtime.tasks.get(task["id"])
+    assert shown["progress"] == "Stopped when the Router closed its worker: Go on, or Cancel."
+    assert runtime.task_actions.view(shown)["stopped"] == "you", "who stopped it is kept"
 
 
 async def test_cancelling_a_stopped_task_after_a_restart_lets_its_worker_go_on(tmp_path):

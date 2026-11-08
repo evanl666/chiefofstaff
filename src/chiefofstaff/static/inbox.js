@@ -1,18 +1,18 @@
 // Home: the conversation with the Router, and beside it what needs the owner and every task.
 
 import { $, api, checkTip, el, keepingFocus, moreMenu, once, reconcile, submits, toast } from "./dom.js";
-import { markdown, shortPath } from "./text.js";
-import { byId, closedWorkers, DOT_HELP, HOME, loadState, ownerQuestions, pendingDrafts, routerId, sessions, state, uncertainDrafts } from "./state.js";
+import { clock, markdown, shortPath, slackText } from "./text.js";
+import { byId, closedWorkers, DOT_HELP, HOME, loadState, ownerQuestions, ownerUpdates, pendingDrafts, routerId, sessions, state, uncertainDrafts } from "./state.js";
 import { boardOf, countOf, followingUp, SECTIONS, workerSection } from "./board.js";
-import { renderStatusLine } from "./sidebar.js";
+import { renderSidebar, renderStatusLine } from "./sidebar.js";
 import { renderHeader, scrollToBottom, select } from "./session.js";
 import { draftCard, draftKey, uncertainCard } from "./drafts.js";
 import { expandTask, followUpItem, inTerminal, ownTasks, taskItem, terminalItem, unfoldTask, workerBoxItem } from "./tasks.js";
 import { artifactItems } from "./artifacts.js";
 // What waits for the owner: cards to approve or answer, and the tasks the board puts under
 // Needs you (waiting for an answer, failed, a result to review, news, no progress); a
-// worker's question whose task does not show it (cancelled, finished, or none). A task waiting
-// on a decision card shows as that card.
+// worker's question whose task does not show it (cancelled, finished, or none); the Router's
+// notes that need the owner, until seen. A task waiting on a decision card shows as that card.
 export function needsYou() {
   const drafts = pendingDrafts();
   const found = board();
@@ -20,13 +20,13 @@ export function needsYou() {
   const waiting = found.sections.needs.flatMap((entry) => entry.tasks).filter((task) => !(task.status === "waiting" && deciding.has(task.id)));
   const shownTasks = new Set(waiting.map((task) => task.id));
   const questions = ownerQuestions().filter((question) => !shownTasks.has(question.task_id));
-  return { drafts, uncertain: uncertainDrafts(), tasks: waiting, questions, board: found };
+  return { drafts, uncertain: uncertainDrafts(), tasks: waiting, questions, updates: ownerUpdates(), board: found };
 }
 // What the badge counts: not the cards the owner just acted on.
 export function needsCount() {
   const items = needsYou();
   const shown = (key) => !state.leaving.has(key);
-  return items.drafts.filter((draft) => shown(`draft:${draft.id}`)).length + items.uncertain.filter((draft) => shown(`draft:${draft.id}`)).length + items.tasks.filter((task) => shown(`task:${task.id}`)).length + items.questions.filter((question) => shown(`question:${question.id}`)).length;
+  return items.drafts.filter((draft) => shown(`draft:${draft.id}`)).length + items.uncertain.filter((draft) => shown(`draft:${draft.id}`)).length + items.tasks.filter((task) => shown(`task:${task.id}`)).length + items.questions.filter((question) => shown(`question:${question.id}`)).length + items.updates.filter((update) => shown(`update:${update.id}`)).length;
 }
 // Where a worker stands, as its sidebar dot says and as Home shows it: the same four places.
 export const WORKER_STATES = [
@@ -242,13 +242,14 @@ function renderPanel() {
   const needBoxes = new Map();
   for (const task of items.tasks) needBoxes.set(task.session_id, [...(needBoxes.get(task.session_id) || []), task]);
   const needItems = [
+    ...items.updates.map(updateItem),
     ...items.drafts.map((draft) => draftItem(draft)),
     ...items.uncertain.map((draft) => ({ key: `uncertain:${draft.id}:${draft.outcome}`, build: () => uncertainCard(draft) })),
     ...[...needBoxes].map(([sessionId, list]) => workerBoxItem("needs", sessionId, list, tasks.phases, editing, elsewhereOf(tasks.sections, "needs", sessionId))),
     ...items.questions.map(questionItem),
   ];
   // Folded, it opens by itself when something new needs the owner.
-  const needKeys = [...items.drafts.map((draft) => `draft:${draft.id}`), ...items.uncertain.map((draft) => `draft:${draft.id}`), ...items.tasks.map((task) => `task:${task.id}`), ...items.questions.map((question) => `question:${question.id}`)];
+  const needKeys = [...items.updates.map((update) => `update:${update.id}`), ...items.drafts.map((draft) => `draft:${draft.id}`), ...items.uncertain.map((draft) => `draft:${draft.id}`), ...items.tasks.map((task) => `task:${task.id}`), ...items.questions.map((question) => `question:${question.id}`)];
   if (state.needKeys && needKeys.some((key) => !state.needKeys.has(key) && !state.leaving.has(key))) needs.open = true;
   state.needKeys = new Set(needKeys);
   reconcile(needs.querySelector(".items"), needItems, editing);
@@ -409,7 +410,7 @@ function questionCard(question) {
       el("span", { class: "chip question", text: "Question" }),
       el("span", { class: "meta", text: questionMeta(question) }),
     ),
-    el("div", { class: "body markdown", html: markdown(question.text) }),
+    el("div", { class: "body markdown", html: markdown(worker?.role === "slack" ? slackText(question.text) : question.text) }),
     actions,
   );
   const act = (run, done) => once(key, null, () => answer(run, done));
@@ -461,6 +462,70 @@ function questionCard(question) {
   }
   show();
   return node;
+}
+// A note of the Router's that needs the owner (notify_owner), kept here until seen: Open shows
+// it in the chat, Got it says it was read; writing to the Router after it does too.
+function updateItem(update) {
+  return { key: `update:${update.id}`, build: () => updateCard(update) };
+}
+function updateCard(update) {
+  const key = `update:${update.id}`;
+  const error = el("span", { class: "error" });
+  const node = el(
+    "div",
+    { class: `card update-card${update.urgent ? " urgent" : ""}`, "data-update": update.id },
+    el(
+      "div",
+      { class: "head" },
+      el("span", { class: "dot waiting" }),
+      el("span", { class: "title", text: "The Router" }),
+      update.urgent ? el("span", { class: "chip blocked", text: "Urgent" }) : null,
+      el("time", { text: clock(update.at), title: new Date(update.at).toLocaleString() }),
+    ),
+    el("div", { class: "body markdown", html: markdown(update.text) }),
+    el(
+      "div",
+      { class: "actions" },
+      error,
+      el("button", { type: "button", class: "text", text: "Open", title: "Show it in the chat", onclick: () => {
+        showUpdate(update.id);
+        seen();
+      } }),
+      el("button", { type: "button", text: "Got it", onclick: () => seen() }),
+    ),
+  );
+  const seen = () => once(key, node, async () => {
+    error.textContent = "";
+    state.leaving.add(key);
+    node.classList.add("leaving");
+    renderSidebar();
+    try {
+      await api(`/api/messages/${update.id}/seen`, { method: "POST" });
+      state.snapshot.updates = ownerUpdates().filter((item) => item.id !== update.id);
+    } catch (failure) {
+      node.classList.remove("leaving");
+      error.textContent = failure.message;
+    }
+    state.leaving.delete(key);
+    renderSidebar();
+    scheduleHome();
+  });
+  return node;
+}
+// The Router's line in the chat, brought into view (and opened when it folds).
+function showUpdate(messageId) {
+  if (narrow()) showHomeTab("chat");
+  const line = document.querySelector(`#timeline [data-id="${messageId}"]`);
+  if (!line) {
+    scrollToBottom(true);
+    return;
+  }
+  const toggle = line.querySelector(":scope > .row > button.line");
+  if (toggle?.getAttribute("aria-expanded") === "false") toggle.click();
+  line.scrollIntoView({ block: "center", behavior: "smooth" });
+  line.classList.remove("flash");
+  void line.offsetWidth;  // Restarts the highlight.
+  line.classList.add("flash");
 }
 function bringIntoView(node) {
   if (narrow()) showHomeTab(node.closest("#needs") ? "needs" : "tasks");
