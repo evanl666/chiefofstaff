@@ -1572,7 +1572,13 @@ class Connector:
                     )
                     return "dropped"
                 if intent != "change" or not answer:
-                    raise ValueError('not sent: answer "send" when it should go, or "no"')
+                    # Said why when its words say it ("after lunch"), as for a send held back.
+                    why = (
+                        f"\u201c{held}\u201d sounds like not now, or not as it is: "
+                        if (held := holds_send(answer))
+                        else ""
+                    )
+                    raise ValueError(f'not sent: {why}answer "send" when it should go, or "no"')
                 # Anything else is what to change: it is drafted again that way.
                 await drafts.resolve(draft["id"], DraftDecision(action="revise", reason=answer))
                 return "to be drafted again as you say"

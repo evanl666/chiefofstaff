@@ -574,7 +574,9 @@ async def s17_open_a_written_file(app: App):
 
 def pull_count(repo: str) -> str:
     return subprocess.run(
-        ["gh", "pr", "list", "-R", repo, "--state", "all", "--json", "number", "--jq", "length"],
+        # gh lists 30 unless told otherwise: the repository has more by now.
+        ["gh", "pr", "list", "-R", repo, "--state", "all", "--limit", "1000", "--json", "number",
+         "--jq", "length"],
         capture_output=True, text=True, check=True,
     ).stdout.strip()  # fmt: skip
 

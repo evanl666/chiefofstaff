@@ -620,7 +620,15 @@ where you got it with the code: "K3XQ7 send" sends a draft, "K3XQ7 2" picks opti
 decision, "K3XQ7 use port 9090" answers a question, "K3XQ7 retry" retries a failed task,
 "K3XQ7 go on" or "K3XQ7 cancel" does what *Go on* or *Cancel* does with a task you stopped. A code
 works once, and only for what it was sent with. A question that comes up again (its task asked
-something new) is sent again. *Send a test* tries the way you gave (a test that fails is said
+something new) is sent again. What your answer to a draft means (send it, drop it, change it, or
+not clear) is the messenger's reading of your words, in any language: "ship it", "发吧", "say
+Friday instead"; one message can answer several codes ("K3XQ7 send, B4XJT no"). Each answer is
+read once, and a code's latest answer is the one that counts. A send you hold back or make
+conditional ("after lunch", "tmrw", "先别发", "once Bob confirms"), a question back ("send?")
+and a joke are never sent, whatever the reading; nor is a draft that still has a blank to fill
+("[yes / no]", "___"). Such an answer is asked again where you got it, saying why ("Not sent
+yet: “after lunch” sounds like not now"); an answer to a code you already used says what it
+did. *Send a test* tries the way you gave (a test that fails is said
 as such in the chat, each time). Without a bot that can message you, say "send it to my own
 Slack DM": with Slack connected in Settings, Chief of Staff sends it there through its own Slack
 connection and reads your answers there; you see it without a phone notification.

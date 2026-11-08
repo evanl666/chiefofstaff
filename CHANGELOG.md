@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.1.32 (2026-11-08)
+
+A seventh live bug bash on real Copilot (regressions of the last release, a PR's whole life, a
+busy day in two languages, and the judgments below, tried to break), and a code review, all
+fixed. Judgments that were word lists are now made by the session that reads the words.
 
 - **Read, not matched against word lists**: whether your message to a worker asks for a
   separate task, whether a worker's result changed code, whether a new task right after

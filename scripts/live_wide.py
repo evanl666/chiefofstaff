@@ -4333,18 +4333,27 @@ async def q2_an_away_send_held_back_is_not_sent(ctx: Ctx):
     draft = await reply_card(ctx, since, "D0BOB0001", "U0BOB001", asked)
     code = await told_away(ctx, before)
     router = (await state(ctx))["router_id"]
-    mark = max((m["id"] for m in await messages(ctx, router)), default=0)
+    notes: list[str] = []
+    # One after the other: a code's newest reply is the one that counts, each read once.
     for said in ("send it after lunch", "\u5148\u522b\u53d1"):
+        mark = max((m["id"] for m in await messages(ctx, router)), default=0)
+        told_before = len(outbox(ctx))
         reply_away(ctx, f"{code} {said}")
 
-    async def answered():
-        found = [
-            m["text"] for m in await messages(ctx, router)
-            if m["id"] > mark and m["meta"].get("away_reply")
-        ]  # fmt: skip
-        return found if len(found) >= 2 else None
+        async def answered(mark=mark):
+            found = [
+                m["text"] for m in await messages(ctx, router)
+                if m["id"] > mark and m["meta"].get("away_reply")
+            ]  # fmt: skip
+            return found or None
 
-    notes = await wait_for("both replies are read", answered, 500, ctx.app)
+        notes += await wait_for(f"“{said}” is read", answered, 500, ctx.app)
+
+        async def asked_again(told_before=told_before):
+            again = [text for text in outbox(ctx)[told_before:] if "Not sent yet" in text]
+            return again or None
+
+        await wait_for("it is asked again where the owner is", asked_again, 400, ctx.app)
     log(f"Q2: {notes}")
     pending = [d["id"] for d in (await state(ctx))["drafts"] if d["status"] == "pending"]
     assert draft["id"] in pending, "not sent"

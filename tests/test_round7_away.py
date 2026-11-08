@@ -135,3 +135,15 @@ def test_a_message_s_part_for_each_code():
     assert own_part("UELNW ship it, B4XJT no", "UELNW", codes).strip() == "ship it,"
     assert own_part("UELNW ship it, B4XJT no", "B4XJT", codes).strip() == "no"
     assert own_part("ship it", "UELNW", codes) == "ship it"
+
+
+async def test_an_unclear_reply_says_what_held_it_back(tmp_path):
+    """Live r31: "send it after lunch" read as unclear said only 'answer "send"…', not why."""
+    _harness, runtime, messenger, body = await drafted(tmp_path, "Lunch on me.")
+    code = code_of(body, "Lunch on me")
+    said = await reply(
+        runtime,
+        messenger,
+        {"code": code, "text": f"{code} send it after lunch", "intent": "unclear"},
+    )
+    assert "\u201cafter\u201d sounds like not now" in said, said
