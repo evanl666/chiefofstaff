@@ -58,6 +58,7 @@ async def test_router_routes_work_and_worker_reports_back(harness):
         "check_back",
         "draft_reply",
         "draft_github_review",
+        "withdraw_draft",
         "find_sessions",
         "ask_session",
         "answer_session",
@@ -370,6 +371,7 @@ async def test_slack_session_drafts_and_owner_decides(tmp_path):
         "follow_thread",
         "unfollow_thread",
         "draft_slack_reply",
+        "withdraw_draft",
     }
 
     bad = await call_tool(

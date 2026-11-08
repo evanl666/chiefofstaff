@@ -1,7 +1,7 @@
 // The main pane: Home or one session, with its header, model settings and timeline.
 
 import { $, api, el, foldable, toast, withKey } from "./dom.js";
-import { clock, compactPaths, firstLine, gist, markdown, threadLabel } from "./text.js";
+import { clock, compactPaths, firstLine, gist, markdown, slackText, threadLabel } from "./text.js";
 import { byId, current, HOME, markRead, pendingDrafts, routerId, state, STATUS_TEXT, upsertSession, viewedId, workerTitle } from "./state.js";
 import { renderSidebar } from "./sidebar.js";
 import { focusDraft, focusTask, renderHome, renderHomeHeader, showHomeTab, welcomeCard, workerStates } from "./inbox.js";
@@ -334,7 +334,16 @@ function eventLine({ mark = "·", kind = "", text, time, view = null, viewText =
     time ? el("time", { text: clock(time), title: new Date(time).toLocaleString() }) : null,
   ];
   if (!body) return el("div", { class: `event ${kind}`.trim() }, ...parts);
-  return el("details", { class: `event ${kind}`.trim() }, el("summary", {}, ...parts), el("div", { class: "markdown", html: markdown(body) }));
+  // Its line opens it; its View is beside that toggle, not in it (no button in a button).
+  const content = el("div", { class: "markdown", html: markdown(body), hidden: true });
+  const node = el("div", { class: `event opens ${kind}`.trim() });
+  const toggle = el("button", { type: "button", class: "line", "aria-expanded": "false", onclick: () => {
+    content.hidden = !content.hidden;
+    node.classList.toggle("open", !content.hidden);
+    toggle.setAttribute("aria-expanded", String(!content.hidden));
+  } }, parts[0], parts[1]);
+  node.append(el("div", { class: "row" }, toggle, ...parts.slice(2)), content);
+  return node;
 }
 // What a worker's report says, in a word: the report itself is on the task's card.
 const REPORTED = {
@@ -344,13 +353,17 @@ const REPORTED = {
   failed: ["✗", "failed", "failed"],
   progress: ["…", "", "reported progress"],
 };
-const SOURCES = { slack: "Slack", github: "GitHub" };
+// Where something that reached the Router came from: a watch's finding is the watch's, whatever
+// source it found it in.
+const SOURCES = { slack: "Slack", github: "GitHub", watch: "a watch" };
+// Slack's text with names for its ids (from Slack, a thread followed, a watch finding there).
+const readable = (meta, text) => (meta.source === "slack" || meta.source === "watch" || meta.thread?.startsWith("slack:") ? slackText(text) : text);
 // Home's conversation is the owner and the Router. Everything else that reaches the Router is
 // one line: a task's news points at its card beside the chat; the rest opens in place.
 function homeEntry(message) {
   const meta = message.meta || {};
   const time = message.created_at;
-  const text = message.text || "";
+  const text = message.kind === "inbound" ? readable(meta, message.text || "") : message.text || "";
   switch (message.kind) {
     case "inbound": {
       if (meta.from && meta.status?.startsWith("watchdog")) {
@@ -438,12 +451,12 @@ function renderMessage(message) {
       if (meta.review) {
         return card({ label: `Review · ${meta.title}`, body: message.text, className: "inbound", time, open: () => select(meta.review) });
       }
-      if (meta.thread) return card({ label: threadLabel(meta.thread), body: message.text, className: "inbound", time });
+      if (meta.thread) return card({ label: threadLabel(meta.thread), body: readable(meta, message.text), className: "inbound", time });
       if (meta.from) {
         return card({ label: meta.title, body: message.text, className: `report ${meta.status}`, status: meta.status, time, open: () => select(meta.from) });
       }
-      const source = { slack: "Slack", github: "GitHub" }[meta.source] || "Event";
-      return card({ label: meta.delegated ? `You handed this over from ${source}` : source, body: message.text, className: "inbound", time });
+      const source = SOURCES[meta.source] || "Event";
+      return card({ label: meta.delegated ? `You handed this over from ${source}` : `From ${source}`, body: readable(meta, message.text), className: "inbound", time });
     }
     case "watchdog": {
       const verdict = { stuck: "looks stuck", looping: "looks like it is looping", off_track: "looks off track" }[meta.verdict];
@@ -608,7 +621,8 @@ export function updateDraftRecords() {
   for (const node of document.querySelectorAll(".draft-record")) {
     const waiting = pending.has(node.dataset.draftId);
     node.classList.toggle("pending", waiting);
-    const head = node.querySelector(".head, summary");
+    // A card's head, or a chat line's row (the line itself when it does not open).
+    const head = node.querySelector(":scope > .head, :scope > .row") || node;
     let link = head.querySelector(".goto");
     if (waiting && !link) {
       link = el("button", { type: "button", class: "link goto", text: "Waiting for you · Needs you", onclick: (event) => { event.preventDefault(); event.stopPropagation(); focusDraft(node.dataset.draftId); } });
@@ -617,6 +631,14 @@ export function updateDraftRecords() {
       else head.append(link);
     } else if (!waiting) {
       link?.remove();
+    }
+    // Gone without being sent: it says so (withdrawn, or a newer draft took its place).
+    const outcome = state.draftOutcomes.get(node.dataset.draftId);
+    if (outcome && !head.querySelector(".outcome")) {
+      const note = el("span", { class: "outcome", text: outcome, title: outcome });
+      const time = head.querySelector("time");
+      if (time) time.before(note);
+      else head.append(note);
     }
   }
 }

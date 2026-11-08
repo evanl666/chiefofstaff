@@ -87,10 +87,24 @@ def flags(row: dict, messages: list[dict], now: float, config: WatchConfig) -> l
 
 
 def review_packet(
-    row: dict, messages: list[dict], reasons: list[str], now: float, output: str = ""
+    row: dict,
+    messages: list[dict],
+    reasons: list[str],
+    now: float,
+    output: str = "",
+    tasks: list[dict] | None = None,
 ) -> str:
     instructions = [m for m in messages if m["kind"] in {"router", "owner"}]
     task = instructions[0]["text"][:2000] if instructions else "(unknown)"
+    if tasks is not None:
+        # What it owes now: its open tasks (not one cancelled or finished long ago).
+        task = (
+            "; ".join(
+                f"{t['id']} “{t['title']}” ({t['status']}): {' '.join(t['goal'].split())[:600]}"
+                for t in tasks
+            )
+            or "none open"
+        )
     recent = [
         m
         for m in messages
@@ -98,7 +112,7 @@ def review_packet(
     ][-30:]
     lines = [
         f"Flagged because: {'; '.join(reasons)}.",
-        f"Task from the Router: {task}",
+        ("Its open tasks: " if tasks is not None else "Task from the Router: ") + task,
     ]
     if later := instructions[1:][-3:]:
         lines.append(
@@ -176,7 +190,16 @@ class Watchdog:
                     "system",
                     "review",
                     review_packet(
-                        row, messages, reasons, moment, self.states[row["id"]].last_output
+                        row,
+                        messages,
+                        reasons,
+                        moment,
+                        self.states[row["id"]].last_output,
+                        [
+                            task
+                            for task in self.runtime.tasks.for_session(row["id"])
+                            if task["status"] in {"queued", "running", "waiting"}
+                        ],
                     ),
                     worker=short(row["id"]),
                     title=row["title"],

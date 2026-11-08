@@ -52,7 +52,23 @@ class FakeSession:
             self.logins.append(request.server_name)
             return SimpleNamespace(authorization_url=self.login_url)
 
-        self.rpc = SimpleNamespace(mcp=SimpleNamespace(oauth=SimpleNamespace(login=login)))
+        # Copilot's background tasks (a command a turn left running): id -> status.
+        self.background: dict[str, str] = {}
+
+        async def listed():
+            return SimpleNamespace(
+                tasks=[SimpleNamespace(id=k, status=v) for k, v in self.background.items()]
+            )
+
+        async def cancel(request):
+            running = self.background.get(request.id) == "running"
+            self.background[request.id] = "cancelled"
+            return SimpleNamespace(cancelled=running)
+
+        self.rpc = SimpleNamespace(
+            mcp=SimpleNamespace(oauth=SimpleNamespace(login=login)),
+            tasks=SimpleNamespace(list=listed, cancel=cancel),
+        )
 
     async def set_model(self, model, **tuning):
         self.models.append(model)
@@ -98,6 +114,7 @@ class FakeClient:
         permission_callbacks=True,
         mcp_sign_in=True,
         sandbox=True,
+        echoes=False,  # Tests emit user.message themselves where it matters.
     )
 
     def __init__(self):

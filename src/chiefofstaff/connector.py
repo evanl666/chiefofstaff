@@ -197,12 +197,41 @@ def minutes_of(clock: str) -> int:
 
 
 def in_hours(hours: str, moment: datetime) -> bool:
+    return not after_hours(hours, moment)
+
+
+def after_hours(hours: str, moment: datetime) -> str:
+    """Why `moment` is after hours: "weekend" (work hours are Monday to Friday), or
+    "outside_hours" on a workday; "" within work hours."""
+    if moment.weekday() >= 5:
+        return "weekend"
     start, end = (minutes_of(part) for part in hours.split("-"))
     current = moment.hour * 60 + moment.minute
-    workday = moment.weekday() < 5
-    if start <= end:
-        return workday and start <= current < end
-    return workday and (current >= start or current < end)
+    within = start <= current < end if start <= end else current >= start or current < end
+    return "" if within else "outside_hours"
+
+
+# A question to the owner: a sentence that ends with "?" (or its fullwidth form).
+QUESTION_END = re.compile("[?\uff1f][\"')\\]*_\u201d\u2019\u300d\u300f]*(?=\\s|$)")
+
+
+def without_link(link: re.Match) -> str:
+    """A link taken out of a sentence, but not what ends the sentence after it."""
+    url = link.group(0)
+    return " " + url[len(url.rstrip(".,;:!?)]'\"")) :]
+
+
+def asks_owner(text: str) -> bool:
+    """Whether a message asks the owner something: its last paragraph has a sentence ending
+    with "?", outside code, tables and links (a "?" in a table cell or a "?q=" is no question)."""
+    text = re.sub(r"```.*?(?:```|$)", "\n\n", text or "", flags=re.DOTALL)
+    text = re.sub(r"`[^`\n]*`", " ", text)
+    text = re.sub(r"\[([^\]\n]*)\]\([^)\s]*\)", r"\1", text)
+    # A link goes; what ends the sentence after it stays ("…see https://x/a?").
+    text = threads.LINK.sub(without_link, text)
+    lines = [line for line in text.splitlines() if line.count("|") < 2]
+    paragraphs = [part for part in re.split(r"\n\s*\n", "\n".join(lines)) if part.strip()]
+    return bool(paragraphs) and bool(QUESTION_END.search(paragraphs[-1]))
 
 
 def gist(text: str, limit: int = 300) -> str:
@@ -293,10 +322,14 @@ class Connector:
         settings = self.store.settings()
         if not any(watch.enabled for watch in settings.watches):
             return 0
-        moment = moment or datetime.now()
-        if in_hours(settings.watch_hours, moment):
+        if not self.after_hours_reason(moment):
             return settings.watch_minutes
         return settings.watch_after_hours_minutes
+
+    def after_hours_reason(self, moment: datetime | None = None) -> str:
+        """Why the watches run at their after-hours pace now: "weekend" (all of Saturday and
+        Sunday), "outside_hours" (a workday outside the work hours); "" in work hours."""
+        return after_hours(self.store.settings().watch_hours, moment or datetime.now())
 
     def due(self) -> bool:
         every = self.interval()
@@ -468,6 +501,7 @@ class Connector:
         finished = json.loads(self.store.get("watch_last") or "{}")
         return {
             "every": self.interval(),
+            "after_hours_reason": self.after_hours_reason(),
             # When the last scan finished (its report), not when one started: "scanned just
             # now" is about what it found.
             "scanned_at": finished.get("at", ""),
@@ -568,20 +602,58 @@ class Connector:
                 return True
         return False
 
+    @staticmethod
+    def router_asks(messages: list[dict]) -> list[dict]:
+        """The Router's messages that ask the owner something or need them."""
+        return [
+            m
+            for m in messages
+            if m["kind"] in {"assistant", "update"}
+            and not m["meta"].get("internal")
+            and (m["meta"].get("needs_action") or asks_owner(m["text"]))
+        ]
+
     def router_question(self) -> dict | None:
         """What the Router asked the owner in the chat and they have not answered yet: its
         latest message after theirs, when it asks something or needs them."""
         latest = self.store.messages(self.runtime.router_id(), limit=40)
         owner = max((m["id"] for m in latest if m["kind"] == "owner"), default=0)
-        asks = [
-            m
-            for m in latest
-            if m["id"] > owner
-            and m["kind"] in {"assistant", "update"}
-            and not m["meta"].get("internal")
-            and (m["meta"].get("needs_action") or re.search("[?\uff1f]", m["text"]))
-        ]
+        asks = [m for m in self.router_asks(latest) if m["id"] > owner]
         return asks[-1] if asks else None
+
+    def told_router_questions(self) -> list[dict]:
+        """The Router's questions the owner was told of while away: each can be answered by its
+        code (even when they wrote to the Router since, about something else) until the Router
+        asks something newer."""
+        router = self.runtime.router_id()
+        told = [
+            item.removeprefix("router:")
+            for item in json.loads(self.store.get("away_sent") or "[]")
+            if item.startswith("router:")
+        ]
+        if not told:
+            return []
+        recent = self.store.messages(router, limit=40)
+        newest = max((m["id"] for m in self.router_asks(recent)), default=0)
+        items = []
+        for number in told:
+            if not number.isdigit() or int(number) < newest:
+                continue  # Superseded: the Router asked something newer.
+            try:
+                ask = self.store.message(int(number))
+            except LookupError:
+                continue
+            if ask["session_id"] == router:
+                items.append({"id": f"router:{number}", "ask": ask})
+        return items
+
+    def open_items(self) -> dict[str, dict]:
+        """What a code the owner got can still answer, by item id: what waits for them now,
+        and the Router's questions they were told of (see told_router_questions)."""
+        items = {item["id"]: item for item in self.waiting_items()}
+        for item in self.told_router_questions():
+            items.setdefault(item["id"], item)
+        return items
 
     # Answer codes: random, so a code cannot be worked out from what others see (a PR, a
     # message id); issued for an item when a notification lists it; used once.
@@ -613,13 +685,23 @@ class Connector:
         sent = set(json.loads(self.store.get("away_sent") or "[]"))
         codes = [
             code
-            for item in self.waiting_items()
-            if item["id"] in sent
-            and (code := self.store.get(f"awayitem:{item['id']}"))
-            and self.code_item(code) == item["id"]
+            for item_id in self.open_items()
+            if item_id in sent
+            and (code := self.store.get(f"awayitem:{item_id}"))
+            and self.code_item(code) == item_id
         ]
         if test := json.loads(self.store.get("away_test") or "null"):
             codes.append(test["code"])
+        return codes
+
+    def told_codes(self) -> list[str]:
+        """Every code the owner was sent and has not used (nor expired), whether or not its item
+        still waits: a reply with one that no longer does is told so, not dropped."""
+        codes = []
+        for item_id in json.loads(self.store.get("away_sent") or "[]"):
+            code = self.store.get(f"awayitem:{item_id}")
+            if code and self.code_item(code) == item_id and code not in codes:
+                codes.append(code)
         return codes
 
     def describe(self, item: dict) -> tuple[str, str, str]:
@@ -786,6 +868,7 @@ class Connector:
             return
         if not (codes := self.open_codes()):
             return
+        codes += [code for code in self.told_codes() if code not in codes]
         read_at = float(self.store.get("away_read_at") or 0)
         if time.time() - read_at < max(1, settings.watch_minutes) * 60:
             return
@@ -860,7 +943,7 @@ class Connector:
                 'No reply was given: pass replies=[{"code": "ABCDE", "text": "the owner\'s '
                 'reply, exactly"}], one item per code.'
             )
-        items = {item["id"]: item for item in self.waiting_items()}
+        items = self.open_items()
         test = json.loads(self.store.get("away_test") or "null")
         done = []
         for reply in params.replies:
@@ -873,13 +956,17 @@ class Connector:
                 outcome = "your answers come back: replies here work"
                 self.verified_replies()
             elif not (item := items.get(item_id)):
-                done.append(f"{code}: nothing waits for that code (answered already?)")
-                continue
+                outcome = "nothing waits for that code (answered already?)"
+                done.append(f"{code}: {outcome}")
+                if self.store.get(f"awayused:{code}") or self.store.get(f"awaynoted:{code}"):
+                    continue  # Applied before (passed again), or said once already.
+                self.store.set(f"awaynoted:{code}", str(time.time()))
             else:
                 self.verified_replies()  # A code it sent came back: replies are read.
                 try:
                     outcome = await self.apply(item, reply.text.strip(), code)
                     self.store.delete(f"awaycode:{code}")  # Used once.
+                    self.store.set(f"awayused:{code}", str(time.time()))
                 except (ValueError, LookupError, RuntimeError) as exc:
                     outcome = f"not done: {exc}"
                 done.append(f"{code}: {outcome}")

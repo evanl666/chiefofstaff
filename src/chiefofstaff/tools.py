@@ -26,7 +26,7 @@ from .decisions import AckDecision, AskDecision, RecordDecision
 from .envelope import clean_title, language, short, wrap
 from .habits import UpdateStyle
 from .learning import ProposeLessons
-from .models import MAX_DRAFT, DraftDecision, NestedArguments
+from .models import MAX_DRAFT, DraftDecision, NestedArguments, WithdrawDraft, leak_proof
 from .peers import TellSession
 from .policy import within
 from .roles import ROUTER, SLACK, WATCHDOG, WORKER
@@ -98,6 +98,12 @@ class SpawnWorker(BaseModel):
         "each one a worker can run (a test passes, a command's output, a request and its "
         "response). For a bug fix include a regression test that fails before the fix and "
         "passes after. Empty for research and questions",
+    )
+    review: bool = Field(
+        default=False,
+        description="True when the owner wants to look at the result before it counts as done "
+        "(they asked for a mockup, a plan, a doc or a proposal to see): it waits for their OK "
+        "even if it changes no code. False for questions and reports that only inform",
     )
     context_from: list[str] = Field(
         default_factory=list,
@@ -216,6 +222,9 @@ class MessageSession(BaseModel):
         default_factory=list,
         description="For task='new': its acceptance criteria, as for spawn_worker",
     )
+    review: bool = Field(
+        default=False, description="For task='new': as for spawn_worker (the owner wants to see it)"
+    )
     decisions: list[str] = Field(
         default_factory=list,
         description="For task='new': ids (dec…) of decisions it relies on, as for spawn_worker",
@@ -287,7 +296,10 @@ class CriterionResult(BaseModel):
 
 
 class ArtifactState(BaseModel):
-    url: str = Field(description="Its link")
+    url: str = Field(
+        description="Its link, or the full path of a file it made in your folder (a mockup, a "
+        "CSV): the owner opens it from the list"
+    )
     name: str = Field(
         description="A short name the owner knows it by, under 40 characters: 'Interviewer "
         "spec', 'ICP flow, full run', 'BG embeddings DAG'"
@@ -369,8 +381,13 @@ class DraftSlackReply(BaseModel):
     text: str = Field(description="The exact reply in the owner's voice")
     thread_ts: str = Field(
         default="",
-        description="ts of the thread parent (or of the message) to reply in its thread; "
-        "empty posts to the conversation itself",
+        description="To reply in a thread: the ts of its first message (or of the message you "
+        "answer). Empty posts to the conversation itself. A DM message that is in no thread is "
+        "answered in the DM, not in a thread under it, unless in_thread",
+    )
+    in_thread: bool = Field(
+        default=False,
+        description="Only to start a thread under a DM message that has none (rarely wanted)",
     )
     to: str = Field(
         default="", description="Where it goes, for the owner, e.g. 'Alice Chen (DM)' or '#deploys'"
@@ -925,6 +942,14 @@ class Tools:
                 self.t_draft_reply,
             ),
             (
+                "withdraw_draft",
+                "Withdraw a draft of yours that still waits for the owner (the conversation "
+                "moved on, it answers the wrong thing): its card leaves, with your reason. A new "
+                "draft_slack_reply to the same conversation replaces your earlier one by itself.",
+                WithdrawDraft,
+                self.t_withdraw_draft,
+            ),
+            (
                 "distill_profile",
                 "Start a worker that distills what the owner's work says about them into a "
                 "profile the owner reviews; later sessions use it.",
@@ -974,7 +999,7 @@ class Tools:
             name: define_tool(
                 name,
                 description=description,
-                params_type=params,
+                params_type=leak_proof(params),
                 handler=self.handler(handler),
                 skip_permission=True,
             )
@@ -1169,6 +1194,8 @@ class Tools:
             needs=params.wait_for,
             criteria=criteria,
         )
+        if params.review:
+            self.store.set(f"reviewreq:{task['id']}", "1")
         self.link_decisions(task["id"], decisions)
         if not special:
             # Again now that it exists: another task started at the same time may exist now.
@@ -1454,6 +1481,8 @@ class Tools:
             task = self.tasks.create(
                 target["id"], title, params.text[:4000], status="running", criteria=criteria
             )
+            if params.review:
+                self.store.set(f"reviewreq:{task['id']}", "1")
             self.link_decisions(task["id"], decisions)
             self.states[caller].turn_tasks.append(task["id"])
             prompt = wrap(
@@ -1654,7 +1683,7 @@ class Tools:
         if steps:
             entries.append(f"{steps} step(s), the last: {last_step[:200]}")
         task = self.tasks.current(row["id"])
-        brief = self.task_brief(task)
+        brief = self.task_brief(task, router=True)
         if task and brief:
             # Its PRs as GitHub has them now, not as its report put them.
             with suppress(Exception):
@@ -1827,11 +1856,12 @@ class Tools:
             entry["now"] = now
         return entry
 
-    @staticmethod
-    def task_brief(task: dict | None) -> dict | None:
+    def task_brief(self, task: dict | None, router: bool = False) -> dict | None:
         if not task:
             return None
         brief = {"task_id": task["id"], "title": task["title"], "status": task["status"]}
+        if router and (words := self.runtime.task_actions.status_words(task)) != task["status"]:
+            brief["stands"] = words  # A finished one: to accept, or a report only.
         if task["status"] == "review":
             brief["result"] = task["result"][:300]
         elif task["progress"]:
@@ -2033,7 +2063,7 @@ class Tools:
         ):
             raise ValueError(problem)
         meta = {"status": params.status, "task_id": task["id"] if task else None}
-        self.runtime.add_message(caller, "report", params.summary, meta)
+        reported = self.runtime.add_message(caller, "report", params.summary, meta)
         if task and params.status == "done" and params.criteria:
             run = self.store.one(
                 "SELECT * FROM runs WHERE task_id=? ORDER BY started_at DESC LIMIT 1",
@@ -2045,9 +2075,19 @@ class Tools:
                     "UPDATE runs SET criteria=? WHERE id=?", (json.dumps(claims), run["id"])
                 )
         settled = chat_news = False
+        # Asked in chat about finished work, it changed code: that is a new result to review,
+        # not news on the old one.
+        changed = bool(
+            task
+            and params.status == "done"
+            and task["status"] in {"review", "done"}
+            and self.store.get(f"followup:{task['id']}") == "chat"
+            and await self.runtime.task_actions.changed_since_result(task)
+        )
         if task:
             # It reports on it: whatever it says next (a question, say), it is not "stopped".
             self.store.delete(f"stopped:{task['id']}")
+            self.store.delete(f"goingon:{task['id']}")
             asked = bool(self.store.get(f"followup:{task['id']}"))
             if task["status"] == "cancelled" and not asked:
                 # Cancelled (a report already on its way, say): it stays cancelled.
@@ -2055,6 +2095,17 @@ class Tools:
             elif task["status"] == "cancelled" and params.status != "done":
                 # Answering the owner's question about it: news, not the task coming back.
                 task = self.tasks.update(task["id"], progress=params.summary[:6000])
+            elif (
+                task["status"] == "waiting"
+                and (was := self.store.get(f"askedafter:{task['id']}"))
+                and params.status in {"progress", "done"}
+                and not asked
+            ):
+                # Finished work it asked the owner about (news on its PR): answered, it goes
+                # back where it was, and what it says now is news; its result stays.
+                self.store.delete(f"askedafter:{task['id']}")
+                self.runtime.task_actions.news(task["id"], params.summary)
+                task = self.tasks.move(task["id"], was, progress=params.summary[:6000])
             elif task["status"] in {"review", "done"} and params.status == "progress":
                 # News about finished work (PR feedback handled, a question answered): it stays
                 # where it is, and stays in sight until the owner has seen it. A blocker or a
@@ -2077,7 +2128,12 @@ class Tools:
                     f"Task {task['id']}'s report is updated. It was reported already: the "
                     "Router is not told again."
                 )
-            elif params.status == "done" and asked and task["status"] in {"review", "done"}:
+            elif (
+                params.status == "done"
+                and asked
+                and task["status"] in {"review", "done"}
+                and not changed
+            ):
                 # The owner's chat about finished work: what it says is news on that task. The
                 # result the owner reviews (or accepted) stays as it is.
                 self.store.delete(f"followup:{task['id']}")
@@ -2092,13 +2148,14 @@ class Tools:
                     caller, report=params.summary[:4000], status="idle" if others else "done"
                 )
                 chat_news = True
-            elif params.status == "done" and task["status"] == "done" and not asked:
+            elif params.status == "done" and task["status"] == "done" and not asked and not changed:
                 # Accepted, or its PR merged: news about it does not reopen the review.
                 self.runtime.task_actions.remember_prs(task["id"], params.summary)
                 self.runtime.task_actions.news(task["id"], params.summary)
                 task = self.tasks.update(task["id"], result=clip_report(params.summary))
             elif params.status == "done":
                 self.store.delete(f"followup:{task['id']}")
+                self.store.delete(f"read:{task['id']}")  # A new result, not read yet.
                 self.states[caller].turn_reported.add(task["id"])
                 self.runtime.task_actions.remember_prs(task["id"], params.summary)
                 task = self.tasks.move(task["id"], "review", result=clip_report(params.summary))
@@ -2110,7 +2167,9 @@ class Tools:
                         self.runtime.drafts.settle_reported(task["id"], reported=True)
                     )
                 else:
-                    self.runtime.background(self.runtime.task_actions.collect_evidence(task["id"]))
+                    self.runtime.background(
+                        self.runtime.task_actions.collect_evidence(task["id"], ended=True)
+                    )
                     # The one notification a finished task gets (the Router does not retell it).
                     # Whether it is to accept (it changed code…) shows on Home once its
                     # receipts are in; the notification says it is finished.
@@ -2121,6 +2180,8 @@ class Tools:
                         title="Finished",
                     )
             elif params.status in {"question", "blocked"}:
+                if task["status"] in {"review", "done"} and not asked:
+                    self.store.set(f"askedafter:{task['id']}", task["status"])
                 task = self.tasks.move(task["id"], "waiting", progress=params.summary[:6000])
             elif task["status"] != "running":
                 task = self.tasks.move(task["id"], "running", progress=params.summary[:6000])
@@ -2178,6 +2239,9 @@ class Tools:
         if params.status == "progress" and not news:
             return "Noted in your session. The Router is not interrupted for progress."
         await self.runtime.tell_router(row, params.status, params.summary, task)
+        # On Home now (a line in the Router's chat, a card): an answer to the owner's @ there
+        # is not shown again.
+        self.store.update_message_meta(reported["id"], {**meta, "told": True})
         if news and params.status == "progress":
             # News on a PR it follows, for work already finished: the owner reads it.
             self.runtime.alert(
@@ -2221,9 +2285,22 @@ class Tools:
             raise ValueError("The reply is empty.")
         if len(params.text) > MAX_DRAFT:
             raise ValueError(f"Too long: keep the reply under {MAX_DRAFT} characters.")
-        target = {"channel_id": params.channel_id, "thread_ts": params.thread_ts, "to": params.to}
-        target["latest"] = await self.runtime.slack.latest(params.channel_id, params.thread_ts)
+        # Where it really goes, and the newest message there (the card quotes it; sending
+        # checks nobody wrote since).
+        place = await self.runtime.slack.reply_place(
+            params.channel_id, params.thread_ts, params.in_thread
+        )
+        target = {
+            "channel_id": params.channel_id,
+            "thread_ts": place["thread_ts"],
+            "to": params.to,
+            "latest": place.get("quote", ""),
+            "latest_ts": place.get("ts", ""),
+        }
+        if place.get("error"):
+            target["latest_error"] = place["error"]
         draft = self.store.create_draft(caller, "slack", target, params.text, params.note)
+        replaced = await self.runtime.drafts.supersede(draft)
         self.runtime.add_message(caller, "draft", params.text, {"draft_id": draft["id"]})
         self.bus.publish("draft", draft)
         self.runtime.alert(
@@ -2232,10 +2309,30 @@ class Tools:
             needs_action=True,
             title="Slack reply to approve",
         )
-        return (
+        result = (
             f"Draft {draft['id']} is waiting for the owner's approval. You will be told if "
             "they edit or reject it. Do not send it any other way."
         )
+        if place["thread_ts"] != params.thread_ts:
+            result += (
+                f" It goes in the thread of {place['thread_ts']} (that message is a reply in it)."
+                if place["thread_ts"]
+                else " It goes into the DM itself: that message is in no thread (in_thread=true "
+                "starts one)."
+            )
+        if replaced:
+            result += f" It replaces your earlier draft {', '.join(replaced)} there."
+        if place.get("error"):
+            result += (
+                f" Slack showed no message there ({place['error']}): check channel_id and "
+                "thread_ts, and withdraw_draft it if they are wrong."
+            )
+        return result
+
+    async def t_withdraw_draft(self, params: WithdrawDraft, caller: str):
+        self.caller(caller, WORKER, SLACK)
+        draft = await self.runtime.drafts.withdraw(caller, params.draft_id, params.reason)
+        return f"Draft {draft['id']} is withdrawn: the owner no longer sees it."
 
     async def t_draft_reply(self, params: DraftReply, caller: str):
         """A reply Chief of Staff cannot send itself (Slack not connected, mail, a doc comment):
@@ -2581,6 +2678,17 @@ class Tools:
         self.runtime.publish_session(self.store.session(caller))
         return "Unfollowed. New messages there go to the Router again."
 
+    def moved_on_since_review(self, row: dict) -> str:
+        """Why a nudge decided on the review is moot now ("" if it is not): the worker reported,
+        or has nothing open to go on with."""
+        mark = self.runtime.watchdog.state(row["id"]).get("reviewed_mark", 0)
+        later = self.store.messages(row["id"], after=mark) if mark else []
+        if any(m["kind"] == "report" for m in later):
+            return "it reported after it was flagged."
+        if not any(t["status"] == "running" for t in self.tasks.for_session(row["id"])):
+            return "it has no running task now."
+        return ""
+
     async def t_assess_worker(self, params: AssessWorker, caller: str):
         self.caller(caller, WATCHDOG)
         row = self.store.session(params.session_id)
@@ -2596,9 +2704,20 @@ class Tools:
             f"“{row['title']}”: {params.verdict.replace('_', ' ')}, {action}. {params.reason}",
             {"session_id": row["id"]},
         )
+        if action in {"nudge", "interrupt"} and (moved := self.moved_on_since_review(row)):
+            # Out of date by the time it came: what it was flagged for is behind it.
+            self.runtime.add_message(
+                caller, "notice", f"Not sent: {moved}", {"session_id": row["id"]}
+            )
+            return f"Not sent: {moved}"
         if action in {"nudge", "interrupt"}:
             if action == "interrupt":
                 await self.runtime.workers.interrupt(row["id"], by="the watchdog")
+                # Stopped to be told what to do instead (the nudge below): it goes on at once,
+                # not stopped for the owner.
+                for task in self.tasks.for_session(row["id"]):
+                    if self.store.get(f"stopped:{task['id']}") == "the watchdog":
+                        self.runtime.task_actions.publish(self.tasks.move(task["id"], "running"))
             text = params.message or params.reason
             # Into the current turn: a worker stuck in a long turn would never see a queued one.
             await self.delivery.deliver(

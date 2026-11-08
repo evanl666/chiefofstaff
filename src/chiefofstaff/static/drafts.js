@@ -2,8 +2,8 @@
 // decisions, forms and sign-ins. Each has one main action; the others are behind "⋯". A card
 // leaves as soon as the owner acts, and comes back with the reason if that did not work.
 
-import { api, el, moreMenu, submits, toast } from "./dom.js";
-import { displayPath, markdown } from "./text.js";
+import { api, el, moreMenu, once, submits, toast } from "./dom.js";
+import { clock, displayPath, markdown, slackText } from "./text.js";
 import { applyDraft, state } from "./state.js";
 import { select } from "./session.js";
 import { renderSidebar } from "./sidebar.js";
@@ -52,7 +52,9 @@ function actionRow(error, main, more = [], ...extra) {
 // The owner's decision on a card: it leaves at once, the toast says what was done; if the
 // server says no, the card comes back with why (`failed` shows it elsewhere, in a view).
 function decider(draft, node, error, failed = null) {
-  return async function decide(body, done = "") {
+  // One decision at a time: a second click while the first is out does nothing.
+  return (body, done = "") => once(`draft:${draft.id}`, node, () => decide(body, done));
+  async function decide(body, done) {
     const key = `draft:${draft.id}`;
     error.textContent = "";
     state.leaving.add(key);
@@ -75,7 +77,7 @@ function decider(draft, node, error, failed = null) {
       scheduleHome();
       return false;
     }
-  };
+  }
 }
 // A one-line reason in place of a card's actions: to reject a draft, or to have it redone.
 function reasonForm(actions, { placeholder, label, className = "secondary", submit, back }) {
@@ -290,7 +292,8 @@ function lessonsCard(draft) {
   const rows = draft.target.lessons.map((lesson) => {
     const keep = el("input", { type: "checkbox", checked: typed.get(`${draft.id}:keep:${lesson.id}`) !== "0", "aria-label": "Keep" });
     keep.addEventListener("change", () => typed.set(`${draft.id}:keep:${lesson.id}`, keep.checked ? "1" : "0"));
-    const text = keepTyped(el("input", { value: lesson.text, "aria-label": "Lesson" }), `${draft.id}:lesson:${lesson.id}`);
+    // As tall as the lesson: a long one is read whole, not cut at the box's edge.
+    const text = keepTyped(fitting(lesson.text, { label: "Lesson", max: 8 }), `${draft.id}:lesson:${lesson.id}`);
     const because = lesson.because.map((item) => `${item.owner}`.trim()).filter(Boolean);
     const where = !lesson.scope ? "everywhere" : lesson.scope === "slack" ? "Slack replies" : `in ${lesson.scope.replace("project:", "").split("/").pop()}`;
     const node = el(
@@ -395,6 +398,10 @@ function replyCard(draft) {
   );
   const decide = decider(draft, node, error);
   const copy = async () => {
+    if (!text.value.trim()) {
+      error.textContent = "The reply is empty.";
+      return;
+    }
     try {
       await navigator.clipboard.writeText(text.value);
     } catch {
@@ -443,7 +450,7 @@ function mergeCard(draft) {
     "merge",
     ["Ready to merge · ", link],
     target.title ? el("div", { class: "note strong", text: `“${target.title}”` }) : null,
-    el("div", { class: "note", text: ["Checks pass", review, `head ${String(target.head || "").slice(0, 7)}`].filter(Boolean).join(" · ") }),
+    el("div", { class: "note", text: [target.checks === "none" ? "No checks" : "Checks pass", review, `head ${String(target.head || "").slice(0, 7)}`].filter(Boolean).join(" · ") }),
     draft.outcome ? el("div", { class: "note", text: draft.outcome }) : null,
   );
   const decide = decider(draft, node, error);
@@ -472,7 +479,7 @@ function messageCard(draft) {
   const error = el("span", { class: "error" });
   const actions = el("div", { class: "actions" });
   // What it answers, then who it is for and why, in one quiet line.
-  const about = [draft.kind === "slack" && target.to ? `For ${target.to}` : "", draft.note].filter(Boolean).join(" · ");
+  const about = [draft.kind === "slack" && target.to ? `For ${slackText(target.to)}` : "", draft.note].filter(Boolean).join(" · ");
   const comment = target.comment;
   // A reply on a line can resolve its conversation too (ticked when its worker proposed it).
   const resolve = draft.kind === "github" && target.in_reply_to ? el("input", { type: "checkbox", checked: Boolean(target.resolve) }) : null;
@@ -480,8 +487,7 @@ function messageCard(draft) {
     draft,
     draft.kind,
     label,
-    // The newest message where it goes, as Slack writes it (its links and names readable).
-    draft.kind === "slack" && target.latest ? el("div", { class: "quoted markdown", html: markdown(target.latest) }) : null,
+    draft.kind === "slack" ? latestQuote(target) : null,
     comment ? el("div", { class: "quoted" }, el("strong", { title: comment.path || "", text: `${comment.author}${comment.path ? ` on ${basename(comment.path)}${comment.line ? `:${comment.line}` : ""}` : ""}: ` }), comment.body) : null,
     about ? el("div", { class: "note", text: about }) : null,
     // Not published after an interrupted send: what happened, and the owner's edit kept.
@@ -492,6 +498,16 @@ function messageCard(draft) {
   );
   const decide = decider(draft, node, error);
   const sent = draft.kind === "slack" ? "Sent on Slack." : "Posted on GitHub.";
+  // Not an empty reply: cleared, it is not the draft that goes.
+  const send = (more = {}) => {
+    if (!text.value.trim()) {
+      error.textContent = "The reply is empty.";
+      return;
+    }
+    const content = { ...(resolve ? { resolve: resolve.checked } : {}), ...more };
+    decide({ action: "send", text: text.value, ...(Object.keys(content).length ? { content } : {}) }, resolve?.checked ? "Posted on GitHub; resolving the conversation." : sent);
+  };
+  const anyway = sendAnyway(draft);
   const show = () =>
     actions.replaceChildren(
       error,
@@ -499,10 +515,26 @@ function messageCard(draft) {
         { text: "Ask to redo…", onclick: () => redoForm(actions, decide, show) },
         { text: "Reject…", onclick: () => rejectForm(actions, decide, show) },
       ]),
-      el("button", { type: "button", text: "Send", onclick: () => decide({ action: "send", text: text.value, ...(resolve ? { content: { resolve: resolve.checked } } : {}) }, resolve?.checked ? "Posted on GitHub; resolving the conversation." : sent) }),
+      anyway ? el("button", { type: "button", class: "secondary", text: "Send anyway", title: "Someone wrote there since it was drafted: send it as it is all the same", onclick: () => send(anyway) }) : "",
+      el("button", { type: "button", text: "Send", onclick: () => send() }),
     );
   show();
   return node;
+}
+// Someone wrote where a Slack reply goes since it was drafted (`moved_on`): the server did not
+// send it and said why on the card. What goes with Send to send it all the same.
+const sendAnyway = (draft) => (draft.kind === "slack" && draft.target?.moved_on ? { send_anyway: true } : null);
+// The newest message where a Slack reply goes, as Slack writes it (its links and names
+// readable); one written since the draft, marked new; or why it could not be read.
+function latestQuote(target) {
+  if (target.latest_error) return el("div", { class: "note warn-note", text: `Could not read the conversation: ${target.latest_error}` });
+  if (!target.latest) return null;
+  const quote = el("div", { class: "quoted markdown", html: markdown(slackText(target.latest)) });
+  const moved = target.moved_on;
+  if (!moved) return quote;
+  quote.classList.add("fresh");
+  const who = slackText(moved.who || "Someone");
+  return el("div", { class: "moved-on" }, el("div", { class: "fresh-label", text: `New since the draft: ${who} wrote${moved.at ? ` at ${clock(moved.at)}` : ""}` }), quote);
 }
 const basename = (path) => path.split("/").pop();
 // A long name keeps its start and its end: "CompanyNa…Normalizer.scala".

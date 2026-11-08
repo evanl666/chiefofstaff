@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from conftest import Harness, call_tool, settle
 
-from chiefofstaff.connector import in_hours
+from chiefofstaff.connector import after_hours, in_hours
 from chiefofstaff.models import Settings, Watch
 from chiefofstaff.runtime import CONNECTOR_TOOLS
 
@@ -573,3 +573,97 @@ async def test_what_the_away_channel_can_do_is_shown_as_tried(tmp_path):
                     method="slack_send", replies="")  # fmt: skip
     can = runtime.connector.view()["away"]["can"]
     assert not can["reads_replies"] and not can["replies_verified_at"], "another way: not tried"
+
+
+async def test_weekends_are_after_hours_and_settings_can_say_so(tmp_path):
+    """With after-hours checks off, nothing is scanned all weekend: Settings says why."""
+    assert after_hours("09:00-18:00", datetime(2026, 11, 7, 10, 0)) == "weekend"
+    assert after_hours("22:00-06:00", datetime(2026, 11, 8, 23, 0)) == "weekend", "a Sunday"
+    assert after_hours("09:00-18:00", datetime(2026, 11, 4, 19, 0)) == "outside_hours"
+    assert after_hours("09:00-18:00", datetime(2026, 11, 4, 10, 0)) == ""
+    settings = Settings(watches=[Watch(what="Slack DMs")], watch_after_hours_minutes=0)
+    harness = Harness(tmp_path / "data", settings)
+    connector = harness.runtime.connector
+    assert connector.interval(datetime(2026, 11, 7, 10, 0)) == 0
+    assert connector.after_hours_reason(datetime(2026, 11, 7, 10, 0)) == "weekend"
+    assert connector.interval(datetime(2026, 11, 4, 10, 0)) == 5
+    assert connector.view()["after_hours_reason"] == connector.after_hours_reason()
+
+
+async def test_only_a_real_question_of_the_routers_reaches_the_owner_away(tmp_path):
+    """Bug bash: a "?" in a table cell or in a link's "?q=" made an answer a question."""
+    harness = Harness(tmp_path / "data", Settings(away_notify=True))
+    runtime = await harness.connect()
+    connector = runtime.connector
+    await runtime.owner_send(harness.router_id, "What changed today?")
+    for answer in (
+        "Two PRs merged:\n\n| PR | CI green? |\n|---|---|\n| #12 | yes |",
+        "The errors: https://grafana.example.com/d/x?q=errors&from=now-1h",
+        "Run it with `?verbose=1` to see more.",
+        "Is it flaky? No: the fixture leaked.\n\nFixed in #12.",
+    ):
+        runtime.add_message(harness.router_id, "assistant", answer)
+        assert connector.waiting_items() == [], answer
+    runtime.add_message(harness.router_id, "assistant", "Merged.\n\nClose the issue too?")
+    [item] = connector.waiting_items()
+    assert item["ask"]["text"].endswith("Close the issue too?")
+
+
+async def test_an_away_answer_to_the_router_counts_after_the_owner_wrote_to_it(tmp_path):
+    """Bug bash: told of the Router's question while away, the owner wrote to the Router about
+    something else; their answer by code was then dropped without a word."""
+    settings = Settings(away_notify=True, away_minutes=5, away_how="DM me")
+    harness = Harness(tmp_path / "data", settings)
+    runtime = await away(harness)
+    connector = runtime.connector
+    router = harness.session(harness.router_id)
+
+    async def asks(text):
+        router.emit("assistant.message", content=text, tool_requests=None)
+        router.emit("session.idle")
+        await settle(runtime)
+
+    async def told(words):
+        await connector.tick()
+        await settle(runtime)
+        messenger = runtime.toolset.last_special("messenger")
+        body, _plain, _blocks = notification(harness, messenger)
+        await call_tool(runtime, "report_notified", messenger["id"], ok=True, where="Slack DM",
+                        method="bot send", replies="bot read")  # fmt: skip
+        harness.session(messenger["id"]).emit("session.idle")
+        await settle(runtime)
+        return messenger["id"], code_in(body, words)
+
+    await runtime.owner_send(harness.router_id, "Write the port into config.txt")
+    await asks("Should it be 8080 or 9090?")
+    messenger, port = await told("8080 or 9090?")
+    await runtime.owner_send(harness.router_id, "Also: is the deploy done?")
+    assert connector.waiting_items() == [], "not told again"
+    assert connector.open_codes() == [port], "its code still answers it"
+    applied = await call_tool(runtime, "report_owner_replies", messenger,
+                              replies=[{"code": port, "text": f"{port} 9090"}])  # fmt: skip
+    assert f"{port}: sent to the Router" in applied.text_result_for_llm
+    assert router.sent[-1].count("9090") == 1
+
+    await asks("Which branch should it go on?")
+    messenger, branch = await told("Which branch")
+    await asks("And which port for staging?")
+    assert branch not in connector.open_codes(), "the Router asked something newer"
+    messenger, staging = await told("port for staging")
+    await connector.tick()
+    await settle(runtime)
+    read = harness.session(messenger).sent[-1]
+    assert "bot read" in read and staging in read and branch in read, "closed codes are read too"
+    stale = await call_tool(runtime, "report_owner_replies", messenger,
+                            replies=[{"code": branch, "text": f"{branch} main"}])  # fmt: skip
+    assert f"{branch}: nothing waits for that code" in stale.text_result_for_llm
+
+    def notices():
+        return [m["text"] for m in harness.store.messages(harness.router_id)]
+
+    assert any(f"[{branch}] main" in note and "nothing waits" in note for note in notices())
+    before = len(notices())
+    await call_tool(runtime, "report_owner_replies", messenger,
+                    replies=[{"code": branch, "text": f"{branch} main"},
+                             {"code": port, "text": f"{port} 9090"}])  # fmt: skip
+    assert len(notices()) == before, "a reply passed again is not said again"

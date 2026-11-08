@@ -422,13 +422,18 @@ def backing(evidence: str, commands: list[dict]) -> dict | None:
 
 
 def failed_there(evidence: str, command: str) -> bool:
-    """Whether a failed command line failed in the part the evidence names. In `a && b && c`
-    an exit code is the last part's that ran: a part before the last may have passed."""
+    """Whether a failed command line failed in what the evidence names. In `a && b && c` an
+    exit code is the last part's that ran: a part before the last may have passed. And the
+    evidence must name that part whole: `cat fin.txt` is not `cat fin.txt g.txt`, which may
+    have failed on g.txt alone."""
     parts = [part for part in simple_commands(command) if part]
-    if len(parts) <= 1:
+    if not parts:
         return True
-    last = " ".join(parts[-1])
-    return any(names(snippet, last) for snippet in QUOTED.findall(evidence or ""))
+    last = parts[-1]
+    quoted = QUOTED.findall(evidence or "")
+    if not quoted:
+        return len(parts) <= 1
+    return any(words(snippet) == last for snippet in quoted)
 
 
 def criteria_results(criteria: list[str], claims: list[dict], commands: list[dict]) -> list[dict]:

@@ -9,6 +9,7 @@ import shutil
 import time
 from contextlib import suppress
 from datetime import UTC, datetime
+from urllib.parse import quote
 
 from .. import threads
 from ..receipts import APPROVAL
@@ -32,6 +33,20 @@ POSTED_MARK = "<!-- chief-of-staff -->"
 def marked(text: str) -> str:
     """The text as posted: with the mark (none on an empty review summary: nothing to learn)."""
     return f"{text.rstrip()}\n\n{POSTED_MARK}" if text.strip() else text
+
+
+# `git commit` output: "[branch abc1234] message".
+COMMITTED = re.compile(r"\[[^\]\n]*? ([0-9a-f]{7,40})\]")
+
+
+def worker_commits(store: Store) -> set[str]:
+    """Commits Chief of Staff's workers made (their `git commit` output names them)."""
+    found = set()
+    for row in store.all(
+        "SELECT output FROM commands WHERE kind='commit' AND exit_code=0 AND output!=''"
+    ):
+        found.update(COMMITTED.findall(row["output"]))
+    return found
 
 
 def unmarked(text: str | None) -> str:
@@ -499,12 +514,22 @@ class GitHubSource:
             self.store.set(f"prtitle:{repo.lower()}#{number}", title)  # Shown with its number.
         base = f"repos/{repo}"
         items: list[tuple[str, str]] = []
+        # The owner's own comments and reviews are not news to the sessions following the PR:
+        # those of the account they act as on this repository (what Chief of Staff posts as).
+        # Another account signed in on this machine (a teammate's, a bot's) may be someone else.
+        mine = {await self.acting_login(repo)} - {""}
+
+        def theirs(item: dict) -> bool:
+            return ((item.get("user") or {}).get("login") or "").lower() not in mine
+
         # Every page: GitHub lists oldest first, so on a busy PR the new ones are on the last.
         for comment in pages(
             await self.gh(
                 "api", f"{base}/issues/{number}/comments?since={after}&per_page=100", "--paginate"
             )
         ):
+            if not theirs(comment):
+                continue
             items.append(
                 (
                     f"github:issuecomment:{comment['id']}",
@@ -517,6 +542,8 @@ class GitHubSource:
                 "api", f"{base}/pulls/{number}/comments?since={after}&per_page=100", "--paginate"
             )
         ):
+            if not theirs(comment):
+                continue
             line = comment.get("line") or comment.get("original_line") or ""
             items.append(
                 (
@@ -529,6 +556,8 @@ class GitHubSource:
             await self.gh("api", f"{base}/pulls/{number}/reviews?per_page=100", "--paginate")
         ):
             if review.get("state") == "PENDING" or (review.get("submitted_at") or "") < after:
+                continue
+            if not theirs(review):
                 continue
             if review.get("state") == "COMMENTED" and not (review.get("body") or "").strip():
                 # It only holds line comments (a reply to one is such a review): listed above.
@@ -600,7 +629,15 @@ class GitHubSource:
             return ((commit.get("author") or {}).get("login") or "").lower()
 
         acting = await self.acting_login(repo)
-        if commits and all(login(commit) == acting for commit in commits):
+        # Its workers' own commits: by the account it works as, or committed in one of their
+        # checkouts (a git email GitHub does not know shows no login).
+        made = worker_commits(self.store)
+
+        def ours(commit: dict) -> bool:
+            sha = commit.get("sha") or ""
+            return login(commit) == acting or any(sha.startswith(short) for short in made)
+
+        if commits and all(ours(commit) for commit in commits):
             return ""
         if not commits or compare.get("status") in {"diverged", "behind"}:
             return f"The branch was rewritten (force-pushed): the head is now {new[:7]}."
@@ -677,11 +714,26 @@ class GitHubSource:
     async def diff_lines(self, repo: str, number: int) -> dict:
         return diff_lines(await self.files(repo, number))
 
-    async def head(self, repo: str, number: int) -> str:
+    async def heads(self, repo: str, number: int) -> set[str]:
+        """The PR's head as GitHub has it, and its branch's head: the PR lags a push to its
+        branch by a second or two, so a review checked against the PR alone could land on the
+        commit before. The branch is not read when it cannot be (a deleted fork)."""
         pull = await self.pull(repo, number)
         if pull["state"] != "open":
             raise ValueError(f"{repo}#{number} is not open.")
-        return pull["head"]["sha"]
+        head = pull["head"]
+        found = {head["sha"]}
+        source = (head.get("repo") or {}).get("full_name") or ""
+        if source and head.get("ref"):
+            path = f"repos/{source}/git/ref/heads/{quote(head['ref'], safe='/')}"
+            try:
+                ref = json.loads(await self.gh("api", path))
+            except RuntimeError as exc:
+                if not NO_ACCESS.search(str(exc)):
+                    raise
+            else:
+                found.add(((ref or {}).get("object") or {}).get("sha") or "")
+        return found
 
     async def find_review(self, target: dict, body: str, since: str = "") -> str:
         """The URL of a published review with this body on the target PR, or "". One without a
@@ -907,7 +959,7 @@ class GitHubSource:
             return await self.publish_reply(target, body)
         if target.get("reply_to_comment"):
             return await self.publish_conversation_reply(target, body)
-        if await self.head(repo, target["number"]) != target["head_sha"]:
+        if await self.heads(repo, target["number"]) != {target["head_sha"]}:
             raise ValueError("The PR changed after the draft was written; nothing was published.")
         event = REVIEW_EVENTS.get(target.get("verdict", ""), "COMMENT")
         payload = {"event": event, "commit_id": target["head_sha"], "body": marked(body)}

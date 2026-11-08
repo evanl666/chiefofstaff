@@ -61,6 +61,13 @@ class SessionState:
     unread: dict[str, tuple[str, tuple[str, ...], int]] = field(default_factory=dict)
     # Its connection has shown a message it received (so unread ones can be told apart).
     echoes: bool = False
+    # Every message sent to it that its conversation has not shown yet, even one that starts a
+    # turn: digest -> the first message's id. A stop before it saw them sends them again.
+    unseen: dict[str, int] = field(default_factory=dict)
+    # It was stopped and its turn aborted: the next message steers (until a turn ends or
+    # starts, Copilot may still hold the session busy). Its first steps after the stop are not
+    # work on the stopped task until a new message started a turn.
+    after_abort: bool = False
     # Tools it called in its current turn: a turn that failed after acting is not sent again.
     turn_tools: int = 0
     # Its failed turn is sent again shortly (not a turn that ended without a report).

@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, Field
 
 from .roles import ROUTER, SLACK, WATCHDOG, WORKER
-from .sources.github import POSTED_MARK, github_time
+from .sources.github import POSTED_MARK, github_time, worker_commits
 from .sources.slack import SEARCH_TOOL
 from .store import now
 from .workspaces import git
@@ -55,6 +55,11 @@ KINDS = {
     "pr_review": "pr_review",
     "commit": "commit",
 }
+# Said with a review style: an older one may have learned file names its examples did not have.
+LINE_COMMENTS = (
+    "A line comment is posted on its line and GitHub shows its file: never start one with the "
+    "file's name or path."
+)
 COLLECT_EVERY = 2 * 3600
 FIRST_COLLECT_DELAY = 120  # After a start: not while it is busy starting sessions.
 LOOKBACK_DAYS = 30
@@ -77,7 +82,6 @@ SLACK_ENTRY = re.compile(
     re.DOTALL,
 )
 # `git commit` prints "[branch abc1234] subject": the commits workers made.
-COMMITTED = re.compile(r"\[[^\]\n]*? ([0-9a-f]{7,40})\]")
 # A style never names a language: each answer is in the language of the message it answers.
 LANGUAGE_NAMES = re.compile(
     r"(?i)\b(english|chinese|mandarin|cantonese|japanese|korean|french|german|spanish)\b"
@@ -87,6 +91,15 @@ QUOTES = re.compile(r"[\"“”「」『』]")
 HAN_OR_KANA = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]")
 GITHUB_ID = re.compile(r"(?:pullrequestreview-|discussion_r)(\d+)$")
 COPILOT_TRAILER = re.compile(r"^Co-authored-by:.*\bcopilot\b", re.IGNORECASE | re.MULTILINE)
+# A file's path at the start of a line comment, as the collector once wrote it ("src/a.py: ").
+FILE_PREFIX = re.compile(r"([\w./-]+\.\w+|[\w.-]+/[\w./-]+): ")
+# A review style must not have line comments start with their file (GitHub shows it): a
+# sentence about comments, how they start and a file's name.
+FILE_NAMED = (
+    re.compile(r"(?i)\bcomment"),
+    re.compile(r"(?i)\b(prefix|start|begin|lead|open|first)"),
+    re.compile(r"(?i)\b(file ?names?|file ?paths?|paths?|the file)\b"),
+)
 # The pull requests an account reviewed (its own too), with its reviews and their comments.
 REVIEWS_QUERY = """
 query($q: String!, $login: String!) {
@@ -133,6 +146,22 @@ def url_id(url: str) -> str:
 
 def slack_entries(text: str) -> list[dict]:
     return [match.groupdict() for match in SLACK_ENTRY.finditer(text or "")]
+
+
+def shown(text: str, limit: int = SHOWN_CHARS) -> str:
+    """A quote shortened at its end, saying so."""
+    text = (text or "").strip()
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "\u2026"
+
+
+def own_words(row: dict) -> str:
+    """An observation's text as the owner wrote it: a line comment collected before 0.1.27
+    starts with "<its file>: ", which was the collector's, not theirs."""
+    text = row["text"]
+    if row["kind"] != "pr_review" or "line_comment" in json.loads(row.get("meta") or "{}"):
+        return text
+    found = FILE_PREFIX.match(text)
+    return text[found.end() :] if found else text
 
 
 class Habits:
@@ -381,9 +410,13 @@ class Habits:
                             continue
                         if POSTED_MARK in comment["body"]:
                             continue  # Drafted for the owner by Chief of Staff (any install).
-                        text = f"{comment.get('path', '')}: {comment['body']}"
+                        # Their own words: GitHub shows the file beside a line comment.
                         added += self.add(
-                            "github", "pr_review", f"github:{comment['id']}", text, meta
+                            "github",
+                            "pr_review",
+                            f"github:{comment['id']}",
+                            comment["body"],
+                            {**meta, "path": comment.get("path") or "", "line_comment": True},
                         )
         if failures and len(failures) == len(accounts):
             raise RuntimeError("; ".join(failures)[:300])
@@ -391,12 +424,7 @@ class Habits:
 
     def worker_commits(self) -> set[str]:
         """Commits Chief of Staff's workers made (their `git commit` output names them)."""
-        found = set()
-        for row in self.store.all(
-            "SELECT output FROM commands WHERE kind='commit' AND exit_code=0 AND output!=''"
-        ):
-            found.update(COMMITTED.findall(row["output"]))
-        return found
+        return worker_commits(self.store)
 
     async def collect_commits(self) -> int:
         """Commit messages the owner wrote in the configured projects (not Copilot's)."""
@@ -512,7 +540,7 @@ class Habits:
                 "you. `kind` says where they wrote it:\n"
                 + "\n".join(
                     json.dumps(
-                        {"id": row["id"], "kind": row["kind"], "text": row["text"][:SHOWN_CHARS]},
+                        {"id": row["id"], "kind": row["kind"], "text": shown(own_words(row))},
                         ensure_ascii=False,
                     )
                     for row in given
@@ -547,6 +575,7 @@ class Habits:
         styles = self.styles()
         parts = [
             f"## {SECTIONS[section]}\n{styles[section]['text']}"
+            + (f"\n{LINE_COMMENTS}" if section == "pr_review" else "")
             for section in self.sections_for(row)
             if section in styles
         ]
@@ -574,7 +603,7 @@ class Habits:
             raise ValueError("The style is empty.")
         if len(text) > MAX_STYLE:
             raise ValueError(f"Keep it under {MAX_STYLE} characters ({len(text)} now).")
-        if problem := self.language_problem(section, text):
+        if problem := self.language_problem(section, text) or self.file_problem(section, text):
             self.store.set(
                 f"style_refused:{caller}", json.dumps(sorted({*self.refused(caller), section}))
             )
@@ -619,6 +648,18 @@ class Habits:
                 "Describe the rest (length, tone, structure, phrases) and call it again."
             )
         return ""
+
+    @staticmethod
+    def file_problem(section: str, text: str) -> str:
+        """Whether a review style would have line comments start with their file's name."""
+        sentences = re.split(r"[.;!?](?:\s|$)|\n", text) if section == "pr_review" else []
+        if not any(all(part.search(said) for part in FILE_NAMED) for said in sentences):
+            return ""
+        return (
+            "Leave out where comments name their file: a line comment is posted on its line, "
+            "and GitHub shows the file (the file names in the examples were added when they were "
+            "collected). Describe the rest and call it again."
+        )
 
     def refused(self, caller: str) -> list[str]:
         """Sections the learning worker must still write again."""

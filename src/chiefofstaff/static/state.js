@@ -49,6 +49,9 @@ export const state = {
   models: [],
   viewing: null,
   usageTimer: null,
+  // Drafts gone without being sent (withdrawn by their worker, replaced by a newer one): what
+  // their lines in a timeline say.
+  draftOutcomes: new Map(),
 };
 export const sessions = () => state.snapshot?.sessions || [];
 export const closedWorkers = () => state.snapshot?.closed || [];
@@ -153,6 +156,7 @@ export function applyDraft(data) {
     state.leaving.delete(`draft:${data.id}`);
     // Its review view, if one was opened, goes with it.
     document.querySelector(`.review-dialog[data-draft="${data.id}"]`)?.remove();
+    if (/^(Withdrawn|Replaced by)/.test(data.outcome || "")) state.draftOutcomes.set(data.id, data.outcome);
   }
   renderSidebar();
   updateDraftRecords();

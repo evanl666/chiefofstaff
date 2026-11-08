@@ -3,7 +3,7 @@ from datetime import datetime
 
 import pytest
 
-from chiefofstaff.models import Settings
+from chiefofstaff.models import DraftDecision, Settings
 from chiefofstaff.sources.github import GitHubSource
 from chiefofstaff.store import Store
 
@@ -227,6 +227,20 @@ async def test_new_commits_on_a_followed_pr_are_news_unless_its_own(tmp_path):
     state |= {"sha": "0a0b0c0", "compare": {"status": "ahead", "commits": [commit("Me", "Fix")]}}
     await source.poll_once()
     assert len(host.deliveries) == seen + 1, "a push of its own is not news"
+    # Bug bash: a worker's own commit with a git email GitHub does not know (no login).
+    store.execute(
+        """INSERT INTO commands(session_id, call_id, command, kind, exit_code, output, started_at)
+        VALUES ('w', 'c', 'git commit -m x', 'commit', 0, ?, 'now')""",
+        ("[fix 1a2b3c4] End with a period",),
+    )
+    anonymous = {
+        "sha": "1a2b3c4d5e",
+        "author": None,
+        "commit": {"message": "End with a period", "author": {"name": "Evan"}},
+    }
+    state |= {"sha": "1a2b3c4", "compare": {"status": "ahead", "commits": [anonymous]}}
+    await source.poll_once()
+    assert len(host.deliveries) == seen + 1, "its worker's push is not news to it"
     state |= {"sha": "9f9f9f9", "compare": {"status": "diverged", "commits": []}}
     await source.poll_once()
     assert "force-pushed" in host.deliveries[-1][2]
@@ -624,3 +638,98 @@ async def test_a_failing_review_request_search_does_not_stop_followed_prs(tmp_pa
     await source.poll_once()
     assert [thread for thread, _, _ in host.deliveries] == [THREAD]
     assert source.status["connected"] and "other" in source.status["error"]
+
+
+async def test_the_owners_own_comments_on_a_followed_pr_are_not_news(tmp_path):
+    """Bug bash: what the owner posted by hand on a followed PR came back as news to every
+    worker following it."""
+    store = Store(tmp_path / "data")
+    store.save_settings(Settings())
+    state = {
+        "state": "open",
+        "merged": False,
+        "comments": [
+            {"id": 11, "user": {"login": "Me"}, "body": "I'll fix it", "html_url": "u11"},
+            {"id": 12, "user": {"login": "bob"}, "body": "Thanks", "html_url": "u12"},
+            # Another account signed in here, not the one used on this repo: someone else's.
+            {"id": 13, "user": {"login": "Tester"}, "body": "Leave it?", "html_url": "u13"},
+        ],
+    }
+    gh = fake_gh(state)
+
+    async def signed_in(*arguments, payload=None, **_):
+        if arguments[:2] == ("auth", "status"):
+            accounts = [
+                {"login": "me", "state": "success", "active": True},
+                {"login": "tester", "state": "success", "active": False},
+            ]
+            return json.dumps({"hosts": {"github.com": accounts}})
+        return await gh(*arguments, payload=payload)
+
+    host = Host(store)
+    await GitHubSource(store, host, gh_command=signed_in).poll_once()
+    [(_thread, keys, text)] = host.deliveries
+    assert "github:issuecomment:12" in keys and "github:review:32" in keys
+    assert "github:issuecomment:13" in keys and "Leave it?" in text
+    assert "github:issuecomment:11" not in keys and "github:review:31" not in keys
+    assert "I'll fix it" not in text and "our own review" not in text
+
+
+def review_draft(harness, **target):
+    return harness.store.create_draft(
+        harness.router_id,
+        "github",
+        {"repo": "acme/app", "number": 7, "url": "https://github.com/acme/app/pull/7",
+         "via": "task", "head_sha": "c0ffee", "verdict": "comment"} | target,
+        "Looks fine",
+    )  # fmt: skip
+
+
+def posted(harness):
+    return [payload for _arguments, payload in harness.gh_calls if payload]
+
+
+async def test_a_bare_approval_chosen_in_review_is_posted(harness):
+    """Bug bash: a drafted comment switched to Approve, with no summary and no line comments,
+    was refused as "Nothing to post"."""
+    runtime = await harness.connect()
+    harness.gh_replies["api repos/acme/app/pulls/7"] = json.dumps(
+        {"state": "open", "head": {"sha": "c0ffee", "ref": "feature"}}
+    )
+    harness.gh_replies["api repos/acme/app/pulls/7/reviews"] = json.dumps({"id": 9})
+    draft = review_draft(harness)
+    with pytest.raises(ValueError, match="Nothing to post"):
+        await runtime.drafts.resolve(
+            draft["id"], DraftDecision(action="send", content={"body": ""})
+        )
+    approve = DraftDecision(action="send", content={"body": "", "verdict": "approve"})
+    assert (await runtime.drafts.resolve(draft["id"], approve))["status"] == "sent"
+    [payload] = posted(harness)
+    assert payload["event"] == "APPROVE" and payload["body"] == ""
+
+
+async def test_a_review_is_not_posted_on_the_commit_before_a_push(harness):
+    """Bug bash: just after a push, the PR still showed the old head, and the review went on
+    the commit before it."""
+    runtime = await harness.connect()
+    pull = {
+        "state": "open",
+        "head": {"sha": "c0ffee", "ref": "fix/x", "repo": {"full_name": "bob/app"}},
+    }
+    harness.gh_replies["api repos/acme/app/pulls/7"] = json.dumps(pull)
+    harness.gh_replies["api repos/acme/app/pulls/7/reviews"] = json.dumps({"id": 9})
+    harness.gh_replies["api repos/bob/app/git/ref/heads/fix/x"] = json.dumps(
+        {"object": {"sha": "beef"}}
+    )
+    stale = review_draft(harness)
+    with pytest.raises(RuntimeError, match="changed after the draft was written"):
+        await runtime.drafts.resolve(stale["id"], DraftDecision(action="send"))
+    assert harness.store.draft(stale["id"])["status"] == "failed" and posted(harness) == []
+    harness.gh_replies["api repos/bob/app/git/ref/heads/fix/x"] = json.dumps(
+        {"object": {"sha": "c0ffee"}}
+    )
+    fresh = review_draft(harness)
+    assert (await runtime.drafts.resolve(fresh["id"], DraftDecision(action="send")))[
+        "status"
+    ] == "sent"
+    assert posted(harness)[0]["commit_id"] == "c0ffee"

@@ -35,12 +35,18 @@ export const MARKERS = {
   overdue: "Overdue",
   idle: "Nothing to wait on",
   delivered: "Delivered",
+  reviewed: "Reviewed",
+  "still-following": "Still following",
   report: "Report",
   done: "Done",
   cancelled: "Cancelled",
 };
 
 const hours = (from, now) => (from ? (now - Date.parse(from)) / 3600000 : 0);
+// A delivered task whose PR (or thread) has not changed for this long goes with the finished
+// ones, still followed: news there brings it back as an Update.
+export const QUIET_HOURS = 24;
+const howLong = (hours) => (hours >= 48 ? `${Math.floor(hours / 24)}d` : `${Math.floor(hours)}h`);
 const working = (worker) => Boolean(worker) && ["working", "starting"].includes(worker.status);
 
 // The task a worker's steps are for now: the one its latest instruction named while that is
@@ -60,6 +66,8 @@ export function activeTaskId(worker, list) {
 // acceptance criteria not all verified, or a check flagged it. A report that only informs
 // (an answer, an analysis) is over once delivered: it is read, not accepted.
 export function needsAcceptance(task) {
+  // The Router said the owner wants to see it (a mockup, a plan): even a report.
+  if (task.review_required) return true;
   const receipts = task.receipts || {};
   const changed = receipts.changed || {};
   if (changed.files || changed.commits || changed.uncommitted) return true;
@@ -68,10 +76,20 @@ export function needsAcceptance(task) {
   return (receipts.flags || []).length > 0;
 }
 
-// One task's place: { section, marker, why }. `active`: the task its worker's turn is on
-// (`activeTitle`, its title); `onCard`: shown on a card under Needs you already (a draft for
-// it), so not again.
-export function taskPhase(task, worker, { active = "", activeTitle = "", now = Date.now(), stallHours = 4, onCard = false } = {}) {
+// What a worker's tasks need to know of each other: the one its turn is on (`active`, its
+// title) and one stopped mid-work that waits for the owner's Go on (`stoppedTitle`).
+export function workerContext(worker, list) {
+  const active = activeTaskId(worker, list);
+  return {
+    active,
+    activeTitle: list.find((task) => task.id === active)?.title || "",
+    stoppedTitle: list.find((task) => task.status === "waiting" && task.stopped)?.title || "",
+  };
+}
+// One task's place: { section, marker, why }. `active`, `activeTitle`, `stoppedTitle`: see
+// workerContext; `onCard`: shown on a card under Needs you already (a draft for it), so not
+// again.
+export function taskPhase(task, worker, { active = "", activeTitle = "", stoppedTitle = "", now = Date.now(), stallHours = 4, onCard = false } = {}) {
   const at = (section, marker, why = "") => ({ section, marker, why });
   const watching = task.watching || [];
   const checkBack = task.check_back;
@@ -88,8 +106,14 @@ export function taskPhase(task, worker, { active = "", activeTitle = "", now = D
     if (working(worker) && active === task.id && task.follow_up) return at("running", "following", "Following up on your message; its result stays yours to review");
     if (task.news) return at("needs", "update", "");
     if (task.status === "review" && needsAcceptance(task)) return at("needs", "review", "");
-    // Delivered, still followed for what comes next (a review, the merge, a reply).
-    if (watching.length) return at("monitoring", "delivered", "");
+    // Delivered, still followed for what comes next (a review, the merge, a reply): the
+    // owner's own work waiting on others, or a PR they reviewed waiting on its author. Nothing
+    // new there for a day, it goes with the finished ones (news brings it back).
+    if (watching.length) {
+      const quiet = hours(task.watch_changed_at, now);
+      if (task.watch_changed_at && quiet >= QUIET_HOURS) return at("finished", "still-following", `Still following; nothing new there for ${howLong(quiet)}`);
+      return at("monitoring", task.watch_kind === "reviewed" ? "reviewed" : "delivered", "");
+    }
     return at("finished", task.status === "review" ? "report" : "done");
   }
   if (task.status === "queued") return at("monitoring", "queued", "");
@@ -105,6 +129,8 @@ export function taskPhase(task, worker, { active = "", activeTitle = "", now = D
   // taken up and left, it is paused (not up next: it may be delivered, or wait on the owner).
   const on = activeTitle ? `“${activeTitle}”` : "another task";
   if (working(worker)) return task.started === false ? at("monitoring", "turn", `Up next: its worker is on ${on} now`) : at("monitoring", "paused", `Paused: its worker is on ${on} now`);
+  // Its worker was stopped on another task: this one comes once the owner says go on there.
+  if (task.started === false && stoppedTitle) return at("monitoring", "turn", `Up next: after you say Go on to “${stoppedTitle}”`);
   if (worker.status === "waiting" && active === task.id) return at("monitoring", "waiting", "It waits for your answer on a card under Needs you");
   if (/^waiting for /i.test(worker.activity || "")) return at("monitoring", "watching", `W${worker.activity.slice(1)}`);
   // Its worker is not at work and it waits on nothing: soon a report or a nudge; long quiet,
@@ -124,19 +150,28 @@ export function taskPhase(task, worker, { active = "", activeTitle = "", now = D
 export function boardOf(tasks, workers, { now = Date.now(), stallHours = 4, onCards = new Set() } = {}) {
   const bySession = new Map();
   for (const task of tasks) bySession.set(task.session_id, [...(bySession.get(task.session_id) || []), task]);
-  const sections = Object.fromEntries(SECTIONS.map(([key]) => [key, new Map()]));
   const phases = new Map();
   for (const [sessionId, list] of bySession) {
     const worker = workers.get(sessionId);
-    const active = activeTaskId(worker, list);
-    const activeTitle = list.find((task) => task.id === active)?.title || "";
-    for (const task of list) {
-      const phase = taskPhase(task, worker, { active, activeTitle, now, stallHours, onCard: onCards.has(task.id) });
-      phases.set(task.id, phase);
-      if (!phase.section || phase.section === "finished") continue;
-      const boxes = sections[phase.section];
-      boxes.set(sessionId, [...(boxes.get(sessionId) || []), task]);
-    }
+    const context = workerContext(worker, list);
+    for (const task of list) phases.set(task.id, taskPhase(task, worker, { ...context, now, stallHours, onCard: onCards.has(task.id) }));
+  }
+  // A PR a worker follows for two of its delivered tasks (one split off the other, say) is
+  // one row, on the newest: the other is with the finished ones, still followed.
+  const followed = new Map();
+  for (const task of [...tasks].sort((a, b) => b.updated_at.localeCompare(a.updated_at))) {
+    if (!["delivered", "reviewed"].includes(phases.get(task.id).marker)) continue;
+    const key = `${task.session_id}|${[...task.watching].sort().join(",")}`;
+    const first = followed.get(key);
+    if (first) phases.set(task.id, { section: "finished", marker: "still-following", why: `Still following, for “${first.title}”` });
+    else followed.set(key, task);
+  }
+  const sections = Object.fromEntries(SECTIONS.map(([key]) => [key, new Map()]));
+  for (const task of tasks) {
+    const phase = phases.get(task.id);
+    if (!phase.section || phase.section === "finished") continue;
+    const boxes = sections[phase.section];
+    boxes.set(task.session_id, [...(boxes.get(task.session_id) || []), task]);
   }
   const newest = (list) => list.reduce((latest, task) => (task.updated_at > latest ? task.updated_at : latest), "");
   const ordered = {};
@@ -146,21 +181,21 @@ export function boardOf(tasks, workers, { now = Date.now(), stallHours = 4, onCa
     entries.sort((a, b) => newest(b.tasks).localeCompare(newest(a.tasks)));
     ordered[key] = entries;
   }
-  // Finished: the newest first across all workers (not worker by worker, which hid newer
-  // results behind a busy worker's old ones); a worker's tasks next to each other share a box.
+  // Finished: the newest first across all workers, a row each (not worker by worker, which
+  // hid newer results behind a busy worker's old ones).
   const finished = tasks.filter((task) => phases.get(task.id)?.section === "finished").sort((a, b) => endedAt(b).localeCompare(endedAt(a)));
-  return { sections: ordered, phases, finished };
+  return { sections: ordered, phases, finished, monitoring: monitoringRows(tasks, phases) };
 }
 export const endedAt = (task) => task.ended_at || task.updated_at || "";
-// The first `limit` finished tasks, in boxes: consecutive tasks of one worker share a box.
-export function finishedBoxes(finished, limit) {
-  const boxes = [];
-  for (const task of finished.slice(0, limit)) {
-    const last = boxes[boxes.length - 1];
-    if (last && last.sessionId === task.session_id) last.tasks.push(task);
-    else boxes.push({ sessionId: task.session_id, tasks: [task], key: task.id });
-  }
-  return boxes;
+// Monitoring, a row per task: what went quiet first (overdue, nothing to wait on), then the
+// rest, newest first; the owner's deliveries waiting on others and the PRs they reviewed in
+// groups of their own.
+const URGENT = { overdue: 0, idle: 1 };
+export function monitoringRows(tasks, phases) {
+  const rank = (task) => URGENT[phases.get(task.id).marker] ?? 2;
+  const list = tasks.filter((task) => phases.get(task.id)?.section === "monitoring").sort((a, b) => rank(a) - rank(b) || b.updated_at.localeCompare(a.updated_at));
+  const marked = (...markers) => list.filter((task) => markers.includes(phases.get(task.id).marker));
+  return { waiting: list.filter((task) => !["delivered", "reviewed"].includes(phases.get(task.id).marker)), delivered: marked("delivered"), reviewed: marked("reviewed") };
 }
 // Workers at work with none of their tasks under Running and none open (news on a PR a
 // finished task follows, a question about it): a card each, so their work shows. One with a

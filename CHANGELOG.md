@@ -1,5 +1,61 @@
 # Changelog
 
+## 0.1.27 (2026-11-08)
+
+A second live bug bash (four instances: lifecycle, Slack and the UI, GitHub, and the changes in
+0.1.26) and a reviewer's report (E1–E10), all fixed.
+
+- **Home**: every section folds (remembered; *Needs you* opens again when something new comes).
+  *Monitoring* and *Recently finished* are lists that scroll on their own, a row per task (no worker
+  groups), a row opens its card in place, and a list does not move under the mouse. Results still
+  followed are in *Delivered, waiting on others* and *PRs you reviewed* (folded); one quiet for a
+  day is with the finished ones as *Still following*. Short tooltips that stay right. Worker boxes
+  say *waits for you*, *done*, *failed*.
+- **Reports**: a report that only informs has *Done* on its card and a dot until you open it; files
+  its worker wrote in its folder are on it (and can be artifacts). The Router marks a task you want
+  to see (a mockup, a plan) *review*: it waits for your OK even without code changes.
+- **Names**: docs are named as declared, else by the words the report linked them with, never by
+  their id; a link counts as made only when declared or reported as made (not a link it discussed,
+  `docs.google.com` itself, one in code, or one cut with "…"); a card's PR chips are the PRs it made
+  or reviewed; tests it ran elsewhere are not a "✓ tests" chip. A worker with nothing open is named
+  by the task it did last.
+- **Split** (now *Move the latest result to a new task…*): offered only when the latest result looks
+  like other work; it shows what stays and what moves (that result and the messages that asked for
+  it, nothing older), refuses a title like "111", keeps the worker's name and the task's follows,
+  and can be undone for ten minutes (until the new task is worked on).
+- **Stop**: it also stops a command its turn left running (Copilot held the session busy, the Go on
+  waited, the Watchdog stepped in and the work was done twice); the next message steers in. A first
+  instruction a worker never saw goes out again with Go on. A task stopped and then worked on again
+  (told in chat, by the Router) runs again (work on anything else leaves it stopped); a queued
+  worker stopped is *Stopped*, not queued forever; a task behind a stopped one says it waits for
+  your Go on. Cancelling a stopped task lets the worker go on with its others at once (not with
+  another you stopped); cancelling the task at work no longer asks for a second report. The Watchdog
+  does not send a nudge decided before the worker reported, and lists the tasks a worker has open
+  (not the first it ever had).
+- **Per-task changes from snapshots**: a task's changes are what its checkouts went through from
+  when it was taken up to its result: a file changed with a shell command counts, two tasks changing
+  one file each have their own lines, a later task's commits are not an earlier one's, and in your
+  folder another task's files (or what you pulled meanwhile) are not its own. A change asked for in
+  chat on finished work is a new result to review.
+- **Chat**: what you write while a worker waits on its question card answers the card; a reply to an
+  @ from Home is shown once; the Router hears that a worker already answered what you asked it
+  directly; closing a worker keeps its question under *Needs you*.
+- **Slack**: an empty reply is never sent (it used to send the original draft); a reply is held when
+  someone wrote in the conversation since (*Send anyway*), a newer draft replaces the older one,
+  sessions can withdraw a draft; a read error is not shown as a message; names instead of ids; a
+  reply to a DM goes in the DM, not a thread. Away: only real questions are sent as questions, and
+  an answer to one is applied even after you wrote to the Router; weekends count as after hours (and
+  Settings says why it is not scanning).
+- **GitHub**: a task keeps the PR it opened after its worker replies on it (merge card, Artifacts);
+  PR news goes to the task that made it, named in it, and a finished task asked about it goes back
+  to where it was; your own comments (as the account you use on that repository) and your workers'
+  own pushes are not news; a bare approval chosen in *Review…* is posted; a review is not posted on
+  an old commit right after a push; *Create PR* writes the result and its checks (not the worker's
+  instructions); the learned review style no longer starts comments with the file name; a rejected
+  draft is news on its task. PR states agree everywhere (*changes requested* wins; *No checks*).
+- **Other**: a criterion is not "contradicted" by a command that failed on another file; a tool call
+  with leaked parameter markup is repaired; lessons list evidence once, cut with "…".
+
 ## 0.1.26 (2026-11-07)
 
 Fixes from a live bug bash (three instances driven like an owner would), and four suspicions it

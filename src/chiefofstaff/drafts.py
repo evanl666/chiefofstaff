@@ -116,39 +116,55 @@ class Drafts:
             if draft["kind"] == "slack":
                 await self.learn_style(draft["text"], reason=decision.reason or "(no reason)")
             reason = f" Reason: {decision.reason}" if decision.reason else " No reason given."
+            if (task := self.task_of(draft)) and task["status"] in {"review", "done"}:
+                # Its result said the draft waits for the owner: it does not any more.
+                self.runtime.task_actions.news(
+                    task["id"], f"You rejected its draft.{reason} Nothing was sent."
+                )
+                self.runtime.task_actions.publish(task)
             await self.tell_drafter(
                 draft, f"The owner rejected draft {draft_id}.{reason} Do not send it.", True
             )
             return draft
-        final = decision.text.strip() or draft["text"]
+        final = decision.text.strip() if "text" in decision.model_fields_set else draft["text"]
         if draft["kind"] == "github" and "body" in decision.content:
             # The review's summary as the owner left it: empty posts the line comments alone.
             final = str(decision.content["body"]).strip()
+        target = draft["target"]
+        if not final.strip() and (
+            draft["kind"] in {"slack", "reply"}
+            or target.get("in_reply_to")
+            or target.get("reply_to_comment")
+        ):
+            # Cleared on the card: never the drafted text in its place.
+            raise ValueError("The reply is empty.")
+        verdict = decision.content.get("verdict")
+        if draft["kind"] == "github" and "verdict" in target and verdict:
+            if not isinstance(verdict, str) or verdict not in REVIEW_EVENTS:
+                raise ValueError("The verdict is approve, request_changes or comment.")
+        else:
+            verdict = None
         if draft["kind"] == "reply":
             return await self.copied(draft, final)
         if draft["kind"] == "github" and not final:
-            # Checked before anything about the draft changes.
-            if draft["target"].get("in_reply_to"):
-                raise ValueError("The reply is empty.")
+            # Checked before anything about the draft changes; with the verdict the owner chose.
             kept = [
                 comment
-                for index, comment in enumerate(draft["target"].get("comments") or [])
+                for index, comment in enumerate(target.get("comments") or [])
                 if str(decision.content.get(f"comment:{index}", comment["body"])).strip()
             ]
-            if not kept and draft["target"].get("verdict") != "approve":
+            if not kept and (verdict or target.get("verdict")) != "approve":
                 raise ValueError("Nothing to post: write a summary or keep a line comment.")
+        if draft["kind"] == "slack" and decision.content.get("send_anyway") is not True:
+            await self.check_conversation(draft)
         comments_edited = ""
-        if draft["kind"] == "github" and draft["target"].get("comments"):
+        if draft["kind"] == "github" and target.get("comments"):
             draft, comments_edited = self.edit_comments(draft, decision.content)
-        verdict = decision.content.get("verdict")
-        if draft["kind"] == "github" and "verdict" in draft["target"] and verdict:
-            if verdict not in REVIEW_EVENTS:
-                raise ValueError("The verdict is approve, request_changes or comment.")
-            if verdict != draft["target"]["verdict"]:
-                comments_edited += f"\nThe owner changed the verdict to {verdict}."
-                draft = self.store.update_draft_target(
-                    draft_id, {**draft["target"], "verdict": verdict}
-                )
+        if verdict and verdict != draft["target"]["verdict"]:
+            comments_edited += f"\nThe owner changed the verdict to {verdict}."
+            draft = self.store.update_draft_target(
+                draft_id, {**draft["target"], "verdict": verdict}
+            )
         self.store.update_draft(draft_id, status="sending", final_text=final)
         try:
             if draft["kind"] == "slack":
@@ -236,6 +252,97 @@ class Drafts:
         target["comments"] = kept
         draft = self.store.update_draft_target(draft["id"], target)
         return draft, "Line comments the owner changed:\n" + "\n".join(changes)
+
+    async def check_conversation(self, draft: dict):
+        """Before a Slack reply goes out: has someone else written there since the message its
+        card quotes (or since it was drafted)? Then it is not sent: the card quotes what they
+        wrote, and sending again (the owner has seen it) or content send_anyway sends it."""
+        target = draft["target"]
+        slack = self.runtime.slack
+        latest = await slack.latest_message(target["channel_id"], target.get("thread_ts") or "")
+        stamp = latest.get("ts") or ""
+        if not stamp:
+            return  # Slack shows nothing to compare: the owner's send decides, as before.
+        seen = target.get("latest_ts") or ""
+        since = float(seen) if seen else datetime.fromisoformat(draft["created_at"]).timestamp()
+        if float(stamp) <= since or latest.get("user") == slack.status.get("user_id"):
+            return
+        who = latest.get("name") or "Someone"
+        said = latest.get("text") or latest.get("quote") or ""
+        said = said if len(said) <= 200 else said[:199].rstrip() + "\u2026"
+        target = {
+            **target,
+            "latest": latest.get("quote") or "",
+            "latest_ts": stamp,
+            "moved_on": {"who": who, "text": said, "ts": stamp, "at": now()},
+        }
+        target.pop("latest_error", None)
+        self.store.update_draft_target(draft["id"], target)
+        draft = self.store.update_draft(
+            draft["id"],
+            outcome=f"{who} wrote since this draft: \u201c{said}\u201d. Not sent: send anyway?",
+        )
+        self.bus.publish("draft", draft)
+        raise ValueError(
+            f"Not sent: {who} wrote since this draft was written: \u201c{said}\u201d. Read it on "
+            "the card; send again to send it anyway."
+        )
+
+    async def supersede(self, draft: dict) -> list[str]:
+        """A newer Slack reply its session drafted for the same conversation replaces the older
+        ones still waiting: the owner gets one card, the latest. In a DM, a reply in the DM and
+        one in a thread of it are the same conversation; two threads are not."""
+        target = draft["target"]
+        channel, thread = target["channel_id"], target.get("thread_ts") or ""
+        replaced = []
+        async with self.draft_lock:
+            for older in self.store.drafts("pending"):
+                other = older["target"].get("thread_ts") or ""
+                if (
+                    older["id"] == draft["id"]
+                    or older["kind"] != "slack"
+                    or older["session_id"] != draft["session_id"]
+                    or older["target"].get("channel_id") != channel
+                    or (
+                        other != thread and not (channel.startswith("D") and not (other and thread))
+                    )
+                ):
+                    continue
+                older = self.store.update_draft(
+                    older["id"],
+                    status="rejected",
+                    outcome=f"Replaced by a newer draft ({draft['id']}).",
+                    resolved_at=now(),
+                )
+                self.bus.publish("draft", older)
+                replaced.append(older["id"])
+        return replaced
+
+    async def withdraw(self, session_id: str, draft_id: str, reason: str) -> dict:
+        """A session takes back a draft of its own still waiting for the owner (the
+        conversation moved on, it answers the wrong thing): its card leaves, with why. Not an
+        owner's rejection: nothing is learned from it."""
+        reason = " ".join(reason.split())[:300]
+        if not reason:
+            raise ValueError("Say why, in a line the owner reads.")
+        async with self.draft_lock:
+            draft = self.store.draft(draft_id.strip())
+            if draft["session_id"] != session_id or draft["kind"] not in {
+                "slack",
+                "github",
+                "reply",
+            }:
+                raise ValueError(f"{draft_id} is not a draft of yours.")
+            if draft["status"] != "pending":
+                raise ValueError(
+                    f"Draft {draft['id']} is {draft['status']}: only a draft that waits for the "
+                    "owner can be withdrawn."
+                )
+            draft = self.store.update_draft(
+                draft["id"], status="rejected", outcome=f"Withdrawn: {reason}", resolved_at=now()
+            )
+        self.bus.publish("draft", draft)
+        return draft
 
     async def answer_workspace(self, draft: dict, decision: DraftDecision) -> dict:
         title = draft["target"]["title"]
@@ -436,7 +543,9 @@ class Drafts:
     async def settle_reported(self, task_id: str, reported: bool = False):
         """Its evidence first: whether it changed code decides. `reported`: just reported done
         (its evidence is collected as after any report)."""
-        await self.runtime.task_actions.collect_evidence(task_id, keep_stale=not reported)
+        await self.runtime.task_actions.collect_evidence(
+            task_id, keep_stale=not reported, ended=reported
+        )
         task = self.runtime.tasks.get(task_id)
         if task["status"] != "review":
             return

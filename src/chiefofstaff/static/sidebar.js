@@ -6,7 +6,7 @@ import { closedWorkers, DOT_HELP, HOME, loadState, sessions, state, workerTitle 
 import { IN_TERMINAL, readOnlyTimeline, scrollToBottom, select, setComposer, setLayout } from "./session.js";
 import { homeItem, needsCount, WORKER_STATES, workerStates } from "./inbox.js";
 import { closeMentions, setRecipient } from "./mention.js";
-import { openSettings } from "./settings.js";
+import { openSettings, watchGaps } from "./settings.js";
 // One count in the whole sidebar, on Home: what needs the owner. Workers show only their dot,
 // which says where each stands as Home does (Needs you, Running, Monitoring).
 function sessionItem(session, label, where) {
@@ -118,14 +118,15 @@ export function renderStatusLine() {
     );
   }
   if (snap.settings.github_enabled && snap.github.error) nodes.push(el("div", { class: "bad", text: `GitHub: ${snap.github.error}` }));
-  // A watch whose last scan could not see all of its source: "0 found" means nothing there.
-  const partial = snap.connector?.last?.incomplete || [];
-  if (partial.length) {
+  // A watch the last scan could not search, or saw only part of: "0 found" means nothing there.
+  const { missed, partial } = watchGaps(snap.connector?.last);
+  if (missed.length || partial.length) {
+    const many = (list, words) => (list.length ? `${list.length === 1 ? "one" : list.length} ${words}` : "");
     nodes.push(
       el(
         "div",
-        { class: "bad", title: partial.map((item) => `Watch ${item.watch}: ${item.reason}`).join("\n") },
-        `Watches: ${partial.length === 1 ? "one was" : `${partial.length} were`} only partly covered `,
+        { class: "bad", title: [...missed.map((item) => `Watch ${item.watch}: not searched (${item.reason})`), ...partial.map((item) => `Watch ${item.watch}: partly covered (${item.reason})`)].join("\n") },
+        `Watches: ${[many(missed, "not searched"), many(partial, "only partly covered")].filter(Boolean).join(", ")} `,
         el("button", { type: "button", class: "link", text: "Settings", onclick: () => openSettings("connections") }),
       ),
     );

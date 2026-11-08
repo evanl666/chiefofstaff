@@ -16,8 +16,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from . import receipts, threads
+from .backend import stop_background
 from .envelope import wrap
+from .policy import within
 from .roles import WORKER
+from .sources.github import marked
 from .sources.slack import describe
 from .store import hours_ago, now
 from .tasks import ENDED, OPEN
@@ -26,8 +29,12 @@ from .workspaces import (
     base_of,
     changes,
     checkout_git,
+    checkout_top,
     diff,
     same_version,
+    snapshot,
+    tree_names,
+    untracked_work,
     version,
     worth_committing,
 )
@@ -117,6 +124,30 @@ def clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
+SPLIT_UNDO_MINUTES = 10
+
+
+def deliverable_title(title: str) -> str:
+    """A task's title as the owner gives it: it must say what the task delivers ("111" does
+    not)."""
+    from .envelope import clean_title
+
+    title = clean_title(title.strip())
+    letters = sum(char.isalpha() for char in title)
+    if title == "Task" or len(title) < 8 or letters < 3:
+        raise ValueError(
+            "Give it a title saying what it delivers (at least 8 characters, in words): "
+            "“Fix the ICP flow's Spark 3.5 dependency”."
+        )
+    return title
+
+
+def ran_in(command: str) -> str:
+    """Where a command line runs, when it says so (`cd folder && …`); "" otherwise."""
+    found = re.match(r"\s*cd\s+(\"[^\"]+\"|'[^']+'|\S+)\s*(?:&&|;)", command or "")
+    return found.group(1).strip("\"'") if found else ""
+
+
 class TaskActions:
     """Changes tasks on behalf of sessions and the owner."""
 
@@ -166,6 +197,13 @@ class TaskActions:
             commands, evidence, task["result"] or task["progress"], criteria, claims
         )
         found["flags"] += failing
+        if found.get("tests"):
+            # Tests of its own work: run where it changed code. A task with no checkout ran
+            # someone else's tests (a clone it read): shown as where it ran them, not a pass.
+            found["tests"]["own"] = bool((evidence or {}).get("checkouts"))
+            found["tests"]["cwd"] = ran_in(found["tests"]["command"]) or (
+                (self.store.find_session(task["session_id"]) or {}).get("cwd") or ""
+            )
         return found
 
     async def check_fresh(self, session_id: str):
@@ -233,13 +271,16 @@ class TaskActions:
                 "UPDATE runs SET evidence=? WHERE id=?", (json.dumps(evidence), run["id"])
             )
 
-    async def collect_evidence(self, task_id: str, keep_stale: bool = False):
+    async def collect_evidence(self, task_id: str, keep_stale: bool = False, ended: bool = False):
         """After a task is reported done: its checkouts' changes and its PRs' state.
-        `keep_stale`: not after a report (a PR opened), so what was checked did not change."""
+        `keep_stale`: not after a report (a PR opened), so what was checked did not change.
+        `ended`: its result was just reported: what its checkouts hold now is what it made."""
         task = self.tasks.get(task_id)
         row = self.store.find_session(task["session_id"])
         if not row:
             return
+        if ended:
+            await self.record_end(task)  # Its result: its share ends here.
         checkouts = []
         for checkout in self.workspaces.checkouts(row):
             with suppress(Exception):
@@ -270,7 +311,62 @@ class TaskActions:
             return None
         base = json.loads(found)
         touched = set(json.loads(self.store.get(f"touched:{task['id']}") or "[]"))
-        return Scope(base.get("commits", {}).get(checkout["path"], ""), base.get("at", 0), touched)
+        # Its result's snapshot: what it delivered (later tasks' work is theirs). Not while it
+        # is open: then its share is up to now.
+        ended = json.loads(self.store.get(f"taskend:{task['id']}") or "{}")
+        end = ended.get(checkout["path"]) if task["status"] not in OPEN else None
+        others: set[str] = set()
+        if checkout.get("shared"):
+            for row in self.store.all(
+                "SELECT key, value FROM kv WHERE key LIKE 'touched:%' AND key!=?",
+                (f"touched:{task['id']}",),
+            ):
+                others.update(json.loads(row["value"] or "[]"))
+        return Scope(
+            base.get("commits", {}).get(checkout["path"], ""),
+            base.get("at", 0),
+            touched,
+            start=base.get("trees", {}).get(checkout["path"], ""),
+            end=end,
+            others=others,
+            head=base.get("heads", {}).get(checkout["path"], ""),
+        )
+
+    async def changed_since_result(self, task: dict) -> bool:
+        """Whether its checkouts changed since its result was reported (it was asked for more
+        in chat and changed code): then what it reports is a new result."""
+        ended = json.loads(self.store.get(f"taskend:{task['id']}") or "{}")
+        row = self.store.find_session(task["session_id"])
+        if not ended or not row:
+            return False
+        for checkout in self.workspaces.checkouts(row):
+            before = ended.get(checkout["path"])
+            with suppress(Exception):
+                now_ = await snapshot(checkout)
+                if not (before and now_ and before["tree"] and now_["tree"]):
+                    continue
+                if before["tree"] == now_["tree"]:
+                    continue
+                top = await checkout_top(checkout)
+                differ = await tree_names(checkout, top, before["tree"], now_["tree"])
+                # Not what running code left behind (new `__pycache__/`, a `.coverage`).
+                if any(status != "A" or untracked_work([name]) for name, status in differ.items()):
+                    return True
+        return False
+
+    async def record_end(self, task: dict):
+        """Its checkouts as its result left them: its share ends there (a later task on the
+        same branch or folder does not add to it)."""
+        row = self.store.find_session(task["session_id"])
+        if not row or not self.store.get(f"taskbase:{task['id']}"):
+            return
+        ended = {}
+        for checkout in self.workspaces.checkouts(row):
+            with suppress(Exception):
+                if (found := await snapshot(checkout)) and found["tree"]:
+                    ended[checkout["path"]] = found
+        if ended:
+            self.store.set(f"taskend:{task['id']}", json.dumps(ended))
 
     async def record_base(self, session_id: str, task_ids: list[str], at: float):
         """Where its checkouts are when a worker takes a task up: that task's changes are what
@@ -279,17 +375,70 @@ class TaskActions:
         task_ids = [task_id for task_id in task_ids if not self.store.get(f"taskbase:{task_id}")]
         if not row or not task_ids:
             return
-        commits = {}
+        commits, trees, heads = {}, {}, {}
         first = self.tasks.for_session(session_id)[:1]
-        # Its first task's work starts where its branch did; a later one's where it is now.
-        if not (first and all(task_id == first[0]["id"] for task_id in task_ids)):
-            for checkout in self.workspaces.checkouts(row):
-                with suppress(Exception):
-                    if found := await version(checkout):
+        # Its first task's work starts where its branch did (in a folder of the owner's, where
+        # the folder is now); a later one's where it is now: its commit and all its files.
+        later = not (first and all(task_id == first[0]["id"] for task_id in task_ids))
+        for checkout in self.workspaces.checkouts(row):
+            if not (later or checkout.get("shared")):
+                continue
+            with suppress(Exception):
+                if found := await snapshot(checkout):
+                    if found["tree"]:
+                        trees[checkout["path"]] = found["tree"]
+                    heads[checkout["path"]] = found["commit"]
+                    if later:
                         commits[checkout["path"]] = found["commit"]
         for task_id in task_ids:
             if not self.store.get(f"taskbase:{task_id}"):
-                self.store.set(f"taskbase:{task_id}", json.dumps({"at": at, "commits": commits}))
+                self.store.set(
+                    f"taskbase:{task_id}",
+                    json.dumps({"at": at, "commits": commits, "trees": trees, "heads": heads}),
+                )
+
+    def needs_acceptance(self, task: dict) -> bool:
+        """Whether a finished result waits for the owner to accept it, as Home decides (board.js
+        needsAcceptance): it changed code, opened a PR still open, has criteria not verified,
+        a flag, or the Router said the owner wants to see it. Else it only informs."""
+        if task["status"] != "review":
+            return False
+        shown = self.view(task)
+        if shown.get("review_required"):
+            return True
+        receipts = shown.get("receipts") or {}
+        changed = receipts.get("changed") or {}
+        if changed.get("files") or changed.get("commits") or changed.get("uncommitted"):
+            return True
+        if any(
+            pr.get("own") and pr.get("state") not in {"MERGED", "CLOSED"}
+            for pr in receipts.get("prs") or []
+        ):
+            return True
+        if receipts.get("criteria") and receipts.get("verdict") != "verified":
+            return True
+        return bool(receipts.get("flags"))
+
+    def status_words(self, task: dict) -> str:
+        """A task's status for the Router: a finished one says whether it waits for the owner."""
+        if task["status"] == "review":
+            return "review, to accept" if self.needs_acceptance(task) else "review, report"
+        if task["status"] == "waiting" and self.store.get(f"stopped:{task['id']}"):
+            return "waiting, stopped by the owner"
+        return task["status"]
+
+    def resume_stopped(self, session_id: str):
+        """Its worker is at work again on a task it was stopped on: one it was told to go on
+        with since (in its chat, by the Router, a nudge: an instruction naming it, see
+        `Runtime.took_up`) runs again. Work on anything else (another task, PR news) leaves
+        a stopped task stopped."""
+        for task in self.tasks.for_session(session_id):
+            if (
+                task["status"] == "waiting"
+                and self.store.get(f"stopped:{task['id']}")
+                and self.store.get(f"goingon:{task['id']}")
+            ):
+                self.publish(self.tasks.move(task["id"], "running", progress=""))
 
     def touched(self, task_id: str, paths: list[str]):
         """Files a worker's edits wrote for a task (in a folder of the owner's, only those are
@@ -344,12 +493,15 @@ class TaskActions:
             if view.get("title"):
                 self.runtime.remember_pr_title(f"{repo}#{number}", view["title"])
         own, about = await self.pr_roles(task, prs)
+        reviewed = self.reviewed_prs(task["session_id"])
         # When each last changed (its state, checks, review, mergeability), not when it was
         # read: "2h ago" on the owner's list says how long it has stood like this.
         before = {pr["label"].lower(): pr for pr in self.previous_prs(task["id"])}
         for pr in prs:
             pr["own"] = pr["label"].lower() in own
             pr["about"] = pr["label"].lower() in about
+            # Reviewed by its worker (others' work it was asked to look at): a main chip too.
+            pr["reviewed"] = pr["label"].lower() in reviewed and not pr["own"]
             old = before.get(pr["label"].lower()) or {}
             same = old and all(old.get(key) == pr.get(key) for key in PR_STANDING)
             pr["changed_at"] = (
@@ -454,13 +606,16 @@ class TaskActions:
             self.runtime.publish_state()
 
     def reviewed_prs(self, session_id: str) -> set[str]:
-        """The PRs a worker reviewed or replied on ("owner/repo#n"): others' work, not its own."""
+        """The PRs a worker drafted a review of ("owner/repo#n"): others' work, not its own. Not
+        those it only replied on: it answers comments on its own PRs too."""
         return {
             f"{target['repo']}#{target['number']}".lower()
             for row in self.store.all(
                 "SELECT target FROM drafts WHERE session_id=? AND kind='github'", (session_id,)
             )
-            if (target := json.loads(row["target"])).get("repo") and target.get("number")
+            if (target := json.loads(row["target"])).get("repo")
+            and target.get("number")
+            and not (target.get("in_reply_to") or target.get("reply_to_comment"))
         }
 
     def first_reporter(self, label: str) -> str:
@@ -553,9 +708,10 @@ class TaskActions:
                 first == f"{task['session_id']}|" and not task["id"]
             )
             maker = self.opener(label)
-            if label not in reviewed and (
-                label in opened
-                or (
+            # What it opened is its own, whatever else it drafted on it.
+            if label in opened or (
+                label not in reviewed
+                and (
                     not maker
                     and (
                         (pr.get("branch") and pr.get("branch") in branches)
@@ -658,6 +814,7 @@ class TaskActions:
                 "head": pr["head"],
                 "task_id": task["id"],
                 "review": pr.get("review", ""),
+                "checks": pr.get("checks", ""),
             }
             card = self.store.create_draft(task["session_id"], "merge", target, pr.get("title", ""))
             self.bus.publish("draft", card)
@@ -791,7 +948,7 @@ class TaskActions:
             raise ValueError(f"The task is {task['status']}: open a PR once it is finished.")
         row = self.store.session(task["session_id"])
         gh = self.runtime.github.gh
-        body = self.report_markdown(task_id).split("\n", 2)[-1]  # Its title is the PR's.
+        title, body = self.pr_text(task)
         opened: list[str] = []
         async with self.states[row["id"]].checkouts:
             plans = []
@@ -816,7 +973,7 @@ class TaskActions:
                     continue
                 created = await gh(
                     "pr", "create", "--repo", slug, "--head", branch,
-                    "--title", task["title"], "--body", body,
+                    "--title", title, "--body", body,
                 )  # fmt: skip
                 if not (found := threads.PR_URL.search(created)):
                     raise ValueError(f"GitHub did not say which PR it opened: {created[:300]}")
@@ -839,6 +996,31 @@ class TaskActions:
             )
         await self.collect_evidence(task_id, keep_stale=True)
         return self.tasks.get(task_id)
+
+    def pr_text(self, task: dict) -> tuple[str, str]:
+        """A PR's title and description for a task's work: what changed, as its worker
+        reported it, and its checks. Not its instructions (written for the worker: "do not
+        open a PR"), its credits or the project's name in its title."""
+        title = re.sub(r"\s*\u00b7\s*[\w.-]+$", "", task["title"]).strip() or task["title"]
+        found = self.view(task)["receipts"] or {}
+        lines = [(task["result"] or task["progress"] or "").strip(), ""]
+        checks = []
+        for label, key in (("Tests", "tests"), ("Checks", "checks"), ("Build", "build")):
+            if (
+                (item := found.get(key))
+                and item.get("passed") is not None
+                and item.get("own", True)
+            ):
+                outcome = "passed" if item["passed"] else f"failed (exit {item['exit_code']})"
+                checks.append(f"- {label}: `{item['command']}` {outcome}")
+        for item in found.get("criteria") or []:
+            if item["state"] == "verified":
+                checks.append(
+                    f"- {item['criterion']}" + (f": `{item['command']}`" if item["command"] else "")
+                )
+        if checks:
+            lines += ["**Checked**", "", *checks, ""]
+        return title[:250], marked("\n".join(lines).strip())
 
     async def pr_plan(self, checkout: dict) -> tuple[str, str, str] | None:
         """(repository, GitHub owner/name, branch) to open a PR from, or None: no commits."""
@@ -953,6 +1135,21 @@ class TaskActions:
                     f"You have {len(open_)} open tasks ({listed}): call report again with the "
                     "task_id of the one this is about."
                 )
+            # Nothing open: news on a thread it follows is about the task it follows it for.
+            last = self.store.one(
+                "SELECT id FROM messages WHERE session_id=? AND kind='report' "
+                "ORDER BY id DESC LIMIT 1",
+                (caller,),
+            )
+            news = self.store.one(
+                "SELECT json_extract(meta, '$.task_id') AS task_id FROM messages "
+                "WHERE session_id=? AND kind='inbound' AND id>? "
+                "AND json_extract(meta, '$.thread') IS NOT NULL "
+                "AND json_extract(meta, '$.task_id') IS NOT NULL ORDER BY id DESC LIMIT 1",
+                (caller, last["id"] if last else 0),
+            )
+            if news and (task := self.tasks.find(news["task_id"])):
+                return task
             return self.tasks.current(caller)
         task = self.tasks.find(reference)
         if not task or task["session_id"] != caller:
@@ -991,6 +1188,7 @@ class TaskActions:
                 owner=reason,
                 scope=self.runtime.learning.scope_of(task["session_id"]),
             )
+        was_stopped = bool(self.store.get(f"stopped:{task_id}"))
         if was := self.store.get(f"reopened:{task_id}"):
             # Only the follow-up on finished work is cancelled: its result stands.
             self.store.delete(f"reopened:{task_id}")
@@ -1021,9 +1219,11 @@ class TaskActions:
                 # At work on it: that work stops now (the running command too), and it goes on
                 # with its other tasks, with what it was sent for them and never saw.
                 self.runtime.asks.cancel_requests(row["id"], why, keep_questions=task_id)
+                self.states[row["id"]].after_abort = True  # Its aborted turn owes no report.
                 if handle := self.states.handle(row["id"]):
                     with suppress(Exception):
                         await handle.abort()
+                    await stop_background(handle)
                 self.states[row["id"]].busy = False
                 self.states[row["id"]].steps.clear()
                 if self.delivery.unsee(row["id"]):
@@ -1039,6 +1239,25 @@ class TaskActions:
                     display=why,
                     meta={"task_id": task_id},
                 )  # fmt: skip
+            elif (
+                was_stopped
+                and (going := [o for o in others if not self.store.get(f"stopped:{o['id']}")])
+                and row["status"] != "working"
+                and self.states.is_live(row["id"])
+                and self.delivery.undefer(row["id"])
+            ):
+                # Stopped on this task, then it is cancelled: what it was given for its other
+                # tasks and held back goes out now, so it goes on with them (not with another
+                # task the owner stopped).
+                listed = "; ".join(f"{other['id']} “{other['title']}”" for other in going)
+                text = (f"{note} " if received else "") + f"Go on with your open task(s): {listed}."
+                await self.delivery.deliver(
+                    row["id"],
+                    wrap("system", "cancelled" if received else "go-on", text, task=task_id),
+                    kind="notice",
+                    display=why,
+                    meta={"task_id": task_id},
+                )
             elif received and row["status"] == "working" and self.states.is_live(row["id"]):
                 # Not "stopped": its turn goes on, and it still owes a report on its other task.
                 await self.delivery.deliver(
@@ -1063,9 +1282,11 @@ class TaskActions:
         elif row and not row["closed_at"]:
             if on_it:
                 self.runtime.asks.cancel_requests(row["id"], why, keep_questions=task_id)
+                self.states[row["id"]].after_abort = True
                 if handle := self.states.handle(row["id"]):
                     with suppress(Exception):
-                        await handle.abort()  # Copilot also stops the running command.
+                        await handle.abort()
+                    await stop_background(handle)  # And what it left running in the background.
                 self.states[row["id"]].busy = False
                 self.states[row["id"]].after_refresh = ""  # Not "go on" once it is stopped.
                 self.delivery.defer_pending(row["id"])  # Its task, if it never started.
@@ -1096,11 +1317,7 @@ class TaskActions:
 
     def rename(self, task_id: str, title: str, by: str = "you") -> dict:
         """A task named for what it delivers; its earlier names are kept (shown on hover)."""
-        from .envelope import clean_title
-
-        title = clean_title(title.strip())
-        if not title or title == "Task":
-            raise ValueError("Give it a title saying what it delivers.")
+        title = deliverable_title(title)
         task = self.tasks.get(task_id)
         if title == task["title"]:
             return self.view(task)
@@ -1111,55 +1328,167 @@ class TaskActions:
         self.runtime.publish_session(self.store.session(task["session_id"]))
         return self.view(task)
 
-    def split(self, task_id: str, title: str, by: str = "you") -> dict:
-        """A finished task that came to hold two deliverables: its latest result becomes a
-        task of its own, named for it; the task keeps the result it had before. Its reports
-        move with it, so each task's report is its own."""
-        from .envelope import clean_title
-
-        title = clean_title(title.strip())
-        if not title or title == "Task":
-            raise ValueError("Give the new task a title saying what it delivers.")
-        task = self.tasks.get(task_id)
+    def split_parts(self, task: dict) -> tuple[dict, dict, list[dict]]:
+        """What a split would do: (the result it keeps, the latest result that moves, the
+        messages that move with it: from the instruction that asked for that result on).
+        Raises when there is nothing to split off."""
         if task["status"] not in {"review", "done"}:
-            raise ValueError(f"Task {task_id} is {task['status']}: split it once it is finished.")
-        reports = self.store.all(
-            "SELECT id, text, meta, created_at FROM messages WHERE session_id=? "
-            "AND kind='report' AND json_extract(meta, '$.task_id')=? "
-            "AND json_extract(meta, '$.status')='done' ORDER BY id",
-            (task["session_id"], task_id),
+            raise ValueError(
+                f"Task {task['id']} is {task['status']}: split it once it is finished."
+            )
+        messages = self.store.all(
+            "SELECT id, kind, text, meta, created_at FROM messages WHERE session_id=? "
+            "AND json_extract(meta, '$.task_id')=? ORDER BY id",
+            (task["session_id"], task["id"]),
         )
+        reports = [
+            m for m in messages
+            if m["kind"] == "report" and json.loads(m["meta"] or "{}").get("status") == "done"
+        ]  # fmt: skip
         if len(reports) < 2:
             raise ValueError(
                 "It has one result only: rename it instead, or give the other work a new task."
             )
-        latest, earlier = reports[-1], reports[-2]
+        earlier, latest = reports[-2], reports[-1]
+        asked = [
+            m["id"] for m in messages
+            if earlier["id"] < m["id"] < latest["id"] and m["kind"] in {"router", "owner"}
+        ]  # fmt: skip
+        first = asked[0] if asked else latest["id"]
+        moving = [m for m in messages if m["id"] >= first]
+        return dict(earlier), dict(latest), [dict(m) for m in moving]
+
+    def splittable(self, task: dict) -> bool:
+        """Whether its latest result looks like other work than the one before (it names other
+        PRs, files or links), so splitting it off is worth offering."""
+        try:
+            earlier, latest, _ = self.split_parts(task)
+        except ValueError:
+            return False
+
+        def named(text: str) -> set[str]:
+            found = {f"{repo}#{number}".lower() for repo, number in threads.PR_URL.findall(text)}
+            found |= {threads.link_key(url) for url in threads.links(text)}
+            found |= {code for code in re.findall(r"`([^`\n]{3,80})`", text) if "." in code}
+            return found
+
+        new = named(latest["text"])
+        return bool(new) and not new <= named(earlier["text"])
+
+    def split_preview(self, task_id: str) -> dict:
+        task = self.tasks.get(task_id)
+        try:
+            earlier, latest, moving = self.split_parts(task)
+        except ValueError as exc:
+            return {"allowed": False, "why": str(exc)}
+        return {
+            "allowed": True,
+            "why": "" if self.splittable(task) else "Its results look like the same work.",
+            "keeps": {"result": earlier["text"][:4000], "at": earlier["created_at"]},
+            "moves": {
+                "result": latest["text"][:4000],
+                "at": latest["created_at"],
+                "messages": [
+                    {k: m[k] for k in ("id", "kind", "created_at")} | {"text": m["text"][:300]}
+                    for m in moving
+                ],
+            },
+        }
+
+    def split(self, task_id: str, title: str, by: str = "you") -> dict:
+        """A finished task that came to hold two deliverables: its latest result becomes a
+        task of its own, named for it; the task keeps the result it had before. That result's
+        report and the messages that asked for it move with it; the worker's name, the task's
+        follows and the rest stay. Undone with merge_back within SPLIT_UNDO_MINUTES."""
+        title = deliverable_title(title)
+        task = self.tasks.get(task_id)
+        earlier, latest, moving = self.split_parts(task)
         # Finished work split in two: what its worker is on now stays its current task.
         current = self.store.value("SELECT task_id FROM sessions WHERE id=?", (task["session_id"],))
         made = self.tasks.create(
-            task["session_id"], title, f"Split off “{task['title']}” ({task_id}).",
-            status=task["status"],
-        )  # fmt: skip
+            task["session_id"], title, f"Split off task {task_id}.", status=task["status"]
+        )
         self.store.execute(
             "UPDATE sessions SET task_id=? WHERE id=?", (current, task["session_id"])
         )
         self.tasks.start_run(made["id"], "split")
         made = self.tasks.move(made["id"], task["status"], result=latest["text"])
-        # Its reports and messages since the earlier result are the new task's.
-        for row in self.store.all(
-            "SELECT id, meta FROM messages WHERE session_id=? AND id>? "
-            "AND json_extract(meta, '$.task_id')=?",
-            (task["session_id"], earlier["id"], task_id),
-        ):
+        for row in moving:
             meta = json.loads(row["meta"] or "{}")
             self.store.update_message_meta(row["id"], {**meta, "task_id": made["id"]})
         names = json.loads(self.store.get(f"titles:{made['id']}") or "[]")
         names.append({"title": f"split from “{task['title']}”", "at": now(), "by": by})
         self.store.set(f"titles:{made['id']}", json.dumps(names))
+        mark = self.store.value("SELECT max(id) FROM messages") or 0
+        until = (datetime.now(UTC) + timedelta(minutes=SPLIT_UNDO_MINUTES)).isoformat()
+        self.store.set(
+            f"splitfrom:{made['id']}",
+            json.dumps({
+                "task_id": task_id, "until": until, "mark": mark, "status": made["status"],
+                "moved": [m["id"] for m in moving], "result": task["result"],
+            }),
+        )  # fmt: skip
         self.tasks.update(task_id, result=earlier["text"])
         self.publish(self.tasks.get(task_id))
         self.runtime.publish_session(self.store.session(task["session_id"]))
         return self.view(self.tasks.get(made["id"]))
+
+    def last_message(self, session_id: str, task_id: str) -> int:
+        """The id of the newest message about this task: when it last saw activity."""
+        return (
+            self.store.value(
+                "SELECT max(id) FROM messages WHERE session_id=? "
+                "AND json_extract(meta, '$.task_id')=?",
+                (session_id, task_id),
+            )
+            or 0
+        )
+
+    def worked_on_since_split(self, task_id: str, found: dict) -> bool:
+        """Whether the task split off saw work since (a follow-up, a report, a status of its
+        own): undoing the split then would lose it."""
+        task = self.tasks.find(task_id)
+        if not task or task["status"] != found.get("status", task["status"]):
+            return True
+        return self.last_message(task["session_id"], task_id) > int(found.get("mark") or 0)
+
+    def split_from(self, task_id: str) -> dict | None:
+        found = json.loads(self.store.get(f"splitfrom:{task_id}") or "null")
+        if found and self.worked_on_since_split(task_id, found):
+            # Its Undo is gone: it is a task of its own now.
+            return {"task_id": found["task_id"], "until": ""}
+        return {"task_id": found["task_id"], "until": found["until"]} if found else None
+
+    def merge_back(self, task_id: str) -> dict:
+        """Undo a split, soon after: the result and messages go back to the task they came from."""
+        found = json.loads(self.store.get(f"splitfrom:{task_id}") or "null")
+        if not found:
+            raise ValueError("That task was not split off.")
+        if found["until"] < now():
+            raise ValueError("Too late to undo the split: rename or cancel the task instead.")
+        if self.worked_on_since_split(task_id, found):
+            raise ValueError(
+                "It was worked on since the split, so it stays a task of its own: rename or "
+                "cancel it instead."
+            )
+        made = self.tasks.get(task_id)
+        original = found["task_id"]
+        for message_id in found["moved"]:
+            row = self.store.one("SELECT meta FROM messages WHERE id=?", (message_id,))
+            if row:
+                meta = json.loads(row["meta"] or "{}")
+                self.store.update_message_meta(message_id, {**meta, "task_id": original})
+        self.store.delete(f"splitfrom:{task_id}")
+        self.store.execute(
+            "DELETE FROM task_deps WHERE task_id=? OR depends_on=?", (task_id, task_id)
+        )
+        self.store.execute("DELETE FROM runs WHERE task_id=?", (task_id,))
+        self.store.execute("DELETE FROM tasks WHERE id=?", (task_id,))
+        restored = self.tasks.update(original, result=found.get("result") or made["result"])
+        self.publish(restored)
+        self.runtime.publish_state()  # The split-off task is gone from every list.
+        self.runtime.publish_session(self.store.session(made["session_id"]))
+        return self.view(restored)
 
     def news(self, task_id: str, text: str):
         """What a worker reported about its finished work (its PR approved or merged, a reply
@@ -1220,14 +1549,8 @@ class TaskActions:
             untrusted=bool(row["slack"]),
         )
         if before == "cancelled":
-            # Answered after it was cancelled: the owner wants it after all. The note that it
-            # was cancelled, not sent yet, is moot.
-            mark = int(self.store.get(f"sent:{row['id']}") or 0)
-            for message in self.store.messages(row["id"], after=mark):
-                prompt = message["meta"].get("prompt", "")
-                if 'type="cancelled"' in prompt and f'task="{task_id}"' in prompt:
-                    kept = {k: v for k, v in message["meta"].items() if k != "prompt"}
-                    self.store.update_message_meta(message["id"], {**kept, "dropped": True})
+            # Answered after it was cancelled: the owner wants it after all.
+            self.drop_cancelled_note(row["id"], task_id)
         if before in {"review", "done", "failed", "cancelled"}:
             # Cancelling this follow-up gives the finished result back.
             self.store.set(f"reopened:{task_id}", before)
@@ -1261,6 +1584,15 @@ class TaskActions:
         self.runtime.owner_told(row, text)
         return task
 
+    def drop_cancelled_note(self, session_id: str, task_id: str):
+        """The note that a task was cancelled, not sent yet, is moot once it is wanted again."""
+        mark = int(self.store.get(f"sent:{session_id}") or 0)
+        for message in self.store.messages(session_id, after=mark):
+            prompt = message["meta"].get("prompt", "")
+            if 'type="cancelled"' in prompt and f'task="{task_id}"' in prompt:
+                kept = {k: v for k, v in message["meta"].items() if k != "prompt"}
+                self.store.update_message_meta(message["id"], {**kept, "dropped": True})
+
     async def retry(self, task_id: str, text: str = "") -> dict:
         """Run a failed or cancelled task again in its worker (reopened if closed)."""
         task = self.tasks.get(task_id)
@@ -1280,6 +1612,8 @@ class TaskActions:
                 scope=self.runtime.learning.scope_of(task["session_id"]),
             )
         self.store.set(f"reopened:{task_id}", before["status"])
+        if before["status"] == "cancelled":
+            self.drop_cancelled_note(row["id"], task_id)  # Moot: it is wanted after all.
         task = self.tasks.move(task_id, "running", reason="retry", progress="")
         body = f"The owner asks you to try task {task_id} “{task['title']}” again."
         if text.strip():
@@ -1325,6 +1659,8 @@ class TaskActions:
                     found.append(key)
                 continue
             pr = threads.GITHUB_PR.fullmatch(key)
+            if pr and self.store.get(f"splitfrom:{task['id']}"):
+                continue  # Split off: the follows stay with the task it came from.
             if pr:
                 label = f"{pr.group(1)}#{pr.group(2)}".lower()
                 if self.creator(label) == task["id"] or names_pr(
@@ -1334,6 +1670,22 @@ class TaskActions:
             elif task["status"] in OPEN and current and current["id"] == task["id"]:
                 found.append(key)  # A Slack thread: the task it was on.
         return found
+
+    def watch_standing(self, task: dict, follows: list[str]) -> dict:
+        """What the PRs it follows are to it ("own": its delivery waiting on others;
+        "reviewed": others' work it reviewed) and when any last changed."""
+        watched = {
+            f"{found.group(1)}#{found.group(2)}".lower()
+            for key in self.watching(task, follows)
+            if (found := threads.GITHUB_PR.fullmatch(key))
+        }
+        prs = [pr for pr in self.previous_prs(task["id"]) if pr["label"].lower() in watched]
+        reviewed = any(pr.get("reviewed") for pr in prs) or bool(
+            watched and watched <= self.reviewed_prs(task["session_id"])
+        )
+        kind = "own" if any(pr.get("own") for pr in prs) else "reviewed" if reviewed else ""
+        changed = max((pr.get("changed_at") or pr.get("at") or "" for pr in prs), default="")
+        return {"watch_kind": kind, "watch_changed_at": changed}
 
     def watching(self, task: dict, follows: list[str]) -> list[str]:
         """The threads it waits on for this task that can be read: what may bring it news."""
@@ -1370,6 +1722,7 @@ class TaskActions:
             # threads it waits on, and when its worker last did anything.
             "check_back": self.check_back(task),
             "watching": self.watching(task, follows),
+            **self.watch_standing(task, follows),
             "watch_failing": self.failing(task, follows),
             "earlier_titles": json.loads(self.store.get(f"titles:{task['id']}") or "[]"),
             # When its worker was last asked where this task stands (stalled).
@@ -1389,18 +1742,43 @@ class TaskActions:
             # Every link its reports gave, and those it was given (not its own work).
             "links": json.loads(self.store.get(f"links:{task['id']}") or "[]"),
             "given_links": self.given_links(task, row),
+            # What its reports call those links ([the plan](…)), and the ones they say it made.
+            "link_names": json.loads(self.store.get(f"linknames:{task['id']}") or "{}"),
+            "made_links": json.loads(self.store.get(f"madelinks:{task['id']}") or "[]"),
+            # Files it wrote in its own folder; whether the owner read its result; whether the
+            # Router said the owner wants to see it (then it waits for their OK).
+            "files": self.made_files(task, row),
+            "read": bool(self.store.get(f"read:{task['id']}")),
+            "review_required": bool(self.store.get(f"reviewreq:{task['id']}")),
+            # Its latest result looks like other work (offered to split off), and, split off
+            # from another task, until when that can be undone.
+            "splittable": task["status"] in {"review", "done"} and self.splittable(task),
+            "split_from": self.split_from(task["id"]),
         }
+
+    def mark_read(self, task_id: str) -> dict:
+        """The owner read its result (opened its report)."""
+        task = self.tasks.get(task_id)
+        if not self.store.get(f"read:{task_id}"):
+            self.store.set(f"read:{task_id}", now())
+            self.publish(task)
+        return self.view(task)
 
     def declare_artifacts(self, task_id: str, items: list[dict]):
         """Its worker says what the task made or runs and where each stands: kept by link, the
         latest word on each; a link said again moves to the top."""
         known = json.loads(self.store.get(f"artifacts:{task_id}") or "[]")
         stamp = now()
+        row = self.store.find_session(self.tasks.get(task_id)["session_id"])
         for item in items:
             url = str(item.get("url") or "").strip()
-            if not re.match(r"https?://\S+$", url) or threads.PR_URL.match(url):
+            path = self.local_file(row, url)
+            if path:
+                url = Path(path).as_uri()  # A file it made (a mockup): opened from its folder.
+            elif not re.match(r"https?://\S+$", url) or threads.PR_URL.match(url):
                 continue  # Not a link; a PR's status comes from GitHub.
             entry = {
+                **({"path": path} if path else {}),
                 "url": url[:2000],
                 "name": clip(" ".join(str(item.get("name") or "").split()), 60),
                 "status": clip(" ".join(str(item.get("status") or "").split()), 40),
@@ -1410,12 +1788,53 @@ class TaskActions:
         self.store.set(f"artifacts:{task_id}", json.dumps(known[-20:]))
         self.publish(self.tasks.get(task_id))
 
+    def local_file(self, row: dict | None, given: str) -> str:
+        """A file in one of the worker's folders, by its path or file:// link; "" otherwise."""
+        if not row or not given:
+            return ""
+        path = given.removeprefix("file://") if given.startswith("file://") else given
+        if not os.path.isabs(path):
+            return ""
+        real = os.path.realpath(path)
+        folders = [row.get("cwd") or "", *(c["path"] for c in self.workspaces.checkouts(row))]
+        if not os.path.isfile(real) or not any(
+            folder and within(real, os.path.realpath(folder)) for folder in folders
+        ):
+            return ""
+        return real
+
+    def made_files(self, task: dict, row: dict) -> list[dict]:
+        """Files its edits wrote in its own folder (not in a checkout, whose changes are its
+        receipts) that are still there: a mockup, a plan, a CSV it delivered."""
+        if not row or not row.get("cwd"):
+            return []
+        folder = os.path.realpath(row["cwd"])
+        checkouts = [os.path.realpath(c["path"]) for c in self.workspaces.checkouts(row)]
+        found = []
+        for path in json.loads(self.store.get(f"touched:{task['id']}") or "[]"):
+            if not within(path, folder) or any(within(path, c) for c in checkouts):
+                continue
+            with suppress(OSError):
+                size = os.path.getsize(path)
+                found.append({"path": path, "name": os.path.basename(path), "size": size})
+        return found[-20:]
+
     def reported_links(self, task_id: str, text: str):
         """Every link its reports gave, kept: a later report that does not repeat a doc it made
         does not take it off the task (nor off the owner's Artifacts). With when each was first
         reported: pasted back to it later, it is still its own, not one it was given."""
         if not (found := threads.links(text)):
             return
+        if names := threads.named_links(text):
+            kept = json.loads(self.store.get(f"linknames:{task_id}") or "{}")
+            self.store.set(
+                f"linknames:{task_id}", json.dumps(dict(list({**kept, **names}.items())[-60:]))
+            )
+        if made := threads.made_links(text):
+            kept = json.loads(self.store.get(f"madelinks:{task_id}") or "[]")
+            self.store.set(
+                f"madelinks:{task_id}", json.dumps(list(dict.fromkeys([*kept, *made]))[-60:])
+            )
         known = json.loads(self.store.get(f"links:{task_id}") or "[]")
         merged = list(dict.fromkeys([*known, *found]))[-60:]
         if merged != known:

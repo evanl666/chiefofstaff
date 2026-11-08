@@ -210,9 +210,13 @@ async def test_messages_during_a_card_do_not_leave_the_worker_waiting(harness):
         runtime.asks.on_user_input({"question": "Ship?"}, {"sessionId": worker})
     )
     draft = await pending(harness, "question")
-    await runtime.owner_send(worker, "Also update the changelog")
-    await runtime.drafts.resolve(draft["id"], DraftDecision(action="answer", text="yes"))
-    await asking
+    sent = len(session.sent)
+    # Written in its chat while it waits on the card: that answers the card (as a message, it
+    # would wait unread until the card timed out).
+    message = await runtime.owner_send(worker, "Yes, and also update the changelog")
+    assert message["meta"]["answered"] == draft["id"] and len(session.sent) == sent
+    assert (await asking)["answer"] == "Yes, and also update the changelog"
+    assert harness.store.draft(draft["id"])["status"] != "pending"
     session.emit("session.idle")
     await settle(runtime)
     assert runtime.view(harness.store.session(worker))["status"] != "waiting"

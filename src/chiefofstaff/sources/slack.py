@@ -10,6 +10,7 @@ Chief of Staff uses the owner's Slack *user* token in two places:
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import re
@@ -56,6 +57,7 @@ MAX_FOLLOW_FAILURES = 5
 MAX_RESULT_CHARS = 6000
 LATEST_CHARS = 400
 PERMALINK = re.compile(r"/archives/[A-Z0-9]+/p(\d{10})(\d{6})")
+PERMALINK_CHANNEL = re.compile(r"/archives/([A-Z0-9]+)/p\d")
 TIMESTAMP = re.compile(r"(?<![\d.])(\d{10}\.\d{6})(?![\d])")
 THREAD_TS = re.compile(r"thread_ts\W{0,4}\d{10}\.\d{6}")
 USER_ID = re.compile(r"user_id is (U[A-Z0-9]{6,})")
@@ -176,30 +178,102 @@ class SlackMcp:
         return text
 
 
-# One message as Slack's MCP server lists it: who, then its text (then its permalink).
+# One message as Slack's MCP server lists it: where and who, then its text (then its permalink).
 MESSAGE = re.compile(
-    r"From: <@[A-Z0-9]+>(?: \((?P<name>[^)\n]*)\))?[^\n]*\nText: (?P<text>.*?)"
-    r"(?:\nPermalink: \S+|(?=\n\S[^\n]*\| From: )|$)",
+    r"(?:Channel: <#(?P<channel>[A-Z0-9]+)>(?: \((?P<where>[^)\n]*)\))?[^\n]*?\| )?"
+    r"From: <@(?P<user>[A-Z0-9]+)>(?: \((?P<name>[^)\n]*)\))?(?P<rest>[^\n]*?)"
+    r"(?:\n| \| )Text: (?P<text>.*?)"
+    r"(?:\nPermalink: (?P<link>\S+)|(?=\n\S[^\n]*\| From: )|$)",
     re.DOTALL,
 )
+STAMP = re.compile(r"(?<!\w)ts: (\d{10}\.\d{6})")
+THREAD_STAMP = re.compile(r"thread_ts[:=] ?(\d{10}\.\d{6})")
+# Names Slack gives next to its ids: "<@U0BOB001> (Bob Li)", "<#C0DEPLOYS> (deploys)",
+# "<@U0BOB001|bob>".
+NAMED = re.compile(r"<([@#])([UWCDG][A-Z0-9]{2,})(?:\|([^>\n]{1,80}))?>(?: \(([^)\n]{1,80})\))?")
+MAX_NAMES = 2000
+
+
+def entities(text: str) -> str:
+    """Slack writes "&", "<" and ">" in a message's text as entities."""
+    return text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+
+
+def messages(listed: str) -> list[dict]:
+    """The messages of what Slack listed (a thread, a channel's history, a search), in the
+    listing's order: channel, where (its name), user, name, ts, thread_ts, text, link."""
+    found = []
+    for match in MESSAGE.finditer(listed or ""):
+        rest, link = match["rest"] or "", match["link"] or ""
+        stamp = STAMP.search(rest)
+        linked = PERMALINK.search(link)
+        root = THREAD_STAMP.search(rest) or THREAD_STAMP.search(link)
+        name = (match["name"] or "").strip()
+        found.append(
+            {
+                "channel": match["channel"] or "",
+                "where": (match["where"] or "").strip(),
+                "user": match["user"],
+                "name": "" if name == "?" else name,
+                "ts": stamp.group(1) if stamp else ".".join(linked.groups()) if linked else "",
+                "thread_ts": root.group(1) if root else "",
+                "text": entities(" ".join(match["text"].split())),
+                "link": link,
+            }
+        )
+    return found
+
+
+def newest_entry(found: list[dict], last: bool) -> dict | None:
+    """The newest of these messages: by their ts when each has one, else by place (`last`:
+    the listing is oldest first)."""
+    if not found:
+        return None
+    if all(entry["ts"] for entry in found):
+        return max(found, key=lambda entry: float(entry["ts"]))
+    return found[-1] if last else found[0]
+
+
+def quote(entry: dict) -> str:
+    """A message as "Who: text", shortened at its end (a cut says so)."""
+    said = f"{entry['name']}: {entry['text']}" if entry["name"] else entry["text"]
+    return said if len(said) <= LATEST_CHARS else said[: LATEST_CHARS - 1].rstrip() + "…"
 
 
 def newest_message(listed: str, last: bool) -> str:
-    """The newest message of what Slack listed, as "Who: text", shortened at its end (a cut
-    says so); the listing itself, shortened, when it is not in that form."""
-    found = list(MESSAGE.finditer(listed or ""))
-    if not found:
-        text = (listed or "").strip()
-        if len(text) <= LATEST_CHARS:
-            return text
-        return "…" + text[-LATEST_CHARS:].lstrip() if last else text[:LATEST_CHARS].rstrip() + "…"
-    entry = found[-1] if last else found[0]
-    who = (entry["name"] or "").strip()
-    # Slack writes "&", "<" and ">" in a message's text as entities.
-    text = " ".join(entry["text"].split()).replace("&lt;", "<").replace("&gt;", ">")
-    text = text.replace("&amp;", "&")
-    said = f"{who}: {text}" if who and who != "?" else text
-    return said if len(said) <= LATEST_CHARS else said[: LATEST_CHARS - 1].rstrip() + "…"
+    """The newest message of what Slack listed, as "Who: text"; "" when no message is in it
+    (an error such as "Thread not found." is not a message)."""
+    entry = newest_entry(messages(listed), last)
+    return quote(entry) if entry else ""
+
+
+def readable(
+    listed: str, names: dict[str, str] | None = None, stamps: set[str] | None = None
+) -> str:
+    """Slack's listing as the owner reads it: who wrote what where, by name, without ids and
+    timestamps; only the messages `stamps` names when given ("1712345678.000100"). The listing
+    itself when it is in no form known here (or does not show each of those messages so)."""
+    names = names or {}
+    found = messages(listed)
+    if stamps is not None:
+        found = [entry for entry in found if entry["ts"] in stamps]
+        if not stamps <= {entry["ts"] for entry in found}:
+            return listed
+    lines = []
+    for entry in found:
+        who = entry["name"] or names.get(entry["user"]) or "Someone"
+        channel = entry["channel"] or (PERMALINK_CHANNEL.findall(entry["link"]) or [""])[0]
+        if channel.startswith("D"):
+            where = "in a DM"
+        elif title := names.get(channel) or entry["where"]:
+            where = f"in #{title.lstrip('#')}"
+        else:
+            where = "in a channel" if channel else ""
+        if entry["thread_ts"] and entry["thread_ts"] != entry["ts"]:
+            where += ", in a thread" if where else "in a thread"
+        head = f"{who} {where}".strip()
+        lines.append(f"{head}: {entry['text']}" + (f"\n{entry['link']}" if entry["link"] else ""))
+    return "\n\n".join(lines) or listed
 
 
 class SlackSource:
@@ -350,6 +424,7 @@ class SlackSource:
                         "limit": PAGE_SIZE,
                     },
                 )
+                self.learn_names(text)
                 found = message_keys(text)
                 links = threads.slack_messages(text)
                 fresh = []
@@ -374,7 +449,8 @@ class SlackSource:
                 if fresh:
                     unseen += fresh
                     sections.append(f"Search `{query}`:\n{text[:MAX_RESULT_CHARS]}")
-                    shown.append(text[:MAX_RESULT_CHARS])
+                    stamps = {key.removeprefix("slack:") for key in fresh}
+                    shown.append(readable(text[:MAX_RESULT_CHARS], self.display_names(), stamps))
                 # A full page may hide newer matches: continue after the newest one returned.
                 newest = int(max((float(key.removeprefix("slack:")) for key in found), default=0))
                 if len(found) < PAGE_SIZE or newest <= after:
@@ -390,12 +466,12 @@ class SlackSource:
                 thread,
                 keys,
                 f"New messages in a Slack conversation you follow ({thread}):\n\n{body}",
-                body,
+                readable(body, self.display_names()),
             )
             if not delivered:  # Nobody follows it any more.
                 unseen += [key for key in keys if not self.seen(key)]
                 sections.append(body)
-                shown.append(body)
+                shown.append(readable(body, self.display_names()))
         if unseen:
             keys_line = (
                 f"Thread keys: {', '.join(dict.fromkeys(thread_keys))}\n" if thread_keys else ""
@@ -442,6 +518,7 @@ class SlackSource:
                 "limit": PAGE_SIZE,
             },
         )
+        self.learn_names(text)
         stamps = [key.removeprefix("slack:") for key in message_keys(text)]
         keys = [f"{DELEGATED}{stamp}" for stamp in stamps]
         if self.store.get("slack_delegate_emoji") != emoji:
@@ -463,7 +540,7 @@ class SlackSource:
             f"The owner reacted with :{emoji}: to {len(fresh)} Slack message(s), handing them to "
             f"you (new ts: {', '.join(fresh)}). The results may also list messages handed over "
             "earlier; handle only the new ones.\n" + keys_line + "\n" + body,
-            body,
+            readable(body, self.display_names(), set(fresh)),
             kind="delegated",
         )
 
@@ -498,6 +575,7 @@ class SlackSource:
                 logger.warning("Could not read followed %s (%s): %s", thread, failures + 1, exc)
                 continue
             self.store.set(f"slackfail:{thread}", "0")
+            self.learn_names(text)
             fresh = [
                 key
                 for key in message_keys(text)
@@ -512,7 +590,11 @@ class SlackSource:
                     f"New messages in a Slack {kind} you follow ({thread}; new ts: "
                     f"{', '.join(key.removeprefix('slack:') for key in fresh)}). Earlier "
                     f"messages may be included for context.\n\n{text[:MAX_RESULT_CHARS]}",
-                    text[:MAX_RESULT_CHARS],
+                    readable(
+                        text[:MAX_RESULT_CHARS],
+                        self.display_names(),
+                        {key.removeprefix("slack:") for key in fresh},
+                    ),
                 )
                 self.store.set(f"slackhw:{thread}", str(newest))
 
@@ -547,20 +629,94 @@ class SlackSource:
                 )
         return ""
 
-    async def latest(self, channel_id: str, thread_ts: str = "") -> str:
+    async def read_conversation(self, channel_id: str, thread_ts: str = "") -> list[dict]:
+        """The messages where a reply would go: a thread's (oldest first), else the newest of
+        the conversation. Raises when Slack shows no message there ("Thread not found.")."""
+        if thread_ts:
+            tool, arguments = (
+                "slack_read_thread",
+                {"channel_id": channel_id, "message_ts": thread_ts},
+            )
+        else:
+            tool, arguments = "slack_read_channel", {"channel_id": channel_id, "limit": 1}
+        text = await asyncio.wait_for(self.mcp.call(tool, arguments), 20)
+        self.learn_names(text)
+        if found := messages(text):
+            return found
+        said = " ".join((text or "").split())[:200]
+        raise SlackError(f"Slack showed no message there ({said or 'nothing'}).")
+
+    async def latest_message(self, channel_id: str, thread_ts: str = "") -> dict:
         """The newest message where a reply would go, as Slack shows it: what the owner checks
-        a draft's destination by, rather than by what the drafting session says."""
+        a draft's destination by, rather than by what the drafting session says. {"quote":
+        "Who: text", "ts", "user"}; {"error": why} when no message could be read there."""
         try:
-            if thread_ts:
-                arguments = {"channel_id": channel_id, "message_ts": thread_ts}
-                text = await asyncio.wait_for(self.mcp.call("slack_read_thread", arguments), 20)
-                return newest_message(text, last=True)  # Oldest first: the newest at the end.
-            arguments = {"channel_id": channel_id, "limit": 1}
-            text = await asyncio.wait_for(self.mcp.call("slack_read_channel", arguments), 20)
-            return newest_message(text, last=False)
+            found = await self.read_conversation(channel_id, thread_ts)
         except Exception as exc:
             logger.info("Could not read %s for a draft: %s", channel_id, describe(exc))
-            return ""
+            return {"error": describe(exc)[:300]}
+        return self.described(newest_entry(found, last=bool(thread_ts)))
+
+    def described(self, entry: dict | None) -> dict:
+        if not entry:
+            return {"error": "Slack showed no message there."}
+        name = entry["name"] or self.display_names().get(entry["user"], "")
+        return {
+            "quote": quote({**entry, "name": name}),
+            "ts": entry["ts"],
+            "user": entry["user"],
+            "name": name,
+            "text": entry["text"],
+        }
+
+    async def latest(self, channel_id: str, thread_ts: str = "") -> str:
+        """The newest message's quote ("" when none could be read)."""
+        return (await self.latest_message(channel_id, thread_ts)).get("quote", "")
+
+    async def reply_place(self, channel_id: str, thread_ts: str, in_thread: bool = False) -> dict:
+        """Where a drafted reply goes ({"thread_ts"}) and the newest message there (as
+        latest_message). A reply to a DM message that is in no thread goes into the DM, not
+        into a new thread under it, unless `in_thread`; a reply to a message inside a thread
+        goes into that thread (under its first message, as Slack threads)."""
+        if not thread_ts:
+            return {"thread_ts": ""} | await self.latest_message(channel_id)
+        try:
+            found = await self.read_conversation(channel_id, thread_ts)
+        except Exception as exc:
+            logger.info("Could not read %s for a draft: %s", channel_id, describe(exc))
+            return {"thread_ts": thread_ts, "error": describe(exc)[:300]}
+        here = next((entry for entry in found if entry["ts"] == thread_ts), None)
+        root = here["thread_ts"] if here else ""
+        if root and root != thread_ts:
+            return {"thread_ts": root} | await self.latest_message(channel_id, root)
+        alone = here is not None and all(entry["ts"] == thread_ts for entry in found)
+        if channel_id.startswith("D") and alone and not in_thread:
+            return {"thread_ts": ""} | await self.latest_message(channel_id)
+        return {"thread_ts": thread_ts} | self.described(newest_entry(found, last=True))
+
+    # Names: who a user id is and what a conversation id is called, as Slack listed them.
+
+    def learn_names(self, listed: str):
+        found = {}
+        for _kind, identifier, alias, name in NAMED.findall(listed or ""):
+            name = (name or alias).strip()
+            if name and name != "?":
+                found[identifier] = name
+        known = self.display_names()
+        if all(known.get(identifier) == name for identifier, name in found.items()):
+            return
+        known.update(found)
+        kept = dict(list(known.items())[-MAX_NAMES:])
+        self.store.set("slacknames", json.dumps(kept, ensure_ascii=False))
+
+    def display_names(self) -> dict[str, str]:
+        """Slack ids -> names, as read in what Slack listed: users (U…, W…) and conversations
+        (C…, G…, D…)."""
+        try:
+            known = json.loads(self.store.get("slacknames") or "{}")
+        except ValueError:
+            return {}
+        return known if isinstance(known, dict) else {}
 
     async def send(self, target: dict, text: str) -> str:
         if self.fingerprint and not self.can_send:

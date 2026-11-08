@@ -1,9 +1,10 @@
 // Task cards on Home: what runs and what it does now, what waits, what is finished.
 
-import { api, el, foldable, moreMenu, reconcile, submits, toast } from "./dom.js";
-import { activeTaskId, MARKERS, SECTION_DOT, SECTIONS, taskPhase } from "./board.js";
-import { ago, compactPaths, findUrls, gist, linkKey, linkKind, markdown, plural, prTitle, shorten, since } from "./text.js";
-import { toneOf } from "./artifacts.js";
+import { api, el, foldable, moreMenu, once, reconcile, submits, toast } from "./dom.js";
+import { MARKERS, SECTION_DOT, SECTIONS, taskPhase, workerContext } from "./board.js";
+import { ago, compactPaths, displayPath, gist, linkName, markdown, plural, prTitle, shorten, since, taskLinks } from "./text.js";
+import { isHidden, prStatus, setHidden, toneOf } from "./artifacts.js";
+import { openFile } from "./files.js";
 import { byId, closedWorkers, ownerQuestions, pendingDrafts, sessions, state, tasks } from "./state.js";
 import { renderSidebar } from "./sidebar.js";
 import { select } from "./session.js";
@@ -90,19 +91,27 @@ export function followUpItem(session) {
 const phaseOf = (task) => {
   const worker = byId(task.session_id);
   const list = tasks().filter((other) => other.session_id === task.session_id);
-  const active = activeTaskId(worker, list);
-  return taskPhase(task, worker, { active, activeTitle: list.find((other) => other.id === active)?.title || "", stallHours: state.snapshot?.settings?.stall_hours || 4 });
+  return taskPhase(task, worker, { ...workerContext(worker, list), stallHours: state.snapshot?.settings?.stall_hours || 4 });
 };
+// Monitoring and Recently finished show a row per task: a click shows its whole card in place.
+const isRow = (phase) => ["monitoring", "finished"].includes(phase.section);
+// A task split off another can go back into it for a while.
+const undoUntil = (task) => (task.split_from?.until && Date.parse(task.split_from.until) > Date.now() ? task.split_from.until : "");
+// A report that only informs, not read yet.
+const unread = (task, phase) => phase.marker === "report" && !task.read;
+const REPORT_HELP = "Only a report: nothing to accept. Done once read.";
 // The key covers what changes a card's actions and layout; the version, what only its text.
 // `phase`: where it is on the board ({section, marker, why}: see board.js).
 export function taskItem(task, phase = phaseOf(task)) {
   const worker = byId(task.session_id);
   const live = ["running", "queued"].includes(task.status);
+  const [meta, help] = taskMeta(task, phase);
+  const made = [task.artifacts, task.links, task.files, task.made_links, task.link_names, task.watch_kind, task.watch_changed_at, state.snapshot?.artifacts_hidden];
   return {
-    key: `task:${task.id}:${task.status}:${phase.section}:${phase.marker}:${task.stopped ? 1 : 0}:${task.blocked ? 1 : 0}:${createsPr(task) ? 1 : 0}:${task.news?.at || ""}`,
+    key: `task:${task.id}:${task.status}:${phase.section}:${phase.marker}:${task.stopped ? 1 : 0}:${task.blocked ? 1 : 0}:${createsPr(task) ? 1 : 0}:${task.news?.at || ""}:${task.splittable ? 1 : 0}:${undoUntil(task) ? 1 : 0}`,
     id: task.id,
     // For running cards the minute too: "6m" and "3m ago" move on by themselves.
-    version: `${task.updated_at}:${task.title}:${phase.why}:${worker?.status || ""}:${worker?.activity || ""}:${worker?.step || ""}:${worker?.step_since || ""}:${worker?.turn_task || ""}:${task.credits}:${task.runs}:${JSON.stringify(task.receipts?.prs || null)}:${task.status === "review" ? JSON.stringify(task.receipts || null) : ""}:${live ? `${Math.floor(Date.now() / 60000)}:${queuedKey()}` : ""}:${waitsOnOwner(task, worker)}:${(task.watching || []).join(",")}:${(task.watch_failing || []).join(",")}:${JSON.stringify(task.check_back || null)}:${task.nudged_at || ""}:${JSON.stringify(task.receipts?.changed || null)}`,
+    version: `${task.updated_at}:${task.title}:${phase.why}:${meta.join("|")}:${help}:${task.read ? 1 : 0}:${worker?.status || ""}:${worker?.activity || ""}:${worker?.step || ""}:${worker?.step_since || ""}:${worker?.turn_task || ""}:${task.credits}:${task.runs}:${JSON.stringify(task.receipts?.prs || null)}:${task.status === "review" ? JSON.stringify(task.receipts || null) : ""}:${live ? `${Math.floor(Date.now() / 60000)}:${queuedKey()}` : ""}:${waitsOnOwner(task, worker)}:${(task.watching || []).join(",")}:${(task.watch_failing || []).join(",")}:${JSON.stringify(task.check_back || null)}:${task.nudged_at || ""}:${JSON.stringify(task.receipts?.changed || null)}:${JSON.stringify(made)}`,
     build: () => taskCard(task, phase),
     refresh: (node) => refreshTaskCard(node, task, phase),
   };
@@ -112,33 +121,41 @@ const queuedKey = () => `${sessions().filter(busy).length}/${state.snapshot.sett
 function refreshTaskCard(node, task, phase) {
   const title = node.querySelector(".head .title");
   title.textContent = task.title;
+  title.dataset.tip = titleTip(task, phase);
   const [meta, help] = taskMeta(task, phase);
   node.querySelector(".head .meta").replaceChildren(...metaParts(meta));
-  node.querySelector(".head .meta").title = help;
+  node.querySelector(".head .meta").dataset.tip = help;
+  const dot = node.querySelector(".head .dot");
+  dot.className = dotClass(task, phase);
+  dot.dataset.tip = unread(task, phase) ? "Not read yet" : "";
   const review = task.status === "review";
   const id = node.querySelector(".head .tid");
   if (id) id.textContent = task.id;
-  for (const part of [".task-body", ".news", ".chips", ".report"]) {
+  for (const part of [".row-line", ".task-body", ".news", ".chips", ".report"]) {
     const old = node.querySelector(`:scope > ${part}`);
-    const fresh = part === ".task-body" ? taskBody(task, phase) : part === ".news" ? newsBlock(task) : !review ? null : part === ".chips" ? chips(task) : report(task);
+    const fresh = part === ".row-line" ? (isRow(phase) ? rowLine(task, byId(task.session_id), phase) : null) : part === ".task-body" ? taskBody(task, phase) : part === ".news" ? newsBlock(task) : !review ? null : part === ".chips" ? chips(task) : report(task);
     if (old && fresh) old.replaceWith(fresh);
     else if (old) old.remove();
+    else if (fresh && part === ".row-line") node.querySelector(":scope > .head").after(fresh);
     else if (fresh) (node.querySelector(":scope > .actions") ? node.querySelector(":scope > .actions").before(fresh) : node.append(fresh));
   }
   expandTask(node, review && openReports.has(task.id));
 }
+const dotClass = (task, phase) => `dot ${SECTION_DOT[phase.section] ?? ""}${unread(task, phase) ? " unread" : ""}`;
+// What a click on its title does, said on hover: a row shows its card; a card opens its worker.
+const titleTip = (task, phase) => (task.session_id ? `${task.title}\n${isRow(phase) ? "Click to see it all; its title then opens its worker" : "Open its worker at this task"}` : task.goal || "");
 // Short on the card: what kind of place it is in (queued, overdue, to review…) and since when;
 // the rest on hover.
 function taskMeta(task, phase = {}) {
   const ended = ["review", "done", "failed", "cancelled"].includes(task.status);
   const earlier = (task.earlier_titles || []).map((item) => `“${item.title}”`).join(", ");
+  // Short: a few lines, each a fact.
   const help = [
-    `Task ${task.id}`,
-    ended ? `Finished ${since(task.ended_at || task.updated_at)}` : `Started ${since(task.created_at)}`,
-    task.worker && task.worker !== task.title ? `Worker: ${task.worker}` : "",
-    earlier ? `Earlier names: ${earlier}` : "",
-    task.credits >= 0.05 ? `${task.credits.toFixed(1)} credits` : "",
-    task.runs > 1 ? `${task.runs} runs` : "",
+    phase.marker === "report" ? REPORT_HELP : "",
+    [`Task ${task.id}`, ended ? `finished ${since(task.ended_at || task.updated_at)}` : `started ${since(task.created_at)}`].join(" · "),
+    task.worker && task.worker !== task.title ? `Worker: ${shorten(task.worker, 60)}` : "",
+    earlier ? `Earlier names: ${shorten(earlier, 80)}` : "",
+    [task.credits >= 0.05 ? `${task.credits.toFixed(1)} credits` : "", task.runs > 1 ? `${task.runs} runs` : ""].filter(Boolean).join(" · "),
   ];
   const marker = MARKERS[phase.marker] || "";
   let when = since(task.ended_at || task.updated_at);
@@ -160,12 +177,36 @@ function createsPr(task) {
 }
 // A result to review shows its full report on demand; an open one stays open while the card
 // is redrawn (new receipts, a fresh PR state).
+// `seen`: the owner opened it (it is read now).
 const openReports = new Set();
-export function expandTask(node, open = !node.classList.contains("expanded")) {
+export function expandTask(node, open = !node.classList.contains("expanded"), seen = false) {
   node.classList.toggle("expanded", open);
   const toggle = node.querySelector(".expand");
   if (toggle) toggle.textContent = open ? "Hide report" : "Show report";
   if (node.dataset.task) openReports[open ? "add" : "delete"](node.dataset.task);
+  if (open && seen) readTask(node.dataset.task);
+}
+// A row (Monitoring, Recently finished) shows its whole card in place, and stays so while
+// redrawn.
+const unfolded = new Set();
+export function unfoldTask(node, open = !node.classList.contains("unfolded"), seen = false) {
+  node.classList.toggle("unfolded", open);
+  if (node.dataset.task) unfolded[open ? "add" : "delete"](node.dataset.task);
+  if (open && seen) readTask(node.dataset.task);
+}
+// A result the owner opened is read: a report's unread dot goes (asked once per task here).
+const reading = new Set();
+function readTask(taskId) {
+  const task = tasks().find((item) => item.id === taskId);
+  if (!task || task.read || task.status !== "review" || reading.has(taskId)) return;
+  reading.add(taskId);
+  // Only that it is read: the rest of the answer may be older than what came since.
+  api(`/api/tasks/${taskId}/read`, { method: "POST", body: {} })
+    .then((view) => {
+      const now = tasks().find((item) => item.id === taskId);
+      if (now && view?.read !== false) upsertTask({ ...now, read: true });
+    })
+    .catch(() => {});
 }
 function taskCard(task, phase = phaseOf(task)) {
   const error = el("span", { class: "error" });
@@ -174,18 +215,30 @@ function taskCard(task, phase = phaseOf(task)) {
   const open = task.session_id ? () => select(task.session_id) : null;
   // The title opens its worker at this task's report: it may be on other work since.
   const openAt = task.session_id ? () => select(task.session_id, { task: task.id }) : null;
+  const row = isRow(phase);
   const node = el(
     "div",
-    { class: `card task ${task.status} in-${phase.section || "card"}${phase.marker ? ` marker-${phase.marker}` : ""}${task.blocked ? " blocked" : ""}`, "data-session": task.session_id || undefined, "data-task": task.id },
+    { class: `card task ${task.status} in-${phase.section || "card"}${phase.marker ? ` marker-${phase.marker}` : ""}${task.blocked ? " blocked" : ""}${row ? " row" : ""}${row && unfolded.has(task.id) ? " unfolded" : ""}`, "data-session": task.session_id || undefined, "data-task": task.id },
     el(
       "div",
       { class: "head" },
-      el("span", { class: `dot ${SECTION_DOT[phase.section] ?? ""}` }),
-      el("button", { type: "button", class: "title", text: task.title, title: openAt ? `Open its worker at this task\n${help}` : task.goal || "", onclick: openAt, disabled: !openAt }),
+      el("span", { class: dotClass(task, phase), "data-tip": unread(task, phase) ? "Not read yet" : undefined }),
+      // On a row its title shows the card first (the row's click); then it opens its worker.
+      el("button", { type: "button", class: "title", text: task.title, "data-tip": titleTip(task, phase), onclick: () => (row && !node.classList.contains("unfolded") ? null : openAt?.()), disabled: !openAt && !row }),
       el("span", { class: "tid", text: task.id, title: "Task id" }),
-      el("span", { class: "meta", title: help }, ...metaParts(meta)),
+      el("span", { class: "meta", "data-tip": help }, ...metaParts(meta)),
     ),
   );
+  if (row) {
+    node.append(rowLine(task, byId(task.session_id), phase));
+    node.addEventListener("click", (event) => {
+      if (!node.classList.contains("unfolded")) {
+        if (!event.target.closest("a, .menu-wrap")) unfoldTask(node, true, true);
+      } else if (event.target.closest(".head") && !event.target.closest("button, a, .menu-wrap")) {
+        unfoldTask(node, false);
+      }
+    });
+  }
   const body = taskBody(task, phase);
   if (body) node.append(body);
   const news = newsBlock(task);
@@ -195,7 +248,9 @@ function taskCard(task, phase = phaseOf(task)) {
   const key = `task:${task.id}`;
 
   // The card leaves its place at once (`moves`); the task's new state puts it where it goes.
-  async function act(path, payload, done, moves = true) {
+  // One request at a time: a second click (or Enter) while it is out does nothing.
+  const act = (path, payload, done, moves = true) => once(key, null, () => send(path, payload, done, moves));
+  async function send(path, payload, done, moves) {
     for (const button of actions.querySelectorAll("button")) button.disabled = true;
     error.textContent = "";
     if (moves) {
@@ -256,9 +311,48 @@ function taskCard(task, phase = phaseOf(task)) {
     form(input, "Rename", () => input.value.trim() && act(`/api/tasks/${task.id}/rename`, { text: input.value.trim() }, "Renamed.", false));
     input.select();
   }
-  function split() {
-    const input = el("input", { placeholder: "Title of a new task for its latest result" });
-    form(input, "Split off", () => input.value.trim() && act(`/api/tasks/${task.id}/split`, { text: input.value.trim() }, "Split off as a task of its own.", false));
+  // Its latest result is about something else (the server says when: `splittable`): after a
+  // look at what stays and what moves, it becomes a task of its own.
+  async function split() {
+    const box = el("div", { class: "split-preview", text: "Looking at what would move…" });
+    const cancel = el("button", { type: "button", class: "text", text: "Cancel", onclick: showActions });
+    actions.replaceChildren(box, error, cancel);
+    actions.dataset.editing = "1";
+    place();
+    let preview;
+    try {
+      preview = await api(`/api/tasks/${task.id}/split-preview`);
+    } catch (failure) {
+      box.textContent = failure.message;
+      return;
+    }
+    if (!box.isConnected) return;
+    if (!preview.allowed) {
+      box.textContent = preview.why || "Its results are one piece of work: nothing to move.";
+      return;
+    }
+    const moves = preview.moves || {};
+    const messages = moves.messages || [];
+    const input = el("input", { placeholder: "What the new task delivers", "aria-label": "Title of the new task", autocomplete: "off" });
+    box.replaceChildren(
+      el("div", { class: "hint", text: "Its latest result becomes a task of its own; this one goes back to the result before it. You can undo it for a while." }),
+      // The server's doubt (its results look like one piece of work): said before it is done.
+      preview.why ? el("div", { class: "doubt", text: preview.why }) : null,
+      el("div", { class: "keeps" }, el("strong", { text: "Stays here: " }), gist(preview.keeps?.result || "") || "no earlier result"),
+      el("div", { class: "moves" }, el("strong", { text: "Moves: " }), gist(moves.result || "") || "its latest result"),
+      messages.length
+        ? el("details", { class: "moved" }, el("summary", { text: `and ${plural(messages.length, "message")} after it` }), el("ul", {}, ...messages.map((message) => el("li", { text: shorten(gist(message.text || ""), 140) }))))
+        : el("div", { class: "moved", text: "No messages move with it." }),
+    );
+    const go = () => input.value.trim() && act(`/api/tasks/${task.id}/split`, { text: input.value.trim() }, "Moved to a new task. Undo split is on its card for a while.", false);
+    input.addEventListener("keydown", (event) => {
+      if (submits(event)) {
+        event.preventDefault();
+        go();
+      }
+    });
+    actions.replaceChildren(box, input, error, cancel, el("button", { type: "button", text: "Move it", onclick: go }));
+    input.focus();
   }
   function retryWithNote() {
     const input = el("textarea", { rows: 2, placeholder: "What should it do differently?" });
@@ -280,7 +374,11 @@ function taskCard(task, phase = phaseOf(task)) {
     const copy = { text: "Copy report", onclick: () => copyReport(task) };
     const pr = createsPr(task) ? { text: "Create PR", onclick: () => act(`/api/tasks/${task.id}/pr`, {}, "PR opened.", false) } : null;
     const named = { text: "Rename…", onclick: rename };
-    const splitOff = ["review", "done"].includes(task.status) ? { text: "Split off its latest result…", onclick: split } : null;
+    const splitOff = task.splittable ? { text: "Move the latest result to a new task…", onclick: split } : null;
+    // Split off another task a moment ago: back into it, until the server's time is up.
+    const until = undoUntil(task);
+    const from = until ? tasks().find((item) => item.id === task.split_from.task_id)?.title || "the task it came from" : "";
+    const undo = until ? el("button", { type: "button", class: "secondary", text: "Undo split", title: `Back into “${from}” (until ${clockTime(until)})`, onclick: () => act(`/api/tasks/${task.id}/merge-back`, {}, `Back in “${from}”.`) }) : null;
     const followUp = { text: "Follow up…", onclick: () => reply("What else should it do?", "Sent to the worker.") };
     const nudge = el("button", { type: "button", text: "Nudge", title: "Ask its worker where this task stands", onclick: () => act(`/api/tasks/${task.id}/nudge`, {}, "Asked its worker where it stands.", false) });
     let main = null;
@@ -292,8 +390,9 @@ function taskCard(task, phase = phaseOf(task)) {
       main = el("button", { type: "button", text: "Accept", onclick: () => act(`/api/tasks/${task.id}/accept`, {}, "Accepted.") });
       more = [followUp, copy, pr, named, splitOff, worker];
     } else if (task.status === "review") {
-      // A report to read (or one still followed): done when read; accepting it is optional.
-      more = [{ text: "Mark done", onclick: () => act(`/api/tasks/${task.id}/accept`, {}, "Marked done.") }, followUp, copy, pr, named, splitOff, worker];
+      // A report to read (or one still followed): nothing to accept, done once read.
+      main = el("button", { type: "button", text: "Done", title: REPORT_HELP, onclick: () => act(`/api/tasks/${task.id}/accept`, {}, "Marked done.") });
+      more = [followUp, copy, pr, named, splitOff, worker];
     } else if (task.status === "waiting" && task.stopped) {
       // Stopped mid-work: go on where it stopped, or with a word on what to do instead.
       main = el("button", { type: "button", text: "Go on", onclick: () => act(`/api/tasks/${task.id}/follow-up`, { text: "Go on where you stopped." }, "Sent to the worker.") });
@@ -319,7 +418,7 @@ function taskCard(task, phase = phaseOf(task)) {
     } else {
       more = [named, worker];
     }
-    actions.replaceChildren(error, moreMenu(more) || "", main || "");
+    actions.replaceChildren(error, moreMenu(more) || "", undo || "", main || "");
     place();
   }
   showActions();
@@ -337,16 +436,19 @@ function taskBody(task, phase = {}) {
     return el("div", { class: "task-body" }, activityLine(worker), el("div", { class: "reason", text: phase.why }));
   }
   if (task.status === "done" || task.status === "cancelled") {
-    // Over: what it delivered stays in reach (its PRs, its documents, the run it made).
+    // Over: what it came to, and what it delivered in reach (its PRs, its documents, the run
+    // it made, the threads it still follows).
+    const first = isRow(phase) ? gist(task.result || "") : "";
     const waits = phase.section === "monitoring" ? waitLine(task, worker, phase) : null;
-    const found = artifacts(task, worker, { active: phase.section === "monitoring" });
-    return waits || found ? el("div", { class: "task-body" }, ...[waits, found].filter(Boolean)) : null;
+    const found = artifacts(task, worker, { active: phase.section === "monitoring" || phase.marker === "still-following" });
+    const nodes = [first ? el("div", { class: "outcome", text: first }) : null, waits, found].filter(Boolean);
+    return nodes.length ? el("div", { class: "task-body" }, ...nodes) : null;
   }
   if (task.status === "review") {
     // What came out, in its first sentences (past a "## Summary" title); the report on demand.
     const first = gist(task.result || task.progress || "");
     const waits = phase.section === "monitoring" ? waitLine(task, worker, phase) : null;
-    const nodes = [first ? el("div", { class: "outcome", text: first, title: first }) : null, waits].filter(Boolean);
+    const nodes = [first ? el("div", { class: "outcome", text: first }) : null, waits].filter(Boolean);
     return nodes.length ? el("div", { class: "task-body" }, ...nodes) : null;
   }
   const text = task.progress || (task.blocked ? "It waits for a task that ended without finishing." : "");
@@ -377,45 +479,51 @@ function progressLine(text, at, taskId = "", stale = false) {
   });
   return el("div", { class: `progress${stale ? " stale" : ""}` }, line, at ? el("div", { class: "when", text: `Reported ${since(at)}` }) : "");
 }
-// What a task has made or points to, by what it is to the owner: what it delivered (its
-// documents, the top-level run it made) first, a few at most; what is under a run (a Spark
-// application, logs, a debug page) and what it only points to (an issue, someone else's PR, a
-// thread) folded away. A run whose id the task itself names (its title or instructions) is
-// what it is about: shown.
-function linkGroups(task, shown) {
+// What a task has made or points to, by what it is to the owner: what it delivered (what its
+// worker declared or its reports say it made, the files it wrote, the top-level run it made)
+// first, a few at most, each with ✕ to take it off; what is under a run (a Spark application,
+// logs, a debug page), what it only points to (a document it mentions, an issue, a PR it did
+// not make or review, a thread) and what was taken off folded away. `shown`: PRs on chips of
+// their own; `mentioned`: chips of PRs it only mentions.
+function linkGroups(task, shown, mentioned = []) {
   const main = [];
-  const more = { made: [], diagnostic: [], reference: [] };
-  const seen = new Set();
-  const asked = `${task.title}\n${task.goal || ""}`;
-  const given = new Set((task.given_links || []).map(linkKey));
-  const declared = new Map((task.artifacts || []).map((item) => [linkKey(item.url), item]));
-  const text = [task.result, task.progress].filter(Boolean).join("\n").replace(/```[\s\S]*?(```|$)/g, " ");
-  // What its worker said it made (with where each stands) first, then every link its reports
-  // gave (not only its latest).
-  const urls = [...new Set([...(task.artifacts || []).map((item) => item.url), ...(task.links || []), ...findUrls(text)])];
-  for (const url of urls) {
-    const found = linkKind(url);
-    const key = linkKey(url);
-    if (!found || seen.has(key) || (found.key && shown.has(found.key))) continue;
-    seen.add(key);
+  const more = { made: [], diagnostic: [], reference: [...mentioned], off: [] };
+  for (const link of taskLinks(task)) {
+    const { found, said } = link;
+    if (found.key && shown.has(found.key)) continue;
     if (found.key) shown.add(found.key);
-    const said = declared.get(key);
-    let role = found.role;
-    if (role === "diagnostic" && found.id && asked.includes(found.id)) role = "run";
-    if (role === "pr") role = "reference";  // Not its own: the PRs it made are on their own chips.
-    if (said && role === "reference") role = "output";  // Its worker says it made it.
-    if (!said && given.has(key)) role = "reference";  // Given to it to work from.
-    const name = said?.name || (found.title ? `${found.label} · ${shorten(found.title, 40)}` : found.label);
-    const label = said?.status ? `${name} · ${said.status}` : name;
-    const chip = el("a", { class: `receipt link-chip kind-${found.kind} ${role}${said ? ` tone-${toneOf(said.status)}` : ""}`, href: url, target: "_blank", rel: "noreferrer", title: [said ? `${said.name} · ${said.status}` : found.title, url].filter(Boolean).join("\n"), text: label });
-    if (role === "output" || role === "run") (main.length < 3 ? main : more.made).push(chip);
+    const role = link.role === "pr" ? "reference" : link.role;
+    const made = ["output", "run"].includes(role);
+    const off = made && isHidden(link.key, toneOf(said?.status));
+    const chip = linkChip(task, link, role, made && !off);
+    if (off) more.off.push(chip);
+    else if (made) (main.length < 3 ? main : more.made).push(chip);
     else (more[role] || more.reference).push(chip);
   }
-  const folded = [...more.made, ...more.diagnostic, ...more.reference];
+  const folded = [...more.made, ...more.diagnostic, ...more.reference, ...more.off];
   if (!folded.length) return { main, more: null };
-  const words = [more.made.length ? `${more.made.length} more made` : "", more.diagnostic.length ? `${more.diagnostic.length} for diagnosis` : "", more.reference.length ? `${more.reference.length} referenced` : ""].filter(Boolean).join(" · ");
+  const words = [more.made.length ? `${more.made.length} more made` : "", more.diagnostic.length ? `${more.diagnostic.length} for diagnosis` : "", more.reference.length ? `${more.reference.length} referenced` : "", more.off.length ? `${more.off.length} taken off` : ""].filter(Boolean).join(" · ");
   const details = el("details", { class: "more-links" }, el("summary", { text: `More links: ${words}` }), el("div", { class: "receipts" }, ...folded));
   return { main, more: details };
+}
+// A link as a chip: its name (and where it stands, as its worker said); a file opens here.
+function linkChip(task, link, role, removable) {
+  const { found, said } = link;
+  const name = linkName(link);
+  const file = link.path && found.kind === "file";
+  const label = `${file ? "file · " : ""}${name}${said?.status ? ` · ${said.status}` : ""}`;
+  const size = link.file?.size ? `${Math.max(1, Math.round(link.file.size / 1024))} KB` : "";
+  // What it is and its id (a document's) on hover, never as its name.
+  const help = [said?.status ? `${name} · ${said.status}` : name, found.id ? `${found.label} ${found.id}` : link.name && found.title ? found.title : "", size, link.path || link.url].filter(Boolean).join("\n");
+  const open = file
+    ? el("button", { type: "button", class: "chip-link", text: label, title: `${help}\nClick to open it`, onclick: () => openFile(link.path, task.session_id) })
+    : el("a", { class: "chip-link", href: link.url, target: "_blank", rel: "noreferrer", title: help, text: label });
+  const chip = el("span", { class: `receipt link-chip kind-${found.kind} ${role}${said ? ` tone-${toneOf(said.status)}` : ""}` }, open);
+  if (removable) {
+    chip.classList.add("removable");
+    chip.append(el("button", { type: "button", class: "chip-off", text: "✕", title: "Take it off this card and Artifacts (it comes back if it fails)", "aria-label": `Take ${name} off`, onclick: () => setHidden(link.key, true, toneOf(said?.status)) }));
+  }
+  return chip;
 }
 const WAITS_WORDS = { github: "Reply draft", slack: "Slack draft", reply: "Reply draft", merge: "Ready to merge", question: "Question", form: "Form", link: "Link to open", signin: "Sign-in", workspace: "Where to work" };
 // Cards under Needs you from this task's worker about this task (one it names, else the task it
@@ -441,19 +549,17 @@ function watchingChip(key) {
   if (!href) return el("span", { class: "receipt watching", title: help, text: `Watching ${label}` });
   return el("a", { class: "receipt watching", href, target: "_blank", rel: "noreferrer", title: help, text: `Watching ${label}` });
 }
-export function artifacts(task, worker = byId(task.session_id), { active = true, prs = true } = {}) {
+export function artifacts(task, worker = byId(task.session_id), { active = true } = {}) {
   const items = [];
-  const shown = new Set();
-  for (const pr of task.receipts?.prs || []) {
-    shown.add(pr.label.toLowerCase());
-    if (prs) items.push(prChip(pr));
-  }
-  const links = linkGroups(task, shown);
+  const { shown, own, mentioned } = prChips(task);
+  items.push(...own);
+  const links = linkGroups(task, shown, mentioned);
   items.push(...links.main);
   if (active && worker) {
+    const onChips = new Set((task.receipts?.prs || []).filter((pr) => pr.own || pr.reviewed).map((pr) => pr.label.toLowerCase()));
     for (const key of task.watching || []) {
       const pr = /^github:(.+)$/.exec(key)?.[1];
-      if (pr && shown.has(pr.toLowerCase())) continue;
+      if (pr && onChips.has(pr.toLowerCase())) continue;
       items.push(watchingChip(key));
     }
   }
@@ -464,6 +570,18 @@ export function artifacts(task, worker = byId(task.session_id), { active = true,
   for (const question of questions) items.push(el("button", { type: "button", class: "receipt needs", title: question.text, text: "Question · Needs you", onclick: () => focusQuestion(question.id) }));
   if (!items.length && !links.more) return null;
   return el("div", { class: "artifacts" }, items.length ? el("div", { class: "receipts" }, ...items) : "", links.more || "");
+}
+// Its PRs as chips: those it made or reviewed in sight, those it only mentions folded with the
+// references.
+function prChips(task) {
+  const shown = new Set();
+  const own = [];
+  const mentioned = [];
+  for (const pr of task.receipts?.prs || []) {
+    shown.add(pr.label.toLowerCase());
+    (pr.own || pr.reviewed ? own : mentioned).push(prChip(pr));
+  }
+  return { shown, own, mentioned };
 }
 function failingChip(key, task) {
   const label = key.replace(/^github:[^/]+\//, "").replace(/^slack:.*/, "a Slack thread");
@@ -485,16 +603,15 @@ function failingChip(key, task) {
   );
   return chip;
 }
-// A worker on the board: one box per section it has tasks in, holding those tasks. The same
-// worker shows in each section one of its tasks is in. The tasks are what to read; the worker
-// is their source, in small type (`key`: a box of its own, as Recently finished has several of
-// one worker's).
-export function workerBoxItem(section, sessionId, list, phases, editing, elsewhere = [], key = "") {
+// A worker on the board (Needs you, Running): one box per section it has tasks in, holding
+// those tasks. The same worker shows in each section one of its tasks is in. The tasks are what
+// to read; the worker is their source, in small type.
+export function workerBoxItem(section, sessionId, list, phases, editing, elsewhere = []) {
   const worker = sessionById(sessionId);
   const items = list.map((task) => taskItem(task, phases.get(task.id)));
   const head = boxHead(section, worker, sessionId, list, elsewhere);
   return {
-    key: `box:${section}:${sessionId}${key ? `:${key}` : ""}`,
+    key: `box:${section}:${sessionId}`,
     version: `${head.version}|${items.map((item) => `${item.key}=${item.version}`).join("|")}`,
     build: () => {
       const node = el("div", { class: `card worker-box in-${section}`, "data-session": sessionId }, head.build(), el("div", { class: "box-tasks" }));
@@ -508,13 +625,16 @@ export function workerBoxItem(section, sessionId, list, phases, editing, elsewhe
     },
   };
 }
+// A worker's state in its box's head, in words: in a turn waiting on the owner, it waits for
+// them, it is not idle.
+const BOX_STATUS = { queued: "queued", waiting: "waits for you", done: "done", failed: "failed" };
 function boxHead(section, worker, sessionId, list, elsewhere) {
   const name = worker?.display_title || worker?.title || "";
   // Its name only when it says more than its tasks' titles below it.
   const named = name && !list.some((task) => task.title === name) ? name : "";
   const short = sessionId.slice(0, 6);
   const working = worker && ["working", "starting"].includes(worker.status);
-  const status = !worker ? "" : worker.closed_at ? "closed" : working ? "working" : worker.status === "queued" ? "queued" : worker.elsewhere ? "in a terminal" : "idle";
+  const status = !worker ? "" : worker.closed_at ? "closed" : working ? "working" : worker.elsewhere ? "in a terminal" : BOX_STATUS[worker.status] || "idle";
   const also = elsewhere.length ? `also: ${elsewhere.join(", ")}` : "";
   return {
     version: `${named}:${status}:${also}`,
@@ -559,8 +679,8 @@ function runningBody(task, worker, phase = {}) {
 }
 // What a task that is not being worked on waits for, and what wakes it: the PR or thread it
 // follows for this task (and where the PR stands), the time it checks back, a slot, its turn,
-// or nothing (then it says so).
-function waitLine(task, worker, phase) {
+// or nothing (then it says so): { text, help, warn }.
+function waitWords(task, worker, phase) {
   const marker = phase.marker;
   let text = phase.why;
   let help = "";
@@ -569,10 +689,10 @@ function waitLine(task, worker, phase) {
     text = `Checks back at ${clockTime(back.at)}: ${back.what}`;
     if (back.error) text += ` · could not wake it last time (${back.error}); trying again`;
     help = "It said when to look again; it is woken then";
-  } else if ((marker === "watching" || marker === "delivered") && (task.watching || []).length) {
+  } else if (["watching", "delivered", "reviewed"].includes(marker) && (task.watching || []).length) {
     const what = task.watching.map((key) => watchedWords(key, task)).join("; ");
-    text = `${marker === "delivered" ? "Delivered; still following" : "Waiting on"} ${what}`;
-    help = "News there (a review, CI, a reply, the merge) wakes its worker";
+    text = `${marker === "watching" ? "Waiting on" : marker === "reviewed" ? "Reviewed; following" : "Delivered; still following"} ${what}`;
+    help = marker === "reviewed" ? "A PR you reviewed: its author's next push or reply wakes its worker" : "News there (a review, CI, a reply, the merge) wakes its worker";
   } else if (marker === "queued") {
     const reason = queuedReason(task);
     text = reason.text;
@@ -580,9 +700,42 @@ function waitLine(task, worker, phase) {
   } else if (marker === "paused") {
     help = "Its worker took it up, then went on to another task: it reports this one (done, a question) or goes back to it after";
   }
-  if (!text) return null;
-  const warn = ["idle", "overdue", "stalled", "check-failed"].includes(marker);
-  return el("div", { class: `reason${warn ? " warn" : ""}`, text, title: help || text });
+  return { text, help: help || text, warn: ["idle", "overdue", "stalled", "check-failed"].includes(marker) };
+}
+function waitLine(task, worker, phase) {
+  const { text, help, warn } = waitWords(task, worker, phase);
+  return text ? el("div", { class: `reason${warn ? " warn" : ""}`, text, title: help }) : null;
+}
+// A row's second line: what it waits on (or what it came to) and the main thing it made.
+function rowLine(task, worker, phase) {
+  const why = phase.section === "monitoring" ? waitWords(task, worker, phase) : { text: finishedWords(task, phase), help: "" };
+  // Not twice: what it waits on may name it already.
+  const made = mainArtifact(task);
+  const named = phase.section === "monitoring" && made && why.text.includes(made);
+  return el(
+    "div",
+    { class: "row-line" },
+    el("span", { class: `why${why.warn ? " warn" : ""}`, text: why.text, "data-tip": why.help && why.help !== why.text ? `${why.text}\n${why.help}` : why.text || undefined }),
+    made && !named ? el("span", { class: "made", text: made }) : "",
+  );
+}
+// What a finished task came to, in its first words.
+function finishedWords(task, phase) {
+  if (phase.marker === "still-following") return phase.why;
+  const said = gist(task.result || task.progress || "");
+  if (task.status === "cancelled") return said ? `Cancelled: ${said}` : "Cancelled";
+  return said || phase.why || "";
+}
+// The main thing a task made, in a word or two: its PR, else the PR it follows, else the first
+// thing it made.
+function mainArtifact(task) {
+  const prs = task.receipts?.prs || [];
+  const pr = prs.find((item) => item.own) || prs.find((item) => item.reviewed);
+  if (pr) return pr.label.replace(/^[^/]+\//, "");
+  const watched = /^github:[^/]+\/(.+)$/.exec((task.watching || [])[0] || "")?.[1];
+  if (watched) return watched;
+  const made = taskLinks(task).find((link) => ["output", "run"].includes(link.role) && !isHidden(link.key, toneOf(link.said?.status)));
+  return made ? shorten(linkName(made), 32) : "";
 }
 // A thread it follows, in words: "app#594 · Fix the Spark dependency (awaiting approval)".
 function watchedWords(key, task) {
@@ -611,18 +764,19 @@ function newsBlock(task) {
 function prChip(pr) {
   const short = pr.label.replace(/^[^/]+\//, "");
   const named = pr.title || prTitle(pr.label);
-  const ci = { passing: "✓ CI", failing: "✗ CI", pending: "CI running" }[pr.checks] || "";
   const state = pr.state === "MERGED" ? "merged" : pr.state === "CLOSED" ? "closed" : "";
-  // An approval gate (an "Owner Approval" check) waits for a person, not for CI.
-  const awaiting = !state && pr.awaiting?.length ? "awaiting approval" : "";
-  const ready = !state && !awaiting && pr.checks !== "failing" && ["CLEAN", "HAS_HOOKS"].includes(pr.merge_state) && !pr.draft ? "ready to merge" : "";
+  const ci = state ? "" : { passing: "✓ CI", failing: "✗ CI", pending: "CI running" }[pr.checks] || "";
+  // Where it stands in one word, as Artifacts says it (changes requested is not ready to
+  // merge); what CI says is beside it, so not again.
+  const [word] = prStatus(pr);
+  const stands = ["CI failing", "CI running", "in review"].includes(word) ? "" : word;
   const review = { APPROVED: "approved", CHANGES_REQUESTED: "changes requested" }[pr.review] || "";
   const failing = pr.checks === "failing" && pr.failing?.length ? `\nFailing: ${pr.failing.join(", ")}` : "";
   const ciWords = { passing: "Checks pass", failing: "Checks fail", pending: "Checks are running", none: "No checks" }[pr.checks] || "";
   const seen = pr.at ? `\nAs of ${new Date(pr.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` : "";
-  const title = [pr.label, named ? `“${named}”` : "", ciWords + failing, awaiting && `Waiting for approval: ${pr.awaiting.join(", ")}`, review && `Review: ${review}`, ready && "GitHub would merge it now", state && `PR ${state}`].filter(Boolean).join("\n") + seen;
+  const title = [pr.label, named ? `“${named}”` : "", ciWords + failing, !state && pr.awaiting?.length && `Waiting for approval: ${pr.awaiting.join(", ")}`, review && `Review: ${review}`, word === "ready to merge" && "GitHub would merge it now", state && `PR ${state}`, pr.reviewed && !pr.own ? "You reviewed it" : ""].filter(Boolean).join("\n") + seen;
   // Its number and title (shortened to fit), then where it stands (always in sight).
-  const where = [state || ci, !state && (awaiting || review), ready].filter(Boolean).join(" · ");
+  const where = [state || ci, stands !== state ? stands : ""].filter(Boolean).join(" · ");
   return el(
     "a",
     { class: `receipt pr ${state || pr.checks}`, href: pr.url, target: "_blank", rel: "noreferrer", title },
@@ -653,17 +807,19 @@ function chips(task) {
     const why = ci ? `\nThe checks on ${item.ci_passing.join(", ")} pass now` : "";
     items.push(el("span", { class: `receipt ${item.passed ? "pass" : ci ? "warn" : "fail"}`, title: `${item.command}\n(${plural(item.runs, "run")})${before}${again}${why}`, text: `${mark} ${label}${ci ? " locally" : ""}${item.running ? " · running again" : ""}` }));
   };
-  result("tests", receipts?.tests);
+  // Its tests, when it ran them on its own work (its checkout); tests run elsewhere (someone's
+  // source, to check a claim) are evidence in its report, not this.
+  if (receipts?.tests?.own) result("tests", receipts.tests);
   result("lint", receipts?.checks);
   result("build", receipts?.build);
   const changed = receipts?.changed || {};
   if (changed.files) items.push(el("button", { type: "button", class: "receipt changes", title: "See the changes and comment on them", text: `+${changed.insertions} −${changed.deletions} in ${plural(changed.files, "file")}`, onclick: () => showChanges(task, upsertTask) }));
-  for (const pr of receipts?.prs || []) items.push(prChip(pr));
-  const prs = new Set((receipts?.prs || []).map((pr) => pr.label.toLowerCase()));
-  const links = linkGroups(task, prs);
+  const { shown, own, mentioned } = prChips(task);
+  items.push(...own);
+  const links = linkGroups(task, shown, mentioned);
   items.push(...links.main);
   const flags = (receipts?.flags || []).map((flag) => el("div", { class: "flag", text: flag }));
-  const toggle = el("button", { type: "button", class: "expand link", text: "Show report", onclick: (event) => expandTask(event.currentTarget.closest(".card")) });
+  const toggle = el("button", { type: "button", class: "expand link", text: "Show report", onclick: (event) => expandTask(event.currentTarget.closest(".card"), undefined, true) });
   return el("div", { class: "chips" }, el("div", { class: "receipts", title: "Observed while it worked, not just reported" }, ...items, toggle), links.more || "", ...flags);
 }
 // The whole report: what the worker wrote, each criterion and how it was checked.
@@ -674,6 +830,7 @@ function report(task) {
   const changed = receipts.changed || {};
   if (changed.commits) more.push(el("span", { class: "receipt", text: plural(changed.commits, "commit") }));
   if (changed.uncommitted) more.push(el("span", { class: "receipt warn", text: `${changed.uncommitted} uncommitted` }));
+  if (receipts.tests && !receipts.tests.own) more.push(testsElsewhere(receipts.tests));
   for (const item of receipts.version || []) {
     more.push(el("span", { class: "receipt none", title: "The code these results are about", text: `at ${item.commit.slice(0, 7)}${item.edited ? " + edits" : ""}` }));
   }
@@ -694,6 +851,14 @@ function report(task) {
       )
     : null;
   return el("div", { class: "report" }, text ? el("div", { class: "body markdown", html: markdown(text) }) : null, criteria, more.length ? el("div", { class: "receipts" }, ...more) : null);
+}
+// Tests it ran outside its own checkout (someone's source, to check what it reports): what they
+// found, as evidence; where, and how they ended, on hover.
+function testsElsewhere(item) {
+  const where = item.cwd ? displayPath(item.cwd).split("/").filter(Boolean).pop() : "";
+  const outcome = item.passed === null ? "running" : item.summary || (item.passed ? "passed" : `failed${item.exit_code ? ` (exit ${item.exit_code})` : ""}`);
+  const help = [`Ran in ${item.cwd || "a folder that is not its checkout"}: not tests of this task's own changes`, item.summary || "", item.command, plural(item.runs || 1, "run")].filter(Boolean).join("\n");
+  return el("span", { class: `receipt tests-elsewhere ${item.passed === false ? "warn" : "none"}`, title: help, text: `Ran tests${where ? ` in ${where}` : ""} · ${outcome}` });
 }
 // What was observed, next to what the worker reported.
 const VERDICT = {

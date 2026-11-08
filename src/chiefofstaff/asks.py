@@ -320,6 +320,18 @@ class Asks:
             if draft["status"] == "pending":
                 self.close_request(draft_id, "expired", reason)
 
+    def answer_in_chat(self, session_id: str, text: str) -> dict | None:
+        """The owner wrote to a worker that is waiting on its question card (Copilot's
+        ask_user): what they wrote answers it (the worker reads nothing else until then). The
+        card it answered, or None."""
+        for draft_id in list(self.states[session_id].asking):
+            draft = self.store.draft(draft_id)
+            answer = self.requests.get(draft_id)
+            pending = draft["kind"] == "question" and draft["status"] == "pending"
+            if pending and answer and not answer.done():
+                return self.answer_request(draft, DraftDecision(action="answer", text=text))
+        return None
+
     def answer_request(self, draft: dict, decision: DraftDecision) -> dict:
         answer = self.requests.get(draft["id"])
         if not answer or answer.done():

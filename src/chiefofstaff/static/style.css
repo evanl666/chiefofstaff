@@ -141,7 +141,8 @@ summary { min-height: 28px; }
   align-items: center;
   gap: 6px;
 }
-.group .legend-toggle { min-height: 0; width: 16px; height: 16px; padding: 0; border-radius: 50%; border: 1px solid var(--line); font-size: 10px; line-height: 14px; color: var(--muted); text-decoration: none; }
+/* A ring of 18px on a target of 28px. */
+.group .legend-toggle { min-height: 28px; width: 28px; height: 28px; margin: -6px -5px; padding: 0; border-radius: 50%; background: radial-gradient(circle, transparent 0 8px, var(--line) 8px 9px, transparent 9.5px); font-size: var(--small); line-height: 1; color: var(--muted); text-decoration: none; }
 .legend { margin: 0 12px 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius); font-size: var(--small); color: var(--soft); display: grid; gap: 4px; }
 .legend-row { display: flex; gap: 8px; align-items: baseline; }
 .legend-row .dot { flex: none; transform: translateY(1px); }
@@ -894,10 +895,11 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
 
 /* Home chat: what is not the owner or the Router, one line each, quieter than the talk. */
 .event { font-size: var(--small); color: var(--muted); }
-.event, .event > summary { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 28px; }
-details.event { display: block; }
-.event > summary { cursor: pointer; list-style: none; }
-.event > summary::-webkit-details-marker { display: none; }
+.event { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 28px; }
+.event.opens { display: block; }
+.event.opens > .row { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 28px; }
+.event.opens .line { display: flex; align-items: center; gap: 8px; flex: 0 1 auto; min-width: 0; padding: 0; background: none; color: inherit; font-weight: inherit; text-align: left; border-radius: 6px; }
+.event.opens .line:not(:disabled):hover { opacity: 1; }
 .event + .event { margin-top: -8px; }
 /* What happened, as the dots elsewhere say it: a ring started, green done, amber needs you. */
 .event .mark { width: 16px; flex: none; text-align: center; color: var(--muted); font-weight: 600; line-height: 1; }
@@ -910,10 +912,10 @@ details.event { display: block; }
 .event:hover button.link, .event button.link:focus-visible { color: var(--accent); }
 .event button.link:not(:disabled):hover { background: var(--hover); color: var(--accent); }
 .event time { margin-left: auto; padding-left: 8px; flex: none; font-size: var(--small); font-variant-numeric: tabular-nums; opacity: 0; transition: opacity 0.15s; }
-.event:hover time, .event > summary:hover time { opacity: 1; }
-details.event > summary:hover .what { color: var(--text); }
-details.event[open] > summary .what { white-space: normal; }
-details.event > .markdown { margin: 4px 0 8px 24px; padding: 8px 12px; font-size: var(--body); color: var(--text); background: var(--card); border: 1px solid var(--line); border-radius: var(--radius-lg); }
+.event:hover time { opacity: 1; }
+.event.opens .line:hover .what { color: var(--text); }
+.event.opens.open .what { white-space: normal; }
+.event.opens > .markdown { margin: 4px 0 8px 24px; padding: 8px 12px; font-size: var(--body); color: var(--text); background: var(--card); border: 1px solid var(--line); border-radius: var(--radius-lg); }
 
 /* Home: the conversation, and the panel with Needs you and Tasks */
 
@@ -939,7 +941,7 @@ details.event > .markdown { margin: 4px 0 8px 24px; padding: 8px 12px; font-size
 #body:has(> #panel[hidden]) > #panel-resizer { display: none; }
 body.resizing { cursor: col-resize; user-select: none; }
 body.resizing iframe { pointer-events: none; }
-.panel-section > h2 {
+.panel-section > :is(h2, summary) {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -950,7 +952,7 @@ body.resizing iframe { pointer-events: none; }
   color: var(--text);
 }
 .panel-section .count { color: var(--muted); font-size: var(--small); font-weight: 500; font-variant-numeric: tabular-nums; }
-#needs > h2 .count:not(:empty) { color: #fff; background: var(--badge); border-radius: 10px; min-width: 20px; padding: 0 6px; line-height: 20px; text-align: center; font-weight: 600; }
+#needs > summary .count:not(:empty) { color: #fff; background: var(--badge); border-radius: 10px; min-width: 20px; padding: 0 6px; line-height: 20px; text-align: center; font-weight: 600; }
 .panel-section .items { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
 .panel-section .empty-hint { margin: 0; font-size: var(--small); color: var(--muted); }
 .task-group + .task-group { margin-top: 16px; }
@@ -965,11 +967,12 @@ body.resizing iframe { pointer-events: none; }
   color: var(--soft);
 }
 .task-group > :is(h3, summary) .count { color: var(--muted); font-weight: 500; }
-details.task-group > summary { list-style: none; cursor: pointer; }
-details.task-group > summary::-webkit-details-marker { display: none; }
-details.task-group > summary::before { content: "▸"; color: var(--muted); width: 8px; }
-details.task-group[open] > summary::before { content: "▾"; }
-details.task-group > summary:hover { color: var(--text); }
+/* Every part of Home folds; its count stays in sight. */
+details:is(.task-group, .panel-section) > summary { list-style: none; cursor: pointer; }
+details:is(.task-group, .panel-section) > summary::-webkit-details-marker { display: none; }
+details:is(.task-group, .panel-section) > summary::before { content: "▸"; color: var(--muted); width: 8px; flex: none; }
+details:is(.task-group, .panel-section)[open] > summary::before { content: "▾"; }
+details:is(.task-group, .panel-section) > summary:hover { color: var(--text); }
 #panel .card { padding: 12px; }
 #panel .card.decision .options { grid-template-columns: 1fr; }
 #panel .card .label { white-space: normal; }
@@ -989,8 +992,8 @@ details.task-group > summary:hover { color: var(--text); }
 .card.worker-box { padding: 6px 12px 4px; display: grid; gap: 2px; min-width: 0; }
 /* The worker, as a quiet label: its tasks are what to read. */
 .card.worker-box > .box-head { display: flex; gap: 6px; align-items: baseline; min-width: 0; font-size: var(--small); color: var(--muted); }
-.card.worker-box > .box-head .who { flex: none; text-transform: uppercase; letter-spacing: 0.04em; font-size: 10px; font-weight: 600; }
-.card.worker-box > .box-head .title { flex: 1; min-width: 0; min-height: 0; text-align: left; padding: 0; background: none; color: var(--soft); font-weight: 400; font-size: var(--small); font-family: inherit; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card.worker-box > .box-head .who { flex: none; text-transform: uppercase; letter-spacing: 0.04em; font-size: var(--small); font-weight: 600; }
+.card.worker-box > .box-head .title { flex: 1; min-width: 0; min-height: 28px; margin: -5px 0; text-align: left; padding: 0; background: none; color: var(--soft); font-weight: 400; font-size: var(--small); font-family: inherit; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card.worker-box > .box-head .title:not(:disabled):hover { text-decoration: underline; }
 .card.worker-box > .box-head .meta { flex: none; max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card.worker-box > .box-tasks { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; }
@@ -1061,7 +1064,9 @@ button.receipt.needs { background: var(--amber-soft); color: var(--amber); }
 .card.broken { color: var(--red); font-size: var(--small); }
 .show-more { margin: 4px 0 0 16px; }
 /* Artifacts: one row each, where it stands in sight; the list scrolls on its own. */
-#tasks-artifacts > .items { max-height: 280px; overflow-y: auto; display: grid; gap: 2px; padding-right: 2px; }
+#tasks-artifacts > .items { display: grid; gap: 2px; }
+/* Artifacts, Monitoring and Recently finished: lists that scroll on their own, a few rows high. */
+:is(#tasks-artifacts, #tasks-monitoring, #tasks-recent) > .items { max-height: min(40vh, 300px); overflow-y: auto; padding-right: 2px; }
 #tasks-artifacts .artifact { display: grid; grid-template-columns: 6.5ch minmax(0, 1fr) auto auto; align-items: center; column-gap: 8px; padding: 5px 8px; border-radius: 6px; background: var(--card, var(--hover)); font-size: var(--small); min-width: 0; }
 #tasks-artifacts .artifact .a-kind { font: 600 10px var(--mono); color: var(--muted); text-transform: uppercase; letter-spacing: 0.02em; min-width: 5.5ch; }
 #tasks-artifacts .artifact .a-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); text-decoration: none; font-weight: 500; }
@@ -1151,9 +1156,10 @@ select.verdict { min-height: 28px; border: 1px solid var(--line); border-radius:
 }
 button.danger { background: var(--red); color: #fff; }
 
-.receipts { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; font-size: var(--small); }
+.receipts { display: flex; flex-wrap: wrap; gap: 6px 4px; align-items: center; font-size: var(--small); }
 .receipt { padding: 0 8px; line-height: 22px; border-radius: 11px; background: var(--hover); color: var(--soft); text-decoration: none; }
-button.receipt { min-height: 22px; font-weight: 400; }
+/* A pill of 22px on a target of 28px (the border is transparent). */
+button.receipt { min-height: 28px; margin: -3px 0; border: solid transparent; border-width: 3px 0; background-clip: padding-box; border-radius: 14px; font-weight: 400; }
 .receipt.pass, .receipt.pr.passing { background: var(--green-soft); color: var(--green); }
 .receipt.fail, .receipt.pr.failing { background: var(--red-soft); color: var(--red); }
 .receipt.warn, .receipt.pr.pending { background: var(--amber-soft); color: var(--amber); }
@@ -1186,8 +1192,8 @@ button.receipt.changes { font-size: var(--small); color: var(--accent); backgrou
 .card.lessons .lesson-list { list-style: none; padding: 0; margin: 8px 0; display: grid; gap: 8px; }
 .card.lessons li { display: flex; gap: 10px; align-items: flex-start; }
 .card.lessons li input[type="checkbox"] { margin-top: 8px; }
-.card.lessons .lesson { flex: 1; display: grid; gap: 2px; }
-.card.lessons .lesson input { min-height: 28px; border: 1px solid var(--line); border-radius: var(--radius); padding: 4px 8px; background: var(--bg); width: 100%; }
+.card.lessons .lesson { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.card.lessons .lesson textarea { display: block; min-height: 28px; border: 1px solid var(--line); border-radius: var(--radius); padding: 4px 8px; background: var(--bg); width: 100%; line-height: 1.45; resize: none; overflow-y: hidden; }
 .card.lessons .lesson small { color: var(--muted); font-size: var(--small); }
 .card.check pre { margin: 8px 0; padding: 8px 12px; border-radius: var(--radius); background: var(--bg); border: 1px solid var(--line); font-size: var(--small); white-space: pre-wrap; overflow-wrap: anywhere; }
 .card.check .proof { font-size: var(--small); color: var(--soft); display: grid; gap: 2px; }
@@ -1258,6 +1264,13 @@ button.receipt.changes:hover { text-decoration: underline; }
   font-size: var(--body);
 }
 .card.draft .quoted strong { overflow-wrap: anywhere; }
+/* Written where a Slack reply goes since it was drafted: marked new. */
+.card.draft .moved-on .fresh-label { font-size: var(--small); font-weight: 600; color: var(--amber); margin-bottom: 2px; }
+.card.draft .quoted.fresh { border-left-color: var(--amber); background: var(--amber-soft); border-radius: 0 var(--radius) var(--radius) 0; padding: 4px 12px; }
+.card.draft .warn-note { color: var(--amber); }
+/* A draft gone without being sent, on its line in a timeline. */
+.draft-record .outcome { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-style: italic; font-size: var(--small); }
+#watch-resting { display: block; color: var(--amber); }
 .card.draft .inline-comment { margin: 8px 0 0; }
 .card.draft .inline-comment textarea { padding: 4px 10px; }
 .card.draft .inline-comment .where {
@@ -1351,8 +1364,48 @@ dialog .row label.hours:not(.grow) { width: auto; flex: none; }
 .away-can li.ok::before { content: "✓ "; color: var(--green); }
 
 /* Chips for what a task made or points to: a declared status shows its tone. */
-.receipt.link-chip { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; vertical-align: bottom; }
+.receipt.link-chip { max-width: 100%; overflow: hidden; white-space: nowrap; display: inline-flex; align-items: baseline; vertical-align: bottom; }
+.receipt.link-chip > .chip-link { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: inherit; text-decoration: none; }
+.receipt.link-chip > button.chip-link { min-height: 28px; margin: -3px 0; padding: 0; background: none; font: inherit; line-height: inherit; }
+.receipt.link-chip > .chip-link:hover { text-decoration: underline; opacity: 1; }
+/* ✕ takes what it made off the card (and Artifacts). */
+.receipt.link-chip > .chip-off { flex: none; min-height: 28px; margin: -3px -4px -3px 0; padding: 0 2px 0 6px; background: none; color: inherit; font-size: 10px; line-height: inherit; opacity: 0.45; }
+.receipt.link-chip > .chip-off:not(:disabled):hover { opacity: 1; }
 .receipt.link-chip.tone-good { background: var(--green-soft); color: var(--green); }
 .receipt.link-chip.tone-bad { background: var(--red-soft); color: var(--red); }
 .receipt.link-chip.tone-wait { background: var(--amber-soft); color: var(--amber); }
 .receipt.link-chip.tone-active { background: var(--accent-soft); color: var(--accent); }
+
+/* Monitoring and Recently finished: a row per task (its title, when, what it waits on or came
+   to, what it made); a click shows its whole card in place. */
+:is(#tasks-monitoring, #tasks-recent) .items { gap: 4px; }
+#panel .card.task.row { padding: 0 10px 4px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--card); box-shadow: none; cursor: pointer; }
+#panel .card.task.row:not(.unfolded):hover { border-color: var(--muted); }
+#panel .card.task.row.unfolded { cursor: auto; padding: 6px 12px 8px; }
+.card.task.row .head { margin-bottom: 0; }
+.card.task.row .head .tid { display: none; }
+/* Its marker gives way first; when stays whole. */
+.card.task.row .head .meta { display: inline-flex; }
+.card.task.row .head .meta .marker { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.card.task.row .head .meta .when { flex: none; white-space: pre; }
+.card.task.row:not(.unfolded) > :not(.head, .row-line), .card.task.row:not(.unfolded) > .head > .actions { display: none; }
+.card.task.row.unfolded > .row-line { display: none; }
+.card.task .row-line { display: flex; gap: 8px; align-items: baseline; margin-left: 16px; min-width: 0; font-size: var(--small); line-height: 18px; color: var(--muted); }
+.card.task .row-line .why { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card.task .row-line .why.warn::before { content: "! "; color: var(--amber); font-weight: 600; }
+.card.task .row-line .made { flex: none; max-width: 42%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--soft); }
+/* Groups inside Monitoring: the owner's deliveries, the PRs they reviewed. */
+.task-group.sub, .task-group.sub + .task-group.sub { margin: 2px 0 0; }
+.task-group.sub > summary { margin: 0; font-weight: 500; color: var(--muted); }
+/* A report not read yet. */
+.dot.unread { background: var(--accent); opacity: 1; }
+/* Moving a task's latest result to a task of its own: what stays, what moves. */
+.card .actions .split-preview { flex: 1 1 100%; display: grid; gap: 4px; min-width: 0; font-size: var(--small); color: var(--soft); }
+.split-preview .hint { color: var(--muted); }
+.split-preview .doubt { color: var(--amber); }
+.split-preview :is(.keeps, .moves) { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.split-preview strong { color: var(--text); font-weight: 600; }
+.split-preview .moved { color: var(--muted); }
+.split-preview .moved ul { margin: 4px 0 0; padding-left: 16px; }
+/* Our own short tooltip (data-tip): it goes when what it is about moves. */
+#tip { position: fixed; z-index: 100; max-width: min(340px, calc(100vw - 16px)); padding: 4px 8px; border-radius: 6px; background: var(--text); color: var(--bg); font-size: var(--small); line-height: 1.45; white-space: pre-line; overflow-wrap: anywhere; pointer-events: none; box-shadow: var(--shadow-pop); }

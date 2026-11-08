@@ -131,6 +131,14 @@ def test_acceptance_criteria_count_only_what_was_seen():
     assert "Says “ruff passes” is met, but `ruff check .` failed (exit 1)." in found["flags"]
     assert found["tests"]["failed_before"], "red, then green"
 
+    # Bug bash: `cat fin.txt g.txt` failed on g.txt (not there yet); fin.txt was fine.
+    part = [
+        {"criterion": "fin.txt exists", "result": "met", "evidence": "`cat fin.txt` showed fin"}
+    ]
+    found = receipts.summarize([command("cat fin.txt g.txt", 1)], {}, "Done.", ["fin.txt exists"],
+                               part)  # fmt: skip
+    assert found["criteria"][0]["state"] == "claimed" and not found["flags"]
+
     in_order = [{"criterion": "the test passes", "result": "met",
                  "evidence": "`uv run pytest tests/test_orders.py`"}]  # fmt: skip
     found = receipts.summarize(commands, {}, "Done.", criteria[:1], in_order)

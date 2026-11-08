@@ -21,11 +21,20 @@ LINK_TRAIL = re.compile(r"(?:[.,;:!?'\"\]]|&quot;|&#39;)$")
 FENCE = re.compile(r"```[\s\S]*?(?:```|$)")
 
 
+CODE_SPAN = re.compile(r"`[^`\n]*`")
+# A link cut short for display ("https://docs.google.com/…"): no link at all.
+CUT = re.compile("(?:\u2026|\\.\\.\\.)")
+
+
 def links(text: str) -> list[str]:
-    """The links a text gives (not those in its code blocks), each once, in order."""
+    """The links a text gives (not those in its code, nor ones cut short with "…"), each once,
+    in order."""
     found = []
-    for raw in LINK.findall(FENCE.sub(" ", text or "")):
-        url = raw.replace("&amp;", "&")
+    plain = CODE_SPAN.sub(" ", FENCE.sub(" ", text or ""))
+    for match in LINK.finditer(plain):
+        if CUT.match(plain, match.end()):
+            continue
+        url = match.group(0).replace("&amp;", "&")
         while True:
             if mark := LINK_TRAIL.search(url):
                 url = url[: mark.start()]
@@ -35,6 +44,34 @@ def links(text: str) -> list[str]:
                 break
         if re.match(r"https?://[^/\s]+\.[^/\s]", url) and url not in found:
             found.append(url)
+    return found
+
+
+# [the plan](https://…): what the report calls a link.
+NAMED_LINK = re.compile(r"\[([^\]\n]{1,120})\]\((https?://[^\s)]+)\)")
+# A line saying it made what it links: created, wrote, opened, published, started…
+MADE = re.compile(
+    r"\b(?:creat|wr[io]te|written|made|mak|open|publish|start|launch|draft|add|upload|generat|"
+    r"produc|deliver|built|build|kick|submit|shar|new)\w*|"
+    "\u521b\u5efa|\u65b0\u5efa|\u5199\u4e86|\u5199\u597d|\u4ea7\u51fa|\u751f\u6210|"
+    "\u542f\u52a8|\u53d1\u5e03|\u63d0\u4ea4|\u8d77\u8349",
+    re.IGNORECASE,
+)
+
+
+def named_links(text: str) -> dict[str, str]:
+    """The text a report gives its links ([text](url)), by link."""
+    plain = CODE_SPAN.sub(" ", FENCE.sub(" ", text or ""))
+    return {url: " ".join(name.split()) for name, url in NAMED_LINK.findall(plain)}
+
+
+def made_links(text: str) -> list[str]:
+    """Links a report says it made: on a line that says so ("Created [the plan](…)", "the run:
+    …" after "Started a run"). Not those it only mentions or was given."""
+    found: list[str] = []
+    for line in FENCE.sub(" ", text or "").splitlines():
+        if MADE.search(CODE_SPAN.sub(" ", NAMED_LINK.sub(r"\1", line))):
+            found += [url for url in links(line) if url not in found]
     return found
 
 

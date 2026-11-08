@@ -29,6 +29,7 @@ from copilot.generated.rpc import (
     SandboxConfigUserPolicy,
     SandboxConfigUserPolicyFilesystem,
     SandboxConfigUserPolicyNetwork,
+    TasksCancelRequest,
 )
 
 
@@ -45,6 +46,8 @@ class Capabilities:
     mcp_sign_in: bool
     # Shell commands can run in an OS sandbox (sandbox_config).
     sandbox: bool
+    # A message sent shows as a user.message event once the session takes it up.
+    echoes: bool = True
 
 
 SendMode = Literal["enqueue", "immediate"]
@@ -247,6 +250,28 @@ class CopilotBackend:
                 ),
             ),
         )
+
+
+async def stop_background(session: Any) -> int:
+    """Cancel what a session left running in the background (a command its turn went on from,
+    a sub-agent): after a stop, a background command would end in a turn of its own, and until
+    then the session takes no queued message. How many were cancelled."""
+    tasks = getattr(getattr(session, "rpc", None), "tasks", None)
+    if tasks is None:
+        return 0
+    try:
+        listed = await tasks.list()
+    except Exception:
+        return 0
+    cancelled = 0
+    for task in getattr(listed, "tasks", None) or []:
+        status = getattr(getattr(task, "status", None), "value", getattr(task, "status", ""))
+        if status != "running":
+            continue
+        with suppress(Exception):
+            if (await tasks.cancel(TasksCancelRequest(id=task.id))).cancelled:
+                cancelled += 1
+    return cancelled
 
 
 def copilot_backend(command: str) -> CopilotBackend:
