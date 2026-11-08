@@ -726,7 +726,7 @@ def misplaced(comments: list[InlineComment], lines: dict) -> list[str]:
 REPORT_STATUS = {"question": "waiting", "blocked": "waiting", "done": "done", "failed": "failed"}
 MAX_RESULT = 30000
 # Copilot hands a tool output over 50 KB to the model as a file, which the Router cannot read.
-LISTED_BYTES = 32000
+LISTED_BYTES = 14000
 # The most watches Settings holds.
 MAX_WATCHES = 10
 
@@ -1536,7 +1536,16 @@ class Tools:
             meta["attachments"] = images  # The owner's images it names come with it.
         self.runtime.add_message(session_id, "router", params.instructions, meta)
         if not special:  # Chief of Staff's own helpers come and go quietly.
-            notice = f"Started “{title}”" + (f" · new because {why_new}" if why_new else "")
+            # Not "Started" for work that waits: for the tasks it comes after, or for a slot.
+            waits = [dep["title"] for dep in after if dep["status"] not in {"done", "review"}]
+            limit = self.store.settings().max_workers
+            if waits:
+                said = f"Queued “{title}” · after " + ", ".join(f"“{t}”" for t in waits[:2])
+            elif self.runtime.workers.running() >= limit:
+                said = f"Queued “{title}” · waits for a worker slot ({limit} busy)"
+            else:
+                said = f"Started “{title}”"
+            notice = said + (f" · new because {why_new}" if why_new else "")
             self.runtime.add_message(
                 caller, "notice", notice, {"session_id": session_id, "task_id": task["id"]}
             )
@@ -3087,7 +3096,11 @@ class Tools:
             )
         # Given a task: for that task only (its other tasks that follow it go on).
         about = task["id"] if task else ""
-        kept = [key for key in gone if not self.runtime.unfollow_for(row["id"], key, about)]
+        kept = [
+            key
+            for key in gone
+            if not self.runtime.unfollow_for(row["id"], key, about, "The Router")
+        ]
         names = self.runtime.slack.display_names()
         said = ", ".join(threads.label(key, names) for key in gone)
         # The owner reads the notice: the task by its title (not its id, nor the worker's).

@@ -359,8 +359,10 @@ function withTask(node, task, draft, inner = null) {
     else if (from) node.querySelector(":scope > .head").after(from);
     return node;
   }
-  const text = task.status === "review" ? task.result || task.progress : task.progress || task.goal || "";
-  const title = [el("span", { class: "muted", text: task.status === "review" ? "Result of " : "For " }), el("strong", { text: task.title })];
+  // A finished task's own result, not what it was asked (the Router's instructions).
+  const ended = ["review", "done"].includes(task.status);
+  const text = ended ? task.result || task.progress : task.progress || task.goal || "";
+  const title = [el("span", { class: "muted", text: ended ? "Result of " : "For " }), el("strong", { text: task.title })];
   const context = text
     ? el("details", { class: "context", open: old?.open }, el("summary", {}, ...title), el("div", { class: "markdown", html: markdown(text) }))
     : el("div", { class: "context" }, ...title);

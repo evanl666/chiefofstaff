@@ -18,8 +18,8 @@ from ..store import Store, now
 from . import SourceHost
 
 MAX_FOLLOW_FAILURES = 5
-# How long a PR already closed when a session was asked to follow it stays followed (to hear
-# if it is reopened).
+# How long a PR closed (not merged) stays followed, from when it was closed (or, closed already
+# when a session was asked to follow it, from then): to hear if it is reopened.
 KEEP_CLOSED_DAYS = 14
 # Reads of a followed PR that GitHub says does not exist before it is let go.
 MISSING_TRIES = 3
@@ -765,25 +765,37 @@ class GitHubSource:
         kept = False
         if state != "open":
             ended = pull.get("merged_at") or pull.get("closed_at")
-            if ended and datetime.fromisoformat(ended).timestamp() < since:
-                asked = float(self.store.get(f"ghkeep:{thread}") or 0)
-                if state == "merged" or not asked:
-                    # Already finished when followed (a PR cited in passing): just stop
-                    # following it.
-                    self.host.unfollow(thread)
-                    return
-                if time.time() - asked > KEEP_CLOSED_DAYS * 86400:
+            when = datetime.fromisoformat(ended).timestamp() if ended else time.time()
+            before = bool(ended) and when < since
+            asked = float(self.store.get(f"ghkeep:{thread}") or 0)
+            if before and (state == "merged" or not asked):
+                # Already finished when followed (a PR cited in passing): just stop
+                # following it.
+                self.host.unfollow(thread)
+                return
+            if state == "merged":
+                items.append((f"github:state:{thread}:merged", "The PR was merged."))
+            else:
+                # Closed, not merged (while followed, or followed on request once closed): it
+                # stays followed for a while, so its reopening (or a comment) is news.
+                if time.time() - (asked if before else when) > KEEP_CLOSED_DAYS * 86400:
                     self.host.missing(
                         thread,
-                        f"it stayed closed for {KEEP_CLOSED_DAYS} days after it was followed "
-                        "(a reopening after that is not noticed)",
+                        f"it stayed closed for {KEEP_CLOSED_DAYS} days after it was "
+                        f"{'followed' if before else 'closed'} (a reopening after that is not "
+                        "noticed)",
                     )
                     return
-                # Followed on request while closed: its reopening (or a comment) is news.
                 kept = True
-                self.store.set(f"ghclosed:{thread}", ended)
-            else:
-                items.append((f"github:state:{thread}:{state}", f"The PR was {state}."))
+                self.store.set(f"ghclosed:{thread}", ended or now())
+                if not before:
+                    items.append(
+                        (
+                            f"github:state:{thread}:closed:{ended}",
+                            f"The PR was closed, not merged. It stays followed for "
+                            f"{KEEP_CLOSED_DAYS} days, so a reopening reaches you.",
+                        )
+                    )
         elif closed := self.store.get(f"ghclosed:{thread}"):
             items.append((f"github:state:{thread}:reopened:{closed}", "The PR was reopened."))
             self.store.delete(f"ghclosed:{thread}")

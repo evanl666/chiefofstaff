@@ -51,10 +51,10 @@ export function terminalItem(session) {
           el("button", { type: "button", class: "title", text: session.display_title || session.title, title: `Open its worker (started as “${session.title}”)`, onclick: () => select(session.id) }),
           el("span", { class: "meta", text: "In a terminal" }),
         ),
-        el("div", { class: "task-body" }, el("div", { class: "activity", text: line() })),
+        el("div", { class: "task-body" }, el("div", { class: "activity" }, el("span", { class: "step", text: line() }))),
       ),
     refresh: (node) => {
-      node.querySelector(".activity").textContent = line();
+      node.querySelector(".activity .step").textContent = line();
     },
   };
 }
@@ -78,10 +78,10 @@ export function followUpItem(session) {
           el("button", { type: "button", class: "title", text: name, title: `Open its worker at this task (started as “${session.title}”)`, onclick: () => select(session.id, { task: session.task?.task_id }) }),
           el("span", { class: "meta", text: meta(), title: "Its task is finished; it works on what came up about it (news on its PR, a question)" }),
         ),
-        el("div", { class: "task-body" }, el("div", { class: "activity", text: line() })),
+        el("div", { class: "task-body" }, el("div", { class: "activity" }, el("span", { class: "step", text: line() }))),
       ),
     refresh: (node) => {
-      node.querySelector(".activity").textContent = line();
+      node.querySelector(".activity .step").textContent = line();
       node.querySelector(".head .title").textContent = name;
       node.querySelector(".head .meta").textContent = meta();
     },
@@ -383,7 +383,7 @@ function taskCard(task, phase = phaseOf(task)) {
     box.replaceChildren(
       el("div", { class: "hint", text: "Its latest result becomes a task of its own; this one goes back to the result before it. You can undo it for a while." }),
       // The server's doubt (its results look like one piece of work): said before it is done.
-      preview.why ? el("div", { class: "doubt", text: preview.why }) : null,
+      preview.why ? el("div", { class: "doubt", text: preview.why }) : "",
       el("div", { class: "keeps" }, el("strong", { text: "Stays here: " }), gist(preview.keeps?.result || "") || "no earlier result"),
       el("div", { class: "moves" }, el("strong", { text: "Moves: " }), gist(moves.result || "") || "its latest result"),
       messages.length
@@ -459,6 +459,10 @@ function taskCard(task, phase = phaseOf(task)) {
       // News about finished work: seen, it goes back to the finished ones.
       main = el("button", { type: "button", text: "Got it", onclick: () => act(`/api/tasks/${task.id}/news-seen`, {}, "") });
       more = [{ text: "Follow up…", onclick: () => reply("What should it do about it?", "Sent to the worker.") }, copy, pr, named, worker];
+    } else if (task.status === "done" && ["pr-failing", "pr-changes"].includes(phase.marker)) {
+      // Its PR has failing CI or changes asked for: tell its worker what to do about it.
+      main = el("button", { type: "button", text: "Ask it to fix…", onclick: () => reply(phase.marker === "pr-failing" ? "What should it do about the failing checks?" : "What should it do about the changes asked for?", "Sent to the worker.") });
+      more = [followUp, copy, named, worker];
     } else if (task.status === "done") {
       more = [followUp, copy, pr, named, splitOff, worker];
     } else {
@@ -572,7 +576,7 @@ function linkChip(task, link, role, removable) {
   }
   return chip;
 }
-const WAITS_WORDS = { github: "Reply draft", slack: "Slack draft", reply: "Reply draft", merge: "Ready to merge", question: "Question", form: "Form", link: "Link to open", signin: "Sign-in", workspace: "Where to work" };
+const WAITS_WORDS = { review: "Review draft", github: "Reply draft", slack: "Slack draft", reply: "Reply draft", merge: "Ready to merge", question: "Question", form: "Form", link: "Link to open", signin: "Sign-in", workspace: "Where to work" };
 // Cards under Needs you from this task's worker about this task (one it names, else the task it
 // is on now).
 function ownerItems(task, worker) {
@@ -587,6 +591,16 @@ const waitsOnOwner = (task, worker) => {
 };
 // A thread its worker follows, as a link to it: a PR on GitHub, a Slack conversation when its
 // link is known.
+// Stop following a thread for this task (its worker's other tasks keep following it).
+async function stopFollowing(key, label, task) {
+  try {
+    const { all } = await api(`/api/sessions/${task.session_id}/unfollow`, { method: "POST", body: { text: key, task_id: task.id } });
+    toast(all ? `Stopped following ${label}: new messages there go to the Router.` : `Stopped following ${label} for this task; its worker still follows it for another task.`);
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+const stopButton = (key, label, task) => el("button", { type: "button", class: "link unfollow", text: "✕", title: `Stop following ${label}`, "aria-label": `Stop following ${label}`, onclick: () => stopFollowing(key, label, task) });
 function watchingChip(key, task) {
   const pr = /^github:([^/#]+\/[^#]+)#(\d+)$/.exec(key);
   const title = pr ? prTitle(`${pr[1]}#${pr[2]}`) : "";
@@ -595,22 +609,7 @@ function watchingChip(key, task) {
   const help = `It follows ${key}${title ? ` (“${title}”)` : ""}: what happens there comes to it`;
   const name = href ? el("a", { class: "watch-name", href, target: "_blank", rel: "noreferrer", text: `Watching ${label}` }) : el("span", { class: "watch-name", text: `Watching ${label}` });
   // Any thread or PR it follows can be let go (not only one it cannot read).
-  const stop = el("button", {
-    type: "button",
-    class: "link unfollow",
-    text: "✕",
-    title: `Stop following ${label}`,
-    "aria-label": `Stop following ${label}`,
-    onclick: async () => {
-      try {
-        const { all } = await api(`/api/sessions/${task.session_id}/unfollow`, { method: "POST", body: { text: key, task_id: task.id } });
-        toast(all ? `Stopped following ${label}: new messages there go to the Router.` : `Stopped following ${label} for this task; its worker still follows it for another task.`);
-      } catch (error) {
-        toast(error.message, "error");
-      }
-    },
-  });
-  return el("span", { class: "receipt watching", title: help }, name, stop);
+  return el("span", { class: "receipt watching", title: help }, name, stopButton(key, label, task));
 }
 export function artifacts(task, worker = byId(task.session_id), { active = true } = {}) {
   const items = [];
@@ -629,7 +628,9 @@ export function artifacts(task, worker = byId(task.session_id), { active = true 
   // A thread it cannot read is not something it waits on: said, with a way to let it go.
   for (const key of followedOnce(task.watch_failing || [])) items.push(failingChip(key, task));
   const { drafts, questions } = ownerItems(task, worker);
-  for (const draft of drafts) items.push(el("button", { type: "button", class: "receipt needs", title: "Waiting for you under Needs you", text: `${WAITS_WORDS[draft.kind] || "Draft"} · Needs you`, onclick: () => focusDraft(draft.id) }));
+  // A review to post is not a reply (a reply answers a comment, or is its own PR's).
+  const waitsKind = (draft) => (draft.kind === "github" && !(draft.target?.in_reply_to || draft.target?.reply_to_comment || draft.target?.own) ? "review" : draft.kind);
+  for (const draft of drafts) items.push(el("button", { type: "button", class: "receipt needs", title: "Waiting for you under Needs you", text: `${WAITS_WORDS[waitsKind(draft)] || "Draft"} · Needs you`, onclick: () => focusDraft(draft.id) }));
   for (const question of questions) items.push(el("button", { type: "button", class: "receipt needs", title: question.text, text: "Question · Needs you", onclick: () => focusQuestion(question.id) }));
   if (!items.length && !links.more) return null;
   return el("div", { class: "artifacts" }, items.length ? el("div", { class: "receipts" }, ...items) : "", links.more || "");
@@ -640,17 +641,24 @@ function prChips(task) {
   const shown = new Set();
   const own = [];
   const mentioned = [];
+  // One it follows for this task can be let go from its chip (Bug bash 7, G5).
+  const followed = new Set([...(task.watching || []), ...(task.watch_unreadable || [])].map((key) => key.toLowerCase()));
   for (const pr of task.receipts?.prs || []) {
     shown.add(pr.label.toLowerCase());
-    (pr.own || pr.reviewed ? own : mentioned).push(prChip(pr));
+    const key = `github:${pr.label.toLowerCase()}`;
+    const chip = prChip(pr);
+    const short = pr.label.replace(/^[^/]+\//, "");
+    (pr.own || pr.reviewed ? own : mentioned).push(followed.has(key) && (pr.own || pr.reviewed) ? el("span", { class: "pr-followed" }, chip, stopButton(key, short, task)) : chip);
   }
   return { shown, own, mentioned };
 }
 // What could not be read, as GitHub said it: no access (another signed-in account may have
 // it), GitHub not answering (tried again), or a part of the PR only (its CI checks, say).
 const READ_PARTS = { account: "account", comments: "comments", "review comments": "review comments", reviews: "reviews", "CI checks": "CI checks" };
-export function failingWords(key, why = {}) {
-  const label = threadWords(key);
+export function failingWords(rawKey, why = {}) {
+  const label = threadWords(rawKey);
+  // In the tooltip too, the PR as the owner reads it ("acme/app#72"), not its key.
+  const key = rawKey.startsWith("github:") ? rawKey.slice("github:".length) : threadLabel(rawKey);
   const error = why.error ? ` GitHub said: ${why.error}` : "";
   if (why.step === "delivery") return [`Can't pass on news from ${label}`, `It reads ${key}, but what it found could not be passed to its worker.${error}`];
   if (why.kind === "transient") return [`GitHub not answering for ${label}`, `Reading ${key} failed several times in a row; it keeps trying.${error}`];
@@ -663,21 +671,7 @@ function failingChip(key, task) {
   const label = threadWords(key);
   const [words, help] = failingWords(key, task.watch_failing_why?.[key]);
   const chip = el("span", { class: "receipt warn failing", title: help }, `${words} · `);
-  chip.append(
-    el("button", {
-      type: "button",
-      class: "link",
-      text: "stop following",
-      onclick: async () => {
-        try {
-          const { all } = await api(`/api/sessions/${task.session_id}/unfollow`, { method: "POST", body: { text: key, task_id: task.id } });
-          toast(all ? `Stopped following ${label}.` : `Stopped following ${label} for this task; its worker still follows it for another task.`);
-        } catch (error) {
-          toast(error.message, "error");
-        }
-      },
-    }),
-  );
+  chip.append(el("button", { type: "button", class: "link", text: "stop following", onclick: () => stopFollowing(key, label, task) }));
   return chip;
 }
 // A worker on the board (Needs you, Running): one box per section it has tasks in, holding
@@ -734,7 +728,8 @@ function activityLine(worker) {
   const said = worker?.said ? `\n\nSaid last: ${worker.said.replace(/\s+/g, " ").slice(0, 400)}` : "";
   // What it runs, in the tooltip: the line says what it is for.
   const command = worker?.step_command && worker.step_command !== raw ? `\n${worker.step_command}` : "";
-  return el("div", { class: "activity", title: `${raw || line}${command}${said}` }, worker?.step ? "Now: " : "", line, long ? el("span", { class: "when", text: ` · ${ago(worker.step_since)}` }) : "");
+  // The step is cut to fit; how long it has run stays in sight beside it.
+  return el("div", { class: "activity", title: `${raw || line}${command}${said}` }, el("span", { class: "step", text: `${worker?.step ? "Now: " : ""}${line}` }), long ? el("span", { class: "when", text: ` · ${ago(worker.step_since)}` }) : "");
 }
 // A running task at a glance, by where it stands: at work (the step its worker is in and for
 // how long), watching (what, and when it checks back), waiting its turn, or stalled; then
@@ -742,7 +737,7 @@ function activityLine(worker) {
 function runningBody(task, worker, phase = {}) {
   const nodes = [];
   const section = phase.section || "running";
-  if (section === "running") nodes.push(phase.marker === "terminal" ? el("div", { class: "activity", text: compactPaths(worker?.terminal?.activity || "Working in a terminal", worker?.cwd) }) : activityLine(worker));
+  if (section === "running") nodes.push(phase.marker === "terminal" ? el("div", { class: "activity" }, el("span", { class: "step", text: compactPaths(worker?.terminal?.activity || "Working in a terminal", worker?.cwd) })) : activityLine(worker));
   else nodes.push(waitLine(task, worker, phase));
   // Its own progress: what it last reported on this task (not its asides while it works);
   // gray once it is old news.

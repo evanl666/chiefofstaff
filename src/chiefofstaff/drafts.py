@@ -41,6 +41,10 @@ DRAFT_DECISION = re.compile(
     r"(?:[\w-]+\s+){0,3}?(?:draft|review|reply|replies|approval)s?\b",
     re.IGNORECASE,
 )
+# A question its session asked this shortly before a draft for the same task, the owner telling
+# it nothing in between, came in the turn that drafted it: it is about that draft ("I drafted an
+# approval for you to send"), whatever its words.
+SAME_TURN_SECONDS = 60
 
 # Cards for the owner, in words (for the Router).
 CARD_WORDS = {
@@ -993,6 +997,7 @@ class Drafts:
         if not question or (
             question.get("at", "") < draft["created_at"]
             and not self.about_draft(question.get("text") or "", draft)
+            and not self.asked_with(question, draft)
         ):
             return  # None, or asked before the draft: about something else.
         self.runtime.asks.answered(draft["session_id"], task["id"] if task else "")
@@ -1005,10 +1010,30 @@ class Drafts:
         approve, send or post the draft (a review, a reply)."""
         return draft["id"] in text or bool(DRAFT_DECISION.search(text))
 
+    def asked_with(self, question: dict, draft: dict) -> bool:
+        """Whether its session asked the owner `question` in the turn that made `draft`, just
+        before it, for the same task: seconds earlier, the owner telling it nothing between."""
+        task = self.task_of(draft)
+        if not task or (question.get("task_id") or "") != task["id"]:
+            return False
+        asked, made = question.get("at") or "", draft["created_at"]
+        try:
+            ahead = datetime.fromisoformat(made) - datetime.fromisoformat(asked)
+        except ValueError:
+            return False
+        if not 0 <= ahead.total_seconds() <= SAME_TURN_SECONDS:
+            return False
+        return not self.store.one(
+            "SELECT 1 FROM messages WHERE session_id=? AND kind='owner' AND created_at>? "
+            "AND created_at<? LIMIT 1",
+            (draft["session_id"], asked, made),
+        )
+
     def question_draft(self, task: dict, text: str | None = None) -> dict | None:
         """The task's own reply or review still waiting for the owner that its question (its
         progress while waiting, or `text`) is about: one decision, told and counted once, as
-        that draft's card (deciding the draft answers the question: settle_question)."""
+        that draft's card (deciding the draft answers the question: settle_question). A
+        question asked in the turn that drafted it, just before, is about it in any words."""
         text = (task.get("progress") or "") if text is None else text
         if not text.strip():
             return None
@@ -1022,7 +1047,11 @@ class Drafts:
         named = [draft for draft in mine if draft["id"] in text]
         if named or not mine:
             return named[-1] if named else None
-        return mine[-1] if DRAFT_DECISION.search(text) else None
+        if DRAFT_DECISION.search(text):
+            return mine[-1]
+        asked = self.runtime.asks.owner_question(f"{task['session_id']}:{task['id']}")
+        together = [draft for draft in mine if asked and self.asked_with(asked, draft)]
+        return together[-1] if together else None
 
     def owner_text(self, text: str) -> str:
         """Text as the owner reads it: without the ids of drafts and Slack timestamps."""
@@ -1527,14 +1556,21 @@ class Drafts:
             not wake
             and row["role"] == WORKER
             and task
-            and task["status"] == "running"
+            and task["status"] in {"running", "waiting"}
+            and not self.store.get(f"stopped:{task['id']}")
             and not self.runtime.states[row["id"]].busy
             and row["status"] != "working"
         ):
             # Its task waited for this (it drafted, then ended its turn): it goes on, or reports
             # that it is done. Otherwise the task would stay "running" with nothing at work.
+            # Waiting on another answer of the owner's, it hears now what became of its draft.
             wake = True
-            text += " Go on with your task, or report it done if this was the last of it."
+            text += (
+                " Go on with your task, or report it done if this was the last of it."
+                if task["status"] == "running"
+                else " Your task still waits for the owner's answer to your question: go on "
+                "with what does not depend on it, or end your turn (do not ask it again)."
+            )
         spoken = self.runtime.heard(said) if said.strip() else ""
         prompt = wrap(
             "system", "draft-outcome", text, task=task["id"] if task else None, reply_in=spoken

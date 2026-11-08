@@ -11,6 +11,7 @@ import json
 import re
 import sys
 import tempfile
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -1016,6 +1017,17 @@ async def round_three(runtime, browser, failures: list[str]):
     )
     await expect(chips_now.locator(".receipt", has_text="Google Doc")).to_have_count(0)
     await expect(group.locator(".activity")).to_contain_text("Measure the row overflow")
+    # Bug bash 7 (D7): a long step is cut to fit, and how long it has run stays in sight.
+    long_step = "Run the long soak check with every fixture and report each timing " * 3
+    runtime.states[busy].steps["soak"] = (time.time() - 180, long_step, "sleep 200")
+    runtime.update_session(busy, status="working", activity="soak")
+    activity = group.locator(".activity").first
+    await expect(activity.locator(".when")).to_have_text(" · 3m")
+    when_box = await activity.locator(".when").bounding_box()
+    row_box = await activity.bounding_box()
+    assert when_box["x"] + when_box["width"] <= row_box["x"] + row_box["width"] + 1, row_box
+    runtime.states[busy].steps.pop("soak")
+    runtime.update_session(busy, status="working", activity="Measure the row overflow again")
     log("a worker's box per section: its task there, two clean lines, when apart, its links")
 
     asking_card = page.locator("#tasks .card.task", has_text="Answer Carol")
@@ -1175,6 +1187,21 @@ async def round_four(runtime, browser, failures: list[str]):
     store.set(f"turntask:{weekly}", answer["id"])
     runtime.update_session(weekly, status="working", activity="Reading the client code")
 
+    # Bug bash 7 (G5): its own PR's CI fails after it was delivered: under Needs you, with a
+    # way to tell its worker what to do and to let the PR go from its chip.
+    cuber = await start("Add cube to textkit")
+    cubed = runtime.tasks.current(cuber)
+    cube_pr = {"label": "acme/app#88", "url": "https://github.com/acme/app/pull/88",
+               "title": "Add cube", "state": "OPEN", "checks": "failing", "failing": ["lint"],
+               "review": "", "own": True, "about": True}  # fmt: skip
+    cube_pr["at"] = datetime.now(UTC).isoformat()
+    cube_run = store.one("SELECT id FROM runs WHERE task_id=?", (cubed["id"],))
+    store.execute("UPDATE runs SET evidence=? WHERE id=?",
+                  (json.dumps({"checkouts": [], "prs": [cube_pr]}), cube_run["id"]))  # fmt: skip
+    runtime.tasks.move(cubed["id"], "done", result="Opened acme/app#88.")
+    runtime.follow(cuber, ["github:acme/app#88"], task_id=cubed["id"])
+    runtime.update_session(cuber, status="idle", activity="")
+
     # C5: a thread it cannot read, for its task.
     stuck = await start("Watch the example PR")
     runtime.follow(stuck, ["github:acme/app#42"], task_id=runtime.tasks.current(stuck)["id"])
@@ -1297,13 +1324,22 @@ async def round_four(runtime, browser, failures: list[str]):
     await expect(weekly_box.locator(".box-head .meta")).to_contain_text("also: Monitoring")
     log("monitoring says what it waits on; a check-back is its task's while its worker works")
 
+    cube_card = page.locator(".card.task.marker-pr-failing", has_text="Add cube to textkit")
+    await expect(cube_card.locator(".head .meta")).to_contain_text("CI failing")
+    await expect(cube_card.locator(".reason")).to_contain_text("CI failing on app#88 (lint)")
+    await expect(cube_card.get_by_role("button", name="Ask it to fix…")).to_be_visible()
+    await cube_card.locator(".pr-followed .unfollow").click()
+    await expect(page.locator(".toast", has_text="Stopped following app#88")).to_be_visible()
+    assert "github:acme/app#88" not in store.follows(cuber)
+    log("a delivered PR with failing CI needs you: ask its worker to fix it, or let it go")
+
     cannot = page.locator(".card.task", has_text="Watch the example PR")
     await unfold(cannot)
     chip = cannot.locator(".receipt.failing")
     await expect(chip).to_contain_text("Can't read app#42")
     await expect(cannot.locator(".receipt.watching")).to_have_count(0)
     await chip.get_by_role("button", name="stop following").click()
-    await expect(page.locator(".toast", has_text="Stopped following app#42.")).to_be_visible()
+    await expect(page.locator(".toast", has_text="Stopped following app#42")).to_be_visible()
     assert "github:acme/app#42" not in store.follows(stuck)
     await expect(chip).to_have_count(0, timeout=10000)
     log("a thread it cannot read is said so, not waited on, and can be let go")

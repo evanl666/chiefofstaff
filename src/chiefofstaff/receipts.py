@@ -406,11 +406,14 @@ def within_words(part: list[str], whole: list[str]) -> bool:
 def names(snippet: str, command: str) -> bool:
     """Whether a quoted command is the one that ran, word for word: it is part of it, or (from
     two words on) all of its words are in it, as `git log --stat` is in
-    `git --no-pager log --oneline --stat -2`. Never by letters: `ls` is not in `tools`."""
-    quoted, ran = words(snippet), words(command)
-    if within_words(quoted, ran):
-        return True
-    return len(quoted) >= 2 and set(quoted) <= set(ran)
+    `git --no-pager log --oneline --stat -2`. Never by letters: `ls` is not in `tools`. Each
+    command of a line counts on its own: in `python -m app 'a b'; pytest`, the `;` is not part
+    of the quoted argument before it."""
+    quoted = words(snippet)
+    for ran in [words(command), *simple_commands(command)]:
+        if within_words(quoted, ran) or (len(quoted) >= 2 and set(quoted) <= set(ran)):
+            return True
+    return False
 
 
 def cited_part(evidence: str, command: str) -> str:

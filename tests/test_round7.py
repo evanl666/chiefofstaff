@@ -154,3 +154,89 @@ async def test_news_for_a_worker_open_in_a_terminal_waits_and_it_keeps_following
     assert not harness.store.get(f"heldnews:{worker}")
     told = [m["text"] for m in harness.store.messages(harness.router_id or "")]
     assert any("no longer open in a terminal" in text for text in told), told[-2:]
+
+
+def test_a_command_quoted_as_evidence_is_found_in_a_line_with_others():
+    """D9: `python -m textkit 'hello big world'` ran (then `; pytest`), and its criterion
+    said only "claimed": the `;` was taken as part of the quoted argument."""
+    from chiefofstaff.receipts import backing
+
+    line = "cd app; python -m textkit 'hello big world'; uv run --with pytest pytest -q"
+    found = backing("ran `python -m textkit 'hello big world'`", [{"command": line}])
+    assert found == {"command": line}
+
+
+async def test_a_task_that_only_waited_on_a_pr_is_told_when_it_is_let_go(tmp_path):
+    """G8: "Stop following PR #77 for task t…" left a watch-only task running, waiting on
+    nothing, and its worker was never told."""
+    harness = Harness(tmp_path / "data")
+    runtime = await harness.connect()
+    made = await spawn(runtime, harness.router_id, "Watch #72 until it is merged")
+    worker, task_id = made["session_id"], made["task_id"]
+    runtime.follow(worker, [KEY], task_id=task_id)
+    harness.session(worker).emit("session.idle")
+    await settle(runtime)
+    await call_tool(runtime, "stop_following", harness.router_id, session_id=task_id)
+    await settle(runtime)
+    told = [sent for sent in harness.session(worker).sent if "stopped you following" in sent]
+    assert told and "report it now" in told[-1], harness.session(worker).sent[-1:]
+
+
+async def test_a_worker_cut_off_by_copilot_restarting_is_told_what_restarted(tmp_path):
+    """R8: after the Copilot CLI was killed, its worker's notice said "Chief of Staff
+    restarted", and what the cut turn used was counted only at the app's next start."""
+    harness = Harness(tmp_path / "data")
+    runtime = await harness.connect()
+    made = await spawn(runtime, harness.router_id, "Count the files")
+    worker = made["session_id"]
+    runtime.update_session(worker, status="working")
+    synced = []
+    original = runtime.workers.sync_all_usage
+
+    async def counted():
+        synced.append(1)
+        await original()
+
+    runtime.workers.sync_all_usage = counted
+    await runtime.reconnect()
+    await settle(runtime)
+    notices = [m["text"] for m in harness.store.messages(worker) if m["kind"] == "notice"]
+    assert "Copilot was restarted; asked the session to continue." in notices, notices
+    assert synced, "what the cut turn used is read from its log at once"
+    await runtime.stop()
+
+
+async def test_work_that_waits_is_said_queued_not_started(tmp_path):
+    """Bug bash 7 (suspicion): "Started “Add the README section”" while it waited for the task
+    it comes after, and "Started" for a task that waited for a worker slot."""
+    from chiefofstaff.models import Settings
+
+    harness = Harness(tmp_path / "data", Settings(max_workers=1))
+    runtime = await harness.connect()
+    first = await spawn(runtime, harness.router_id, "Add truncate")
+    runtime.update_session(first["session_id"], status="working")
+    runtime.workers.states[first["session_id"]].busy = True
+    await spawn(runtime, harness.router_id, "Add the README section", after=[first["task_id"]])
+    await spawn(runtime, harness.router_id, "Count the files")
+    notices = [text for kind, text in harness.kinds(harness.router_id) if kind == "notice"]
+    said = [text.split(" · new because")[0] for text in notices]
+    assert said == [
+        "Started “Add truncate”",
+        "Queued “Add the README section” · after “Add truncate”",
+        "Queued “Count the files” · waits for a worker slot (1 busy)",
+    ]
+
+
+async def test_news_held_for_a_terminal_goes_out_after_a_restart_too(tmp_path):
+    """R3 (review): the held news went out only when this app saw the terminal close; closed
+    while it was not running, it never did."""
+    harness = Harness(tmp_path / "data")
+    runtime = await harness.connect()
+    made = await spawn(runtime, harness.router_id, "Add cube")
+    worker = made["session_id"]
+    held = {"prompt": "news: bob commented", "display": "bob commented", "meta": {}}
+    harness.store.set(f"heldnews:{worker}", json.dumps([held]))
+    await runtime.workers.refresh_elsewhere()  # Never seen open here: closed meanwhile.
+    await settle(runtime)
+    assert any("bob commented" in sent for sent in harness.session(worker).sent)
+    assert not harness.store.get(f"heldnews:{worker}")

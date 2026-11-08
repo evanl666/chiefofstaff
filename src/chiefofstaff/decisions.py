@@ -287,7 +287,7 @@ class Decisions:
                 + " Go on with your recommendation only if it is safe and easy to undo; "
                 "otherwise report(status=\"blocked\")."
             )  # fmt: skip
-            await self.tell_askers(target, text, "Not decided", "")
+            await self.tell_askers(target, text, "Not decided", "", "Not decided by you")
             return card
         if decision.action != "answer":
             raise ValueError("Decide, or say Not now.")
@@ -307,17 +307,23 @@ class Decisions:
         )
         card = self.close(card["id"], "answered", choice)
         text = f"The owner decided: {choice}"
-        await self.tell_askers(target, text, f"Decision: {choice}", recorded["decision"]["id"])
+        short = choice if len(choice) <= 80 else choice[:79].rstrip() + "…"
+        await self.tell_askers(
+            target, text, f"Decision: {choice}", recorded["decision"]["id"], f"Decided: {short}"
+        )
         return card
 
-    async def tell_askers(self, target: dict, text: str, display: str, identifier: str):
+    async def tell_askers(
+        self, target: dict, text: str, display: str, identifier: str, progress: str = ""
+    ):
+        """`progress`: what its task shows at work now (not "Needs your decision" any more)."""
         for asker in target["askers"]:
             row = self.store.find_session(asker["session_id"])
             if not row or row["closed_at"]:
                 continue
             task = self.tasks.find(asker["task_id"]) if asker["task_id"] else None
             if task and task["status"] == "waiting":
-                self.tasks.move(task["id"], "running", reason="decision")
+                self.tasks.move(task["id"], "running", reason="decision", progress=progress)
             # Only the owner's own words go in the owner's envelope; the question was a worker's.
             asked = wrap("system", "context", f"Your decision card asked: {target['question']}")
             try:

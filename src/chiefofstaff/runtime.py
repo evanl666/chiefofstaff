@@ -431,6 +431,10 @@ class Runtime:
                     "AND closed_at IS NULL"
                 )
                 await self.reconcile_sends()
+                if self.connections:
+                    # Copilot stopped (crashed, killed) and started again: what the turns it cut
+                    # short used is in their logs, not in events that came by.
+                    await self.workers.sync_all_usage()
                 await self.resume_working()
                 try:
                     await self.ensure_slack_session()
@@ -1688,7 +1692,9 @@ class Runtime:
             logger.info("Interrupted send to %s: %s.", session_id, outcome[arrived])
 
     async def resume_working(self):
-        """After a restart, sessions that were mid-turn continue, with what they had not handled."""
+        """After a restart, sessions that were mid-turn continue, with what they had not handled.
+        What restarted: this app, or (connected before) only Copilot."""
+        what = "Copilot was restarted" if self.connections else "Chief of Staff restarted"
         for row in self.store.open_sessions():
             if row["role"] == SLACK and not self.slack.configured():
                 continue
@@ -1720,7 +1726,7 @@ class Runtime:
                 self.took_up(row["id"], named, switch=False)
             if any(message["kind"] == "owner" for message in since):
                 self.states[row["id"]].owner_turn = True
-            note = "Chief of Staff restarted while you were working. Continue where you left off."
+            note = f"{what} while you were working. Continue where you left off."
             if unhandled:
                 # The newest whole (a task's instructions, say); older ones cut.
                 quoted = unhandled[-10:]
@@ -1734,8 +1740,8 @@ class Runtime:
                     note + "\n\nThe message(s) before this note had not reached you yet: they "
                     "are new to you."
                     if unhandled
-                    else "Chief of Staff restarted just after sending you the message(s) above, "
-                    "before they reached you: they are new to you."
+                    else f"{what} just after sending you the message(s) above, before they "
+                    "reached you: they are new to you."
                 )
             prompt = wrap("system", "restart", note)
             try:
@@ -1743,7 +1749,7 @@ class Runtime:
                     row["id"],
                     prompt,
                     kind="notice",
-                    display="Chief of Staff restarted; asked the session to continue.",
+                    display=f"{what}; asked the session to continue.",
                 )
             except Exception as exc:
                 self.states[row["id"]].owner_turn = False
@@ -2294,11 +2300,21 @@ class Runtime:
                 ):
                     self.task_actions.publish(task)
 
-    def unfollow_for(self, session_id: str, thread: str, task_id: str = "") -> bool:
+    def unfollow_for(
+        self, session_id: str, thread: str, task_id: str = "", by: str = "The owner"
+    ) -> bool:
         """Stop a session following a thread for one task (`task_id`), or for all of them.
         It goes on following it for its other tasks that follow it; only when none is left
-        does it stop following it. True when it no longer follows it at all."""
+        does it stop following it. True when it no longer follows it at all. A task still at
+        work that now waits on nothing is told so by its worker (`by` stopped it)."""
         thread = threads.normalize(thread)
+        before = self.store.follows(session_id)
+        affected = [
+            task
+            for task in self.tasks.for_session(session_id)
+            if (task["id"] == task_id if task_id else True)
+            and thread in self.task_actions.followed_for(task, before)
+        ]
         others: list[str] = []
         if task_id:
             bound = self.store.follow_tasks(session_id, thread)
@@ -2323,6 +2339,29 @@ class Runtime:
         self.publish_session(self.store.session(session_id))
         for task in self.tasks.for_session(session_id):
             self.task_actions.publish(task)
+        follows = self.store.follows(session_id)
+        for task in affected:
+            if (
+                task["status"] == "running"
+                and not self.task_actions.followed_for(task, follows)
+                and not self.task_actions.check_back(task)
+            ):
+                # It waited on that thread alone: not left hanging, waiting for nothing.
+                text = (
+                    f"{by} stopped you following {threads.label(thread)} for task {task['id']} "
+                    f"\u201c{task['title']}\u201d: nothing there reaches you now. If the task only "
+                    "waited on it, report it now (done, with where it stands; or blocked); else "
+                    "go on with it."
+                )
+                self.background(
+                    self.delivery.deliver(
+                        session_id,
+                        wrap("system", "notice", text, task=task["id"]),
+                        kind="notice",
+                        display=f"{by} stopped following {threads.label(thread)}.",
+                        meta={"task_id": task["id"]},
+                    )
+                )
         return not others
 
     def read_health_changed(self, thread: str):

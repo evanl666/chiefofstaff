@@ -18,6 +18,39 @@
 - **A task built on another's branch has only its own changes**: its worker fast-forwarding
   onto that task's branch no longer adds that task's commits to its card, nor makes it *Out of
   date* when that task's files change.
+- **A seventh live bug bash**:
+  - **PRs**: the Router, Focus and the daily summary count a delivered PR to fix as Home
+    does; one row for a PR two tasks follow keeps the one that needs you; a PR that cannot be
+    read for a while keeps its task where it was; a PR chip has its own ✕ to stop following;
+    a "CI failing" or "Changes requested" card has *Ask it to fix…*; a task that only waited
+    on a PR you stopped following is told so by its worker.
+  - **Workers**: news for a worker open in a terminal waits until you close it there (it keeps
+    following the PR), and the Router hears when it can reach it again; after Copilot itself
+    restarts, a worker's note says so (not "Chief of Staff restarted") and what the cut-short
+    turn used is counted at once.
+  - **What you read**: "Queued" (after which task, or for a slot), not "Started", for work
+    that waits; titles in the language of the request; a long step keeps how long it has run in
+    sight; review drafts are not called reply drafts; a Merge card shows the task's result,
+    not its instructions; a command quoted as evidence is found in a line with others, and is
+    cited without its redirections; the split preview says no "null"; "Ready to merge" is not
+    "waiting on others"; Router answers about stopping a follow name the task.
+  - **Lists**: the Router's overview of its sessions fits what Copilot reads at once on a
+    busy day.
+  - **Closed and reopened PRs**: a PR reopened shows open again on its task (its chip,
+    Artifacts, Monitoring) as soon as anything happens on it, and a closed one is looked at
+    again now and then; reopened ready to merge at the same commit, it has its Merge card
+    again; a worker following a PR closed without a merge is told it keeps following it for
+    14 days, and hears when it is reopened.
+  - **Drafts and questions**: a question a worker asks as it makes a draft ("I drafted an
+    approval for you to send") is on that draft's card, one card; sending or rejecting the
+    draft answers it and the task goes on at once; a worker whose task waits on another of
+    your answers hears at once what became of its draft.
+  - **What you read, too**: after a merge a result no longer says "still following" nor
+    leaves a sentence ending in ";" or starting in lowercase; *Retry* shows "Try again." (or
+    your note) in the Router's chat, not a task id; a task at work after you decided shows
+    "Decided: …", not "Needs your decision".
+  - **Results**: a result is not *Out of date* because its worker went on, on a new branch
+    built on it, while its own branch is unchanged.
 
 ## 0.1.31 (2026-11-08)
 

@@ -518,7 +518,7 @@ details.steps .step {
 
 .draft .head { margin-bottom: 4px; }
 .card.draft .label a { color: inherit; display: inline-flex; align-items: center; min-height: 28px; vertical-align: middle; }
-.card .label button.link { padding: 0; font-size: inherit; font-weight: inherit; color: var(--accent); vertical-align: middle; }
+.card .label button.link { padding: 0; font-size: inherit; font-weight: inherit; color: var(--accent); vertical-align: middle; text-align: left; }
 .card.draft .label a:hover { color: var(--accent); }
 .card .actions a.link { font-size: var(--small); margin-right: auto; }
 .workspace .choices { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 2px; }
@@ -1172,12 +1172,14 @@ select.verdict { min-height: 28px; border: 1px solid var(--line); border-radius:
 .card.task.done, .card.task.cancelled { background: none; box-shadow: none; border-color: transparent; }
 .card.task:is(.done, .cancelled) .title { font-weight: 500; color: var(--soft); }
 .card.task .activity {
+  display: flex;
   font: var(--small)/1.6 var(--mono);
   color: var(--muted);
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
+.receipts .pr-followed { display: inline-flex; align-items: center; gap: 2px; }
+.card.task .activity .step { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.card.task .activity .when { flex: none; white-space: pre; }
 .card.task .progress { color: var(--soft); font-size: var(--body); margin-top: 2px; }
 .card.task .task-body .body { color: var(--soft); }
 .card .actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; align-items: center; margin-top: 12px; }

@@ -151,7 +151,9 @@ How to route:
 - Task titles say what the task delivers, so the owner tells tasks apart at a glance: a verb,
   the object and where, e.g. "Fix the Spark 3.5 dependency in the ICP flow ·
   ranking-data#594", "Review embedding schema · ranking-data#589",
-  "Answer Jingtao: why two parallel gets are slow". Not "Handle the new Slack message" or a
+  "Answer Jingtao: why two parallel gets are slow"; in the language the owner wrote the
+  request in (a Chinese request gets a Chinese title, as does why_new). Not "Handle the new
+  Slack message" or a
   thread timestamp; not the phase ("waiting for the reviewer" is a state, not a title). When a
   task turned out to be about something else, rename_task it; when it now holds two
   deliverables, split_task the latest one off under its own title.

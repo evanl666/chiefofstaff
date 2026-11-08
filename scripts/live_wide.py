@@ -167,7 +167,7 @@ SHARDS = {
     "E": (18785, 18915), "F": (18786, 18916), "G": (18787, 18917), "H": (18788, 18918),
     "I": (18799, 18929), "J": (18800, 18930), "K": (18801, 18931),
     "L": (18802, 18932), "M": (18803, 18933), "N": (18804, 18934), "O": (18805, 18935),
-    "P": (18806, 18936),
+    "P": (18806, 18936), "Q": (18807, 18937),
 }  # fmt: skip
 MODEL = "claude-sonnet-5.5"
 CJK = re.compile(r"[\u4e00-\u9fff]")
@@ -4265,6 +4265,165 @@ async def p5_the_router_stops_following_without_closing(ctx: Ctx):
     log("P5 passed")
 
 
+# Shard Q, bug bash round seven: judgments made by the session that reads the words
+
+
+async def away_on(ctx: Ctx):
+    """Away, reached through the acmebot test bot; this computer looks idle."""
+    bot = {
+        "type": "local",
+        "command": sys.executable,
+        "args": [str(SCRIPTS / "fake_bot_mcp.py")],
+        "env": {
+            "BOT_OUTBOX": str(ctx.root / "outbox.jsonl"),
+            "BOT_REPLIES": str(ctx.root / "replies.json"),
+        },
+    }
+    (ctx.root / "idle").write_text("3600")
+    await settings(ctx, mcp_servers={"acmebot": bot}, away_notify=True, away_minutes=1,
+                   watch_minutes=1, away_how=AWAY_HOW)  # fmt: skip
+
+
+async def reply_card(ctx: Ctx, since: str, channel: str, user: str, text: str) -> dict:
+    ctx.slack.post(channel, user, text)
+
+    async def card():
+        found = [
+            d for d in (await state(ctx))["drafts"]
+            if d["kind"] in {"reply", "slack"} and d["created_at"] > since
+            and d["status"] == "pending"
+        ]  # fmt: skip
+        return found[0] if found else None
+
+    return await wait_for("a reply card", card, 900, ctx.app)
+
+
+async def q1_an_away_send_in_any_words_is_sent(ctx: Ctx):
+    """Round 7: what an away reply means is the messenger's reading, not a word list: "ship
+    it" (no list knew it) sends the reply."""
+    await away_on(ctx)
+    since, before = now(), len(outbox(ctx))
+    asked = f"Hi! How many data rows does data/sales.csv in {ctx.project} have?"
+    draft = await reply_card(ctx, since, "D0ALICE01", "U0ALICE1", asked)
+    code = await told_away(ctx, before)
+    sent_before = len(ctx.slack.sent)
+    reply_away(ctx, f"{code} ship it")
+
+    async def sent():
+        pending = [d["id"] for d in (await state(ctx))["drafts"] if d["status"] == "pending"]
+        return ctx.slack.sent[sent_before:] if draft["id"] not in pending else None
+
+    await wait_for("the reply is sent", sent, 400, ctx.app)
+    log(f"Q1: {code} ship it -> sent: {ctx.slack.sent[sent_before:][-1:]}")
+    assert len(ctx.slack.sent) > sent_before
+    log("Q1 passed")
+
+
+async def q2_an_away_send_held_back_is_not_sent(ctx: Ctx):
+    """Round 7: "send it after lunch" and "先别发" are not sends, whatever the messenger reads
+    (the code's floor), and the owner is asked again."""
+    since, before = now(), len(outbox(ctx))
+    asked = f"Quick one: which file in {ctx.project} defines initials()?"
+    draft = await reply_card(ctx, since, "D0BOB0001", "U0BOB001", asked)
+    code = await told_away(ctx, before)
+    router = (await state(ctx))["router_id"]
+    mark = max((m["id"] for m in await messages(ctx, router)), default=0)
+    for said in ("send it after lunch", "\u5148\u522b\u53d1"):
+        reply_away(ctx, f"{code} {said}")
+
+    async def answered():
+        found = [
+            m["text"] for m in await messages(ctx, router)
+            if m["id"] > mark and m["meta"].get("away_reply")
+        ]  # fmt: skip
+        return found if len(found) >= 2 else None
+
+    notes = await wait_for("both replies are read", answered, 500, ctx.app)
+    log(f"Q2: {notes}")
+    pending = [d["id"] for d in (await state(ctx))["drafts"] if d["status"] == "pending"]
+    assert draft["id"] in pending, "not sent"
+    assert all("not sent" in note for note in notes), notes
+    await ctx.app.post(f"/api/drafts/{draft['id']}", {"action": "reject", "reason": "test"})
+    await settings(ctx, away_notify=False)
+    (ctx.root / "idle").write_text("0")
+    log("Q2 passed")
+
+
+async def q3_separate_work_asked_while_a_task_runs_is_its_own(ctx: Ctx):
+    """Round 7: the worker, not a word list, says that work asked of it straight is another
+    deliverable; asked while its task is still at work, both keep their own result."""
+    since = now()
+    await say(ctx, "Start a worker titled 'Long Count' (no project): run `sleep 90` in a shell, "
+              "then write the word done into long.txt in your folder and report.")  # fmt: skip
+    long = await titled(ctx, since, "long count")
+
+    async def stepping():
+        row = await session(ctx, long["session_id"])
+        return row if row.get("step") else None
+
+    await wait_for("it is in its long step", stepping, 300, ctx.app)
+    asked = now()
+    await ctx.app.post(
+        f"/api/sessions/{long['session_id']}/messages",
+        {"text": "New, separate task: write hello into hello.txt in your folder and report "
+                 "that on its own."},
+    )  # fmt: skip
+
+    async def separate():
+        found = [t for t in await tasks_since(ctx, asked) if t["session_id"] == long["session_id"]]
+        return found[0] if found else None
+
+    hello = await wait_for("its separate task", separate, 600, ctx.app)
+    hello = await task_status(ctx, hello["id"], FINISHED, "hello reported", 600)
+    done = await task_status(ctx, long["id"], FINISHED, "the long count reported", 600)
+    log(f"Q3: {hello['title']!r}: {hello['result'][:80]!r} / {done['result'][:80]!r}")
+    assert "hello" in hello["result"].lower()
+    assert "long" in done["result"].lower() and "hello.txt" not in done["result"]
+    log("Q3 passed")
+
+
+async def q4_only_a_task_that_says_it_changed_code_and_did_not_is_flagged(ctx: Ctx):
+    """Round 7: a read-only task is never "Says it made changes" (the worker says what it
+    changed, no word list guesses)."""
+    since = now()
+    await ask(ctx, f"In {ctx.project}: how many lines does data/sales.csv have? Do not change "
+              "any file.")  # fmt: skip
+    [task] = await finished(ctx, since, 1, "the count", 600)
+
+    async def read():
+        found = (await ctx.app.get(f"/api/tasks/{task['id']}")).get("receipts") or {}
+        return found if found.get("at") or found.get("commands") else None
+
+    receipts = await wait_for("its receipts", read, 120, ctx.app)
+    flags = receipts.get("flags") or []
+    log(f"Q4: flags {flags}")
+    assert not [f for f in flags if "made changes" in f], flags
+    log("Q4 passed")
+
+
+async def q5_work_that_waits_for_a_slot_is_queued_not_started(ctx: Ctx):
+    """Round 7: "Started" for a task that waited for a worker slot."""
+    await settings(ctx, max_workers=1)
+    since = now()
+    await ask(ctx, "Start a worker titled 'Nap One' (no project): run `sleep 60`, then report.")
+    nap = await titled(ctx, since, "nap one")
+    await task_status(ctx, nap["id"], {"running"}, "it runs", 300)
+    mark = now()
+    await ask(ctx, "Start another new worker titled 'Nap Two' (no project): write two into "
+              "two.txt in its folder and report.")  # fmt: skip
+    router = (await state(ctx))["router_id"]
+    notices = [
+        m["text"]
+        for m in await messages(ctx, router)
+        if m["kind"] == "notice" and m["created_at"] > mark and "Nap Two" in m["text"]
+    ]
+    log(f"Q5: {notices}")
+    assert notices and notices[0].startswith("Queued “Nap Two”"), notices
+    await finished(ctx, since, 2, "both naps", 600)
+    await settings(ctx, max_workers=4)
+    log("Q5 passed")
+
+
 SCENARIOS = {
     "A": [
         w1_ask, w2_progress, w3_answered_directly, w4_pasted_orders, w5_chinese_log,
@@ -4343,6 +4502,12 @@ SCENARIOS = {
         p3_separate_work_asked_of_a_worker_is_its_own_task,
         p4_a_renamed_task_is_known_by_its_worker, p5_the_router_stops_following_without_closing,
         w52_no_ids,
+    ],
+    "Q": [
+        q1_an_away_send_in_any_words_is_sent, q2_an_away_send_held_back_is_not_sent,
+        q3_separate_work_asked_while_a_task_runs_is_its_own,
+        q4_only_a_task_that_says_it_changed_code_and_did_not_is_flagged,
+        q5_work_that_waits_for_a_slot_is_queued_not_started,
     ],
 }  # fmt: skip
 

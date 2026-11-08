@@ -1256,10 +1256,15 @@ class Workers:
         self.runtime.elsewhere = await self.runtime.open_elsewhere()
         changed = set(before) ^ set(self.runtime.elsewhere)
         for row in self.store.open_sessions(WORKER):
-            if self.runtime.copilot_id(row["id"]) in changed:
+            copilot = self.runtime.copilot_id(row["id"])
+            if copilot in changed:
                 self.runtime.publish_session(row)
-                if self.runtime.copilot_id(row["id"]) not in self.runtime.elsewhere:
-                    await self.closed_elsewhere(row)
+            # Closed there (also while this app was not running): what waited for it goes.
+            if copilot not in self.runtime.elsewhere and (
+                self.store.get(f"heldnews:{row['id']}")
+                or self.store.get(f"refusedopen:{row['id']}")
+            ):
+                await self.closed_elsewhere(row)
 
     async def closed_elsewhere(self, row: dict):
         """A worker's terminal was closed: what came for it meanwhile (news on what it follows)

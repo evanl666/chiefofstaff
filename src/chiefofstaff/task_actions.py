@@ -87,6 +87,8 @@ def moved(before: list[dict], now: list[dict]) -> str:
 # A recent task's open PRs are read again this often (seconds), and for this long (hours).
 PR_REFRESH = 180
 PR_HOURS = 72
+# Those closed (not merged) this many times less often: one may be reopened.
+CLOSED_PR_PACE = 5
 
 
 # A report line that says its worker opened the PR it names (not that someone else did).
@@ -126,23 +128,31 @@ def stamp(value: str | None) -> float:
     return 0.0
 
 
-async def elsewhere_now(checkout: dict, top: Path, ended: str, head: str) -> bool:
+async def elsewhere_now(checkout: dict, top: Path, ended: str, head: str, branch: str = "") -> bool:
     """Whether a checkout moved to another line of history since a result (a worker's next task
     on a branch of its own), while the result's commit is still on a branch: not a change of
-    that result's files."""
+    that result's files. So did one now on another branch built on top of it, while the
+    result's own branch (`branch`, "refs/heads/…", when known) still ends at its commit."""
     if not ended or ended == head:
         return False
     try:
         await checkout_git(checkout, str(top), "merge-base", "--is-ancestor", ended, head)
-        return False
     except ValueError:
-        pass
+        with suppress(ValueError):
+            holding = await checkout_git(
+                checkout, str(top), "for-each-ref", "--contains", ended, "--format=%(refname)",
+                "refs/heads",
+            )  # fmt: skip
+            return bool(holding.strip())
+        return False
     with suppress(ValueError):
-        holding = await checkout_git(
-            checkout, str(top), "for-each-ref", "--contains", ended, "--format=%(refname)",
+        on = (await checkout_git(checkout, str(top), "symbolic-ref", "-q", "HEAD")).strip()
+        ending = await checkout_git(
+            checkout, str(top), "for-each-ref", "--points-at", ended, "--format=%(refname)",
             "refs/heads",
         )  # fmt: skip
-        return bool(holding.strip())
+        results = set(ending.split()) & ({branch} if branch else set(ending.split()))
+        return bool(results) and on not in results
     return False
 
 
@@ -225,6 +235,16 @@ NOT_MERGED = re.compile(
     r"|merg(?:e|ing)\s+is\s+(?:yours|up\s+to\s+you)|for\s+you\s+to\s+merge)(?![\w-])",
     re.IGNORECASE,
 )
+# What a result says of following its PR until it is merged ("still following", "watching it
+# for CI"): over once it is merged.
+FOLLOWING_PR = re.compile(
+    r"(?<![\w-])(?:(?:I\s+am|I'm|I\s+will|I'll|will)\s+)?(?:keep(?:ing)?\s+)?"
+    r"(?:following|watching|monitoring)(?:\s+(?:it|the\s+PR|its\s+CI|CI|the\s+checks|checks))?"
+    r"(?:\s+(?:for|until)\s+(?:CI|checks|reviews?|comments|approval|the\s+merge|"
+    r"it\s+(?:merges|is\s+merged)))?(?![\w-])",
+    re.IGNORECASE,
+)
+STALE_ONCE_MERGED = re.compile(f"{NOT_MERGED.pattern}|{FOLLOWING_PR.pattern}", re.IGNORECASE)
 # The words that may go with such a status ("It is", "the branch", "and"): nothing more.
 STATUS_FILLER = re.compile(
     r"\b(?:and|or|but|nor|yet|so|far|still|also|it|its|this|that|the|branch|PR|pull|request|"
@@ -268,6 +288,12 @@ def not_pushed(clause: str) -> bool:
     return status_only(clause, NOT_PUSHED)
 
 
+def capitalized(text: str) -> str:
+    """A sentence whose start was dropped, starting with a capital: "the CI is green" (not
+    `code`, nor "iOS")."""
+    return text[0].upper() + text[1:] if re.match(r"[a-z]+\b", text) else text
+
+
 def without_status(text: str, only: Callable[[str], bool]) -> str:
     """A result without the clauses, sentences and remarks in parentheses that say nothing but
     a status that no longer holds (`only`): "Committed abc, not pushed." keeps "Committed abc."
@@ -285,21 +311,36 @@ def without_status(text: str, only: Callable[[str], bool]) -> str:
             r"\s*\(([^()]*)\)", lambda found: "" if only(found.group(1)) else found.group(0),
             line[start:],
         )  # fmt: skip
-        kept = []
+        kept: list[str] = []
+        # The next sentence kept starts a sentence of its own, and what began it was dropped
+        # ("Not merged; the CI is green." keeps "The CI is green.").
+        opening, dropped = True, False
         for sentence in re.split(r"(?<=[.!?;])\s+", body):
             parts = re.split(r"(,\s+|\s+[\u2013\u2014]\s+)", sentence)
             clauses = parts[::2]
             if not any(only(clause) for clause in clauses):
-                kept.append(sentence)
+                out = sentence
+            else:
+                out = ""
+                for index, clause in enumerate(clauses):
+                    if not only(clause):
+                        out += (parts[2 * index - 1] if out else "") + clause
+                if out:
+                    end = re.search(r"[.!?;:\u2026]*$", sentence)
+                    ending = end.group(0) if end else ""
+                    out = out if re.search(r"[.!?;:]$", out) else out.rstrip(" ,") + ending
+            if not out:
+                if not sentence.rstrip().endswith(";"):
+                    # It ended the sentence: so does what was kept of it ("Tests pass;
+                    # not merged." keeps "Tests pass.").
+                    if kept and kept[-1].endswith(";"):
+                        tail = sentence.rstrip()[-1:]
+                        kept[-1] = kept[-1][:-1] + (tail if tail in ".!?\u2026" else "")
+                    opening = True
+                dropped = True
                 continue
-            out = ""
-            for index, clause in enumerate(clauses):
-                if not only(clause):
-                    out += (parts[2 * index - 1] if out else "") + clause
-            if out:
-                end = re.search(r"[.!?;:\u2026]*$", sentence)
-                ending = end.group(0) if end else ""
-                kept.append(out if re.search(r"[.!?;:]$", out) else out.rstrip(" ,") + ending)
+            kept.append(capitalized(out) if opening and dropped else out)
+            opening, dropped = bool(re.search(r"[.!?\u2026]$", out)), False
         if kept or not line.strip():
             lines.append(line[:start] + " ".join(kept) if kept else line)
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
@@ -549,7 +590,9 @@ class TaskActions:
                 if not (now_ and now_["tree"]) or now_["tree"] == end["tree"]:
                     continue
                 top = await checkout_top(checkout)
-                if await elsewhere_now(checkout, top, end["commit"], now_["commit"]):
+                if await elsewhere_now(
+                    checkout, top, end["commit"], now_["commit"], end.get("branch", "")
+                ):
                     continue  # On another branch now: its result is on its own, unchanged.
                 differ = await tree_names(checkout, top, end["tree"], now_["tree"])
                 if hit := sorted(set(differ) & await share_files(checkout, scope)):
@@ -911,6 +954,12 @@ class TaskActions:
         for checkout in self.workspaces.checkouts(row):
             with suppress(Exception):
                 if (found := await snapshot(checkout)) and found["tree"]:
+                    with suppress(ValueError):
+                        # The branch it is on (see elsewhere_now).
+                        on = await checkout_git(
+                            checkout, checkout["path"], "symbolic-ref", "-q", "HEAD"
+                        )
+                        found["branch"] = on.strip()
                     if checkout.get("shared") and (
                         start := base.get("trees", {}).get(checkout["path"])
                     ):
@@ -1452,9 +1501,10 @@ class TaskActions:
                         if gone
                         else "The PR changed since: offered again once it is ready."
                     )
-                    if not gone:
+                    if pr.get("state") != "MERGED":
                         # Not ready for now (a check run again, changes asked for and then
-                        # dismissed): offered again when it is, even at the same head.
+                        # dismissed, the PR closed and maybe reopened later): offered again
+                        # when it is, even at the same head.
                         self.store.delete(f"mergeoffer:{label}@{target['head']}")
                     closed = self.store.update_draft(
                         card["id"], status="rejected", outcome=why, resolved_at=now()
@@ -1523,7 +1573,8 @@ class TaskActions:
 
     async def refresh_open_prs(self, pull: str = "", every: float = PR_REFRESH):
         """Every few minutes (and at once for `pull`, "owner/repo#n", when something happened
-        on it): the PRs of recent tasks that are not merged or closed yet."""
+        on it): the PRs of recent tasks that are not merged yet. Those all closed (not merged)
+        less often, and at once when something happened on one: it may have been reopened."""
         for task in self.tasks.listed(include_ended_since=hours_ago(PR_HOURS)):
             run = self.store.one(
                 """SELECT evidence FROM runs WHERE task_id=? AND evidence!=''
@@ -1532,10 +1583,12 @@ class TaskActions:
             )
             evidence = json.loads(run["evidence"]) if run else {}
             prs = evidence.get("prs") or []
-            if not prs or all(pr.get("state") in {"MERGED", "CLOSED"} for pr in prs):
+            states = {pr.get("state") for pr in prs}
+            if not prs or states == {"MERGED"}:
                 continue
             named = pull and any(pr.get("label", "").lower() == pull.lower() for pr in prs)
-            if not named and time.time() - evidence.get("prs_at", 0) < every:
+            pace = every * CLOSED_PR_PACE if states <= {"MERGED", "CLOSED"} else every
+            if not named and time.time() - evidence.get("prs_at", 0) < pace:
                 continue
             try:
                 await self.refresh_prs(task["id"])
@@ -1615,8 +1668,8 @@ class TaskActions:
     def shown_result(self, task: dict) -> str:
         """Its result as its card shows it (the stored one stays as reported): once its PR is
         open, without what it said of it before ("not pushed", "no PR opened"); once merged,
-        without "(not merged)" or "#72 is open", and saying first that it is merged. Only
-        those words: everything else it said stays."""
+        without "(not merged)", "#72 is open" or "still following", and saying first that it
+        is merged. Only those words: everything else it said stays."""
         result = task["result"] or ""
         own = [pr for pr in self.previous_prs(task["id"]) if pr.get("own")]
         noted = json.loads(self.store.get(f"mergedprs:{task['id']}") or "[]")
@@ -1630,7 +1683,7 @@ class TaskActions:
             names = pr_names(label)
 
             def unmerged(clause: str, names: re.Pattern = names) -> bool:
-                return status_only(clause, NOT_MERGED, names)
+                return status_only(clause, STALE_ONCE_MERGED, names)
 
             result = without_status(result, unmerged) or result
             said = re.split(r"(?<=[.!?])\s+|\n", result)
@@ -2730,19 +2783,21 @@ class TaskActions:
         prompt = wrap("owner", "message", body, task=task_id, reply_in=spoken)
         if text.strip() and (switched := self.runtime.switched_language(row["id"], spoken)):
             prompt += "\n\n" + wrap("system", "context", switched)
+        shown = text.strip() or "Try again."
         try:
             await self.delivery.deliver(
                 row["id"],
                 prompt,
                 kind="owner",
-                display=text.strip() or "Try again.",
+                display=shown,
                 meta={"task_id": task_id},
             )
         except Exception:
             self.store.delete(f"reopened:{task_id}")
             self.tasks.move(task_id, before["status"], progress=before["progress"])
             raise
-        self.runtime.owner_told(row, body)
+        # What the owner did, as their chat shows it: the task's id is for its worker only.
+        self.runtime.owner_told(row, shown)
         return task
 
     def followed_for(self, task: dict, follows: list[str]) -> list[str]:
