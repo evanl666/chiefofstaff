@@ -1,7 +1,7 @@
 import json
 import os
 import subprocess
-from datetime import datetime
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -129,7 +129,7 @@ async def test_the_owners_own_words_are_collected_where_they_wrote_them(tmp_path
             session_id="mine-1",
             summary="Tune the ranker",
             is_remote=False,
-            modified_time=datetime.now(),
+            modified_time=datetime.now(UTC),
             context=SimpleNamespace(working_directory=str(project), repository="", branch=""),
         )
     ]
@@ -217,7 +217,7 @@ async def test_the_owners_style_is_learned_applies_at_once_and_can_be_undone(tmp
 
     await runtime.habits.undo("slack_dm")
     assert runtime.habits.styles() == {}
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="Nothing to undo"):
         await runtime.habits.undo("slack_dm")
 
 
@@ -400,7 +400,7 @@ async def test_a_check_cannot_reach_the_network_or_write(tmp_path):
 async def test_what_accepted_results_cost_by_model(harness):
     runtime = await harness.connect()
     store = harness.store
-    for task, status, session, model, credits in [
+    for task, status, session, model, credits_used in [
         ("t1", "done", "w1", "smart", 4.0),
         ("t2", "review", "w2", "smart", 2.0),
         ("t3", "done", "w3", "fast", 1.0),
@@ -416,7 +416,7 @@ async def test_what_accepted_results_cost_by_model(harness):
             "VALUES (?,?,?,'done','now')",
             ("r" + task, task, session),
         )
-        store.record_usage(session, "worker", model, credits, 0, 1, 1, run_id="r" + task)
+        store.record_usage(session, "worker", model, credits_used, 0, 1, 1, run_id="r" + task)
     store.record_usage("w1", "worker", "tiny", 0.1, 0, 1, 1, run_id="rt1")  # Naming it, say.
     store.set("learner:helper", "1")
     found = {row["model"]: row for row in store.usage(0, 2e10)["outcomes"]}
@@ -504,7 +504,7 @@ async def test_learn_now_answers_at_once_and_helpers_take_no_worker_slot(tmp_pat
     runtime.learning.record("follow-up", context="t", owner="Shorter reports")
     runtime.habits.start_learning()
     assert runtime.habits.view()["running"], "shown running at once"
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="learning from your work already"):
         runtime.habits.start_learning()
     await settle(runtime)
     learner = learner_of(harness)

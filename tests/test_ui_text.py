@@ -129,9 +129,9 @@ def board(tasks: list, workers: list, **options):
     )
 
 
-def task(id, session, status="running", at="2026-11-07T11:50:00Z", **extra):
-    return {"id": id, "session_id": session, "status": status, "title": id, "created_at": at,
-            "updated_at": at, "active_at": at, **extra}  # fmt: skip
+def task(task_id, session, status="running", at="2026-11-07T11:50:00Z", **extra):
+    return {"id": task_id, "session_id": session, "status": status, "title": task_id,
+            "created_at": at, "updated_at": at, "active_at": at, **extra}  # fmt: skip
 
 
 CHANGED = {"changed": {"files": 2, "insertions": 5, "deletions": 1}}
@@ -283,8 +283,8 @@ def test_no_answer_to_a_nudge_brings_a_stalled_task_to_the_owner():
 
 
 def test_recently_finished_is_newest_first_across_workers():
-    def ended(id, session, hour):
-        return task(id, session, "done", ended_at=f"2026-11-07T{hour:02d}:00:00Z")
+    def ended(task_id, session, hour):
+        return task(task_id, session, "done", ended_at=f"2026-11-07T{hour:02d}:00:00Z")
 
     workers = [{"id": "w1", "status": "idle"}, {"id": "w2", "status": "idle"}]
     # A busy worker's old results do not hide another's newer ones; a row each, no boxes.
@@ -324,6 +324,53 @@ def test_monitoring_keeps_deliveries_and_reviewed_prs_apart_and_lets_quiet_ones_
     assert found["whys"]["quiet"] == "Still following; nothing new there for 26h"
     assert found["whys"]["old"] == "Still following, for “rev”"
     assert found["sidebar"] == {"w1": "needs", "w2": "monitoring"}
+
+
+def test_a_delivered_task_is_placed_by_where_its_own_pr_stands():
+    """E12: with its PR's CI failing, changes requested or ready to merge, a delivered task
+    stayed in Monitoring as "Delivered" while Artifacts said otherwise: both use prStatus now."""
+    workers = [{"id": "w1", "status": "idle"}]
+
+    def own(number, **pr):
+        label = f"o/r#{number}"
+        prs = [{"label": label, "own": True, "state": "OPEN", **pr}]
+        return task(f"t{number}", "w1", "done", watching=[f"github:{label}"], watch_kind="own",
+                    watch_changed_at="2026-11-07T11:00:00Z", receipts={"prs": prs})  # fmt: skip
+
+    tasks = [
+        own(1, checks="failing", failing=["lint"]),
+        own(2, review="CHANGES_REQUESTED", checks="failing"),
+        own(3, checks="passing", merge_state="CLEAN"),
+        own(4, checks="pending"),
+        own(5, checks="failing", draft=True),  # A draft: not done yet, whatever its CI says.
+        # Someone else's PR it reviewed: what the author does about it is theirs.
+        task(
+            "t6",
+            "w1",
+            "done",
+            watching=["github:o/r#6"],
+            watch_kind="reviewed",
+            receipts={
+                "prs": [{"label": "o/r#6", "reviewed": True, "state": "OPEN", "checks": "failing"}]
+            },
+        ),
+    ]
+    found = board(tasks, workers)
+    assert found["phases"] == {
+        "t1": "needs/pr-failing", "t2": "needs/pr-changes", "t3": "monitoring/mergeable",
+        "t4": "monitoring/delivered", "t5": "monitoring/delivered", "t6": "monitoring/reviewed",
+    }  # fmt: skip
+    assert found["whys"]["t1"] == "CI failing on r#1 (lint)"
+    assert found["whys"]["t2"] == "Changes requested on r#2"
+    assert found["whys"]["t3"] == "Ready to merge: r#3"
+    assert found["monitoring"]["delivered"] == ["t3", "t4", "t5"]
+    # Its status in Artifacts is the same word.
+    words = run_js(
+        f"const a = await import({json.dumps((STATIC / 'board.js').as_uri())});\n"
+        f"return {json.dumps([t['receipts']['prs'][0] for t in tasks[:3]])}"
+        ".map((pr) => a.prStatus(pr)[0]);"
+    )
+    assert words == ["CI failing", "changes requested", "ready to merge"]
 
 
 def test_a_report_the_router_wants_looked_at_and_a_task_after_a_stopped_one():
@@ -856,3 +903,17 @@ def test_what_cancelling_came_to_and_a_cancelled_line_said_once():
         "Cancelled: The bucket is gone.",
         "Cancelled",
     ]
+
+
+def test_an_unreadable_follow_says_why():
+    """E11: "Can't read app#72" whatever the reason; it reads the PR when only its CI checks
+    could not be read, and no access is not GitHub being slow."""
+    found = tasks_js(
+        "const key = 'github:acme/app#72';\n"
+        "return [{kind: 'access', step: 'pull request', error: 'HTTP 404'},"
+        " {kind: 'access', step: 'CI checks', error: 'HTTP 403'},"
+        " {kind: 'transient', step: 'reviews', error: 'GitHub request timed out.'}, {}]"
+        ".map((why) => k.failingWords(key, why)[0]);"
+    )
+    assert found == ["No access to app#72", "Can't read app#72's CI checks",
+                     "GitHub not answering for app#72", "Can't read app#72"]  # fmt: skip

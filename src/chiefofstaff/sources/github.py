@@ -9,6 +9,7 @@ import shutil
 import time
 from contextlib import suppress
 from datetime import UTC, datetime
+from pathlib import Path
 from urllib.parse import quote
 
 from .. import threads
@@ -28,6 +29,26 @@ NOT_FOUND = re.compile(
     r"HTTP 404\b|\bgh: Not Found\b|Could not resolve to a (?:Repository|PullRequest)\b"
 )
 FAILED = {"failure", "timed_out", "cancelled", "action_required", "startup_failure"}
+# A followed PR shows as unreadable on its task after this many failed reads in a row.
+SHOWN_AFTER = 3
+# GitHub not answering now (tried again as usual), as against no access (another signed-in
+# account may have it) or something else.
+TRANSIENT = re.compile(
+    r"rate limit|timed out|HTTP 5\d\d|connection|EOF|temporarily|try again|TLS|network|"
+    r"unexpected end",
+    re.IGNORECASE,
+)
+
+
+def failure_kind(error: str) -> str:
+    """What a failed read says: "transient", "access" or "other"."""
+    if re.search(r"rate limit", error, re.IGNORECASE):
+        return "transient"  # GitHub says HTTP 403 for it too.
+    if NOT_FOUND.search(error) or ACCESS_ERRORS.search(error):
+        return "access"
+    return "transient" if TRANSIENT.search(error) else "other"
+
+
 # Under what Chief of Staff posts for the owner, unseen on GitHub: learning how the owner writes
 # leaves it out (it is drafted text), whichever install of Chief of Staff posted it.
 POSTED_MARK = "<!-- chief-of-staff -->"
@@ -80,16 +101,15 @@ def worker_folders(store: Store) -> list[str]:
                 folders += [entry.path for entry in os.scandir(own) if entry.is_dir()]
     repositories: dict[str, str] = {}
     for folder in dict.fromkeys(filter(None, folders)):
-        marker = os.path.join(folder, ".git")
-        if os.path.isdir(marker):
+        marker = Path(folder) / ".git"
+        # os.path's checks answer False for a folder that cannot be read; Path's raise.
+        if os.path.isdir(marker):  # noqa: PTH112
             repositories.setdefault(os.path.realpath(marker), folder)
-        elif os.path.isfile(marker):  # A worktree: "gitdir: <repository>/.git/worktrees/<x>".
+        elif os.path.isfile(marker):  # noqa: PTH113
+            # A worktree: "gitdir: <repository>/.git/worktrees/<x>".
             with suppress(OSError):
-                with open(marker, encoding="utf-8") as file:
-                    linked = file.read().removeprefix("gitdir:").strip()
-                common = os.path.dirname(
-                    os.path.dirname(os.path.realpath(os.path.join(folder, linked)))
-                )
+                linked = marker.read_text(encoding="utf-8").removeprefix("gitdir:").strip()
+                common = str(Path(os.path.realpath(Path(folder) / linked)).parent.parent)
                 repositories.setdefault(common, folder)
     return list(repositories.values())
 
@@ -344,6 +364,8 @@ class GitHubSource:
         self.changed = asyncio.Event()
         self.job: asyncio.Task | None = None
         self.status = {"enabled": False, "connected": False, "error": "", "last_checked": None}
+        # What a followed PR's poll is reading now: when it fails, what could not be read.
+        self.reading: dict[str, str] = {}
 
     async def start(self):
         self.job = asyncio.create_task(self.loop())
@@ -433,8 +455,8 @@ class GitHubSource:
             except RuntimeError as exc:
                 if not NO_ACCESS.search(str(exc)):
                     raise
-        assert failure
-        raise failure
+        # The first attempt above always runs, so `failure` is set by now.
+        raise failure or RuntimeError("No GitHub account could be tried.")
 
     async def as_account(self, owner, login, remembered, arguments, payload) -> str:
         """One attempt as `login` ("": gh's active account); a 403/404 means try another, and
@@ -517,6 +539,7 @@ class GitHubSource:
             # Failures in a row (ghfail) count real reads only; after a few, it is read only
             # every tenth poll (ghskip counts those passed over).
             failures = int(self.store.get(f"ghfail:{thread}") or 0)
+            why = json.loads(self.store.get(f"ghwhy:{thread}") or "{}")
             if failures >= MAX_FOLLOW_FAILURES:
                 skipped = int(self.store.get(f"ghskip:{thread}") or 0) + 1
                 if skipped < 10:
@@ -529,6 +552,19 @@ class GitHubSource:
                 # One inaccessible PR must not stop the others.
                 self.store.set(f"ghfail:{thread}", str(failures + 1))
                 logger.warning("Could not read followed %s (%s): %s", thread, failures + 1, exc)
+                error = " ".join(str(exc).removeprefix("GitHub request failed: ").split())
+                found = {
+                    "kind": failure_kind(error),
+                    "step": self.reading.pop(thread, ""),
+                    "error": error[:300],
+                    "at": now(),
+                }
+                self.store.set(f"ghwhy:{thread}", json.dumps(found))
+                if failures + 1 == SHOWN_AFTER or (
+                    failures + 1 > SHOWN_AFTER
+                    and (why.get("kind"), why.get("step")) != (found["kind"], found["step"])
+                ):
+                    self.host.read_health_changed(thread)  # Its task's card says so now.
                 missing = (
                     int(self.store.get(f"gh404:{thread}") or 0) + 1
                     if NOT_FOUND.search(str(exc))
@@ -543,9 +579,23 @@ class GitHubSource:
                         "GitHub has no such pull request, or none of your accounts can see it",
                     )
                 continue
-            for key in ("ghfail", "gh404", "ghskip"):
-                self.store.set(f"{key}:{thread}", "0")
+            self.reading.pop(thread, None)
+            self.read_ok(thread)
         self.status.update(connected=True, error="; ".join(errors)[:500], last_checked=now())
+
+    def read_ok(self, thread: str, whole: bool = True):
+        """A followed PR was read: what failed before is over, and its task's card says so at
+        once. `whole`: all of it (comments, reviews, CI); else only the PR itself, which
+        clears only a failure to read the PR itself."""
+        why = json.loads(self.store.get(f"ghwhy:{thread}") or "{}")
+        if not whole and why.get("step") not in {None, "", "pull request"}:
+            return
+        failed = int(self.store.get(f"ghfail:{thread}") or 0)
+        for key in ("ghfail", "gh404", "ghskip"):
+            self.store.set(f"{key}:{thread}", "0")
+        self.store.delete(f"ghwhy:{thread}")
+        if failed >= SHOWN_AFTER:
+            self.host.read_health_changed(thread)
 
     async def poll_review_requests(self, settings, followed: set[str]) -> list[str]:
         """Review requests in the owner's repositories become triggers. What failed, said (one
@@ -614,6 +664,7 @@ class GitHubSource:
         repo, number = match.groups()
         started = github_time(datetime.now(UTC).timestamp() - 60)
         after = self.store.get(f"ghsince:{thread}") or github_time(since)
+        self.reading[thread] = "pull request"
         pull = await self.pull(repo, int(number))
         if title := " ".join((pull.get("title") or "").split())[:200]:
             self.store.set(f"prtitle:{repo.lower()}#{number}", title)  # Shown with its number.
@@ -623,12 +674,14 @@ class GitHubSource:
         # The owner's own comments and reviews are not news to the sessions following the PR:
         # those of the account they act as on this repository (what Chief of Staff posts as).
         # Another account signed in on this machine (a teammate's, a bot's) may be someone else.
+        self.reading[thread] = "account"
         mine = {await self.acting_login(repo)} - {""}
 
         def theirs(item: dict) -> bool:
             return ((item.get("user") or {}).get("login") or "").lower() not in mine
 
         # Every page: GitHub lists oldest first, so on a busy PR the new ones are on the last.
+        self.reading[thread] = "comments"
         for comment in pages(
             await self.gh(
                 "api", f"{base}/issues/{number}/comments?since={after}&per_page=100", "--paginate"
@@ -643,6 +696,7 @@ class GitHubSource:
                     f"({comment['html_url']})",
                 )
             )
+        self.reading[thread] = "review comments"
         for comment in pages(
             await self.gh(
                 "api", f"{base}/pulls/{number}/comments?since={after}&per_page=100", "--paginate"
@@ -664,6 +718,7 @@ class GitHubSource:
                     # in): news to the task that wrote it.
                     replies[key] = (self.store.get(f"ghby:{answered}") or "", said)
                     break
+        self.reading[thread] = "reviews"
         for review in pages(
             await self.gh("api", f"{base}/pulls/{number}/reviews?per_page=100", "--paginate")
         ):
@@ -691,6 +746,7 @@ class GitHubSource:
             and (line := await self.pushed(repo, last, sha, (pull.get("base") or {}).get("ref")))
         ):
             items.append((f"github:head:{repo}#{number}@{sha}", line))
+        self.reading[thread] = "CI checks"
         ci = await self.ci_result(base, sha)
         if ci and not last and ci["at"] and ci["at"] < github_time(since):
             # Its first look, at CI that finished before it was followed: where it stands, not
@@ -709,7 +765,7 @@ class GitHubSource:
         kept = False
         if state != "open":
             ended = pull.get("merged_at") or pull.get("closed_at")
-            if ended and datetime.fromisoformat(ended.replace("Z", "+00:00")).timestamp() < since:
+            if ended and datetime.fromisoformat(ended).timestamp() < since:
                 asked = float(self.store.get(f"ghkeep:{thread}") or 0)
                 if state == "merged" or not asked:
                     # Already finished when followed (a PR cited in passing): just stop
@@ -734,6 +790,7 @@ class GitHubSource:
         fresh = [(key, line) for key, line in items if not self.seen(key)]
         if fresh:
             lines = "\n".join(f"- {line}" for _, line in fresh)
+            self.reading[thread] = "delivery"
             await self.host.on_thread(
                 "github",
                 thread,
@@ -1066,7 +1123,7 @@ class GitHubSource:
             if ((item.get("user") or {}).get("login") or "").lower() not in mine:
                 continue
             when = item.get("created_at") or item.get("submitted_at") or ""
-            if start and when and datetime.fromisoformat(when.replace("Z", "+00:00")) < start:
+            if start and when and datetime.fromisoformat(when) < start:
                 continue  # Before the draft was written: another reply.
             if self.sent_by_us(key):
                 continue  # Chief of Staff posted it (as the owner): not theirs by hand.

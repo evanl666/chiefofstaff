@@ -6,7 +6,7 @@ import pytest
 from conftest import Harness, call_tool, settle, task_of
 
 from chiefofstaff.store import Store
-from chiefofstaff.tasks import settle_adopted, settle_decision_changes
+from chiefofstaff.tasks import TaskBook, settle_adopted, settle_decision_changes
 
 
 async def spawn(runtime, router_id, title, **extra):
@@ -268,8 +268,9 @@ async def test_workers_from_before_tasks_get_one_each(tmp_path):
         )
     store.set("after:" + "b" * 36, json.dumps(["a" * 36]))
     store.close()
-    with sqlite3.connect(data / "chiefofstaff.db") as db:
+    with contextlib.closing(sqlite3.connect(data / "chiefofstaff.db")) as db:
         db.execute("DELETE FROM tasks")
+        db.commit()
 
     harness = Harness(data)
     runtime = await harness.connect()
@@ -624,3 +625,15 @@ async def test_more_on_a_reported_result_is_reported_whole_not_as_an_addendum(ha
     whole = f"{first}\n\n{addendum}"
     await call_tool(runtime, "report", worker, status="done", summary=whole)
     assert task(harness, made["task_id"])["result"] == whole
+
+
+def test_an_unknown_status_or_need_is_refused(tmp_path):
+    tasks = TaskBook(Store(tmp_path / "data"))
+    with pytest.raises(ValueError, match="Invalid task status"):
+        tasks.create("w1", "Fix it", "", status="paused")
+    with pytest.raises(ValueError, match="Invalid dependency need"):
+        tasks.create("w1", "Fix it", "", needs="anything")
+    made = tasks.create("w1", "Fix it", "")
+    with pytest.raises(ValueError, match="Invalid task status"):
+        tasks.move(made["id"], "paused")
+    assert tasks.get(made["id"])["status"] == "queued"

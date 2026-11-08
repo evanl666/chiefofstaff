@@ -229,9 +229,10 @@ HID_IDLE = re.compile(r'"HIDIdleTime" = (\d+)')
 def later(first: str, second: str) -> bool:
     """Whether ISO time `first` is after `second` (False when either cannot be read)."""
     try:
-        return datetime.fromisoformat(first.replace("Z", "+00:00")) > datetime.fromisoformat(
-            second.replace("Z", "+00:00")
-        )
+        # Times the model wrote: "Z" becomes "+00:00" first, which also reads a date-only
+        # "2026-11-07Z" that fromisoformat alone refuses.
+        first_time = datetime.fromisoformat(first.replace("Z", "+00:00"))  # noqa: FURB162
+        return first_time > datetime.fromisoformat(second.replace("Z", "+00:00"))  # noqa: FURB162
     except (ValueError, TypeError):
         return False
 
@@ -244,7 +245,9 @@ def watch_key(what: str) -> str:
 def without_code(text: str, code: str) -> str:
     """An answer without its code (any case, with or without brackets): "URN2F drop them" and
     "[urn2f] drop them" are both "drop them"."""
-    return re.sub(rf"\[?\b{re.escape(code)}\b\]?[\s:,.-]*", "", text, count=1, flags=re.I).strip()
+    return re.sub(
+        rf"\[?\b{re.escape(code)}\b\]?[\s:,.-]*", "", text, count=1, flags=re.IGNORECASE
+    ).strip()
 
 
 class FoundItem(BaseModel):
@@ -542,7 +545,9 @@ class Connector:
     def after_hours_reason(self, moment: datetime | None = None) -> str:
         """Why the watches run at their after-hours pace now: "weekend" (all of Saturday and
         Sunday), "outside_hours" (a workday outside the work hours); "" in work hours."""
-        return after_hours(self.store.settings().watch_hours, moment or datetime.now())
+        # Work hours are the owner's wall-clock time.
+        moment = moment or datetime.now().astimezone()
+        return after_hours(self.store.settings().watch_hours, moment)
 
     def due(self) -> bool:
         every = self.interval()

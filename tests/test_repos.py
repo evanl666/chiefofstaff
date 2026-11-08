@@ -248,7 +248,7 @@ async def test_commands_never_wait_on_a_terminal(monkeypatch):
     async def fake_exec(*arguments, **options):
         seen.update(options)
         return SimpleNamespace(
-            returncode=0, pid=1, communicate=lambda input=None: asyncio.sleep(0, (b"ok", b""))
+            returncode=0, pid=1, communicate=lambda data=None: asyncio.sleep(0, (b"ok", b""))
         )
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)

@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- **A delivered task by where its PR stands**: with its own PR's CI failing or changes
+  requested it is under *Needs you*, saying which; ready to merge it says so in Monitoring
+  (not "Delivered"): the same words as its PR chip and Artifacts, from one rule.
+- **A PR that cannot be read says why**: no access, GitHub not answering, or only a part of it
+  (its CI checks, its reviews), with what GitHub said; on the task the PR is, not on every task
+  of its worker; gone as soon as it is read again; *stop following* there stops it for that
+  task only (so does the Router's, given a task).
+
 ## 0.1.31 (2026-11-08)
 
 A sixth live bug bash on real Copilot (the 0.1.30 changes, a team's busy morning in Slack and

@@ -219,7 +219,7 @@ RECONNECT_DELAY = float(os.environ.get("CHIEFOFSTAFF_RECONNECT_DELAY", "3"))
 RECONNECT_MOST = 300.0
 
 
-class OpenElsewhere(RuntimeError):
+class OpenElsewhereError(RuntimeError):
     """A session is open in another Copilot window (a terminal): `pid` runs it."""
 
     def __init__(self, message: str, pid: int):
@@ -441,7 +441,7 @@ class Runtime:
                         f"The Slack session could not start: {describe(exc)[:200]}"
                     )
                 self.status = {"state": "ready", "error": "", "warning": warning}
-            except OpenElsewhere as exc:
+            except OpenElsewhereError as exc:
                 # The Router waits until the owner exits it there: connecting again then.
                 self.status = {"state": "error", "error": str(exc)}
                 self.recover_later()
@@ -1334,7 +1334,7 @@ class Runtime:
         open in a terminal is left alone until it is closed there."""
         self.elsewhere = await self.open_elsewhere()
         if pid := self.elsewhere.get(self.copilot_id(row["id"])):
-            raise OpenElsewhere(
+            raise OpenElsewhereError(
                 f"“{row['title']}” is open in another Copilot window (process {pid}). Exit it "
                 "there (/exit), then try again.",
                 pid,
@@ -1596,8 +1596,8 @@ class Runtime:
                 try:
                     await self.open_live(row)
                     return
-                except OpenElsewhere as exc:
-                    raise OpenElsewhere(
+                except OpenElsewhereError as exc:
+                    raise OpenElsewhereError(
                         f"The Router is open in another Copilot window (process {exc.pid}): "
                         "exit it there (/exit). Chief of Staff connects again once it is closed.",
                         exc.pid,
@@ -1648,7 +1648,7 @@ class Runtime:
             try:
                 await self.session_for(rows[0]["id"])
                 return
-            except OpenElsewhere:
+            except OpenElsewhereError:
                 raise  # Open in a terminal: it stays, and waits until it is closed there.
             except Exception:
                 if not self.connected().alive():
@@ -2131,8 +2131,9 @@ class Runtime:
     def projects_note(self) -> str:
         """Tell the Router when the configured projects changed since it last heard (also when
         a project's folder went missing, or came back)."""
+        # os.path.isdir, not Path.is_dir: a folder it cannot look at is missing, not an error.
         projects = [
-            project if os.path.isdir(project) else f"{project} {MISSING_PROJECT}"
+            project if os.path.isdir(project) else f"{project} {MISSING_PROJECT}"  # noqa: PTH112
             for project in self.workspaces.projects()
         ]
         heard = self.store.get("router_projects")
@@ -2232,19 +2233,27 @@ class Runtime:
         (follow_thread, a `follow` the Router passed), not only named: a PR closed already
         stays followed a while, so its reopening is news (GitHubSource.poll_pull). One the Router
         or the owner stopped it following stays stopped until they give it back: the session
-        does not follow it again by itself (a later report naming the PR)."""
+        does not follow it again by itself (a later report naming the PR); nor for a task it
+        was stopped following it for (see unfollow_for)."""
         followed = [threads.normalize(key) for key in keys]
-        if given:
-            for key in followed:
-                self.store.delete(f"stopped:{session_id}:{key}")
-        else:
-            followed = [k for k in followed if not self.store.get(f"stopped:{session_id}:{k}")]
         wanted = {threads.normalize(key) for key in asked}
         row = self.store.session(session_id)
-        self.check_follow(row, followed)
         if task_id is None and row["role"] == WORKER:
             current = self.tasks.current(session_id)
             task_id = self.turn_task(session_id) or (current["id"] if current else "")
+        if given:
+            for key in followed:
+                self.store.delete(f"stopped:{session_id}:{key}")
+                if task_id:
+                    self.store.delete(f"stoppedfor:{task_id}:{key}")
+        else:
+            followed = [
+                key
+                for key in followed
+                if not self.store.get(f"stopped:{session_id}:{key}")
+                and not (task_id and self.store.get(f"stoppedfor:{task_id}:{key}"))
+            ]
+        self.check_follow(row, followed)
         for key in followed:
             self.store.follow(key, session_id)
             if given:
@@ -2288,6 +2297,52 @@ class Runtime:
                     f"news:{task['id']}"
                 ):
                     self.task_actions.publish(task)
+
+    def unfollow_for(self, session_id: str, thread: str, task_id: str = "") -> bool:
+        """Stop a session following a thread for one task (`task_id`), or for all of them.
+        It goes on following it for its other tasks that follow it; only when none is left
+        does it stop following it. True when it no longer follows it at all."""
+        thread = threads.normalize(thread)
+        others: list[str] = []
+        if task_id:
+            bound = self.store.follow_tasks(session_id, thread)
+            listed = bound or [
+                task["id"]
+                for task in self.tasks.for_session(session_id)
+                if thread in self.task_actions.followed_for(task, [thread])
+            ]
+            others = [
+                found["id"]
+                for other in listed
+                if other != task_id
+                and (found := self.tasks.find(other))
+                and found["status"] not in {"cancelled", "failed"}
+            ]
+        if others:
+            self.store.set(f"followtask:{session_id}:{thread}", json.dumps(others))
+            self.store.set(f"stoppedfor:{task_id}:{thread}", "1")
+        else:
+            self.store.unfollow(thread, session_id)
+            self.store.set(f"stopped:{session_id}:{thread}", "1")
+        self.publish_session(self.store.session(session_id))
+        for task in self.tasks.for_session(session_id):
+            self.task_actions.publish(task)
+        return not others
+
+    def read_health_changed(self, thread: str):
+        """A followed thread could not be read for a while, or can be again: the cards of the
+        tasks that follow it say so now (not at their next change)."""
+        for session_id in self.store.followers(thread):
+            if not (row := self.store.find_session(session_id)):
+                continue
+            self.publish_session(row)
+            for task in self.tasks.for_session(session_id):
+                self.task_actions.publish(task)
+
+    def follow_why(self, thread: str) -> dict:
+        """Why a followed PR could not be read last: {kind, step, error, at} (see
+        GitHubSource.poll_once); {} when that is not known."""
+        return json.loads(self.store.get(f"ghwhy:{thread}") or "{}")
 
     def follow_health(self, session_id: str) -> dict[str, int]:
         """Its followed threads that could not be read lately: failures in a row."""
@@ -2870,7 +2925,9 @@ class Runtime:
             "settings": self.store.settings().model_dump(),
             # Configured projects whose folder is gone: Settings says so.
             "missing_projects": [
-                project for project in self.store.settings().projects if not os.path.isdir(project)
+                project
+                for project in self.store.settings().projects
+                if not os.path.isdir(project)  # noqa: PTH112  (False when it cannot look)
             ],
             "slack": {**self.slack.status, "token_saved": bool(self.slack.tokens.get())},
             "github": self.github.status,

@@ -31,6 +31,7 @@ from .models import (
     SkillUpload,
     SlackToken,
     TaskNote,
+    Unfollow,
 )
 from .runtime import Runtime
 from .store import Store
@@ -428,13 +429,10 @@ def create_app(
         }
 
     @app.post("/api/sessions/{session_id}/unfollow")
-    async def unfollow_session_thread(session_id: str, payload: TaskNote):
-        runtime.store.unfollow(payload.text.strip(), session_id)
-        runtime.store.set(f"stopped:{session_id}:{payload.text.strip()}", "1")
-        runtime.publish_session(runtime.store.session(session_id))
-        for task in runtime.tasks.for_session(session_id):
-            runtime.task_actions.publish(task)
-        return {"ok": True}
+    async def unfollow_session_thread(session_id: str, payload: Unfollow):
+        # From a task's card: for that task (its worker's other tasks keep following it).
+        gone = runtime.unfollow_for(session_id, payload.text.strip(), payload.task_id.strip())
+        return {"ok": True, "all": gone}
 
     @app.post("/api/tasks/{task_id}/nudge")
     async def nudge_task(task_id: str):

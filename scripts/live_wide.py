@@ -2286,7 +2286,7 @@ async def peers_ok(ctx: Ctx, since: str, giver: dict, takers: list[dict], value:
         inbound = [m for m in rows if m["kind"] == "inbound" and value in m["text"]]
         relayed = [m for m in rows if m["kind"] == "router" and value in m["text"]]
         waited = [m for m in rows if m["kind"] == "report" and m["meta"].get("status") != "done"
-                  and re.search(r"\bwait", m["text"], re.I)]  # fmt: skip
+                  and re.search(r"\bwait", m["text"], re.IGNORECASE)]  # fmt: skip
         linked.append('type="peer' in prompts_of(rows))
         log(f"  {taker['title']}: told={taker['session_id'] in told} "
             f"from={[m['meta'].get('told_by', '')[:8] for m in inbound]} relayed={len(relayed)} "
@@ -2356,7 +2356,8 @@ async def e3_contract_in_chinese(ctx: Ctx):
     await finished(ctx, since, 2, "both tasks", 600)
     column = re.search(r"col_[0-9a-f]{6}", schema.read_text())
     log(f"E3: schema {schema.read_text()!r} query {query.read_text()!r}")
-    assert column and f"SELECT {column.group(0)} FROM events" in query.read_text()
+    # The SQL the worker was to write: text compared, not a query run.
+    assert column and f"SELECT {column.group(0)} FROM events" in query.read_text()  # noqa: S608
     maker, writer = await titled(ctx, since, "column"), await titled(ctx, since, "query")
     await peers_ok(ctx, since, maker, [writer], column.group(0))
     assert CJK.search(writer["result"]), "reported in Chinese"
@@ -2468,7 +2469,7 @@ async def e7_one_to_two(ctx: Ctx):
     log("E7 passed")
 
 
-async def tests_seen(ctx: Ctx, task_id: str, what: str, check, timeout=400) -> dict:
+async def receipts_seen(ctx: Ctx, task_id: str, what: str, check, timeout=400) -> dict:
     """The task's receipts once `check` holds for them."""
 
     async def ready():
@@ -2523,7 +2524,7 @@ async def e9_long_failure_after_a_short_wait(ctx: Ctx):
         "it to end, and report what failed. Do not fix anything.",
     )
     task = await titled(ctx, since, "")
-    receipts = await tests_seen(ctx, task["id"], "the failed run", lambda r: (
+    receipts = await receipts_seen(ctx, task["id"], "the failed run", lambda r: (
         (r.get("tests") or {}).get("passed") is not None and not r["tests"].get("running")
     ), 900)  # fmt: skip
     await task_status(ctx, task["id"], FINISHED, "its report", 600)
@@ -2603,7 +2604,7 @@ async def e13_ci_passes_after_a_local_failure(ctx: Ctx):
     assert done["receipts"]["tests"]["passed"] is False
     set_check("success")
     label = f"{APPROVE_REPO}#1"
-    receipts = await tests_seen(ctx, task["id"], "CI's newer word", lambda r: any(
+    receipts = await receipts_seen(ctx, task["id"], "CI's newer word", lambda r: any(
         "pass now" in flag for flag in r.get("flags", [])
     ), 480)  # fmt: skip
     log(f"E13: after {receipts['tests']} {receipts['flags']} {receipts['prs']}")
@@ -2630,7 +2631,7 @@ async def e14_card_follows_the_fix(ctx: Ctx):
     await ctx.app.post(f"/api/tasks/{task['id']}/follow-up", {
         "text": "Now fix sub in calc.py and run the same tests again."
     })  # fmt: skip
-    receipts = await tests_seen(ctx, task["id"], "the card turns green", lambda r: (
+    receipts = await receipts_seen(ctx, task["id"], "the card turns green", lambda r: (
         (r.get("tests") or {}).get("passed") is True
     ), 600)  # fmt: skip
     log(f"E14: {receipts['tests']}")

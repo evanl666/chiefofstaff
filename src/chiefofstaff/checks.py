@@ -133,7 +133,8 @@ def wrapper(kind: str, scratch: Path, readable: list[Path], cwd: Path) -> list[s
         binds += ["--ro-bind" if path != scratch else "--bind", str(path), str(path)]
     # No network, no other processes, and none of the sockets in /run (the session bus).
     return [
-        "bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp",
+        "bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc",
+        "--tmpfs", "/tmp",  # noqa: S108  (a fresh, empty /tmp inside the sandbox)
         "--tmpfs", "/run", "--tmpfs", home, *binds, "--unshare-net", "--unshare-ipc",
         "--unshare-pid", "--new-session", "--die-with-parent", "--chdir", str(cwd),
     ]  # fmt: skip
@@ -147,7 +148,7 @@ def prepare(root: Path, cwd: Path, readable: list[Path]) -> tuple[Path, Path, li
 
 
 def copy_index(index: str, to: Path):
-    if os.path.exists(index):
+    if os.path.exists(index):  # noqa: PTH110  (False, not an error, when it cannot look)
         shutil.copyfile(index, to)
 
 

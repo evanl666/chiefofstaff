@@ -28,6 +28,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from contextlib import suppress
 from pathlib import Path
 
 import httpx
@@ -301,7 +302,7 @@ async def scenario_reopen(app: App, worker: dict):
             idle
             and not any(m["text"].startswith("Reopened") for m in messages)
             and any(
-                m["kind"] == "assistant" and re.search(r"\b1\b|\bone\b", m["text"], re.I)
+                m["kind"] == "assistant" and re.search(r"\b1\b|\bone\b", m["text"], re.IGNORECASE)
                 for m in messages
             )
         )
@@ -316,7 +317,7 @@ async def scenario_reopen(app: App, worker: dict):
         log("a related question went to the worker that already knew the project")
     else:
         replies = " ".join(m["text"] for m in messages if m["kind"] == "assistant")
-        assert re.search(r"\b1\b|\bone\b", replies, re.I), transcript(messages)
+        assert re.search(r"\b1\b|\bone\b", replies, re.IGNORECASE), transcript(messages)
         log(f"the Router answered from what that worker had reported: {replies[:80]!r}")
 
 
@@ -1615,14 +1616,12 @@ async def main():
             failed = True
             raise
         finally:
-            try:
+            with suppress(Exception):  # Best effort: the app may be down by now.
                 state = await app.get("/api/state")
                 for session in state["sessions"]:
                     messages = await app.get(f"/api/sessions/{session['id']}/messages")
                     print(f"--- {session['role']} {session['title']} [{session['status']}]")
                     print(transcript(messages))
-            except Exception:
-                pass
             await app.stop()
             if failed:
                 print("--- chiefofstaff.log (tail)")

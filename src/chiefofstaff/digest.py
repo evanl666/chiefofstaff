@@ -49,7 +49,7 @@ def finished_tasks(store: Store, since: float, until: float) -> list[dict]:
         AND t.id NOT IN (SELECT substr(key, 10) FROM kv WHERE key LIKE 'setaside:%')
         AND t.session_id NOT IN ({HELPERS})
         AND t.session_id IN (SELECT id FROM sessions WHERE role='worker')
-        GROUP BY t.id ORDER BY max(r.ended_at)""",
+        GROUP BY t.id ORDER BY max(r.ended_at)""",  # noqa: S608  (HELPERS: constant SQL)
         (iso(since), iso(until)),
     )
 
@@ -258,7 +258,7 @@ def digest(runtime: Runtime, since: float, until: float) -> str:
     store = runtime.store
     window = (iso(since), iso(until))
     finished = finished_tasks(store, since, until)
-    mine = f"session_id NOT IN ({HELPERS})"
+    mine = f"session_id NOT IN ({HELPERS})"  # Constant SQL.
     found = needs(runtime)
     failed = found.tasks("failed")
     sent = store.value(
@@ -273,8 +273,10 @@ def digest(runtime: Runtime, since: float, until: float) -> str:
     )
     if not (finished or found.items or sent or follow_ups):
         return ""
-    running = store.value(f"SELECT count(*) AS n FROM tasks WHERE status='running' AND {mine}")
-    credits = store.value(
+    running = store.value(
+        f"SELECT count(*) AS n FROM tasks WHERE status='running' AND {mine}"  # noqa: S608
+    )
+    credits_used = store.value(
         "SELECT coalesce(sum(credits), 0) AS c FROM usage WHERE at>=? AND at<?", (since, until)
     )
     lines = ["Daily summary"]
@@ -289,5 +291,7 @@ def digest(runtime: Runtime, since: float, until: float) -> str:
             f"• Handled: {sent} repl{'ies' if sent != 1 else 'y'} sent, "
             f"{follow_ups} thread follow-up{'s' if follow_ups != 1 else ''} without the Router"
         )
-    lines.append(f"• {running} task{'s' if running != 1 else ''} running · {credits:.1f} credits")
+    lines.append(
+        f"• {running} task{'s' if running != 1 else ''} running · {credits_used:.1f} credits"
+    )
     return "\n".join(lines)

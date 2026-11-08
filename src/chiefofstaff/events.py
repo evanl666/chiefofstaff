@@ -91,7 +91,7 @@ def describe_step(name: str, arguments: Any) -> str:
         path = str(arguments.get("path") or arguments.get("file_path") or "")
         url = str(arguments.get("url") or "")
         found = {
-            "path": os.path.basename(path.rstrip("/")) or "a file",
+            "path": path.rstrip("/").rpartition("/")[2] or "a file",
             "pattern": " ".join(str(arguments.get("pattern") or "").split())[:60],
             "query": " ".join(str(arguments.get("query") or "").split())[:60],
             "host": re.sub(r"^https?://([^/]+).*", r"\1", url) or "a web page",
@@ -494,7 +494,7 @@ class Events:
             # The session's own conversation: not a sub-agent's or a background call's model
             # (a cheaper one, say), nor one that Auto picked for this turn only.
             and getattr(data, "interaction_type", None) in (None, "conversation-agent")
-            and getattr(data, "initiator", None) not in ("sub-agent",)
+            and getattr(data, "initiator", None) != "sub-agent"
             and not getattr(data, "is_auto", False)
             and not self.runtime.model_for(row)
             and not self.store.get(f"pinned:{session_id}")

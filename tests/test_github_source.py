@@ -38,6 +38,9 @@ class Host:
         self.subscriptions = [s for s in self.subscriptions if s["thread"] != thread]
         self.unfollowed.append((thread, "missing", why))
 
+    def read_health_changed(self, thread):
+        self.health_changes = [*getattr(self, "health_changes", []), thread]
+
 
 def fake_gh(state):
     async def gh(*arguments, payload=None):
@@ -353,6 +356,36 @@ async def test_one_broken_pr_does_not_stop_the_others(tmp_path):
     assert store.get("ghfail:github:acme/gone#1") == "5", "reads that failed, not polls"
 
 
+async def test_a_follow_says_what_could_not_be_read_and_recovers_at_once(tmp_path):
+    """E11: "Can't read #72" while the PR could be read (its CI checks could not), with no
+    reason, and still shown after it could be read again."""
+    store = Store(tmp_path / "data")
+    store.save_settings(Settings())
+    host = Host(store)
+    gh = fake_gh({"state": "open", "merged": False, "comments": []})
+    broken = {"checks": True}
+
+    async def no_checks(*arguments, payload=None):
+        if "/check-runs" in arguments[1] and broken["checks"]:
+            raise RuntimeError("GitHub request failed: gh: Resource not accessible (HTTP 403)")
+        return await gh(*arguments, payload=payload)
+
+    source = GitHubSource(store, host, gh_command=no_checks)
+    for _ in range(3):
+        await source.poll_once()
+    why = json.loads(store.get(f"ghwhy:{THREAD}"))
+    assert (why["kind"], why["step"]) == ("access", "CI checks"), why
+    assert "Resource not accessible" in why["error"]
+    assert host.health_changes == [THREAD], "its card says so once it shows"
+    # The PR itself read elsewhere (its card's chip) does not clear what failed on its checks.
+    source.read_ok(THREAD, whole=False)
+    assert store.get(f"ghfail:{THREAD}") == "3"
+    broken["checks"] = False
+    await source.poll_once()
+    assert store.get(f"ghfail:{THREAD}") == "0" and not store.get(f"ghwhy:{THREAD}")
+    assert host.health_changes == [THREAD, THREAD], "and once it can be read again"
+
+
 async def test_a_followed_pr_that_does_not_exist_is_let_go(tmp_path):
     store = Store(tmp_path / "data")
     store.save_settings(Settings())
@@ -511,21 +544,15 @@ async def test_each_repository_is_reached_with_the_account_that_can_see_it(tmp_p
         "repos/corp/svc/pulls/2"
     ], "remembered: straight to the company account"
 
-    try:
+    with pytest.raises(RuntimeError, match="404"):  # A missing PR is still missing.
         await source.pull("corp/svc", 404)
-        raise AssertionError("a missing PR is still missing")
-    except RuntimeError as exc:
-        assert "404" in str(exc)
     assert store.get("ghaccount:corp") == "evan-corp", "a missing PR does not forget the account"
 
     calls.clear()
-    try:
+    with pytest.raises(RuntimeError, match="timed out"):  # Not an access problem.
         await source.gh(
             "api", "repos/corp/svc/pulls/9/reviews", "--method=POST", "--input=-", payload={}
         )
-        raise AssertionError("a timeout is not an access problem")
-    except RuntimeError as exc:
-        assert "timed out" in str(exc)
     posts = [arguments for arguments, _ in calls if "--method=POST" in arguments]
     assert len(posts) == 1, "a write that may have happened is never sent again"
     assert await source.logins() == {"evanl666", "evan-corp"}

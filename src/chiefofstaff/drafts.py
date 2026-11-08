@@ -669,7 +669,7 @@ class Drafts:
         theirs = self.task_of(review)
         return bool(
             (task and theirs and theirs["id"] == task["id"])
-            or re.search(rf"(?:#|\bPR\s*#?\s*|/pull/){number}(?!\d)", text, re.I)
+            or re.search(rf"(?:#|\bPR\s*#?\s*|/pull/){number}(?!\d)", text, re.IGNORECASE)
             or (theirs and self.follows_there(session_id, theirs["id"], draft["target"]))
         )
 
@@ -1490,7 +1490,7 @@ class Drafts:
             if channel.startswith("D"):
                 place = f"your {threads.dm_with(name)}" if name else "a DM"
                 # "to Alice Chen (DM)" says where already.
-                said = bool(to) and re.search(r"\bDM\b|direct", to, re.I) is not None
+                said = bool(to) and re.search(r"\bDM\b|direct", to, re.IGNORECASE) is not None
                 where = "" if said else "a DM" if to else place
             else:
                 place = f"#{name.lstrip('#')}" if name else ""

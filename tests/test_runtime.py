@@ -440,7 +440,7 @@ async def test_slack_session_drafts_and_owner_decides(tmp_path):
         },
     )
     assert "edited draft" in slack.sent[-1]
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="already handled"):
         await runtime.drafts.resolve(first["id"], DraftDecision(action="send"))
 
     second = await draft("lol no")
@@ -837,14 +837,14 @@ async def test_external_sessions_can_be_adopted(harness, tmp_path):
             session_id="ext-1",
             summary="Refactor parser",
             is_remote=False,
-            modified_time=datetime(2026, 10, 1),
+            modified_time=datetime(2026, 10, 1, tzinfo=UTC),
             context=SimpleNamespace(working_directory=str(tmp_path), repository="", branch=""),
         ),
         SimpleNamespace(
             session_id=harness.router_id,
             summary="Router",
             is_remote=False,
-            modified_time=datetime(2026, 10, 2),
+            modified_time=datetime(2026, 10, 2, tzinfo=UTC),
             context=None,
         ),
     ]
@@ -872,7 +872,7 @@ async def test_sessions_open_in_a_terminal_are_shown_and_left_alone(harness, tmp
             session_id=identifier,
             summary=summary,
             is_remote=False,
-            modified_time=datetime(2026, 10, day),
+            modified_time=datetime(2026, 10, day, tzinfo=UTC),
             context=context,
         )
         for identifier, summary, day in [("old", "Old work", 3), ("open", "Slow query", 1)]

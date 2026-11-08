@@ -127,7 +127,7 @@ def make_project(root: Path) -> Path:
         ["git", "add", "."],
         ["git", "commit", "-qm", "Initial commit"],
     ):
-        subprocess.run(command, cwd=project, check=True, capture_output=True)
+        subprocess.run(command, cwd=project, check=True, capture_output=True)  # noqa: S603  (fixed)
     return project
 
 
@@ -218,7 +218,9 @@ class DemoBrain:
                         )
                         continue
                 title = " ".join(body.split()[:7]).rstrip(".,!?") or "Task"
-                code = re.search(r"\b(fix|bug|test|code|add|refactor|repo|api)\b", body, re.I)
+                code = re.search(
+                    r"\b(fix|bug|test|code|add|refactor|repo|api)\b", body, re.IGNORECASE
+                )
                 arguments = {"title": title[:60], "instructions": body}
                 if code:
                     arguments |= {"project": self.project, "isolate": True}

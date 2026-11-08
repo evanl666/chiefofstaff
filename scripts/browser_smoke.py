@@ -143,12 +143,14 @@ async def run(page, app: App, project: Path, workspace: Workspace, errors: list[
     question = page.locator("#needs .card.request.question")
     await expect(question).to_be_visible(timeout=300000)
     await page.screenshot(path=SHOTS / "11-question.png")
-    await question.get_by_role("button", name=re.compile("^blue$", re.I)).click()
+    await question.get_by_role("button", name=re.compile("^blue$", re.IGNORECASE)).click()
     await expect(question).to_have_count(0)
-    await expect(page.locator("#panel")).to_contain_text(re.compile("blue", re.I), timeout=300000)
+    await expect(page.locator("#panel")).to_contain_text(
+        re.compile("blue", re.IGNORECASE), timeout=300000
+    )
     log("the owner answered a worker's question on its card")
 
-    accepted = page.locator("#needs .card.task", has_text=re.compile("notes", re.I))
+    accepted = page.locator("#needs .card.task", has_text=re.compile("notes", re.IGNORECASE))
     if await accepted.count():
         await accepted.first.get_by_role("button", name="Accept").click()
         await expect(accepted).to_have_count(0)

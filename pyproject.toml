@@ -82,7 +82,10 @@ target-version = "py311"
 line-length = 100
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "ASYNC", "SIM", "RUF", "PIE", "RET", "C4", "PERF"]
+select = [
+    "E", "F", "I", "UP", "B", "ASYNC", "SIM", "RUF", "PIE", "RET", "C4", "PERF",
+    "S", "A", "DTZ", "T20", "N", "PT", "PTH", "FURB", "ERA", "PGH", "G", "LOG",
+]
 # The UI shows deletions as "−12", with a real minus sign.
 allowed-confusables = ["−"]
 # Word lists read better as one string.split() than as a column of literals; a loop that
@@ -90,8 +93,25 @@ allowed-confusables = ["−"]
 ignore = ["SIM905", "PERF401"]
 
 [tool.ruff.lint.per-file-ignores]
-# Test drivers deliberately block on processes and files.
-"scripts/*" = ["ASYNC"]
+"tests/*" = [
+    "S101",  # Asserts are how pytest checks.
+    "S105", "S107",  # Fake tokens and passwords.
+    "S108",  # Made-up /tmp paths: nothing is written there.
+    "S603", "S607",  # Tests run git to set up repositories.
+    "PT018",  # A composite assert reads as one fact about a result.
+]
+"scripts/*" = [
+    "ASYNC",  # Test drivers deliberately block on processes and files.
+    "S101",  # Drivers check what they see with asserts.
+    "S105", "S106",  # Fake tokens for the fake servers.
+    "S108",  # /tmp: made-up paths in scripted content, and where a live run leaves its logs.
+    "S311",  # Seeded random test data, not secrets.
+    "S603", "S607",  # Drivers run git, gh and the app.
+    "T201",  # Drivers print their progress.
+    "PT017", "PT018",  # Not pytest: drivers assert on what an error says, several facts at once.
+]
+# The command line prints where Chief of Staff runs.
+"src/chiefofstaff/__main__.py" = ["T201"]
 
 [tool.pyright]
 include = ["src"]

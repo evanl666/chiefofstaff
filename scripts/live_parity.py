@@ -387,7 +387,7 @@ def cli_timeline(home: Path, cwd: Path) -> list[str]:
         start = next((e for e in events if e.get("type") == "session.start"), None)
         if not start or str(cwd) not in json.dumps(start.get("data", {}).get("context", {})):
             continue
-        begun = datetime.fromisoformat(start["timestamp"].replace("Z", "+00:00")).timestamp()
+        begun = datetime.fromisoformat(start["timestamp"]).timestamp()
         lines = []
         for event in events:
             kind = event.get("type")
@@ -400,7 +400,7 @@ def cli_timeline(home: Path, cwd: Path) -> list[str]:
                 text = kind
             else:
                 continue
-            at = datetime.fromisoformat(event["timestamp"].replace("Z", "+00:00")).timestamp()
+            at = datetime.fromisoformat(event["timestamp"]).timestamp()
             lines.append(f"{at - begun:6.1f}s {text}".replace("\n", " "))
         return lines
     return ["(no log found)"]

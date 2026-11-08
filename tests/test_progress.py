@@ -6,7 +6,7 @@ import json
 import subprocess
 import time
 from dataclasses import replace
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -151,7 +151,7 @@ async def test_the_router_knows_sessions_open_in_a_terminal(harness, tmp_path):
             session_id=identifier,
             summary=summary,
             is_remote=False,
-            modified_time=datetime(2026, 11, day),
+            modified_time=datetime(2026, 11, day, tzinfo=UTC),
             context=context,
         )
         for identifier, summary, day in [("term-1", "Tune the ranker", 3), ("old-1", "Old work", 1)]
@@ -575,7 +575,7 @@ async def test_a_session_started_in_home_never_gets_home_to_write(harness):
 def test_folders_the_sandbox_never_opens():
     above_home = str(Path.home().parent)  # /Users on macOS, /home on Linux
     for path in (above_home, "~", "~/.copilot", "~/.copilot/session-state", "~/.ssh"):
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="The sandbox cannot open"):
             Settings(sandbox_writable=[path])
     assert Settings(sandbox_writable=["~/.copilot/context-repo"]).sandbox_writable == [
         str(Path("~/.copilot/context-repo").expanduser().resolve())
@@ -605,7 +605,7 @@ async def test_one_card_per_session_to_continue_and_the_router_hears_the_answer(
             session_id="old-2",
             summary="Old eval",
             is_remote=False,
-            modified_time=datetime(2026, 11, 1),
+            modified_time=datetime(2026, 11, 1, tzinfo=UTC),
             context=context,
         )
     ]
@@ -990,7 +990,7 @@ NAMED = "acme/checkout-service"
 
 
 @pytest.mark.parametrize(
-    "text, named",
+    ("text", "named"),
     [
         ("Review checkout-service PR #1529", True),
         ("帮我review一下 checkout-service 的 PR #1529", True),
@@ -1037,7 +1037,7 @@ def test_a_repository_name_in_a_path_or_near_an_issue_is_not_its_pr():
 
 
 @pytest.mark.parametrize(
-    "text, number, named",
+    ("text", "number", "named"),
     [
         ("Review acme/web#1529 and acme/api#1600", 1529, False),
         ("Review https://github.com/acme/web/pull/1529 and acme/api#1600", 1529, False),
@@ -1385,7 +1385,7 @@ async def test_a_decision_recorded_again_in_the_same_words_changes_nothing(harne
 
 
 @pytest.mark.parametrize(
-    "goal, summary, missing",
+    ("goal", "summary", "missing"),
     [
         (
             "用 sales.csv 做个分析, 一步一步讲清楚, 最后用一个 markdown 表格总结",

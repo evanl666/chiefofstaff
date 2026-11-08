@@ -159,12 +159,8 @@ async def test_thinking_effort_and_context_follow_what_the_model_supports(tmp_pa
         ("max", "", "efforts: low, medium, high"),
         ("", "long_context", "no long-context"),
     ]:
-        try:
+        with pytest.raises(ValueError, match=error):
             await runtime.set_session_model(plain, "fast-model" if context else "", effort, context)
-        except ValueError as exc:
-            assert error in str(exc)
-        else:
-            raise AssertionError("expected a ValueError")
 
 
 async def test_sessions_on_the_copilot_default_model_get_its_options(harness):
@@ -650,12 +646,8 @@ async def test_the_owner_picks_the_folder_when_the_router_is_unsure(tmp_path):
     third = harness.store.drafts()[0]["id"]
     await runtime.drafts.resolve(third, DraftDecision(action="reject", reason="later"))
     assert "do not start it. Reason: later" in harness.session(router).sent[-1]
-    try:
-        await runtime.add_project(str(tmp_path))
-    except ValueError as exc:
-        assert "private data directory" in str(exc)
-    else:
-        raise AssertionError("the data directory must stay private")
+    with pytest.raises(ValueError, match="private data directory"):
+        await runtime.add_project(str(tmp_path))  # The data directory must stay private.
 
 
 async def test_scratch_folder_and_opening_a_workers_folder(tmp_path, monkeypatch):
@@ -757,7 +749,7 @@ async def test_the_owner_adds_a_habit_of_their_own(harness):
     await runtime.learning.add("Run the linter before every commit", "everywhere")
     [lesson] = runtime.learning.lessons()
     assert lesson["text"] == "Run the linter before every commit" and lesson["scope"] == ""
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="Write the habit"):
         await runtime.learning.add("   ")
 
 

@@ -350,7 +350,7 @@ def process_table() -> dict[int, tuple[int, str]]:
     """Every process: pid -> (parent pid, command line)."""
     try:
         table = subprocess.run(
-            ["ps", "-axo", "pid=,ppid=,command="],
+            ["ps", "-axo", "pid=,ppid=,command="],  # noqa: S607  (a fixed command, found on PATH)
             capture_output=True,
             text=True,
             check=True,

@@ -27,7 +27,7 @@ BRANCH_PREFIX = "chief/"
 
 
 async def command(
-    *arguments: str, limit: float = 60, input: bytes | None = None, env: dict | None = None
+    *arguments: str, limit: float = 60, stdin_data: bytes | None = None, env: dict | None = None
 ) -> str:
     """Run a command without a terminal (it can never wait for a password prompt)."""
     env = {**os.environ, **(env or {}), "GIT_TERMINAL_PROMPT": "0", "GH_PROMPT_DISABLED": "1"}
@@ -35,7 +35,7 @@ async def command(
     env.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
     process = await asyncio.create_subprocess_exec(
         *arguments,
-        stdin=asyncio.subprocess.DEVNULL if input is None else asyncio.subprocess.PIPE,
+        stdin=asyncio.subprocess.DEVNULL if stdin_data is None else asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
@@ -43,7 +43,7 @@ async def command(
     )
     try:
         async with asyncio.timeout(limit):
-            stdout, stderr = await process.communicate(input)
+            stdout, stderr = await process.communicate(stdin_data)
     except TimeoutError as exc:
         with suppress(ProcessLookupError):
             os.killpg(process.pid, signal.SIGKILL)  # Also ssh and other children.
@@ -55,8 +55,8 @@ async def command(
     return stdout.decode(errors="replace")
 
 
-async def git(*arguments: str, limit: float = 60, input: bytes | None = None) -> str:
-    return await command("git", *SAFE_GIT, *arguments, limit=limit, input=input)
+async def git(*arguments: str, limit: float = 60, stdin_data: bytes | None = None) -> str:
+    return await command("git", *SAFE_GIT, *arguments, limit=limit, stdin_data=stdin_data)
 
 
 # Chief of Staff's own git runs outside any sandbox: nothing in a repository's config may run
@@ -134,7 +134,8 @@ def git_pins(checkout: dict, path: str) -> dict[str, str] | None:
     common = checkout.get("git_dir") or (
         str(Path(checkout["repo"]) / ".git") if checkout.get("repo") else ""
     )
-    if not common or not os.path.isdir(common):
+    # os.path.isdir, not Path.is_dir: False, not an error, for a folder it cannot look at.
+    if not common or not os.path.isdir(common):  # noqa: PTH112
         return {}
     planted = Path(common) / "commondir"
     if Path(common).name == ".git" and planted.exists():
@@ -144,9 +145,9 @@ def git_pins(checkout: dict, path: str) -> dict[str, str] | None:
             planted.unlink()
     tree = checkout.get("worktree")
     resolved = Path(path).resolve()
-    if tree and os.path.isdir(tree) and resolved.is_relative_to(Path(tree).resolve()):
+    if tree and os.path.isdir(tree) and resolved.is_relative_to(Path(tree).resolve()):  # noqa: PTH112
         admin = checkout.get("admin") or ""
-        if not admin or not os.path.isdir(admin):
+        if not admin or not os.path.isdir(admin):  # noqa: PTH112
             admin = admin_dir(common, tree)  # Made again when the worker was reopened.
         if not admin:
             return None
@@ -350,7 +351,7 @@ async def carry_ignored_files(top: Path, tree: Path) -> list[str]:
     try:  # Only what git ignores; check-ignore fails when it ignores none of them.
         ignored = await git(
             "-C", str(top), "check-ignore", "--stdin", "-z",
-            input="\0".join(candidates).encode() + b"\0",
+            stdin_data="\0".join(candidates).encode() + b"\0",
         )  # fmt: skip
     except ValueError:
         return []
@@ -502,7 +503,8 @@ def locate(checkout: dict) -> tuple[str, str, bool]:
     """Where to read a checkout's work: (folder, head, live). A closed worker's worktree may be
     gone (see Workspaces.release); its branch is still in the repository, with all its work."""
     tree = checkout.get("worktree")
-    if tree and checkout.get("branch") and not os.path.isdir(tree):
+    # os.path.isdir, not Path.is_dir: a worktree it cannot look at is gone, not an error.
+    if tree and checkout.get("branch") and not os.path.isdir(tree):  # noqa: PTH112
         return checkout["repo"], f"refs/heads/{checkout['branch']}", False
     return checkout["path"], "HEAD", True
 
@@ -535,7 +537,11 @@ async def version(checkout: dict) -> dict | None:
                 )
                 names = untracked_work(others.split("\0"))[:MAX_NEW_FILES]
                 edits += await asyncio.to_thread(file_digest, Path(path), names)
-    digest = hashlib.sha1(edits.encode()).hexdigest()[:12] if edits.strip() else ""
+    digest = (
+        hashlib.sha1(edits.encode(), usedforsecurity=False).hexdigest()[:12]
+        if edits.strip()
+        else ""
+    )
     return {"commit": commit, "edits": digest, "digest": DIGEST}
 
 
@@ -555,7 +561,7 @@ def same_version(recorded: dict, current: dict) -> bool:
 def file_digest(top: Path, names: list[str]) -> str:
     """The contents of new files, read here: one odd entry (a nested repository, a broken link)
     must not leave the others out."""
-    found = hashlib.sha1()
+    found = hashlib.sha1(usedforsecurity=False)
     for name in names:
         path = top / name
         if name.endswith("/") or not path.is_file():
@@ -601,7 +607,7 @@ class CommandRun:
         self.unnamed = unnamed
 
     def names(self, top: Path, name: str) -> bool:
-        base = os.path.basename(name)
+        base = name.rpartition("/")[2]
         return (
             name in self.words
             or str(top / name) in self.words
@@ -785,7 +791,7 @@ async def snapshot(checkout: dict) -> dict | None:
         if len(names) > MAX_SNAPSHOT_FILES or len(large) > MAX_LARGE_LEFT_OUT:
             return {"commit": commit, "tree": "", "large": []}  # Its commit all the same.
         index = (await checkout_git(checkout, top, "rev-parse", "--git-path", "index")).strip()
-        index = str(Path(top) / index) if not os.path.isabs(index) else index
+        index = str(Path(top) / index) if not Path(index).is_absolute() else index
         with tempfile.TemporaryDirectory(prefix="cos-snap-") as folder:
             own = str(Path(folder) / "index")
             with suppress(FileNotFoundError):

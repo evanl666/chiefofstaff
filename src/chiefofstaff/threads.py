@@ -94,7 +94,9 @@ PERMALINK = re.compile(r"/archives/([A-Z0-9]+)/p(\d{10})(\d{6})(?:\?thread_ts=(\
 
 
 GOOGLE_DOC = re.compile(r"^https://docs\.google\.com/.*?/d/(?:e/)?([\w-]{6,})")
-SHARING = re.compile(r"^(usp|utm_\w+|ref|ref_src|fbclid|gclid|si|authuser|ouid|rtpof|sd)$", re.I)
+SHARING = re.compile(
+    r"^(usp|utm_\w+|ref|ref_src|fbclid|gclid|si|authuser|ouid|rtpof|sd)$", re.IGNORECASE
+)
 
 
 def link_key(url: str) -> str:
@@ -132,7 +134,9 @@ def normalize(key: str) -> str:
 
 def dm_with(name: str) -> str:
     """A DM by its name: "DM with Bob"; a name that already says DM ("DM with Bob") as it is."""
-    return name if re.search(r"\bDM\b|direct", name, re.I) else f"DM with {name.lstrip('@')}"
+    return (
+        name if re.search(r"\bDM\b|direct", name, re.IGNORECASE) else f"DM with {name.lstrip('@')}"
+    )
 
 
 def label(key: str, names: dict[str, str] | None = None) -> str:

@@ -208,9 +208,10 @@ async def test_a_worker_cannot_point_chief_of_staffs_git_at_its_own_config(tmp_p
     (repo / ".git" / "commondir").write_text(str(evil / ".git"))  # And planted here.
     assert run("git", "config", "--get", "probe.owner", cwd=tree).strip() == "attacker"
 
-    with pytest.raises(ValueError):  # Not found: the worker's config is not read.
+    # Not found: the worker's config is not read.
+    with pytest.raises(ValueError, match="git failed"):
         await checkout_git(checkout, str(tree), "config", "--get", "probe.owner")
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="git failed"):
         await checkout_git(checkout, str(repo), "config", "--get", "probe.owner")
     assert not (repo / ".git" / "commondir").exists(), "the planted pointer is removed"
     assert (await changes(checkout))["branch"] == "chief/x", "its work is still read"

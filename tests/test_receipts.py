@@ -549,7 +549,7 @@ async def test_a_reconnect_ends_the_commands_left_running(harness):
 
 
 @pytest.mark.parametrize(
-    "command, expected",
+    ("command", "expected"),
     [
         ("# run the suite\npytest -q", "test"),
         ("cd svc  # the service\nuv run pytest -q", "test"),
@@ -570,7 +570,7 @@ def test_command_kinds_across_lines_and_runners(command, expected):
 
 
 @pytest.mark.parametrize(
-    "output, expected",
+    ("output", "expected"),
     [
         ("TAP version 13\nok 1 - adds\nnot ok 2 - subtracts\n1..2\n# pass 1\n# fail 1", "failed"),
         ("TAP version 13\nok 1 - adds\nok 2 - subtracts\n1..2\n# pass 2\n# fail 0", "passed"),
@@ -589,7 +589,7 @@ def test_runner_summaries(output, expected):
 
 
 @pytest.mark.parametrize(
-    "report, expected",
+    ("report", "expected"),
     [
         ("All tests pass.", True),
         ("Tests do not pass yet: two fail on the new schema.", False),
@@ -604,7 +604,7 @@ def test_what_a_report_says_about_tests(report, expected):
 
 
 @pytest.mark.parametrize(
-    "report, expected",
+    ("report", "expected"),
     [
         ("I fixed the null check.", True),
         ("Nothing to change: it was already fixed upstream.", False),

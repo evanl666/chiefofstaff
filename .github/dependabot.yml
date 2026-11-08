@@ -12,5 +12,7 @@ updates:
     schedule:
       interval: weekly
     groups:
+      # Minor and patch updates together; a major update comes on its own, to review by itself.
       python:
         patterns: ["*"]
+        update-types: [minor, patch]

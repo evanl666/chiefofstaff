@@ -35,6 +35,9 @@ export const MARKERS = {
   overdue: "Overdue",
   idle: "Nothing to wait on",
   delivered: "Delivered",
+  "pr-failing": "CI failing",
+  "pr-changes": "Changes requested",
+  mergeable: "Ready to merge",
   reviewed: "Reviewed",
   "still-following": "Still following",
   report: "Report",
@@ -42,6 +45,44 @@ export const MARKERS = {
   "set-aside": "Set aside",
   cancelled: "Cancelled",
 };
+
+// What a PR's state comes to, in a word or two, worst first: one rule for Artifacts, a card's
+// PR chip, what Monitoring says it waits on and where its task is placed (changes requested
+// wins over failing CI: the author has to act on the review either way).
+export function prStatus(pr) {
+  if (pr.state === "MERGED") return ["merged", "good"];
+  if (pr.state === "CLOSED") return ["closed", "muted"];
+  if (pr.draft) return ["draft", "active"];
+  if (pr.review === "CHANGES_REQUESTED") return ["changes requested", "bad"];
+  if (pr.checks === "failing") return ["CI failing", "bad"];
+  if (pr.awaiting?.length) return ["awaiting approval", "wait"];
+  if (pr.checks === "pending") return ["CI running", "active"];
+  // GitHub would merge it now (approved, or no review required): a Ready-to-merge card says so.
+  if (["CLEAN", "HAS_HOOKS"].includes(pr.merge_state)) return ["ready to merge", "good"];
+  if (pr.review === "APPROVED") return ["approved", "good"];
+  return ["in review", "active"];
+}
+// Where a delivered task's own open PRs that it follows stand, the one that matters most
+// first: one to fix (changes requested, CI failing), then one ready to merge. Null when none
+// of them asks for anything (in review, awaiting approval, CI running).
+const PR_MARKERS = { "changes requested": "pr-changes", "CI failing": "pr-failing", "ready to merge": "mergeable" };
+// The markers of a delivered task by where its PR stands (one row per followed PR, see boardOf).
+const DELIVERED = ["delivered", "reviewed", "mergeable", "pr-failing", "pr-changes"];
+function ownPrStanding(task) {
+  const watched = new Set((task.watching || []).map((key) => /^github:(.+#\d+)$/.exec(key)?.[1]?.toLowerCase()).filter(Boolean));
+  const found = (task.receipts?.prs || [])
+    .filter((pr) => pr.own && watched.has(pr.label.toLowerCase()))
+    .map((pr) => ({ pr, word: prStatus(pr)[0] }))
+    .filter((item) => PR_MARKERS[item.word]);
+  const rank = (item) => Object.keys(PR_MARKERS).indexOf(item.word);
+  const [first] = found.sort((a, b) => rank(a) - rank(b));
+  if (!first) return null;
+  const { pr, word } = first;
+  const short = pr.label.replace(/^[^/]+\//, "");
+  const failing = word === "CI failing" && pr.failing?.length ? ` (${pr.failing.join(", ")})` : "";
+  const why = { "changes requested": `Changes requested on ${short}`, "CI failing": `CI failing on ${short}${failing}`, "ready to merge": `Ready to merge: ${short}` }[word];
+  return { marker: PR_MARKERS[word], why };
+}
 
 const hours = (from, now) => (from ? (now - Date.parse(from)) / 3600000 : 0);
 // A delivered task whose PR (or thread) has not changed for this long goes with the finished
@@ -114,8 +155,14 @@ export function taskPhase(task, worker, { active = "", activeTitle = "", stopped
     // owner's own work waiting on others, or a PR they reviewed waiting on its author. Nothing
     // new there for a day, it goes with the finished ones (news brings it back).
     if (watching.length) {
+      // Its own PR as GitHub has it (as Artifacts and its chip say it): one to fix is the
+      // owner's to act on; one ready to merge is offered on a Merge card (shown above when
+      // there is one), else it waits here, said as it is, not as "Delivered".
+      const standing = ownPrStanding(task);
+      if (standing && standing.marker !== "mergeable") return at("needs", standing.marker, standing.why);
       const quiet = hours(task.watch_changed_at, now);
       if (task.watch_changed_at && quiet >= QUIET_HOURS) return at("finished", "still-following", `Still following; nothing new there for ${howLong(quiet)}`);
+      if (standing) return at("monitoring", standing.marker, standing.why);
       return at("monitoring", task.watch_kind === "reviewed" ? "reviewed" : "delivered", "");
     }
     if (task.set_aside) return at("finished", "set-aside", "Cancelled after it finished: not accepted");
@@ -171,7 +218,7 @@ export function boardOf(tasks, workers, { now = Date.now(), stallHours = 4, onCa
   // one row, on the newest: the other is with the finished ones, still followed.
   const followed = new Map();
   for (const task of [...tasks].sort((a, b) => b.updated_at.localeCompare(a.updated_at))) {
-    if (!["delivered", "reviewed"].includes(phases.get(task.id).marker)) continue;
+    if (!DELIVERED.includes(phases.get(task.id).marker)) continue;
     const key = `${task.session_id}|${[...task.watching].sort().join(",")}`;
     const first = followed.get(key);
     if (first) phases.set(task.id, { section: "finished", marker: "still-following", why: `Still following, for “${first.title}”` });
@@ -207,7 +254,7 @@ export function monitoringRows(tasks, phases) {
   const order = (a, b) => (rank(a) === URGENT.queued ? a.created_at.localeCompare(b.created_at) : b.updated_at.localeCompare(a.updated_at));
   const list = tasks.filter((task) => phases.get(task.id)?.section === "monitoring").sort((a, b) => rank(a) - rank(b) || order(a, b));
   const marked = (...markers) => list.filter((task) => markers.includes(phases.get(task.id).marker));
-  return { waiting: list.filter((task) => !["delivered", "reviewed"].includes(phases.get(task.id).marker)), delivered: marked("delivered"), reviewed: marked("reviewed") };
+  return { waiting: list.filter((task) => !["delivered", "mergeable", "reviewed"].includes(phases.get(task.id).marker)), delivered: marked("mergeable", "delivered"), reviewed: marked("reviewed") };
 }
 // Workers at work with none of their tasks under Running and none open (news on a PR a
 // finished task follows, a question about it): a card each, so their work shows. One with a

@@ -14,7 +14,7 @@ def test_thread_keys():
     assert threads.normalize(" github:Acme/App#7 ") == "github:acme/app#7"
     assert threads.normalize("slack:C0DEPLOYS:1712345678.000100")
     assert threads.normalize("slack:D0ALICE01")
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="Unknown thread key"):
         threads.normalize("slack:C0DEPLOYS")  # a whole channel is too broad to follow
     text = (
         "https://acme.slack.com/archives/C0DEPLOYS/p1712345690000200"

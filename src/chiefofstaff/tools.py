@@ -785,10 +785,12 @@ OWNER_ANSWER = re.compile(
 RISKY = re.compile(
     r"\bgh\s+pr\s+merge\b|\bgh\s+repo\s+delete\b|\bgit\s+push\s+(-f|--force)(?![\w-])"
     r"|\bno (merge )?card (is )?needed\b|\b(skip|without) the (owner's )?(merge )?card\b",
-    re.I,
+    re.IGNORECASE,
 )
 # "do not run gh pr merge", "never force-push": said so the worker does not.
-FORBIDS = re.compile(r"\b(do not|don't|dont|never|not to|must not|no)\W+(\w+\W+){0,2}$", re.I)
+FORBIDS = re.compile(
+    r"\b(do not|don't|dont|never|not to|must not|no)\W+(\w+\W+){0,2}$", re.IGNORECASE
+)
 
 
 def risky(text: str) -> re.Match | None:
@@ -804,7 +806,7 @@ def risky(text: str) -> re.Match | None:
 ADDS_TO = re.compile(
     r"\b(one more thing|oh wait|wait,|forgot to (mention|say|add|ask)|one thing I forgot)\b"
     r"|\u8fd8\u6709\u4e00(\u4ef6|\u70b9)|\u8865\u5145\u4e00\u4e0b|\u5bf9\u4e86|\u5fd8\u4e86\u8bf4",
-    re.I,
+    re.IGNORECASE,
 )
 ADD_MINUTES = 30
 # Internal ids a worker may write in its report: a draft's ("d4d31ea2f"), a Slack message's
@@ -815,7 +817,7 @@ DRAFT_ID = r"d[0-9a-f]{8}"
 IDS_IN_BRACKETS = re.compile(rf"\s*\(\s*({DRAFT_ID}(?:\s*,\s*{DRAFT_ID})*)\s*\)")
 ID_FIRST = re.compile(rf"\(\s*({DRAFT_ID})\s*,\s*")
 ID_LISTED = re.compile(rf"\s*,\s*({DRAFT_ID})\b")
-DRAFT_NAMED = re.compile(rf"\b(?:(\w+)\s+)?draft\s+({DRAFT_ID})\b", re.I)
+DRAFT_NAMED = re.compile(rf"\b(?:(\w+)\s+)?draft\s+({DRAFT_ID})\b", re.IGNORECASE)
 TS_MENTION = re.compile(r"\s*\(?\b(?:ts|thread_ts|thread)\s*=?\s*\d{10}\.\d{6}\b\)?")
 NAMING = {"the", "a", "this", "that", "your", "my", "its", "slack", "review", "reply"}
 
@@ -881,20 +883,26 @@ ACTS_ON = re.compile(
     r"mov(?:e|es|ing)\b|tell\s+(?:me|us)\s+(?:if|when|once)|let\s+(?:me|us)\s+know|"
     r"keep\s+(?:me|us)\s+posted)\w*"
     r"|\b(?:ci|checks?)\b|审|修|合并|看|检查|跟进|处理|回复|评论|关注|盯",
-    re.I,
+    re.IGNORECASE,
 )
-NOT_ACTING = re.compile(r"\b(?:not|don't|dont|never|without|no)\b|不要|别|不用|勿|无需", re.I)
+NOT_ACTING = re.compile(
+    r"\b(?:not|don't|dont|never|without|no)\b|不要|别|不用|勿|无需", re.IGNORECASE
+)
 # Right before a PR: an example or a source, not what to act on ("see #60", "like #60").
 ONLY_MENTIONED = re.compile(
-    r"(?:\b(?:like|see|cf|per|unlike|from|similar\s+to|as\s+in)\W*|参考|参见|类似)$", re.I
+    r"(?:\b(?:like|see|cf|per|unlike|from|similar\s+to|as\s+in)\W*|参考|参见|类似)$", re.IGNORECASE
 )
 # A word of the next sentence that points back at the PR ("… #5 from Bob. Review it.").
-POINTS_BACK = re.compile(r"\b(?:it|its|this|that|them|these|those|the\s+prs?)\b|它|这个|该", re.I)
+POINTS_BACK = re.compile(
+    r"\b(?:it|its|this|that|them|these|those|the\s+prs?)\b|它|这个|该", re.IGNORECASE
+)
 QUOTED = re.compile(r"\"[^\"\n]*\"|“[^”\n]*”|「[^」\n]*」")
 SENTENCE = re.compile(r"(?<=[.!?;])\s+|\n+|\s+but\s+|[\u3002\uff01\uff1f\uff1b]")
 MENTION = re.compile(rf"{threads.PR_URL.pattern}|{GITHUB_KEY.pattern}")
 # Names, paths and links: "fix-tool", "cos-approve-test" say nothing about what to do.
-IDENTIFIER = re.compile(r"https?://[!-~]+|[\w./#-]*[A-Za-z0-9][/#_.-][A-Za-z0-9][\w./#-]*", re.A)
+IDENTIFIER = re.compile(
+    r"https?://[!-~]+|[\w./#-]*[A-Za-z0-9][/#_.-][A-Za-z0-9][\w./#-]*", re.ASCII
+)
 
 
 def acting(clause: str) -> bool:
@@ -3040,21 +3048,25 @@ class Tools:
             raise ValueError(
                 f"“{self.runtime.display_title(row)}” does not follow that ({listed})."
             )
-        for key in gone:
-            self.store.unfollow(key, row["id"])
-            self.store.set(f"stopped:{row['id']}:{key}", "1")
-        self.runtime.publish_session(self.store.session(row["id"]))
-        for item in self.tasks.for_session(row["id"]):
-            self.runtime.task_actions.publish(item)
+        # Given a task: for that task only (its other tasks that follow it go on).
+        about = task["id"] if task else ""
+        kept = [key for key in gone if not self.runtime.unfollow_for(row["id"], key, about)]
         names = self.runtime.slack.display_names()
         said = ", ".join(threads.label(key, names) for key in gone)
+        for_task = f" for task {task['id']}" if task else ""
         self.runtime.add_message(
-            row["id"], "notice", f"No longer following {said} (the Router stopped it).",
+            row["id"], "notice", f"No longer following {said}{for_task} (the Router stopped it).",
             {"threads": gone},
         )  # fmt: skip
+        still = (
+            f" It still follows {', '.join(threads.label(key, names) for key in kept)} for its "
+            "other tasks."
+            if kept
+            else ""
+        )
         return (
-            f"“{self.runtime.display_title(row)}” no longer follows {said}: new messages there "
-            "come to you. Its tasks, results and drafts are as they were."
+            f"“{self.runtime.display_title(row)}” no longer follows {said}{for_task}: new "
+            f"messages there come to you.{still} Its tasks, results and drafts are as they were."
         )
 
     async def t_stop_worker(self, params: StopWorker, caller: str):

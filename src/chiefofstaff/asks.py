@@ -367,9 +367,9 @@ class Asks:
                     kind="notice",
                     display=f"Watch not added (its card expired at a restart): {what}"[:300],
                 )
-        kinds = ",".join(f"'{kind}'" for kind in sorted(REQUEST_KINDS))
+        kinds = ",".join(f"'{kind}'" for kind in sorted(REQUEST_KINDS))  # Constant SQL.
         self.store.execute(
-            f"UPDATE drafts SET status='expired', outcome=?, resolved_at=? "
+            f"UPDATE drafts SET status='expired', outcome=?, resolved_at=? "  # noqa: S608
             f"WHERE status='pending' AND kind IN ({kinds})",
             (reason, now()),
         )

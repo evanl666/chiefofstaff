@@ -114,9 +114,7 @@ def not_before(when: str | None, start: str) -> bool:
     """Whether ISO time `when` (GitHub's "…Z" or ours) is at or after `start`; False when
     either cannot be read."""
     try:
-        return datetime.fromisoformat((when or "").replace("Z", "+00:00")) >= (
-            datetime.fromisoformat(start.replace("Z", "+00:00"))
-        )
+        return datetime.fromisoformat(when or "") >= datetime.fromisoformat(start)
     except ValueError:
         return False
 
@@ -155,7 +153,7 @@ JUST_FINISHED_SECONDS = 60
 def just_now(when: str | None) -> bool:
     """Whether ISO time `when` (a result's) is within the last minute."""
     try:
-        ended = datetime.fromisoformat((when or "").replace("Z", "+00:00"))
+        ended = datetime.fromisoformat(when or "")
     except ValueError:
         return False
     if ended.tzinfo is None:
@@ -836,9 +834,9 @@ class TaskActions:
         if not sessions:
             return []
         start = datetime.fromtimestamp(max(since - 60, 0), UTC).isoformat()
-        marks = ",".join("?" * len(sessions))
+        marks = ",".join("?" * len(sessions))  # Only placeholders go into the SQL text.
         rows = self.store.all(
-            "SELECT c.command, c.started_at, c.ended_at FROM commands c JOIN runs r "
+            "SELECT c.command, c.started_at, c.ended_at FROM commands c JOIN runs r "  # noqa: S608
             f"ON r.id=c.run_id WHERE r.task_id!=? AND c.session_id IN ({marks}) "
             "AND c.started_at>=? ORDER BY c.id DESC LIMIT 2000",
             (task["id"], *sessions, start),
@@ -1143,6 +1141,8 @@ class TaskActions:
             except Exception:
                 logger.info("Could not read %s#%s for receipts.", repo, number, exc_info=True)
                 continue
+            # Read: a follow that could not read the PR itself can again.
+            self.runtime.github.read_ok(threads.normalize(f"github:{repo}#{number}"), whole=False)
             rollup = view.get("statusCheckRollup") or []
             prs.append(
                 {
@@ -2786,8 +2786,9 @@ class TaskActions:
         kind = "own" if any(pr.get("own") for pr in prs) else "reviewed" if reviewed else ""
         changed = max((pr.get("changed_at") or pr.get("at") or "" for pr in prs), default="")
         if slack := [key for key in keys if key.startswith("slack:")]:
+            # Only "?" placeholders go into the SQL text.
             touched = self.store.value(
-                "SELECT max(touched) FROM subscriptions WHERE session_id=? AND thread IN "
+                "SELECT max(touched) FROM subscriptions WHERE session_id=? AND thread IN "  # noqa: S608
                 f"({','.join('?' * len(slack))})",
                 (task["session_id"], *slack),
             )
@@ -2797,17 +2798,41 @@ class TaskActions:
 
     def watching(self, task: dict, follows: list[str]) -> list[str]:
         """The threads it waits on for this task that can be read: what may bring it news."""
-        failing = self.failing(task, follows)
+        failing = self.unreadable(task, follows)
         return [key for key in self.followed_for(task, follows) if key not in failing]
 
-    def failing(self, task: dict, follows: list[str]) -> list[str]:
-        """Its threads for this task that could not be read several times in a row: shown as
-        such, not as something it waits on."""
+    def unreadable(self, task: dict, follows: list[str]) -> list[str]:
+        """Its threads for this task that could not be read several times in a row: not
+        something it waits on."""
         row = self.store.find_session(task["session_id"])
         health = self.runtime.follow_health(row["id"]) if row else {}
         return [
             key for key in self.followed_for(task, follows) if health.get(key, 0) >= FAILING_READS
         ]
+
+    def failing(self, task: dict, follows: list[str]) -> list[str]:
+        """Those of them shown as unreadable on this task's card: on one task only, the one
+        the PR is (the task that made it), else the newest that follows it; not on every task
+        of its worker that follows it too."""
+        found = self.unreadable(task, follows)
+        if not found:
+            return []
+        others = [t for t in self.tasks.for_session(task["session_id"]) if t["id"] != task["id"]]
+        shown = []
+        for key in found:
+            claims = [t for t in others if key in self.followed_for(t, [key])]
+            pr = threads.GITHUB_PR.fullmatch(key)
+            made = self.creator(f"{pr.group(1)}#{pr.group(2)}".lower()) if pr and claims else ""
+            if made == task["id"] or (
+                made not in {t["id"] for t in claims}
+                and all(t["created_at"] <= task["created_at"] for t in claims)
+            ):
+                shown.append(key)
+        return shown
+
+    def failing_why(self, task: dict, keys: list[str]) -> dict[str, dict]:
+        """Why each of its unreadable PRs could not be read (see Runtime.follow_why)."""
+        return {key: why for key in keys if (why := self.runtime.follow_why(key))}
 
     def view(self, task: dict) -> dict:
         row = self.store.find_session(task["session_id"]) or {}
@@ -2834,7 +2859,8 @@ class TaskActions:
             "check_back": self.check_back(task),
             "watching": self.watching(task, follows),
             **self.watch_standing(task, follows),
-            "watch_failing": self.failing(task, follows),
+            "watch_failing": (failing := self.failing(task, follows)),
+            "watch_failing_why": self.failing_why(task, failing),
             "earlier_titles": json.loads(self.store.get(f"titles:{task['id']}") or "[]"),
             # When its worker was last asked where this task stands (stalled).
             "nudged_at": self.store.get(f"stallnudge:{task['id']}") or "",
@@ -2919,12 +2945,14 @@ class TaskActions:
         if not row or not given:
             return ""
         path = given.removeprefix("file://") if given.startswith("file://") else given
-        if not os.path.isabs(path):
+        if not Path(path).is_absolute():
             return ""
         real = os.path.realpath(path)
         # Its folders: its workspace (its scratch files too), its checkouts.
         folders = self.workspaces.writable(row) if row.get("id") else [row.get("cwd") or ""]
-        if not os.path.isfile(real) or not any(
+        # os.path.isfile answers False for any path it cannot look at (too long, say): this one
+        # is whatever the worker wrote, and Path.is_file would raise.
+        if not os.path.isfile(real) or not any(  # noqa: PTH113
             folder and within(real, os.path.realpath(folder)) for folder in folders
         ):
             return ""
@@ -2948,8 +2976,8 @@ class TaskActions:
             ):
                 continue
             with suppress(OSError):
-                size = os.path.getsize(path)
-                found.append({"path": path, "name": os.path.basename(path), "size": size})
+                size = Path(path).stat().st_size
+                found.append({"path": path, "name": Path(path).name, "size": size})
         return found[-20:]
 
     def reported_links(self, task_id: str, text: str):

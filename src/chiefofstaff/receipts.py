@@ -125,9 +125,11 @@ SAYS_CHANGED = re.compile(
 )
 # A negation that governs the verb right after it: "No files were changed", "nothing was
 # committed", "were not updated"; not "it did not work, so I fixed it".
-NEGATED = re.compile(r"(\b(no|not|nothing|never|none|neither|nor)\b|n't)(\W+\w+){0,4}\W*$", re.I)
+NEGATED = re.compile(
+    r"(\b(no|not|nothing|never|none|neither|nor)\b|n't)(\W+\w+){0,4}\W*$", re.IGNORECASE
+)
 # Or right after it: "I changed nothing", "modified no files" (not "added no-cache headers").
-NOTHING_AFTER = re.compile(r"\s+(nothing|none|no\s)", re.I)
+NOTHING_AFTER = re.compile(r"\s+(nothing|none|no\s)", re.IGNORECASE)
 
 
 # Changed by someone else, or before: "it was already fixed upstream", "fixed by Bob in #12".
@@ -140,9 +142,9 @@ NOT_ITS_OWN = re.compile(
 HEDGED = re.compile(
     r"\b(believe|think|seems?|apparently|reportedly|according|probably|likely|docs|changelog)\b"
     r"|\b(in|since) (v\d|version|release)",
-    re.I,
+    re.IGNORECASE,
 )
-PASSIVE = re.compile(r"\b(was|were|been|is|are|got)\s+(\w+\s+)?$", re.I)
+PASSIVE = re.compile(r"\b(was|were|been|is|are|got)\s+(\w+\s+)?$", re.IGNORECASE)
 # A report that says outright it changed nothing (whatever its prose mentions as changed).
 CHANGED_NOTHING = re.compile(
     r"\b(no (code|files?|changes?) (was|were|has been|have been) (written|changed|modified|made)"
@@ -151,7 +153,7 @@ CHANGED_NOTHING = re.compile(
     r"(anything|any (code|files?))"
     r"|made no changes|no changes (were )?made"
     r"|(changed|modified|touched|edited) (no (code|files?)|nothing)|no code (was )?changed)\b",
-    re.I,
+    re.IGNORECASE,
 )
 
 
@@ -818,7 +820,7 @@ PENDING = {"PENDING", "IN_PROGRESS", "QUEUED", "EXPECTED", "WAITING", ""}
 
 
 # Checks that wait for a person, not for CI: "Owner Approval", "Code owner review", sign-offs.
-APPROVAL = re.compile(r"approv|code.?owner|owner.?review|sign.?off|review.?required", re.I)
+APPROVAL = re.compile(r"approv|code.?owner|owner.?review|sign.?off|review.?required", re.IGNORECASE)
 
 
 def check_name(item: dict) -> str:

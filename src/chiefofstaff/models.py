@@ -457,6 +457,11 @@ class TaskNote(StrictModel):
     text: str = Field(default="", max_length=20000)
 
 
+class Unfollow(StrictModel):
+    text: str = Field(max_length=500)  # The thread: slack:… or github:owner/repo#n.
+    task_id: str = Field(default="", max_length=20)  # For this task only (else for all).
+
+
 class ArtifactHide(StrictModel):
     key: str = Field(max_length=2100)
     hidden: bool = True

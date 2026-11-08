@@ -51,8 +51,9 @@ def task_id() -> str:
 # Chief of Staff's own helper workers (learning, checks, profile, connector, messenger): not the
 # owner's tasks, never listed with them.
 HELPER_KINDS = ("learner", "checker", "distill", "connector", "messenger")
+# Constant SQL, made of the constant kinds above.
 HELPERS = " UNION ".join(
-    f"SELECT substr(key, {len(kind) + 2}) FROM kv WHERE key >= '{kind}:' AND key < '{kind}:\uffff'"
+    f"SELECT substr(key, {len(kind) + 2}) FROM kv WHERE key >= '{kind}:' AND key < '{kind}:\uffff'"  # noqa: S608
     for kind in HELPER_KINDS
 )
 
@@ -97,7 +98,7 @@ class TaskBook:
             OR (ended_at IS NOT NULL AND ended_at>=?)
             OR 'news:' || id IN (SELECT key FROM kv WHERE key LIKE 'news:%'))
             AND NOT (status='done' AND result=?) AND session_id NOT IN ({HELPERS})
-            ORDER BY created_at""",
+            ORDER BY created_at""",  # noqa: S608  (HELPERS: constant SQL)
             (include_ended_since or now(), ADOPTED),
         )
 
@@ -175,7 +176,10 @@ class TaskBook:
         needs: str = "result",
         criteria: list[str] | None = None,
     ) -> dict:
-        assert status in STATUSES and needs in {"result", "accepted"}
+        if status not in STATUSES:
+            raise ValueError(f"Invalid task status: {status}")
+        if needs not in {"result", "accepted"}:
+            raise ValueError(f"Invalid dependency need: {needs}")
         identifier, stamp = task_id(), now()
         acceptance = json.dumps(criteria) if criteria else ""
         self.store.execute(
@@ -199,8 +203,9 @@ class TaskBook:
         if not values.keys() <= TASK_FIELDS:
             raise ValueError(f"Invalid task fields: {sorted(values.keys() - TASK_FIELDS)}")
         values["updated_at"] = now()
+        columns = ",".join(f"{key}=?" for key in values)
         self.store.execute(
-            f"UPDATE tasks SET {','.join(f'{key}=?' for key in values)} WHERE id=?",
+            f"UPDATE tasks SET {columns} WHERE id=?",  # noqa: S608  (names checked above)
             (*values.values(), task_id),
         )
         task = self.get(task_id)
@@ -229,7 +234,8 @@ class TaskBook:
 
     def move(self, task_id: str, status: str, *, reason: str = "", **values: Any) -> dict:
         """Change a task's status, keeping its runs in step."""
-        assert status in STATUSES
+        if status not in STATUSES:
+            raise ValueError(f"Invalid task status: {status}")
         task = self.get(task_id)
         if status in {"running", "waiting"}:
             self.start_run(

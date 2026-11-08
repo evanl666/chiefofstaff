@@ -404,6 +404,23 @@ def pytest_collection_modifyitems(items):
 
 
 @pytest.fixture(autouse=True)
+def close_stores(monkeypatch):
+    """Every store a test opens (its harness's, one it makes itself, one a restart makes) is
+    closed after it, once what it left running has ended."""
+    opened: list[Store] = []
+    open_store = Store.__init__
+
+    def tracked(self: Store, *args, **kwargs):
+        open_store(self, *args, **kwargs)
+        opened.append(self)
+
+    monkeypatch.setattr(Store, "__init__", tracked)
+    yield
+    for store in opened:
+        store.close()
+
+
+@pytest.fixture(autouse=True)
 def plenty_of_memory(monkeypatch):
     """Tests do not depend on how much memory the machine running them has left."""
     monkeypatch.setattr(machine, "free_memory", lambda: None)

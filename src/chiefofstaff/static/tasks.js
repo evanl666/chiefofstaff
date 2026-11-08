@@ -116,7 +116,7 @@ export function taskItem(task, phase = phaseOf(task)) {
     key: `task:${task.id}:${task.status}:${phase.section}:${phase.marker}:${task.stopped ? 1 : 0}:${task.blocked ? 1 : 0}:${createsPr(task) ? 1 : 0}:${task.news?.at || ""}:${task.splittable ? 1 : 0}:${undoUntil(task) ? 1 : 0}`,
     id: task.id,
     // For running cards the minute too: "6m" and "3m ago" move on by themselves.
-    version: `${task.updated_at}:${task.title}:${phase.why}:${meta.join("|")}:${help}:${task.read ? 1 : 0}:${worker?.status || ""}:${worker?.activity || ""}:${worker?.step || ""}:${worker?.step_since || ""}:${worker?.turn_task || ""}:${task.credits}:${task.runs}:${JSON.stringify(task.receipts?.prs || null)}:${task.status === "review" ? JSON.stringify(task.receipts || null) : ""}:${live ? `${Math.floor(Date.now() / 60000)}:${queuedKey()}` : ""}:${waitsOnOwner(task, worker)}:${(task.watching || []).join(",")}:${(task.watch_failing || []).join(",")}:${JSON.stringify(task.check_back || null)}:${task.nudged_at || ""}:${JSON.stringify(task.receipts?.changed || null)}:${JSON.stringify(made)}`,
+    version: `${task.updated_at}:${task.title}:${phase.why}:${meta.join("|")}:${help}:${task.read ? 1 : 0}:${worker?.status || ""}:${worker?.activity || ""}:${worker?.step || ""}:${worker?.step_since || ""}:${worker?.turn_task || ""}:${task.credits}:${task.runs}:${JSON.stringify(task.receipts?.prs || null)}:${task.status === "review" ? JSON.stringify(task.receipts || null) : ""}:${live ? `${Math.floor(Date.now() / 60000)}:${queuedKey()}` : ""}:${waitsOnOwner(task, worker)}:${(task.watching || []).join(",")}:${(task.watch_failing || []).join(",")}:${JSON.stringify(task.watch_failing_why || null)}:${JSON.stringify(task.check_back || null)}:${task.nudged_at || ""}:${JSON.stringify(task.receipts?.changed || null)}:${JSON.stringify(made)}`,
     build: () => taskCard(task, phase),
     refresh: (node) => refreshTaskCard(node, task, phase),
   };
@@ -485,7 +485,8 @@ function taskBody(task, phase = {}) {
     // Over: what it came to, and what it delivered in reach (its PRs, its documents, the run
     // it made, the threads it still follows).
     const first = isRow(phase) ? gist(task.result || "") : "";
-    const waits = phase.section === "monitoring" ? waitLine(task, worker, phase) : null;
+    // Monitoring: what it waits on; under Needs you for its PR: what is wrong there.
+    const waits = phase.section === "monitoring" || ["pr-failing", "pr-changes"].includes(phase.marker) ? waitLine(task, worker, phase) : null;
     const found = artifacts(task, worker, { active: phase.section === "monitoring" || phase.marker === "still-following" });
     const nodes = [first ? el("div", { class: "outcome", text: first }) : null, waits, found].filter(Boolean);
     return nodes.length ? el("div", { class: "task-body" }, ...nodes) : null;
@@ -602,8 +603,8 @@ function watchingChip(key, task) {
     "aria-label": `Stop following ${label}`,
     onclick: async () => {
       try {
-        await api(`/api/sessions/${task.session_id}/unfollow`, { method: "POST", body: { text: key } });
-        toast(`Stopped following ${label}: new messages there go to the Router.`);
+        const { all } = await api(`/api/sessions/${task.session_id}/unfollow`, { method: "POST", body: { text: key, task_id: task.id } });
+        toast(all ? `Stopped following ${label}: new messages there go to the Router.` : `Stopped following ${label} for this task; its worker still follows it for another task.`);
       } catch (error) {
         toast(error.message, "error");
       }
@@ -645,9 +646,23 @@ function prChips(task) {
   }
   return { shown, own, mentioned };
 }
+// What could not be read, as GitHub said it: no access (another signed-in account may have
+// it), GitHub not answering (tried again), or a part of the PR only (its CI checks, say).
+const READ_PARTS = { account: "account", comments: "comments", "review comments": "review comments", reviews: "reviews", "CI checks": "CI checks" };
+export function failingWords(key, why = {}) {
+  const label = threadWords(key);
+  const error = why.error ? ` GitHub said: ${why.error}` : "";
+  if (why.step === "delivery") return [`Can't pass on news from ${label}`, `It reads ${key}, but what it found could not be passed to its worker.${error}`];
+  if (why.kind === "transient") return [`GitHub not answering for ${label}`, `Reading ${key} failed several times in a row; it keeps trying.${error}`];
+  const part = READ_PARTS[why.step];
+  if (part && part !== "account") return [`Can't read ${label}'s ${part}`, `It reads the PR, but not its ${part}: news of that kind does not reach it.${error}`];
+  if (why.kind === "access") return [`No access to ${label}`, `None of your GitHub accounts signed in here can read ${key}: sign in with one that can (gh auth login), or stop following it.${error}`];
+  return [`Can't read ${label}`, `It follows ${key} for this task, but it could not be read several times in a row: nothing there reaches it.${error || " The reason is not known yet."}`];
+}
 function failingChip(key, task) {
   const label = threadWords(key);
-  const chip = el("span", { class: "receipt warn failing", title: `It follows ${key} for this task, but it could not be read several times in a row: nothing there reaches it` }, `Can't read ${label} · `);
+  const [words, help] = failingWords(key, task.watch_failing_why?.[key]);
+  const chip = el("span", { class: "receipt warn failing", title: help }, `${words} · `);
   chip.append(
     el("button", {
       type: "button",
@@ -655,8 +670,8 @@ function failingChip(key, task) {
       text: "stop following",
       onclick: async () => {
         try {
-          await api(`/api/sessions/${task.session_id}/unfollow`, { method: "POST", body: { text: key } });
-          toast(`Stopped following ${label}.`);
+          const { all } = await api(`/api/sessions/${task.session_id}/unfollow`, { method: "POST", body: { text: key, task_id: task.id } });
+          toast(all ? `Stopped following ${label}.` : `Stopped following ${label} for this task; its worker still follows it for another task.`);
         } catch (error) {
           toast(error.message, "error");
         }
@@ -761,7 +776,9 @@ function waitWords(task, worker, phase) {
   } else if (marker === "paused") {
     help = "Its worker took it up, then went on to another task: it reports this one (done, a question) or goes back to it after";
   }
-  return { text, help: help || text, warn: ["idle", "overdue", "stalled", "check-failed"].includes(marker) };
+  if (["pr-failing", "pr-changes"].includes(marker)) help = "Its PR, as GitHub has it now: tell its worker what to do about it here, or act on GitHub";
+  else if (marker === "mergeable") help = "GitHub would merge it now; you can merge it on GitHub (Merge cards come once per new commit)";
+  return { text, help: help || text, warn: ["idle", "overdue", "stalled", "check-failed", "pr-failing", "pr-changes"].includes(marker) };
 }
 function waitLine(task, worker, phase) {
   const { text, help, warn } = waitWords(task, worker, phase);

@@ -35,6 +35,8 @@ class SourceHost(Protocol):
 
     def missing(self, thread: str, why: str) -> None: ...
 
+    def read_health_changed(self, thread: str) -> None: ...
+
 
 class Source(Protocol):
     name: str

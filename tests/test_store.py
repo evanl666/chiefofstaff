@@ -1,5 +1,6 @@
 import json
 import sqlite3
+from contextlib import closing
 
 from chiefofstaff.store import Store
 
@@ -19,9 +20,10 @@ def test_settings_carry_over_from_the_previous_chiefofstaff(tmp_path):
         "github_enabled": True,
         "github_repos": ["Acme/App"],
     }
-    with sqlite3.connect(data / "work-buddy.db") as db:
+    with closing(sqlite3.connect(data / "work-buddy.db")) as db:
         db.execute("CREATE TABLE settings (id INTEGER PRIMARY KEY, value TEXT NOT NULL)")
         db.execute("INSERT INTO settings VALUES (1, ?)", (json.dumps(legacy),))
+        db.commit()
 
     settings = Store(data).settings()
     assert settings.projects == [str(project.resolve())]
@@ -33,9 +35,10 @@ def test_settings_carry_over_from_the_previous_chiefofstaff(tmp_path):
 def test_a_database_from_before_the_rename_is_kept(tmp_path):
     data = tmp_path / "data"
     data.mkdir()
-    with sqlite3.connect(data / "work-buddy-sessions.db") as db:
+    with closing(sqlite3.connect(data / "work-buddy-sessions.db")) as db:
         db.execute("CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         db.execute("INSERT INTO kv VALUES ('router_id', 'r1')")
+        db.commit()
     store = Store(data)
     assert store.get("router_id") == "r1"
     assert not (data / "work-buddy-sessions.db").exists()

@@ -3,7 +3,7 @@ import re
 import sqlite3
 import threading
 import time
-from contextlib import suppress
+from contextlib import closing, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, overload
@@ -295,7 +295,7 @@ class Store:
         if not legacy.exists():
             return
         try:
-            with sqlite3.connect(legacy) as old:
+            with closing(sqlite3.connect(legacy)) as old:
                 row = old.execute("SELECT value FROM settings WHERE id=1").fetchone()
             values = json.loads(row[0]) if row else {}
             settings = Settings(
@@ -444,8 +444,9 @@ class Store:
         if not values or not values.keys() <= SESSION_FIELDS:
             raise ValueError("Invalid session update.")
         values["updated_at"] = now()
+        columns = ",".join(f"{key}=?" for key in values)
         self.execute(
-            f"UPDATE sessions SET {','.join(f'{key}=?' for key in values)} WHERE id=?",
+            f"UPDATE sessions SET {columns} WHERE id=?",  # noqa: S608  (names checked above)
             (*values.values(), session_id),
         )
         return self.session(session_id)
@@ -454,14 +455,15 @@ class Store:
         """Add to a worker's record without counting as activity."""
         if column not in RECORD_LISTS:
             raise ValueError("Invalid record list.")
-        row = self.one(f"SELECT {column} FROM sessions WHERE id=?", (session_id,))
+        # The column is one of RECORD_LISTS (checked above), never an outside value.
+        row = self.one(f"SELECT {column} FROM sessions WHERE id=?", (session_id,))  # noqa: S608
         if not row:
             return
         current = json.loads(row[column])
         added = [item for item in dict.fromkeys(items) if item and item not in current]
         if added:
             self.execute(
-                f"UPDATE sessions SET {column}=? WHERE id=?",
+                f"UPDATE sessions SET {column}=? WHERE id=?",  # noqa: S608
                 (json.dumps((current + added)[-keep:]), session_id),
             )
 
@@ -553,8 +555,9 @@ class Store:
     def update_draft(self, draft_id: str, **values) -> dict:
         if not values or not values.keys() <= DRAFT_FIELDS:
             raise ValueError("Invalid draft update.")
+        columns = ",".join(f"{key}=?" for key in values)
         self.execute(
-            f"UPDATE drafts SET {','.join(f'{key}=?' for key in values)} WHERE id=?",
+            f"UPDATE drafts SET {columns} WHERE id=?",  # noqa: S608  (names checked above)
             (*values.values(), draft_id),
         )
         return self.draft(draft_id)
@@ -634,7 +637,7 @@ class Store:
         session_id: str,
         role: str,
         model: str,
-        credits: float,
+        credits_used: float,
         premium: float,
         input_tokens: int,
         output_tokens: int,
@@ -648,7 +651,7 @@ class Store:
                 session_id,
                 role,
                 model,
-                credits,
+                credits_used,
                 premium,
                 input_tokens,
                 output_tokens,
@@ -658,28 +661,29 @@ class Store:
         )
 
     def usage(self, since: float, until: float) -> dict:
+        # Constant SQL: the queries below put no outside value in their text.
         totals = """sum(credits) AS credits, sum(premium) AS premium, count(*) AS calls,
             sum(input_tokens) AS input_tokens, sum(output_tokens) AS output_tokens"""
         window = (since, until)
-        total = self.row(f"SELECT {totals} FROM usage WHERE at>=? AND at<?", window)
+        total = self.row(f"SELECT {totals} FROM usage WHERE at>=? AND at<?", window)  # noqa: S608
         return {
             "since": since,
             "until": until,
             "total": {key: value or 0 for key, value in total.items()},
             "by_role": self.all(
-                f"SELECT role, {totals} FROM usage WHERE at>=? AND at<? GROUP BY role"
+                f"SELECT role, {totals} FROM usage WHERE at>=? AND at<? GROUP BY role"  # noqa: S608
                 " ORDER BY credits DESC",
                 window,
             ),
             "by_model": self.all(
-                f"SELECT model, {totals} FROM usage WHERE at>=? AND at<? GROUP BY model"
+                f"SELECT model, {totals} FROM usage WHERE at>=? AND at<? GROUP BY model"  # noqa: S608
                 " ORDER BY credits DESC",
                 window,
             ),
             "by_session": self.all(
                 f"""SELECT u.session_id, s.title, s.role, s.closed_at, {totals}
                 FROM usage u LEFT JOIN sessions s ON s.id=u.session_id
-                WHERE u.at>=? AND u.at<? GROUP BY u.session_id ORDER BY credits DESC LIMIT 50""",
+                WHERE u.at>=? AND u.at<? GROUP BY u.session_id ORDER BY credits DESC LIMIT 50""",  # noqa: S608
                 window,
             ),
             "outcomes": self.outcomes(since, until),

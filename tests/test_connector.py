@@ -1,7 +1,7 @@
 import json
 import re
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -21,10 +21,12 @@ async def spawn(runtime, router, title):
 
 
 def test_watches_run_often_in_work_hours_and_less_after():
-    assert in_hours("09:00-18:00", datetime(2026, 11, 4, 10, 0))  # A Wednesday.
-    assert not in_hours("09:00-18:00", datetime(2026, 11, 4, 18, 30))
-    assert not in_hours("09:00-18:00", datetime(2026, 11, 7, 10, 0)), "not on a Saturday"
-    assert in_hours("22:00-06:00", datetime(2026, 11, 4, 23, 0)), "across midnight"
+    assert in_hours("09:00-18:00", datetime(2026, 11, 4, 10, 0, tzinfo=UTC))  # A Wednesday.
+    assert not in_hours("09:00-18:00", datetime(2026, 11, 4, 18, 30, tzinfo=UTC))
+    assert not in_hours("09:00-18:00", datetime(2026, 11, 7, 10, 0, tzinfo=UTC)), (
+        "not on a Saturday"
+    )
+    assert in_hours("22:00-06:00", datetime(2026, 11, 4, 23, 0, tzinfo=UTC)), "across midnight"
 
 
 async def test_a_scan_hands_what_needs_the_owner_to_the_router_once(tmp_path):
@@ -33,8 +35,8 @@ async def test_a_scan_hands_what_needs_the_owner_to_the_router_once(tmp_path):
     harness = Harness(tmp_path / "data", settings)
     runtime = await harness.connect()
     connector = runtime.connector
-    assert connector.interval(datetime(2026, 11, 4, 10, 0)) == 5
-    assert connector.interval(datetime(2026, 11, 4, 20, 0)) == 0, "none after hours"
+    assert connector.interval(datetime(2026, 11, 4, 10, 0, tzinfo=UTC)) == 5
+    assert connector.interval(datetime(2026, 11, 4, 20, 0, tzinfo=UTC)) == 0, "none after hours"
 
     await connector.scan()
     await settle(runtime)
@@ -665,16 +667,18 @@ async def test_what_the_away_channel_can_do_is_shown_as_tried(tmp_path):
 
 async def test_weekends_are_after_hours_and_settings_can_say_so(tmp_path):
     """With after-hours checks off, nothing is scanned all weekend: Settings says why."""
-    assert after_hours("09:00-18:00", datetime(2026, 11, 7, 10, 0)) == "weekend"
-    assert after_hours("22:00-06:00", datetime(2026, 11, 8, 23, 0)) == "weekend", "a Sunday"
-    assert after_hours("09:00-18:00", datetime(2026, 11, 4, 19, 0)) == "outside_hours"
-    assert after_hours("09:00-18:00", datetime(2026, 11, 4, 10, 0)) == ""
+    assert after_hours("09:00-18:00", datetime(2026, 11, 7, 10, 0, tzinfo=UTC)) == "weekend"
+    assert after_hours("22:00-06:00", datetime(2026, 11, 8, 23, 0, tzinfo=UTC)) == "weekend", (
+        "a Sunday"
+    )
+    assert after_hours("09:00-18:00", datetime(2026, 11, 4, 19, 0, tzinfo=UTC)) == "outside_hours"
+    assert after_hours("09:00-18:00", datetime(2026, 11, 4, 10, 0, tzinfo=UTC)) == ""
     settings = Settings(watches=[Watch(what="Slack DMs")], watch_after_hours_minutes=0)
     harness = Harness(tmp_path / "data", settings)
     connector = harness.runtime.connector
-    assert connector.interval(datetime(2026, 11, 7, 10, 0)) == 0
-    assert connector.after_hours_reason(datetime(2026, 11, 7, 10, 0)) == "weekend"
-    assert connector.interval(datetime(2026, 11, 4, 10, 0)) == 5
+    assert connector.interval(datetime(2026, 11, 7, 10, 0, tzinfo=UTC)) == 0
+    assert connector.after_hours_reason(datetime(2026, 11, 7, 10, 0, tzinfo=UTC)) == "weekend"
+    assert connector.interval(datetime(2026, 11, 4, 10, 0, tzinfo=UTC)) == 5
     assert connector.view()["after_hours_reason"] == connector.after_hours_reason()
 
 

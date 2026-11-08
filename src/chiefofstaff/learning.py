@@ -297,14 +297,19 @@ class Learning:
                  json.dumps(observed), "proposed", now(), now()),
             )  # fmt: skip
             proposed.append(identifier)
+        # Only "?" placeholders go into the SQL text below.
         if given:
             marks = ",".join("?" * len(given))
-            self.store.execute(f"UPDATE feedback SET learned=1 WHERE id IN ({marks})", tuple(given))
+            self.store.execute(
+                f"UPDATE feedback SET learned=1 WHERE id IN ({marks})",  # noqa: S608
+                tuple(given),
+            )
         if seen:
             marks = ",".join("?" * len(seen))
             self.runtime.habits.mark_learned(
                 self.store.all(
-                    f"SELECT id, kind FROM observations WHERE id IN ({marks})", tuple(seen)
+                    f"SELECT id, kind FROM observations WHERE id IN ({marks})",  # noqa: S608
+                    tuple(seen),
                 )
             )
         if proposed:
@@ -355,15 +360,16 @@ class Learning:
     def card_item(self, identifier: str) -> dict:
         lesson = self.store.one("SELECT * FROM lessons WHERE id=?", (identifier,)) or {}
         evidence = json.loads(lesson["evidence"] or "[]")
+        # Only "?" placeholders (or an empty string) go into the SQL text below.
         marks = ",".join("?" * len(evidence)) or "''"
         rows = self.store.all(
-            f"SELECT kind, context, owner FROM feedback WHERE id IN ({marks}) ORDER BY id",
+            f"SELECT kind, context, owner FROM feedback WHERE id IN ({marks}) ORDER BY id",  # noqa: S608
             tuple(evidence),
         )
         observed = json.loads(lesson.get("observed") or "[]")
         marks = ",".join("?" * len(observed)) or "''"
         words = self.store.all(
-            f"SELECT kind, text, meta FROM observations WHERE id IN ({marks}) ORDER BY id",
+            f"SELECT kind, text, meta FROM observations WHERE id IN ({marks}) ORDER BY id",  # noqa: S608
             tuple(observed),
         )
         because = [
@@ -465,7 +471,7 @@ class Learning:
                 row = self.store.one(
                     f"""SELECT coalesce(sum(agreed), 0) AS yes, count(*) AS total FROM feedback
                     WHERE kind IN ({marks}) AND agreed IS NOT NULL AND created_at>=?
-                    AND created_at<?""",
+                    AND created_at<?""",  # noqa: S608  (only ? placeholders)
                     (*kinds, since, until),
                 ) or {"yes": 0, "total": 0}
                 return [int(row["yes"]), int(row["total"])]
