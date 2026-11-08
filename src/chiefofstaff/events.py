@@ -128,6 +128,13 @@ MODEL_REFUSED = re.compile(
     re.IGNORECASE,
 )
 ROUTER_CONTEXT = int(os.environ.get("CHIEFOFSTAFF_ROUTER_CONTEXT", "150000"))
+# The Router's closing words in a turn without the owner that only say it has nothing to say
+# ("(quiet)", as its prompt asks, or "Nothing more to route: …"): not shown to the owner.
+NOTHING_TO_SAY = re.compile(
+    r"^\W*(?:quiet|nothing (?:more |else |further |new )?(?:to (?:route|do|add|report|say|tell|"
+    r"act on)|needed)|no (?:further |other )?(?:action|reply) (?:is )?(?:needed|required))\b",
+    re.IGNORECASE,
+)
 
 
 # Copilot's tools that write files, by the argument naming the file.
@@ -372,6 +379,8 @@ class Events:
             # What it said last: the latest word on its progress, shown at a glance.
             self.store.set(f"said:{row['id']}", json.dumps({"text": content[:1500], "at": now()}))
         if row["role"] == ROUTER and self.states[row["id"]].event_turn:
+            if NOTHING_TO_SAY.match(content):
+                return  # Nothing for the owner: nothing shown.
             # Results reach the owner through notify_owner; the closing remark is a footnote.
             self.runtime.add_message(row["id"], "assistant", content, {"internal": True})
         else:

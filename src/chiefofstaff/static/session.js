@@ -1,7 +1,7 @@
 // The main pane: Home or one session, with its header, model settings and timeline.
 
 import { $, api, el, foldable, toast, withKey } from "./dom.js";
-import { clock, compactPaths, firstLine, gist, markdown, slackText, threadLabel } from "./text.js";
+import { clock, compactPaths, firstLine, gist, headOf, markdown, slackText, threadLabel } from "./text.js";
 import { byId, current, HOME, markRead, pendingDrafts, routerId, state, STATUS_TEXT, upsertSession, viewedId, workerTitle } from "./state.js";
 import { renderSidebar } from "./sidebar.js";
 import { focusDraft, focusTask, renderHome, renderHomeHeader, showHomeTab, welcomeCard, workerStates } from "./inbox.js";
@@ -345,14 +345,17 @@ function eventLine({ mark = "·", kind = "", text, time, view = null, viewText =
   node.append(el("div", { class: "row" }, toggle, ...parts.slice(2)), content);
   return node;
 }
-// What a worker's report says, in a word: the report itself is on the task's card.
+// What a worker's report says, in a word: the report itself is on the task's card. Blocked, it
+// could not go on (not "Slack is blocked", which reads as if the connection broke).
 const REPORTED = {
   done: ["✓", "done", "finished"],
   question: ["?", "waiting", "has a question"],
-  blocked: ["!", "waiting", "is blocked"],
+  blocked: ["!", "waiting", "couldn't go on"],
   failed: ["✗", "failed", "failed"],
   progress: ["…", "", "reported progress"],
 };
+// Reports whose line says what they came to (or why not), and opens to the whole report.
+const SAYS_WHY = new Set(["done", "blocked", "failed"]);
 // Where something that reached the Router came from: a watch's finding is the watch's, whatever
 // source it found it in.
 const SOURCES = { slack: "Slack", github: "GitHub", watch: "a watch" };
@@ -371,8 +374,9 @@ function homeEntry(message) {
       }
       if (meta.from && meta.status) {
         const [mark, kind, what] = REPORTED[meta.status] || ["·", "", meta.status];
-        // What it found, in a line (the whole report opens here; its card has the receipts).
-        const said = meta.status === "done" ? gist(text) : "";
+        // What it found, or why it could not go on, in a line (the whole report opens here;
+        // its card has the receipts).
+        const said = SAYS_WHY.has(meta.status) ? gist(text) : "";
         return eventLine({ mark, kind, text: `${meta.title} ${what}${said ? `: ${said}` : ""}`, time, body: said ? text : "", view: () => focusTask(meta.task_id, meta.from) });
       }
       if (meta.asked_by) return eventLine({ mark: "?", text: `Question from “${meta.title}”: ${firstLine(text)}`, time, body: text, view: () => select(meta.asked_by), viewText: "Open" });
@@ -407,9 +411,9 @@ function homeEntry(message) {
     case "notice": {
       if (meta.settings) return eventLine({ mark: "✦", text, time, view: () => openSettings(meta.settings), viewText: "Open Settings" });
       if (meta.away_reply) return eventLine({ mark: "↩", text, time });
-      // "Started “X” · new because …": the why is on hover.
+      // "Started “X” · new because …": the why is on hover (a " · " in the title is the title's).
       const started = /^(Started|New task|Continued)/.test(text);
-      const node = eventLine({ mark: started ? "" : "·", kind: started ? "started" : "", text: text.split(" · ")[0], time, view: meta.session_id ? () => focusTask(meta.task_id || "", meta.session_id) : null });
+      const node = eventLine({ mark: started ? "" : "·", kind: started ? "started" : "", text: headOf(text), time, view: meta.session_id ? () => focusTask(meta.task_id || "", meta.session_id) : null });
       node.querySelector(".what").title = text;
       return node;
     }

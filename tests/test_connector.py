@@ -667,3 +667,73 @@ async def test_an_away_answer_to_the_router_counts_after_the_owner_wrote_to_it(t
                     replies=[{"code": branch, "text": f"{branch} main"},
                              {"code": port, "text": f"{port} 9090"}])  # fmt: skip
     assert len(notices()) == before, "a reply passed again is not said again"
+
+
+async def test_away_a_failed_task_is_told_and_retried_by_its_code(tmp_path):
+    """Bug bash 3 (U2): failed tasks never reached the owner away (only open tasks were
+    looked at), though the guide promises "K3XQ7 retry"."""
+    harness = Harness(tmp_path / "data", Settings(away_notify=True, away_how="DM me"))
+    runtime = await away(harness)
+    worker = await spawn(runtime, harness.router_id, "Build the release")
+    task = runtime.tasks.current(worker)
+    harness.session(worker).emit("session.error", message="boom")
+    await settle(runtime)
+    assert runtime.tasks.get(task["id"])["status"] == "failed"
+    await runtime.connector.notify_away()
+    await settle(runtime)
+    messenger = runtime.toolset.last_special("messenger")
+    body, _plain, _blocks = notification(harness, messenger)
+    code = code_in(body, "Failed · “Build the release”")
+    assert f"Reply: `{code} retry`" in body
+
+
+async def test_a_failed_test_send_is_said_as_the_test(tmp_path):
+    """Bug bash 3 (U13): a failed "Send a test" was said as "Could not reach you while you
+    were away"."""
+    harness = Harness(tmp_path / "data", Settings(away_notify=True, away_how="DM me"))
+    runtime = await harness.connect()
+    await runtime.connector.notify_away(test=True)
+    await settle(runtime)
+    messenger = runtime.toolset.last_special("messenger")
+    await call_tool(runtime, "report_notified", messenger["id"], ok=False, error="no bot")
+    said = [m["text"] for m in harness.store.messages(harness.router_id) if m["kind"] == "notice"]
+    assert not any("while you were away" in text for text in said)
+    assert any("The test notification did not reach you: no bot" in text for text in said)
+    assert harness.store.get("away_failing") != "1", "a real one failing later is still said"
+
+
+async def test_away_the_owner_is_reached_in_their_own_slack_dm(tmp_path):
+    """Bug bash 3 (U12): "send it to my own Slack DM" failed with Slack connected: the messenger
+    had no Slack tools. It sends there through Chief of Staff's own Slack connection, and only
+    there, and reads the owner's replies there (not its own notification)."""
+    settings = Settings(away_notify=True, away_how="send it to my own Slack DM", slack_enabled=True)
+    harness = Harness(tmp_path / "data", settings)
+    runtime = await away(harness)
+    writer = await spawn(runtime, harness.router_id, "Answer Carol")
+    await call_tool(runtime, "draft_reply", writer, text="yes, friday works", to="Carol",
+                    where="email")  # fmt: skip
+    await runtime.connector.notify_away()
+    await settle(runtime)
+    messenger = runtime.toolset.last_special("messenger")["id"]
+    options = harness.session(messenger).options
+    assert {"send_owner_slack_dm", "read_owner_slack_dm"} <= {t.name for t in options["tools"]}
+    assert "slack" not in options.get("mcp_servers", {}), "no Slack tools of its own"
+    assert "send_owner_slack_dm" in harness.session(messenger).sent[-1]
+
+    harness.mcp.sent_link = "https://acme.slack.com/archives/D0SELF001/p1712345678000200"
+    await call_tool(runtime, "send_owner_slack_dm", messenger, version="A")
+    [sent] = [args for tool, args in harness.mcp.calls if tool == "slack_send_message"]
+    assert sent["channel_id"] == "U0OWNER1", "the owner's own DM, nobody else"
+    code = code_in(sent["message"], "Draft to approve")
+    await call_tool(runtime, "report_notified", messenger, ok=True, where="your own Slack DM",
+                    method="send_owner_slack_dm", replies="read_owner_slack_dm")  # fmt: skip
+    dm = "Channel: <#D0SELF001> | From: <@U0OWNER1> (Me) | ts: {} | Text: {}\nPermalink: x\n"
+    harness.mcp.reads["D0SELF001"] = dm.format(
+        "1712345678.000200", f"[{code}] Draft to approve Reply: `{code} send · no`"
+    ) + dm.format("1712345690.000100", f"{code} send")
+    read = await call_tool(runtime, "read_owner_slack_dm", messenger)
+    assert f"- {code} send" in read.text_result_for_llm
+    assert "send · no" not in read.text_result_for_llm, "not its own notification"
+    worker = await spawn(runtime, harness.router_id, "Other work")
+    refused = await call_tool(runtime, "send_owner_slack_dm", worker, version="A")
+    assert refused.result_type == "failure", "only the messenger"

@@ -476,10 +476,14 @@ export function renderConnections() {
       : "";
   watchSummary();
   $("#watch-state").textContent = scanned;
-  // After hours (the schedule above): not scanning now, and why.
-  const resting = { weekend: "weekend", outside_hours: "outside work hours" }[connector.after_hours_reason];
-  $("#watch-resting").textContent = resting ? `Not scanning now: ${resting} (after-hours setting)` : "";
-  $("#watch-resting").hidden = !resting;
+  // After hours (the schedule above): how often it scans now, and why; "not scanning" only when
+  // after hours is 0. Nothing to say while it scans, or with no watch on.
+  const resting = { weekend: "Weekend", outside_hours: "Outside work hours" }[connector.after_hours_reason];
+  const watching = (settings.watches || []).some((watch) => watch.enabled !== false);
+  const pace = Number(settings.watch_after_hours_minutes ?? 30);
+  const restingText = !resting || connector.scanning || !watching ? "" : pace > 0 ? `${resting}: every ${pace} min (after-hours setting)` : `Not scanning now: ${resting.toLowerCase()}, and after hours is 0`;
+  $("#watch-resting").textContent = restingText;
+  $("#watch-resting").hidden = !restingText;
   $("#watch-state").classList.toggle("error", Boolean(problems));
   $("#watch-scan").disabled = Boolean(connector.scanning);
   $("#watch-activity").hidden = !connector.session_id;

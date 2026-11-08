@@ -81,6 +81,7 @@ from .state import SessionStates
 from .store import Store, ago_minutes, hours_ago, now
 from .task_actions import TaskActions
 from .tasks import (
+    ENDED,
     HELPER_KINDS,
     OPEN,
     TaskBook,
@@ -135,6 +136,8 @@ ROUTER_TOOLS = [
     "read_session",
     "answer_session",
     "cancel_task",
+    "stop_worker",
+    "add_watch",
     "rename_task",
     "split_task",
     "record_decision",
@@ -164,8 +167,11 @@ ATTACHMENT_NAME = re.compile(r"\b([0-9a-f]{32}\.(?:png|jpg|gif|webp))\b")
 TOOLLESS = {"learner": ["update_style", "propose_lessons"], "checker": ["propose_checks"]}
 SPECIALS = HELPER_KINDS
 CONNECTOR_TOOLS = ["report_found", "report_owner_words"]
-# The messenger sends away notifications and reads the owner's replies to them.
+# The messenger sends away notifications and reads the owner's replies to them; through Chief of
+# Staff's Slack connection (when there is one) only to and from the owner's own DM: no Slack
+# tools of its own.
 MESSENGER_TOOLS = ["report_notified", "report_owner_replies"]
+SLACK_DM_TOOLS = ["send_owner_slack_dm", "read_owner_slack_dm"]
 # Owner messages at least this long are instructions the learner looks at ("progress?" is not).
 INSTRUCTION_CHARS = 25
 # A message to a worker this long into a step gets a note that it waits for the step to end.
@@ -288,7 +294,7 @@ class Runtime:
         self.work_root = store.directory / "work"
         self.workspaces = Workspaces(store, self.work_root)
         self.workspaces.github_token = lambda repo: self.github.token_for(repo)
-        self.tasks = TaskBook(store, on_change=lambda task: self.task_actions.publish(task))
+        self.tasks = TaskBook(store, on_change=lambda task: self.task_changed(task))
         migrate_tasks(store)
         settle_adopted(store)
         settle_followups(store)
@@ -666,7 +672,7 @@ class Runtime:
         if special == "connector":
             return CONNECTOR_TOOLS
         if special == "messenger":
-            return MESSENGER_TOOLS
+            return MESSENGER_TOOLS + (SLACK_DM_TOOLS if self.connector.slack_dm() else [])
         if row["role"] == WATCHDOG:
             return ["assess_worker"]
         names = ["report", "follow_thread", "unfollow_thread"]
@@ -716,6 +722,7 @@ class Runtime:
                 local=bool(sandbox and sandbox.local_network),
                 gradle=bool(sandbox) and (Path.home() / ".gradle" / "caches").is_dir(),
                 gh_accounts=self.github.accounts_cache[1],
+                gh_acting=self.store.items("ghaccount:"),
             )
         if (profile := self.store.get("profile", "")) and row["role"] != WATCHDOG:
             prompt += f"\n<owner_profile>\n{profile}\n</owner_profile>"
@@ -1262,6 +1269,24 @@ class Runtime:
             lines += [
                 f"- {short(r['id'])} “{r['title']}”: {clip(r['report'], 160)}" for r in closed
             ]
+        # What was cancelled lately (by the owner, or with the worker they closed): a fresh
+        # Router that does not know would start it again. And what failed: the owner retries it
+        # (or the Router has it done over, replacing it), never both.
+        ended = self.tasks.listed(include_ended_since=hours_ago(TASKS_SHOWN_HOURS))
+        for status, heading in (
+            ("cancelled", "Cancelled in the last days (do not start them again unless the owner "
+             "asks):"),
+            ("failed", "Failed in the last days (the owner can retry them; to do one over, "
+             "message_session its worker with task='continue' and its task_id, or pass "
+             "replaces=[its id]):"),
+        ):  # fmt: skip
+            if found := [task for task in ended if task["status"] == status]:
+                lines.append(f"\n{heading}")
+                lines += [
+                    f"- {t['id']} “{t['title']}” (worker {short(t['session_id'])}): "
+                    f"{clip(t['progress'], 160)}"
+                    for t in found[-20:]
+                ]
         if drafts := self.store.drafts():
             lines.append("\nCards waiting for the owner:")
             lines += [
@@ -1451,12 +1476,27 @@ class Runtime:
         self.publish_session(row)
         return row
 
+    def task_changed(self, task: dict):
+        """Every created or changed task: shown, and once it ended (done, failed, cancelled),
+        a decision card it waited on no longer waits for it."""
+        self.task_actions.publish(task)
+        if task["status"] in ENDED:
+            self.decisions.drop_task(task["id"])
+
     def fail(self, row: dict, message: str):
         self.states[row["id"]].busy = False
         self.add_message(row["id"], "error", message)
         self.update_session(row["id"], status="failed", activity="")
         self.delivery.defer_pending(row["id"])  # Not a turn by itself after a restart.
-        task = self.tasks.find(self.working_on(row["id"]) or "") if row["role"] == WORKER else None
+        task = None
+        if row["role"] == WORKER:
+            # The task it was on; failing to start, the one it was given (still queued).
+            open_ = [t for t in self.tasks.for_session(row["id"]) if t["status"] in OPEN]
+            current = self.tasks.current(row["id"])
+            task = self.tasks.find(self.working_on(row["id"]) or "") or (
+                current if current and current["status"] in OPEN else None
+            )
+            task = task or (open_[-1] if open_ else None)
         self.task_actions.fail(row["id"], message)
         if row["role"] == WORKER:
             self.background(self.workers.pump())  # Its slot is free for a queued worker.
@@ -1529,7 +1569,7 @@ class Runtime:
         asked for. `from_home`: written on Home (@ a worker), where its answer is shown too."""
         row = self.store.session(session_id)
         if row["closed_at"] and row["role"] == WORKER:
-            await self.workers.reopen(session_id)
+            await self.workers.reopen(session_id, restore=True)
         # The task this is about: the one whose question it answers, else the one it is on.
         about = self.chat_task(session_id) if row["role"] == WORKER else None
         if row["role"] == WORKER and not attachments and text.strip():
@@ -1544,16 +1584,23 @@ class Runtime:
                     if tell_router:
                         self.owner_told(row, text)
                     return message
-        if row["role"] == WORKER and clear_questions:
+        if row["role"] in {WORKER, SLACK} and clear_questions:
             # The owner answers what it asked on that task (others' questions stay).
             self.asks.answered(session_id, about["id"] if about else "")
             self.asks.answered(session_id, "")
+        # Waiting on its decision card: what the owner writes it is their answer to it.
+        decided = (
+            self.decisions.answered_in_chat(session_id, about, text.strip())
+            if row["role"] == WORKER and clear_questions and text.strip()
+            else []
+        )
         # Answers come in the language of this message, whatever the conversation used before.
         spoken = self.heard(text) if learn else language(text)
         prompt = wrap("owner", "message", text, reply_in=spoken)
         meta: dict[str, Any] = {}
         switched = self.switched_language(session_id, spoken)
         notes = [switched]
+        notes += [f"This answers your decision card: {c['target']['question']}" for c in decided]
         if attachments:
             meta["attachments"] = self.save_attachments(attachments)
             paths = ", ".join(f"{a['path']} ({a['name']})" for a in meta["attachments"])
@@ -1583,6 +1630,8 @@ class Runtime:
         if task and task["status"] in {"review", "done", "failed", "cancelled"}:
             # A question about finished work changes nothing: what it reports is news on it.
             self.store.set(f"followup:{task['id']}", "chat")
+            # Its checkouts now: what this task changes from here is a new result.
+            await self.task_actions.record_chat_base(task)
         message = await self.delivery.deliver(
             session_id,
             prompt,
@@ -1595,6 +1644,10 @@ class Runtime:
         )
         if row["role"] == WORKER and tell_router:
             self.owner_told(row, text)
+        if about and about["status"] == "waiting" and clear_questions:
+            # It has the owner's answer now: it goes on (not "waits for your answer" until its
+            # next report).
+            self.asks.go_on(about)
         if learn and len(text.strip()) >= INSTRUCTION_CHARS:
             # What the owner asks for again and again becomes a lesson (they review it first).
             self.learning.record(
@@ -1674,6 +1727,15 @@ class Runtime:
                 },
             )
 
+    def usage(self, since: float, until: float) -> dict:
+        """What was spent in a range; each worker by the name it has everywhere (its work's,
+        not its first prompt's)."""
+        found = self.store.usage(since, until)
+        for item in found["by_session"]:
+            if item.get("role") == WORKER and (row := self.store.find_session(item["session_id"])):
+                item["title"] = self.display_title(row)
+        return found
+
     def told_prompt(self, message: dict) -> str:
         """What the owner told a worker directly, as the Router hears of it: with what the
         worker answered since, so the Router does not take the question as still open."""
@@ -1681,11 +1743,16 @@ class Runtime:
         worker = message["meta"].get("to")
         if not worker or 'type="to-worker"' not in prompt:
             return prompt
+        # Its answer to this message: what it said before the owner's next message to it.
+        later = self.store.value(
+            "SELECT min(id) FROM messages WHERE session_id=? AND kind='owner' AND id>?",
+            (worker, message["id"]),
+        )
         answered = self.store.one(
-            "SELECT text FROM messages WHERE session_id=? AND created_at>=? AND kind IN "
+            "SELECT text FROM messages WHERE session_id=? AND id>? AND id<? AND kind IN "
             "('report', 'assistant') AND json_extract(meta, '$.narration') IS NULL "
             "ORDER BY id DESC LIMIT 1",
-            (worker, message["created_at"]),
+            (worker, message["id"], later or 2**63 - 1),
         )
         if not answered:
             return prompt
@@ -1784,13 +1851,22 @@ class Runtime:
             )
 
     def follow(
-        self, session_id: str, keys: list[str], *, given: bool = True, task_id: str | None = None
+        self,
+        session_id: str,
+        keys: list[str],
+        *,
+        given: bool = True,
+        task_id: str | None = None,
+        asked: Sequence[str] = (),
     ) -> list[str]:
         """`given`: the Router or the owner gave the session these threads (not the session
         itself), so it may also draft replies there. `task_id`: the task it follows them for
         (default: the one its turn is on, else its current one); a thread waited on is that
-        task's, not every task of the worker."""
+        task's, not every task of the worker. `asked`: those of them it was asked to follow
+        (follow_thread, a `follow` the Router passed), not only named: a PR closed already
+        stays followed a while, so its reopening is news (GitHubSource.poll_pull)."""
         followed = [threads.normalize(key) for key in keys]
+        wanted = {threads.normalize(key) for key in asked}
         row = self.store.session(session_id)
         self.check_follow(row, followed)
         if task_id is None and row["role"] == WORKER:
@@ -1800,6 +1876,8 @@ class Runtime:
             self.store.follow(key, session_id)
             if given:
                 self.store.set(f"given:{session_id}:{key}", "1")
+            if key in wanted and key.startswith("github:"):
+                self.store.set(f"ghkeep:{key}", str(time.time()))
             if task_id:
                 bound = self.store.follow_tasks(session_id, key)
                 if task_id not in bound:
@@ -1870,9 +1948,17 @@ class Runtime:
                     self.background(self.workers.close(session_id))
 
     async def on_thread(
-        self, source: str, thread: str, keys: list[str], text: str, display: str | None = None
+        self,
+        source: str,
+        thread: str,
+        keys: list[str],
+        text: str,
+        display: str | None = None,
+        replies: dict[str, tuple[str, str]] | None = None,
     ) -> bool:
-        """New activity in a followed thread goes straight to its followers, not the Router."""
+        """New activity in a followed thread goes straight to its followers, not the Router.
+        `replies`: of a PR's items, those that answer a comment Chief of Staff posted there
+        (key -> the task that posted it, "" when not known, and the item's line)."""
         self.require_ready()
         followers = self.store.followers(thread)
         if thread.startswith("slack:"):
@@ -1892,21 +1978,42 @@ class Runtime:
         if thread.startswith("github:"):
             # CI or a review came in: the PR's chips change now, not at the next round.
             self.background(self.task_actions.refresh_open_prs(thread.removeprefix("github:")))
+        owners = self.thread_owners(followers, thread)
+        recipients = [
+            (session_id, self.thread_task(session_id, thread), text, display)
+            for session_id in owners
+        ]
+        bystanders = [s for s in followers if s not in owners] if replies else []
+        for session_id in bystanders:
+            # Not its PR, but someone answered its own comment there (a review it posted).
+            task, lines = self.replied_to(session_id, thread, replies or {}, fresh)
+            if lines:
+                said = "\n".join(f"- {line}" for line in lines)
+                recipients.append(
+                    (
+                        session_id,
+                        task,
+                        f"Replies to your comments on {threads.label(thread)}, a PR you "
+                        f"follow:\n{said}",
+                        said,
+                    )
+                )
         delivered = []
-        for session_id in self.thread_owners(followers, thread):
-            task = self.thread_task(session_id, thread)
+        for session_id, task, told, shown in recipients:
             attributes = {"task": task["id"]} if task else {}
             try:
                 await self.delivery.deliver(
                     session_id,
-                    wrap(source, "thread", text, thread=thread, trust=UNTRUSTED, **attributes),
+                    wrap(source, "thread", told, thread=thread, trust=UNTRUSTED, **attributes),
                     batch=True,
                     kind="inbound",
-                    display=(display or text)[:2000],
+                    display=(shown or told)[:2000],
                     meta={"source": source, "thread": thread}
                     | ({"task_id": task["id"]} if task else {}),
                 )
-                delivered.append(self.thread_task_title(session_id, thread))
+                delivered.append(
+                    task["title"] if task else self.display_title(self.store.session(session_id))
+                )
             except Exception:
                 # A follower that cannot take messages stops following; others still get them.
                 logger.warning("Could not deliver a thread follow-up.", exc_info=True)
@@ -2095,6 +2202,11 @@ class Runtime:
         another task steered into its turn: an answer it asked for, say)."""
         fresh = [task_id for task_id in tasks if not self.store.get(f"started:{task_id}")]
         for task_id in tasks:
+            # Taken up again after its result: other work may have come in between.
+            again = task_id not in fresh and self.store.get(f"taskend:{task_id}")
+            if again and (task := self.tasks.find(task_id)):
+                self.background(self.task_actions.record_restart(task))
+        for task_id in tasks:
             self.store.set(f"started:{task_id}", "1")
             if self.store.get(f"stopped:{task_id}"):
                 # Told to go on with a task the owner stopped: once it works, it runs again.
@@ -2193,11 +2305,51 @@ class Runtime:
 
         return max(tasks, key=last_active)["title"]
 
+    def made_pr(self, task: dict, label: str, creator: str | None = None) -> bool:
+        """Whether this task made the PR ("owner/repo#n", lowercase): it opened it (by record,
+        or its report says so and no other task opened it), or its PR chips count it as its
+        own. Not a task that only names, reads or reviews it. `creator`: the PR's, when read
+        already (TaskActions.creator)."""
+        if creator is None:
+            creator = self.task_actions.creator(label)
+        return (
+            task["id"] == creator
+            or label in self.task_actions.opened_prs(task["id"])
+            or any(
+                pr.get("own") and pr["label"].lower() == label
+                for pr in self.task_actions.previous_prs(task["id"])
+            )
+        )
+
+    def pr_maker(self, session_id: str, thread: str) -> dict | None:
+        """The worker's task that made the PR a thread key names, the newest first (one still
+        standing before a cancelled or failed one); None for a Slack thread or when none of
+        its tasks made it."""
+        found = threads.GITHUB_PR.fullmatch(thread)
+        if not found:
+            return None
+        label = f"{found.group(1)}#{found.group(2)}".lower()
+        creator = self.task_actions.creator(label)
+        made = [
+            task
+            for task in reversed(self.tasks.for_session(session_id))
+            if self.made_pr(task, label, creator)
+        ]
+        return next(
+            (task for task in made if task["status"] not in {"cancelled", "failed"}),
+            made[0] if made else None,
+        )
+
     def thread_task(self, session_id: str, thread: str) -> dict | None:
-        """Which of a worker's tasks a followed thread is about: the one the follow was made
-        for, else the one whose PRs or instructions name it."""
+        """Which of a worker's tasks a followed thread is about: for a PR, the task that made
+        it (its news is that work's, whichever later task of the worker follows or names it
+        too); else the newest one the follow was made for, else the newest whose PRs or
+        instructions name it."""
         from .tools import names_pr
 
+        maker = self.pr_maker(session_id, thread)
+        if maker and maker["status"] not in {"cancelled", "failed"}:
+            return maker
         bound = self.store.follow_tasks(session_id, thread)
         for task in reversed(self.tasks.for_session(session_id)):
             if task["id"] in bound:
@@ -2212,34 +2364,45 @@ class Runtime:
                     return task
         return None
 
-    def thread_task_title(self, session_id: str, thread: str) -> str:
-        """Which of a worker's tasks a followed thread is about, by its title; else the
-        worker's display title."""
-        task = self.thread_task(session_id, thread)
-        return task["title"] if task else self.display_title(self.store.session(session_id))
-
     def thread_owners(self, followers: list[str], thread: str) -> list[str]:
-        """Of the workers following a PR, those whose task made it: its news is theirs to act
-        on (a worker that only reviewed or reported on it would ask the owner the same)."""
-        found = threads.GITHUB_PR.fullmatch(thread)
-        if not found:
+        """Of the workers following a PR, those with a task that made it (any of their tasks,
+        not only the newest that names it): its news is theirs to act on (a worker that only
+        reviewed, read or reported on it would ask the owner the same). Everyone following it
+        when none made it."""
+        if not threads.GITHUB_PR.fullmatch(thread):
             return followers
-        label = f"{found.group(1)}#{found.group(2)}".lower()
-        owners = []
-        for session_id in followers:
-            task = self.thread_task(session_id, thread)
-            if task and (
-                label in self.task_actions.opened_prs(task["id"])
-                or any(
-                    pr.get("own") and pr["label"].lower() == label
-                    for pr in self.task_actions.previous_prs(task["id"])
-                )
-            ):
-                owners.append(session_id)
+        owners = [session_id for session_id in followers if self.pr_maker(session_id, thread)]
         return owners or followers
+
+    def replied_to(
+        self, session_id: str, thread: str, replies: dict[str, tuple[str, str]], keys: list[str]
+    ) -> tuple[dict | None, list[str]]:
+        """Of a PR's news, the replies to comments this worker posted there (`replies`: an
+        item's key -> the task whose comment it answers, "" when not known, and its line):
+        that task, and those lines. A reviewer hears what answers its own review even when
+        the PR's maker gets the rest."""
+        tasks = {task["id"]: task for task in self.tasks.for_session(session_id)}
+        found = threads.GITHUB_PR.fullmatch(thread)
+        label = f"{found.group(1)}#{found.group(2)}".lower() if found else ""
+        reviewer = label in self.task_actions.reviewed_prs(session_id)
+        task, lines = None, []
+        for key in keys:
+            task_id, line = replies.get(key, ("", ""))
+            if task_id in tasks or (line and not task_id and reviewer):
+                task = task or tasks.get(task_id) or self.thread_task(session_id, thread)
+                lines.append(line)
+        return task, lines
 
     def publish_state(self):
         self.bus.publish("state")
+
+    def slack_names(self) -> dict[str, str]:
+        """Names by Slack id, for the page: the owner's own id too (Slack lists it without a
+        name), as "you" when no name was read for it."""
+        names = self.slack.display_names()
+        if owner := self.slack.status.get("user_id"):
+            names = {**names, owner: names.get(owner) or "you"}
+        return names
 
     def snapshot(self) -> dict:
         return {
@@ -2250,9 +2413,19 @@ class Runtime:
             "sessions": [self.view(row) for row in self.store.open_sessions()],
             "drafts": self.store.drafts(),
             "uncertain": self.store.drafts("uncertain"),
+            # Drafts withdrawn or replaced lately: what their lines in a timeline say.
+            "draft_outcomes": {
+                row["id"]: row["outcome"]
+                for row in self.store.all(
+                    "SELECT id, outcome FROM drafts WHERE status IN ('rejected', 'withdrawn', "
+                    "'replaced') AND resolved_at > ? AND (status != 'rejected' OR outcome LIKE "
+                    "'Withdrawn%' OR outcome LIKE 'Replaced by%')",
+                    (hours_ago(72),),
+                )
+            },
             # PRs by "owner/repo#n" with their titles; followed threads with a link to them.
             "pr_titles": self.store.items("prtitle:"),
-            "slack_names": self.slack.display_names(),
+            "slack_names": self.slack_names(),
             "artifacts_hidden": self.hidden_artifacts(),
             "thread_links": self.store.items("threadlink:"),
             "questions": self.asks.owner_questions(),

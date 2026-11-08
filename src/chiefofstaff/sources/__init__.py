@@ -20,7 +20,13 @@ class SourceHost(Protocol):
     ) -> bool: ...
 
     async def on_thread(
-        self, source: str, thread: str, keys: list[str], text: str, display: str | None = None
+        self,
+        source: str,
+        thread: str,
+        keys: list[str],
+        text: str,
+        display: str | None = None,
+        replies: dict[str, tuple[str, str]] | None = None,
     ) -> bool: ...
 
     def followed(self, prefix: str) -> list[dict]: ...

@@ -2,7 +2,7 @@
 
 import { api, el, foldable, moreMenu, once, reconcile, submits, toast } from "./dom.js";
 import { MARKERS, SECTION_DOT, SECTIONS, taskPhase, workerContext } from "./board.js";
-import { ago, compactPaths, displayPath, gist, linkName, markdown, plural, prTitle, shorten, since, taskLinks } from "./text.js";
+import { ago, changesText, compactPaths, displayPath, gist, linkName, markdown, notCountedText, plural, prTitle, shorten, since, taskLinks } from "./text.js";
 import { isHidden, prStatus, setHidden, toneOf } from "./artifacts.js";
 import { openFile } from "./files.js";
 import { byId, closedWorkers, ownerQuestions, pendingDrafts, sessions, state, tasks } from "./state.js";
@@ -163,17 +163,27 @@ function taskMeta(task, phase = {}) {
   else if (phase.marker === "check-back" && task.check_back?.at) when = clockTime(task.check_back.at);
   else if (phase.section === "monitoring") when = since(task.active_at || task.updated_at);
   else if (phase.marker === "queued" || phase.marker === "turn") when = "";
+  // On a row whose second line says it already ("Checks back at 3:15 PM: …", "Paused: …"), not
+  // twice: the meta says when it was last active, and the title keeps its room.
+  if (marker && isRow(phase) && rowWhy(task, byId(task.session_id), phase).text.toLowerCase().startsWith(marker.toLowerCase())) {
+    return [["", phase.section === "monitoring" ? since(task.active_at || task.updated_at) : when], help.filter(Boolean).join("\n")];
+  }
   return [[marker, when], help.filter(Boolean).join("\n")];
 }
 // The meta's parts: the marker, and when (left out on a narrow card: it is in the tooltip).
 const metaParts = ([marker, when]) => [marker ? el("span", { class: "marker", text: marker }) : "", when ? el("span", { class: "when", text: `${marker ? " · " : ""}${when}` }) : ""];
 const clockTime = (iso) => new Date(iso).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-// Work on a branch of Chief of Staff's own (chief/…) that is not in a PR yet. A worker that
-// checked out someone else's PR to review it is on their branch: nothing to open.
+// Commits on a branch of its own checkout (a chief/… one, or one the owner named) that no PR is
+// from yet: Create PR opens one. Not on the default branch, and not on a PR it checked out to
+// review (someone else's branch: its PR is known, and it made no commits there).
+const DEFAULT_BRANCHES = new Set(["main", "master", "trunk", "develop", "development", "default", "HEAD"]);
 function createsPr(task) {
   const receipts = task.receipts;
-  if (!receipts || receipts.prs?.length) return false;
-  return (receipts.checkouts || []).some((checkout) => checkout.branch?.startsWith("chief/") && (checkout.commits || checkout.uncommitted));
+  if (!receipts) return false;
+  const prs = receipts.prs || [];
+  if (prs.some((pr) => pr.own)) return false;
+  // Not from a folder of the owner's (shared): its branch is theirs, not the task's.
+  return (receipts.checkouts || []).some((checkout) => !checkout.shared && checkout.commits > 0 && checkout.branch && !DEFAULT_BRANCHES.has(checkout.branch) && !prs.some((pr) => pr.branch === checkout.branch));
 }
 // A result to review shows its full report on demand; an open one stays open while the card
 // is redrawn (new receipts, a fresh PR state).
@@ -191,6 +201,10 @@ export function expandTask(node, open = !node.classList.contains("expanded"), se
 const unfolded = new Set();
 export function unfoldTask(node, open = !node.classList.contains("unfolded"), seen = false) {
   node.classList.toggle("unfolded", open);
+  // Folded, its title shows it whole (said to screen readers); shown, the title opens its worker.
+  const title = node.querySelector(":scope > .head .title");
+  if (open) title?.removeAttribute("aria-expanded");
+  else title?.setAttribute("aria-expanded", "false");
   if (node.dataset.task) unfolded[open ? "add" : "delete"](node.dataset.task);
   if (open && seen) readTask(node.dataset.task);
 }
@@ -224,19 +238,31 @@ function taskCard(task, phase = phaseOf(task)) {
       { class: "head" },
       el("span", { class: dotClass(task, phase), "data-tip": unread(task, phase) ? "Not read yet" : undefined }),
       // On a row its title shows the card first (the row's click); then it opens its worker.
-      el("button", { type: "button", class: "title", text: task.title, "data-tip": titleTip(task, phase), onclick: () => (row && !node.classList.contains("unfolded") ? null : openAt?.()), disabled: !openAt && !row }),
+      el("button", { type: "button", class: "title", text: task.title, "data-tip": titleTip(task, phase), "aria-expanded": row && !unfolded.has(task.id) ? "false" : undefined, onclick: () => (row && !node.classList.contains("unfolded") ? null : openAt?.()), disabled: !openAt && !row }),
       el("span", { class: "tid", text: task.id, title: "Task id" }),
       el("span", { class: "meta", "data-tip": help }, ...metaParts(meta)),
+      // A row shown whole folds back here (or with Escape): its title opens its worker then.
+      row ? el("button", { type: "button", class: "fold icon", text: "▴", title: "Fold it back into a row (Esc)", "aria-label": "Fold", onclick: () => foldBack() }) : null,
     ),
   );
+  function foldBack() {
+    unfoldTask(node, false);
+    node.querySelector(":scope > .head .title")?.focus();
+  }
   if (row) {
     node.append(rowLine(task, byId(task.session_id), phase));
     node.addEventListener("click", (event) => {
       if (!node.classList.contains("unfolded")) {
-        if (!event.target.closest("a, .menu-wrap")) unfoldTask(node, true, true);
+        if (!event.target.closest("a, .menu-wrap, .fold")) unfoldTask(node, true, true);
       } else if (event.target.closest(".head") && !event.target.closest("button, a, .menu-wrap")) {
         unfoldTask(node, false);
       }
+    });
+    node.addEventListener("keydown", (event) => {
+      // Not while typing in a form on it, nor to close its open menu.
+      if (event.key !== "Escape" || !node.classList.contains("unfolded") || event.target.closest("input, textarea, select") || node.querySelector(".menu:not([hidden])")) return;
+      event.preventDefault();
+      foldBack();
     });
   }
   const body = taskBody(task, phase);
@@ -294,7 +320,8 @@ function taskCard(task, phase = phaseOf(task)) {
     const inline = !actions.querySelector(":scope > button:not(.more-button)") && !actions.dataset.editing;
     actions.classList.toggle("inline", inline);
     const parent = inline ? node.querySelector(":scope > .head") : node;
-    if (actions.parentElement !== parent) parent.append(actions);
+    // In the head, before a row's fold button (that stays at the end).
+    if (actions.parentElement !== parent) parent.insertBefore(actions, inline ? parent.querySelector(":scope > .fold") : null);
   }
   function reply(placeholder, done, moves = true) {
     const input = el("textarea", { rows: 2, placeholder });
@@ -396,13 +423,13 @@ function taskCard(task, phase = phaseOf(task)) {
     } else if (task.status === "waiting" && task.stopped) {
       // Stopped mid-work: go on where it stopped, or with a word on what to do instead.
       main = el("button", { type: "button", text: "Go on", onclick: () => act(`/api/tasks/${task.id}/follow-up`, { text: "Go on where you stopped." }, "Sent to the worker.") });
-      more = [{ text: "Go on with a note…", onclick: () => reply("What should it do now?", "Sent to the worker.") }, worker, cancel];
+      more = [{ text: "Go on with a note…", onclick: () => reply("What should it do now?", "Sent to the worker.") }, named, worker, cancel];
     } else if (task.status === "waiting") {
       main = el("button", { type: "button", text: "Reply", onclick: () => reply("Your answer", "Sent to the worker.") });
-      more = [worker, cancel];
+      more = [named, worker, cancel];
     } else if (task.status === "failed") {
       main = el("button", { type: "button", text: "Retry", onclick: () => act(`/api/tasks/${task.id}/retry`, {}, "Retrying.") });
-      more = [{ text: "Retry with a note…", onclick: retryWithNote }, worker, cancel];
+      more = [{ text: "Retry with a note…", onclick: retryWithNote }, named, worker, cancel];
     } else if (task.status === "running" && ["stalled", "overdue", "idle", "check-failed"].includes(phase.marker)) {
       // Nothing moves on it: ask its worker where it stands, or end it.
       main = nudge;
@@ -708,7 +735,7 @@ function waitLine(task, worker, phase) {
 }
 // A row's second line: what it waits on (or what it came to) and the main thing it made.
 function rowLine(task, worker, phase) {
-  const why = phase.section === "monitoring" ? waitWords(task, worker, phase) : { text: finishedWords(task, phase), help: "" };
+  const why = rowWhy(task, worker, phase);
   // Not twice: what it waits on may name it already.
   const made = mainArtifact(task);
   const named = phase.section === "monitoring" && made && why.text.includes(made);
@@ -719,6 +746,8 @@ function rowLine(task, worker, phase) {
     made && !named ? el("span", { class: "made", text: made }) : "",
   );
 }
+// What a row says on its second line: what it waits on, or what it came to.
+const rowWhy = (task, worker, phase) => (phase.section === "monitoring" ? waitWords(task, worker, phase) : { text: finishedWords(task, phase), help: "" });
 // What a finished task came to, in its first words.
 function finishedWords(task, phase) {
   if (phase.marker === "still-following") return phase.why;
@@ -744,7 +773,8 @@ function watchedWords(key, task) {
   const label = `${match[1]}#${match[2]}`.toLowerCase();
   const pr = (task.receipts?.prs || []).find((item) => item.label.toLowerCase() === label);
   const title = pr?.title || prTitle(label);
-  const where = !pr ? "" : pr.awaiting?.length ? "awaiting approval" : pr.review === "CHANGES_REQUESTED" ? "changes requested" : pr.checks === "pending" ? "CI running" : pr.checks === "failing" ? "CI failing" : pr.review === "APPROVED" ? "approved, not merged" : "review or merge";
+  // Where it stands as Artifacts and its chip say it.
+  const where = pr ? prStatus(pr)[0] : "";
   return `${match[1].split("/")[1]}#${match[2]}${title ? ` · ${shorten(title, 40)}` : ""}${where ? ` (${where})` : ""}`;
 }
 // A worker between turns on a running task: how long it has been quiet, and what it follows.
@@ -766,10 +796,11 @@ function prChip(pr) {
   const named = pr.title || prTitle(pr.label);
   const state = pr.state === "MERGED" ? "merged" : pr.state === "CLOSED" ? "closed" : "";
   const ci = state ? "" : { passing: "✓ CI", failing: "✗ CI", pending: "CI running" }[pr.checks] || "";
-  // Where it stands in one word, as Artifacts says it (changes requested is not ready to
-  // merge); what CI says is beside it, so not again.
+  // Where it stands in a word, as Artifacts and Monitoring say it (changes requested wins over
+  // failing CI); a word only about CI is not said again beside the CI mark, and "in review"
+  // (nothing to say yet) is left out.
   const [word] = prStatus(pr);
-  const stands = ["CI failing", "CI running", "in review"].includes(word) ? "" : word;
+  const stands = word === "in review" || (word === "CI failing" && ci) || (word === "CI running" && ci) ? "" : word;
   const review = { APPROVED: "approved", CHANGES_REQUESTED: "changes requested" }[pr.review] || "";
   const failing = pr.checks === "failing" && pr.failing?.length ? `\nFailing: ${pr.failing.join(", ")}` : "";
   const ciWords = { passing: "Checks pass", failing: "Checks fail", pending: "Checks are running", none: "No checks" }[pr.checks] || "";
@@ -813,7 +844,10 @@ function chips(task) {
   result("lint", receipts?.checks);
   result("build", receipts?.build);
   const changed = receipts?.changed || {};
-  if (changed.files) items.push(el("button", { type: "button", class: "receipt changes", title: "See the changes and comment on them", text: `+${changed.insertions} −${changed.deletions} in ${plural(changed.files, "file")}`, onclick: () => showChanges(task, upsertTask) }));
+  // What others changed in the owner's folder meanwhile is not its own: said quietly beside it.
+  const others = notCountedText(changed);
+  const othersHelp = others ? `\n${others[0].toUpperCase()}${others.slice(1)} changed there meanwhile by you or other work: not this task's` : "";
+  if (changed.files) items.push(el("button", { type: "button", class: "receipt changes", title: `See the changes and comment on them${othersHelp}`, onclick: () => showChanges(task, upsertTask) }, changesText(changed), others ? el("span", { class: "not-counted", text: ` · ${others}` }) : ""));
   const { shown, own, mentioned } = prChips(task);
   items.push(...own);
   const links = linkGroups(task, shown, mentioned);
@@ -830,6 +864,8 @@ function report(task) {
   const changed = receipts.changed || {};
   if (changed.commits) more.push(el("span", { class: "receipt", text: plural(changed.commits, "commit") }));
   if (changed.uncommitted) more.push(el("span", { class: "receipt warn", text: `${changed.uncommitted} uncommitted` }));
+  // No changes of its own, but others changed its folder meanwhile: said, not counted.
+  if (!changed.files && notCountedText(changed)) more.push(el("span", { class: "receipt none", title: "Changed in your folder meanwhile by you or other work: not this task's", text: notCountedText(changed) }));
   if (receipts.tests && !receipts.tests.own) more.push(testsElsewhere(receipts.tests));
   for (const item of receipts.version || []) {
     more.push(el("span", { class: "receipt none", title: "The code these results are about", text: `at ${item.commit.slice(0, 7)}${item.edited ? " + edits" : ""}` }));

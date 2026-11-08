@@ -165,7 +165,7 @@ SHARDS = {
     "A": (18781, 18911), "B": (18782, 18912), "C": (18783, 18913), "D": (18784, 18914),
     "E": (18785, 18915), "F": (18786, 18916), "G": (18787, 18917), "H": (18788, 18918),
     "I": (18799, 18929), "J": (18800, 18930), "K": (18801, 18931),
-    "L": (18802, 18932),
+    "L": (18802, 18932), "M": (18803, 18933),
 }  # fmt: skip
 MODEL = "claude-sonnet-5.5"
 CJK = re.compile(r"[\u4e00-\u9fff]")
@@ -3802,6 +3802,149 @@ async def l4_split_preview_and_undo(ctx: Ctx):
     log("L4 passed")
 
 
+async def receipts_changed(ctx: Ctx, task_id: str, after: str = "", timeout: int = 120):
+    """A task's receipts' changes, once its evidence was collected (after `after`)."""
+
+    async def check():
+        found = (await ctx.app.get(f"/api/tasks/{task_id}")).get("receipts") or {}
+        if not found.get("changed") or (after and (found.get("at") or "") <= after):
+            return None
+        return found["changed"]
+
+    return await wait_for("its receipts", check, timeout, ctx.app)
+
+
+async def m1_owners_edits_in_their_folder_are_not_the_tasks(ctx: Ctx):
+    """Bug bash 3: in the owner's folder, what the owner edited while a worker ran a long
+    command counted as the task's changes."""
+    since = now()
+    await say(ctx, f"Start a worker titled 'Marker' working directly in my project folder "
+              f"{ctx.project} (no worktree, no commit): run `sleep 45` in the shell, then append "
+              "the line '# marker' to textkit/__init__.py with a shell command (echo >>). Report "
+              "done.")  # fmt: skip
+    task = await titled(ctx, since, "marker")
+
+    async def sleeping():
+        row = await session(ctx, task["session_id"])
+        return row if "sleep" in (row.get("step_command") or "") else None
+
+    await wait_for("it sleeps", sleeping, 300, ctx.app)
+    (ctx.project / "OWNER_TODO.md").write_text("the owner's own notes\n")
+    with (ctx.project / "pyproject.toml").open("a") as file:
+        file.write("\n# the owner's own line\n")
+    await task_status(ctx, task["id"], FINISHED, "marked", 400)
+    changed = await receipts_changed(ctx, task["id"])
+    log(f"M1: {changed}")
+    diff = json.dumps(await ctx.app.get(f"/api/tasks/{task['id']}/diff"))
+    try:
+        assert "# marker" in diff, diff[:400]
+        assert "OWNER_TODO" not in diff and "the owner's own line" not in diff, diff[:800]
+        assert changed["files"] == 1 and changed.get("not_counted", 0) >= 2, changed
+        ctx.notes["marker"] = task
+        log("M1 passed")
+    finally:
+        (ctx.project / "OWNER_TODO.md").unlink(missing_ok=True)
+        subprocess.run(["git", "-C", str(ctx.project), "checkout", "--", "."], check=False)
+
+
+async def m2_a_question_in_chat_stays_news(ctx: Ctx):
+    """Bug bash 3: a question in chat about finished work, while others changed the folder,
+    became a "new result" that replaced the one under review."""
+    task = ctx.notes["marker"]
+    before = await ctx.app.get(f"/api/tasks/{task['id']}")
+    (ctx.project / "AGENTS.md").write_text("the owner's own agent notes\n")
+    try:
+        mark = max(m["id"] for m in await messages(ctx, task["session_id"]))
+        await ctx.app.post(
+            f"/api/sessions/{task['session_id']}/messages",
+            {"text": "Question only, change nothing: how many lines does textkit/__init__.py "
+             "have? Answer with a done report."},
+        )  # fmt: skip
+
+        async def answered():
+            rows = await messages(ctx, task["session_id"])
+            return [m for m in rows if m["id"] > mark and m["kind"] in {"report", "assistant"}]
+
+        await wait_for("its answer", answered, 300, ctx.app)
+        await asyncio.sleep(10)
+        after = await ctx.app.get(f"/api/tasks/{task['id']}")
+        log(f"M2: {after['status']} {after['result'][:120]!r}")
+        assert after["result"] == before["result"], "an answer is news, not a new result"
+        log("M2 passed")
+    finally:
+        (ctx.project / "AGENTS.md").unlink(missing_ok=True)
+
+
+async def m3_a_split_result_keeps_its_changes(ctx: Ctx):
+    """Bug bash 3: a result split off had no receipts (a report, not to accept); the task it
+    came from kept its changes."""
+    since = now()
+    await say(ctx, "Start a worker titled 'Currency Default' in the textkit project, in a "
+              "worktree: add DEFAULT_CURRENCY = 'USD' to textkit/__init__.py and commit it. "
+              "Report done.")  # fmt: skip
+    task = await titled(ctx, since, "currency default")
+    await task_status(ctx, task["id"], FINISHED, "currency added", 400)
+    await receipts_changed(ctx, task["id"])
+    mark = max(m["id"] for m in await messages(ctx, task["session_id"]))
+    await ctx.app.post(
+        f"/api/sessions/{task['session_id']}/messages",
+        {"text": "Also add textkit/units.py with UNITS = {} and commit it, then report done."},
+    )
+
+    async def second():
+        rows = await messages(ctx, task["session_id"])
+        done = [m for m in rows if m["id"] > mark and m["kind"] == "report"
+                and m["meta"].get("status") == "done"]  # fmt: skip
+        return done or None
+
+    await wait_for("its second result", second, 400, ctx.app)
+    await asyncio.sleep(5)
+    made = await ctx.app.post(f"/api/tasks/{task['id']}/split", {"text": "Add the units module"})
+
+    async def split_receipts():
+        new = (await ctx.app.get(f"/api/tasks/{made['id']}")).get("receipts") or {}
+        old = (await ctx.app.get(f"/api/tasks/{task['id']}")).get("receipts") or {}
+        new_c, old_c = new.get("changed") or {}, old.get("changed") or {}
+        return (new_c, old_c) if new_c.get("commits") == 1 and old_c.get("commits") == 1 else None
+
+    new, old = await wait_for("each result's changes", split_receipts, 120, ctx.app)
+    log(f"M3: new {new}; old {old}")
+    diff = json.dumps(await ctx.app.get(f"/api/tasks/{made['id']}/diff"))
+    assert "units.py" in diff and "DEFAULT_CURRENCY" not in diff, diff[:600]
+    shown = await ctx.app.get(f"/api/tasks/{made['id']}")
+    assert shown["status"] == "review", shown["status"]
+    ctx.notes["currency"] = task
+    log("M3 passed")
+
+
+async def m4_a_follow_up_after_another_task(ctx: Ctx):
+    """Bug bash 3: a finished task followed up after a later task on the same worker showed
+    the later task's changes too."""
+    task = ctx.notes["currency"]
+    later = now()
+    await ask(ctx, "Give the 'Currency Default' worker a new task titled 'Truncate Fn': add "
+              "truncate(text, n) returning text[:n] to textkit/__init__.py and commit it. "
+              "Report done.")  # fmt: skip
+
+    async def truncate():
+        found = [t for t in await tasks_since(ctx, later) if t["session_id"] == task["session_id"]]
+        return found[0] if found else None
+
+    other = await wait_for("its new task", truncate, 300, ctx.app)
+    await task_status(ctx, other["id"], FINISHED, "truncate added", 400)
+    checked = now()
+    await ctx.app.post(
+        f"/api/tasks/{task['id']}/follow-up",
+        {"text": "Rename DEFAULT_CURRENCY to BASE_CURRENCY and commit it."},
+    )
+    await task_status(ctx, task["id"], {"review"}, "renamed", 400)
+    changed = await receipts_changed(ctx, task["id"], checked)
+    diff = json.dumps(await ctx.app.get(f"/api/tasks/{task['id']}/diff"))
+    log(f"M4: {changed}")
+    assert "BASE_CURRENCY" in diff and "def truncate" not in diff, diff[:800]
+    log("M4 passed")
+
+
 SCENARIOS = {
     "A": [
         w1_ask, w2_progress, w3_answered_directly, w4_pasted_orders, w5_chinese_log,
@@ -3861,6 +4004,10 @@ SCENARIOS = {
     "L": [
         l1_stop_with_a_command_in_the_background, l2_shared_folder_shell_edits_are_the_tasks,
         l3_chat_answers_the_question_card, l4_split_preview_and_undo, w52_no_ids,
+    ],
+    "M": [
+        m1_owners_edits_in_their_folder_are_not_the_tasks, m2_a_question_in_chat_stays_news,
+        m3_a_split_result_keeps_its_changes, m4_a_follow_up_after_another_task, w52_no_ids,
     ],
 }  # fmt: skip
 

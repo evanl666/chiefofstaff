@@ -32,6 +32,7 @@ from .workspaces import (
     checkout_top,
     diff,
     same_version,
+    share_files,
     snapshot,
     tree_names,
     untracked_work,
@@ -129,17 +130,22 @@ SPLIT_UNDO_MINUTES = 10
 
 def deliverable_title(title: str) -> str:
     """A task's title as the owner gives it: it must say what the task delivers ("111" does
-    not)."""
+    not). Chinese, Japanese and Korean say it in fewer characters: each counts as a word."""
     from .envelope import clean_title
 
     title = clean_title(title.strip())
     letters = sum(char.isalpha() for char in title)
-    if title == "Task" or len(title) < 8 or letters < 3:
+    words = len(CJK.findall(title))
+    if title == "Task" or (words < 4 and (len(title) < 8 or letters < 3)):
         raise ValueError(
-            "Give it a title saying what it delivers (at least 8 characters, in words): "
-            "“Fix the ICP flow's Spark 3.5 dependency”."
+            "Give it a title saying what it delivers, in words (at least 8 characters, or 4 "
+            "Chinese, Japanese or Korean ones), e.g. “Add a retry to the upload step”."
         )
     return title
+
+
+# A character that is a word of its own (Han, kana, Hangul).
+CJK = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]")
 
 
 def ran_in(command: str) -> str:
@@ -224,8 +230,35 @@ class TaskActions:
             evidence = json.loads(run["evidence"]) if run else {}
             if not evidence or evidence.get("stale"):
                 continue
-            if reason := await self.changed_since(evidence, live):
+            ended = json.loads(self.store.get(f"taskend:{task['id']}") or "{}")
+            if ended:
+                # Its result's own files, since its result: not a later task's work.
+                reason = await self.own_files_changed(task, live, ended)
+            else:
+                reason = await self.changed_since(evidence, live)
+            if reason:
                 self.stale(task["id"], reason)
+
+    async def own_files_changed(self, task: dict, live: dict[str, dict], ended: dict) -> str:
+        """Why a finished task's own files are not what its result left (or "")."""
+        for path, end in ended.items():
+            checkout = live.get(path)
+            if not checkout or not (scope := self.scope(task, checkout)):
+                continue
+            with suppress(Exception):
+                now_ = await snapshot(checkout)
+                if not (now_ and now_["tree"]) or now_["tree"] == end["tree"]:
+                    continue
+                top = await checkout_top(checkout)
+                differ = await tree_names(checkout, top, end["tree"], now_["tree"])
+                if hit := sorted(set(differ) & await share_files(checkout, scope)):
+                    return (
+                        "Out of date: its files changed since it was checked ("
+                        + ", ".join(hit[:3])
+                        + (f" and {len(hit) - 3} more" if len(hit) > 3 else "")
+                        + ")."
+                    )
+        return ""
 
     @staticmethod
     async def changed_since(evidence: dict, live: dict[str, dict]) -> str:
@@ -316,6 +349,7 @@ class TaskActions:
         ended = json.loads(self.store.get(f"taskend:{task['id']}") or "{}")
         end = ended.get(checkout["path"]) if task["status"] not in OPEN else None
         others: set[str] = set()
+        commands = self.shell_text(task) if checkout.get("shared") else ""
         if checkout.get("shared"):
             for row in self.store.all(
                 "SELECT key, value FROM kv WHERE key LIKE 'touched:%' AND key!=?",
@@ -330,17 +364,91 @@ class TaskActions:
             end=end,
             others=others,
             head=base.get("heads", {}).get(checkout["path"], ""),
+            large=set(base.get("large", {}).get(checkout["path"], [])),
+            commands=commands,
+            gaps=[
+                (
+                    gap["end"][checkout["path"]],
+                    gap["start"][checkout["path"]],
+                    gap.get("end_commits", {}).get(checkout["path"], ""),
+                    gap.get("start_commits", {}).get(checkout["path"], ""),
+                    float(gap.get("at") or 0),
+                )
+                for gap in json.loads(self.store.get(f"taskgaps:{task['id']}") or "[]")
+                if checkout["path"] in gap["end"] and checkout["path"] in gap["start"]
+            ],
         )
 
-    async def changed_since_result(self, task: dict) -> bool:
-        """Whether its checkouts changed since its result was reported (it was asked for more
-        in chat and changed code): then what it reports is a new result."""
+    async def record_restart(self, task: dict):
+        """A finished task taken up again (a follow-up, the owner's chat): when other work
+        changed its checkouts since its result, that gap is kept (see Scope.gaps)."""
         ended = json.loads(self.store.get(f"taskend:{task['id']}") or "{}")
         row = self.store.find_session(task["session_id"])
         if not ended or not row:
-            return False
+            return
+        at = time.time()  # Taken up again now: what it commits from here on is its own.
+        result = json.dumps({p: e["tree"] for p, e in sorted(ended.items())})
+        checked = json.loads(self.store.get(f"restarted:{task['id']}") or "{}")
+        if isinstance(checked, dict) and checked.get("result") == result:
+            return  # Checked once for this result: later messages are about its own work.
+        gaps = json.loads(self.store.get(f"taskgaps:{task['id']}") or "[]")
+        now_trees, now_commits = {}, {}
         for checkout in self.workspaces.checkouts(row):
-            before = ended.get(checkout["path"])
+            with suppress(Exception):
+                if (found := await snapshot(checkout)) and found["tree"]:
+                    now_trees[checkout["path"]] = found["tree"]
+                    now_commits[checkout["path"]] = found["commit"]
+        end_trees = {path: end["tree"] for path, end in ended.items()}
+        end_commits = {path: end["commit"] for path, end in ended.items()}
+        if any(now_trees.get(path, tree) != tree for path, tree in end_trees.items()):
+            gap = {"end": end_trees, "start": now_trees, "end_commits": end_commits,
+                   "start_commits": now_commits, "at": at}  # fmt: skip
+            gaps = [*gaps, gap][-5:]
+            self.store.set(f"taskgaps:{task['id']}", json.dumps(gaps))
+        self.store.set(f"restarted:{task['id']}", json.dumps({"result": result, "at": at}))
+
+    def shell_text(self, task: dict, since: str = "") -> str:
+        """The shell commands its worker ran for this task (since a time)."""
+        rows = self.store.all(
+            "SELECT c.command FROM commands c JOIN runs r ON r.id=c.run_id WHERE r.task_id=? "
+            "AND c.started_at>=? ORDER BY c.id",
+            (task["id"], since),
+        )
+        return "\n".join(row["command"] for row in rows)
+
+    async def record_chat_base(self, task: dict):
+        """Its checkouts when the owner asks about a finished task in chat: what changes from
+        then on, by this task, is a new result (see changed_since_result)."""
+        row = self.store.find_session(task["session_id"])
+        if not row:
+            return
+        chat = json.loads(self.store.get(f"chatbase:{task['id']}") or "{}")
+        results = json.loads(self.store.get(f"taskends:{task['id']}") or "[]")
+        if chat.get("at") and (not results or chat["at"] > results[-1]["at"]):
+            # Asked again before a new result: what it changed since the first ask still
+            # counts (it is not the base of the next one).
+            await self.record_restart(task)
+            return
+        trees = {}
+        for checkout in self.workspaces.checkouts(row):
+            with suppress(Exception):
+                if (found := await snapshot(checkout)) and found["tree"]:
+                    trees[checkout["path"]] = found
+        self.store.set(f"chatbase:{task['id']}", json.dumps({"at": now(), "trees": trees}))
+        await self.record_restart(task)
+
+    async def changed_since_result(self, task: dict) -> bool:
+        """Whether this task changed its checkouts since the owner asked about it in chat (else
+        since its result): then what it reports is a new result. Not another task's changes
+        since, nor the owner's, nor what running code left behind."""
+        chat = json.loads(self.store.get(f"chatbase:{task['id']}") or "{}")
+        ended = json.loads(self.store.get(f"taskend:{task['id']}") or "{}")
+        row = self.store.find_session(task["session_id"])
+        if not row or not (chat.get("trees") or ended):
+            return False
+        touched = set(json.loads(self.store.get(f"touched:{task['id']}") or "[]"))
+        for checkout in self.workspaces.checkouts(row):
+            before = (chat.get("trees") or {}).get(checkout["path"]) or ended.get(checkout["path"])
             with suppress(Exception):
                 now_ = await snapshot(checkout)
                 if not (before and now_ and before["tree"] and now_["tree"]):
@@ -350,7 +458,13 @@ class TaskActions:
                 top = await checkout_top(checkout)
                 differ = await tree_names(checkout, top, before["tree"], now_["tree"])
                 # Not what running code left behind (new `__pycache__/`, a `.coverage`).
-                if any(status != "A" or untracked_work([name]) for name, status in differ.items()):
+                names = [n for n, status in differ.items() if status != "A" or untracked_work([n])]
+                if checkout.get("shared"):
+                    # In a folder of the owner's: only what its edits wrote or its commands named.
+                    commands = self.shell_text(task, chat.get("at", ""))
+                    scope = Scope(touched=touched, commands=commands)
+                    names = [n for n in names if scope.wrote(top, n) or scope.named(top, n)]
+                if names:
                     return True
         return False
 
@@ -367,6 +481,57 @@ class TaskActions:
                     ended[checkout["path"]] = found
         if ended:
             self.store.set(f"taskend:{task['id']}", json.dumps(ended))
+            # Each result's end, kept: a split gives each result its own share.
+            history = json.loads(self.store.get(f"taskends:{task['id']}") or "[]")
+            history = [*history, {"at": now(), "ended": ended}][-6:]
+            self.store.set(f"taskends:{task['id']}", json.dumps(history))
+
+    def split_changes(self, task: dict, made: dict, latest: dict, first_at: str) -> dict:
+        """A split's checkouts: the new task's share runs from the end of the result the task
+        keeps to the end of the one that moves (with the commands run for it); the task's ends
+        where its kept result did. What undoing it puts back."""
+        history = json.loads(self.store.get(f"taskends:{task['id']}") or "[]")
+        kept = [h for h in history if h["at"] < latest["created_at"]]
+        moved_end = [h for h in history if h["at"] >= latest["created_at"]]
+        before = json.loads(self.store.get(f"taskend:{task['id']}") or "null")
+        undo = {"ended": before}
+        if kept and (moved_end or before):
+            start, end = kept[-1], (moved_end[-1]["ended"] if moved_end else before)
+            at = datetime.fromisoformat(start["at"]).timestamp()
+            ended = start["ended"]
+            self.store.set(
+                f"taskbase:{made['id']}",
+                json.dumps(
+                    {"at": at, "commits": {p: e["commit"] for p, e in ended.items()},
+                     "trees": {p: e["tree"] for p, e in ended.items()},
+                     "heads": {p: e["commit"] for p, e in ended.items()},
+                     "large": {p: e.get("large", []) for p, e in ended.items()}}
+                ),
+            )  # fmt: skip
+            self.store.set(f"taskend:{made['id']}", json.dumps(end))
+            self.store.set(f"taskend:{task['id']}", json.dumps(ended))
+        run = self.store.one(
+            "SELECT id FROM runs WHERE task_id=? ORDER BY started_at DESC LIMIT 1", (made["id"],)
+        )
+        if run:
+            # Its tests and commands: those run since it was asked for.
+            moved = self.store.all(
+                "SELECT c.id FROM commands c JOIN runs r ON r.id=c.run_id WHERE r.task_id=? "
+                "AND c.started_at>=?",
+                (task["id"], first_at),
+            )
+            ids = [row["id"] for row in moved]
+            for identifier in ids:
+                self.store.execute(
+                    "UPDATE commands SET run_id=? WHERE id=?", (run["id"], identifier)
+                )
+            undo |= {"commands": ids}
+        touched = self.store.get(f"touched:{task['id']}")
+        if touched:
+            self.store.set(f"touched:{made['id']}", touched)
+        self.runtime.background(self.collect_evidence(made["id"]))
+        self.runtime.background(self.collect_evidence(task["id"]))
+        return undo
 
     async def record_base(self, session_id: str, task_ids: list[str], at: float):
         """Where its checkouts are when a worker takes a task up: that task's changes are what
@@ -375,7 +540,7 @@ class TaskActions:
         task_ids = [task_id for task_id in task_ids if not self.store.get(f"taskbase:{task_id}")]
         if not row or not task_ids:
             return
-        commits, trees, heads = {}, {}, {}
+        commits, trees, heads, large = {}, {}, {}, {}
         first = self.tasks.for_session(session_id)[:1]
         # Its first task's work starts where its branch did (in a folder of the owner's, where
         # the folder is now); a later one's where it is now: its commit and all its files.
@@ -388,13 +553,23 @@ class TaskActions:
                     if found["tree"]:
                         trees[checkout["path"]] = found["tree"]
                     heads[checkout["path"]] = found["commit"]
+                    if found.get("large"):
+                        large[checkout["path"]] = found["large"]
                     if later:
                         commits[checkout["path"]] = found["commit"]
         for task_id in task_ids:
             if not self.store.get(f"taskbase:{task_id}"):
                 self.store.set(
                     f"taskbase:{task_id}",
-                    json.dumps({"at": at, "commits": commits, "trees": trees, "heads": heads}),
+                    json.dumps(
+                        {
+                            "at": at,
+                            "commits": commits,
+                            "trees": trees,
+                            "heads": heads,
+                            "large": large,
+                        }
+                    ),
                 )
 
     def needs_acceptance(self, task: dict) -> bool:
@@ -844,17 +1019,18 @@ class TaskActions:
             return False
         task = self.tasks.get(task_id)
         await self.offer_merge(task, prs)
+        shown = [{k: v for k, v in pr.items() if k != "at"} for pr in evidence["prs"]]
+        changed = shown != [{k: v for k, v in pr.items() if k != "at"} for pr in prs]
+        evidence |= {"prs": prs, "prs_at": time.time()}
+        # Saved first: whether its other PRs are still open is read from what is true now.
+        self.store.execute(
+            "UPDATE runs SET evidence=? WHERE id=?", (json.dumps(evidence), run["id"])
+        )
         # Its own PR merged: what it delivers is in. Not a PR its report only mentions.
         merged = [pr["label"] for pr in prs if pr.get("state") == "MERGED" and pr.get("own")]
         if merged and task["status"] == "review":
             for label in merged:
                 self.pr_merged(task["session_id"], f"github:{label.lower()}", task["id"])
-        shown = [{k: v for k, v in pr.items() if k != "at"} for pr in evidence["prs"]]
-        changed = shown != [{k: v for k, v in pr.items() if k != "at"} for pr in prs]
-        evidence |= {"prs": prs, "prs_at": time.time()}
-        self.store.execute(
-            "UPDATE runs SET evidence=? WHERE id=?", (json.dumps(evidence), run["id"])
-        )
         if changed:
             self.publish(self.tasks.get(task_id))
         return changed
@@ -925,6 +1101,16 @@ class TaskActions:
             if not task_id and not self.owns_pr(task, label):
                 continue
             if thread in threads.pull_requests(" ".join(self.pr_urls(task))):
+                # Its other PRs still open: it is done when the last of its own is merged.
+                still = [
+                    pr["label"]
+                    for pr in self.previous_prs(task["id"])
+                    if pr.get("own")
+                    and pr.get("state") == "OPEN"
+                    and pr["label"].lower() != label.lower()
+                ]
+                if still:
+                    continue
                 self.tasks.move(task["id"], "done")
                 self.runtime.background(self.runtime.workers.pump())
 
@@ -1034,6 +1220,15 @@ class TaskActions:
                 f"{name} has uncommitted changes. Follow up and ask the worker to commit "
                 "them, then create the PR."
             )
+        if live:
+            # The branch it is on now (one the owner named, say), not the one it was given.
+            with suppress(ValueError):
+                current = (
+                    await checkout_git(checkout, tree, "rev-parse", "--abbrev-ref", "HEAD")
+                ).strip()
+                default = base_of(checkout).removeprefix("origin/")
+                if current and current not in {"HEAD", default, "main", "master"}:
+                    branch = current
         commits = await checkout_git(
             checkout, repo, "rev-list", "--count", f"{base_of(checkout)}..refs/heads/{branch}"
         )
@@ -1243,12 +1438,11 @@ class TaskActions:
                 was_stopped
                 and (going := [o for o in others if not self.store.get(f"stopped:{o['id']}")])
                 and row["status"] != "working"
-                and self.states.is_live(row["id"])
                 and self.delivery.undefer(row["id"])
             ):
                 # Stopped on this task, then it is cancelled: what it was given for its other
                 # tasks and held back goes out now, so it goes on with them (not with another
-                # task the owner stopped).
+                # task the owner stopped). After a restart too: delivering resumes its session.
                 listed = "; ".join(f"{other['id']} “{other['title']}”" for other in going)
                 text = (f"{note} " if received else "") + f"Go on with your open task(s): {listed}."
                 await self.delivery.deliver(
@@ -1304,12 +1498,32 @@ class TaskActions:
                 },
             )
         with suppress(RuntimeError):
-            self.runtime.add_message(
-                self.runtime.router_id(),
-                "notice",
-                f"Task “{task['title']}” cancelled",
-                {"session_id": task["session_id"], "task_id": task_id},
-            )
+            display = f"Task “{task['title']}” cancelled"
+            meta = {"session_id": task["session_id"], "task_id": task_id}
+            if by.lower().removeprefix("the ") == "router":
+                self.runtime.add_message(self.runtime.router_id(), "notice", display, meta)
+            else:
+                # The Router hears of it with its next message (not a turn of its own): it must
+                # not start that work again by itself, here or in another worker.
+                who = "The owner" if by == "you" else by[:1].upper() + by[1:]
+                told = (
+                    f"{who} cancelled the follow-up on task {task_id} “{task['title']}”; its "
+                    "earlier result stands."
+                    if was
+                    else f"{who} cancelled task {task_id} “{task['title']}”."
+                )
+                told += f" Reason: {reason.strip()}" if reason.strip() else ""
+                told += (
+                    " Do not start that work again (in this worker or another) unless the owner "
+                    "asks for it."
+                )
+                self.delivery.hold(
+                    self.runtime.router_id(),
+                    wrap("system", "cancelled", told, task=task_id, title=task["title"]),
+                    kind="notice",
+                    display=display,
+                    meta=meta,
+                )
         self.runtime.background(
             self.runtime.workers.pump()
         )  # Tasks that depended on it are now blocked.
@@ -1350,11 +1564,30 @@ class TaskActions:
                 "It has one result only: rename it instead, or give the other work a new task."
             )
         earlier, latest = reports[-2], reports[-1]
-        asked = [
-            m["id"] for m in messages
-            if earlier["id"] < m["id"] < latest["id"] and m["kind"] in {"router", "owner"}
-        ]  # fmt: skip
-        first = asked[0] if asked else latest["id"]
+        # The instructions that asked for the latest result: those since the worker last
+        # answered before it (a reply that asks nothing back, or a report on this task). An
+        # exchange about the earlier result (a decision on it, a question answered) stays.
+        between = self.store.all(
+            "SELECT id, kind, text, meta FROM messages WHERE session_id=? AND id>? AND id<? "
+            "ORDER BY id DESC",
+            (task["session_id"], earlier["id"], latest["id"]),
+        )
+        asked: list[int] = []
+        for message in between:
+            meta = json.loads(message["meta"] or "{}")
+            if message["kind"] in {"router", "owner"} and meta.get("task_id") == task["id"]:
+                asked.append(message["id"])
+            elif (
+                asked
+                and not meta.get("narration")
+                and (
+                    message["kind"] == "assistant"
+                    or (message["kind"] == "report" and meta.get("task_id") == task["id"])
+                )
+                and not message["text"].rstrip().endswith(("?", "\uff1f"))
+            ):
+                break
+        first = min(asked) if asked else latest["id"]
         moving = [m for m in messages if m["id"] >= first]
         return dict(earlier), dict(latest), [dict(m) for m in moving]
 
@@ -1416,6 +1649,7 @@ class TaskActions:
         for row in moving:
             meta = json.loads(row["meta"] or "{}")
             self.store.update_message_meta(row["id"], {**meta, "task_id": made["id"]})
+        undo = self.split_changes(task, made, latest, moving[0]["created_at"] if moving else now())
         names = json.loads(self.store.get(f"titles:{made['id']}") or "[]")
         names.append({"title": f"split from “{task['title']}”", "at": now(), "by": by})
         self.store.set(f"titles:{made['id']}", json.dumps(names))
@@ -1425,7 +1659,7 @@ class TaskActions:
             f"splitfrom:{made['id']}",
             json.dumps({
                 "task_id": task_id, "until": until, "mark": mark, "status": made["status"],
-                "moved": [m["id"] for m in moving], "result": task["result"],
+                "moved": [m["id"] for m in moving], "result": task["result"], "undo": undo,
             }),
         )  # fmt: skip
         self.tasks.update(task_id, result=earlier["text"])
@@ -1482,9 +1716,23 @@ class TaskActions:
         self.store.execute(
             "DELETE FROM task_deps WHERE task_id=? OR depends_on=?", (task_id, task_id)
         )
+        undo = found.get("undo") or {}
+        if undo.get("ended"):
+            self.store.set(f"taskend:{original}", json.dumps(undo["ended"]))
+        back = self.store.one(
+            "SELECT id FROM runs WHERE task_id=? ORDER BY started_at DESC LIMIT 1", (original,)
+        )
+        if back:
+            for identifier in undo.get("commands") or []:
+                self.store.execute(
+                    "UPDATE commands SET run_id=? WHERE id=?", (back["id"], identifier)
+                )
+        for key in ("taskbase", "taskend", "taskends", "touched"):
+            self.store.delete(f"{key}:{task_id}")
         self.store.execute("DELETE FROM runs WHERE task_id=?", (task_id,))
         self.store.execute("DELETE FROM tasks WHERE id=?", (task_id,))
         restored = self.tasks.update(original, result=found.get("result") or made["result"])
+        self.runtime.background(self.collect_evidence(original))
         self.publish(restored)
         self.runtime.publish_state()  # The split-off task is gone from every list.
         self.runtime.publish_session(self.store.session(made["session_id"]))
@@ -1551,10 +1799,16 @@ class TaskActions:
         if before == "cancelled":
             # Answered after it was cancelled: the owner wants it after all.
             self.drop_cancelled_note(row["id"], task_id)
+            with suppress(RuntimeError):
+                self.drop_cancelled_note(self.runtime.router_id(), task_id)
         if before in {"review", "done", "failed", "cancelled"}:
             # Cancelling this follow-up gives the finished result back.
             self.store.set(f"reopened:{task_id}", before)
             task = self.tasks.move(task_id, "running", reason="follow-up")
+        elif before == "waiting" and self.store.get(f"askedafter:{task_id}"):
+            # Finished work it asked the owner about: answered, it is back where it was, and
+            # what its worker says next is news on it.
+            task = self.runtime.asks.go_on(task)
         elif before == "waiting":
             # The owner answered what it waited for: it goes on (and asks again if need be).
             task = self.tasks.move(task_id, "running", progress="")
@@ -1614,6 +1868,8 @@ class TaskActions:
         self.store.set(f"reopened:{task_id}", before["status"])
         if before["status"] == "cancelled":
             self.drop_cancelled_note(row["id"], task_id)  # Moot: it is wanted after all.
+            with suppress(RuntimeError):
+                self.drop_cancelled_note(self.runtime.router_id(), task_id)
         task = self.tasks.move(task_id, "running", reason="retry", progress="")
         body = f"The owner asks you to try task {task_id} “{task['title']}” again."
         if text.strip():
@@ -1765,8 +2021,9 @@ class TaskActions:
         return self.view(task)
 
     def declare_artifacts(self, task_id: str, items: list[dict]):
-        """Its worker says what the task made or runs and where each stands: kept by link, the
-        latest word on each; a link said again moves to the top."""
+        """Its worker says what the task made or runs and where each stands: kept by link (or
+        by name: declared again under another link, it is the same thing moved on), the latest
+        word on each; one said again moves to the top."""
         known = json.loads(self.store.get(f"artifacts:{task_id}") or "[]")
         stamp = now()
         row = self.store.find_session(self.tasks.get(task_id)["session_id"])
@@ -1784,7 +2041,11 @@ class TaskActions:
                 "status": clip(" ".join(str(item.get("status") or "").split()), 40),
                 "at": stamp,
             }
-            known = [other for other in known if other["url"] != url] + [entry]
+            known = [
+                other
+                for other in known
+                if other["url"] != url and not (entry["name"] and other["name"] == entry["name"])
+            ] + [entry]
         self.store.set(f"artifacts:{task_id}", json.dumps(known[-20:]))
         self.publish(self.tasks.get(task_id))
 
@@ -1796,7 +2057,8 @@ class TaskActions:
         if not os.path.isabs(path):
             return ""
         real = os.path.realpath(path)
-        folders = [row.get("cwd") or "", *(c["path"] for c in self.workspaces.checkouts(row))]
+        # Its folders: its workspace (its scratch files too), its checkouts.
+        folders = self.workspaces.writable(row) if row.get("id") else [row.get("cwd") or ""]
         if not os.path.isfile(real) or not any(
             folder and within(real, os.path.realpath(folder)) for folder in folders
         ):
@@ -1808,11 +2070,17 @@ class TaskActions:
         receipts) that are still there: a mockup, a plan, a CSV it delivered."""
         if not row or not row.get("cwd"):
             return []
-        folder = os.path.realpath(row["cwd"])
         checkouts = [os.path.realpath(c["path"]) for c in self.workspaces.checkouts(row)]
+        folders = [
+            os.path.realpath(folder)
+            for folder in self.workspaces.writable(row)
+            if folder and os.path.realpath(folder) not in checkouts
+        ]
         found = []
         for path in json.loads(self.store.get(f"touched:{task['id']}") or "[]"):
-            if not within(path, folder) or any(within(path, c) for c in checkouts):
+            if not any(within(path, folder) for folder in folders) or any(
+                within(path, c) for c in checkouts
+            ):
                 continue
             with suppress(OSError):
                 size = os.path.getsize(path)

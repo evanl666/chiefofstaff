@@ -565,11 +565,30 @@ def file_digest(top: Path, names: list[str]) -> str:
     return found.hexdigest()
 
 
+# What separates the words of a command line that may name a file.
+COMMAND_WORD = re.compile(r"[^\s<>|;&()'\"`=,]+")
+
+
+def command_words(commands: str) -> frozenset[str]:
+    """The words of shell commands that may name files: each as written (without a leading
+    "./"), and its last path part ("kit.py" in "textkit/kit.py")."""
+    words: set[str] = set()
+    for word in COMMAND_WORD.findall(commands or ""):
+        word = word.removeprefix("./").rstrip("/:")
+        if not word:
+            continue
+        words.add(word)
+        if "/" in word:
+            words.add(word.rsplit("/", 1)[-1])
+    return frozenset(words)
+
+
 class Scope:
     """One task's share of a checkout a worker kept using for several tasks: what it committed
     since `base` (the commit the checkout was at when the task was taken up), and of what is
     not committed, the files it changed: in a folder of the owner's (shared), those its own
-    edits touched; elsewhere, those changed after `since` (when the task was taken up)."""
+    edits touched or its own shell commands named; elsewhere, those changed after `since` (when
+    the task was taken up)."""
 
     def __init__(
         self,
@@ -580,16 +599,39 @@ class Scope:
         end: dict | None = None,
         others: set[str] | None = None,
         head: str = "",
+        large: set[str] | None = None,
+        commands: str = "",
+        gaps: list[tuple[str, str, str, str, float]] | None = None,
     ):
         self.base, self.since, self.touched = base, since, touched or set()
         # The commit the checkout was on when it was taken up (`start`'s): what commits made
         # before then brought in since (a pull, another branch checked out) is not its work.
         self.head = head
+        # New files too large for its start snapshot (left out of it): not its own later.
+        self.large = large or set()
+        # Its own shell commands (in a folder of the owner's): a file one names is its work.
+        self.commands = commands
+        self.words = command_words(commands)
+        # Between a result and its follow-up, other work may have changed the checkout (a later
+        # task): (tree at its result, tree when it was taken up again, their commits, and when
+        # it was taken up again: a commit after that is its own, however late the snapshot).
+        self.gaps = gaps or []
         # Snapshots (see snapshot): the files as they were when it was taken up (`start`, a
         # tree) and when it reported its result (`end`, {"commit", "tree"}; None while open).
         # Its share is what changed between them: shell edits too, and not an earlier or later
         # task's. `others`: files other tasks' edits wrote (in a folder of the owner's).
         self.start, self.end, self.others = start, end, others or set()
+
+    def named(self, top: Path, name: str) -> bool:
+        """Whether one of its own shell commands names this file (its path, or its name)."""
+        if not self.words:
+            return False
+        base = os.path.basename(name)
+        return (
+            name in self.words
+            or str(top / name) in self.words
+            or (len(base) >= 3 and base in self.words)
+        )
 
     def wrote(self, top: Path, name: str) -> bool:
         """Whether its own edits wrote this file."""
@@ -615,22 +657,25 @@ class Scope:
 
 MAX_SNAPSHOT_FILES = 5000
 MAX_SNAPSHOT_FILE = 20_000_000
+MAX_LARGE_LEFT_OUT = 50
 
 
-def untracked_sizes(top: str, names: list[str]) -> int:
-    """The largest of these files' sizes (0 for none)."""
-    largest = 0
+def too_large(top: str, names: list[str]) -> list[str]:
+    """Those of these files too large to copy into a snapshot."""
+    found = []
     for name in names:
         with suppress(OSError):
-            largest = max(largest, (Path(top) / name).lstat().st_size)
-    return largest
+            if (Path(top) / name).lstat().st_size > MAX_SNAPSHOT_FILE:
+                found.append(name)
+    return found
 
 
 async def snapshot(checkout: dict) -> dict | None:
     """What a checkout holds now, all of it: its commit, and a tree of its files as they are
     (edited, new; not ignored ones). Written to the repository's objects only, through an index
-    of its own: no branch, index or file of the checkout changes. With many or very large new
-    files (not worth copying), its commit and no tree ("") ; None when it cannot be taken."""
+    of its own: no branch, index or file of the checkout changes. New files too large to copy
+    are left out, listed in `large`; with very many new files, its commit and no tree ("");
+    None when it cannot be taken."""
     path, head, live = await asyncio.to_thread(locate, checkout)
     try:
         commit = (await checkout_git(checkout, path, "rev-parse", head)).strip()
@@ -642,10 +687,9 @@ async def snapshot(checkout: dict) -> dict | None:
             checkout, top, "ls-files", "--others", "--exclude-standard", "-z"
         )
         names = [name for name in others.split("\0") if name]
-        if len(names) > MAX_SNAPSHOT_FILES or (
-            await asyncio.to_thread(untracked_sizes, top, names) > MAX_SNAPSHOT_FILE
-        ):
-            return {"commit": commit, "tree": ""}  # Its commit all the same, no tree.
+        large = await asyncio.to_thread(too_large, top, names)
+        if len(names) > MAX_SNAPSHOT_FILES or len(large) > MAX_LARGE_LEFT_OUT:
+            return {"commit": commit, "tree": "", "large": []}  # Its commit all the same.
         index = (await checkout_git(checkout, top, "rev-parse", "--git-path", "index")).strip()
         index = str(Path(top) / index) if not os.path.isabs(index) else index
         with tempfile.TemporaryDirectory(prefix="cos-snap-") as folder:
@@ -653,9 +697,11 @@ async def snapshot(checkout: dict) -> dict | None:
             with suppress(FileNotFoundError):
                 await asyncio.to_thread(shutil.copyfile, index, own)
             env = {"GIT_INDEX_FILE": own}
-            await checkout_git(checkout, top, "add", "-A", limit=120, env=env)
+            # New files too large to copy are left out (and listed: a task's large new file).
+            left_out = [f":(exclude,literal){name}" for name in large]
+            await checkout_git(checkout, top, "add", "-A", "--", ".", *left_out, limit=120, env=env)
             tree = (await checkout_git(checkout, top, "write-tree", env=env)).strip()
-        return {"commit": commit, "tree": tree}
+        return {"commit": commit, "tree": tree, "large": large}
     except (ValueError, OSError):
         return None
 
@@ -664,6 +710,13 @@ def status_name(line: str) -> str:
     """The file a `git status --porcelain` line is about (a rename's new name)."""
     name = line[3:]
     return name.split(" -> ", 1)[-1].strip('"')
+
+
+async def share_files(checkout: dict, scope: Scope) -> set[str]:
+    """The files that are one task's share of a checkout (see Scope)."""
+    path, head, live = await asyncio.to_thread(locate, checkout)
+    share = await scope_files(checkout, path, head, live, bool(checkout.get("shared")), scope)
+    return {*share.keep, *share.fresh, *share.large}
 
 
 async def changes(checkout: dict, scope: Scope | None = None) -> dict | None:
@@ -685,6 +738,8 @@ async def changes(checkout: dict, scope: Scope | None = None) -> dict | None:
             if current and current != "HEAD":
                 result["branch"] = current
     shared = bool(checkout.get("shared"))
+    if shared:
+        result["shared"] = True  # A folder of the owner's: no branch of its own to open a PR from.
     if scope is not None:
         result.update(await scoped_changes(checkout, path, head, live, shared, scope))
         result.update(await version(checkout) or {})
@@ -752,6 +807,9 @@ class Share:
         # kept files were not committed then.
         self.start, self.end, self.end_commit = "", "", ""
         self.uncommitted: set[str] = set()
+        self.large: list[str] = []  # Its new files too large to count or show.
+        # In a folder of the owner's: what changed there meanwhile that is not its own.
+        self.not_counted: list[str] = []
 
 
 async def own_commits(checkout: dict, path: str, head: str, shared: bool, share: Share, scope):
@@ -835,18 +893,54 @@ async def tree_share(
         for name, status in (await tree_names(checkout, top, start, end["tree"])).items()
         if (status != "A" and uncommitted.get(name) != "A") or untracked_work([name])
     }
+    if scope.gaps:
+        # Reopened after other work: what changed only in between is not its own.
+        between: set[str] = set()
+        own: set[str] = set()
+        edges = [start]
+        for before, after, *_ in scope.gaps:
+            between |= set(await tree_names(checkout, top, before, after))
+            edges += [before, after]
+        edges.append(end["tree"])
+        for first, last in zip(edges[::2], edges[1::2], strict=True):
+            own |= set(await tree_names(checkout, top, first, last))
+        window = {
+            name: status for name, status in window.items() if name in own or name not in between
+        }
+        share.exact = share.exact and not (between & own)
     share.uncommitted = set(uncommitted)
     if share.base:
         await own_commits(checkout, path, end["commit"], False, share, scope)
+        for _before, _after, done, again, restarted in scope.gaps:
+            if not (done and again and done != again):
+                continue
+            # Commits made in between (another task's): not its own.
+            with suppress(ValueError):
+                listed = await checkout_git(
+                    checkout, path, "rev-list", "--format=%H %ct", "--no-commit-header",
+                    f"{done}..{again}",
+                )  # fmt: skip
+                pairs = listed.split()
+                made = {
+                    sha
+                    for sha, when in zip(pairs[::2], pairs[1::2], strict=False)
+                    if not restarted or int(when) <= restarted
+                }
+                if made & set(share.own):
+                    share.own = {sha: names for sha, names in share.own.items() if sha not in made}
+                    share.exact = False
         share.committed = {name for names in share.own.values() for name in names}
     if shared:
+        # In a folder of the owner's, others work too (the owner, other tasks): its files are
+        # those its own edits wrote or its own commands named; not what a pull brought in.
         brought = await brought_in(checkout, top, scope, end["commit"])
         keep = {
             name
             for name in window
             if scope.wrote(top, name)
-            or not (scope.others_wrote(top, name) or (name in brought and name not in uncommitted))
+            or (scope.named(top, name) and not (name in brought and name not in uncommitted))
         }
+        share.not_counted = sorted(set(window) - keep)
         mixed = {sha for sha, names in share.own.items() if not set(names) & keep}
         if mixed:
             share.exact = False  # The owner's own commits (or pulled ones) in between.
@@ -860,6 +954,12 @@ async def tree_share(
     share.committed &= keep
     share.uncommitted &= keep
     share.start, share.end, share.end_commit = start, end["tree"], end["commit"]
+    share.large = [
+        name
+        for name in end.get("large") or []
+        if name not in scope.large
+        and (not shared or scope.wrote(top, name) or not scope.others_wrote(top, name))
+    ]
     return share
 
 
@@ -947,6 +1047,10 @@ async def scoped_changes(
     total["uncommitted"] = 0
     if share.end:
         total |= {"files": len(keep), "uncommitted": len(share.uncommitted)}
+        if share.large:
+            total["large"] = len(share.large)
+        if share.not_counted:
+            total["not_counted"] = len(share.not_counted)
         if keep and share.exact:
             with suppress(ValueError):
                 total |= receipts.shortstat(
@@ -957,6 +1061,8 @@ async def scoped_changes(
                 total["files"] = len(keep)
         elif keep:
             await own_lines(checkout, share, total)
+        total["files"] += len(share.large)
+        total["uncommitted"] += len(share.large)
         return total
     if share.exact and keep and (share.base or live):
         against = share.base if live else f"{share.base}..{head}"
@@ -974,7 +1080,20 @@ async def scoped_changes(
         )
         total["files"] += len(share.fresh)
         total["insertions"] += await asyncio.to_thread(count_lines, share.top, share.fresh)
+        if large := await asyncio.to_thread(too_large_to_count, share.top, share.fresh):
+            total["large"] = large
     return total
+
+
+def too_large_to_count(root: Path, names: list[str]) -> int:
+    """How many of these new files are too large to count lines in."""
+    found = 0
+    for name in names[:MAX_NEW_FILES]:
+        with suppress(OSError):
+            file = root / name
+            if file.is_file() and not file.is_symlink() and file.stat().st_size > MAX_NEW_FILE:
+                found += 1
+    return found
 
 
 def count_lines(root: Path, names: list[str]) -> int:

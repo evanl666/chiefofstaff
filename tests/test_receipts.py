@@ -596,3 +596,12 @@ def test_a_check_not_finished_yet_is_not_the_oldest_run():
     assert receipts.checks_state(rollup) == "pending", "the rerun is the latest"
     done = [{**rollup[1], "conclusion": "SUCCESS", "completedAt": "0001-01-01T00:00:00Z"}]
     assert receipts.checks_started(done) == "2026-01-01T01:00:00Z"
+
+
+def test_a_receipt_shows_the_test_run_of_a_compound_command():
+    """Bug bash: the tests chip's tooltip showed the heredoc that wrote a file before them."""
+    from chiefofstaff.receipts import shown_command
+
+    line = "cat >> kit.py <<'EOF'\ndef x(): pass\nEOF\ncd /w/app && uv run pytest -q 2>&1 | tail -3"
+    assert shown_command(line, "test") == "cd /w/app && uv run pytest -q"
+    assert shown_command("ruff check . && pytest -k 'a or b'", "test") == "pytest -k 'a or b'"

@@ -125,10 +125,16 @@ export function taskPhase(task, worker, { active = "", activeTitle = "", stopped
   if (checkBack) return at("monitoring", "check-back", "");
   if (watching.length) return at("monitoring", "watching", "");
   if (["queued", "starting"].includes(worker.status)) return at("monitoring", "queued", "");
-  // Its worker is on another task: this one waits its turn when it was not taken up yet;
-  // taken up and left, it is paused (not up next: it may be delivered, or wait on the owner).
+  // Its worker is on another task: this one waits its turn when it was not taken up yet, or when
+  // it was finished and the owner followed up on it (it runs again, its worker gets to it after
+  // the task it is on); taken up and left, it is paused (it may be delivered, or wait on the
+  // owner).
   const on = activeTitle ? `“${activeTitle}”` : "another task";
-  if (working(worker)) return task.started === false ? at("monitoring", "turn", `Up next: its worker is on ${on} now`) : at("monitoring", "paused", `Paused: its worker is on ${on} now`);
+  if (working(worker)) {
+    if (task.started === false) return at("monitoring", "turn", `Up next: its worker is on ${on} now`);
+    if (task.result) return at("monitoring", "turn", `Up next: following up after ${on}`);
+    return at("monitoring", "paused", `Paused: its worker is on ${on} now`);
+  }
   // Its worker was stopped on another task: this one comes once the owner says go on there.
   if (task.started === false && stoppedTitle) return at("monitoring", "turn", `Up next: after you say Go on to “${stoppedTitle}”`);
   if (worker.status === "waiting" && active === task.id) return at("monitoring", "waiting", "It waits for your answer on a card under Needs you");
@@ -188,12 +194,13 @@ export function boardOf(tasks, workers, { now = Date.now(), stallHours = 4, onCa
 }
 export const endedAt = (task) => task.ended_at || task.updated_at || "";
 // Monitoring, a row per task: what went quiet first (overdue, nothing to wait on), then the
-// rest, newest first; the owner's deliveries waiting on others and the PRs they reviewed in
-// groups of their own.
-const URGENT = { overdue: 0, idle: 1 };
+// rest, newest first, then the queued ones in the order they start (the oldest first); the
+// owner's deliveries waiting on others and the PRs they reviewed in groups of their own.
+const URGENT = { overdue: 0, idle: 1, queued: 3 };
 export function monitoringRows(tasks, phases) {
   const rank = (task) => URGENT[phases.get(task.id).marker] ?? 2;
-  const list = tasks.filter((task) => phases.get(task.id)?.section === "monitoring").sort((a, b) => rank(a) - rank(b) || b.updated_at.localeCompare(a.updated_at));
+  const order = (a, b) => (rank(a) === URGENT.queued ? a.created_at.localeCompare(b.created_at) : b.updated_at.localeCompare(a.updated_at));
+  const list = tasks.filter((task) => phases.get(task.id)?.section === "monitoring").sort((a, b) => rank(a) - rank(b) || order(a, b));
   const marked = (...markers) => list.filter((task) => markers.includes(phases.get(task.id).marker));
   return { waiting: list.filter((task) => !["delivered", "reviewed"].includes(phases.get(task.id).marker)), delivered: marked("delivered"), reviewed: marked("reviewed") };
 }

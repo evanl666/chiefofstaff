@@ -566,3 +566,110 @@ def test_a_stopped_task_waits_for_the_owner():
         [{"id": "w1", "status": "working", "turn_task": "o"}],
     )
     assert found["phases"] == {"s": "needs/stopped", "o": "running"}
+
+
+def test_a_link_it_was_given_is_not_its_output_and_cut_or_generic_links_say_nothing():
+    """G8b: a link the task was given stays a reference though a report says it made it
+    (declared, or a file it wrote, it is output). G9b: a link cut with "..." is no link. G10b:
+    "here", "this doc", "链接" are not a doc's name: it is named by its kind."""
+    found = run_js(
+        """
+        const doc = (id) => `https://docs.google.com/document/d/${id}/edit`;
+        const links = t.taskLinks({
+          title: "Summarize the spec", goal: "",
+          given_links: [doc("1GivenSpec"), doc("1GivenDeclared")],
+          made_links: [doc("1GivenSpec"), doc("1OwnDoc")],
+          artifacts: [{ url: doc("1GivenDeclared"), name: "", status: "final" }],
+          result: "Wrote [here](" + doc("1OwnDoc") + "), from [this doc](" + doc("1GivenSpec")
+            + ") and [链接](" + doc("1GivenDeclared") + "). See "
+            + "https://docs.google.com/document/d/1CutShort... "
+            + "and https://docs.google.com/document/d/1CutUni…",
+        });
+        return links.map((l) => [l.key, l.role, t.linkName(l)]);
+        """
+    )
+    assert found == [
+        ["gdoc:1GivenDeclared", "output", "Google Doc"],
+        ["gdoc:1OwnDoc", "output", "Google Doc"],
+        ["gdoc:1GivenSpec", "reference", "Google Doc"],
+    ]
+
+
+def test_a_line_keeps_what_follows_a_link_and_a_notice_keeps_its_whole_title():
+    """H10: "#44 (https://…/pull/44) is open" kept its ")"; U7: a title with " · " in it is
+    the title's, not where the notice's aside starts. U16b: a file too large to count is said
+    so, not "+0 −0"."""
+    found = run_js(
+        """
+        return {
+          gist: [
+            t.gist("Opened #44 (https://github.com/o/cos-approve-test/pull/44) is open."),
+            t.gist("Doc: https://docs.google.com/document/d/abc/edit. Done (see https://x.com/a/b)."),
+          ],
+          heads: [
+            t.headOf("Started “Benchmark words() · textkit” · new because the owner asked"),
+            t.headOf("New task “Fix A · B” for “Worker · two”"),
+            t.headOf("Told “Fix it”"),
+          ],
+          changes: [
+            t.changesText({ files: 1, insertions: 0, deletions: 0, large: 1 }),
+            t.changesText({ files: 3, insertions: 5, deletions: 1, large: 2 }),
+            t.changesText({ files: 2, insertions: 5, deletions: 1 }),
+          ],
+          others: [t.notCountedText({ files: 1, not_counted: 2 }), t.notCountedText({ files: 1 })],
+        };
+        """
+    )
+    assert found["gist"] == [
+        "Opened #44 (cos-approve-test#44) is open.",
+        "Doc: docs.google.com… Done (see x.com…).",
+    ]
+    assert found["heads"] == [
+        "Started “Benchmark words() · textkit”",
+        "New task “Fix A · B” for “Worker · two”",
+        "Told “Fix it”",
+    ]
+    assert found["changes"] == [
+        "1 large new file",
+        "+5 −1 in 1 file · 2 large new files",
+        "+5 −1 in 2 files",
+    ]
+    assert found["others"] == ["not counted: 2 files", ""]
+
+
+def test_changes_requested_wins_over_failing_ci():
+    """H9: one word for a PR everywhere: changes requested before CI failing."""
+    found = run_js(
+        f"const a = await import({json.dumps((STATIC / 'artifacts.js').as_uri())});\n"
+        """
+        return [
+          a.prStatus({ state: "OPEN", checks: "failing", review: "CHANGES_REQUESTED" }),
+          a.prStatus({ state: "OPEN", checks: "failing", review: "" }),
+        ];
+        """
+    )
+    assert found == [["changes requested", "bad"], ["CI failing", "bad"]]
+
+
+def test_queued_rows_in_start_order_and_a_follow_up_is_up_next():
+    """L6: queued rows in the order they start (the oldest first), after the rest. L7: a
+    finished task the owner followed up on runs again at once, but its worker is on another
+    task: it is up next, not paused."""
+    workers = [
+        {"id": "w1", "status": "working", "turn_task": "on"},
+        {"id": "w2", "status": "queued"},
+    ]
+    tasks = [
+        task("on", "w1", started=True),
+        task("again", "w1", started=True, result="Fixed it.", at="2026-11-07T11:40:00Z"),
+        task("left", "w1", started=True, at="2026-11-07T11:30:00Z"),
+        task("q2", "w2", "queued", at="2026-11-07T11:55:00Z"),
+        task("q1", "w2", "queued", at="2026-11-07T11:10:00Z"),
+        task("q3", "w2", "queued", at="2026-11-07T11:58:00Z"),
+    ]
+    tasks[4]["updated_at"] = "2026-11-07T11:59:00Z"  # Updated last, created first.
+    found = board(tasks, workers)
+    assert found["phases"]["again"] == "monitoring/turn"
+    assert found["whys"]["again"] == "Up next: following up after “on”"
+    assert found["phases"]["left"] == "monitoring/paused"
+    assert found["monitoring"]["waiting"] == ["again", "left", "q1", "q2", "q3"]

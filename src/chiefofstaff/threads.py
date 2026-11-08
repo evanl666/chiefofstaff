@@ -32,8 +32,8 @@ def links(text: str) -> list[str]:
     found = []
     plain = CODE_SPAN.sub(" ", FENCE.sub(" ", text or ""))
     for match in LINK.finditer(plain):
-        if CUT.match(plain, match.end()):
-            continue
+        if CUT.match(plain, match.end()) or match.group(0).endswith("..."):
+            continue  # Cut short ("…" or "..."): not the whole address.
         url = match.group(0).replace("&amp;", "&")
         while True:
             if mark := LINK_TRAIL.search(url):
@@ -49,20 +49,35 @@ def links(text: str) -> list[str]:
 
 # [the plan](https://…): what the report calls a link.
 NAMED_LINK = re.compile(r"\[([^\]\n]{1,120})\]\((https?://[^\s)]+)\)")
-# A line saying it made what it links: created, wrote, opened, published, started…
+# A line saying it made what it links: created, wrote, opened, published, started… Whole
+# words ("product spec" is not "produced"), and not someone else's ("the doc you shared").
 MADE = re.compile(
-    r"\b(?:creat|wr[io]te|written|made|mak|open|publish|start|launch|draft|add|upload|generat|"
-    r"produc|deliver|built|build|kick|submit|shar|new)\w*|"
+    r"(?<!\byou )(?<!\bthey )(?<!\bhe )(?<!\bshe )\b(?:creat(?:e|ed|es|ing)|wrote|written|"
+    r"made|opened|published|started|launched|drafted|added|uploaded|generated|produced|"
+    r"delivered|built|kicked off|submitted|posted|filed|set up)\b|"
     "\u521b\u5efa|\u65b0\u5efa|\u5199\u4e86|\u5199\u597d|\u4ea7\u51fa|\u751f\u6210|"
     "\u542f\u52a8|\u53d1\u5e03|\u63d0\u4ea4|\u8d77\u8349",
+    re.IGNORECASE,
+)
+# Words that only point at a link ("[here](…)"): not its name.
+GENERIC_NAME = re.compile(
+    r"^(?:here|link|this link|the link|this|this doc|the doc|doc|document|click here|source|url|"
+    r"page|this page|"
+    "\u8fd9\u91cc|\u94fe\u63a5|\u6b64\u5904|\u6587\u6863|\u8fd9\u4e2a)[.:!]?$",
     re.IGNORECASE,
 )
 
 
 def named_links(text: str) -> dict[str, str]:
-    """The text a report gives its links ([text](url)), by link."""
+    """The text a report gives its links ([text](url)), by link; not words that only point at
+    it ("here")."""
     plain = CODE_SPAN.sub(" ", FENCE.sub(" ", text or ""))
-    return {url: " ".join(name.split()) for name, url in NAMED_LINK.findall(plain)}
+    found = {}
+    for name, url in NAMED_LINK.findall(plain):
+        words = " ".join(name.split())
+        if not GENERIC_NAME.match(words):
+            found[url] = words
+    return found
 
 
 def made_links(text: str) -> list[str]:

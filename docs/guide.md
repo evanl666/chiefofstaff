@@ -29,16 +29,17 @@ bounds, see [SECURITY.md](../SECURITY.md).
 
 Home is the one screen you work from. On the left is your conversation with the Router: what
 you asked, its short answers, and one line for each thing that happened on the way (*Started
-“Fix the flaky login test”*, *Fix the flaky login test finished · View*). **View** brings up the
+“Fix the flaky login test”*, *Fix the flaky login test finished · View*; a worker that could not
+go on says why, *Slack couldn't go on: …*). **View** brings up the
 task's card on the right instead of repeating its report in the chat; lines from Slack, the
-Watchdog and other sessions open in place.
+Watchdog and other sessions open in place, as does a report's line (to read all of it).
 
 On the right, everything has one place:
 
 | Section | What is there |
 | --- | --- |
-| **Needs you** | Questions and forms from workers, sign-ins, decisions, a folder to pick, Slack replies, PR reviews and replies to approve, PRs of yours ready to merge (*Merge* merges it as shown; anything pushed since stops it), sends a restart interrupted, failed or blocked tasks. A Slack reply someone answered before you sent it is not sent: its card shows what they wrote, marked new, with *Send anyway*; a reply you emptied is not sent either. A draft its worker withdrew or replaced leaves, and its line in the chat says so. A worker's question stays here until you answer or dismiss it, also when its task was cancelled or finished meanwhile: answering means you want the work, and that task goes on with your answer. Each card has one main action (*Send*, *Answer*, *Accept*…); the rest is behind **⋯**. A card leaves as soon as you act and a short note confirms it; if that did not work, it comes back with the reason. |
-| **Tasks** | Task by task, in four parts beside *Needs you*. Every part of Home (*Needs you* too) folds: click its title; its count stays in sight, and it stays as you left it (*Needs you* opens again by itself when something new comes). *Artifacts* (a list that scrolls on its own): every PR, doc, run and file your tasks made, by its name (what its worker called it, else the words its report linked it with, else what it is, *Google Doc*: a document's id is only on hover) and where it stands now: a PR as GitHub has it (*draft*, *in review*, *CI failing*, *awaiting approval*, *ready to merge*, *approved*, *merged*…), a doc or run as its worker last said (*draft*, *running*, *succeeded*, *failed*…), else as its task stands (in italics; a report's are *reported*). It lists the PRs a task made (not those it only mentions), the docs and files its worker declared or its reports say it made, and the runs it gives (one a later report does not repeat stays); not what it only mentions (a doc it discussed, *docs.google.com* itself, a link in code) nor the links you or the Router gave it. The ones that need a look come first; **✕** takes one off the list (here or on its task's card, where it then folds under *More links*; it comes back by itself if it goes wrong later), *Show … taken off* brings it back. *Running*: a box per worker with the task it is on now (a worker does one task at a time), with the step it is in (what it is for: *Reading app.py*, *Searching the code for “…”*, or the command's own description) and for how long, its latest report in two lines (click for all of it; when it reported is on its own line below) and what it made: its PRs with GitHub's number, title and state, the docs it wrote and the runs it started; Spark applications, logs, debug pages, documents and PRs it only mentions fold under *More links*. A result you asked more about shows here (*Following up*) while its worker is at it; a box says *waits for you* when its worker waits on your answer. *Monitoring* and *Recently finished* are lists that scroll on their own, a row per task: its title, when, what it waits on (or what it came to) and the main thing it made (*app#432*); click a row for its whole card (its title then opens its worker); hover for its id, worker and credits. A list does not move while the mouse is over it. *Monitoring*: tasks not being worked on now, the overdue ones first, each saying what it waits on and what wakes it: a PR or thread it follows (*Waiting on app#594 (awaiting approval)*), a time it checks back (`check_back`, for a long run: *Checks back at 3:15 PM: the Flyte run*), a slot (*Queued · Waiting for a worker slot · 3 of 3 busy*, *Waiting for “…”*), its turn (*Up next*, not taken up yet; behind a task you stopped, *after you say Go on to “…”*) or its worker's return (*Paused*, taken up and left for another task). Results delivered and still followed for what comes next are in groups of their own: *Delivered, waiting on others* (your work, waiting on a review, the merge, a reply) and *PRs you reviewed* (folded at first); a PR a worker follows for two of its tasks is one row. One with nothing new there for a day is with the finished ones, *Still following* (news brings it back as an *Update*). *Overdue*: no activity for *Stalled after* hours (Settings → General, 4 by default) and nothing to wait on: its worker is asked once where it stands, *Nudge* asks again; no answer within the hour brings it to *Needs you*. *Recently finished*: the newest first across workers, 30 at a time (*Show more* at the end of the list), for three days. A report that only informs is here once delivered, marked *Report*, with a dot until you open it and *Done* on its card (nothing to accept: done once read); the files its worker wrote in its folder are on it (*file · mock5.html*: click to read it). Under *Needs you* go results to accept (*To review*: it changed code, opened a PR, has unverified criteria or a flag, or the Router said you want to look at it, a mockup or a plan; the outcome in a line and the [receipts](#receipts), *Show report* for the whole report) and news on finished work (*Update*, until *Got it*). *Accept*, or under **⋯** *Follow up*, *Copy report* (markdown for a PR description), *Create PR* (for work on a branch of its own), *Rename…* and, when its latest result is about something else, *Move the latest result to a new task…*: it shows what stays and what moves (that result and the messages after it) and asks what the new task delivers; the new task's card has *Undo split* for ten minutes, until it is worked on (then it is a task of its own). A card's PR chips are the PRs its task made or reviewed, each with where it stands in a word (*changes requested*, *ready to merge*…); its tests are a chip when they ran in its own checkout, and tests it ran elsewhere (someone's source, to check a claim) are in its report (*Ran tests in source-v0.1.26 · 592 passed*). Every count counts tasks. |
+| **Needs you** | Questions and forms from workers, sign-ins, decisions, a folder to pick, Slack replies, PR reviews and replies to approve, PRs of yours ready to merge (*Merge* merges it as shown; anything pushed since stops it: the card says so and goes, and the PR comes back once its new commits are ready), sends a restart interrupted, failed or blocked tasks. A Slack reply someone answered before you sent it is not sent: its card shows what they wrote, marked new, and its one action is *Send anyway* (held again only if someone writes after that); a reply you emptied is not sent either. A draft its worker withdrew or replaced leaves, and its line in the chat says so (after a reload too). A worker's (or the Slack session's) question stays here until you answer or dismiss it, also when its task was cancelled or finished meanwhile: answering means you want the work, and that task goes on with your answer. Each card has one main action (*Send*, *Answer*, *Accept*…); the rest is behind **⋯**. A card leaves as soon as you act and a short note confirms it; if that did not work, it comes back with the reason. |
+| **Tasks** | Task by task, in four parts beside *Needs you*. Every part of Home (*Needs you* too) folds: click its title; its count stays in sight, and it stays as you left it (*Needs you* opens again by itself when something new comes). *Artifacts* (a list that scrolls on its own): every PR, doc, run and file your tasks made, by its name (what its worker called it, else the words its report linked it with, else what it is, *Google Doc*: a document's id is only on hover) and where it stands now: a PR as GitHub has it (*draft*, *in review*, *changes requested*, *CI failing*, *awaiting approval*, *ready to merge*, *approved*, *merged*…; changes requested comes before failing CI here, on a card's PR chip and in what Monitoring says it waits on), a doc or run as its worker last said (*draft*, *running*, *succeeded*, *failed*…), else as its task stands (in italics; a report's are *reported*). It lists the PRs a task made (not those it only mentions), the docs and files its worker declared or its reports say it made, and the runs it gives (one a later report does not repeat stays); not what it only mentions (a doc it discussed, *docs.google.com* itself, a link in code) nor the links you or the Router gave it. The ones that need a look come first; **✕** takes one off the list (here or on its task's card, where it then folds under *More links*; it comes back by itself if it goes wrong later), *Show … taken off* brings it back. *Running*: a box per worker with the task it is on now (a worker does one task at a time), with the step it is in (what it is for: *Reading app.py*, *Searching the code for “…”*, or the command's own description) and for how long, its latest report in two lines (click for all of it; when it reported is on its own line below) and what it made: its PRs with GitHub's number, title and state, the docs it wrote and the runs it started; Spark applications, logs, debug pages, documents and PRs it only mentions fold under *More links*. A result you asked more about shows here (*Following up*) while its worker is at it; a box says *waits for you* when its worker waits on your answer. *Monitoring* and *Recently finished* are lists that scroll on their own, a row per task: its title, when, what it waits on (or what it came to) and the main thing it made (*app#432*); click a row for its whole card (its title then opens its worker; **▴** or Esc folds it back, and Enter on a row's title shows it); hover for its id, worker and credits. A list does not move while the mouse is over it. *Monitoring*: tasks not being worked on now, the overdue ones first, each saying what it waits on and what wakes it: a PR or thread it follows (*Waiting on app#594 (awaiting approval)*), a time it checks back (`check_back`, for a long run: *Checks back at 3:15 PM: the Flyte run*), a slot (*Queued · Waiting for a worker slot · 3 of 3 busy*, *Waiting for “…”*; queued ones last, in the order they start), its turn (*Up next*, not taken up yet; a finished task you followed up on while its worker is on another, *Up next: following up after “…”*; behind a task you stopped, *after you say Go on to “…”*) or its worker's return (*Paused*, taken up and left for another task). A row says what it waits on once, on its second line. Results delivered and still followed for what comes next are in groups of their own: *Delivered, waiting on others* (your work, waiting on a review, the merge, a reply) and *PRs you reviewed* (folded at first); a PR a worker follows for two of its tasks is one row. One with nothing new there for a day is with the finished ones, *Still following* (news brings it back as an *Update*). *Overdue*: no activity for *Stalled after* hours (Settings → General, 4 by default) and nothing to wait on: its worker is asked once where it stands, *Nudge* asks again; no answer within the hour brings it to *Needs you*. *Recently finished*: the newest first across workers, 30 at a time (*Show more* at the end of the list), for three days. A report that only informs is here once delivered, marked *Report*, with a dot until you open it and *Done* on its card (nothing to accept: done once read); the files its worker wrote in its folder are on it (*file · mock5.html*: click to read it). Under *Needs you* go results to accept (*To review*: it changed code, opened a PR, has unverified criteria or a flag, or the Router said you want to look at it, a mockup or a plan; the outcome in a line and the [receipts](#receipts), *Show report* for the whole report) and news on finished work (*Update*, until *Got it*). *Accept*, or under **⋯** *Follow up*, *Copy report* (markdown for a PR description), *Create PR* (for commits on a branch of its own, a *chief/…* one or one you named, that no PR is from yet), *Rename…* (on any task, also one that waits for you or failed) and, when its latest result is about something else, *Move the latest result to a new task…*: it shows what stays and what moves (that result and the messages that asked for it; what was said about the earlier result stays) and asks what the new task delivers; the new task's card has *Undo split* for ten minutes, until it is worked on (then it is a task of its own). A card's PR chips are the PRs its task made or reviewed, each with where it stands in a word (*changes requested*, *ready to merge*…); its tests are a chip when they ran in its own checkout, and tests it ran elsewhere (someone's source, to check a claim) are in its report (*Ran tests in source-v0.1.26 · 592 passed*). Every count counts tasks. |
 
 When a finished task's worker drafted something for you (a Slack reply, a PR review), the draft
 is the one card: it shows the task's result, and sending it accepts the task.
@@ -49,9 +50,13 @@ to it directly; **← Home** goes back. *Stop*, next to *Thinking…* at
 the end of a timeline, interrupts what a session is doing (and a command it left running in
 the background): the task its worker was on waits under *Needs you* as *Stopped* until you say
 *Go on* (or *Go on with a note…*), tell it in its chat, or cancel it, and what it was sent
-during that turn goes out again with its next message. Cancelling a stopped task lets the
-worker go on with its other tasks at once. What you write in a worker's chat answers the task
-that asked you (or the question card it waits on); about finished work, its answer is an
+during that turn goes out again with its next message. Ask the Router to stop ("stop all my
+work") and it does the same (*Stopped by the Router*, with *Go on*): it cancels only when you
+say cancel. Cancelling a stopped task lets the worker go on with its other tasks at once (also
+after a restart). When you cancel a task, the Router hears of it with its next message, and it
+does not start that work again (nor a new Router after a handover) unless you ask. What you
+write in a worker's chat answers the task that asked you (or the question or decision card it
+waits on), and that task goes on at once; about finished work, its answer is an
 *Update* on the task, which keeps its result, unless it changed code for you: then that is a new
 result to review. Written to it from Home (@ in the Router chat), its answer shows there too
 (once: not when its report is there already). A worker's **⋯** (top right) has its
@@ -107,7 +112,9 @@ on the same subject reuses its context.
 
 Task states: *queued* (waiting for a slot or for tasks it depends on), *running*, *waiting*
 (it asked something or is blocked), *review* (done, ready for you), *done* (you accepted it),
-*failed* (retry it with an optional note) and *cancelled*.
+*failed* (it could not start, or its worker found it cannot be done and says why; retry it
+with an optional note) and *cancelled*. When the Router has another worker do a failed task
+instead, the failed one is marked replaced by the new one, so no *Retry* is left beside it.
 
 A task that needs another's result starts once that one reports done. When it must build on
 work you have checked (an API others code against), the Router makes it wait until you
@@ -144,6 +151,9 @@ timeline shows *New task … for …*, *Continued in …* or *Started … · new
 Workers close themselves when their PR is merged or closed. Finished workers that follow
 nothing close after *Close idle after* hours (default 24). Closing is reversible: talk to a
 closed worker, or open it and press *Reopen*, to continue with its conversation and checkout.
+Closing a worker at work stops it and cancels its open tasks, and the Router hears of it;
+*Reopen* (or writing to it) brings back the ones it had started, where they were: stopped,
+waiting for your *Go on* or *Cancel* (or still waiting for your answer).
 
 At most *Parallel workers* run at once (up to 1000); the rest queue.
 
@@ -269,7 +279,13 @@ A worker's report is its claim. Receipts are what Chief of Staff observed:
 - the shell commands it ran and their exit codes, recognized as tests, checks or builds (also
   tests run through a script of the project's, known by the test runner's summary, and runs a
   worker hands to one of Copilot's sub-agents);
-- commits and changes in its checkouts (`git diff` against where its branch started);
+- commits and changes in its checkouts (`git diff` against where its branch started), each
+  task's own: from when it was taken up to its result, less what other work changed in between
+  (a later task's, before a follow-up on it). In a folder of yours (not a worktree), a file is a
+  task's when its edits wrote it or its own commands named it; what you (or a pull, or another
+  task) changed there meanwhile is not counted (*not counted: 2 files*). A new file too large to
+  count is *1 large new file*. A finished task is *Out of date* when its own files changed
+  since its result (not when a later task changed others);
 - the state and checks of pull requests it reported.
 
 The review card shows them under *Observed* and flags disagreements, e.g. *Says tests pass, but
@@ -327,7 +343,8 @@ notification:
 - **Decisions**: a choice that is yours (scope, a trade-off, a risky change such as a migration).
   The card says why it comes up, the options and what each means, and what the worker
   recommends; pick one or write your own. Workers that hit the same question wait on the same
-  card, and one answer reaches all of them. See [Decisions](#decisions).
+  card, and one answer reaches all of them. Answering in the worker's chat answers its card
+  too; a card whose task ended (done, failed, cancelled) leaves. See [Decisions](#decisions).
 - **Questions**: a worker uses Copilot's `ask_user` for quick facts. Pick a choice or type an
   answer.
 - **Forms and links**: an MCP tool asks for input, or for you to open a link.
@@ -335,13 +352,17 @@ notification:
   itself. Copilot keeps the sign-in for every session (see [SECURITY.md](../SECURITY.md)).
 - **A folder**: the Router is not sure where a task belongs.
 - **Approvals**: Slack replies and PR reviews drafted in your voice. Edit and *Send*; or,
-  under **⋯**, *Ask to redo…* (say what should change: the same session drafts it again and a
-  new card comes) or *Reject* with a reason the session learns from. A Slack draft shows where
+  under **⋯**, *Ask to redo…* (say what should change, it is needed: the same session drafts it
+  again and a new card comes) or *Reject* with a reason the session learns from. A Slack draft
+  shows where
   it goes (DM, channel or thread) and the latest message there, read from Slack itself, so you
   can check it answers the right conversation. When someone wrote there after the draft, *Send*
   does not send: the card shows what they wrote, and *Send anyway* sends it. A newer draft for
   the same conversation replaces the older one, and a session can withdraw a draft that turned
-  out wrong. An empty reply is never sent.
+  out wrong. An empty reply is never sent. A question its worker asked about the draft (send
+  it?) is answered by what you do with it, and its task goes on (or, finished, stays where it
+  was). Edits you make to a finished task's draft reach its worker with its next message: it is
+  not woken for them, and the task keeps its result.
 
 There are no per-tool settings: Chief of Staff uses whatever your Copilot has (MCP servers,
 CLIs). For a new ability ("read our company docs"), the Router starts a setup worker that finds
@@ -508,13 +529,17 @@ with @ and its author's login.
 (edited a little, even)? Within a few minutes Chief of Staff finds it there: the card leaves as
 sent, and the worker is told, so it does not ask you about it again. A worker also always hears
 what became of its drafts (sent, edited, rejected), with its next message. What you post on a PR
-yourself, and what its own worker pushes, is not news to the workers following it; news on a
-PR goes to the task that made it (the task is named in it), and once handled, a finished task
-goes back to where it was.
+yourself, and what its own worker pushes (any commit made in a worker's checkout, quiet or not),
+is not news to the workers following it; news on a PR goes to the task that made it (the task is
+named in it; not a later task of that worker that only asks about it), and once handled, a
+finished task goes back to where it was. A worker that only read or reviewed a PR someone else's
+task made is not asked too, except for replies to its own review comments.
 
 **Several GitHub accounts** (a personal one active in `gh`, your company's signed in as well):
 Chief of Staff reaches each repository with the account that can see it, and remembers it per
-organization. Sign in with each once (`gh auth login`); you need not switch. When none can see a
+organization. Sign in with each once (`gh auth login`); you need not switch. Workers are told the
+same: they open PRs and push as that account (gh's active one, unless it cannot see the
+repository), not as another one that happens to be signed in. When none can see a
 repository, the worker tells you which accounts are signed in.
 
 Workers commit on their branch but do not push unless the task asks for it: you open the PR with
@@ -526,10 +551,13 @@ Settings → Connections → *Watches* says what to look out for, in your words:
 mentions of me", "comments on my Google Docs", "emails from customers". Optionally say with
 what: "Glean search", "the Slack MCP server", your company's own search. Chief of Staff's
 connector checks them on a schedule (every 5 minutes in work hours, every 30 after; both
-settable, 0 turns after-hours checks off; weekends count as after hours, and Settings says when
-it is not scanning and why) with whatever MCP servers, skills and CLIs your
+settable, 0 turns after-hours checks off; weekends count as after hours: Settings says
+*Weekend: every 30 min*, or *Not scanning now* and why when after-hours checks are off) with
+whatever MCP servers, skills and CLIs your
 Copilot has here, so it works without a Slack token wherever your company gives Copilot a
-search. *Scan now* saves the watches as written and checks at once.
+search. *Scan now* saves the watches as written and checks at once. You can also ask the
+Router ("watch #deploys for payment failures"): it proposes the watch on a card under *Needs
+you*, and *Submit* adds it (edit it first if you like).
 
 What needs you (a question, a request, a mention that expects your answer) goes to the Router,
 like a Slack event. It has a worker look into it, read the conversation and draft the reply in
@@ -548,18 +576,23 @@ voice even where Slack is reached through another tool.
 Turn on Settings → Connections → *When you're away* and say how to reach you, for example
 "DM me on Slack through the acmebot plugin". After that many minutes without keyboard or mouse,
 what needs you (cards, questions from workers, a question the Router asked you in the chat,
-failed tasks) is sent to you that way, once: a short gist of up to five items (*and 3 more*),
+failed tasks (of the last three days, as under *Needs you*)) is sent to you that way, once: a
+short gist of up to five items (*and 3 more*),
 each with a code of its own (random, five letters, for that item only, valid for a week). Answer
 where you got it with the code: "K3XQ7 send" sends a draft, "K3XQ7 2" picks option 2 of a
 decision, "K3XQ7 use port 9090" answers a question, "K3XQ7 retry" retries a failed task. A code
 works once, and only for what it was sent with. A question that comes up again (its task asked
-something new) is sent again. *Send a test* tries the way you gave. Without a bot that can
-message you, say "send it to my own Slack DM": you see it there, without a phone notification.
+something new) is sent again. *Send a test* tries the way you gave (a test that fails is said
+as such in the chat, each time). Without a bot that can message you, say "send it to my own
+Slack DM": with Slack connected in Settings, Chief of Staff sends it there through its own Slack
+connection and reads your answers there; you see it without a phone notification.
 
 The notifications are sent by a messenger of their own, not the connector: it is given only
 Chief of Staff's message, in a file (plain text, Slack formatting and Block Kit to choose from),
 and follows your worker sandbox setting, so a company bot's command-line tool works (with the
-sandbox off, it runs as in your own sessions). An item counts as sent only once the messenger
+sandbox off, it runs as in your own sessions). It has no Slack tools of its own: for your own
+Slack DM it asks Chief of Staff to send the message there (nothing else, to nobody else) and to
+read what you wrote there since. An item counts as sent only once the messenger
 says it went out; a failed send is tried again ten minutes later. The messenger also reads your
 answers, the way it sent (the bot's DM, your own DM), every few minutes while you are away and
 for a day after; the chat notes each one. When sending fails, the chat says so once and Settings
@@ -596,6 +629,10 @@ goes straight to it; the Router is not woken (its timeline shows one line).
   as a line in the chat ("CI passes now"), and a question when you should decide how to go on
   (someone answered your comment: reply, re-review, approve, or leave it), often with a reply
   drafted. A merged PR marks the task that delivered it done.
+- A PR merged or closed before it was followed is let go at once when a task only names it. One
+  a worker was asked to follow (with `follow_thread`, or handed over by the Router to watch it)
+  stays followed for two weeks if it is closed, not merged: its reopening (and comments on it)
+  is news. After two weeks it is let go, and its worker's chat and the Router's say so.
 - A task card's PR chips (a review task's card shows the PR it reviews) show the PR as it is
   now: read again every few minutes and as soon as something happens on it, judging each check
   by its latest run. "What's the status of my PRs?" is answered from that, not from an earlier

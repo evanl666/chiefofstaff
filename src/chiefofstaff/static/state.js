@@ -73,6 +73,9 @@ export async function loadState() {
   const data = await api("/api/state");
   const first = !state.snapshot;
   state.snapshot = data;
+  // Drafts gone without being sent (withdrawn, replaced) in the last days: their timeline lines
+  // say so after a reload too.
+  for (const [id, outcome] of Object.entries(data.draft_outcomes || {})) state.draftOutcomes.set(id, outcome);
   if (state.selected === routerId()) state.selected = HOME;
   const known =
     state.selected === HOME || current() || closedWorkers().some((item) => item.id === state.selected) || state.external.some((item) => item.id === state.selected);

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 from contextlib import suppress
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -330,15 +331,42 @@ class Decisions:
 
     def drop_asker(self, session_id: str):
         """A closed worker no longer waits; a card nobody waits for ends."""
+        self.drop_askers(
+            lambda asker: asker["session_id"] == session_id, "expired", "Its worker was closed."
+        )
+
+    def drop_task(self, task_id: str):
+        """A task that ended (done, failed, cancelled) no longer waits for a decision."""
+        self.drop_askers(
+            lambda asker: asker.get("task_id") == task_id, "expired", "Its task ended."
+        )
+
+    def answered_in_chat(self, session_id: str, task: dict | None, text: str) -> list[dict]:
+        """The owner wrote to a worker that waits on its decision card: that is their answer to
+        it, for that worker (the card leaves once nobody else waits on it). The cards."""
+
+        def mine(asker: dict) -> bool:
+            return asker["session_id"] == session_id and (
+                not task or not asker.get("task_id") or asker["task_id"] == task["id"]
+            )
+
+        return self.drop_askers(mine, "answered", f"Answered in chat: {clean(text, 300)}")
+
+    def drop_askers(self, gone: Callable[[dict], bool], status: str, outcome: str) -> list[dict]:
+        """Askers that no longer wait leave their cards; a card nobody waits for ends with
+        `status` and `outcome`. The cards they left."""
+        left = []
         for card in self.open_cards("decision"):
-            askers = [a for a in card["target"]["askers"] if a["session_id"] != session_id]
+            askers = [a for a in card["target"]["askers"] if not gone(a)]
             if len(askers) == len(card["target"]["askers"]):
                 continue
+            left.append(card)
             if askers:
                 target = {**card["target"], "askers": askers}
                 self.bus.publish("draft", self.store.update_draft_target(card["id"], target))
             else:
-                self.close(card["id"], "expired", "Its worker was closed.")
+                self.close(card["id"], status, outcome)
+        return left
 
     # Recording and changing
 

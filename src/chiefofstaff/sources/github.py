@@ -17,6 +17,9 @@ from ..store import Store, now
 from . import SourceHost
 
 MAX_FOLLOW_FAILURES = 5
+# How long a PR already closed when a session was asked to follow it stays followed (to hear
+# if it is reopened).
+KEEP_CLOSED_DAYS = 14
 # Reads of a followed PR that GitHub says does not exist before it is let go.
 MISSING_TRIES = 3
 # GitHub's own answers only (case and all): "GitHub CLI not found" (gh missing from PATH) is
@@ -46,6 +49,66 @@ def worker_commits(store: Store) -> set[str]:
         "SELECT output FROM commands WHERE kind='commit' AND exit_code=0 AND output!=''"
     ):
         found.update(COMMITTED.findall(row["output"]))
+    return found
+
+
+# A reflog entry of a commit made in that checkout ("commit: …", "commit (amend): …", a
+# cherry-pick, a rebase's picks, a merge commit), not one a fetch, pull, reset or checkout
+# brought in.
+MADE_HERE = re.compile(
+    r"^(?:commit|cherry-pick|revert|am)\b"
+    r"|^(?:pull --rebase|rebase(?: -i)?) \((?:pick|reword|edit|squash|fixup|finish)\)"
+    r"|^(?:merge|pull)\b.*: Merge made by"
+)
+
+
+def worker_folders(store: Store) -> list[str]:
+    """The git repositories Chief of Staff's workers worked in, one folder each: their
+    worktrees' (a closed worker's worktree may be gone; its branch's log is in the
+    repository), the project folders they shared with the owner, and those cloned into their
+    own folder."""
+    folders = []
+    workspaces = store.items("workspace:")
+    for row in store.all("SELECT id, repos, cwd FROM sessions WHERE role='worker'"):
+        for checkout in json.loads(row["repos"] or "[]"):
+            folders += [checkout.get("repo") or "", checkout.get("path") or ""]
+        for own in dict.fromkeys(filter(None, [row["cwd"], workspaces.get(row["id"])])):
+            folders.append(own)
+            with suppress(OSError):
+                folders += [entry.path for entry in os.scandir(own) if entry.is_dir()]
+    repositories: dict[str, str] = {}
+    for folder in dict.fromkeys(filter(None, folders)):
+        marker = os.path.join(folder, ".git")
+        if os.path.isdir(marker):
+            repositories.setdefault(os.path.realpath(marker), folder)
+        elif os.path.isfile(marker):  # A worktree: "gitdir: <repository>/.git/worktrees/<x>".
+            with suppress(OSError):
+                with open(marker, encoding="utf-8") as file:
+                    linked = file.read().removeprefix("gitdir:").strip()
+                common = os.path.dirname(
+                    os.path.dirname(os.path.realpath(os.path.join(folder, linked)))
+                )
+                repositories.setdefault(common, folder)
+    return list(repositories.values())
+
+
+async def made_locally(folders: list[str], shas: list[str]) -> set[str]:
+    """Of these commits, those made in one of these folders (their reflogs say so)."""
+    from ..workspaces import git
+
+    wanted, found = set(shas), set()
+    for folder in folders:
+        try:
+            # Every branch's log, and each worktree's HEAD's.
+            log = await git("-C", folder, "reflog", "show", "--all", "--format=%H %gs", limit=20)
+        except ValueError:
+            continue
+        for line in log.splitlines():
+            sha, _, subject = line.partition(" ")
+            if sha in wanted and MADE_HERE.search(subject):
+                found.add(sha)
+        if found == wanted:
+            break
     return found
 
 
@@ -112,6 +175,39 @@ TRANSIENT = re.compile(r"rate limit|abuse detection|try again later", re.IGNOREC
 
 # A review's verdict, as GitHub's review event.
 REVIEW_EVENTS = {"approve": "APPROVE", "request_changes": "REQUEST_CHANGES", "comment": "COMMENT"}
+
+# Why GitHub refused a merge (gh prints GraphQL's words), as the owner reads it.
+HEAD_MOVED = re.compile(r"Head branch was modified|expected head (?:sha|oid)", re.IGNORECASE)
+MERGE_REFUSALS = (
+    (re.compile(r"Base branch was modified", re.IGNORECASE), "Its base branch moved: try again."),
+    (
+        re.compile(r"not mergeable|merge conflict", re.IGNORECASE),
+        "GitHub cannot merge it as it is (a conflict, or a check or review it requires): see "
+        "the PR.",
+    ),
+    (
+        re.compile(r"required status check|status checks? .*(?:expected|pending)", re.IGNORECASE),
+        "A check GitHub requires has not passed yet.",
+    ),
+    (
+        re.compile(r"approving review|review is required", re.IGNORECASE),
+        "GitHub requires an approving review first.",
+    ),
+)
+
+
+def merge_refusal(error: str) -> tuple[str, bool]:
+    """Why a merge failed, in words, and whether it is that new commits came (the head the
+    card shows is not the PR's any more)."""
+    if HEAD_MOVED.search(error):
+        return "New commits were pushed since: check them, then merge.", True
+    for pattern, reason in MERGE_REFUSALS:
+        if pattern.search(error):
+            return reason, False
+    plain = re.sub(
+        r"^(?:GitHub request failed:\s*)?(?:GraphQL:\s*)?|\s*\(mergePullRequest\)", "", error
+    )
+    return " ".join(plain.split())[:300] or "GitHub refused.", False
 
 
 class NoAccess:
@@ -394,6 +490,13 @@ class GitHubSource:
         found = "SELECT id FROM triggers WHERE key=? AND source='github-sent'"
         return bool(self.store.one(found, (key,)))
 
+    def posted(self, key: str, text: str, target: dict):
+        """What Chief of Staff posted for a draft: never news to the PR's followers, and a
+        reply to it is news to the task that drafted it (a reviewer that does not own the PR)."""
+        self.store.add_trigger("github-sent", key, text)
+        if target.get("task_id"):
+            self.store.set(f"ghby:{key}", target["task_id"])
+
     async def poll_once(self):
         settings = self.store.settings()
         self.status["enabled"] = settings.github_enabled
@@ -514,6 +617,7 @@ class GitHubSource:
             self.store.set(f"prtitle:{repo.lower()}#{number}", title)  # Shown with its number.
         base = f"repos/{repo}"
         items: list[tuple[str, str]] = []
+        replies: dict[str, tuple[str, str]] = {}
         # The owner's own comments and reviews are not news to the sessions following the PR:
         # those of the account they act as on this repository (what Chief of Staff posts as).
         # Another account signed in on this machine (a teammate's, a bot's) may be someone else.
@@ -545,13 +649,19 @@ class GitHubSource:
             if not theirs(comment):
                 continue
             line = comment.get("line") or comment.get("original_line") or ""
-            items.append(
-                (
-                    f"github:reviewcomment:{comment['id']}",
-                    f"{comment['user']['login']} on {comment.get('path')}:{line}: "
-                    f"{body(comment)} ({comment['html_url']})",
-                )
+            key = f"github:reviewcomment:{comment['id']}"
+            said = (
+                f"{comment['user']['login']} on {comment.get('path')}:{line}: "
+                f"{body(comment)} ({comment['html_url']})"
             )
+            items.append((key, said))
+            root = comment.get("in_reply_to_id")
+            for answered in (f"github:reviewcomment:{root}", f"github:reviewthread:{root}"):
+                if root and self.sent_by_us(answered):
+                    # It answers a comment Chief of Staff posted (or a conversation it replied
+                    # in): news to the task that wrote it.
+                    replies[key] = (self.store.get(f"ghby:{answered}") or "", said)
+                    break
         for review in pages(
             await self.gh("api", f"{base}/pulls/{number}/reviews?per_page=100", "--paginate")
         ):
@@ -594,13 +704,31 @@ class GitHubSource:
                 )
             )
         state = "merged" if pull.get("merged") else pull["state"]
+        kept = False
         if state != "open":
             ended = pull.get("merged_at") or pull.get("closed_at")
             if ended and datetime.fromisoformat(ended.replace("Z", "+00:00")).timestamp() < since:
-                # Already finished when followed (a PR cited in passing): just stop following it.
-                self.host.unfollow(thread)
-                return
-            items.append((f"github:state:{thread}:{state}", f"The PR was {state}."))
+                asked = float(self.store.get(f"ghkeep:{thread}") or 0)
+                if state == "merged" or not asked:
+                    # Already finished when followed (a PR cited in passing): just stop
+                    # following it.
+                    self.host.unfollow(thread)
+                    return
+                if time.time() - asked > KEEP_CLOSED_DAYS * 86400:
+                    self.host.missing(
+                        thread,
+                        f"it stayed closed for {KEEP_CLOSED_DAYS} days after it was followed "
+                        "(a reopening after that is not noticed)",
+                    )
+                    return
+                # Followed on request while closed: its reopening (or a comment) is news.
+                kept = True
+                self.store.set(f"ghclosed:{thread}", ended)
+            else:
+                items.append((f"github:state:{thread}:{state}", f"The PR was {state}."))
+        elif closed := self.store.get(f"ghclosed:{thread}"):
+            items.append((f"github:state:{thread}:reopened:{closed}", "The PR was reopened."))
+            self.store.delete(f"ghclosed:{thread}")
         fresh = [(key, line) for key, line in items if not self.seen(key)]
         if fresh:
             lines = "\n".join(f"- {line}" for _, line in fresh)
@@ -610,10 +738,11 @@ class GitHubSource:
                 [key for key, _ in fresh],
                 f"New activity on {repo}#{number}, a PR you follow:\n{lines}",
                 lines,
+                replies={key: replies[key] for key, _ in fresh if key in replies},
             )
         self.store.set(f"ghsince:{thread}", started)
         self.store.set(f"ghhead:{thread}", sha)
-        if state != "open":
+        if state != "open" and not kept:
             self.host.unfollow(thread, finished=True, merged=state == "merged")
 
     async def pushed(self, repo: str, old: str, new: str) -> str:
@@ -630,13 +759,16 @@ class GitHubSource:
 
         acting = await self.acting_login(repo)
         # Its workers' own commits: by the account it works as, or committed in one of their
-        # checkouts (a git email GitHub does not know shows no login).
+        # checkouts (a git email GitHub does not know shows no login; `git commit -q` says
+        # nothing, so their checkouts' logs are asked).
         made = worker_commits(self.store)
 
         def ours(commit: dict) -> bool:
             sha = commit.get("sha") or ""
             return login(commit) == acting or any(sha.startswith(short) for short in made)
 
+        if unknown := [c["sha"] for c in commits if c.get("sha") and not ours(c)]:
+            made |= await made_locally(worker_folders(self.store), unknown)
         if commits and all(ours(commit) for commit in commits):
             return ""
         if not commits or compare.get("status") in {"diverged", "behind"}:
@@ -812,7 +944,7 @@ class GitHubSource:
         )
         if posted.get("id"):
             # Our own reply must not come back as activity on the followed PR.
-            self.store.add_trigger("github-sent", f"github:issuecomment:{posted['id']}", text)
+            self.posted(f"github:issuecomment:{posted['id']}", text, target)
         return posted.get("html_url", "Reply published.")
 
     async def find_conversation_reply(self, target: dict, text: str) -> str:
@@ -947,7 +1079,11 @@ class GitHubSource:
         )
         if reply.get("id"):
             # Our own reply must not come back as activity on the followed PR.
-            self.store.add_trigger("github-sent", f"github:reviewcomment:{reply['id']}", text)
+            self.posted(f"github:reviewcomment:{reply['id']}", text, target)
+            # Later replies in that conversation name its first comment (GitHub's threads
+            # are flat): they answer this one too.
+            root = reply.get("in_reply_to_id") or target["in_reply_to"]
+            self.posted(f"github:reviewthread:{root}", text, target)
         return reply.get("html_url", "Reply published.")
 
     async def publish_review(self, target: dict, body: str) -> str:
@@ -997,7 +1133,7 @@ class GitHubSource:
         if review.get("id"):
             # Our own review, and its line comments, must not come back as activity on the
             # followed PR.
-            self.store.add_trigger("github-sent", f"github:review:{review['id']}", body)
+            self.posted(f"github:review:{review['id']}", body, target)
             if target.get("comments"):
                 try:
                     posted = pages(
@@ -1012,9 +1148,7 @@ class GitHubSource:
                     logger.info("Could not list the review's comments.", exc_info=True)
                     posted = []
                 for comment in posted:
-                    self.store.add_trigger(
-                        "github-sent",
-                        f"github:reviewcomment:{comment['id']}",
-                        comment.get("body", ""),
+                    self.posted(
+                        f"github:reviewcomment:{comment['id']}", comment.get("body", ""), target
                     )
         return review.get("html_url", "Review published.") + note

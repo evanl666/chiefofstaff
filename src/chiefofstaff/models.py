@@ -1,6 +1,8 @@
+import json
 import re
+from contextlib import suppress
 from pathlib import Path
-from typing import Annotated, Any, Literal, TypeVar, cast
+from typing import Annotated, Any, Literal, TypeVar, cast, get_origin
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -38,34 +40,59 @@ ModelT = TypeVar("ModelT", bound=BaseModel)
 # A model's tool call that leaked its own markup into a value: `"done</parameter>\n<parameter
 # name="summary">Ran …"` (the other parameters inside the first one's string).
 LEAKED = re.compile(r'\s*</parameter>\s*<parameter name="(\w+)">\s*')
-LEAK_END = re.compile(r"\s*</parameter>\s*$")
+# The end of the call leaked into the last value: `…</parameter>`, `…</parameter>\n</invoke>`.
+LEAK_END = re.compile(r"\s*</parameter>(?:\s*</invoke>)?(?:\s*</function_calls>)?\s*$")
 
 
-def repair_leaked(data: object, fields: set[str]) -> object:
-    """Tool arguments with leaked parameter markup, split back into their parameters."""
+def repair_leaked(
+    data: object, fields: set[str], structured: frozenset[str] = frozenset()
+) -> object:
+    """Tool arguments with leaked parameter markup, split back into their parameters; a list or
+    object parameter (`structured`) that came as its JSON text is parsed."""
     if not isinstance(data, dict):
         return data
     fixed = dict(data)
     for key, value in data.items():
-        if not isinstance(value, str) or not LEAKED.search(value):
+        if not isinstance(value, str):
             continue
-        parts = LEAKED.split(value)
-        fixed[key] = LEAK_END.sub("", parts[0])
-        for name, part in zip(parts[1::2], parts[2::2], strict=True):
-            if name in fields and name not in data:
-                fixed[name] = LEAK_END.sub("", part)
+        if LEAKED.search(value):
+            parts = LEAKED.split(value)
+            fixed[key] = LEAK_END.sub("", parts[0])
+            for name, part in zip(parts[1::2], parts[2::2], strict=True):
+                if name in fields and name not in data:
+                    fixed[name] = LEAK_END.sub("", part)
+        elif LEAK_END.search(value):
+            fixed[key] = LEAK_END.sub("", value)
+    for name in structured & fixed.keys():
+        value = fixed[name]
+        if isinstance(value, str) and value.strip()[:1] in {"[", "{"}:
+            with suppress(ValueError):
+                fixed[name] = json.loads(value)
     return fixed
+
+
+def structured_fields(model: type[BaseModel]) -> frozenset[str]:
+    """Its parameters that are lists or objects."""
+    found = set()
+    for name, field in model.model_fields.items():
+        kind = get_origin(field.annotation) or field.annotation
+        if kind in (list, dict, set, tuple) or (
+            isinstance(kind, type) and issubclass(kind, BaseModel)
+        ):
+            found.add(name)
+    return frozenset(found)
 
 
 def leak_proof(model: type[ModelT]) -> type[ModelT]:
     """The tool's arguments model, repairing leaked parameter markup before it validates."""
     fields = set(model.model_fields)
+    structured = structured_fields(model)
 
     class Repaired(model):  # pyright: ignore[reportGeneralTypeIssues]
         @model_validator(mode="before")
         @classmethod
         def repair(cls, data: Any) -> Any:
-            return repair_leaked(data, fields)
+            return repair_leaked(data, fields, structured)
 
     Repaired.__name__ = Repaired.__qualname__ = model.__name__
     Repaired.__doc__ = model.__doc__

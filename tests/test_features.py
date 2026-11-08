@@ -300,6 +300,17 @@ async def test_usage_is_recorded_per_call_and_summed_by_range(harness):
     assert usage["by_session"][0]["title"] == "Router"
     assert harness.store.usage(now + 60, now + 120)["total"]["calls"] == 0
     assert runtime.view(harness.store.session(harness.router_id))["credits"] == 2.5
+    # A worker by its work's name, as everywhere (bug bash: its first prompt's).
+    worker = (await spawn(runtime, harness.router_id, "Benchmark words"))["session_id"]
+    await call_tool(runtime, "report", worker, status="done", summary="Done.")
+    await call_tool(runtime, "message_session", harness.router_id, session_id=worker,
+                    task="new", title="Write the usage docs", text="Write them")  # fmt: skip
+    harness.session(worker).emit("assistant.usage", model="fast-model", cost=1.0,
+                                 input_tokens=10, output_tokens=5,
+                                 copilot_usage=SimpleNamespace(total_nano_aiu=1e9))  # fmt: skip
+    await settle(runtime)
+    rows = runtime.usage(now - 60, time.time() + 60)["by_session"]
+    assert {row["title"] for row in rows} >= {"Router", "Write the usage docs"}
 
 
 async def test_daily_digest_once_a_day_and_only_when_useful(harness):
