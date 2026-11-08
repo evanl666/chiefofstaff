@@ -20,7 +20,7 @@ browser ── REST (actions) ──────────────► web.
 | --- | --- | --- |
 | **Router** | Turns requests into tasks, routes reports and events, tells the owner what matters. | Only its own: `spawn_worker`, `message_session`, `cancel_task`, `list_sessions`, `find_sessions`, `ask_workspace`, `notify_owner`, `close_worker`, `answer_session`, `distill_profile`. No shell, files or web. |
 | **Worker** | One task at a time, autonomously; later tasks on the same subject. | Everything Copilot offers in its folders, plus `report`, `ask_session`, `tell_session`, `add_repo`, `record_setup`, `follow_thread`, drafts. |
-| **Slack session** | Reads conversations and drafts replies in the owner's voice. | Slack read tools and `draft_slack_reply`. |
+| **Slack session** | Reads conversations and drafts replies in the owner's voice. | Slack read tools, `draft_slack_reply` and `withdraw_draft`. |
 | **Watchdog** | Reviews workers a cheap check flagged. | `assess_worker`. |
 
 Roles differ only in their options (`Runtime.options`): system prompt (`prompts.py`), tools,
@@ -36,7 +36,7 @@ tool allowlist, permission and request callbacks, sandbox, model.
 | `delivery.py` | Messages to sessions: stored, batched, sent, checked after a restart. |
 | `workers.py` | The worker queue (`max_workers`, dependencies), starting, closing, reopening, interrupting. |
 | `tasks.py` | Tasks, runs and dependencies as records; status transitions. |
-| `task_actions.py` | What happens to tasks: reports, cancel (a cancelled follow-up gives the earlier result back), accept, retry, follow-up; receipts (per task: on a branch, the commits since it began; in a shared folder, the files it edited), PR state (refreshed every few minutes) and the *Ready to merge* card; the shareable report. |
+| `task_actions.py` | What happens to tasks: reports, cancel (a cancelled follow-up gives the earlier result back), accept, retry, follow-up; receipts (per task: between snapshots of its checkouts taken when it was taken up and when it reported its result, written to the repository's objects through an index of their own; on a branch, its own commits; in a shared folder, not the files other tasks' edits wrote nor what commits older than the task brought in, a pull or another branch checked out), PR state (refreshed every few minutes) and the *Ready to merge* card; the shareable report. |
 | `tools.py` | Every tool a session can call, with its argument model; which role gets which. |
 | `drafts.py` | Drafts the owner approves (Slack replies, PR reviews, a task's folder); interrupted sends. |
 | `focus.py` | Focus Shield. |
@@ -170,8 +170,9 @@ up next, paused, checks back, delivered, overdue, to review…) from its status,
 state, the task the worker is on (`turn_task`: its turn's task while open or followed up by the
 owner, else its current open one; only instructions set it, not notes), whether it was taken up
 (`started`), `check_back`, the threads it watches and when it was last active. Home, the
-sidebar's dots and the cards all use it. `tasks.js` draws a box per worker per place with its
-task cards; `artifacts.js` the Artifacts list (the PRs a task owns, from their receipts; docs and runs as
+sidebar's dots and the cards all use it. `tasks.js` draws a box per worker in *Needs you* and
+*Running* with its task cards, and a row per task in *Monitoring* and *Recently finished*
+(scrolling lists; a row opens its card in place); every section folds (`inbox.js` fold); `artifacts.js` the Artifacts list (the PRs a task owns, from their receipts; docs and runs as
 their workers declared them with `report(artifacts=…)` or linked in any report, kept per task;
 links the task was given are references, not output). `session.js`, `sidebar.js`,
 `drafts.js`,

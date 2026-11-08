@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import subprocess
 import tempfile
 from pathlib import Path
@@ -15,8 +16,10 @@ from chiefofstaff.store import Store
 from chiefofstaff.task_actions import moved
 
 
-def run(*command, cwd=None):
-    return subprocess.run(command, cwd=cwd, check=True, capture_output=True, text=True).stdout
+def run(*command, cwd=None, env=None):
+    return subprocess.run(
+        command, cwd=cwd, check=True, capture_output=True, text=True, env=env
+    ).stdout
 
 
 def commit(repo: Path, name: str, text: str):
@@ -455,13 +458,14 @@ async def test_receipts_show_what_was_observed_next_to_the_report(tmp_path, git_
             break
         await asyncio.sleep(0.05)
     found = view["receipts"]
-    assert found["tests"] == {
+    assert {k: v for k, v in found["tests"].items() if k != "cwd"} == {
         "command": "uv run pytest -q",
         "exit_code": 0,
         "passed": True,
         "runs": 2,
         "failed_before": True,
         "running": False,
+        "own": True,  # Run in its own checkout: its tests.
     }
     assert found["changed"]["files"] == 1 and found["changed"]["commits"] == 1
     assert found["prs"][0]["checks"] == "passing" and found["flags"] == []
@@ -686,7 +690,7 @@ async def test_create_pr_pushes_the_branch_and_the_worker_follows_the_pr(tmp_pat
 
     [found] = await runtime.task_actions.diff(task_id)
     assert "+    return True" in found["diff"], "its commits"
-    assert "+++ b/notes.md\n@@ -0,0 +1,1 @@\n+draft" in found["diff"], "and new files"
+    assert "+++ b/notes.md\n@@ -0,0 +1 @@\n+draft" in found["diff"], "and new files"
     with pytest.raises(ValueError, match="uncommitted changes"):
         await runtime.task_actions.create_pr(task_id)
     assert not calls, "nothing is pushed or opened while work is uncommitted"
@@ -700,7 +704,9 @@ async def test_create_pr_pushes_the_branch_and_the_worker_follows_the_pr(tmp_pat
     assert created[created.index("--repo") + 1] == "acme/app"
     assert created[created.index("--head") + 1] == branch
     assert created[created.index("--title") + 1] == "Fix login"
-    assert "Fixed the login." in created[created.index("--body") + 1]
+    body = created[created.index("--body") + 1]
+    assert "Fixed the login." in body and "<!-- chief-of-staff -->" in body
+    assert "credits" not in body and "**Goal**" not in body, "not the worker's instructions"
     assert harness.store.follows(worker_id) == ["github:acme/app#9"], "its PR comes to it"
     stale = runtime.task_actions.view(task)["receipts"]["stale"]
     assert stale.startswith("Out of date"), "checked with notes.md, opened without it"
@@ -852,6 +858,11 @@ async def test_a_later_task_on_the_same_branch_shows_only_its_own_changes(tmp_pa
     assert changed["commits"] == 1 and changed["files"] == 1, changed
     [found] = await runtime.task_actions.diff(chunk)
     assert "+chunk = True" in found["diff"] and "doc = True" not in found["diff"]
+    first = runtime.tasks.for_session(session_id)[0]["id"]
+    [found] = await runtime.task_actions.diff(first)
+    assert "+doc = True" in found["diff"] and "chunk" not in found["diff"], (
+        "the first task's result is what it delivered: not the later task's commit"
+    )
     await call_tool(runtime, "message_session", harness.router_id, session_id=session_id,
                     task="new", title="Count tests", text="How many tests?")  # fmt: skip
     question = task_of(harness, session_id)
@@ -865,30 +876,128 @@ async def test_a_later_task_on_the_same_branch_shows_only_its_own_changes(tmp_pa
     assert not (changed["commits"] or changed["files"] or changed["uncommitted"]), changed
 
 
-async def test_in_the_owners_folder_only_files_its_edits_touched_are_its_changes(tmp_path):
+async def test_in_the_owners_folder_a_task_has_what_it_changed_not_another_tasks(tmp_path):
+    """Bug bash: in a folder of the owner's, a file another worker's edits wrote is that task's;
+    a file this one changed with a shell command (`printf >> file`) is this task's; and of a
+    file two tasks of one worker changed in turn, each has its own lines."""
     _, app = published(tmp_path, "app")
+    (app / "kit.py").write_text("def base():\n    return 1\n")
     harness = Harness(tmp_path / "data", Settings(projects=[str(app)]))
     runtime = await harness.connect()
-    worker = await spawn(runtime, harness.router_id, title="Note", instructions="x",
-                         project=str(app))  # fmt: skip
-    session_id = worker["session_id"]
+
+    async def started(title):
+        worker = await spawn(runtime, harness.router_id, title=title, instructions="x",
+                             project=str(app))  # fmt: skip
+        await settle(runtime)
+        for _ in range(50):
+            if runtime.store.get(f"taskbase:{task_of(harness, worker['session_id'])}"):
+                break
+            await asyncio.sleep(0.05)
+        return worker["session_id"]
+
+    mine, theirs = await started("Note"), await started("Their note")
+    (app / "theirs.txt").write_text("another worker's file\n")
+    harness.session(theirs).emit(
+        "tool.execution_start", tool_call_id="t1", tool_name="create",
+        arguments={"path": str(app / "theirs.txt"), "file_text": "x"},
+    )  # fmt: skip
+    with (app / "kit.py").open("a") as file:
+        file.write("\n\ndef shout(text):\n    return text.upper()\n")  # By a shell command.
+    await call_tool(runtime, "report", mine, status="done", summary="Added shout.")
+    shout = task_of(harness, mine)
+    changed = (await receipts_of(runtime, shout))["changed"]
+    assert changed["files"] == 1 and changed["uncommitted"] == 1, changed
+    [found] = await runtime.task_actions.diff(shout)
+    assert "+def shout(text):" in found["diff"] and "theirs.txt" not in found["diff"]
+
+    await call_tool(runtime, "message_session", harness.router_id, session_id=mine,
+                    task="new", title="Add whisper", text="Add whisper")  # fmt: skip
+    whisper = task_of(harness, mine)
     await settle(runtime)
     for _ in range(50):
-        if runtime.store.get(f"taskbase:{task_of(harness, session_id)}"):
+        if runtime.store.get(f"taskbase:{whisper}"):
             break
         await asyncio.sleep(0.05)
-    (app / "theirs.txt").write_text("another worker's file\n")
-    (app / "mine.txt").write_text("this task's file\n")
-    harness.session(session_id).emit(
-        "tool.execution_start", tool_call_id="e1", tool_name="create",
-        arguments={"path": str(app / "mine.txt"), "file_text": "x"},
-    )  # fmt: skip
-    await call_tool(runtime, "report", session_id, status="done", summary="Wrote mine.txt.")
+    with (app / "kit.py").open("a") as file:
+        file.write("\n\ndef whisper(text):\n    return text.lower()\n")
+    (app / "__pycache__").mkdir(exist_ok=True)
+    (app / "__pycache__" / "kit.cpython-313.pyc").write_bytes(b"\0compiled")  # By running it.
+    await call_tool(runtime, "report", mine, status="done", summary="Added whisper.")
+    [found] = await runtime.task_actions.diff(whisper)
+    assert "+def whisper(text):" in found["diff"] and "+def shout" not in found["diff"]
+    assert "__pycache__" not in found["diff"]
+    [found] = await runtime.task_actions.diff(shout)
+    assert "+def shout(text):" in found["diff"] and "whisper" not in found["diff"], (
+        "its result as it delivered it, not with the later task's lines"
+    )
+
+
+async def test_in_the_owners_folder_what_the_owner_pulled_is_not_the_tasks_work(tmp_path):
+    """Code review: in a folder of the owner's, files a `git pull` brought in while a worker
+    worked there counted as that task's changes."""
+    _, app = published(tmp_path, "app")
+    run("git", "pull", "-q", "--ff-only", cwd=app)
+    commit(app, "kit.py", "def base():\n    return 1\n")
+    run("git", "push", "-q", "origin", "main", cwd=app)
+    other = tmp_path / "app-other"
+    run("git", "pull", "-q", "--ff-only", cwd=other)
+    (other / "team.py").write_text("team = 1\n")
+    run("git", "add", ".", cwd=other)
+    old = {**os.environ, "GIT_AUTHOR_DATE": "2020-01-01T00:00:00Z",
+           "GIT_COMMITTER_DATE": "2020-01-01T00:00:00Z"}  # fmt: skip
+    run("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "team", cwd=other,
+        env=old)  # fmt: skip
+    run("git", "push", "-q", "origin", "main", cwd=other)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(app)]))
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, title="Shout", instructions="x",
+                         project=str(app))  # fmt: skip
+    session_id = worker["session_id"]
     task = task_of(harness, session_id)
+    await settle(runtime)
+    for _ in range(50):
+        if runtime.store.get(f"taskbase:{task}"):
+            break
+        await asyncio.sleep(0.05)
+    run("git", "pull", "-q", "--ff-only", cwd=app)  # The owner pulls meanwhile.
+    with (app / "kit.py").open("a") as file:
+        file.write("\n\ndef shout(text):\n    return text.upper()\n")  # By a shell command.
+    await call_tool(runtime, "report", session_id, status="done", summary="Added shout.")
     changed = (await receipts_of(runtime, task))["changed"]
     assert changed["files"] == 1 and changed["uncommitted"] == 1, changed
     [found] = await runtime.task_actions.diff(task)
-    assert "mine.txt" in found["diff"] and "theirs.txt" not in found["diff"]
+    assert "+def shout(text):" in found["diff"] and "team.py" not in found["diff"]
+
+
+async def test_a_later_task_keeps_its_start_when_its_files_are_too_big_to_copy(
+    tmp_path, monkeypatch
+):
+    """Code review: with a large new file (no snapshot taken), a later task had no start and
+    counted an earlier task's commits as its own."""
+    monkeypatch.setattr(workspaces_module, "MAX_SNAPSHOT_FILE", 10)
+    _, app = published(tmp_path, "app")
+    harness = Harness(tmp_path / "data", Settings(projects=[str(app)]))
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, title="First", instructions="x",
+                         project=str(app), isolate=True)  # fmt: skip
+    tree, session_id = Path(worker["cwd"]), worker["session_id"]
+    commit(tree, "first.py", "first = True\n")
+    (tree / "data.bin").write_bytes(b"0" * 100)  # Too big to copy (here).
+    await call_tool(runtime, "report", session_id, status="done", summary="First.")
+    await call_tool(runtime, "message_session", harness.router_id, session_id=session_id,
+                    task="new", title="Second", text="Add second")  # fmt: skip
+    second = task_of(harness, session_id)
+    await settle(runtime)
+    for _ in range(50):
+        if runtime.store.get(f"taskbase:{second}"):
+            break
+        await asyncio.sleep(0.05)
+    base = json.loads(runtime.store.get(f"taskbase:{second}"))
+    assert base["commits"].get(str(tree)) and not base["trees"], base
+    commit(tree, "second.py", "second = True\n")
+    await call_tool(runtime, "report", session_id, status="done", summary="Second.")
+    [found] = await runtime.task_actions.diff(second)
+    assert "second.py" in found["diff"] and "first.py" not in found["diff"]
 
 
 async def test_a_project_is_also_known_by_its_package_name(tmp_path):
@@ -957,3 +1066,34 @@ async def test_a_tasks_new_folder_and_merged_upstream_work_are_counted_right(tmp
     assert "+feature = True" in diff and "+core = 1" in diff and "newpkg/__init__.py" in diff
     assert "+setting_11 = 'mine'" in diff and "setting_0 = 'team'" not in diff
     assert "team0.py" not in diff and "first.py" not in diff
+
+
+async def test_a_change_asked_for_in_chat_is_a_new_result_not_news(tmp_path):
+    """Bug bash: asked in chat to change a finished result, the worker edited the file; the
+    change came as news on the old result, which still showed its old diff."""
+    _, app = published(tmp_path, "app")
+    harness = Harness(tmp_path / "data", Settings(projects=[str(app)]))
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, title="Notes", instructions="x",
+                         project=str(app), isolate=True)  # fmt: skip
+    tree, session_id = Path(worker["cwd"]), worker["session_id"]
+    (tree / "NOTES.md").write_text("notes\n")
+    await call_tool(runtime, "report", session_id, status="done", summary="NOTES.md written.")
+    task = task_of(harness, session_id)
+    await receipts_of(runtime, task)
+    for _ in range(50):
+        if runtime.store.get(f"taskend:{task}"):
+            break
+        await asyncio.sleep(0.05)
+    await runtime.owner_send(session_id, "What does it say?")
+    # Running it to answer leaves files behind: not a change.
+    (tree / "__pycache__").mkdir()
+    (tree / "__pycache__" / "notes.cpython-313.pyc").write_bytes(b"\0compiled")
+    (tree / ".coverage").write_bytes(b"coverage")
+    await call_tool(runtime, "report", session_id, status="done", summary="It says notes.")
+    assert runtime.tasks.get(task)["result"] == "NOTES.md written.", "a question: news"
+    await runtime.owner_send(session_id, "Add a line more")
+    (tree / "NOTES.md").write_text("notes\nmore\n")
+    await call_tool(runtime, "report", session_id, status="done", summary="Added the line more.")
+    shown = runtime.tasks.get(task)
+    assert shown["status"] == "review" and shown["result"] == "Added the line more."

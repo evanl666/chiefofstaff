@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from . import catalog, machine
+from .backend import stop_background
 from .envelope import clean_title, owner_text, short, wrap
 from .events import PLUMBING_TOOLS, describe_tool
 from .roles import ROUTER, WORKER
@@ -214,6 +215,10 @@ class Workers:
             or (m["kind"] == "assistant" and not m["meta"].get("narration"))
         ]
         if not said:
+            return
+        if any(m["kind"] == "report" and m["meta"].get("told") for m in recent[1:]):
+            # Its result or question reached Home already (a line, a card): not again.
+            self.store.set(f"answered_home:{asked['id']}", "1")
             return
         self.store.set(f"answered_home:{asked['id']}", "1")
         row = self.store.session(session_id)
@@ -584,6 +589,7 @@ class Workers:
                 if row["status"] == "working":
                     with suppress(Exception):
                         await session.abort()
+                    await stop_background(session)
                 with suppress(Exception):
                     await session.disconnect()
         self.states[session_id].busy = False
@@ -592,7 +598,13 @@ class Workers:
         self.runtime.decisions.drop_asker(session_id)
         self.states[session_id].last_output = ""
         self.states[session_id].close_after_turn = False
-        self.runtime.asks.cancel_requests(session_id, "The session was closed.")
+        # A question it asked the owner (Copilot's ask_user) still waits for them, under Needs
+        # you: answered, it reopens (as one asked with report does).
+        self.runtime.asks.cancel_requests(
+            session_id,
+            "The session was closed.",
+            keep_questions=self.runtime.working_on(session_id) if row["role"] == WORKER else None,
+        )
         await self.runtime.asks.cancel_questions(session_id)
         self.delivery.drop_pending(session_id)  # A reopened worker does not get them.
         for task in self.tasks.for_session(session_id):
@@ -645,7 +657,9 @@ class Workers:
             "status": row["status"],
             "closed": bool(row["closed_at"]),
             "task": row["task"][:300],
-            "current_task": self.runtime.toolset.task_brief(self.tasks.current(row["id"])),
+            "current_task": self.runtime.toolset.task_brief(
+                self.tasks.current(row["id"]), router=True
+            ),
             "project": row["project"],
             "cwd": row["cwd"],
             "branch": row["branch"],
@@ -756,21 +770,32 @@ class Workers:
         row = self.store.session(session_id)
         self.runtime.asks.cancel_requests(session_id, f"Stopped by {by}.")
         self.states[session_id].after_refresh = ""  # Not "go on" once it is stopped.
+        if row["role"] == WORKER:
+            self.states[session_id].after_abort = True
         if row["status"] in {"working", "queued", "starting"}:
             # Recorded before the abort: the turn's end (idle) can arrive before the abort
             # returns, and must find a deliberate stop, not a worker that ended without a report
             # (nor a silent stall for the Watchdog).
             self.runtime.update_session(session_id, status="idle", activity="")
             self.runtime.add_message(session_id, "notice", f"Stopped by {by}.", {"stopped": True})
-            # The task it was on (not one given last that it has not started): stopped, waiting
-            # for the owner to say go on or cancel it.
+            # The task it was on (not one given last that it has not started), or, before it
+            # started, those it was given: stopped, waiting for the owner to say go on or cancel.
             on = self.runtime.working_on(session_id) if row["role"] == WORKER else ""
-            task = self.tasks.find(on) if on else None
-            if task and task["status"] in {"queued", "running"}:
-                self.store.set(f"stopped:{task['id']}", by)
-                self.tasks.move(task["id"], "waiting", progress=f"Stopped by {by}.")
+            stopped = [self.tasks.find(on)] if on else []
+            if row["status"] in {"queued", "starting"} and row["role"] == WORKER:
+                stopped += [
+                    t for t in self.tasks.for_session(session_id) if t["status"] == "queued"
+                ]
+            for task in {t["id"]: t for t in stopped if t}.values():
+                if task["status"] in {"queued", "running"}:
+                    self.store.set(f"stopped:{task['id']}", by)
+                    self.store.delete(f"goingon:{task['id']}")
+                    self.tasks.move(task["id"], "waiting", progress=f"Stopped by {by}.")
+                    self.runtime.task_actions.publish(self.tasks.get(task["id"]))
         if session := self.states.handle(session_id):
             await session.abort()
+            # A command its turn left running would go on (and end in a turn of its own).
+            await stop_background(session)
         self.states[session_id].busy = False
         self.states[session_id].steps.clear()
         if row["role"] == WORKER:

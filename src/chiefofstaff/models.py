@@ -1,6 +1,6 @@
 import re
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -32,6 +32,44 @@ class NestedArguments(BaseModel):
     @classmethod
     def model_json_schema(cls, *args, **kwargs) -> dict:  # pyright: ignore[reportIncompatibleMethodOverride]
         return inline_refs(super().model_json_schema(*args, **kwargs))
+
+
+ModelT = TypeVar("ModelT", bound=BaseModel)
+# A model's tool call that leaked its own markup into a value: `"done</parameter>\n<parameter
+# name="summary">Ran …"` (the other parameters inside the first one's string).
+LEAKED = re.compile(r'\s*</parameter>\s*<parameter name="(\w+)">\s*')
+LEAK_END = re.compile(r"\s*</parameter>\s*$")
+
+
+def repair_leaked(data: object, fields: set[str]) -> object:
+    """Tool arguments with leaked parameter markup, split back into their parameters."""
+    if not isinstance(data, dict):
+        return data
+    fixed = dict(data)
+    for key, value in data.items():
+        if not isinstance(value, str) or not LEAKED.search(value):
+            continue
+        parts = LEAKED.split(value)
+        fixed[key] = LEAK_END.sub("", parts[0])
+        for name, part in zip(parts[1::2], parts[2::2], strict=True):
+            if name in fields and name not in data:
+                fixed[name] = LEAK_END.sub("", part)
+    return fixed
+
+
+def leak_proof(model: type[ModelT]) -> type[ModelT]:
+    """The tool's arguments model, repairing leaked parameter markup before it validates."""
+    fields = set(model.model_fields)
+
+    class Repaired(model):  # pyright: ignore[reportGeneralTypeIssues]
+        @model_validator(mode="before")
+        @classmethod
+        def repair(cls, data: Any) -> Any:
+            return repair_leaked(data, fields)
+
+    Repaired.__name__ = Repaired.__qualname__ = model.__name__
+    Repaired.__doc__ = model.__doc__
+    return cast("type[ModelT]", Repaired)
 
 
 class StrictModel(BaseModel):
@@ -316,6 +354,13 @@ class DraftDecision(StrictModel):
     choice: str = Field(default="", max_length=1000)
     text: str = Field(default="", max_length=MAX_DRAFT)
     reason: str = Field(default="", max_length=2000)
+
+
+class WithdrawDraft(BaseModel):
+    draft_id: str = Field(description="Your draft that waits for the owner (d…)")
+    reason: str = Field(
+        description="Why, in a line the owner reads, e.g. 'Alice no longer needs the approval'"
+    )
 
 
 class SlackToken(StrictModel):

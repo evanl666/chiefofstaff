@@ -602,7 +602,10 @@ class DemoSlackMcp:
                     f"   https://demo.slack.com/archives/{MAYA_DM}/p{stamp}"
                 )
             return "No results found."
-        return "Maya Chen: hey! is the login fix going out today? support keeps asking"
+        return (
+            f"Channel: <#{MAYA_DM}> | From: <@U0MAYA01> (Maya Chen) | ts: 1\n"
+            "Text: hey! is the login fix going out today? support keeps asking"
+        )
 
 
 class DemoTokens:

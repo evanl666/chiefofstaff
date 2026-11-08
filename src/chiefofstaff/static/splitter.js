@@ -29,14 +29,15 @@ function apply(width, save = true) {
   const [low, high] = limits();
   handle.setAttribute("aria-valuemin", String(low));
   handle.setAttribute("aria-valuemax", String(high));
-  handle.setAttribute("aria-valuenow", String(Math.round(panel.getBoundingClientRect().width)));
+  handle.setAttribute("aria-valuenow", String(clamp(panel.getBoundingClientRect().width)));
 }
 
 export function bindSplitter() {
   const handle = $("#panel-resizer");
   const panel = $("#panel");
   const saved = Number(localStorage.getItem(KEY));
-  if (saved) apply(saved, false);
+  // Its value is set from the start (a separator one can focus needs one).
+  apply(saved || null, false);
   handle.addEventListener("pointerdown", (event) => {
     if (event.button !== 0) return;
     event.preventDefault();

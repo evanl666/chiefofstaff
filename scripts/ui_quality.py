@@ -17,6 +17,7 @@ visible focus ring.
 import asyncio
 import json
 import os
+import re
 import sys
 import tempfile
 import urllib.request
@@ -369,11 +370,19 @@ async def run(runtime, seeded, browser, quality: Quality, phase: str):
         await page.set_viewport_size({"width": 1280, "height": 900})
         await page.locator("#tasks").scroll_into_view_if_needed()
         await page.locator("#tasks").screenshot(path=SHOTS / f"quality-{phase}-tasks-{scheme}.png")
-        review = page.locator("#tasks-review .card.task").first
-        await review.get_by_role("button", name="Show report").click()
+        # The fixed test's report only informs (no code to accept): a row in Recently finished
+        # that opens its card in place, then its report.
+        review = page.locator("#tasks-recent .card.task", has_text=FIX)
+        await review.click()
+        await expect(review).to_have_class(re.compile(r"\bunfolded\b"))
+        toggle = review.locator(".expand")
+        if (await toggle.inner_text()).strip() == "Show report":
+            await toggle.click()
+        await expect(toggle).to_have_text("Hide report")
         await review.screenshot(path=SHOTS / f"quality-{phase}-review-open-{scheme}.png")
         await quality.check(page, f"review open {scheme}", "#panel")
-        await review.get_by_role("button", name="Hide report").click()
+        await toggle.click()
+        await expect(toggle).to_have_text("Show report")
         # A finished task: at most its start, the Router's reply and its end in the chat.
         lines = await page.locator("#timeline > *", has_text=FIX).count()
         if lines > 3:
@@ -392,7 +401,11 @@ async def run(runtime, seeded, browser, quality: Quality, phase: str):
         if not ring:
             quality.failures.append(f"focus {scheme}: no visible focus ring on a card's button")
 
-        await page.locator("#session-list .item", has_text=FIX).click()
+        # Its worker has nothing open: it is in the sidebar's folded group.
+        worker = page.locator("#session-list .item", has_text=FIX)
+        if not await worker.is_visible():
+            await page.locator("#session-list .idle-workers > summary").click()
+        await worker.click()
         await expect(page.locator("#back-home")).to_be_visible()
         await page.wait_for_timeout(300)
         for width in (1024, 800):

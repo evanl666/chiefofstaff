@@ -415,6 +415,15 @@ async function settingsAction(path, done) {
   }
 }
 const PLUGIN_STATE = { pending: "waiting", installing: "installing…", installed: "installed", failed: "failed" };
+// What the last scan could not cover, watch by watch: those it did not search at all (a problem
+// kept it from running them, so the server marked each with that problem) apart from those it
+// searched only in part.
+export function watchGaps(last = {}) {
+  const problems = (Array.isArray(last.problems) ? last.problems.join("; ") : String(last.problems || "")).trim();
+  const none = (item) => item.searched === false || (problems && item.reason && problems.startsWith(item.reason.trim()));
+  const gaps = last.incomplete || [];
+  return { problems, missed: gaps.filter(none), partial: gaps.filter((item) => !none(item)) };
+}
 export function renderConnections() {
   const snap = state.snapshot;
   if (!snap) return;
@@ -451,9 +460,15 @@ export function renderConnections() {
   $("#plugins-retry").hidden = !plugins.some(([, status]) => status.state === "failed");
   const connector = snap.connector || {};
   const last = connector.last || {};
-  // What the last scan could not do: one line (saved as text; a list from older versions).
-  const partial = (last.incomplete || []).map((item) => `watch ${item.watch} only partly covered: ${item.reason}`);
-  const problems = [(Array.isArray(last.problems) ? last.problems.join("; ") : String(last.problems || "")).trim(), ...partial].filter(Boolean).join(" · ");
+  // What the last scan could not do, in one line: each reason once.
+  const gaps = watchGaps(last);
+  const reasons = [...new Set(gaps.missed.map((item) => item.reason).filter(Boolean))];
+  const watches = (list) => `${list.length === 1 ? "watch" : "watches"} ${list.map((item) => item.watch).join(", ")}`;
+  const problems = [
+    gaps.problems && !reasons.some((reason) => gaps.problems.startsWith(reason)) ? gaps.problems : "",
+    gaps.missed.length ? `${watches(gaps.missed)} not searched${reasons.length ? `: ${reasons.join("; ")}` : ""}` : "",
+    ...gaps.partial.map((item) => `watch ${item.watch} only partly covered: ${item.reason}`),
+  ].filter(Boolean).join(" · ");
   const scanned = connector.scanning
     ? "Scanning now…"
     : connector.scanned_at
@@ -461,6 +476,10 @@ export function renderConnections() {
       : "";
   watchSummary();
   $("#watch-state").textContent = scanned;
+  // After hours (the schedule above): not scanning now, and why.
+  const resting = { weekend: "weekend", outside_hours: "outside work hours" }[connector.after_hours_reason];
+  $("#watch-resting").textContent = resting ? `Not scanning now: ${resting} (after-hours setting)` : "";
+  $("#watch-resting").hidden = !resting;
   $("#watch-state").classList.toggle("error", Boolean(problems));
   $("#watch-scan").disabled = Boolean(connector.scanning);
   $("#watch-activity").hidden = !connector.session_id;

@@ -148,7 +148,7 @@ async def test_the_owners_own_words_are_collected_where_they_wrote_them(tmp_path
         ("slack_dm", "hey! can u send me the deck? thx"),
         ("slack_channel", "Deploying now. Ping me if it breaks"),
         ("pr_review", "Nice. Two nits, then ship it."),
-        ("pr_review", "r.py: nit: name it retries"),
+        ("pr_review", "nit: name it retries"),
         ("commit", "Fix the retry loop\n\nIt retried forever on 404."),
         ("instruction", "先跑一个小的 smoke test 再跑全量"),
         ("instruction", "Always answer me in Chinese, briefly."),
@@ -158,6 +158,8 @@ async def test_the_owners_own_words_are_collected_where_they_wrote_them(tmp_path
     assert searched and all("reviewed-by:owner" in call for call in searched), (
         "only the owner's active account; not another signed in for tests"
     )
+    [comment] = harness.store.all("SELECT meta FROM observations WHERE ref='github:C1'")
+    assert json.loads(comment["meta"])["path"] == "r.py", "its file beside it, not in its words"
     assert await runtime.habits.collect() == 0, "read once"
     assert runtime.habits.view()["observed"]["pr_review"] == 2
 
@@ -491,3 +493,31 @@ async def test_learn_now_answers_at_once_and_helpers_take_no_worker_slot(tmp_pat
     assert learner["status"] == "working", "not queued behind the owner's worker"
     assert runtime.workers.running() == 1
     assert "learning from it now" in runtime.habits.view()["last"]["text"]
+
+
+async def test_review_style_is_learned_from_the_comments_own_words(tmp_path):
+    """Bug bash: line comments were kept as "calc.py: Nit: ...", the style learned that the
+    owner starts them with the file's name, and a posted comment read "calc.py: Nit: ..."."""
+    harness = Harness(tmp_path / "data")
+    runtime = await harness.connect()
+    habits = runtime.habits
+    habits.add("github", "pr_review", "github:OLD", "src/calc.py: Nit: name it total")
+    for index, text in enumerate(["Nit: rename", "Why not a set?", "LGTM once CI passes"]):
+        habits.add("github", "pr_review", f"github:C{index}", text, {"line_comment": True})
+    await runtime.learning.learn()
+    learner = learner_of(harness)
+    prompt = harness.session(learner["id"]).sent[0]
+    assert '"text": "Nit: name it total"' in prompt and "calc.py" not in prompt
+    ids = [row["id"] for row in harness.store.all("SELECT id FROM observations")]
+    refused = await call_tool(runtime, "update_style", learner["id"], section="pr_review",
+                              text="Starts each line comment with the file name, then a terse "
+                              "nit.", evidence=ids)  # fmt: skip
+    assert refused.result_type == "failure" and "GitHub shows the file" in (
+        refused.text_result_for_llm
+    )
+    done = await call_tool(runtime, "update_style", learner["id"], section="pr_review",
+                           text="Terse nits, questions over orders.", evidence=ids)  # fmt: skip
+    assert "version 1" in done.text_result_for_llm
+    worker = await spawn(runtime, harness.router_id, "Review acme/app#7")
+    content = runtime.options(harness.store.session(worker["session_id"]))["system_message"]
+    assert "never start one with the file's name" in content["content"]

@@ -1,7 +1,7 @@
 import pytest
-from conftest import FakeSlackMcp, FakeTokens, slack_tool
+from conftest import FakeSlackMcp, FakeTokens, Harness, call_tool, slack_tool
 
-from chiefofstaff.models import Settings
+from chiefofstaff.models import DraftDecision, Settings
 from chiefofstaff.sources.slack import SlackError, SlackSource, message_keys, newest_message
 from chiefofstaff.store import Store
 
@@ -312,4 +312,142 @@ def test_the_newest_message_is_quoted_whole_not_cut_mid_sentence():
     assert newest_message(listed, last=False).startswith("Bob: older older")
     long = newest_message(listed.replace("Ship it", "word " * 200), last=True)
     assert len(long) == 400 and long.endswith("\u2026") and long.startswith("Alice: word")
-    assert newest_message("plain " * 100, last=True).startswith("\u2026")
+    assert newest_message("plain " * 100, last=True) == "", "not a message: no quote"
+
+
+def entry(channel, user, name, ts, text, root=""):
+    """One message as Slack's MCP server lists it."""
+    thread = f" | thread_ts: {root}" if root else ""
+    link = f"https://acme.slack.com/archives/{channel}/p{ts.replace('.', '')}"
+    link += f"?thread_ts={root}&cid={channel}" if root else ""
+    return (
+        f"Channel: <#{channel}> | From: <@{user}> ({name}) | ts: {ts}{thread}\n"
+        f"Text: {text}\nPermalink: {link}"
+    )
+
+
+async def test_a_read_error_is_not_quoted_as_the_latest_message(source):
+    """Bug bash: "Thread not found." showed on a card as Bob's message."""
+    source.mcp.reads["C0DEPLOYS"] = "Thread not found."
+    found = await source.latest_message("C0DEPLOYS", "1712345678.000100")
+    assert "quote" not in found and "Thread not found." in found["error"]
+    assert await source.latest("C0DEPLOYS", "1712345678.000100") == ""
+    place = await source.reply_place("C0DEPLOYS", "1712345678.000100")
+    assert place["thread_ts"] == "1712345678.000100" and "Thread not found." in place["error"]
+
+
+async def test_slack_news_reads_by_name_and_the_names_are_kept(source):
+    await source.poll_once()
+    source.mcp.results["to:me"] = (
+        "Channel: <#C0DEPLOYS> (deploys) | From: <@U0BOB001> (Bob Li) | ts: 1712345678.000100\n"
+        "Text: can you check the rollout? &lt;3\n"
+        "Permalink: https://acme.slack.com/archives/C0DEPLOYS/p1712345678000100\n\n"
+        "Channel: <#D0ALICE01> (DM with Alice) | From: <@U0ALICE1> (Alice Chen) | ts: "
+        "1712345690.000200 | thread_ts: 1712345600.000100\nText: lunch?\n"
+        "Permalink: https://acme.slack.com/archives/D0ALICE01/p1712345690000200"
+        "?thread_ts=1712345600.000100&cid=D0ALICE01"
+    )
+    await source.poll_once()
+    [(_name, keys, text, display)] = source.calls
+    assert len(keys) == 2 and "| ts: 1712345678.000100" in text, "the Router keeps the ids"
+    assert display == (
+        "Bob Li in #deploys: can you check the rollout? <3\n"
+        "https://acme.slack.com/archives/C0DEPLOYS/p1712345678000100\n\n"
+        "Alice Chen in a DM, in a thread: lunch?\n"
+        "https://acme.slack.com/archives/D0ALICE01/p1712345690000200"
+        "?thread_ts=1712345600.000100&cid=D0ALICE01"
+    )
+    names = {
+        "C0DEPLOYS": "deploys",
+        "U0BOB001": "Bob Li",
+        "D0ALICE01": "DM with Alice",
+        "U0ALICE1": "Alice Chen",
+    }
+    assert source.display_names() == names
+    later = SlackSource(source.store, source.host, tokens=FakeTokens(), mcp=FakeSlackMcp())
+    assert later.display_names() == names, "kept for the page, across restarts"
+
+
+async def test_a_dm_message_in_no_thread_is_answered_in_the_dm(source):
+    """Bug bash: a reply to a top-level DM was drafted "in a thread" under it."""
+    asked = entry("D0ALICE01", "U0ALICE1", "Alice Chen", "1712345600.000100", "approve it?")
+    source.mcp.reads["D0ALICE01"] = asked
+    place = await source.reply_place("D0ALICE01", "1712345600.000100")
+    assert place["thread_ts"] == "" and place["quote"] == "Alice Chen: approve it?"
+    assert place["ts"] == "1712345600.000100" and place["user"] == "U0ALICE1"
+    asked_for = await source.reply_place("D0ALICE01", "1712345600.000100", in_thread=True)
+    assert asked_for["thread_ts"] == "1712345600.000100", "a thread when the session asks"
+    reply = entry("D0ALICE01", "U0OWNER1", "Owner", "1712345650.000200", "on it",
+                  root="1712345600.000100")  # fmt: skip
+    source.mcp.reads["D0ALICE01"] = f"{asked}\n\n{reply}"
+    place = await source.reply_place("D0ALICE01", "1712345600.000100")
+    assert place["thread_ts"] == "1712345600.000100", "a DM thread stays its thread"
+    assert place["quote"] == "Owner: on it"
+    source.mcp.reads["C0DEPLOYS"] = reply.replace("D0ALICE01", "C0DEPLOYS")
+    place = await source.reply_place("C0DEPLOYS", "1712345650.000200")
+    assert place["thread_ts"] == "1712345600.000100", "a reply goes into its thread"
+
+
+async def test_a_reply_is_not_sent_into_a_conversation_that_moved_on(tmp_path):
+    """Bug bash: Alice asked for an approval and "Approved" was drafted; she then wrote "nvm, DO
+    NOT approve"; the session could not withdraw its draft, both cards stayed, and Send posted
+    the approval."""
+    harness = Harness(tmp_path / "data", Settings(slack_enabled=True))
+    runtime = await harness.connect()
+    await runtime.slack.discover()
+    slack = harness.store.open_sessions("slack")[0]["id"]
+    dm = "D0ALICE01"
+    harness.mcp.reads[dm] = entry(dm, "U0ALICE1", "Alice Chen", "1712345600.000100", "approve?")
+
+    async def draft(text):
+        result = await call_tool(runtime, "draft_slack_reply", slack, channel_id=dm,
+                                 thread_ts="1712345600.000100", text=text)  # fmt: skip
+        return harness.store.drafts()[-1], result.text_result_for_llm
+
+    def sends():
+        return [args for tool, args in harness.mcp.calls if tool == "slack_send_message"]
+
+    first, said = await draft("Approved \u2705")
+    assert first["target"]["thread_ts"] == "" and "into the DM itself" in said
+    assert first["target"]["latest"] == "Alice Chen: approve?"
+    nvm = entry(dm, "U0ALICE1", "Alice Chen", "1712345700.000100", "nvm \u2014 DO NOT approve")
+    harness.mcp.reads[dm] = nvm
+    with pytest.raises(ValueError, match="Alice Chen wrote since this draft"):
+        await runtime.drafts.resolve(first["id"], DraftDecision(action="send", text="Approved"))
+    card = harness.store.draft(first["id"])
+    assert card["status"] == "pending" and sends() == []
+    assert card["target"]["latest"] == "Alice Chen: nvm \u2014 DO NOT approve"
+    assert card["target"]["moved_on"]["who"] == "Alice Chen"
+    assert card["outcome"].endswith("Not sent: send anyway?")
+    # The newer draft replaces the older one; a draft can be withdrawn.
+    second, said = await draft("OK, holding off.")
+    assert f"replaces your earlier draft {first['id']}" in said
+    replaced = harness.store.draft(first["id"])
+    assert replaced["status"] == "rejected" and replaced["outcome"].startswith("Replaced by")
+    assert [d["id"] for d in harness.store.drafts()] == [second["id"]]
+    assert not harness.store.all("SELECT id FROM feedback"), "not the owner's rejection"
+    not_mine = await call_tool(runtime, "withdraw_draft", harness.router_id,
+                               draft_id=second["id"], reason="x")  # fmt: skip
+    assert not_mine.result_type == "failure"
+    withdrawn = await call_tool(runtime, "withdraw_draft", slack, draft_id=second["id"],
+                                reason="Alice sorted it out")  # fmt: skip
+    assert "withdrawn" in withdrawn.text_result_for_llm
+    gone = harness.store.draft(second["id"])
+    assert gone["status"] == "rejected" and gone["outcome"] == "Withdrawn: Alice sorted it out"
+    # Sent again once the card shows what was written since; or at once with send_anyway.
+    third, _ = await draft("Holding off, then.")
+    harness.mcp.reads[dm] = entry(dm, "U0ALICE1", "Alice Chen", "1712345800.000100", "hello?")
+    with pytest.raises(ValueError, match="wrote since"):
+        await runtime.drafts.resolve(third["id"], DraftDecision(action="send"))
+    sent = await runtime.drafts.resolve(third["id"], DraftDecision(action="send"))
+    assert sent["status"] == "sent" and sends()[-1]["message"] == "Holding off, then."
+    fourth, _ = await draft("Done.")
+    harness.mcp.reads[dm] = entry(dm, "U0ALICE1", "Alice Chen", "1712345900.000100", "and?")
+    anyway = DraftDecision(action="send", content={"send_anyway": True})
+    assert (await runtime.drafts.resolve(fourth["id"], anyway))["status"] == "sent"
+    # What the owner wrote there themself is not someone moving the conversation on.
+    fifth, _ = await draft("One more thing.")
+    harness.mcp.reads[dm] = entry(dm, "U0OWNER1", "Owner", "1712346000.000100", "brb")
+    assert (await runtime.drafts.resolve(fifth["id"], DraftDecision(action="send")))[
+        "status"
+    ] == "sent"

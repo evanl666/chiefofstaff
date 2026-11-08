@@ -247,6 +247,8 @@ class TaskBook:
             self.store.delete(f"checkback:{task_id}")  # Nothing to check back on.
         if status != "waiting":
             self.store.delete(f"stopped:{task_id}")  # Going on (or over): not stopped now.
+            self.store.delete(f"goingon:{task_id}")
+            self.store.delete(f"askedafter:{task_id}")
         if status == "running" and task["session_id"]:
             # The worker is on this task now.
             self.store.execute(

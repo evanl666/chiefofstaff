@@ -106,7 +106,7 @@ def test_fences_with_any_info_string_and_first_lines_keep_numbers():
 
 def board(tasks: list, workers: list, **options):
     """Where each task is on the board (board.js): its section and marker, the boxes per
-    section, and the finished ones in order."""
+    section, Monitoring's rows by group, and the finished ones in order."""
     return run_js(
         f"const b = await import({json.dumps((STATIC / 'board.js').as_uri())});\n"
         f"const workers = new Map({json.dumps(workers)}.map((w) => [w.id, w]));\n"
@@ -119,8 +119,8 @@ def board(tasks: list, workers: list, **options):
         " boxes: Object.fromEntries(Object.entries(found.sections).map(([k, v]) =>"
         " [k, v.map((e) => [e.sessionId, e.tasks.map((t) => t.id)])])),"
         " finished: found.finished.map((t) => t.id),"
-        " pages: b.finishedBoxes(found.finished, options.limit || 30)"
-        ".map((box) => [box.sessionId, box.tasks.map((t) => t.id)]),"
+        " monitoring: Object.fromEntries(Object.entries(found.monitoring).map(([k, v]) =>"
+        " [k, v.map((t) => t.id)])),"
         " sidebar: Object.fromEntries([...workers.keys()].map((id) => [id, b.workerSection("
         "found.phases, " + json.dumps(tasks) + ".filter((t) => t.session_id === id))])),"
         " whys: Object.fromEntries([...found.phases].map(([id, p]) => [id, p.why])),"
@@ -239,17 +239,66 @@ def test_no_answer_to_a_nudge_brings_a_stalled_task_to_the_owner():
     assert found["phases"] == {"a": "needs/stalled", "b": "monitoring/overdue"}
 
 
-def test_recently_finished_is_newest_first_across_workers_a_page_at_a_time():
+def test_recently_finished_is_newest_first_across_workers():
     def ended(id, session, hour):
         return task(id, session, "done", ended_at=f"2026-11-07T{hour:02d}:00:00Z")
 
     workers = [{"id": "w1", "status": "idle"}, {"id": "w2", "status": "idle"}]
-    # A busy worker's old results do not hide another's newer ones.
+    # A busy worker's old results do not hide another's newer ones; a row each, no boxes.
     tasks = [ended(f"a{h}", "w1", h) for h in range(1, 6)] + [ended("b9", "w2", 9)]
     tasks += [ended("b10", "w2", 10), ended("a11", "w1", 11)]
-    found = board(tasks, workers, limit=4)
+    found = board(tasks, workers)
     assert found["finished"] == ["a11", "b10", "b9", "a5", "a4", "a3", "a2", "a1"]
-    assert found["pages"] == [["w1", ["a11"]], ["w2", ["b10", "b9"]], ["w1", ["a5"]]]
+
+
+def test_monitoring_keeps_deliveries_and_reviewed_prs_apart_and_lets_quiet_ones_go():
+    """E6: the owner's deliveries waiting on others and PRs they reviewed are groups of their
+    own; one PR a worker follows for two tasks is one row; a day with nothing new there and it
+    is with the finished ones, still followed (news brings it back); overdue comes first."""
+    workers = [{"id": "w1", "status": "idle"}, {"id": "w2", "status": "idle"}]
+    day_ago = "2026-11-06T10:00:00Z"
+    tasks = [
+        task("own", "w1", "done", watching=["github:o/r#1"], watch_kind="own",
+             watch_changed_at="2026-11-07T09:00:00Z"),
+        task("rev", "w2", "done", watching=["github:o/r#2"], watch_kind="reviewed"),
+        # The same PR for the same worker: one split off the other, say; the newer shows.
+        task("old", "w2", "review", at="2026-11-07T08:00:00Z", watching=["github:o/r#2"],
+             watch_kind="reviewed"),
+        task("quiet", "w1", "done", watching=["github:o/r#3"], watch_changed_at=day_ago),
+        task("news", "w1", "done", watching=["github:o/r#4"], watch_changed_at=day_ago,
+             news={"at": "2026-11-07T11:00:00Z", "text": "merged"}),
+        task("wait", "w1", watching=["github:o/r#5"], at="2026-11-07T11:58:00Z"),
+        task("late", "w2", at="2026-11-07T06:00:00Z"),
+    ]  # fmt: skip
+    found = board(tasks, workers)
+    assert found["phases"] == {
+        "own": "monitoring/delivered", "rev": "monitoring/reviewed",
+        "old": "finished/still-following", "quiet": "finished/still-following",
+        "news": "needs/update", "wait": "monitoring/watching", "late": "monitoring/overdue",
+    }  # fmt: skip
+    assert found["monitoring"] == {"waiting": ["late", "wait"], "delivered": ["own"],
+                                   "reviewed": ["rev"]}  # fmt: skip
+    assert found["whys"]["quiet"] == "Still following; nothing new there for 26h"
+    assert found["whys"]["old"] == "Still following, for “rev”"
+    assert found["sidebar"] == {"w1": "needs", "w2": "monitoring"}
+
+
+def test_a_report_the_router_wants_looked_at_and_a_task_after_a_stopped_one():
+    """E10: review_required is a result to review, report or not. #4: a task its worker has not
+    taken up, behind one the owner stopped, is up next after Go on, not "nothing to wait on"."""
+    workers = [{"id": "w1", "status": "idle"}]
+    tasks = [
+        task("mock", "w1", "review", review_required=True),
+        task("s", "w1", "waiting", stopped="you"),
+        task("next", "w1", started=False),
+    ]
+    found = board(tasks, workers)
+    assert found["phases"] == {
+        "mock": "needs/review",
+        "s": "needs/stopped",
+        "next": "monitoring/turn",
+    }
+    assert found["whys"]["next"] == "Up next: after you say Go on to “s”"
 
 
 def test_urls_keep_their_underscores_and_parentheses_and_bad_escapes_do_not_break():
@@ -282,7 +331,8 @@ def test_links_have_a_role_on_a_card():
         """
         const urls = [
           "https://github.com/o/r/pull/7",
-          "https://docs.google.com/document/d/abc/edit",
+          "https://docs.google.com/document/d/abc123/edit",
+          "https://docs.google.com/",
           "https://flyte.example.com/console/projects/p/domains/d/executions/abc123",
           "https://flyte.example.com/console/projects/p/domains/d/executions/abc123/logs",
           "https://shs.example.com/history/application_1700000000000_0042/jobs/",
@@ -295,8 +345,8 @@ def test_links_have_a_role_on_a_card():
         """
     )
     assert roles == [
-        "pr", "output", "run", "diagnostic", "diagnostic", "run", "diagnostic", "diagnostic",
-        "reference",
+        "pr", "output", "reference", "run", "diagnostic", "diagnostic", "run", "diagnostic",
+        "diagnostic", "reference",
     ]  # fmt: skip
 
 
@@ -317,11 +367,19 @@ def test_artifacts_in_one_list_with_where_each_stands():
                 name: "ICP flow", status: "running", at: "2026-11-07T11:20:00Z" },
               { url: sheet, name: "Weekly sheet", status: "draft", at: "2026-11-07T11:00:00Z" },
             ],
-            // A doc an earlier report gave (the latest does not repeat it), the same document
-            // again with a query, a Spark application under the run, a link in code.
+            // A doc an earlier report said it made (the latest does not repeat it), named as
+            // that report linked it, the same document again with a query; one it only
+            // mentions, docs.google.com itself, a Spark application under the run, links in
+            // code and one cut short.
             links: ["https://docs.google.com/document/d/1DocMadeEarly/edit"],
+            made_links: ["https://docs.google.com/document/d/1DocMadeEarly/edit"],
+            link_names: { "https://docs.google.com/document/d/1DocMadeEarly/edit": "Early doc" },
             progress: "Doc: https://docs.google.com/document/d/1DocMadeEarly/edit?usp=sharing "
+              + "see [the spec](https://docs.google.com/document/d/1OnlyMentioned/edit) and "
+              + "https://docs.google.com/ "
               + "Spark https://shs.example.com/history/application_1700000000000_0042/jobs/\\n"
+              + "`[x](https://docs.google.com/document/d/1InCodeDoc/edit)` "
+              + "https://docs.google.com/document/d/1CutShort… "
               + "```\\nhttps://not-a-link.example.com/x\\n```" },
           { id: "t2", status: "done", title: "Review #2", updated_at: "2026-11-07T10:00:00Z",
             receipts: { prs: [pr(2, { own: true, state: "MERGED" }),
@@ -332,18 +390,102 @@ def test_artifacts_in_one_list_with_where_each_stands():
             given_links: ["https://docs.google.com/document/d/1GivenDocC"],
             result: "Read https://docs.google.com/document/d/1GivenDocC/edit?usp=sharing",
             goal: "See https://docs.google.com/document/d/1GivenDocC" },
+          // A report that only informs (Home says so): "reported", not "to review".
+          { id: "t3", status: "review", title: "Explain the flow",
+            updated_at: "2026-11-07T09:00:00Z",
+            result: "Wrote [the plan](https://docs.google.com/document/d/1PlanDoc/edit) and "
+              + "https://docs.google.com/spreadsheets/d/1NumbersSheet/edit",
+            made_links: ["https://docs.google.com/document/d/1PlanDoc/edit?usp=sharing",
+              "https://docs.google.com/spreadsheets/d/1NumbersSheet/edit"] },
         ];
-        return a.collectArtifacts(tasks).map((i) => [i.kind, i.name, i.status, i.tone, i.task.id]);
+        const phases = new Map([["t3", { section: "finished", marker: "report" }]]);
+        return a.collectArtifacts(tasks, phases)
+          .map((i) => [i.kind, i.name, i.status, i.tone, i.task.id]);
         """
     )
     assert found == [
         ["PR", "app#1", "CI failing", "bad", "t1"],
-        ["Doc", "1DocMade", "in progress", "active", "t1"],
+        ["Doc", "Early doc", "in progress", "active", "t1"],
         ["Flyte", "ICP flow", "running", "active", "t1"],
         ["PR", "app#3", "draft", "active", "t2"],
+        ["Doc", "the plan", "reported", "neutral", "t3"],
+        ["Sheet", "Sheet", "reported", "neutral", "t3"],
         ["Sheet", "Weekly sheet", "final", "good", "t2"],
         ["PR", "app#2", "merged", "good", "t2"],
     ], "worst first, then newest; own PRs only; one row per document, the newer word on it"
+
+
+def test_a_pr_is_ready_to_merge_when_github_would_merge_it():
+    found = run_js(
+        f"const a = await import({json.dumps((STATIC / 'artifacts.js').as_uri())});\n"
+        """
+        const pr = (extra) => a.prStatus({ state: "OPEN", checks: "passing", ...extra });
+        return [
+          pr({ merge_state: "CLEAN" }), pr({ merge_state: "CLEAN", review: "CHANGES_REQUESTED" }),
+          pr({ merge_state: "CLEAN", checks: "pending" }),
+          pr({ merge_state: "HAS_HOOKS", review: "APPROVED" }),
+          pr({ merge_state: "BLOCKED", review: "APPROVED" }), pr({}),
+          pr({ merge_state: "CLEAN", draft: true }),
+        ].map(([word]) => word);
+        """
+    )
+    assert found == ["ready to merge", "changes requested", "CI running", "ready to merge",
+                     "approved", "in review", "draft"]  # fmt: skip
+
+
+def test_what_a_task_made_is_what_it_declared_or_says_it_made():
+    """E1/E9: a link is its output when its worker declared it or a report says it made it;
+    what it only mentions, docs.google.com itself and links in code are not. A document is
+    named as its worker or a report named it, else by its kind: never by its id."""
+    found = run_js(
+        """
+        const doc = (id) => `https://docs.google.com/document/d/${id}/edit`;
+        const links = t.taskLinks({
+          title: "Eval SLM", goal: "",
+          artifacts: [{ url: doc("1Declared"), name: "", status: "draft" },
+            { url: "file:///work/scratch/mock5.html", path: "/work/scratch/mock5.html",
+              name: "mock5.html", status: "draft" }],
+          files: [{ path: "/work/scratch/notes.md", name: "notes.md", size: 2048 },
+            { path: "/work/scratch/mock5.html", name: "mock5.html", size: 10 }],
+          made_links: [doc("1SPkOjC0abc") + "?usp=sharing"],
+          given_links: [doc("1Given")],
+          result: "Made [qwen3_8b SFT 11-05](" + doc("1SPkOjC0abc") + "), read " + doc("1Given")
+            + ", see [the bug report](" + doc("1Mentioned") + ") and https://docs.google.com/ "
+            + "`" + doc("1InCode") + "` https://flyte.example.com/console/projects/p/domains/d/executions/run1",
+        });
+        return links.map((l) => [l.found.kind, l.role, t.linkName(l), l.path]);
+        """
+    )
+    assert found == [
+        ["doc", "output", "Google Doc", ""],
+        ["file", "output", "mock5.html", "/work/scratch/mock5.html"],
+        ["doc", "output", "qwen3_8b SFT 11-05", ""],
+        ["doc", "reference", "Google Doc", ""],
+        ["doc", "reference", "the bug report", ""],
+        ["link", "reference", "docs.google.com", ""],
+        ["run", "run", "Flyte · run1", ""],
+        ["file", "output", "notes.md", "/work/scratch/notes.md"],
+    ]
+
+
+def test_slack_ids_read_as_names():
+    found = run_js(
+        """
+        s.state.snapshot = { slack_names: { U0OWNER1: "Evan", D0BOB0001: "Bob", C0ENG: "eng" } };
+        return [
+          t.slackText("Channel: <#C0DEPLOYS> (deploys) | From: <@U0BOB001> (Bob) | "
+            + "ts: 1712345678.000100\\nText: hi <@U0OWNER1>"),
+          t.slackText("DM <#D0BOB0001> ts: 1712345700.000400 <#C0ENG|eng> (see above) <@U0NOBODY>"),
+          t.threadLabel("slack:D0BOB0001"), t.threadLabel("slack:C0ENG:1712345678.000100"),
+          t.threadLabel("slack:D0UNKNOWN"),
+        ];
+        """
+    )
+    assert found == [
+        "Channel: #deploys | From: @Bob\nText: hi @Evan",
+        "DM DM with Bob #eng (see above) @U0NOBODY",
+        "Slack DM with Bob", "Slack thread in #eng", "Slack DM",
+    ]  # fmt: skip
 
 
 def test_a_status_in_words_has_its_tone_negations_too():
@@ -395,9 +537,9 @@ def test_lines_keep_code_and_underscores_as_the_message_shows_them():
           ],
           flyte: t.linkKind("https://example.com/console/projects/p/domains/d/executions/abc123"),
           docs: [
-            t.linkKind("https://docs.google.com/document/d/ABCDEFGH123/edit").label,
-            t.linkKind("https://docs.google.com/document/d/ZYXWVUT9876/edit").label,
-          ],
+            t.linkKind("https://docs.google.com/document/d/ABCDEFGH123/edit"),
+            t.linkKind("https://docs.google.com/document/d/ZYXWVUT9876/edit"),
+          ].map((found) => [found.label, found.id]),
         };
         """
     )
@@ -414,7 +556,8 @@ def test_lines_keep_code_and_underscores_as_the_message_shows_them():
     assert found["keys"][3] == "airflow.corp/graph?dag_id=a" != found["keys"][4]
     assert found["keys"][5] != found["keys"][6]
     assert found["flyte"]["label"] == "Flyte · abc123" and found["flyte"]["role"] == "run"
-    assert found["docs"] == ["Google Doc · ABCDEFGH", "Google Doc · ZYXWVUT9"]
+    # Named by what they are; their ids tell them apart (linkKey) and are on hover.
+    assert found["docs"] == [["Google Doc", "ABCDEFGH123"], ["Google Doc", "ZYXWVUT9876"]]
 
 
 def test_a_stopped_task_waits_for_the_owner():

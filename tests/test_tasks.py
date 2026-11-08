@@ -2,6 +2,7 @@ import contextlib
 import json
 import sqlite3
 
+import pytest
 from conftest import Harness, call_tool, settle, task_of
 
 from chiefofstaff.store import Store
@@ -353,12 +354,31 @@ async def test_a_task_that_drifted_is_split_with_each_result_its_own(harness):
         text="Does Qwen need a weekly rerun?", task_id=made["task_id"],
     )  # fmt: skip
     await call_tool(runtime, "report", worker, status="done", summary="No: vectors are built in.")
+    bad = await call_tool(
+        runtime, "split_task", harness.router_id, task_id=made["task_id"], title="111"
+    )
+    assert bad.result_type == "failure" and "what it delivers" in bad.text_result_for_llm
+    preview = runtime.task_actions.split_preview(made["task_id"])
+    assert preview["keeps"]["result"] == "Scheduled for Mondays."
+    assert preview["moves"]["result"] == "No: vectors are built in."
+    assert [m["kind"] for m in preview["moves"]["messages"]] == ["router", "report"], (
+        "the question that asked for it and its answer: not the earlier work"
+    )
     early = await call_tool(
-        runtime, "split_task", harness.router_id, task_id=made["task_id"], title="x"
+        runtime, "split_task", harness.router_id, task_id=made["task_id"], title="Qwen rerun answer"
     )
     assert early.result_type == "success"
     [split] = [t for t in runtime.tasks.for_session(worker) if t["id"] != made["task_id"]]
-    assert split["title"] == "x" and split["result"] == "No: vectors are built in."
+    assert split["title"] == "Qwen rerun answer" and split["result"] == "No: vectors are built in."
+    assert runtime.display_title(harness.store.session(worker)) == "Schedule BG features weekly", (
+        "a split does not rename the worker"
+    )
+    undone = runtime.task_actions.merge_back(split["id"])
+    assert undone["result"] == "No: vectors are built in." and not runtime.tasks.find(split["id"])
+    assert len(runtime.tasks.for_session(worker)) == 1
+    await call_tool(runtime, "split_task", harness.router_id, task_id=made["task_id"],
+                    title="Qwen rerun answer")  # fmt: skip
+    [split] = [t for t in runtime.tasks.for_session(worker) if t["id"] != made["task_id"]]
     kept = runtime.tasks.get(made["task_id"])
     assert kept["result"] == "Scheduled for Mondays." and kept["status"] == "review"
     moved = [
@@ -377,14 +397,38 @@ async def test_a_task_that_drifted_is_split_with_each_result_its_own(harness):
     assert other.result_type == "success", other.text_result_for_llm
     busy = runtime.tasks.current(worker)
     assert busy["title"] == "Backfill the BG table"
-    await call_tool(runtime, "split_task", harness.router_id, task_id=split["id"], title="Qwen")
+    await call_tool(runtime, "split_task", harness.router_id, task_id=split["id"],
+                    title="Qwen is fine note")  # fmt: skip
     assert runtime.tasks.current(worker)["id"] == busy["id"]
     single = await spawn(runtime, harness.router_id, "One result", why_new="separate")
     await call_tool(runtime, "report", single["session_id"], status="done", summary="Done.")
     refused = await call_tool(
-        runtime, "split_task", harness.router_id, task_id=single["task_id"], title="y"
+        runtime, "split_task", harness.router_id, task_id=single["task_id"], title="Another result"
     )
     assert refused.result_type == "failure" and "rename" in refused.text_result_for_llm
+
+
+async def test_a_split_off_task_worked_on_since_cannot_be_undone(harness):
+    """Code review: Undo split deleted a split-off task followed up on since (the follow-up's
+    reports pointed at a deleted task)."""
+    runtime = await harness.connect()
+    made = await spawn(runtime, harness.router_id, "Schedule BG features weekly")
+    worker = made["session_id"]
+    await call_tool(runtime, "report", worker, status="done", summary="Scheduled for Mondays.")
+    await call_tool(
+        runtime, "message_session", harness.router_id, session_id=worker,
+        text="Does Qwen need a weekly rerun?", task_id=made["task_id"],
+    )  # fmt: skip
+    await call_tool(runtime, "report", worker, status="done", summary="No: vectors are built in.")
+    split = runtime.task_actions.split(made["task_id"], "Qwen rerun answer")
+    assert split["split_from"]["until"], "undo offered at first"
+    await call_tool(runtime, "message_session", harness.router_id, session_id=worker,
+                    text="And the 8B model?", task_id=split["id"])  # fmt: skip
+    shown = runtime.task_actions.view(runtime.tasks.get(split["id"]))
+    assert shown["split_from"]["until"] == "", "no Undo once it is worked on"
+    with pytest.raises(ValueError, match="worked on since the split"):
+        runtime.task_actions.merge_back(split["id"])
+    assert runtime.tasks.find(split["id"]), "the task and its follow-up stay"
 
 
 async def test_a_worker_says_what_its_task_made_and_where_each_stands(harness):

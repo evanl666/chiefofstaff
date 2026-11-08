@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import signal
+import tempfile
 import time
 import unicodedata
 from collections.abc import Awaitable, Callable
@@ -177,7 +178,9 @@ def config_runs_code(common: str) -> list[str]:
     return found
 
 
-async def checkout_git(checkout: dict, path: str, *arguments: str, limit: float = 60) -> str:
+async def checkout_git(
+    checkout: dict, path: str, *arguments: str, limit: float = 60, env: dict | None = None
+) -> str:
     """git in one of a worker's checkouts, as Chief of Staff: the repository pinned (git_pins),
     nothing in its config run, and a clone in the worker's own folder (whose config it can
     write) refused if its config would run code."""
@@ -188,7 +191,9 @@ async def checkout_git(checkout: dict, path: str, *arguments: str, limit: float 
         config_runs_code, pins.get("GIT_COMMON_DIR") or str(Path(path) / ".git")
     )):  # fmt: skip
         raise ValueError(f"Not reading {path}: its git config was changed ({', '.join(found)}).")
-    return await command("git", *SAFE_GIT, "-C", path, *arguments, limit=limit, env=pins)
+    return await command(
+        "git", *SAFE_GIT, "-C", path, *arguments, limit=limit, env={**pins, **(env or {})}
+    )
 
 
 # Repository -> when its default branch was last fetched; parallel workers fetch once.
@@ -566,12 +571,33 @@ class Scope:
     not committed, the files it changed: in a folder of the owner's (shared), those its own
     edits touched; elsewhere, those changed after `since` (when the task was taken up)."""
 
-    def __init__(self, base: str = "", since: float = 0, touched: set[str] | None = None):
+    def __init__(
+        self,
+        base: str = "",
+        since: float = 0,
+        touched: set[str] | None = None,
+        start: str = "",
+        end: dict | None = None,
+        others: set[str] | None = None,
+        head: str = "",
+    ):
         self.base, self.since, self.touched = base, since, touched or set()
+        # The commit the checkout was on when it was taken up (`start`'s): what commits made
+        # before then brought in since (a pull, another branch checked out) is not its work.
+        self.head = head
+        # Snapshots (see snapshot): the files as they were when it was taken up (`start`, a
+        # tree) and when it reported its result (`end`, {"commit", "tree"}; None while open).
+        # Its share is what changed between them: shell edits too, and not an earlier or later
+        # task's. `others`: files other tasks' edits wrote (in a folder of the owner's).
+        self.start, self.end, self.others = start, end, others or set()
 
     def wrote(self, top: Path, name: str) -> bool:
         """Whether its own edits wrote this file."""
         return os.path.realpath(top / name) in self.touched
+
+    def others_wrote(self, top: Path, name: str) -> bool:
+        """Whether another task's edits wrote this file."""
+        return os.path.realpath(top / name) in self.others
 
     def keeps(self, top: Path, name: str, shared: bool, committed: set[str]) -> bool:
         if name in committed:
@@ -585,6 +611,53 @@ class Scope:
             return path.lstat().st_mtime >= self.since - 1
         except OSError:
             return True  # Deleted: a change all the same.
+
+
+MAX_SNAPSHOT_FILES = 5000
+MAX_SNAPSHOT_FILE = 20_000_000
+
+
+def untracked_sizes(top: str, names: list[str]) -> int:
+    """The largest of these files' sizes (0 for none)."""
+    largest = 0
+    for name in names:
+        with suppress(OSError):
+            largest = max(largest, (Path(top) / name).lstat().st_size)
+    return largest
+
+
+async def snapshot(checkout: dict) -> dict | None:
+    """What a checkout holds now, all of it: its commit, and a tree of its files as they are
+    (edited, new; not ignored ones). Written to the repository's objects only, through an index
+    of its own: no branch, index or file of the checkout changes. With many or very large new
+    files (not worth copying), its commit and no tree ("") ; None when it cannot be taken."""
+    path, head, live = await asyncio.to_thread(locate, checkout)
+    try:
+        commit = (await checkout_git(checkout, path, "rev-parse", head)).strip()
+        if not live:
+            tree = await checkout_git(checkout, path, "rev-parse", f"{head}^{{tree}}")
+            return {"commit": commit, "tree": tree.strip()}
+        top = (await checkout_git(checkout, path, "rev-parse", "--show-toplevel")).strip()
+        others = await checkout_git(
+            checkout, top, "ls-files", "--others", "--exclude-standard", "-z"
+        )
+        names = [name for name in others.split("\0") if name]
+        if len(names) > MAX_SNAPSHOT_FILES or (
+            await asyncio.to_thread(untracked_sizes, top, names) > MAX_SNAPSHOT_FILE
+        ):
+            return {"commit": commit, "tree": ""}  # Its commit all the same, no tree.
+        index = (await checkout_git(checkout, top, "rev-parse", "--git-path", "index")).strip()
+        index = str(Path(top) / index) if not os.path.isabs(index) else index
+        with tempfile.TemporaryDirectory(prefix="cos-snap-") as folder:
+            own = str(Path(folder) / "index")
+            with suppress(FileNotFoundError):
+                await asyncio.to_thread(shutil.copyfile, index, own)
+            env = {"GIT_INDEX_FILE": own}
+            await checkout_git(checkout, top, "add", "-A", limit=120, env=env)
+            tree = (await checkout_git(checkout, top, "write-tree", env=env)).strip()
+        return {"commit": commit, "tree": tree}
+    except (ValueError, OSError):
+        return None
 
 
 def status_name(line: str) -> str:
@@ -675,6 +748,10 @@ class Share:
         self.committed: set[str] = set()
         self.keep: list[str] = []  # Changed files it keeps, committed or not.
         self.fresh: list[str] = []  # Its new untracked files.
+        # From snapshots: the trees its share lies between, the commit at its end, and which
+        # kept files were not committed then.
+        self.start, self.end, self.end_commit = "", "", ""
+        self.uncommitted: set[str] = set()
 
 
 async def own_commits(checkout: dict, path: str, head: str, shared: bool, share: Share, scope):
@@ -703,12 +780,101 @@ async def own_commits(checkout: dict, path: str, head: str, shared: bool, share:
         share.own[sha] = files
 
 
+async def tree_names(checkout: dict, top: Path, old: str, new: str) -> dict[str, str]:
+    """The files that differ between two trees (or commits): name -> A, M or D."""
+    listed = await checkout_git(
+        checkout, str(top), "-c", "core.quotePath=false", "diff", "--name-status", "--no-renames",
+        old, new,
+    )  # fmt: skip
+    found = {}
+    for line in listed.splitlines():
+        status, _, name = line.partition("\t")
+        if name:
+            found[name] = status[:1]
+    return found
+
+
+async def checkout_top(checkout: dict) -> Path:
+    """The top folder of a checkout's repository."""
+    path, _head, _live = await asyncio.to_thread(locate, checkout)
+    return Path((await checkout_git(checkout, path, "rev-parse", "--show-toplevel")).strip())
+
+
+async def brought_in(checkout: dict, top: Path, scope: Scope, head: str) -> set[str]:
+    """Files that commits made before the task was taken up brought into the checkout since
+    (the owner pulled, or checked out another branch): not its work. Commits made since may be
+    its own."""
+    if not scope.head or not head or scope.head == head or not scope.since:
+        return set()
+    listed = await checkout_git(
+        checkout, str(top), "-c", "core.quotePath=false", "log", "--format=%x00%ct",
+        "--name-only", "--no-renames", f"{scope.head}...{head}",
+    )  # fmt: skip
+    older: set[str] = set()
+    newer: set[str] = set()
+    for block in listed.split("\0")[1:]:
+        when, _, names = block.partition("\n")
+        files = {name for name in names.splitlines() if name}
+        made = int(when.strip() or 0)
+        (older if made < scope.since - 1 else newer).update(files)
+    return older - newer
+
+
+async def tree_share(
+    checkout: dict, path: str, shared: bool, scope: Scope, share: Share, start: str, end: dict
+) -> Share:
+    """Its share between two snapshots: what changed from when it was taken up to its result
+    (or now), less what was not its own: in a folder of the owner's, files other tasks' edits
+    wrote; on a branch, what a merge brought in."""
+    top = share.top
+    uncommitted = await tree_names(checkout, top, end["commit"], end["tree"])
+    # Not what running it left behind (`__pycache__/`, a `uv.lock` it wrote): new files, or
+    # ones never committed, that only running code makes.
+    window = {
+        name: status
+        for name, status in (await tree_names(checkout, top, start, end["tree"])).items()
+        if (status != "A" and uncommitted.get(name) != "A") or untracked_work([name])
+    }
+    share.uncommitted = set(uncommitted)
+    if share.base:
+        await own_commits(checkout, path, end["commit"], False, share, scope)
+        share.committed = {name for names in share.own.values() for name in names}
+    if shared:
+        brought = await brought_in(checkout, top, scope, end["commit"])
+        keep = {
+            name
+            for name in window
+            if scope.wrote(top, name)
+            or not (scope.others_wrote(top, name) or (name in brought and name not in uncommitted))
+        }
+        mixed = {sha for sha, names in share.own.items() if not set(names) & keep}
+        if mixed:
+            share.exact = False  # The owner's own commits (or pulled ones) in between.
+            share.own = {sha: names for sha, names in share.own.items() if sha not in mixed}
+            share.committed = {name for names in share.own.values() for name in names}
+    elif share.exact:
+        keep = set(window)
+    else:
+        keep = {name for name in window if name in share.committed or name in share.uncommitted}
+    share.keep = sorted(keep)
+    share.committed &= keep
+    share.uncommitted &= keep
+    share.start, share.end, share.end_commit = start, end["tree"], end["commit"]
+    return share
+
+
 async def scope_files(
     checkout: dict, path: str, head: str, live: bool, shared: bool, scope: Scope
 ) -> Share:
     """This task's share of a checkout."""
     top = Path((await checkout_git(checkout, path, "rev-parse", "--show-toplevel")).strip())
     share = Share(await scope_base(checkout, path, head, scope), top)
+    start = scope.start or share.base
+    end = scope.end or (await snapshot(checkout) if start else None)
+    if start and end and end["tree"]:
+        with suppress(ValueError):
+            return await tree_share(checkout, path, shared, scope, share, start, end)
+        share = Share(share.base, top)
     if share.base:
         await own_commits(checkout, path, head, shared, share, scope)
         committed = {name for names in share.own.values() for name in names}
@@ -744,6 +910,34 @@ async def scope_files(
 MAX_OWN_COMMITS = 200
 
 
+async def own_lines(checkout: dict, share: Share, total: dict, edits_from: str = ""):
+    """Lines its own commits changed (not a merged-in teammate's in the same file), then its
+    edits since the last commit (from the end snapshot's commit to its files, or from HEAD to
+    the folder as it is)."""
+    top = str(share.top)
+    if share.own and share.committed:
+        shas = list(share.own)[:MAX_OWN_COMMITS]
+        with suppress(ValueError):
+            counted = await checkout_git(
+                checkout, top, "show", "--numstat", "--format=", *shas, "--",
+                *sorted(share.committed),
+            )  # fmt: skip
+            for line in counted.splitlines():
+                added, removed, *_ = [*line.split("\t"), "", ""]
+                if added.isdigit() and removed.isdigit():
+                    total["insertions"] += int(added)
+                    total["deletions"] += int(removed)
+    edited = sorted(share.uncommitted) if share.end else share.keep
+    against = [share.end_commit, share.end] if share.end else [edits_from] if edits_from else []
+    if edited and against:
+        with suppress(ValueError):
+            edits = receipts.shortstat(
+                await checkout_git(checkout, top, "diff", "--shortstat", *against, "--", *edited)
+            )
+            total["insertions"] += edits.get("insertions", 0)
+            total["deletions"] += edits.get("deletions", 0)
+
+
 async def scoped_changes(
     checkout: dict, path: str, head: str, live: bool, shared: bool, scope: Scope
 ) -> dict:
@@ -751,6 +945,19 @@ async def scoped_changes(
     top, keep = str(share.top), share.keep
     total = {"files": 0, "insertions": 0, "deletions": 0, "commits": len(share.own)}
     total["uncommitted"] = 0
+    if share.end:
+        total |= {"files": len(keep), "uncommitted": len(share.uncommitted)}
+        if keep and share.exact:
+            with suppress(ValueError):
+                total |= receipts.shortstat(
+                    await checkout_git(
+                        checkout, top, "diff", "--shortstat", share.start, share.end, "--", *keep
+                    )
+                )
+                total["files"] = len(keep)
+        elif keep:
+            await own_lines(checkout, share, total)
+        return total
     if share.exact and keep and (share.base or live):
         against = share.base if live else f"{share.base}..{head}"
         with suppress(ValueError):
@@ -759,28 +966,8 @@ async def scoped_changes(
             )
             total |= receipts.shortstat(diffed)
     elif keep:
-        # Its commits' own lines (not a merged-in teammate's in the same file), then its edits
-        # since the last commit.
         total["files"] = len(keep)
-        if share.own and share.committed:
-            shas = list(share.own)[:MAX_OWN_COMMITS]
-            with suppress(ValueError):
-                counted = await checkout_git(
-                    checkout, top, "show", "--numstat", "--format=", *shas, "--",
-                    *sorted(share.committed),
-                )  # fmt: skip
-                for line in counted.splitlines():
-                    added, removed, *_ = [*line.split("\t"), "", ""]
-                    if added.isdigit() and removed.isdigit():
-                        total["insertions"] += int(added)
-                        total["deletions"] += int(removed)
-        if live:
-            with suppress(ValueError):
-                edits = receipts.shortstat(
-                    await checkout_git(checkout, top, "diff", "--shortstat", "HEAD", "--", *keep)
-                )
-                total["insertions"] += edits.get("insertions", 0)
-                total["deletions"] += edits.get("deletions", 0)
+        await own_lines(checkout, share, total, "HEAD" if live else "")
     if live:
         total["uncommitted"] = len([name for name in keep if name not in share.committed]) + len(
             share.fresh
@@ -844,7 +1031,24 @@ async def diff(checkout: dict, scope: Scope | None = None) -> dict:
     if scope is not None:
         share = await scope_files(checkout, path, head, live, bool(checkout.get("shared")), scope)
         text = ""
-        if share.exact and share.keep:
+        if share.end and share.keep:
+            if share.exact:
+                text = await checkout_git(
+                    checkout, top, *PLAIN_DIFF, share.start, share.end, "--", *share.keep, limit=60
+                )
+            else:
+                if share.own and share.committed:
+                    shas = list(reversed(list(share.own)[:MAX_OWN_COMMITS]))
+                    text = await checkout_git(
+                        checkout, top, *PLAIN_SHOW, *shas, "--", *sorted(share.committed),
+                        limit=60,
+                    )  # fmt: skip
+                if share.uncommitted:
+                    text += await checkout_git(
+                        checkout, top, *PLAIN_DIFF, share.end_commit, share.end, "--",
+                        *sorted(share.uncommitted), limit=60,
+                    )  # fmt: skip
+        elif share.exact and share.keep:
             against = (share.base or "HEAD") if live else f"{share.base}...{head}"
             text = await checkout_git(
                 checkout, top, *PLAIN_DIFF, against, "--", *share.keep, limit=60

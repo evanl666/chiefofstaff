@@ -96,6 +96,63 @@ export function closeMenus(except = null) {
 }
 document.addEventListener("click", (event) => closeMenus(event.target));
 document.addEventListener("keydown", (event) => event.key === "Escape" && closeMenus());
+// One request at a time per card: two quick clicks (or Enter twice) send once. `key` names the
+// card; `node`'s buttons are off while the request is out, back on when it is done or failed.
+const inFlight = new Set();
+export const busy = (key) => inFlight.has(key);
+export async function once(key, node, run) {
+  if (inFlight.has(key)) return undefined;
+  inFlight.add(key);
+  const buttons = node ? [...node.querySelectorAll("button:not(:disabled)")] : [];
+  for (const button of buttons) button.disabled = true;
+  try {
+    return await run();
+  } finally {
+    inFlight.delete(key);
+    for (const button of buttons) button.disabled = false;
+  }
+}
+// A short tooltip of our own (`data-tip`) for what moves: the browser's stays where it was
+// shown, over whatever the list moved there since. Ours goes as soon as what it is for moves,
+// changes or goes.
+let tip = null;
+function tipBox() {
+  return document.getElementById("tip") || document.body.appendChild(el("div", { id: "tip", role: "tooltip", hidden: true }));
+}
+export function hideTip() {
+  clearTimeout(tip?.timer);
+  tip = null;
+  const box = document.getElementById("tip");
+  if (box) box.hidden = true;
+}
+function showTip(node) {
+  const box = tipBox();
+  box.textContent = node.dataset.tip;
+  box.hidden = false;
+  const at = node.getBoundingClientRect();
+  const size = box.getBoundingClientRect();
+  const below = at.bottom + 6 + size.height <= window.innerHeight;
+  box.style.top = `${below ? at.bottom + 6 : Math.max(4, at.top - size.height - 6)}px`;
+  box.style.left = `${Math.max(8, Math.min(at.left, window.innerWidth - size.width - 8))}px`;
+  tip.at = at;
+}
+// After the page is redrawn: the tooltip says what its element says now, or goes with it.
+export function checkTip() {
+  if (!tip?.at) return;
+  const at = tip.node.isConnected && tip.node.dataset.tip ? tip.node.getBoundingClientRect() : null;
+  if (!at || Math.abs(at.top - tip.at.top) > 1 || Math.abs(at.left - tip.at.left) > 1) hideTip();
+  else if (tipBox().textContent !== tip.node.dataset.tip) showTip(tip.node);
+}
+document.addEventListener("pointerover", (event) => {
+  const node = event.target.closest?.("[data-tip]");
+  if (node && node === tip?.node) return;
+  hideTip();
+  if (node?.dataset.tip) tip = { node, timer: setTimeout(() => showTip(node), 350) };
+});
+document.addEventListener("pointerout", (event) => {
+  if (tip && !tip.node.contains(event.relatedTarget)) hideTip();
+});
+for (const type of ["pointerdown", "keydown", "scroll", "wheel"]) document.addEventListener(type, hideTip, true);
 // Long text shows its start, with Show more. `wrapper` gets the content and the toggle.
 export function foldable(wrapper, content, text, { chars = 700, lines = 10 } = {}) {
   wrapper.append(content);

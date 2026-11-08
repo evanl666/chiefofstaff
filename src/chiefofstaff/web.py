@@ -325,6 +325,10 @@ def create_app(
         runtime.asks.dismiss(question_id)
         return runtime.snapshot()
 
+    @app.post("/api/tasks/{task_id}/read")
+    async def read_task(task_id: str):
+        return runtime.task_actions.mark_read(task_id)
+
     @app.post("/api/tasks/{task_id}/news-seen")
     async def task_news_seen(task_id: str):
         return runtime.task_actions.view(runtime.task_actions.news_seen(task_id))
@@ -344,6 +348,14 @@ def create_app(
     @app.post("/api/tasks/{task_id}/split")
     async def split_task(task_id: str, payload: TaskNote):
         return runtime.task_actions.split(task_id, payload.text)
+
+    @app.get("/api/tasks/{task_id}/split-preview")
+    async def split_preview(task_id: str):
+        return runtime.task_actions.split_preview(task_id)
+
+    @app.post("/api/tasks/{task_id}/merge-back")
+    async def merge_back(task_id: str):
+        return runtime.task_actions.merge_back(task_id)
 
     @app.post("/api/artifacts/hide")
     async def hide_artifact(payload: ArtifactHide):

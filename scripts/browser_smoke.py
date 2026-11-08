@@ -63,8 +63,8 @@ async def run(page, app: App, project: Path, workspace: Workspace, errors: list[
     await form.get_by_role("button", name="Save", exact=True).click()
     await expect(page.locator("#settings-dialog")).to_be_hidden()
     await page.wait_for_function(
-        "() => fetch('/api/state').then((r) => r.json())"
-        ".then((s) => s.sessions.some((x) => x.role === 'slack'))",
+        "() => fetch('/api/state', {headers: {'X-Chief-Key': localStorage.getItem('cos.key')}})"
+        ".then((r) => r.json()).then((s) => (s.sessions || []).some((x) => x.role === 'slack'))",
         timeout=30000,
     )
 
@@ -93,9 +93,12 @@ async def run(page, app: App, project: Path, workspace: Workspace, errors: list[
 
     # The finished task waits for review, with the commit the worker made.
     await page.locator("#back-home").click()
-    review = page.locator("#tasks-review .card.task").first
+    # Changes to accept: under Needs you (a report that only informs is with the finished).
+    review = page.locator("#needs .card.task").first
     await expect(review).to_be_visible(timeout=60000)
-    await review.get_by_role("button", name="Show report").click()
+    toggle = review.locator(".expand")
+    if (await toggle.inner_text()).strip() == "Show report":
+        await toggle.click()
     await expect(review.locator(".report .receipt", has_text="commit")).to_be_visible(timeout=60000)
     log("the result waits for review with its commit")
     await page.screenshot(path=SHOTS / "5-review.png")
@@ -142,12 +145,10 @@ async def run(page, app: App, project: Path, workspace: Workspace, errors: list[
     await page.screenshot(path=SHOTS / "11-question.png")
     await question.get_by_role("button", name=re.compile("^blue$", re.I)).click()
     await expect(question).to_have_count(0)
-    await expect(page.locator("#tasks-review")).to_contain_text(
-        re.compile("blue", re.I), timeout=300000
-    )
+    await expect(page.locator("#panel")).to_contain_text(re.compile("blue", re.I), timeout=300000)
     log("the owner answered a worker's question on its card")
 
-    accepted = page.locator("#tasks-review .card.task", has_text=re.compile("notes", re.I))
+    accepted = page.locator("#needs .card.task", has_text=re.compile("notes", re.I))
     if await accepted.count():
         await accepted.first.get_by_role("button", name="Accept").click()
         await expect(accepted).to_have_count(0)
@@ -170,15 +171,24 @@ async def run(page, app: App, project: Path, workspace: Workspace, errors: list[
         await page.locator("#session-more-button").click()
         await page.locator("#session-menu-items").get_by_role("button", name="Close worker").click()
 
+    async def shown(text):
+        """A worker's item in the sidebar; one with nothing open is in a folded group."""
+        item = page.locator("#session-list .item", has_text=text)
+        fold = page.locator("#session-list details.idle-workers")
+        if await item.count() and not await item.is_visible() and await fold.count():
+            await fold.locator("summary").click()
+        return item
+
     if await page.locator("#session-list .item", has_text="notes").count():
-        await page.locator("#session-list .item", has_text="notes").click()
+        await (await shown("notes")).click()
         await close_worker()
     await expect(page.locator("#session-list .item", has_text="notes")).to_have_count(0)
     await page.locator("#closed summary").click()
     await page.locator("#closed-list .item", has_text="notes").click()
     await expect(page.locator("#closed-list .item", has_text="notes")).to_be_visible()
     await page.locator("#session-actions").get_by_role("button", name="Reopen").click()
-    await expect(page.locator("#session-list .item", has_text="notes")).to_be_visible()
+    await expect(page.locator("#session-list .item", has_text="notes")).to_have_count(1)
+    await expect(await shown("notes")).to_be_visible()
     await expect(page.locator("#closed")).to_be_hidden()
     await close_worker()
     await page.locator("#closed-list .item", has_text="notes").click()
@@ -186,7 +196,7 @@ async def run(page, app: App, project: Path, workspace: Workspace, errors: list[
     await page.screenshot(path=SHOTS / "10-closed.png")
     await composer.fill("Which file did you add? Reply with only its name, in UPPERCASE.")
     await composer.press("Enter")
-    await expect(page.locator("#session-list .item", has_text="notes")).to_be_visible()
+    await expect(page.locator("#session-list .item", has_text="notes")).to_have_count(1)
     await expect(page.locator("#timeline")).to_contain_text("NOTES.MD", timeout=300000)
     log("a reply reopened the closed worker, which still knew its task")
 
@@ -215,7 +225,7 @@ async def run(page, app: App, project: Path, workspace: Workspace, errors: list[
 
     await page.emulate_media(color_scheme="dark")
     await home.click()
-    await expect(page.locator("#tasks-recent, #tasks-review").first).to_be_visible()
+    await expect(page.locator("#tasks-recent, #needs").first).to_be_visible()
     await page.screenshot(path=SHOTS / "8-dark-inbox.png")
     await expect(page.locator("#timeline .event.done").first).to_be_visible()
     await expect(home).to_be_in_viewport()

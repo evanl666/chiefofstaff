@@ -197,6 +197,8 @@ async def run(scheme: str):
             log("commented on lines of the diff; the worker got the comments")
 
             research = review.filter(has_text="Compare feature-flag services")
+            if await research.locator(".row-line").count():
+                await research.locator(".row-line").click()  # A row: its card opens in place.
             await research.locator(".actions .more-button").click()
             await research.get_by_role("menuitem", name="Follow up…").click()
             await research.locator("textarea").fill("Add pricing for 50 seats")
@@ -257,7 +259,14 @@ async def run(scheme: str):
             await expect(lessons).to_be_visible(timeout=30000)
             await expect(lessons).to_contain_text("because you said")
             await page.screenshot(path=SHOTS / f"demo-{scheme}-5-lessons.png")
-            dropped = lessons.locator("li", has=page.locator("input[value^='Rate-limit']"))
+            rows = lessons.locator("li")
+            texts = await rows.evaluate_all(
+                "rs => rs.map((r) => (r.querySelector('textarea, input[type=text]') || {}).value"
+                " || '')"
+            )
+            dropped = rows.nth(
+                next(i for i, text in enumerate(texts) if text.startswith("Rate-limit"))
+            )
             await dropped.locator("input[type=checkbox]").uncheck()
             await lessons.get_by_role("button", name="Keep ticked").click()
             await expect(lessons).to_have_count(0)

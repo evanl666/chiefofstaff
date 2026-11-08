@@ -165,6 +165,7 @@ SHARDS = {
     "A": (18781, 18911), "B": (18782, 18912), "C": (18783, 18913), "D": (18784, 18914),
     "E": (18785, 18915), "F": (18786, 18916), "G": (18787, 18917), "H": (18788, 18918),
     "I": (18799, 18929), "J": (18800, 18930), "K": (18801, 18931),
+    "L": (18802, 18932),
 }  # fmt: skip
 MODEL = "claude-sonnet-5.5"
 CJK = re.compile(r"[\u4e00-\u9fff]")
@@ -628,7 +629,9 @@ async def w9_queue(ctx: Ctx):
     cancelled = await ctx.app.get(f"/api/tasks/{waiting['id']}")
     steps = [m for m in await messages(ctx, waiting["session_id"]) if m["kind"] == "tool"]
     assert cancelled["status"] == "cancelled" and not steps, "it never ran"
-    assert not await file_of_now(ctx, since, "turn.txt")
+    # Whichever the Router started first runs; the queued one's file was never written.
+    if "turn" in waiting["title"].lower():
+        assert not await file_of_now(ctx, since, "turn.txt")
     log("W9 passed")
 
 
@@ -828,7 +831,8 @@ async def w17_close_done(ctx: Ctx):
     closed = before - still
     log(f"W17: closed {len(closed)} of {len(before)}")
     assert keeper["session_id"] in still, "the running one stays"
-    assert len(closed) >= 2, "finished ones closed"
+    # Every finished one (at least two after the shard's earlier scenarios).
+    assert len(closed) >= min(2, len(before) - 1), "finished ones closed"
     log("W17 passed")
 
 
@@ -922,7 +926,10 @@ async def w54_calm(ctx: Ctx):
     lines = [
         m
         for m in await ctx.app.get(f"/api/sessions/{router}/messages?after={mark}")
-        if m["kind"] in SHOWN and not m["meta"].get("internal")
+        if m["kind"] in SHOWN
+        and not m["meta"].get("internal")
+        # The harness keeps the Router's context small: a hand-over can come at any time.
+        and "fresh Router session took over" not in m["text"]
     ]
     toasts = events.kinds("toast")
     log(
@@ -1187,6 +1194,7 @@ async def w57_reply_to_your_comment(ctx: Ctx):
     reviewer, comment = ctx.notes["w55"]["session"], ctx.notes["w55"]["comment"]
     router = (await state(ctx))["router_id"]
     mark = max(m["id"] for m in await messages(ctx, router))
+    since = now()  # What was waiting or drafted before the reply is not about it.
     token = subprocess.run(
         ["gh", "auth", "token", "--user", "evan666-lgtm"], capture_output=True, text=True,
         check=True,
@@ -1202,10 +1210,14 @@ async def w57_reply_to_your_comment(ctx: Ctx):
         rows = await ctx.app.get(f"/api/sessions/{router}/messages?after={mark}")
         news = [m for m in rows if m["kind"] == "inbound" and m["meta"].get("from") == reviewer]
         snap = await state(ctx)
-        asking = [d for d in snap["drafts"] if d["session_id"] == reviewer and d["kind"] != "merge"]
+        asking = [
+            d for d in snap["drafts"]
+            if d["session_id"] == reviewer and d["kind"] != "merge" and d["created_at"] > since
+        ]  # fmt: skip
         waiting = [
-            t for t in snap["tasks"] if t["session_id"] == reviewer and t["status"] == "waiting"
-        ]
+            t for t in snap["tasks"]
+            if t["session_id"] == reviewer and t["status"] == "waiting" and t["updated_at"] > since
+        ]  # fmt: skip
         return (news, asking, waiting) if news or asking or waiting else None
 
     news, asking, _ = await wait_for("the owner hears of the reply", told, 900, ctx.app)
@@ -2958,7 +2970,8 @@ async def g6_two_tasks_one_worker(ctx: Ctx):
         await page.goto(f"{ctx.app_base}/#token={ctx.app.launch_token}")
         worker_id = first["session_id"]
         running = page.locator(f'#tasks-running .card.worker-box[data-session="{worker_id}"]')
-        queued = page.locator(f'#tasks-monitoring .card.worker-box[data-session="{worker_id}"]')
+        # Monitoring is a row per task (not a box per worker).
+        queued = page.locator(f'#tasks-monitoring .card.task[data-session="{worker_id}"]')
         open_now = [t for t in (await state(ctx))["tasks"] if t["session_id"] == worker_id
                     and t["status"] in {"running", "queued", "waiting"}]  # fmt: skip
         log(f"G6: open tasks {[(t['title'], t['status']) for t in open_now]}")
@@ -2966,13 +2979,13 @@ async def g6_two_tasks_one_worker(ctx: Ctx):
             # A box per section: the task it is on under Running, the other under Monitoring,
             # up next.
             await expect(running.locator(".card.task")).to_have_count(1, timeout=20000)
-            await expect(queued.locator(".card.task")).to_have_count(1, timeout=20000)
+            await expect(queued).to_have_count(1, timeout=20000)
             # Still in the sleep it began before the second task came: on the first one.
             if "sleep" in ((await session(ctx, worker_id)).get("step_command") or ""):
                 await expect(running.locator(".card.task .head .title")).to_have_text(
                     re.compile("Twin Tasks", re.IGNORECASE)
                 )
-                await expect(queued.locator(".reason")).to_contain_text(
+                await expect(queued).to_contain_text(
                     re.compile(r"Up next: its worker is on “Twin Tasks", re.IGNORECASE)
                 )
             await running.screenshot(path=SCRIPTS.parent / "browser-shots" / "live-g-group.png")
@@ -3005,8 +3018,9 @@ async def h1_question_survives_cancel(ctx: Ctx):
     since = now()
     await say(
         ctx,
-        "Start a worker for this: before doing anything, ask me whether port.txt should say 8080 "
-        "or 9090 (a question to me), then write my choice into port.txt.",
+        "Start a worker for this, no project (its own scratch folder): before doing anything, "
+        "ask me whether port.txt should say 8080 or 9090 (a question to me), then write my "
+        "choice into port.txt.",
     )
     waiting = await waiting_on_owner(ctx, since, "its question", 600)
     task = waiting.get("task") or {}
@@ -3335,12 +3349,12 @@ async def j2_second_task_and_a_note(ctx: Ctx):
         page.on("pageerror", lambda error: errors.append(str(error)))
         await page.goto(f"{ctx.app_base}/#token={ctx.app.launch_token}")
         running = page.locator(f'#tasks-running .card.worker-box[data-session="{worker}"]')
-        waiting = page.locator(f'#tasks-monitoring .card.worker-box[data-session="{worker}"]')
+        waiting = page.locator(f'#tasks-monitoring .card.task[data-session="{worker}"]')
         if "sleep 100" in ((await session(ctx, worker)).get("step_command") or ""):
             await expect(running.locator(".card.task .head .title")).to_have_text(
                 first["title"], timeout=20000
             )
-            await expect(waiting.locator(".reason")).to_contain_text("Up next")
+            await expect(waiting).to_contain_text("Up next")
             await page.screenshot(path=SCRIPTS.parent / "browser-shots" / "live-j2-up-next.png")
         # The worker on the second (the first reported or not yet): a note about the first.
         await wait_for("on the second", await step("sleep 75"), 400, ctx.app)
@@ -3658,6 +3672,136 @@ async def k5_receipts_per_task(ctx: Ctx):
     log("K5 passed")
 
 
+async def l1_stop_with_a_command_in_the_background(ctx: Ctx):
+    """Bug bash 2: stopped while it waited on a command it left running, Copilot held the
+    owner's Go on until that command ended (the Watchdog stepped in, the work was done twice)."""
+    since = now()
+    await say(ctx, "Start a worker titled 'Nap Bee' (no project): run `sleep 200`, then write "
+              "alpha into a.txt in its folder and report done.")  # fmt: skip
+    task = await titled(ctx, since, "nap bee")
+    worker = task["session_id"]
+    await sleeping_on(ctx, worker, "sleep 200")
+    # A message mid-step: Copilot moves the command to the background and ends its turn.
+    await ctx.app.post(f"/api/sessions/{worker}/messages", {"text": "Also write beta into b.txt."})
+    await asyncio.sleep(20)
+    await ctx.app.post(f"/api/sessions/{worker}/stop")
+    await task_status(ctx, task["id"], {"waiting"}, "stopped", 60)
+    went = time.time()
+    await ctx.app.post(
+        f"/api/tasks/{task['id']}/follow-up", {"text": "Go on, but sleep 3 instead of 200."}
+    )
+    await task_status(ctx, task["id"], FINISHED, "it finishes", 240)
+    took = time.time() - went
+    rows = await messages(ctx, worker)
+    nudges = [m for m in rows if m["kind"] == "watchdog"]
+    log(f"L1: finished {took:.0f}s after Go on; watchdog nudges {len(nudges)}")
+    assert took < 150, "Go on was taken at once, not after the background command"
+    assert not nudges, "no Watchdog needed"
+    log("L1 passed")
+
+
+async def l2_shared_folder_shell_edits_are_the_tasks(ctx: Ctx):
+    """Bug bash: in the owner's folder a change made with a shell command (printf >> file) was
+    0 changes; a second task on the same file showed the first one's lines too."""
+    since = now()
+    await say(ctx, f"Start a worker titled 'Shout Fn' working directly in my project folder "
+              f"{ctx.project} (no worktree, no commit): append a function shout(text) returning "
+              "text.upper() + '!' to textkit/__init__.py using a shell command (printf >> or "
+              "cat >>), not the edit tool. Report done.")  # fmt: skip
+    shout = await titled(ctx, since, "shout fn")
+    await task_status(ctx, shout["id"], FINISHED, "shout added", 400)
+
+    async def changed(task_id):
+        async def check():
+            found = (await ctx.app.get(f"/api/tasks/{task_id}")).get("receipts") or {}
+            return found.get("changed") if (found.get("changed") or {}).get("files") else None
+
+        return await wait_for("its receipts", check, 120, ctx.app)
+
+    first = await changed(shout["id"])
+    log(f"L2: shout {first}")
+    later = now()
+    await ask(ctx, "Give the 'Shout Fn' worker a new task titled 'Whisper Fn': append "
+              "whisper(text) returning text.lower() + '...' to textkit/__init__.py in my project "
+              "folder the same way (shell, no commit). Report done.")  # fmt: skip
+
+    async def second():
+        found = [t for t in await tasks_since(ctx, later) if t["session_id"] == shout["session_id"]]
+        return found[0] if found else None
+
+    whisper = await wait_for("its second task", second, 300, ctx.app)
+    await task_status(ctx, whisper["id"], FINISHED, "whisper added", 400)
+    await changed(whisper["id"])
+    diff = json.dumps(await ctx.app.get(f"/api/tasks/{whisper['id']}/diff"))
+    assert "+def whisper" in diff and "+def shout" not in diff, diff[:600]
+    assert "__pycache__" not in diff, "not what running the code left behind"
+    diff = json.dumps(await ctx.app.get(f"/api/tasks/{shout['id']}/diff"))
+    assert "+def shout" in diff and "def whisper" not in diff, diff[:600]
+    subprocess.run(["git", "-C", str(ctx.project), "checkout", "--", "."], check=False)
+    log("L2 passed")
+
+
+async def l3_chat_answers_the_question_card(ctx: Ctx):
+    """Bug bash: written in its chat while it waited on its question card (ask_user), the
+    answer waited unread until the card timed out."""
+    since = now()
+    await say(ctx, "Start a worker titled 'Tabs Or Spaces' (no project): use your ask_user tool "
+              "to ask me whether to use tabs or spaces, then write my answer into style.txt in "
+              "its folder and report done.")  # fmt: skip
+    task = await titled(ctx, since, "tabs or spaces")
+
+    async def card():
+        snap = await state(ctx)
+        return next((d for d in snap["drafts"] if d["kind"] == "question"
+                     and d["session_id"] == task["session_id"]), None)  # fmt: skip
+
+    asked = await wait_for("its question card", card, 300, ctx.app)
+    await ctx.app.post(f"/api/sessions/{task['session_id']}/messages", {"text": "spaces"})
+    done = await task_status(ctx, task["id"], FINISHED, "it goes on with the answer", 240)
+    assert "space" in (done["result"] or "").lower(), done["result"]
+    assert not [d for d in (await state(ctx))["drafts"] if d["id"] == asked["id"]]
+    log("L3 passed")
+
+
+async def l4_split_preview_and_undo(ctx: Ctx):
+    """Reviewer E3: splitting off a result shows what moves first, refuses a title like
+    "111", can be undone, and does not rename the worker."""
+    since = now()
+    await say(ctx, "Start a worker titled 'Count Primes' (no project): count the primes below "
+              "50 and report the number as its result.")  # fmt: skip
+    task = await titled(ctx, since, "count primes")
+    await task_status(ctx, task["id"], FINISHED, "counted", 300)
+    question = "Also: what is the sum of the squares of 1 to 10? One line."
+    await ctx.app.post(f"/api/sessions/{task['session_id']}/messages", {"text": question})
+
+    async def second_report():
+        rows = await messages(ctx, task["session_id"])
+        done = [m for m in rows if m["kind"] == "report" and m["meta"].get("status") == "done"]
+        return done if len(done) >= 2 else None
+
+    await wait_for("its second result", second_report, 300, ctx.app)
+    before = await ctx.app.get(f"/api/tasks/{task['id']}")
+    preview = await ctx.app.get(f"/api/tasks/{task['id']}/split-preview")
+    log(f"L4: preview allowed={preview['allowed']} moves {len(preview['moves']['messages'])}")
+    assert preview["allowed"] and "385" in preview["moves"]["result"]
+    try:
+        await ctx.app.post(f"/api/tasks/{task['id']}/split", {"text": "111"})
+        raise AssertionError("a title like 111 is refused")
+    except RuntimeError as exc:
+        assert ": 400 " in str(exc), exc
+    made = await ctx.app.post(f"/api/tasks/{task['id']}/split", {"text": "Sum of squares 1-10"})
+    worker = await session(ctx, task["session_id"])
+    assert worker["display_title"] != "Sum of squares 1-10", "a split does not rename the worker"
+    back = await ctx.app.post(f"/api/tasks/{made['id']}/merge-back", {})
+    # Undone: the task as it was (its result), the moved report back on it, the new task gone.
+    assert back["id"] == task["id"] and back["result"] == before["result"], back["result"]
+    rows = await messages(ctx, task["session_id"])
+    moved = [m for m in rows if m["kind"] == "report" and "385" in m["text"]]
+    assert moved and all(m["meta"].get("task_id") == task["id"] for m in moved), moved
+    assert made["id"] not in {t["id"] for t in (await state(ctx))["tasks"]}
+    log("L4 passed")
+
+
 SCENARIOS = {
     "A": [
         w1_ask, w2_progress, w3_answered_directly, w4_pasted_orders, w5_chinese_log,
@@ -3713,6 +3857,10 @@ SCENARIOS = {
         k1_stop_keeps_what_it_never_saw, k2_chat_on_finished_work_is_news,
         k3_answer_goes_to_the_task_that_asked, k4_cancel_the_task_at_work, k5_receipts_per_task,
         w52_no_ids,
+    ],
+    "L": [
+        l1_stop_with_a_command_in_the_background, l2_shared_folder_shell_edits_are_the_tasks,
+        l3_chat_answers_the_question_card, l4_split_preview_and_undo, w52_no_ids,
     ],
 }  # fmt: skip
 

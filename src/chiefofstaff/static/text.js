@@ -100,6 +100,8 @@ export function linkKind(url) {
   // what is under one (a Spark application, logs, a debug page, a CI run); "reference",
   // something it points to.
   const is = (kind, label, role, extra = {}) => ({ kind, label, role, ...extra });
+  // A file its worker made (declared by its path): opened here, not by the browser.
+  if (parsed.protocol === "file:") return is("file", last || "File", "output", { path });
   if ((match = /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/.exec(url))) {
     const key = `${match[1]}/${match[2]}#${match[3]}`.toLowerCase();
     return is("pr", `${match[2]}#${match[3]}`, "pr", { key, title: prTitle(key) });
@@ -107,12 +109,12 @@ export function linkKind(url) {
   if ((match = /^https:\/\/github\.com\/[^/]+\/([^/]+)\/issues\/(\d+)/.exec(url))) return is("issue", `${match[1]}#${match[2]}`, "reference");
   if ((match = /^https:\/\/github\.com\/[^/]+\/([^/]+)\/actions\/runs\//.exec(url))) return is("run", `CI run · ${match[1]}`, "diagnostic");
   if (/^https:\/\/github\.com\/[^/]+\/[^/]+\/(blob|tree)\//.test(url)) return is("file", last || "File", "reference");
-  // Google's documents by their id too: several are told apart.
+  // A Google document is one with an id (docs.google.com alone is not one). Named by what it
+  // is: its id tells it apart (linkKey) and is in the tooltip, never its name.
   const docId = /\/d\/(?:e\/)?([\w-]{6,})/.exec(parsed.pathname)?.[1] || "";
-  const doc = (label) => is("doc", docId ? `${label} · ${docId.slice(0, 8)}` : label, "output", { id: docId });
-  if (/docs\.google\.com\/spreadsheets/.test(url)) return doc("Sheet");
-  if (/docs\.google\.com\/presentation/.test(url)) return doc("Slides");
-  if (/docs\.google\.com\//.test(url)) return doc("Google Doc");
+  if (docId && /docs\.google\.com\/spreadsheets/.test(url)) return is("doc", "Sheet", "output", { id: docId });
+  if (docId && /docs\.google\.com\/presentation/.test(url)) return is("doc", "Slides", "output", { id: docId });
+  if (docId && /docs\.google\.com\//.test(url)) return is("doc", "Google Doc", "output", { id: docId });
   if (/\.slack\.com\/archives\//.test(url)) return is("slack", "Slack message", "reference");
   if ((match = /atlassian\.net\/browse\/([A-Z][A-Z0-9]+-\d+)/.exec(url)) || (match = /\/browse\/([A-Z][A-Z0-9]+-\d+)/.exec(url))) return is("ticket", match[1], "reference");
   if (/notion\.so$/.test(host)) return is("doc", "Notion", "output");
@@ -151,6 +153,61 @@ export function linkKey(url) {
     return url;
   }
 }
+// The links of a report: not those in code (a block or `inline`), nor one cut short ("…").
+export function reportUrls(text) {
+  return findUrls((text || "").replace(/```[\s\S]*?(```|$)/g, " ").replace(/`[^`\n]+`/g, " ").replace(/https?:\/\/\S*…\S*/g, " "));
+}
+// The words a task's reports linked each link with ("[qwen3 SFT 11-05](https://…)"), by its key:
+// its latest report's, then those the server kept from earlier ones (`link_names`).
+export function linkNames(task) {
+  const names = new Map();
+  const add = (url, words) => {
+    const name = plainText(String(words || "")).replace(/\s+/g, " ").trim();
+    if (name && !/^https?:\/\//.test(name) && !names.has(linkKey(url))) names.set(linkKey(url), shorten(name, 80));
+  };
+  const text = [task.result, task.progress].filter(Boolean).join("\n").replace(/```[\s\S]*?(```|$)/g, " ").replace(/`[^`\n]+`/g, " ");
+  for (const [, words, url] of text.matchAll(/(?<!!)\[([^\]\n]+)\]\((https?:\/\/(?:[^\s()]|\([^\s()]*\))+)\)/g)) add(url, words);
+  for (const [url, words] of Object.entries(task.link_names || {})) add(url, words);
+  return names;
+}
+const fileUrl = (path) => `file://${path.split("/").map(encodeURIComponent).join("/")}`;
+// A task's links, each once, by what each is to the owner: { url, key, found (linkKind), role,
+// said (what its worker declared about it), file, name, path }. What it made is what its worker
+// declared (report(artifacts=…)), what its reports say it made (`made_links`) and the files it
+// wrote in its folder (`files`); a top-level run it gives is its run. A document it only
+// mentions, and anything it was given, is a reference.
+export function taskLinks(task) {
+  const given = new Set((task.given_links || []).map(linkKey));
+  const made = new Set((task.made_links || []).map(linkKey));
+  const declared = new Map((task.artifacts || []).map((item) => [linkKey(item.url), item]));
+  const files = new Map((task.files || []).map((file) => [linkKey(fileUrl(file.path)), { ...file, url: fileUrl(file.path) }]));
+  const names = linkNames(task);
+  const asked = `${task.title}\n${task.goal || ""}`;
+  // What its worker declared first, then what its reports link, then the files it wrote.
+  const urls = [...declared.values()].map((item) => item.url).concat(task.links || [], reportUrls([task.result, task.progress].filter(Boolean).join("\n")), [...files.values()].map((file) => file.url));
+  const seen = new Set();
+  const links = [];
+  for (const url of urls) {
+    const found = linkKind(url);
+    const key = linkKey(url);
+    if (!found || seen.has(key)) continue;
+    seen.add(key);
+    const said = declared.get(key);
+    const file = files.get(key);
+    let role = found.role;
+    if (role === "diagnostic" && found.id && asked.includes(found.id)) role = "run";
+    if (said || file || made.has(key)) {
+      if (!["pr", "run"].includes(role)) role = "output";
+    } else if (role === "output" || given.has(key)) {
+      role = "reference";
+    }
+    links.push({ url, key, found, role, said, file, name: said?.name || file?.name || names.get(key) || "", path: said?.path || file?.path || found.path || "" });
+  }
+  return links;
+}
+// A link's name on a chip or a row: what its worker or a report called it, else what it is
+// ("Google Doc", "Flyte · abc123", a PR with its title).
+export const linkName = (link) => link.name || (link.found.title ? `${link.found.label} · ${shorten(link.found.title, 40)}` : link.found.label);
 // A link's text in a message: a PR by its number and title; a Slack message as one.
 function linkLabel(url) {
   let match;
@@ -390,10 +447,25 @@ export function ago(iso) {
 }
 export function threadLabel(key) {
   let match;
-  if ((match = /^slack:([A-Z0-9]+):/.exec(key))) return `Slack thread in ${match[1]}`;
-  if ((match = /^slack:([A-Z0-9]+)$/.exec(key))) return `Slack DM ${match[1]}`;
+  if ((match = /^slack:([A-Z0-9]+):/.exec(key))) return `Slack thread in ${slackName("#", match[1])}`;
+  if ((match = /^slack:([A-Z0-9]+)$/.exec(key))) return `Slack ${slackName("#", match[1])}`;
   if ((match = /^github:(.+)$/.exec(key))) return match[1];
   return key;
+}
+// A Slack id by its name, as Slack shows it: "@Bob", "#eng", "DM with Bob" (`slack_names`, else
+// the name Slack wrote beside it); an id with no name known stays as it is.
+function slackName(mark, id, said = "") {
+  const name = String(state.snapshot?.slack_names?.[id] || said || "").trim();
+  if (mark === "@") return `@${name.replace(/^@/, "") || id}`;
+  if (id.startsWith("D")) return !name ? "DM" : /\bDM\b|direct/i.test(name) ? name : `DM with ${name.replace(/^@/, "")}`;
+  return `#${name.replace(/^#/, "") || id}`;
+}
+// Slack's text as people read it: names for its ids ("<@U0BOB001> (Bob)", "<#C0ENG|eng>"), and
+// without the message stamps ("| ts: 1712345678.000100").
+export function slackText(text) {
+  return String(text || "")
+    .replace(/[ \t]*\|?[ \t]*\bts:[ \t]*\d+\.\d+/g, "")
+    .replace(/<([@#])([A-Z0-9]{2,})(?:\|([^>\n]+))?>(?:[ \t]*\(([^()\n]{1,60})\)(?=[ \t]*(?:\||$)))?/gm, (_, mark, id, label, beside) => slackName(mark, id, label || beside));
 }
 export function shortPath(path) {
   const home = state.snapshot?.home;

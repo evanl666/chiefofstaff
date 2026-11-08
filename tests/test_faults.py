@@ -8,6 +8,7 @@ import asyncio
 import json
 import time
 
+import pytest
 from conftest import Harness, call_tool, settle, task_of
 
 from chiefofstaff.delivery import digest
@@ -347,3 +348,32 @@ async def test_the_owner_settles_an_interrupted_draft(tmp_path):
     assert [
         call[1]["message"] for call in harness.mcp.calls if call[0] == "slack_send_message"
     ] == ["No"]
+
+
+async def test_a_reply_cleared_on_its_card_is_refused_not_sent_as_drafted(tmp_path):
+    """Bug bash: clearing a draft's text and pressing Send posted the original draft."""
+    harness = Harness(tmp_path / "data", Settings(slack_enabled=True))
+    runtime = await harness.connect()
+    targets = [
+        ("slack", {"channel_id": "C0DEPLOYS", "thread_ts": ""}),
+        ("reply", {"to": "Carol", "where": "email", "link": ""}),
+        ("github", {"repo": "acme/app", "number": 7, "in_reply_to": 21}),
+        ("github", {"repo": "acme/app", "number": 7, "reply_to_comment": 5}),
+    ]
+    for kind, target in targets:
+        draft = harness.store.create_draft(harness.router_id, kind, target, "Approved")
+        for cleared in ("", "   "):
+            with pytest.raises(ValueError, match="The reply is empty"):
+                await runtime.drafts.resolve(
+                    draft["id"], DraftDecision(action="send", text=cleared)
+                )
+        assert harness.store.draft(draft["id"])["status"] == "pending"
+    assert not [call for call in harness.mcp.calls if call[0] == "slack_send_message"]
+    assert not [call for call in harness.gh_calls if call[1]], "nothing posted on GitHub"
+    agreed = runtime.learning.agreement()["now"]["drafts"]
+    assert agreed == [0, 0], "not sent as written: not sent at all"
+    # A send that says nothing of the text (an answer from away) sends it as drafted.
+    copied = harness.store.drafts()[1]
+    assert (await runtime.drafts.resolve(copied["id"], DraftDecision(action="send")))[
+        "final_text"
+    ] == "Approved"

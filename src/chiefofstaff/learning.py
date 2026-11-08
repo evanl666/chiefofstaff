@@ -27,6 +27,7 @@ from uuid import uuid4
 from pydantic import BaseModel, Field
 
 from . import prompts
+from .habits import own_words, shown
 from .models import DraftDecision, NestedArguments
 from .policy import within
 from .roles import ROUTER, SLACK, WATCHDOG, WORKER
@@ -354,18 +355,27 @@ class Learning:
         observed = json.loads(lesson.get("observed") or "[]")
         marks = ",".join("?" * len(observed)) or "''"
         words = self.store.all(
-            f"SELECT kind, text FROM observations WHERE id IN ({marks}) ORDER BY id",
+            f"SELECT kind, text, meta FROM observations WHERE id IN ({marks}) ORDER BY id",
             tuple(observed),
         )
+        because = [
+            {"kind": row["kind"], "about": shown(row["context"], 200), "owner": row["owner"]}
+            for row in rows[:4]
+        ] + [{"kind": row["kind"], "about": "", "owner": own_words(row)} for row in words[:4]]
+        # What the owner told the Router is feedback and an observation both: listed once.
+        said: set[str] = set()
+        unique = []
+        for item in because:
+            key = " ".join(item["owner"].split()).casefold()
+            if key and key in said:
+                continue
+            said.add(key)
+            unique.append({**item, "owner": shown(item["owner"], 300)})
         return {
             "id": lesson["id"],
             "text": lesson["text"],
             "scope": lesson["scope"],
-            "because": [
-                {"kind": row["kind"], "about": row["context"][:200], "owner": row["owner"][:300]}
-                for row in rows[:4]
-            ]
-            + [{"kind": row["kind"], "about": "", "owner": row["text"][:300]} for row in words[:4]],
+            "because": unique,
         }
 
     async def review(self, card: dict, decision: DraftDecision) -> dict:

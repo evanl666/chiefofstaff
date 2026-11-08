@@ -341,10 +341,13 @@ class Events:
             # What its turn is about now; steered into a turn on another task, it stays on that.
             delivery = getattr(getattr(event.data, "delivery", None), "value", "")
             self.runtime.took_up(row["id"], named, switch=delivery != "steering")
+        seen = digest(getattr(event.data, "content", "") or "")
         if state.unread:
             # It sees a message now: that one (or, changed on the way, the oldest).
-            seen = digest(getattr(event.data, "content", "") or "")
             state.unread.pop(seen if seen in state.unread else next(iter(state.unread)))
+        if state.unseen:
+            state.unseen.pop(seen if seen in state.unseen else next(iter(state.unseen)))
+        state.after_abort = False  # A turn on what it was sent now: its steps are work again.
         owner = from_owner(getattr(event.data, "content", "") or "") or state.owner_turn
         state.owner_turn = False
         state.event_turn = not owner
@@ -394,6 +397,10 @@ class Events:
             # flow, often run again there) are receipts all the same.
             self.observe_shell(row, name, call, arguments)
             return
+        if row["role"] == WORKER and not self.states[row["id"]].after_abort:
+            # Working again after a stop (told to go on in its chat, by the Router, nudged): the
+            # task it was stopped on runs again.
+            self.runtime.task_actions.resume_stopped(row["id"])
         if name in self.runtime.tools or name in PLUMBING_TOOLS:
             return  # Chief of Staff's own tools show as what they did.
         if row["role"] == WORKER and OPENS_PR_TOOL.search(name):
@@ -494,6 +501,9 @@ class Events:
         session_id = row["id"]
         state = self.states[session_id]
         state.busy = False
+        # Its session is free again: messages queue as usual. A turn that ended because it was
+        # aborted (stopped, its task cancelled) owes no report.
+        aborted, state.after_abort = state.after_abort, False
         state.steps.clear()
         state.retuned = False
         last = self.store.value("SELECT max(id) FROM messages WHERE session_id=?", (session_id,))
@@ -533,7 +543,7 @@ class Events:
             self.runtime.background(self.runtime.rotate_router())
         if row["role"] == WORKER:
             self.runtime.background(self.runtime.workers.pump())
-            if settled and not state.retrying:
+            if settled and not state.retrying and not aborted:
                 self.runtime.workers.complete_report(session_id)
                 self.runtime.background(self.runtime.workers.ask_for_report(session_id))
                 self.news_unreported(row, state)

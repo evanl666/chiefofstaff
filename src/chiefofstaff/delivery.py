@@ -87,6 +87,10 @@ class Delivery:
         mode = (
             "immediate" if steer and working and not self.states[session_id].retuned else "enqueue"
         )
+        if row["role"] == WORKER and self.states[session_id].after_abort:
+            # Stopped: Copilot may hold the session busy (a command it left running) and keep a
+            # queued message until then. Steered, it takes it at once.
+            mode = "immediate"
         try:
             sent = await self.flush(
                 session_id, await self.runtime.session_for(session_id), mode, busy=working
@@ -153,12 +157,24 @@ class Delivery:
             if "prompt" in message["meta"] and not message["meta"].get("deferred"):
                 self.store.update_message_meta(message["id"], {**message["meta"], "deferred": True})
 
+    def undefer(self, session_id: str) -> bool:
+        """What was held back for its next message (it was stopped) is due now; whether any."""
+        mark = int(self.store.get(f"sent:{session_id}") or 0)
+        found = False
+        for message in self.store.messages(session_id, after=mark):
+            if message["meta"].get("deferred") and "prompt" in message["meta"]:
+                kept = {k: v for k, v in message["meta"].items() if k != "deferred"}
+                self.store.update_message_meta(message["id"], kept)
+                found = True
+        return found
+
     def unsee(self, session_id: str) -> bool:
         """Its turn was stopped (Copilot drops what it queued for that turn): what it was sent
         and never saw is sent again, with its next message."""
         state = self.states[session_id]
-        firsts = [entry[2] for entry in state.unread.values()]
+        firsts = [entry[2] for entry in state.unread.values()] + list(state.unseen.values())
         state.unread.clear()
+        state.unseen.clear()
         if not firsts:
             return False
         mark = int(self.store.get(f"sent:{session_id}") or 0)
@@ -209,7 +225,7 @@ class Delivery:
             ]
             if not pending:
                 return False
-            prompts = [message["meta"]["prompt"] for message in pending]
+            prompts = [self.runtime.told_prompt(message) for message in pending]
             if preamble := self.store.get(f"preamble:{session_id}"):
                 prompts.insert(0, preamble)  # A new Router's handover, before what is new.
             text = "\n\n".join(prompts)
@@ -234,10 +250,30 @@ class Delivery:
                 raise
             if row["role"] == WORKER and any(m["meta"].get("thread") for m in pending):
                 state.thread_turn, state.thread_nudged = True, False
-            if row["role"] == WORKER and not mid_turn and not busy and (named := tasks_named(text)):
+            # What it is given now, not what rides along with it (instructions held back
+            # while it was stopped are taken up when their turn comes).
+            fresh = "\n\n".join(
+                m["meta"]["prompt"] for m in pending if not m["meta"].get("deferred")
+            )
+            if (
+                row["role"] == WORKER
+                and not mid_turn
+                and not busy
+                and (named := tasks_named(fresh or text))
+            ):
                 # A turn on it starts now; sent while it works, once its conversation shows it
                 # (a connection that shows none: when its turn on it comes, see working_on).
                 self.runtime.took_up(session_id, named)
+            if row["role"] == WORKER:
+                # The owner's chat about a task they stopped (its prompt names no task): once
+                # it works on it, it runs again (TaskActions.resume_stopped).
+                for message in pending:
+                    about = message["meta"].get("task_id") if message["kind"] == "owner" else ""
+                    if about and self.store.get(f"stopped:{about}"):
+                        self.store.set(f"goingon:{about}", "1")
+            if row["role"] == WORKER and (state.echoes or self.runtime.backend_echoes()):
+                # Until its conversation shows it: a stop before then sends it again.
+                state.unseen[marker["digest"]] = pending[0]["id"]
             if mid_turn:
                 # It sees this once its conversation shows it (events.user_message): a report
                 # before that is about the work without it.
