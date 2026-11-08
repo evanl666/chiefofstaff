@@ -19,7 +19,7 @@ from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecis
 
 from . import prompts, receipts, threads
 from .delivery import digest
-from .envelope import from_owner, task_named, wrap
+from .envelope import from_owner, tasks_named, wrap
 from .policy import permission_denial, written_file
 from .roles import ROUTER, SLACK, WORKER
 from .store import now
@@ -117,6 +117,8 @@ TRANSIENT = re.compile(
 RETRIES = 2
 # A shell command that opens a PR (its URL is in the output).
 OPENS_PR = re.compile(r"\bgh\s+pr\s+create\b|\bhub\s+pull-request\b")
+# A tool that opens one (a GitHub MCP server's).
+OPENS_PR_TOOL = re.compile(r"create_pull_request|create_pr\b|pull_request_create", re.IGNORECASE)
 RETRY_WINDOW = 600
 RETRY_DELAY = float(os.environ.get("CHIEFOFSTAFF_RETRY_DELAY", "8"))
 # Copilot will not run the model asked for (a model or option the company does not allow).
@@ -239,6 +241,16 @@ class Events:
                 )
         self.command_changed({**ran, "kind": kind})
 
+    def opened_pr(self, session_id: str, output: str):
+        """A PR a worker's tool opened: its turn's task's own work."""
+        task_id = self.runtime.turn_task(session_id) or (
+            (self.tasks.current(session_id) or {}).get("id") or ""
+        )
+        if task_id and (urls := threads.PR_URL.findall(output or "")):
+            self.runtime.task_actions.record_opened(
+                task_id, [f"https://github.com/{r}/pull/{n}" for r, n in urls[:1]]
+            )
+
     def command_changed(self, ran: dict):
         """A test run, push or the like started or ended: its task's card shows it now, also
         when the task was reported already (work on its PR after the report)."""
@@ -309,8 +321,8 @@ class Events:
     def user_message(self, row: dict, event: Any):
         state = self.states[row["id"]]
         state.echoes = True
-        if row["role"] == WORKER and (named := task_named(getattr(event.data, "content", ""))):
-            self.store.set(f"turntask:{row['id']}", named)  # What its turn is about now.
+        if row["role"] == WORKER and (named := tasks_named(getattr(event.data, "content", ""))):
+            self.runtime.took_up(row["id"], named)  # What its turn is about now.
         if state.unread:
             # It sees a message now: that one (or, changed on the way, the oldest).
             seen = digest(getattr(event.data, "content", "") or "")
@@ -321,6 +333,7 @@ class Events:
         state.owner_reply = bool(owner)
         state.turn_decisions, state.turn_tasks = [], []
         state.turn_check_backs = set()
+        state.turn_reported = set()
         state.turn_tools = 0
 
     def assistant_message(self, row: dict, event: Any):
@@ -365,6 +378,8 @@ class Events:
             return
         if name in self.runtime.tools or name in PLUMBING_TOOLS:
             return  # Chief of Staff's own tools show as what they did.
+        if row["role"] == WORKER and OPENS_PR_TOOL.search(name):
+            self.states[row["id"]].pr_calls.add(call)
         summary = describe_tool(name, arguments)
         self.runtime.add_message(row["id"], "tool", summary)
         step = describe_step(name, arguments)
@@ -399,6 +414,11 @@ class Events:
         # Kept for the watchdog: the tail of the latest output shows hangs and errors.
         if output and not sub:
             self.states[row["id"]].last_output = output[-1500:]
+        call = getattr(data, "tool_call_id", "") or ""
+        if call in self.states[row["id"]].pr_calls:
+            self.states[row["id"]].pr_calls.discard(call)
+            if getattr(data, "success", True) is not False:
+                self.opened_pr(row["id"], output)
         shell_call = self.states[row["id"]].shell_calls.pop(getattr(data, "tool_call_id", ""), None)
         if shell_call:
             self.shell_read(row["id"], *shell_call, output)

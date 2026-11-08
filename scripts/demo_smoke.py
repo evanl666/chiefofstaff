@@ -66,11 +66,10 @@ async def run(scheme: str):
             await expect(page.locator("#conversation")).to_be_visible()
             await expect(page.locator("#panel")).to_be_visible()
             await expect(page.locator("#session-list .item", has_text="Chat")).to_have_count(0)
-            board = page.locator("#tasks-running .card.task, #tasks-queued .card.task")
+            board = page.locator("#tasks-running .card.task, #tasks-monitoring .card.task")
             await expect(board).to_have_count(3, timeout=20000)
-            await expect(page.locator("#tasks-queued .card.task")).to_contain_text(
-                "Waiting for “Fix the flaky login test”"
-            )
+            queued = page.locator("#tasks-monitoring .card.task.marker-queued")
+            await expect(queued).to_contain_text("Waiting for “Fix the flaky login test”")
             started = page.locator(
                 "#timeline .event", has_text="Started “Fix the flaky login test”"
             )
@@ -143,8 +142,13 @@ async def run(scheme: str):
             await expect(page.locator(".toast", has_text="Posted on GitHub.")).to_be_visible()
             log("reviewed the review: one line comment left out, the rest posted")
 
-            review = page.locator("#tasks-review .card.task")
+            # Results: those that changed code under Needs you to accept; a report that only
+            # informs with the finished ones, read rather than accepted.
+            review = page.locator("#panel .card.task.review")
             await expect(review).to_have_count(3, timeout=60000)
+            recent = page.locator("#tasks-recent")
+            if not await recent.evaluate("n => n.open"):
+                await recent.locator("summary").click()
             fix = review.filter(has_text="Fix the flaky login test")
             await expect(fix.locator(".receipt.pass", has_text="tests")).to_be_visible()
             limited = review.filter(has_text="Rate-limit")
@@ -199,15 +203,19 @@ async def run(scheme: str):
             await research.get_by_role("button", name="Send").click()
             await expect(page.locator(".toast", has_text="Sent to the worker.")).to_be_visible()
             await expect(
-                page.locator("#tasks-review .card.task", has_text="Compare feature-flag services")
+                page.locator("#panel .card.task.review", has_text="Compare feature-flag services")
             ).to_be_visible(timeout=30000)
             log("followed up on a finished task; it came back for review")
 
             await fix.get_by_role("button", name="Accept").click()
-            await expect(page.locator("#tasks-review .card.task")).to_have_count(2)
+            await expect(page.locator("#panel .card.task.review")).to_have_count(2)
             await expect(page.locator(".toast", has_text="Accepted.")).to_be_visible()
             log("accepted a result")
 
+            # Its result accepted, its worker has nothing open: folded away with the others.
+            idle = page.locator("#session-list details.idle-workers")
+            await expect(idle.locator(".item", has_text="Fix the flaky login")).to_have_count(1)
+            await idle.locator("summary").click()
             await page.locator("#session-list .item", has_text="Fix the flaky login").click()
             work = page.locator("#timeline details.steps")
             await expect(work.locator(".said").first).to_contain_text("Passing the clock in")
@@ -222,7 +230,7 @@ async def run(scheme: str):
                 "#composer-input", "Change of plan: limit login attempts per IP address only"
             )
             await page.press("#composer-input", "Enter")
-            limited = page.locator("#tasks-review .card.task", has_text="per IP address only")
+            limited = page.locator("#panel .card.task.review", has_text="per IP address only")
             await expect(limited).to_be_visible(timeout=30000)
             await expect(page.locator("#timeline")).to_contain_text(
                 "works to the new decision", timeout=10000

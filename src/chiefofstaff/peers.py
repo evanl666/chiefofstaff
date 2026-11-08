@@ -184,7 +184,11 @@ class Peers:
             if other["id"] != session_id
             and not self.runtime.special(other)
             and bool(other["slack"]) == bool(row["slack"])
-            and mentions(words, other["title"])
+            and (
+                mentions(words, other["title"], by_name=True)
+                or mentions(words, self.runtime.display_title(other), by_name=True)
+                or re.search(rf"(?<![\w-]){other['id'][:8]}(?![\w-])", words or "") is not None
+            )
             and (task := self.tasks.current(other["id"]))
             and task["status"] in OPEN
         ]
@@ -322,13 +326,19 @@ def same(name: str, title: str) -> bool:
     return " ".join(name.split()).casefold() == " ".join(title.split()).casefold()
 
 
-def mentions(text: str, title: str) -> bool:
-    """Whether a text names a task by its title (whole words; a title too short to tell a
-    task by never counts)."""
+def mentions(text: str, title: str, by_name: bool = False) -> bool:
+    """Whether a text names a task by its title (whole words; a title too short to tell a task
+    by never counts). `by_name`: also by the name the title starts with ("Token Scout" of
+    "Token Scout: generate a token"), as a worker says whom it waits for."""
     title = " ".join(title.split())
-    if len(title) < 5:
-        return False
-    return re.search(rf"(?<!\w){re.escape(title)}(?!\w)", text or "", re.IGNORECASE) is not None
+    head = re.split(r"\s*[:·|(]\s*|\s+[-\u2013\u2014]\s+", title, maxsplit=1)[0].strip()
+    named = by_name and head != title and len(head.split()) >= 2 and len(head) >= 8
+    names = [title, head] if named else [title]
+    return any(
+        len(name) >= 5
+        and re.search(rf"(?<!\w){re.escape(name)}(?!\w)", text or "", re.IGNORECASE) is not None
+        for name in names
+    )
 
 
 def clip(text: str, limit: int) -> str:

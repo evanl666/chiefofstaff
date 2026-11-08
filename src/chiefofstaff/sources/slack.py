@@ -455,11 +455,15 @@ class SlackSource:
                 channel = thread.removeprefix("slack:")
                 tool, arguments = "slack_read_channel", {"channel_id": channel}
                 kind = "DM"
+            # Failures in a row count real reads only; after a few, it is read only every
+            # tenth poll (quiet follows expire anyway).
             failures = int(self.store.get(f"slackfail:{thread}") or 0)
-            # After repeated failures retry only every tenth poll (quiet follows expire anyway).
-            if failures >= MAX_FOLLOW_FAILURES and failures % 10:
-                self.store.set(f"slackfail:{thread}", str(failures + 1))
-                continue
+            if failures >= MAX_FOLLOW_FAILURES:
+                skipped = int(self.store.get(f"slackskip:{thread}") or 0) + 1
+                if skipped < 10:
+                    self.store.set(f"slackskip:{thread}", str(skipped))
+                    continue
+                self.store.set(f"slackskip:{thread}", "0")
             try:
                 text = await self.mcp.call(tool, {**arguments, "oldest": str(oldest), "limit": 50})
             except Exception as exc:

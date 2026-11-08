@@ -27,6 +27,8 @@ class SourceHost(Protocol):
 
     def unfollow(self, thread: str, finished: bool = False, merged: bool = False) -> None: ...
 
+    def missing(self, thread: str, why: str) -> None: ...
+
 
 class Source(Protocol):
     name: str

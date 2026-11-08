@@ -16,6 +16,13 @@ from ..store import Store, now
 from . import SourceHost
 
 MAX_FOLLOW_FAILURES = 5
+# Reads of a followed PR that GitHub says does not exist before it is let go.
+MISSING_TRIES = 3
+# GitHub's own answers only (case and all): "GitHub CLI not found" (gh missing from PATH) is
+# this computer's problem, not a PR that is gone.
+NOT_FOUND = re.compile(
+    r"HTTP 404\b|\bgh: Not Found\b|Could not resolve to a (?:Repository|PullRequest)\b"
+)
 FAILED = {"failure", "timed_out", "cancelled", "action_required", "startup_failure"}
 
 
@@ -374,19 +381,37 @@ class GitHubSource:
             errors = await self.poll_review_requests(settings, {sub["thread"] for sub in followed})
         for sub in followed:
             thread = sub["thread"]
+            # Failures in a row (ghfail) count real reads only; after a few, it is read only
+            # every tenth poll (ghskip counts those passed over).
             failures = int(self.store.get(f"ghfail:{thread}") or 0)
-            # After repeated failures retry only every tenth poll; never drop or close anything.
-            if failures >= MAX_FOLLOW_FAILURES and failures % 10:
-                self.store.set(f"ghfail:{thread}", str(failures + 1))
-                continue
+            if failures >= MAX_FOLLOW_FAILURES:
+                skipped = int(self.store.get(f"ghskip:{thread}") or 0) + 1
+                if skipped < 10:
+                    self.store.set(f"ghskip:{thread}", str(skipped))
+                    continue
+                self.store.set(f"ghskip:{thread}", "0")
             try:
                 await self.poll_pull(thread, sub["since"])
             except Exception as exc:
                 # One inaccessible PR must not stop the others.
                 self.store.set(f"ghfail:{thread}", str(failures + 1))
                 logger.warning("Could not read followed %s (%s): %s", thread, failures + 1, exc)
+                missing = (
+                    int(self.store.get(f"gh404:{thread}") or 0) + 1
+                    if NOT_FOUND.search(str(exc))
+                    else 0
+                )
+                self.store.set(f"gh404:{thread}", str(missing))
+                if missing >= MISSING_TRIES:
+                    # No such PR (an example in a report, a typo), or no account sees it:
+                    # following it can never bring news.
+                    self.host.missing(
+                        thread,
+                        "GitHub has no such pull request, or none of your accounts can see it",
+                    )
                 continue
-            self.store.set(f"ghfail:{thread}", "0")
+            for key in ("ghfail", "gh404", "ghskip"):
+                self.store.set(f"{key}:{thread}", "0")
         self.status.update(connected=True, error="; ".join(errors)[:500], last_checked=now())
 
     async def poll_review_requests(self, settings, followed: set[str]) -> list[str]:

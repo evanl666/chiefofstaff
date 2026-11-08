@@ -8,13 +8,37 @@ const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 // A URL ends at whitespace, brackets, quotes, Markdown marks or punctuation (Western or CJK):
 // "…/pull/1068：head", "…/pull/79”" and "…/repo**" are the URL without what follows. One rule
 // for links in text and for the chips on cards.
-const URL_CHARS = "[^\\s<>()\\[\\]{}`'\"*|，。、；：！？（）「」『』【】“”‘’《》〈〉…]+";
+// Parentheses may be part of a URL (a wiki page "Foo_(bar)"): one that closes nothing in it is
+// the sentence's.
+const URL_CHARS = "[^\\s<>\\[\\]{}`'\"*|，。、；：！？（）「」『』【】“”‘’《》〈〉…]+";
 export const URL_RE = new RegExp(`https?:\\/\\/${URL_CHARS}`, "g");
-const URL_TRAIL = /(?:[.,;:!?'"_~\])]|&quot;|&#39;)+$/;
+// Sentence punctuation after a URL (not "_" or "~": paths end with them).
+const URL_TRAIL = /(?:[.,;:!?'"\]]|&quot;|&#39;)$/;
+const count = (text, char) => text.split(char).length - 1;
 // A URL and the sentence punctuation after it: ["https://x/y", "."].
 export function trimUrl(raw) {
-  const trail = raw.match(URL_TRAIL)?.[0] || "";
-  return [trail ? raw.slice(0, -trail.length) : raw, trail];
+  let url = raw;
+  let trail = "";
+  for (;;) {
+    const mark = url.match(URL_TRAIL)?.[0];
+    if (mark) {
+      trail = mark + trail;
+      url = url.slice(0, -mark.length);
+    } else if (url.endsWith(")") && count(url, ")") > count(url, "(")) {
+      trail = `)${trail}`;
+      url = url.slice(0, -1);
+    } else {
+      return [url, trail];
+    }
+  }
+}
+// A URL's path as words: undecodable escapes ("%zz") stay as they are.
+export function decodePath(path) {
+  try {
+    return decodeURIComponent(path);
+  } catch {
+    return path;
+  }
 }
 // Every URL in a text, in order, each once.
 // Slack writes "&" in a link as "&amp;": the link has "&".
@@ -37,7 +61,8 @@ function inlinePattern() {
         "\\*\\*([^*\\n]+)\\*\\*",
         "~~([^~\\n]+)~~",
         "(?<![\\w*])\\*([^*\\s](?:[^*\\n]*[^*\\s])?)\\*(?![\\w*])",
-        "\\[([^\\]\\n]+)\\]\\((https?:\\/\\/[^\\s)]+)\\)",
+        // A link's address may hold one level of parentheses.
+        "\\[([^\\]\\n]+)\\]\\((https?:\\/\\/(?:[^\\s()]|\\([^\\s()]*\\))+)\\)",
         // <https://…> and Slack's <https://…|label>, escaped.
         "&lt;(https?:\\/\\/[^\\s|]+?)(?:\\|([^\\n]+?))?&gt;",
         `(https?:\\/\\/${URL_CHARS})`,
@@ -68,36 +93,43 @@ export function linkKind(url) {
     return null;
   }
   const host = parsed.hostname.replace(/^www\./, "");
-  const path = decodeURIComponent(parsed.pathname);
+  const path = decodePath(parsed.pathname);
   const last = path.split("/").filter(Boolean).pop() || "";
+  // Its role on a card: "pr"; "output", what the task made (a doc); "run", a top-level
+  // workflow run the owner would open (a Flyte execution, an Airflow DAG run); "diagnostic",
+  // what is under one (a Spark application, logs, a debug page, a CI run); "reference",
+  // something it points to.
+  const is = (kind, label, role, extra = {}) => ({ kind, label, role, ...extra });
   if ((match = /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/.exec(url))) {
     const key = `${match[1]}/${match[2]}#${match[3]}`.toLowerCase();
-    return { kind: "pr", label: `${match[2]}#${match[3]}`, key, title: prTitle(key) };
+    return is("pr", `${match[2]}#${match[3]}`, "pr", { key, title: prTitle(key) });
   }
-  if ((match = /^https:\/\/github\.com\/[^/]+\/([^/]+)\/issues\/(\d+)/.exec(url))) return { kind: "issue", label: `${match[1]}#${match[2]}` };
-  if ((match = /^https:\/\/github\.com\/[^/]+\/([^/]+)\/actions\/runs\//.exec(url))) return { kind: "run", label: `CI run · ${match[1]}` };
-  if (/^https:\/\/github\.com\/[^/]+\/[^/]+\/(blob|tree)\//.test(url)) return { kind: "file", label: last || "File" };
-  if (/docs\.google\.com\/spreadsheets/.test(url)) return { kind: "doc", label: "Sheet" };
-  if (/docs\.google\.com\/presentation/.test(url)) return { kind: "doc", label: "Slides" };
-  if (/docs\.google\.com\//.test(url)) return { kind: "doc", label: "Google Doc" };
-  if (/\.slack\.com\/archives\//.test(url)) return { kind: "slack", label: "Slack message" };
-  if ((match = /atlassian\.net\/browse\/([A-Z][A-Z0-9]+-\d+)/.exec(url)) || (match = /\/browse\/([A-Z][A-Z0-9]+-\d+)/.exec(url))) return { kind: "ticket", label: match[1] };
-  if (/notion\.so$/.test(host)) return { kind: "doc", label: "Notion" };
-  // Spark History: its application; Flyte and Airflow: the execution or DAG; rdev and Darwin:
-  // which one. Anything else: the host and the last part of the path.
-  if ((match = /(application_\d+_\d+)/.exec(url)) && /spark|shs|history/i.test(host + path)) return { kind: "run", label: `Spark · ${match[1]}` };
-  if (/spark|shs-/i.test(host)) return { kind: "run", label: `Spark history${last ? ` · ${shorten(last, 28)}` : ""}` };
+  if ((match = /^https:\/\/github\.com\/[^/]+\/([^/]+)\/issues\/(\d+)/.exec(url))) return is("issue", `${match[1]}#${match[2]}`, "reference");
+  if ((match = /^https:\/\/github\.com\/[^/]+\/([^/]+)\/actions\/runs\//.exec(url))) return is("run", `CI run · ${match[1]}`, "diagnostic");
+  if (/^https:\/\/github\.com\/[^/]+\/[^/]+\/(blob|tree)\//.test(url)) return is("file", last || "File", "reference");
+  if (/docs\.google\.com\/spreadsheets/.test(url)) return is("doc", "Sheet", "output");
+  if (/docs\.google\.com\/presentation/.test(url)) return is("doc", "Slides", "output");
+  if (/docs\.google\.com\//.test(url)) return is("doc", "Google Doc", "output");
+  if (/\.slack\.com\/archives\//.test(url)) return is("slack", "Slack message", "reference");
+  if ((match = /atlassian\.net\/browse\/([A-Z][A-Z0-9]+-\d+)/.exec(url)) || (match = /\/browse\/([A-Z][A-Z0-9]+-\d+)/.exec(url))) return is("ticket", match[1], "reference");
+  if (/notion\.so$/.test(host)) return is("doc", "Notion", "output");
+  // Logs, pods and task instances are under a run: for diagnosis, whatever runs them.
+  const underRun = /\/(logs?|pods?|nodes|taskinstance|task_instance|containers?)(\/|$)|[?&](task_id|try_number|pod)=/i.test(parsed.pathname + parsed.search);
+  // Airflow (also on another host, an rdev box's): the DAG or its run; Flyte: the execution.
+  const dag = parsed.searchParams.get("dag_id") || /\/dags\/([^/?#]+)/.exec(path)?.[1] || "";
+  if (/airflow/i.test(host) || dag) {
+    return is("run", `Airflow${dag ? ` · ${shorten(dag, 28)}` : " run"}`, underRun ? "diagnostic" : "run");
+  }
   if (/flyte/i.test(host)) {
     const execution = /\/executions?\/([^/?#]+)/.exec(path)?.[1] || /\/(?:executions?|exec)\/[^/]+\/[^/]+\/([^/?#]+)/.exec(path)?.[1] || "";
-    return { kind: "run", label: `Flyte${execution ? ` · ${shorten(execution, 24)}` : " run"}` };
+    return is("run", `Flyte${execution ? ` · ${shorten(execution, 24)}` : " run"}`, underRun ? "diagnostic" : "run");
   }
-  if (/airflow/i.test(host)) {
-    const dag = parsed.searchParams.get("dag_id") || /\/dags\/([^/?#]+)/.exec(path)?.[1] || "";
-    return { kind: "run", label: `Airflow${dag ? ` · ${shorten(dag, 28)}` : " run"}` };
-  }
-  if (/(^|[.-])rdev([.-]|$)/i.test(host)) return { kind: "run", label: `rdev · ${shorten(host.split(".")[0], 28)}` };
-  if (/darwin/i.test(host)) return { kind: "doc", label: `Darwin${last ? ` · ${shorten(last, 28)}` : ""}` };
-  return { kind: "link", label: last && !/^[\w-]{32,}$/.test(last) ? `${shorten(host, 28)} · ${shorten(last, 24)}` : shorten(host, 40) };
+  // Spark History: its application, for diagnosis (the flow that ran it is what to open).
+  if ((match = /(application_\d+_\d+)/.exec(url)) && /spark|shs|history/i.test(host + path)) return is("run", `Spark · ${match[1]}`, "diagnostic", { id: match[1] });
+  if (/spark|shs-/i.test(host)) return is("run", `Spark history${last ? ` · ${shorten(last, 28)}` : ""}`, "diagnostic");
+  if (/(^|[.-])rdev([.-]|$)/i.test(host)) return is("run", `rdev · ${shorten(host.split(".")[0], 28)}`, "diagnostic", { id: host.split(".")[0] });
+  if (/darwin/i.test(host)) return is("doc", `Darwin${last ? ` · ${shorten(last, 28)}` : ""}`, "output");
+  return is("link", last && !/^[\w-]{32,}$/.test(last) ? `${shorten(host, 28)} · ${shorten(last, 24)}` : shorten(host, 40), "reference");
 }
 // A link's text in a message: a PR by its number and title; a Slack message as one.
 function linkLabel(url) {

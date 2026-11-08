@@ -282,7 +282,8 @@ async def test_an_unreadable_followed_thread_does_not_block_dms(source):
         "slack:1712345678.000100",
         "slack:1712345690.000200",
     ]
-    assert source.store.get(f"slackfail:{THREAD}") == "8", "it backs off instead of dropping"
+    assert source.store.get(f"slackfail:{THREAD}") == "5", "read 5 times, then backs off"
+    assert source.store.get(f"slackskip:{THREAD}") == "3", "passed over since, not failed"
 
 
 async def test_dm_thread_replies_found_by_search_reach_the_follower(source):

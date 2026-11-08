@@ -164,11 +164,17 @@ both Copilot sessions to the same Router.
 The UI is plain ES modules in `static/`, with no build step: `app.js` starts the page;
 `state.js` loads a snapshot (`/api/state`) and applies SSE events (`message`, `session`, `task`,
 `draft`, `toast`, `state`, `focus_summary`); `inbox.js` renders Home (the Router's chat beside
-Needs you and the task board). `board.js` (pure, tested with node) places each task in a section
-(running, monitoring, stalled, queued, review, finished, or needs you) from its status, its
-worker's state, the task its worker's turn is on (`turn_task`), `check_back`, the threads it
-watches and when it was last active; `tasks.js` draws a box per worker per section with its task
-cards. `session.js`, `sidebar.js`, `drafts.js`,
+Needs you and the task board). `board.js` (pure, tested with node) places each task in one of
+four places (needs you, running, monitoring, recently finished) with a marker in words (queued,
+up next, paused, checks back, delivered, overdue, to review…) from its status, its worker's
+state, the task the worker is on (`turn_task`: its turn's task while open or followed up by the
+owner, else its current open one; only instructions set it, not notes), whether it was taken up
+(`started`), `check_back`, the threads it watches and when it was last active. Home, the
+sidebar's dots and the cards all use it. `tasks.js` draws a box per worker per place with its
+task cards; `artifacts.js` the Artifacts list (PRs from their receipts, docs and runs as their
+workers declared them with `report(artifacts=…)`, kept per task). `session.js`, `sidebar.js`,
+`drafts.js`,
 `composer.js` (the message box, with images) and `settings.js` render their parts; `dom.js` and `text.js` are helpers (the Markdown subset is
 escaped first). Writes are REST calls. Cards are reconciled by key and refreshed in place, so a
-half-typed reply survives updates. ESLint checks the modules in CI.
+half-typed reply survives updates, and a card whose drawing fails shows so without stopping the
+rest. ESLint checks the modules in CI.

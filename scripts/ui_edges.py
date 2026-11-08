@@ -11,7 +11,7 @@ import json
 import re
 import sys
 import tempfile
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import uvicorn
@@ -275,8 +275,10 @@ async def home(runtime, browser, failures: list[str]):
     await expect(page.locator(".home-item .badge")).to_have_text("1")
     assert (await page.title()).startswith("(1) "), await page.title()
 
-    queued = page.locator("#tasks-queued .card.task", has_text="Fix the parser")
+    # Queued: not worked on now, it waits for a slot (Monitoring, marked so).
+    queued = page.locator("#tasks-monitoring .card.task.marker-queued", has_text="Fix the parser")
     await expect(queued).to_contain_text("Waiting for a worker slot · 1 of 1 busy")
+    await expect(queued.locator(".head .meta")).to_contain_text("Queued")
     for hidden in (page.locator("#session-list"), page.locator("#tasks")):
         await expect(hidden).not_to_contain_text("Learn how you work")
     log("one badge; the queued task says why; the learning helper is not in the lists")
@@ -505,8 +507,12 @@ async def home(runtime, browser, failures: list[str]):
     follow_up = await spawn("Review api PR #12")
     await call_tool(runtime, "report", follow_up, status="done", summary="Reviewed.")
     runtime.update_session(follow_up, status="working", activity="reading the reply")
+    # At work on news about its finished task (not the owner's follow-up): a card of its own,
+    # named for that task, its result left where it is.
     card = running.filter(has_text="Review api PR #12")
-    await expect(card).to_contain_text("Following up on your message")
+    await expect(card).to_have_class(re.compile(r"\bfollowup\b"))
+    await expect(card.locator(".head .meta")).to_have_text("Following up")
+    await expect(card.locator(".activity")).to_have_text("reading the reply")
     worker = await spawn("Ship the docs")
     runtime.update_session(worker, status="working")
     card_draft = store.create_draft(worker, "reply", {"to": "Al", "where": "email"}, "Hi")
@@ -683,7 +689,7 @@ async def this_round(runtime, browser, failures: list[str]):
 
 async def round_two(runtime, browser, failures: list[str]):
     """A risky menu item is readable; a click around a dialog closes it (a selection dragged
-    out of it does not); news on finished work waits under Ready to review until seen; a
+    out of it does not); news on finished work waits under Needs you until seen; a
     worker with two tasks shows which it is on; replies say whom they answer and can resolve."""
     store = runtime.store
     router = store.get("router_id")
@@ -697,7 +703,7 @@ async def round_two(runtime, browser, failures: list[str]):
     await settle(runtime)
     second = await call_tool(runtime, "message_session", router, session_id=first,
                              text="Also fix the review comments", task="new",
-                             title="Fix review comments on lms")  # fmt: skip
+                             title="Fix review comments on lms", earlier="keep")  # fmt: skip
     assert second.result_type == "success", second.text_result_for_llm
     quiet = await start("Buyer Group Graph 7-pager")
     await settle(runtime)
@@ -732,17 +738,20 @@ async def round_two(runtime, browser, failures: list[str]):
     def titled(title):
         return board.locator(".card.task").filter(has=page.locator(".head .title", has_text=title))
 
-    # A worker with two tasks: the one it is on under Running, the other under Queued, waiting
-    # its turn; the worker's box in each.
+    # A worker with two tasks: the one it is on under Running, the other (taken up, then left
+    # for it) under Monitoring, paused; the worker's box in each.
     running_box = board.locator(f'#tasks-running .card.worker-box[data-session="{first}"]')
-    queued_box = board.locator(f'#tasks-queued .card.worker-box[data-session="{first}"]')
+    queued_box = board.locator(f'#tasks-monitoring .card.worker-box[data-session="{first}"]')
     await expect(running_box.locator(".card.task")).to_have_count(1, timeout=15000)
     await expect(running_box.locator(".card.task .head .title")).to_have_text(
         "Fix review comments on lms"
     )
-    await expect(running_box.locator(".box-head .meta")).to_contain_text("also: Queued")
+    await expect(running_box.locator(".box-head .meta")).to_contain_text("also: Monitoring")
     await expect(queued_box.locator(".card.task .head .title")).to_have_text("Editor event paths")
-    await expect(queued_box.locator(".reason")).to_contain_text("Waits its turn")
+    await expect(queued_box.locator(".reason")).to_contain_text(
+        "Paused: its worker is on “Fix review comments on lms” now"
+    )
+    await expect(queued_box.locator(".card.task .head .meta")).to_contain_text("Paused")
     await expect(running_box.locator(".activity")).to_have_count(1)
     await running_box.screenshot(path=SHOTS / "ui-edges-worker-group.png")
     # Its conversation takes up the earlier task again: that one runs now, the newer waits.
@@ -761,11 +770,13 @@ async def round_two(runtime, browser, failures: list[str]):
     await expect(queued_box.locator(".card.task .head .title")).to_have_text(
         "Fix review comments on lms"
     )
-    idle = titled("Buyer Group Graph 7-pager")
-    await expect(idle.locator(".activity")).to_contain_text("Quiet since")
-    log("a worker with two tasks: the one it is on runs, the next waits; a quiet one says since")
+    # Its worker between turns, nothing registered to wait on: not running, and it says so.
+    idle = board.locator("#tasks-monitoring .card.task", has_text="Buyer Group Graph 7-pager")
+    await expect(idle.locator(".reason.warn")).to_contain_text("nothing registered to wait on")
+    await expect(idle.get_by_role("button", name="Nudge")).to_be_visible()
+    log("a worker with two tasks: the one it is on runs, the other paused; a quiet one says why")
 
-    update = page.locator("#tasks-review .card.task", has_text="Filter opt-outs before inference")
+    update = page.locator("#needs .card.task", has_text="Filter opt-outs before inference")
     await expect(update.locator(".news")).to_contain_text("approved and ready to merge")
     await expect(update.locator(".news .chip")).to_have_text("Update")
     await update.get_by_role("button", name="Got it").click()
@@ -773,7 +784,7 @@ async def round_two(runtime, browser, failures: list[str]):
     await expect(
         page.locator("#tasks-recent .card.task", has_text="Filter opt-outs")
     ).to_have_count(1)
-    log("news on finished work: under Ready to review until Got it, then back with the finished")
+    log("news on finished work: under Needs you until Got it, then back with the finished")
 
     # The reply itself is in a text box: the cards are found by what they answer.
     line_reply = page.locator(".card.draft", has_text="Opt-out titles are not removed")
@@ -853,7 +864,7 @@ async def round_three(runtime, browser, failures: list[str]):
     # A worker with two tasks, long markdown progress and links.
     busy = await start("Research the Slack bot")
     await call_tool(runtime, "message_session", router, session_id=busy, task="new",
-                    title="CoS bug bash", text="Now the bug bash")  # fmt: skip
+                    title="CoS bug bash", text="Now the bug bash", earlier="keep")  # fmt: skip
     long = ("**Status:** fixed `B16`; see [the doc](https://docs.google.com/document/d/abc) and "
             "https://github.com/acme/app/pull/592 — " + "more words here " * 120)  # fmt: skip
     for task in runtime.tasks.for_session(busy):
@@ -906,16 +917,22 @@ async def round_three(runtime, browser, failures: list[str]):
     await expect(dot("Pick the database")).to_have_class(re.compile(r"\bwaiting\b"))
     await expect(dot("Answer Carol")).to_have_class(re.compile(r"\bwaiting\b"))
     await expect(dot("Watch CI on #12")).to_have_class(re.compile(r"\bwatching\b"))
-    await expect(dot("Count the orders")).to_have_class(re.compile(r"\bdone\b"))
+    # A report that only informs is over once delivered: its worker has nothing open, folded
+    # away with the others like it.
+    await expect(dot("Count the orders")).to_have_class(re.compile(r"\bidle\b"))
+    idle_fold = page.locator("#session-list details.idle-workers")
+    await expect(idle_fold.locator(".item", has_text="Count the orders")).to_have_count(1)
+    await expect(idle_fold).not_to_have_attribute("open", "")
     await expect(dot("CoS bug bash")).to_have_class(re.compile(r"\bworking\b"))
     await page.locator("#session-list .legend-toggle").click()
-    await expect(page.locator("#session-list .legend .legend-row")).to_have_count(9)
+    # Four places and a session open in a terminal: no more colors than that.
+    await expect(page.locator("#session-list .legend .legend-row")).to_have_count(5)
     await page.locator("#session-list .legend-toggle").click()
     await expect(page.locator("#session-list .legend")).to_have_count(0)
-    log("sidebar dots follow Home (needs you, working, waiting on others, review), with a legend")
+    log("sidebar dots follow Home's four places, with a legend; idle workers fold away")
 
     group = page.locator(f'#tasks-running .card.worker-box[data-session="{busy}"]')
-    waits = page.locator(f'#tasks-queued .card.worker-box[data-session="{busy}"]')
+    waits = page.locator(f'#tasks-monitoring .card.worker-box[data-session="{busy}"]')
     await expect(group.locator(".card.task")).to_have_count(1)
     await expect(group.locator(".card.task .head .title")).to_have_text("CoS bug bash")
     await expect(waits.locator(".card.task .head .title")).to_have_text("Research the Slack bot")
@@ -951,7 +968,9 @@ async def round_three(runtime, browser, failures: list[str]):
     await progress.click()
     chips_now = group.locator(".card.task").first.locator(".artifacts")
     await expect(chips_now.locator(".receipt", has_text="Google Doc")).to_be_visible()
-    await expect(chips_now.locator(".receipt", has_text="app#592")).to_be_visible()
+    # A PR it only mentions (not one it made) is a reference: folded under "More links".
+    await expect(chips_now.locator(".more-links summary")).to_have_text("More links: 1 referenced")
+    await expect(chips_now.locator(".more-links .receipt", has_text="app#592")).to_have_count(1)
     await expect(group.locator(".activity")).to_contain_text("Measure the row overflow")
     log("a worker's box per section: its task there, two clean lines, when apart, its links")
 
@@ -963,11 +982,11 @@ async def round_three(runtime, browser, failures: list[str]):
     await expect(watching.locator(".receipt.watching")).to_have_text("Watching app#12")
     counts = await page.evaluate("""() => {
       const n = (id) => Number(document.querySelector(`#${id} .count`)?.textContent || 0);
-      return [n("tasks"), n("tasks-running") + n("tasks-monitoring") + n("tasks-stalled")
-              + n("tasks-queued") + n("tasks-review")];
+      return [n("tasks"), n("tasks-running") + n("tasks-monitoring")];
     }""")
     assert counts[0] == counts[1], counts
-    log("monitoring has its own group; the Tasks count is the sum of its groups")
+    await expect(watching.locator(".reason")).to_contain_text("Waiting on app#12")
+    log("monitoring says what it waits on; the Tasks count is the sum of its groups")
 
     rendered = page.locator("#timeline .markdown .table").last
     await expect(rendered.locator("tbody tr")).to_have_count(2)
@@ -979,11 +998,10 @@ async def round_three(runtime, browser, failures: list[str]):
     assert table_box["width"] <= message_box["width"] + 1, (table_box, message_box)
     log("a table: no blank row or column, a pipe in code stays, it fits its message")
 
-    await (
-        page.locator("#tasks-review .card.task", has_text="Count the orders")
-        .locator(".head .title")
-        .click()
-    )
+    recent = page.locator("#tasks-recent")
+    if not await recent.evaluate("n => n.open"):
+        await recent.locator("summary").click()
+    await recent.locator(".card.task", has_text="Count the orders").locator(".head .title").click()
     report = page.locator(f'#timeline [data-kind="report"][data-task="{done_task["id"]}"]')
     await expect(report).to_be_in_viewport(timeout=10000)
     await expect(page.locator("#timeline > *").last).not_to_be_in_viewport()
@@ -1026,6 +1044,325 @@ async def round_three(runtime, browser, failures: list[str]):
     await expect(line).to_have_count(0, timeout=10000)
     assert not store.settings().slack_enabled
     log("the Slack problem line can turn Slack watching off")
+    await context.close()
+
+
+async def round_four(runtime, browser, failures: list[str]):
+    """The v0.1.24 bug bash. A result to review with a long PR title, its changes and runs fits
+    at 352-400px, runs under a run folded (C1, C2); a worker following up on finished work is
+    named for that work and fits (C13); workers are named by their work in the sidebar, the
+    header and Closed (C14); a link that cannot be decoded does not stop Home, and a card that
+    cannot be drawn does not stop the others (C10); a monitored task says what it waits on,
+    a check-back is its own task's whatever its worker does (C3); a thread that cannot be read
+    can be let go (C5); finished tasks newest first across workers, a page at a time (C11)."""
+    store = runtime.store
+    router = store.get("router_id")
+    store.save_settings(store.settings().model_copy(update={"max_workers": 30}))
+
+    async def start(title):
+        result = await call_tool(runtime, "spawn_worker", router, title=title,
+                                 instructions=title, why_new="test")  # fmt: skip
+        assert result.result_type == "success", result.text_result_for_llm
+        await settle(runtime)
+        return json.loads(result.text_result_for_llm)["session_id"]
+
+    async def another(worker, title):
+        result = await call_tool(runtime, "message_session", router, session_id=worker,
+                                 task="new", title=title, text=title, earlier="keep")  # fmt: skip
+        assert result.result_type == "success", result.text_result_for_llm
+        await settle(runtime)
+        return next(t for t in runtime.tasks.for_session(worker) if t["title"] == title)
+
+    # C1/C2: to review, a PR with a long title, its changes, a Flyte run and what is under it.
+    fixer = await start("Fix the Spark 3.5 dependency of the ICP flow")
+    fix = runtime.tasks.current(fixer)
+    label = "acme/ad-targeting-model-data#594"
+    store.set(f"prtitle:{label}", "Upgrade the ICP flow to Spark 3.5 and pin the shaded " * 3)
+    pr = {"label": label, "url": "https://github.com/acme/ad-targeting-model-data/pull/594",
+          "state": "OPEN", "checks": "passing", "failing": [], "review": "", "own": True,
+          "about": True, "at": datetime.now(UTC).isoformat()}  # fmt: skip
+    checkout = {"path": "/tmp/icp", "branch": "chief/icp", "commit": "b" * 40, "commits": 2,
+                "files": 3, "insertions": 40, "deletions": 12}  # fmt: skip
+    run = store.one("SELECT id FROM runs WHERE task_id=?", (fix["id"],))
+    store.execute("UPDATE runs SET evidence=? WHERE id=?",
+                  (json.dumps({"checkouts": [checkout], "prs": [pr]}), run["id"]))  # fmt: skip
+    runtime.tasks.move(fix["id"], "review", result=(
+        f"Opened {pr['url']}. The flow ran: "
+        "https://flyte.example.com/console/projects/p/domains/d/executions/abc123 . Spark: "
+        "https://shs.example.com/history/application_1700000000000_0042/jobs/ ; debug "
+        "https://box-rdev-1.example.com/debug"))  # fmt: skip
+    runtime.update_session(fixer, status="idle", activity="")
+
+    # C13/C14: started for one thing, now on another, finished; at work on news about it.
+    researcher = await start("Research Peter Huang's Slack-sending skill")
+    await another(researcher, "Chief of Staff merge bug report")
+    for item in runtime.tasks.for_session(researcher):
+        runtime.tasks.move(item["id"], "done", result="Done.")
+
+    # C3: delivered and still followed; a check-back while its worker is on another task.
+    shipper = await start("Ship the exporter")
+    shipped = runtime.tasks.current(shipper)
+    runtime.tasks.move(shipped["id"], "done", result="Opened acme/app#77.")
+    runtime.follow(shipper, ["github:acme/app#77"], task_id=shipped["id"])
+    runtime.update_session(shipper, status="idle", activity="")
+    weekly = await start("Run the weekly embeddings")
+    first = runtime.tasks.current(weekly)
+    at = (datetime.now(UTC) + timedelta(minutes=30)).isoformat()
+    runtime.task_actions.set_check_back(first, at, "the Flyte run finishing", "")
+    weekly_run = "https://flyte.example.com/console/projects/p/domains/d/executions/weekly42"
+    runtime.task_actions.declare_artifacts(
+        first["id"], [{"url": weekly_run, "name": "Weekly embeddings run", "status": "running"}]
+    )
+    answer = await another(weekly, "Answer Jingtao about the two gets")
+    runtime.tasks.move(first["id"], "running")
+    runtime.tasks.move(answer["id"], "running")
+    store.set(f"turntask:{weekly}", answer["id"])
+    runtime.update_session(weekly, status="working", activity="Reading the client code")
+
+    # C5: a thread it cannot read, for its task.
+    stuck = await start("Watch the example PR")
+    runtime.follow(stuck, ["github:acme/app#42"], task_id=runtime.tasks.current(stuck)["id"])
+    store.set("ghfail:github:acme/app#42", "3")
+    runtime.update_session(stuck, status="idle", activity="")
+
+    # C10: links that cannot be decoded, with parentheses, ending in "_".
+    spec = await start("Draft the AI interviewer spec")
+    runtime.task_actions.publish(runtime.tasks.update(
+        runtime.tasks.current(spec)["id"],
+        progress="See https://example.com/report%zz and https://en.wikipedia.org/wiki/Foo_(bar) "
+        "and https://example.com/run_ for the details.",
+    ))  # fmt: skip
+
+    # C14: a closed worker by its latest work.
+    repopulate = await start("Repopulate buyer_advertiser_features_v1 via Darwin")
+    recheck = await another(repopulate, "Recheck buyer_advertiser_features_v1 has data")
+    for item in runtime.tasks.for_session(repopulate):
+        runtime.tasks.move(item["id"], "done", result="Done.")
+    await runtime.workers.close(repopulate)
+
+    # C11: 33 finished tasks of two workers, ended a minute apart, the workers interleaved.
+    batch = {name: await start(name) for name in ("Batch A", "Batch B")}
+    stamp = datetime.now(UTC)
+    for index in range(33):
+        owner = batch["Batch B" if 10 <= index < 20 else "Batch A"]
+        made = runtime.tasks.create(owner, f"Finished item {index:02d}", "x", status="running")
+        runtime.tasks.move(made["id"], "done", result="ok")
+        ended = (stamp - timedelta(minutes=index + 1)).isoformat()
+        store.execute("UPDATE tasks SET ended_at=?, updated_at=? WHERE id=?",
+                      (ended, ended, made["id"]))  # fmt: skip
+    for worker in batch.values():
+        for item in runtime.tasks.for_session(worker):
+            if item["status"] != "done":
+                runtime.tasks.move(item["id"], "done", result="ok")
+        runtime.update_session(worker, status="idle", activity="")
+    await settle(runtime)
+    # At work on news about its finished tasks, its last instruction on neither.
+    store.set(f"turntask:{researcher}", "elsewhere")
+    runtime.update_session(researcher, status="working", activity="Reading the reply on #352")
+    runtime.publish_state()
+
+    context = await browser.new_context(viewport={"width": 1280, "height": 900})
+    page = await context.new_page()
+    errors: list[str] = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    needs, running = page.locator("#needs"), page.locator("#tasks-running")
+    monitoring = page.locator("#tasks-monitoring")
+
+    review = needs.locator(".card.task", has_text="Fix the Spark 3.5 dependency")
+    await expect(review).to_be_visible(timeout=15000)
+    await expect(review.locator(".head .meta")).to_contain_text("To review")
+    await expect(review.locator(".receipt.pr .pr-state")).to_have_text(" · ✓ CI")
+    await expect(review.locator(".receipt.changes")).to_have_text("+40 −12 in 3 files")
+    main = review.locator(".chips > .receipts > .receipt.artifact")
+    await expect(main).to_have_text(["Flyte · abc123"])
+    folded = review.locator(".chips .more-links")
+    await expect(folded.locator("summary")).to_have_text("More links: 2 for diagnosis")
+    await expect(folded.locator(".receipt", has_text="Spark")).to_be_hidden()
+    follow_up = running.locator(f'.card.task.followup[data-key="followup:{researcher}"]')
+    await expect(follow_up.locator(".head .title")).to_have_text("Chief of Staff merge bug report")
+    await expect(follow_up.locator(".head .meta")).to_have_text("Following up")
+    for width in (352, 376, 400):
+        await page.evaluate("w => document.querySelector('#panel').style.width = `${w}px`", width)
+        for card in (review, follow_up):
+            found = await card.evaluate(OVERFLOWS)
+            assert not found, (width, found)
+            outer = await card.bounding_box()
+            for part in await card.locator(".receipt, .head > *").all():
+                if not await part.is_visible():
+                    continue
+                inner = await part.bounding_box()
+                assert inner["x"] + inner["width"] <= outer["x"] + outer["width"] + 1, (
+                    width, await part.text_content(), inner, outer)  # fmt: skip
+        if width == 352:
+            await review.screenshot(path=SHOTS / "ui-edges-review-352.png")
+            await follow_up.screenshot(path=SHOTS / "ui-edges-followup-352.png")
+        title_box = await follow_up.locator(".head .title").bounding_box()
+        assert title_box["width"] > 80, (width, title_box)
+        state = await review.locator(".receipt.pr .pr-state").bounding_box()
+        assert state["width"] > 20, ("where the PR stands stays in sight", width, state)
+    await page.evaluate("document.querySelector('#panel').style.removeProperty('width')")
+    await folded.locator("summary").click()
+    await expect(folded.locator(".receipt", has_text="Spark · application_1700000000000_0042"))\
+        .to_be_visible()  # fmt: skip
+    log("to review: the PR, changes and the run fit at 352-400px; Spark and debug folded")
+    log("a follow-up on finished work: named for it, a short meta, fits at 352-400px")
+
+    item = page.locator(f'#session-list .item[data-id="{researcher}"]')
+    await expect(item.locator(".label")).to_have_text("Chief of Staff merge bug report")
+    await expect(item).to_have_attribute("title", re.compile("Started as “Research Peter"))
+    await item.click()
+    await expect(page.locator("#session-title")).to_have_text("Chief of Staff merge bug report")
+    await expect(page.locator("#session-title")).to_have_attribute(
+        "title", "Started as “Research Peter Huang's Slack-sending skill”"
+    )
+    await page.locator("#back-home").click()
+    closed = page.locator("#closed-list")
+    await expect(closed).to_contain_text("Recheck buyer_advertiser_features_v1 has data")
+    await expect(closed).not_to_contain_text("Repopulate")
+    assert recheck["title"] in (await closed.text_content())
+    log("workers by their work: the sidebar, the header (started as… on hover), Closed")
+
+    delivered = monitoring.locator(".card.task", has_text="Ship the exporter")
+    await expect(delivered.locator(".reason")).to_contain_text("Delivered; still following app#77")
+    await expect(delivered.locator(".head .meta")).to_contain_text("Delivered")
+    later = monitoring.locator(".card.task", has_text="Run the weekly embeddings")
+    await expect(later.locator(".reason")).to_contain_text("the Flyte run finishing")
+    await expect(later.locator(".head .meta")).to_contain_text("Checks back")
+    await expect(running.locator(".card.task", has_text="Answer Jingtao")).to_have_count(1)
+    weekly_box = running.locator(f'.card.worker-box[data-session="{weekly}"]')
+    await expect(weekly_box.locator(".box-head .meta")).to_contain_text("also: Monitoring")
+    log("monitoring says what it waits on; a check-back is its task's while its worker works")
+
+    cannot = page.locator(".card.task", has_text="Watch the example PR")
+    chip = cannot.locator(".receipt.failing")
+    await expect(chip).to_contain_text("Can't read app#42")
+    await expect(cannot.locator(".receipt.watching")).to_have_count(0)
+    await chip.get_by_role("button", name="stop following").click()
+    await expect(page.locator(".toast", has_text="Stopped following app#42.")).to_be_visible()
+    assert "github:acme/app#42" not in store.follows(stuck)
+    await expect(chip).to_have_count(0, timeout=10000)
+    log("a thread it cannot read is said so, not waited on, and can be let go")
+
+    spec_card = page.locator(".card.task", has_text="Draft the AI interviewer spec")
+    await expect(spec_card.locator(".more-links summary")).to_be_visible()
+    hrefs = await spec_card.locator(".more-links a").evaluate_all("as => as.map((a) => a.href)")
+    assert "https://example.com/report%zz" in hrefs, hrefs
+    assert "https://en.wikipedia.org/wiki/Foo_(bar)" in hrefs, hrefs
+    assert "https://example.com/run_" in hrefs, hrefs
+    # Home goes on: a task added after it shows.
+    await start("Proof Home still redraws")
+    await expect(page.locator("#tasks", has_text="Proof Home still redraws")).to_have_count(
+        1, timeout=10000
+    )
+    isolated = await page.evaluate("""async () => {
+      const d = await import("/static/dom.js");
+      const box = document.createElement("div");
+      const quiet = console.error;
+      console.error = () => {};
+      try {
+        d.reconcile(box, [
+          { key: "bad", build: () => { throw new URIError("URI malformed"); } },
+          { key: "good", build: () => d.el("div", { text: "drawn" }) },
+        ]);
+      } finally {
+        console.error = quiet;
+      }
+      return [...box.children].map((n) => [n.className, n.textContent]);
+    }""")
+    assert isolated == [
+        ["card broken", "This card could not be shown: URI malformed"],
+        ["", "drawn"],
+    ], isolated
+    log("a malformed link does not stop Home; a card that cannot be drawn leaves the others")
+
+    # Artifacts: every PR, doc and run in one list, where each stands, in a box that scrolls.
+    made = page.locator("#tasks-artifacts")
+    await expect(made).to_have_attribute("open", "")
+    rows = made.locator(".artifact")
+    pr_row = rows.filter(has_text="ad-targeting-model-data#594")
+    await expect(pr_row.locator(".a-kind")).to_have_text("PR")
+    await expect(pr_row.locator(".a-status")).to_have_text("in review")
+    await expect(pr_row.locator(".a-task")).to_have_text(
+        "Fix the Spark 3.5 dependency of the ICP flow"
+    )
+    run_row = rows.filter(has_text="Weekly embeddings run")
+    await expect(run_row.locator(".a-kind")).to_have_text("Flyte")
+    await expect(run_row.locator(".a-status")).to_have_text("running")
+    await expect(run_row).to_have_class(re.compile(r"\btone-active\b"))
+    told = rows.filter(has_text="abc123")  # Named only in a report: as its task stands.
+    await expect(told.locator(".a-status")).to_have_text("to review")
+    await expect(told.locator(".a-status.derived")).to_have_count(1)
+    await expect(rows.filter(has_text="application_1700000000000_0042")).to_have_count(0)
+    box = await made.locator(".items").evaluate(
+        "n => [getComputedStyle(n).maxHeight, getComputedStyle(n).overflowY]"
+    )
+    assert box == ["280px", "auto"], box
+    for width in (352, 400):
+        await page.evaluate("w => document.querySelector('#panel').style.width = `${w}px`", width)
+        found = await made.evaluate(OVERFLOWS)
+        assert not found, (width, found)
+    await made.screenshot(path=SHOTS / "ui-edges-artifacts-400.png")
+    await page.evaluate("document.querySelector('#panel').style.removeProperty('width')")
+    before = await rows.count()
+    await run_row.get_by_role("button", name="Take Weekly embeddings run off this list").click()
+    await expect(rows).to_have_count(before - 1)
+    await expect(page.locator(".toast", has_text="Taken off Artifacts")).to_be_visible()
+    assert json.loads(store.get("artifacts_hidden")) == [weekly_run]
+    await made.get_by_role("button", name="Show 1 taken off").click()
+    await expect(run_row).to_have_class(re.compile(r"\bhidden-artifact\b"))
+    await run_row.get_by_role("button", name="Bring back").click()
+    await expect(run_row).not_to_have_class(re.compile(r"\bhidden-artifact\b"))
+    assert json.loads(store.get("artifacts_hidden")) == []
+    # Where it stands changes: the row says so as it comes.
+    runtime.task_actions.declare_artifacts(
+        first["id"], [{"url": weekly_run, "name": "Weekly embeddings run", "status": "failed"}]
+    )
+    await expect(run_row.locator(".a-status")).to_have_text("failed", timeout=10000)
+    await expect(run_row).to_have_class(re.compile(r"\btone-bad\b"))
+    await expect(rows.first).to_contain_text("Weekly embeddings run")  # What needs a look first.
+    await run_row.locator(".a-task").click()
+    await expect(
+        page.locator(".card.task.flash", has_text="Run the weekly embeddings")
+    ).to_be_visible()
+    log("artifacts: PRs, docs and runs in one scrolling list, live; one taken off and back")
+
+    recent = page.locator("#tasks-recent")
+    if not await recent.evaluate("n => n.open"):
+        await recent.locator("summary").click()
+    cards = recent.locator(".card.task")
+    total = int(await page.evaluate(
+        "() => document.querySelector('#tasks-recent .count').textContent.split(' of ')[1]"
+    ))  # fmt: skip
+    assert total >= 33, total
+    await expect(cards).to_have_count(30)
+    await expect(recent.locator("summary .count")).to_have_text(f"30 of {total}")
+    more = recent.get_by_role("button", name=re.compile(r"^Show \d+ more$"))
+    await expect(more).to_have_text(f"Show {min(30, total - 30)} more")
+
+    async def in_order():
+        ids = await cards.evaluate_all("cs => cs.map((c) => c.dataset.task)")
+        ended = [store.one("SELECT ended_at, updated_at FROM tasks WHERE id=?", (i,))
+                 for i in ids]  # fmt: skip
+        stamps = [row["ended_at"] or row["updated_at"] for row in ended]
+        assert stamps == sorted(stamps, reverse=True), list(zip(ids, stamps, strict=True))
+        return ids
+
+    shown = await in_order()
+    items = [store.one("SELECT title FROM tasks WHERE id=?", (i,))["title"] for i in shown]
+    batch_items = [title for title in items if title.startswith("Finished item")]
+    assert batch_items == sorted(batch_items), batch_items
+    # One worker's tasks next to each other share a box; another worker's in between part them.
+    heads = await recent.locator(".card.worker-box").evaluate_all(
+        "bs => bs.map((b) => [b.dataset.session, b.querySelectorAll('.card.task').length])"
+    )
+    assert all(a[0] != b[0] for a, b in itertools.pairwise(heads)), heads
+    await more.click()
+    await expect(cards).to_have_count(min(60, total))
+    await in_order()
+    log(f"recently finished: newest first across workers, 30 of {total}, then more")
+
+    assert not errors, errors
     await context.close()
 
 
@@ -1242,7 +1579,7 @@ async def main():
             )
             await plain_card.locator(".context summary").click()
             await expect(plain_card.locator(".context .markdown")).to_contain_text("Review done.")
-            reviewing = page.locator("#tasks .card.task", has_text="Review the exports PR")
+            reviewing = page.locator("#panel .card.task", has_text="Review the exports PR")
             await expect(reviewing).to_have_count(0)
             # Its verdict can change before it is sent, in the review view.
             await plain_card.get_by_role("button", name="Review…").click()
@@ -1288,7 +1625,11 @@ async def main():
             store.update_draft(plain["id"], status="rejected")
             runtime.bus.publish("draft", store.draft(plain["id"]))
             await expect(reviewing).to_have_count(1, timeout=10000)
-            await expect(page.locator("#tasks-review")).to_contain_text("Review the exports PR")
+            # A review that changed nothing informs: read, it is with the finished ones (no
+            # Accept to click), marked a report.
+            await expect(page.locator("#tasks-recent")).to_contain_text("Review the exports PR")
+            await expect(reviewing.locator(".head .meta")).to_contain_text("Report")
+            await expect(reviewing.get_by_role("button", name="Accept")).to_have_count(0)
             # In the chat, the report is one line pointing at the task's card.
             reported = page.locator("#timeline .event.done", has_text="Review the exports PR")
             await expect(reported).to_contain_text("finished")
@@ -1309,6 +1650,11 @@ async def main():
                 (json.dumps({"checkouts": [checkout], "prs": []}), run["id"]),
             )
             runtime.task_actions.publish(runtime.tasks.get(task["id"]))
+            # It changed code now: a result to accept, under Needs you.
+            await expect(
+                page.locator("#needs .card.task", has_text="Review the exports")
+            ).to_have_count(1, timeout=5000)
+            await expect(reviewing.locator(".head .meta")).to_contain_text("To review")
             await expect(reviewing.locator(".receipt.changes")).to_be_visible(timeout=5000)
             await expect(reviewing).to_have_class(re.compile(r"\bexpanded\b"))
             await expect(reviewing.locator(".expand")).to_have_text("Hide report")
@@ -1331,6 +1677,11 @@ async def main():
             log("a one-line report gets the answer in place in the timeline")
             await page.locator("#back-home").click()
             await expect(page.locator(".home-item.selected")).to_be_visible()
+            # Accepted from its card: it leaves Needs you for the finished ones.
+            await reviewing.get_by_role("button", name="Accept").click()
+            await expect(page.locator("#needs .card.task")).to_have_count(0, timeout=5000)
+            await expect(page.locator("#tasks-recent")).to_contain_text("Review the exports PR")
+            assert runtime.tasks.get(task["id"])["status"] == "done"
             await context.close()
 
             await home(runtime, browser, failures)
@@ -1338,6 +1689,7 @@ async def main():
             await this_round(runtime, browser, failures)
             await round_two(runtime, browser, failures)
             await round_three(runtime, browser, failures)
+            await round_four(runtime, browser, failures)
             await browser.close()
         server.should_exit = True
         await serving

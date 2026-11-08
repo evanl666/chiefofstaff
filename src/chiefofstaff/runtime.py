@@ -55,7 +55,7 @@ from .decisions import Decisions
 from .delivery import Delivery
 from .digest import digest
 from .drafts import Drafts
-from .envelope import UNTRUSTED, clean_title, language, sender, short, wrap
+from .envelope import UNTRUSTED, clean_title, language, sender, short, task_named, wrap
 from .events import ROUTER_CONTEXT, Events
 from .focus import Focus
 from .habits import Habits
@@ -126,6 +126,8 @@ ROUTER_TOOLS = [
     "read_session",
     "answer_session",
     "cancel_task",
+    "rename_task",
+    "split_task",
     "record_decision",
     "check_prs",
 ]
@@ -161,6 +163,8 @@ INSTRUCTION_CHARS = 25
 STEP_NOTE_SECONDS = 20
 # Tasks that ended within this many hours are still shown (and can be reviewed or retried).
 TASKS_SHOWN_HOURS = 72
+# A task its worker is on (or will be, once the owner's answer comes).
+OPEN_WORK = frozenset({"running", "waiting"})
 # The same message again within this long is not shown twice.
 REPEAT_SECONDS = 60
 GITHUB_HOSTS = (
@@ -1693,16 +1697,28 @@ class Runtime:
                 "threads (spawn_worker with slack=true, or the Slack session)."
             )
 
-    def follow(self, session_id: str, keys: list[str], *, given: bool = True) -> list[str]:
+    def follow(
+        self, session_id: str, keys: list[str], *, given: bool = True, task_id: str | None = None
+    ) -> list[str]:
         """`given`: the Router or the owner gave the session these threads (not the session
-        itself), so it may also draft replies there."""
+        itself), so it may also draft replies there. `task_id`: the task it follows them for
+        (default: the one its turn is on, else its current one); a thread waited on is that
+        task's, not every task of the worker."""
         followed = [threads.normalize(key) for key in keys]
-        self.check_follow(self.store.session(session_id), followed)
+        row = self.store.session(session_id)
+        self.check_follow(row, followed)
+        if task_id is None and row["role"] == WORKER:
+            current = self.tasks.current(session_id)
+            task_id = self.turn_task(session_id) or (current["id"] if current else "")
         for key in followed:
             self.store.follow(key, session_id)
             if given:
                 self.store.set(f"given:{session_id}:{key}", "1")
-            for prefix in ("ghfail", "slackfail"):
+            if task_id:
+                bound = self.store.follow_tasks(session_id, key)
+                if task_id not in bound:
+                    self.store.set(f"followtask:{session_id}:{key}", json.dumps([*bound, task_id]))
+            for prefix in ("ghfail", "slackfail", "gh404", "ghskip", "slackskip"):
                 self.store.set(f"{prefix}:{key}", "0")
         self.store.record(session_id, "links", followed)
         if followed:
@@ -1711,6 +1727,39 @@ class Runtime:
 
     def followed(self, prefix: str) -> list[dict]:
         return self.store.followed(prefix)
+
+    def missing(self, thread: str, why: str):
+        """A followed thread that does not exist: its followers stop following it, and say so
+        (once; nothing of their tasks changes)."""
+        for session_id in self.store.followers(thread):
+            self.store.unfollow(thread, session_id)
+            row = self.store.find_session(session_id)
+            if not row:
+                continue
+            text = f"Stopped following {thread}: {why}."
+            self.add_message(session_id, "notice", text, {"thread": thread})
+            with suppress(RuntimeError):
+                self.add_message(
+                    self.router_id(),
+                    "notice",
+                    f"“{self.display_title(row)}” stopped following {thread}: {why}.",
+                    {"session_id": session_id},
+                )
+            self.publish_session(row)
+            for task in self.tasks.for_session(session_id):
+                if task["status"] not in {"done", "cancelled"} or self.store.get(
+                    f"news:{task['id']}"
+                ):
+                    self.task_actions.publish(task)
+
+    def follow_health(self, session_id: str) -> dict[str, int]:
+        """Its followed threads that could not be read lately: failures in a row."""
+        found = {}
+        for key in self.store.follows(session_id):
+            prefix = "ghfail" if key.startswith("github:") else "slackfail"
+            if failures := int(self.store.get(f"{prefix}:{key}") or 0):
+                found[key] = failures
+        return found
 
     def unfollow(self, thread: str, finished: bool = False, merged: bool = False):
         """Stop following; `finished` means the PR was merged or closed while followed."""
@@ -1861,6 +1910,7 @@ class Runtime:
             "slack": bool(row["slack"]),
             "live": self.states.is_live(row["id"]),
             "follows": self.store.follows(row["id"]),
+            "follow_health": self.follow_health(row["id"]),
             "model": self.effective_model(row),
             "model_choice": row["model"],
             "effort": self.shown_effort(row),
@@ -1880,7 +1930,7 @@ class Runtime:
             ),
             "task": self.toolset.task_brief(self.tasks.current(row["id"])),
             # The task its current (or last) turn is about: what its steps are for.
-            "turn_task": self.turn_task(row["id"]) if row["role"] == WORKER else "",
+            "turn_task": self.working_on(row["id"]) if row["role"] == WORKER else "",
             "display_title": self.display_title(row),
             "elsewhere": self.copilot_id(row["id"]) in self.elsewhere and not row["closed_at"],
             "terminal": self.terminal.get(row["id"]),
@@ -1900,16 +1950,57 @@ class Runtime:
 
     def turn_task(self, session_id: str) -> str:
         """The task its current (or last) turn is about: named by the latest instruction its
-        conversation took up (one sent mid-turn waits until then)."""
+        conversation took up (one sent mid-turn waits until then). Commands it runs belong to
+        it, also after it reported (a final push)."""
         if known := self.store.get(f"turntask:{session_id}"):
             return known
-        found = self.store.one(
-            """SELECT json_extract(meta, '$.task_id') AS task FROM messages WHERE session_id=?
-            AND kind IN ('router', 'owner') AND json_extract(meta, '$.prompt') IS NOT NULL
-            AND json_extract(meta, '$.task_id') IS NOT NULL ORDER BY id DESC LIMIT 1""",
+        rows = self.store.all(
+            """SELECT json_extract(meta, '$.prompt') AS prompt FROM messages WHERE session_id=?
+            AND kind IN ('router', 'owner', 'notice') AND json_extract(meta, '$.prompt') IS NOT
+            NULL AND json_extract(meta, '$.task_id') IS NOT NULL ORDER BY id DESC LIMIT 20""",
             (session_id,),
         )
-        return found["task"] if found else ""
+        return next((named for row in rows if (named := task_named(row["prompt"]))), "")
+
+    def hidden_artifacts(self) -> list[str]:
+        return json.loads(self.store.get("artifacts_hidden") or "[]")
+
+    def hide_artifact(self, key: str, hidden: bool = True) -> list[str]:
+        """The owner's Artifacts list without (or again with) this one: a PR's key or a link."""
+        key = key.strip()[:600]
+        if not key:
+            raise ValueError("Which artifact?")
+        found = [item for item in self.hidden_artifacts() if item != key]
+        if hidden:
+            found = [*found, key][-500:]
+        self.store.set("artifacts_hidden", json.dumps(found))
+        self.publish_state()
+        return found
+
+    def took_up(self, session_id: str, tasks: list[str]):
+        """Its conversation shows instructions on these tasks: its turn is on the last; each has
+        been taken up (one given while it was on another waited its turn until now)."""
+        for task_id in tasks:
+            self.store.set(f"started:{task_id}", "1")
+        self.store.set(f"turntask:{session_id}", tasks[-1])
+
+    def working_on(self, session_id: str) -> str:
+        """The task it is on, as the owner sees it: its turn's task while that is open (or the
+        owner asked about it after it finished); once reported or accepted, the task it still
+        has open: its current one, else its newest running one."""
+        turn = self.turn_task(session_id)
+        found = self.tasks.find(turn) if turn else None
+        if (
+            found
+            and found["session_id"] == session_id
+            and (found["status"] in OPEN_WORK or self.store.get(f"followup:{turn}"))
+        ):
+            return turn
+        open_ = [t for t in self.tasks.for_session(session_id) if t["status"] in OPEN_WORK]
+        current = self.tasks.current(session_id)
+        if current and current["status"] in OPEN_WORK:
+            return current["id"]
+        return open_[-1]["id"] if open_ else ""
 
     def progress(self, row: dict) -> dict:
         """What a session is doing now and what it said last: progress at a glance."""
@@ -1994,6 +2085,7 @@ class Runtime:
             "uncertain": self.store.drafts("uncertain"),
             # PRs by "owner/repo#n" with their titles; followed threads with a link to them.
             "pr_titles": self.store.items("prtitle:"),
+            "artifacts_hidden": self.hidden_artifacts(),
             "thread_links": self.store.items("threadlink:"),
             "questions": self.asks.owner_questions(),
             "tasks": [

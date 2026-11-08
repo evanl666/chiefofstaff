@@ -15,6 +15,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .bus import Bus
 from .models import (
+    ArtifactHide,
     DraftDecision,
     FocusRequest,
     NewLesson,
@@ -335,6 +336,27 @@ def create_app(
     @app.post("/api/tasks/{task_id}/retry")
     async def retry_task(task_id: str, payload: TaskNote):
         return runtime.task_actions.view(await runtime.task_actions.retry(task_id, payload.text))
+
+    @app.post("/api/tasks/{task_id}/rename")
+    async def rename_task(task_id: str, payload: TaskNote):
+        return runtime.task_actions.rename(task_id, payload.text)
+
+    @app.post("/api/tasks/{task_id}/split")
+    async def split_task(task_id: str, payload: TaskNote):
+        return runtime.task_actions.split(task_id, payload.text)
+
+    @app.post("/api/artifacts/hide")
+    async def hide_artifact(payload: ArtifactHide):
+        """Off the owner's Artifacts list (or back on it): the task keeps it."""
+        return {"hidden": runtime.hide_artifact(payload.key, payload.hidden)}
+
+    @app.post("/api/sessions/{session_id}/unfollow")
+    async def unfollow_session_thread(session_id: str, payload: TaskNote):
+        runtime.store.unfollow(payload.text.strip(), session_id)
+        runtime.publish_session(runtime.store.session(session_id))
+        for task in runtime.tasks.for_session(session_id):
+            runtime.task_actions.publish(task)
+        return {"ok": True}
 
     @app.post("/api/tasks/{task_id}/nudge")
     async def nudge_task(task_id: str):

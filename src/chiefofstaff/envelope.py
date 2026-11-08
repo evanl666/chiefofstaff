@@ -127,14 +127,22 @@ def clean_title(title: str) -> str:
     return text.replace('"', "'")[:80] or "Task"
 
 
-# An instruction about a task, in a message to a worker (not the note that one was cancelled).
+# An instruction to work on a task, in a message to a worker: a task, more on it, a check-back
+# or a request to report on it. Not a note about one (an FYI, a decision changed, that it was
+# cancelled): the worker stays on what it is on.
 TASK_NAMED = re.compile(
-    r'<message from="(?:router|owner|system)" type="(?!cancelled")[\w-]+"'
+    r'<message from="(?:router|owner|system)" '
+    r'type="(?:task|message|check-back|nudge|wait-missing|report-missing)"'
     r'[^>]*?\btask="(t[0-9a-f]+)"'
 )
 
 
 def task_named(text: str) -> str:
     """The task the last instruction in a message to a worker is about ("" for none)."""
-    found = TASK_NAMED.findall(text or "")
+    found = tasks_named(text)
     return found[-1] if found else ""
+
+
+def tasks_named(text: str) -> list[str]:
+    """Every task the instructions in a message to a worker are about, in order."""
+    return TASK_NAMED.findall(text or "")

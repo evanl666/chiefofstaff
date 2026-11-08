@@ -50,11 +50,14 @@ class SessionState:
     turn_tasks: list[str] = field(default_factory=list)
     # Tasks a worker set a check-back on in its current turn: it waits for it, not in this turn.
     turn_check_backs: set[str] = field(default_factory=set)
+    # Tasks it reported done in its current turn: another done report on one is an amendment.
+    turn_reported: set[str] = field(default_factory=set)
     # Open cards for the owner: draft id -> text.
     asking: dict[str, str] = field(default_factory=dict)
     # Messages sent to it that its conversation has not shown it yet (sent while it was
-    # finishing a turn, say): digest of what was sent -> the newest message's text.
-    unread: dict[str, str] = field(default_factory=dict)
+    # finishing a turn, say): digest of what was sent -> the newest message's text and the
+    # tasks they are about ("" for a message about none).
+    unread: dict[str, tuple[str, tuple[str, ...]]] = field(default_factory=dict)
     # Its connection has shown a message it received (so unread ones can be told apart).
     echoes: bool = False
     # Tools it called in its current turn: a turn that failed after acting is not sent again.
@@ -71,6 +74,9 @@ class SessionState:
     steps: dict[str, tuple[float, str, str]] = field(default_factory=dict)
     # Its calls that read, type into or stop a shell, by call id: (tool, shell id).
     shell_calls: dict[str, tuple[str, str]] = field(default_factory=dict)
+    # Calls of a tool that opens a PR (a GitHub MCP server's create_pull_request): its result
+    # names the PR, which is then the task's own.
+    pr_calls: set[str] = field(default_factory=set)
     lifecycle: asyncio.Lock = field(default_factory=asyncio.Lock)
     sending: asyncio.Lock = field(default_factory=asyncio.Lock)
     # Serializes add_repo for one worker.

@@ -61,11 +61,10 @@ export const pendingDrafts = () => state.snapshot?.drafts || [];
 export const uncertainDrafts = () => state.snapshot?.uncertain || [];
 export const tasks = () => state.snapshot?.tasks || [];
 export const ownerQuestions = () => state.snapshot?.questions || [];
-// A worker by what it is on: its latest task while that is open (a worker given new work keeps
-// the title it was started with), else that title.
+// A worker by what it is on (the server's one rule: its current task while open, else its
+// newest open task, else its newest task); the first thing it was asked only when it has none.
 export function workerTitle(session) {
-  const task = session?.task;
-  return task?.title && ["running", "waiting", "queued"].includes(task.status) ? task.title : session?.title || "";
+  return session?.display_title || session?.title || "";
 }
 export async function loadState() {
   const data = await api("/api/state");

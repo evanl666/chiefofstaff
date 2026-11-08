@@ -162,6 +162,7 @@ async def test_cancelling_one_of_a_workers_tasks_leaves_its_other_task_running(h
         session_id=worker,
         text="Also update the docs",
         task="new",
+        earlier="keep",
         title="Docs",
     )
     docs = task_of(harness, worker)

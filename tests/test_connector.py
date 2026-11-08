@@ -269,7 +269,7 @@ async def test_away_the_owner_merges_and_answers_a_cancelled_tasks_question(tmp_
     fixer = await spawn(runtime, harness.router_id, "Fix login")
     fix = runtime.tasks.current(fixer)
     await call_tool(
-        runtime, "report", fixer, status="done", summary="https://github.com/acme/app/pull/7"
+        runtime, "report", fixer, status="done", summary="Opened https://github.com/acme/app/pull/7"
     )
     asker = await spawn(runtime, harness.router_id, "Pick a port")
     asked = runtime.tasks.current(asker)
@@ -403,12 +403,49 @@ async def test_a_scan_that_never_reported_back_leaves_its_window_to_the_next(tmp
         sent = harness.session(row["id"]).sent[-1]
         harness.session(row["id"]).emit("session.idle")
         await settle(runtime)
-        return re.search(r"new since (\S+)\.", sent).group(1)
+        return re.search(r"new since (\S+)$", sent, re.MULTILINE).group(1)
 
     first = await since()
     assert await since() == first, "the failed scan's window is read again"
     await call_tool(runtime, "report_found", connector.session()["id"], items=[])
     assert await since() != first, "once one reported back, the next reads on from it"
+
+
+async def test_a_partial_scan_keeps_that_watchs_window_open(tmp_path):
+    settings = Settings(
+        watches=[Watch(what="DMs to me"), Watch(what="PR mentions")], watch_after_hours_minutes=0
+    )
+    harness = Harness(tmp_path / "data", settings)
+    runtime = await harness.connect()
+    connector = runtime.connector
+    harness.store.set("watch_done_at", str(time.time() - 3 * 3600))
+
+    async def windows() -> list[str]:
+        harness.store.set("watch_scanned_at", "0")
+        await connector.scan()
+        await settle(runtime)
+        row = connector.session()
+        sent = harness.session(row["id"]).sent[-1]
+        harness.session(row["id"]).emit("session.idle")
+        await settle(runtime)
+        return re.findall(r"new since (\S+)$", sent, re.MULTILINE)
+
+    before = await windows()
+    await call_tool(
+        runtime, "report_found", connector.session()["id"], items=[],
+        incomplete=[{"watch": 1, "reason": "the DM search returns only the newest 3 threads"}],
+    )  # fmt: skip
+    after = await windows()
+    assert after[0] == before[0], "partly covered: read again from where it was"
+    assert after[1] != before[1], "fully covered: reads on"
+    last = runtime.connector.view()["last"]
+    assert last["incomplete"] == [
+        {"watch": 1, "reason": "the DM search returns only the newest 3 threads"}
+    ]
+    # A problem with no watch named: nothing counts as covered.
+    await call_tool(runtime, "report_found", connector.session()["id"], items=[],
+                    problems="Search failed; only three threads were visible")  # fmt: skip
+    assert (await windows())[1] == after[1]
 
 
 async def test_a_new_question_on_the_same_task_is_told_again(tmp_path):
@@ -510,3 +547,26 @@ async def test_a_found_message_the_owner_answered_is_left_out(tmp_path):
     assert "review?" in router and "ACL ok?" not in router
     assert "Thread: slack:C0123ABC:1700000000.000100 (Slack is not connected here" in router
     assert "Context (as the watcher read it)" in router
+
+
+async def test_what_the_away_channel_can_do_is_shown_as_tried(tmp_path):
+    harness = Harness(tmp_path / "data", Settings(away_notify=True, away_how="DM me"))
+    runtime = await away(harness)
+    await runtime.connector.notify_away(test=True)
+    await settle(runtime)
+    messenger = runtime.toolset.last_special("messenger")
+    await call_tool(
+        runtime, "report_notified", messenger["id"], ok=True, where="Slack DM from acmebot",
+        method="acmebot send", replies="acmebot read_dm_replies",
+    )  # fmt: skip
+    can = runtime.connector.view()["away"]["can"]
+    assert can["sends"] and can["reads_replies"] and not can["replies_verified_at"]
+    assert can["new_requests"] is False
+    code = json.loads(harness.store.get("away_test"))["code"]
+    await call_tool(runtime, "report_owner_replies", messenger["id"],
+                    replies=[{"code": code, "text": f"{code} ok"}])  # fmt: skip
+    assert runtime.connector.view()["away"]["can"]["replies_verified_at"], "a reply came back"
+    await call_tool(runtime, "report_notified", messenger["id"], ok=True, where="my own DM",
+                    method="slack_send", replies="")  # fmt: skip
+    can = runtime.connector.view()["away"]["can"]
+    assert not can["reads_replies"] and not can["replies_verified_at"], "another way: not tried"

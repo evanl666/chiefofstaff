@@ -989,7 +989,7 @@ details.task-group > summary:hover { color: var(--text); }
 /* The worker, as a quiet label: its tasks are what to read. */
 .card.worker-box > .box-head { display: flex; gap: 6px; align-items: baseline; min-width: 0; font-size: var(--small); color: var(--muted); }
 .card.worker-box > .box-head .who { flex: none; text-transform: uppercase; letter-spacing: 0.04em; font-size: 10px; font-weight: 600; }
-.card.worker-box > .box-head .title { flex: 1; min-width: 0; min-height: 0; text-align: left; padding: 0; background: none; color: var(--soft); font-weight: 500; font-size: var(--small); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card.worker-box > .box-head .title { flex: 1; min-width: 0; min-height: 0; text-align: left; padding: 0; background: none; color: var(--soft); font-weight: 400; font-size: var(--small); font-family: inherit; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card.worker-box > .box-head .title:not(:disabled):hover { text-decoration: underline; }
 .card.worker-box > .box-head .meta { flex: none; max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card.worker-box > .box-tasks { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; }
@@ -1041,11 +1041,56 @@ button.receipt.needs { background: var(--amber-soft); color: var(--amber); }
 }
 .card.task .head .title:not(:disabled):hover { text-decoration: underline; opacity: 1; }
 .card.task .head .title:disabled { opacity: 1; cursor: default; }
-.card.task .meta { font-size: var(--small); color: var(--muted); white-space: nowrap; flex: none; }
+/* The meta (since when, a marker) gives way before the title does. */
+.card.task .meta { font-size: var(--small); color: var(--muted); white-space: nowrap; flex: 0 1 auto; min-width: 0; max-width: 45%; overflow: hidden; text-overflow: ellipsis; }
+.card.task .head .title { min-width: min(9em, 50%); }
+/* A narrow box keeps its room for the title: the task id is in the title's tooltip too. */
+.card.worker-box { container: box / inline-size; }
+@container box (max-width: 400px) {
+  .card.task .head .tid, .card.task .head .meta .when { display: none; }
+}
+.card.task .head .tid { flex: none; font: 10px var(--mono); color: var(--muted); opacity: 0.8; }
+.card.task .reason.warn { color: var(--soft); }
+.card.task .reason.warn::before { content: "! "; color: var(--amber); font-weight: 600; }
+.more-links { font-size: var(--small); color: var(--muted); margin-top: 4px; min-width: 0; }
+.more-links > summary { cursor: pointer; list-style: none; }
+.more-links > summary::before { content: "▸ "; }
+.more-links[open] > summary::before { content: "▾ "; }
+.more-links > .receipts { margin-top: 4px; }
+.receipt.failing .link { padding: 0; min-height: 0; color: inherit; text-decoration: underline; }
+.card.broken { color: var(--red); font-size: var(--small); }
+.show-more { margin: 4px 0 0 16px; }
+/* Artifacts: one row each, where it stands in sight; the list scrolls on its own. */
+#tasks-artifacts > .items { max-height: 280px; overflow-y: auto; display: grid; gap: 2px; padding-right: 2px; }
+.artifact { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; column-gap: 8px; padding: 5px 8px; border-radius: 6px; background: var(--card, var(--hover)); font-size: var(--small); min-width: 0; }
+.artifact .a-kind { font: 600 10px var(--mono); color: var(--muted); text-transform: uppercase; letter-spacing: 0.02em; min-width: 5.5ch; }
+.artifact .a-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); text-decoration: none; font-weight: 500; }
+.artifact .a-name:hover { text-decoration: underline; }
+.artifact .a-status { padding: 0 8px; line-height: 20px; border-radius: 10px; white-space: nowrap; background: var(--hover); color: var(--soft); max-width: 12em; overflow: hidden; text-overflow: ellipsis; }
+.artifact .a-status.derived { font-style: italic; }
+.artifact.tone-good .a-status { background: var(--green-soft); color: var(--green); }
+.artifact.tone-bad .a-status { background: var(--red-soft); color: var(--red); }
+.artifact.tone-wait .a-status { background: var(--amber-soft); color: var(--amber); }
+.artifact.tone-active .a-status { background: var(--accent-soft); color: var(--accent); }
+.artifact.tone-muted .a-status { color: var(--muted); }
+.artifact .a-hide { min-height: 0; padding: 0 4px; background: none; color: var(--muted); font-weight: 400; }
+.artifact .a-hide:hover { color: var(--text); }
+.artifact .a-meta { grid-column: 2 / -1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+.artifact .a-task { padding: 0; min-height: 0; font: inherit; color: inherit; background: none; text-align: left; max-width: 70%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+.artifact .a-task:hover { color: var(--text); text-decoration: underline; }
+.artifact.hidden-artifact { opacity: 0.6; }
+#tasks-artifacts .show-hidden { justify-self: start; margin: 2px 0 0 8px; font-size: var(--small); }
+#session-list .idle-workers > summary { cursor: pointer; list-style: none; font-size: var(--small); color: var(--muted); padding: 6px 12px; }
+#session-list .idle-workers > summary::-webkit-details-marker { display: none; }
+#session-list .idle-workers > summary::before { content: "▸ "; }
+#session-list .idle-workers[open] > summary::before { content: "▾ "; }
 .card.task .reason { font-size: var(--small); color: var(--muted); }
 .card.task .task-body, .card.task .chips, .card.task .report { margin-left: 16px; }
 .card.task .outcome { color: var(--soft); font-size: var(--body); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.card.task .chips { margin-top: 8px; display: grid; gap: 4px; }
+.card.task .chips { margin-top: 8px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; }
+/* A long chip must not widen its row: the row is as wide as the card, its chips shrink. */
+.card.task .chips > .receipts, .card.task .artifacts, .card.task .report .receipts { min-width: 0; max-width: 100%; }
+.receipts > * { min-width: 0; max-width: 100%; }
 .card.task .chips .expand { min-height: 28px; margin: -3px 0; padding: 0 6px; font-size: var(--small); font-weight: 500; color: var(--accent); }
 .card.task .chips .expand:not(:disabled):hover { background: var(--accent-soft); opacity: 1; }
 .card.task .report { display: none; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); min-width: 0; }
@@ -1113,7 +1158,10 @@ button.receipt { min-height: 22px; font-weight: 400; }
 .receipt.fail, .receipt.pr.failing { background: var(--red-soft); color: var(--red); }
 .receipt.warn, .receipt.pr.pending { background: var(--amber-soft); color: var(--amber); }
 .receipt.none { background: none; color: var(--muted); padding-left: 0; }
-.receipt.pr { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A PR: its name shortens first, where it stands stays in sight. */
+.receipt.pr { max-width: 100%; display: inline-flex; gap: 4px; align-items: baseline; overflow: hidden; white-space: nowrap; }
+.receipt.pr .pr-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.receipt.pr .pr-state { flex: none; font-weight: 500; }
 .receipt.pr.merged { background: var(--accent-soft); color: var(--accent); }
 .receipt.pr.closed { color: var(--muted); }
 a.receipt:hover { text-decoration: underline; }
@@ -1296,3 +1344,8 @@ dialog .row label.hours:not(.grow) { width: auto; flex: none; }
 .card.question-card .head .meta { color: var(--muted); font-size: var(--small); }
 .card.question-card > .body { margin-top: 6px; max-height: 240px; overflow-y: auto; }
 .card.draft.merge .note.strong { color: var(--text); font-weight: 500; }
+
+/* What the away channel can do, as tried. */
+.away-can { list-style: none; margin: 4px 0 0; padding: 0; font-size: var(--small); color: var(--muted); display: grid; gap: 2px; }
+.away-can li::before { content: "– "; }
+.away-can li.ok::before { content: "✓ "; color: var(--green); }

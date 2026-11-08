@@ -573,11 +573,21 @@ class Store:
             self.execute(
                 "DELETE FROM subscriptions WHERE thread=? AND session_id=?", (thread, session_id)
             )
+            self.delete(f"followtask:{session_id}:{thread}")
         else:
             self.execute("DELETE FROM subscriptions WHERE thread=?", (thread,))
+            for key in self.keys("followtask:"):
+                if key.endswith(f":{thread}"):
+                    self.delete(key)
 
     def unfollow_session(self, session_id: str):
         self.execute("DELETE FROM subscriptions WHERE session_id=?", (session_id,))
+        for key in self.keys(f"followtask:{session_id}:"):
+            self.delete(key)
+
+    def follow_tasks(self, session_id: str, thread: str) -> list[str]:
+        """The tasks a session follows a thread for (it follows it on their behalf)."""
+        return json.loads(self.get(f"followtask:{session_id}:{thread}") or "[]")
 
     def touch(self, thread: str):
         self.execute("UPDATE subscriptions SET touched=? WHERE thread=?", (time.time(), thread))
