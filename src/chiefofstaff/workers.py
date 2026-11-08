@@ -596,6 +596,9 @@ class Workers:
             if not self.runtime.backend or self.runtime.connections != connection:
                 self.requeue(session_id)  # Copilot disconnected meanwhile: not its failure.
                 return
+            if self.runtime.refused_at_start(row, describe(exc)):
+                self.requeue(session_id)  # It starts again, on Copilot's default model.
+                return
             self.runtime.fail(row, f"Could not start: {describe(exc)}")
 
     def requeue(self, session_id: str):
@@ -607,10 +610,17 @@ class Workers:
         self.runtime.background(self.pump())  # Does nothing until Copilot is ready again.
 
     def finished(self, session_id: str) -> bool:
-        """Nothing of it is open: no task at work, waiting or queued, no card for the owner,
-        no question of it unanswered. Only then may it close by itself."""
-        if any(task["status"] in OPEN for task in self.tasks.for_session(session_id)):
-            return False
+        """Nothing of it is open: no task at work, waiting or queued, no result the owner has
+        not reviewed yet (read, or accepted when it waits for that), no card for the owner, no
+        question of it unanswered. Only then may it close by itself (after a merge, say)."""
+        for task in self.tasks.for_session(session_id):
+            if task["status"] in OPEN:
+                return False
+            if task["status"] == "review" and (
+                not self.store.get(f"read:{task['id']}")
+                or self.runtime.task_actions.needs_acceptance(task)
+            ):
+                return False
         if any(draft["session_id"] == session_id for draft in self.store.drafts()):
             return False
         return not self.runtime.asks.session_questions(session_id)
@@ -969,7 +979,7 @@ class Workers:
         meta = await backend.get_session_metadata(session_id)
         if not meta:
             raise LookupError("Session not found.")
-        if pid := (await backend.open_elsewhere()).get(session_id):
+        if pid := (await self.runtime.open_elsewhere()).get(session_id):
             raise ValueError(
                 f"That session is open in another Copilot window (process {pid}). Exit it there "
                 "(/exit), then let the Router manage it."
@@ -1243,7 +1253,7 @@ class Workers:
         if not self.runtime.backend:
             return
         before = self.runtime.elsewhere
-        self.runtime.elsewhere = await self.runtime.connected().open_elsewhere()
+        self.runtime.elsewhere = await self.runtime.open_elsewhere()
         changed = set(before) ^ set(self.runtime.elsewhere)
         for row in self.store.open_sessions(WORKER):
             if self.runtime.copilot_id(row["id"]) in changed:

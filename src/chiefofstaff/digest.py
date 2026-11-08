@@ -46,6 +46,7 @@ def finished_tasks(store: Store, since: float, until: float) -> list[dict]:
     return store.all(
         f"""SELECT t.id, t.title FROM tasks t JOIN runs r ON r.task_id=t.id
         WHERE r.status='succeeded' AND r.ended_at>=? AND r.ended_at<? AND t.status!='cancelled'
+        AND t.id NOT IN (SELECT substr(key, 10) FROM kv WHERE key LIKE 'setaside:%')
         AND t.session_id NOT IN ({HELPERS})
         AND t.session_id IN (SELECT id FROM sessions WHERE role='worker')
         GROUP BY t.id ORDER BY max(r.ended_at)""",
@@ -158,7 +159,11 @@ def needs(runtime: Runtime, moment: datetime | None = None) -> Needs:
         if (
             draft["kind"] not in {"decision", "merge"}
             and (task := runtime.drafts.task_of(draft))
-            and task["status"] == "review"
+            # A result to review, or finished work with news (what it drafted is the news).
+            and (
+                task["status"] == "review"
+                or (task["status"] == "done" and store.get(f"news:{task['id']}"))
+            )
             and task["id"] not in found.markers
         ):
             found.markers[task["id"]] = "card"
@@ -172,6 +177,8 @@ def needs(runtime: Runtime, moment: datetime | None = None) -> Needs:
         marker = needs_marker(runtime, task, moment)
         if marker == "question" and task["id"] in deciding:
             found.markers[task["id"]] = "decision"
+        elif marker == "question" and runtime.drafts.question_draft(task):
+            found.markers[task["id"]] = "card"  # It asks only about its draft: that card counts.
         elif marker:
             found.markers[task["id"]] = marker
             found.items.append(
@@ -194,6 +201,8 @@ def task_words(task: dict, found: Needs) -> str:
     marker = found.markers.get(task["id"], "")
     if marker in NEEDS_WORDS:
         words = f"{NEEDS_WORDS[marker]} (needs you)"
+    elif marker == "card" and task["status"] == "waiting":
+        words = "its question is its draft's card (needs you)"
     elif marker == "card":
         words = "to review on its draft's card (needs you)"
     elif marker == "decision":
@@ -253,7 +262,8 @@ def digest(runtime: Runtime, since: float, until: float) -> str:
     found = needs(runtime)
     failed = found.tasks("failed")
     sent = store.value(
-        "SELECT count(*) AS n FROM drafts WHERE status='sent' AND resolved_at>=? AND resolved_at<?",
+        "SELECT count(*) AS n FROM drafts WHERE status='sent' AND resolved_at>=? AND resolved_at<? "
+        "AND kind IN ('slack', 'github', 'reply')",  # Replies and reviews, not a merge.
         window,
     )
     follow_ups = store.value(

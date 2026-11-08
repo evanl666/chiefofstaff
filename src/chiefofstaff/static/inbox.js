@@ -66,7 +66,7 @@ function board() {
   // A result its worker drafted something for (a reply, a review) is reviewed on that card: its
   // task's card goes in it (the first one about it). Not a Ready-to-merge card: merging is its
   // own decision, and the result's receipts (tests, CI) are what to look at before it.
-  const onCards = new Set(pendingDrafts().filter((draft) => draft.kind !== "merge").map(draftTask).filter((task) => task?.status === "review").map((task) => task.id));
+  const onCards = new Set(pendingDrafts().filter((draft) => draft.kind !== "merge").filter((draft) => { const task = draftTask(draft); return task && (task.status === "review" || (task.status === "done" && task.news) || (task.status === "waiting" && task.question_draft === draft.id)); }).map((draft) => draftTask(draft).id));
   const workers = new Map([...sessions(), ...closedWorkers()].map((session) => [session.id, session]));
   const stallHours = state.snapshot.settings.stall_hours || 4;
   const found = boardOf(mine, workers, { stallHours, onCards });

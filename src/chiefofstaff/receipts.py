@@ -131,7 +131,10 @@ NOTHING_AFTER = re.compile(r"\s+(nothing|none|no\s)", re.I)
 
 
 # Changed by someone else, or before: "it was already fixed upstream", "fixed by Bob in #12".
-NOT_ITS_OWN = re.compile(r"\balready\b|\bupstream\b|\bby (someone|another|other|@?[A-Z]\w+)\b")
+NOT_ITS_OWN = re.compile(
+    r"\balready\b|\bupstream\b|\bautomatically\b"
+    r"|\bby (someone|something|another|other|an? (unknown|external|other)|@?[A-Z]\w+)\b"
+)
 # What it heard or believes was done (to a library, in a release), not what it did: "I believe
 # the pure-Python mode was removed", "it seems it was renamed in v2".
 HEDGED = re.compile(
@@ -146,7 +149,8 @@ CHANGED_NOTHING = re.compile(
     r"|nothing (was|has been) (changed|modified|written|edited)"
     r"|(did not|didn't|have not|haven't) (change|modify|write|edit|touch) "
     r"(anything|any (code|files?))"
-    r"|made no changes|no changes (were )?made)\b",
+    r"|made no changes|no changes (were )?made"
+    r"|(changed|modified|touched|edited) (no (code|files?)|nothing)|no code (was )?changed)\b",
     re.I,
 )
 
@@ -163,6 +167,10 @@ def says_changed(report: str) -> bool:
             continue
         if PASSIVE.search(clause) and HEDGED.search(f"{clause} {rest}"):
             continue
+        if re.match(r"\s+to\s+[\"\u201c'`]", report[match.end() :]) or re.search(
+            r"[\"\u201d'`]\s*$", clause
+        ):
+            continue  # Wording: '"it's broken" changed to "it has a bug"' (a reply's text).
         if NOT_ITS_OWN.search(clause[-20:]) or NOT_ITS_OWN.match(rest.strip()):
             continue
         if re.match(r"\s+(by|in) ", rest) and NOT_ITS_OWN.search(rest):
@@ -457,6 +465,17 @@ def names(snippet: str, command: str) -> bool:
     return len(quoted) >= 2 and set(quoted) <= set(ran)
 
 
+def cited_part(evidence: str, command: str) -> str:
+    """Of a command line, the command the evidence names (`uv run pytest -q`, not the `sed`
+    edit chained before it); the line itself when none is named alone."""
+    quoted = QUOTED.findall(evidence or "")
+    for parts in simple_commands(command):
+        part = " ".join(parts)
+        if any(names(snippet, part) for snippet in quoted):
+            return shown(part)
+    return shown(command)
+
+
 def backing(evidence: str, commands: list[dict]) -> dict | None:
     """The observed command a criterion's evidence names (in backticks, or verbatim), latest
     first: what makes a worker's "met" an observation rather than a claim."""
@@ -581,7 +600,7 @@ def criteria_results(
                 "result": result,
                 "evidence": proof[:500],
                 "state": state,
-                "command": shown(observed["command"]) if observed else "",
+                "command": cited_part(proof, observed["command"]) if observed else "",
                 "exit_code": observed["exit_code"] if observed else None,
                 "earlier": carried,
             }

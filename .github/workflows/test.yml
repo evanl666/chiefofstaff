@@ -1,48 +1,160 @@
 name: Test
-on: [push, pull_request]
+# Every pull request must pass all of these before it can be merged (see the "CI passed" job,
+# the one required check). Actions are pinned to commits; Dependabot proposes updates.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  merge_group:
+  workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  test:
+  lint:
+    name: Lint and types
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.11", "3.13"]
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          python-version: "3.13"
+      - name: Lockfile matches pyproject.toml
+        run: uv lock --check
+      - run: uv sync --locked --extra dev
+      - name: Ruff
+        run: uv run --locked --extra dev ruff check --output-format=github .
+      - name: Formatting
+        run: uv run --locked --extra dev ruff format --check --diff .
+      - name: Pyright
+        run: uv run --locked --extra dev pyright
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+      - name: ESLint (web UI)
+        run: npx --yes eslint@10.14.0 --max-warnings 0 src/chiefofstaff/static
+      - name: Workflow files
+        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12 -color
+
+  test:
+    name: Tests (Python ${{ matrix.python-version }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
           python-version: ${{ matrix.python-version }}
       - run: uv sync --locked --extra dev
-      - run: uv run --locked --extra dev ruff check .
-      - run: uv run --locked --extra dev ruff format --check .
-      - run: uv run --locked --extra dev pyright
-      - run: npx --yes eslint@10.14.0 src/chiefofstaff/static
-      - run: uv run --locked --extra dev pytest -q
+      - name: Tests
+        if: ${{ !(matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13') }}
+        run: uv run --locked --extra dev pytest -q --timeout 120
+      - name: Tests with coverage (at least 88% of lines and branches)
+        if: ${{ matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13' }}
+        run: >-
+          uv run --locked --extra dev pytest -q --timeout 120
+          --cov=chiefofstaff --cov-branch --cov-report=term-missing:skip-covered
+          --cov-fail-under=88
+
+  package:
+    name: Package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          python-version: "3.13"
+      - run: uv build
+      - name: Metadata renders on PyPI
+        run: uvx twine check --strict dist/*
+      - name: The wheel installs and starts, with its web UI
+        run: |
+          uv venv /tmp/installed
+          uv pip install --python /tmp/installed dist/*.whl
+          /tmp/installed/bin/chiefofstaff --help
+          /tmp/installed/bin/python - <<'PY'
+          from importlib.resources import files
+          static = files("chiefofstaff") / "static"
+          for name in ("index.html", "app.js", "style.css"):
+              assert (static / name).is_file(), name
+          PY
 
   demo-ui:
     # The whole product in a browser, with scripted sessions: no Copilot or Slack account.
+    name: Demo in a browser
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
           python-version: "3.13"
       - run: uv sync --locked --extra dev
       - run: uv run --with playwright python -m playwright install --with-deps chromium
       - run: uv run --with playwright python scripts/demo_smoke.py
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: demo-screenshots
           path: browser-shots/
 
   secrets:
+    name: Secret scan
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@v2
+          persist-credentials: false
+      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  dependencies:
+    name: Dependency review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4
+        with:
+          fail-on-severity: moderate
+
+  passed:
+    # The one check branch protection requires: it fails unless every job above passed (or,
+    # for dependency review, did not apply).
+    name: CI passed
+    if: always()
+    needs: [lint, test, package, demo-ui, secrets, dependencies]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every job passed
+        env:
+          RESULTS: ${{ toJSON(needs.*.result) }}
+        run: |
+          echo "$RESULTS"
+          echo "$RESULTS" | grep -Eq '"(failure|cancelled)"' && exit 1 || exit 0

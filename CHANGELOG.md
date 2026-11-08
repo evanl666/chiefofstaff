@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.1.31 (2026-11-08)
+
+A sixth live bug bash on real Copilot (the 0.1.30 changes, a team's busy morning in Slack and
+GitHub, failures and recovery, regressions of every earlier round) and a code review, all fixed.
+
+- **The Router keeps its history**: a Router that cannot be resumed (open in a terminal, Copilot
+  restarting) is never replaced by a fresh one that forgot the conversation: it waits, says why,
+  and goes on; when Copilot lost its session, the same Router takes over with a summary. A
+  Copilot CLI that stops is noticed and reconnected; a CLI it left running is not taken for one
+  of yours in a terminal.
+- **Replies in Slack**: a reply about a review waits until that review is posted (the card says
+  so); a newer reply of another task does not replace an unsent one, and one you edited is never
+  replaced; the Slack session does not draft where a worker took the conversation over; a
+  question about a task's own draft is one card and one away code; a Slack question you
+  answered through the Router is settled.
+- **Away replies**: a question back ("ok?", "发吗") or a send held back ("send it after lunch",
+  "一会再发", "暂时不要") never sends and is not redrafted; a refused reply is said once; a
+  replaced draft's code says what replaced it; review items say Approve or Request changes and
+  which PR; file names are not garbled.
+- **Results**: fixes for review comments after a question are a new result to review; separate
+  work asked of a worker directly ("New, separate task: …") is a task of its own, and work on
+  another branch than a task's open PR is not that task's result; a worker with a result you have
+  not reviewed is not closed after a merge; the card no longer says "not pushed" after Create PR
+  or "not merged" after a merge (the result itself is kept as written); the PR text cites the
+  test that ran, not a chained edit.
+- **Each task's changes**: rebased onto your newer main in a repository without an origin, not
+  main's commits; a follow-up's edit of a file other work made counts only its own lines, once;
+  a result is not out of date because its worker moved to another branch.
+- **What you read**: no draft ids or Slack timestamps in reports, outcomes or away messages, nor
+  a worker's id in its box; place names said once; a batch of Slack messages says how many came
+  and is cut at a word; the Router hears what became of drafts since a report, and is told when
+  you rename a task; "set aside, not accepted" one way everywhere; the daily summary counts
+  replies (not merges) and leaves set-aside tasks out.
+- **The Router**: never has a worker merge, delete or force-push, or skip your card; can stop a
+  worker following a thread without closing it (and Home can, on any followed thread), and the
+  worker does not follow it again by itself; "oh wait, one more thing" is asked about once
+  before it becomes a second task.
+- **Settings**: a model Copilot does not offer is refused (a worker refused its model starts on
+  the default, with a plain notice); a model fallback ends when you choose another; a project
+  whose folder is gone stays, marked "folder not found"; a credit limit under the minimum is
+  refused, not raised silently.
+- **Workers that read Slack** say why their sandbox is stricter (GitHub only, no package caches),
+  and the Router gives code whose tests must run to a worker without Slack access.
+- **Project**: every pull request must pass lint, formatting, types, ESLint, workflow checks,
+  tests on Python 3.11 to 3.13 on Linux and macOS with at least 88% coverage, a package build
+  that installs and starts, the demo in a browser, a secret scan and a dependency review; changes
+  need the maintainer's review (CODEOWNERS). Actions are pinned to commits and Dependabot keeps
+  them and the Python dependencies current. Examples in code and docs use made-up names.
+
 ## 0.1.30 (2026-11-08)
 
 A fifth live bug bash on real Copilot (the 0.1.29 features, several days of use, code work and
@@ -812,7 +861,7 @@ Workers can do what your own Copilot sessions can.
 - **Reviews on company repositories**: Chief of Staff reaches each repository with the `gh`
   account that can see it (your company's, say, signed in next to a personal active one), and
   remembers it per organization. A rate limit never makes it switch accounts. "Review
-  tscp-targeting PR #1529" works by name, in English or Chinese ("tscp-targeting 的 PR #1529");
+  checkout-service PR #1529" works by name, in English or Chinese ("checkout-service 的 PR #1529");
   a PR GitHub asks you to review can always be drafted on. When no signed-in account can see a
   repository, the worker says which are signed in (or that the organization needs single
   sign-on authorized).

@@ -590,8 +590,8 @@ async def this_round(runtime, browser, failures: list[str]):
             (worker, run["id"], call, command, "test" if "pytest" in command else "check", code,
              ended, ended),
         )  # fmt: skip
-    pr = {"label": "linkedin-multiproduct/ad-targeting-model-pytorch#71",
-          "url": "https://github.com/linkedin-multiproduct/ad-targeting-model-pytorch/pull/71",
+    pr = {"label": "acme/ranking-model#71",
+          "url": "https://github.com/acme/ranking-model/pull/71",
           "state": "OPEN", "checks": "passing", "failing": [], "review": "APPROVED",
           "checks_started": "2026-11-05T10:00:00Z", "at": "2026-11-05T10:05:00+00:00",
           "own": True}  # fmt: skip
@@ -608,11 +608,9 @@ async def this_round(runtime, browser, failures: list[str]):
     await page.goto(f"{BASE}/#token={TOKEN}")
     card = page.locator(".card.task.review", has_text="Filter opt-outs")
     await expect(card).to_be_visible(timeout=15000)
-    await expect(card.locator(".receipt.pr")).to_have_text(
-        "ad-targeting-model-pytorch#71 · ✓ CI · approved"
-    )
+    await expect(card.locator(".receipt.pr")).to_have_text("ranking-model#71 · ✓ CI · approved")
     title = await card.locator(".receipt.pr").get_attribute("title")
-    assert "linkedin-multiproduct/ad-targeting-model-pytorch#71" in title and "Checks pass" in title
+    assert "acme/ranking-model#71" in title and "Checks pass" in title
     # Its tests are a chip when they ran on its own work (CONTRACT receipts.tests.own), else
     # evidence in its report, saying where they ran.
     tests = runtime.task_actions.view(runtime.tasks.get(task["id"]))["receipts"]["tests"]
@@ -623,8 +621,7 @@ async def this_round(runtime, browser, failures: list[str]):
         await expect(card.locator(".report .tests-elsewhere")).to_contain_text("Ran tests")
     await expect(card.locator(".receipt.pass", has_text="✓ lint")).to_be_visible()
     await expect(card.locator(".flag")).to_contain_text(
-        "The last local test run failed (exit 1), but the checks on "
-        "linkedin-multiproduct/ad-targeting-model-pytorch#71 pass now."
+        "The last local test run failed (exit 1), but the checks on acme/ranking-model#71 pass now."
     )
     found = await card.evaluate(OVERFLOWS)
     assert not found, found
@@ -1026,7 +1023,11 @@ async def round_three(runtime, browser, failures: list[str]):
     await expect(watching).to_be_visible()
     await expect(watching.locator(".row-line .why")).to_have_text("Waiting on app#12")
     await unfold(watching)
-    await expect(watching.locator(".receipt.watching")).to_have_text("Watching app#12")
+    await expect(watching.locator(".receipt.watching .watch-name")).to_have_text("Watching app#12")
+    # Bug bash 6 (T11): any thread or PR it follows can be let go from its card.
+    await expect(
+        watching.locator(".receipt.watching .unfollow", has_text="\u2715")
+    ).to_have_attribute("aria-label", "Stop following app#12")
     counts = await page.evaluate("""() => {
       const n = (id) => Number(document.querySelector(`#${id} .count`)?.textContent || 0);
       return [n("tasks"), n("tasks-running") + n("tasks-monitoring")];
@@ -1128,9 +1129,9 @@ async def round_four(runtime, browser, failures: list[str]):
     # C1/C2: to review, a PR with a long title, its changes, a Flyte run and what is under it.
     fixer = await start("Fix the Spark 3.5 dependency of the ICP flow")
     fix = runtime.tasks.current(fixer)
-    label = "acme/ad-targeting-model-data#594"
+    label = "acme/ranking-data#594"
     store.set(f"prtitle:{label}", "Upgrade the ICP flow to Spark 3.5 and pin the shaded " * 3)
-    pr = {"label": label, "url": "https://github.com/acme/ad-targeting-model-data/pull/594",
+    pr = {"label": label, "url": "https://github.com/acme/ranking-data/pull/594",
           "state": "OPEN", "checks": "passing", "failing": [], "review": "", "own": True,
           "about": True, "at": datetime.now(UTC).isoformat()}  # fmt: skip
     checkout = {"path": "/tmp/icp", "branch": "chief/icp", "commit": "b" * 40, "commits": 2,
@@ -1341,7 +1342,7 @@ async def round_four(runtime, browser, failures: list[str]):
     made = page.locator("#tasks-artifacts")
     await expect(made).to_have_attribute("open", "")
     rows = made.locator(".artifact")
-    pr_row = rows.filter(has_text="ad-targeting-model-data#594")
+    pr_row = rows.filter(has_text="ranking-data#594")
     await expect(pr_row.locator(".a-kind")).to_have_text("PR")
     await expect(pr_row.locator(".a-status")).to_have_text("in review")
     await expect(pr_row.locator(".a-task")).to_have_text(
@@ -1627,7 +1628,7 @@ async def round_six(runtime, browser, failures: list[str]):
         "and `https://docs.google.com/document/d/1InCodeOnly9/edit`."))  # fmt: skip
     shipper = await start("Ship app#594 export fix")
     finish(shipper, "done", "Opened acme/app#594.")
-    reviewer = await start("Review tscp-targeting PR #1537")
+    reviewer = await start("Review checkout-service PR #1537")
     finish(reviewer, "done", "Reviewed #1537.")
     twin = runtime.tasks.create(reviewer, "Correct the #1537 review draft", "x", status="running")
     runtime.tasks.move(twin["id"], "done", result="Corrected.")
@@ -1710,9 +1711,9 @@ async def round_six(runtime, browser, failures: list[str]):
                                    "command": "uv run pytest -q", "runs": 2,
                                    "failed_before": False, "running": False}}},
         "Ship app#594 export fix": {"watching": ["github:acme/app#594"], "watch_kind": "own"},
-        "Review tscp-targeting PR #1537": {"watching": ["github:acme/tscp#1537"],
+        "Review checkout-service PR #1537": {"watching": ["github:acme/checkout#1537"],
                                            "watch_kind": "reviewed"},
-        "Correct the #1537 review draft": {"watching": ["github:acme/tscp#1537"],
+        "Correct the #1537 review draft": {"watching": ["github:acme/checkout#1537"],
                                            "watch_kind": "reviewed"},
         "Investigate faro#1536 flake": {"watching": ["github:acme/faro#1536"],
                                         "watch_kind": "reviewed", "watch_changed_at": two_days},
@@ -1858,6 +1859,8 @@ async def round_six(runtime, browser, failures: list[str]):
     # #3: a worker in a turn waiting on the owner waits for them; it is not idle.
     box = needs.locator(".card.worker-box", has_text="Pick the cache size")
     await expect(box.locator(".box-head .meta")).to_have_text("waits for you")
+    # Bug bash 6 (T5): no session id in its head ("WORKER d62fdc").
+    await expect(box.locator(".box-head .title")).not_to_have_text(re.compile(r"[0-9a-f]{6}"))
 
     # E3: move the latest result to a new task: what stays, what moves, a bad title refused,
     # then Undo split on the new task.

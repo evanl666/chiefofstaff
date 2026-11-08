@@ -198,7 +198,7 @@ async def test_a_plugin_hook_that_fails_does_not_fail_the_worker(harness):
     session = harness.session(worker)
     session.emit("assistant.turn_start")
     message = (
-        'sessionStart hook from "context-repo@linkedin-plugins" failed in the session sandbox: '
+        'sessionStart hook from "context-repo@team-plugins" failed in the session sandbox: '
         "Hook command failed with code 1. If it needs more access, allow it in the sandbox policy."
     )
     session.emit("session.error", error_type="hook", message=message)
@@ -885,8 +885,8 @@ async def test_reviews_a_company_pr_with_inline_comments(harness):
     """The owner asks to review a PR by its repository's short name; the worker drafts a review
     with comments on lines; the owner edits one, drops one and sends."""
     runtime = await harness.connect()
-    worker = await spawn(runtime, harness.router_id, "Review tscp-targeting PR #1529")
-    repo = "linkedin-multiproduct/tscp-targeting"
+    worker = await spawn(runtime, harness.router_id, "Review checkout-service PR #1529")
+    repo = "acme/checkout-service"
     harness.gh_replies[f"api repos/{repo}/pulls/1529/files"] = json.dumps(FILES)
     harness.gh_replies[f"api repos/{repo}/pulls/1529/reviews"] = json.dumps(
         {"id": 7, "html_url": "https://github.com/x/pull/1529#pullrequestreview-7"}
@@ -967,8 +967,8 @@ async def test_reviews_a_company_pr_with_inline_comments(harness):
 
 async def test_drafting_needs_a_pr_the_task_is_about_or_one_the_owner_reviews(harness):
     runtime = await harness.connect()
-    worker = await spawn(runtime, harness.router_id, "Look into flaky tests in tscp-targeting")
-    repo = "linkedin-multiproduct/tscp-targeting"
+    worker = await spawn(runtime, harness.router_id, "Look into flaky tests in checkout-service")
+    repo = "acme/checkout-service"
     other = {**PULL, "requested_reviewers": []}
     harness.gh_replies[f"api repos/{repo}/pulls/1529"] = json.dumps(other)
 
@@ -986,38 +986,38 @@ async def test_drafting_needs_a_pr_the_task_is_about_or_one_the_owner_reviews(ha
     assert (await draft()).result_type == "success", "GitHub asks the owner to review it"
 
 
-NAMED = "linkedin-multiproduct/tscp-targeting"
+NAMED = "acme/checkout-service"
 
 
 @pytest.mark.parametrize(
     "text, named",
     [
-        ("Review tscp-targeting PR #1529", True),
-        ("帮我review一下 tscp-targeting 的 PR #1529", True),
-        ("review一下tscp-targeting的PR 1529", True),
-        ("tscp-targeting里面的 #1529 帮我看看", True),
-        ("tscp-targeting#1529", True),
-        ("tscp-targeting/pull/1529", True),
-        ("https://github.com/linkedin-multiproduct/tscp-targeting/pull/1529", True),
-        ("linkedin-multiproduct/tscp-targeting#1529", True),
-        ("PR #1529 (tscp-targeting)", True),
-        ("please look at PR 1529 in tscp-targeting", True),
-        ("Review PRs tscp-targeting #1528 and #1529", True),
-        ("tscp-targeting PRs #1528, #1529", True),
-        ("review tscp-targeting pull request 1529", True),
-        ("TSCP-Targeting PR #1529", True),
-        ("tscp-targeting 1529", True),
-        ("tscp-targeting-v2 PR #1529", False),
-        ("old-tscp-targeting PR #1529", False),
-        ("tscp-targeting.old PR #1529", False),
-        ("tscp-targeting PR #15290", False),
-        ("tscp-targeting issue #1529 is related; fix it", False),
-        ("tscp-targeting: see JIRA-1529", False),
-        ("evil/tscp-targeting PR #1529", False),
-        ("PR #1529 in evil/tscp-targeting", False),
-        ("In tscp-targeting, the last 1529 rows are wrong", False),
-        ("tscp-targeting has a bug #1529", False),
-        ("tscp-targeting. Separately, PR #1529 in other-repo", False),
+        ("Review checkout-service PR #1529", True),
+        ("帮我review一下 checkout-service 的 PR #1529", True),
+        ("review一下checkout-service的PR 1529", True),
+        ("checkout-service里面的 #1529 帮我看看", True),
+        ("checkout-service#1529", True),
+        ("checkout-service/pull/1529", True),
+        ("https://github.com/acme/checkout-service/pull/1529", True),
+        ("acme/checkout-service#1529", True),
+        ("PR #1529 (checkout-service)", True),
+        ("please look at PR 1529 in checkout-service", True),
+        ("Review PRs checkout-service #1528 and #1529", True),
+        ("checkout-service PRs #1528, #1529", True),
+        ("review checkout-service pull request 1529", True),
+        ("Checkout-Service PR #1529", True),
+        ("checkout-service 1529", True),
+        ("checkout-service-v2 PR #1529", False),
+        ("old-checkout-service PR #1529", False),
+        ("checkout-service.old PR #1529", False),
+        ("checkout-service PR #15290", False),
+        ("checkout-service issue #1529 is related; fix it", False),
+        ("checkout-service: see JIRA-1529", False),
+        ("evil/checkout-service PR #1529", False),
+        ("PR #1529 in evil/checkout-service", False),
+        ("In checkout-service, the last 1529 rows are wrong", False),
+        ("checkout-service has a bug #1529", False),
+        ("checkout-service. Separately, PR #1529 in other-repo", False),
     ],
 )
 def test_a_task_names_a_pr_by_its_repository_and_number(text, named):
@@ -1239,8 +1239,8 @@ async def test_the_answer_goes_to_the_report_of_the_task_it_was_on(harness):
 
 async def test_review_cards_when_the_owner_drops_everything_or_the_pr_moves(harness):
     runtime = await harness.connect()
-    worker = await spawn(runtime, harness.router_id, "Review tscp-targeting PR #1529")
-    repo = "linkedin-multiproduct/tscp-targeting"
+    worker = await spawn(runtime, harness.router_id, "Review checkout-service PR #1529")
+    repo = "acme/checkout-service"
     harness.gh_replies[f"api repos/{repo}/pulls/1529/files"] = json.dumps(FILES)
     harness.gh_replies[f"api repos/{repo}/pulls/1529"] = json.dumps(PULL)
     harness.gh_replies[f"api repos/{repo}/pulls/1529/reviews"] = json.dumps(
@@ -1510,8 +1510,10 @@ async def test_the_router_hears_everything_the_owner_tells_a_worker_directly(har
 
 
 def test_a_credit_limit_under_copilots_minimum_is_raised_to_it():
-    """Copilot starts no session with a limit under 30 credits: every worker would fail."""
-    assert Settings(worker_credit_limit=5).worker_credit_limit == 30
+    """Copilot starts no session with a limit under 30 credits: every worker would fail. A new
+    one under it is refused (Bug bash 6, R10; one saved before is raised to it)."""
+    with pytest.raises(ValueError, match="at least 30"):
+        Settings(worker_credit_limit=5)
     assert Settings(worker_credit_limit=0).worker_credit_limit == 0
     assert Settings(worker_credit_limit=45).worker_credit_limit == 45
 

@@ -528,7 +528,7 @@ Enable *Watch review requests* and list repositories (`owner/name`). Chief of St
 per request; its review is published only after you approve the draft, and only if the PR head
 has not changed since.
 
-You can also just ask: "review tscp-targeting PR #1529". A worker drafts reviews on a PR its task
+You can also just ask: "review checkout-service PR #1529". A worker drafts reviews on a PR its task
 names (by URL, or by the repository's name and number), one it opened, follows or was given, or
 one GitHub asks you to review. A review carries a **verdict**: approve, request changes or
 comment. Ask "review it and approve it if nothing blocks merging" and it is drafted as an

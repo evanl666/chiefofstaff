@@ -4,5 +4,9 @@
 
 ## How it was tested
 
-- [ ] `uv run ruff check . && uv run ruff format --check . && uv run pytest -q`
+- [ ] `uv run ruff check . && uv run ruff format --check . && uv run pyright`
+- [ ] `uv run pytest -q` (a new or changed behavior has a test that fails without the change)
+- [ ] `npx eslint@10 --max-warnings 0 src/chiefofstaff/static`, if the UI changed
 - [ ] Demo or live test, if it changes behavior: <!-- which -->
+
+CI must pass and the maintainer must approve before this can be merged.

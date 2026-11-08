@@ -394,4 +394,5 @@ async def test_create_pr_describes_the_change_not_the_instruction(tmp_path):
     assert "- It lists the five round 5 areas." in body
     assert "push" not in body.lower() and "no PR" not in body, body
     assert "- notes.md is committed: `git log --oneline -1 -- notes.md" in body
-    assert "x" * 100 + "\u2026`" in body, "a command cut is marked"
+    # The command its evidence names, not the chained line around it (bug bash 6, N3).
+    assert "`git log --oneline -1 -- notes.md`" in body and "x" * 50 not in body

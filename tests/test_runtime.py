@@ -320,6 +320,18 @@ async def test_a_router_turn_with_nothing_to_say_shows_nothing(harness):
                 if m["kind"] == "assistant"]  # fmt: skip
 
 
+async def test_a_batch_of_slack_messages_says_how_many_and_is_cut_at_a_word(harness):
+    """Bug bash 6 (T10): a 5-message batch was cut mid-word at 2,000 characters, and its chat
+    line showed only the first message."""
+    runtime = await harness.connect()
+    keys = [f"slack:{n}.1" for n in range(5)]
+    text = "Alice: no rush.\n\n" + "Dave: URGENT billing page is down " * 200
+    await runtime.on_trigger("slack", keys, text)
+    [line] = [m for m in harness.store.messages(harness.router_id) if m["kind"] == "inbound"]
+    assert line["meta"]["count"] == 5
+    assert line["text"].endswith("down\u2026") and len(line["text"]) <= 4000
+
+
 async def test_triggers_are_delivered_once(harness):
     runtime = await harness.connect()
     router = harness.session(harness.router_id)

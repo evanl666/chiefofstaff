@@ -45,8 +45,8 @@ def run_js(body: str):
 
 def test_a_url_ends_where_the_sentence_goes_on():
     cases = {
-        "#1068 https://github.com/o/ad-targeting-model/pull/1068：head `5e8adc1b`": (
-            "https://github.com/o/ad-targeting-model/pull/1068"
+        "#1068 https://github.com/o/ranking-model/pull/1068：head `5e8adc1b`": (
+            "https://github.com/o/ranking-model/pull/1068"
         ),
         "见 https://github.com/o/r/pull/79”。": "https://github.com/o/r/pull/79",
         "https://github.com/o/r/pull/3608（叠在": "https://github.com/o/r/pull/3608",
@@ -244,6 +244,19 @@ def test_news_on_a_result_with_a_draft_card_shows_on_that_card():
     found = board(tasks, workers, onCards=["r", "p"])
     assert found["phases"] == {"r": "update", "p": "report"}
     assert found["boxes"]["needs"] == [], "on the draft's card only"
+
+
+def test_a_question_about_its_own_draft_is_decided_on_that_card():
+    """Bug bash 6 (T6): "approve the draft, or hold it" showed as a Question card beside the
+    draft's card: two cards for one decision."""
+    workers = [{"id": "w1", "status": "idle"}]
+    tasks = [
+        task("q", "w1", "waiting", question_draft="d1"),
+        task("o", "w1", "waiting"),  # Another question: under Needs you as it was.
+    ]
+    found = board(tasks, workers, onCards=["q"])
+    assert found["phases"] == {"q": "", "o": "needs/question"}
+    assert found["boxes"]["needs"] == [["w1", ["o"]]]
 
 
 def test_a_follow_up_behind_another_task_is_up_next_not_waiting_on_its_pr():

@@ -499,6 +499,8 @@ function messageCard(draft) {
   const actions = el("div", { class: "actions" });
   // What it answers, then who it is for and why, in one quiet line.
   const about = [draft.kind === "slack" && target.to ? `For ${slackText(target.to)}` : "", draft.note].filter(Boolean).join(" · ");
+  // It says what a review says: it goes once that review is posted (still waiting on its card).
+  const review = draft.kind === "slack" && target.after_review && pendingDrafts().some((other) => other.id === target.after_review.id) ? target.after_review : null;
   const comment = target.comment;
   // A reply on a line can resolve its conversation too (ticked when its worker proposed it).
   const resolve = draft.kind === "github" && target.in_reply_to ? el("input", { type: "checkbox", checked: Boolean(target.resolve) }) : null;
@@ -509,6 +511,7 @@ function messageCard(draft) {
     draft.kind === "slack" ? latestQuote(target) : null,
     comment ? el("div", { class: "quoted" }, el("strong", { title: comment.path || "", text: `${comment.author}${comment.path ? ` on ${basename(comment.path)}${comment.line ? `:${comment.line}` : ""}` : ""}: ` }), comment.body) : null,
     about ? el("div", { class: "note", text: about }) : null,
+    review ? el("div", { class: "note warn-note waits-review", text: `Waits for ${review.label || "its review"} to be posted first: post that, then send this.` }) : null,
     // Not published after an interrupted send: what happened, and the owner's edit kept. Held
     // because someone wrote since: that message is quoted above, not said again here.
     draft.outcome && !(target.moved_on && /\bwrote since\b/.test(draft.outcome)) ? el("div", { class: "note", text: draft.outcome }) : null,
@@ -538,7 +541,7 @@ function messageCard(draft) {
         { text: "Ask to redo…", onclick: () => redoForm(actions, decide, show) },
         { text: "Reject…", onclick: () => rejectForm(actions, decide, show) },
       ]),
-      el("button", { type: "button", text: held ? "Send anyway" : "Send", title: held ? "Send it as it is, now that you have seen what they wrote" : undefined, onclick: () => send() }),
+      el("button", { type: "button", class: review ? "secondary" : "", text: held ? "Send anyway" : "Send", title: held ? "Send it as it is, now that you have seen what they wrote" : review ? "It waits for the review to be posted first" : undefined, onclick: () => send() }),
     );
   show();
   return node;

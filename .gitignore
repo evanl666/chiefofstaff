@@ -11,3 +11,7 @@ dist/
 *.db-*
 .DS_Store
 browser-shots/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml

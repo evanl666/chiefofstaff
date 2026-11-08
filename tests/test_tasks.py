@@ -562,6 +562,9 @@ async def test_cancelling_work_that_had_finished_keeps_its_result_and_says_so(ha
     result = await call_tool(runtime, "cancel_task", harness.router_id, task_id=made["task_id"],
                              reason="Not needed any more")  # fmt: skip
     assert "had finished already" in result.text_result_for_llm
+    # One word for it everywhere (bug bash 6, N9): set aside, not accepted.
+    assert "set aside, not accepted" in result.text_result_for_llm
+    assert task(harness, made["task_id"])["progress"].endswith("set aside, not accepted.")
     found = task(harness, made["task_id"])
     assert found["status"] == "done" and found["result"] == report
     assert found["progress"].startswith("Cancelled by the Router: Not needed any more. It had")

@@ -54,6 +54,17 @@ FRESH_AFTER = 120_000
 # Kinds of needs-you cards a notification lists, and how a reply settles each.
 NOTIFIED_KINDS = {"slack", "github", "reply", "question", "decision", "workspace", "merge"}
 CODE = re.compile(r"\b([A-Z2-7]{5})\b")
+# A review's verdict as a notification says it.
+VERDICTS = {"approve": "Approve", "request_changes": "Request changes", "comment": "Comment"}
+# A PR's checks as a merge card has them (receipts.checks_state).
+CHECK_WORDS = {
+    "passing": "checks pass",
+    "failing": "checks fail",
+    "pending": "checks still running",
+    "none": "no checks",
+}
+# A folder choice's answer for no project (the card's "No project").
+NO_PROJECT_WORDS = {"none", "no project", "\u65e0"}
 # Answer codes: random, issued only for what a notification told, single-use, for a week.
 CODE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
 CODE_DAYS = 7
@@ -65,6 +76,19 @@ RETRY_SECONDS = 600
 PENDING_SECONDS = 900
 # The owner's replies are read for this long after the last notification.
 READ_REPLIES_HOURS = 24
+# Where a notification sent with send_owner_slack_dm went, as the owner reads it.
+OWN_SLACK_DM = "your own Slack DM"
+
+
+def yours(where: str) -> str:
+    """Where a notification went, as the owner reads it: the messenger writes of them in the
+    third person ("Owner's own Slack DM", "a DM to the owner")."""
+    where = re.sub(r"\b(?:the\s+)?owner['\u2019]s\b", "your", where, flags=re.IGNORECASE)
+    where = re.sub(r"\b(?:the\s+)?owner\b", "you", where, flags=re.IGNORECASE)
+    where = re.sub(r"\bthemsel(?:f|ves)\b", "yourself", where, flags=re.IGNORECASE)
+    return re.sub(r"\btheir\b", "your", where, flags=re.IGNORECASE)
+
+
 # The messenger's way to the owner when nothing else reaches them: their own Slack DM, through
 # Chief of Staff's own Slack connection (it gets no Slack tools of its own).
 SLACK_DM_HINT = (
@@ -85,13 +109,20 @@ SEND_PHRASES = {"发吧", "发送吧", "发出去", "发了吧", "好的", "可�
 # Words that hold a send back ("do not send", "ok wait", "not yet, send later").
 HOLD_WORDS = {
     "not", "no", "don't", "dont", "never", "nope", "wait", "hold", "later", "yet", "stop",
-    "until", "tomorrow", "before", "after",
+    "until", "tomorrow", "before", "after", "once", "when", "if", "unless",
 }  # fmt: skip
 # A short "don't send": nothing but a no and a send (dropped, as "no" is).
 NO_SEND_WORDS = {"do", "not", "don't", "dont", "never", "no", "send", "it", "this", "please", "pls"}
 # Chinese, written without spaces ("好的发吧", "可以发了"): read by its parts, not by words.
-CJK_HOLDS = ("先别", "先不", "别", "不", "等", "稍后", "晚点", "暂", "慢")  # "先别发": not yet.
+# "先别发", "一会再发", "待会发", "回头再发": not now.
+CJK_HOLDS = (
+    "先别", "先不", "别", "不", "等", "稍后", "晚点", "暂", "慢", "一会", "待会", "回头", "再",
+)  # fmt: skip
 CJK_NO = {
+    "不要发送",
+    "先不要发",
+    "不要发了",
+    "暂时别发",
     "别发",
     "不要发",
     "不发",
@@ -105,7 +136,23 @@ CJK_NO = {
     "算了",
 }
 CJK_SENDS = ("没问题", "可以", "发送", "发出去", "发", "好", "行", "嗯", "对")
-CJK_FILLER = ("吧", "了", "的", "啊", "呀", "哈", "吗", "就", "直接", "出去", "一下")
+CJK_FILLER = (
+    "吧",
+    "了",
+    "的",
+    "啊",
+    "呀",
+    "哈",
+    "就",
+    "直接",
+    "出去",
+    "一下",
+    "儿",
+)
+# A question ("ok?", "发吗", "可以吗"): the owner asks, they do not say send.
+ASKS = re.compile(r"[?\uff1f]|[\u5417\u4e48\u5462\u561b]")
+# What else holds a send back, or says no ("hold on", "never mind", "nah").
+HOLD_PHRASES = re.compile(r"\b(hold on|hang on|one sec|not now|never ?mind|nevermind|nah)\b")
 CJK = re.compile(r"[\u3400-\u9fff]")
 
 
@@ -120,7 +167,8 @@ def cjk_answer(text: str) -> str:
         rest = plain
         for part in (*CJK_HOLDS, *CJK_SENDS, *CJK_FILLER):
             rest = rest.replace(part, "")
-        return "" if rest else "unclear"  # "先别发", "等等": held; more words: what to change.
+        # "先别发", "等等", "暂时不要", "好 但先等等": held; more words: what to change.
+        return "" if len(rest) > 3 else "unclear"
     rest, sends = plain, False
     for part in CJK_SENDS:
         sends = sends or part in rest
@@ -136,19 +184,38 @@ def send_answer(word: str) -> str:
     word = word.replace("\u2019", "'")  # A phone's "don\u2019t".
     if word in REJECT_WORDS:
         return "no"
+    if ASKS.search(word):
+        # "ok?", "send now?", "发了吗": a question back, never a send (nor something to change
+        # when it is only that).
+        rest = ASKS.sub(" ", word)
+        return "unclear" if not rest.strip() or send_answer(rest) in {"send", "no"} else ""
+    if HOLD_PHRASES.search(word):
+        rest = HOLD_PHRASES.sub(" ", word)
+        return (
+            "unclear"
+            if send_answer(rest) in {"send", "", "unclear"} and len(rest.split()) <= 3
+            else ""
+        )
     if CJK.search(word) and not re.search(r"[A-Za-z]", word):
         return cjk_answer(word)
     said = re.findall(r"[\w']+", word)
-    if not said or len(said) > 5:
+    if not said or len(said) > 12:
         return ""
     tokens = set(said)
     plain = SEND_WORDS | SEND_PHRASES | SEND_FILLER | {"send"}
     if tokens & HOLD_WORDS:
-        if tokens <= NO_SEND_WORDS and "send" in tokens:
-            return "no"
-        # Nothing in it but a send and a hold: not a send, and nothing to change either.
-        if all(token in plain | HOLD_WORDS for token in tokens):
+        if (
+            tokens <= NO_SEND_WORDS
+            and "send" in tokens
+            and not (said[0] == "no" and said[-1] in {"send", "it"} and "not" not in tokens)
+        ):
+            return "no"  # "do not send", "don't send it"; not "no, send it".
+        # A send held back ("send it after lunch", "ok, send it once Bob confirms", "yes send.
+        # actually wait"): not a send, and not something to redraft either.
+        if tokens & (SEND_WORDS | SEND_PHRASES | {"send"}) or tokens <= plain | HOLD_WORDS:
             return "unclear"
+        return ""
+    if len(said) > 5:
         return ""
     if tokens & (SEND_WORDS | SEND_PHRASES) and tokens <= plain:
         return "send"
@@ -322,15 +389,55 @@ def without_link(link: re.Match) -> str:
     return " " + url[len(url.rstrip(".,;:!?)]'\"")) :]
 
 
-def asks_owner(text: str) -> bool:
+LIST_LINE = re.compile(r"^\s*(?:[-*+\u2022]|\d+[.)])\s+")
+# A list line that says what someone wrote or asked ("- **Gina (#textkit):** …?"): theirs,
+# not a question to the owner.
+QUOTED_LINE = re.compile(
+    r"^\s*(?:[-*+\u2022]|\d+[.)])\s+(?:\*\*|\*|__|_)?"
+    r"(?P<who>(?:[A-Z][\w.'-]*|[\u4e00-\u9fff]+)(?:\s+(?:and|&|[A-Z][\w.'-]*))*"
+    r"(?:\s*\([^)\n]*\))?)\s*(?:\*\*|\*|__|_)?\s*[:\uff1a]"
+)
+# Labels a list line may start with that name no one ("- **Decision:** merge now?").
+LABELS = {
+    "a", "action", "actions", "also", "approve", "ask", "asks", "blocker", "blockers", "both",
+    "card", "cards", "choice", "confirm", "deadline", "decide", "decision", "decisions", "draft",
+    "drafts", "due", "either", "how", "i", "issue", "me", "merge", "needs", "next", "note",
+    "notes", "option", "options", "or", "plan", "pr", "proposal", "q", "question", "questions",
+    "recommendation", "result", "results", "review", "risk", "send", "status", "summary",
+    "to", "today", "todo", "update", "waiting", "what", "when", "which", "why", "you",
+}  # fmt: skip
+
+
+def quoted(line: str) -> bool:
+    """Whether a list line quotes someone (see QUOTED_LINE)."""
+    found = QUOTED_LINE.match(line)
+    return bool(found) and found.group("who").split()[0].casefold() not in LABELS
+
+
+def asks_owner(text: str, answer: bool = False) -> bool:
     """Whether a message asks the owner something: its last paragraph has a sentence ending
-    with "?", outside code, tables and links (a "?" in a table cell or a "?q=" is no question)."""
+    with "?", outside code, tables and links (a "?" in a table cell or a "?q=" is no question),
+    and outside what it quotes others asking ("- *Gina:* deprecate it in 0.5?", and the lines
+    under it). `answer`: it answers the owner's own question, and its lists are that answer."""
     text = re.sub(r"```.*?(?:```|$)", "\n\n", text or "", flags=re.DOTALL)
     text = re.sub(r"`[^`\n]*`", " ", text)
     text = re.sub(r"\[([^\]\n]*)\]\([^)\s]*\)", r"\1", text)
     # A link goes; what ends the sentence after it stays ("…see https://x/a?").
     text = threads.LINK.sub(without_link, text)
-    lines = [line for line in text.splitlines() if line.count("|") < 2]
+    lines, quoting = [], -1
+    for line in text.splitlines():
+        indent = len(line) - len(line.lstrip())
+        if not line.strip() or (quoting >= 0 and indent > quoting):
+            lines.append("" if not line.strip() else " ")  # Under a quoted line: left out.
+            continue
+        quoting = -1
+        if line.count("|") >= 2:
+            continue
+        if quoted(line) or (answer and LIST_LINE.match(line)):
+            quoting = indent
+            lines.append(" ")
+            continue
+        lines.append(line)
     paragraphs = [part for part in re.split(r"\n\s*\n", "\n".join(lines)) if part.strip()]
     return bool(paragraphs) and bool(QUESTION_END.search(paragraphs[-1]))
 
@@ -351,8 +458,13 @@ def gist(text: str, limit: int = 300) -> str:
         said = said[: limit - 1].rsplit(" ", 1)[0] + "\u2026"
     said = mrkdwn(said)
     said = re.sub(r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)", r"<\2|\1>", said)
-    said = re.sub(r"\*\*(.+?)\*\*|__(.+?)__", lambda m: f"*{m.group(1) or m.group(2)}*", said)
-    return re.sub(r"~~(.+?)~~", r"~\1~", said)
+    parts = re.split(r"(`[^`]*`)", said)
+    for index in range(0, len(parts), 2):  # Outside `code`: Markdown's emphasis as Slack's.
+        part = re.sub(r"\*\*(.+?)\*\*", r"*\1*", parts[index])
+        # __bold__, not the underscores of a name or path ("textkit/__init__.py").
+        part = re.sub(r"(?<![\w/.])__(?=\S)(.+?)(?<=\S)__(?![\w/.])", r"*\1*", part)
+        parts[index] = re.sub(r"~~(.+?)~~", r"~\1~", part)
+    return "".join(parts)
 
 
 def mrkdwn(text: str) -> str:
@@ -509,17 +621,6 @@ class Connector:
             self.store.set("watch_done_at", started)
         if params.methods.strip():
             self.store.set("watch_methods", params.methods.strip()[:2000])
-        self.store.set(
-            "watch_last",
-            json.dumps(
-                {
-                    "at": now(),
-                    "found": len(params.items),
-                    "problems": params.problems[:500],
-                    "incomplete": incomplete,
-                }
-            ),
-        )
         new = 0
         answered = 0
         for item in params.items:
@@ -552,6 +653,19 @@ class Connector:
                 continue
             if await self.runtime.on_trigger("watch", [key, *slack_keys], text, display=display):
                 new += 1
+        self.store.set(
+            "watch_last",
+            json.dumps(
+                {
+                    "at": now(),
+                    # What was new and handed over (Settings: "N found"), of all it saw.
+                    "found": new,
+                    "seen": len(params.items),
+                    "problems": params.problems[:500],
+                    "incomplete": incomplete,
+                }
+            ),
+        )
         self.runtime.publish_state()
         skipped = f" {answered} the owner already answered were left out." if answered else ""
         return f"{new} new item(s) handed to the Router; the rest were seen before.{skipped}"
@@ -618,7 +732,7 @@ class Connector:
             "away": {
                 "enabled": settings.away_notify,
                 "last": json.loads(self.store.get("away_last") or "{}"),
-                "where": self.store.get("away_where") or "",
+                "where": yours(self.store.get("away_where") or ""),
                 "can": self.capabilities(),
             },
         }
@@ -677,7 +791,11 @@ class Connector:
         # Also those that ended lately: a failed task waits for the owner (Retry), as Home
         # shows it under Needs you.
         tasks = self.runtime.tasks.listed(include_ended_since=hours_ago(TASKS_SHOWN_HOURS))
+        about = self.runtime.drafts.question_draft
         for question in self.runtime.asks.owner_questions():
+            asker = self.runtime.tasks.find(question["task_id"]) if question["task_id"] else None
+            if asker and about(asker, question.get("text") or ""):
+                continue  # Told as its draft: deciding that answers it (settle_question).
             items.append(
                 {"id": f"question:{question['session_id']}:{question['at']}", "question": question}
             )
@@ -688,6 +806,12 @@ class Connector:
                 task["id"] in deciding or task["session_id"] in carded
             ):
                 continue
+            if (
+                task["status"] == "waiting"
+                and not self.store.get(f"stopped:{task['id']}")
+                and about(task)
+            ):
+                continue  # It asks only about its own draft: told once, as that draft.
             if task["status"] in {"waiting", "failed"}:
                 # Its question, by its words: a new question on the same task is a new item.
                 asked = hashlib.sha256((task.get("progress") or "").encode()).hexdigest()[:10]
@@ -695,10 +819,10 @@ class Connector:
         return items
 
     def relays(self, ask: dict, tasks: list[dict]) -> bool:
-        """Whether the Router's question is a worker's, retold: a question of a waiting task
-        reached it after the owner's last message and before it asked, in much the same words.
-        The owner is told it once, as the task's."""
-        waiting = {task["id"]: task for task in tasks if task["status"] == "waiting"}
+        """Whether the Router's question is a worker's, retold: a question of a waiting task (or
+        the failure of a failed one) reached it after the owner's last message and before it
+        asked, in much the same words. The owner is told it once, as the task's."""
+        waiting = {task["id"]: task for task in tasks if task["status"] in {"waiting", "failed"}}
         asked = words_of(ask["text"])
         # A question a session asked the owner with no task (the Slack session's), retold.
         for question in self.runtime.asks.owner_questions():
@@ -720,14 +844,19 @@ class Connector:
 
     @staticmethod
     def router_asks(messages: list[dict]) -> list[dict]:
-        """The Router's messages that ask the owner something or need them."""
-        return [
-            m
-            for m in messages
-            if m["kind"] in {"assistant", "update"}
-            and not m["meta"].get("internal")
-            and (m["meta"].get("needs_action") or asks_owner(m["text"]))
-        ]
+        """The Router's messages that ask the owner something or need them. Its answer to the
+        owner's own question (a turn of theirs: its words there are not internal) asks nothing
+        by its lists: they are the answer (what the team asked them, say)."""
+        found, asked = [], False
+        for m in sorted(messages, key=lambda m: m["id"]):
+            if m["kind"] == "owner":
+                asked = asks_owner(m["text"])
+            if m["kind"] not in {"assistant", "update"} or m["meta"].get("internal"):
+                continue
+            answer = asked and m["kind"] == "assistant"
+            if m["meta"].get("needs_action") or asks_owner(m["text"], answer=answer):
+                found.append(m)
+        return found
 
     def router_question(self) -> dict | None:
         """What the Router asked the owner in the chat and they have not answered yet: its
@@ -849,38 +978,70 @@ class Connector:
                 "ok",
             )
         if ask := item.get("ask"):
-            return "Chief of Staff asks", gist(ask["text"]), "<your answer>"
+            return "Chief of Staff asks", self.gist(ask["text"]), "<your answer>"
         if draft := item.get("draft"):
             target = draft["target"]
             kind = draft["kind"]
-            if kind in {"slack", "github", "reply"}:
+            reply = target.get("in_reply_to") or target.get("reply_to_comment")
+            if kind == "github" and not reply and not target.get("own"):
+                # What posting it does, in words: "send" alone would approve a PR unsaid.
+                verdict = str(target.get("verdict") or "comment")
+                title = (target.get("pr") or {}).get("title") or ""
+                pr = f"{str(target.get('repo', '')).split('/')[-1]}#{target.get('number', '')}"
+                head = f"Review of {pr}" + (f" \u201c{title}\u201d" if title else "")
+                head += f": {VERDICTS.get(verdict, 'Comment')}"
+                word = "approve" if verdict == "approve" else "post"
+                return head, self.gist(draft["text"]), f"{word} · no"
+            if kind == "github":
+                author = (target.get("comment") or {}).get("author") or ""
+                pr = f"{str(target.get('repo', '')).split('/')[-1]}#{target.get('number', '')}"
+                title = (target.get("pr") or {}).get("title") or ""
+                head = f"Reply{f' to {author}' if author else ''} on {pr}"
+                head += f" \u201c{title}\u201d" if title and not reply else ""
+                return head, self.gist(draft["text"]), "send · no"
+            if kind in {"slack", "reply"}:
                 where = target.get("to") or target.get("where") or target.get("url") or ""
                 head = f"Draft to approve{f' · {where}' if where else ''}"
-                return head, gist(draft["text"]), "send · no"
+                return head, self.gist(draft["text"]), "send · no"
             if kind == "decision":
                 options = target.get("options") or []
                 listed = " ".join(f"{n}) {o.get('choice', '')}" for n, o in enumerate(options, 1))
                 text = f"{target.get('question', draft['text'])} {listed}".strip()
-                return "Decision", gist(text), "<number or your answer>"
+                return "Decision", self.gist(text), "<number or your answer>"
             if kind == "merge":
                 head = f"Ready to merge · {target['label']}"
-                return head, gist(target.get("title", "") + " (checks pass)"), "merge · no"
+                checks = CHECK_WORDS.get(target.get("checks") or "", "")
+                said = target.get("title", "") + (f" ({checks})" if checks else "")
+                return head, gist(said), "merge · no"
             if kind == "workspace":
                 options = target.get("options") or []
-                listed = " ".join(f"{n}) {o['path']}" for n, o in enumerate(options, 1))
-                return f"Which folder for “{target.get('title', '')}”", gist(listed), "<number>"
-            return "Question", gist(draft["text"]), "<your answer>"
+                # Not at the start of the line: gist would take "1)" for a list's marker.
+                listed = "Folders: " + " ".join(
+                    f"{n}) {o['path']}" for n, o in enumerate(options, 1)
+                )
+                listed = " · ".join(
+                    x
+                    for x in (listed if options else "", "none: no project, or a folder's path")
+                    if x
+                )
+                hint = "<number, none or a path>" if options else "<none or a path>"
+                return f"Which folder for “{target.get('title', '')}”", gist(listed), hint
+            return "Question", self.gist(draft["text"]), "<your answer>"
         if question := item.get("question"):
             about = question.get("task_title") or question["worker"]
-            return f"“{about}” asks", gist(question["text"]), "<your answer>"
+            return f"“{about}” asks", self.gist(question["text"]), "<your answer>"
         task = item["task"]
+        said = self.gist(task.get("progress") or "")
         if task["status"] == "failed":
-            return f"Failed · “{task['title']}”", gist(task.get("progress") or ""), "retry"
+            return f"Failed · “{task['title']}”", said, "retry"
         if self.store.get(f"stopped:{task['id']}"):
             # Stopped mid-work: it asks nothing, it waits for Go on or Cancel.
-            said = gist(task.get("progress") or "")
             return f"Stopped · “{task['title']}”", said, "go on · cancel"
-        return f"“{task['title']}” asks", gist(task.get("progress") or ""), "<your answer>"
+        return f"“{task['title']}” asks", said, "<your answer>"
+
+    def gist(self, text: str) -> str:
+        """gist, of a text sessions wrote: without draft ids or Slack timestamps."""
+        return gist(self.runtime.drafts.owner_text(text))
 
     def render(self, items: list[dict], more: int, codes: bool) -> tuple[str, dict]:
         """A notification as Slack text (mrkdwn) and as Block Kit, with answer codes or
@@ -1023,6 +1184,8 @@ class Connector:
             return
         self.store.set("away_read_at", str(time.time()))
         where = self.store.get("away_where") or "the conversation you sent Chief of Staff's "
+        # Kept as the owner reads it ("your own Slack DM"); the messenger reads it as theirs.
+        where = re.sub(r"\byour\b", "the owner's", where, flags=re.IGNORECASE)
         text = (
             f"Read the owner's replies to Chief of Staff's notifications in {where} with: {how}\n\n"
             f"Pass each reply that names one of these codes with report_owner_replies (the code "
@@ -1080,6 +1243,8 @@ class Connector:
             ),
         )
         replies = "read_owner_slack_dm" if params.version == "A" else ""
+        # Where it went, in the owner's words, whatever the messenger reports.
+        self.store.set("away_pending", json.dumps({**pending, "slack_dm": True}))
         return (
             "Sent to the owner's own Slack DM. Now call report_notified(ok=true, where=\"your "
             f'own Slack DM", method="send_owner_slack_dm", replies="{replies}").'
@@ -1119,13 +1284,16 @@ class Connector:
         self.check(caller, (MESSENGER,))
         pending = json.loads(self.store.get("away_pending") or "null")
         self.store.delete("away_pending")
+        where = yours(params.where.strip())[:300]
+        if params.ok and pending and pending.get("slack_dm"):
+            where = OWN_SLACK_DM
         if params.ok:
             if params.method.strip():
                 self.store.set("away_method", params.method.strip()[:1000])
-            if params.where.strip():
-                if params.where.strip()[:300] != (self.store.get("away_where") or ""):
+            if where:
+                if where != (self.store.get("away_where") or ""):
                     self.store.delete("away_reply_verified")  # Another way: not tried yet.
-                self.store.set("away_where", params.where.strip()[:300])
+                self.store.set("away_where", where)
             replies = params.replies.strip()[:1000]
             if replies != (self.store.get("away_replies") or ""):
                 self.store.delete("away_reply_verified")
@@ -1146,7 +1314,7 @@ class Connector:
                 {
                     "at": now(),
                     "ok": params.ok,
-                    "where": params.where[:300],
+                    "where": where if params.ok else yours(params.where)[:300],
                     "error": params.error[:500],
                     "replies": bool(params.replies.strip()),
                 }
@@ -1198,7 +1366,9 @@ class Connector:
                 outcome = "your answers come back: replies here work"
                 self.verified_replies()
             elif not (item := items.get(item_id)):
-                outcome = "nothing waits for that code (answered already?)"
+                outcome = self.what_became(item_id) or (
+                    "nothing waits for that code (answered already?)"
+                )
                 done.append(f"{code}: {outcome}")
                 if self.store.get(f"awayused:{code}") or self.store.get(f"awaynoted:{code}"):
                     continue  # Applied before (passed again), or said once already.
@@ -1212,22 +1382,63 @@ class Connector:
                 except (ValueError, LookupError, RuntimeError) as exc:
                     outcome = f"not done: {exc}"
                     done.append(f"{code}: {outcome}")
-                    # The same reply read again (each time it looks) is said once.
+                    # The same reply read again (each time it looks) is said once, each reply.
                     said = hashlib.sha256(reply.text.strip().encode()).hexdigest()[:16]
-                    if self.store.get(f"awayfailed:{code}") == said:
+                    if self.store.get(f"awayfailed:{code}:{said}"):
                         continue
-                    self.store.set(f"awayfailed:{code}", said)
+                    self.store.set(f"awayfailed:{code}:{said}", str(time.time()))
                 else:
                     done.append(f"{code}: {outcome}")
             self.runtime.add_message(
                 self.runtime.router_id(),
                 "notice",
-                f"You answered from {self.store.get('away_where') or 'elsewhere'}: [{code}] "
-                f"{without_code(reply.text, code)[:200]} → {outcome}",
+                f"You answered from {yours(self.store.get('away_where') or 'elsewhere')}: "
+                f"[{code}] {without_code(reply.text, code)[:200]} → {outcome}",
                 {"away_reply": True},
             )
         self.runtime.publish_state()
         return "\n".join(done) or "Nothing to apply."
+
+    def what_became(self, item_id: str) -> str:
+        """What became of a draft a code was given for, once it no longer waits for the owner
+        (replaced by a newer one, withdrawn, sent); "" when the item is not such a draft."""
+        if not item_id.startswith("draft:") or item_id.startswith("draft:merge:"):
+            return ""
+        try:
+            draft = self.store.draft(item_id.removeprefix("draft:"))
+        except LookupError:
+            return ""
+        outcome = self.runtime.drafts.owner_text(draft["outcome"] or "").strip()
+        if draft["status"] == "pending":
+            return ""
+        if draft["status"] in {"sent", "sending", "uncertain"}:
+            return "sent already" if draft["status"] == "sent" else "being sent: see Home"
+        if draft["status"] == "failed":
+            return f"its sending failed: {outcome}" if outcome else "its sending failed"
+        newer = self.store.get(f"replacedby:{draft['id']}") or ""
+        if newer or outcome.startswith("Replaced by"):
+            try:
+                newest = self.store.draft(newer) if newer else None
+            except LookupError:
+                newest = None
+            said = ""
+            if newest:
+                text = " ".join(newest["text"].split())
+                said = f": \u201c{text if len(text) <= 160 else text[:159] + chr(0x2026)}\u201d"
+            told = self.store.get(f"awayitem:draft:{newer}") if newer else ""
+            if told and self.code_item(told) != f"draft:{newer}":
+                told = ""
+            then = ""
+            if newest and newest["status"] == "pending":
+                then = " It waits for you on Home."
+                if told:
+                    then = f" Answer that one with its code {told}, or on Home."
+            return f"that draft was replaced by a newer one{said}; nothing was sent.{then}"
+        if outcome.startswith("Withdrawn"):
+            return "withdrawn: " + outcome.removeprefix("Withdrawn").lstrip(":. ")
+        if outcome.startswith("Redo:"):
+            return "you asked for it again: " + outcome.removeprefix("Redo:").strip()
+        return f"dropped already ({outcome})" if outcome else "dropped already"
 
     def verified_replies(self):
         self.store.set(
@@ -1271,6 +1482,19 @@ class Connector:
                     return "left as it is"
                 raise ValueError('answer "merge" or "no"')
             if kind in {"slack", "github", "reply"}:
+                target = draft["target"]
+                if kind == "github" and not (
+                    target.get("in_reply_to") or target.get("reply_to_comment") or target.get("own")
+                ):
+                    verdict = str(target.get("verdict") or "comment")
+                    if word in {"post", "post it", "publish"}:
+                        word = "send"
+                    elif verdict != "approve" and "approve" in re.findall(r"\w+", word):
+                        # It would post as it is, not as an approval.
+                        raise ValueError(
+                            f"not posted: this review is {VERDICTS.get(verdict, verdict)}, not an "
+                            'approval: answer "post" to post it as it is, or "no"'
+                        )
                 # "yes, send it", "send pls", "ok 👍", "好的 发吧": a send in a few words; "do not
                 # send" is a no; "ok wait", "not yet, send later" are not a send.
                 meant = send_answer(word)
@@ -1297,12 +1521,24 @@ class Connector:
                 await drafts.resolve(draft["id"], DraftDecision(action="answer", text=answer))
                 return f"decided: {answer[:100]}"
             if kind == "workspace":
+                # As its card: a folder it offers, no project, or another folder by its path.
                 options = draft["target"].get("options") or []
-                if not (word.isdigit() and 1 <= int(word) <= len(options)):
-                    raise ValueError("answer with the number of a folder")
-                choice = options[int(word) - 1]["path"]
+                path = answer.strip("`'\" \u201c\u201d")
+                if word.isdigit() and 1 <= int(word) <= len(options):
+                    choice = options[int(word) - 1]["path"]
+                elif word in NO_PROJECT_WORDS:
+                    choice = ""
+                elif path.startswith(("/", "~")):
+                    choice = path
+                else:
+                    raise ValueError(
+                        ("answer with the number of a folder, " if options else "answer ")
+                        + '"none" for no project, or the path of a folder'
+                    )
                 await drafts.resolve(draft["id"], DraftDecision(action="choose", choice=choice))
-                return f"chose {choice}"
+                return (
+                    f"chose {choice}" if choice else "no project: it starts in a folder of its own"
+                )
             await drafts.resolve(draft["id"], DraftDecision(action="answer", text=answer))
             return "answered"
         if question := item.get("question"):

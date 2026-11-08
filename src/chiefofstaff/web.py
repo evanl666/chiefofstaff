@@ -49,8 +49,12 @@ ATTACHMENT_FILE = re.compile(r"[0-9a-f]{32}\.(?:png|jpg|gif|webp)")
 def settings_from(values: dict[str, Any], old: Settings) -> Settings:
     """Settings from what was saved (`old`) and what the page sent: one invalid is answered as
     FastAPI answers an invalid body (422, each problem with its field). A saved MCP server
-    Copilot would refuse, sent back as it was, stays off (Settings.mcp_off), not refused."""
-    context = {"mcp_saved": {**old.mcp_servers, **old.mcp_servers_off}}
+    Copilot would refuse, sent back as it was, stays off (Settings.mcp_off), not refused; so
+    does a saved project whose folder is gone (it shows as not found)."""
+    context = {
+        "mcp_saved": {**old.mcp_servers, **old.mcp_servers_off},
+        "projects_saved": old.projects,
+    }
     try:
         return Settings.model_validate(values, context=context)
     except ValidationError as error:
@@ -58,6 +62,43 @@ def settings_from(values: dict[str, Any], old: Settings) -> Settings:
         raise RequestValidationError(
             [{**problem, "loc": ("body", *problem["loc"])} for problem in problems]
         ) from None
+
+
+MODEL_FIELDS = {"router": "Router", "worker": "Workers", "slack": "Slack", "watchdog": "Watchdog"}
+
+
+async def check_models(runtime: Runtime, old: Settings, new: Settings):
+    """A model newly named in Settings must be one Copilot offers ("" and auto: Copilot's
+    choice); else every session given it would fail to start. Refused as an invalid field is
+    (422), naming it. Unchecked while Copilot is not connected."""
+    named = [(("model",), "Default model", new.model, old.model)] + [
+        (
+            ("role_models", role),
+            f"{MODEL_FIELDS.get(role, role)} model",
+            model,
+            old.role_models.get(role),
+        )
+        for role, model in new.role_models.items()
+    ]
+    fresh = [item for item in named if item[2] and item[2].lower() != "auto" and item[2] != item[3]]
+    if not fresh:
+        return
+    try:
+        offered = [item["id"] for item in await runtime.available_models()]
+    except Exception:
+        return
+    if problems := [
+        {
+            "type": "value_error",
+            "loc": ("body", *loc),
+            "msg": f"{field}: Copilot offers no model {model!r}. Available: "
+            f"{', '.join(offered) or 'none'}.",
+            "input": model,
+        }
+        for loc, field, model, _ in fresh
+        if offered and model not in offered
+    ]:
+        raise RequestValidationError(problems)
 
 
 def create_app(
@@ -389,6 +430,7 @@ def create_app(
     @app.post("/api/sessions/{session_id}/unfollow")
     async def unfollow_session_thread(session_id: str, payload: TaskNote):
         runtime.store.unfollow(payload.text.strip(), session_id)
+        runtime.store.set(f"stopped:{session_id}:{payload.text.strip()}", "1")
         runtime.publish_session(runtime.store.session(session_id))
         for task in runtime.tasks.for_session(session_id):
             runtime.task_actions.publish(task)
@@ -481,6 +523,7 @@ def create_app(
                         "Workers must not write Chief of Staff's private data directory."
                     )
             await asyncio.to_thread(runtime.workspaces.check_scratch, settings)
+            await check_models(runtime, old, settings)
             store.save_settings(settings)
         await runtime.settings_changed(old, settings)
         return runtime.snapshot()

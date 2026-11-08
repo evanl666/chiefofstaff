@@ -424,7 +424,7 @@ async def test_a_reply_is_not_sent_into_a_conversation_that_moved_on(tmp_path):
     nvm = entry(dm, "U0ALICE1", "Alice Chen", "1712345700.000100", "nvm \u2014 DO NOT approve")
     harness.mcp.reads[dm] = nvm
     with pytest.raises(ValueError, match="Alice Chen wrote since this draft"):
-        await runtime.drafts.resolve(first["id"], DraftDecision(action="send", text="Approved"))
+        await runtime.drafts.resolve(first["id"], DraftDecision(action="send"))
     card = harness.store.draft(first["id"])
     assert card["status"] == "pending" and sends() == []
     assert card["target"]["latest"] == "Alice Chen: nvm \u2014 DO NOT approve"

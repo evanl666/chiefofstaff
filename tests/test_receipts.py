@@ -101,12 +101,34 @@ def test_claims_are_checked_against_what_was_observed():
     assert not receipts.says_changed(research)
     assert not receipts.says_changed("It seems the flag was renamed upstream-side last year.")
     assert receipts.says_changed("The failing test was fixed by updating the fixture.")
+    # Bug bash 6 (N4): a Slack reply's rewording, and "I changed no code".
+    assert not receipts.says_changed("Drafted the reply to Alice. I changed no code.")
+    # Bug bash 6 (R11): done by something else, not by it.
+    assert not receipts.says_changed("The checkout was re-created by something unknown.")
+    assert receipts.says_changed("I re-created the fixture and added a test.")
+    assert not receipts.says_changed("Alice updated her question in the thread. I changed no code.")
+    assert not receipts.says_changed('Reworded: "it\'s broken" changed to "it has a bug".')
     failing = receipts.summarize([command("npm test", 1)], None, "Done.")
     assert failing["flags"] == ["The last test run failed (exit 1)."]
     red = receipts.summarize(
         [], {"prs": [{"label": "acme/app#7", "checks": "failing"}]}, "Opened the PR."
     )
     assert red["flags"] == ["Checks are failing on acme/app#7."]
+
+
+def test_a_criterion_cites_the_command_it_names_not_the_line_around_it():
+    """Bug bash 6 (N3): "verified" with `sed -i '' 's/return text…` (a chained edit, cut at
+    200 characters) when the evidence named `uv run --with pytest pytest -q`."""
+    line = (
+        "sed -i '' 's/return text\\[: limit - 1\\] + \"...\"/return text[: limit - 1]/' "
+        "textkit/__init__.py && uv run --with pytest pytest -q"
+    )
+    commands = [{"command": line, "kind": "test", "exit_code": 0, "ended_at": ""}]
+    claims = [{"criterion": "Tests pass", "result": "met",
+               "evidence": "`uv run --with pytest pytest -q`: 12 passed"}]  # fmt: skip
+    [found] = receipts.criteria_results(["Tests pass"], claims, commands)
+    assert found["state"] == "verified"
+    assert found["command"] == "uv run --with pytest pytest -q"
 
 
 def test_acceptance_criteria_count_only_what_was_seen():

@@ -10,7 +10,7 @@ import logging
 import os
 import re
 import time
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -128,6 +128,26 @@ def stamp(value: str | None) -> float:
     return 0.0
 
 
+async def elsewhere_now(checkout: dict, top: Path, ended: str, head: str) -> bool:
+    """Whether a checkout moved to another line of history since a result (a worker's next task
+    on a branch of its own), while the result's commit is still on a branch: not a change of
+    that result's files."""
+    if not ended or ended == head:
+        return False
+    try:
+        await checkout_git(checkout, str(top), "merge-base", "--is-ancestor", ended, head)
+        return False
+    except ValueError:
+        pass
+    with suppress(ValueError):
+        holding = await checkout_git(
+            checkout, str(top), "for-each-ref", "--contains", ended, "--format=%(refname)",
+            "refs/heads",
+        )  # fmt: skip
+        return bool(holding.strip())
+    return False
+
+
 # A result this recent may have landed while the owner was cancelling the work.
 JUST_FINISHED_SECONDS = 60
 
@@ -174,6 +194,82 @@ def deliverable_title(title: str) -> str:
 # A character that is a word of its own (Han, kana, Hangul).
 CJK = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]")
 
+# The owner asking a worker straight for work apart from the task it is on, explicitly: the
+# message leads with it ("New, separate task for this worker: …", "Another task: …", and in
+# Chinese "new task:", "another task:", "open another task:"), or tells it to do something
+# "as a separate task". Not a question about it, nor what it says is not one.
+SEPARATE_LEAD = re.compile(
+    r"^\W*(?:(?:here(?:'s| is)|please(?:\s+(?:do|take|start))?|now|and|also)\s+)?"
+    r"(?:an?\s+)?(?:another|new|separate|different|unrelated|independent)"
+    r"(?:[\s,]+(?:and\s+)?(?:new|separate|different|unrelated|independent))?\s+task"
+    r"(?:\s+(?:for|to)\s+[^:\n\uff1a]{1,40}?)?\s*[:\uff1a]"
+    r"|^\W*\u8bf7?(?:[\u53e6\u518d\u65b0]?[\u5f00\u5efa](?:\u4e00\u4e2a)?"
+    r"(?:\u65b0\u7684?|\u5355\u72ec\u7684?|\u72ec\u7acb\u7684?)?|(?:\u4e00\u4e2a)?"
+    r"(?:\u53e6\u4e00\u4e2a|\u53e6\u5916\u4e00\u4e2a|\u65b0\u7684?|\u5355\u72ec\u7684?|"
+    r"\u72ec\u7acb\u7684?))\u4efb\u52a1(?:\u7ed9[^:\n\uff1a]{1,20}?)?\s*[:\uff1a]",
+    re.IGNORECASE,
+)
+SEPARATE_PHRASE = re.compile(
+    r"\b(?:as|in|into)\s+(?:an?\s+)?(?:new|separate|different|independent)\s+task\b"
+    r"|\u4f5c\u4e3a(?:\u4e00\u4e2a)?(?:\u65b0\u7684?|\u5355\u72ec\u7684?|\u53e6\u4e00\u4e2a|"
+    r"\u72ec\u7acb\u7684?)\u4efb\u52a1",
+    re.IGNORECASE,
+)
+# In the same clause, what makes "as a separate task" not a request for one: a negation ("I
+# don't think this needs to go in a separate task", Chinese "not", "don't", "without"), "rather
+# than", "instead of" (Chinese "rather than"), a question ("would", "should", Chinese "ma").
+NOT_ASKED = re.compile(
+    r"\b(?:not|no|never|without|rather|instead|than|unless)\b|n't\b"
+    r"|[\u4e0d\u522b\u6ca1\u5417]|\u800c\u4e0d\u662f",
+    re.IGNORECASE,
+)
+# How a sentence that is not an instruction starts (a statement or a question): "When I save it
+# as a new task…", "Would this be better as a separate task", Chinese "I", "if", "this".
+NOT_AN_ORDER = re.compile(
+    r"(?:i|we|you|he|she|it|they|this|that|these|those|there|here|when|whenever|if|while|"
+    r"because|since|as|after|before|once|would|could|should|can|will|shall|may|might|must|is|"
+    r"are|was|were|does|did|has|have|had|why|what|how|where|who|which|maybe|perhaps|the|a|an|"
+    r"my|our|your|its|their)\b|[\u6211\u4f60\u4ed6\u5979\u5b83\u8fd9\u90a3]|\u5982\u679c|\u5f53",
+    re.IGNORECASE,
+)
+
+
+def separate_task(text: str) -> str:
+    """The title of separate work the owner asks a worker for in their message ("New task: add
+    mod() on a new branch" gives "Add mod() on a new branch"); "" when it asks for none."""
+    text = text.strip()
+    if found := SEPARATE_LEAD.match(text):
+        rest = text[found.end() :]
+    elif found := SEPARATE_PHRASE.search(text):
+        # Its clause: from the boundary before it to the one after it.
+        bound = r"[.!?;](?=\s|$)|\n|[\u3002\uff01\uff1f\uff1b]"
+        start = max([m.end() for m in re.finditer(bound, text[: found.start()])], default=0)
+        stop = re.search(bound, text[found.end() :])
+        end = found.end() + stop.start() if stop else len(text)
+        clause = text[start:end]
+        fluff = r"^\W*(?:(?:please|now|also|then|and|ok(?:ay)?|so)\b\W*)*"
+        opening = re.sub(fluff, "", clause, flags=re.IGNORECASE)
+        if (
+            NOT_ASKED.search(clause)
+            or text[end : end + 1] in {"?", "\uff1f"}
+            or NOT_AN_ORDER.match(opening)
+        ):
+            return ""
+        after = text[found.end() : end].strip()
+        if after[:1] in {":", "\uff1a"}:
+            rest = after[1:]  # "Do this as a separate task: add mod()."
+        else:
+            before = re.sub(fluff, "", text[start : found.start()], flags=re.IGNORECASE)
+            rest = before.rstrip() + " " + after
+    else:
+        return ""
+    first = re.split(r"(?<=[.!?])\s+|(?<=[\u3002\uff01\uff1f])|\n", rest.strip(), maxsplit=1)[0]
+    first = first.strip(" ,;:.\u3002")
+    try:
+        return deliverable_title(first[:1].upper() + first[1:])
+    except ValueError:
+        return "Separate work the owner asked for"
+
 
 def ran_in(command: str) -> str:
     """Where a command line runs, when it says so (`cd folder && …`); "" otherwise."""
@@ -181,52 +277,165 @@ def ran_in(command: str) -> str:
     return found.group(1).strip("\"'") if found else ""
 
 
-# Pushing a branch or opening a PR (done, not done, to do): moot in that PR's description.
-PUSH_OR_PR = re.compile(
-    r"\b(push(ed|es|ing)?|unpushed)\b(?!\s+notifications?)"
-    r"|\bno\s+(PR|pull request)s?\b"
-    r"|\b(PR|pull request)s?\b[^.\n]{0,40}?\b(open(ed)?|creat(e|ed)|rais(e|ed)|filed)\b"
-    r"|\b(open(ed|ing)?|creat(e|ed|ing)|rais(e|ed|ing))\b[^.\n]{0,20}?\b(PR|pull request)s?\b",
+# What a result says of its branch before its PR was opened: "not pushed", "nothing pushed",
+# "no PR (opened)", "did not open a PR". Only those (not "pre-push", "pushed", "open").
+NOT_PUSHED = re.compile(
+    r"(?<![\w-])(?:"
+    r"(?:not|never)\s+(?:yet\s+)?(?:been\s+)?pushed(?:\s+yet)?"
+    r"|nothing\s+(?:was\s+|has\s+been\s+|is\s+)?pushed(?:\s+yet)?"
+    r"|unpushed"
+    r"|(?:(?:did|do|have|has)(?:n't|\s+not)|will\s+not|won't)\s+(?:yet\s+)?"
+    r"(?:push(?:ed)?|open(?:ed)?)(?:\s+(?:it|anything|the\s+branch))?"
+    r"(?:\s+(?:or|and|nor)\s+(?:push(?:ed)?|open(?:ed)?))?(?:\s+(?:a|any|the)\s+"
+    r"(?:PR|pull\s+request))?"
+    r"|no\s+(?:PR|pull\s+request)s?(?:\s+(?:opened|open|created|raised))?(?:\s+yet)?"
+    r"(?=\s*(?:$|[.,;:)!\u2026]|(?:and|or|but)\b))"
+    r"|(?:PR|pull\s+request)\s+not\s+(?:yet\s+)?(?:opened|created|raised)(?:\s+yet)?"
+    r")(?![\w-])",
+    re.IGNORECASE,
+)
+# What a result says of its PR before it was merged: "(not merged)", "awaiting review",
+# "merging is yours"; with "open" in "It is open and not merged" (see status_only).
+NOT_MERGED = re.compile(
+    r"(?<![\w-])(?:not\s+(?:yet\s+)?merged(?:\s+yet)?|unmerged"
+    r"|(?:awaiting|waiting\s+for|ready\s+(?:for|to))\s+(?:your\s+)?"
+    r"(?:review|merge|merging|approval|be\s+merged)"
+    r"|merg(?:e|ing)\s+is\s+(?:yours|up\s+to\s+you)|for\s+you\s+to\s+merge)(?![\w-])",
+    re.IGNORECASE,
+)
+# The words that may go with such a status ("It is", "the branch", "and"): nothing more.
+STATUS_FILLER = re.compile(
+    r"\b(?:and|or|but|nor|yet|so|far|still|also|it|its|this|that|the|branch|PR|pull|request|"
+    r"is|was|are|has|been|i|we|now)\b|[^\w\s]",
     re.IGNORECASE,
 )
 
 
+def pr_names(label: str) -> re.Pattern:
+    """How a result names one PR ("owner/repo#72"): its URL, "repo#72", "#72", "PR 72"."""
+    repo, _, number = label.rpartition("#")
+    name = re.escape(repo.rsplit("/", 1)[-1])
+    return re.compile(
+        rf"https?://github\.com/{re.escape(repo)}/pull/{number}\b"
+        rf"|(?<![\w#])(?:{re.escape(repo)}|{name})?#{number}\b"
+        rf"|\b(?:PR|pull\s+request)\s+{number}\b",
+        re.IGNORECASE,
+    )
+
+
 def about_pushing(text: str) -> bool:
-    """Whether a sentence or criterion is about pushing or opening a PR (not code that pushes:
-    `queue.push`)."""
-    return bool(PUSH_OR_PR.search(re.sub(r"`[^`]*`", "", text)))
+    """Whether a criterion is about its branch not being pushed or its PR not opened yet."""
+    return bool(NOT_PUSHED.search(re.sub(r"`[^`]*`", "", text)))
 
 
-def without_pushing(text: str) -> str:
-    """A result without what it says about pushing its branch or opening a PR, done or not:
-    once the PR is open that is moot ("Committed abc, not pushed." keeps "Committed abc.")."""
+def status_only(clause: str, phrases: re.Pattern, names: re.Pattern | None = None) -> bool:
+    """Whether a clause says nothing but a status `phrases` finds ("not pushed", "It is open
+    and not merged"), about the PR `names` finds or "it" (not code: `is_open`)."""
+    text = re.sub(r"`[^`]*`", " code ", clause)
+    rest = phrases.sub(" ", text)
+    named = bool(names and names.search(rest))
+    if rest == text and not named:
+        return False
+    if names:
+        rest = re.sub(r"\bopen\b", " ", names.sub(" ", rest), flags=re.IGNORECASE)
+    return not re.search(r"\w", STATUS_FILLER.sub(" ", rest))
+
+
+def not_pushed(clause: str) -> bool:
+    """Whether a clause says only that its branch is not pushed or its PR not opened."""
+    return status_only(clause, NOT_PUSHED)
+
+
+def without_status(text: str, only: Callable[[str], bool]) -> str:
+    """A result without the clauses, sentences and remarks in parentheses that say nothing but
+    a status that no longer holds (`only`): "Committed abc, not pushed." keeps "Committed abc."
+    Everything else stays as it is."""
     lines, fenced = [], False
     for line in text.splitlines():
         if line.lstrip().startswith("```"):
             fenced = not fenced
-        lead = re.match(r"\s*(?:[-*+]\s+|\d+[.)]\s+)?", line)
-        start = lead.end() if lead else 0
-        if fenced or line.lstrip().startswith(("```", "|")) or not about_pushing(line):
+        if fenced or line.lstrip().startswith(("```", "|")):
             lines.append(line)
             continue
+        lead = re.match(r"\s*(?:[-*+]\s+|\d+[.)]\s+)?", line)
+        start = lead.end() if lead else 0
+        body = re.sub(
+            r"\s*\(([^()]*)\)", lambda found: "" if only(found.group(1)) else found.group(0),
+            line[start:],
+        )  # fmt: skip
         kept = []
-        for sentence in re.split(r"(?<=[.!?;])\s+", line[start:]):
-            sentence = re.sub(
-                r"\s*\([^()]*\)",
-                lambda found: "" if about_pushing(found.group(0)) else found.group(0),
-                sentence,
-            )
-            if not about_pushing(sentence):
+        for sentence in re.split(r"(?<=[.!?;])\s+", body):
+            parts = re.split(r"(,\s+|\s+[\u2013\u2014]\s+)", sentence)
+            clauses = parts[::2]
+            if not any(only(clause) for clause in clauses):
                 kept.append(sentence)
                 continue
-            # What it says before it is about pushing: "Committed abc, not pushed."
-            clauses = re.split(r",\s+|\s+[\u2013\u2014]\s+", sentence)
-            first = next((i for i, clause in enumerate(clauses) if about_pushing(clause)), 0)
-            if first:
-                kept.append(", ".join(clauses[:first]).rstrip(" ,;:") + ".")
-        if kept:
-            lines.append(line[:start] + " ".join(kept))
+            out = ""
+            for index, clause in enumerate(clauses):
+                if not only(clause):
+                    out += (parts[2 * index - 1] if out else "") + clause
+            if out:
+                end = re.search(r"[.!?;:\u2026]*$", sentence)
+                ending = end.group(0) if end else ""
+                kept.append(out if re.search(r"[.!?;:]$", out) else out.rstrip(" ,") + ending)
+        if kept or not line.strip():
+            lines.append(line[:start] + " ".join(kept) if kept else line)
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+
+
+# What a follow-up's report says about the result before it ("This is unchanged from before.",
+# "57c5e01 (new):"): it means nothing where that earlier result is not shown (a PR's text).
+FOLLOW_UP_MARK = re.compile(
+    r"\s+\((?:new|newly added|unchanged|updated|changed|as before|same as before|"
+    r"(?:unchanged|carried over) from (?:before|the earlier result))\)",
+    re.IGNORECASE,
+)
+FOLLOW_UP_SENTENCE = re.compile(
+    r"(?:(?:this|that|it|these|those|the rest|everything else)\s+(?:is|are|was|were|stays?|"
+    r"remains?)\s+)?(?:still\s+)?(?:unchanged|as before|the same as before)"
+    r"(?:\s+from\s+(?:before|the earlier result|earlier|last time))?[.!]?",
+    re.IGNORECASE,
+)
+
+
+def without_follow_up(text: str) -> str:
+    """A result without what only the reader of its follow-up needs: what is new, or the same
+    as in the result before ("(new)", "This is unchanged from before.")."""
+    lines, fenced = [], False
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+        if fenced or line.lstrip().startswith("```"):
+            lines.append(line)
+            continue
+        lead = re.match(r"\s*(?:[-*+]\s+|\d+[.)]\s+)?", line)
+        start = lead.end() if lead else 0
+        sentences = re.split(r"(?<=[.!?])\s+", FOLLOW_UP_MARK.sub("", line[start:]))
+        body = " ".join(s for s in sentences if not FOLLOW_UP_SENTENCE.fullmatch(s.strip()))
+        if body.strip() or not line[start:].strip():
+            lines.append(line[:start] + body.strip() if body.strip() else line)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+
+
+def cited_command(command: str, evidence: str = "") -> str:
+    """A check's command as a PR's description cites it, in one line: never a here-document's
+    body (its blank lines end the code span on GitHub). Of a command on several lines, the run
+    its evidence names, else its test run, else its first line (the cut marked)."""
+    if "\n" not in command.strip():
+        return command.strip()
+    for snippet in receipts.QUOTED.findall(evidence or ""):
+        if receipts.kind(snippet) or (
+            len(receipts.words(snippet)) >= 2 and receipts.names(snippet, command)
+        ):
+            return snippet.strip()
+    if runs := receipts.test_runs(command):
+        return receipts.shown(runs[0])
+    return command.strip().splitlines()[0].rstrip().removesuffix("\u2026") + " \u2026"
+
+
+def code_span(text: str) -> str:
+    """`text` as inline code, also when it holds a backtick."""
+    return f"`` {text} ``" if "`" in text else f"`{text}`"
 
 
 def pr_title(subjects: list[str], limit: int = 100) -> str:
@@ -387,6 +596,8 @@ class TaskActions:
                 if not (now_ and now_["tree"]) or now_["tree"] == end["tree"]:
                     continue
                 top = await checkout_top(checkout)
+                if await elsewhere_now(checkout, top, end["commit"], now_["commit"]):
+                    continue  # On another branch now: its result is on its own, unchanged.
                 differ = await tree_names(checkout, top, end["tree"], now_["tree"])
                 if hit := sorted(set(differ) & await share_files(checkout, scope)):
                     return (
@@ -560,8 +771,8 @@ class TaskActions:
         it changes for it from here starts (see changed_since_result)."""
         ended = json.loads(self.store.get(f"taskend:{task['id']}") or "{}")
         row = self.store.find_session(task["session_id"])
-        if not ended or not row:
-            return
+        if not ended or not row or (not resumed and self.own_change_pending(task)):
+            return  # What changed since its result is its own: not a gap.
         at = time.time()  # Taken up again now: what it commits from here on is its own.
         result = json.dumps({p: e["tree"] for p, e in sorted(ended.items())})
         checked = json.loads(self.store.get(f"restarted:{task['id']}") or "{}")
@@ -637,11 +848,27 @@ class TaskActions:
             for row in rows
         ]
 
+    def result_at(self, task: dict) -> str:
+        """When its latest result's end was recorded ("" for none)."""
+        results = json.loads(self.store.get(f"taskends:{task['id']}") or "[]")
+        return results[-1]["at"] if results else ""
+
+    def keep_result_base(self, task: dict):
+        """It changed its own code since its result, and asks the owner about it: what it
+        reports once answered is a new result, counted from where it was then (the answer does
+        not record a new start past those changes; see record_chat_base)."""
+        self.store.set(f"ownchange:{task['id']}", self.result_at(task) or "-")
+
+    def own_change_pending(self, task: dict) -> bool:
+        """Whether its own changes since its latest result wait for a new result."""
+        return self.store.get(f"ownchange:{task['id']}") == (self.result_at(task) or "-")
+
     async def record_chat_base(self, task: dict):
         """Its checkouts when the owner asks about a finished task in chat: what changes from
-        then on, by this task, is a new result (see changed_since_result)."""
+        then on, by this task, is a new result (see changed_since_result). Not when it changed
+        its code since its result already: those changes are part of that new result."""
         row = self.store.find_session(task["session_id"])
-        if not row:
+        if not row or self.own_change_pending(task):
             return
         chat = json.loads(self.store.get(f"chatbase:{task['id']}") or "{}")
         results = json.loads(self.store.get(f"taskends:{task['id']}") or "[]")
@@ -1369,11 +1596,14 @@ class TaskActions:
         label = thread.removeprefix("github:")
         self.runtime.drafts.merged(session_id, thread, task_id)
         for task in self.tasks.for_session(session_id):
-            if task["status"] != "review" or (task_id and task["id"] != task_id):
+            if task["status"] not in {"review", "done"} or (task_id and task["id"] != task_id):
                 continue
             if not task_id and not self.owns_pr(task, label):
                 continue
             if thread in threads.pull_requests(" ".join(self.pr_urls(task))):
+                self.note_merged(task, label)
+                if task["status"] != "review":
+                    continue
                 # Its other PRs still open: it is done when the last of its own is merged.
                 still = [
                     pr["label"]
@@ -1386,6 +1616,40 @@ class TaskActions:
                     continue
                 self.tasks.move(task["id"], "done")
                 self.runtime.background(self.runtime.workers.pump())
+
+    def note_merged(self, task: dict, label: str):
+        """Its PR (`label`, "owner/repo#n") is merged, as of now (before its next read from
+        GitHub): its card shows so (see shown_result)."""
+        merged = json.loads(self.store.get(f"mergedprs:{task['id']}") or "[]")
+        if label.lower() not in {known.lower() for known in merged}:
+            self.store.set(f"mergedprs:{task['id']}", json.dumps([*merged, label]))
+            self.publish(self.tasks.get(task["id"]))
+
+    def shown_result(self, task: dict) -> str:
+        """Its result as its card shows it (the stored one stays as reported): once its PR is
+        open, without what it said of it before ("not pushed", "no PR opened"); once merged,
+        without "(not merged)" or "#72 is open", and saying first that it is merged. Only
+        those words: everything else it said stays."""
+        result = task["result"] or ""
+        own = [pr for pr in self.previous_prs(task["id"]) if pr.get("own")]
+        noted = json.loads(self.store.get(f"mergedprs:{task['id']}") or "[]")
+        if not result or not (own or noted or self.opened_prs(task["id"])):
+            return result
+        result = without_status(result, not_pushed) or result
+        merged = {pr["label"].lower(): pr["label"] for pr in own if pr.get("state") == "MERGED"}
+        for label in noted:
+            merged.setdefault(label.lower(), label)
+        for label in merged.values():
+            names = pr_names(label)
+
+            def unmerged(clause: str, names: re.Pattern = names) -> bool:
+                return status_only(clause, NOT_MERGED, names)
+
+            result = without_status(result, unmerged) or result
+            said = re.split(r"(?<=[.!?])\s+|\n", result)
+            if not any(names.search(part) and re.search(r"\bmerged\b", part) for part in said):
+                result = f"{label} is merged.\n\n{result}"
+        return result
 
     async def diff(self, task_id: str) -> list[dict]:
         """What the task's worker changed, per checkout, as unified diffs."""
@@ -1460,13 +1724,14 @@ class TaskActions:
         """A PR's title and description for a task's work: what changed, as its commits say
         (`subjects`; else the task's title) and its worker reported it, and its checks. Not
         its instructions (written for the worker: "do not open a PR"), what it said about
-        pushing or a PR (moot once it is open), its credits or the project's name in its
-        title."""
+        pushing or a PR (moot once it is open), what a follow-up said about the result before
+        ("unchanged from before"), its credits or the project's name in its title."""
         title = pr_title(subjects or []) or (
             re.sub(r"\s*\u00b7\s*[\w.-]+$", "", task["title"]).strip() or task["title"]
         )
         found = self.view(task)["receipts"] or {}
-        lines = [without_pushing((task["result"] or task["progress"] or "").strip()), ""]
+        text = (task["result"] or task["progress"] or "").strip()
+        lines = [without_follow_up(without_status(text, not_pushed)), ""]
         checks = []
         for label, key in (("Tests", "tests"), ("Checks", "checks"), ("Build", "build")):
             if (
@@ -1475,11 +1740,12 @@ class TaskActions:
                 and item.get("own", True)
             ):
                 outcome = "passed" if item["passed"] else f"failed (exit {item['exit_code']})"
-                checks.append(f"- {label}: `{item['command']}` {outcome}")
+                checks.append(f"- {label}: {code_span(cited_command(item['command']))} {outcome}")
         for item in found.get("criteria") or []:
             if item["state"] == "verified" and not about_pushing(item["criterion"]):
+                command = cited_command(item["command"], item.get("evidence", ""))
                 checks.append(
-                    f"- {item['criterion']}" + (f": `{item['command']}`" if item["command"] else "")
+                    f"- {item['criterion']}" + (f": {code_span(command)}" if command else "")
                 )
         if checks:
             lines += ["**Checked**", "", *checks, ""]
@@ -1861,7 +2127,7 @@ class TaskActions:
         self.drop_follows(task)
         why = why if why.rstrip().endswith((".", "!", "?")) else f"{why.rstrip()}."
         task = self.tasks.move(
-            task["id"], "done", progress=f"{why} It had finished: its result stands."
+            task["id"], "done", progress=f"{why} It had finished: set aside, not accepted."
         )
         if unaccepted:
             # Done, but not accepted: Home shows it as set aside.
@@ -1869,13 +2135,14 @@ class TaskActions:
         self.publish(task)
         told = (
             f"Task {task['id']} “{task['title']}” had finished already (its result was "
-            "reported): nothing was stopped, and it is done with its result as it was."
+            "reported): nothing was stopped; it is set aside, not accepted (its result is "
+            "kept for reference, not to act on)."
         )
         if withdrawn:
             told += f" Its {len(withdrawn)} draft(s) waiting for the owner were withdrawn."
         with suppress(RuntimeError):
             router = self.runtime.router_id()
-            display = f"“{task['title']}” had finished: set aside, its result stands"
+            display = f"“{task['title']}” had finished: set aside, not accepted"
             meta = {"session_id": task["session_id"], "task_id": task["id"]}
             if by.lower().removeprefix("the ") == "router":
                 self.runtime.add_message(router, "notice", display, meta)
@@ -1934,8 +2201,21 @@ class TaskActions:
         names = json.loads(self.store.get(f"titles:{task_id}") or "[]")
         names.append({"title": task["title"], "at": now(), "by": by})
         self.store.set(f"titles:{task_id}", json.dumps(names[-20:]))
+        before = task["title"]
         task = self.tasks.update(task_id, title=title)
-        self.runtime.publish_session(self.store.session(task["session_id"]))
+        row = self.store.session(task["session_id"])
+        self.runtime.publish_session(row)
+        if row["role"] == WORKER and not row["closed_at"]:
+            # Its worker knows it by the new name too (a retry names it; "that is not what
+            # this task is" otherwise). Read with its next message, not a turn of its own.
+            who = "The owner" if by == "you" else by[:1].upper() + by[1:]
+            note = f"{who} renamed your task {task_id} “{before}” to “{title}”. Same task."
+            self.delivery.hold(
+                row["id"],
+                wrap("system", "renamed", note, task=task_id),
+                kind="notice",
+                display=f"Renamed “{before}” to “{title}”",
+            )
         return self.view(task)
 
     def split_parts(self, task: dict) -> tuple[dict, dict, list[dict]]:
@@ -2133,6 +2413,134 @@ class TaskActions:
         self.runtime.publish_state()  # The split-off task is gone from every list.
         self.runtime.publish_session(self.store.session(made["session_id"]))
         return self.view(restored)
+
+    def open_separate(self, row: dict, text: str) -> dict | None:
+        """The owner asks a worker straight for work apart from what it is on ("New, separate
+        task: …"): a task of its own for that worker, which its report goes to. The task it was
+        on keeps its result (and its PR). None when the message asks for no such thing."""
+        title = separate_task(text)
+        if not title or row["role"] != WORKER:
+            return None
+        return self.tasks.create(row["id"], title, text[:4000], status="running")
+
+    def start_of_more(self, task: dict) -> tuple[str, dict]:
+        """When and where (as a task's base, see record_base) work on a finished task started
+        again: its checkouts when it was last taken up again after its result (the owner's
+        chat, its worker back from other work), else when its result left them."""
+        latest = self.result_at(task)
+        bases = [
+            found
+            for key in ("chatbase", "resumed")
+            if (found := json.loads(self.store.get(f"{key}:{task['id']}") or "{}")).get("at")
+            and found["at"] > latest
+        ]
+        if bases:
+            base = max(bases, key=lambda found: found["at"])
+            at, trees = base["at"], base.get("trees") or {}
+        else:
+            at, trees = latest, json.loads(self.store.get(f"taskend:{task['id']}") or "{}")
+        if not at or not trees:
+            return at, {}
+        commits = {path: found["commit"] for path, found in trees.items() if found.get("commit")}
+        return at, {
+            "at": datetime.fromisoformat(at).timestamp(),
+            "commits": commits,
+            "trees": {path: found["tree"] for path, found in trees.items() if found.get("tree")},
+            "heads": commits,
+            "large": {path: found.get("large", []) for path, found in trees.items()},
+        }
+
+    def split_off(self, task: dict, title: str) -> dict:
+        """A report on work apart from a task's result (its worker says it is another
+        deliverable, or it is on another branch than the task's open PR): a new task of the
+        same worker gets it, with what asked for it since the task was taken up again (the
+        owner's or the Router's messages, the commands run). The task keeps its result and PR,
+        as it was before (a follow-up that was this other work is over)."""
+        title = deliverable_title(title)
+        earlier = self.tasks.find(self.store.get(f"splitoff:{task['id']}") or "")
+        if earlier and earlier["status"] == "running" and not earlier["result"]:
+            return earlier  # Reported again (refused for something else the first time).
+        since, base = self.start_of_more(task)
+        made = self.tasks.create(
+            task["session_id"], title, f"Split off task {task['id']}.", status="running"
+        )
+        self.store.set(f"splitoff:{task['id']}", made["id"])
+        self.store.set(f"started:{made['id']}", "1")  # Taken up: it started where `base` says.
+        if base:
+            self.store.set(f"taskbase:{made['id']}", json.dumps(base))
+        if since:
+            asked = self.store.all(
+                "SELECT id, text, meta FROM messages WHERE session_id=? AND kind IN "
+                "('owner', 'router') AND json_extract(meta, '$.task_id')=? AND created_at>=? "
+                "ORDER BY id",
+                (task["session_id"], task["id"], since),
+            )
+            for message in asked:
+                meta = json.loads(message["meta"] or "{}")
+                self.store.update_message_meta(message["id"], {**meta, "task_id": made["id"]})
+            if asked:
+                goal = "\n\n".join(message["text"] for message in asked)[:4000]
+                made = self.tasks.update(made["id"], goal=goal)
+            run = self.tasks.start_run(made["id"], "split")
+            self.store.execute(
+                "UPDATE commands SET run_id=? WHERE id IN (SELECT c.id FROM commands c JOIN runs "
+                "r ON r.id=c.run_id WHERE r.task_id=? AND c.started_at>=?)",
+                (run["id"], task["id"], since),
+            )
+        if touched := self.store.get(f"touched:{task['id']}"):
+            self.store.set(f"touched:{made['id']}", touched)
+        names = [{"title": f"split from \u201c{task['title']}\u201d", "at": now(), "by": "worker"}]
+        self.store.set(f"titles:{made['id']}", json.dumps(names))
+        for key in ("followup", "morefor", "newresult", "ownchange"):
+            self.store.delete(f"{key}:{task['id']}")
+        if task["status"] in OPEN and (was := self.store.get(f"reopened:{task['id']}")):
+            self.tasks.move(task["id"], was)
+        self.store.set(f"turntask:{task['session_id']}", made["id"])
+        self.publish(self.tasks.get(task["id"]))
+        return made
+
+    async def off_branch(self, task: dict) -> tuple[str, str, str] | None:
+        """(its PR, that PR's branch, the branch it is on now) when the worker did code work for
+        this task, taken up again since its result, on another branch than that of the task's
+        own open PR: that work is not that PR's. None when it is on it, did no such work (an
+        answer in chat, PR news, read while it is on another task's branch), or the task has
+        no open PR of its own."""
+        prs = [
+            pr
+            for pr in self.previous_prs(task["id"])
+            if pr.get("own") and pr.get("state") == "OPEN" and pr.get("branch")
+        ]
+        row = self.store.find_session(task["session_id"])
+        if not prs or not row:
+            return None
+        latest = self.result_at(task)
+        again = self.runtime.turn_task(row["id"]) == task["id"] or any(
+            json.loads(self.store.get(f"{key}:{task['id']}") or "{}").get("at", "") > latest
+            for key in ("chatbase", "resumed")
+        )
+        # Only work for it: since it was taken up again (another task's work in between is
+        # not), as changed_since_result counts it.
+        if not again or not await self.changed_since_result(task):
+            return None
+        found = None
+        for checkout in self.workspaces.checkouts(row):
+            tree = checkout.get("worktree") or checkout["path"]
+            if not await asyncio.to_thread(os.path.isdir, tree):
+                continue
+            with suppress(ValueError):
+                current = (
+                    await checkout_git(checkout, tree, "rev-parse", "--abbrev-ref", "HEAD")
+                ).strip()
+                for pr in prs:
+                    if current == pr["branch"]:
+                        return None
+                    if current in {"", "HEAD"} or found:
+                        continue
+                    with suppress(ValueError):
+                        ref = f"refs/heads/{pr['branch']}"
+                        await checkout_git(checkout, tree, "rev-parse", "--verify", "--quiet", ref)
+                        found = (pr["label"], pr["branch"], current)
+        return found
 
     def news(self, task_id: str, text: str):
         """What a worker reported about its finished work (its PR approved or merged, a reply
@@ -2406,6 +2814,9 @@ class TaskActions:
         follows = self.store.follows(row["id"]) if row else []
         return {
             **task,
+            # As its card shows it: what it said of its PR before it was opened or merged
+            # left out once that is past (the stored result stays as reported).
+            "result": self.shown_result(task),
             "worker": self.runtime.display_title(row) if row else "",
             "worker_status": row.get("status", ""),
             "worker_closed": bool(row.get("closed_at")),
@@ -2438,6 +2849,13 @@ class TaskActions:
             # Cancelled after it reported, before the owner accepted it: done, not accepted.
             "set_aside": task["status"] == "done"
             and bool(self.store.get(f"setaside:{task['id']}")),
+            # Waiting on a question about its own draft: that draft's card is where it is
+            # decided (one card, not a question beside it).
+            "question_draft": (
+                (self.runtime.drafts.question_draft(task) or {}).get("id", "")
+                if task["status"] == "waiting" and not self.store.get(f"stopped:{task['id']}")
+                else ""
+            ),
             # Stopped by the owner (or the Watchdog) mid-work: it waits to be told to go on.
             "stopped": self.store.get(f"stopped:{task['id']}") or "",
             # What it made or runs, as its worker last said: a short name and status each.

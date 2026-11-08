@@ -97,6 +97,8 @@ export function taskPhase(task, worker, { active = "", activeTitle = "", stopped
   const checkBack = task.check_back;
   if (task.blocked) return at("needs", "blocked", "It waits for a task that ended without finishing");
   if (task.status === "waiting" && task.stopped) return at("needs", "stopped", `Stopped by ${task.stopped}: tell it to go on, or cancel it`);
+  // Its question is about its own draft: decided on that draft's card, which holds it.
+  if (task.status === "waiting" && onCard && task.question_draft) return at("", "", "On its draft's card under Needs you");
   if (task.status === "waiting") return at("needs", "question", "It waits for your answer");
   if (task.status === "failed") return at("needs", "failed", "");
   if (task.status === "cancelled") return at("finished", "cancelled");
