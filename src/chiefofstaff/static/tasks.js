@@ -116,7 +116,7 @@ export function taskItem(task, phase = phaseOf(task)) {
     key: `task:${task.id}:${task.status}:${phase.section}:${phase.marker}:${task.stopped ? 1 : 0}:${task.blocked ? 1 : 0}:${createsPr(task) ? 1 : 0}:${task.news?.at || ""}:${task.splittable ? 1 : 0}:${undoUntil(task) ? 1 : 0}`,
     id: task.id,
     // For running cards the minute too: "6m" and "3m ago" move on by themselves.
-    version: `${task.updated_at}:${task.title}:${phase.why}:${meta.join("|")}:${help}:${task.read ? 1 : 0}:${worker?.status || ""}:${worker?.activity || ""}:${worker?.step || ""}:${worker?.step_since || ""}:${worker?.turn_task || ""}:${task.credits}:${task.runs}:${JSON.stringify(task.receipts?.prs || null)}:${task.status === "review" ? JSON.stringify(task.receipts || null) : ""}:${live ? `${Math.floor(Date.now() / 60000)}:${queuedKey()}` : ""}:${waitsOnOwner(task, worker)}:${(task.watching || []).join(",")}:${(task.watch_failing || []).join(",")}:${JSON.stringify(task.watch_failing_why || null)}:${JSON.stringify(task.check_back || null)}:${task.nudged_at || ""}:${JSON.stringify(task.receipts?.changed || null)}:${JSON.stringify(made)}`,
+    version: `${task.updated_at}:${task.title}:${phase.why}:${meta.join("|")}:${help}:${task.read ? 1 : 0}:${worker?.status || ""}:${worker?.activity || ""}:${worker?.step || ""}:${worker?.step_since || ""}:${worker?.turn_task || ""}:${task.credits}:${task.runs}:${JSON.stringify(task.receipts?.prs || null)}:${task.status === "review" ? JSON.stringify(task.receipts || null) : ""}:${live ? `${Math.floor(Date.now() / 60000)}:${queuedKey()}` : ""}:${waitsOnOwner(task, worker)}:${(task.watching || []).join(",")}:${(task.watch_failing || []).join(",")}:${(task.watch_unreadable || []).join(",")}:${JSON.stringify(task.watch_failing_why || null)}:${JSON.stringify(task.check_back || null)}:${task.nudged_at || ""}:${JSON.stringify(task.receipts?.changed || null)}:${JSON.stringify(made)}`,
     build: () => taskCard(task, phase),
     refresh: (node) => refreshTaskCard(node, task, phase),
   };
@@ -765,8 +765,10 @@ function waitWords(task, worker, phase) {
     text = `Checks back at ${clockTime(back.at)}: ${back.what}`;
     if (back.error) text += ` · could not wake it last time (${back.error}); trying again`;
     help = "It said when to look again; it is woken then";
-  } else if (["watching", "delivered", "reviewed"].includes(marker) && (task.watching || []).length) {
-    const what = followedOnce(task.watching).map((key) => watchedWords(key, task)).join("; ");
+  } else if (["watching", "delivered", "reviewed"].includes(marker) && [...(task.watching || []), ...(task.watch_unreadable || [])].length) {
+    // One it cannot read now is said so (its card says why).
+    const unread = new Set(task.watch_unreadable || []);
+    const what = followedOnce([...(task.watching || []), ...unread]).map((key) => `${watchedWords(key, task)}${unread.has(key) ? " (can't read it now)" : ""}`).join("; ");
     text = `${marker === "watching" ? "Waiting on" : marker === "reviewed" ? "Reviewed; following" : "Delivered; still following"} ${what}`;
     help = marker === "reviewed" ? "A PR you reviewed: its author's next push or reply wakes its worker" : "News there (a review, CI, a reply, the merge) wakes its worker";
   } else if (marker === "queued") {

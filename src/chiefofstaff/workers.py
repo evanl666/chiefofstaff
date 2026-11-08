@@ -1258,6 +1258,33 @@ class Workers:
         for row in self.store.open_sessions(WORKER):
             if self.runtime.copilot_id(row["id"]) in changed:
                 self.runtime.publish_session(row)
+                if self.runtime.copilot_id(row["id"]) not in self.runtime.elsewhere:
+                    await self.closed_elsewhere(row)
+
+    async def closed_elsewhere(self, row: dict):
+        """A worker's terminal was closed: what came for it meanwhile (news on what it follows)
+        goes to it now, and the Router hears it can reach it again (it may have promised the
+        owner to send something once it was closed)."""
+        news = json.loads(self.store.get(f"heldnews:{row['id']}") or "[]")
+        self.store.delete(f"heldnews:{row['id']}")
+        for item in news:
+            try:
+                await self.runtime.delivery.deliver(
+                    row["id"], item["prompt"], batch=True, kind="inbound",
+                    display=item["display"], meta=item["meta"],
+                )  # fmt: skip
+            except Exception:
+                logger.warning("Could not deliver news held for %s.", row["id"], exc_info=True)
+        if self.store.get(f"refusedopen:{row['id']}"):
+            self.store.delete(f"refusedopen:{row['id']}")
+            title = self.runtime.display_title(row)
+            with suppress(Exception):
+                await self.runtime.tell_router(
+                    row,
+                    "reachable",
+                    f"\u201c{title}\u201d is no longer open in a terminal: messages reach it "
+                    "again. Send it now what could not reach it while it was open there.",
+                )
 
     async def release_idle(self, moment: float | None = None) -> list[str]:
         """Workers quiet for a while let go of their Copilot session: the MCP servers it

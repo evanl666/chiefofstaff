@@ -907,7 +907,7 @@ async def test_a_later_task_on_the_same_branch_shows_only_its_own_changes(tmp_pa
     commit(tree, "doc.py", "doc = True\n")
     await call_tool(runtime, "report", session_id, status="done", summary="Docstring added.")
     await call_tool(runtime, "message_session", harness.router_id, session_id=session_id,
-                    task="new", title="Fix chunk", text="Fix chunk")  # fmt: skip
+                    task="new", why_new="test", title="Fix chunk", text="Fix chunk")  # fmt: skip
     chunk = task_of(harness, session_id)
     await settle(runtime)
     for _ in range(50):
@@ -926,7 +926,8 @@ async def test_a_later_task_on_the_same_branch_shows_only_its_own_changes(tmp_pa
         "the first task's result is what it delivered: not the later task's commit"
     )
     await call_tool(runtime, "message_session", harness.router_id, session_id=session_id,
-                    task="new", title="Count tests", text="How many tests?")  # fmt: skip
+                    task="new", title="Count tests", text="How many tests?",
+                    why_new="test")  # fmt: skip
     question = task_of(harness, session_id)
     await settle(runtime)
     for _ in range(50):
@@ -975,7 +976,8 @@ async def test_in_the_owners_folder_a_task_has_what_it_changed_not_another_tasks
     assert "+def shout(text):" in found["diff"] and "theirs.txt" not in found["diff"]
 
     await call_tool(runtime, "message_session", harness.router_id, session_id=mine,
-                    task="new", title="Add whisper", text="Add whisper")  # fmt: skip
+                    task="new", title="Add whisper", text="Add whisper",
+                    why_new="test")  # fmt: skip
     whisper = task_of(harness, mine)
     await settle(runtime)
     for _ in range(50):
@@ -1197,7 +1199,7 @@ async def test_a_follow_up_after_a_later_task_does_not_take_in_its_changes(tmp_p
     await call_tool(runtime, "report", session_id, status="done", summary="Slugify.")
     await receipts_of(runtime, first)
     await call_tool(runtime, "message_session", harness.router_id, session_id=session_id,
-                    task="new", title="Truncate", text="Add truncate")  # fmt: skip
+                    task="new", why_new="test", title="Truncate", text="Add truncate")  # fmt: skip
     second = task_of(harness, session_id)
     await settle(runtime)
     for _ in range(50):
@@ -1246,7 +1248,7 @@ async def test_a_follow_up_after_a_later_tasks_commit_on_the_same_file(tmp_path)
     await call_tool(runtime, "report", session_id, status="done", summary="Currency.")
     await receipts_of(runtime, first)
     await call_tool(runtime, "message_session", harness.router_id, session_id=session_id,
-                    task="new", title="Truncate", text="Add truncate")  # fmt: skip
+                    task="new", why_new="test", title="Truncate", text="Add truncate")  # fmt: skip
     second = task_of(harness, session_id)
     await settle(runtime)
     for _ in range(50):
@@ -1427,7 +1429,7 @@ async def test_a_later_task_keeps_its_start_when_its_files_are_too_big_to_copy(
     (tree / "data.bin").write_bytes(b"0" * 100)  # Too big to copy (here).
     await call_tool(runtime, "report", session_id, status="done", summary="First.")
     await call_tool(runtime, "message_session", harness.router_id, session_id=session_id,
-                    task="new", title="Second", text="Add second")  # fmt: skip
+                    task="new", why_new="test", title="Second", text="Add second")  # fmt: skip
     second = task_of(harness, session_id)
     await settle(runtime)
     for _ in range(50):
@@ -1486,7 +1488,8 @@ async def test_a_tasks_new_folder_and_merged_upstream_work_are_counted_right(tmp
     commit(tree, "first.py", "first = True\n")
     await call_tool(runtime, "report", session_id, status="done", summary="First.")
     await call_tool(runtime, "message_session", harness.router_id, session_id=session_id,
-                    task="new", title="Feature", text="Add the feature")  # fmt: skip
+                    task="new", title="Feature", text="Add the feature",
+                    why_new="test")  # fmt: skip
     feature = task_of(harness, session_id)
     await settle(runtime)
     for _ in range(50):
@@ -1620,7 +1623,7 @@ async def test_a_follow_up_after_a_split_and_another_task_leaves_out_that_tasks_
     await receipts_of(runtime, task, lambda found: found["changed"]["commits"] == 2)
     runtime.task_actions.split(task, "Add the units module")
     await call_tool(runtime, "message_session", harness.router_id, session_id=session_id,
-                    task="new", title="Truncate", text="Add truncate")  # fmt: skip
+                    task="new", why_new="test", title="Truncate", text="Add truncate")  # fmt: skip
     other = task_of(harness, session_id)
     await settle(runtime)
     for _ in range(50):
@@ -1993,3 +1996,53 @@ async def test_a_file_it_committed_then_changed_after_others_counts_once(tmp_pat
     assert (found["insertions"], found["deletions"]) == (3, 0), found
     shown = (await workspaces_module.diff(checkout, scope))["diff"]
     assert shown.count("+b = 2") == 1 and "+d = 4" in shown and "+# someone else" not in shown
+
+
+async def test_a_task_built_on_another_tasks_branch_counts_only_its_own_commits(tmp_path):
+    """Bug bash 7 (D2): a task whose worker fast-forwarded onto another task's branch counted
+    that task's commits as its own ("+66 −0 in 3 files" for a 13-line README section) and was
+    out of date when that task's files changed."""
+    _, app = published(tmp_path, "textkit")
+    harness = Harness(tmp_path / "data", Settings(projects=[str(app)]))
+    runtime = await harness.connect()
+    first = await spawn(runtime, harness.router_id, title="Truncate", instructions="x",
+                        project=str(app), isolate=True)  # fmt: skip
+    tree = Path(first["cwd"])
+    (tree / "textkit").mkdir()
+    (tree / "tests").mkdir()
+    (tree / "textkit" / "__init__.py").write_text("def truncate(text, n):\n    return text[:n]\n")
+    (tree / "tests" / "test_truncate.py").write_text("def test_truncate(): ...\n")
+    (tree / "README.md").write_text("# textkit\n\nHas truncate.\n")
+    run("git", "add", "-A", cwd=tree)
+    run("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "truncate",
+        cwd=tree)  # fmt: skip
+    await call_tool(runtime, "report", first["session_id"], status="done", summary="Truncate.")
+    await receipts_of(runtime, first["task_id"])
+    await asyncio.sleep(1.1)  # Its commit is from before the next task was taken up.
+    worker = await spawn(runtime, harness.router_id, title="README section", instructions="x",
+                         project=str(app), isolate=True)  # fmt: skip
+    tree, session_id, task = Path(worker["cwd"]), worker["session_id"], worker["task_id"]
+    for _ in range(50):
+        if runtime.store.get(f"taskbase:{task}"):
+            break
+        await asyncio.sleep(0.05)
+    run("git", "merge", "-q", "--ff-only", first["branch"], cwd=tree)
+    with (tree / "README.md").open("a") as file:
+        file.write("\n## Truncate\n\n`truncate(text, n)` keeps the first n characters.\n")
+    run("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qam", "README",
+        cwd=tree)  # fmt: skip
+    await call_tool(runtime, "report", session_id, status="done", summary="README section.")
+    changed = (await receipts_of(runtime, task))["changed"]
+    assert changed["commits"] == 1 and changed["files"] == 1, changed
+    assert (changed["insertions"], changed["deletions"]) == (4, 0), changed
+    [found] = await runtime.task_actions.diff(task)
+    assert "+## Truncate" in found["diff"], found["diff"]
+    assert "+Has truncate" not in found["diff"] and "test_truncate" not in found["diff"]
+    # The other task's files change in its checkout: not its own.
+    (tree / "tests" / "test_truncate.py").write_text("def test_truncate(): assert True\n")
+    await runtime.task_actions.check_fresh(session_id)
+    assert not (await receipts_of(runtime, task))["stale"]
+    (tree / "README.md").write_text("# textkit\n")
+    await runtime.task_actions.check_fresh(session_id)
+    found = await receipts_of(runtime, task, lambda found: bool(found["stale"]))
+    assert found["stale"] == "Out of date: its files changed since it was checked (README.md)."

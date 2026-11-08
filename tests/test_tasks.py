@@ -36,6 +36,7 @@ async def test_a_dependency_waits_for_the_new_work_of_a_reused_worker(harness):
         session_id=worker,
         text="Add a captcha to the login form",
         task="new",
+        why_new="test",
         title="Add captcha",
     )
     captcha = task_of(harness, worker)
@@ -69,6 +70,7 @@ async def test_a_queued_worker_given_more_work_still_waits_for_its_first_tasks_d
         session_id=worker,
         text="Also add a metric",
         task="new",
+        why_new="test",
         title="Metric",
     )
     metric = task_of(harness, worker)
@@ -151,6 +153,7 @@ async def test_cancelling_a_task_stops_its_worker_and_blocks_what_depends_on_it(
         session_id=worker,
         text="Next",
         task="new",
+        why_new="test",
         title="Next",
     )
     sent = harness.session(worker).sent[-1]
@@ -415,7 +418,7 @@ async def test_a_task_that_drifted_is_split_with_each_result_its_own(harness):
                     task_id=split["id"])  # fmt: skip
     other = await call_tool(
         runtime, "message_session", harness.router_id, session_id=worker, task="new",
-        title="Backfill the BG table", text="Backfill it",
+        why_new="test", title="Backfill the BG table", text="Backfill it",
     )  # fmt: skip
     assert other.result_type == "success", other.text_result_for_llm
     busy = runtime.tasks.current(worker)

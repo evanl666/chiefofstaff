@@ -62,7 +62,11 @@ does not start that work again (nor a new Router after a handover) unless you as
 write in a worker's chat answers the task that asked you (or the question or decision card it
 waits on), and that task goes on at once; about finished work, its answer is an
 *Update* on the task, which keeps its result, unless it changed code for you: then that is a new
-result to review. More asked of a reported result (*Follow up…*, or the Router continuing it)
+result to review. A message there that asks for something else ("New, separate task: add mod()
+on a new branch", another PR or question) is told apart by the worker that reads it, not by
+its words: it reports that work as a task of its own, with your message and what it ran for
+it, and the task it was on keeps its result (or, still at work, goes on).
+More asked of a reported result (*Follow up…*, or the Router continuing it)
 comes back as the whole result, updated: its worker is told that its report replaces the
 result, and one that reports only what it added is asked once for the whole. Written to it from Home (@ in the Router chat), its answer shows there too
 (once: not when its report is there already). A worker's **⋯** (top right) has its
@@ -155,8 +159,10 @@ Chinese included). For work on a subject a worker already knows, the Router eith
   change with its own branch and PR, or work that must run in parallel. It gets the earlier
   tasks' results, folders and files, not their whole conversations.
 
-`spawn_worker` refuses once when related workers exist, so the Router decides explicitly; the
-timeline shows *New task … for …*, *Continued in …* or *Started … · new because …*.
+`spawn_worker` refuses once when related workers exist, so the Router decides explicitly; so
+does a new task for a worker given one in the last half hour ("oh wait, one more thing" is
+more of that task), unless the Router says why it is another. The timeline shows *New task …
+for …*, *Continued in …* or *Started …* (or *New task …*) *· new because …*.
 
 Workers close themselves when their PR is merged or closed. Finished workers that follow
 nothing close after *Close idle after* hours (default 24), unless something of theirs is still
@@ -303,9 +309,10 @@ A worker's report is its claim. Receipts are what Chief of Staff observed:
 - the state and checks of pull requests it reported.
 
 The review card shows them under *Observed* and flags disagreements, e.g. *Says tests pass, but
-no test run was observed*, *The last test run failed (exit 1)*, or *Checks are failing on
-acme/app#7*. A test that failed first and then passed (a regression test for a fix) shows as
-*✗→✓ tests*. *Copy report* puts goal, result and receipts into markdown.
+no test run was observed*, *The last test run failed (exit 1)*, *Checks are failing on
+acme/app#7*, or *Says it made changes, but its checkouts have none* (each worker says with its
+report whether it changed files). A test that failed first and then passed (a regression test
+for a fix) shows as *✗→✓ tests*. *Copy report* puts goal, result and receipts into markdown.
 
 Receipts show the latest: the card changes as soon as a test run, push or commit ends, also
 after the report (work on its PR). A test run Copilot left running (a long suite, or one in the

@@ -25,6 +25,8 @@ NEEDS_WORDS = {
     "update": "update",
     "stalled": "no progress",
     "check-failed": "check-back failed",
+    "pr-failing": "CI failing on its PR",
+    "pr-changes": "changes requested on its PR",
 }
 # Cards whose text goes out once the owner approves it.
 APPROVALS = {"slack", "github", "reply"}
@@ -131,7 +133,11 @@ def needs_marker(runtime: Runtime, task: dict, moment: datetime) -> str:
         return ""  # Its worker follows up on the owner's message: under Running.
     if store.get(f"news:{task_id}"):
         return "update"
-    return "review" if actions.needs_acceptance(task) else ""
+    if actions.needs_acceptance(task):
+        return "review"
+    # Delivered, its own PR to fix (CI failing, changes requested): Home's rule.
+    marker, _why = actions.own_pr_standing(task)
+    return marker if marker in {"pr-failing", "pr-changes"} else ""
 
 
 def needs(runtime: Runtime, moment: datetime | None = None) -> Needs:

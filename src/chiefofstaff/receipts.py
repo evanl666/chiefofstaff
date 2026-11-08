@@ -119,68 +119,6 @@ def says_tests_pass(report: str) -> bool:
     return False
 
 
-SAYS_CHANGED = re.compile(
-    r"\b(added|fixed|implemented|changed|updated|refactored|created|removed|renamed|committed)\b",
-    re.IGNORECASE,
-)
-# A negation that governs the verb right after it: "No files were changed", "nothing was
-# committed", "were not updated"; not "it did not work, so I fixed it".
-NEGATED = re.compile(
-    r"(\b(no|not|nothing|never|none|neither|nor)\b|n't)(\W+\w+){0,4}\W*$", re.IGNORECASE
-)
-# Or right after it: "I changed nothing", "modified no files" (not "added no-cache headers").
-NOTHING_AFTER = re.compile(r"\s+(nothing|none|no\s)", re.IGNORECASE)
-
-
-# Changed by someone else, or before: "it was already fixed upstream", "fixed by Bob in #12".
-NOT_ITS_OWN = re.compile(
-    r"\balready\b|\bupstream\b|\bautomatically\b"
-    r"|\bby (someone|something|another|other|an? (unknown|external|other)|@?[A-Z]\w+)\b"
-)
-# What it heard or believes was done (to a library, in a release), not what it did: "I believe
-# the pure-Python mode was removed", "it seems it was renamed in v2".
-HEDGED = re.compile(
-    r"\b(believe|think|seems?|apparently|reportedly|according|probably|likely|docs|changelog)\b"
-    r"|\b(in|since) (v\d|version|release)",
-    re.IGNORECASE,
-)
-PASSIVE = re.compile(r"\b(was|were|been|is|are|got)\s+(\w+\s+)?$", re.IGNORECASE)
-# A report that says outright it changed nothing (whatever its prose mentions as changed).
-CHANGED_NOTHING = re.compile(
-    r"\b(no (code|files?|changes?) (was|were|has been|have been) (written|changed|modified|made)"
-    r"|nothing (was|has been) (changed|modified|written|edited)"
-    r"|(did not|didn't|have not|haven't) (change|modify|write|edit|touch) "
-    r"(anything|any (code|files?))"
-    r"|made no changes|no changes (were )?made"
-    r"|(changed|modified|touched|edited) (no (code|files?)|nothing)|no code (was )?changed)\b",
-    re.IGNORECASE,
-)
-
-
-def says_changed(report: str) -> bool:
-    """Whether a report claims changes: "I added a test", not "No files were changed" or
-    "it was already fixed upstream"."""
-    if CHANGED_NOTHING.search(report):
-        return False
-    for match in SAYS_CHANGED.finditer(report):
-        clause = re.split(r"[.!?;:,\n]", report[max(0, match.start() - 80) : match.start()])[-1]
-        rest = re.split(r"[.!?;:,\n]", report[match.end() : match.end() + 60])[0]
-        if NEGATED.search(clause) or NOTHING_AFTER.match(report, match.end()):
-            continue
-        if PASSIVE.search(clause) and HEDGED.search(f"{clause} {rest}"):
-            continue
-        if re.match(r"\s+to\s+[\"\u201c'`]", report[match.end() :]) or re.search(
-            r"[\"\u201d'`]\s*$", clause
-        ):
-            continue  # Wording: '"it's broken" changed to "it has a bug"' (a reply's text).
-        if NOT_ITS_OWN.search(clause[-20:]) or NOT_ITS_OWN.match(rest.strip()):
-            continue
-        if re.match(r"\s+(by|in) ", rest) and NOT_ITS_OWN.search(rest):
-            continue
-        return True
-    return False
-
-
 def drop_heredocs(command: str) -> str:
     """A command line without the bodies of its here-documents (text, not commands)."""
     lines, kept, until = command.split("\n"), [], None
@@ -286,22 +224,30 @@ def shown_command(command: str, name: str) -> str:
     )
     if at < 0:
         return shown(command)
-    words, kept = parts[at], []
+    text = " ".join(runs(parts[at]))
+    where = next((ws[1] for ws in reversed(parts[:at]) if len(ws) == 2 and ws[0] == "cd"), "")
+    if where:
+        text = f"cd {shlex.quote(where)} && {text}"
+    return shown(text)
+
+
+def runs(words: list[str]) -> list[str]:
+    """A simple command's words without its redirections (`2>&1`, `> out.txt`: not what
+    runs), quoted again where they hold spaces."""
+    kept: list[str] = []
     skip = False
     for index, word in enumerate(words):
         if skip:
             skip = False
         elif re.fullmatch(r"\d*[<>]+&?|&>", word):
-            skip = True  # A redirection and its target: not what runs.
+            skip = not word.endswith("&")  # Its target follows, unless it is a descriptor.
+            if word.endswith("&") and index + 1 < len(words) and words[index + 1].isdigit():
+                skip = True  # "2>&1" split as "2", ">&", "1".
         elif word.isdigit() and index + 1 < len(words) and words[index + 1][:1] in "<>":
             continue
         else:
             kept.append(shlex.quote(word) if re.search(r"\s", word) else word)
-    text = " ".join(kept)
-    where = next((ws[1] for ws in reversed(parts[:at]) if len(ws) == 2 and ws[0] == "cd"), "")
-    if where:
-        text = f"cd {shlex.quote(where)} && {text}"
-    return shown(text)
+    return kept
 
 
 def kind(command: str) -> str:
@@ -472,7 +418,7 @@ def cited_part(evidence: str, command: str) -> str:
     edit chained before it); the line itself when none is named alone."""
     quoted = QUOTED.findall(evidence or "")
     for parts in simple_commands(command):
-        part = " ".join(parts)
+        part = " ".join(runs(parts))
         if any(names(snippet, part) for snippet in quoted):
             return shown(part)
     return shown(command)
@@ -647,9 +593,12 @@ def summarize(
     claims: list[dict] | None = None,
     earlier: list[dict] | None = None,
     since: str = "",
+    said_changed: bool | None = None,
 ) -> dict:
     """The receipts for a task: observed commands, changes and PRs, the acceptance criteria and
-    what backs them, and what disagrees. `earlier`, `since`: see criteria_results."""
+    what backs them, and what disagrees. `earlier`, `since`: see criteria_results.
+    `said_changed`: whether its worker said it changed files (report's changed_code; None when
+    it did not say)."""
     commands = list(commands)
     evidence = evidence or {}
     by_kind: dict[str, list[dict]] = {}
@@ -722,7 +671,7 @@ def summarize(
             flags.append(f"Says tests pass, but the last test run failed (exit {code}).")
     elif tests and tests["passed"] is False:
         flags.append(f"The last test run failed (exit {tests['exit_code']}).")
-    if checkouts and says_changed(report or "") and not any(changed.values()):
+    if checkouts and said_changed and not any(changed.values()):
         flags.append("Says it made changes, but its checkouts have none.")
     for pr in prs:
         # A closed or merged PR's checks are history: nothing to fix there now.

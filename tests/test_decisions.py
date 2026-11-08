@@ -138,7 +138,7 @@ async def test_claims_on_an_earlier_task_and_a_bad_decision_id(harness):
     runtime = await harness.connect()
     first = await spawn(runtime, harness.router_id, "API", done_when=["`make test` passes"])
     await call_tool(runtime, "message_session", harness.router_id, session_id=first["session_id"],
-                    text="Also the docs", task="new", title="Docs")  # fmt: skip
+                    text="Also the docs", task="new", why_new="test", title="Docs")  # fmt: skip
     criteria = [{"criterion": "`make test` passes", "result": "met", "evidence": "x"}]
     await call_tool(runtime, "report", first["session_id"], status="done", summary="API done.",
                     task_id=first["task_id"], criteria=criteria)  # fmt: skip

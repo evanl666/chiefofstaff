@@ -192,82 +192,6 @@ def deliverable_title(title: str) -> str:
 # A character that is a word of its own (Han, kana, Hangul).
 CJK = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]")
 
-# The owner asking a worker straight for work apart from the task it is on, explicitly: the
-# message leads with it ("New, separate task for this worker: …", "Another task: …", and in
-# Chinese "new task:", "another task:", "open another task:"), or tells it to do something
-# "as a separate task". Not a question about it, nor what it says is not one.
-SEPARATE_LEAD = re.compile(
-    r"^\W*(?:(?:here(?:'s| is)|please(?:\s+(?:do|take|start))?|now|and|also)\s+)?"
-    r"(?:an?\s+)?(?:another|new|separate|different|unrelated|independent)"
-    r"(?:[\s,]+(?:and\s+)?(?:new|separate|different|unrelated|independent))?\s+task"
-    r"(?:\s+(?:for|to)\s+[^:\n\uff1a]{1,40}?)?\s*[:\uff1a]"
-    r"|^\W*\u8bf7?(?:[\u53e6\u518d\u65b0]?[\u5f00\u5efa](?:\u4e00\u4e2a)?"
-    r"(?:\u65b0\u7684?|\u5355\u72ec\u7684?|\u72ec\u7acb\u7684?)?|(?:\u4e00\u4e2a)?"
-    r"(?:\u53e6\u4e00\u4e2a|\u53e6\u5916\u4e00\u4e2a|\u65b0\u7684?|\u5355\u72ec\u7684?|"
-    r"\u72ec\u7acb\u7684?))\u4efb\u52a1(?:\u7ed9[^:\n\uff1a]{1,20}?)?\s*[:\uff1a]",
-    re.IGNORECASE,
-)
-SEPARATE_PHRASE = re.compile(
-    r"\b(?:as|in|into)\s+(?:an?\s+)?(?:new|separate|different|independent)\s+task\b"
-    r"|\u4f5c\u4e3a(?:\u4e00\u4e2a)?(?:\u65b0\u7684?|\u5355\u72ec\u7684?|\u53e6\u4e00\u4e2a|"
-    r"\u72ec\u7acb\u7684?)\u4efb\u52a1",
-    re.IGNORECASE,
-)
-# In the same clause, what makes "as a separate task" not a request for one: a negation ("I
-# don't think this needs to go in a separate task", Chinese "not", "don't", "without"), "rather
-# than", "instead of" (Chinese "rather than"), a question ("would", "should", Chinese "ma").
-NOT_ASKED = re.compile(
-    r"\b(?:not|no|never|without|rather|instead|than|unless)\b|n't\b"
-    r"|[\u4e0d\u522b\u6ca1\u5417]|\u800c\u4e0d\u662f",
-    re.IGNORECASE,
-)
-# How a sentence that is not an instruction starts (a statement or a question): "When I save it
-# as a new task…", "Would this be better as a separate task", Chinese "I", "if", "this".
-NOT_AN_ORDER = re.compile(
-    r"(?:i|we|you|he|she|it|they|this|that|these|those|there|here|when|whenever|if|while|"
-    r"because|since|as|after|before|once|would|could|should|can|will|shall|may|might|must|is|"
-    r"are|was|were|does|did|has|have|had|why|what|how|where|who|which|maybe|perhaps|the|a|an|"
-    r"my|our|your|its|their)\b|[\u6211\u4f60\u4ed6\u5979\u5b83\u8fd9\u90a3]|\u5982\u679c|\u5f53",
-    re.IGNORECASE,
-)
-
-
-def separate_task(text: str) -> str:
-    """The title of separate work the owner asks a worker for in their message ("New task: add
-    mod() on a new branch" gives "Add mod() on a new branch"); "" when it asks for none."""
-    text = text.strip()
-    if found := SEPARATE_LEAD.match(text):
-        rest = text[found.end() :]
-    elif found := SEPARATE_PHRASE.search(text):
-        # Its clause: from the boundary before it to the one after it.
-        bound = r"[.!?;](?=\s|$)|\n|[\u3002\uff01\uff1f\uff1b]"
-        start = max([m.end() for m in re.finditer(bound, text[: found.start()])], default=0)
-        stop = re.search(bound, text[found.end() :])
-        end = found.end() + stop.start() if stop else len(text)
-        clause = text[start:end]
-        fluff = r"^\W*(?:(?:please|now|also|then|and|ok(?:ay)?|so)\b\W*)*"
-        opening = re.sub(fluff, "", clause, flags=re.IGNORECASE)
-        if (
-            NOT_ASKED.search(clause)
-            or text[end : end + 1] in {"?", "\uff1f"}
-            or NOT_AN_ORDER.match(opening)
-        ):
-            return ""
-        after = text[found.end() : end].strip()
-        if after[:1] in {":", "\uff1a"}:
-            rest = after[1:]  # "Do this as a separate task: add mod()."
-        else:
-            before = re.sub(fluff, "", text[start : found.start()], flags=re.IGNORECASE)
-            rest = before.rstrip() + " " + after
-    else:
-        return ""
-    first = re.split(r"(?<=[.!?])\s+|(?<=[\u3002\uff01\uff1f])|\n", rest.strip(), maxsplit=1)[0]
-    first = first.strip(" ,;:.\u3002")
-    try:
-        return deliverable_title(first[:1].upper() + first[1:])
-    except ValueError:
-        return "Separate work the owner asked for"
-
 
 def ran_in(command: str) -> str:
     """Where a command line runs, when it says so (`cd folder && …`); "" otherwise."""
@@ -455,6 +379,36 @@ def pr_title(subjects: list[str], limit: int = 100) -> str:
     return title
 
 
+def pr_status(pr: dict) -> str:
+    """Where a PR stands in a word or two: the same rule as the UI's prStatus (board.js), worst
+    first (changes requested before failing CI: the author acts on the review either way)."""
+    if pr.get("state") == "MERGED":
+        return "merged"
+    if pr.get("state") == "CLOSED":
+        return "closed"
+    if pr.get("draft"):
+        return "draft"
+    if pr.get("review") == "CHANGES_REQUESTED":
+        return "changes requested"
+    if pr.get("checks") == "failing":
+        return "CI failing"
+    if pr.get("awaiting"):
+        return "awaiting approval"
+    if pr.get("checks") == "pending":
+        return "CI running"
+    if pr.get("merge_state") in {"CLEAN", "HAS_HOOKS"}:
+        return "ready to merge"
+    return "approved" if pr.get("review") == "APPROVED" else "in review"
+
+
+# What a delivered task's own PR asks for, most pressing first (board.js PR_MARKERS).
+PR_MARKERS = {
+    "changes requested": "pr-changes",
+    "CI failing": "pr-failing",
+    "ready to merge": "mergeable",
+}
+
+
 class TaskActions:
     """Changes tasks on behalf of sessions and the owner."""
 
@@ -489,7 +443,7 @@ class TaskActions:
         )
         # Claims are saved with the report; what was observed follows from git and gh.
         runs = self.store.all(
-            """SELECT started_at, evidence, criteria FROM runs WHERE task_id=?
+            """SELECT id, started_at, evidence, criteria FROM runs WHERE task_id=?
             AND (evidence!='' OR criteria!='') ORDER BY started_at DESC""",
             (task["id"],),
         )
@@ -506,9 +460,10 @@ class TaskActions:
             return None
         claims = json.loads(latest["criteria"]) if latest and latest["criteria"] else []
         earlier, since = self.earlier_claims(runs) if criteria else ([], "")
+        said = self.store.get(f"saidchanged:{latest['id']}") if latest else None
         found = receipts.summarize(
             commands, evidence, task["result"] or task["progress"], criteria, claims,
-            earlier=earlier, since=since,
+            earlier=earlier, since=since, said_changed=None if said is None else said == "1",
         )  # fmt: skip
         found["flags"] += failing
         if found.get("tests"):
@@ -1090,6 +1045,38 @@ class TaskActions:
         if receipts.get("criteria") and receipts.get("verdict") != "verified":
             return True
         return bool(receipts.get("flags"))
+
+    def own_pr_standing(self, task: dict) -> tuple[str, str]:
+        """Where a delivered task's own open PRs that it follows stand, as Home places it
+        (board.js ownPrStanding): ("pr-changes" | "pr-failing" | "mergeable", why), the most
+        pressing first; ("", "") when none asks for anything. Unreadable ones count, as they
+        stood when last read."""
+        row = self.store.find_session(task["session_id"])
+        if not row:
+            return "", ""
+        followed = {
+            f"{found.group(1)}#{found.group(2)}".lower()
+            for key in self.followed_for(task, self.store.follows(row["id"]))
+            if (found := threads.GITHUB_PR.fullmatch(key))
+        }
+        prs = [
+            pr
+            for pr in (self.view(task).get("receipts") or {}).get("prs") or []
+            if pr.get("own") and pr["label"].lower() in followed
+        ]
+        ranked = [(PR_MARKERS[word], pr) for pr in prs if (word := pr_status(pr)) in PR_MARKERS]
+        if not ranked:
+            return "", ""
+        marker, pr = min(ranked, key=lambda item: list(PR_MARKERS.values()).index(item[0]))
+        short = pr["label"].split("/", 1)[-1]
+        failing = (
+            f" ({', '.join(pr['failing'])})" if marker == "pr-failing" and pr.get("failing") else ""
+        )
+        return marker, {
+            "pr-changes": f"Changes requested on {short}",
+            "pr-failing": f"CI failing on {short}{failing}",
+            "mergeable": f"Ready to merge: {short}",
+        }[marker]
 
     def status_words(self, task: dict) -> str:
         """A task's status for the Router: a finished one says whether it waits for the owner."""
@@ -2414,15 +2401,6 @@ class TaskActions:
         self.runtime.publish_session(self.store.session(made["session_id"]))
         return self.view(restored)
 
-    def open_separate(self, row: dict, text: str) -> dict | None:
-        """The owner asks a worker straight for work apart from what it is on ("New, separate
-        task: …"): a task of its own for that worker, which its report goes to. The task it was
-        on keeps its result (and its PR). None when the message asks for no such thing."""
-        title = separate_task(text)
-        if not title or row["role"] != WORKER:
-            return None
-        return self.tasks.create(row["id"], title, text[:4000], status="running")
-
     def start_of_more(self, task: dict) -> tuple[str, dict]:
         """When and where (as a task's base, see record_base) work on a finished task started
         again: its checkouts when it was last taken up again after its result (the owner's
@@ -2455,12 +2433,27 @@ class TaskActions:
         deliverable, or it is on another branch than the task's open PR): a new task of the
         same worker gets it, with what asked for it since the task was taken up again (the
         owner's or the Router's messages, the commands run). The task keeps its result and PR,
-        as it was before (a follow-up that was this other work is over)."""
+        as it was before (a follow-up that was this other work is over). A task with no result
+        yet goes on as it was: what the owner asked in its chat moves (see asked_in_chat)."""
         title = deliverable_title(title)
         earlier = self.tasks.find(self.store.get(f"splitoff:{task['id']}") or "")
         if earlier and earlier["status"] == "running" and not earlier["result"]:
             return earlier  # Reported again (refused for something else the first time).
-        since, base = self.start_of_more(task)
+        if task["result"]:
+            since, base = self.start_of_more(task)
+            asked = (
+                self.store.all(
+                    "SELECT id, text, meta FROM messages WHERE session_id=? AND kind IN "
+                    "('owner', 'router') AND json_extract(meta, '$.task_id')=? AND created_at>=? "
+                    "ORDER BY id",
+                    (task["session_id"], task["id"], since),
+                )
+                if since
+                else []
+            )
+        else:
+            asked, base = self.asked_in_chat(task), {}
+            since = asked[0]["created_at"] if asked else ""
         made = self.tasks.create(
             task["session_id"], title, f"Split off task {task['id']}.", status="running"
         )
@@ -2468,19 +2461,13 @@ class TaskActions:
         self.store.set(f"started:{made['id']}", "1")  # Taken up: it started where `base` says.
         if base:
             self.store.set(f"taskbase:{made['id']}", json.dumps(base))
+        for message in asked:
+            meta = json.loads(message["meta"] or "{}")
+            self.store.update_message_meta(message["id"], {**meta, "task_id": made["id"]})
+        if asked:
+            goal = "\n\n".join(message["text"] for message in asked)[:4000]
+            made = self.tasks.update(made["id"], goal=goal)
         if since:
-            asked = self.store.all(
-                "SELECT id, text, meta FROM messages WHERE session_id=? AND kind IN "
-                "('owner', 'router') AND json_extract(meta, '$.task_id')=? AND created_at>=? "
-                "ORDER BY id",
-                (task["session_id"], task["id"], since),
-            )
-            for message in asked:
-                meta = json.loads(message["meta"] or "{}")
-                self.store.update_message_meta(message["id"], {**meta, "task_id": made["id"]})
-            if asked:
-                goal = "\n\n".join(message["text"] for message in asked)[:4000]
-                made = self.tasks.update(made["id"], goal=goal)
             run = self.tasks.start_run(made["id"], "split")
             self.store.execute(
                 "UPDATE commands SET run_id=? WHERE id IN (SELECT c.id FROM commands c JOIN runs "
@@ -2491,13 +2478,34 @@ class TaskActions:
             self.store.set(f"touched:{made['id']}", touched)
         names = [{"title": f"split from \u201c{task['title']}\u201d", "at": now(), "by": "worker"}]
         self.store.set(f"titles:{made['id']}", json.dumps(names))
-        for key in ("followup", "morefor", "newresult", "ownchange"):
-            self.store.delete(f"{key}:{task['id']}")
-        if task["status"] in OPEN and (was := self.store.get(f"reopened:{task['id']}")):
-            self.tasks.move(task["id"], was)
-        self.store.set(f"turntask:{task['session_id']}", made["id"])
+        # A task with no result yet stays as it is: its worker goes on with it (the task it is
+        # on), and what it runs from here is that task's.
+        if not task["result"]:
+            self.store.execute(
+                "UPDATE sessions SET task_id=? WHERE id=?", (task["id"], task["session_id"])
+            )
+        else:
+            for key in ("followup", "morefor", "newresult", "ownchange"):
+                self.store.delete(f"{key}:{task['id']}")
+            if task["status"] in OPEN and (was := self.store.get(f"reopened:{task['id']}")):
+                self.tasks.move(task["id"], was)
+            self.store.set(f"turntask:{task['session_id']}", made["id"])
         self.publish(self.tasks.get(task["id"]))
         return made
+
+    def asked_in_chat(self, task: dict) -> list[dict]:
+        """What the owner wrote to a task's worker about it since it was taken up (its latest
+        run), not their answers to its questions: with no result yet, all that may have asked
+        for work apart from it."""
+        started = self.store.value(
+            "SELECT max(started_at) FROM runs WHERE task_id=?", (task["id"],)
+        )
+        return self.store.all(
+            "SELECT id, text, meta, created_at FROM messages WHERE session_id=? AND kind='owner' "
+            "AND json_extract(meta, '$.task_id')=? AND json_extract(meta, '$.answered') IS NULL "
+            "AND created_at>=? ORDER BY id",
+            (task["session_id"], task["id"], started or ""),
+        )
 
     async def off_branch(self, task: dict) -> tuple[str, str, str] | None:
         """(its PR, that PR's branch, the branch it is on now) when the worker did code work for
@@ -2859,6 +2867,9 @@ class TaskActions:
             "check_back": self.check_back(task),
             "watching": self.watching(task, follows),
             **self.watch_standing(task, follows),
+            # Followed but not read lately: still followed (Home places it by how its PR
+            # stood when last read); its warning shows on one task (watch_failing).
+            "watch_unreadable": self.unreadable(task, follows),
             "watch_failing": (failing := self.failing(task, follows)),
             "watch_failing_why": self.failing_why(task, failing),
             "earlier_titles": json.loads(self.store.get(f"titles:{task['id']}") or "[]"),

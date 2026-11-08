@@ -363,7 +363,9 @@ def test_a_delivered_task_is_placed_by_where_its_own_pr_stands():
     assert found["whys"]["t1"] == "CI failing on r#1 (lint)"
     assert found["whys"]["t2"] == "Changes requested on r#2"
     assert found["whys"]["t3"] == "Ready to merge: r#3"
-    assert found["monitoring"]["delivered"] == ["t3", "t4", "t5"]
+    # Ready to merge waits on no one else: a row of its own, not in "Delivered" (R8).
+    assert found["monitoring"]["delivered"] == ["t4", "t5"]
+    assert "t3" in found["monitoring"]["waiting"]
     # Its status in Artifacts is the same word.
     words = run_js(
         f"const a = await import({json.dumps((STATIC / 'board.js').as_uri())});\n"
@@ -917,3 +919,44 @@ def test_an_unreadable_follow_says_why():
     )
     assert found == ["No access to app#72", "Can't read app#72's CI checks",
                      "GitHub not answering for app#72", "Can't read app#72"]  # fmt: skip
+
+
+def test_one_row_for_a_followed_pr_keeps_the_task_that_needs_you():
+    """Bug bash 7 (R2, R4): a newer task of the same worker following the same PR pushed the
+    "Changes requested" one to the finished; a PR that could not be read lately took its task
+    off Home (placed as if it followed nothing)."""
+    workers = [{"id": "w1", "status": "idle"}]
+    prs = [{"label": "o/r#9", "own": True, "state": "OPEN", "review": "CHANGES_REQUESTED"}]
+    tasks = [
+        task("older", "w1", "done", at="2026-11-07T08:00:00Z", watching=["github:o/r#9"],
+             watch_changed_at="2026-11-07T11:00:00Z", receipts={"prs": prs}),
+        task("newer", "w1", "done", at="2026-11-07T11:30:00Z", watching=["github:o/r#9"],
+             watch_changed_at="2026-11-07T11:00:00Z"),
+        task("unread", "w1", "done", watch_unreadable=["github:o/r#5"],
+             watch_changed_at="2026-11-07T11:00:00Z",
+             receipts={"prs": [{"label": "o/r#5", "own": True, "state": "OPEN",
+                                "checks": "failing"}]}),
+    ]  # fmt: skip
+    found = board(tasks, workers)
+    assert found["phases"]["older"] == "needs/pr-changes"
+    assert found["phases"]["newer"] == "finished/still-following"
+    assert found["phases"]["unread"] == "needs/pr-failing"
+
+
+def test_python_and_the_page_say_where_a_pr_stands_the_same_way():
+    """Bug bash 7 (R1): Home placed a task by its PR, the Router and the daily summary did not:
+    one rule, in both."""
+    from chiefofstaff.task_actions import pr_status
+
+    prs = [
+        {"state": "MERGED"}, {"state": "CLOSED"}, {"state": "OPEN", "draft": True},
+        {"state": "OPEN", "review": "CHANGES_REQUESTED", "checks": "failing"},
+        {"state": "OPEN", "checks": "failing"}, {"state": "OPEN", "awaiting": ["lead"]},
+        {"state": "OPEN", "checks": "pending"}, {"state": "OPEN", "merge_state": "CLEAN"},
+        {"state": "OPEN", "review": "APPROVED", "merge_state": "BEHIND"}, {"state": "OPEN"},
+    ]  # fmt: skip
+    page = run_js(
+        f"const b = await import({json.dumps((STATIC / 'board.js').as_uri())});\n"
+        f"return {json.dumps(prs)}.map((pr) => b.prStatus(pr)[0]);"
+    )
+    assert page == [pr_status(pr) for pr in prs]

@@ -234,6 +234,7 @@ class DemoBrain:
                             "text": body,
                             "task": "new",
                             "title": title[:60],
+                            "why_new": "Another request about the code it knows.",
                         },
                     )
                     yield Say(f"Gave it to “{related['title']}”, which already knows this code.")

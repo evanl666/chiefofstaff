@@ -33,7 +33,7 @@ FAILED = {"failure", "timed_out", "cancelled", "action_required", "startup_failu
 SHOWN_AFTER = 3
 # GitHub not answering now (tried again as usual), as against no access (another signed-in
 # account may have it) or something else.
-TRANSIENT = re.compile(
+NOT_ANSWERING = re.compile(
     r"rate limit|timed out|HTTP 5\d\d|connection|EOF|temporarily|try again|TLS|network|"
     r"unexpected end",
     re.IGNORECASE,
@@ -46,7 +46,7 @@ def failure_kind(error: str) -> str:
         return "transient"  # GitHub says HTTP 403 for it too.
     if NOT_FOUND.search(error) or ACCESS_ERRORS.search(error):
         return "access"
-    return "transient" if TRANSIENT.search(error) else "other"
+    return "transient" if NOT_ANSWERING.search(error) else "other"
 
 
 # Under what Chief of Staff posts for the owner, unseen on GitHub: learning how the owner writes

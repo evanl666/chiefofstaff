@@ -300,7 +300,8 @@ async def test_usage_is_recorded_per_call_and_summed_by_range(harness):
     worker = (await spawn(runtime, harness.router_id, "Benchmark words"))["session_id"]
     await call_tool(runtime, "report", worker, status="done", summary="Done.")
     await call_tool(runtime, "message_session", harness.router_id, session_id=worker,
-                    task="new", title="Write the usage docs", text="Write them")  # fmt: skip
+                    task="new", title="Write the usage docs", text="Write them",
+                    why_new="test")  # fmt: skip
     harness.session(worker).emit("assistant.usage", model="fast-model", cost=1.0,
                                  input_tokens=10, output_tokens=5,
                                  copilot_usage=SimpleNamespace(total_nano_aiu=1e9))  # fmt: skip
@@ -476,7 +477,7 @@ async def test_a_finished_dependent_is_not_blocked_again(tmp_path):
     assert harness.store.session(second)["status"] == "queued"
     harness.session(first).emit("session.idle")
     await settle(runtime)
-    assert harness.session(second).sent[-1] == said("tweak it")
+    assert harness.session(second).sent[-1].startswith(said("tweak it"))
 
 
 async def test_settings_models_reach_live_sessions(tmp_path):
@@ -515,7 +516,7 @@ async def test_closed_workers_come_back_with_their_conversation(harness):
     await runtime.workers.close(worker_id)
     await runtime.owner_send(worker_id, "One more thing")
     assert not harness.store.session(worker_id)["closed_at"]
-    assert harness.session(worker_id).sent[-1] == said("One more thing")
+    assert harness.session(worker_id).sent[-1].startswith(said("One more thing"))
 
 
 async def test_a_reopened_worker_is_not_pushed_back_onto_abandoned_work(harness):
@@ -537,7 +538,7 @@ async def test_a_worker_whose_conversation_is_gone_is_not_reopened(harness):
     del harness.client.sessions[worker_id]
     result = await call_tool(
         runtime, "message_session", harness.router_id, session_id=worker_id, text="again",
-        task="new", title="Again",
+        task="new", why_new="test", title="Again",
     )  # fmt: skip
     assert "no longer has that conversation" in result.text_result_for_llm
     assert harness.store.session(worker_id)["closed_at"]

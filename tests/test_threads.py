@@ -428,7 +428,7 @@ async def test_a_follow_belongs_to_the_task_it_was_made_for(harness):
     review = runtime.tasks.current(worker)
     await call_tool(
         runtime, "message_session", harness.router_id, session_id=worker, text="Then the docs",
-        task="new", earlier="keep", title="Write the docs",
+        task="new", why_new="test", earlier="keep", title="Write the docs",
     )  # fmt: skip
     docs = runtime.tasks.current(worker)
     follows = harness.store.follows(worker)

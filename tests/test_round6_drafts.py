@@ -161,16 +161,16 @@ async def test_away_a_code_for_a_replaced_or_withdrawn_draft_says_what_became_of
     code = code_in(body, "keeps the last group")
     newer = await draft(runtime, harness, worker, "D0ERIN001", "", "Fixed, with a test.")
     ok = "\u597d\u7684\uff0c\u53d1\u5427"
-    replied = await call_tool(runtime, "report_owner_replies", messenger["id"],
-                              replies=[{"code": code, "text": f"{code} {ok}"}])  # fmt: skip
+    reply = {"code": code, "text": f"{code} {ok}", "intent": "send"}
+    replied = await call_tool(runtime, "report_owner_replies", messenger["id"], replies=[reply])
     said = replied.text_result_for_llm
     assert "replaced by a newer one: \u201cFixed, with a test.\u201d; nothing was sent" in said
     assert "It waits for you on Home" in said and "nothing waits" not in said
     await call_tool(runtime, "withdraw_draft", worker, draft_id=newer["id"],
                     reason="Erin sorted it out")  # fmt: skip
     gone = runtime.connector.code_for(f"draft:{newer['id']}")
-    replied = await call_tool(runtime, "report_owner_replies", messenger["id"],
-                              replies=[{"code": gone, "text": f"{gone} send"}])  # fmt: skip
+    reply = {"code": gone, "text": f"{gone} send", "intent": "send"}
+    replied = await call_tool(runtime, "report_owner_replies", messenger["id"], replies=[reply])
     assert f"{gone}: withdrawn: Erin sorted it out" in replied.text_result_for_llm
 
 
@@ -244,7 +244,7 @@ async def test_away_a_review_says_its_verdict_and_the_word_that_posts_it(harness
         "post · no",
     )
     with pytest.raises(ValueError, match="not an approval"):
-        await runtime.connector.apply({"draft": changes}, "QQQQQ approve", "QQQQQ")
+        await runtime.connector.apply({"draft": changes}, "QQQQQ approve", "QQQQQ", "send")
     assert harness.store.draft(changes["id"])["status"] == "pending"
     own = review(harness, worker, task, verdict="comment", number=69, own=True)
     what, _said, hint = describe({"id": "x", "draft": own})
@@ -402,7 +402,10 @@ async def test_away_each_refused_reply_is_said_once(tmp_path):
                     where="email")  # fmt: skip
     messenger, body = await told(runtime, harness)
     code = code_in(body, "friday works")
-    replies = [{"code": code, "text": f"{code} not yet"}, {"code": code, "text": f"{code} ok wait"}]
+    replies = [
+        {"code": code, "text": f"{code} not yet", "intent": "unclear"},
+        {"code": code, "text": f"{code} ok wait", "intent": "send"},
+    ]
     for _read in range(3):
         await call_tool(runtime, "report_owner_replies", messenger["id"], replies=replies)
     notes = [m for m in harness.store.messages(harness.router_id or "") if f"[{code}]" in m["text"]]

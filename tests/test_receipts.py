@@ -2,9 +2,10 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from conftest import call_tool, settle
+from conftest import Harness, call_tool, settle
 
 from chiefofstaff import receipts
+from chiefofstaff.models import Settings
 
 
 def command(text, code, kind=None):
@@ -68,46 +69,12 @@ def test_claims_are_checked_against_what_was_observed():
     assert clean["changed"]["insertions"] == 40 and clean["flags"] == []
 
     unverified = receipts.summarize(
-        [command("ls", 0)], {"checkouts": [{}]}, "Tests pass; fixed it."
+        [command("ls", 0)], {"checkouts": [{}]}, "Tests pass; fixed it.", said_changed=True
     )
     assert unverified["flags"] == [
         "Says tests pass, but no test run was observed.",
         "Says it made changes, but its checkouts have none.",
     ]
-    analysis = receipts.summarize(
-        [command("python3 analyze.py", 0)],
-        {"checkouts": [{}]},
-        "Analyzed data/sales.csv. No files were changed. Line 302 adds 3,600.00 to north.",
-    )
-    assert analysis["flags"] == [], "an analysis that changed nothing says so: not a claim"
-    assert not receipts.says_changed("I did not change anything, nothing was committed.")
-    assert receipts.says_changed("Nothing failed. I added a regression test.")
-    for claim in (
-        "The endpoint did not validate input, so I fixed it and added a regression test.",
-        "The login page didn't redirect after sign-in, so I updated the handler.",
-        "Without changing the public API, I refactored the parser.",
-        "Tests were not running on CI because the workflow had no trigger, so I fixed it.",
-    ):
-        assert receipts.says_changed(claim), claim
-    assert not receipts.says_changed("None of the files were changed.")
-    for nothing in ("The failure is expected; I changed nothing.", "I updated no files."):
-        assert not receipts.says_changed(nothing), nothing
-    assert receipts.says_changed("I added no-cache headers to the responses.")
-    # Prose about what others did, in a report that says it changed nothing: not a claim.
-    research = (
-        "rapidfuzz is still the pick. I believe the pure-Python mode was removed in v3, so "
-        "difflib is the fallback. No code was written and nothing was changed in the project."
-    )
-    assert not receipts.says_changed(research)
-    assert not receipts.says_changed("It seems the flag was renamed upstream-side last year.")
-    assert receipts.says_changed("The failing test was fixed by updating the fixture.")
-    # Bug bash 6 (N4): a Slack reply's rewording, and "I changed no code".
-    assert not receipts.says_changed("Drafted the reply to Alice. I changed no code.")
-    # Bug bash 6 (R11): done by something else, not by it.
-    assert not receipts.says_changed("The checkout was re-created by something unknown.")
-    assert receipts.says_changed("I re-created the fixture and added a test.")
-    assert not receipts.says_changed("Alice updated her question in the thread. I changed no code.")
-    assert not receipts.says_changed('Reworded: "it\'s broken" changed to "it has a bug".')
     failing = receipts.summarize([command("npm test", 1)], None, "Done.")
     assert failing["flags"] == ["The last test run failed (exit 1)."]
     red = receipts.summarize(
@@ -603,17 +570,46 @@ def test_what_a_report_says_about_tests(report, expected):
     assert receipts.says_tests_pass(report) is expected
 
 
+CHANGED_NOTHING = "Says it made changes, but its checkouts have none."
+
+
 @pytest.mark.parametrize(
-    ("report", "expected"),
+    ("said", "checkouts", "flagged"),
     [
-        ("I fixed the null check.", True),
-        ("Nothing to change: it was already fixed upstream.", False),
-        ("The crash was fixed by Bob in #12, so no change here.", False),
-        ("No files were changed.", False),
+        (True, [{}], True),
+        (False, [{}], False),
+        (None, [{}], False),
+        (True, [{"files": 1, "insertions": 3, "commits": 1}], False),
+        (True, [], False),  # No checkout to look at.
     ],
 )
-def test_what_a_report_says_about_changes(report, expected):
-    assert receipts.says_changed(report) is expected
+def test_a_change_is_claimed_by_the_workers_word_not_its_prose(said, checkouts, flagged):
+    """Bug bashes 5 and 6: prose ("I believe the mode was removed in v3", "fixed by Bob", a
+    reply's rewording) was read as a claim to have changed code. Only what its worker said
+    (changed_code) is held against its checkouts."""
+    found = receipts.summarize(
+        [], {"checkouts": checkouts}, "I fixed the null check.", said_changed=said
+    )
+    assert (CHANGED_NOTHING in found["flags"]) is flagged, found["flags"]
+
+
+@pytest.mark.parametrize(("said", "flagged"), [(True, True), (False, False), (None, False)])
+async def test_what_a_report_says_it_changed_reaches_its_receipts(
+    tmp_path, git_repo, said, flagged
+):
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    runtime = await harness.connect()
+    result = await call_tool(runtime, "spawn_worker", harness.router_id, title="Fix the parser",
+                             instructions="Fix it", project=str(git_repo), isolate=True,
+                             why_new="t")  # fmt: skip
+    worker = json.loads(result.text_result_for_llm)["session_id"]
+    said_so = {} if said is None else {"changed_code": said}
+    await call_tool(runtime, "report", worker, status="done", summary="Fixed the parser.",
+                    **said_so)  # fmt: skip
+    await settle(runtime)
+    found = runtime.task_actions.receipts(runtime.tasks.current(worker))
+    assert found["changed"]["files"] == 0 and found["version"], found
+    assert (CHANGED_NOTHING in found["flags"]) is flagged, found["flags"]
 
 
 def test_a_check_not_finished_yet_is_not_the_oldest_run():

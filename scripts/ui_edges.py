@@ -730,7 +730,8 @@ async def round_two(runtime, browser, failures: list[str]):
     await settle(runtime)
     second = await call_tool(runtime, "message_session", router, session_id=first,
                              text="Also fix the review comments", task="new",
-                             title="Fix review comments on lms", earlier="keep")  # fmt: skip
+                             title="Fix review comments on lms", earlier="keep",
+                             why_new="another PR")  # fmt: skip
     assert second.result_type == "success", second.text_result_for_llm
     take_up(runtime, first, "Fix review comments on lms")  # Seen once its turn is over.
     quiet = await start("Buyer Group Graph 7-pager")
@@ -899,7 +900,8 @@ async def round_three(runtime, browser, failures: list[str]):
     # A worker with two tasks, long markdown progress and links.
     busy = await start("Research the Slack bot")
     await call_tool(runtime, "message_session", router, session_id=busy, task="new",
-                    title="CoS bug bash", text="Now the bug bash", earlier="keep")  # fmt: skip
+                    title="CoS bug bash", text="Now the bug bash", earlier="keep",
+                    why_new="another subject")  # fmt: skip
     take_up(runtime, busy, "CoS bug bash")
     long = ("**Status:** fixed `B16`; see [the B16 notes](https://docs.google.com/document/d/"
             "abc123) and https://github.com/acme/app/pull/592 — "
@@ -1120,7 +1122,8 @@ async def round_four(runtime, browser, failures: list[str]):
 
     async def another(worker, title):
         result = await call_tool(runtime, "message_session", router, session_id=worker,
-                                 task="new", title=title, text=title, earlier="keep")  # fmt: skip
+                                 task="new", title=title, text=title, earlier="keep",
+                                 why_new="another deliverable")  # fmt: skip
         assert result.result_type == "success", result.text_result_for_llm
         take_up(runtime, worker, title)
         await settle(runtime)
@@ -1470,7 +1473,7 @@ async def round_five(runtime, browser, failures: list[str]):
     planner = await start("Write the first plan")
     await call_tool(runtime, "message_session", router, session_id=planner, task="new",
                     title="Write the second plan", text="Write the second plan",
-                    earlier="keep")  # fmt: skip
+                    earlier="keep", why_new="another plan")  # fmt: skip
     second = take_up(runtime, planner, "Write the second plan")
     plans = ("Plans: [Plan A](https://docs.google.com/document/d/PLANAAAA1111/edit) and "
              "https://docs.google.com/document/d/PLANBBBB2222/edit")  # fmt: skip

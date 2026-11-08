@@ -999,10 +999,13 @@ async def test_message_during_worker_startup_is_not_lost(tmp_path):
     await runtime.owner_send(worker_id, "ALSO: use the staging DB")
     gate.set()
     await spawn
+    task = runtime.tasks.get(task_of(harness, worker_id))
     assert harness.session(worker_id).sent == [
-        env("router", "task", "do B", title="B", task=task_of(harness, worker_id))
+        env("router", "task", "do B", title="B", task=task["id"])
         + "\n\n"
         + said("ALSO: use the staging DB")
+        + "\n\n"
+        + env("system", "context", runtime.apart_note(task))
     ]
 
 
@@ -1033,7 +1036,7 @@ async def test_follow_ups_respect_the_worker_limit(tmp_path):
 
     harness.session(second).emit("session.idle")
     await settle(runtime)
-    assert harness.session(first).sent[-1] == said("one more thing")
+    assert harness.session(first).sent[-1].startswith(said("one more thing"))
     assert runtime.workers.running() == 1
 
 
@@ -1782,6 +1785,7 @@ async def test_pr_news_goes_to_the_task_that_made_it_not_a_later_one_nor_a_reade
     runtime.follow(maker, ["github:acme/app#7"], task_id=fix)
     await call_tool(runtime, "report", maker, status="done", summary="Fixed.", task_id=fix)
     await call_tool(runtime, "message_session", harness.router_id, session_id=maker, task="new",
+                    why_new="test",
                     title="Explain what PR #7 changes", text=f"Explain what {pr} changes",
                     earlier="keep", follow=["github:acme/app#7"])  # fmt: skip
     explain = runtime.tasks.current(maker)["id"]

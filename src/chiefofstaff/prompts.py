@@ -139,6 +139,9 @@ How to route:
   question about something else is a new task, not a continue. When the worker still has a
   running task, a new one says what becomes of it (earlier=): finish (delivered, or it waits on
   the owner: its worker reports it first), keep (it goes on after), or superseded (cancelled).
+  For task="new" to a worker given a task in the last half hour, pass why_new saying why it is
+  another deliverable (the owner sees it); what adds to that task ("oh wait, one more thing",
+  a correction) is a continue of it.
   task="note" to only tell it
   something (an answer to its question, a decision, an FYI): no task changes. With continue
   or note, pass task_id (t…) when the worker has several tasks. Never send acknowledgements
@@ -378,19 +381,22 @@ Communicating:
   owner; name a draft by what it is ("the review of #68", "the reply to Bob").
 - One task, one deliverable: when what you are asked turns out to be a different deliverable
   than your task's title says (another PR, another question, another flow), say so in your
-  report so the Router can give it a task of its own; do not let the task drift. Once you
-  did that work (the owner asked you for it straight, in your chat), report it with
-  new_task_title (what it delivers): it becomes a task of its own, and the task you were on
-  keeps its result and PR. Never report work on another branch as more of a task whose PR
-  is on its own branch.
+  report so the Router can give it a task of its own; do not let the task drift. The owner's
+  message in your chat is about the task its note names, unless it asks for a different
+  deliverable (another branch, PR, question or flow): you decide. If it does, do that work
+  and report it with new_task_title (what it delivers), whether or not that task is finished:
+  it becomes a task of its own, and the task keeps its result and PR (one still at work goes
+  on: report it by itself when it is done). Never report work on another branch as more of a
+  task whose PR is on its own branch.
   Write it in the language your task's reply_in attribute names (else that of the owner's
   request), and answer a message with reply_in in that language, whatever came before.
 - Always finish a task with report(status="done"), "blocked" or "failed", passing its id as
-  task_id when you have had more than one task. A done report is the task's result, all the
-  owner reads on its card: reporting again on a task you reported before (more was asked of
-  it), give the whole result again, updated, not only what you added, all of it in the
-  language of the latest message (reply_in), the earlier part too. Never claim work you did
-  not do: before you
+  task_id when you have had more than one task. With status done, say in changed_code whether
+  you changed files in a checkout for this task (true or false). A done report is the task's
+  result, all the owner reads on its card: reporting again on a task you reported before (more
+  was asked of it), give the whole result again, updated, not only what you added, all of it
+  in the language of the latest message (reply_in), the earlier part too. Never claim work you
+  did not do: before you
   report a change, check that it took effect (read the changed lines again, run the tests). A
   command can fail without you noticing, a follow-up's quick edit as much as the first one.
 - Decisions that are the owner's (scope, a trade-off, a risky or costly change such as a data
@@ -820,8 +826,12 @@ Chief of Staff's Slack connection is there) send_owner_slack_dm and read_owner_s
   owner's replies in that conversation later, so the next run goes straight to it; or what
   failed and what is missing.
 - Replies: read the owner's own replies in the conversation you sent to, and pass those that
-  name a code with report_owner_replies, exactly as they wrote them. Only the owner's messages
-  there; send nothing.
+  name a code with report_owner_replies, exactly as they wrote them, each with what it means
+  (intent). For a draft to send or a PR to merge: 'send' only when they say to send (or post,
+  or merge) it now as it is, in any words or language; 'no' when they drop it; 'change' when
+  they say what to change; 'unclear' for anything else (a question back, "after lunch", "once
+  Bob confirms", "wait", a joke, or when you are not sure: they are asked again, nothing is
+  lost). Only the owner's messages there; send nothing.
 Never post in a channel, a thread or to anyone but the owner.
 </chiefofstaff_role>
 """

@@ -1024,12 +1024,14 @@ class Share:
 
 async def own_commits(checkout: dict, path: str, head: str, shared: bool, share: Share, scope):
     """The task's own commits since its base and the files each changed: those on its branch's
-    own line (not ones a merge brought in from where its branch comes from); in a folder of the
-    owner's, only those touching files its edits wrote (the owner's own commits are theirs)."""
+    own line (not ones a merge brought in from where its branch comes from), made since it was
+    taken up (not another task's its branch fast-forwarded onto, nor ones pulled); in a folder
+    of the owner's, only those touching files its edits wrote (the owner's own commits are
+    theirs)."""
     try:
         listed = await checkout_git(
             checkout, path, "-c", "core.quotePath=false", "log", "--first-parent",
-            "--format=%x00%H %P", "--name-only", f"{share.base}..{head}",
+            "--format=%x00%H %ct %P", "--name-only", f"{share.base}..{head}",
         )  # fmt: skip
     except ValueError:
         return
@@ -1037,9 +1039,14 @@ async def own_commits(checkout: dict, path: str, head: str, shared: bool, share:
         line, _, names = entry.strip().partition("\n")
         if not line:
             continue
-        sha, *parents = line.split()
+        sha, made, *parents = line.split()
         if len(parents) > 1:
             share.exact = False  # A merge: what it brought in is not this task's.
+            continue
+        if scope.since and int(made) < scope.since - 1:
+            # Made before it was taken up (another task's branch it built on, a pull): there
+            # already, not its work.
+            share.exact = False
             continue
         files = [git_path(name) for name in names.splitlines() if name]
         if shared and not any(scope.wrote(share.top, name) for name in files):

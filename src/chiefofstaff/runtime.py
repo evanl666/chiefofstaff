@@ -1329,11 +1329,14 @@ class Runtime:
             )
         return session
 
-    async def refuse_if_open_elsewhere(self, row: dict):
+    async def refuse_if_open_elsewhere(self, row: dict, tell: bool = True):
         """Two programs writing to one Copilot session would interleave its history: a session
-        open in a terminal is left alone until it is closed there."""
+        open in a terminal is left alone until it is closed there. `tell`: once it is closed,
+        the Router hears it can be reached again (what was refused came from it)."""
         self.elsewhere = await self.open_elsewhere()
         if pid := self.elsewhere.get(self.copilot_id(row["id"])):
+            if tell:
+                self.store.set(f"refusedopen:{row['id']}", now())
             raise OpenElsewhereError(
                 f"“{row['title']}” is open in another Copilot window (process {pid}). Exit it "
                 "there (/exit), then try again.",
@@ -1902,11 +1905,7 @@ class Runtime:
                     if tell_router:
                         self.owner_told(row, text)
                     return message
-        # Separate work asked for straight ("New, separate task: …"): a task of its own, not
-        # more on the one it is on (whose result and PR stay as they are).
-        separate = self.task_actions.open_separate(row, text) if row["role"] == WORKER else None
-        before, about = about, separate or about
-        if row["role"] in {WORKER, SLACK} and clear_questions and not separate:
+        if row["role"] in {WORKER, SLACK} and clear_questions:
             # The owner answers what it asked on that task (others' questions stay).
             self.asks.answered(session_id, about["id"] if about else "")
             self.asks.answered(session_id, "")
@@ -1914,12 +1913,12 @@ class Runtime:
         # they ask something back: then the card stays, and this is chat).
         decided = (
             self.decisions.answered_in_chat(session_id, about, text.strip())
-            if row["role"] == WORKER and clear_questions and text.strip() and not separate
+            if row["role"] == WORKER and clear_questions and text.strip()
             else []
         )
         asked_back = (
             self.decisions.asked_back(session_id, about, text.strip())
-            if row["role"] == WORKER and clear_questions and not separate
+            if row["role"] == WORKER and clear_questions
             else []
         )
         # Answers come in the language of this message, whatever the conversation used before.
@@ -1928,18 +1927,8 @@ class Runtime:
         meta: dict[str, Any] = {}
         switched = self.switched_language(session_id, spoken)
         notes = [switched]
-        if separate:
-            prompt = wrap("owner", "message", text, task=separate["id"], reply_in=spoken)
-            kept = (
-                f"; task {before['id']} \u201c{before['title']}\u201d keeps its result"
-                if before
-                else ""
-            )
-            notes.append(
-                f"The owner asks for this apart from what you were on: it is a task of its own, "
-                f"{separate['id']} \u201c{separate['title']}\u201d. Report it on that task "
-                f"(task_id={separate['id']}){kept}."
-            )
+        if row["role"] == WORKER and about and about["status"] != "cancelled":
+            notes.append(self.apart_note(about))
         notes += [f"This answers your decision card: {c['target']['question']}" for c in decided]
         notes += [
             f"The owner asks about your decision card before deciding: answer them. The card "
@@ -1984,12 +1973,11 @@ class Runtime:
             display=text,
             meta=meta,
             # Steered into a Router turn written in the other language, the answer stays in it;
-            # its own turn (Router turns are short) starts in the owner's. A task of its own
-            # waits for the turn it may be in on another.
-            steer=not (switched and row["role"] == ROUTER) and not separate,
+            # its own turn (Router turns are short) starts in the owner's.
+            steer=not (switched and row["role"] == ROUTER),
         )
         if row["role"] == WORKER and tell_router:
-            self.owner_told(row, text, made=separate)
+            self.owner_told(row, text)
         if about and about["status"] == "waiting" and clear_questions and not asked_back:
             # It has the owner's answer now: it goes on (not "waits for your answer" until its
             # next report).
@@ -2005,6 +1993,21 @@ class Runtime:
         if note := self.busy_note(session_id):
             self.add_message(session_id, "notice", note, {"progress": True})
         return message
+
+    @staticmethod
+    def apart_note(task: dict) -> str:
+        """For the owner's message to a worker: the task it is about, unless its worker finds
+        it asks for another deliverable; that work it reports as a task of its own (the worker
+        reads the message: no word list decides)."""
+        kept = (
+            "keeps its result" if task["result"] else "goes on: report it by itself when it is done"
+        )
+        return (
+            f"This message is about task {task['id']} \u201c{task['title']}\u201d unless it asks "
+            "for a different deliverable (another branch, PR, question or flow). If it does, do "
+            "that work and report it with report(new_task_title=<what it delivers>, status=…): "
+            f"it becomes a task of its own, and task {task['id']} {kept}."
+        )
 
     def heard(self, text: str, home: bool = False) -> str:
         """The language of what the owner wrote. Written to the Router (`home`), it is
@@ -2057,16 +2060,9 @@ class Runtime:
             self.add_message(router_id, "notice", note, {"session_id": row["id"]})
         return {**message, "note": note}
 
-    def owner_told(self, row: dict, text: str, made: dict | None = None):
+    def owner_told(self, row: dict, text: str):
         """What the owner told a worker directly (in its timeline, @ in Chat, on a task card):
-        the Router hears of it with its next message, so it never takes the result for drift.
-        `made`: the task of its own that message became (separate work asked for)."""
-        said = f"The owner told this worker directly: {text}"
-        if made:
-            said += (
-                f"\n\nThat is a task of its own now, {made['id']} \u201c{made['title']}\u201d, "
-                "given to this worker: do not give it again."
-            )
+        the Router hears of it with its next message, so it never takes the result for drift."""
         with suppress(RuntimeError):
             self.add_message(
                 self.router_id(),
@@ -2079,7 +2075,7 @@ class Runtime:
                     "prompt": wrap(
                         "system",
                         "to-worker",
-                        said,
+                        f"The owner told this worker directly: {text}",
                         worker=short(row["id"]),
                         title=row["title"],
                     ),
@@ -2429,19 +2425,28 @@ class Runtime:
         delivered = []
         for session_id, task, told, shown in recipients:
             attributes = {"task": task["id"]} if task else {}
+            held = {
+                "prompt": wrap(
+                    source, "thread", told, thread=thread, trust=UNTRUSTED, **attributes
+                ),
+                "display": (shown or told)[:2000],
+                "meta": {"source": source, "thread": thread}
+                | ({"task_id": task["id"]} if task else {}),
+            }
+            title = task["title"] if task else self.display_title(self.store.session(session_id))
             try:
+                if not self.states.handle(session_id):  # Live here, it is open nowhere else.
+                    await self.refuse_if_open_elsewhere(self.store.session(session_id), False)
                 await self.delivery.deliver(
-                    session_id,
-                    wrap(source, "thread", told, thread=thread, trust=UNTRUSTED, **attributes),
-                    batch=True,
-                    kind="inbound",
-                    display=(shown or told)[:2000],
-                    meta={"source": source, "thread": thread}
-                    | ({"task_id": task["id"]} if task else {}),
-                )
-                delivered.append(
-                    task["title"] if task else self.display_title(self.store.session(session_id))
-                )
+                    session_id, held["prompt"], batch=True, kind="inbound",
+                    display=held["display"], meta=held["meta"],
+                )  # fmt: skip
+                delivered.append(title)
+            except OpenElsewhereError:
+                # Open in a terminal: it keeps following, and gets this once it is closed there.
+                news = json.loads(self.store.get(f"heldnews:{session_id}") or "[]")
+                self.store.set(f"heldnews:{session_id}", json.dumps([*news, held][-20:]))
+                delivered.append(f"{title} (held: open in a terminal)")
             except Exception:
                 # A follower that cannot take messages stops following; others still get them.
                 logger.warning("Could not deliver a thread follow-up.", exc_info=True)

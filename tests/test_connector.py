@@ -185,7 +185,7 @@ async def test_away_the_owner_is_told_where_they_are_and_answers_from_there(tmp_
     applied = await call_tool(
         runtime, "report_owner_replies", messenger["id"],
         replies=[
-            {"code": draft_code.lower(), "text": f"{draft_code.lower()} send"},
+            {"code": draft_code.lower(), "text": f"{draft_code.lower()} send", "intent": "send"},
             {"code": task_code, "text": f"{task_code.title()} 9090 please"},
             {"code": "ZZZZZ", "text": "ZZZZZ send"},
         ],
@@ -207,7 +207,7 @@ async def test_away_the_owner_is_told_where_they_are_and_answers_from_there(tmp_
     assert json.loads(harness.store.get("away_last"))["ok"]
     again = await call_tool(
         runtime, "report_owner_replies", messenger["id"],
-        replies=[{"code": draft_code, "text": f"{draft_code} send"}],
+        replies=[{"code": draft_code, "text": f"{draft_code} send", "intent": "send"}],
     )  # fmt: skip
     assert "nothing waits" in again.text_result_for_llm, "a code is used once"
 
@@ -243,7 +243,7 @@ async def test_away_a_draft_answered_in_words_is_redone_and_a_bad_answer_is_said
              if m["kind"] == "notice" and task_code in m["text"]]  # fmt: skip
     assert len(notes) == 1 and "not done" in notes[0], notes
     redo = await call_tool(runtime, "report_owner_replies", messenger["id"], replies=[
-        {"code": draft_code, "text": f"{draft_code} no, say Thursday instead"},
+        {"code": draft_code, "text": f"{draft_code} no, say Thursday instead", "intent": "change"},
     ])  # fmt: skip
     assert "drafted again" in redo.text_result_for_llm
     assert harness.store.draft(draft["id"])["status"] != "pending"
@@ -253,27 +253,32 @@ async def test_away_a_draft_answered_in_words_is_redone_and_a_bad_answer_is_said
                     where="email")  # fmt: skip
     [again] = [d for d in harness.store.drafts() if d["kind"] == "reply"]
     item = {"id": f"draft:{again['id']}", "draft": again}
-    assert await runtime.connector.apply(item, "QQQQQ yes, send it", "QQQQQ") == "marked as sent"
+    sent = await runtime.connector.apply(item, "QQQQQ yes, send it", "QQQQQ", "send")
+    assert sent == "marked as sent"
     assert harness.store.draft(again["id"])["status"] == "sent"
-    # A no, or a send held back, never sends; a short Chinese yes does.
-    for said, outcome in (
-        ("do not send", "dropped"),
-        ("ok wait", None),
-        ("not yet, send later", None),
-        ("\u597d\u7684\uff0c\u53d1\u5427", "marked as sent"),
-        ("\u53ef\u4ee5\u53d1\u4e86", "marked as sent"),  # No comma: "can send it".
-        ("\u5148\u522b\u53d1", None),  # "Don't send it yet": kept.
-        ("don\u2019t send it", "dropped"),  # A phone's apostrophe.
-        ("send now?", None),  # A question back (bug bash 6, G5), not a send.
-        ("\u53ef\u4ee5\u5417", None),  # "Is it ok?"
-        ("never mind", None),
-        ("\u7b49\u4e00\u4e0b\u518d\u53d1", None),  # "Send it in a bit."
-        ("send it after lunch", None),  # A send held back (bug bash 6, N6): not redrafted.
-        ("ok, send it once bob confirms", None),
-        ("\u6682\u65f6\u4e0d\u8981", None),  # "Not for now."
-        ("\u4e0d\u8981\u53d1\u9001", "dropped"),  # "Don't send it."
-        ("\u4e00\u4f1a\u518d\u53d1", None),  # "Send it in a bit" (code review, round 6).
-        ("\u518d\u53d1\u5427", None),
+    # What a reply means is the messenger's reading (intent); a send it holds back, asks about
+    # or makes conditional is never sent, whatever the messenger read (code review: the floor).
+    for said, intent, outcome in (
+        ("do not send", "no", "dropped"),
+        ("\u597d\u7684\uff0c\u53d1\u5427", "send", "marked as sent"),
+        ("\u53ef\u4ee5\u53d1\u4e86", "send", "marked as sent"),
+        ("ship it", "send", "marked as sent"),  # No word list knew it.
+        ("lgtm \U0001f44d", "send", "marked as sent"),
+        ("\u6ca1\u95ee\u9898", "send", "marked as sent"),  # "No problem."
+        ("ok wait", "send", None),
+        ("not yet, send later", "send", None),
+        ("\u5148\u522b\u53d1", "send", None),  # "Don't send it yet."
+        ("send now?", "send", None),  # A question back (bug bash 6, G5), not a send.
+        ("\u53ef\u4ee5\u5417", "send", None),  # "Is it ok?"
+        ("never mind", "send", None),
+        ("\u7b49\u4e00\u4e0b\u518d\u53d1", "send", None),  # "Send it in a bit."
+        ("send it after lunch", "send", None),  # Held back (bug bash 6, N6): not redrafted.
+        ("ok, send it once bob confirms", "send", None),
+        ("\u6682\u65f6\u4e0d\u8981", "unclear", None),  # "Not for now."
+        ("\u4e0d\u8981\u53d1\u9001", "no", "dropped"),  # "Don't send it."
+        ("\u4e00\u4f1a\u518d\u53d1", "send", None),  # "Send it in a bit" (code review, round 6).
+        ("don\u2019t send it", "send", None),  # Read wrong: still not sent.
+        ("make it Friday", "change", "to be drafted again as you say"),
     ):
         await call_tool(runtime, "draft_reply", writer, text=f"re: {said}", to="Carol",
                         where="email")  # fmt: skip
@@ -281,11 +286,23 @@ async def test_away_a_draft_answered_in_words_is_redone_and_a_bad_answer_is_said
         item = {"id": f"draft:{one['id']}", "draft": one}
         if outcome is None:
             with pytest.raises(ValueError, match="not sent"):
-                await runtime.connector.apply(item, f"QQQQQ {said}", "QQQQQ")
-            assert harness.store.draft(one["id"])["status"] == "pending"
+                await runtime.connector.apply(item, f"QQQQQ {said}", "QQQQQ", intent)
+            assert harness.store.draft(one["id"])["status"] == "pending", said
             await runtime.drafts.resolve(one["id"], DraftDecision(action="reject"))
         else:
-            assert await runtime.connector.apply(item, f"QQQQQ {said}", "QQQQQ") == outcome
+            done = await runtime.connector.apply(item, f"QQQQQ {said}", "QQQQQ", intent)
+            assert done == outcome, said
+    # A reply to a draft without what it means is passed again with it.
+    await call_tool(runtime, "draft_reply", writer, text="re: later", to="Carol", where="email")
+    [one] = [d for d in harness.store.drafts() if d["status"] == "pending"]
+    runtime.store.set(
+        "awaycode:WWWWW", json.dumps({"item": f"draft:{one['id']}", "at": time.time()})
+    )
+    runtime.store.set(f"awayitem:draft:{one['id']}", "WWWWW")
+    unsaid = await call_tool(runtime, "report_owner_replies", messenger["id"],
+                             replies=[{"code": "WWWWW", "text": "WWWWW send"}])  # fmt: skip
+    assert unsaid.result_type == "failure" and "intent=" in unsaid.text_result_for_llm
+    assert harness.store.draft(one["id"])["status"] == "pending"
 
 
 async def test_only_the_messenger_reports_how_it_reached_the_owner_and_what_they_said(tmp_path):
@@ -385,7 +402,7 @@ async def test_away_the_owner_merges_and_answers_a_cancelled_tasks_question(tmp_
     applied = await call_tool(
         runtime, "report_owner_replies", messenger["id"],
         replies=[
-            {"code": merge_code, "text": f"{merge_code} merge"},
+            {"code": merge_code, "text": f"{merge_code} merge", "intent": "send"},
             {"code": question_code, "text": f"{question_code} 9090"},
         ],
     )  # fmt: skip

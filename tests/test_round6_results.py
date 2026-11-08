@@ -11,7 +11,6 @@ import pytest
 from conftest import Harness, call_tool, settle
 
 from chiefofstaff.models import Settings
-from chiefofstaff.task_actions import separate_task
 
 
 def run(*command, cwd=None):
@@ -183,9 +182,25 @@ async def test_a_merged_pr_is_not_open_in_its_task_s_result(harness):
     ), shown
 
 
+def owner_messages(harness, session_id: str) -> list[dict]:
+    return [m for m in harness.store.messages(session_id) if m["kind"] == "owner"]
+
+
+def commands_of(runtime, task_id: str) -> list[str]:
+    return [
+        row["command"]
+        for row in runtime.store.all(
+            "SELECT c.command FROM commands c JOIN runs r ON r.id=c.run_id WHERE r.task_id=? "
+            "ORDER BY c.id",
+            (task_id,),
+        )
+    ]
+
+
 async def test_separate_work_asked_of_a_worker_straight_is_a_task_of_its_own(harness):
     """G2: "New, separate task for this worker: … add mod()" @-sent to a worker whose PR waited
-    to merge was filed under that PR's task, and its result replaced that task's."""
+    to merge was filed under that PR's task, and its result replaced that task's. Its worker,
+    which reads the message, is told what it is about and says it is another deliverable."""
     runtime = await harness.connect()
     worker = await spawn(runtime, harness.router_id, title="Div", instructions="x")
     session_id, task = worker["session_id"], worker["task_id"]
@@ -195,19 +210,69 @@ async def test_separate_work_asked_of_a_worker_straight_is_a_task_of_its_own(har
         "mod(a, b) with a test. Do not push."
     )
     await runtime.owner_send_to(harness.router_id, session_id, asked)
-    [made] = [t for t in runtime.tasks.for_session(session_id) if t["id"] != task]
-    assert made["status"] == "running"
-    assert made["title"] == "Make a new branch r6reg-mod from main and add mod(a, b) with a test"
-    [message] = [m for m in harness.store.messages(session_id) if m["kind"] == "owner"]
-    assert message["meta"]["task_id"] == made["id"]
-    assert f'task="{made["id"]}"' in message["meta"]["prompt"], "it takes the new task up"
-    assert not runtime.store.get(f"followup:{task}"), "nothing asked of the task it was on"
-    router = [m for m in harness.store.messages(harness.router_id) if m["kind"] == "owner"]
-    assert made["id"] in router[-1]["meta"]["prompt"], "the Router knows: no second task"
+    assert [t["id"] for t in runtime.tasks.for_session(session_id)] == [task], "its worker says"
+    [message] = owner_messages(harness, session_id)
+    assert message["meta"]["task_id"] == task
+    prompt = message["meta"]["prompt"]
+    assert f"about task {task} \u201cDiv\u201d unless it asks" in prompt, prompt
+    assert "report(new_task_title=" in prompt and f"task {task} keeps its result" in prompt
     done = "Branch `r6reg-mod`: `mod(a, b)` with `test_mod`; `pytest -q` gives 5 passed."
-    await call_tool(runtime, "report", session_id, status="done", summary=done)
-    assert runtime.tasks.get(made["id"])["result"] == done
+    told = await call_tool(runtime, "report", session_id, status="done", summary=done,
+                           new_task_title="Add mod() on r6reg-mod")  # fmt: skip
+    assert "a task of its own" in told.text_result_for_llm, told.text_result_for_llm
+    [made] = [t for t in runtime.tasks.for_session(session_id) if t["id"] != task]
+    assert (made["title"], made["status"], made["result"]) == ("Add mod() on r6reg-mod",
+                                                               "review", done)  # fmt: skip
     assert runtime.tasks.get(task)["result"] == RESULT
+    [message] = owner_messages(harness, session_id)
+    assert message["meta"]["task_id"] == made["id"], "what asked for it goes with it"
+    inbound = [m for m in harness.store.messages(harness.router_id) if m["kind"] == "inbound"]
+    assert inbound[-1]["meta"]["task_id"] == made["id"], "the Router hears of a task of its own"
+
+
+async def test_separate_work_asked_while_a_task_is_at_work_is_a_task_of_its_own(harness):
+    """Asked in its chat for something apart from the task it is still at, its worker reports
+    that with new_task_title: a task of its own, with that message and the commands run since.
+    The task it is on goes on, and its own report (without new_task_title) is its result."""
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, title="Div", instructions="x")
+    session_id, task = worker["session_id"], worker["task_id"]
+    shell(harness, session_id, "c1", "pytest -q tests/test_div.py", "1 passed")
+    await settle(runtime)
+    asked = "Separately: write the 0.2 release notes into NOTES.md."
+    await runtime.owner_send(session_id, asked)
+    [message] = owner_messages(harness, session_id)
+    prompt = message["meta"]["prompt"]
+    assert f"about task {task} \u201cDiv\u201d unless it asks" in prompt, prompt
+    assert f"task {task} goes on" in prompt, prompt
+    shell(harness, session_id, "c2", "pytest -q tests/test_notes.py", "1 passed")
+    await settle(runtime)
+    notes = "Wrote the 0.2 release notes into `NOTES.md`."
+    told = await call_tool(runtime, "report", session_id, status="done", summary=notes,
+                           new_task_title="Write the 0.2 release notes")  # fmt: skip
+    assert f"{task} goes on" in told.text_result_for_llm, told.text_result_for_llm
+    [made] = [t for t in runtime.tasks.for_session(session_id) if t["id"] != task]
+    assert (made["title"], made["status"], made["result"]) == ("Write the 0.2 release notes",
+                                                               "review", notes)  # fmt: skip
+    still = runtime.tasks.get(task)
+    assert (still["status"], still["result"]) == ("running", ""), "it goes on"
+    assert runtime.tasks.current(session_id)["id"] == task
+    [message] = owner_messages(harness, session_id)
+    assert message["meta"]["task_id"] == made["id"], "what asked for it goes with it"
+    assert commands_of(runtime, made["id"]) == ["pytest -q tests/test_notes.py"]
+    assert commands_of(runtime, task) == ["pytest -q tests/test_div.py"]
+    shell(harness, session_id, "c3", "pytest -q", "2 passed")
+    await settle(runtime)
+    assert commands_of(runtime, task)[-1] == "pytest -q", "what it runs now is the task's"
+    done = "Added `div(a, b)` in `calc.py`; `pytest -q` gives 2 passed."
+    reported = await call_tool(runtime, "report", session_id, status="done", summary=done)
+    assert reported.result_type != "failure", reported.text_result_for_llm
+    assert (runtime.tasks.get(task)["status"], runtime.tasks.get(task)["result"]) == (
+        "review",
+        done,
+    )
+    assert runtime.tasks.get(made["id"])["result"] == notes
+    assert len(runtime.tasks.for_session(session_id)) == 2
 
 
 async def test_work_on_another_branch_than_its_open_pr_is_another_task(tmp_path):
@@ -261,7 +326,8 @@ async def test_a_worker_with_a_result_not_reviewed_stays_after_a_merge(harness):
     await call_tool(runtime, "report", session_id, status="done", summary=f"Opened {url}.")
     runtime.follow(session_id, ["github:acme/app#70"], task_id=task)
     await call_tool(runtime, "message_session", harness.router_id, session_id=session_id,
-                    task="new", title="Add mod to calc", text="Add mod()")  # fmt: skip
+                    task="new", title="Add mod to calc", text="Add mod()",
+                    why_new="another function")  # fmt: skip
     await call_tool(runtime, "report", session_id, status="done", summary="Added mod().")
     runtime.unfollow("github:acme/app#70", finished=True, merged=True)
     harness.session(session_id).emit("session.idle")
@@ -270,40 +336,23 @@ async def test_a_worker_with_a_result_not_reviewed_stays_after_a_merge(harness):
     assert not harness.store.session(session_id)["closed_at"], "its other result waits"
 
 
-NOT_SEPARATE = [
-    "Keep it in this PR rather than in a separate task.",
-    "I don't think this needs to go in a separate task, just fix it here",
-    "\u4efb\u52a1\u7684\u7ed3\u679c\u6709\u95ee\u9898\uff1a\u6d4b\u8bd5\u6ca1\u8fc7\uff0c"
-    "\u8bf7\u4fee\u4e00\u4e0b",
-    "Would this be better as a separate task?",
-    "When I save it as a new task, the due date is lost. Fix that.",
-]
-
-
-async def test_only_an_explicit_request_makes_separate_work_a_task(harness):
+async def test_without_new_task_title_a_report_is_the_task_s_own(harness):
     """Code review: messages that turn a separate task down, ask about one or only name one
-    made a task, and left the question they answered open."""
-    for text in NOT_SEPARATE:
-        assert not separate_task(text), text
-    asked = {
-        "New task: add mod() on a new branch.": "Add mod() on a new branch",
-        "Another task: write the notes": "Write the notes",
-        "Add mod() to calc.py as a separate task.": "Add mod() to calc.py",
-        "\u53e6\u5f00\u4e00\u4e2a\u4efb\u52a1\uff1a\u52a0 mod \u51fd\u6570\u548c\u6d4b\u8bd5": (
-            "\u52a0 mod \u51fd\u6570\u548c\u6d4b\u8bd5"
-        ),
-    }
-    for text, title in asked.items():
-        assert separate_task(text) == title, text
+    made a task, and left the question they answered open. Now nothing but its worker's
+    report makes one."""
     runtime = await harness.connect()
     worker = await spawn(runtime, harness.router_id, title="Div", instructions="x")
     session_id, task = worker["session_id"], worker["task_id"]
     await call_tool(runtime, "report", session_id, status="question",
                     summary="Fix it here, or in a separate task?")  # fmt: skip
-    await runtime.owner_send(session_id, NOT_SEPARATE[0])
+    await runtime.owner_send(session_id, "Keep it in this PR rather than in a separate task.")
     assert [t["id"] for t in runtime.tasks.for_session(session_id)] == [task]
     assert not runtime.asks.session_questions(session_id), "answered"
     assert runtime.tasks.get(task)["status"] == "running"
+    done = "Fixed it here: `div(a, b)` raises `ValueError` for 0."
+    await call_tool(runtime, "report", session_id, status="done", summary=done)
+    assert [t["id"] for t in runtime.tasks.for_session(session_id)] == [task]
+    assert runtime.tasks.get(task)["result"] == done
 
 
 async def test_an_answer_about_a_task_while_on_another_branch_is_not_split_off(tmp_path):
@@ -326,7 +375,7 @@ async def test_an_answer_about_a_task_while_on_another_branch_is_not_split_off(t
     runtime.store.execute("UPDATE runs SET evidence=? WHERE id=?",
                           (json.dumps({"checkouts": [], "prs": [pr]}), run_id))  # fmt: skip
     await call_tool(runtime, "message_session", harness.router_id, session_id=session_id,
-                    task="new", title="Add feature b", text="Add b")  # fmt: skip
+                    task="new", why_new="test", title="Add feature b", text="Add b")  # fmt: skip
     second = runtime.tasks.current(session_id)["id"]
     runtime.took_up(session_id, [second])
     run("git", "checkout", "-q", "-b", "feat-b", "origin/main", cwd=tree)

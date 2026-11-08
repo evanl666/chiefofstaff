@@ -40,7 +40,7 @@ from .policy import within
 from .roles import ROUTER, SLACK, WATCHDOG, WORKER
 from .sources.github import NO_ACCESS, diff_lines, snippet
 from .store import ago_minutes, now
-from .tasks import OPEN
+from .tasks import ADOPTED, OPEN
 from .workspaces import resolve_project
 
 if TYPE_CHECKING:
@@ -260,6 +260,12 @@ class MessageSession(BaseModel):
     replaces: list[str] = Field(
         default_factory=list, description=f"For task='new': {REPLACES[0].lower()}{REPLACES[1:]}"
     )
+    why_new: str = Field(
+        default="",
+        description="For task='new' when the worker was given a task in the last half hour: "
+        "why this is another deliverable, not more of that task (a correction, one more thing "
+        "is task='continue')",
+    )
     follow: list[str] = Field(
         default_factory=list,
         description="Thread keys from the event (slack:<channel>:<ts>, slack:<D…>, "
@@ -363,10 +369,16 @@ class Report(NestedArguments):
     )
     new_task_title: str = Field(
         default="",
-        description="With status done, when this is work apart from the task's result (the "
-        "owner asked you straight for another deliverable: another branch, PR, question or "
-        "flow): a title saying what it delivers. It becomes a task of its own with this "
-        "result; the task keeps its result and PR",
+        description="With status done, when this is work apart from the task (the owner asked "
+        "you straight for another deliverable: another branch, PR, question or flow), finished "
+        "or not: a title saying what it delivers. It becomes a task of its own with this "
+        "result; the task keeps its result and PR (one still at work goes on, reported by "
+        "itself). Never for the task's own result",
+    )
+    changed_code: bool | None = Field(
+        default=None,
+        description="With status done: whether you changed files in a checkout for this task "
+        "(true or false)",
     )
 
 
@@ -802,12 +814,7 @@ def risky(text: str) -> re.Match | None:
     return None
 
 
-# A message that adds to what was just asked: "oh wait, one more thing", "also…", "\u8fd8\u6709".
-ADDS_TO = re.compile(
-    r"\b(one more thing|oh wait|wait,|forgot to (mention|say|add|ask)|one thing I forgot)\b"
-    r"|\u8fd8\u6709\u4e00(\u4ef6|\u70b9)|\u8865\u5145\u4e00\u4e0b|\u5bf9\u4e86|\u5fd8\u4e86\u8bf4",
-    re.IGNORECASE,
-)
+# A new task for a worker given one this recently is asked about once (see recent_task).
 ADD_MINUTES = 30
 # Internal ids a worker may write in its report: a draft's ("d4d31ea2f"), a Slack message's
 # timestamp ("ts 1794157630.819867").
@@ -1765,19 +1772,22 @@ class Tools:
                 "since they looked): tell them where it is. For something destructive, give the "
                 "owner the exact command to run themselves."
             )
+        why_new = " ".join(params.why_new.split())[:200]
         if (
             params.task == "new"
             and target["role"] == WORKER
-            and (recent := self.addition_to(target["id"], params.text))
+            and not why_new
+            and (recent := self.recent_task(target["id"]))
         ):
             # "Oh wait, one more thing: accents too" is more of the task just given, not a new
-            # one (two results to accept, two replies to the asker): asked once.
+            # one (two results to accept, two replies to the asker): the Router, which read it,
+            # says why it is new. Asked once.
             self.store.set(f"newasked:{recent['id']}", "1")
             raise ValueError(
-                f"This reads like more on {recent['id']} “{recent['title']}”, given to that worker "
-                f"minutes ago: if it is the same deliverable (a correction, one more thing), call "
-                f"again with task='continue' and task_id='{recent['id']}'. If it truly is another "
-                "deliverable, call again with task='new'."
+                f"That worker was given {recent['id']} “{recent['title']}” minutes ago. If this "
+                "adds to it (a correction, one more thing), call again with task='continue' and "
+                f"task_id='{recent['id']}'. If it truly is another deliverable, call again with "
+                "task='new' and why_new saying why (the owner sees it)."
             )
         replaced = self.replaced_tasks(params.replaces)
         # A running task left behind by a new one would show as waiting its turn though it was
@@ -1834,7 +1844,12 @@ class Tools:
             criteria = clean_criteria(params.done_when)
             decisions = self.with_turn_decisions(caller, params.decisions)
             task = self.tasks.create(
-                target["id"], title, params.text[:4000], status="running", criteria=criteria
+                target["id"],
+                title,
+                params.text[:4000],
+                status="running",
+                why_new=why_new,
+                criteria=criteria,
             )
             if params.review:
                 self.store.set(f"reviewreq:{task['id']}", "1")
@@ -1856,7 +1871,9 @@ class Tools:
                 "\n\n" + wrap("system", "context", text)
                 for text in await self.settle_earlier(earlier, params.earlier, task)
             )
-            notice = f"New task “{title}” for the worker of “{worker_name}”"
+            notice = f"New task “{title}” for the worker of “{worker_name}”" + (
+                f" · new because {why_new}" if why_new else ""
+            )
         elif params.task == "note":
             prompt = wrap(
                 "router",
@@ -2604,11 +2621,16 @@ class Tools:
             else None
         )
         split_note = ""
-        if task and params.status == "done" and task["result"] and task["status"] != "cancelled":
+        if task and params.status == "done" and task["status"] != "cancelled":
             # Never the result of a task it is not: work apart from it (the worker says so, or
-            # it is on another branch than the task's open PR) is a task of its own.
+            # it is on another branch than the task's open PR) is a task of its own, also while
+            # the task is still at work (asked for in its chat).
             title = params.new_task_title.strip()
-            off = None if title else await self.runtime.task_actions.off_branch(task)
+            off = (
+                await self.runtime.task_actions.off_branch(task)
+                if task["result"] and not title
+                else None
+            )
             if off and not self.store.get(f"offbranch:{task['id']}"):
                 self.store.set(f"offbranch:{task['id']}", "1")
                 label, branch, current = off
@@ -2623,9 +2645,14 @@ class Tools:
                 made = self.runtime.task_actions.split_off(
                     task, title or f"Work on branch {off[2] if off else ''}"
                 )
+                kept = (
+                    "keeps its result"
+                    if task["result"]
+                    else "goes on: report it by itself when it is done"
+                )
                 split_note = (
                     f" Filed as task {made['id']} \u201c{made['title']}\u201d, a task of its "
-                    f"own; {task['id']} keeps its result."
+                    f"own; {task['id']} {kept}."
                 )
                 task = made
         if task and params.artifacts:
@@ -2783,16 +2810,23 @@ class Tools:
         }
         shown = owner_words(params.summary, drafts)
         reported = self.runtime.add_message(caller, "report", shown, meta)
-        if task and params.status == "done" and params.criteria:
+        if (
+            task
+            and params.status == "done"
+            and (params.criteria or params.changed_code is not None)
+        ):
             run = self.store.one(
                 "SELECT * FROM runs WHERE task_id=? ORDER BY started_at DESC LIMIT 1",
                 (task["id"],),
             )
-            if run:
+            if run and params.criteria:
                 claims = [item.model_dump() for item in params.criteria[:12]]
                 self.store.execute(
                     "UPDATE runs SET criteria=? WHERE id=?", (json.dumps(claims), run["id"])
                 )
+            if run and params.changed_code is not None:
+                # What it says it changed, held against its checkouts (see receipts.summarize).
+                self.store.set(f"saidchanged:{run['id']}", "1" if params.changed_code else "0")
         settled = chat_news = False
         if task:
             # It reports on it: whatever it says next (a question, say), it is not "stopped".
@@ -3014,16 +3048,19 @@ class Tools:
             )
         return f"Cancelled task {task['id']}."
 
-    def addition_to(self, session_id: str, text: str) -> dict | None:
-        """The worker's task given in the last half hour that this text adds to ("one more
-        thing", "also", "\u8fd8\u6709"), when the Router was not asked about it yet."""
-        if not ADDS_TO.search(text):
-            return None
+    def recent_task(self, session_id: str) -> dict | None:
+        """The worker's task given in the last half hour (not cancelled) that a new one may
+        only add to, when the Router was not asked about it yet. Not an adopted session's work
+        so far: no task was given there."""
         since = (datetime.now(UTC) - timedelta(minutes=ADD_MINUTES)).isoformat()
         for task in reversed(self.tasks.for_session(session_id)):
             if task["created_at"] < since:
                 break
-            if task["status"] != "cancelled" and not self.store.get(f"newasked:{task['id']}"):
+            if (
+                task["status"] != "cancelled"
+                and task["result"] != ADOPTED
+                and not self.store.get(f"newasked:{task['id']}")
+            ):
                 return task
         return None
 
@@ -3053,21 +3090,26 @@ class Tools:
         kept = [key for key in gone if not self.runtime.unfollow_for(row["id"], key, about)]
         names = self.runtime.slack.display_names()
         said = ", ".join(threads.label(key, names) for key in gone)
-        for_task = f" for task {task['id']}" if task else ""
+        # The owner reads the notice: the task by its title (not its id, nor the worker's).
+        for_task = f" for \u201c{task['title']}\u201d" if task else ""
         self.runtime.add_message(
             row["id"], "notice", f"No longer following {said}{for_task} (the Router stopped it).",
             {"threads": gone},
         )  # fmt: skip
-        still = (
-            f" It still follows {', '.join(threads.label(key, names) for key in kept)} for its "
-            "other tasks."
-            if kept
-            else ""
-        )
-        return (
-            f"“{self.runtime.display_title(row)}” no longer follows {said}{for_task}: new "
-            f"messages there come to you.{still} Its tasks, results and drafts are as they were."
-        )
+        gone_all = [key for key in gone if key not in kept]
+        lines = []
+        if gone_all:
+            listed = ", ".join(threads.label(key, names) for key in gone_all)
+            lines.append(
+                f"Its worker no longer follows {listed}{for_task}: new messages there come to you."
+            )
+        if kept:
+            listed = ", ".join(threads.label(key, names) for key in kept)
+            lines.append(
+                f"Task {task['id'] if task else ''}{for_task} no longer follows {listed}; its "
+                "worker still follows it for its other tasks, so news there still goes to it."
+            )
+        return " ".join(lines) + " Its tasks, results and drafts are as they were."
 
     async def t_stop_worker(self, params: StopWorker, caller: str):
         self.caller(caller, ROUTER)

@@ -166,6 +166,7 @@ async def test_cancelling_one_of_a_workers_tasks_leaves_its_other_task_running(h
         session_id=worker,
         text="Also update the docs",
         task="new",
+        why_new="test",
         earlier="keep",
         title="Docs",
     )
@@ -212,6 +213,7 @@ async def test_cancelling_a_queued_workers_new_task_drops_only_that_instruction(
         session_id=worker,
         text="Then rename the table",
         task="new",
+        why_new="test",
         title="Rename",
     )
     rename = task_of(harness, worker)

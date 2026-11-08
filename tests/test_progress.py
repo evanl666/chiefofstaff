@@ -95,6 +95,7 @@ async def test_the_router_reaches_a_busy_worker_within_its_turn(harness):
         session_id=worker,
         text="Then write the docs.",
         task="new",
+        why_new="test",
         earlier="keep",
         title="Docs",
     )
@@ -541,7 +542,7 @@ async def test_a_review_draft_is_the_task_that_reviews_that_pr_and_sending_it_se
         )
     await call_tool(runtime, "follow_thread", worker, thread="github:acme/app#52")
     made = await call_tool(runtime, "message_session", harness.router_id, session_id=worker,
-                           task="new", title="Review acme/app#53", earlier="keep",
+                           task="new", why_new="test", title="Review acme/app#53", earlier="keep",
                            text="Review https://github.com/acme/app/pull/53")  # fmt: skip
     assert made.result_type == "success", made.text_result_for_llm
     second = runtime.tasks.for_session(worker)[-1]
@@ -671,7 +672,7 @@ async def test_a_merge_settles_only_the_task_that_opened_the_pr(harness):
     )  # fmt: skip
     await call_tool(
         runtime, "message_session", harness.router_id, session_id=worker, text="Fix it",
-        task="new", title="Fix",
+        task="new", why_new="test", title="Fix",
     )  # fmt: skip
     fix = runtime.tasks.current(worker)
     session = harness.session(worker)
@@ -1224,6 +1225,7 @@ async def test_the_answer_goes_to_the_report_of_the_task_it_was_on(harness):
         session_id=worker,
         text="Then chart it",
         task="new",
+        why_new="test",
         title="Chart",
     )
     await call_tool(
@@ -1623,7 +1625,7 @@ async def test_a_new_task_answered_without_a_report_is_filed_not_left_running(ha
     assert harness.store.session(worker)["status"] == "done"
     given = await call_tool(
         runtime, "message_session", harness.router_id, session_id=worker, task="new",
-        title="Monthly growth", text="Now the month-over-month growth, as a table.",
+        why_new="test", title="Monthly growth", text="Now the month-over-month growth, as a table.",
     )  # fmt: skip
     assert given.result_type != "failure", given.text_result_for_llm
     answer = "| month | growth |\n|---|---|\n| Feb | +4% |\n| Mar | +2% |\n" + "Computed so. " * 20
@@ -1875,7 +1877,7 @@ async def test_a_sent_draft_settles_the_task_it_was_drafted_for(harness):
     await call_tool(runtime, "report", worker, status="done", summary="Drafted the reply.")
     await call_tool(
         runtime, "message_session", harness.router_id, session_id=worker, text="Now the docs",
-        task="new", title="Docs",
+        task="new", why_new="test", title="Docs",
     )  # fmt: skip
     docs = runtime.tasks.current(worker)
     await runtime.drafts.copied(harness.store.draft(draft["id"]), "On it!")
@@ -2026,7 +2028,7 @@ async def test_a_merged_pr_does_not_close_a_worker_with_other_open_work(harness)
     await settle(runtime)
     await call_tool(
         runtime, "message_session", harness.router_id, session_id=worker, text="Now logout",
-        task="new", title="Fix logout",
+        task="new", why_new="test", title="Fix logout",
     )  # fmt: skip
     second = runtime.tasks.current(worker)
     runtime.unfollow("github:acme/app#7", finished=True, merged=True)
@@ -2097,7 +2099,7 @@ async def test_a_message_names_which_of_several_open_tasks_it_is_about(harness):
     first = runtime.tasks.current(worker)
     await call_tool(
         runtime, "message_session", harness.router_id, session_id=worker, text="Also this",
-        task="new", earlier="keep", title="Second",
+        task="new", why_new="test", earlier="keep", title="Second",
     )  # fmt: skip
     vague = await call_tool(
         runtime, "message_session", harness.router_id, session_id=worker, text="Use Postgres"
@@ -2170,6 +2172,7 @@ async def test_a_closed_worker_reopened_does_not_get_what_it_never_received(tmp_
         session_id=worker,
         text="Old plan",
         task="new",
+        why_new="test",
         title="Plan",
     )
     assert harness.store.session(worker)["status"] == "queued"
@@ -2207,7 +2210,7 @@ async def test_a_worker_with_several_open_tasks_names_the_one_it_reports(harness
     first = runtime.tasks.current(worker)
     await call_tool(
         runtime, "message_session", harness.router_id, session_id=worker, text="Also this",
-        task="new", earlier="keep", title="Second",
+        task="new", why_new="test", earlier="keep", title="Second",
     )  # fmt: skip
     second = runtime.tasks.current(worker)
     assert first["id"] != second["id"]
@@ -2446,7 +2449,7 @@ async def test_two_cancellations_in_a_minute_both_reach_the_worker(harness):
     for title in ("Second", "Third"):
         await call_tool(
             runtime, "message_session", harness.router_id, session_id=worker, text=title,
-            task="new", earlier="keep", title=title,
+            task="new", why_new="test", earlier="keep", title=title,
         )  # fmt: skip
         tasks.append(runtime.tasks.current(worker))
     await runtime.task_actions.cancel(tasks[1]["id"])
@@ -2475,7 +2478,7 @@ async def test_another_tasks_report_leaves_an_open_question_alone(harness):
     await runtime.task_actions.cancel(first["id"])
     await call_tool(
         runtime, "message_session", harness.router_id, session_id=worker, text="Also the cache",
-        task="new", earlier="keep", title="Cache",
+        task="new", why_new="test", earlier="keep", title="Cache",
     )  # fmt: skip
     second = runtime.tasks.current(worker)
     runtime.tasks.move(second["id"], "running")
@@ -2548,7 +2551,7 @@ async def test_a_pr_opened_in_a_turn_belongs_to_the_task_that_turn_is_on(harness
     session.emit("user.message", content=harness.session(worker).sent[0])
     await call_tool(
         runtime, "message_session", harness.router_id, session_id=worker, text="Then the docs",
-        task="new", earlier="keep", title="Docs",
+        task="new", why_new="test", earlier="keep", title="Docs",
     )  # fmt: skip
     docs = runtime.tasks.current(worker)
     session.emit("tool.execution_start", tool_name="bash", tool_call_id="pr",
@@ -2729,6 +2732,7 @@ async def test_a_new_task_needs_a_title_saying_what_it_delivers(harness):
     refused = await call_tool(
         runtime, "message_session", harness.router_id, session_id=worker,
         text="Handle the new Slack message\nJingtao asks why two gets are slow", task="new",
+        why_new="test",
     )  # fmt: skip
     assert refused.result_type == "failure" and "title" in refused.text_result_for_llm
     assert len(runtime.tasks.for_session(worker)) == 1, "no task named after a first line"
@@ -2747,6 +2751,7 @@ async def test_a_note_about_a_finished_task_does_not_move_its_worker_off_the_one
                     summary="Spec written; I need your OpenAI key for the voice test.")  # fmt: skip
     await call_tool(
         runtime, "message_session", harness.router_id, session_id=worker, task="new",
+        why_new="test",
         earlier="keep", title="Test the AI interviewer end to end", text="Run it end to end",
     )  # fmt: skip
     e2e = runtime.tasks.current(worker)
@@ -2794,7 +2799,7 @@ async def test_a_new_task_says_what_becomes_of_the_running_one(harness):
 
     def new(worker, title, **extra):
         return call_tool(runtime, "message_session", harness.router_id, session_id=worker,
-                         task="new", title=title, text=title, **extra)  # fmt: skip
+                         task="new", why_new="test", title=title, text=title, **extra)  # fmt: skip
 
     worker, spec = await worker_with("Write the spec")
     refused = await new(worker, "Build it")
@@ -2870,7 +2875,7 @@ async def test_a_new_task_sent_while_its_worker_finishes_does_not_hold_back_the_
     await settle(runtime)
     await call_tool(
         runtime, "message_session", harness.router_id, session_id=worker, task="new",
-        earlier="keep", title="Build it", text="Then build it",
+        why_new="test", earlier="keep", title="Build it", text="Then build it",
     )  # fmt: skip
     build = runtime.tasks.current(worker)
     assert runtime.states[worker].unread, "sent mid-turn: not shown to it yet"
@@ -2907,6 +2912,7 @@ async def test_stop_stops_the_task_at_work_and_resends_what_it_never_saw(harness
     runtime = await harness.connect()
     worker, session, sleep = await busy_worker(runtime, harness, "Sleep A")
     await call_tool(runtime, "message_session", harness.router_id, session_id=worker, task="new",
+                    why_new="test",
                     earlier="keep", title="Write B", text="Write B into b.txt")  # fmt: skip
     write_b = runtime.tasks.current(worker)
     assert runtime.states[worker].unread, "sent within its turn, not seen yet"
@@ -2926,6 +2932,7 @@ async def test_cancelling_the_task_at_work_stops_it_and_it_goes_on_with_the_othe
     runtime = await harness.connect()
     worker, session, sleep = await busy_worker(runtime, harness, "Sleep A")
     await call_tool(runtime, "message_session", harness.router_id, session_id=worker, task="new",
+                    why_new="test",
                     earlier="keep", title="Write B", text="Write B into b.txt")  # fmt: skip
     write_b = runtime.tasks.current(worker)
     await call_tool(runtime, "message_session", harness.router_id, session_id=worker,
@@ -2947,7 +2954,7 @@ async def test_the_owners_chat_answers_the_task_that_asked(harness):
     await call_tool(runtime, "report", worker, status="question", summary="1 or 2?",
                     task_id=ask["id"])  # fmt: skip
     await call_tool(runtime, "message_session", harness.router_id, session_id=worker, task="new",
-                    title="Write hello", text="Write hello")  # fmt: skip
+                    why_new="test", title="Write hello", text="Write hello")  # fmt: skip
     hello = runtime.tasks.current(worker)
     assert hello["id"] != ask["id"]
     message = await runtime.owner_send(worker, "2")
@@ -3039,7 +3046,7 @@ async def test_one_answer_about_two_reported_tasks_is_added_to_neither(harness):
     worker = await spawn(runtime, harness.router_id, "Alpha")
     alpha = runtime.tasks.current(worker)
     await call_tool(runtime, "message_session", harness.router_id, session_id=worker, task="new",
-                    earlier="keep", title="Count", text="Count rows")  # fmt: skip
+                    why_new="test", earlier="keep", title="Count", text="Count rows")  # fmt: skip
     count = runtime.tasks.current(worker)
     await call_tool(runtime, "report", worker, status="done", summary="Alpha done.",
                     task_id=alpha["id"])  # fmt: skip
@@ -3133,7 +3140,7 @@ async def test_tasks_quoted_after_a_restart_are_taken_up(harness):
     runtime = await harness.connect()
     worker, _session, alpha = await busy_worker(runtime, harness, "Alpha")
     await call_tool(runtime, "message_session", harness.router_id, session_id=worker, task="new",
-                    earlier="keep", title="Count", text="Count rows")  # fmt: skip
+                    why_new="test", earlier="keep", title="Count", text="Count rows")  # fmt: skip
     count = runtime.tasks.current(worker)
     runtime.states[worker].unread.clear()
     await runtime.resume_working()
@@ -3147,9 +3154,10 @@ async def test_a_new_task_notice_names_its_worker_as_a_worker(harness):
     runtime = await harness.connect()
     worker, _session, _alpha = await busy_worker(runtime, harness, "Alpha")
     await call_tool(runtime, "message_session", harness.router_id, session_id=worker, task="new",
+                    why_new="test",
                     earlier="keep", title="Count rows", text="Count rows")  # fmt: skip
     notices = [text for kind, text in harness.kinds(harness.router_id) if kind == "notice"]
-    assert "New task “Count rows” for the worker of “Alpha”" in notices
+    assert "New task “Count rows” for the worker of “Alpha” · new because test" in notices
 
 
 async def test_the_router_hears_when_a_blocked_task_is_unblocked(harness):
@@ -3180,7 +3188,7 @@ async def test_notices_of_new_tasks_say_which_task(harness):
     first = runtime.tasks.current(worker)
     await call_tool(runtime, "report", worker, status="done", summary="Fixed.")
     await call_tool(runtime, "message_session", harness.router_id, session_id=worker, task="new",
-                    title="Then the docs", text="Then the docs")  # fmt: skip
+                    why_new="test", title="Then the docs", text="Then the docs")  # fmt: skip
     docs = runtime.tasks.current(worker)
     notices = [m for m in harness.store.messages(harness.router_id) if m["kind"] == "notice"]
     started = next(m for m in notices if m["text"].startswith("Started"))
@@ -3192,6 +3200,7 @@ async def test_a_worker_is_named_by_the_task_it_is_on(harness):
     runtime = await harness.connect()
     worker, _session, _check = await busy_worker(runtime, harness, "Check the totals")
     await call_tool(runtime, "message_session", harness.router_id, session_id=worker, task="new",
+                    why_new="test",
                     earlier="keep", title="Save monthly.csv", text="Save it")  # fmt: skip
     row = harness.store.session(worker)
     assert runtime.display_title(row) == "Check the totals", "not the one given last"
@@ -3298,6 +3307,7 @@ async def test_a_stopped_task_stays_stopped_while_its_worker_works_on_something_
     await settle(runtime)
     assert runtime.tasks.get(task["id"])["status"] == "waiting", "PR news is not a go-on"
     await call_tool(runtime, "message_session", harness.router_id, session_id=worker, task="new",
+                    why_new="test",
                     earlier="keep", title="Write B", text="Write B into b.txt")  # fmt: skip
     session.emit("user.message", content="Write B into b.txt")
     session.emit("tool.execution_start", tool_call_id="n2", tool_name="bash",
@@ -3312,6 +3322,7 @@ async def test_cancelling_another_task_does_not_resume_the_stopped_one(harness):
     runtime = await harness.connect()
     worker, session, sleep = await busy_worker(runtime, harness, "Sleep A")
     await call_tool(runtime, "message_session", harness.router_id, session_id=worker, task="new",
+                    why_new="test",
                     earlier="keep", title="Write B", text="Write B into b.txt")  # fmt: skip
     write_b = runtime.tasks.current(worker)
     await runtime.workers.interrupt(worker)
@@ -3376,6 +3387,7 @@ async def test_cancelling_the_task_at_work_does_not_ask_for_the_others_report(ha
     runtime = await harness.connect()
     worker, session, sleep = await busy_worker(runtime, harness, "Sleep A")
     await call_tool(runtime, "message_session", harness.router_id, session_id=worker, task="new",
+                    why_new="test",
                     earlier="keep", title="Write B", text="Write B into b.txt")  # fmt: skip
     await runtime.task_actions.cancel(sleep["id"], "Not needed")
     session.emit("session.idle")  # The aborted turn ends.
@@ -3387,6 +3399,7 @@ async def test_cancelling_a_stopped_task_lets_its_worker_go_on_with_the_others(h
     runtime = await harness.connect()
     worker, session, sleep = await busy_worker(runtime, harness, "Sleep A")
     await call_tool(runtime, "message_session", harness.router_id, session_id=worker, task="new",
+                    why_new="test",
                     earlier="keep", title="Write B", text="Write B into b.txt")  # fmt: skip
     write_b = runtime.tasks.current(worker)
     await runtime.workers.interrupt(worker)
@@ -3443,7 +3456,7 @@ async def test_retrying_a_cancelled_task_does_not_send_its_cancelled_note(harnes
     runtime = await harness.connect()
     worker, session, _task = await busy_worker(runtime, harness, "Sleep A")
     await call_tool(runtime, "message_session", harness.router_id, session_id=worker, task="new",
-                    earlier="keep", title="Write B", text="Write B")  # fmt: skip
+                    why_new="test", earlier="keep", title="Write B", text="Write B")  # fmt: skip
     write_b = runtime.tasks.current(worker)
     runtime.update_session(worker, status="idle")
     runtime.states[worker].busy = False
@@ -3512,6 +3525,7 @@ async def test_cancelling_a_stopped_task_after_a_restart_lets_its_worker_go_on(t
     runtime = await first.connect()
     worker, _session, sleep = await busy_worker(runtime, first, "Sleep A")
     await call_tool(runtime, "message_session", first.router_id, session_id=worker, task="new",
+                    why_new="test",
                     earlier="keep", title="Write B", text="Write B into b.txt")  # fmt: skip
     write_b = runtime.tasks.current(worker)
     await runtime.workers.interrupt(worker)
@@ -3639,7 +3653,7 @@ async def test_pr_news_goes_to_the_task_that_made_the_pr_and_names_it(harness):
     runtime.follow(maker, ["github:acme/app#7"], task_id=fix["id"])
     told = await call_tool(runtime, "message_session", harness.router_id, session_id=maker,
                            task="new", title="Review PR acme/app#8", text="Review #8",
-                           earlier="keep")  # fmt: skip
+                           why_new="test", earlier="keep")  # fmt: skip
     assert told.result_type == "success", told.text_result_for_llm
     review = runtime.tasks.current(maker)
     assert review["id"] != fix["id"]

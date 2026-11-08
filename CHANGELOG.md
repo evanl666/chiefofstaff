@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Read, not matched against word lists**: whether your message to a worker asks for a
+  separate task, whether a worker's result changed code, whether a new task right after
+  another is really "one more thing" for it, and what your away replies mean are now said by
+  the session that reads the words (the worker, the Router, the messenger), so any phrasing,
+  in any language, is understood; only a cautious check stays (a reply that holds a send back
+  still never sends).
 - **A delivered task by where its PR stands**: with its own PR's CI failing or changes
   requested it is under *Needs you*, saying which; ready to merge it says so in Monitoring
   (not "Delivered"): the same words as its PR chip and Artifacts, from one rule.
@@ -9,6 +15,9 @@
   (its CI checks, its reviews), with what GitHub said; on the task the PR is, not on every task
   of its worker; gone as soon as it is read again; *stop following* there stops it for that
   task only (so does the Router's, given a task).
+- **A task built on another's branch has only its own changes**: its worker fast-forwarding
+  onto that task's branch no longer adds that task's commits to its card, nor makes it *Out of
+  date* when that task's files change.
 
 ## 0.1.31 (2026-11-08)
 

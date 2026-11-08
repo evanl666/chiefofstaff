@@ -69,7 +69,7 @@ const PR_MARKERS = { "changes requested": "pr-changes", "CI failing": "pr-failin
 // The markers of a delivered task by where its PR stands (one row per followed PR, see boardOf).
 const DELIVERED = ["delivered", "reviewed", "mergeable", "pr-failing", "pr-changes"];
 function ownPrStanding(task) {
-  const watched = new Set((task.watching || []).map((key) => /^github:(.+#\d+)$/.exec(key)?.[1]?.toLowerCase()).filter(Boolean));
+  const watched = new Set(followedKeys(task).map((key) => /^github:(.+#\d+)$/.exec(key)?.[1]?.toLowerCase()).filter(Boolean));
   const found = (task.receipts?.prs || [])
     .filter((pr) => pr.own && watched.has(pr.label.toLowerCase()))
     .map((pr) => ({ pr, word: prStatus(pr)[0] }))
@@ -83,6 +83,11 @@ function ownPrStanding(task) {
   const why = { "changes requested": `Changes requested on ${short}`, "CI failing": `CI failing on ${short}${failing}`, "ready to merge": `Ready to merge: ${short}` }[word];
   return { marker: PR_MARKERS[word], why };
 }
+
+// What a task follows: those read lately and those that could not be (as they stood last).
+const followedKeys = (task) => [...(task.watching || []), ...(task.watch_unreadable || [])];
+// The most pressing first when one PR's row stands for several tasks (see boardOf).
+const URGENCY = { "pr-changes": 0, "pr-failing": 0, mergeable: 1 };
 
 const hours = (from, now) => (from ? (now - Date.parse(from)) / 3600000 : 0);
 // A delivered task whose PR (or thread) has not changed for this long goes with the finished
@@ -135,6 +140,7 @@ export function workerContext(worker, list) {
 export function taskPhase(task, worker, { active = "", activeTitle = "", stoppedTitle = "", now = Date.now(), stallHours = 4, onCard = false } = {}) {
   const at = (section, marker, why = "") => ({ section, marker, why });
   const watching = task.watching || [];
+  const followed = followedKeys(task);
   const checkBack = task.check_back;
   if (task.blocked) return at("needs", "blocked", "It waits for a task that ended without finishing");
   if (task.status === "waiting" && task.stopped) return at("needs", "stopped", `Stopped by ${task.stopped}: tell it to go on, or cancel it`);
@@ -154,7 +160,7 @@ export function taskPhase(task, worker, { active = "", activeTitle = "", stopped
     // Delivered, still followed for what comes next (a review, the merge, a reply): the
     // owner's own work waiting on others, or a PR they reviewed waiting on its author. Nothing
     // new there for a day, it goes with the finished ones (news brings it back).
-    if (watching.length) {
+    if (followed.length) {
       // Its own PR as GitHub has it (as Artifacts and its chip say it): one to fix is the
       // owner's to act on; one ready to merge is offered on a Merge card (shown above when
       // there is one), else it waits here, said as it is, not as "Delivered".
@@ -217,9 +223,10 @@ export function boardOf(tasks, workers, { now = Date.now(), stallHours = 4, onCa
   // A PR a worker follows for two of its delivered tasks (one split off the other, say) is
   // one row, on the newest: the other is with the finished ones, still followed.
   const followed = new Map();
-  for (const task of [...tasks].sort((a, b) => b.updated_at.localeCompare(a.updated_at))) {
+  const urgency = (task) => URGENCY[phases.get(task.id).marker] ?? 2;
+  for (const task of [...tasks].sort((a, b) => urgency(a) - urgency(b) || b.updated_at.localeCompare(a.updated_at))) {
     if (!DELIVERED.includes(phases.get(task.id).marker)) continue;
-    const key = `${task.session_id}|${[...task.watching].sort().join(",")}`;
+    const key = `${task.session_id}|${followedKeys(task).sort().join(",")}`;
     const first = followed.get(key);
     if (first) phases.set(task.id, { section: "finished", marker: "still-following", why: `Still following, for “${first.title}”` });
     else followed.set(key, task);
@@ -254,7 +261,8 @@ export function monitoringRows(tasks, phases) {
   const order = (a, b) => (rank(a) === URGENT.queued ? a.created_at.localeCompare(b.created_at) : b.updated_at.localeCompare(a.updated_at));
   const list = tasks.filter((task) => phases.get(task.id)?.section === "monitoring").sort((a, b) => rank(a) - rank(b) || order(a, b));
   const marked = (...markers) => list.filter((task) => markers.includes(phases.get(task.id).marker));
-  return { waiting: list.filter((task) => !["delivered", "mergeable", "reviewed"].includes(phases.get(task.id).marker)), delivered: marked("mergeable", "delivered"), reviewed: marked("reviewed") };
+  // Ready to merge is not waiting on others: a row of its own, not in that group.
+  return { waiting: list.filter((task) => !["delivered", "reviewed"].includes(phases.get(task.id).marker)), delivered: marked("delivered"), reviewed: marked("reviewed") };
 }
 // Workers at work with none of their tasks under Running and none open (news on a PR a
 // finished task follows, a question about it): a card each, so their work shows. One with a

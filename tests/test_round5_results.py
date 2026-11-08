@@ -277,6 +277,7 @@ async def test_another_tasks_work_in_the_same_worktree_is_no_change_of_a_finishe
     runtime.follow(session_id, ["github:acme/app#7"], task_id=first)
     runtime.task_actions.accept(first)
     await call_tool(runtime, "message_session", router, session_id=session_id, task="new",
+                    why_new="test",
                     title="Add the units module", text="Add units.py from main")  # fmt: skip
     second = runtime.tasks.current(session_id)["id"]
     assert second != first
@@ -312,7 +313,8 @@ async def test_news_on_a_finished_tasks_pr_puts_its_worker_on_that_task(tmp_path
     runtime.task_actions.record_opened(first, ["https://github.com/acme/app/pull/7"])
     runtime.follow(session_id, ["github:acme/app#7"], task_id=first)
     await call_tool(runtime, "message_session", harness.router_id, session_id=session_id,
-                    task="new", title="Write the notes", text="Write notes")  # fmt: skip
+                    task="new", title="Write the notes", text="Write notes",
+                    why_new="test")  # fmt: skip
     second = runtime.tasks.current(session_id)["id"]
     await call_tool(runtime, "report", session_id, status="done", summary="Notes written.",
                     task_id=second)  # fmt: skip
@@ -335,7 +337,8 @@ async def test_news_seen_mid_turn_puts_its_worker_on_that_task(harness):
     session_id, first = worker["session_id"], worker["task_id"]
     await call_tool(runtime, "report", session_id, status="done", summary="Calc added.")
     await call_tool(runtime, "message_session", harness.router_id, session_id=session_id,
-                    task="new", title="Write the notes", text="Write notes")  # fmt: skip
+                    task="new", title="Write the notes", text="Write notes",
+                    why_new="test")  # fmt: skip
     assert runtime.turn_task(session_id) != first
     runtime.store.set(f"stopped:{first}", "you")
     news = wrap("github", "thread", "Bob: add type hints", thread="github:acme/app#7",

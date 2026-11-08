@@ -2,6 +2,7 @@
 
 import json
 import time
+from datetime import UTC, datetime
 
 from conftest import Harness, call_tool, settle
 
@@ -119,7 +120,8 @@ async def test_the_daily_summary_counts_replies_not_merges_and_leaves_out_set_as
 
 async def test_one_more_thing_on_a_task_just_given_is_asked_about_once(tmp_path):
     """T12: "oh wait, one more thing: accents too" became a second task (two results, two
-    replies to the asker)."""
+    replies to the asker). The Router, which reads it, says why a task for a worker given one
+    minutes ago is new (why_new, shown to the owner); without it, it is asked once."""
     harness = Harness(tmp_path / "data")
     runtime = await harness.connect()
     made = await spawn(runtime, harness.router_id, "Add slugify")
@@ -128,17 +130,30 @@ async def test_one_more_thing_on_a_task_just_given_is_asked_about_once(tmp_path)
     new = {"task": "new", "title": "Strip accents", "text": text, "earlier": "keep"}
     refused = await call_tool(runtime, "message_session", harness.router_id, session_id=worker,
                               **new)  # fmt: skip
+    said = refused.text_result_for_llm
     assert refused.result_type == "failure"
-    assert "task='continue'" in refused.text_result_for_llm and made["task_id"] in (
-        refused.text_result_for_llm
-    )
+    assert "task='continue'" in said and made["task_id"] in said and "why_new" in said, said
     again = await call_tool(runtime, "message_session", harness.router_id, session_id=worker,
                             **new)  # fmt: skip
-    assert again.result_type == "success", "the Router decided: another deliverable"
-    plain = await call_tool(runtime, "message_session", harness.router_id, session_id=worker,
-                            task="new", title="Add a metric", text="Also add a metric",
-                            earlier="keep")  # fmt: skip
-    assert plain.result_type == "success", "a plain new task is not asked about"
+    assert again.result_type == "success", "asked once: the Router decided"
+    plain = {"task": "new", "title": "Add a metric", "text": "Add a metric", "earlier": "keep"}
+    why = "a metric is a change of its own"
+    told = await call_tool(runtime, "message_session", harness.router_id, session_id=worker,
+                           why_new=why, **plain)  # fmt: skip
+    assert told.result_type == "success", told.text_result_for_llm
+    notices = [text for kind, text in harness.kinds(harness.router_id) if kind == "notice"]
+    assert notices[-1].endswith(f" · new because {why}"), notices[-1]
+    asked = await call_tool(runtime, "message_session", harness.router_id, session_id=worker,
+                            **{**plain, "title": "Add a counter"})  # fmt: skip
+    assert asked.result_type == "failure" and "Add a metric" in asked.text_result_for_llm, (
+        "whatever its words: the newest task given minutes ago"
+    )
+    older = time.time() - 31 * 60
+    runtime.store.execute("UPDATE tasks SET created_at=?",
+                          (datetime.fromtimestamp(older, UTC).isoformat(),))  # fmt: skip
+    later = await call_tool(runtime, "message_session", harness.router_id, session_id=worker,
+                            **{**plain, "title": "Add a gauge"})  # fmt: skip
+    assert later.result_type == "success", "a worker given its task a while ago is not asked"
 
 
 async def test_a_renamed_task_is_told_to_its_worker(tmp_path):

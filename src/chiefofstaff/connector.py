@@ -97,129 +97,30 @@ SLACK_DM_HINT = (
     "B there, and read_owner_slack_dm reads their replies there later. Use it when that is how "
     'they want to get it ("my own Slack DM"), or when nothing else here reaches them.'
 )
-SEND_WORDS = {"send", "ok", "okay", "yes", "y", "approve", "lgtm", "发", "发送", "好", "可以"}
 REJECT_WORDS = {"reject", "no", "n", "skip", "don't", "dont", "不", "不要", "拒绝"}
 GO_ON_WORDS = {"go on", "go", "continue", "resume", "继续"}
-# What else a short send may say ("yes, send it", "go ahead and send", "好的 发吧").
-SEND_FILLER = {
-    "it", "pls", "please", "plz", "now", "go", "ahead", "and", "sure", "yep", "yeah", "yup",
-    "thanks", "thx", "ty", "just", "this", "that", "one", "reply", "out", "send it",
-}  # fmt: skip
-SEND_PHRASES = {"发吧", "发送吧", "发出去", "发了吧", "好的", "可以发", "行", "没问题", "嗯"}
-# Words that hold a send back ("do not send", "ok wait", "not yet, send later").
-HOLD_WORDS = {
-    "not", "no", "don't", "dont", "never", "nope", "wait", "hold", "later", "yet", "stop",
-    "until", "tomorrow", "before", "after", "once", "when", "if", "unless",
-}  # fmt: skip
-# A short "don't send": nothing but a no and a send (dropped, as "no" is).
-NO_SEND_WORDS = {"do", "not", "don't", "dont", "never", "no", "send", "it", "this", "please", "pls"}
-# Chinese, written without spaces ("好的发吧", "可以发了"): read by its parts, not by words.
-# "先别发", "一会再发", "待会发", "回头再发": not now.
-CJK_HOLDS = (
-    "先别", "先不", "别", "不", "等", "稍后", "晚点", "暂", "慢", "一会", "待会", "回头", "再",
-)  # fmt: skip
-CJK_NO = {
-    "不要发送",
-    "先不要发",
-    "不要发了",
-    "暂时别发",
-    "别发",
-    "不要发",
-    "不发",
-    "不用发",
-    "别发了",
-    "不用了",
-    "不要了",
-    "别",
-    "不要",
-    "不",
-    "算了",
-}
-CJK_SENDS = ("没问题", "可以", "发送", "发出去", "发", "好", "行", "嗯", "对")
-CJK_FILLER = (
-    "吧",
-    "了",
-    "的",
-    "啊",
-    "呀",
-    "哈",
-    "就",
-    "直接",
-    "出去",
-    "一下",
-    "儿",
+# What a reply to a draft means is the messenger's judgment (report_owner_replies' intent), not
+# a guess from its words. These only ever stop a send: a reply the messenger read as "send"
+# that asks something back, holds it back, makes it conditional or says no is not sent (the
+# owner is asked to answer "send" when it should go). Matching too much only asks once more.
+HOLDS_SEND = re.compile(
+    r"[?\uff1f]"
+    r"|\b(?:wait|hold|later|yet|until|till|tomorrow|tonight|before|after|once|when|if|unless|"
+    r"not|don'?t|do not|never|no|nope|nah|stop|first|instead|but|except|hang on|one sec|"
+    r"never ?mind)\b"
+    r"|n't\b"
+    r"|[\u5417\u4e48\u5462\u561b\u4e0d\u522b\u7b49\u6682\u6162\u518d\u5148\u4f46]"
+    r"|\u7a0d\u540e|\u665a\u70b9|\u4e00\u4f1a|\u5f85\u4f1a|\u56de\u5934|\u4e4b\u540e|\u4ee5\u540e",
+    re.IGNORECASE,
 )
-# A question ("ok?", "发吗", "可以吗"): the owner asks, they do not say send.
-ASKS = re.compile(r"[?\uff1f]|[\u5417\u4e48\u5462\u561b]")
-# What else holds a send back, or says no ("hold on", "never mind", "nah").
-HOLD_PHRASES = re.compile(r"\b(hold on|hang on|one sec|not now|never ?mind|nevermind|nah)\b")
-CJK = re.compile(r"[\u3400-\u9fff]")
+# What the messenger may say a reply to a draft (or a merge card) means.
+DRAFT_INTENTS = {"send", "no", "change", "unclear"}
 
 
-def cjk_answer(text: str) -> str:
-    """send_answer for an answer in Chinese."""
-    plain = re.sub(r"[\W_]+", "", text)
-    if not plain or len(plain) > 8:
-        return ""
-    if plain in CJK_NO:
-        return "no"
-    if any(hold in plain for hold in CJK_HOLDS):
-        rest = plain
-        for part in (*CJK_HOLDS, *CJK_SENDS, *CJK_FILLER):
-            rest = rest.replace(part, "")
-        # "先别发", "等等", "暂时不要", "好 但先等等": held; more words: what to change.
-        return "" if len(rest) > 3 else "unclear"
-    rest, sends = plain, False
-    for part in CJK_SENDS:
-        sends = sends or part in rest
-        rest = rest.replace(part, "")
-    for part in CJK_FILLER:
-        rest = rest.replace(part, "")
-    return "send" if sends and not rest else ""
-
-
-def send_answer(word: str) -> str:
-    """What a short answer to a draft says: "send", "no", "unclear" (a send held back:
-    "ok wait", "not yet, send later", "先别发"), or "" (something else: what to change)."""
-    word = word.replace("\u2019", "'")  # A phone's "don\u2019t".
-    if word in REJECT_WORDS:
-        return "no"
-    if ASKS.search(word):
-        # "ok?", "send now?", "发了吗": a question back, never a send (nor something to change
-        # when it is only that).
-        rest = ASKS.sub(" ", word)
-        return "unclear" if not rest.strip() or send_answer(rest) in {"send", "no"} else ""
-    if HOLD_PHRASES.search(word):
-        rest = HOLD_PHRASES.sub(" ", word)
-        return (
-            "unclear"
-            if send_answer(rest) in {"send", "", "unclear"} and len(rest.split()) <= 3
-            else ""
-        )
-    if CJK.search(word) and not re.search(r"[A-Za-z]", word):
-        return cjk_answer(word)
-    said = re.findall(r"[\w']+", word)
-    if not said or len(said) > 12:
-        return ""
-    tokens = set(said)
-    plain = SEND_WORDS | SEND_PHRASES | SEND_FILLER | {"send"}
-    if tokens & HOLD_WORDS:
-        if (
-            tokens <= NO_SEND_WORDS
-            and "send" in tokens
-            and not (said[0] == "no" and said[-1] in {"send", "it"} and "not" not in tokens)
-        ):
-            return "no"  # "do not send", "don't send it"; not "no, send it".
-        # A send held back ("send it after lunch", "ok, send it once Bob confirms", "yes send.
-        # actually wait"): not a send, and not something to redraft either.
-        if tokens & (SEND_WORDS | SEND_PHRASES | {"send"}) or tokens <= plain | HOLD_WORDS:
-            return "unclear"
-        return ""
-    if len(said) > 5:
-        return ""
-    if tokens & (SEND_WORDS | SEND_PHRASES) and tokens <= plain:
-        return "send"
-    return ""
+def holds_send(text: str) -> str:
+    """What in a reply stops a send ("" when nothing does): see HOLDS_SEND."""
+    found = HOLDS_SEND.search(text.replace("\u2019", "'"))
+    return found.group(0) if found else ""
 
 
 CANCEL_WORDS = {"cancel", "取消"}
@@ -343,6 +244,14 @@ class ReadOwnerSlackDm(BaseModel):
 class OwnerReply(BaseModel):
     code: str = Field(description="The five-letter code the owner's reply names")
     text: str = Field(description="The owner's reply, exactly")
+    intent: Literal["send", "no", "change", "unclear", "answer"] = Field(
+        default="answer",
+        description="What the reply means. For a code that is a draft or a PR to merge: "
+        "'send' (send it, post it, merge it now, as it is: 'ok', 'ship it', '发吧'), 'no' "
+        "(drop it, leave it), 'change' (it says what to change in it), or 'unclear' (anything "
+        "else: a question back, a send held back or with a condition: 'after lunch', 'once Bob "
+        "confirms', 'wait'; or when you are not sure). For any other code: 'answer'",
+    )
 
 
 class ReportOwnerReplies(NestedArguments):
@@ -1191,12 +1100,24 @@ class Connector:
         where = self.store.get("away_where") or "the conversation you sent Chief of Staff's "
         # Kept as the owner reads it ("your own Slack DM"); the messenger reads it as theirs.
         where = re.sub(r"\byour\b", "the owner's", where, flags=re.IGNORECASE)
+        items = self.open_items()
+        listed = []
+        for code in codes:
+            item = items.get(self.code_item(code)) or {}
+            kind = (item.get("draft") or {}).get("kind")
+            listed.append(
+                f"{code} (a PR to merge)"
+                if kind == "merge"
+                else f"{code} (a draft to send)"
+                if self.decides_draft(item)
+                else code
+            )
         text = (
             f"Read the owner's replies to Chief of Staff's notifications in {where} with: {how}\n\n"
-            f"Pass each reply that names one of these codes with report_owner_replies (the code "
-            f"and the reply exactly): {', '.join(codes)}. Only what the owner themself wrote "
-            "there; a reply you passed before is fine to pass again. If there is none, end "
-            "without calling it. Send nothing."
+            f"Pass each reply that names one of these codes with report_owner_replies (the code, "
+            f"the reply exactly, and what it means as intent): {', '.join(listed)}. Only what "
+            "the owner themself wrote there; a reply you passed before is fine to pass again. "
+            "If there is none, end without calling it. Send nothing."
         )
         await self.runtime.toolset.start_special(MESSENGER, MESSENGER_TITLE, text)
 
@@ -1360,6 +1281,19 @@ class Connector:
             )
         items = self.open_items()
         test = json.loads(self.store.get("away_test") or "null")
+        # A reply to a draft or a merge card says what it means: the messenger reads it.
+        unsaid = [
+            reply.code.strip().upper()
+            for reply in params.replies
+            if (item := items.get(self.code_item(reply.code.strip().upper()) or ""))
+            and self.decides_draft(item)
+            and reply.intent not in DRAFT_INTENTS
+        ]
+        if unsaid:
+            raise ValueError(
+                f"{', '.join(unsaid)}: a draft or a PR to merge: pass each reply again with "
+                "intent='send', 'no', 'change' or 'unclear' (what the owner means)."
+            )
         done = []
         for reply in params.replies:
             code = reply.code.strip().upper()
@@ -1381,7 +1315,7 @@ class Connector:
             else:
                 self.verified_replies()  # A code it sent came back: replies are read.
                 try:
-                    outcome = await self.apply(item, reply.text.strip(), code)
+                    outcome = await self.apply(item, reply.text.strip(), code, reply.intent)
                     self.store.delete(f"awaycode:{code}")  # Used once.
                     self.store.set(f"awayused:{code}", str(time.time()))
                 except (ValueError, LookupError, RuntimeError) as exc:
@@ -1465,8 +1399,17 @@ class Connector:
             "new_requests": False,
         }
 
-    async def apply(self, item: dict, text: str, code: str) -> str:
-        """The owner's answer to one card, from elsewhere: what follows its code (any case)."""
+    @staticmethod
+    def decides_draft(item: dict) -> bool:
+        """An item answered with send / no / change: a reply to send, a review to post, a PR
+        to merge."""
+        draft = item.get("draft")
+        return bool(draft) and draft["kind"] in {"merge", "slack", "github", "reply"}
+
+    async def apply(self, item: dict, text: str, code: str, intent: str = "answer") -> str:
+        """The owner's answer to one card, from elsewhere: what follows its code (any case).
+        `intent`: what the messenger read it to mean, for a draft or a merge card (see
+        OwnerReply); a send it holds back is not sent (holds_send)."""
         answer = without_code(text, code)
         answer = answer.strip(" :,-\t\n")
         word = answer.lower().strip(" .!")
@@ -1479,43 +1422,37 @@ class Connector:
             kind = draft["kind"]
             drafts = self.runtime.drafts
             if kind == "merge":
-                if word in SEND_WORDS | {"merge", "合并"}:
+                if intent == "send" and not holds_send(answer):
                     merged = await drafts.resolve(draft["id"], DraftDecision(action="send"))
                     return merged.get("outcome") or "merged"
-                if word in REJECT_WORDS:
+                if intent == "no":
                     await drafts.resolve(draft["id"], DraftDecision(action="reject"))
                     return "left as it is"
-                raise ValueError('answer "merge" or "no"')
+                raise ValueError('not merged: answer "merge" when it should be merged, or "no"')
             if kind in {"slack", "github", "reply"}:
                 target = draft["target"]
                 if kind == "github" and not (
                     target.get("in_reply_to") or target.get("reply_to_comment") or target.get("own")
                 ):
                     verdict = str(target.get("verdict") or "comment")
-                    if word in {"post", "post it", "publish"}:
-                        word = "send"
-                    elif verdict != "approve" and "approve" in re.findall(r"\w+", word):
+                    if verdict != "approve" and "approve" in re.findall(r"\w+", word):
                         # It would post as it is, not as an approval.
                         raise ValueError(
                             f"not posted: this review is {VERDICTS.get(verdict, verdict)}, not an "
                             'approval: answer "post" to post it as it is, or "no"'
                         )
-                # "yes, send it", "send pls", "ok 👍", "好的 发吧": a send in a few words; "do not
-                # send" is a no; "ok wait", "not yet, send later" are not a send.
-                meant = send_answer(word)
-                if meant == "unclear":
-                    raise ValueError('not sent: answer "send" when it should go, or "no"')
-                word = {"send": "send", "no": "no"}.get(meant, word)
-                if word in SEND_WORDS:
+                # What it means is the messenger's reading; a send it holds back ("ok wait",
+                # "send it after lunch", "发吗") is not one.
+                if intent == "send" and not holds_send(answer):
                     await drafts.resolve(draft["id"], DraftDecision(action="send"))
                     return "sent" if kind != "reply" else "marked as sent"
-                if word in REJECT_WORDS:
+                if intent == "no":
                     await drafts.resolve(
                         draft["id"], DraftDecision(action="reject", reason="From away")
                     )
                     return "dropped"
-                if not answer:
-                    raise ValueError('answer "send" or "no", or say what to change')
+                if intent != "change" or not answer:
+                    raise ValueError('not sent: answer "send" when it should go, or "no"')
                 # Anything else is what to change: it is drafted again that way.
                 await drafts.resolve(draft["id"], DraftDecision(action="revise", reason=answer))
                 return "to be drafted again as you say"
