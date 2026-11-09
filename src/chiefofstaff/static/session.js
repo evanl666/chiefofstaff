@@ -2,7 +2,8 @@
 
 import { $, api, el, foldable, toast, withKey } from "./dom.js";
 import { clock, compactPaths, firstLine, gist, headOf, markdown, slackText, threadLabel } from "./text.js";
-import { byId, current, HOME, markRead, pendingDrafts, routerId, state, STATUS_TEXT, upsertSession, viewedId, workerTitle } from "./state.js";
+import { byId, current, HOME, markRead, pendingDrafts, routerId, state, STATUS_TEXT, tasks, upsertSession, viewedId, workerTitle } from "./state.js";
+import { MARKERS, needsAcceptance } from "./board.js";
 import { renderSidebar } from "./sidebar.js";
 import { focusDraft, focusTask, renderHome, renderHomeHeader, showHomeTab, welcomeCard, workerStates } from "./inbox.js";
 import { closeMentions, setRecipient } from "./mention.js";
@@ -292,12 +293,36 @@ export function scrollToBottom(force = false) {
     scroller.scrollTop = scroller.scrollHeight;
   }
 }
+// An image has no height until it loads: one that loads with the chat at its end keeps it there.
+function imageLoaded(event) {
+  const scroller = $("#scroller");
+  if (scroller.contains(event.target) && scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight - event.target.offsetHeight < 160) {
+    scroller.scrollTop = scroller.scrollHeight;
+  }
+}
 const STATUS_CHIP = { done: "Done", progress: "Progress", question: "Question", blocked: "Blocked", failed: "Failed" };
-export function chip(status) {
-  return STATUS_CHIP[status] ? el("span", { class: `chip ${status}`, text: STATUS_CHIP[status] }) : null;
+// A done report whose result waits for the owner's review says so, as Home does ("To review").
+const toReview = (taskId) => {
+  const task = taskId ? tasks().find((item) => item.id === taskId) : null;
+  return task?.status === "review" && needsAcceptance(task);
+};
+export function chip(status, taskId = "") {
+  if (!STATUS_CHIP[status]) return null;
+  const node = el("span", { class: `chip ${status}`, "data-task": status === "done" && taskId ? taskId : undefined });
+  showChip(node, status);
+  return node;
+}
+function showChip(node, status = "done") {
+  const review = Boolean(node.dataset.task) && toReview(node.dataset.task);
+  node.textContent = review ? MARKERS.review : STATUS_CHIP[status];
+  node.classList.toggle("waiting", review);
+}
+// As its task stands now: accepted since, it is done.
+export function refreshChips() {
+  for (const node of document.querySelectorAll("#timeline .chip[data-task]")) showChip(node);
 }
 // A card: a header (what, status, time, optional "Open"), then the markdown body. Long bodies fold.
-function card({ label, body, className = "", status, time, open }) {
+function card({ label, body, className = "", status, task = "", time, open }) {
   const content = el("div", { class: "body markdown", html: markdown(body) });
   const node = el(
     "div",
@@ -306,7 +331,7 @@ function card({ label, body, className = "", status, time, open }) {
       "div",
       { class: "head" },
       el("span", { class: "label", text: label }),
-      chip(status),
+      chip(status, task),
       el("span", { class: "spacer" }),
       time ? el("time", { text: clock(time), title: new Date(time).toLocaleString() }) : null,
       open ? el("button", { type: "button", class: "open", text: "Open", onclick: open }) : null,
@@ -465,7 +490,7 @@ function renderMessage(original) {
       }
       if (meta.thread) return card({ label: threadLabel(meta.thread), body: readable(meta, message.text), className: "inbound", time });
       if (meta.from) {
-        return card({ label: meta.title, body: message.text, className: `report ${meta.status}`, status: meta.status, time, open: () => select(meta.from) });
+        return card({ label: meta.title, body: message.text, className: `report ${meta.status}`, status: meta.status, task: meta.task_id, time, open: () => select(meta.from) });
       }
       const source = SOURCES[meta.source] || "Event";
       return card({ label: meta.delegated ? `You handed this over from ${source}` : `From ${source}`, body: readable(meta, message.text), className: "inbound", time });
@@ -484,7 +509,7 @@ function renderMessage(original) {
       return card({ label, body: message.text, className: meta.needs_action ? "update attention" : "update", time });
     }
     case "report":
-      return card({ label: "Report", body: message.text, className: `report ${meta.status}`, status: meta.status, time });
+      return card({ label: "Report", body: message.text, className: `report ${meta.status}`, status: meta.status, task: meta.task_id, time });
     case "answer":
       return card({ label: `Answer from “${meta.from_title}”`, body: message.text, className: "inbound answer", time, open: () => select(meta.session_id) });
     case "draft": {
@@ -522,7 +547,7 @@ function ownerMessage(text, meta = {}, time = "") {
           el(
             "a",
             { href: withKey(file.url), target: "_blank", rel: "noreferrer", title: file.name },
-            file.type?.startsWith("image/") ? el("img", { src: withKey(file.url), alt: file.name, loading: "lazy" }) : el("span", { class: "file", text: file.name }),
+            file.type?.startsWith("image/") ? el("img", { src: withKey(file.url), alt: file.name, loading: "lazy", onload: imageLoaded }) : el("span", { class: "file", text: file.name }),
           ),
         ),
       ),

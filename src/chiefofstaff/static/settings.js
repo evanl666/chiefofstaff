@@ -36,6 +36,7 @@ export function openSettings(tab = "") {
       state.snapshot.checks = data.checks;
       state.snapshot.abilities = data.abilities;
       state.snapshot.connector = data.connector;
+      if (data.projects) state.snapshot.projects = data.projects;
       renderLearning();
       renderConnections();
     })
@@ -158,8 +159,7 @@ export function bindSettings() {
     try {
       const snapshot = await api("/api/slack/token", { method: "DELETE" });
       state.snapshot = { ...state.snapshot, ...snapshot };
-      $("#slack-status").textContent = slackStatusText();
-      $("#slack-token-remove").hidden = true;
+      showSlackToken();
     } catch (error) {
       settingsError(error.message);
     }
@@ -266,12 +266,14 @@ export async function showUsage(range) {
     toast(error.message, "error");
   }
 }
+const SLACK_TOKEN_ENV = "CHIEFOFSTAFF_SLACK_USER_TOKEN";
 export function slackStatusText() {
   const slack = state.snapshot.slack;
-  const parts = [slack.token_saved ? "Token saved." : "No token yet."];
+  const env = slack.token_source === "env";
+  const parts = [env ? `Set by ${SLACK_TOKEN_ENV}: change it there.` : slack.token_saved ? "Token saved." : "No token yet."];
   if (slack.error) parts.push(slack.error);
   else if (slack.connected) parts.push(`Watching${slack.last_checked ? `, checked ${since(slack.last_checked)}` : ""}.`);
-  if (slack.token_saved && slack.connected && !slack.can_send) parts.push("This token cannot send messages (chat:write).");
+  if ((slack.token_saved || env) && slack.connected && !slack.can_send) parts.push("This token cannot send messages (chat:write).");
   return parts.join(" ");
 }
 export function fillSettings() {
@@ -359,8 +361,7 @@ export function fillSettings() {
   form.away_minutes.value = settings.away_minutes ?? 10;
   form.away_how.value = settings.away_how || "";
   renderConnections();
-  $("#slack-status").textContent = slackStatusText();
-  $("#slack-token-remove").hidden = !state.snapshot.slack.token_saved;
+  showSlackToken();
   const github = state.snapshot.github;
   $("#github-status").textContent = github.error || (github.connected ? `Watching${github.last_checked ? `, checked ${since(github.last_checked)}` : ""}.` : "");
   $("#data-directory").textContent = `Data: ${state.snapshot.data_directory}`;
@@ -488,7 +489,9 @@ export function renderConnections() {
   const abilities = snap.abilities || { skills: [], plugins: {} };
   const servers = Object.keys(settings.mcp_servers || {}).length;
   const off = Object.keys(settings.mcp_servers_off || {}).length;
-  $("#abilities-summary").textContent = [abilities.skills.length ? plural(abilities.skills.length, "skill") : "", (settings.plugins || []).length ? plural(settings.plugins.length, "plugin") : "", servers + off ? `${plural(servers + off, "MCP server")}${off ? ` (${off} off)` : ""}` : ""].filter(Boolean).join(" · ") || "None added";
+  // As many as are listed below (one written twice is listed once).
+  const pluginCount = abilities.plugins ? Object.keys(abilities.plugins).length : new Set(settings.plugins || []).size;
+  $("#abilities-summary").textContent = [abilities.skills.length ? plural(abilities.skills.length, "skill") : "", pluginCount ? plural(pluginCount, "plugin") : "", servers + off ? `${plural(servers + off, "MCP server")}${off ? ` (${off} off)` : ""}` : ""].filter(Boolean).join(" · ") || "None added";
   $("#skills").replaceChildren(
     ...abilities.skills.map((skill) =>
       el(
@@ -703,12 +706,13 @@ function showList(id, count) {
   heading.hidden = !count && !heading.classList.contains("always");
   heading.dataset.count = count;
 }
-// A habit the owner writes down themselves: everywhere, in Slack replies, or in one project.
+// A habit the owner writes down themselves: everywhere, in Slack replies, or in one project (one
+// in Settings or a repository in the code folder, as the server lists them: `projects`).
 function renderLessonForm() {
   const scope = $("#lesson-scope");
-  const projects = state.snapshot.settings.projects || [];
+  const projects = [...new Set([...(state.snapshot.settings.projects || []), ...(state.snapshot.projects || [])])];
   const chosen = scope.value;
-  scope.replaceChildren(el("option", { value: "", text: "Everywhere" }), el("option", { value: "slack", text: "Slack replies" }), ...projects.map((path) => el("option", { value: path, text: `In ${path.split("/").pop()}` })));
+  scope.replaceChildren(el("option", { value: "", text: "Everywhere" }), el("option", { value: "slack", text: "Slack replies" }), ...projects.map((path) => el("option", { value: path, text: `In ${path.split("/").pop()}`, title: path })));
   scope.value = [...scope.options].some((option) => option.value === chosen) ? chosen : "";
 }
 async function addLesson() {
@@ -834,7 +838,24 @@ async function saveSettings(event) {
     renderHeader();
   } catch (error) {
     settingsError(error.message);
+    showProblem(error);
   }
+}
+// The field a server's error is about (named by the server, or by its label at the start of
+// the message, "Parallel workers: …"), shown on its tab, its part open.
+function showProblem(error) {
+  const form = $("#settings-form");
+  const named = (error.fields || []).map((name) => form.elements.namedItem(name)).find((field) => field?.closest);
+  const labelled = [...form.querySelectorAll(".tab label")].find((label) => {
+    const words = (label.querySelector("span") || label).textContent.trim();
+    return words && error.message.startsWith(`${words}:`);
+  });
+  const field = named || labelled?.querySelector("input, textarea, select");
+  const tab = (field || labelled)?.closest(".tab");
+  if (!tab) return;
+  showSettingsTab(tab.dataset.tab);
+  for (let part = (field || labelled).closest("details"); part; part = part.parentElement.closest("details")) part.open = true;
+  field?.focus();
 }
 // The watches as written in the form, with when they run.
 function watchFields() {
@@ -913,6 +934,13 @@ export async function saveToken() {
   const snapshot = await api("/api/slack/token", { method: "POST", body: { token: form.slack_token.value.trim() } });
   state.snapshot = { ...state.snapshot, ...snapshot };
   form.slack_token.value = "";
+  showSlackToken();
+}
+// A token set by the environment is the one used, whatever is saved here: it is changed there.
+function showSlackToken() {
+  const slack = state.snapshot.slack || {};
+  const env = slack.token_source === "env";
   $("#slack-status").textContent = slackStatusText();
-  $("#slack-token-remove").hidden = false;
+  $("#slack-token-save").closest(".row").hidden = env;
+  $("#slack-token-remove").hidden = env || !slack.token_saved;
 }

@@ -130,16 +130,20 @@ export function isHidden(key, tone = "") {
   const off = hiddenList().find((item) => hiddenKey(item) === key);
   return Boolean(off) && !(tone === "bad" && off.tone !== "bad");
 }
+// What taking one off said: gone once it is back (said so instead), not left on screen.
+let offNote = null;
 export async function setHidden(key, hidden, tone = "") {
   const before = state.snapshot.artifacts_hidden || [];
   const same = hiddenList().filter((item) => hiddenKey(item) === key).map((item) => item.key);
   const others = hiddenList().filter((item) => hiddenKey(item) !== key);
   state.snapshot.artifacts_hidden = hidden ? [...others, { key, tone }] : others;
   import("./inbox.js").then((module) => module.renderHome());
+  if (!hidden) offNote?.remove();
   try {
     const also = same.filter((old) => old !== key);
     await api("/api/artifacts/hide", { method: "POST", body: { key, hidden, tone, ...(also.length ? { also } : {}) } });
-    if (hidden) toast("Taken off Artifacts; its task keeps it.");
+    offNote?.remove();
+    offNote = toast(hidden ? "Taken off Artifacts; its task keeps it." : "Back on Artifacts.");
   } catch (error) {
     state.snapshot.artifacts_hidden = before;
     import("./inbox.js").then((module) => module.renderHome());

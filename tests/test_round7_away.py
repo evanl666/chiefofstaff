@@ -1,5 +1,7 @@
 """Bug bash round 7: away replies the messenger reads (J1, J4-J9)."""
 
+import json
+
 import pytest
 from conftest import Harness, call_tool, settle
 from test_round6_drafts import away, spawn, told
@@ -147,3 +149,23 @@ async def test_an_unclear_reply_says_what_held_it_back(tmp_path):
         {"code": code, "text": f"{code} send it after lunch", "intent": "unclear"},
     )
     assert "\u201cafter\u201d sounds like not now" in said, said
+
+
+async def test_replies_are_read_less_often_after_the_first_hour(tmp_path):
+    """Bug bash 7: replies were read (a messenger run each) every few minutes for a day."""
+    import time
+    from datetime import UTC, datetime
+
+    harness, runtime, messenger, _body = await drafted(tmp_path, "Noted.")
+    harness.session(messenger["id"]).emit("session.idle")
+    await settle(runtime)
+    last = json.loads(harness.store.get("away_last"))
+    two_hours_ago = datetime.fromtimestamp(time.time() - 7200, UTC).isoformat()
+    harness.store.set("away_last", json.dumps({**last, "at": two_hours_ago}))
+    runs = len(runtime.tasks.for_session(messenger["id"]))
+    harness.store.set("away_read_at", str(time.time() - 20 * 60))
+    await runtime.connector.read_replies()
+    assert len(runtime.tasks.for_session(messenger["id"])) == runs, "20 minutes: not yet"
+    harness.store.set("away_read_at", str(time.time() - 31 * 60))
+    await runtime.connector.read_replies()
+    assert len(runtime.tasks.for_session(messenger["id"])) == runs + 1, "half an hour: read"

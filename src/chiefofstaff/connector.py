@@ -22,7 +22,7 @@ import secrets
 import sys
 import time
 from contextlib import suppress
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -74,8 +74,11 @@ MAX_AWAY_ITEMS = 5
 # counts as failed after PENDING_SECONDS.
 RETRY_SECONDS = 600
 PENDING_SECONDS = 900
-# The owner's replies are read for this long after the last notification.
+# The owner's replies are read for this long after the last notification: every few minutes
+# in its first hour, then every half hour.
 READ_REPLIES_HOURS = 24
+READ_OFTEN_SECONDS = 3600
+READ_LATER_SECONDS = 1800
 # Where a notification sent with send_owner_slack_dm went, as the owner reads it.
 OWN_SLACK_DM = "your own Slack DM"
 
@@ -139,17 +142,43 @@ ANY_CODE = re.compile(r"\[?\b([A-Za-z2-7]{5})\b\]?")
 
 # What the messenger may say a reply to a draft (or a merge card) means.
 DRAFT_INTENTS = {"send", "no", "change", "unclear"}
+# A merge card's outcome once its PR was closed (TaskActions.offer_merge): reopened at the same
+# commit, the PR's next card is a new item, told again.
+PR_CLOSED = "The PR is closed."
+# A reply judged when its code no longer answered anything (see t_report_owner_replies).
+GONE = "nothing waited for it"
+# A "no" that says nothing more: its reason is that it came from away.
+BARE_NO = REJECT_WORDS | {"nope", "nah", "drop", "drop it", "no thanks", "not now"}
+
+
+def blanks_of(text: str) -> str:
+    """A draft's blanks to fill, as it has them (“[yes / no]”, “___”); "" when none."""
+    found = list(dict.fromkeys(BLANKS.findall(text or "")))[:3]
+    return ", ".join(f"\u201c{blank}\u201d" for blank in found)
+
+
+# A link in a reply as Slack writes it (<url|its words>, <url>): its words count, not its address.
+SLACK_LINK = re.compile(r"<(?:https?://|mailto:)[^<>|\s]*(?:\|([^<>]*))?>")
+# Separators between a code and its answer ("ABCDE: x", "ABCDE - x", "x; ABCDE"), not the
+# answer's own punctuation (".env", "Pasta please.").
+AFTER_CODE = re.compile(r"^(?:[:,;.\-\u2013\u2014]+|\s+[:,;.\-\u2013\u2014]+(?=\s|$))?\s*")
+BEFORE_CODE = re.compile(r"[\s:,;\-\u2013\u2014]+$")
 
 
 def holds_send(text: str) -> str:
-    """What in a reply stops a send ("" when nothing does): see HOLDS_SEND."""
+    """What in a reply stops a send ("" when nothing does): see HOLDS_SEND. Links count by their
+    words only: "?tab=rows" or "/next/" in an address hold nothing."""
+    text = SLACK_LINK.sub(lambda link: f" {link.group(1) or ''} ", text)
+    text = re.sub(r"\[([^\]\n]*)\]\([^)\s]*\)", r"\1", text)
+    text = threads.LINK.sub(without_link, text)
     found = HOLDS_SEND.search(NOT_HOLDS.sub(" ", text.replace("\u2019", "'")))
     return found.group(0) if found else ""
 
 
 def own_part(text: str, code: str, codes: set[str]) -> str:
     """Of a message naming several codes, the part about `code`: from it to the next code
-    ("UELNW ship it, B4XJT no": "ship it, " for UELNW). Without its code (the messenger left it
+    ("UELNW ship it, B4XJT no": "ship it, " for UELNW). Naming `code` alone, the message
+    without it, wherever it is ("Teal, please. 4IF37"). Without its code (the messenger left it
     out), the message up to the first other code."""
     found = [
         (match.start(), match.end(), match.group(1).upper())
@@ -160,8 +189,15 @@ def own_part(text: str, code: str, codes: set[str]) -> str:
     if not mine:
         others = [at for at in found if at[2] != code]
         return text[: others[0][0]] if others else text
+    if len(found) == 1:
+        return without_code(text, code)
     after = [at for at in found if at[0] >= mine[0][1] and at[2] != code]
-    return text[mine[0][1] : after[0][0] if after else len(text)]
+    return AFTER_CODE.sub("", text[mine[0][1] : after[0][0] if after else len(text)], count=1)
+
+
+def answer_part(text: str, code: str, codes: set[str]) -> str:
+    """own_part, without what separates it from the next code ("ship it, " is "ship it")."""
+    return BEFORE_CODE.sub("", own_part(text, code, codes).strip())
 
 
 def reply_key(code: str, text: str) -> str:
@@ -192,11 +228,15 @@ def watch_key(what: str) -> str:
 
 
 def without_code(text: str, code: str) -> str:
-    """An answer without its code (any case, with or without brackets): "URN2F drop them" and
-    "[urn2f] drop them" are both "drop them"."""
-    return re.sub(
-        rf"\[?\b{re.escape(code)}\b\]?[\s:,.-]*", "", text, count=1, flags=re.IGNORECASE
-    ).strip()
+    """An answer without its code (any case, with or without brackets) and the separators next
+    to it: "URN2F drop them", "[urn2f]: drop them" and "drop them - URN2F" are all "drop them";
+    "URN2F .env" is ".env"."""
+    found = re.search(rf"\[?\b{re.escape(code)}\b\]?", text, flags=re.IGNORECASE)
+    if not found:
+        return text.strip()
+    before = BEFORE_CODE.sub("", text[: found.start()])
+    after = AFTER_CODE.sub("", text[found.end() :], count=1)
+    return f"{before} {after}".strip()
 
 
 class FoundItem(BaseModel):
@@ -300,9 +340,10 @@ class OwnerReply(BaseModel):
         default="answer",
         description="What the reply means. For a code that is a draft or a PR to merge: "
         "'send' (send it, post it, merge it now, as it is: 'ok', 'ship it', '发吧'), 'no' "
-        "(drop it, leave it), 'change' (it says what to change in it), or 'unclear' (anything "
-        "else: a question back, a send held back or with a condition: 'after lunch', 'once Bob "
-        "confirms', 'wait'; or when you are not sure). For any other code: 'answer'",
+        "(drop it, leave it), 'change' (it says what to change in it, or gives the words for a "
+        "draft's blanks: 'attending yes, size M'), or 'unclear' (anything else: a question "
+        "back, a send held back or with a condition: 'after lunch', 'once Bob confirms', "
+        "'wait'; or when you are not sure). For any other code: 'answer'",
     )
 
 
@@ -749,8 +790,9 @@ class Connector:
                 continue
             key = draft["id"]
             if draft["kind"] == "merge":
-                # A PR offered again at the same commit is the same item: told once, one code.
-                key = f"merge:{draft['target']['label'].lower()}@{draft['target']['head']}"
+                # A PR offered again at the same commit is the same item: told once, one code
+                # (unless it was closed and reopened since: merge_key).
+                key = self.merge_key(draft)
             items.append({"id": f"draft:{key}", "draft": draft})
         from .runtime import TASKS_SHOWN_HOURS
 
@@ -783,6 +825,52 @@ class Connector:
                 asked = hashlib.sha256((task.get("progress") or "").encode()).hexdigest()[:10]
                 items.append({"id": f"task:{task['id']}:{task['status']}:{asked}", "task": task})
         return items
+
+    def merge_key(self, draft: dict) -> str:
+        """A merge card as an item: its PR at its commit, and how many times the PR was closed
+        at that commit before it (reopened, its card is told again, with a code of its own)."""
+        label, head = draft["target"]["label"].lower(), draft["target"]["head"]
+        closed = self.store.one(
+            "SELECT COUNT(*) AS closed FROM drafts WHERE kind='merge' AND outcome=? "
+            "AND created_at<? AND lower(json_extract(target, '$.label'))=? "
+            "AND json_extract(target, '$.head')=?",
+            (PR_CLOSED, draft["created_at"], label, head),
+        )
+        count = (closed or {}).get("closed") or 0
+        return f"merge:{label}@{head}" + (f"+{count}" if count else "")
+
+    def merge_became(self, key: str) -> str:
+        """What became of a merge card a code was given for (by its merge_key), once it no
+        longer waits: merged, or not and why; and the PR's newer card, if one waits."""
+        label = key.removeprefix("merge:").rsplit("@", 1)[0]
+        cards = [
+            self.store.draft(row["id"])
+            for row in self.store.all(
+                "SELECT id FROM drafts WHERE kind='merge' "
+                "AND lower(json_extract(target, '$.label'))=? ORDER BY created_at",
+                (label,),
+            )
+        ]
+        mine = [card for card in cards if self.merge_key(card) == key]
+        if not mine or mine[-1]["status"] == "pending":
+            return ""
+        card = mine[-1]
+        outcome = self.runtime.drafts.owner_text(card["outcome"] or "").strip().rstrip(".")
+        if card["status"] == "sent":
+            became = f"merged already: {outcome}" if outcome else "merged already"
+        elif outcome == "Not now":
+            became = "not merged: you chose not now"
+        else:
+            became = "not merged" + (f": {outcome[:1].lower()}{outcome[1:]}" if outcome else "")
+        newer = [card for card in cards if card["status"] == "pending"]
+        if not newer:
+            return f"{became}."
+        item = f"draft:{self.merge_key(newer[-1])}"
+        told = self.store.get(f"awayitem:{item}") or ""
+        then = "it waits for you on Home"
+        if told and self.code_item(told) == item:
+            then = f"answer it with its code {told}, or on Home"
+        return f"{became}. It is ready to merge again: {then}."
 
     def relays(self, ask: dict, tasks: list[dict]) -> bool:
         """Whether the Router's question is a worker's, retold: a question of a waiting task (or
@@ -960,6 +1048,8 @@ class Connector:
             target = draft["target"]
             kind = draft["kind"]
             reply = target.get("in_reply_to") or target.get("reply_to_comment")
+            # A draft with blanks is answered with the words for them (sent as it is, never).
+            fill = "<words for the blanks> · no" if blanks_of(draft["text"]) else ""
             if kind == "github" and not reply and not target.get("own"):
                 # What posting it does, in words: "send" alone would approve a PR unsaid.
                 verdict = str(target.get("verdict") or "comment")
@@ -968,18 +1058,18 @@ class Connector:
                 head = f"Review of {pr}" + (f" \u201c{title}\u201d" if title else "")
                 head += f": {VERDICTS.get(verdict, 'Comment')}"
                 word = "approve" if verdict == "approve" else "post"
-                return head, self.gist(draft["text"]), f"{word} · no"
+                return head, self.gist(draft["text"]), fill or f"{word} · no"
             if kind == "github":
                 author = (target.get("comment") or {}).get("author") or ""
                 pr = f"{str(target.get('repo', '')).split('/')[-1]}#{target.get('number', '')}"
                 title = (target.get("pr") or {}).get("title") or ""
                 head = f"Reply{f' to {author}' if author else ''} on {pr}"
                 head += f" \u201c{title}\u201d" if title and not reply else ""
-                return head, self.gist(draft["text"]), "send · no"
+                return head, self.gist(draft["text"]), fill or "send · no"
             if kind in {"slack", "reply"}:
                 where = target.get("to") or target.get("where") or target.get("url") or ""
                 head = f"Draft to approve{f' · {where}' if where else ''}"
-                return head, self.gist(draft["text"]), "send · no"
+                return head, self.gist(draft["text"]), fill or "send · no"
             if kind == "decision":
                 options = target.get("options") or []
                 listed = " ".join(f"{n}) {o.get('choice', '')}" for n, o in enumerate(options, 1))
@@ -1027,7 +1117,15 @@ class Connector:
         for item in items:
             what, said, hint = self.describe(item)
             if reason := self.store.get(f"awayreask:{item['id']}"):
-                what, said = f"Not sent yet \u00b7 {what}", f"{reason}. {said}".strip()
+                kind = (item.get("draft") or {}).get("kind")
+                again = (
+                    "Not merged yet"
+                    if kind == "merge"
+                    else "Not sent yet"
+                    if self.decides_draft(item)
+                    else "Not answered yet"
+                )
+                what, said = f"{again} \u00b7 {what}", f"{reason.rstrip('.')}. {said}".strip()
             code = item["code"]
             head = f"*[{code}]* {mrkdwn(what)}" if codes else f"*{mrkdwn(what)}*"
             lines = [head]
@@ -1141,6 +1239,13 @@ class Connector:
             old.unlink(missing_ok=True)
         return files
 
+    def reply_codes(self) -> list[str]:
+        """The codes a reply of the owner's may name: open, told, and answered lately (a new
+        reply to one is told what became of it: "wait, don't send that yet")."""
+        codes = self.open_codes()
+        codes += [code for code in self.told_codes() if code not in codes]
+        return codes + [code for code in self.used_codes() if code not in codes]
+
     def messenger_busy(self) -> bool:
         row = self.runtime.toolset.last_special(MESSENGER)
         return bool(
@@ -1159,16 +1264,20 @@ class Connector:
         told = datetime.fromisoformat(last["at"]).timestamp()
         if time.time() - told > READ_REPLIES_HOURS * 3600:
             return
-        codes = self.open_codes()
-        codes += [code for code in self.told_codes() if code not in codes]
+        codes = self.reply_codes()
         if not codes:
             return
-        # Answered lately: a new reply to one is told what became of it.
-        codes += [code for code in self.used_codes() if code not in codes]
         read_at = float(self.store.get("away_read_at") or 0)
-        if time.time() - read_at < max(1, settings.watch_minutes) * 60:
+        # Each read is a run of the messenger (a fresh Copilot conversation): every few minutes
+        # in the hour after a notification, then every half hour.
+        every = max(1, settings.watch_minutes) * 60
+        if time.time() - told > READ_OFTEN_SECONDS:
+            every = max(every, READ_LATER_SECONDS)
+        if time.time() - read_at < every:
             return
         self.store.set("away_read_at", str(time.time()))
+        if "read_owner_slack_dm" in how and not await self.owner_dm_news():
+            return  # Their own Slack DM, read here: nothing new from them, no run.
         where = self.store.get("away_where") or "the conversation you sent Chief of Staff's "
         # Kept as the owner reads it ("your own Slack DM"); the messenger reads it as theirs.
         where = re.sub(r"\byour\b", "the owner's", where, flags=re.IGNORECASE)
@@ -1177,9 +1286,13 @@ class Connector:
         for code in codes:
             item = items.get(self.code_item(code)) or {}
             kind = (item.get("draft") or {}).get("kind")
+            blanks = blanks_of(item["draft"]["text"]) if self.decides_draft(item) else ""
             listed.append(
                 f"{code} (a PR to merge)"
                 if kind == "merge"
+                else f"{code} (a draft to send, with blanks to fill: {blanks}; words for them "
+                "are intent 'change')"
+                if blanks
                 else f"{code} (a draft to send)"
                 if self.decides_draft(item)
                 else code
@@ -1249,10 +1362,23 @@ class Connector:
             f'own Slack DM", method="send_owner_slack_dm", replies="{replies}").'
         )
 
-    async def t_read_owner_slack_dm(self, params: ReadOwnerSlackDm, caller: str):
-        """What the owner wrote in their own Slack DM since a notification was sent there:
-        their own messages only, not the notifications."""
-        self.check(caller, (MESSENGER,))
+    async def owner_dm_news(self) -> bool:
+        """Whether the owner wrote in their own Slack DM since it was last looked at (read
+        through Chief of Staff's own Slack connection: no messenger run). When it cannot be
+        read, True: the messenger looks."""
+        try:
+            found = await self.owner_dm_messages()
+        except Exception:
+            logger.warning("Could not read the owner's own Slack DM.", exc_info=True)
+            return True
+        newest = max((float(entry["ts"]) for entry in found), default=0.0)
+        # Seen once the messenger read it (see t_read_owner_slack_dm): a run that failed
+        # first leaves it for the next.
+        return newest > float(self.store.get("away_dm_seen") or 0)
+
+    async def owner_dm_messages(self) -> list[dict]:
+        """The owner's own messages in their own Slack DM since a notification was sent
+        there, oldest first."""
         dm = json.loads(self.store.get("away_slack_dm") or "null")
         if not dm:
             raise ValueError("Nothing was sent to the owner's own Slack DM.")
@@ -1271,10 +1397,31 @@ class Connector:
                 (f"slack:{entry['ts']}",),
             )
         ]
+        return sorted(found, key=lambda entry: float(entry["ts"]))
+
+    async def t_read_owner_slack_dm(self, params: ReadOwnerSlackDm, caller: str):
+        """What the owner wrote in their own Slack DM since a notification was sent there:
+        their own messages only, not the notifications; each with when (for its `at`)."""
+        self.check(caller, (MESSENGER,))
+        found = await self.owner_dm_messages()
         if not found:
             return "No reply from the owner there yet."
+        newest = str(max(float(entry["ts"]) for entry in found))
+        seen = float(self.store.get("away_dm_seen") or 0)
+        codes = {code.lower() for code in self.reply_codes()}
+        if any(
+            code in codes
+            for entry in found
+            if float(entry["ts"]) > seen
+            for code in re.findall(r"[a-z2-7]{5}", entry["text"].lower())
+        ):
+            # Seen once it reported them: a run that fails before that leaves them for the next.
+            self.store.set("away_dm_reading", newest)
+        else:
+            self.store.set("away_dm_seen", newest)  # Nothing in them to report.
         return "The owner wrote there (oldest first):\n" + "\n".join(
-            f"- {entry['text']}" for entry in sorted(found, key=lambda e: float(e["ts"]))
+            f"- ({datetime.fromtimestamp(float(entry['ts']), UTC).isoformat()}) {entry['text']}"
+            for entry in found
         )
 
     async def t_report_notified(self, params: ReportNotified, caller: str):
@@ -1354,6 +1501,10 @@ class Connector:
                 'No reply was given: pass replies=[{"code": "ABCDE", "text": "the owner\'s '
                 'reply, exactly"}], one item per code.'
             )
+        if reading := self.store.get("away_dm_reading"):
+            # What it read in the owner's own Slack DM reached here: seen.
+            self.store.set("away_dm_seen", reading)
+            self.store.delete("away_dm_reading")
         items = self.open_items()
         test = json.loads(self.store.get("away_test") or "null")
         # A reply to a draft or a merge card says what it means: the messenger reads it.
@@ -1381,18 +1532,32 @@ class Connector:
         for reply in ordered:
             code = reply.code.strip().upper()
             if reply is not newest[code]:
-                part = own_part(reply.text, code, known)
+                part = answer_part(reply.text, code, known)
                 key = f"awayjudged:{reply_key(code, part)}"
                 if not self.store.get(key):
                     self.store.set(key, "superseded by a later reply")
         done = []
         for code, reply in newest.items():
-            part = own_part(reply.text, code, known).strip(" :,;.-\t\n")
+            part = answer_part(reply.text, code, known)
             key = f"awayjudged:{reply_key(code, part)}"
-            if self.store.get(key):
-                continue  # Judged before: never again (a second reading could differ).
             item_id = self.code_item(code) if CODE.fullmatch(code) else ""
             used = json.loads(self.store.get(f"awayused:{code}") or "null")
+            item = items.get(item_id)
+            gone = not item and not used and not (test and code == test["code"])
+            judged = self.store.get(key)
+            if judged and not (gone and judged == GONE):
+                continue  # Judged before: never again (a second reading could differ).
+            outcome = ""
+            if gone:
+                outcome = self.what_became(item_id) or (
+                    "nothing waits for that code (answered already?)"
+                )
+                # Nothing to apply: said again only once what became of it changes (the PR
+                # closed, then reopened). Should it wait again, these words never apply to it.
+                self.store.set(key, GONE)
+                key += ":" + hashlib.sha256(outcome.encode()).hexdigest()[:8]
+                if self.store.get(key):
+                    continue
             if test and code == test["code"]:
                 self.store.delete("away_test")
                 self.store.delete(f"awaycode:{code}")
@@ -1406,15 +1571,12 @@ class Connector:
                     f" ({became})" if became else ""
                 )
                 done.append(f"{code}: {outcome}")
-            elif not (item := items.get(item_id)):
-                outcome = self.what_became(item_id) or (
-                    "nothing waits for that code (answered already?)"
-                )
+            elif not item:
                 done.append(f"{code}: {outcome}")
-                if self.store.get(f"awaynoted:{code}"):
+                if self.store.get(f"awaynoted:{code}") == outcome:
                     self.store.set(key, outcome)
                     continue  # Said once already.
-                self.store.set(f"awaynoted:{code}", str(time.time()))
+                self.store.set(f"awaynoted:{code}", outcome)
             else:
                 self.verified_replies()  # A code it sent came back: replies are read.
                 try:
@@ -1427,9 +1589,8 @@ class Connector:
                     self.store.delete(f"awayreask:{item_id}")
                 except (ValueError, LookupError, RuntimeError) as exc:
                     outcome = f"not done: {exc}"
-                    if self.decides_draft(item):
-                        # Asked again where the owner is, not only here (see notify_away).
-                        self.store.set(f"awayreask:{item_id}", str(exc)[:200])
+                    # Asked again where the owner is, not only here (see notify_away).
+                    self.store.set(f"awayreask:{item_id}", str(exc)[:200])
                 done.append(f"{code}: {outcome}")
             self.store.set(key, outcome)
             self.runtime.add_message(
@@ -1443,9 +1604,12 @@ class Connector:
         return "\n".join(done) or "Nothing to apply."
 
     def what_became(self, item_id: str) -> str:
-        """What became of a draft a code was given for, once it no longer waits for the owner
-        (replaced by a newer one, withdrawn, sent); "" when the item is not such a draft."""
-        if not item_id.startswith("draft:") or item_id.startswith("draft:merge:"):
+        """What became of a draft (or a merge card) a code was given for, once it no longer
+        waits for the owner (replaced by a newer one, withdrawn, sent, merged, its PR closed);
+        "" when the item is not such a draft."""
+        if item_id.startswith("draft:merge:"):
+            return self.merge_became(item_id.removeprefix("draft:"))
+        if not item_id.startswith("draft:"):
             return ""
         try:
             draft = self.store.draft(item_id.removeprefix("draft:"))
@@ -1515,7 +1679,6 @@ class Connector:
         `intent`: what the messenger read it to mean, for a draft or a merge card (see
         OwnerReply); a send it holds back is not sent (holds_send)."""
         answer = without_code(text, code)
-        answer = answer.strip(" :,-\t\n")
         word = answer.lower().strip(" .!")
         if item.get("ask"):
             if not answer:
@@ -1537,7 +1700,12 @@ class Connector:
                 if intent == "no":
                     await drafts.resolve(draft["id"], DraftDecision(action="reject"))
                     return "left as it is"
-                raise ValueError('not merged: answer "merge" when it should be merged, or "no"')
+                # Said why when its words say it ("after CI", "tomorrow").
+                held = holds_send(answer)
+                why = f"\u201c{held}\u201d sounds like not now: " if held else ""
+                raise ValueError(
+                    f'not merged: {why}answer "merge" when it should be merged, or "no"'
+                )
             if kind in {"slack", "github", "reply"}:
                 target = draft["target"]
                 if kind == "github" and not (
@@ -1567,10 +1735,11 @@ class Connector:
                     await drafts.resolve(draft["id"], DraftDecision(action="send"))
                     return "sent" if kind != "reply" else "marked as sent"
                 if intent == "no":
-                    await drafts.resolve(
-                        draft["id"], DraftDecision(action="reject", reason="From away")
-                    )
+                    # Their words are the reason (on its card, and for how they write).
+                    reason = "From away" if word in BARE_NO else answer
+                    await drafts.resolve(draft["id"], DraftDecision(action="reject", reason=reason))
                     return "dropped"
+                blanks = blanks_of(draft["text"])
                 if intent != "change" or not answer:
                     # Said why when its words say it ("after lunch"), as for a send held back.
                     why = (
@@ -1578,9 +1747,15 @@ class Connector:
                         if (held := holds_send(answer))
                         else ""
                     )
+                    if blanks:
+                        raise ValueError(
+                            f'not sent: {why}say the words for its blanks ({blanks}), or "no"'
+                        )
                     raise ValueError(f'not sent: {why}answer "send" when it should go, or "no"')
-                # Anything else is what to change: it is drafted again that way.
-                await drafts.resolve(draft["id"], DraftDecision(action="revise", reason=answer))
+                # Anything else is what to change (or the words for its blanks): it is drafted
+                # again that way.
+                reason = f"Fill in its blanks: {answer}" if blanks else answer
+                await drafts.resolve(draft["id"], DraftDecision(action="revise", reason=reason))
                 return "to be drafted again as you say"
             if kind == "decision":
                 options = draft["target"].get("options") or []

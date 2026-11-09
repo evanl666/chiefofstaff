@@ -3,7 +3,7 @@
 // leaves as soon as the owner acts, and comes back with the reason if that did not work.
 
 import { api, el, moreMenu, once, submits, toast } from "./dom.js";
-import { clock, displayPath, markdown, slackText } from "./text.js";
+import { clock, codeHtml, displayPath, inlineHtml, markdown, slackText } from "./text.js";
 import { applyDraft, pendingDrafts, state } from "./state.js";
 import { select } from "./session.js";
 import { renderSidebar } from "./sidebar.js";
@@ -237,8 +237,8 @@ function decisionCard(draft) {
     "decision",
     askers.length === 1 ? ["Decision for ", taskLink(askers[0])] : "Decision",
     askers.length > 1 ? el("div", { class: "affects" }, el("span", { text: `For ${askers.length} tasks:` }), ...askers.map(taskLink)) : null,
-    el("div", { class: "question", text: target.question }),
-    target.why ? el("div", { class: "why", text: target.why }) : null,
+    el("div", { class: "question", html: inlineHtml(target.question) }),
+    target.why ? el("div", { class: "why", html: inlineHtml(target.why) }) : null,
   );
   const decide = decider(draft, node, error);
   const answer = (text) => text.trim() && decide({ action: "answer", text }, "Decided.");
@@ -253,9 +253,9 @@ function decisionCard(draft) {
           el(
             "button",
             { type: "button", class: `option${option === best ? " recommended" : ""}`, onclick: () => answer(option.choice) },
-            el("span", { class: "choice", text: option.choice }),
+            el("span", { class: "choice", html: codeHtml(option.choice) }),
             option === best ? el("span", { class: "tag", text: "Recommended" }) : null,
-            option.effect ? el("small", { text: option.effect }) : null,
+            option.effect ? el("small", { html: codeHtml(option.effect) }) : null,
           ),
         ),
       ),
@@ -264,9 +264,9 @@ function decisionCard(draft) {
   if (target.recommendation) {
     // "Per account: it protects each user directly" says why next to the option marked.
     const reason = best && lowered.startsWith(best.choice.toLowerCase()) ? target.recommendation.slice(best.choice.length).replace(/^[\s:,.;—–-]+/, "") : "";
-    node.append(el("div", { class: "recommendation", text: reason ? `Why ${best.choice.toLowerCase()}: ${reason}` : `Recommended: ${target.recommendation}` }));
+    node.append(el("div", { class: "recommendation", html: inlineHtml(reason ? `Why ${best.choice.toLowerCase()}: ${reason}` : `Recommended: ${target.recommendation}`) }));
   }
-  if (target.precedents?.length) node.append(el("div", { class: "precedents", text: `You decided before: ${target.precedents.join(" · ")}` }));
+  if (target.precedents?.length) node.append(el("div", { class: "precedents", html: inlineHtml(`You decided before: ${target.precedents.join(" · ")}`) }));
   const field = () => {
     const input = keepTyped(el("input", { placeholder: "Your decision", autocomplete: "off", "aria-label": "Your decision" }), `${draft.id}:decision`);
     input.addEventListener("keydown", (event) => submits(event) && answer(input.value));
@@ -288,8 +288,8 @@ function changeCard(draft) {
     draft,
     "change",
     "Decision changed",
-    el("div", { class: "question", text: target.decision.text }),
-    el("div", { class: "before", text: `Was: ${target.before.join("; ")}` }),
+    el("div", { class: "question", html: inlineHtml(target.decision.text) }),
+    el("div", { class: "before", html: inlineHtml(`Was: ${target.before.join("; ")}`) }),
     el("div", { class: "why", text: `${confirmed} of ${target.tasks.length} task${target.tasks.length === 1 ? "" : "s"} confirmed${redo ? `; ${redo} checked result${redo === 1 ? " is" : "s are"} out of date and being redone` : ""}.` }),
     el(
       "ul",
@@ -319,7 +319,7 @@ function lessonsCard(draft) {
       "li",
       {},
       keep,
-      el("div", { class: "lesson" }, text, el("small", { text: `${where}${because.length ? ` · because you said: “${because.slice(0, 2).join("”, “")}”` : ""}` })),
+      el("div", { class: "lesson" }, text, el("small", { html: inlineHtml(`${where}${because.length ? ` · because you said: “${because.slice(0, 2).join("”, “")}”` : ""}`) })),
     );
     return { lesson, keep, text, node };
   });

@@ -47,14 +47,14 @@ export function findUrls(text) {
 }
 // A path segment ends at whitespace, punctuation (Western or CJK) or markup.
 const SEGMENT = "[^\\s/,，。;；:：()（）\\[\\]{}<>`'\"、|&*!?！？]+";
+const pathSource = (roots) =>
+  `(?:${[...roots.map(escapeRegExp), "~"].join("|")})(?:\\/${SEGMENT})+` +
+  `|(?<![\\w.~\\/-])\\/(?:Users|home|tmp|private|var|opt|etc|Volumes|workspace)(?:\\/${SEGMENT})+`;
 function inlinePattern() {
   const roots = [state.snapshot?.data_directory, state.snapshot?.home].filter(Boolean);
   const key = roots.join("\n");
   if (inlinePattern.key !== key || !inlinePattern.re) {
-    const known = [...roots.map((root) => escapeRegExp(escapeHtml(root))), "~"];
-    const path =
-      `(?:${known.join("|")})(?:\\/${SEGMENT})+` +
-      `|(?<![\\w.~\\/-])\\/(?:Users|home|tmp|private|var|opt|etc|Volumes|workspace)(?:\\/${SEGMENT})+`;
+    const path = pathSource(roots.map(escapeHtml));
     inlinePattern.re = new RegExp(
       [
         "`([^`\\n]+)`",
@@ -71,9 +71,18 @@ function inlinePattern() {
       "g",
     );
     inlinePattern.path = new RegExp(`^(?:${path})$`);
+    inlinePattern.plain = new RegExp(pathSource(roots), "g");
     inlinePattern.key = key;
   }
   return inlinePattern.re;
+}
+// Paths in a line of plain text, short as on a chip: "~/notes/a.md", "…/report/notes.md".
+export function shortPaths(text) {
+  inlinePattern();
+  return text.replace(inlinePattern.plain, (path) => {
+    const trail = path.match(/[.,;:!?'"]+$/)?.[0] || "";
+    return displayPath(trail ? path.slice(0, -trail.length) : path) + trail;
+  });
 }
 // Trailing punctuation belongs to the sentence, not to a URL or path.
 const TRAILING = /(?:[.,;:!?'"]|&quot;|&#39;)+$/;
@@ -293,6 +302,10 @@ function inline(text, keyed = false) {
   }
   return inlineEscaped(escapeHtml(text));
 }
+// A line on a card with its Markdown marks (`code`, **bold**, links, paths) shown, as HTML.
+export const inlineHtml = (text) => inline(withoutBidi(text));
+// Only its `code`, for words inside a button (a link there would be a link in a button).
+export const codeHtml = (text) => escapeHtml(withoutBidi(text)).replace(/`([^`\n]+)`/g, "<code>$1</code>");
 // Any info string ("python", "c#", "objective-c", "shell title=x"), not a backtick in it.
 const FENCE = /^\s*(```+|~~~+)[^`]*$/;
 const HEADING = /^\s*(#{1,6})\s+(.*)$/;
@@ -447,16 +460,18 @@ export function gist(text) {
     return !(plain.length <= 12 && plain.split(/\s+/).length <= 2 && (/[:：]$/.test(plainText(bare)) || /^\*\*.*\*\*$/.test(bare)));
   });
   // Links as what they are, short: "app#592", "docs.google.com…"; what follows a link (")", ".")
-  // stays the sentence's.
-  return plainText(said.join("\n"))
-    .replace(/\s*\n\s*/g, " ")
-    .replace(URL_RE, (raw) => {
-      const [url, trail] = trimUrl(raw);
-      const pr = /^https:\/\/github\.com\/[^/\s]+\/([^/\s]+)\/(?:pull|issues)\/(\d+)/.exec(url);
-      if (pr) return `${pr[1]}#${pr[2]}${trail}`;
-      const site = /^https?:\/\/(?:www\.)?([^/\s]+)\//.exec(url);
-      return site ? `${site[1]}…${trail.replace(/^\./, "")}` : raw;
-    });
+  // stays the sentence's. Paths as on a chip.
+  return shortPaths(
+    plainText(said.join("\n"))
+      .replace(/\s*\n\s*/g, " ")
+      .replace(URL_RE, (raw) => {
+        const [url, trail] = trimUrl(raw);
+        const pr = /^https:\/\/github\.com\/[^/\s]+\/([^/\s]+)\/(?:pull|issues)\/(\d+)/.exec(url);
+        if (pr) return `${pr[1]}#${pr[2]}${trail}`;
+        const site = /^https?:\/\/(?:www\.)?([^/\s]+)\//.exec(url);
+        return site ? `${site[1]}…${trail.replace(/^\./, "")}` : raw;
+      }),
+  );
 }
 // A notice's main part, without its aside: "Started “Benchmark words() · textkit”" of
 // "Started “Benchmark words() · textkit” · new because …" (a " · " inside quotes is the title's).
@@ -560,5 +575,5 @@ export function firstLine(text) {
   // Without its list mark or heading ("1. ", "- ", "## "), not its own numbers ("3 tests").
   const lines = text.split("\n").map((line) => line.replace(/^\s*(?:(?:#{1,6}|>|[-*•+]|\d+[.)])\s+)+/, "").replace(/\*\*|`/g, "").trim()).filter(Boolean);
   // Not a lead-in like "Results:" when something follows it.
-  return lines.find((line) => !/^[\p{L}\s]{1,24}:$/u.test(line)) || lines[0] || "";
+  return shortPaths(lines.find((line) => !/^[\p{L}\s]{1,24}:$/u.test(line)) || lines[0] || "");
 }

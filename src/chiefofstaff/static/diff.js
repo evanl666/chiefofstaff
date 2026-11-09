@@ -111,7 +111,7 @@ export function showChanges(task, onSent) {
   const dialog = el(
     "dialog",
     { class: "diff-dialog" },
-    el("header", {}, el("h2", { text: task.title }), el("span", { class: "muted", text: "Click a line to comment on it." }), el("span", { class: "spacer" }), el("button", { type: "button", class: "text", text: "Close", onclick: close })),
+    el("header", {}, el("h2", { text: task.title }), el("span", { class: "muted", text: "Click a line, or press Enter on it, to comment on it." }), el("span", { class: "spacer" }), el("button", { type: "button", class: "text", text: "Close", onclick: close })),
     body,
     el("footer", {}, error, count, send),
   );
@@ -143,11 +143,18 @@ export function showChanges(task, onSent) {
   }
   function comment(row, file, line) {
     if (row.nextElementSibling?.classList.contains("diff-compose")) return row.nextElementSibling.querySelector("textarea").focus();
-    const input = el("textarea", { rows: 2, placeholder: "Comment for the worker" });
+    const input = el("textarea", { rows: 2, placeholder: "Comment for the worker", "aria-label": "Comment for the worker" });
     const compose = el("div", { class: "diff-compose" }, input);
+    // Closed or done, the keyboard is back on its line.
+    const back = (node) => {
+      const focused = node.contains(document.activeElement);
+      node.remove();
+      if (focused) row.focus();
+    };
     const add = () => {
       const text = input.value.trim();
       if (!text) return;
+      const focused = compose.contains(document.activeElement);
       const item = { ...line, file: file.name, body: text };
       comments.push(item);
       const note = el("div", { class: "diff-comment" }, el("span", { text }));
@@ -158,12 +165,13 @@ export function showChanges(task, onSent) {
           text: "Remove",
           onclick: () => {
             comments.splice(comments.indexOf(item), 1);
-            note.remove();
+            back(note);
             counted();
           },
         }),
       );
       compose.replaceWith(note);
+      if (focused) row.focus();
       counted();
     };
     input.addEventListener("keydown", (event) => {
@@ -171,26 +179,43 @@ export function showChanges(task, onSent) {
       if (event.key === "Escape") {
         event.preventDefault();
         event.stopPropagation();
-        compose.remove();
+        back(compose);
       }
     });
-    compose.append(el("div", { class: "buttons" }, el("button", { type: "button", class: "text", text: "Cancel", onclick: () => compose.remove() }), el("button", { type: "button", text: "Comment", onclick: add })));
+    compose.append(el("div", { class: "buttons" }, el("button", { type: "button", class: "text", text: "Cancel", onclick: () => back(compose) }), el("button", { type: "button", text: "Comment", onclick: add })));
     row.after(compose);
     input.focus();
   }
   function fileLines(file) {
     const lines = el("div", { class: "diff-lines" });
-    for (const line of file.lines.slice(0, MAX_LINES)) {
+    file.lines.slice(0, MAX_LINES).forEach((line, index) => {
       const sign = { add: "+", del: "−", ctx: "" }[line.kind] ?? "";
       const number = line.kind === "hunk" ? "" : line.kind === "del" ? line.old : line.line;
       const row = el("div", { class: `diff-line ${line.kind}` }, el("span", { class: "num", text: String(number) }), el("span", { class: "sign", text: sign }), el("span", { class: "code", text: line.text }));
       if (line.kind !== "hunk") {
-        row.addEventListener("click", () => {
-          if (!window.getSelection()?.toString()) comment(row, file, line);  // Not when copying.
-        });
+        // Reached with Tab too: Enter or Space comments on it (the dialog says so).
+        const what = { add: "Added line", del: "Removed line" }[line.kind] || "Line";
+        row.dataset.index = String(index);
+        row.tabIndex = 0;
+        row.setAttribute("role", "button");
+        row.setAttribute("aria-label", `${what} ${number}: ${line.text.trim() || "blank"}`);
       }
       lines.append(row);
-    }
+    });
+    const target = (event) => {
+      const row = event.target.closest?.(".diff-line[data-index]");
+      return row && lines.contains(row) ? row : null;
+    };
+    lines.addEventListener("click", (event) => {
+      const row = target(event);
+      if (row && !window.getSelection()?.toString()) comment(row, file, file.lines[Number(row.dataset.index)]);  // Not when copying.
+    });
+    lines.addEventListener("keydown", (event) => {
+      const row = target(event);
+      if (!row || event.target !== row || !(event.key === "Enter" || event.key === " ")) return;
+      event.preventDefault();
+      comment(row, file, file.lines[Number(row.dataset.index)]);
+    });
     if (file.lines.length > MAX_LINES) lines.append(el("p", { class: "muted note", text: `${file.lines.length - MAX_LINES} more lines not shown.` }));
     return lines;
   }

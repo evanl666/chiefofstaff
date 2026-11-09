@@ -128,6 +128,9 @@ MODEL_REFUSED = re.compile(
     r"not allowed to use (?:the )?model|context tier[^.\n]{0,40}not supported",
     re.IGNORECASE,
 )
+# Copilot kept a thinking effort the session's model takes none of ("Reasoning effort 'low' is
+# not supported for model …"): chosen for the model the session had before.
+EFFORT_REFUSED = re.compile(r"effort\b[^.\n]{0,40}\bnot supported", re.IGNORECASE)
 ROUTER_CONTEXT = int(os.environ.get("CHIEFOFSTAFF_ROUTER_CONTEXT", "150000"))
 # The Router's closing words in a turn without the owner that only say it has nothing to say
 # ("(quiet)", as its prompt asks, or "Nothing more to route: …"): not shown to the owner.
@@ -598,6 +601,10 @@ class Events:
         self.states[session_id].retuned = False
         self.states[session_id].awaiting = None  # Copilot said what went wrong.
         self.states[session_id].steps.clear()
+        if EFFORT_REFUSED.search(message) and self.runtime.effort_clearable(row):
+            self.runtime.update_session(session_id, status="idle", activity="")
+            self.runtime.background(self.runtime.clear_effort(row))
+            return
         if MODEL_REFUSED.search(message):
             # The company's policy, say: it recovers on another model instead of failing again
             # on every message.
@@ -713,7 +720,7 @@ class Events:
         if not row:
             return PermissionDecisionReject(feedback="Unknown session.")
         if not self.runtime.yolo(row) and (
-            reason := permission_denial(row, request, self.workspaces.writable(row))
+            reason := permission_denial(row, request, self.workspaces.writes(row))
         ):
             self.runtime.add_message(row["id"], "notice", reason)
             return PermissionDecisionReject(feedback=reason)

@@ -45,6 +45,27 @@ class Login(BaseModel):
 
 
 ATTACHMENT_FILE = re.compile(r"[0-9a-f]{32}\.(?:png|jpg|gif|webp)")
+# What each list in Settings holds, for "At most 10 MCP servers." (not pydantic's "Dictionary
+# should have at most 10 items after validation").
+HOLDS = {
+    "projects": "other project folders",
+    "sandbox_writable": "folders writable in the sandbox",
+    "github_repos": "GitHub repositories",
+    "skill_folders": "skill folders",
+    "plugins": "plugins",
+    "mcp_servers": "MCP servers",
+    "mcp_servers_off": "MCP servers",
+    "watches": "watches",
+}
+
+
+def in_words(problem: Any) -> Any:
+    """A Settings problem as the owner reads it: too many entries in a list, said in words."""
+    loc = problem["loc"]
+    if problem["type"] == "too_long" and len(loc) == 1 and loc[0] in HOLDS:
+        limit = (problem.get("ctx") or {}).get("max_length")
+        return {**problem, "type": "value_error", "msg": f"At most {limit} {HOLDS[loc[0]]}."}
+    return problem
 
 
 def settings_from(values: dict[str, Any], old: Settings) -> Settings:
@@ -55,13 +76,15 @@ def settings_from(values: dict[str, Any], old: Settings) -> Settings:
     context = {
         "mcp_saved": {**old.mcp_servers, **old.mcp_servers_off},
         "projects_saved": old.projects,
+        "writable_saved": old.sandbox_writable,
+        "scratch_saved": old.scratch_directory,
     }
     try:
         return Settings.model_validate(values, context=context)
     except ValidationError as error:
         problems = error.errors(include_url=False)
         raise RequestValidationError(
-            [{**problem, "loc": ("body", *problem["loc"])} for problem in problems]
+            [{**in_words(problem), "loc": ("body", *problem["loc"])} for problem in problems]
         ) from None
 
 
@@ -514,6 +537,12 @@ def create_app(
             if any(directory.is_relative_to(Path(project)) for project in settings.projects):
                 raise ValueError(
                     "A project must not contain Chief of Staff's private data directory."
+                )
+            # As when it is chosen on the first-run card.
+            code = settings.code_folder
+            if code and code != old.code_folder and directory.is_relative_to(Path(code)):
+                raise ValueError(
+                    "Code folder: choose a folder that does not contain Chief of Staff's own data."
                 )
             for folder in map(Path, settings.sandbox_writable):
                 if directory.is_relative_to(folder) or folder.is_relative_to(directory):

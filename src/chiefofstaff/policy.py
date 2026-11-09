@@ -121,6 +121,12 @@ def permission_denial(row: dict, request: Any, writable: list[str] | None = None
             target = str(Path(cwd) / target)
         folders = [*(writable or [cwd]), tempfile.gettempdir()]
         if not any(within(target, folder) for folder in folders if folder):
+            if writable and within(target, cwd) and (Path(cwd) / ".git").exists():
+                return (
+                    "This folder is the owner's own checkout: nothing is written there. To change "
+                    "it or run what writes files (installs, builds, tests), add_repo it: you get "
+                    "your own worktree and branch, and work there."
+                )
             return (
                 f"Writing outside your working directory ({cwd}) and checkouts needs the owner. "
                 'Ask with report(status="question"), or add_repo for another repository.'

@@ -69,6 +69,26 @@ class SlackError(RuntimeError):
     pass
 
 
+def refused(error: BaseException) -> int:
+    """The HTTP status Slack refused with (401, 403), else 0."""
+    if isinstance(error, BaseExceptionGroup):
+        return next((code for inner in error.exceptions if (code := refused(inner))), 0)
+    if isinstance(error, httpx.HTTPStatusError) and error.response.status_code in {401, 403}:
+        return error.response.status_code
+    return refused(error.__cause__) if error.__cause__ else 0
+
+
+def unreachable(error: BaseException) -> str:
+    """Why Slack could not be reached, as the owner can act on it."""
+    if code := refused(error):
+        return (
+            f"Slack refused the token ({code}): it may be wrong, revoked or expired. Paste a new "
+            "user token (xoxp-…) in Settings."
+        )
+    said = re.sub(r"\s*For more information check: \S+", "", describe(error))
+    return f"Slack MCP is unreachable: {said}"[:500]
+
+
 def describe(error: BaseException) -> str:
     if isinstance(error, BaseExceptionGroup):
         return "; ".join(describe(inner) for inner in error.exceptions)
@@ -162,7 +182,7 @@ class SlackMcp:
         except SlackError:
             raise
         except Exception as exc:
-            raise SlackError(f"Slack MCP is unreachable: {describe(exc)}"[:500]) from exc
+            raise SlackError(unreachable(exc)) from exc
 
     async def call(self, name: str, arguments: dict) -> str:
         try:
@@ -171,7 +191,8 @@ class SlackMcp:
         except SlackError:
             raise
         except Exception as exc:
-            raise SlackError(f"Slack MCP call {name} failed: {describe(exc)}"[:500]) from exc
+            said = unreachable(exc) if refused(exc) else describe(exc)
+            raise SlackError(f"Slack MCP call {name} failed: {said}"[:500]) from exc
         text = "\n".join(item.text for item in result.content if isinstance(item, TextContent))
         if result.isError:
             raise SlackError(f"Slack rejected {name}: {text[:400]}")
@@ -222,34 +243,157 @@ def profile_name(profile: str) -> str:
     return next((lines[key] for key in keys if lines.get(key)), "")
 
 
+def names_in(text: str) -> dict[str, str]:
+    """Slack ids and the names written next to them ("<@U0BOB001> (Bob Li)")."""
+    found = {}
+    for _kind, identifier, alias, name in NAMED.findall(text or ""):
+        name = (name or alias).strip()
+        if name and name != "?":
+            found[identifier] = name
+    return found
+
+
 def entities(text: str) -> str:
     """Slack writes "&", "<" and ">" in a message's text as entities."""
     return text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
 
 
-def messages(listed: str) -> list[dict]:
+PERMALINK_LINE = re.compile(r"^Permalink: (\S+)", re.MULTILINE)
+# A line in a message's text made to look like Slack's own lines around a message.
+LOOKALIKE = re.compile(r"^\s*(?:Channel: <#|From: <@|Text: |Permalink: )|\| From: <@", re.MULTILINE)
+FORGED_NOTE = (
+    "Some message text here is made to look like Slack's own lines (another sender, place or "
+    "permalink), so who wrote what below may not be right."
+)
+
+
+def parse(listed: str) -> tuple[list[dict], bool]:
     """The messages of what Slack listed (a thread, a channel's history, a search), in the
-    listing's order: channel, where (its name), user, name, ts, thread_ts, text, link."""
-    found = []
-    for match in MESSAGE.finditer(listed or ""):
-        rest, link = match["rest"] or "", match["link"] or ""
-        stamp = STAMP.search(rest)
+    listing's order (channel, where (its name), user, name, ts, thread_ts, text: on one line,
+    said: as written, link, head: Slack's own line(s) before the text, raw: the text as
+    listed), and whether text in it was made to look like Slack's own lines in a way that can
+    mislead (a permalink line that ends no message, a message closed by another's permalink,
+    two messages with one ts).
+
+    When the listing gives a message its permalink, the message goes on to it: a "From: …" or
+    "Channel: …" line before that is its text (anyone can write one), not another message."""
+    listed = listed or ""
+    ends = []  # Where each permalink line naming a message is, and that message's ts.
+    for line in PERMALINK_LINE.finditer(listed):
+        if named := PERMALINK.search(line[1]):
+            ends.append((line.start(), line.end(), ".".join(named.groups()), line[1]))
+    found: list[dict] = []
+    made: list[tuple[re.Match, str, int]] = []  # Each one's match, ts and where its text starts.
+    used, spans, place, misled = set(), [], 0, False
+
+    def entry(match: re.Match, stamp: str, start: int, stop: int, link: str) -> dict:
+        rest = match["rest"] or ""
+        raw = listed[start:stop]
         linked = PERMALINK.search(link)
         root = THREAD_STAMP.search(rest) or THREAD_STAMP.search(link)
         name = (match["name"] or "").strip()
-        found.append(
-            {
-                "channel": match["channel"] or "",
-                "where": (match["where"] or "").strip(),
-                "user": match["user"],
-                "name": "" if name == "?" else name,
-                "ts": stamp.group(1) if stamp else ".".join(linked.groups()) if linked else "",
-                "thread_ts": root.group(1) if root else "",
-                "text": entities(" ".join(match["text"].split())),
-                "link": link,
-            }
+        head = listed[match.start() : match.start("text")].removesuffix("Text: ")
+        return {
+            "channel": match["channel"] or "",
+            "where": (match["where"] or "").strip(),
+            "user": match["user"],
+            "name": "" if name == "?" else name,
+            "ts": stamp or (".".join(linked.groups()) if linked else ""),
+            "thread_ts": root.group(1) if root else "",
+            "text": entities(" ".join(raw.split())),
+            # As written: its lines, lists and code blocks (and spaces) kept.
+            "said": entities("\n".join(line.rstrip() for line in raw.strip("\n").splitlines())),
+            "link": link,
+            "head": head.rstrip(" |\n"),
+            "raw": raw.strip("\n"),
+        }
+
+    while match := MESSAGE.search(listed, place):
+        found_stamp = STAMP.search(match["rest"] or "")
+        stamp = found_stamp.group(1) if found_stamp else ""
+        start = match.start("text")
+        own = stamp and next((end for end in ends if end[0] > start and end[2] == stamp), None)
+        if own:
+            stop, link, place = own[0], own[3], own[1]
+            used.add(own[0])
+        else:
+            stop, link = match.end("text"), match["link"] or ""
+            place = max(match.end(), place + 1)
+            if link:
+                used.add(match.start("link") - len("Permalink: "))
+                closing = PERMALINK.search(link)
+                closes = ".".join(closing.groups()) if closing else ""
+                if stamp and closes and closes != stamp:
+                    # Its header was written in a message's text: that message ended itself
+                    # early (with a copy of its permalink) and goes on to here, its own.
+                    misled = True
+                    if made and made[-1][1] == closes:
+                        before, before_stamp, before_start = made.pop()
+                        found.pop()
+                        spans.pop()
+                        match, stamp, start = before, before_stamp, before_start
+        made.append((match, stamp, start))
+        found.append(entry(match, stamp, start, stop, link))
+        spans.append((start, stop))
+    stamps = [entry["ts"] for entry in found if entry["ts"]]
+    # A permalink line in a message's text was written there; one outside every message is
+    # out of place: a message whose text named its own permalink to end early, say.
+    astray = any(
+        start not in used and not any(first <= start < last for first, last in spans)
+        for start, *_ in ends
+    )
+    return found, misled or astray or len(stamps) != len(set(stamps))
+
+
+def messages(listed: str) -> list[dict]:
+    """The messages of what Slack listed, in the listing's order (see `parse`)."""
+    return parse(listed)[0]
+
+
+def listing_keys(listed: str) -> list[str]:
+    """Keys ("slack:<ts>") of the messages Slack listed: the messages read in it when each has
+    a ts (a ts in a message's text is not a message), else every ts in it."""
+    found = parse(listed)[0]
+    if found and all(entry["ts"] for entry in found):
+        # Also when who wrote which is unsure: a message's header with its own permalink is
+        # always read as one.
+        return [f"slack:{stamp}" for stamp in dict.fromkeys(entry["ts"] for entry in found)]
+    return message_keys(listed)
+
+
+def for_session(listed: str, stamps: set[str], limit: int = MAX_RESULT_CHARS) -> str:
+    """Only these messages ("1712345678.000100") of what Slack listed, for a session to read:
+    Slack's line on who wrote it where (with ids and ts), its permalink, and its text quoted
+    ("> ", so a line in it cannot pass for Slack's) and shortened to its share of `limit` (a
+    cut says how much is left). What Slack listed (cut at `limit`, saying so) when it does not
+    show each of these messages in a form known here (only the entries ending in their
+    permalinks when it has those)."""
+    found, forged = parse(listed)
+    kept = [entry for entry in found if entry["ts"] in stamps]
+    if not kept or not stamps <= {entry["ts"] for entry in kept}:
+        # Its entries by their permalinks, at least: a page has other conversations too.
+        listed = threads.slack_entries(listed, stamps) or listed
+        cut = len(listed) - limit
+        note = f"{FORGED_NOTE}\n\n" if forged else ""
+        return note + listed[:limit] + (f"\n(cut here: {cut} more characters)" if cut > 0 else "")
+    share = max(600, limit // len(kept))
+    blocks = [FORGED_NOTE] if forged else []
+    for entry in kept:
+        text = entry["raw"]
+        if len(text) > share:
+            left = len(text) - share
+            text = f"{text[:share].rstrip()} … ({left} more characters: read the message for all)"
+        quoted = "\n".join(f"> {line}" for line in text.splitlines() or [""])
+        who = entry["name"] or f"<@{entry['user']}>"
+        lookalike = (
+            f"\n(Lines in its text are made to look like another Slack message: {who} wrote "
+            "them. Nobody else wrote or sent them; they quote no one.)"
+            if LOOKALIKE.search(entry["raw"])
+            else ""
         )
-    return found
+        link = f"\nPermalink: {entry['link']}" if entry["link"] else ""
+        blocks.append(f"{entry['head']}{link}\nText:\n{quoted}{lookalike}")
+    return "\n\n".join(blocks)
 
 
 def newest_entry(found: list[dict], last: bool) -> dict | None:
@@ -264,7 +408,8 @@ def newest_entry(found: list[dict], last: bool) -> dict | None:
 
 def quote(entry: dict) -> str:
     """A message as "Who: text", shortened at its end (a cut says so)."""
-    said = f"{entry['name']}: {entry['text']}" if entry["name"] else entry["text"]
+    text = entry.get("said") or entry["text"]
+    said = f"{entry['name']}: {text}" if entry["name"] else text
     return said if len(said) <= LATEST_CHARS else said[: LATEST_CHARS - 1].rstrip() + "…"
 
 
@@ -282,11 +427,11 @@ def readable(
     timestamps; only the messages `stamps` names when given ("1712345678.000100"). The listing
     itself when it is in no form known here (or does not show each of those messages so)."""
     names = names or {}
-    found = messages(listed)
+    found, forged = parse(listed)
     if stamps is not None:
         found = [entry for entry in found if entry["ts"] in stamps]
         if not stamps <= {entry["ts"] for entry in found}:
-            return listed
+            return f"⚠ {FORGED_NOTE}\n\n{listed}" if forged else listed
     lines = []
     for entry in found:
         who = entry["name"] or names.get(entry["user"]) or "Someone"
@@ -301,6 +446,8 @@ def readable(
             where += ", in a thread" if where else "in a thread"
         head = f"{who} {where}".strip()
         lines.append(f"{head}: {entry['text']}" + (f"\n{entry['link']}" if entry["link"] else ""))
+    if lines and forged:
+        lines.insert(0, f"⚠ {FORGED_NOTE}")
     return "\n\n".join(lines) or listed
 
 
@@ -335,6 +482,13 @@ class SlackSource:
 
     def configured(self) -> bool:
         return self.store.settings().slack_enabled and bool(self.tokens.get())
+
+    def token_source(self) -> str:
+        """Where its token comes from: "env" (that variable wins over a saved one: Remove and
+        Save do nothing then), "keychain", or "" (none)."""
+        if os.environ.get(SlackTokens.ENV):
+            return "env"
+        return "keychain" if self.tokens.get() else ""
 
     def session_mcp_config(self) -> dict | None:
         """MCP config for model sessions: read-only tools only, never send/write tools."""
@@ -435,7 +589,7 @@ class SlackSource:
         shown: list[str] = []
         unseen: list[str] = []
         thread_keys: list[str] = []
-        for_followers: dict[str, tuple[list[str], list[str]]] = {}
+        for_followers: dict[str, tuple[list[str], list[tuple[str, str]]]] = {}
         # How far this poll got: short of now when a query had more pages than it reads.
         reached = started
         for query in self.queries():
@@ -453,7 +607,7 @@ class SlackSource:
                     },
                 )
                 self.learn_names(text)
-                found = message_keys(text)
+                found = listing_keys(text)
                 links = threads.slack_messages(text)
                 fresh = []
                 for key in found:
@@ -469,37 +623,54 @@ class SlackSource:
                         if key not in bucket[0]:
                             # Only its own messages: the page has other conversations too.
                             bucket[0].append(key)
-                            stamp_text = key.removeprefix("slack:")
-                            bucket[1].append(threads.slack_entries(text, {stamp_text}))
+                            bucket[1].append((text, key.removeprefix("slack:")))
                         continue
                     fresh.append(key)
                     thread_keys += keys
                 if fresh:
                     unseen += fresh
-                    sections.append(f"Search `{query}`:\n{text[:MAX_RESULT_CHARS]}")
                     stamps = {key.removeprefix("slack:") for key in fresh}
-                    shown.append(readable(text[:MAX_RESULT_CHARS], self.display_names(), stamps))
+                    # Only the new ones, each with its share: none goes past the Router unread.
+                    sections.append(f"Search `{query}`:\n{for_session(text, stamps)}")
+                    shown.append(readable(text, self.display_names(), stamps))
                 # A full page may hide newer matches: continue after the newest one returned.
                 newest = int(max((float(key.removeprefix("slack:")) for key in found), default=0))
-                if len(found) < PAGE_SIZE or newest <= after:
+                if len(found) < PAGE_SIZE:
                     break
+                if newest <= after:
+                    # A page of matches within one second: past it, a search by time can only
+                    # go on from the next second. Said, so the rest is looked for.
+                    logger.warning(
+                        "More than %s Slack matches at %s for %s", PAGE_SIZE, after, query
+                    )
+                    sections.append(
+                        f"More than {PAGE_SIZE} messages for `{query}` came within one second "
+                        f"({after}): the ones past these {PAGE_SIZE} are not listed here. Read "
+                        "those conversations to find them."
+                    )
+                    newest = after + 1
                 after = newest
             else:
                 # More than MAX_PAGES pages: the rest comes with the next poll, from here.
                 reached = min(reached, after)
-        for thread, (keys, texts) in for_followers.items():
-            body = "\n\n".join(dict.fromkeys(texts))
+        for thread, (keys, listed) in for_followers.items():
+            body = "\n\n".join(dict.fromkeys(for_session(text, {stamp}) for text, stamp in listed))
+            said = "\n\n".join(
+                dict.fromkeys(
+                    readable(text, self.display_names(), {stamp}) for text, stamp in listed
+                )
+            )
             delivered = await self.host.on_thread(
                 "slack",
                 thread,
                 keys,
                 f"New messages in a Slack conversation you follow ({thread}):\n\n{body}",
-                readable(body, self.display_names()),
+                said,
             )
             if not delivered:  # Nobody follows it any more.
                 unseen += [key for key in keys if not self.seen(key)]
                 sections.append(body)
-                shown.append(readable(body, self.display_names()))
+                shown.append(said)
         if unseen:
             keys_line = (
                 f"Thread keys: {', '.join(dict.fromkeys(thread_keys))}\n" if thread_keys else ""
@@ -509,7 +680,7 @@ class SlackSource:
                 unseen,
                 f"{len(unseen)} new Slack message(s) to or mentioning the owner "
                 f"(new ts: {', '.join(key.removeprefix('slack:') for key in unseen)}). "
-                "Results may also contain messages handled earlier.\n"
+                "Each one's text is quoted under its Slack line.\n"
                 + keys_line
                 + "\n"
                 + "\n\n".join(sections),
@@ -547,7 +718,7 @@ class SlackSource:
             },
         )
         self.learn_names(text)
-        stamps = [key.removeprefix("slack:") for key in message_keys(text)]
+        stamps = [key.removeprefix("slack:") for key in listing_keys(text)]
         keys = [f"{DELEGATED}{stamp}" for stamp in stamps]
         if self.store.get("slack_delegate_emoji") != emoji:
             # Reactions from before the feature was on (or with another emoji) are history.
@@ -561,14 +732,15 @@ class SlackSource:
         links = threads.slack_messages(text)
         thread_keys = list(dict.fromkeys(key for stamp in fresh for key in links.get(stamp, [])))
         keys_line = f"Thread keys: {', '.join(thread_keys)}\n" if thread_keys else ""
-        body = text[:MAX_RESULT_CHARS]
         await self.host.on_trigger(
             "slack",
             [f"{DELEGATED}{stamp}" for stamp in fresh],
             f"The owner reacted with :{emoji}: to {len(fresh)} Slack message(s), handing them to "
-            f"you (new ts: {', '.join(fresh)}). The results may also list messages handed over "
-            "earlier; handle only the new ones.\n" + keys_line + "\n" + body,
-            readable(body, self.display_names(), set(fresh)),
+            f"you (new ts: {', '.join(fresh)}). Each one's text is quoted under its Slack line.\n"
+            + keys_line
+            + "\n"
+            + for_session(text, set(fresh)),
+            readable(text, self.display_names(), set(fresh)),
             kind="delegated",
         )
 
@@ -606,24 +778,21 @@ class SlackSource:
             self.learn_names(text)
             fresh = [
                 key
-                for key in message_keys(text)
+                for key in listing_keys(text)
                 if float(key.removeprefix("slack:")) >= oldest and not self.seen(key)
             ]
             if fresh:
                 await self.learn_mentions(text)
                 newest = max(float(key.removeprefix("slack:")) for key in fresh)
+                stamps = {key.removeprefix("slack:") for key in fresh}
                 await self.host.on_thread(
                     "slack",
                     thread,
                     fresh,
                     f"New messages in a Slack {kind} you follow ({thread}; new ts: "
-                    f"{', '.join(key.removeprefix('slack:') for key in fresh)}). Earlier "
-                    f"messages may be included for context.\n\n{text[:MAX_RESULT_CHARS]}",
-                    readable(
-                        text[:MAX_RESULT_CHARS],
-                        self.display_names(),
-                        {key.removeprefix("slack:") for key in fresh},
-                    ),
+                    f"{', '.join(sorted(stamps))}). Each one's text is quoted under its Slack "
+                    f"line; read the {kind} for what came before.\n\n" + for_session(text, stamps),
+                    readable(text, self.display_names(), stamps),
                 )
                 self.store.set(f"slackhw:{thread}", str(newest))
 
@@ -728,11 +897,16 @@ class SlackSource:
     # Names: who a user id is and what a conversation id is called, as Slack listed them.
 
     def learn_names(self, listed: str):
-        found = {}
-        for _kind, identifier, alias, name in NAMED.findall(listed or ""):
-            name = (name or alias).strip()
-            if name and name != "?":
-                found[identifier] = name
+        """Names from Slack's own lines on who wrote a message where: not from its text, where
+        anyone can write "<@U0BOB001> (Alice Chen)"; none from a listing whose text was made to
+        look like those lines."""
+        entries, forged = parse(listed)
+        if not forged:
+            self.remember_names(
+                names_in("\n".join(entry["head"] for entry in entries if entry["head"]))
+            )
+
+    def remember_names(self, found: dict[str, str]):
         known = self.display_names()
         if all(known.get(identifier) == name for identifier, name in found.items()):
             return
@@ -756,9 +930,9 @@ class SlackSource:
             except Exception as exc:
                 logger.info("Could not read the Slack profile of %s: %s", user, describe(exc))
                 continue
-            self.learn_names(profile)
-            if user not in self.display_names() and (name := profile_name(profile)):
-                self.learn_names(f"<@{user}> ({name})")
+            named = names_in(profile).get(user) or profile_name(profile)
+            if named:
+                self.remember_names({user: named})
 
     def display_names(self) -> dict[str, str]:
         """Slack ids -> names, as read in what Slack listed: users (U…, W…) and conversations

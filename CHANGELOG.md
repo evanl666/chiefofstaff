@@ -1,5 +1,99 @@
 # Changelog
 
+## 0.1.33 (2026-11-08)
+
+An eighth live bug bash on real Copilot (regressions of the last release, setup and settings,
+adversarial Slack and GitHub input, and the UI in depth) and a code review, all fixed.
+
+- **Fewer messenger runs while you are away**: your replies to a notification are read every
+  few minutes for its first hour, then every half hour (each read is a messenger run); through
+  your own Slack DM, only when you wrote something new there. Its lines now say when you wrote
+  each one, so the newest reply to a code wins.
+- **Slack messages are read as Slack wrote them**: a line break and a made-up "Channel: … |
+  From: <@Alice> …" line in Bob's message no longer show as Alice's message in #deploys (to
+  you or the Router): a message goes on to its own permalink, and its text is quoted for the
+  Router. Names come only from Slack's own lines, not from what someone typed ("<@U0BOB001>
+  (Alice Chen)" renamed Bob). A message made to end early says that who wrote what may not be
+  right.
+- **No Slack message is marked handled unread**: the Router got a poll's results cut at 6,000
+  characters (partly spent on messages handled before), so a fourth long mention never reached
+  it. It now gets only the new ones, each with its share and saying how much was cut. Over 20
+  messages within one second no longer stop the read there (what came after was lost), and it
+  says so.
+- **Slack quotes keep their lines**: a numbered list or code block quoted on a draft's card was
+  one paragraph, and two spaces became one.
+- **A wrong Slack token says so**: "Slack refused the token (401): … paste a new one", not
+  "unreachable" with a link to an HTTP manual. Settings knows when the token comes from
+  `CHIEFOFSTAFF_SLACK_USER_TOKEN`.
+- **A stopped task stays stopped**: its check-back time woke it and it ran its long command
+  again; the check-back now waits for *Go on*.
+- **Retry once**: several clicks on Retry for a task whose worker was closed each sent "Try
+  again.".
+- **Separate work in a worktree of its own** (split off a task at work) is counted only in its
+  own task, not also in the task it was split from.
+- **A worker you open in a terminal while it is live here** is left to the terminal: news on
+  what it follows waits until you close it there (it got a review at once and pushed), and its
+  replies are not stored twice.
+- **News in a conversation a worker follows** is cut at a word with "…" (up to 4,000
+  characters) and says how many messages came, not cut mid-name.
+- **A review waiting on its card** is not "You reviewed it" on the PR's chip.
+- **A model without thinking effort for workers**: a worker that had an effort failed every
+  turn ("Reasoning effort 'low' is not supported for model …"), as Copilot keeps it across a
+  model change and a resume. It is now cleared, and a turn refused for it is sent again.
+- **"~" as the code folder** says to choose the folder your repositories are in.
+- **Your checkouts are not written by a task that only reads them**: a worker given your own
+  project folder (a task that changes no code) ran its tests there and left `.venv`, `uv.lock`
+  and caches. Its sandboxed commands and its edits can no longer write there; for that it gets
+  its own worktree (`add_repo`), as it is told.
+- **Away replies**:
+  - "send it" with a link in it (`<https://…?tab=rows|sheet>`) is sent: a "?" or "next" in a
+    link no longer holds it back.
+  - An answer with its code at the end ("Teal, please. 4IF37") counts again, and any reply that
+    is not acted on is asked again where you are, not only drafts.
+  - A draft with blanks can be completed from away: words for its blanks fill them (the hint
+    says `<words for the blanks> · no`), instead of asking for "send" again and again.
+  - A merge card after its PR closed says so, a PR reopened at the same commit gets a new card
+    and code, and "Not merged yet" says what held it back.
+  - A reply to a code you used is read even when no other code waits.
+  - "no thanks, I'll answer Alice myself" is the reason a dropped draft gives, not "From away".
+  - An answer keeps its own punctuation (".env", "Pasta please.").
+- **A question asked right after its draft** (about it) goes on the draft's card, as one asked
+  right before did: one decision, one code away.
+- **No green "tests" chip when no test ran**: "no tests ran", "file or directory not found",
+  "Ran 0 tests", "No tests found" and the like are not a pass, and a run piped through `head`
+  or `grep` that shows no result is not one either (a report that says they pass then is
+  flagged).
+- **Stop following a PR** for a task no longer says its news comes to the Router: nobody reads
+  it then, and the Router says so.
+- **"new because"** keeps names and titles capitalized ("Long Count"), asks for a reason in
+  your language addressed to you, and leaves out an English one under a Chinese message.
+- **Habits waiting for your OK**: "3 new habits wait for your OK under Needs you on Home".
+- **Settings**:
+  - "Auto" in any case is Copilot's choice (Copilot refused "Auto").
+  - A skill with a name you have is refused, not silently replaced; its front matter is read as
+    YAML (a folded `description: >`), its name is written as listed, and an error says which
+    field is wrong.
+  - Relative folders are refused (they were taken from the server's folder), as are task
+    folders inside a repository, a code folder that holds Chief of Staff's data, and new
+    "Also writable" folders that do not exist.
+  - Errors say what is allowed (not a pattern), Save goes to the tab with the problem, a
+    duplicate plugin is kept once, a failed plugin install says why in a line, a Slack token
+    with a space says so, and GitHub repositories can be pasted as URLs.
+  - The pause checkbox says what it pauses (Slack, GitHub, Watches, away notifications and
+    learning), and "Where it applies" lists the code folder's repositories.
+- **Home and chat**:
+  - Paths on cards and chat lines are short, as on chips.
+  - A result to review whose own PR has changes requested or failing CI is under Needs you
+    with *Ask it to fix…* (Accept is under **⋯**); the worker's chip says *To review* as Home
+    does.
+  - Inline `code` on decision and habit cards shows as code.
+  - The chat opens at its end with images in it.
+  - Diff lines can be commented from the keyboard (Tab, Enter).
+  - Reduced motion is respected; the ☰ count no longer covers "Home" on narrow screens; the
+    header no longer grows when Focus starts; *Bring back* on Artifacts clears the toast.
+  - Screen readers hear "Open worker: …", "More actions for “…”", "Focus", the @mention list
+    opening, and *Needs you* as a heading.
+
 ## 0.1.32 (2026-11-08)
 
 A seventh live bug bash on real Copilot (regressions of the last release, a PR's whole life, a

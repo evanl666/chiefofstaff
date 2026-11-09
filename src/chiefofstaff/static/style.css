@@ -314,6 +314,8 @@ summary { min-height: 28px; }
 #session-header h1 {
   margin: 0;
   font-size: var(--title);
+  /* With the meta line under it, within the header's height: "Focusing until…" moves nothing. */
+  line-height: 21px;
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -321,6 +323,9 @@ summary { min-height: 28px; }
 }
 #session-meta {
   font-size: var(--small);
+  /* One line, whatever font a character in it comes from (the narrow space in "5:04 PM"). */
+  line-height: 18px;
+  height: 18px;
   color: var(--muted);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -849,7 +854,7 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
   #settings-pane { grid-area: 3 / 1; }
   #settings-form > footer { grid-area: 4 / 1; }
 }
-.error { color: var(--red); font-size: var(--small); margin: 0; }
+.error { color: var(--red); font-size: var(--small); margin: 0; white-space: pre-line; }
 .error:empty { display: none; }
 .ok { color: var(--green); }
 
@@ -957,6 +962,7 @@ body.resizing iframe { pointer-events: none; }
   color: var(--text);
 }
 .panel-section .count { color: var(--muted); font-size: var(--small); font-weight: 500; font-variant-numeric: tabular-nums; }
+.panel-section > summary > h2 { margin: 0; font: inherit; }
 #needs > summary .count:not(:empty) { color: #fff; background: var(--badge); border-radius: 10px; min-width: 20px; padding: 0 6px; line-height: 20px; text-align: center; font-weight: 600; }
 .panel-section .items { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
 .panel-section .empty-hint { margin: 0; font-size: var(--small); color: var(--muted); }
@@ -1033,7 +1039,9 @@ button.receipt.needs { background: var(--amber-soft); color: var(--amber); }
    opens over the page; the page has the whole width. Keep NARROW in sidebar.js in step. */
 #sidebar-toggle { display: none; position: relative; flex: none; margin-left: -6px; }
 #sidebar-toggle .bars { font-size: 18px; line-height: 1; }
-#sidebar-toggle .badge { position: absolute; top: -6px; right: -10px; min-width: 16px; height: 16px; padding: 0 4px; font-size: 10px; }
+/* Its count beside ☰, inside the button: it covers neither ☰ nor what follows it. */
+#sidebar-toggle:has(> .badge:not([hidden])) { width: auto; padding: 0 4px 0 5px; gap: 2px; grid-auto-flow: column; }
+#sidebar-toggle .badge { align-self: start; margin-top: -2px; min-width: 16px; height: 16px; padding: 0 4px; font-size: 10px; }
 @media (max-width: 760px) {
   #application { grid-template-columns: minmax(0, 1fr); }
   #sidebar-toggle { display: grid; }
@@ -1230,6 +1238,7 @@ button.receipt.changes .not-counted { color: var(--muted); }
 .card.decision .option .tag { grid-column: 2; grid-row: 1; font-size: var(--small); color: var(--accent); font-weight: 600; }
 .card.decision .option small { grid-column: 1 / -1; color: var(--muted); font-size: var(--small); }
 .card.decision .recommendation, .card.decision .precedents { font-size: var(--small); color: var(--soft); margin-top: 8px; }
+.card.draft :is(.question, .why, .before, .recommendation, .precedents, .option, .lesson small) code { font: 0.92em var(--mono); background: var(--bubble); padding: 0 4px; border-radius: 4px; overflow-wrap: anywhere; }
 .card.lessons .lesson-list { list-style: none; padding: 0; margin: 8px 0; display: grid; gap: 8px; }
 .card.lessons li { display: flex; gap: 10px; align-items: flex-start; }
 .card.lessons li input[type="checkbox"] { margin-top: 8px; }
@@ -1287,6 +1296,7 @@ button.receipt.changes:hover { text-decoration: underline; }
 .diff-line.hunk { color: var(--muted); background: var(--accent-soft); cursor: default; }
 .diff-line:not(.hunk):hover .num { color: var(--accent); }
 .diff-line:not(.hunk):hover { box-shadow: inset 2px 0 var(--accent); }
+.diff-line:focus-visible { outline-offset: -2px; }
 .diff-compose, .diff-comment { margin: 4px 10px 8px 62px; font: var(--body)/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
 .diff-compose { display: grid; gap: 6px; }
 .diff-compose textarea { border: 1px solid var(--line); border-radius: var(--radius); padding: 6px 10px; background: var(--bg); width: 100%; resize: vertical; }
@@ -1455,3 +1465,9 @@ dialog .row label.hours:not(.grow) { width: auto; flex: none; }
 .split-preview .moved ul { margin: 4px 0 0; padding-left: 16px; }
 /* Our own short tooltip (data-tip): it goes when what it is about moves. */
 #tip { position: fixed; z-index: 100; max-width: min(340px, calc(100vw - 16px)); padding: 4px 8px; border-radius: 6px; background: var(--text); color: var(--bg); font-size: var(--small); line-height: 1.45; white-space: pre-line; overflow-wrap: anywhere; pointer-events: none; box-shadow: var(--shadow-pop); }
+/* Less motion when the system asks for it: nothing pulses, slides or fades; a spinner stays a
+   still ring, and a highlight shows at once and goes without fading. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+  .card.flash, #timeline .flash { animation: flash 1.6s steps(1, end) !important; }
+}

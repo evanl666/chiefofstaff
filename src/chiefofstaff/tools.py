@@ -9,7 +9,7 @@ import json
 import logging
 import os
 import re
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -62,6 +62,12 @@ REPLACES = (
     "are cancelled as replaced by it, so the owner is not also offered to retry them. To try "
     "a failed task again in its own worker, message_session it with task='continue' and its "
     "task_id instead"
+)
+WHY_NEW_WORDS = (
+    "The owner reads it after “new because”, so a short phrase that goes on from there, said "
+    "to them (“a different repository”, “you asked for a separate PR”), never your reasoning "
+    "(not “separate decision task, no code change”). In the language the owner writes in: to "
+    "an owner who writes Chinese, in Chinese (“你要单独的 PR”), or it is not shown"
 )
 
 
@@ -156,9 +162,7 @@ class SpawnWorker(BaseModel):
         default="",
         description="Only after spawn_worker listed related workers: why none of them should "
         "take this (different subject, an independent change that needs its own PR, or work "
-        "that must run in parallel with theirs). The owner reads it after “new because”: a "
-        "short reason in the owner's language, addressing them as “you” (“a different "
-        "repository”, “you asked for a separate PR”), not your reasoning",
+        "that must run in parallel with theirs). " + WHY_NEW_WORDS,
     )
     replaces: list[str] = Field(
         default_factory=list,
@@ -197,6 +201,8 @@ ACK_FILLER = {
 ACK_CJK = re.compile(
     r"谢谢|感谢|多谢|收到|好的|明白了?|了解|辛苦了?|知道了|没问题|很好|不错|嗯|好|啦|了"
 )
+# Chinese, Japanese or Korean writing.
+CJK_TEXT = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]")
 
 
 def acknowledgement(text: str) -> bool:
@@ -266,9 +272,7 @@ class MessageSession(BaseModel):
         default="",
         description="For task='new' when the worker was given a task in the last half hour: "
         "why this is another deliverable, not more of that task (a correction, one more thing "
-        "is task='continue'). The owner reads it after “new because”: a short reason in the "
-        "owner's language, addressing them as “you” (“a different repository”, “you asked "
-        "for a separate PR”), not your reasoning",
+        "is task='continue'). " + WHY_NEW_WORDS,
     )
     follow: list[str] = Field(
         default_factory=list,
@@ -413,15 +417,31 @@ def clean_criteria(criteria: list[str]) -> list[str]:
     return [" ".join(text.split())[:300] for text in criteria if text.strip()][:8]
 
 
-def mid_sentence(text: str) -> str:
-    """A reason as it reads after "new because": no capital to start it (an acronym or a
-    name such as "PR" or "PRs" keeps its), no period to end it."""
+# Words a reason starts with as a sentence does (“The task is busy”, “Different subject”): not
+# capitalized after "new because". Any other capitalized word may start a name or a title
+# (“Long Count is busy”, “Alice asked for it”), which keeps its capital.
+SENTENCE_STARTS = frozenset(
+    "a an the this that these those it its it's another other others different separate "
+    "independent unrelated new same each both either neither no not one two your you you're "
+    "they their there we our for from in on at by to with without after before since because "
+    "as so but and or while unlike only also still just already needs needed requested asked "
+    "own parallel research review work".split()
+)
+
+
+def mid_sentence(text: str, names: Iterable[str] = ()) -> str:
+    """A reason as it reads after "new because": no period to end it, and no capital to start
+    it when it starts as a sentence does (“The task is busy”), unless that is the start of a
+    name in `names` (a task's title: “The Long Count is busy”). A name, a title or an acronym
+    keeps its capital (“Long Count is busy”, “Alice asked”, “PR of its own”)."""
     if text.endswith("\u3002") or (text.endswith(".") and not text.endswith("..")):
         text = text[:-1].rstrip()
-    first = text.split(maxsplit=1)[0] if text else ""
-    acronym = len(first) > 1 and first.isupper()
-    pronoun = first == "I" or first.startswith(("I'", "I\u2019"))
-    if text[:1].isupper() and not acronym and not text[1:2].isupper() and not pronoun:
+    words = text.split(maxsplit=2)
+    first = words[0].replace("\u2019", "'").rstrip(",:;") if words else ""
+    second = words[1] if len(words) > 1 else ""
+    titled = second[:1].isupper() and not second.isupper()  # “The Long Count is busy”
+    named = any(name and text.startswith(name) for name in names)
+    if first[:1].isupper() and first.lower() in SENTENCE_STARTS and not titled and not named:
         text = text[0].lower() + text[1:]
     return text
 
@@ -1195,8 +1215,10 @@ class Tools:
             (
                 "stop_following",
                 "Stop a worker following a Slack thread, DM or PR (the owner's “stop following "
-                "…”, “ignore that thread”): new messages there come to you again. The worker, "
-                "its tasks, results and drafts stay; closing the worker is not how to do this.",
+                "…”, “ignore that thread”): new messages in a Slack thread come to you again; a "
+                "PR nobody else follows is no longer read, so its news reaches no one. The "
+                "worker, its tasks, results and drafts stay; closing the worker is not how to do "
+                "this.",
                 StopFollowing,
                 self.t_stop_following,
             ),
@@ -1569,7 +1591,7 @@ class Tools:
                 said = f"Queued “{title}” · waits for a worker slot ({limit} busy)"
             else:
                 said = f"Started “{title}”"
-            notice = said + (f" · new because {mid_sentence(why_new)}" if why_new else "")
+            notice = said + self.new_because(why_new)
             self.runtime.add_message(
                 caller, "notice", notice, {"session_id": session_id, "task_id": task["id"]}
             )
@@ -1678,6 +1700,22 @@ class Tools:
                 return f"Told the worker of “{name}” about “{task['title']}”"
             return f"Continued “{task['title']}” in the worker of “{name}”"
         return f"{done} “{name}”"
+
+    def new_because(self, why_new: str) -> str:
+        """ " · new because …" for a notice ("" without a reason). Not an English reason in the
+        middle of the line of an owner who writes Chinese, Japanese or Korean: one in their
+        language was asked for."""
+        if not why_new or (
+            self.store.get("owner_language") in {"Chinese", "Japanese", "Korean"}
+            and not CJK_TEXT.search(why_new)
+        ):
+            return ""
+        # A reason may start with a task's title (“The Long Count is busy”): it keeps its capital.
+        names = [
+            row["title"]
+            for row in self.store.all("SELECT title FROM tasks ORDER BY updated_at DESC LIMIT 200")
+        ]
+        return f" · new because {mid_sentence(why_new, names)}"
 
     def report_language(self, caller: str, instructions: str) -> tuple[str, str]:
         """The language a new task reports in, and a note when its instructions are in another:
@@ -1904,8 +1942,8 @@ class Tools:
                 "\n\n" + wrap("system", "context", text)
                 for text in await self.settle_earlier(earlier, params.earlier, task)
             )
-            notice = f"New task “{title}” for the worker of “{worker_name}”" + (
-                f" · new because {mid_sentence(why_new)}" if why_new else ""
+            notice = f"New task “{title}” for the worker of “{worker_name}”" + self.new_because(
+                why_new
             )
         elif params.task == "note":
             prompt = wrap(
@@ -3157,11 +3195,42 @@ class Tools:
         )  # fmt: skip
         gone_all = [key for key in gone if key not in kept]
         lines = []
-        if gone_all:
-            listed = ", ".join(threads.label(key, names) for key in gone_all)
+        # Others that still follow it get its news; else a Slack thread's comes to the Router
+        # (Slack is searched for what reaches the owner), a PR's to no one (only followed PRs
+        # are read).
+        held = {
+            key: [
+                self.runtime.display_title(self.store.session(other))
+                for other in self.store.followers(key)
+                if other != row["id"]
+            ]
+            for key in gone_all
+        }
+        slack = [key for key in gone_all if not held[key] and not threads.GITHUB_PR.fullmatch(key)]
+        prs = [key for key in gone_all if not held[key] and threads.GITHUB_PR.fullmatch(key)]
+        if slack:
+            listed = ", ".join(threads.label(key, names) for key in slack)
             lines.append(
                 f"Its worker no longer follows {listed}{for_task}: new messages there come to you."
             )
+        if prs:
+            listed = ", ".join(threads.label(key, names) for key in prs)
+            it, its = ("them", "their") if len(prs) > 1 else ("it", "its")
+            lines.append(
+                f"Its worker no longer follows {listed}{for_task}. Nobody follows {it} now, so "
+                f"{its} CI, reviews and comments reach no one, you included, until a worker "
+                f"follows {it} again (hand {it} on with follow=). A review requested from the "
+                "owner still comes to you."
+            )
+        for key in gone_all:
+            if held[key]:
+                many = len(held[key]) > 1
+                followers = ", ".join(f"\u201c{name}\u201d" for name in held[key])
+                lines.append(
+                    f"Its worker no longer follows {threads.label(key, names)}{for_task}; the "
+                    f"worker{'s' if many else ''} of {followers} still follow{'' if many else 's'}"
+                    f" it, so news there goes to {'them' if many else 'that worker'}."
+                )
         if kept:
             listed = ", ".join(threads.label(key, names) for key in kept)
             lines.append(
@@ -3709,8 +3778,11 @@ class Tools:
 
     async def t_unfollow_thread(self, params: FollowThread, caller: str):
         self.caller(caller, WORKER, SLACK)
-        self.store.unfollow(threads.normalize(params.thread), caller)
+        key = threads.normalize(params.thread)
+        self.store.unfollow(key, caller)
         self.runtime.publish_session(self.store.session(caller))
+        if threads.GITHUB_PR.fullmatch(key) and not self.store.followers(key):
+            return "Unfollowed. Nobody follows it now: its news reaches no one."
         return "Unfollowed. New messages there go to the Router again."
 
     def moved_on_since_review(self, row: dict) -> str:

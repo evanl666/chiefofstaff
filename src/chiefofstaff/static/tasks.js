@@ -7,7 +7,7 @@ import { isHidden, prStatus, setHidden, toneOf } from "./artifacts.js";
 import { openFile } from "./files.js";
 import { byId, closedWorkers, ownerQuestions, pendingDrafts, sessions, state, tasks } from "./state.js";
 import { renderSidebar } from "./sidebar.js";
-import { select } from "./session.js";
+import { refreshChips, select } from "./session.js";
 import { focusDraft, focusQuestion, scheduleHome } from "./inbox.js";
 import { showChanges } from "./diff.js";
 // Chief of Staff's own helpers (learning how the owner works, checks, the profile): their
@@ -100,6 +100,8 @@ const undoUntil = (task) => (task.split_from?.until && Date.parse(task.split_fro
 // A report that only informs, not read yet.
 const unread = (task, phase) => phase.marker === "report" && !task.read;
 const REPORT_HELP = "Only a report: nothing to accept. Done once read.";
+// Its "⋯", told apart from every other card's by its task.
+const moreName = (task) => `More actions for “${task.title}”`;
 // The longest title the server keeps (clean_title).
 const TITLE_MAX = 80;
 // What cancelling came to, as the server has the task after it: one that had finished is set
@@ -127,6 +129,7 @@ function refreshTaskCard(node, task, phase) {
   const title = node.querySelector(".head .title");
   title.textContent = task.title;
   title.dataset.tip = titleTip(task, phase);
+  node.querySelector(":scope > .actions .more-button")?.setAttribute("aria-label", moreName(task));
   const [meta, help] = taskMeta(task, phase);
   node.querySelector(".head .meta").replaceChildren(...metaParts(meta));
   node.querySelector(".head .meta").dataset.tip = help;
@@ -432,6 +435,11 @@ function taskCard(task, phase = phaseOf(task)) {
     if (task.status === "review" && task.news) {
       main = el("button", { type: "button", text: "Got it", onclick: () => act(`/api/tasks/${task.id}/news-seen`, {}, "") });
       more = [{ text: "Accept", onclick: () => act(`/api/tasks/${task.id}/accept`, {}, "Accepted.") }, followUp, copy, pr, named, splitOff, worker];
+    } else if (["review", "done"].includes(task.status) && ["pr-failing", "pr-changes"].includes(phase.marker)) {
+      // Its PR has failing CI or changes asked for: tell its worker what to do about it (a result
+      // not accepted yet can be, as it is, under ⋯).
+      main = el("button", { type: "button", text: "Ask it to fix…", onclick: () => reply(phase.marker === "pr-failing" ? "What should it do about the failing checks?" : "What should it do about the changes asked for?", "Sent to the worker.") });
+      more = task.status === "review" ? [{ text: "Accept", onclick: () => act(`/api/tasks/${task.id}/accept`, {}, "Accepted.") }, followUp, copy, named, splitOff, worker] : [followUp, copy, named, worker];
     } else if (task.status === "review" && phase.section === "needs") {
       main = el("button", { type: "button", text: "Accept", onclick: () => act(`/api/tasks/${task.id}/accept`, {}, "Accepted.") });
       more = [followUp, copy, pr, named, splitOff, worker];
@@ -459,16 +467,12 @@ function taskCard(task, phase = phaseOf(task)) {
       // News about finished work: seen, it goes back to the finished ones.
       main = el("button", { type: "button", text: "Got it", onclick: () => act(`/api/tasks/${task.id}/news-seen`, {}, "") });
       more = [{ text: "Follow up…", onclick: () => reply("What should it do about it?", "Sent to the worker.") }, copy, pr, named, worker];
-    } else if (task.status === "done" && ["pr-failing", "pr-changes"].includes(phase.marker)) {
-      // Its PR has failing CI or changes asked for: tell its worker what to do about it.
-      main = el("button", { type: "button", text: "Ask it to fix…", onclick: () => reply(phase.marker === "pr-failing" ? "What should it do about the failing checks?" : "What should it do about the changes asked for?", "Sent to the worker.") });
-      more = [followUp, copy, named, worker];
     } else if (task.status === "done") {
       more = [followUp, copy, pr, named, splitOff, worker];
     } else {
       more = [named, worker];
     }
-    actions.replaceChildren(error, moreMenu(more) || "", undo || "", main || "");
+    actions.replaceChildren(error, moreMenu(more, "More actions", "⋯", moreName(task)) || "", undo || "", main || "");
     place();
   }
   showActions();
@@ -498,7 +502,8 @@ function taskBody(task, phase = {}) {
   if (task.status === "review") {
     // What came out, in its first sentences (past a "## Summary" title); the report on demand.
     const first = gist(task.result || task.progress || "");
-    const waits = phase.section === "monitoring" ? waitLine(task, worker, phase) : null;
+    // Under Needs you for its PR: what is wrong there.
+    const waits = phase.section === "monitoring" || ["pr-failing", "pr-changes"].includes(phase.marker) ? waitLine(task, worker, phase) : null;
     const nodes = [first ? el("div", { class: "outcome", text: first }) : null, waits].filter(Boolean);
     return nodes.length ? el("div", { class: "task-body" }, ...nodes) : null;
   }
@@ -713,7 +718,7 @@ function boxHead(section, worker, sessionId, list, elsewhere) {
         "div",
         { class: "box-head", title: SECTIONS.find(([key]) => key === section)?.[1] || "" },
         el("span", { class: "who", text: "Worker" }),
-        el("button", { type: "button", class: "title", text: named || "Open", title: `Open the worker${name ? ` “${name}”` : ""}${worker?.title && worker.title !== name ? ` (started as “${worker.title}”)` : ""}`, onclick: () => worker && select(worker.id), disabled: !worker }),
+        el("button", { type: "button", class: "title", text: named || "Open", "aria-label": `Open worker${name ? `: ${name}` : ""}`, title: `Open the worker${name ? ` “${name}”` : ""}${worker?.title && worker.title !== name ? ` (started as “${worker.title}”)` : ""}`, onclick: () => worker && select(worker.id), disabled: !worker }),
         el("span", { class: "meta", text: [status, also].filter(Boolean).join(" · "), title: also ? "Its other tasks are in these sections" : "" }),
       ),
   };
@@ -860,6 +865,9 @@ function newsBlock(task) {
   foldable(wrapper, el("div", { class: "body markdown", html: markdown(task.news.text) }), task.news.text, { chars: 360, lines: 4 });
   return wrapper;
 }
+// Someone else's PR it reviewed: whether that review was sent, or waits on its card (rejected
+// there or not written yet, nothing).
+export const reviewedWords = (pr) => (!pr.reviewed || pr.own ? "" : { sent: "You reviewed it", drafted: "Its review waits on its card" }[pr.review_state] || "");
 // A PR as GitHub has it now, in a few words: "app#7 · ✓ CI · approved".
 function prChip(pr) {
   const short = pr.label.replace(/^[^/]+\//, "");
@@ -875,7 +883,7 @@ function prChip(pr) {
   const failing = pr.checks === "failing" && pr.failing?.length ? `\nFailing: ${pr.failing.join(", ")}` : "";
   const ciWords = { passing: "Checks pass", failing: "Checks fail", pending: "Checks are running", none: "No checks" }[pr.checks] || "";
   const seen = pr.at ? `\nAs of ${new Date(pr.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` : "";
-  const title = [pr.label, named ? `“${named}”` : "", ciWords + failing, !state && pr.awaiting?.length && `Waiting for approval: ${pr.awaiting.join(", ")}`, review && `Review: ${review}`, word === "ready to merge" && "GitHub would merge it now", state && `PR ${state}`, pr.reviewed && !pr.own ? "You reviewed it" : ""].filter(Boolean).join("\n") + seen;
+  const title = [pr.label, named ? `“${named}”` : "", ciWords + failing, !state && pr.awaiting?.length && `Waiting for approval: ${pr.awaiting.join(", ")}`, review && `Review: ${review}`, word === "ready to merge" && "GitHub would merge it now", state && `PR ${state}`, reviewedWords(pr)].filter(Boolean).join("\n") + seen;
   // Its number and title (shortened to fit), then where it stands (always in sight).
   const where = [state || ci, stands !== state ? stands : ""].filter(Boolean).join(" · ");
   return el(
@@ -1017,4 +1025,5 @@ export function upsertTask(task) {
   state.snapshot.tasks = list;
   scheduleHome();
   renderSidebar();
+  refreshChips();
 }

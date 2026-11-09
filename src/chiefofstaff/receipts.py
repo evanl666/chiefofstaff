@@ -24,6 +24,8 @@ STILL_RUNNING = re.compile(
     r"with shellId: ([^\s>]+) is still running|started in background with shellId: ([^\s>]+)"
 )
 SHELL_DONE = re.compile(r"<shellId: ([^\s>]+) completed with exit code (-?\d+)>")
+# Copilot's own lines about a command (started, still running, ended), not what it printed.
+COPILOT_MARKS = re.compile(r"<(command\b|shellId: |exited with\b)[^<>]*>")
 
 # Matched against each simple command, from the program on: `grep pytest`, `pip install jest`
 # or a commit message that mentions tests are not test runs.
@@ -133,19 +135,24 @@ def drop_heredocs(command: str) -> str:
     return "\n".join(kept)
 
 
-def simple_commands(command: str, depth: int = 0) -> list[list[str]]:
-    """The simple commands in a shell command line, as words (quotes respected); those in a
-    `bash -c "…"` script count as its own."""
+def tokens(command: str) -> list[str]:
+    """A shell command line's words and the separators between its commands (`|`, `&&`, `;`),
+    quotes respected."""
     # A comment ends at its line: each line is its own command (not swallowed by one).
     lines = drop_heredocs(command.replace("\\\n", " ")).replace("\n", " ;\n; ")
     lexer = shlex.shlex(lines, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
     try:
-        words = list(lexer)
+        return list(lexer)
     except ValueError:  # Unbalanced quotes: a rough split is better than nothing.
-        words = re.sub(r"(&&|\|\||[;|&()])", r" \1 ", command).split()
+        return re.sub(r"(&&|\|\||[;|&()])", r" \1 ", command).split()
+
+
+def simple_commands(command: str, depth: int = 0) -> list[list[str]]:
+    """The simple commands in a shell command line, as words (quotes respected); those in a
+    `bash -c "…"` script count as its own."""
     found, current = [], []
-    for word in words:
+    for word in tokens(command):
         if word in SEPARATORS:
             found.append(current)
             current = []
@@ -205,6 +212,24 @@ def program(words: list[str]) -> str:
     if not words:
         return ""
     return " ".join([words[0].rsplit("/", 1)[-1], *words[1:]])
+
+
+def piped(command: str, depth: int = 0) -> bool:
+    """Whether a test run's output goes into another program (`pytest -q 2>&1 | tail -5`):
+    what shows is what that program let through, and its exit code is that program's."""
+    test = dict(KINDS)["test"]
+    current: list[str] = []
+    for word in [*tokens(command), ";"]:
+        if word not in SEPARATORS and word != "|&":
+            current.append(word)
+            continue
+        script = shell_script(current) if depth < 3 else None
+        if script and piped(script, depth + 1):
+            return True
+        if word in {"|", "|&"} and current and test.search(program(current)):
+            return True
+        current = []
+    return False
 
 
 def test_runs(command: str) -> list[str]:
@@ -272,6 +297,7 @@ TESTS_FAILED = re.compile(
     r"|^(\[\w+\] )?BUILD FAIL(ED|URE)\b"
     r"|^not ok \d+"
     r"|^# fail\s+[1-9]"
+    r"|^!* ?Interrupted: [1-9]\d* errors? during collection"
     r"|^(\[\w+\] )?Tests run: \d+, Failures: (\d+, Errors: [1-9]|[1-9])",
     re.MULTILINE,
 )
@@ -285,13 +311,35 @@ TESTS_PASSED = re.compile(
     r"|^OK( \(|$)"
     r"|^\s*Tests:?\s+(\d+ (skipped|todo|pending), )*[1-9]\d* passed\b(?!.*failed)"
     r"|^\s*[1-9]\d* passing \("
-    r"|^ok\s+\S+\s+(\(cached\)|[\d.]+s)"
+    r"|^ok\s+\S+\s+(\(cached\)|[\d.]+s)(?!.*\[no tests to run\])"
     r"|^# pass\s+[1-9]\d*\s*$(?![\s\S]*^# fail\s+[1-9])"
-    r"|^test result: ok\b"
+    r"|^test result: ok\b(?!\. 0 passed)"
     r"|^(\[\w+\] )?BUILD SUCCESS(FUL)?\b"
     r"|^(\[\w+\] )?Tests run: [1-9]\d*, Failures: 0, Errors: 0\b",
     re.MULTILINE,
 )
+# What test runners print when no test ran: pytest "no tests ran in 0.01s" (after "ERROR: file or
+# directory not found: tests/x.py" for a path it did not find) or "5 deselected in 0.1s",
+# unittest "Ran 0 tests" (then "OK" or "NO TESTS RAN"), jest "No tests found", vitest "No test
+# files found", mocha "0 passing".
+TESTS_NONE = re.compile(
+    r"^=* ?no tests ran\b"
+    r"|^ERROR: (file or directory not found|not found|usage):"
+    r"|^=* ?[1-9]\d* deselected(, \d+ warnings?)? in [\d.]+s"
+    r"|^Ran 0 tests in [\d.]+s\s*(OK\b|NO TESTS RAN\b)?"
+    r"|^NO TESTS RAN\b"
+    r"|^\s*No tests found\b"
+    r"|^\s*No test files found\b"
+    r"|^\s*0 passing\b",
+    re.MULTILINE,
+)
+# One package's or crate's part of a run that ran none (go "[no test files]", cargo "0 passed"):
+# no test ran only when no other part shows a summary.
+NO_TESTS_HERE = re.compile(
+    r"\[no test files\]\s*$|\[no tests to run\]\s*$|^test result: ok\. 0 passed", re.MULTILINE
+)
+# The exit code of a run in which no test ran, when the line's says 0 (pytest's and unittest's).
+NO_TESTS_RAN = 5
 
 
 def masked_failure(command: str, output: str) -> bool:
@@ -305,19 +353,25 @@ def masked_failure(command: str, output: str) -> bool:
 
 
 def last_summary(output: str) -> str:
-    """ "passed" or "failed": what the last test summary in the output says ("" if none)."""
+    """ "passed", "failed" or "none" (no test ran): what the last test summary in the output
+    says ("" if none shows)."""
     tail = (output or "")[-4000:]
-    failed = [match.start() for match in TESTS_FAILED.finditer(tail)]
-    passed = [match.start() for match in TESTS_PASSED.finditer(tail)]
-    if not failed and not passed:
-        return ""
-    return "failed" if failed and (not passed or failed[-1] > passed[-1]) else "passed"
+    found = sorted(
+        [(match.start(), "failed") for match in TESTS_FAILED.finditer(tail)]
+        + [(match.start(), "passed") for match in TESTS_PASSED.finditer(tail)]
+        # By where it ends: unittest's "OK" after "Ran 0 tests" is part of it.
+        + [(match.end(), "none") for match in TESTS_NONE.finditer(tail)]
+    )
+    if found:
+        return found[-1][1]
+    return "none" if NO_TESTS_HERE.search(tail) else ""
 
 
 # A test runner's own summary line: what shows a command ran tests, whatever started them
 # (`./run_tests.sh`, `python tests/run.py`, a Makefile target with another name).
 TEST_SUMMARY = re.compile(
     r"^=* ?(\d+ \w+, )*\d+ (passed|failed|errors?)\b.* in [\d.]+s"
+    r"|^=* ?no tests ran in [\d.]+s"
     r"|^Ran \d+ tests? in [\d.]+s"
     r"|^\s*Tests:?\s+\d+ (passed|failed)\b"
     r"|^\s*\d+ passing \("
@@ -348,12 +402,19 @@ def output_kind(command: str, output: str) -> str:
 def test_exit(command: str, output: str, code: int | None) -> int | None:
     """Whether the tests in a command line passed (0) or failed, rather than the line: piped
     into `tail` they exit 0 even when they fail; in `pytest && git push` a rejected push exits
-    1 after every test passed."""
+    1 after every test passed. A run in which no test ran did not pass; one whose output was
+    cut before its summary (`pytest | head`) is not known (None)."""
     if code is None:
         return None
     summary = last_summary(output)
     if code == 0 and summary == "failed" and masked_failure(command, output):
         return 1
+    if code == 0 and summary == "none":
+        return NO_TESTS_RAN
+    if not summary and piped(command) and COPILOT_MARKS.sub("", output or "").strip():
+        # What it printed shows no summary (cut by `| head`, filtered by `| grep`), and the
+        # exit code is the last program's: no result.
+        return None
     if code != 0 and summary == "passed":
         parts = simple_commands(command)
         test = dict(KINDS)["test"]
@@ -665,7 +726,10 @@ def summarize(
     elif tests and tests["running"] and tests["passed"] is not True:
         pass  # Its tests are running again: their result is not in yet.
     elif says_tests_pass(report or ""):
-        if not tests:
+        if not tests and by_kind.get("test"):
+            # Stopped, or its output cut before its summary (`pytest | head`): no result.
+            flags.append("Says tests pass, but no test run showed whether they pass.")
+        elif not tests:
             flags.append("Says tests pass, but no test run was observed.")
         elif tests["passed"] is False:
             code = tests["exit_code"]

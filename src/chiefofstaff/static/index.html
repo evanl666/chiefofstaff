@@ -76,7 +76,7 @@
               <div id="composer-to" hidden></div>
               <div id="composer-count" aria-live="polite" hidden></div>
               <div id="attachments" aria-label="Images to send" hidden></div>
-              <textarea id="composer-input" rows="1" aria-label="Message"></textarea>
+              <textarea id="composer-input" rows="1" aria-label="Message" role="combobox" aria-autocomplete="list" aria-controls="mention-list" aria-expanded="false"></textarea>
               <button id="attach-button" type="button" class="attach" aria-label="Add images" title="Add images (or paste, or drop them here)">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M15.5 9.2 9.6 15a3.6 3.6 0 0 1-5.1-5.1l6.4-6.4a2.4 2.4 0 0 1 3.4 3.4l-6.4 6.4a1.2 1.2 0 0 1-1.7-1.7l5.8-5.8" /></svg>
               </button>
@@ -123,9 +123,9 @@
               <label><span>Parallel workers</span><input name="max_workers" type="number" min="1" max="1000" /></label>
               <label><span>Close idle after (h)</span><input name="worker_idle_hours" type="number" min="1" max="720" /></label>
               <label title="A running task with no activity and nothing it waits on for this long shows under Stalled, and its worker is asked once where it stands"><span>Stalled after (h)</span><input name="stall_hours" type="number" min="1" max="168" /></label>
-              <label><span>Daily summary at</span><input name="digest_time" type="time" /></label>
+              <label title="When the day's summary comes; empty turns it off"><span>Daily summary at</span><input name="digest_time" type="time" /></label>
             </div>
-            <small>More tasks wait in the queue, and new work also waits while this computer is low on memory. Idle finished workers close; you can reopen them.</small>
+            <small>More tasks wait in the queue, and new work also waits while this computer is low on memory. Idle finished workers close; you can reopen them. Clear <em>Daily summary at</em> to turn the summary off.</small>
             <label class="check"><input name="mac_notifications" type="checkbox" /> Desktop notifications</label>
           </section>
 
@@ -309,7 +309,7 @@
               <label class="grow"><span>Copilot command</span><input name="copilot_command" /></label>
               <label><span>Slack check (s)</span><input name="slack_poll_seconds" type="number" min="20" max="900" /></label>
             </div>
-            <label class="check"><input name="paused" type="checkbox" /> Pause Slack and GitHub watchers</label>
+            <label class="check" title="While paused, Slack and GitHub are not checked, Watches do not scan, “When you're away” sends nothing and reads no replies, and nothing is learned from your work."><input name="paused" type="checkbox" /> Pause watching: Slack, GitHub, Watches, away notifications and learning</label>
             <label class="check"><input name="report_footer" type="checkbox" /> Copied reports end with a short “Orchestrated with Chief of Staff” line</label>
             <label>
               <span>Other project folders</span>

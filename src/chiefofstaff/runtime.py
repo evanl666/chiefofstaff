@@ -49,6 +49,7 @@ from .backend import (
     end_processes,
     older,
     sandbox_supported,
+    switch_model,
 )
 from .bus import Bus
 from .checks import Checks
@@ -67,7 +68,7 @@ from .envelope import (
     tasks_named,
     wrap,
 )
-from .events import MODEL_REFUSED, ROUTER_CONTEXT, Events
+from .events import EFFORT_REFUSED, MODEL_REFUSED, ROUTER_CONTEXT, Events
 from .focus import Focus
 from .habits import Habits
 from .learning import Learning
@@ -606,7 +607,7 @@ class Runtime:
         checkouts = self.workspaces.checkouts(row)
         repositories = git_dirs(checkouts)
         settings = self.store.settings()
-        writable = [*self.workspaces.writable(row), *repositories, *settings.sandbox_writable]
+        writable = [*self.workspaces.writes(row), *repositories, *settings.sandbox_writable]
         if settings.shared_caches and not row["slack"]:
             # Packages its installs need are what the owner's installs already have (checked
             # against lockfiles before use). Not for workers that read Slack.
@@ -762,6 +763,9 @@ class Runtime:
         if await common_git_dir(path):
             return {"path": await self.add_project(str(path)), "kind": "project"}
         old = self.store.settings()
+        if path in {Path.home(), Path(path.anchor)}:
+            # Home holds the data too: what is wrong first is that it is not a code folder.
+            raise ValueError("Choose the folder your repositories are in, like ~/workspace.")
         if self.store.directory.is_relative_to(path):
             raise ValueError("Choose a folder that does not contain Chief of Staff's own data.")
         if old.code_folder and old.code_folder != str(path):
@@ -1036,9 +1040,11 @@ class Runtime:
             # Copilot refused this session's model with these options: the model's own defaults.
             if not info:
                 return {}
-            defaults: dict[str, str] = {}
+            defaults: dict[str, str | None] = {}
             if info["efforts"]:
                 defaults["reasoning_effort"] = default_effort(info)
+            else:
+                defaults["reasoning_effort"] = None  # Takes none: the one it had is cleared.
             if info["long_context"]:
                 defaults["context_tier"] = "default"
             return defaults if switching else {}
@@ -1046,12 +1052,14 @@ class Runtime:
             # Copilot's default model, before its first turn shows which it is: Copilot applies
             # the effort to it (open_live retries without one if the default takes none).
             return {"reasoning_effort": effort} if effort else {}
-        result = {}
+        result: dict[str, str | None] = {}
         if info["efforts"]:
             if effort in info["efforts"]:
                 result["reasoning_effort"] = effort
             elif switching:
                 result["reasoning_effort"] = default_effort(info)
+        elif switching:
+            result["reasoning_effort"] = None  # Takes none: the one it had is cleared.
         if info["long_context"]:
             if row.get("context") == "long_context":
                 result["context_tier"] = "long_context"
@@ -1127,12 +1135,32 @@ class Runtime:
             if model == "auto":
                 tuning.pop("reasoning_effort", None)
             with suppress(Exception):
-                await session.set_model(model, **tuning)
+                await switch_model(session, model, **tuning)
         # What the failed turn was given is sent again.
         if (before := self.store.get(f"prevsent:{session_id}")) is not None:
             self.store.set(f"sent:{session_id}", before)
         self.background(self.delivery.resume(session_id))
         return True
+
+    def effort_clearable(self, row: dict) -> bool:
+        """Whether a turn refused for its thinking effort is cleared and sent again: once an
+        hour at most (else it fails as any refused turn)."""
+        key = f"effortcleared:{row['id']}"
+        if time.time() - float(self.store.get(key) or 0) < 3600:
+            return False
+        self.store.set(key, str(time.time()))
+        return True
+
+    async def clear_effort(self, row: dict):
+        """Copilot kept the thinking effort of the model the session had before, which its
+        model now takes none of: cleared, and the failed turn sent again."""
+        session_id = row["id"]
+        if (session := self.states.handle(session_id)) and (model := self.effective_model(row)):
+            with suppress(Exception):
+                await switch_model(session, model, reasoning_effort=None)
+        if (before := self.store.get(f"prevsent:{session_id}")) is not None:
+            self.store.set(f"sent:{session_id}", before)
+        self.background(self.delivery.resume(session_id))
 
     async def apply_model(self, row: dict):
         if row["status"] == "working":
@@ -1144,7 +1172,7 @@ class Runtime:
             tuning = self.tuning(row, switching=True)
             if model == "auto":
                 tuning.pop("reasoning_effort", None)  # Auto takes none.
-            await session.set_model(model, **tuning)
+            await switch_model(session, model, **tuning)
 
     async def refresh(self, *roles: str):
         """Sessions of these roles pick up new prompts (profile, style) on their next use."""
@@ -1290,6 +1318,12 @@ class Runtime:
 
         session.on(forward)
         self.states[session_id].handle = session
+        model = self.model_for(row)
+        if not create and model and (info := self.model_info(model)) and not info["efforts"]:
+            # Resumed on a model that takes no thinking effort: Copilot would keep the one it
+            # had (from before the owner chose this model) and refuse every turn.
+            with suppress(Exception):
+                await switch_model(session, model, **self.tuning(row, switching=True))
         if not create and row["role"] == WORKER:
             await self.workers.import_history(row, session)
         self.publish_session(self.store.session(session_id))
@@ -1319,7 +1353,7 @@ class Runtime:
         try:
             return await open_session(options)
         except Exception as exc:
-            if "reasoning_effort" not in options or "effort is not supported" not in str(exc):
+            if "reasoning_effort" not in options or not EFFORT_REFUSED.search(str(exc)):
                 raise
         options = {key: value for key, value in options.items() if key != "reasoning_effort"}
         session = await open_session(options)
@@ -2474,14 +2508,16 @@ class Runtime:
                 "prompt": wrap(
                     source, "thread", told, thread=thread, trust=UNTRUSTED, **attributes
                 ),
-                "display": (shown or told)[:2000],
+                "display": clip_words(shown or told, 4000),
                 "meta": {"source": source, "thread": thread}
-                | ({"task_id": task["id"]} if task else {}),
+                | ({"task_id": task["id"]} if task else {})
+                # Its chat line says how many came.
+                | ({"count": len(keys)} if len(keys) > 1 else {}),
             }
             title = task["title"] if task else self.display_title(self.store.session(session_id))
             try:
-                if not self.states.handle(session_id):  # Live here, it is open nowhere else.
-                    await self.refuse_if_open_elsewhere(self.store.session(session_id), False)
+                # Also when live here: the owner may have opened it in a terminal since.
+                await self.refuse_if_open_elsewhere(self.store.session(session_id), False)
                 await self.delivery.deliver(
                     session_id, held["prompt"], batch=True, kind="inbound",
                     display=held["display"], meta=held["meta"],
@@ -2979,13 +3015,19 @@ class Runtime:
                 for task in self.tasks.listed(include_ended_since=hours_ago(TASKS_SHOWN_HOURS))
             ],
             "settings": self.store.settings().model_dump(),
+            # Configured projects and the code folder's repositories (where a habit applies).
+            "projects": self.workspaces.projects(),
             # Configured projects whose folder is gone: Settings says so.
             "missing_projects": [
                 project
                 for project in self.store.settings().projects
                 if not os.path.isdir(project)  # noqa: PTH112  (False when it cannot look)
             ],
-            "slack": {**self.slack.status, "token_saved": bool(self.slack.tokens.get())},
+            "slack": {
+                **self.slack.status,
+                "token_saved": bool(self.slack.tokens.get()),
+                "token_source": self.slack.token_source(),
+            },
             "github": self.github.status,
             "closed": [self.view(row) for row in self.workers.recently_closed(20)],
             "profile": self.store.get("profile", ""),

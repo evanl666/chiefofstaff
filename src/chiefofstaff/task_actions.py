@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import time
 from collections.abc import Callable, Coroutine
 from contextlib import suppress
@@ -211,6 +212,50 @@ def ran_in(command: str) -> str:
 
 # What a result says of its branch before its PR was opened: "not pushed", "nothing pushed",
 # "no PR (opened)", "did not open a PR". Only those (not "pre-push", "pushed", "open").
+# Options of `git clone` and `git worktree add` that take a value (`-b main`).
+GIT_VALUED = {
+    "-b", "-B", "--branch", "-o", "--origin", "--depth", "-c", "--config", "--reference",
+    "--reference-if-able", "--separate-git-dir", "-u", "--upload-pack", "--template",
+    "--filter", "-j", "--jobs", "--shallow-since", "--shallow-exclude", "--reason", "--orphan",
+}  # fmt: skip
+
+
+def made_folders(command: str) -> list[str]:
+    """The folders a shell command's `git clone` or `git worktree add` makes (by name)."""
+    found = []
+    for part in re.split(r"&&|\|\||[;|\n]", command):
+        try:
+            words = shlex.split(part)
+        except ValueError:
+            continue
+        while words[:1] and "=" in words[0]:  # GIT_DIR=… git …
+            words = words[1:]
+        if words[:1] != ["git"]:
+            continue
+        words = words[1:]
+        while words[:1] and words[0].startswith("-"):  # git -C dir …
+            words = words[2:] if words[0] in {"-C", "-c"} else words[1:]
+        if words[:1] == ["clone"]:
+            words, least = words[1:], 1
+        elif words[:2] == ["worktree", "add"]:
+            words, least = words[2:], 0
+        else:
+            continue
+        plain, skip = [], False
+        for word in words:
+            if skip:
+                skip = False
+            elif word in GIT_VALUED:
+                skip = True
+            elif not word.startswith("-"):
+                plain.append(word)
+        if len(plain) > least:
+            found.append(Path(plain[least]).name)
+        elif plain:  # A clone into the folder its repository is named by.
+            found.append(Path(plain[0].rstrip("/")).name.removesuffix(".git"))
+    return found
+
+
 NOT_PUSHED = re.compile(
     r"(?<![\w-])(?:"
     r"(?:not|never)\s+(?:yet\s+)?(?:been\s+)?pushed(?:\s+yet)?"
@@ -675,6 +720,8 @@ class TaskActions:
             row = self.store.find_session(task["session_id"]) or row  # Its own clones too.
         checkouts = []
         for checkout in self.workspaces.checkouts(row):
+            if self.split_away(task, row, checkout):
+                continue
             with suppress(Exception):
                 if found := await changes(checkout, self.scope(task, checkout)):
                     checkouts.append(found)
@@ -931,6 +978,23 @@ class TaskActions:
                     return True
         return False
 
+    def split_away(self, task: dict, row: dict, checkout: dict) -> bool:
+        """Whether a clone or worktree its worker made is the work split off this task (its
+        `git worktree add`/`git clone` was that task's): counted there, not here too."""
+        split = self.store.get(f"splitoff:{task['id']}")
+        made = checkout.get("base") in {"a worktree it made itself", "a clone it made itself"}
+        if not split or not made:
+            return False
+        name = Path(checkout["path"]).name
+        return any(
+            name in made_folders(found["command"])
+            for found in self.store.all(
+                "SELECT c.command FROM commands c JOIN runs r ON r.id=c.run_id WHERE "
+                "c.session_id=? AND r.task_id=?",
+                (row["id"], split),
+            )
+        )
+
     async def adopt_clones(self, row: dict) -> dict:
         """A worker's own clones (see Workspaces.own_clones) become its checkouts."""
         if row["role"] != WORKER:
@@ -952,6 +1016,8 @@ class TaskActions:
         ended = {}
         base = json.loads(self.store.get(f"taskbase:{task['id']}") or "{}")
         for checkout in self.workspaces.checkouts(row):
+            if self.split_away(task, row, checkout):
+                continue
             with suppress(Exception):
                 if (found := await snapshot(checkout)) and found["tree"]:
                     with suppress(ValueError):
@@ -1204,6 +1270,7 @@ class TaskActions:
                 self.runtime.remember_pr_title(f"{repo}#{number}", view["title"])
         own, about = await self.pr_roles(task, prs)
         reviewed = self.reviewed_prs(task["session_id"])
+        reviews = self.review_states(task["session_id"])
         # When each last changed (its state, checks, review, mergeability), not when it was
         # read: "2h ago" on the owner's list says how long it has stood like this.
         before = {pr["label"].lower(): pr for pr in self.previous_prs(task["id"])}
@@ -1212,6 +1279,8 @@ class TaskActions:
             pr["about"] = pr["label"].lower() in about
             # Reviewed by its worker (others' work it was asked to look at): a main chip too.
             pr["reviewed"] = pr["label"].lower() in reviewed and not pr["own"]
+            # Its review went out, or waits on its card (the chip says which).
+            pr["review_state"] = reviews.get(pr["label"].lower(), "") if pr["reviewed"] else ""
             old = before.get(pr["label"].lower()) or {}
             same = old and all(old.get(key) == pr.get(key) for key in PR_STANDING)
             pr["changed_at"] = (
@@ -1251,6 +1320,8 @@ class TaskActions:
             if not task or task["status"] not in {"running", "waiting"}:
                 self.store.delete(f"checkback:{task_id}")
                 continue
+            if self.store.get(f"stopped:{task_id}"):
+                continue  # Stopped by the owner: kept until they say Go on.
             row = self.store.find_session(task["session_id"])
             if not row:
                 self.store.delete(f"checkback:{task_id}")
@@ -1327,6 +1398,22 @@ class TaskActions:
             and target.get("number")
             and not (target.get("in_reply_to") or target.get("reply_to_comment"))
         }
+
+    def review_states(self, session_id: str) -> dict[str, str]:
+        """Where a worker's reviews of PRs ("owner/repo#n") stand: "sent" once one went out,
+        else "drafted" while one waits for the owner, else "" (rejected, failed)."""
+        found: dict[str, str] = {}
+        for row in self.store.all(
+            "SELECT target, status FROM drafts WHERE session_id=? AND kind='github'", (session_id,)
+        ):
+            target = json.loads(row["target"])
+            if target.get("in_reply_to") or target.get("reply_to_comment"):
+                continue
+            label = f"{target.get('repo')}#{target.get('number')}".lower()
+            state = {"sent": "sent", "pending": "drafted", "sending": "drafted"}.get(row["status"])
+            if state and found.get(label) != "sent":
+                found[label] = state
+        return found
 
     def first_reporter(self, label: str) -> str:
         """The task ("session_id|task_id") whose report named this PR ("owner/repo#n") first:
@@ -2814,6 +2901,9 @@ class TaskActions:
         row = self.store.session(task["session_id"])
         if row["closed_at"]:
             await self.runtime.workers.reopen(row["id"])
+            task = self.tasks.get(task_id)
+            if task["status"] not in {"failed", "cancelled"}:
+                return task  # Retried meanwhile (a second click): once is enough.
         before = task
         if text.strip():
             self.runtime.learning.record(

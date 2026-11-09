@@ -34,9 +34,10 @@ function errorText(data, status) {
 // One of the server's validation problems, with the field it is about as the page names it
 // ("Parallel workers: Input should be greater than or equal to 1"). A problem the server worded
 // itself ("Value error, …") says what it is about.
+const fieldName = (item) => (Array.isArray(item.loc) ? item.loc : []).find((part, index) => typeof part === "string" && !(index === 0 && ["body", "query", "path"].includes(part)));
 function problemText(item) {
   const text = String(item.msg).replace(/^Value error, /, "");
-  const name = (Array.isArray(item.loc) ? item.loc : []).find((part, index) => typeof part === "string" && !(index === 0 && ["body", "query", "path"].includes(part)));
+  const name = fieldName(item);
   if (!name || item.type === "value_error") return text;
   return `${fieldLabel(name)}: ${text}`;
 }
@@ -76,12 +77,17 @@ export async function api(path, { method = "GET", body } = {}) {
   }
   // Starlette's own "Not Found": this page is newer than the server that is still running.
   if (response.status === 404 && data.detail === "Not Found") throw new Error("Chief of Staff was updated. Restart it to use this.");
-  if (!response.ok) throw new Error(errorText(data, response.status));
+  if (!response.ok) {
+    // With the fields it is about, for a form to show them.
+    const fields = Array.isArray(data.detail) ? data.detail.map(fieldName).filter(Boolean) : [];
+    throw Object.assign(new Error(errorText(data, response.status)), { fields });
+  }
   return data;
 }
 // Secondary actions behind "⋯" (or behind a named button, `text`): items are { text, onclick,
-// danger }; falsy ones are left out.
-export function moreMenu(items, label = "More actions", text = "⋯") {
+// danger }; falsy ones are left out. `label` says what they are (on hover; a named button is
+// called by its own words, the label describes it); `name`, what "⋯" is called (whose actions).
+export function moreMenu(items, label = "More actions", text = "⋯", name = label) {
   const list = items.filter(Boolean);
   if (!list.length) return null;
   const menu = el(
@@ -105,7 +111,7 @@ export function moreMenu(items, label = "More actions", text = "⋯") {
     class: text === "⋯" ? "more-button" : "menu-button",
     text,
     title: label,
-    "aria-label": label,
+    "aria-label": text === "⋯" ? name : undefined,
     "aria-haspopup": "menu",
     onclick: (event) => {
       event.stopPropagation();
@@ -260,6 +266,7 @@ export function toast(text, kind = "", sessionId = null) {
   });
   $("#toasts").append(node);
   setTimeout(() => node.remove(), kind === "attention" ? 12000 : 6000);
+  return node;
 }
 // A click on the dim area around an open dialog closes it as Esc does: through its "cancel"
 // event, so a dialog that keeps unsaved work (the diff's comments) decides. Only when the press

@@ -41,9 +41,10 @@ DRAFT_DECISION = re.compile(
     r"(?:[\w-]+\s+){0,3}?(?:draft|review|reply|replies|approval)s?\b",
     re.IGNORECASE,
 )
-# A question its session asked this shortly before a draft for the same task, the owner telling
-# it nothing in between, came in the turn that drafted it: it is about that draft ("I drafted an
-# approval for you to send"), whatever its words.
+# A question its session asked this shortly before or after a draft for the same task, saying it
+# is about its draft (about_draft), the owner telling it nothing in between, came in the turn
+# that drafted it: it is about that draft ("I drafted an approval for you to send"), whatever its
+# words.
 SAME_TURN_SECONDS = 60
 
 # Cards for the owner, in words (for the Router).
@@ -154,9 +155,12 @@ class Drafts:
             reason = f" Reason: {decision.reason}" if decision.reason else " No reason given."
             self.settle_question(draft)
             if (task := self.task_of(draft)) and task["status"] in {"review", "done"}:
-                # Its result said the draft waits for the owner: it does not any more.
+                # Its result said the draft waits for the owner: it does not any more. Their
+                # reason (their own words, from away) as a sentence.
+                said = reason.rstrip()
+                said += "" if said[-1] in ".!?\u3002\uff01\uff1f" else "."
                 self.runtime.task_actions.news(
-                    task["id"], f"You rejected its draft.{reason} Nothing was sent."
+                    task["id"], f"You rejected its draft.{said} Nothing was sent."
                 )
                 self.runtime.task_actions.publish(task)
             await self.tell_drafter(
@@ -1013,9 +1017,9 @@ class Drafts:
     def asked_with(self, question: dict, draft: dict) -> bool:
         """Whether `question` is about `draft`: its session said it only asks the owner to
         decide its draft (report(about_draft=true)), and asked it in the turn that made the
-        draft, just before it, for the same task, the owner telling it nothing between. Asked
-        next to a draft without saying so, it is a question of its own (not hidden on a card,
-        nor answered by sending the draft)."""
+        draft, just before or just after it, for the same task, the owner telling it nothing
+        between. Asked next to a draft without saying so, it is a question of its own (not
+        hidden on a card, nor answered by sending the draft)."""
         task = self.task_of(draft)
         if not question.get("about_draft"):
             return False
@@ -1023,22 +1027,23 @@ class Drafts:
             return False
         asked, made = question.get("at") or "", draft["created_at"]
         try:
-            ahead = datetime.fromisoformat(made) - datetime.fromisoformat(asked)
+            apart = datetime.fromisoformat(made) - datetime.fromisoformat(asked)
         except ValueError:
             return False
-        if not 0 <= ahead.total_seconds() <= SAME_TURN_SECONDS:
+        if abs(apart.total_seconds()) > SAME_TURN_SECONDS:
             return False
         return not self.store.one(
             "SELECT 1 FROM messages WHERE session_id=? AND kind='owner' AND created_at>? "
             "AND created_at<? LIMIT 1",
-            (draft["session_id"], asked, made),
+            (draft["session_id"], *sorted((asked, made))),
         )
 
     def question_draft(self, task: dict, text: str | None = None) -> dict | None:
         """The task's own reply or review still waiting for the owner that its question (its
         progress while waiting, or `text`) is about: one decision, told and counted once, as
         that draft's card (deciding the draft answers the question: settle_question). A
-        question asked in the turn that drafted it, just before, is about it in any words."""
+        question asked in the turn that drafted it, just before or after, is about it in any
+        words (asked_with)."""
         text = (task.get("progress") or "") if text is None else text
         if not text.strip():
             return None

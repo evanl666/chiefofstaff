@@ -1813,6 +1813,18 @@ class Workspaces:
             checkout["remote"] = checkout["repo"]
         return checkout
 
+    def writes(self, row: dict) -> list[str]:
+        """Where a worker may write (its edits and, sandboxed, its commands): its folders, but
+        not a git folder of the owner's it was given only to read (a task that changes no code,
+        see make_checkout). Their checkouts are never touched: an install or a test run there
+        would leave .venv, a lockfile or caches behind. Its own worktree is for those."""
+        kept = {
+            os.path.realpath(checkout["path"])
+            for checkout in self.checkouts(row)
+            if checkout.get("shared") and checkout.get("git_dir")
+        }
+        return [path for path in self.writable(row) if os.path.realpath(path) not in kept]
+
     def writable(self, row: dict) -> list[str]:
         if row["role"] != WORKER:
             return [row["cwd"]]
@@ -1930,13 +1942,15 @@ class Workspaces:
 
     @staticmethod
     def check_scratch(settings: Settings):
-        """A scratch folder must be usable before it is saved."""
+        """Task folders must be usable before they are saved."""
         if not settings.scratch_directory:
             return
         try:
             Path(settings.scratch_directory).mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            raise ValueError(f"The scratch folder cannot be used: {exc.strerror or exc}") from exc
+            raise ValueError(
+                f"Task folders: {settings.scratch_directory} cannot be used: {exc.strerror or exc}"
+            ) from exc
 
     async def project_cards(self) -> list[dict]:
         """What the Router needs to match a request to a project."""

@@ -661,12 +661,17 @@ def worker_context(
             elif checkout.get("git_dir"):
                 where += (
                     ": the project folder itself, which the owner works in: change nothing "
-                    "there. For a code change, first add_repo this folder: you get your own "
-                    "worktree and branch, and make the change there"
+                    "there, and run nothing there that writes files (installs, builds, test "
+                    "runs: `uv run`, `npm install` and `pytest` leave .venv, uv.lock, "
+                    "node_modules and caches behind). For a code change, or to run its tests or "
+                    "build, first add_repo this folder: you get your own worktree and branch, "
+                    "and work there"
                 )
             else:
                 where += (
-                    ": the project folder itself (not a git repository; change it only if asked)"
+                    ": the project folder itself (not a git repository; change it only if "
+                    "asked, and run nothing there that writes files, such as installs or test "
+                    "runs: copy it into your workspace for those)"
                 )
             lines.append(where)
     if any(checkout.get("worktree") for checkout in checkouts):
@@ -833,7 +838,8 @@ Chief of Staff's Slack connection is there) send_owner_slack_dm and read_owner_s
   name a code with report_owner_replies, exactly as they wrote them, each with what it means
   (intent). For a draft to send or a PR to merge: 'send' only when they say to send (or post,
   or merge) it now as it is, in any words or language; 'no' when they drop it; 'change' when
-  they say what to change; 'unclear' for anything else (a question back, "after lunch", "once
+  they say what to change, or give words for a draft's blanks ("attending yes, size M");
+  'unclear' for anything else (a question back, "after lunch", "once
   Bob confirms", "wait", a joke, or when you are not sure: they are asked again, nothing is
   lost). Only the owner's messages there; send nothing.
 Never post in a channel, a thread or to anyone but the owner.

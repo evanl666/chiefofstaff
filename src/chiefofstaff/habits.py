@@ -227,8 +227,15 @@ class Habits:
 
         self.runtime.background(run())
 
-    def last(self, text: str, error: str = ""):
-        self.store.set("habits_last", json.dumps({"at": now(), "text": text, "error": error}))
+    def last(self, text: str, error: str = "", waiting: int = 0, settled: str = ""):
+        """What the last learning run did, for Settings. `waiting`: new habits on their card
+        under Needs you; once it is gone (kept or dropped), `settled` is said instead."""
+        self.store.set(
+            "habits_last",
+            json.dumps(
+                {"at": now(), "text": text, "error": error, "waiting": waiting, "settled": settled}
+            ),
+        )
 
     def learned(self, caller: str, section: str, version: int):
         """What a learning run changed, for its one summary when it ends (see summarize)."""
@@ -244,17 +251,20 @@ class Habits:
         lessons = self.runtime.learning.pending_card()
         count = len(lessons["target"]["lessons"]) if lessons else 0
         parts = [f"{TITLES[section]} (v{version})" for section, version in changed.items()]
+        # On their card on Home, not in Settings (where Habits lists those already kept).
+        waiting = (
+            f"{count} new habit{'s wait' if count != 1 else ' waits'} for your OK under "
+            "Needs you on Home"
+        )
         if parts:
-            text = "Learned how you write: " + ", ".join(parts) + ". It applies now"
-            text += f"; {count} habit(s) wait for your OK." if count else "."
-            self.last(text)
+            settled = "Learned how you write: " + ", ".join(parts) + ". It applies now"
+            text = f"{settled}; {waiting}." if count else f"{settled}."
+            self.last(text, waiting=count, settled=f"{settled}.")
             self.runtime.add_message(
                 self.runtime.router_id(), "notice", text, {"settings": "you", "styles": changed}
             )
         else:
-            self.last(
-                f"{count} habit(s) wait for your OK." if count else "Nothing new learned this time."
-            )
+            self.last(f"{waiting}." if count else "Nothing new learned this time.", waiting=count)
 
     def enabled(self) -> bool:
         settings = self.store.settings()
@@ -718,6 +728,9 @@ class Habits:
                 "SELECT kind, count(*) AS count FROM observations GROUP BY kind"
             )
         }
+        last = json.loads(self.store.get("habits_last") or "{}")
+        if last.get("waiting") and not self.runtime.learning.pending_card():
+            last["text"] = last.get("settled", "")  # Their card is done: none waits now.
         return {
             "enabled": self.store.settings().learn_from_work,
             "styles": [
@@ -736,6 +749,6 @@ class Habits:
             "new": self.unlearned(),
             "collected_at": self.store.get("habits_collected_at") or "",
             "running": self.running or self.runtime.learning.busy(),
-            "last": json.loads(self.store.get("habits_last") or "{}"),
+            "last": last,
             "errors": {name: error for name, error in self.status.items() if error},
         }

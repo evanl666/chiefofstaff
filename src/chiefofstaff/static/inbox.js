@@ -176,7 +176,9 @@ function fold(id, title, { className = "task-group", shut = false, help = "" } =
   // A click in its list (Show more, Done…) redraws it at once, even with the mouse over it.
   const items = el("div", { class: "items" });
   items.addEventListener("click", () => (items.dataset.clicked = String(Date.now())), true);
-  const node = el("details", { id, class: className, open: saved === null ? !shut : saved !== "0" }, el("summary", { title: help || undefined }, el("span", { class: "title", text: title }), el("span", { class: "count" })), items);
+  // A part of its own (Needs you) is a heading, as Tasks is.
+  const named = el(className === "panel-section" ? "h2" : "span", { class: "title", text: title });
+  const node = el("details", { id, class: className, open: saved === null ? !shut : saved !== "0" }, el("summary", { title: help || undefined }, named, el("span", { class: "count" })), items);
   node.addEventListener("toggle", () => localStorage.setItem(`cos.section.${id}`, node.open ? "1" : "0"));
   return node;
 }
@@ -373,6 +375,8 @@ function withTask(node, task, draft, inner = null) {
   return node;
 }
 const narrow = () => window.matchMedia("(max-width: 1099px)").matches;
+// Scrolled to, not glided to, when the system asks for less motion.
+const glide = () => (window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth");
 // From the chat: the task's card in the panel, brought into view (its report open), or the
 // card that asks the owner about it. Not on the board any more: its worker.
 export function focusTask(taskId, sessionId = "") {
@@ -553,7 +557,7 @@ function showUpdate(messageId) {
   }
   const toggle = line.querySelector(":scope > .row > button.line");
   if (toggle?.getAttribute("aria-expanded") === "false") toggle.click();
-  line.scrollIntoView({ block: "center", behavior: "smooth" });
+  line.scrollIntoView({ block: "center", behavior: glide() });
   line.classList.remove("flash");
   void line.offsetWidth;  // Restarts the highlight.
   line.classList.add("flash");
@@ -561,7 +565,7 @@ function showUpdate(messageId) {
 function bringIntoView(node) {
   if (narrow()) showHomeTab(node.closest("#needs") ? "needs" : "tasks");
   for (let group = node.closest("details"); group; group = group.parentElement.closest("details")) group.open = true;
-  node.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  node.scrollIntoView({ block: "nearest", behavior: glide() });
   node.classList.remove("flash");
   void node.offsetWidth;  // Restarts the highlight.
   node.classList.add("flash");

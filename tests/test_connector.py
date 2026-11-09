@@ -904,8 +904,34 @@ async def test_away_the_owner_is_reached_in_their_own_slack_dm(tmp_path):
         "1712345678.000200", f"[{code}] Draft to approve Reply: `{code} send · no`"
     ) + dm.format("1712345690.000100", f"{code} send")
     read = await call_tool(runtime, "read_owner_slack_dm", messenger)
-    assert f"- {code} send" in read.text_result_for_llm
+    assert f"+00:00) {code} send" in read.text_result_for_llm, "with when, for its `at`"
     assert "send · no" not in read.text_result_for_llm, "not its own notification"
+    # Bug bash 7: each read of their replies was a messenger run (a fresh Copilot conversation)
+    # every few minutes for a day. Their own DM is read here first: a run only when they wrote
+    # something new there.
+    harness.session(messenger).emit("session.idle")
+    await settle(runtime)
+    runs = len(runtime.tasks.for_session(messenger))
+    harness.store.set("away_read_at", "0")
+    await runtime.connector.read_replies()
+    await settle(runtime)
+    assert len(runtime.tasks.for_session(messenger)) == runs + 1, "they wrote: the messenger reads"
+    harness.session(messenger).emit("session.idle")
+    await settle(runtime)
+    harness.store.set("away_read_at", "0")
+    await runtime.connector.read_replies()
+    await settle(runtime)
+    # Code review: a run that ended before it reported what it read lost the reply for good.
+    assert len(runtime.tasks.for_session(messenger)) == runs + 2, "not reported yet: read again"
+    await call_tool(runtime, "read_owner_slack_dm", messenger)
+    dropped = [{"code": code, "text": f"{code} no", "intent": "no"}]
+    reported = await call_tool(runtime, "report_owner_replies", messenger, replies=dropped)
+    assert reported.result_type == "success", reported.text_result_for_llm
+    harness.session(messenger).emit("session.idle")
+    await settle(runtime)
+    harness.store.set("away_read_at", "0")
+    await runtime.connector.read_replies()
+    assert len(runtime.tasks.for_session(messenger)) == runs + 2, "nothing new: no run"
     worker = await spawn(runtime, harness.router_id, "Other work")
     refused = await call_tool(runtime, "send_owner_slack_dm", worker, version="A")
     assert refused.result_type == "failure", "only the messenger"

@@ -17,12 +17,18 @@ function query(input) {
 
 function render() {
   const list = $("#mention-list");
+  const input = $("#composer-input");
   list.hidden = !mention.options.length;
+  // The message box is a combobox: screen readers hear the list open and the worker picked.
+  input.setAttribute("aria-expanded", String(!list.hidden));
+  if (list.hidden) input.removeAttribute("aria-activedescendant");
+  else input.setAttribute("aria-activedescendant", `mention-${mention.active}`);
   list.replaceChildren(
     ...mention.options.map((worker, index) =>
       el(
         "li",
         {
+          id: `mention-${index}`,
           role: "option",
           class: index === mention.active ? "active" : "",
           "aria-selected": String(index === mention.active),

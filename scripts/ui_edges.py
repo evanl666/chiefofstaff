@@ -9,9 +9,11 @@ import base64
 import itertools
 import json
 import re
+import struct
 import sys
 import tempfile
 import time
+import zlib
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -2865,6 +2867,247 @@ async def round_nine(runtime, browser, failures: list[str]):
     await context.close()
 
 
+def picture(width: int, height: int) -> bytes:
+    """A plain PNG of this size."""
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        crc = struct.pack(">I", zlib.crc32(kind + data))
+        return struct.pack(">I", len(data)) + kind + data + crc
+
+    rows = b"".join(b"\x00" + b"\x60\x80\xc0" * width for _ in range(height))
+    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    body = chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b"")
+    return b"\x89PNG\r\n\x1a\n" + body
+
+
+async def round_ten(runtime, browser, failures: list[str]):
+    """The 0.1.32 bug bash, round 8 (UI): a result whose own PR has changes requested says so
+    under Needs you, with Ask it to fix… and Accept under ⋯ (R13), and its report says To review
+    in its worker's chat; a path in a line is short (U3); inline code on a decision card (U7);
+    the chat opens at its end when that is an image (U4); diff lines from the keyboard (U6);
+    less motion when asked (U8); ☰'s count clear of what is beside it, and Focusing until…
+    moves nothing (U9); names for screen readers (U10); Bring back takes its toast away
+    (U13)."""
+    store = runtime.store
+    router = store.get("router_id")
+
+    async def start(title):
+        result = await call_tool(runtime, "spawn_worker", router, title=title,
+                                 instructions=title, why_new="test")  # fmt: skip
+        assert result.result_type == "success", result.text_result_for_llm
+        await settle(runtime)
+        return json.loads(result.text_result_for_llm)["session_id"]
+
+    fixer = await start("Rename the r10 flag")
+    fixed = runtime.tasks.current(fixer)
+    notes = f"{Path.home()}/r10-notes/flag.md"
+    runtime.tasks.move(fixed["id"], "review", result=f"Renamed it; the notes are at {notes}.")
+    runtime.update_session(fixer, status="idle", activity="")
+    runtime.add_message(fixer, "report", "Renamed it.", {"status": "done", "task_id": fixed["id"]})
+    decider = await start("Speed up r10 words")
+    decision = store.create_draft(decider, "decision", {
+        "question": "words() is currently `text.split()`. Keep it?",
+        "why": "A regex would also split `a,b`.",
+        "options": [{"choice": "Keep `split()`", "effect": "Nothing changes"},
+                    {"choice": "Regex", "effect": "Splits on `,` too"}],
+        "recommendation": "Keep `split()`: callers expect it",
+        "askers": [{"session_id": decider, "title": "Speed up r10 words"}], "precedents": [],
+    }, "words() is currently `text.split()`. Keep it?")  # fmt: skip
+    runtime.bus.publish("draft", store.draft(decision["id"]))
+    await settle(runtime)
+    runtime.publish_state()
+    pr = {"label": "acme/r10#4", "own": True, "state": "OPEN", "review": "CHANGES_REQUESTED",
+          "url": "https://github.com/acme/r10/pull/4", "title": "Rename the flag"}  # fmt: skip
+    patches = {"Rename the r10 flag": {"watching": ["github:acme/r10#4"], "watch_kind": "own",
+                                       "receipts": {"prs": [pr]}}}  # fmt: skip
+
+    context = await browser.new_context(viewport={"width": 1280, "height": 900})
+    page = await context.new_page()
+    page.on("pageerror", lambda error: failures.append(str(error)))
+    await patch_state(page, patches)
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    await expect(page.locator("#application")).to_be_visible()
+
+    # R13: to review, its PR has changes requested: Needs you says so; Accept is under ⋯.
+    card = page.locator("#needs .card.task", has_text="Rename the r10 flag")
+    await expect(card.locator(".head .meta")).to_contain_text("Changes requested")
+    await expect(card.locator(".reason")).to_have_text("Changes requested on r10#4")
+    await expect(card.get_by_role("button", name="Ask it to fix…")).to_be_visible()
+    await expect(card.get_by_role("button", name="Accept")).to_have_count(0)
+    more = card.locator(".actions .more-button")
+    await expect(more).to_have_attribute("aria-label", "More actions for “Rename the r10 flag”")
+    await more.click()
+    await expect(card.get_by_role("menuitem", name="Accept")).to_be_visible()
+    await page.keyboard.press("Escape")
+    # U3: the path in its line as a chip has it.
+    await expect(card.locator(".outcome")).to_have_text("Renamed it; the notes are at "
+                                                        "~/r10-notes/flag.md.")  # fmt: skip
+    log("R13: to review with changes requested on its PR: Needs you says so, Accept under ⋯")
+
+    # U7: inline code on a decision card, never its backticks.
+    asked = page.locator(f'#needs .card.draft[data-id="{decision["id"]}"]')
+    await expect(asked.locator(".question code")).to_have_text("text.split()")
+    await expect(asked.locator(".why code")).to_have_text("a,b")
+    await expect(asked.locator(".recommendation code")).to_have_text("split()")
+    await expect(asked.locator(".option .choice code")).to_have_text("split()")
+    for part in (".question", ".why", ".recommendation", ".options"):
+        assert "`" not in await asked.locator(part).inner_text(), part
+    log("U7: a decision card shows `code` as code")
+
+    # U10: names a screen reader says.
+    await expect(page.get_by_role("heading", name="Needs you", level=2)).to_be_visible()
+    await expect(page.get_by_role("button", name="Focus", exact=True)).to_be_visible()
+    open_worker = page.locator("#panel .box-head .title").first
+    assert (await open_worker.get_attribute("aria-label")).startswith("Open worker: ")
+    composer = page.locator("#composer-input")
+    await expect(composer).to_have_attribute("aria-expanded", "false")
+    await composer.press_sequentially("@Rename the r10")
+    await expect(composer).to_have_attribute("aria-expanded", "true")
+    await expect(composer).to_have_attribute("aria-activedescendant", "mention-0")
+    await expect(page.get_by_role("option", name=re.compile("Rename the r10 flag"))).to_have_id(
+        "mention-0"
+    )
+    await composer.press("Escape")
+    await expect(composer).to_have_attribute("aria-expanded", "false")
+    await composer.fill("")
+    log("U10: Needs you is a heading, Focus is called Focus, @ is a combobox, ⋯ says whose")
+
+    # U9: Focusing until… does not move what is below it.
+    header = page.locator("#session-header")
+    before = (await header.bounding_box())["height"]
+    await page.get_by_role("button", name="Focus", exact=True).click()
+    await page.get_by_role("menuitem", name="For 30 minutes").click()
+    await expect(page.locator("#session-meta")).to_contain_text("Focusing until")
+    after = (await header.bounding_box())["height"]
+    assert after == before, ("the header grew", before, after)
+    await page.get_by_role("button", name="End focus").click()
+    await expect(page.locator("#session-meta")).to_be_hidden()
+    # U9: at 400px, ☰'s count covers neither ☰ nor "Home" or "← Home" beside it.
+    await page.set_viewport_size({"width": 400, "height": 800})
+    badge = page.locator("#sidebar-toggle .badge")
+    await expect(badge).to_be_visible()
+
+    def apart(a, b):
+        return (a["x"] + a["width"] <= b["x"] or b["x"] + b["width"] <= a["x"]
+                or a["y"] + a["height"] <= b["y"] or b["y"] + b["height"] <= a["y"])  # fmt: skip
+
+    for where in ("home", "worker"):
+        await expect(page.locator("#sidebar")).to_be_hidden()
+        count = await badge.bounding_box()
+        bars = await page.locator("#sidebar-toggle .bars").bounding_box()
+        assert apart(count, bars), (where, count, bars)
+        beside = page.locator("#back-home" if where == "worker" else "#session-title")
+        words = await beside.evaluate(
+            "node => { const range = document.createRange(); range.selectNodeContents(node);"
+            " const box = range.getBoundingClientRect();"
+            " return { x: box.x, y: box.y, width: box.width, height: box.height }; }"
+        )
+        assert apart(count, words), (where, count, words)
+        await page.screenshot(path=SHOTS / f"ui-edges-r10-badge-{where}.png")
+        if where == "home":
+            await page.locator("#sidebar-toggle").click()
+            await page.locator("#sidebar .item", has_text="Rename the r10 flag").click()
+            await expect(page.locator("#back-home")).to_be_visible()
+    # Its report in its worker's chat says what Home says: To review.
+    await expect(page.locator("#timeline .card.report .chip")).to_have_text("To review")
+    await page.locator("#back-home").click()
+    await page.set_viewport_size({"width": 1280, "height": 900})
+    log("U9: Focusing until… moves nothing; ☰'s count is clear of ☰ and of Home at 400px")
+
+    # U13: Bring back takes away the toast that taking it off left.
+    row = page.locator("#tasks-artifacts .artifact", has_text="Rename the flag")
+    await row.get_by_role("button", name=re.compile("^Take .* off this list$")).click()
+    taken = page.locator(".toast", has_text="Taken off Artifacts")
+    await expect(taken).to_be_visible()
+    await page.locator("#tasks-artifacts").get_by_role("button", name="Show 1 taken off").click()
+    await row.get_by_role("button", name="Bring back").click()
+    await expect(taken).to_have_count(0)
+    await expect(page.locator(".toast", has_text="Back on Artifacts.")).to_be_visible()
+    log("U13: Bring back takes away “Taken off Artifacts” and says it is back")
+
+    # U6: lines of a diff from the keyboard: Tab to one, Enter, write, Ctrl+Enter.
+    diff = ("diff --git a/words.py b/words.py\n--- a/words.py\n+++ b/words.py\n"
+            "@@ -1,2 +1,2 @@\n def words(text):\n-    return text.split()\n"
+            "+    return text.split(None)\n")  # fmt: skip
+
+    async def changes(route):
+        await route.fulfill(json=[{"name": "textkit", "branch": "r10", "diff": diff}])
+
+    sent: list = []
+
+    async def follow_up(route):
+        sent.append(route.request.post_data_json)
+        await route.fulfill(json={})
+
+    await page.route("**/api/tasks/r10diff/diff", changes)
+    await page.route("**/api/tasks/r10diff/follow-up", follow_up)
+    await page.evaluate(
+        "async () => (await import('/static/diff.js')).showChanges("
+        "{ id: 'r10diff', title: 'Speed up words' }, () => {})"
+    )
+    dialog = page.locator(".diff-dialog")
+    await expect(dialog.locator(".diff-line.add")).to_be_visible()
+    await dialog.locator(".diff-file > summary").focus()
+    await page.keyboard.press("Tab")
+    await expect(dialog.locator(".diff-line.ctx").first).to_be_focused()
+    await page.keyboard.press("Tab")
+    await page.keyboard.press("Tab")
+    added = dialog.get_by_role("button", name="Added line 2: return text.split(None)")
+    await expect(added).to_be_focused()
+    await page.keyboard.press("Enter")
+    await expect(dialog.locator(".diff-compose textarea")).to_be_focused()
+    await page.keyboard.type("Keep the default.")
+    await page.keyboard.press("Control+Enter")
+    await expect(dialog.locator(".diff-comment")).to_have_text(re.compile("Keep the default."))
+    await expect(added).to_be_focused()
+    await dialog.get_by_role("button", name="Send to the worker").click()
+    await expect(dialog).to_have_count(0)
+    assert "words.py:2 `return text.split(None)`: Keep the default." in sent[0]["text"], sent
+    log("U6: a diff line is reached with Tab and commented on with Enter")
+
+    # U8: less motion when the system asks: menus, dialogs and toasts appear still; a
+    # highlight shows without fading.
+    for reduce in (False, True):
+        await page.emulate_media(reduced_motion="reduce" if reduce else "no-preference")
+        await page.get_by_role("button", name="Focus", exact=True).click()
+        menu = page.locator("#session-actions .menu")
+        moving = await menu.evaluate("node => getComputedStyle(node).animationName")
+        assert (moving == "none") == reduce, (reduce, moving)
+        await page.keyboard.press("Escape")
+        flash = await card.evaluate(
+            "node => { node.classList.add('flash'); const style = getComputedStyle(node);"
+            " const found = [style.animationName, style.animationTimingFunction];"
+            " node.classList.remove('flash'); return found; }"
+        )
+        assert flash[0] == "flash" and ("steps" in flash[1]) == reduce, (reduce, flash)
+    await page.emulate_media(reduced_motion="no-preference")
+    log("U8: with reduced motion, nothing pops or rises; a highlight shows without fading")
+
+    # U4: a chat that ends with an image opens at its end, once the image has loaded.
+    for index in range(30):
+        runtime.add_message(router, "assistant", f"Line {index} of what came before.")
+    await page.locator("#attach-input").set_input_files(
+        files=[{"name": "r10.png", "mimeType": "image/png", "buffer": picture(400, 300)}]
+    )
+    await composer.fill("What is wrong in r10?")
+    await composer.press("Enter")
+    image = page.locator("#timeline .msg.owner .attachments img").last
+    await expect(image).to_be_visible()
+    await page.reload()
+    await expect(image).to_be_visible(timeout=15000)
+    await page.wait_for_function(
+        "() => [...document.querySelectorAll('#timeline .attachments img')].at(-1)?.complete"
+    )
+    await page.wait_for_timeout(300)
+    short = await page.evaluate(
+        "() => { const box = document.querySelector('#scroller');"
+        " return box.scrollHeight - box.scrollTop - box.clientHeight; }"
+    )
+    assert short <= 2, f"the chat stops {short}px above its end"
+    log("U4: the chat opens at its end when that is an image")
+    await context.close()
+
+
 async def main():
     with tempfile.TemporaryDirectory(prefix="cos-ui-") as temporary:
         holder: dict = {}
@@ -3200,7 +3443,8 @@ async def main():
             # `python scripts/ui_edges.py round_nine …`: only those, after the checks above.
             only = set(sys.argv[1:])
             for check in (home, memory, this_round, round_two, round_three, round_four,
-                          round_five, round_six, round_seven, round_eight, round_nine):  # fmt: skip
+                          round_five, round_six, round_seven, round_eight, round_nine,
+                          round_ten):  # fmt: skip
                 if not only or check.__name__ in only:
                     await check(runtime, browser, failures)
             await browser.close()

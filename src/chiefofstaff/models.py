@@ -5,7 +5,9 @@ from pathlib import Path
 from typing import Annotated, Any, Literal, TypeVar, cast, get_origin
 
 from pydantic import (
+    AfterValidator,
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
     ValidationInfo,
@@ -13,7 +15,26 @@ from pydantic import (
     model_validator,
 )
 
-Repository = Annotated[str, Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")]
+# owner/repo, also from its github.com address (https://github.com/acme/app, git@github.com:…).
+GITHUB_URL = re.compile(
+    r"(?:(?:https?://)?(?:www\.)?github\.com/|git@github\.com:)([\w.-]+)/([\w.-]+?)(?:\.git)?/?"
+    r"(?:[/#?].*)?",
+    re.IGNORECASE,
+)
+
+
+def github_repository(value: object) -> object:
+    if not isinstance(value, str):
+        return value
+    value = value.strip()
+    if found := GITHUB_URL.fullmatch(value):
+        value = f"{found[1]}/{found[2]}"
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", value):
+        raise ValueError(f"GitHub repository {value}: write it as owner/name, like acme/app.")
+    return value
+
+
+Repository = Annotated[str, BeforeValidator(github_repository)]
 Role = Literal["router", "worker", "slack", "watchdog"]
 Effort = Literal["none", "low", "medium", "high", "xhigh", "max"]
 
@@ -137,18 +158,63 @@ def private_folders(home: Path) -> list[Path]:
     ]
 
 
+def owner_folder(raw: str, what: str, example: str = "~/code/app") -> Path:
+    """A folder the owner wrote, ~ expanded: a relative one is refused, not taken as inside the
+    folder Chief of Staff was started in."""
+    path = Path(raw.strip()).expanduser()
+    if not path.is_absolute():
+        raise ValueError(
+            f"{what}: give the folder as an absolute path, e.g. {example} (not {raw.strip()})."
+        )
+    return path
+
+
+def repository_around(path: Path) -> Path | None:
+    """The git repository a folder is (or is in), up to the home folder (which some keep their
+    dotfiles in as a repository)."""
+    home = Path.home().resolve()
+    for folder in (path, *path.parents):
+        if home.is_relative_to(folder):
+            return None
+        if (folder / ".git").exists():
+            return folder
+    return None
+
+
 # Copilot refuses to start a session with a lower credit limit.
 MIN_CREDIT_LIMIT = 30
 
 # A Copilot plugin to install: owner/repo, owner/repo:path, name@marketplace or a git URL.
-PluginSource = Annotated[
-    str,
-    Field(
-        max_length=300,
-        pattern=r"^([\w.-]+/[\w.-]+(:[\w./-]+)?|[\w.-]+@[\w.-]+|https://[\w.-]+/[\w./~%-]+)$",
-    ),
-]
-McpName = Annotated[str, Field(pattern=r"^[A-Za-z0-9_-]{1,40}$")]
+PLUGIN_SOURCE = re.compile(
+    r"[\w.-]+/[\w.-]+(:[\w./-]+)?|[\w.-]+@[\w.-]+|https://[\w.-]+/[\w./~%-]+"
+)
+
+
+def plugin_source(value: str) -> str:
+    if PLUGIN_SOURCE.fullmatch(value):
+        return value
+    # Copilot reads x@y as plugin@marketplace: a git URL must be https.
+    if ssh := re.fullmatch(r"(?:ssh://)?git@([\w.-]+)[:/]([\w./~%-]+)", value):
+        raise ValueError(
+            f"Plugin {value}: use its https URL, https://{ssh[1]}/{ssh[2]} (Copilot installs "
+            "git URLs over https)."
+        )
+    raise ValueError(
+        f"Plugin {value}: write owner/repo, owner/repo:path, name@marketplace or an https:// "
+        "git URL."
+    )
+
+
+def mcp_name(value: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,40}", value):
+        raise ValueError(
+            f"MCP server name {value or '(empty)'}: use letters, digits, - and _ (at most 40)."
+        )
+    return value
+
+
+PluginSource = Annotated[str, Field(max_length=300), AfterValidator(plugin_source)]
+McpName = Annotated[str, AfterValidator(mcp_name)]
 HourRange = Annotated[str, Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$")]
 # Validating settings as they were saved (by this version or an earlier one): see mcp_off,
 # copilot_minimum and validate_paths.
@@ -261,9 +327,7 @@ class Settings(StrictModel):
     slack_enabled: bool = False
     slack_poll_seconds: int = Field(default=60, ge=20, le=900)
     # Reacting with this emoji to any Slack message hands it to Chief of Staff; empty turns it off.
-    slack_delegate_emoji: str = Field(
-        default="robot_face", max_length=60, pattern=r"^[a-z0-9_+'-]*$"
-    )
+    slack_delegate_emoji: str = Field(default="robot_face", max_length=60)
     github_enabled: bool = False
     github_repos: list[Repository] = Field(default_factory=list, max_length=10)
     # More for workers than Copilot finds by itself (the owner's plugins, skills and MCP
@@ -325,8 +389,8 @@ class Settings(StrictModel):
     def skill_paths(cls, value: list[str]) -> list[str]:
         folders = []
         for raw in value:
-            path = Path(raw.strip()).expanduser()
-            if not path.is_absolute() or not path.is_dir():
+            path = owner_folder(raw, "Skill folders", "~/skills")
+            if not path.is_dir():
                 raise ValueError(f"Not an existing folder: {raw}")
             folders.append(str(path.resolve()))
         return list(dict.fromkeys(folders))
@@ -343,10 +407,31 @@ class Settings(StrictModel):
             )
         return value
 
-    @field_validator("slack_delegate_emoji", mode="before")
+    @field_validator("slack_delegate_emoji")
     @classmethod
-    def emoji_code(cls, value: object) -> object:
-        return value.strip().strip(":").lower() if isinstance(value, str) else value
+    def emoji_code(cls, value: str) -> str:
+        value = value.strip(":").strip().lower()
+        if not re.fullmatch(r"[a-z0-9_+'-]*", value):
+            raise ValueError(
+                "Delegate emoji: the emoji's name as Slack writes it, like eyes or "
+                "white_check_mark."
+            )
+        return value
+
+    @field_validator("model", "role_models")
+    @classmethod
+    def auto_model(cls, value: str | dict[Role, str]) -> str | dict[Role, str]:
+        """Auto, AUTO…: Copilot's choice, which it knows only as `auto`."""
+        if isinstance(value, dict):
+            return {
+                role: "auto" if model.lower() == "auto" else model for role, model in value.items()
+            }
+        return "auto" if value.lower() == "auto" else value
+
+    @field_validator("plugins")
+    @classmethod
+    def unique_plugins(cls, value: list[str]) -> list[str]:
+        return list(dict.fromkeys(value))
 
     @model_validator(mode="after")
     def validate_paths(self, info: ValidationInfo):
@@ -356,7 +441,7 @@ class Settings(StrictModel):
         saved = set(context.get("projects_saved") or ())
         projects = []
         for raw in self.projects:
-            path = Path(raw).expanduser().resolve()
+            path = owner_folder(raw, "Other project folders").resolve()
             if not path.is_dir() and not (context.get("saved") or {raw, str(path)} & saved):
                 raise ValueError(f"Project is not an existing directory: {raw}")
             if path == Path.home() or path == Path(path.anchor):
@@ -365,12 +450,11 @@ class Settings(StrictModel):
                 projects.append(str(path))
         self.projects = projects
         writable = []
+        writable_saved = set(context.get("writable_saved") or ())
         for raw in self.sandbox_writable:
             if not raw.strip():
                 continue
-            path = Path(raw.strip()).expanduser()
-            if not path.is_absolute():
-                raise ValueError(f"Use an absolute folder for the sandbox: {raw}")
+            path = owner_folder(raw, "Also writable in the sandbox", "~/.copilot/journal")
             path = path.resolve()
             home = Path.home().resolve()
             if path == Path(path.anchor) or home.is_relative_to(path):
@@ -380,11 +464,19 @@ class Settings(StrictModel):
                 for private in private_folders(home)
             ):
                 raise ValueError(f"The sandbox cannot open {path}: it holds keys or settings.")
+            # Saved from Settings (writable_saved: what was saved before), as with projects: a
+            # saved one whose folder is gone stays; a new one must exist.
+            if (
+                "writable_saved" in context
+                and not path.is_dir()
+                and not {raw.strip(), str(path)} & writable_saved
+            ):
+                raise ValueError(f"Folder not found: {raw.strip()}")
             if str(path) not in writable:
                 writable.append(str(path))
         self.sandbox_writable = writable
         if self.code_folder:
-            path = Path(self.code_folder).expanduser().resolve()
+            path = owner_folder(self.code_folder, "Code folder", "~/workspace").resolve()
             if not path.is_dir():
                 raise ValueError(f"The code folder does not exist: {self.code_folder}")
             if path == Path.home() or path == Path(path.anchor):
@@ -397,14 +489,21 @@ class Settings(StrictModel):
                 )
             self.code_folder = str(path)
         if self.scratch_directory:
-            scratch = Path(self.scratch_directory).expanduser()
-            if not scratch.is_absolute():
-                raise ValueError(
-                    "The scratch folder must be an absolute path, e.g. ~/ChiefOfStaff."
-                )
+            scratch = owner_folder(self.scratch_directory, "Task folders", "~/ChiefOfStaff")
             scratch = scratch.resolve()
             if scratch == Path.home() or scratch == Path(scratch.anchor):
-                raise ValueError("Choose a scratch folder, not your home or filesystem root.")
+                raise ValueError("Task folders: choose a folder, not your home or filesystem root.")
+            # Checked when chosen, as for the code folder: a worker's folder would land in the
+            # repository as untracked files, and git there would work on that repository.
+            if (
+                not context.get("saved")
+                and str(scratch) != context.get("scratch_saved")
+                and (repository := repository_around(scratch))
+            ):
+                raise ValueError(
+                    f"Task folders: {scratch} is in the repository {repository}. Choose a folder "
+                    "outside your repositories, like ~/ChiefOfStaff."
+                )
             self.scratch_directory = str(scratch)
         self.github_repos = list(dict.fromkeys(repo.lower() for repo in self.github_repos))
         if self.github_enabled and not self.github_repos:
@@ -499,6 +598,8 @@ class SlackToken(StrictModel):
     @field_validator("token")
     @classmethod
     def user_token(cls, value: str) -> str:
+        if re.search(r"\s", value):
+            raise ValueError("A Slack token has no spaces: paste it again.")
         if not re.fullmatch(r"xoxp-[A-Za-z0-9-]+", value):
             raise ValueError(
                 "That is not a Slack user token (xoxp-…). Bot tokens (xoxb-) do not work "

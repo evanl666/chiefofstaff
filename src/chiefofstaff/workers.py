@@ -1204,6 +1204,8 @@ class Workers:
             if self.runtime.terminal.pop(row["id"], None) is not None:
                 self.runtime.publish_session(row)
             return
+        if self.states.handle(row["id"]):
+            return  # Live here still: its events come from its session, not from the log.
         events, after, changed = await backend.read_history(copilot, int(offset or 0))
         await self.sync_usage(row)
         entries = terminal_timeline(events, self.runtime.tools)
@@ -1259,6 +1261,15 @@ class Workers:
             copilot = self.runtime.copilot_id(row["id"])
             if copilot in changed:
                 self.runtime.publish_session(row)
+            if (
+                copilot in self.runtime.elsewhere
+                and self.states.handle(row["id"])
+                and row["status"] != "working"
+            ):
+                # Opened in a terminal while live here: it is the terminal's now (two programs
+                # would interleave its history). The mirror shows it; news waits for it.
+                with suppress(Exception):
+                    await self.runtime.detach(row["id"])
             # Closed there (also while this app was not running): what waited for it goes.
             if copilot not in self.runtime.elsewhere and (
                 self.store.get(f"heldnews:{row['id']}")

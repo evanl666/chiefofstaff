@@ -308,7 +308,8 @@ def test_the_newest_message_is_quoted_whole_not_cut_mid_sentence():
             [("Bob", "older " * 80), ("Alice", "Ship it &lt;today&gt; &amp; tell\n  me.")]
         )
     )
-    assert newest_message(listed, last=True) == "Alice: Ship it <today> & tell me."
+    # Its lines kept (bug bash 8: a list or code block became one paragraph).
+    assert newest_message(listed, last=True) == "Alice: Ship it <today> & tell\n  me."
     assert newest_message(listed, last=False).startswith("Bob: older older")
     long = newest_message(listed.replace("Ship it", "word " * 200), last=True)
     assert len(long) == 400 and long.endswith("\u2026") and long.startswith("Alice: word")

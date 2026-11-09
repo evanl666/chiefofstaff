@@ -156,7 +156,13 @@ export function taskPhase(task, worker, { active = "", activeTitle = "", stopped
     // The owner asked more about it, and its worker is at it now.
     if (working(worker) && active === task.id && task.follow_up) return at("running", "following", "Following up on your message; its result stays yours to review");
     if (task.news) return at("needs", "update", "");
-    if (task.status === "review" && needsAcceptance(task)) return at("needs", "review", "");
+    if (task.status === "review" && needsAcceptance(task)) {
+      // Its own PR to fix (changes requested, CI failing) is said, as once it is accepted: the
+      // owner asks its worker to fix it, or accepts it as it is.
+      const standing = ownPrStanding(task);
+      if (standing && standing.marker !== "mergeable") return at("needs", standing.marker, standing.why);
+      return at("needs", "review", "");
+    }
     // Delivered, still followed for what comes next (a review, the merge, a reply): the
     // owner's own work waiting on others, or a PR they reviewed waiting on its author. Nothing
     // new there for a day, it goes with the finished ones (news brings it back).
@@ -225,7 +231,8 @@ export function boardOf(tasks, workers, { now = Date.now(), stallHours = 4, onCa
   const followed = new Map();
   const urgency = (task) => URGENCY[phases.get(task.id).marker] ?? 2;
   for (const task of [...tasks].sort((a, b) => urgency(a) - urgency(b) || b.updated_at.localeCompare(a.updated_at))) {
-    if (!DELIVERED.includes(phases.get(task.id).marker)) continue;
+    // A result still to accept stays where it is, whichever task has the row.
+    if (!DELIVERED.includes(phases.get(task.id).marker) || (task.status === "review" && needsAcceptance(task))) continue;
     const key = `${task.session_id}|${followedKeys(task).sort().join(",")}`;
     const first = followed.get(key);
     if (first) phases.set(task.id, { section: "finished", marker: "still-following", why: `Still following, for “${first.title}”` });

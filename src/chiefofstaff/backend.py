@@ -290,6 +290,21 @@ class CopilotBackend:
         )
 
 
+async def switch_model(session: Any, model: str, **tuning: Any) -> None:
+    """Switch a session's model. `reasoning_effort=None`: the model takes no thinking effort.
+    Copilot keeps the effort a session had (after a resume too) and refuses such a model with
+    it ("Reasoning effort 'low' is not supported for model …"), and the SDK leaves a None out:
+    Copilot is sent null, which clears it."""
+    client = getattr(session, "_client", None)
+    if "reasoning_effort" not in tuning or tuning["reasoning_effort"] is not None or not client:
+        await session.set_model(model, **tuning)
+        return
+    params = {"sessionId": session.session_id, "modelId": model, "reasoningEffort": None}
+    if tuning.get("context_tier"):
+        params["contextTier"] = tuning["context_tier"]
+    await client.request("session.model.switchTo", params)
+
+
 async def stop_background(session: Any) -> int:
     """Cancel what a session left running in the background (a command its turn went on from,
     a sub-agent): after a stop, a background command would end in a turn of its own, and until

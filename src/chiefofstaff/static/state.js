@@ -3,7 +3,7 @@
 import { $, api, el, toast, withKey } from "./dom.js";
 import { firstLine, shorten } from "./text.js";
 import { renderSidebar } from "./sidebar.js";
-import { appendMessages, renderHeader, replaceMessage, select, updateDraftRecords, updateWorkingLine } from "./session.js";
+import { appendMessages, refreshChips, renderHeader, replaceMessage, select, updateDraftRecords, updateWorkingLine } from "./session.js";
 import { scheduleHome } from "./inbox.js";
 import { upsertTask } from "./tasks.js";
 import { refreshUsageLink, renderConnections, renderLearning } from "./settings.js";
@@ -92,6 +92,7 @@ export async function loadState() {
   renderHeader();
   scheduleHome();
   updateDraftRecords();
+  refreshChips();
   if ($("#settings-dialog").open) {
     renderLearning();
     renderConnections();
