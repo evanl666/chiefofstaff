@@ -2,8 +2,8 @@
 
 import { $, api, el, foldable, toast, withKey } from "./dom.js";
 import { clock, compactPaths, firstLine, gist, headOf, markdown, slackText, threadLabel } from "./text.js";
-import { byId, current, HOME, markRead, pendingDrafts, routerId, state, STATUS_TEXT, tasks, upsertSession, viewedId, workerTitle } from "./state.js";
-import { MARKERS, needsAcceptance } from "./board.js";
+import { byId, current, DELIVERY_WORDS, HOME, markRead, pendingDrafts, routerId, state, STATUS_TEXT, tasks, upsertSession, viewedId, workerTitle } from "./state.js";
+import { MARKERS } from "./board.js";
 import { renderSidebar } from "./sidebar.js";
 import { focusDraft, focusTask, renderHome, renderHomeHeader, showHomeTab, welcomeCard, workerStates } from "./inbox.js";
 import { closeMentions, setRecipient } from "./mention.js";
@@ -65,7 +65,9 @@ export function renderHeader() {
     // Where it stands, in the words of its sidebar dot and of Home.
     const found = workerStates().get(session.id);
     const where = (found?.dot || "idle").split(" ")[0];
-    meta = [SHORT_STATE[where] || STATUS_TEXT[session.status], found?.sub || "", session.status === "queued" ? session.activity : "", session.branch, repos > 1 ? `${repos} repos` : ""];
+    // Its turn over while a command it left running goes on: said, not "Running" alone.
+    const background = session.background && session.status !== "working" ? "waiting for background process" : "";
+    meta = [SHORT_STATE[where] || STATUS_TEXT[session.status], found?.sub || background, session.status === "queued" ? session.activity : "", session.branch, repos > 1 ? `${repos} repos` : ""];
     if (session.elsewhere) {
       // What it does in the terminal, read from its log; Chief of Staff does not drive it now.
       const terminal = session.terminal || {};
@@ -436,11 +438,8 @@ function imageLoaded(event) {
   }
 }
 const STATUS_CHIP = { done: "Done", progress: "Progress", question: "Question", blocked: "Blocked", failed: "Failed" };
-// A done report whose result waits for the owner's review says so, as Home does ("To review").
-const toReview = (taskId) => {
-  const task = taskId ? tasks().find((item) => item.id === taskId) : null;
-  return task?.status === "review" && needsAcceptance(task);
-};
+// A done report whose result waits for the owner's Accept says so, as Home does.
+const toReview = (taskId) => tasks().find((item) => item.id === taskId)?.status === "review";
 export function chip(status, taskId = "") {
   if (!STATUS_CHIP[status]) return null;
   const node = el("span", { class: `chip ${status}`, "data-task": status === "done" && taskId ? taskId : undefined });
@@ -598,7 +597,7 @@ function renderMessage(original) {
   }
   switch (message.kind) {
     case "owner":
-      return ownerMessage(message.text, meta, time);
+      return ownerMessage(message.text, meta, time, message.delivery);
     case "assistant":
       if (meta.internal) return el("div", { class: "line note", text: message.text, title: clock(time) });
       return el("div", { class: "msg agent markdown", html: markdown(message.text), title: clock(time) });
@@ -668,8 +667,9 @@ function renderMessage(original) {
       return el("div", { class: "line", text: message.text, title: clock(time) });
   }
 }
-// The owner's message: long ones fold, images show small and open full size.
-function ownerMessage(text, meta = {}, time = "") {
+// The owner's message: long ones fold, images show small and open full size; under it, whether
+// it reached its session (`delivery`), in a word.
+function ownerMessage(text, meta = {}, time = "", delivery = "") {
   const node = el("div", { class: "msg owner", title: time ? clock(time) : undefined });
   // Sent from Home straight to one worker.
   if (meta.to) node.append(el("button", { type: "button", class: "to", text: `→ ${meta.to_title}`, title: "Open this worker", onclick: () => select(meta.to) }));
@@ -690,7 +690,20 @@ function ownerMessage(text, meta = {}, time = "") {
     );
   }
   if (text) foldable(node, el("div", { class: "text", text }), text);
+  const [said, tone] = DELIVERY_WORDS[delivery] || [];
+  if (said) {
+    node.dataset.delivery = delivery;
+    node.append(el("div", { class: `delivery ${tone || ""}`.trim(), text: said }));
+  }
   return node;
+}
+// Where the owner's messages stand, under each: what is not there yet (or never got there)
+// under every one; that one got there or was handled, only under the latest.
+const SETTLED = new Set(["received", "processed"]);
+function showDeliveries() {
+  const nodes = [...$("#timeline").querySelectorAll(".msg.owner[data-delivery]")];
+  const latest = [...$("#timeline").querySelectorAll(".msg.owner")].pop();
+  for (const node of nodes) node.querySelector(":scope > .delivery").hidden = SETTLED.has(node.dataset.delivery) && node !== latest;
 }
 // The work between messages, folded into one line: its steps, and what the session said on the
 // way to them ("Now the tests:"), which is narration, not an answer. The line shows the latest.
@@ -749,7 +762,12 @@ export function replaceMessage(message) {
   const node = old && renderMessage(message);
   if (!node?.dataset) return;
   Object.assign(node.dataset, { ...old.dataset, id: message.id });
+  if (message.kind === "owner") {
+    if (DELIVERY_WORDS[message.delivery]) node.dataset.delivery = message.delivery;
+    else delete node.dataset.delivery;
+  }
   old.replaceWith(node);
+  showDeliveries();
 }
 
 export function appendMessages(messages) {
@@ -767,6 +785,7 @@ export function appendMessages(messages) {
   if (!timeline.children.length && state.selected === HOME && state.snapshot?.runtime.state !== "error") timeline.append(welcomeCard());
   updateWorkingLine();
   updateDraftRecords();
+  showDeliveries();
   scrollToBottom();
 }
 // One message at the end of `container`: a step (or narration) joins the fold before it.
@@ -787,13 +806,15 @@ export function updateWorkingLine() {
   const timeline = $("#timeline");
   timeline.querySelector(".working-line")?.remove();
   const session = byId(viewedId());
-  if (session?.status !== "working") return;
+  // Its turn is over, but a command it left running (a dev server) goes on: not thinking.
+  const background = session?.background && session.status !== "working";
+  if (session?.status !== "working" && !background) return;
   timeline.append(
     el(
       "div",
-      { class: "working-line" },
-      el("span", { class: "dot working" }),
-      el("span", { text: session.activity || "Thinking…" }),
+      { class: `working-line${background ? " background" : ""}` },
+      el("span", { class: `dot ${background ? "watching" : "working"}` }),
+      el("span", { text: background ? "Waiting for background process" : session.activity || "Thinking…", title: background ? "Its turn is over; a command it started (a dev server, a watcher) still runs. Stop ends it." : undefined }),
       el("button", { type: "button", class: "link", text: "Stop", title: "Interrupt what it is doing now", onclick: () => post(`/api/sessions/${session.id}/stop`) }),
     ),
   );

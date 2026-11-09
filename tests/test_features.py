@@ -32,12 +32,14 @@ async def test_a_worker_closes_itself_when_its_pr_is_finished(harness):
         summary="Opened https://github.com/acme/app/pull/7",
     )
     await settle(runtime)  # It follows the PR in the background.
+    task = task_of(harness, worker_id)
+    # Accepted (merging is not accepting, E28): it still follows its PR until that is over.
+    runtime.task_actions.accept(task)
     await runtime.on_thread(
         "github", "github:acme/app#7", ["github:state:merged"], "The PR was merged."
     )
     runtime.unfollow("github:acme/app#7", finished=True, merged=True)
-    task = task_of(harness, worker_id)
-    assert runtime.tasks.get(task)["status"] == "done", "its PR is merged: the task is done"
+    assert runtime.tasks.get(task)["status"] == "done"
     assert not harness.store.session(worker_id)["closed_at"], "it handles the news first"
     await call_tool(runtime, "report", worker_id, status="done", summary="It was merged.")
     assert runtime.tasks.get(task)["status"] == "done", "and does not go back to review"
@@ -59,6 +61,8 @@ async def test_quiet_finished_workers_are_tidied_up(harness):
     await call_tool(runtime, "report", asking, status="question", summary="which db?")
     await settle(runtime)
     assert await runtime.workers.tidy(time.time() + 3600) == []
+    assert await runtime.workers.tidy(time.time() + 2 * 86400) == [], "results to accept"
+    runtime.task_actions.accept(task_of(harness, done))
     assert await runtime.workers.tidy(time.time() + 2 * 86400) == [done]
 
 
@@ -320,7 +324,7 @@ async def test_daily_digest_once_a_day_and_only_when_useful(harness):
     await call_tool(runtime, "report", asking, status="question", summary="postgres or mysql?")
     text = digest(runtime, now - 60, time.time() + 1)
     assert "• Finished: “Ship notes”" in text
-    assert "• Waiting for you: “Pick DB” asked a question" in text
+    assert "• Waiting for you: 1 result to review · “Pick DB” asked a question" in text
 
     harness.store.save_settings(Settings(digest_time="00:00"))
     first = await runtime.digest_once(time.time() + 1)
@@ -329,9 +333,10 @@ async def test_daily_digest_once_a_day_and_only_when_useful(harness):
 
 
 async def test_the_daily_digest_counts_what_home_shows(harness):
-    """Bug bash 4 (D3): the digest said "7 results to review" when Home had one to accept (it
-    counted reports that only inform), listed Chief of Staff's helpers' and cancelled tasks as
-    finished, and said "0 workers running" while tasks ran (it counted sessions in a turn)."""
+    """Bug bash 4 (D3): the digest listed Chief of Staff's helpers' and cancelled tasks as
+    finished (and to review), and said "0 workers running" while tasks ran (it counted sessions
+    in a turn). Every result of the owner's waits for Accept, a report that only informs too
+    (E28)."""
     runtime = await harness.connect()
     now = time.time()
     workers = {}
@@ -346,7 +351,7 @@ async def test_the_daily_digest_counts_what_home_shows(harness):
     await spawn(runtime, harness.router_id, "Benchmark")
     text = digest(runtime, now - 60, time.time() + 1)
     assert "• Finished: “Compare libraries”, “Fix the bug”\n" in text
-    assert "• Waiting for you: 1 result to review\n" in text
+    assert "• Waiting for you: 2 results to review\n" in text
     assert "• 1 task running · " in text
 
 
@@ -370,8 +375,9 @@ async def test_the_focus_summary_agrees_with_home(harness):
     runtime.asks.record_question(worker, "Which port?")  # On no task: its own card.
     await runtime.focus.check(time.time() + 3601)
     summary = harness.store.messages(harness.router_id)[-1]["text"]
+    # Both results wait for Accept (E28), and the question.
     assert summary.endswith(
-        "3 messages handled · 1 reply drafted for you · 2 tasks finished · 3 need you."
+        "3 messages handled · 1 reply drafted for you · 2 tasks finished · 4 need you."
     ), summary
 
 
@@ -494,7 +500,9 @@ async def test_closed_workers_come_back_with_their_conversation(harness):
     runtime = await harness.connect()
     worker_id = (await spawn(runtime, harness.router_id, "Fix login"))["session_id"]
     await call_tool(runtime, "report", worker_id, status="done", summary="Fixed.")
-    assert await runtime.workers.tidy(time.time() + 2 * 86400) == [worker_id]
+    # Its result waits for Accept (E28): tidying leaves it; closed, it comes back all the same.
+    assert await runtime.workers.tidy(time.time() + 2 * 86400) == []
+    await runtime.workers.close(worker_id)
     listed = json.loads(
         (await call_tool(runtime, "list_sessions", harness.router_id)).text_result_for_llm
     )

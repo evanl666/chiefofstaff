@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -17,7 +18,6 @@ from ..receipts import APPROVAL
 from ..store import Store, now
 from . import SourceHost
 
-MAX_FOLLOW_FAILURES = 5
 # How long a PR closed (not merged) stays followed, from when it was closed (or, closed already
 # when a session was asked to follow it, from then): to hear if it is reopened.
 KEEP_CLOSED_DAYS = 14
@@ -31,22 +31,120 @@ NOT_FOUND = re.compile(
 FAILED = {"failure", "timed_out", "cancelled", "action_required", "startup_failure"}
 # A followed PR shows as unreadable on its task after this many failed reads in a row.
 SHOWN_AFTER = 3
-# GitHub not answering now (tried again as usual), as against no access (another signed-in
-# account may have it) or something else.
-NOT_ANSWERING = re.compile(
-    r"rate limit|timed out|HTTP 5\d\d|connection|EOF|temporarily|try again|TLS|network|"
-    r"unexpected end",
+# How often followed PRs are read (a new follow wakes the loop sooner).
+POLL_SECONDS = 120
+# After failed reads a PR is read again one poll later, then twice as long each time (four
+# times for no access: that seldom mends by itself), at most this long apart. GitHub's rate
+# limits reset within the hour too.
+MAX_BACKOFF_SECONDS = 3600
+# A read due this soon is made now: the next poll is minutes away.
+EARLY_SECONDS = 10
+# Why a read failed, as the owner is told it. A rate limit first: GitHub answers HTTP 403 for
+# it too, and it says nothing of what this account may read.
+KINDS = ("permission", "not_found", "rate_limited", "transient")
+RATE_LIMITED = re.compile(r"rate limit|HTTP 429\b|too many requests|abuse detection", re.IGNORECASE)
+PERMISSION = re.compile(
+    r"HTTP 40[13]\b|Resource not accessible|SAML|single sign-on|\bSSO\b|Bad credentials|"
+    r"do not have permission|must have (?:admin|push|read|write) (?:rights|access)|"
+    r"no longer signed in|requires authentication",
     re.IGNORECASE,
+)
+# What a rate limit's answer may say of when it ends: seconds to wait, or the reset (epoch).
+RETRY_AFTER = re.compile(r"retry[- ]after:?\s*(\d+)", re.IGNORECASE)
+RATE_RESET = re.compile(r"x-ratelimit-reset:?\s*(\d{9,})", re.IGNORECASE)
+# GitHub not answering, in a few words for the owner.
+NOT_ANSWERING = (
+    (re.compile(r"timed? ?out|timeout", re.IGNORECASE), "timeout"),
+    (re.compile(r"HTTP (5\d\d)"), r"HTTP \1"),
+    (
+        re.compile(r"connection|EOF|TLS|network|unexpected end|no such host", re.IGNORECASE),
+        "network error",
+    ),
+    (re.compile(r"temporarily|try again|unavailable", re.IGNORECASE), "unavailable"),
+)
+# What reading a followed PR keeps between reads (its failures, its backoff, where its news got
+# to, its head and closing): of no use once nobody follows it. Its news, the tasks' results and
+# what they made stay.
+READ_STATE = (
+    "ghfail",
+    "gh404",
+    "ghskip",
+    "ghwhy",
+    "ghnext",
+    "ghread",
+    "ghsince",
+    "ghhead",
+    "ghclosed",
+    "ghkeep",
 )
 
 
 def failure_kind(error: str) -> str:
-    """What a failed read says: "transient", "access" or "other"."""
-    if re.search(r"rate limit", error, re.IGNORECASE):
-        return "transient"  # GitHub says HTTP 403 for it too.
-    if NOT_FOUND.search(error) or ACCESS_ERRORS.search(error):
-        return "access"
-    return "transient" if NOT_ANSWERING.search(error) else "other"
+    """What a failed read says: "rate_limited", "not_found", "permission", or "transient"
+    (GitHub not answering: a 5xx, a timeout, the network; and anything else, so that it is
+    tried again, never taken for a PR that is gone or out of reach)."""
+    if RATE_LIMITED.search(error):
+        return "rate_limited"
+    if NOT_FOUND.search(error):
+        return "not_found"
+    return "permission" if PERMISSION.search(error) else "transient"
+
+
+def backoff(kind: str, failures: int, step: str) -> float:
+    """Seconds until a followed PR that failed `failures` reads in a row is read again. One not
+    found is read again at the next poll: three in a row say it is gone."""
+    if kind == "not_found" and step == "pull request":
+        return POLL_SECONDS
+    factor = 4 if kind == "permission" else 2
+    return min(MAX_BACKOFF_SECONDS, POLL_SECONDS * factor ** min(max(failures, 1) - 1, 12))
+
+
+def iso(moment: float) -> str:
+    return datetime.fromtimestamp(moment, UTC).isoformat()
+
+
+def clock(moment: float) -> str:
+    """A time of day as the owner reads it ("3:05 PM"), in this computer's time zone."""
+    local = datetime.fromtimestamp(moment).astimezone()
+    return f"{local.hour % 12 or 12}:{local.minute:02d} {'AM' if local.hour < 12 else 'PM'}"
+
+
+def why_words(kind: str, detail: str, retry_at: str | None, moment: float) -> str:
+    """Why a followed PR could not be read and when it is tried again, in one short sentence
+    for the owner (`detail`: GitHub's own words; `moment`: now)."""
+    if kind == "rate_limited":
+        said = "GitHub rate limit"
+    elif kind == "not_found":
+        said = "GitHub says there is no such pull request, or no account here can see it"
+    elif kind == "permission" and re.search(r"SAML|single sign-on|\bSSO\b", detail, re.IGNORECASE):
+        said = "GitHub says this account must be authorized for the organization's SSO to read it"
+    elif kind == "permission" and re.search(
+        r"Bad credentials|no longer signed in", detail, re.IGNORECASE
+    ):
+        said = "GitHub no longer accepts the signed-in account (gh auth login signs in again)"
+    elif kind == "permission":
+        said = "GitHub says this account cannot read it (permission)"
+    elif "GitHub CLI not found" in detail:
+        said = "The GitHub CLI (gh) is not installed here"
+    else:
+        cause = next(
+            (
+                found.expand(words)
+                for pattern, words in NOT_ANSWERING
+                if (found := pattern.search(detail))
+            ),
+            "",
+        )
+        said = (
+            f"GitHub did not answer ({cause})" if cause else "Reading it failed (unexpected error)"
+        )
+    if not retry_at:
+        return said
+    at = datetime.fromisoformat(retry_at).timestamp()
+    if kind == "rate_limited":
+        return f"{said}; retrying at {clock(at)}"
+    minutes = math.ceil((at - moment) / 60)
+    return f"{said}; retrying now" if minutes <= 0 else f"{said}; retrying in {minutes} min"
 
 
 # Under what Chief of Staff posts for the owner, unseen on GitHub: learning how the owner writes
@@ -366,6 +464,9 @@ class GitHubSource:
         self.status = {"enabled": False, "connected": False, "error": "", "last_checked": None}
         # What a followed PR's poll is reading now: when it fails, what could not be read.
         self.reading: dict[str, str] = {}
+        # One read of a PR at a time (the poll's, or one the owner asked for now).
+        self.locks: dict[str, asyncio.Lock] = {}
+        self.clock = time.time
 
     async def start(self):
         self.job = asyncio.create_task(self.loop())
@@ -388,7 +489,7 @@ class GitHubSource:
                     logger.warning("GitHub watcher failed: %s", exc)
                 self.status.update(connected=False, error=str(exc)[:500])
             with suppress(TimeoutError):
-                await asyncio.wait_for(self.changed.wait(), timeout=120)
+                await asyncio.wait_for(self.changed.wait(), timeout=POLL_SECONDS)
 
     async def signed_in(self, fresh: bool = False) -> list[dict]:
         """The github.com accounts signed in to gh ({login, active})."""
@@ -527,6 +628,7 @@ class GitHubSource:
         if settings.paused:
             return
         followed = self.host.followed("github:")
+        self.forget_unfollowed({sub["thread"] for sub in followed})
         if not (settings.github_enabled or followed):
             self.status.update(connected=False, error="")
             return
@@ -535,67 +637,166 @@ class GitHubSource:
             # Its failure (one owner's search, say) must not stop the followed PRs.
             errors = await self.poll_review_requests(settings, {sub["thread"] for sub in followed})
         for sub in followed:
-            thread = sub["thread"]
-            # Failures in a row (ghfail) count real reads only; after a few, it is read only
-            # every tenth poll (ghskip counts those passed over).
-            failures = int(self.store.get(f"ghfail:{thread}") or 0)
-            why = json.loads(self.store.get(f"ghwhy:{thread}") or "{}")
-            if failures >= MAX_FOLLOW_FAILURES:
-                skipped = int(self.store.get(f"ghskip:{thread}") or 0) + 1
-                if skipped < 10:
-                    self.store.set(f"ghskip:{thread}", str(skipped))
-                    continue
-                self.store.set(f"ghskip:{thread}", "0")
-            try:
-                await self.poll_pull(thread, sub["since"])
-            except Exception as exc:
-                # One inaccessible PR must not stop the others.
-                self.store.set(f"ghfail:{thread}", str(failures + 1))
-                logger.warning("Could not read followed %s (%s): %s", thread, failures + 1, exc)
-                error = " ".join(str(exc).removeprefix("GitHub request failed: ").split())
-                found = {
-                    "kind": failure_kind(error),
-                    "step": self.reading.pop(thread, ""),
-                    "error": error[:300],
-                    "at": now(),
-                }
-                self.store.set(f"ghwhy:{thread}", json.dumps(found))
-                if failures + 1 == SHOWN_AFTER or (
-                    failures + 1 > SHOWN_AFTER
-                    and (why.get("kind"), why.get("step")) != (found["kind"], found["step"])
-                ):
-                    self.host.read_health_changed(thread)  # Its task's card says so now.
-                missing = (
-                    int(self.store.get(f"gh404:{thread}") or 0) + 1
-                    if NOT_FOUND.search(str(exc))
-                    else 0
-                )
-                self.store.set(f"gh404:{thread}", str(missing))
-                if missing >= MISSING_TRIES:
-                    # No such PR (an example in a report, a typo), or no account sees it:
-                    # following it can never bring news.
-                    self.host.missing(
-                        thread,
-                        "GitHub has no such pull request, or none of your accounts can see it",
-                    )
-                continue
-            self.reading.pop(thread, None)
-            self.read_ok(thread)
+            # One inaccessible PR must not stop the others.
+            await self.read_followed(sub["thread"], sub["since"])
         self.status.update(connected=True, error="; ".join(errors)[:500], last_checked=now())
 
+    async def read_followed(self, thread: str, since: float, at_once: bool = False) -> bool:
+        """Read a followed PR, unless it is waiting out its backoff after failed reads
+        (`at_once`: the owner asked to try now). True when it was read."""
+        async with self.locks.setdefault(thread, asyncio.Lock()):
+            moment = self.clock()
+            # Failures in a row (ghfail) count real reads only: one backing off is not read
+            # before its next read is due (ghnext).
+            failures = int(self.store.get(f"ghfail:{thread}") or 0)
+            due = self.store.get(f"ghnext:{thread}") or ""
+            waiting = bool(failures and due and not at_once)
+            if waiting and moment < datetime.fromisoformat(due).timestamp() - EARLY_SECONDS:
+                return False
+            try:
+                followed = await self.poll_pull(thread, since)
+            except Exception as exc:
+                await self.read_failed(thread, failures + 1, exc)
+                return False
+            self.reading.pop(thread, None)
+            if not followed:
+                self.forget(thread)  # Let go as it ended: nothing of it is read again.
+            else:
+                self.read_ok(thread)
+            return True
+
+    async def read_failed(self, thread: str, failures: int, exc: Exception):
+        """A followed PR could not be read: why, said on its task's card once it has failed a
+        few times in a row; when it is read again; let go once GitHub said three times in a
+        row that it does not exist."""
+        logger.warning("Could not read followed %s (%s): %s", thread, failures, exc)
+        before = json.loads(self.store.get(f"ghwhy:{thread}") or "{}")
+        detail = " ".join(str(exc).removeprefix("GitHub request failed: ").split())[:300]
+        kind, step, moment = failure_kind(detail), self.reading.pop(thread, ""), self.clock()
+        retry = moment + backoff(kind, failures, step)
+        reset = await self.rate_reset(thread, detail) if kind == "rate_limited" else None
+        if reset and reset > moment:
+            # When GitHub lifts it, sooner or later than backing off would (within the hour).
+            retry = min(reset, moment + MAX_BACKOFF_SECONDS)
+        found = {
+            "kind": kind,
+            "step": step,
+            "error": why_words(kind, detail, iso(retry), moment),
+            "detail": detail,
+            "at": iso(moment),
+            "retry_at": iso(retry),
+        }
+        self.store.set(f"ghfail:{thread}", str(failures))
+        self.store.set(f"ghwhy:{thread}", json.dumps(found))
+        self.store.set(f"ghnext:{thread}", iso(retry))
+        if failures == SHOWN_AFTER or (
+            failures > SHOWN_AFTER and (before.get("kind"), before.get("step")) != (kind, step)
+        ):
+            self.host.read_health_changed(thread)  # Its task's card says so now.
+        missing = int(self.store.get(f"gh404:{thread}") or 0)
+        if kind == "not_found" and step == "pull request":
+            missing += 1
+        elif kind == "permission" or step != "pull request":
+            missing = 0  # GitHub refuses it, or the PR itself was read: it is there.
+        # A rate limit or GitHub not answering says nothing of it either way: the count stays.
+        if missing:
+            self.store.set(f"gh404:{thread}", str(missing))
+        else:
+            self.store.delete(f"gh404:{thread}")
+        if missing >= MISSING_TRIES:
+            # No such PR (an example in a report, a typo), or no account sees it: following it
+            # can never bring news.
+            self.host.missing(
+                thread, "GitHub has no such pull request, or none of your accounts can see it"
+            )
+
+    async def rate_reset(self, thread: str, detail: str) -> float | None:
+        """When GitHub lifts the rate limit a read of this PR hit (epoch seconds), when it says:
+        in its answer, else the reading account's REST limit (asking does not count against
+        it). None for a secondary limit, which says no time."""
+        if found := RETRY_AFTER.search(detail):
+            return self.clock() + int(found.group(1))
+        if found := RATE_RESET.search(detail):
+            return float(found.group(1))
+        owner = thread.removeprefix("github:").split("/")[0]
+        login = self.store.get(f"ghaccount:{owner}") or ""
+        try:
+            extra = {"token": await self.token(login)} if login else {}
+            core = json.loads(await self.raw("api", "rate_limit", **extra))["resources"]["core"]
+        except Exception:
+            return None
+        return float(core["reset"]) if core.get("remaining") == 0 and core.get("reset") else None
+
+    async def retry(self, thread: str) -> bool:
+        """Read a followed PR now, whatever its backoff (the owner asked): True when it was
+        read. Failed again, it is read next after the backoff that failure brings."""
+        since = next(
+            (sub["since"] for sub in self.host.followed("github:") if sub["thread"] == thread),
+            None,
+        )
+        if since is None:
+            raise ValueError(f"Nothing follows {threads.label(thread)} now.")
+        return await self.read_followed(thread, since, at_once=True)
+
     def read_ok(self, thread: str, whole: bool = True):
-        """A followed PR was read: what failed before is over, and its task's card says so at
-        once. `whole`: all of it (comments, reviews, CI); else only the PR itself, which
-        clears only a failure to read the PR itself."""
+        """A followed PR was read: what failed before is over, its backoff too, and its task's
+        card says so at once. `whole`: all of it (comments, reviews, CI); else only the PR
+        itself, which clears only a failure to read the PR itself."""
         why = json.loads(self.store.get(f"ghwhy:{thread}") or "{}")
         if not whole and why.get("step") not in {None, "", "pull request"}:
             return
         failed = int(self.store.get(f"ghfail:{thread}") or 0)
-        for key in ("ghfail", "gh404", "ghskip"):
-            self.store.set(f"{key}:{thread}", "0")
-        self.store.delete(f"ghwhy:{thread}")
-        if failed >= SHOWN_AFTER:
+        for key in ("ghfail", "gh404", "ghskip", "ghwhy"):
+            self.store.delete(f"{key}:{thread}")
+        moment = self.clock()
+        if whole:
+            self.store.set(f"ghread:{thread}", iso(moment))
+            self.store.set(f"ghnext:{thread}", iso(moment + POLL_SECONDS))
+        elif failed:
+            self.store.set(f"ghnext:{thread}", iso(moment))  # Read whole at the next poll.
+        if failed:
             self.host.read_health_changed(thread)
+
+    def forget(self, thread: str):
+        """What reading a PR kept (see READ_STATE), once nobody follows it: a PR followed again
+        later starts afresh."""
+        for prefix in READ_STATE:
+            self.store.delete(f"{prefix}:{thread}")
+        self.reading.pop(thread, None)
+        if (lock := self.locks.get(thread)) and not lock.locked():
+            del self.locks[thread]
+
+    def forget_unfollowed(self, followed: set[str]):
+        """Read state left of PRs nobody follows now (its worker closed, the task it was
+        followed for gone): nothing reads them till they are followed again. (Before, following
+        a Slack thread wrote some under its key too.)"""
+        left = {
+            key.removeprefix(f"{prefix}:")
+            for prefix in READ_STATE
+            for key in self.store.keys(f"{prefix}:")
+        }
+        for thread in (left | set(self.locks)) - followed:
+            self.forget(thread)
+
+    def why(self, thread: str) -> dict:
+        """Why a followed PR could not be read last, as the owner is told it: {kind (one of
+        KINDS), error (in words, with when it is tried again), step, at, retry_at (ISO, or None),
+        detail (GitHub's own words)}; {} when its last read worked."""
+        why = json.loads(self.store.get(f"ghwhy:{thread}") or "{}")
+        if not why:
+            return {}
+        # Before: GitHub's words in "error", and kinds "access" and "other".
+        detail = why["detail"] if "detail" in why else why.get("error") or ""
+        kind = why.get("kind") if why.get("kind") in KINDS else failure_kind(detail)
+        retry_at = why.get("retry_at") or self.store.get(f"ghnext:{thread}") or None
+        return {
+            "kind": kind,
+            "error": why_words(kind, detail, retry_at, self.clock()),
+            "step": why.get("step") or "",
+            "at": why.get("at") or "",
+            "retry_at": retry_at,
+            "detail": detail,
+        }
 
     async def poll_review_requests(self, settings, followed: set[str]) -> list[str]:
         """Review requests in the owner's repositories become triggers. What failed, said (one
@@ -656,8 +857,9 @@ class GitHubSource:
             )
         return errors
 
-    async def poll_pull(self, thread: str, since: float):
-        """New comments, reviews, CI results and the end of a followed PR go to its followers."""
+    async def poll_pull(self, thread: str, since: float) -> bool:
+        """New comments, reviews, CI results and the end of a followed PR go to its followers.
+        False when it was let go (it ended)."""
         match = threads.GITHUB_PR.fullmatch(thread)
         if not match:
             raise ValueError(f"Not a pull request thread: {thread}")
@@ -782,7 +984,7 @@ class GitHubSource:
                 # Already finished when followed (a PR cited in passing): just stop
                 # following it.
                 self.host.unfollow(thread)
-                return
+                return False
             if state == "merged":
                 items.append((f"github:state:{thread}:merged", "The PR was merged."))
             else:
@@ -795,7 +997,7 @@ class GitHubSource:
                         f"{'followed' if before else 'closed'} (a reopening after that is not "
                         "noticed)",
                     )
-                    return
+                    return False
                 kept = True
                 self.store.set(f"ghclosed:{thread}", ended or now())
                 if not before:
@@ -829,6 +1031,8 @@ class GitHubSource:
         self.store.set(f"ghhead:{thread}", sha)
         if state != "open" and not kept:
             self.host.unfollow(thread, finished=True, merged=state == "merged")
+            return False
+        return True
 
     async def branch_gone(self, pull: dict) -> str:
         """The name of a closed PR's head branch when it no longer exists (deleted, or its fork

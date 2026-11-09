@@ -83,6 +83,16 @@ READ_LATER_SECONDS = 1800
 OWN_SLACK_DM = "your own Slack DM"
 # The threads of the notifications sent there are read too (the newest this many).
 MAX_THREADS = 10
+# The owner's own DM is read this many messages at a time: a full page whose oldest message is
+# newer than what was read before leaves the rest unread (coverage limited).
+DM_PAGE = 50
+# New commands from where the owner is: none, by design. A reply answers what a notification
+# asked, by its code; one that names no code is placed with a code that waits (or the owner is
+# asked which), never taken as new work.
+NO_NEW_COMMANDS = (
+    "by design: a reply answers what a notification asked, by its code; new work starts in "
+    "Chief of Staff"
+)
 # What the owner reads away (fixed words: a notification's, what became of a reply) in Chinese
 # (simplified) for an owner who writes it; English otherwise. Written with ASCII punctuation:
 # Chinese gets its own (FULLWIDTH). Reply keywords ("send", "no") stay, with what they mean.
@@ -99,6 +109,9 @@ CHINESE = {
         ),
         "Answer in Chief of Staff on your computer: replies here are not read.": (
             "请在电脑上的 Chief of Staff 里答复:这里的回复不会被读取。"
+        ),
+        "Replies here cannot be read now: answer in Chief of Staff on your computer.": (
+            "现在读不到这里的回复:请在电脑上的 Chief of Staff 里答复。"
         ),
         "{more} more waiting: open Chief of Staff. ": "还有 {more} 项在等你:打开 Chief of Staff。",
         "Not merged yet": "还没合并",
@@ -733,7 +746,19 @@ class Connector:
             # Each watch from where it was last covered in full (a little before: what came in
             # while that scan ran), not from the last scan started: one that failed, or could
             # see only part of its source, leaves its window to the next.
-            self.store.set("watch_scan", json.dumps([watch_key(w.what) for w in watches]))
+            keys = [watch_key(w.what) for w in watches]
+            self.store.set("watch_scan", json.dumps(keys))
+            # Where each was covered to before it: a later report of this scan that finds one
+            # partial puts it back there, even after an earlier report took it for covered.
+            self.store.set(
+                "watch_scan_before",
+                json.dumps(
+                    {
+                        "done_at": self.store.get("watch_done_at"),
+                        "done": {key: self.store.get(f"watchdone:{key}") for key in keys},
+                    }
+                ),
+            )
             lines = ["Scan now. The owner's watches, each with the time to look from:"]
             for number, watch in enumerate(watches, 1):
                 since = self.watch_since(watch.what)
@@ -757,6 +782,13 @@ class Connector:
             if by_owner:
                 self.runtime.publish_state()
 
+    def restore(self, key: str, value: str | None):
+        """A cursor back where it was (`value`; none when that is empty)."""
+        if value:
+            self.store.set(key, value)
+        else:
+            self.store.delete(key)
+
     def watch_since(self, what: str) -> float:
         """Where a watch's next scan starts: a little before the last scan that covered it in
         full (at most LOOKBACK_HOURS back); 0 for a new one."""
@@ -773,20 +805,31 @@ class Connector:
         partial = {item.watch: item.reason.strip()[:300] for item in params.incomplete}
         if params.problems.strip() and not partial:
             partial = dict.fromkeys(range(1, len(scanned) + 1), params.problems.strip()[:300])
+        before = json.loads(self.store.get("watch_scan_before") or "{}")
         incomplete = []
         for number, key in enumerate(scanned, 1):
-            if number in partial:
+            # Partial in an earlier report of this same scan (items come in several reports):
+            # still partial, whatever a later one leaves out.
+            earlier = json.loads(self.store.get(f"watchpartial:{key}") or "null") or {}
+            if earlier.get("scan") != started:
+                earlier = {}
+            if number in partial or earlier:
+                reason = partial.get(number) or earlier["reason"]
                 # Its window stays open: the next scan looks from where it was last covered.
                 self.store.set(
                     f"watchpartial:{key}",
-                    json.dumps({"reason": partial[number], "at": now()}),
+                    json.dumps({"reason": reason, "at": now(), "scan": started}),
                 )
-                incomplete.append({"watch": number, "reason": partial[number]})
+                if key in (before.get("done") or {}):
+                    self.restore(f"watchdone:{key}", before["done"][key])
+                incomplete.append({"watch": number, "reason": reason})
             else:
                 self.store.set(f"watchdone:{key}", started)
                 self.store.delete(f"watchpartial:{key}")
         if not incomplete:
             self.store.set("watch_done_at", started)
+        elif "done_at" in before:
+            self.restore("watch_done_at", before["done_at"])
         if params.methods.strip():
             self.store.set("watch_methods", params.methods.strip()[:2000])
         new = 0
@@ -1318,6 +1361,11 @@ class Connector:
         without (then the owner answers in Chief of Staff). `notes`: lines for the owner that
         are no items (see tell_away)."""
         notes = notes or []
+        if not codes:
+            # Without codes nothing asks for a reply there: not a note asking which code a
+            # reply answers.
+            asking = set(self.asking_notes())
+            notes = [note for note in notes if note not in asking]
         sections = []
         for item in items:
             what, said, hint = self.describe(item)
@@ -1330,8 +1378,9 @@ class Connector:
                     if self.decides_draft(item)
                     else "Not answered yet"
                 )
-                # Its heading says "not sent" already; the draft goes on its own line.
-                reason = NOT_DONE.sub("", reason.strip()).rstrip(".\u3002")
+                # Its heading says "not sent" already; the draft goes on its own line. Without
+                # codes, not why (it says what to answer there).
+                reason = NOT_DONE.sub("", reason.strip()).rstrip(".\u3002") if codes else ""
                 reason = reason[:1].upper() + reason[1:]
                 end = "\u3002" if self.chinese() else "."
                 what = f"{self.say(again)} \u00b7 {what}"
@@ -1403,6 +1452,9 @@ class Connector:
         for item in shown:
             item["code"] = self.code_for(item["id"])
         files = await asyncio.to_thread(self.write_notification, shown, more, notes)
+        # Replies where it goes could not be read when last tried (Send only): it asks for none
+        # and points back to Chief of Staff. A test tries reading them again.
+        plain = not test and self.capabilities()["send_only"]
         self.store.set(
             "away_pending",
             json.dumps(
@@ -1412,31 +1464,47 @@ class Connector:
                     "test": test,
                     "files": files,
                     "notes": notes,
+                    "plain": plain,
                 }
             ),
         )
         settings = self.store.settings()
         how = settings.away_how.strip() or prompts.AWAY_DEFAULT
-        lines = [
-            "Send the owner one of these messages, as it is (only to the owner themself, nobody "
-            "else). Version A has answer codes: send it when you can read the owner's replies in "
-            "that same conversation later with your tools. Otherwise send version B. Each is "
-            "written as Slack text and as Slack Block Kit (JSON with blocks and a fallback text): "
-            "send the Block Kit one when your tool can, else the text.",
-            f"A: {files['codes.txt']} or {files['codes.json']}",
-            f"B: {files['plain.txt']} or {files['plain.json']}",
-            f"How the owner wants to get it: {how}",
-        ]
+        lines = (
+            [
+                "Send the owner this message, as it is (only to the owner themself, nobody "
+                "else). Their replies there could not be read when last tried, so it asks for "
+                "none: send this version only (with send_owner_slack_dm, version B). It is "
+                "written as Slack text and as Slack Block Kit (JSON with blocks and a fallback "
+                "text): send the Block Kit one when your tool can, else the text.",
+                f"B: {files['plain.txt']} or {files['plain.json']}",
+            ]
+            if plain
+            else [
+                "Send the owner one of these messages, as it is (only to the owner themself, "
+                "nobody else). Version A has answer codes: send it when you can read the owner's "
+                "replies in that same conversation later with your tools. Otherwise send version "
+                "B. Each is written as Slack text and as Slack Block Kit (JSON with blocks and a "
+                "fallback text): send the Block Kit one when your tool can, else the text.",
+                f"A: {files['codes.txt']} or {files['codes.json']}",
+                f"B: {files['plain.txt']} or {files['plain.json']}",
+            ]
+        )
+        lines.append(f"How the owner wants to get it: {how}")
         if self.slack_dm():
             lines.append(SLACK_DM_HINT)
         if method := self.store.get("away_method"):
             lines.append(f"What you used before: {method}")
-        if replies := self.store.get("away_replies"):
+        if not plain and (replies := self.store.get("away_replies")):
             lines.append(f"How you read their replies before: {replies}")
         lines.append(
-            "Then call report_notified: whether it arrived, where, the exact method, and how you "
-            "can read their replies there (empty if you sent B). Never post it anywhere else or "
-            "as the owner to anyone else."
+            "Then call report_notified: whether it arrived, where, and the exact method (replies "
+            "empty: they are not read). Never post it anywhere else or as the owner to anyone "
+            "else."
+            if plain
+            else "Then call report_notified: whether it arrived, where, the exact method, and how "
+            "you can read their replies there (empty if you sent B). Never post it anywhere else "
+            "or as the owner to anyone else."
         )
         await self.runtime.toolset.start_special(MESSENGER, MESSENGER_TITLE, "\n\n".join(lines))
 
@@ -1485,22 +1553,31 @@ class Connector:
             note["text"] for note in notes if time.time() - note["at"] < READ_REPLIES_HOURS * 3600
         ]
 
-    async def tell_away(self, text: str):
+    def asking_notes(self) -> list[str]:
+        """Those of the notes that ask the owner to reply there (which code a reply answers)."""
+        notes = json.loads(self.store.get("away_notes") or "[]")
+        return [note["text"] for note in notes if note.get("asks")]
+
+    async def tell_away(self, text: str, asks: bool = False):
         """A line for the owner where they are, about a reply of theirs there (no item to
-        answer): at once in their own Slack DM, else with the next notification."""
+        answer): at once in their own Slack DM, else with the next notification. `asks`: it
+        asks them to reply there (left out of a notification that reads no replies)."""
         if self.store.get("away_where") == OWN_SLACK_DM and self.slack_dm():
             try:
                 user = await self.owner_slack_id()
                 result = await self.runtime.slack.send({"channel_id": user}, text)
-            except Exception:
+            except Exception as exc:
                 logger.warning("Could not write to the owner's own Slack DM.", exc_info=True)
+                self.tried("send", False, str(exc), OWN_SLACK_DM)
             else:
+                self.tried("send", True, "", OWN_SLACK_DM)
                 for key in message_keys(result):
                     self.store.add_trigger("slack-sent", key, text)  # Not a reply of theirs.
                 return
         notes = json.loads(self.store.get("away_notes") or "[]")
         notes = [note for note in notes if note["text"] != text]
-        self.store.set("away_notes", json.dumps([*notes, {"text": text, "at": time.time()}][-10:]))
+        note = {"text": text, "at": time.time(), **({"asks": True} if asks else {})}
+        self.store.set("away_notes", json.dumps([*notes, note][-10:]))
 
     def messenger_busy(self) -> bool:
         row = self.runtime.toolset.last_special(MESSENGER)
@@ -1612,9 +1689,20 @@ class Connector:
         if not pending or not pending.get("files"):
             raise ValueError("No notification is being sent now.")
         user = await self.owner_slack_id()
-        name = "codes.txt" if params.version == "A" else "plain.txt"
+        # With answer codes only while replies there can be read: not when the notification
+        # asks for none (Send only), nor when reading them failed when last tried.
+        replies = self.capabilities_of(OWN_SLACK_DM).get("replies") or {}
+        codes = (
+            params.version == "A" and not pending.get("plain") and replies.get("ok") is not False
+        )
+        name = "codes.txt" if codes else "plain.txt"
         text = (await asyncio.to_thread(Path(pending["files"][name]).read_text, "utf-8")).strip()
-        result = await self.runtime.slack.send({"channel_id": user}, text)
+        try:
+            result = await self.runtime.slack.send({"channel_id": user}, text)
+        except Exception as exc:
+            self.tried("send", False, str(exc), OWN_SLACK_DM)
+            raise
+        self.tried("send", True, "", OWN_SLACK_DM)
         keys = message_keys(result)
         for key in keys:
             # Not a message to the owner for the Slack watcher, nor a reply of theirs.
@@ -1631,19 +1719,30 @@ class Connector:
         ]
         if stamps:
             notified.append(max(stamps, key=float))
+        # The DM itself (D…), as Slack linked the message; else the owner's id.
+        channel = (PERMALINK_CHANNEL.findall(result) or [user])[0]
         self.store.set(
             "away_slack_dm",
             json.dumps(
                 {
-                    # The DM itself (D…), as Slack linked the message; else the owner's id.
-                    "channel": (PERMALINK_CHANNEL.findall(result) or [user])[0],
+                    "channel": channel,
                     # Replies to every notification still answerable are read.
                     "after": min(before["after"], sent) if recent else sent,
                     "threads": notified[-MAX_THREADS:],
                 }
             ),
         )
-        replies = "read_owner_slack_dm" if params.version == "A" else ""
+        readable = await self.read_back(channel, max(stamps, key=float) if stamps else "")
+        if codes and not readable:
+            # It asks for replies that cannot be read: said at once, where it went.
+            note = self.say(
+                "Replies here cannot be read now: answer in Chief of Staff on your computer."
+            )
+            with suppress(Exception):
+                for key in message_keys(await self.runtime.slack.send({"channel_id": user}, note)):
+                    self.store.add_trigger("slack-sent", key, note)
+            codes = False
+        replies = "read_owner_slack_dm" if codes else ""
         # Where it went, in the owner's words, whatever the messenger reports.
         self.store.set("away_pending", json.dumps({**pending, "slack_dm": True}))
         return (
@@ -1651,29 +1750,74 @@ class Connector:
             f'own Slack DM", method="send_owner_slack_dm", replies="{replies}").'
         )
 
+    async def read_back(self, channel: str, stamp: str) -> bool:
+        """Right after a notification went to the owner's own Slack DM, read there as their
+        replies are read: whether it is there (Delivery), and whether the DM and its thread can
+        be read (Read replies). False when replies there cannot be read."""
+        mcp = self.runtime.slack.mcp
+        try:
+            listed = await mcp.call("slack_read_channel", {"channel_id": channel, "limit": DM_PAGE})
+        except Exception as exc:
+            logger.info("Could not read the owner's own Slack DM back: %s", exc)
+            self.tried("delivery", False, f"could not read the DM back: {exc}", OWN_SLACK_DM)
+            self.tried("replies", False, f"could not read the DM: {exc}", OWN_SLACK_DM)
+            return False
+        if not stamp:
+            self.tried("delivery", False, "Slack gave no message id to look for", OWN_SLACK_DM)
+            self.tried(
+                "replies", False, "Slack gave no message id: its thread cannot be read",
+                OWN_SLACK_DM,
+            )  # fmt: skip
+            return False
+        there = stamp in {entry["ts"] for entry in messages(listed)}
+        self.tried(
+            "delivery", there, "" if there else "not found in the DM when read back", OWN_SLACK_DM
+        )
+        try:
+            await mcp.call("slack_read_thread", {"channel_id": channel, "message_ts": stamp})
+        except Exception as exc:
+            logger.info("Could not read the notification's thread back: %s", exc)
+            self.tried("replies", False, f"could not read its thread: {exc}", OWN_SLACK_DM)
+            return False
+        self.tried("replies", True, "", OWN_SLACK_DM)
+        return True
+
     async def owner_dm_news(self) -> bool | None:
         """Whether the owner wrote in their own Slack DM since it was last looked at (read
         through Chief of Staff's own Slack connection: no messenger run); None when it cannot
-        be read here (the messenger looks)."""
+        be read here, or only in part (the messenger looks, at its own pace)."""
         try:
-            found = await self.owner_dm_messages()
+            found, complete = await self.owner_dm_messages()
         except Exception:
             logger.warning("Could not read the owner's own Slack DM.", exc_info=True)
             return None
         newest = max((float(entry["ts"]) for entry in found), default=0.0)
         # Seen once the messenger read it (see t_read_owner_slack_dm): a run that failed
         # first leaves it for the next.
-        return newest > float(self.store.get("away_dm_seen") or 0)
+        seen = float(self.store.get("away_dm_seen") or 0)
+        if complete:
+            return newest > seen
+        # Part of it could not be read: nothing counts as seen. At once only for what the
+        # messenger has not looked at yet.
+        looked = float(self.store.get("away_dm_looked") or 0)
+        return True if newest > max(seen, looked) else None
 
-    async def owner_dm_messages(self) -> list[dict]:
+    async def owner_dm_messages(self) -> tuple[list[dict], bool]:
         """The owner's own messages in their own Slack DM since a notification was sent
-        there, and in the threads of the notifications, oldest first."""
+        there, and in the threads of the notifications, oldest first; and whether all of it
+        was read (a thread that could not be read, a listing cut short: see away_coverage)."""
         dm = json.loads(self.store.get("away_slack_dm") or "null")
         if not dm:
             raise ValueError("Nothing was sent to the owner's own Slack DM.")
         user = await self.owner_slack_id()
         mcp = self.runtime.slack.mcp
-        listed = await mcp.call("slack_read_channel", {"channel_id": dm["channel"], "limit": 50})
+        try:
+            listed = await mcp.call(
+                "slack_read_channel", {"channel_id": dm["channel"], "limit": DM_PAGE}
+            )
+        except Exception as exc:
+            self.tried("replies", False, f"could not read the DM: {exc}", OWN_SLACK_DM)
+            raise
         stamps = dm.get("threads") or []
         replies = await asyncio.gather(
             *(
@@ -1683,7 +1827,8 @@ class Connector:
             return_exceptions=True,
         )
         entries = messages(listed)
-        gone = []
+        page = [float(entry["ts"]) for entry in entries if entry["ts"]]
+        gone, failed = [], 0
         for stamp, thread in zip(stamps, replies, strict=True):
             if isinstance(thread, BaseException):
                 # One that cannot be read (deleted, a passing error) does not stop the rest;
@@ -1691,12 +1836,26 @@ class Connector:
                 logger.info("Could not read the notification thread %s: %s", stamp, thread)
                 if re.search(r"thread_not_found|not found", str(thread), re.IGNORECASE):
                     gone.append(stamp)
+                else:
+                    failed += 1
                 continue
             # Its replies, not the notification itself.
             entries += [e for e in messages(thread) if e["ts"] and float(e["ts"]) > float(stamp)]
         if gone:
             kept = [stamp for stamp in stamps if stamp not in gone]
             self.store.set("away_slack_dm", json.dumps({**dm, "threads": kept}))
+        gaps = []
+        if failed:
+            gaps.append(f"could not read {failed} of {len(stamps)} notification threads")
+        # A full page that does not reach back to what was read before: the rest is unread.
+        reached = max(dm["after"], float(self.store.get("away_dm_seen") or 0))
+        if len(page) >= DM_PAGE and min(page) > reached:
+            gaps.append(f"the DM listing stopped at {DM_PAGE} messages: earlier ones were not read")
+        self.covered(gaps)
+        if not gaps:
+            self.tried("replies", True, "", OWN_SLACK_DM)
+        if stamps and float(stamps[-1]) in page:
+            self.tried("delivery", True, "", OWN_SLACK_DM)  # The latest one is there.
         found = {
             entry["ts"]: entry
             for entry in entries
@@ -1708,15 +1867,40 @@ class Connector:
                 (f"slack:{entry['ts']}",),
             )
         }
-        return sorted(found.values(), key=lambda entry: float(entry["ts"]))
+        return sorted(found.values(), key=lambda entry: float(entry["ts"])), not gaps
+
+    def covered(self, gaps: list[str]):
+        """How much of the owner's own DM the last read covered: "limited" (and why) when part
+        of it could not be read; a full read clears it."""
+        before = json.loads(self.store.get("away_coverage") or "{}")
+        detail = "; ".join(gaps)
+        self.store.set(
+            "away_coverage", json.dumps({"limited": bool(gaps), "at": now(), "detail": detail})
+        )
+        if bool(before.get("limited")) != bool(gaps) or before.get("detail", "") != detail:
+            self.runtime.publish_state()
 
     async def t_read_owner_slack_dm(self, params: ReadOwnerSlackDm, caller: str):
         """What the owner wrote in their own Slack DM since a notification was sent there:
         their own messages only, not the notifications; each with when (for its `at`)."""
         self.check(caller, (MESSENGER,))
-        found = await self.owner_dm_messages()
+        found, complete = await self.owner_dm_messages()
+        limited = (
+            ""
+            if complete
+            else "\n(Coverage limited: "
+            + json.loads(self.store.get("away_coverage") or "{}").get("detail", "")
+            + ". What could not be read is read again later.)"
+        )
+        if not complete:
+            # Part of it could not be read: what is reported now is not all there is, so
+            # nothing counts as seen (see owner_dm_news); what was looked at is not run for
+            # again at once.
+            self.store.delete("away_dm_reading")
+            if found:
+                self.store.set("away_dm_looked", str(max(float(e["ts"]) for e in found)))
         if not found:
-            return "No reply from the owner there yet."
+            return "No reply from the owner there yet." + limited
         newest = str(max(float(entry["ts"]) for entry in found))
         seen = float(self.store.get("away_dm_seen") or 0)
         codes = {code.lower() for code in self.reply_codes()}
@@ -1731,14 +1915,18 @@ class Connector:
         codeless = any(
             self.followed_codes(float(entry["ts"])) for entry in fresh if entry not in coded
         )
-        if coded or (codeless and self.store.get("away_dm_reading") != newest):
+        if complete and (coded or (codeless and self.store.get("away_dm_reading") != newest)):
             # Seen once it reported them: a run that fails before that leaves them for the next.
             self.store.set("away_dm_reading", newest)
-        else:
+        elif complete:
             self.store.set("away_dm_seen", newest)  # Nothing in them to report.
-        return "The owner wrote there (oldest first):\n" + "\n".join(
-            f"- ({datetime.fromtimestamp(float(entry['ts']), UTC).isoformat()}) {entry['text']}"
-            for entry in found
+        return (
+            "The owner wrote there (oldest first):\n"
+            + "\n".join(
+                f"- ({datetime.fromtimestamp(float(entry['ts']), UTC).isoformat()}) {entry['text']}"
+                for entry in found
+            )
+            + limited
         )
 
     async def t_report_notified(self, params: ReportNotified, caller: str):
@@ -1751,15 +1939,19 @@ class Connector:
         if params.ok and pending and pending.get("slack_dm"):
             where = OWN_SLACK_DM
         if params.ok:
+            # A message went out (the send tool said so, for the owner's own Slack DM).
+            self.tried("send", True, "", where)
+            if not params.replies.strip() and not (pending and pending.get("slack_dm")):
+                # Its tools found no way to read replies there (the own Slack DM's are tried
+                # by reading them: read_back).
+                self.tried("replies", False, "no way to read them there was found", where)
             if params.method.strip():
                 self.store.set("away_method", params.method.strip()[:1000])
             if where:
-                if where != (self.store.get("away_where") or ""):
-                    self.store.delete("away_reply_verified")  # Another way: not tried yet.
                 self.store.set("away_where", where)
             replies = params.replies.strip()[:1000]
-            if replies != (self.store.get("away_replies") or ""):
-                self.store.delete("away_reply_verified")
+            if where != OWN_SLACK_DM and replies not in {"", self.store.get("away_replies")}:
+                self.untried("replies")  # Read another way now: not tried yet.
             self.store.set("away_replies", replies)
             self.store.delete("away_retry_at")
             if pending and pending.get("test"):
@@ -1786,6 +1978,7 @@ class Connector:
                     "away_notes", json.dumps([note for note in notes if note["text"] not in told])
                 )
         else:
+            self.tried("send", False, params.error, yours(params.where.strip())[:300])
             self.store.set("away_retry_at", str(time.time() + RETRY_SECONDS))
         self.store.set(
             "away_last",
@@ -1970,7 +2163,9 @@ class Connector:
             return ""
         self.store.set(f"awayasked:{key}", now())
         listed = ", ".join(codes)
-        await self.tell_away(self.say("Which one? Reply with its code: {codes}", codes=listed))
+        await self.tell_away(
+            self.say("Which one? Reply with its code: {codes}", codes=listed), asks=True
+        )
         said = " ".join(reply.text.split())[:200]
         self.runtime.add_message(
             self.runtime.router_id(),
@@ -2063,24 +2258,71 @@ class Connector:
         return self.say("dropped already")
 
     def verified_replies(self):
-        self.store.set(
-            "away_reply_verified",
-            json.dumps({"at": now(), "where": self.store.get("away_where") or ""}),
-        )
+        """A code a notification gave came back: it arrived, and replies there are read."""
+        self.tried("delivery", True, "you answered it")
+        self.tried("replies", True, "a reply came back")
+
+    def tried(self, what: str, ok: bool, detail: str = "", where: str | None = None):
+        """What the way the owner is reached away did when it was just used: "send",
+        "delivery" or "replies" worked, or failed (see capabilities). `where`: the way (where
+        notifications went); a message that went out another way starts afresh, as what the
+        last way could do says nothing of it."""
+        where = (self.store.get("away_where") or "") if where is None else where
+        tested: dict[str, Any] = json.loads(self.store.get("away_tested") or "{}")
+        if what == "send" and ok and where != tested.get("way"):
+            tested = {"way": where}
+        tested[what] = {
+            "ok": ok,
+            "at": now(),
+            "where": where,
+            "detail": " ".join(detail.split())[:300],
+        }
+        self.store.set("away_tested", json.dumps(tested))
+
+    def untried(self, what: str):
+        tested = json.loads(self.store.get("away_tested") or "{}")
+        if tested.pop(what, None) is not None:
+            self.store.set("away_tested", json.dumps(tested))
+
+    def capabilities_of(self, where: str) -> dict:
+        """What was tried of one way to the owner: each capability's last result there."""
+        tested = json.loads(self.store.get("away_tested") or "{}")
+        return {
+            what: entry
+            for what, entry in tested.items()
+            if isinstance(entry, dict) and entry.get("where") == where
+        }
 
     def capabilities(self) -> dict:
-        """What the way the owner is reached can do, as tried, not as claimed: messages went
-        out (the messenger said so), replies are read (it says how), a reply came back (a code
-        returned), and new requests by reply (no: codes answer what was sent)."""
-        last = json.loads(self.store.get("away_last") or "{}")
-        verified = json.loads(self.store.get("away_reply_verified") or "null")
-        return {
-            "sends": bool(last.get("ok")),
-            "sent_at": last.get("at", "") if last.get("ok") else "",
-            "reads_replies": bool(self.store.get("away_replies")),
-            "replies_verified_at": (verified or {}).get("at", ""),
-            "new_requests": False,
+        """What the way the owner is reached away can do, as tried when it was used (by the
+        Away test, and by notifications and reads as they happen), never as a tool claims:
+        Send (a message went out), Delivery (it was found where it went, or the owner answered
+        it), Read replies (their replies there were read: in the DM and in the threads of the
+        notifications), each yes, no or untested, with when; New commands: no, by design (see
+        NO_NEW_COMMANDS). Send only: messages go out, replies there are not read. Coverage: how
+        much of the owner's own DM the last read could read."""
+        tested = json.loads(self.store.get("away_tested") or "{}")
+        found: dict[str, Any] = {}
+        for what in ("send", "delivery", "replies"):
+            entry = tested.get(what)
+            found[what] = (
+                {
+                    "state": "yes" if entry["ok"] else "no",
+                    "at": entry["at"],
+                    "detail": entry.get("detail", ""),
+                }
+                if isinstance(entry, dict)
+                else {"state": "untested", "at": "", "detail": ""}
+            )
+        found["commands"] = {"state": "no", "at": "", "detail": NO_NEW_COMMANDS}
+        found["send_only"] = found["send"]["state"] == "yes" and found["replies"]["state"] == "no"
+        coverage = json.loads(self.store.get("away_coverage") or "{}")
+        found["coverage"] = {
+            "limited": bool(coverage.get("limited")),
+            "at": coverage.get("at", ""),
+            "detail": coverage.get("detail", ""),
         }
+        return found
 
     @staticmethod
     def decides_draft(item: dict) -> bool:

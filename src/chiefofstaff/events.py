@@ -13,11 +13,13 @@ import os
 import re
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 
 from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
 
 from . import prompts, receipts, threads
+from .backend import running_background, stop_background
 from .delivery import digest
 from .envelope import from_owner, news_tasks, tasks_named, wrap
 from .policy import owners_checkout, permission_denial, written_file
@@ -115,6 +117,11 @@ TRANSIENT = re.compile(
     re.IGNORECASE,
 )
 RETRIES = 2
+# Seconds after its loop went idle (assistant.idle) or a turn ended (assistant.turn_end, for a
+# Copilot that does not say assistant.idle) with no session.idle: a command left running in the
+# background holds it (see Events.held_idle).
+HELD_AFTER_IDLE = float(os.environ.get("CHIEFOFSTAFF_HELD_AFTER_IDLE", "2"))
+HELD_AFTER_TURN = float(os.environ.get("CHIEFOFSTAFF_HELD_AFTER_TURN", "8"))
 # A shell command that opens a PR (its URL is in the output).
 OPENS_PR = re.compile(r"\bgh\s+pr\s+create\b|\bhub\s+pull-request\b")
 # A tool that opens one (a GitHub MCP server's).
@@ -178,6 +185,8 @@ class Events:
             "session.mcp_server_status_changed": self.mcp_status,
             "session.mcp_server_tools_loaded": self.mcp_status,
             "session.idle": self.idle,
+            "assistant.idle": self.loop_idle,
+            "assistant.turn_end": self.turn_end,
             "session.error": self.error,
             "system.notification": self.notification,
         }
@@ -318,6 +327,8 @@ class Events:
     def notification(self, row: dict, event: Any):
         """Copilot tells a session that a command it left running ended."""
         kind = getattr(event.data, "kind", None)
+        if row["role"] == WORKER and not self.states[row["id"]].busy:
+            self.states[row["id"]].woken = True
         if row["role"] != WORKER or getattr(kind, "type", "") != "shell_completed":
             return
         ran = self.store.one(
@@ -345,10 +356,42 @@ class Events:
         if handler and row and not row["closed_at"]:
             handler(row, event)
 
+    def stopped_work(self, row: dict) -> bool:
+        """Whether what it was on was called off (stopped, cancelled) and nothing else of it is
+        open: a turn it starts on its own has nothing to do."""
+        tasks = self.tasks.for_session(row["id"])
+        if any(
+            t["status"] in {"queued", "running"}
+            or (t["status"] == "waiting" and not self.store.get(f"stopped:{t['id']}"))
+            for t in tasks
+        ):
+            return False
+        last = self.tasks.current(row["id"]) or (tasks[-1] if tasks else None)
+        return bool(
+            last and (last["status"] == "cancelled" or self.store.get(f"stopped:{last['id']}"))
+        )
+
+    async def stop_waking(self, session_id: str):
+        if not (handle := self.states.handle(session_id)):
+            return
+        with suppress(Exception):
+            await handle.abort()
+        await stop_background(handle)
+        self.states[session_id].busy = False
+        self.runtime.update_session(session_id, status="idle", activity="")
+        self.runtime.add_message(
+            session_id,
+            "notice",
+            "It started again on its own when a command it had left running ended; what it was "
+            "on is stopped or cancelled, so it was stopped again.",
+        )
+
     def user_message(self, row: dict, event: Any):
         state = self.states[row["id"]]
+        state.woken = False  # A turn on a message.
         state.echoes = True
         state.awaiting = None  # It took up what it was sent.
+        self.delivery.echoed(row["id"], getattr(event.data, "content", "") or "")
         if row["role"] == WORKER and (named := tasks_named(getattr(event.data, "content", ""))):
             # What its turn is about now; steered into a turn on another task, it stays on that.
             delivery = getattr(getattr(event.data, "delivery", None), "value", "")
@@ -399,7 +442,16 @@ class Events:
             )
 
     def turn_start(self, row: dict, event: Any):
+        state = self.states[row["id"]]
+        woken, state.woken = state.woken and not state.busy, False
+        if woken and row["role"] == WORKER and self.stopped_work(row):
+            # Bug E13: stopped (its task stopped or cancelled), it started again on its own when
+            # a command it had left running ended, and worked on what was called off.
+            self.runtime.background(self.stop_waking(row["id"]))
+            return
         self.states[row["id"]].awaiting = None  # It started.
+        self.states[row["id"]].held = False
+        self.states[row["id"]].turn_mark += 1
         if row["role"] == WORKER:
             self.states[row["id"]].busy = True
         if row["status"] == "idle":
@@ -520,10 +572,67 @@ class Events:
     def mcp_status(self, row: dict, event: Any):
         self.runtime.asks.mcp_connected(row["id"], event.data)
 
-    def idle(self, row: dict, event: Any):
+    def loop_idle(self, row: dict, event: Any):
+        """Its turn is over (assistant.idle); session.idle follows unless a command it left
+        running in the background holds it."""
+        if not getattr(event.data, "parent_tool_call_id", None):
+            self.check_held(row, HELD_AFTER_IDLE)
+
+    def turn_end(self, row: dict, event: Any):
+        """A step of its turn ended (assistant.turn_end): the end of its turn when no step
+        follows. Copilot says no assistant.idle while a message it queued waits for a command
+        running in the background. A sub-agent's steps are steps of a call in its turn."""
+        if not getattr(event.data, "parent_tool_call_id", None):
+            self.check_held(row, HELD_AFTER_TURN)
+
+    def check_held(self, row: dict, delay: float):
+        if row["role"] == WORKER:
+            mark = self.states[row["id"]].turn_mark
+            self.runtime.background(self.held_idle(row["id"], mark, delay))
+
+    async def held_idle(self, session_id: str, mark: int, delay: float):
+        """Bug E13: a worker that left a command running in the background (a dev server
+        started attached) ended its turn, but Copilot defers session.idle until that command
+        ends, and it was taken to work for ever ("Thinking…"): what was sent to it then went
+        into a turn that was over, and was lost. Its turn's end is taken now (as idle does),
+        and what is sent to it goes in at once (see Delivery.flush)."""
+        await asyncio.sleep(delay)
+        state = self.states[session_id]
+        if state.turn_mark != mark or not state.busy or state.held:
+            return  # Another turn began, or it went idle as usual.
+        if not (handle := self.states.handle(session_id)) or not await running_background(handle):
+            return
+        row = self.store.find_session(session_id)
+        if state.turn_mark != mark or not state.busy or not row or row["closed_at"]:
+            return
+        if await self.delivery.take_back(session_id, handle):
+            # What Copilot had queued for it goes in now: its turn goes on with that.
+            return
+        if state.turn_mark != mark or not state.busy:
+            return
+        logger.info("%s ended its turn with a command running in the background.", session_id)
+        self.idle(row, None, held=True)
+
+    def idle(self, row: dict, event: Any, held: bool = False):
+        """Its turn is over (session.idle; or `held`: its loop is idle with a command it left
+        running holding session.idle, see held_idle)."""
         session_id = row["id"]
         state = self.states[session_id]
+        state.turn_mark += 1
+        if state.held and not state.busy:
+            # What it left running in the background ended, and it did not go on (Copilot
+            # wakes it when a command ends; this one did not, or it was stopped): its turn's end
+            # was taken already, what waited for its session to be free is due now: a
+            # reconnect, or a report it owes.
+            state.held = False
+            if state.stale:
+                self.runtime.background(self.runtime.reattach(session_id))
+            elif row["role"] == WORKER and not state.after_abort:
+                self.owes_report(row, state)
+            return
+        state.held = held
         state.busy = False
+        self.delivery.handled(session_id)
         # Its session is free again: messages queue as usual. A turn that ended because it was
         # aborted (stopped, its task cancelled) owes no report.
         aborted, state.after_abort = state.after_abort, False
@@ -557,7 +666,9 @@ class Events:
         settled = not (state.close_after_turn or state.stale or state.after_refresh)
         if state.close_after_turn:
             self.runtime.background(self.runtime.workers.close(session_id))
-        elif state.stale:
+        elif state.stale and not held:
+            # Reconnected once its session is free: a held one's command would end with none
+            # to wake (see the start of idle, for its session.idle).
             self.runtime.background(self.runtime.reattach(session_id))
         if row["role"] in {ROUTER, SLACK} and self.delivery.has_unsent(session_id):
             self.delivery.schedule_flush(session_id)  # Events that arrived during the turn.
@@ -566,12 +677,18 @@ class Events:
             self.runtime.background(self.runtime.rotate_router())
         if row["role"] == WORKER:
             self.runtime.background(self.runtime.workers.pump())
-            if settled and not state.retrying and not aborted:
-                self.runtime.workers.complete_report(session_id)
-                self.runtime.background(self.runtime.workers.ask_for_report(session_id))
-                self.news_unreported(row, state)
+            # Held: it waits for a command it left running, whose end wakes it to go on (a
+            # report now would be asked of work in the middle); asked once it is free.
+            if settled and not state.retrying and not aborted and not held:
+                self.owes_report(row, state)
             # A turn may have changed code whose evidence was already collected.
             self.runtime.background(self.runtime.task_actions.check_fresh(session_id))
+
+    def owes_report(self, row: dict, state):
+        """Its turn is over: what it said is its report, or it is asked for one."""
+        self.runtime.workers.complete_report(row["id"])
+        self.runtime.background(self.runtime.workers.ask_for_report(row["id"]))
+        self.news_unreported(row, state)
 
     def news_unreported(self, row: dict, state):
         """A followed PR or thread changed and the worker, its work finished, said nothing to

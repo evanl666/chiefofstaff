@@ -79,10 +79,10 @@ OVERFLOWS = """root => [root, ...root.querySelectorAll("*")].filter((node) => {
 
 
 async def unfold(card):
-    """A row (Monitoring, Recently finished) shows its whole card: a click on it."""
+    """A row shows its whole card: a click on its title (its second line may hold links)."""
     classes = (await card.get_attribute("class")).split()
     if "row" in classes and "unfolded" not in classes:
-        await card.locator(".row-line").click()
+        await card.locator(":scope > .head .title").click()
         await expect(card).to_have_class(re.compile(r"\bunfolded\b"))
 
 
@@ -326,7 +326,8 @@ async def home(runtime, browser, failures: list[str]):
     await expect(page.locator("#home-tabs")).to_be_visible()
     await expect(panel).to_be_hidden()
     await page.locator("#home-tabs [data-tab=tasks]").click()
-    await expect(page.locator("#tasks")).to_be_visible()
+    # Tasks groups the four parts below Needs you (no box of its own).
+    await expect(page.locator("#tasks-running")).to_be_visible()
     await expect(page.locator("#needs")).to_be_hidden()
     await expect(chat).to_be_hidden()
     await expect(page.locator("#home-tabs [data-tab=needs] .count")).to_have_text("1")
@@ -536,7 +537,7 @@ async def home(runtime, browser, failures: list[str]):
     card = running.filter(has_text="Review api PR #12")
     await expect(card).to_have_class(re.compile(r"\bfollowup\b"))
     await expect(card.locator(".head .meta")).to_have_text("Following up")
-    await expect(card.locator(".activity")).to_have_text("reading the reply")
+    await expect(card.locator(".row-line .latest")).to_have_text("reading the reply")
     worker = await spawn("Ship the docs")
     runtime.update_session(worker, status="working")
     card_draft = store.create_draft(worker, "reply", {"to": "Al", "where": "email"}, "Hi")
@@ -611,8 +612,15 @@ async def this_round(runtime, browser, failures: list[str]):
     await page.goto(f"{BASE}/#token={TOKEN}")
     card = page.locator(".card.task.review", has_text="Filter opt-outs")
     await expect(card).to_be_visible(timeout=15000)
-    await expect(card.locator(".receipt.pr")).to_have_text("ranking-model#71 · ✓ CI · approved")
-    title = await card.locator(".receipt.pr").get_attribute("title")
+    # Its row has the PR it delivered; its whole card (View report) the receipts.
+    await expect(card.locator(".row-foot .receipt.pr")).to_have_text(
+        "ranking-model#71 · ✓ CI · approved"
+    )
+    await card.get_by_role("button", name="View report").click()
+    await expect(card.locator(".chips .receipt.pr")).to_have_text(
+        "ranking-model#71 · ✓ CI · approved"
+    )
+    title = await card.locator(".chips .receipt.pr").get_attribute("data-tip")
     assert "acme/ranking-model#71" in title and "Checks pass" in title
     # Its tests are a chip when they ran on its own work (CONTRACT receipts.tests.own), else
     # evidence in its report, saying where they ran.
@@ -771,22 +779,20 @@ async def round_two(runtime, browser, failures: list[str]):
         return board.locator(".card.task").filter(has=page.locator(".head .title", has_text=title))
 
     # A worker with two tasks: the one it is on under Running, the other (taken up, then left
-    # for it) under Monitoring, paused; the worker's box in each.
-    running_box = board.locator(f'#tasks-running .card.worker-box[data-session="{first}"]')
-    # Monitoring: a row per task, its worker in the tooltip.
+    # for it) under Monitoring, paused; a row each (QA E16: no box per worker), its worker a
+    # small reference at its foot.
+    running_box = board.locator(f'#tasks-running .card.task[data-session="{first}"]')
     queued_box = board.locator(f'#tasks-monitoring .card.task[data-session="{first}"]')
-    await expect(running_box.locator(".card.task")).to_have_count(1, timeout=15000)
-    await expect(running_box.locator(".card.task .head .title")).to_have_text(
-        "Fix review comments on lms"
-    )
-    await expect(running_box.locator(".box-head .meta")).to_contain_text("also: Monitoring")
+    await expect(running_box).to_have_count(1, timeout=15000)
+    await expect(running_box.locator(".head .title")).to_have_text("Fix review comments on lms")
+    await expect(running_box.locator(".row-line .worker-ref")).to_have_count(1)
     await expect(queued_box.locator(".head .title")).to_have_text("Editor event paths")
-    await expect(queued_box.locator(".row-line .why")).to_contain_text(
-        "Paused: its worker is on “Fix review comments on lms” now"
+    # Its status beside the title, why on its second line: not said twice (U-s3).
+    await expect(queued_box.locator(".head .meta")).to_contain_text("Paused")
+    await expect(queued_box.locator(".row-line .why")).to_have_text(
+        "its worker is on “Fix review comments on lms” now"
     )
-    # Said on its second line, not again beside the title (U-s3).
-    await expect(queued_box.locator(".head .meta")).not_to_contain_text("Paused")
-    await expect(running_box.locator(".activity")).to_have_count(1)
+    await expect(running_box.locator(".row-line .latest")).to_have_count(1)
     await running_box.screenshot(path=SHOTS / "ui-edges-worker-group.png")
     # Its conversation takes up the earlier task again: that one runs now, the newer waits.
     earlier = next(
@@ -798,7 +804,7 @@ async def round_two(runtime, browser, failures: list[str]):
     )
     await settle(runtime)
     runtime.publish_session(store.session(first))
-    await expect(running_box.locator(".card.task .head .title")).to_have_text(
+    await expect(running_box.locator(".head .title")).to_have_text(
         "Editor event paths", timeout=10000
     )
     await expect(queued_box.locator(".head .title")).to_have_text("Fix review comments on lms")
@@ -816,6 +822,9 @@ async def round_two(runtime, browser, failures: list[str]):
     log("a worker with two tasks: the one it is on runs, the other paused; a quiet one says why")
 
     update = page.locator("#needs .card.task", has_text="Filter opt-outs before inference")
+    # The news in its row's line; all of it on its card.
+    await expect(update.locator(".row-line .latest")).to_contain_text("approved and ready")
+    await unfold(update)
     await expect(update.locator(".news")).to_contain_text("approved and ready to merge")
     await expect(update.locator(".news .chip")).to_have_text("Update")
     await update.get_by_role("button", name="Got it").click()
@@ -835,7 +844,7 @@ async def round_two(runtime, browser, failures: list[str]):
     await line_reply.screenshot(path=SHOTS / "ui-edges-reply-resolve.png")
     log("a reply on a line can resolve its conversation; one in the conversation names its author")
 
-    card = running_box.locator(".card.task").first
+    card = running_box
     await card.locator(".more-button").click()
     danger = card.locator(".menu button.danger")
     await expect(danger).to_have_text("Cancel task…")
@@ -921,6 +930,8 @@ async def round_three(runtime, browser, failures: list[str]):
     done = await start("Count the orders")
     done_task = runtime.tasks.current(done)
     await call_tool(runtime, "report", done, status="done", summary="There are 412 orders.")
+    # Accepted (a report too waits for Accept): with the finished ones.
+    runtime.task_actions.accept(done_task["id"])
     for number in range(40):
         runtime.add_message(done, "assistant", f"Later remark {number}. " * 6)
     # A table with a pipe in code, an empty row and a blank line inside.
@@ -959,8 +970,7 @@ async def round_three(runtime, browser, failures: list[str]):
     await expect(dot("Pick the database")).to_have_class(re.compile(r"\bwaiting\b"))
     await expect(dot("Answer Carol")).to_have_class(re.compile(r"\bwaiting\b"))
     await expect(dot("Watch CI on #12")).to_have_class(re.compile(r"\bwatching\b"))
-    # A report that only informs is over once delivered: its worker has nothing open, folded
-    # away with the others like it.
+    # An accepted report: its worker has nothing open, folded away with the others like it.
     await expect(dot("Count the orders")).to_have_class(re.compile(r"\bidle\b"))
     idle_fold = page.locator("#session-list details.idle-workers")
     await expect(idle_fold.locator(".item", has_text="Count the orders")).to_have_count(1)
@@ -973,21 +983,22 @@ async def round_three(runtime, browser, failures: list[str]):
     await expect(page.locator("#session-list .legend")).to_have_count(0)
     log("sidebar dots follow Home's four places, with a legend; idle workers fold away")
 
-    group = page.locator(f'#tasks-running .card.worker-box[data-session="{busy}"]')
+    group = page.locator(f'#tasks-running .card.task[data-session="{busy}"]')
     waits = page.locator(f'#tasks-monitoring .card.task[data-session="{busy}"]')
-    await expect(group.locator(".card.task")).to_have_count(1)
-    await expect(group.locator(".card.task .head .title")).to_have_text("CoS bug bash")
+    await expect(group).to_have_count(1)
+    await expect(group.locator(".head .title")).to_have_text("CoS bug bash")
     await expect(waits.locator(".head .title")).to_have_text("Research the Slack bot")
-    for box, row in ((group, group.locator(".card.task").first), (waits, waits)):
-        card_box = await box.bounding_box()
-        row_box = await row.bounding_box()
-        assert row_box["width"] <= card_box["width"], (row_box, card_box)
+    # A row: what its worker does now in a line; its whole card (its progress, its links) on a
+    # click.
+    await expect(group.locator(".row-line .latest")).to_contain_text("Measure the row overflow")
+    await unfold(group)
+    for row in (group, waits):
+        card_box = await row.bounding_box()
         meta_box = await row.locator(".head .meta").bounding_box()
         assert meta_box["x"] + meta_box["width"] <= card_box["x"] + card_box["width"] + 1
-        if box == group:
-            menu_box = await row.locator(".more-button").bounding_box()
-            assert menu_box["x"] + menu_box["width"] <= card_box["x"] + card_box["width"] + 1
-        assert not await box.evaluate(OVERFLOWS), await box.evaluate(OVERFLOWS)
+        menu_box = await row.locator(".more-button").bounding_box()
+        assert menu_box["x"] + menu_box["width"] <= card_box["x"] + card_box["width"] + 1
+        assert not await row.evaluate(OVERFLOWS), await row.evaluate(OVERFLOWS)
     progress = group.locator(".progress-line").first
     await expect(progress).not_to_contain_text("**")
     await expect(progress).to_contain_text("Status: fixed B16")
@@ -1008,14 +1019,14 @@ async def round_three(runtime, browser, failures: list[str]):
     await expect(group.locator(".activity")).to_contain_text("again")
     assert await progress.evaluate("n => n.classList.contains('open')")
     await progress.click()
-    chips_now = group.locator(".card.task").first.locator(".artifacts")
+    chips_now = group.locator(".artifacts")
     # A doc and a PR it only mentions (it did not say it made them) are references, folded
     # under "More links"; the doc named as the report linked it, its id on hover.
     await expect(chips_now.locator(".more-links summary")).to_have_text("More links: 2 referenced")
     await expect(chips_now.locator(".more-links .receipt", has_text="app#592")).to_have_count(1)
     doc_chip = chips_now.locator(".more-links .receipt.link-chip", has_text="the B16 notes")
     await expect(doc_chip.locator(".chip-link")).to_have_attribute(
-        "title", re.compile("Google Doc abc123")
+        "data-tip", re.compile("Google Doc abc123")
     )
     await expect(chips_now.locator(".receipt", has_text="Google Doc")).to_have_count(0)
     await expect(group.locator(".activity")).to_contain_text("Measure the row overflow")
@@ -1030,14 +1041,18 @@ async def round_three(runtime, browser, failures: list[str]):
     assert when_box["x"] + when_box["width"] <= row_box["x"] + row_box["width"] + 1, row_box
     runtime.states[busy].steps.pop("soak")
     runtime.update_session(busy, status="working", activity="Measure the row overflow again")
-    log("a worker's box per section: its task there, two clean lines, when apart, its links")
+    log("a row per task: what its worker does now; its card: two clean lines, when apart, links")
 
     asking_card = page.locator("#tasks .card.task", has_text="Answer Carol")
     if await asking_card.count():
         await expect(asking_card.locator(".receipt.needs")).to_be_visible()
     watching = page.locator("#tasks-monitoring .card.task", has_text="Watch CI on #12")
     await expect(watching).to_be_visible()
-    await expect(watching.locator(".row-line .why")).to_have_text("Waiting on app#12")
+    # What it waits on (QA E12): the PR it follows, a link to it.
+    await expect(watching.locator(".row-line .why")).to_have_text(
+        re.compile(r"^(Following|Waiting for \w+)$")
+    )
+    await expect(watching.locator(".row-line a.object")).to_have_text("app#12")
     await unfold(watching)
     await expect(watching.locator(".receipt.watching .watch-name")).to_have_text("Watching app#12")
     # Bug bash 6 (T11): any thread or PR it follows can be let go from its card.
@@ -1045,12 +1060,13 @@ async def round_three(runtime, browser, failures: list[str]):
         watching.locator(".receipt.watching .unfollow", has_text="\u2715")
     ).to_have_attribute("aria-label", "Stop following app#12")
     counts = await page.evaluate("""() => {
-      const n = (id) => Number(document.querySelector(`#${id} .count`)?.textContent || 0);
-      return [n("tasks"), n("tasks-running") + n("tasks-monitoring")];
+      const n = (selector) => Number(document.querySelector(selector)?.textContent || 0);
+      return [n("#home-tabs [data-tab=tasks] .count"),
+        n("#tasks-running > summary .count") + n("#tasks-monitoring > summary .count")];
     }""")
     assert counts[0] == counts[1], counts
-    await expect(watching.locator(".task-body .reason")).to_contain_text("Waiting on app#12")
-    log("monitoring says what it waits on; the Tasks count is the sum of its groups")
+    await expect(watching.locator(".task-body .reason")).to_contain_text("app#12")
+    log("monitoring says what it waits on; the Tasks count is the sum of its parts")
 
     rendered = page.locator("#timeline .markdown .table").last
     await expect(rendered.locator("tbody tr")).to_have_count(2)
@@ -1065,11 +1081,15 @@ async def round_three(runtime, browser, failures: list[str]):
     recent = page.locator("#tasks-recent")
     if not await recent.evaluate("n => n.open"):
         await recent.locator("summary").click()
-    # A row's title shows its card first; then it opens its worker.
+    # A row's title shows all of it, and folds it back; its worker, at its foot, opens that
+    # worker's chat at the task.
     counted = recent.locator(".card.task", has_text="Count the orders")
     await counted.locator(".head .title").click()
     await expect(counted).to_have_class(re.compile(r"\bunfolded\b"))
+    await expect(counted.locator(".head .title")).to_have_attribute("aria-expanded", "true")
     await counted.locator(".head .title").click()
+    await expect(counted).not_to_have_class(re.compile(r"\bunfolded\b"))
+    await counted.locator(".row-line .worker-ref").click()
     report = page.locator(f'#timeline [data-kind="report"][data-task="{done_task["id"]}"]')
     await expect(report).to_be_in_viewport(timeout=10000)
     await expect(page.locator("#timeline > *").last).not_to_be_in_viewport()
@@ -1256,13 +1276,22 @@ async def round_four(runtime, browser, failures: list[str]):
 
     review = needs.locator(".card.task", has_text="Fix the Spark 3.5 dependency")
     await expect(review).to_be_visible(timeout=15000)
-    await expect(review.locator(".head .meta")).to_contain_text("To review")
+    await expect(review.locator(".head .meta")).to_contain_text("Awaiting acceptance")
+    # Folded, its row has its PR (what it delivered); shown whole, its receipts.
+    await expect(review.locator(".row-foot .receipt.pr .pr-state")).to_have_text(" · ✓ CI")
+    await review.get_by_role("button", name="View report").click()
+    await expect(review).to_have_class(re.compile(r"\bunfolded\b"))
     await expect(review.locator(".receipt.pr .pr-state")).to_have_text(" · ✓ CI")
     await expect(review.locator(".receipt.changes")).to_have_text("+40 −12 in 3 files")
+    # What it delivered is its PR (the server's deliverables): a run its report only names is
+    # a link on its card, with what is under it folded.
     main = review.locator(".chips > .receipts > .receipt.link-chip > .chip-link")
-    await expect(main).to_have_text(["Flyte · abc123"])
+    await expect(main).to_have_count(0)
     folded = review.locator(".chips .more-links")
-    await expect(folded.locator("summary")).to_have_text("More links: 2 for diagnosis")
+    await expect(folded.locator("summary")).to_have_text(
+        "More links: 1 more made · 2 for diagnosis"
+    )
+    await expect(folded.locator(".receipt", has_text="Flyte · abc123")).to_have_count(1)
     await expect(folded.locator(".receipt", has_text="Spark")).to_be_hidden()
     follow_up = running.locator(f'.card.task.followup[data-key="followup:{researcher}"]')
     await expect(follow_up.locator(".head .title")).to_have_text("Chief of Staff merge bug report")
@@ -1309,26 +1338,24 @@ async def round_four(runtime, browser, failures: list[str]):
     log("workers by their work: the sidebar, the header (started as… on hover), Closed")
 
     delivered = monitoring.locator(".card.task", has_text="Ship the exporter")
-    await expect(delivered.locator(".row-line .why")).to_contain_text(
-        "Delivered; still following app#77"
-    )
-    await expect(delivered.locator(".head .meta")).not_to_contain_text("Delivered")
-    # The owner's deliveries waiting on others: a group of their own, open.
-    await expect(
-        monitoring.locator("#tasks-monitoring-delivered[open] .card.task", has_text="Ship the")
-    ).to_have_count(1)
+    # What it waits for and on what (QA E12): its PR, a link to it; its status beside its title.
+    await expect(delivered.locator(".row-line .why")).to_have_text(re.compile(r"^Waiting for "))
+    await expect(delivered.locator(".row-line .object")).to_contain_text("app#77")
+    await expect(delivered.locator(".head .meta")).to_contain_text("Delivered")
+    # One list: no groups inside Monitoring (QA E16).
+    await expect(monitoring.locator("details")).to_have_count(0)
     later = monitoring.locator(".card.task", has_text="Run the weekly embeddings")
     await expect(later.locator(".row-line .why")).to_contain_text("the Flyte run finishing")
-    await expect(later.locator(".row-line .why")).to_contain_text("Checks back at")
-    await expect(later.locator(".head .meta")).not_to_contain_text("Checks back")
+    await expect(later.locator(".row-line .why")).to_have_text(re.compile(r"^at "))
+    await expect(later.locator(".head .meta")).to_contain_text("Checks back")
     await expect(running.locator(".card.task", has_text="Answer Jingtao")).to_have_count(1)
-    weekly_box = running.locator(f'.card.worker-box[data-session="{weekly}"]')
-    await expect(weekly_box.locator(".box-head .meta")).to_contain_text("also: Monitoring")
+    weekly_row = running.locator(f'.card.task[data-session="{weekly}"]')
+    await expect(weekly_row).to_have_count(1)
     log("monitoring says what it waits on; a check-back is its task's while its worker works")
 
     cube_card = page.locator(".card.task.marker-pr-failing", has_text="Add cube to textkit")
     await expect(cube_card.locator(".head .meta")).to_contain_text("CI failing")
-    await expect(cube_card.locator(".reason")).to_contain_text("CI failing on app#88 (lint)")
+    await expect(cube_card.locator(".row-line .why")).to_contain_text("CI failing on app#88 (lint)")
     await expect(cube_card.get_by_role("button", name="Ask it to fix…")).to_be_visible()
     await cube_card.locator(".pr-followed .unfollow").click()
     await expect(page.locator(".toast", has_text="Stopped following app#88")).to_be_visible()
@@ -1338,7 +1365,10 @@ async def round_four(runtime, browser, failures: list[str]):
     cannot = page.locator(".card.task", has_text="Watch the example PR")
     await unfold(cannot)
     chip = cannot.locator(".receipt.failing")
-    await expect(chip).to_contain_text("Can't read app#42")
+    # Why, by the server's kind (here GitHub does not find it): not one that passes by itself.
+    await expect(chip.locator(".words")).to_have_text(
+        re.compile(r"(Can't read|No access to) app#42|app#42 not found")
+    )
     await expect(cannot.locator(".receipt.watching")).to_have_count(0)
     await chip.get_by_role("button", name="stop following").click()
     await expect(page.locator(".toast", has_text="Stopped following app#42")).to_be_visible()
@@ -1390,12 +1420,11 @@ async def round_four(runtime, browser, failures: list[str]):
         "Fix the Spark 3.5 dependency of the ICP flow"
     )
     run_row = rows.filter(has_text="Weekly embeddings run")
-    await expect(run_row.locator(".a-kind")).to_have_text("Flyte")
+    await expect(run_row.locator(".a-kind")).to_have_text("Flow")
     await expect(run_row.locator(".a-status")).to_have_text("running")
     await expect(run_row).to_have_class(re.compile(r"\btone-active\b"))
-    told = rows.filter(has_text="abc123")  # Named only in a report: as its task stands.
-    await expect(told.locator(".a-status")).to_have_text("to review")
-    await expect(told.locator(".a-status.derived")).to_have_count(1)
+    # A run only named in a report is no deliverable (QA E25).
+    await expect(rows.filter(has_text="abc123")).to_have_count(0)
     await expect(rows.filter(has_text="application_1700000000000_0042")).to_have_count(0)
     for listed in (made, monitoring, page.locator("#tasks-recent")):
         box = await listed.locator(":scope > .items").evaluate(
@@ -1459,9 +1488,9 @@ async def round_four(runtime, browser, failures: list[str]):
     items = [store.one("SELECT title FROM tasks WHERE id=?", (i,))["title"] for i in shown]
     batch_items = [title for title in items if title.startswith("Finished item")]
     assert batch_items == sorted(batch_items), batch_items
-    # A row per task (no worker boxes: the worker is in the tooltip), each with a background
-    # and a border, a few to the list's height; Show more at the end of the list.
-    await expect(recent.locator(".card.worker-box")).to_have_count(0)
+    # A row per task (its worker a small reference on it), each with a background and a
+    # border, a few to the list's height; Show more at the end of the list.
+    await expect(cards.first.locator(".row-line .worker-ref")).to_have_count(1)
     looks = await cards.first.evaluate(
         "n => [getComputedStyle(n).borderTopWidth, getComputedStyle(n).backgroundColor,"
         " n.getBoundingClientRect().height]"
@@ -1555,13 +1584,14 @@ async def round_five(runtime, browser, failures: list[str]):
     await expect(page.locator("#panel .card.task.flash")).to_have_count(1)
     # Named as the report linked them, else what they are; their ids on hover, not as names.
     plan_a_chip = flashed.locator(".artifacts > .receipts .receipt.link-chip", has_text="Plan A")
-    await expect(plan_a_chip.locator(".chip-link")).to_have_text("Plan A · draft")
+    # What it delivered, as Artifacts has it (QA E17): its kind, its name, where it stands.
+    await expect(plan_a_chip.locator(".chip-link")).to_have_text("Doc · Plan A · draft")
     await expect(plan_a_chip.locator(".chip-link")).to_have_attribute(
-        "title", re.compile("Google Doc PLANAAAA1111")
+        "data-tip", re.compile("PLANAAAA1111")
     )
     plan_b = flashed.locator(".more-links .receipt.link-chip .chip-link")
     await expect(plan_b).to_have_text("Google Doc")
-    await expect(plan_b).to_have_attribute("title", re.compile("PLANBBBB2222"))
+    await expect(plan_b).to_have_attribute("data-tip", re.compile("PLANBBBB2222"))
     log("View on a notice opens that task; docs by their names, their ids on hover")
 
     table = timeline.locator(".markdown .table", has_text="averyvery")
@@ -1742,16 +1772,27 @@ async def round_six(runtime, browser, failures: list[str]):
     runtime.publish_state()
 
     two_days = (datetime.now(UTC) - timedelta(days=2)).isoformat()
+    ago = lambda **delta: (datetime.now(UTC) - timedelta(**delta)).isoformat()  # noqa: E731
     scratch = "/tmp/cos-scratch/eval"
+    # What it waits on, as the server says it (QA E12/E18): what for, when it was read and is
+    # read next, what wakes it, when it last changed.
+    shipping = {"key": "github:acme/app#594", "kind": "pr", "label": "app#594",
+                "url": "https://github.com/acme/app/pull/594", "waiting_for": "approval",
+                "last_check": ago(minutes=5, seconds=10), "next_check": ago(seconds=-650),
+                "trigger": "A review, CI result or merge on it brings it back",
+                "changed_at": ago(hours=26, minutes=5)}  # fmt: skip
     patches = {
         "Eval SLM fine-tune report": {
-            "made_links": [doc], "read": False,
+            "made_links": [doc], "read": False, "deliverables": [
+                {"kind": "doc", "url": doc, "title": "qwen3_8b SFT 11-05", "role": "",
+                 "status": ""}],
             "files": [{"path": f"{scratch}/mock5.html", "name": "mock5.html", "size": 5120}],
             "receipts": {"tests": {"own": False, "cwd": "/tmp/cos-scratch/source-v0.1.26",
                                    "passed": True, "exit_code": 0, "summary": "592 passed",
                                    "command": "uv run pytest -q", "runs": 2,
                                    "failed_before": False, "running": False}}},
-        "Ship app#594 export fix": {"watching": ["github:acme/app#594"], "watch_kind": "own"},
+        "Ship app#594 export fix": {"watching": ["github:acme/app#594"], "watch_kind": "own",
+                                    "monitoring": [shipping]},
         "Review checkout-service PR #1537": {"watching": ["github:acme/checkout#1537"],
                                            "watch_kind": "reviewed"},
         "Correct the #1537 review draft": {"watching": ["github:acme/checkout#1537"],
@@ -1788,33 +1829,37 @@ async def round_six(runtime, browser, failures: list[str]):
             has=page.locator(".head .title", has_text=title)
         )
 
-    # E1/E9/E10: a report: Report with Done, unread; the doc named as linked, its id on hover;
-    # docs.google.com itself and a link in code are not docs; its file; tests run elsewhere.
+    # E1/E9/E10, QA E1/E17: a report waits for Accept under Needs you, unread until opened;
+    # what it delivered is its doc (named as linked, its address on hover); its file, and
+    # docs.google.com itself, are links on its card, not deliverables; tests run elsewhere.
     reported = card("Eval SLM fine-tune report")
     await expect(reported).to_have_class(re.compile(r"\brow\b"), timeout=15000)
-    assert await recent.locator(".card.task", has_text="Eval SLM").count() == 1
-    await expect(reported.locator(".head .meta")).to_contain_text("Report")
+    assert await needs.locator(".card.task", has_text="Eval SLM").count() == 1
+    await expect(reported.locator(".head .meta")).to_contain_text("Awaiting acceptance")
     await expect(reported.locator(".head .dot.unread")).to_have_count(1)
-    await expect(reported.locator(".row-line .made")).to_have_text("qwen3_8b SFT 11-05")
+    await expect(reported.locator(".row-foot .row-chips .chip-link")).to_have_text(
+        ["Doc · qwen3_8b SFT 11-05"]
+    )
     async with page.expect_request(f"**/api/tasks/{report['id']}/read"):
         await reported.locator(".row-line").click()
     await expect(reported).to_have_class(re.compile(r"\bunfolded\b"))
     await expect(reported.locator(".head .dot.unread")).to_have_count(0)
     chips = reported.locator(".chips > .receipts")
-    await expect(chips.locator(".link-chip .chip-link")).to_have_text(
-        ["qwen3_8b SFT 11-05", "file · mock5.html"]
-    )
+    await expect(chips.locator(".link-chip .chip-link")).to_have_text(["Doc · qwen3_8b SFT 11-05"])
     await expect(chips.locator(".link-chip .chip-link").first).to_have_attribute(
-        "title", re.compile("Google Doc 1SPkOjC0xyz123")
+        "data-tip", re.compile("1SPkOjC0xyz123")
     )
     await expect(chips.locator(".receipt", has_text="tests")).to_have_count(0)
-    await expect(reported.locator(".more-links summary")).to_have_text("More links: 1 referenced")
-    await expect(reported.locator(".more-links .chip-link")).to_have_text(["docs.google.com"])
-    done = reported.get_by_role("button", name="Done")
-    await expect(done).to_be_visible()
-    await expect(done).to_have_attribute(
-        "title", "Only a report: nothing to accept. Done once read."
+    more_links = reported.locator(".chips > .more-links")
+    await expect(more_links.locator("summary")).to_have_text(
+        "More links: 1 more made · 1 referenced"
     )
+    await expect(more_links.locator(".chip-link")).to_have_text(
+        ["file · mock5.html", "docs.google.com"]
+    )
+    await expect(reported.get_by_role("button", name="Done")).to_have_count(0)
+    await expect(reported.get_by_role("button", name="Accept")).to_be_visible()
+    await expect(reported.get_by_role("button", name="Request changes")).to_be_visible()
     await reported.get_by_role("button", name="Show report").click()
     await expect(reported.locator(".report .tests-elsewhere")).to_have_text(
         "Ran tests in source-v0.1.26 · 592 passed"
@@ -1827,53 +1872,68 @@ async def round_six(runtime, browser, failures: list[str]):
     await page.route("**/api/file?*", lambda route: route.fulfill(json={
         "name": "mock5.html", "path": f"{scratch}/mock5.html", "text": "<h1>Home</h1>",
         "truncated": False}))  # fmt: skip
+    await more_links.locator("summary").click()
     async with page.expect_request("**/api/file?*") as opened:
-        await chips.get_by_role("button", name="file · mock5.html").click()
+        await more_links.get_by_role("button", name="file · mock5.html").click()
     assert "session=" in (await opened.value).url and "mock5.html" in (await opened.value).url
     await expect(page.locator("#file-dialog")).to_be_visible()
     await page.locator("#file-close").click()
     rows = made.locator(".artifact")
     doc_row = rows.filter(has_text="qwen3_8b SFT 11-05")
     await expect(doc_row.locator(".a-kind")).to_have_text("Doc")
-    await expect(doc_row.locator(".a-status")).to_have_text("reported")
+    await expect(doc_row.locator(".a-status")).to_have_text("to accept")
+    # Its file is no artifact (QA E25): Artifacts has PRs, docs and flows only.
+    await expect(rows.filter(has_text="mock5.html")).to_have_count(0)
     await expect(rows.filter(has_text="Eval SLM fine-tune report")).to_have_count(1)
     await chips.get_by_role("button", name="Take qwen3_8b SFT 11-05 off").click()
     await expect(doc_row).to_have_count(0)
-    await expect(reported.locator(".more-links summary")).to_have_text(
-        "More links: 1 referenced · 1 taken off"
+    await expect(more_links.locator("summary")).to_have_text(
+        "More links: 1 more made · 1 referenced · 1 taken off"
     )
     await made.get_by_role("button", name="Show 1 taken off").click()
     await doc_row.get_by_role("button", name="Bring back").click()
-    await expect(chips.locator(".link-chip .chip-link").first).to_have_text("qwen3_8b SFT 11-05")
+    await expect(chips.locator(".link-chip .chip-link").first).to_have_text(
+        "Doc · qwen3_8b SFT 11-05"
+    )
     log(
-        "a report: Done in sight, unread until opened, the doc by its name (id on hover), its "
-        "file, docs.google.com and code not docs, tests run elsewhere as evidence, ✕ and back"
+        "a report: Accept and Request changes in sight, unread until opened, the doc it "
+        "delivered by its name, its file a link not an artifact, tests elsewhere, ✕ and back"
     )
 
-    # E6: deliveries waiting on others and PRs reviewed apart (the latter folded); one row for
-    # one PR a worker follows; quiet for a day, with the finished ones, still followed.
-    delivered = monitoring.locator("#tasks-monitoring-delivered")
-    reviewed = monitoring.locator("#tasks-monitoring-reviewed")
-    await expect(delivered).to_have_attribute("open", "")
-    await expect(delivered.locator(".card.task", has_text="Ship app#594")).to_have_count(1)
-    await expect(reviewed).not_to_have_attribute("open", "")
-    await expect(reviewed.locator(":scope > summary .count")).to_have_text("1")
-    await expect(reviewed.locator(".card.task")).to_have_count(1)
-    await expect(recent.locator(".card.task.marker-still-following")).to_have_count(2)
-    stale = recent.locator(".card.task", has_text="Investigate faro#1536")
-    await expect(stale.locator(".head .meta")).not_to_contain_text("Still following")
-    await expect(stale.locator(".row-line .why")).to_contain_text("nothing new there for 2d")
-    await reviewed.locator(":scope > summary").click()
-    await expect(reviewed).to_have_attribute("open", "")
-    await page.wait_for_function(
-        "() => localStorage.getItem('cos.section.tasks-monitoring-reviewed') === '1'"
+    # QA E12/E16/E18: Monitoring is one list (no groups); an accepted task waiting on others
+    # says for what, on what (a link), how long nothing changed there (it stays monitored
+    # however long), when it was checked and is checked next; others' PRs the owner reviewed
+    # are with the finished ones (no obligation of theirs).
+    await expect(monitoring.locator("details")).to_have_count(0)
+    shipped = monitoring.locator(".card.task", has_text="Ship app#594")
+    await expect(shipped.locator(".row-line .why")).to_have_text("Waiting for approval")
+    await expect(shipped.locator(".row-line a.object")).to_have_text("app#594")
+    await expect(shipped.locator(".row-line a.object")).to_have_attribute(
+        "href", "https://github.com/acme/app/pull/594"
     )
-    log("monitoring: deliveries and reviewed PRs apart, one row a PR, a quiet one finished")
+    await expect(shipped.locator(".row-line .quiet")).to_have_text("No updates for 26h")
+    await expect(shipped.locator(".row-foot .checks")).to_have_text(
+        "checked 5 min ago · next in 10 min"
+    )
+    await expect(shipped.locator(".row-foot .checks")).to_have_attribute(
+        "data-tip", "A review, CI result or merge on it brings it back"
+    )
+    await expect(shipped.locator(".head .meta")).to_contain_text("Delivered")
+    for title in ("Review checkout-service PR #1537", "Correct the #1537 review draft",
+                  "Investigate faro#1536 flake"):  # fmt: skip
+        reviewed_row = recent.locator(".card.task").filter(
+            has=page.locator(".head .title", has_text=title)
+        )
+        await expect(reviewed_row.locator(".head .meta")).to_contain_text("Reviewed")
+    await expect(monitoring.locator(".card.task", has_text="#1537")).to_have_count(0)
+    log("monitoring: one list; waits for what, on what, quiet how long, checked when")
 
     # E7 and #1: PR chips for PRs it made or reviewed, one state word; the rest referenced.
     prs = card("Check the PR states")
+    await unfold(prs)
+    # Its part in each (QA E26): one it reviewed says so.
     await expect(prs.locator(".chips > .receipts > .receipt.pr")).to_have_text(
-        ["app#9 · ✓ CI · changes requested", "app#11 · ✓ CI · ready to merge"]
+        ["app#9 · ✓ CI · changes requested · reviewed", "app#11 · ✓ CI · ready to merge"]
     )
     await expect(prs.locator(".more-links summary")).to_have_text("More links: 1 referenced")
     await expect(prs.locator(".more-links .receipt.pr")).to_contain_text("app#10")
@@ -1882,7 +1942,7 @@ async def round_six(runtime, browser, failures: list[str]):
 
     # E10: the Router wants a look: to review, Accept; #5: a second click sends nothing.
     mock = needs.locator(".card.task", has_text="Mockup for the new Home")
-    await expect(mock.locator(".head .meta")).to_contain_text("To review")
+    await expect(mock.locator(".head .meta")).to_contain_text("Awaiting acceptance")
     accepted: list[str] = []
 
     async def accept(route):
@@ -1898,10 +1958,10 @@ async def round_six(runtime, browser, failures: list[str]):
     log("a result the Router wants looked at is to review; two clicks accept once")
 
     # #3: a worker in a turn waiting on the owner waits for them; it is not idle.
-    box = needs.locator(".card.worker-box", has_text="Pick the cache size")
-    await expect(box.locator(".box-head .meta")).to_have_text("waits for you")
-    # Bug bash 6 (T5): no session id in its head ("WORKER d62fdc").
-    await expect(box.locator(".box-head .title")).not_to_have_text(re.compile(r"[0-9a-f]{6}"))
+    box = needs.locator(".card.task", has_text="Pick the cache size")
+    await expect(box.locator(".head .meta")).to_contain_text("Question")
+    # Bug bash 6 (T5): no session id for its worker ("WORKER d62fdc").
+    await expect(box.locator(".worker-ref")).not_to_have_text(re.compile(r"[0-9a-f]{6}"))
 
     # E3: move the latest result to a new task: what stays, what moves, a bad title refused,
     # then Undo split on the new task.
@@ -1952,7 +2012,7 @@ async def round_six(runtime, browser, failures: list[str]):
     await unfold(new_card)
     undo = new_card.get_by_role("button", name="Undo split")
     await expect(undo).to_have_attribute(
-        "title", re.compile("Back into “Schedule the weekly jobs”")
+        "data-tip", re.compile("Back into “Schedule the weekly jobs”")
     )
     await page.route("**/api/tasks/tmoved01/merge-back",
                      lambda route: route.fulfill(json=sent[scheduled["id"]]))  # fmt: skip
@@ -2015,9 +2075,8 @@ async def round_six(runtime, browser, failures: list[str]):
     await page.wait_for_timeout(200)
     sizes = await lesson.evaluate("n => [n.scrollHeight, n.clientHeight]")
     assert sizes[0] <= sizes[1] + 2 and sizes[1] > 40, sizes
-    for part in (needs, page.locator("#tasks")):
-        found = await part.evaluate(OVERFLOWS)
-        assert not found, found
+    found = await page.locator("#panel").evaluate(OVERFLOWS)
+    assert not found, found
     await page.evaluate("document.querySelector('#panel').style.removeProperty('width')")
     log("a long lesson is read whole in a box that grows")
 
@@ -2089,6 +2148,24 @@ async def round_six(runtime, browser, failures: list[str]):
         "Finished while hovered", timeout=10000
     )
     log("a short tooltip, gone when the mouse leaves; the list waits for the mouse to leave")
+    # Needs you too: its rows have Accept in the same place, so a new result must not slide
+    # under the pointer as the owner clicks.
+    needs = page.locator("#needs > .items")
+    held = needs.locator(":scope > *").first
+    await held.hover()
+    before = await needs.evaluate("list => [...list.children].map((n) => n.dataset.key).join()")
+    arrived = runtime.tasks.create(reporter, "Arrived while hovered", "x", status="review")
+    runtime.tasks.update(arrived["id"], result="New result.")
+    runtime.task_actions.publish(runtime.tasks.get(arrived["id"]))
+    await expect(page.locator("#needs")).to_contain_text("Arrived while hovered", timeout=10000)
+    after = await needs.evaluate("list => [...list.children].map((n) => n.dataset.key).join()")
+    assert after.startswith(before), ("its rows keep their places; new at the end", before, after)
+    await page.mouse.move(700, 450)
+    # Then in its place: the newest of the tasks (drafts come first).
+    await expect(needs.locator(":scope > .card.task").first).to_contain_text(
+        "Arrived while hovered", timeout=10000
+    )
+    log("Needs you keeps its rows in place under the mouse; what is new still shows, at its end")
 
     for width in (352, 376, 400):
         await page.evaluate("w => document.querySelector('#panel').style.width = `${w}px`", width)
@@ -2173,7 +2250,11 @@ async def round_seven(runtime, browser, failures: list[str]):
             "review": "CHANGES_REQUESTED", "own": True, "at": stamp}  # fmt: skip
     patches = {
         "Cache size for app": {"check_back": {"at": soon, "what": "the Flyte run"}},
-        "Fix the exporter PR": {"watching": ["github:acme/app#21"], "receipts": {"prs": [pr21]}},
+        "Fix the exporter PR": {"watching": ["github:acme/app#21"], "receipts": {"prs": [pr21]},
+                                "deliverables": [{"kind": "pr", "url": pr21["url"],
+                                                  "title": "app#21 · Export all rows",
+                                                  "role": "created",
+                                                  "status": "changes requested"}]},
         "Add notes on a named branch": {"receipts": {
             "checkouts": [{"path": "/tmp/notes", "branch": "bb3-ideas", "commits": 1,
                            "files": 1, "insertions": 0, "deletions": 0, "large": 1}],
@@ -2193,6 +2274,9 @@ async def round_seven(runtime, browser, failures: list[str]):
     page = await context.new_page()
     page.on("pageerror", lambda error: failures.append(str(error)))
     await patch_state(page, patches)
+    # Opening a result reads it: not on the server here (its task event would come without
+    # what was put in above).
+    await page.route("**/api/tasks/*/read", lambda route: route.fulfill(json={"read": True}))
     await page.goto(f"{BASE}/#token={TOKEN}")
     needs, monitoring = page.locator("#needs"), page.locator("#tasks-monitoring")
     recent, made = page.locator("#tasks-recent"), page.locator("#tasks-artifacts")
@@ -2265,11 +2349,12 @@ async def round_seven(runtime, browser, failures: list[str]):
 
     # U-s3: "Checks back" once on a row, the title keeps its room at 352 px.
     later = card("Cache size for app")
-    await expect(later.locator(".row-line .why")).to_contain_text("Checks back at")
-    await expect(later.locator(".head .meta")).not_to_contain_text("Checks back")
+    await expect(later.locator(".head .meta")).to_contain_text("Checks back")
+    await expect(later.locator(".row-line .why")).to_have_text(re.compile(r"^at .*the Flyte run$"))
     # H9: changes requested wins over failing CI, in every place it is said.
     waits = card("Fix the exporter PR")
-    await expect(waits.locator(".row-line .why")).to_contain_text("(changes requested)")
+    await expect(waits.locator(".row-line .why")).to_have_text("Waiting for changes")
+    await expect(waits.locator(".row-line .object")).to_have_text("app#21")
     await expect(made.locator(".artifact", has_text="app#21").locator(".a-status")).to_have_text(
         "changes requested"
     )
@@ -2281,16 +2366,18 @@ async def round_seven(runtime, browser, failures: list[str]):
     # U16b: a new file too large to count is said so. H4b: Create PR on a branch the owner
     # named, not on main.
     noted = needs.locator(".card.task", has_text="Add notes on a named branch")
+    await unfold(noted)
     await expect(noted.locator(".receipt.changes")).to_have_text("1 large new file")
     await noted.locator(".actions .more-button").click()
     await expect(noted.get_by_role("menuitem", name="Create PR")).to_be_visible()
     await page.keyboard.press("Escape")
     tidy = needs.locator(".card.task", has_text="Tidy the README on main")
+    await unfold(tidy)
     await expect(tidy.locator(".receipt.changes")).to_have_text(
         "+2 −0 in 1 file · not counted: 2 files"
     )
     await expect(tidy.locator(".receipt.changes")).to_have_attribute(
-        "title", re.compile("changed there meanwhile by you or other work")
+        "data-tip", re.compile("changed there meanwhile by you or other work")
     )
     await tidy.locator(".actions .more-button").click()
     await expect(tidy.get_by_role("menuitem", name="Copy report")).to_be_visible()
@@ -2298,18 +2385,17 @@ async def round_seven(runtime, browser, failures: list[str]):
     await page.keyboard.press("Escape")
     log("a large new file said so; Create PR on a branch of its own, not on main")
 
-    # U17: a file's name starts at the left of its row, as a link's does.
-    file_name = made.locator(".artifact", has_text="mock7.html").locator(".a-name")
+    # U17: a name starts at the left of its row. QA E25: a mockup file is no artifact (PRs,
+    # docs and flows only); it stays on its task's card.
+    file_name = made.locator(".artifact", has_text="app#21").locator(".a-name")
     gap = await file_name.evaluate(
         "n => { const r = document.createRange(); r.selectNodeContents(n);"
         " return r.getBoundingClientRect().left - n.getBoundingClientRect().left; }"
     )
     assert abs(gap) <= 1, gap
-    heights = [
-        await made.locator(".artifact", has_text=name).evaluate("n => n.offsetHeight")
-        for name in ("mock7.html", "app#21")
-    ]
-    assert abs(heights[0] - heights[1]) <= 1, heights
+    await expect(made.locator(".artifact", has_text="mock7.html")).to_have_count(0)
+    kinds = await made.locator(".artifact .a-kind").all_text_contents()
+    assert set(kinds) <= {"PR", "Doc", "Flow"}, kinds
 
     # U6b: Ask to redo needs a reason.
     redo_card = needs.locator(f'.card.draft[data-id="{redo["id"]}"]')
@@ -2745,7 +2831,8 @@ async def round_nine(runtime, browser, failures: list[str]):
     # W3: news on a result a draft is for shows on that card, once.
     news = needs.locator(f'.card.draft[data-id="{to_bob["id"]}"] .card.task.in-draft')
     await expect(news.locator(".news")).to_contain_text("Bob says the flag is on now.")
-    await expect(news.get_by_role("button", name="Got it")).to_be_visible()
+    # Still a result to accept (QA round 10): Accept takes its news with it.
+    await expect(news.get_by_role("button", name="Accept")).to_be_visible()
     await expect(needs.locator(".news", has_text="Bob says the flag")).to_have_count(1)
     await card.screenshot(path=SHOTS / "ui-edges-r9-draft-result.png")
     log("S6/W3: a draft's card holds its result's card: changes, Accept, its news, once")
@@ -2882,9 +2969,10 @@ def picture(width: int, height: int) -> bytes:
 
 async def round_ten(runtime, browser, failures: list[str]):
     """The 0.1.32 bug bash, round 8 (UI): a result whose own PR has changes requested says so
-    under Needs you, with Ask it to fix… and Accept under ⋯ (R13), and its report says To review
-    in its worker's chat; a path in a line is short (U3); inline code on a decision card (U7);
-    the chat opens at its end when that is an image (U4); diff lines from the keyboard (U6);
+    under Needs you, with Ask it to fix… and a quiet Accept (R13), and its report says Awaiting
+    acceptance in its worker's chat; a path in a line is short (U3); inline code on a decision
+    card (U7); the chat opens at its end when that is an image (U4); diff lines from the
+    keyboard (U6);
     less motion when asked (U8); ☰'s count clear of what is beside it, and Focusing until…
     moves nothing (U9); names for screen readers (U10); Bring back takes its toast away
     (U13)."""
@@ -2918,8 +3006,11 @@ async def round_ten(runtime, browser, failures: list[str]):
     runtime.publish_state()
     pr = {"label": "acme/r10#4", "own": True, "state": "OPEN", "review": "CHANGES_REQUESTED",
           "url": "https://github.com/acme/r10/pull/4", "title": "Rename the flag"}  # fmt: skip
+    delivered = [{"kind": "pr", "url": pr["url"], "title": "r10#4 · Rename the flag",
+                  "role": "created", "status": "changes requested"}]  # fmt: skip
     patches = {"Rename the r10 flag": {"watching": ["github:acme/r10#4"], "watch_kind": "own",
-                                       "receipts": {"prs": [pr]}}}  # fmt: skip
+                                       "receipts": {"prs": [pr]},
+                                       "deliverables": delivered}}  # fmt: skip
 
     context = await browser.new_context(viewport={"width": 1280, "height": 900})
     page = await context.new_page()
@@ -2928,21 +3019,20 @@ async def round_ten(runtime, browser, failures: list[str]):
     await page.goto(f"{BASE}/#token={TOKEN}")
     await expect(page.locator("#application")).to_be_visible()
 
-    # R13: to review, its PR has changes requested: Needs you says so; Accept is under ⋯.
+    # R13 (as of QA round 10): to accept, its PR has changes requested: still a result awaiting
+    # acceptance, with Accept and Request changes at hand; why it needs a look is its reason.
     card = page.locator("#needs .card.task", has_text="Rename the r10 flag")
-    await expect(card.locator(".head .meta")).to_contain_text("Changes requested")
-    await expect(card.locator(".reason")).to_have_text("Changes requested on r10#4")
-    await expect(card.get_by_role("button", name="Ask it to fix…")).to_be_visible()
-    await expect(card.get_by_role("button", name="Accept")).to_have_count(0)
+    await expect(card.locator(".head .meta")).to_contain_text("Awaiting acceptance")
+    await expect(card.locator(".row-line .why")).to_have_text("Changes requested on r10#4")
+    await expect(card.get_by_role("button", name="Accept")).to_be_visible()
+    await expect(card.get_by_role("button", name="Request changes")).to_be_visible()
     more = card.locator(".actions .more-button")
     await expect(more).to_have_attribute("aria-label", "More actions for “Rename the r10 flag”")
-    await more.click()
-    await expect(card.get_by_role("menuitem", name="Accept")).to_be_visible()
-    await page.keyboard.press("Escape")
     # U3: the path in its line as a chip has it.
-    await expect(card.locator(".outcome")).to_have_text("Renamed it; the notes are at "
-                                                        "~/r10-notes/flag.md.")  # fmt: skip
-    log("R13: to review with changes requested on its PR: Needs you says so, Accept under ⋯")
+    await expect(card.locator(".row-line .latest")).to_have_text(
+        "Renamed it; the notes are at ~/r10-notes/flag.md."
+    )
+    log("R13: changes requested on its PR: Needs you says so; fix it, or accept it as it is")
 
     # U7: inline code on a decision card, never its backticks.
     asked = page.locator(f'#needs .card.draft[data-id="{decision["id"]}"]')
@@ -2957,8 +3047,8 @@ async def round_ten(runtime, browser, failures: list[str]):
     # U10: names a screen reader says.
     await expect(page.get_by_role("heading", name="Needs you", level=2)).to_be_visible()
     await expect(page.get_by_role("button", name="Focus", exact=True)).to_be_visible()
-    open_worker = page.locator("#panel .box-head .title").first
-    assert (await open_worker.get_attribute("aria-label")).startswith("Open worker: ")
+    open_worker = page.locator("#panel .worker-ref").first
+    assert (await open_worker.get_attribute("aria-label")).startswith("Open the worker of “")
     composer = page.locator("#composer-input")
     await expect(composer).to_have_attribute("aria-expanded", "false")
     await composer.press_sequentially("@Rename the r10")
@@ -3008,8 +3098,8 @@ async def round_ten(runtime, browser, failures: list[str]):
             await page.locator("#sidebar-toggle").click()
             await page.locator("#sidebar .item", has_text="Rename the r10 flag").click()
             await expect(page.locator("#back-home")).to_be_visible()
-    # Its report in its worker's chat says what Home says: To review.
-    await expect(page.locator("#timeline .card.report .chip")).to_have_text("To review")
+    # Its report in its worker's chat says what Home says: Awaiting acceptance.
+    await expect(page.locator("#timeline .card.report .chip")).to_have_text("Awaiting acceptance")
     await page.locator("#back-home").click()
     await page.set_viewport_size({"width": 1280, "height": 900})
     log("U9: Focusing until… moves nothing; ☰'s count is clear of ☰ and of Home at 400px")
@@ -3212,6 +3302,245 @@ async def round_scale(runtime, browser, failures: list[str]):
     await expect(page.locator(".home-item.selected")).to_be_visible(timeout=15000)
     await expect(composer).to_have_value("")
     log("C5: unsent text stays with its chat through a reload, and goes once sent")
+    await context.close()
+
+
+async def round_qa(runtime, browser, failures: list[str]):
+    """QA round 10 in the browser: Home's five parts in order (Artifacts last), no sideways
+    overflow at 360, 768 and 1280 px; a report waits for Accept and can be sent back with what
+    to change; a question with why, choices and what next; a follow that cannot be read says
+    why by kind, with Retry or Stop following; a worker whose turn is over while a command it
+    left runs waits for that process; the owner's messages say whether they got there, in the
+    chat and on the row they were sent from; the tooltip goes when Home changes under it."""
+    store = runtime.store
+    router = store.get("router_id")
+    store.save_settings(store.settings().model_copy(update={"max_workers": 80}))
+
+    async def start(title):
+        result = await call_tool(runtime, "spawn_worker", router, title=title,
+                                 instructions=title, why_new="test")  # fmt: skip
+        assert result.result_type == "success", result.text_result_for_llm
+        await settle(runtime)
+        return json.loads(result.text_result_for_llm)["session_id"]
+
+    informer = await start("QA tell me the flag state")
+    await call_tool(runtime, "report", informer, status="done", summary="The flag is on.")
+    informed = runtime.tasks.current(informer)
+    asker = await start("QA pick the cache size")
+    await call_tool(runtime, "report", asker, status="question", summary="QA: 48 or 96 MB?",
+                    why="The cache must fit the box's memory", options=["48 MB", "96 MB"],
+                    next="I set it and rerun the benchmark")  # fmt: skip
+    asked = runtime.tasks.current(asker)
+    watcher = await start("QA watch the slow PR")
+    runtime.update_session(watcher, status="idle", activity="")
+    locked = await start("QA watch the private PR")
+    runtime.update_session(locked, status="idle", activity="")
+    server = await start("QA run the dev server")
+    stopper = await start("QA measure the latency")
+    stopped = runtime.tasks.current(stopper)
+    runtime.update_session(stopper, status="working", activity="Reading the logs")
+    await runtime.workers.interrupt(stopper)
+    await settle(runtime)
+    busy = await start("QA keep busy")
+    runtime.update_session(busy, status="working", activity="Step one")
+    runtime.publish_state()
+
+    soon = (datetime.now(UTC) + timedelta(minutes=20)).isoformat()
+    slow, private = "github:acme/app#301", "github:acme/app#302"
+    patches = {
+        "QA watch the slow PR": {"watch_failing": [slow], "watch_failing_why": {slow: {
+            "kind": "rate_limited", "error": "GitHub asked to wait before reading it again.",
+            "step": "pull request", "at": datetime.now(UTC).isoformat(), "retry_at": soon,
+            "detail": "HTTP 429"}}},
+        "QA watch the private PR": {"watch_failing": [private], "watch_failing_why": {private: {
+            "kind": "permission", "error": "None of your accounts can see acme/app.",
+            "step": "pull request", "at": datetime.now(UTC).isoformat(), "retry_at": None,
+            "detail": "HTTP 404"}}},
+    }  # fmt: skip
+    context = await browser.new_context(viewport={"width": 1280, "height": 900})
+    page = await context.new_page()
+    errors: list[str] = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    await patch_state(page, patches)
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    needs = page.locator("#needs")
+
+    def card(title):
+        return page.locator("#panel .card.task").filter(
+            has=page.locator(".head .title", has_text=title)
+        )
+
+    # Five parts, Artifacts last, each folding; no part inside another.
+    await expect(card("QA tell me the flag state")).to_be_visible(timeout=15000)
+    parts = await page.evaluate("[...document.querySelectorAll('#panel .area')].map(n => n.id)")
+    assert parts == ["needs", "tasks-running", "tasks-monitoring", "tasks-recent",
+                     "tasks-artifacts"], parts  # fmt: skip
+    assert not await page.locator("#panel .area .area, #panel .area details.panel-section").count()
+    gaps = await page.evaluate("""() => {
+      const areas = [...document.querySelectorAll('#panel .area')].filter((n) => n.offsetHeight);
+      return areas.slice(1).map((n, i) => Math.round(n.getBoundingClientRect().top
+        - areas[i].getBoundingClientRect().bottom));
+    }""")
+    assert set(gaps) == {12}, ("12px between parts", gaps)
+    log("Home: five parts in order, Artifacts last, 12px apart")
+
+    # QA E27: a tooltip of Home's own, gone as soon as Home changes under it.
+    row = card("QA keep busy")
+    tip = page.locator("#tip")
+    # Shown once the mouse rests on it (Home may still be settling from earlier rounds: a
+    # change under it takes it away, and the next move of the mouse shows it again).
+    for _ in range(10):
+        await page.mouse.move(0, 0)
+        await row.locator(".head .meta").hover()
+        await page.wait_for_timeout(700)
+        if await tip.is_visible():
+            break
+    await expect(tip).to_be_visible()
+    await expect(tip).to_contain_text("Task ")
+    runtime.update_session(busy, status="working", activity="Step two")
+    await expect(row.locator(".row-line .latest")).to_have_text("Step two")
+    await expect(tip).to_be_hidden()
+    assert not await page.locator("#panel [title]").count(), "no native tooltips on Home"
+    log("the tooltip goes when Home changes under it; no native tooltips on Home")
+
+    # QA E1: a report that only informs waits for Accept; Request changes sends it back.
+    report = card("QA tell me the flag state")
+    await expect(report.locator(".head .meta")).to_contain_text("Awaiting acceptance")
+    for name in ("Accept", "Follow up", "Request changes", "View report"):
+        await expect(report.get_by_role("button", name=name, exact=True)).to_be_visible()
+    await report.get_by_role("button", name="Request changes").click()
+    async with page.expect_request(f"**/api/tasks/{informed['id']}/request-changes") as sent:
+        await report.locator("textarea").fill("Say which flag")
+        await report.get_by_role("button", name="Send").click()
+    assert (await sent.value).post_data_json == {"text": "Say which flag"}
+    await expect(page.locator(".toast", has_text="Sent back with your changes.")).to_be_visible()
+    await expect(needs.locator(".card.task", has_text="QA tell me the flag")).to_have_count(
+        0, timeout=10000
+    )
+    assert runtime.tasks.get(informed["id"])["status"] == "running"
+    log("a report waits for Accept; Request changes sends it back with what to change")
+
+    # QA E9: its question with why, the answers it offers and what it does then.
+    question = card("QA pick the cache size")
+    await expect(question.locator(".asked .q-why")).to_contain_text("fit the box's memory")
+    await expect(question.locator(".asked .q-next")).to_have_text(
+        "Then: I set it and rerun the benchmark"
+    )
+    await expect(question.locator(".asked .q-option")).to_have_text(["48 MB", "96 MB"])
+    async with page.expect_request("**/api/questions/*/answer") as answered:
+        await question.get_by_role("button", name="96 MB").click()
+    assert (await answered.value).post_data_json == {"text": "96 MB"}
+    await expect(needs.locator(".card", has_text="QA: 48 or 96 MB?")).to_have_count(
+        0, timeout=10000
+    )
+    assert runtime.tasks.get(asked["id"])["status"] == "running"
+    log("a question: why, its choices as buttons (one sends it), then what it does")
+
+    # QA E10: a follow that cannot be read, by kind: GitHub's rate limit passes (Retry, the
+    # details); no access does not (Stop following).
+    limited = card("QA watch the slow PR")
+    await unfold(limited)
+    chip = limited.locator(".receipt.failing")
+    await expect(chip.locator(".words")).to_have_text("GitHub's rate limit for app#301")
+    await expect(chip.get_by_role("button", name="stop following")).to_have_count(0)
+    retried: list[dict] = []
+
+    async def retry(route):
+        retried.append(route.request.post_data_json)
+        await route.fulfill(json={"key": slow, "failures": 0, "why": {}, "read_at": "",
+                                  "next_at": ""})  # fmt: skip
+
+    await page.route(f"**/api/sessions/{watcher}/follow-retry", retry)
+    await chip.get_by_role("button", name="Retry").click()
+    await expect(page.locator(".toast", has_text="Reading app#301 again.")).to_be_visible()
+    assert retried == [{"key": slow}], retried
+    await chip.locator(".why-details summary").click()
+    await expect(chip.locator(".why-details .detail")).to_contain_text("asked to wait")
+    denied = card("QA watch the private PR")
+    await unfold(denied)
+    chip = denied.locator(".receipt.failing")
+    await expect(chip.locator(".words")).to_have_text("No access to app#302")
+    await expect(chip).to_have_attribute("data-tip", re.compile("None of your accounts"))
+    await expect(chip.get_by_role("button", name="stop following")).to_be_visible()
+    await expect(chip.get_by_role("button", name="Retry")).to_have_count(0)
+    log("a follow it cannot read: rate limited offers Retry and details; no access, Stop")
+
+    # QA E13/8: its turn over, a command it left running goes on: waiting for that process.
+    runtime.states[server].held = True
+    runtime.update_session(server, status="idle", activity="")
+    serving_row = card("QA run the dev server")
+    await expect(serving_row.locator(".row-line .latest")).to_have_text(
+        "Waiting for background process", timeout=10000
+    )
+    await expect(
+        page.locator("#tasks-running .card.task", has_text="QA run the dev")
+    ).to_have_count(1)
+    await serving_row.locator(".worker-ref").click()
+    await expect(page.locator("#timeline .working-line")).to_contain_text(
+        "Waiting for background process"
+    )
+    await expect(page.locator("#timeline .working-line")).not_to_contain_text("Thinking")
+
+    # QA E11: the owner's messages say whether they got there, as the server says it.
+    # Not sent for real (no prompt): what it says is what these events say.
+    said = runtime.add_message(server, "owner", "Use port 8080")
+    message = page.locator(f'#timeline .msg.owner[data-id="{said["id"]}"]')
+    await expect(message).to_be_visible(timeout=10000)
+    states = [("sent", "Sent"), ("resending", "Not received yet — sending again"),
+              ("undelivered", "Not delivered"), ("received", "Received")]  # fmt: skip
+    for delivery, words in states:
+        runtime.bus.publish("message", {**said, "meta": {}, "delivery": delivery, "amended": True})
+        await expect(message.locator(".delivery")).to_have_text(words)
+    later = runtime.add_message(server, "owner", "And log it")
+    runtime.bus.publish("message", {**later, "meta": {}, "delivery": "queued", "amended": True})
+    newer = page.locator(f'#timeline .msg.owner[data-id="{later["id"]}"]')
+    await expect(newer.locator(".delivery")).to_have_text("Waiting to be sent")
+    # Got there: said under the latest only.
+    await expect(message.locator(".delivery")).to_be_hidden()
+    runtime.states[server].held = False
+    await page.locator("#back-home").click()
+    log("a background process is said, not Thinking; each message says if it got there")
+
+    # Go on from a row: the row says whether it got there.
+    go_on = card("QA measure the latency")
+    await go_on.get_by_role("button", name="Go on", exact=True).click()
+    await expect(page.locator(".toast", has_text="Sent to the worker.")).to_be_visible()
+    moved = card("QA measure the latency")
+    await expect(moved.locator(".row-foot .delivery")).to_be_visible(timeout=10000)
+    await settle(runtime)
+    await page.wait_for_timeout(500)
+    prompt = store.one(
+        "SELECT * FROM messages WHERE session_id=? AND json_extract(meta, '$.prompt') IS NOT "
+        "NULL ORDER BY id DESC LIMIT 1",
+        (stopper,),
+    )
+    runtime.bus.publish("message", {**prompt, "meta": {}, "delivery": "resending",
+                                    "amended": True})  # fmt: skip
+    await expect(moved.locator(".row-foot .delivery")).to_have_text(
+        "Not received yet — sending again"
+    )
+    assert runtime.tasks.get(stopped["id"])["status"] == "running"
+    log("Go on from a row: the row says the message is being sent again")
+
+    # QA E19/E20: no sideways overflow at 360, 768 and 1280 px, in either tab.
+    for width in (1280, 768, 360):
+        await page.set_viewport_size({"width": width, "height": 900})
+        for tab in ("needs", "tasks") if width < 1100 else ("",):
+            if tab:
+                await page.locator(f"#home-tabs [data-tab={tab}]").click()
+            await page.wait_for_timeout(150)
+            wide = await page.evaluate(
+                "[document.documentElement.scrollWidth, innerWidth,"
+                " document.querySelector('#panel').scrollWidth,"
+                " document.querySelector('#panel').clientWidth]"
+            )
+            assert wide[0] <= wide[1] and wide[2] <= wide[3] + 1, (width, tab, wide)
+            found = await page.locator("#panel").evaluate(OVERFLOWS)
+            assert not found, (width, tab, found)
+        await page.screenshot(path=SHOTS / f"ui-edges-qa-home-{width}.png")
+    await page.set_viewport_size({"width": 1280, "height": 900})
+    log("Home fits at 360, 768 and 1280 px: nothing runs past the panel")
+    assert not errors, errors
     await context.close()
 
 
@@ -3477,16 +3806,15 @@ async def main():
             runtime.bus.publish("draft", store.draft(plain["id"]))
             await expect(reviewing).to_have_count(1, timeout=10000)
             task_id = runtime.tasks.current(worker)["id"]
-            # A review that changed nothing informs: read, it is with the finished ones (no
-            # Accept to click), marked a report.
-            await expect(page.locator("#tasks-recent")).to_contain_text("Review the exports PR")
-            await expect(reviewing.locator(".head .meta")).to_contain_text("Report")
-            await expect(reviewing.get_by_role("button", name="Accept")).to_have_count(0)
+            # A review that changed nothing is a result to accept all the same (QA E1): under
+            # Needs you, never with the finished ones before Accept; it can be sent back too.
+            await expect(page.locator("#needs")).to_contain_text("Review the exports PR")
+            await expect(page.locator("#tasks-recent")).not_to_contain_text("Review the exports")
+            await expect(reviewing.locator(".head .meta")).to_contain_text("Awaiting acceptance")
+            await expect(reviewing.get_by_role("button", name="Accept")).to_be_visible()
+            await expect(reviewing.get_by_role("button", name="Request changes")).to_be_visible()
             # Not read yet (CONTRACT task.read): a dot says so until the owner opens it.
             await expect(reviewing.locator(".head .dot.unread")).to_have_count(1)
-            await expect(reviewing.locator(".head .meta")).to_have_attribute(
-                "data-tip", re.compile("Only a report: nothing to accept. Done once read.")
-            )
             # In the chat, the report is one line with its gist, pointing at the task's card.
             reported = page.locator("#timeline .event.done", has_text="Review the exports PR")
             await expect(reported).to_contain_text("finished: Review done.")
@@ -3495,11 +3823,9 @@ async def main():
             assert (await read.value).method == "POST"
             await expect(reviewing).to_have_class(re.compile(r"\bexpanded\b"))
             await expect(reviewing.locator(".report")).to_contain_text("Review done.")
-            # Read now (once the server keeps it); Done, not Accept, ends it.
+            # Read now (once the server keeps it); Accept ends it, as any result.
             await expect(reviewing.locator(".head .dot.unread")).to_have_count(0, timeout=5000)
-            await expect(reviewing.get_by_role("button", name="Done")).to_have_attribute(
-                "title", "Only a report: nothing to accept. Done once read."
-            )
+            await expect(reviewing.get_by_role("button", name="Done")).to_have_count(0)
             # New receipts redraw the card (a commit seen: Create PR comes): the report the
             # owner opened stays open.
             task = runtime.tasks.current(worker)
@@ -3517,7 +3843,7 @@ async def main():
             await expect(
                 page.locator("#needs .card.task", has_text="Review the exports")
             ).to_have_count(1, timeout=5000)
-            await expect(reviewing.locator(".head .meta")).to_contain_text("To review")
+            await expect(reviewing.locator(".head .meta")).to_contain_text("Awaiting acceptance")
             await expect(reviewing.locator(".receipt.changes")).to_be_visible(timeout=5000)
             await expect(reviewing).to_have_class(re.compile(r"\bexpanded\b"))
             await expect(reviewing.locator(".expand")).to_have_text("Hide report")
@@ -3551,7 +3877,7 @@ async def main():
             only = set(sys.argv[1:])
             for check in (home, memory, this_round, round_two, round_three, round_four,
                           round_five, round_six, round_seven, round_eight, round_nine,
-                          round_ten, round_scale):  # fmt: skip
+                          round_ten, round_scale, round_qa):  # fmt: skip
                 if not only or check.__name__ in only:
                     await check(runtime, browser, failures)
             await browser.close()

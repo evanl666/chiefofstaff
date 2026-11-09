@@ -941,8 +941,16 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
   border-left: 1px solid var(--line);
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  gap: 12px;
 }
+/* Home's five parts, one under the other the same way: Needs you, Running, Monitoring, Recently
+   finished, then Artifacts; 12px apart, a line between them. Tasks only groups the four below
+   Needs you (for the Tasks tab on a narrow window): it is no part of its own. */
+#tasks { display: contents; }
+#panel .area { min-width: 0; }
+#panel .area:not(#needs) { border-top: 1px solid var(--line); padding-top: 12px; }
+#panel .area > .empty-hint { margin: 0; }
+#panel .area:not([open]) > .empty-hint { display: none; }
 /* The border between the chat and the panel: drag it to make the panel wider or narrower. */
 #panel-resizer { flex: none; width: 9px; margin: 0 -5px 0 -4px; cursor: col-resize; position: relative; z-index: 3; touch-action: none; }
 #panel-resizer::after { content: ""; position: absolute; top: 0; bottom: 0; left: 4px; width: 1px; transition: background 0.15s var(--ease); }
@@ -964,26 +972,15 @@ body.resizing iframe { pointer-events: none; }
 .panel-section .count { color: var(--muted); font-size: var(--small); font-weight: 500; font-variant-numeric: tabular-nums; }
 .panel-section > summary > h2 { margin: 0; font: inherit; }
 #needs > summary .count:not(:empty) { color: #fff; background: var(--badge); border-radius: 10px; min-width: 20px; padding: 0 6px; line-height: 20px; text-align: center; font-weight: 600; }
-.panel-section .items { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+.panel-section .items { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
 .panel-section .empty-hint { margin: 0; font-size: var(--small); color: var(--muted); }
-.task-group + .task-group { margin-top: 16px; }
-.task-group > :is(h3, summary) {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 28px;
-  margin: 0 0 4px;
-  font-size: var(--small);
-  font-weight: 600;
-  color: var(--soft);
-}
-.task-group > :is(h3, summary) .count { color: var(--muted); font-weight: 500; }
 /* Every part of Home folds; its count stays in sight. */
-details:is(.task-group, .panel-section) > summary { list-style: none; cursor: pointer; }
-details:is(.task-group, .panel-section) > summary::-webkit-details-marker { display: none; }
-details:is(.task-group, .panel-section) > summary::before { content: "▸"; color: var(--muted); width: 8px; flex: none; }
-details:is(.task-group, .panel-section)[open] > summary::before { content: "▾"; }
-details:is(.task-group, .panel-section) > summary:hover { color: var(--text); }
+details.panel-section > summary { list-style: none; cursor: pointer; }
+details.panel-section > summary::-webkit-details-marker { display: none; }
+details.panel-section > summary::before { content: "▸"; color: var(--muted); width: 8px; flex: none; }
+details.panel-section[open] > summary::before { content: "▾"; }
+details.panel-section > summary:hover { color: var(--text); }
+details.panel-section:not([open]) > summary { margin-bottom: 0; }
 #panel .card { padding: 12px; }
 #panel .card.decision .options { grid-template-columns: 1fr; }
 #panel .card .label { white-space: normal; }
@@ -999,18 +996,6 @@ details:is(.task-group, .panel-section) > summary:hover { color: var(--text); }
 .task-body .progress > .when { font-size: var(--small); color: var(--muted); }
 .task-body .progress.stale .progress-line { color: var(--muted); }
 .card.task .reason.stalled { color: var(--soft); }
-/* A worker's box: its name, then its tasks in this section as plain rows. */
-.card.worker-box { padding: 6px 12px 4px; display: grid; gap: 2px; min-width: 0; }
-/* The worker, as a quiet label: its tasks are what to read. */
-.card.worker-box > .box-head { display: flex; gap: 6px; align-items: baseline; min-width: 0; font-size: var(--small); color: var(--muted); }
-.card.worker-box > .box-head .who { flex: none; text-transform: uppercase; letter-spacing: 0.04em; font-size: var(--small); font-weight: 600; }
-.card.worker-box > .box-head .title { flex: 1; min-width: 0; min-height: 28px; margin: -5px 0; text-align: left; padding: 0; background: none; color: var(--soft); font-weight: 400; font-size: var(--small); font-family: inherit; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.card.worker-box > .box-head .title:not(:disabled):hover { text-decoration: underline; }
-.card.worker-box > .box-head .meta { flex: none; max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.card.worker-box > .box-tasks { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; }
-.card.worker-box > .box-tasks > .card.task { margin: 0; border: 0; border-top: 1px solid var(--line); border-radius: 0; box-shadow: none; background: none; padding: 6px 0; }
-.card.worker-box > .box-tasks > .card.task:first-child { border-top: 0; }
-.card.worker-box.in-finished { background: none; box-shadow: none; border-color: transparent; padding-top: 2px; padding-bottom: 2px; }
 .task-body .artifacts { margin-top: 6px; }
 .receipt.watching { background: none; border: 1px solid var(--line); color: var(--muted); line-height: 20px; }
 button.receipt.needs { background: var(--amber-soft); color: var(--amber); }
@@ -1026,7 +1011,7 @@ button.receipt.needs { background: var(--amber-soft); color: var(--amber); }
   #main.home:not(.tab-chat) #conversation, #main.home.tab-chat #panel { display: none; }
   #main.home #panel { width: auto !important; flex: 1; border-left: 0; background: var(--bg); padding: 16px 20px 32px; }
   #main.home #panel-resizer { display: none; }
-  #main.home #panel > * { width: 100%; max-width: 760px; margin: 0 auto; }
+  #main.home :is(#panel, #tasks) > * { width: 100%; max-width: 760px; margin-left: auto; margin-right: auto; }
   #main.tab-needs #tasks, #main.tab-tasks #needs { display: none; }
 }
 @media (max-width: 900px) {
@@ -1078,10 +1063,10 @@ button.receipt.needs { background: var(--amber-soft); color: var(--amber); }
 /* The meta (since when, a marker) gives way before the title does. */
 .card.task .meta { font-size: var(--small); color: var(--muted); white-space: nowrap; flex: 0 1 auto; min-width: 0; max-width: 45%; overflow: hidden; text-overflow: ellipsis; }
 .card.task .head .title { min-width: min(9em, 50%); }
-/* A narrow box keeps its room for the title: the task id is in the title's tooltip too. */
-.card.worker-box { container: box / inline-size; }
-@container box (max-width: 400px) {
-  .card.task .head .tid, .card.task .head .meta .when { display: none; }
+/* A narrow panel keeps its room for the title: since when is in the status's tooltip too. */
+#panel { container: panel / inline-size; }
+@container panel (max-width: 400px) {
+  .card.task .head .meta .when { display: none; }
 }
 .card.task .head .tid { flex: none; font: 10px var(--mono); color: var(--muted); opacity: 0.8; }
 .card.task .reason.warn { color: var(--soft); }
@@ -1091,7 +1076,6 @@ button.receipt.needs { background: var(--amber-soft); color: var(--amber); }
 .more-links > summary::before { content: "▸ "; }
 .more-links[open] > summary::before { content: "▾ "; }
 .more-links > .receipts { margin-top: 4px; }
-.receipt.failing .link { padding: 0; min-height: 0; color: inherit; text-decoration: underline; }
 .receipt.watching { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
 .receipt.watching .watch-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: inherit; }
 .receipt.watching .unfollow { padding: 0 2px; min-height: 0; color: inherit; flex: none; opacity: 0.7; }
@@ -1117,9 +1101,13 @@ button.receipt.needs { background: var(--amber-soft); color: var(--amber); }
 #tasks-artifacts .artifact.tone-muted .a-status { color: var(--muted); }
 #tasks-artifacts .artifact .a-hide { min-height: 0; padding: 0 4px; background: none; color: var(--muted); font-weight: 400; }
 #tasks-artifacts .artifact .a-hide:hover { color: var(--text); }
-#tasks-artifacts .artifact .a-meta { grid-column: 2 / -1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
-#tasks-artifacts .artifact .a-task { padding: 0; min-height: 0; font: inherit; color: inherit; background: none; text-align: left; max-width: 70%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+/* Its PR's part, its task (cut to fit) and when: since when always in sight. */
+#tasks-artifacts .artifact .a-meta { grid-column: 2 / -1; display: flex; align-items: baseline; gap: 0 4px; min-width: 0; overflow: hidden; white-space: nowrap; color: var(--muted); }
+#tasks-artifacts .artifact .a-meta > * { flex: none; }
+#tasks-artifacts .artifact .a-task { flex: 0 1 auto; min-width: 0; padding: 0; min-height: 0; font: inherit; color: inherit; background: none; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #tasks-artifacts .artifact .a-task:hover { color: var(--text); text-decoration: underline; }
+/* A PR's part in its task: opened, pushed to or reviewed. */
+#tasks-artifacts .artifact .a-role { color: var(--soft); font-weight: 500; }
 #tasks-artifacts .artifact.hidden-artifact { opacity: 0.6; }
 #tasks-artifacts .show-hidden { justify-self: start; margin: 2px 0 0 8px; font-size: var(--small); }
 #session-list .idle-workers > summary { cursor: pointer; list-style: none; font-size: var(--small); color: var(--muted); padding: 6px 12px; }
@@ -1431,28 +1419,75 @@ dialog .row label.hours:not(.grow) { width: auto; flex: none; }
 .receipt.link-chip.tone-wait { background: var(--amber-soft); color: var(--amber); }
 .receipt.link-chip.tone-active { background: var(--accent-soft); color: var(--accent); }
 
-/* Monitoring and Recently finished: a row per task (its title, when, what it waits on or came
-   to, what it made); a click shows its whole card in place. */
-:is(#tasks-monitoring, #tasks-recent) .items { gap: 4px; }
-#panel .card.task.row { padding: 0 10px 4px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--card); box-shadow: none; cursor: pointer; }
+/* A task, the same row in all four places: its title (cut to fit, whole once shown), its status
+   and since when; its reason and latest progress; its worker, what it delivered; the one thing
+   to do about it. A click shows its whole card in place. */
+#panel .card.task.row { padding: 0 10px 6px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--card); box-shadow: none; cursor: pointer; min-width: 0; }
 #panel .card.task.row:not(.unfolded):hover { border-color: var(--muted); }
 #panel .card.task.row.unfolded { cursor: auto; padding: 6px 12px 8px; }
 .card.task.row .head { margin-bottom: 0; }
 .card.task.row .head .tid { display: none; }
-/* Its marker gives way first; when stays whole. */
-.card.task.row .head .meta { display: inline-flex; }
-.card.task.row .head .meta .marker { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.card.task.row .head .meta .when { flex: none; white-space: pre; }
-.card.task.row:not(.unfolded) > :not(.head, .row-line), .card.task.row:not(.unfolded) > .head > :is(.actions, .fold) { display: none; }
+.card.task.row.unfolded > .head .title { white-space: normal; overflow-wrap: anywhere; }
+/* Its status gives way first; when stays whole. */
+.card.task .head .meta { display: inline-flex; }
+.card.task .head .meta .marker { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.card.task .head .meta .when { flex: none; white-space: pre; }
+.card.task.row:not(.unfolded) > :not(.head, .row-line, .row-foot, .asked, .actions), .card.task.row:not(.unfolded) > .head > .fold { display: none; }
 .card.task.row .head .fold { flex: none; font-size: var(--small); }
-.card.task.row.unfolded > .row-line { display: none; }
-.card.task .row-line { display: flex; gap: 8px; align-items: baseline; margin-left: 16px; min-width: 0; font-size: var(--small); line-height: 18px; color: var(--muted); }
-.card.task .row-line .why { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Its worker, at the end of its second line: a small reference, never the main thing. */
+.card.task .row-line .worker-ref { flex: 0 0 auto; max-width: 40%; margin-left: auto; overflow: hidden; }
+.card.task.row > .actions:not(.inline) { margin-top: 6px; gap: 4px 6px; }
+.card.task.row > .actions:not(.inline) > button.text { padding: 0 4px; }
+/* Nothing to do on it here (its "⋯" is in its head), nothing went wrong: no empty line. */
+.card.task.row > .actions:not(:has(> :not(.error:empty))) { display: none; }
+.card.task.row .head .row-menu:empty { display: none; }
+.card.task .row-line { display: flex; gap: 6px; align-items: baseline; margin-left: 16px; min-width: 0; font-size: var(--small); line-height: 18px; color: var(--muted); white-space: nowrap; overflow: hidden; }
+.card.task .row-line > * { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card.task .row-line .why { flex: 0 1 auto; color: var(--soft); }
 .card.task .row-line .why.warn::before { content: "! "; color: var(--amber); font-weight: 600; }
-.card.task .row-line .made { flex: none; max-width: 42%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--soft); }
-/* Groups inside Monitoring: the owner's deliveries, the PRs they reviewed. */
-.task-group.sub, .task-group.sub + .task-group.sub { margin: 2px 0 0; }
-.task-group.sub > summary { margin: 0; font-weight: 500; color: var(--muted); }
+.card.task .row-line .object { flex: 0 1 auto; color: var(--soft); }
+.card.task .row-line .quiet, .card.task .row-line .also { flex: 0 0 auto; }
+.card.task .row-line .quiet::before, .card.task .row-line .why + .object::before { content: "· "; }
+.card.task .row-line .latest { flex: 1 1 0; min-width: 3em; }
+.card.task .row-line .why + .latest::before, .card.task .row-line .quiet + .latest::before, .card.task .row-line .object + .latest::before { content: "— "; }
+.card.task .row-line .step { font-family: var(--mono); }
+.card.task .row-foot { display: flex; flex-wrap: wrap; gap: 2px 8px; align-items: center; margin-left: 16px; min-width: 0; font-size: var(--small); line-height: 18px; color: var(--muted); }
+.card.task .row-foot:empty { display: none; }
+/* Its worker: a small reference to its chat, never the main thing on the row. */
+.card.task .worker-ref { display: inline-flex; align-items: center; gap: 4px; min-width: 0; max-width: 60%; min-height: 28px; margin: -5px 0; padding: 0; font-size: var(--small); color: var(--muted); }
+.card.task .worker-ref .who { flex: none; font-weight: 600; }
+.card.task .worker-ref .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card.task .worker-ref:not(:disabled):hover .name { text-decoration: underline; color: var(--text); }
+.card.task .row-foot .checks { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Its chips wrap rather than squeeze: where a PR stands stays whole, its title gives way. */
+.card.task .row-chips { display: inline-flex; flex-wrap: wrap; gap: 4px; min-width: 0; max-width: 100%; }
+.card.task .row-chips > * { min-width: 0; max-width: 100%; }
+.card.task .row-chips .receipt { line-height: 18px; }
+.card.task .row-chips :is(.pr-name, .chip-link) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card.task .row-chips .more-made { flex: none; align-self: center; }
+/* Whether what the owner sent from here got there. */
+.delivery { font-size: var(--small); color: var(--muted); white-space: nowrap; }
+.delivery.wait, .delivery.warn { color: var(--amber); }
+.delivery.bad { color: var(--red); font-weight: 600; }
+.delivery.good { color: var(--green); }
+.msg.owner > .delivery { margin-top: 2px; text-align: right; opacity: 0.85; }
+/* Its question: what it asks, why, the answers it offers, what it does then. */
+.card .asked { display: grid; gap: 4px; margin: 4px 0 0 16px; min-width: 0; font-size: var(--small); color: var(--soft); }
+.card.question-card .asked { margin-left: 0; }
+.card .asked .q-text { font-size: var(--body); color: var(--text); max-height: 9em; overflow-y: auto; overflow-wrap: anywhere; }
+.card .asked :is(.q-why, .q-next) { overflow-wrap: anywhere; }
+.card .asked .q-options { display: flex; flex-wrap: wrap; gap: 6px; }
+.card .asked .q-option { min-height: 28px; max-width: 100%; white-space: normal; text-align: left; }
+.card .asked .error:empty { display: none; }
+/* A follow it cannot read: what is wrong, Retry and the details, or stop following it. */
+.receipt.failing { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 0 4px; white-space: normal; }
+.receipt.failing :is(.retry, .link) { padding: 0; min-height: 28px; margin: -5px 0; color: inherit; text-decoration: underline; }
+.receipt.failing .retry { font-weight: 600; }
+.receipt.failing .why-details > summary { cursor: pointer; text-decoration: underline; list-style: none; }
+.receipt.failing .why-details > summary::-webkit-details-marker { display: none; }
+.receipt.failing .why-details[open] { flex-basis: 100%; }
+.receipt.failing .why-details .detail { white-space: pre-line; overflow-wrap: anywhere; padding: 2px 0; }
+.working-line.background .dot { background: none; }
 /* A report not read yet. */
 .dot.unread { background: var(--accent); opacity: 1; }
 /* Moving a task's latest result to a task of its own: what stays, what moves. */

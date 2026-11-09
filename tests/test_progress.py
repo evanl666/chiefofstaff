@@ -640,7 +640,8 @@ async def test_a_blocker_on_finished_work_needs_the_owner(harness):
     assert runtime.tasks.get(task["id"])["status"] == "waiting", "shown under Needs you"
 
 
-async def test_a_merged_pr_settles_its_task_after_later_reports(harness):
+async def test_a_merged_pr_after_later_reports_leaves_its_result_to_accept(harness):
+    """Merging is not accepting (E28): its card says the PR is merged; only Accept settles it."""
     runtime = await harness.connect()
     worker = await spawn(runtime, harness.router_id, "Login")
     harness.own_pull("acme/app", 7)
@@ -659,10 +660,11 @@ async def test_a_merged_pr_settles_its_task_after_later_reports(harness):
     await call_tool(runtime, "report", worker, status="done", summary="Logout too.")
     assert runtime.tasks.get(task["id"])["status"] == "review"
     runtime.unfollow("github:acme/app#7", finished=True, merged=True)
-    assert runtime.tasks.get(task["id"])["status"] == "done"
+    assert runtime.tasks.get(task["id"])["status"] == "review"
+    assert "acme/app#7" in json.loads(harness.store.get(f"mergedprs:{task['id']}"))
 
 
-async def test_a_merge_settles_only_the_task_that_opened_the_pr(harness):
+async def test_a_merge_is_noted_only_on_the_task_that_opened_the_pr(harness):
     runtime = await harness.connect()
     worker = await spawn(runtime, harness.router_id, "Survey")
     survey = runtime.tasks.current(worker)
@@ -687,12 +689,14 @@ async def test_a_merge_settles_only_the_task_that_opened_the_pr(harness):
         summary="Fixed in https://github.com/acme/app/pull/9",
     )  # fmt: skip
     runtime.task_actions.pr_merged(worker, "github:acme/app#9")
-    assert runtime.tasks.get(fix["id"])["status"] == "done"
-    assert runtime.tasks.get(survey["id"])["status"] == "review", "it only mentioned it"
+    assert harness.store.get(f"mergedprs:{fix['id']}"), "its own PR"
+    assert not harness.store.get(f"mergedprs:{survey['id']}"), "it only mentioned it"
+    assert {runtime.tasks.get(t["id"])["status"] for t in (fix, survey)} == {"review"}
 
 
-async def test_a_task_with_two_prs_is_done_when_the_last_is_merged(harness):
-    """Bug bash: a task that opened two PRs was done once the first was merged."""
+async def test_a_task_with_two_prs_stays_to_accept_when_both_are_merged(harness):
+    """Bug bash: a task that opened two PRs was done once the first was merged. Since E28 no
+    merge accepts it: each is noted on its card, and it waits for the owner's Accept."""
     runtime = await harness.connect()
     worker = await spawn(runtime, harness.router_id, "Split the change")
     task = runtime.tasks.current(worker)
@@ -720,12 +724,14 @@ async def test_a_task_with_two_prs_is_done_when_the_last_is_merged(harness):
     assert runtime.tasks.get(task["id"])["status"] == "review", "#10 is still open"
     harness.store.execute("UPDATE runs SET evidence=? WHERE task_id=?", (prs("MERGED"), task["id"]))
     runtime.task_actions.pr_merged(worker, "github:acme/app#10")
-    assert runtime.tasks.get(task["id"])["status"] == "done"
+    assert runtime.tasks.get(task["id"])["status"] == "review", "merged is not accepted"
+    noted = json.loads(harness.store.get(f"mergedprs:{task['id']}"))
+    assert noted == ["acme/app#9", "acme/app#10"]
 
 
-async def test_a_task_whose_two_prs_merged_since_the_last_look_is_done(harness, monkeypatch):
+async def test_a_task_whose_two_prs_merged_since_the_last_look_says_both(harness, monkeypatch):
     """Code review: both PRs merged within one refresh: each looked at the other as still
-    open (the old state), and the task stayed in review."""
+    open (the old state). Both are noted merged; the task waits for Accept (E28)."""
     runtime = await harness.connect()
     worker = await spawn(runtime, harness.router_id, "Split the change")
     task = runtime.tasks.current(worker)
@@ -737,12 +743,14 @@ async def test_a_task_whose_two_prs_merged_since_the_last_look_is_done(harness, 
         "UPDATE runs SET evidence=? WHERE task_id=?", (json.dumps({"prs": old}), task["id"])
     )
 
-    async def merged(_task):
+    async def merged(_task, **_how):
         return [{**pr, "state": "MERGED"} for pr in old]
 
     monkeypatch.setattr(runtime.task_actions, "read_prs", merged)
     await runtime.task_actions.refresh_prs(task["id"])
-    assert runtime.tasks.get(task["id"])["status"] == "done"
+    assert runtime.tasks.get(task["id"])["status"] == "review"
+    noted = json.loads(harness.store.get(f"mergedprs:{task['id']}"))
+    assert noted == ["acme/app#9", "acme/app#10"]
 
 
 async def test_a_pr_github_cannot_read_is_followed_only_when_it_opened_it(harness):
@@ -2284,7 +2292,7 @@ async def test_the_owners_pr_ready_to_merge_comes_as_a_card_once(harness):
     harness.gh_replies["pr view https://github.com/acme/app/pull/7"] = pr_view(state="MERGED")
     decided = await runtime.drafts.resolve(card["id"], DraftDecision(action="send"))
     assert decided["status"] == "sent" and "squashed and merged" in decided["outcome"]
-    assert runtime.tasks.get(task["id"])["status"] == "done", "merged: its task is done at once"
+    assert runtime.tasks.get(task["id"])["status"] == "review", "merged is not accepted"
     merge = [args for args, _ in harness.gh_calls if args[:2] == ("pr", "merge")]
     assert merge and "--match-head-commit" in merge[0] and "abc1234" in merge[0]
 
@@ -3445,11 +3453,9 @@ async def test_the_router_hears_which_finished_results_wait_for_the_owner(harnes
     worker = await spawn(runtime, harness.router_id, "Count rows")
     task = runtime.tasks.current(worker)
     await call_tool(runtime, "report", worker, status="done", summary="540 rows.")
-    assert runtime.task_actions.status_words(runtime.tasks.get(task["id"])) == "review, report"
-    assert "review, report" in runtime.handover()
-    runtime.store.execute("UPDATE tasks SET acceptance=? WHERE id=?",
-                          (json.dumps(["rows counted twice"]), task["id"]))  # fmt: skip
+    # A report that only informs waits for Accept too (E28).
     assert runtime.task_actions.status_words(runtime.tasks.get(task["id"])) == "review, to accept"
+    assert "to review (needs you)" in runtime.handover()
 
 
 async def test_retrying_a_cancelled_task_does_not_send_its_cancelled_note(harness):

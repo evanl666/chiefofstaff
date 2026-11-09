@@ -4,7 +4,7 @@ from datetime import datetime
 import pytest
 
 from chiefofstaff.models import DraftDecision, Settings
-from chiefofstaff.sources.github import GitHubSource
+from chiefofstaff.sources.github import MAX_BACKOFF_SECONDS, POLL_SECONDS, GitHubSource
 from chiefofstaff.store import Store
 
 THREAD = "github:acme/app#7"
@@ -348,12 +348,16 @@ async def test_one_broken_pr_does_not_stop_the_others(tmp_path):
         return await with_missing(*arguments, payload=payload)
 
     source = GitHubSource(store, host, gh_command=counted)
+    moment = [1793600000.0]
+    source.clock = lambda: moment[0]
     for _ in range(8):
         await source.poll_once()
+        moment[0] += POLL_SECONDS
     assert host.deliveries and host.deliveries[0][0] == THREAD
     assert len(host.subscriptions) == 2, "failures never drop a follow (or close a worker)"
-    assert sum("acme/gone" in call for call in calls) == 5, "then it backs off"
-    assert store.get("ghfail:github:acme/gone#1") == "5", "reads that failed, not polls"
+    # Read at polls 0, 1, 3 and 7: one, two, then four polls apart.
+    assert sum("acme/gone" in call for call in calls) == 4, "then it backs off"
+    assert store.get("ghfail:github:acme/gone#1") == "4", "reads that failed, not polls"
 
 
 async def test_a_follow_says_what_could_not_be_read_and_recovers_at_once(tmp_path):
@@ -371,18 +375,21 @@ async def test_a_follow_says_what_could_not_be_read_and_recovers_at_once(tmp_pat
         return await gh(*arguments, payload=payload)
 
     source = GitHubSource(store, host, gh_command=no_checks)
+    moment = [1793600000.0]
+    source.clock = lambda: moment[0]
     for _ in range(3):
         await source.poll_once()
+        moment[0] += MAX_BACKOFF_SECONDS  # Each read due by then.
     why = json.loads(store.get(f"ghwhy:{THREAD}"))
-    assert (why["kind"], why["step"]) == ("access", "CI checks"), why
-    assert "Resource not accessible" in why["error"]
+    assert (why["kind"], why["step"]) == ("permission", "CI checks"), why
+    assert "Resource not accessible" in why["detail"]
     assert host.health_changes == [THREAD], "its card says so once it shows"
     # The PR itself read elsewhere (its card's chip) does not clear what failed on its checks.
     source.read_ok(THREAD, whole=False)
     assert store.get(f"ghfail:{THREAD}") == "3"
     broken["checks"] = False
     await source.poll_once()
-    assert store.get(f"ghfail:{THREAD}") == "0" and not store.get(f"ghwhy:{THREAD}")
+    assert not store.get(f"ghfail:{THREAD}") and not store.get(f"ghwhy:{THREAD}")
     assert host.health_changes == [THREAD, THREAD], "and once it can be read again"
 
 
@@ -396,8 +403,11 @@ async def test_a_followed_pr_that_does_not_exist_is_let_go(tmp_path):
         raise RuntimeError("gh: Not Found (HTTP 404)")
 
     source = GitHubSource(store, host, gh_command=gh)
+    moment = [1793600000.0]
+    source.clock = lambda: moment[0]
     for _ in range(2):
         await source.poll_once()
+        moment[0] += POLL_SECONDS  # Not found at three polls in a row, not three wakes.
     assert host.subscriptions, "a PR not found twice may be a hiccup"
     await source.poll_once()
     assert host.subscriptions == []

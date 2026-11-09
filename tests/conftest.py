@@ -66,9 +66,23 @@ class FakeSession:
             self.background[request.id] = "cancelled"
             return SimpleNamespace(cancelled=running)
 
+        # What Copilot queued and has not started on: queue item id -> prompt.
+        self.queued: dict[str, str] = {}
+
+        async def pending_items():
+            await asyncio.sleep(0)  # An RPC: others run meanwhile.
+            return SimpleNamespace(
+                items=[SimpleNamespace(id=k, display_text=v) for k, v in self.queued.items()]
+            )
+
+        async def remove_at(request):
+            await asyncio.sleep(0)
+            return SimpleNamespace(removed=self.queued.pop(request.id, None) is not None)
+
         self.rpc = SimpleNamespace(
             mcp=SimpleNamespace(oauth=SimpleNamespace(login=login)),
             tasks=SimpleNamespace(list=listed, cancel=cancel),
+            queue=SimpleNamespace(pending_items=pending_items, remove_at=remove_at),
         )
 
     async def set_model(self, model, **tuning):

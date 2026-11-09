@@ -73,6 +73,35 @@ export const focusing = () => new Date(state.snapshot?.focus?.until || 0) > new 
 export function workerTitle(session) {
   return session?.display_title || session?.title || "";
 }
+// Where a message sent to a session stands (`delivery`: the owner's, the Router's, a notice),
+// in words for the chat and for the row the owner sent it from: queued, sent, its conversation
+// shows it (received), the turn it was in ended (handled), sent again for want of a sign it got
+// there, or given up on.
+export const DELIVERY_WORDS = {
+  queued: ["Waiting to be sent", "wait"],
+  sent: ["Sent", ""],
+  received: ["Received", "good"],
+  processed: ["Handled", "good"],
+  resending: ["Not received yet — sending again", "warn"],
+  undelivered: ["Not delivered", "bad"],
+};
+// The latest few such messages of each session, as their events said (any session's, not only
+// the one shown: a row on Home says how what was sent from it is doing).
+const deliveries = new Map();
+export function noteDelivery(message) {
+  if (!message?.delivery || !message.session_id) return false;
+  const known = deliveries.get(message.session_id) || [];
+  const before = known.find((item) => item.id === message.id);
+  const list = known.filter((item) => item.id !== message.id);
+  // When it came to where it stands (a row shows "Handled" for a while, then nothing).
+  const changed = before?.delivery === message.delivery ? before.changed : Date.now();
+  list.push({ id: message.id, kind: message.kind, delivery: message.delivery, at: Date.parse(message.created_at) || Date.now(), changed });
+  deliveries.set(message.session_id, list.sort((a, b) => a.id - b.id).slice(-8));
+  return true;
+}
+// The latest of the owner's messages to a session since a moment (ms): not the Router's, which
+// it may get meanwhile.
+export const latestDelivery = (sessionId, since = 0) => (deliveries.get(sessionId) || []).filter((item) => item.at >= since && item.kind === "owner").pop() || null;
 export async function loadState() {
   const data = await api("/api/state");
   const first = !state.snapshot;
@@ -135,6 +164,8 @@ function handleEvent({ type, data }) {
     state.connectedOnce = true;
   } else if (type === "message") {
     noteUpdate(data);
+    // Where a message sent to a worker stands: the row it was sent from says it too.
+    if (noteDelivery(data) && data.session_id !== viewedId()) scheduleHome();
     if (data.amended) {
       if (data.session_id === viewedId()) replaceMessage(data);
       return;

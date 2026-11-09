@@ -20,6 +20,7 @@ import os
 from contextlib import suppress
 from typing import TYPE_CHECKING
 
+from .backend import running_background, stop_background, take_queued
 from .envelope import news_tasks, tasks_named
 from .roles import ROUTER, SLACK, WORKER
 from .sources.slack import describe
@@ -39,6 +40,22 @@ RETRY_DELAY = 2.0
 # A message that starts a turn shows in the session's conversation at once (Copilot writes it
 # down before its first step). One that does not after this long was never started on.
 START_CHECK = float(os.environ.get("CHIEFOFSTAFF_START_CHECK", "90"))
+
+# A message sent to a session shows in its conversation within seconds (a steer, at its next
+# step; one queued behind its turn waits there, which Copilot can say). One that is neither
+# shown nor waiting after this long was lost: it is sent again, up to ECHO_RESENDS times.
+ECHO_CHECK = float(os.environ.get("CHIEFOFSTAFF_ECHO_CHECK", "20"))
+ECHO_RESENDS = 2
+# Kinds of messages whose delivery the chats show as it changes (the owner's and the Router's
+# words to a session; not every event batched to the Router).
+TRACKED = {"owner", "router"}
+
+# Said when a command a session left running in the background held its messages and was
+# stopped for them.
+HELD_STOPPED = (
+    "Stopped a command it left running in the background (a server, a watcher): Copilot held "
+    "the messages sent to it until that command ended."
+)
 
 # Errors of a send to a Copilot CLI that stopped (crashed, killed): the connection is gone.
 CONNECTION_LOST = (BrokenPipeError, ConnectionResetError, EOFError)
@@ -269,6 +286,7 @@ class Delivery:
         """Its turn was stopped (Copilot drops what it queued for that turn): what it was sent
         and never saw is sent again, with its next message."""
         state = self.states[session_id]
+        state.echo_wait.clear()  # Sent again with its next message, under a new digest.
         firsts = [entry[2] for entry in state.unread.values()] + list(state.unseen.values())
         state.unread.clear()
         state.unseen.clear()
@@ -314,107 +332,126 @@ class Delivery:
         """Send every prompt this session has not received yet, as one message. `busy`: it is
         in a turn, which this joins or follows (not a turn of its own starting now)."""
         async with self.states[session_id].sending:
-            # The Router's Copilot session may have been replaced while this waited.
-            session = self.states.handle(session_id) or session
-            mark = int(self.store.get(f"sent:{session_id}") or 0)
-            pending = self.store.prompts(session_id, after=mark)
-            if not pending:
-                return False
-            prompts = [self.runtime.told_prompt(message) for message in pending]
-            if preamble := self.store.get(f"preamble:{session_id}"):
-                prompts.insert(0, preamble)  # A new Router's handover, before what is new.
-            text = "\n\n".join(prompts)
-            marker = {"upto": pending[-1]["id"], "digest": digest(text)}
-            self.store.set(f"sending:{session_id}", json.dumps(marker))
-            row = self.store.session(session_id)
-            state = self.states[session_id]
-            mid_turn = row["role"] == WORKER and row["status"] == "working" and state.echoes
-            attachments = [
-                {"type": "file", "path": item["path"], "displayName": item["name"]}
-                for message in pending
-                for item in message["meta"].get("attachments") or []
-            ]
-            # A turn starts on it now: its conversation shows it soon, or Copilot gave up on it.
-            # Marked before the send (its echo may come before the send returns).
-            starts = (
-                self.runtime.backend_echoes()
-                and not joins
-                and not mid_turn
-                and not (busy and state.echoes)
-                and not state.after_abort
-                and state.awaiting is None
-            )
-            if starts:
-                state.awaiting = (marker["digest"], mark)
-            try:
-                if attachments:
-                    await session.send(text, mode=mode, attachments=attachments)
-                else:
-                    await session.send(text, mode=mode)
-            except BaseException:
-                # The caller hears of the failure and the messages count as not delivered.
-                self.store.delete(f"sending:{session_id}")
-                if starts:
-                    state.awaiting = None
-                raise
-            if starts:
-                asyncio.get_running_loop().call_later(
-                    START_CHECK,
-                    lambda: self.runtime.background(
-                        self.check_started(session_id, session, marker["digest"])
-                    ),
-                )
-            if row["role"] == WORKER and any(m["meta"].get("thread") for m in pending):
-                state.thread_turn, state.thread_nudged = True, False
-            # What it is given now, not what rides along with it (instructions held back
-            # while it was stopped are taken up when their turn comes).
-            fresh = "\n\n".join(
-                m["meta"]["prompt"] for m in pending if not m["meta"].get("deferred")
-            )
-            if (
-                row["role"] == WORKER
-                and not mid_turn
-                and not busy
-                and (named := tasks_named(fresh or text))
-            ):
-                # A turn on it starts now; sent while it works, once its conversation shows it
-                # (a connection that shows none: when its turn on it comes, see working_on).
-                self.runtime.took_up(session_id, named)
-            elif (
-                row["role"] == WORKER
-                and not mid_turn
-                and not busy
-                and (named := news_tasks(fresh or text))
-            ):
-                # News on a thread it follows for a task: its turn is on that task.
-                self.runtime.took_up(session_id, named, news=True)
-            if row["role"] == WORKER:
-                # The owner's chat about a task they stopped (its prompt names no task): once
-                # it works on it, it runs again (TaskActions.resume_stopped).
-                for message in pending:
-                    about = message["meta"].get("task_id") if message["kind"] == "owner" else ""
-                    if about and self.store.get(f"stopped:{about}"):
-                        self.store.set(f"goingon:{about}", "1")
-            if row["role"] == WORKER and (state.echoes or self.runtime.backend_echoes()):
-                # Until its conversation shows it: a stop before then sends it again.
-                state.unseen[marker["digest"]] = pending[0]["id"]
-            if mid_turn:
-                # It sees this once its conversation shows it (events.user_message): a report
-                # before that is about the work without it.
-                state.unread[marker["digest"]] = (
-                    pending[-1]["text"][:300],
-                    tuple(m["meta"].get("task_id") or "" for m in pending),
-                    pending[0]["id"],
-                )
-            self.store.set(f"prevsent:{session_id}", str(mark))  # To send again after a failure.
-            self.store.set(f"sent:{session_id}", str(pending[-1]["id"]))
+            return await self.send_pending(session_id, session, mode, busy, joins)
+
+    async def send_pending(
+        self, session_id: str, session, mode: SendMode, busy: bool, joins: bool
+    ) -> bool:
+        """flush, with the session's `sending` lock held."""
+        # The Router's Copilot session may have been replaced while this waited.
+        session = self.states.handle(session_id) or session
+        mark = int(self.store.get(f"sent:{session_id}") or 0)
+        pending = self.store.prompts(session_id, after=mark)
+        if not pending:
+            return False
+        prompts = [self.runtime.told_prompt(message) for message in pending]
+        if preamble := self.store.get(f"preamble:{session_id}"):
+            prompts.insert(0, preamble)  # A new Router's handover, before what is new.
+        text = "\n\n".join(prompts)
+        marker = {"upto": pending[-1]["id"], "digest": digest(text)}
+        self.store.set(f"sending:{session_id}", json.dumps(marker))
+        row = self.store.session(session_id)
+        state = self.states[session_id]
+        if state.held:
+            # Its turn is over, but a command it left running holds what Copilot queues for
+            # it: sent at once, this starts a turn.
+            mode = "immediate"
+        mid_turn = row["role"] == WORKER and row["status"] == "working" and state.echoes
+        attachments = [
+            {"type": "file", "path": item["path"], "displayName": item["name"]}
+            for message in pending
+            for item in message["meta"].get("attachments") or []
+        ]
+        # A turn starts on it now: its conversation shows it soon, or Copilot gave up on it.
+        # Marked before the send (its echo may come before the send returns).
+        starts = (
+            self.runtime.backend_echoes()
+            and not joins
+            and not mid_turn
+            and not (busy and state.echoes)
+            and not state.after_abort
+            and state.awaiting is None
+        )
+        if starts:
+            state.awaiting = (marker["digest"], mark)
+        try:
+            if attachments:
+                await session.send(text, mode=mode, attachments=attachments)
+            else:
+                await session.send(text, mode=mode)
+        except BaseException:
+            # The caller hears of the failure and the messages count as not delivered.
             self.store.delete(f"sending:{session_id}")
-            self.store.delete(f"fresh:{self.runtime.copilot_id(session_id)}")
-            if preamble:
-                self.store.delete(f"preamble:{session_id}")
-            if self.store.get(f"undelivered:{session_id}"):
-                self.resolve_undelivered(session_id)
-            return True
+            if starts:
+                state.awaiting = None
+            raise
+        if starts:
+            asyncio.get_running_loop().call_later(
+                START_CHECK,
+                lambda: self.runtime.background(
+                    self.check_started(session_id, session, marker["digest"])
+                ),
+            )
+        if row["role"] == WORKER and any(m["meta"].get("thread") for m in pending):
+            state.thread_turn, state.thread_nudged = True, False
+        # What it is given now, not what rides along with it (instructions held back
+        # while it was stopped are taken up when their turn comes).
+        fresh = "\n\n".join(m["meta"]["prompt"] for m in pending if not m["meta"].get("deferred"))
+        if (
+            row["role"] == WORKER
+            and not mid_turn
+            and not busy
+            and (named := tasks_named(fresh or text))
+        ):
+            # A turn on it starts now; sent while it works, once its conversation shows it
+            # (a connection that shows none: when its turn on it comes, see working_on).
+            self.runtime.took_up(session_id, named)
+        elif (
+            row["role"] == WORKER
+            and not mid_turn
+            and not busy
+            and (named := news_tasks(fresh or text))
+        ):
+            # News on a thread it follows for a task: its turn is on that task.
+            self.runtime.took_up(session_id, named, news=True)
+        if row["role"] == WORKER:
+            # The owner's chat about a task they stopped (its prompt names no task): once
+            # it works on it, it runs again (TaskActions.resume_stopped).
+            for message in pending:
+                about = message["meta"].get("task_id") if message["kind"] == "owner" else ""
+                if about and self.store.get(f"stopped:{about}"):
+                    self.store.set(f"goingon:{about}", "1")
+        if state.echoes or self.runtime.backend_echoes():
+            # Until its conversation shows it: lost on the way, it is sent again.
+            state.echo_wait[marker["digest"]] = (
+                pending[0]["id"],
+                pending[-1]["id"],
+                text,
+                attachments,
+                0,
+            )
+            self.check_echo_later(session_id, session, marker["digest"])
+        if row["role"] == WORKER and (state.echoes or self.runtime.backend_echoes()):
+            # Until its conversation shows it: a stop before then sends it again.
+            state.unseen[marker["digest"]] = pending[0]["id"]
+        if mid_turn:
+            # It sees this once its conversation shows it (events.user_message): a report
+            # before that is about the work without it.
+            state.unread[marker["digest"]] = (
+                pending[-1]["text"][:300],
+                tuple(m["meta"].get("task_id") or "" for m in pending),
+                pending[0]["id"],
+            )
+        self.store.set(f"prevsent:{session_id}", str(mark))  # To send again after a failure.
+        self.store.set(f"sent:{session_id}", str(pending[-1]["id"]))
+        self.store.delete(f"sending:{session_id}")
+        self.store.delete(f"fresh:{self.runtime.copilot_id(session_id)}")
+        if preamble:
+            self.store.delete(f"preamble:{session_id}")
+        if self.store.get(f"undelivered:{session_id}"):
+            self.resolve_undelivered(session_id)
+        self.publish_delivery(session_id, pending)
+        return True
 
     async def reconcile(self, session_id: str) -> bool | None:
         """After a stop during a send: True if it arrived, False if not, None if unknown."""
@@ -462,11 +499,214 @@ class Delivery:
                 last = index
         return messages[: last + 1]
 
-    async def check_started(self, session_id: str, session, sent: str):
+    # Delivery, as the chats show it: queued (not sent yet) -> sent -> received (its
+    # conversation shows it) -> processed (the turn it was in ended); or resending, undelivered.
+
+    def delivery_marks(self, session_id: str) -> dict:
+        seen = self.store.get(f"seen:{session_id}")
+        handled = self.store.get(f"handled:{session_id}")
+        waiting = self.states[session_id].echo_wait.values()
+        return {
+            "sent": int(self.store.get(f"sent:{session_id}") or 0),
+            "seen": int(seen) if seen else None,
+            "handled": int(handled) if handled else None,
+            "waiting": [(first, last, resent) for first, last, _, _, resent in waiting],
+        }
+
+    @staticmethod
+    def delivery_of(message: dict, marks: dict) -> str:
+        """Where one message stands ("" for one not sent as a prompt, or from before Chief of
+        Staff kept track)."""
+        meta = message.get("meta") or {}
+        if not isinstance(meta, dict) or "prompt" not in meta or meta.get("dropped"):
+            return ""
+        if meta.get("undelivered"):
+            return "undelivered"
+        if message["id"] > marks["sent"]:
+            return "queued"
+        for first, last, resent in marks["waiting"]:
+            if first <= message["id"] <= last:
+                return "resending" if resent else "sent"
+        if marks["handled"] is not None and message["id"] <= marks["handled"]:
+            return "processed"
+        if marks["seen"] is not None and message["id"] <= marks["seen"]:
+            return "received"
+        return "sent" if marks["seen"] is not None else ""
+
+    def publish_delivery(self, session_id: str, messages: list[dict]):
+        """The chats show where these messages stand now."""
+        tracked = [m for m in messages if m["kind"] in TRACKED]
+        if not tracked:
+            return
+        marks = self.delivery_marks(session_id)
+        for message in tracked:
+            meta = {k: v for k, v in (message.get("meta") or {}).items() if k != "prompt"}
+            delivery = self.delivery_of(message, marks)
+            self.runtime.bus.publish(
+                "message", {**message, "meta": meta, "delivery": delivery, "amended": True}
+            )
+
+    def publish_range(self, session_id: str, first: int, last: int):
+        found = self.store.all(
+            "SELECT id FROM messages WHERE session_id=? AND id BETWEEN ? AND ? AND kind IN "
+            "('owner', 'router') ORDER BY id DESC LIMIT 20",
+            (session_id, first, last),
+        )
+        self.publish_delivery(session_id, [self.store.message(row["id"]) for row in found])
+
+    def echoed(self, session_id: str, content: str):
+        """Its conversation shows a message it was sent: received."""
+        state = self.states[session_id]
+        if not state.echo_wait:
+            return
+        seen = digest(content)
+        # That one (or, changed on the way, the oldest).
+        first, last, *_ = state.echo_wait.pop(
+            seen if seen in state.echo_wait else next(iter(state.echo_wait))
+        )
+        mark = int(self.store.get(f"seen:{session_id}") or 0)
+        self.store.set(f"seen:{session_id}", str(max(mark, last)))
+        self.publish_range(session_id, first, last)
+
+    def handled(self, session_id: str):
+        """Its turn ended: what it received is processed."""
+        seen = self.store.get(f"seen:{session_id}")
+        before = int(self.store.get(f"handled:{session_id}") or 0)
+        if seen and int(seen) > before:
+            self.store.set(f"handled:{session_id}", seen)
+            self.publish_range(session_id, before + 1, int(seen))
+
+    def check_echo_later(self, session_id: str, session, sent: str, after: float = 0):
+        asyncio.get_running_loop().call_later(
+            after or ECHO_CHECK,
+            lambda: self.runtime.background(self.check_echo(session_id, session, sent, after)),
+        )
+
+    async def check_echo(self, session_id: str, session, sent: str, waited: float = 0):
+        """Bug E14: a message whose conversation never showed it was taken for delivered (sent
+        into a turn that was over, say) and silently lost. Not shown a while after it was sent,
+        and not waiting in Copilot's queue either: it is sent again, the same message (so its
+        echo settles it), a couple of times, then the owner hears it did not get through."""
+        state = self.states[session_id]
+        entry = state.echo_wait.get(sent)
+        if entry is None:
+            return  # Shown.
+        if state.after_abort:
+            # Stopped, or its task cancelled: Copilot dropped what that turn had not taken up.
+            # Sent again now it would start the work called off (Stop sends it again with its
+            # next message instead; a cancellation drops it).
+            state.echo_wait.pop(sent, None)
+            return
+        if self.states.handle(session_id) is not session:
+            state.echo_wait.pop(sent, None)  # Reconnected: what it missed is replayed or resent.
+            return
+        later = min(max(waited * 2, ECHO_CHECK), 300)
+        if state.awaiting and state.awaiting[0] == sent:
+            self.check_echo_later(session_id, session, sent, later)  # check_started has it.
+            return
+        try:
+            events = await session.get_events()
+        except Exception:
+            logger.warning("Could not check whether %s got a message.", session_id, exc_info=True)
+            self.check_echo_later(session_id, session, sent, later)
+            return
+        shown = [
+            content
+            for event in events
+            if getattr(event.type, "value", "") == "user.message"
+            and digest(content := getattr(event.data, "content", "") or "") == sent
+        ]
+        if shown:
+            if sent in state.echo_wait:
+                self.echoed(session_id, shown[0])
+            return
+        if await queue_holds(session):
+            # Queued behind its turn, or a steer waiting for its next step: it comes.
+            self.check_echo_later(session_id, session, sent, later)
+            return
+        row = self.store.find_session(session_id)
+        if not row or row["closed_at"] or sent not in state.echo_wait or state.after_abort:
+            return
+        first, last, text, attachments, resent = state.echo_wait[sent]
+        if resent >= ECHO_RESENDS:
+            state.echo_wait.pop(sent, None)
+            self.undelivered_after_resends(session_id, first, last)
+            return
+        async with state.sending:
+            if (
+                sent not in state.echo_wait
+                or state.after_abort
+                or self.states.handle(session_id) is not session
+            ):
+                return
+            working = row["role"] == WORKER and row["status"] == "working"
+            mode: SendMode = "immediate" if state.held or working else "enqueue"
+            try:
+                if attachments:
+                    await session.send(text, mode=mode, attachments=attachments)
+                else:
+                    await session.send(text, mode=mode)
+            except Exception:
+                logger.warning("Could not send %s a message again.", session_id, exc_info=True)
+            state.echo_wait[sent] = (first, last, text, attachments, resent + 1)
+        logger.info("A message to %s never showed in its conversation: sent again.", session_id)
+        self.publish_range(session_id, first, last)
+        self.check_echo_later(session_id, session, sent, later)
+
+    def undelivered_after_resends(self, session_id: str, first: int, last: int):
+        found = self.store.all(
+            "SELECT id FROM messages WHERE session_id=? AND id BETWEEN ? AND ?",
+            (session_id, first, last),
+        )
+        for row in found:
+            message = self.store.message(row["id"])
+            if "prompt" in (message.get("meta") or {}):
+                self.store.update_message_meta(
+                    message["id"], {**message["meta"], "undelivered": True}
+                )
+        self.publish_range(session_id, first, last)
+        text = (
+            "A message did not reach it, though it was sent again: Copilot never showed it in "
+            "its conversation. Send it again, or Stop and Go on."
+        )
+        self.runtime.add_message(session_id, "error", text)
+        self.runtime.alert(text, session_id=session_id, needs_action=True)
+
+    async def take_back(self, session_id: str, session) -> bool:
+        """Its turn ended with a command left running in the background (Events.held_idle):
+        what it was sent while it worked waits in Copilot's queue until that command ends (a
+        dev server: for ever). Taken back from there, it is sent again at once. Whether its
+        turn goes on with it (as it would have, but for that command): then it did not end."""
+        state = self.states[session_id]
+        # Under the lock: a send under way when its turn ended is in Copilot's queue by then.
+        async with state.sending:
+            if not (state.unseen or state.unread):
+                return False
+            taken = await take_queued(session)
+            if taken is None:
+                # Copilot cannot say what it queued: once nothing runs in the background, it
+                # starts on it.
+                if not await stop_background(session):
+                    return False
+                self.runtime.add_message(session_id, "notice", HELD_STOPPED)
+                return True
+            if not taken or not self.unsee(session_id):
+                return False
+            logger.info(
+                "Took back %d message(s) Copilot queued for %s to resend.", taken, session_id
+            )
+            state.held = True  # Sent at once, as what comes next.
+            await self.send_pending(session_id, session, "immediate", busy=True, joins=True)
+            return True
+
+    async def check_started(
+        self, session_id: str, session, sent: str, stopped_background: bool = False
+    ):
         """A message that should have started a turn a while ago. Unless its conversation shows
         it, Copilot took it and gave up: a setting it cannot load (an MCP server's) stops every
         message to the session, with no error event. The session says so (Runtime.not_started)
-        instead of working forever."""
+        instead of working forever. Or a command it left running in the background holds it:
+        that command is stopped, and the message checked on again."""
         state = self.states[session_id]
         if not state.awaiting or state.awaiting[0] != sent:
             return  # It started (events.user_message), or was sent again since.
@@ -484,8 +724,19 @@ class Delivery:
         ):
             state.awaiting = None
             return
-        if state.awaiting and state.awaiting[0] == sent:
-            await self.runtime.not_started(session_id)
+        if not (state.awaiting and state.awaiting[0] == sent):
+            return
+        if not stopped_background and await running_background(session):
+            if await stop_background(session):
+                self.runtime.add_message(session_id, "notice", HELD_STOPPED)
+            asyncio.get_running_loop().call_later(
+                START_CHECK,
+                lambda: self.runtime.background(
+                    self.check_started(session_id, session, sent, stopped_background=True)
+                ),
+            )
+            return
+        await self.runtime.not_started(session_id)
 
     def rest_after(self, row: dict):
         """A done or waiting worker asked about its work returns to that state after a turn
@@ -523,3 +774,17 @@ class Delivery:
 
 def digest(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:24]
+
+
+async def queue_holds(session) -> bool:
+    """Whether Copilot holds messages for the session (queued for after its turn, or steers
+    for its next step); True when it cannot say (so nothing is sent twice)."""
+    try:
+        listed = await session.rpc.queue.pending_items()
+    except Exception:
+        return True
+    return bool(
+        listed.items
+        or getattr(listed, "steering_messages", None)
+        or getattr(listed, "in_flight_steering_count", 0)
+    )

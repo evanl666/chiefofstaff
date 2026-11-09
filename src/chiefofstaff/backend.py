@@ -12,6 +12,7 @@ import asyncio
 import json
 import os
 import re
+import secrets
 import shutil
 import signal
 import subprocess
@@ -26,6 +27,7 @@ from typing import Any, Literal, Protocol
 from copilot import CopilotClient, RuntimeConnection
 from copilot.generated.rpc import (
     MCPOauthLoginRequest,
+    QueueRemoveAtRequest,
     SandboxConfig,
     SandboxConfigAuth,
     SandboxConfigUserPolicy,
@@ -305,6 +307,43 @@ async def switch_model(session: Any, model: str, **tuning: Any) -> None:
     await client.request("session.model.switchTo", params)
 
 
+def _word(value: Any) -> str:
+    return str(getattr(value, "value", value) or "")
+
+
+async def running_background(session: Any) -> int:
+    """How many things a session left running in the background that hold its end of turn
+    (shells attached to it, sub-agents), not a call its turn waits for nor a detached
+    process; 0 when it cannot say."""
+    tasks = getattr(getattr(session, "rpc", None), "tasks", None)
+    if tasks is None:
+        return 0
+    try:
+        listed = await tasks.list()
+    except Exception:
+        return 0
+    return sum(
+        _word(getattr(task, "status", None)) == "running"
+        and _word(getattr(task, "execution_mode", None)) != "sync"
+        and _word(getattr(task, "attachment_mode", None)) != "detached"
+        for task in getattr(listed, "tasks", None) or []
+    )
+
+
+async def take_queued(session: Any) -> int | None:
+    """Take back what Copilot queued for a session and has not started on (sent while it
+    worked): how many, None when it cannot say."""
+    try:
+        queue = session.rpc.queue
+        listed = await queue.pending_items()
+        taken = 0
+        for item in listed.items or []:
+            taken += bool((await queue.remove_at(QueueRemoveAtRequest(id=item.id))).removed)
+    except Exception:
+        return None
+    return taken
+
+
 async def stop_background(session: Any) -> int:
     """Cancel what a session left running in the background (a command its turn went on from,
     a sub-agent): after a stop, a background command would end in a turn of its own, and until
@@ -446,6 +485,149 @@ def running(pid: int) -> bool:
     except PermissionError:
         return True  # Someone else's process, but it exists.
     return True
+
+
+# This running Chief of Staff, as its records of the Copilot processes it started name it.
+INSTANCE = secrets.token_hex(8)
+# A Chief of Staff service in a process's command line (its script, or `python -m`).
+SERVICE = re.compile(r"(?:^|[\s/])chiefofstaff(?:\s|$)")
+
+
+def start_times() -> dict[int, str]:
+    """When each process started: pid -> a time to compare, not to show. A pid is reused, and
+    the process that has it now started after the one recorded."""
+    try:
+        table = subprocess.run(
+            ["ps", "-axo", "pid=,lstart="],  # noqa: S607  (a fixed command, found on PATH)
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=5,
+            # The same words whatever language the owner's terminal has: compared across runs.
+            env={**os.environ, "LC_ALL": "C"},
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    found = {}
+    for line in table.splitlines():
+        pid, _, started = line.strip().partition(" ")
+        if pid.isdigit() and started.strip():
+            found[int(pid)] = " ".join(started.split())
+    return found
+
+
+def data_identity(directory: Path) -> dict:
+    """Which data directory this is: its real path, and the file system's own id for it. A copy
+    has another id, even when it is moved to the original's path."""
+    real = directory.resolve()
+    try:
+        info = real.stat()
+    except OSError:
+        return {"path": str(real)}
+    return {"path": str(real), "device": info.st_dev, "inode": info.st_ino}
+
+
+def copilot_records(processes: dict[int, str], directory: Path) -> dict[str, dict]:
+    """What is kept of the processes this instance's Copilot CLI runs (pid -> command line), so
+    that a later start can tell they are still those, and its own to stop (copilot_orphans):
+    this instance, its data directory, when each started, its command and its parents."""
+    if not processes:
+        return {}
+    starts, table = start_times(), process_table()
+    me = os.getpid()
+    owner = {"pid": me, "started": starts.get(me, "")}
+    data = data_identity(directory)
+    records = {}
+    for pid, command in processes.items():
+        parents, at = [], table.get(pid, (0, ""))[0]
+        while at > 1 and at not in parents and len(parents) < 20:
+            parents.append(at)
+            if at == me:
+                break
+            at = table.get(at, (0, ""))[0]
+        records[str(pid)] = {
+            "command": command,
+            "started": starts.get(pid, ""),
+            "parents": parents,
+            "instance": INSTANCE,
+            "owner": owner,
+            "data_dir": data,
+        }
+    return records
+
+
+def started_elsewhere(
+    pid: int, record: dict, starts: dict[int, str], table: dict[int, tuple[int, str]]
+) -> bool:
+    """Whether another running Chief of Staff owns a recorded process: the one that started it
+    still runs, or its parents now lead to one (never this one, or what this one runs under)."""
+    me = os.getpid()
+    owner = record.get("owner")
+    owner = owner if isinstance(owner, dict) else {}
+    owner_pid, owner_started = owner.get("pid"), owner.get("started")
+    # The one that started it still runs (a start it cannot compare: as good as the same one).
+    if (
+        isinstance(owner_pid, int)
+        and owner_pid != me
+        and owner_pid in starts
+        and (not owner_started or starts[owner_pid] == owner_started)
+    ):
+        return True
+    mine, at = set(), me
+    while at > 1 and at not in mine:
+        mine.add(at)
+        at = table.get(at, (0, ""))[0]
+    seen, at = set(), table.get(pid, (0, ""))[0]
+    while at > 1 and at not in mine and at not in seen:
+        seen.add(at)
+        if SERVICE.search(table.get(at, (0, ""))[1]):
+            return True
+        at = table.get(at, (0, ""))[0]
+    return False
+
+
+def copilot_orphans(records: Any, directory: Path) -> dict[int, str]:
+    """Of the processes recorded (copilot_records), those this instance may stop: pid ->
+    command line. Only this data directory's (an instance on a copy of it never stops the
+    original's, which its copied records name), each only while it is the process recorded (the
+    same start and command: a pid is reused), and only when no other running Chief of Staff
+    owns it."""
+    if not isinstance(records, dict) or not records:
+        return {}
+    here = data_identity(directory)
+    starts, table = start_times(), process_table()
+    found = {}
+    for key, record in records.items():
+        if not (isinstance(record, dict) and str(key).isdigit()):
+            continue  # Recorded by an earlier version: not told from another instance's.
+        pid = int(key)
+        if (
+            record.get("data_dir") == here
+            and pid != os.getpid()
+            and record.get("started")
+            and starts.get(pid) == record["started"]
+            and pid in table
+            and table[pid][1] == record.get("command")
+            and not started_elsewhere(pid, record, starts, table)
+        ):
+            found[pid] = table[pid][1]
+    return found
+
+
+def copilot_ours(records: Any, directory: Path) -> set[int]:
+    """The recorded processes this running instance's Copilot CLI has (its last connection's),
+    with this data directory: never another program, such as the owner's terminal."""
+    if not isinstance(records, dict):
+        return set()
+    here = data_identity(directory)
+    return {
+        int(key)
+        for key, record in records.items()
+        if str(key).isdigit()
+        and isinstance(record, dict)
+        and record.get("instance") == INSTANCE
+        and record.get("data_dir") == here
+    }
 
 
 def sessions_in_use(home: Path) -> dict[str, int]:

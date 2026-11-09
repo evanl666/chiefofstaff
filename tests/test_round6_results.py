@@ -173,7 +173,7 @@ async def test_a_merged_pr_is_not_open_in_its_task_s_result(harness):
     for _ in range(2):  # From its card, then seen merged: once.
         runtime.task_actions.pr_merged(session_id, "github:acme/app#72", task)
     found = runtime.tasks.get(task)
-    assert found["status"] == "done"
+    assert found["status"] == "review", "merged is not accepted (E28)"
     assert found["result"] == summary, "the result stays as reported"
     shown = runtime.task_actions.view(found)["result"]
     assert shown == (
@@ -332,7 +332,7 @@ async def test_a_worker_with_a_result_not_reviewed_stays_after_a_merge(harness):
     runtime.unfollow("github:acme/app#70", finished=True, merged=True)
     harness.session(session_id).emit("session.idle")
     await settle(runtime)
-    assert runtime.tasks.get(task)["status"] == "done"
+    assert runtime.tasks.get(task)["status"] == "review", "merged is not accepted (E28)"
     assert not harness.store.session(session_id)["closed_at"], "its other result waits"
 
 

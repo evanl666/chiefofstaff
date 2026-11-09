@@ -80,7 +80,8 @@ async def run(scheme: str):
             await page.screenshot(path=SHOTS / f"demo-{scheme}-1-running.png")
 
             # A half-typed note survives updates of its card as the worker moves on.
-            research = page.locator("#tasks .card.task", has_text="Compare feature-flag services")
+            # Its result may come meanwhile (then it is under Needs you): the note goes along.
+            research = page.locator("#panel .card.task", has_text="Compare feature-flag services")
             await research.locator(".more-button").click()
             await research.get_by_role("menuitem", name="Add a note…").click()
             await research.locator("textarea").press_sequentially("Include pricing")
@@ -142,16 +143,19 @@ async def run(scheme: str):
             await expect(page.locator(".toast", has_text="Posted on GitHub.")).to_be_visible()
             log("reviewed the review: one line comment left out, the rest posted")
 
-            # Results: those that changed code under Needs you to accept; a report that only
-            # informs with the finished ones, read rather than accepted.
-            review = page.locator("#panel .card.task.review")
+            # Results, each a row under Needs you to accept: those that changed code, and a
+            # report that only informs too (QA E1); a row shows its card in place.
+            review = page.locator("#needs .card.task.review")
             await expect(review).to_have_count(3, timeout=60000)
-            recent = page.locator("#tasks-recent")
-            if not await recent.evaluate("n => n.open"):
-                await recent.locator("summary").click()
             fix = review.filter(has_text="Fix the flaky login test")
-            await expect(fix.locator(".receipt.pass", has_text="tests")).to_be_visible()
             limited = review.filter(has_text="Rate-limit")
+            research = review.filter(has_text="Compare feature-flag services")
+            await expect(research.get_by_role("button", name="Accept")).to_be_visible()
+            await expect(research.get_by_role("button", name="Request changes")).to_be_visible()
+            for row in (fix, limited):
+                await row.locator(".row-line").click()
+                await expect(row).to_have_class(re.compile(r"\bunfolded\b"))
+            await expect(fix.locator(".receipt.pass", has_text="tests")).to_be_visible()
             await expect(limited.locator(".outcome")).to_contain_text("per account")
             await expect(fix.locator(".receipt.verdict")).to_have_text("✓ Verified")
             await expect(fix.locator(".receipt", has_text="✗→✓ tests")).to_be_visible()
@@ -196,11 +200,7 @@ async def run(scheme: str):
             await expect(fix).to_contain_text("Review comments on your changes", timeout=30000)
             log("commented on lines of the diff; the worker got the comments")
 
-            research = review.filter(has_text="Compare feature-flag services")
-            if await research.locator(".row-line").count():
-                await research.locator(".row-line").click()  # A row: its card opens in place.
-            await research.locator(".actions .more-button").click()
-            await research.get_by_role("menuitem", name="Follow up…").click()
+            await research.get_by_role("button", name="Follow up", exact=True).click()
             await research.locator("textarea").fill("Add pricing for 50 seats")
             await research.get_by_role("button", name="Send").click()
             await expect(page.locator(".toast", has_text="Sent to the worker.")).to_be_visible()

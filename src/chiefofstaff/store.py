@@ -39,7 +39,8 @@ SESSION_FIELDS = {
 RECORD_LISTS = {"files", "links"}
 SHORT_ID = re.compile(r"[0-9a-f-]+")
 DRAFT_FIELDS = {"status", "outcome", "final_text", "resolved_at"}
-# Followed Slack conversations stop being followed after this long without activity.
+# Slack conversations the Slack session follows stop being followed after this long without
+# activity (a worker's, followed for its task, do not: see Store.followed).
 CONVERSATION_TTL = 12 * 3600
 THREAD_TTL = 3 * 86400
 # The settings as last read are used for this long (seconds); a folder they name may go meanwhile.
@@ -668,11 +669,14 @@ class Store:
         ]
 
     def followed(self, prefix: str) -> list[dict]:
-        """Threads with at least one open follower; quiet Slack conversations expire."""
+        """Threads with at least one open follower. Quiet Slack conversations the Slack session
+        follows expire; one a worker follows for its task does not: it is what the task waits
+        on, and only its task ending (or the owner) stops it, however long it is quiet."""
         moment = time.time()
         self.execute(
             """DELETE FROM subscriptions WHERE thread LIKE 'slack:%' AND touched < (
-                CASE WHEN thread LIKE 'slack:%:%' THEN ? ELSE ? END)""",
+                CASE WHEN thread LIKE 'slack:%:%' THEN ? ELSE ? END)
+                AND session_id NOT IN (SELECT id FROM sessions WHERE role='worker')""",
             (moment - THREAD_TTL, moment - CONVERSATION_TTL),
         )
         return self.all(

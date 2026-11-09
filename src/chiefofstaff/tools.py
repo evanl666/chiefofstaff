@@ -128,9 +128,9 @@ class SpawnWorker(BaseModel):
     )
     review: bool = Field(
         default=False,
-        description="True when the owner wants to look at the result before it counts as done "
-        "(they asked for a mockup, a plan, a doc or a proposal to see): it waits for their OK "
-        "even if it changes no code. False for questions and reports that only inform",
+        description="True when the owner asked to see what it makes before it counts (a "
+        "mockup, a plan, a doc or a proposal). Every finished result waits for their Accept "
+        "either way; this marks it as one they asked to look at",
     )
     context_from: list[str] = Field(
         default_factory=list,
@@ -380,6 +380,23 @@ class Report(NestedArguments):
         "Flyte or Airflow run, a job, a dashboard, a table), each with a short name and its "
         "status now; whenever one is made or its status changes. Not PRs: their status comes "
         "from GitHub",
+    )
+    why: str = Field(
+        default="",
+        max_length=1000,
+        description="With status question or blocked: why you need the owner for it (what only "
+        "they can decide or give), in a sentence",
+    )
+    options: list[str] = Field(
+        default_factory=list,
+        max_length=8,
+        description="With status question or blocked: the choices they can pick from, each in "
+        "a few words, your recommendation first; empty when only their own words answer it",
+    )
+    next: str = Field(
+        default="",
+        max_length=1000,
+        description="With status question or blocked: what you will do once they answer",
     )
     about_draft: bool = Field(
         default=False,
@@ -2386,6 +2403,12 @@ class Tools:
             if task := item.get("task"):
                 card["result_to_review"] = f"{named(task)}: its result is reviewed on this card"
             cards.append(card)
+
+        def asked(question: dict | None) -> dict:
+            """Why it asks, the choices it gives, what it does next: as the owner sees them."""
+            question = question or {}
+            return {key: question[key] for key in ("why", "options", "next") if question.get(key)}
+
         questions = [
             {
                 "worker": question["worker"],
@@ -2395,6 +2418,7 @@ class Tools:
                     if question["task_id"]
                     else {}
                 ),
+                **asked(question),
             }
             for question in (item["question"] for item in found.of("question"))
         ]
@@ -2409,6 +2433,11 @@ class Tools:
                         if item["marker"] == "stopped"
                         else " ".join((task["progress"] or "").split())[:300],
                         "task": named(task),
+                        **(
+                            asked(self.runtime.task_actions.open_question(task))
+                            if item["marker"] == "question"
+                            else {}
+                        ),
                     }
                 )
                 continue
@@ -3107,7 +3136,14 @@ class Tools:
             # Under Needs you until answered, whatever becomes of the task (the Slack
             # session's too: it has no task).
             self.runtime.asks.record_question(
-                caller, params.summary, task["id"] if task else "", about_draft=params.about_draft
+                caller,
+                params.summary,
+                task["id"] if task else "",
+                about_draft=params.about_draft,
+                why=params.why,
+                options=params.options,
+                next_step=params.next,
+                kind=params.status,
             )
         else:
             # It went on with this task: its question is behind it (another task's stays).

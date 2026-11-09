@@ -417,7 +417,7 @@ async def test_away_the_owner_merges_and_answers_a_cancelled_tasks_question(tmp_
     assert f"{merge_code}: acme/app#7 squashed and merged" in text, text
     assert f"{question_code}: sent to the worker" in text, text
     assert [args for args, _ in harness.gh_calls if args[:2] == ("pr", "merge")]
-    assert runtime.tasks.get(fix["id"])["status"] == "done", "merged: its task is done"
+    assert runtime.tasks.get(fix["id"])["status"] == "review", "merged is not accepted (E28)"
     assert runtime.tasks.get(asked["id"])["status"] == "running", "answered: it goes on"
     assert "9090" in harness.session(asker).sent[-1]
     assert runtime.snapshot()["questions"] == []
@@ -677,16 +677,29 @@ async def test_what_the_away_channel_can_do_is_shown_as_tried(tmp_path):
         method="acmebot send", replies="acmebot read_dm_replies",
     )  # fmt: skip
     can = runtime.connector.view()["away"]["can"]
-    assert can["sends"] and can["reads_replies"] and not can["replies_verified_at"]
-    assert can["new_requests"] is False
+    assert can["send"]["state"] == "yes" and can["send"]["at"]
+    assert can["replies"]["state"] == "untested", "it says how it reads them: not tried yet"
+    assert can["delivery"]["state"] == "untested"
+    assert can["commands"]["state"] == "no" and "by design" in can["commands"]["detail"]
     code = json.loads(harness.store.get("away_test"))["code"]
     await call_tool(runtime, "report_owner_replies", messenger["id"],
                     replies=[{"code": code, "text": f"{code} ok"}])  # fmt: skip
-    assert runtime.connector.view()["away"]["can"]["replies_verified_at"], "a reply came back"
+    can = runtime.connector.view()["away"]["can"]
+    assert can["replies"]["state"] == can["delivery"]["state"] == "yes", "a reply came back"
+    await call_tool(
+        runtime, "report_notified", messenger["id"], ok=True, where="Slack DM from acmebot",
+        method="acmebot send", replies="acmebot read_thread_replies",
+    )  # fmt: skip
+    can = runtime.connector.view()["away"]["can"]
+    assert can["replies"]["state"] == "untested", "read another way: not tried yet"
+    assert can["delivery"]["state"] == "yes"
     await call_tool(runtime, "report_notified", messenger["id"], ok=True, where="my own DM",
                     method="slack_send", replies="")  # fmt: skip
     can = runtime.connector.view()["away"]["can"]
-    assert not can["reads_replies"] and not can["replies_verified_at"], "another way: not tried"
+    assert can["replies"]["state"] == "no" and can["delivery"]["state"] == "untested", (
+        "another way: what the last one did says nothing of it"
+    )
+    assert can["send_only"]
 
 
 async def test_weekends_are_after_hours_and_settings_can_say_so(tmp_path):

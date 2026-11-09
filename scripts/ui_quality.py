@@ -374,8 +374,10 @@ async def run(runtime, seeded, browser, quality: Quality, phase: str):
         errors: list[str] = []
         page.on("pageerror", lambda error: errors.append(str(error)))  # noqa: B023
         await page.goto(f"{BASE}/#token={TOKEN}")
-        await expect(page.locator("#tasks .card.task")).to_have_count(3, timeout=15000)
-        await expect(page.locator("#needs .card")).to_have_count(2)
+        # Running and Monitoring: the comparison at work, rate limiting queued behind the fix.
+        await expect(page.locator("#tasks .card.task")).to_have_count(2, timeout=15000)
+        # The decision, the Slack reply and the fixed test's result to accept.
+        await expect(page.locator("#needs > .items > .card")).to_have_count(3)
         await page.wait_for_timeout(400)
         for width in WIDTHS:
             await page.set_viewport_size({"width": width, "height": 900})
@@ -389,12 +391,14 @@ async def run(runtime, seeded, browser, quality: Quality, phase: str):
                     quality.failures.append(f"{where}: {len(panel)} buttons in the panel: {panel}")
         await quality.contrast(page, f"home {scheme}")
         await page.set_viewport_size({"width": 1280, "height": 900})
-        await page.locator("#tasks").scroll_into_view_if_needed()
-        await page.locator("#tasks").screenshot(path=SHOTS / f"quality-{phase}-tasks-{scheme}.png")
-        # The fixed test's report only informs (no code to accept): a row in Recently finished
-        # that opens its card in place, then its report.
-        review = page.locator("#tasks-recent .card.task", has_text=FIX)
-        await review.click()
+        # Tasks only groups Home's four parts below Needs you (it is no box of its own).
+        await page.locator("#tasks-running").scroll_into_view_if_needed()
+        await page.locator("#panel").screenshot(path=SHOTS / f"quality-{phase}-tasks-{scheme}.png")
+        # The fixed test's report waits for Accept under Needs you (a report that only informs
+        # too): a row that opens its card in place, then its report.
+        review = page.locator("#needs .card.task", has_text=FIX)
+        await expect(review.get_by_role("button", name="Request changes")).to_be_visible()
+        await review.locator(".head .title").click()
         await expect(review).to_have_class(re.compile(r"\bunfolded\b"))
         toggle = review.locator(".expand")
         if (await toggle.inner_text()).strip() == "Show report":

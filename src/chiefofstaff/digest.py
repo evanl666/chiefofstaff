@@ -4,6 +4,7 @@ what needs the owner, counted as Home counts it."""
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -69,6 +70,8 @@ class Needs:
 
     items: list[dict] = field(default_factory=list)
     markers: dict[str, str] = field(default_factory=dict)
+    # What an accepted task is still monitored for, in a few words ("" for nothing).
+    monitored: Callable[[dict], str] = lambda task: ""
 
     def of(self, kind: str) -> list[dict]:
         return [item for item in self.items if item["kind"] == kind]
@@ -111,36 +114,14 @@ def stalled(runtime: Runtime, task: dict, moment: datetime) -> bool:
 
 def needs_marker(runtime: Runtime, task: dict, moment: datetime) -> str:
     """Why Home puts a task under Needs you (board.js taskPhase), "" when it does not: not one
-    on a draft's card (see needs)."""
-    store, actions = runtime.store, runtime.task_actions
-    status, task_id = task["status"], task["id"]
-    if status == "queued":
-        return "blocked" if runtime.tasks.broken(task) else ""
-    if status == "waiting":
-        return "stopped" if store.get(f"stopped:{task_id}") else "question"
-    if status == "failed":
-        return "failed"
-    if status == "running":
-        if (actions.check_back(task) or {}).get("attempts", 0) >= 3:
-            return "check-failed"
+    on a draft's card (see needs). What the task's view says the owner has to do about it
+    (TaskActions.attention: every result to accept, its own PR to fix, news on finished
+    work, a question…), and a running task that made no progress. Its own PR ready to merge
+    is not here: its Merge card is."""
+    attention, _why = runtime.task_actions.attention(task)
+    if task["status"] == "running" and not attention:
         return "stalled" if stalled(runtime, task, moment) else ""
-    if status not in {"review", "done"}:
-        return ""
-    row = store.find_session(task["session_id"])
-    if (
-        row
-        and row["status"] in {"working", "starting"}
-        and store.get(f"followup:{task_id}")
-        and runtime.working_on(row["id"]) == task_id
-    ):
-        return ""  # Its worker follows up on the owner's message: under Running.
-    if store.get(f"news:{task_id}"):
-        return "update"
-    if actions.needs_acceptance(task):
-        return "review"
-    # Delivered, its own PR to fix (CI failing, changes requested): Home's rule.
-    marker, _why = actions.own_pr_standing(task)
-    return marker if marker in PR_TO_FIX else ""
+    return {"acceptance": "review", "merge": ""}.get(attention, attention)
 
 
 def needs(runtime: Runtime, moment: datetime | None = None) -> Needs:
@@ -155,7 +136,7 @@ def needs(runtime: Runtime, moment: datetime | None = None) -> Needs:
 
     moment = moment or datetime.now(UTC)
     store = runtime.store
-    found = Needs()
+    found = Needs(monitored=runtime.task_actions.monitoring_words)
     drafts = store.drafts()
     deciding = {
         asker.get("task_id")
@@ -200,6 +181,13 @@ def needs(runtime: Runtime, moment: datetime | None = None) -> Needs:
             )
     seen: set[tuple[str, tuple[str, ...]]] = set()
     for task, marker in sorted(pr_rows, key=lambda row: row[0]["updated_at"], reverse=True):
+        if task["status"] == "review":
+            # A result still to accept stays a row of its own, whichever task has the PR's.
+            found.markers[task["id"]] = marker
+            found.items.append(
+                {"kind": "task", "marker": marker, "task": task, "session_id": task["session_id"]}
+            )
+            continue
         follows = store.follows(task["session_id"])
         key = (task["session_id"], tuple(sorted(runtime.task_actions.followed_for(task, follows))))
         if key in seen:
@@ -222,7 +210,8 @@ def needs(runtime: Runtime, moment: datetime | None = None) -> Needs:
 
 def task_words(task: dict, found: Needs) -> str:
     """Its status with where Home shows it, in its words: why it is under Needs you, or a
-    finished one's standing (a report only informs: read, not accepted)."""
+    finished one's standing (every result waits for the owner's Accept; one accepted may
+    still be monitored, its PR waiting for a review, say)."""
     marker = found.markers.get(task["id"], "")
     if marker in NEEDS_WORDS:
         words = f"{NEEDS_WORDS[marker]} (needs you)"
@@ -233,7 +222,9 @@ def task_words(task: dict, found: Needs) -> str:
     elif marker == "decision":
         words = "on the owner's decision card (needs you)"
     elif task["status"] == "review":
-        words = "report (read only, nothing to accept)"
+        words = "to accept once its worker has followed up on the owner's message"
+    elif task["status"] == "done" and (watched := found.monitored(task)):
+        words = f"accepted, monitoring {watched}"
     else:
         return task["status"]
     return words if words.startswith(task["status"]) else f"{task['status']}, {words}"

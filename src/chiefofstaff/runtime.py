@@ -44,6 +44,9 @@ from .backend import (
     AgentBackend,
     SandboxPolicy,
     copilot_backend,
+    copilot_orphans,
+    copilot_ours,
+    copilot_records,
     copilot_tree,
     copilot_trusts,
     end_processes,
@@ -372,6 +375,7 @@ class Runtime:
             ("Chief of Staff stopped while sending. Check whether it was delivered.",),
         )
         self.asks.expire_requests()
+        self.task_actions.settle_old_reports(TASKS_SHOWN_HOURS)
         await self.connect()
         for source in self.all_sources():
             await source.start()
@@ -410,16 +414,22 @@ class Runtime:
             self.publish_state()
             try:
                 # Copilot CLIs started before that outlived their connection (orphaned when
-                # their loader was killed, or this app stopped abruptly) hold sessions open.
-                if started := self.own_processes():
+                # their loader was killed, or this app stopped abruptly) hold sessions open. Only
+                # those still this data directory's to stop: never an original's processes that
+                # a copy of its data directory names (backend.copilot_orphans).
+                records = self.recorded_processes()
+                directory = self.store.directory
+                if started := await asyncio.to_thread(copilot_orphans, records, directory):
                     await asyncio.to_thread(lambda: end_processes(copilot_tree(started)))
                 self.backend = self.backend_factory(self.store.settings())
                 await self.backend.start()
                 auth = await self.backend.get_auth_status()
                 # It answered: its processes run now. Remembered, so they never count as the
-                # owner's terminal (even orphaned) and are stopped when they outlive it.
+                # owner's terminal (even orphaned) and are stopped when they outlive it: with
+                # what tells them from another instance's later (backend.copilot_records).
                 pids = await asyncio.to_thread(self.backend.processes)
-                self.store.set("copilot_pids", json.dumps(pids))
+                records = await asyncio.to_thread(copilot_records, pids, directory)
+                self.store.set("copilot_pids", json.dumps(records))
                 if not auth.isAuthenticated:
                     raise RuntimeError("Copilot is not signed in. Run `copilot login`.")
                 warning = await self.version_warning()
@@ -493,20 +503,33 @@ class Runtime:
         await self.disconnect()
         await self.connect()
 
-    def own_processes(self) -> dict[int, str]:
-        """The processes of the Copilot CLI this app started last (see connect): pid ->
-        command line."""
+    def recorded_processes(self) -> dict:
+        """What connect recorded of the processes of the Copilot CLI it started last (see
+        backend.copilot_records): pid -> its record."""
         try:
-            started = json.loads(self.store.get("copilot_pids") or "{}")
-            return {int(pid): str(command) for pid, command in started.items()}
-        except (ValueError, TypeError, AttributeError):
+            records = json.loads(self.store.get("copilot_pids") or "{}")
+        except ValueError:
             return {}
+        if not isinstance(records, dict):
+            return {}
+        if records and all(isinstance(record, str) for record in records.values()):
+            # An earlier version kept only pid and command: they cannot be told from another
+            # instance's (one whose data directory this is a copy of), so they are left
+            # running. Forgotten, so this is said once.
+            logger.warning(
+                "Left running: Copilot processes %s recorded by an earlier version, which "
+                "cannot be told from another Chief of Staff's.",
+                ", ".join(records),
+            )
+            self.store.set("copilot_pids", "{}")
+            return {}
+        return records
 
     async def open_elsewhere(self) -> dict[str, int]:
         """Sessions another program (a terminal) has open now: session id -> its pid. Never
         those a Copilot CLI this app started has open, even one its loader no longer runs."""
         found = await self.connected().open_elsewhere()
-        ours = self.own_processes()
+        ours = copilot_ours(self.recorded_processes(), self.store.directory)
         return {session_id: pid for session_id, pid in found.items() if pid not in ours}
 
     async def watch_process(self, backend: AgentBackend, connection: int):
@@ -654,11 +677,15 @@ class Runtime:
             # It has not started on what it was sent (Copilot may have given up on it, on the
             # settings it had): sent again now, on a new connection with the new ones.
             await self.send_again(row)
-        # A worker that reported "done" may still be finishing its turn.
-        elif row["status"] == "working" or self.states[row["id"]].busy:
+        # A worker that reported "done" may still be finishing its turn; one whose turn is over
+        # with a command it left running (held) would lose that command's end, which wakes it.
+        elif row["status"] == "working" or self.states[row["id"]].busy or self.held(row["id"]):
             self.states[row["id"]].stale = True  # Refreshed once its current turn ends.
         else:
             await self.detach(row["id"])
+
+    def held(self, session_id: str) -> bool:
+        return self.states[session_id].held
 
     async def send_again(self, row: dict):
         """What it was sent and never started on goes out again on a new connection."""
@@ -1205,6 +1232,8 @@ class Runtime:
         state.steps.clear()  # A disconnected session is in no step.
         state.unread.clear()  # What it was sent is resent or replayed, not waiting in a turn.
         state.unseen.clear()
+        state.echo_wait.clear()
+        state.held = False  # Its next connection holds nothing.
         state.awaiting = None
         state.echoes = False
         if state.busy:
@@ -1533,9 +1562,9 @@ class Runtime:
         home = needs(self)
         if tasks := self.tasks.listed():
             lines.append(
-                "\nTasks not done yet, as Home shows them (“to review” waits for the owner's "
-                "Accept; one on its draft's card is reviewed on that card; “report” only "
-                "informed them and waits for nothing):"
+                "\nTasks not done yet, as Home shows them (every finished result waits for the "
+                "owner's Accept: “to review”; one on its draft's card is reviewed on that card; "
+                "“accepted, monitoring …” is still followed up):"
             )
             lines += [
                 f"- {t['id']} “{t['title']}” ({task_words(t, home)}, worker "
@@ -1707,7 +1736,13 @@ class Runtime:
     async def refresh_slack(self):
         """Reattach Slack-capable sessions so they pick up the current token and settings."""
         for row in self.store.open_sessions():
-            if (row["role"] == SLACK or row["slack"]) and row["status"] != "working":
+            if not (row["role"] == SLACK or row["slack"]):
+                continue
+            if row["status"] == "working" or self.states[row["id"]].busy or self.held(row["id"]):
+                # Reattached once it is free (its turn over, or what it left running ended):
+                # a held one's command would end with none to wake.
+                self.states[row["id"]].stale = True
+            else:
                 await self.detach(row["id"])
         if self.ready():
             await self.ensure_slack_session()
@@ -2318,6 +2353,10 @@ class Runtime:
             ]
         self.check_follow(row, followed)
         for key in followed:
+            if key.startswith("github:") and not self.store.followers(key):
+                # Followed afresh: nothing of an earlier follow (its failures, its backoff)
+                # carries over. One another session follows keeps its health as it stands.
+                self.github.forget(key)
             self.store.follow(key, session_id)
             if given:
                 self.store.set(f"given:{session_id}:{key}", "1")
@@ -2327,8 +2366,9 @@ class Runtime:
                 bound = self.store.follow_tasks(session_id, key)
                 if task_id not in bound:
                     self.store.set(f"followtask:{session_id}:{key}", json.dumps([*bound, task_id]))
-            for prefix in ("ghfail", "slackfail", "gh404", "ghskip", "slackskip"):
-                self.store.set(f"{prefix}:{key}", "0")
+            if key.startswith("slack:"):
+                for prefix in ("slackfail", "slackskip"):
+                    self.store.set(f"{prefix}:{key}", "0")
         self.store.record(session_id, "links", followed)
         if followed:
             self.publish_session(self.store.session(session_id))
@@ -2339,7 +2379,9 @@ class Runtime:
 
     def missing(self, thread: str, why: str):
         """A followed thread that does not exist: its followers stop following it, and say so
-        (once; nothing of their tasks changes)."""
+        (once; nothing of their tasks changes). Nothing reads it again."""
+        if thread.startswith("github:"):
+            self.github.forget(thread)
         for session_id in self.store.followers(thread):
             self.store.unfollow(thread, session_id)
             row = self.store.find_session(session_id)
@@ -2397,6 +2439,8 @@ class Runtime:
         else:
             self.store.unfollow(thread, session_id)
             self.store.set(f"stopped:{session_id}:{thread}", "1")
+            if thread.startswith("github:") and not self.store.followers(thread):
+                self.github.forget(thread)  # Nobody else follows it: nothing reads it now.
         self.publish_session(self.store.session(session_id))
         for task in self.tasks.for_session(session_id):
             self.task_actions.publish(task)
@@ -2436,9 +2480,34 @@ class Runtime:
                 self.task_actions.publish(task)
 
     def follow_why(self, thread: str) -> dict:
-        """Why a followed PR could not be read last: {kind, step, error, at} (see
-        GitHubSource.poll_once); {} when that is not known."""
-        return json.loads(self.store.get(f"ghwhy:{thread}") or "{}")
+        """Why a followed PR could not be read last: {kind (permission, not_found, rate_limited
+        or transient), error (in words, with when it is tried again), step, at, retry_at (ISO,
+        or None), detail (GitHub's words)} (see GitHubSource.read_failed); {} when it was read
+        since."""
+        return self.github.why(thread)
+
+    async def retry_follow(self, session_id: str, key: str) -> dict:
+        """The owner's "try again now" on a PR a session follows that could not be read: its
+        backoff cleared, it is read at once. Its failures in a row after it (0: it was read),
+        why (as follow_why), when it was last read and when it is read next (ISO)."""
+        key = threads.normalize(key)
+        if key not in self.store.follows(session_id):
+            raise ValueError(f"This session does not follow {threads.label(key)}.")
+        if not threads.GITHUB_PR.fullmatch(key):
+            raise ValueError("Only a followed GitHub PR can be read again now.")
+        if self.store.settings().paused:
+            raise ValueError("Chief of Staff is paused: resume it to read followed PRs.")
+        await self.github.retry(key)
+        failures = int(self.store.get(f"ghfail:{key}") or 0)
+        if failures:
+            self.read_health_changed(key)  # When it is tried next changed on its card.
+        return {
+            "key": key,
+            "failures": failures,
+            "why": self.follow_why(key),
+            "read_at": self.store.get(f"ghread:{key}"),
+            "next_at": self.store.get(f"ghnext:{key}"),
+        }
 
     def follow_health(self, session_id: str) -> dict[str, int]:
         """Its followed threads that could not be read lately: failures in a row."""
@@ -2453,6 +2522,8 @@ class Runtime:
         """Stop following; `finished` means the PR was merged or closed while followed."""
         followers = self.store.followers(thread)
         self.store.unfollow(thread)
+        if thread.startswith("github:"):
+            self.github.forget(thread)
         for session_id in followers:
             row = self.store.session(session_id)
             self.publish_session(row)
@@ -2653,6 +2724,8 @@ class Runtime:
             "helper": self.special(row) if row["role"] == WORKER else "",
             # It holds one of the owner's worker slots (in a turn, or finishing one).
             "slot": row["role"] == WORKER and self.states[row["id"]].busy,
+            # Its turn is over, and a command it left running (a dev server) goes on.
+            "background": self.states[row["id"]].held,
             "checkouts": self.workspaces.checkouts(row),
             # Its own folder (its checkouts are in it, or its files when it has none).
             "workspace": str(self.workspaces.workspace(row)) if row["role"] == WORKER else "",
@@ -3035,7 +3108,12 @@ class Runtime:
             "thread_links": self.store.items("threadlink:"),
             # As the owner reads them: no draft ids, Slack ids or timestamps.
             "questions": [
-                {**question, "text": self.drafts.owner_text(question.get("text") or "")}
+                {
+                    **question,
+                    "text": self.drafts.owner_text(question.get("text") or ""),
+                    "why": self.drafts.owner_text(question.get("why") or ""),
+                    "next": self.drafts.owner_text(question.get("next") or ""),
+                }
                 for question in self.asks.owner_questions()
             ],
             "updates": self.owner_updates(),

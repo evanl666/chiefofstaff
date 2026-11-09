@@ -756,9 +756,12 @@ async def test_create_pr_pushes_the_branch_and_the_worker_follows_the_pr(tmp_pat
 
     await runtime.owner_send(worker_id, "Is CI green?")  # A question, before the merge.
     runtime.unfollow("github:acme/app#9", finished=True, merged=True)
-    assert runtime.tasks.get(task_id)["status"] == "done", "merged, its task is done"
+    assert runtime.tasks.get(task_id)["status"] == "review", "merged is not accepted (E28)"
     await call_tool(runtime, "report", worker_id, status="done", summary="Merged, all good.")
-    assert runtime.tasks.get(task_id)["status"] == "done", "the question does not reopen it"
+    assert runtime.tasks.get(task_id)["status"] == "review", "the answer is news on it"
+    runtime.task_actions.accept(task_id)
+    await call_tool(runtime, "report", worker_id, status="done", summary="Still all good.")
+    assert runtime.tasks.get(task_id)["status"] == "done", "news does not reopen it"
 
 
 async def test_editing_a_new_file_changes_the_version(tmp_path, git_repo):

@@ -19,6 +19,7 @@ from .models import (
     ArtifactHide,
     DraftDecision,
     FocusRequest,
+    FollowRetry,
     NewLesson,
     OpenFolder,
     OwnerMessage,
@@ -255,6 +256,9 @@ def create_app(
         prompts they were sent as (as long again; the chat shows what they say)."""
         session_id = store.session(session_id)["id"]
         rows = store.messages(session_id, after or 0, limit, before=before, first=after is not None)
+        # Where each message it was sent stands: queued, sent, received, processed...
+        marks = runtime.delivery.delivery_marks(session_id)
+        rows = [{**row, "delivery": runtime.delivery.delivery_of(row, marks)} for row in rows]
         return rows if prompts else [shown(row) for row in rows]
 
     @app.get("/api/sessions/{session_id}/messages/count")
@@ -492,6 +496,11 @@ def create_app(
         gone = runtime.unfollow_for(session_id, payload.text.strip(), payload.task_id.strip())
         return {"ok": True, "all": gone}
 
+    @app.post("/api/sessions/{session_id}/follow-retry")
+    async def follow_retry(session_id: str, payload: FollowRetry):
+        """Read a PR it follows now, past any wait after failed reads."""
+        return await runtime.retry_follow(session_id, payload.key.strip())
+
     @app.post("/api/tasks/{task_id}/nudge")
     async def nudge_task(task_id: str):
         return await runtime.task_actions.nudge(task_id)
@@ -502,6 +511,13 @@ def create_app(
             raise ValueError("Write what the worker should do.")
         return runtime.task_actions.view(
             await runtime.task_actions.follow_up(task_id, payload.text)
+        )
+
+    @app.post("/api/tasks/{task_id}/request-changes")
+    async def request_changes(task_id: str, payload: OwnerMessage):
+        """The owner does not accept the result: its worker changes it as they say."""
+        return runtime.task_actions.view(
+            await runtime.task_actions.request_changes(task_id, payload.text)
         )
 
     @app.post("/api/sessions/{session_id}/stop")

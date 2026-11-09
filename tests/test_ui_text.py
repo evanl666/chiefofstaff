@@ -105,8 +105,9 @@ def test_fences_with_any_info_string_and_first_lines_keep_numbers():
 
 
 def board(tasks: list, workers: list, **options):
-    """Where each task is on the board (board.js): its section and marker, the boxes per
-    section, Monitoring's rows by group, and the finished ones in order."""
+    """Where each task is on the board (board.js): its section and marker, each section's rows
+    (task ids, in order), the reasons, the sidebar's place per worker and the workers at work
+    with no row of a task in Running."""
     return run_js(
         f"const b = await import({json.dumps((STATIC / 'board.js').as_uri())});\n"
         f"const workers = new Map({json.dumps(workers)}.map((w) => [w.id, w]));\n"
@@ -116,16 +117,13 @@ def board(tasks: list, workers: list, **options):
         "{ now: Date.parse('2026-11-07T12:00:00Z'), stallHours: 4, ...options });\n"
         "return { phases: Object.fromEntries([...found.phases].map(([id, p]) =>"
         " [id, [p.section, p.marker].filter(Boolean).join('/')])),"
-        " boxes: Object.fromEntries(Object.entries(found.sections).map(([k, v]) =>"
-        " [k, v.map((e) => [e.sessionId, e.tasks.map((t) => t.id)])])),"
-        " finished: found.finished.map((t) => t.id),"
-        " monitoring: Object.fromEntries(Object.entries(found.monitoring).map(([k, v]) =>"
+        " sections: Object.fromEntries(Object.entries(found.sections).map(([k, v]) =>"
         " [k, v.map((t) => t.id)])),"
         " sidebar: Object.fromEntries([...workers.keys()].map((id) => [id, b.workerSection("
         "found.phases, " + json.dumps(tasks) + ".filter((t) => t.session_id === id))])),"
         " whys: Object.fromEntries([...found.phases].map(([id, p]) => [id, p.why])),"
         " followUps: b.followingUp([...workers.values()], " + json.dumps(tasks) + ","
-        " new Set(found.sections.running.map((e) => e.sessionId))).map((w) => w.id) };"
+        " new Set(found.sections.running.map((t) => t.session_id))).map((w) => w.id) };"
     )
 
 
@@ -154,8 +152,8 @@ def test_the_board_places_each_task_by_where_it_stands():
         task("c", "w2", check_back={"at": "2026-11-07T13:00:00Z", "what": "the Flyte run"}),
         task("d", "w2", watching=["github:o/r#7"]),
         task("e", "w3", at="2026-11-07T06:00:00Z"),  # 6h quiet, waits on nothing.
-        task("f", "w3", "review"),  # A report that only informs: read, not accepted.
-        task("v", "w3", "review", receipts=CHANGED),  # Changed code: to review.
+        task("f", "w3", "review"),  # A report that only informs: accepted all the same.
+        task("v", "w3", "review", receipts=CHANGED),  # Changed code: to accept.
         task("r", "w4", "review", follow_up=True),  # The owner asked more; its worker is at it.
         task("g", "w3", "done", ended_at="2026-11-07T10:00:00Z"),
         task("s", "w3", "done", set_aside=True),  # Cancelled after it finished: not accepted.
@@ -169,16 +167,19 @@ def test_the_board_places_each_task_by_where_it_stands():
         "a": "running", "b": "monitoring/turn", "p": "monitoring/paused",
         "k": "monitoring/check-back",
         "q": "needs/question", "c": "monitoring/check-back", "d": "monitoring/watching",
-        "e": "monitoring/overdue", "f": "finished/report", "v": "needs/review",
+        "e": "monitoring/overdue", "f": "needs/review", "v": "needs/review",
         "r": "running/following", "g": "finished/done", "s": "finished/set-aside",
         "h": "monitoring/delivered",
         "n": "needs/update", "x": "needs/failed", "y": "needs/check-failed",
     }  # fmt: skip
-    boxes = found["boxes"]
-    assert sorted(boxes["running"]) == [["w1", ["a"]], ["w4", ["r"]]]
-    assert sorted(entry[0] for entry in boxes["monitoring"]) == ["w1", "w2", "w3"]
-    assert sorted(entry[0] for entry in boxes["needs"]) == ["w1", "w2", "w3"]
-    assert set(boxes) == {"needs", "running", "monitoring"}, "four places, finished apart"
+    # A row per task in each place (not a box per worker), each task in one place.
+    sections = found["sections"]
+    assert set(sections) == {"needs", "running", "monitoring", "finished"}
+    assert sorted(sections["running"]) == ["a", "r"]
+    assert sorted(sections["needs"]) == ["f", "n", "q", "v", "x", "y"]
+    assert sorted(sections["finished"]) == ["g", "s"]
+    placed = [task_id for ids in sections.values() for task_id in ids]
+    assert sorted(placed) == sorted(t["id"] for t in tasks), "each task in one place"
     assert found["sidebar"] == {"w1": "needs", "w2": "needs", "w3": "needs", "w4": "running"}
     assert found["whys"]["b"] == "Up next: its worker is on “a” now"
     assert found["whys"]["p"] == "Paused: its worker is on “a” now"
@@ -228,7 +229,7 @@ def test_a_task_on_a_card_or_quiet_briefly_stays_put():
     found = board(tasks, workers, onCards=["r"])
     assert found["phases"]["a"] == "monitoring/idle", "2h quiet: says it waits on nothing"
     assert found["phases"]["r"] == "review", "on its card, not again: a result to accept there"
-    assert found["boxes"]["needs"] == []
+    assert found["sections"]["needs"] == []
     assert board(tasks, workers, stallHours=1)["phases"]["a"] == "monitoring/overdue"
 
 
@@ -242,8 +243,9 @@ def test_news_on_a_result_with_a_draft_card_shows_on_that_card():
         task("p", "w1", "review"),  # A report that only informs, with a reply drafted.
     ]
     found = board(tasks, workers, onCards=["r", "p"])
-    assert found["phases"] == {"r": "update", "p": "report"}
-    assert found["boxes"]["needs"] == [], "on the draft's card only"
+    # Still a result to accept (QA round 10); its news shows in it (newsBlock, from task.news).
+    assert found["phases"] == {"r": "review", "p": "review"}, "a report waits for Accept too"
+    assert found["sections"]["needs"] == [], "on the draft's card only"
 
 
 def test_a_question_about_its_own_draft_is_decided_on_that_card():
@@ -256,7 +258,7 @@ def test_a_question_about_its_own_draft_is_decided_on_that_card():
     ]
     found = board(tasks, workers, onCards=["q"])
     assert found["phases"] == {"q": "", "o": "needs/question"}
-    assert found["boxes"]["needs"] == [["w1", ["o"]]]
+    assert found["sections"]["needs"] == ["o"]
 
 
 def test_a_follow_up_behind_another_task_is_up_next_not_waiting_on_its_pr():
@@ -287,27 +289,34 @@ def test_recently_finished_is_newest_first_across_workers():
         return task(task_id, session, "done", ended_at=f"2026-11-07T{hour:02d}:00:00Z")
 
     workers = [{"id": "w1", "status": "idle"}, {"id": "w2", "status": "idle"}]
-    # A busy worker's old results do not hide another's newer ones; a row each, no boxes.
+    # A busy worker's old results do not hide another's newer ones; a row each.
     tasks = [ended(f"a{h}", "w1", h) for h in range(1, 6)] + [ended("b9", "w2", 9)]
     tasks += [ended("b10", "w2", 10), ended("a11", "w1", 11)]
     found = board(tasks, workers)
-    assert found["finished"] == ["a11", "b10", "b9", "a5", "a4", "a3", "a2", "a1"]
+    assert found["sections"]["finished"] == ["a11", "b10", "b9", "a5", "a4", "a3", "a2", "a1"]
 
 
-def test_monitoring_keeps_deliveries_and_reviewed_prs_apart_and_lets_quiet_ones_go():
-    """E6: the owner's deliveries waiting on others and PRs they reviewed are groups of their
-    own; one PR a worker follows for two tasks is one row; a day with nothing new there and it
-    is with the finished ones, still followed (news brings it back); overdue comes first."""
+def test_monitoring_is_one_list_and_a_quiet_one_stays_monitored():
+    """QA E12/E16/E18: Monitoring is one list (no "delivered" and "reviewed" groups); an
+    accepted task still waiting on others stays there however quiet ("No updates for 26h"),
+    not with the finished ones; someone else's PR the owner reviewed is no obligation of theirs:
+    finished (news there comes as an update); one PR a worker follows for two tasks is one
+    row; overdue comes first."""
     workers = [{"id": "w1", "status": "idle"}, {"id": "w2", "status": "idle"}]
     day_ago = "2026-11-06T10:00:00Z"
+    awaiting = {"prs": [{"label": "o/r#3", "own": True, "state": "OPEN", "awaiting": ["lead"]}]}
     tasks = [
-        task("own", "w1", "done", watching=["github:o/r#1"], watch_kind="own",
-             watch_changed_at="2026-11-07T09:00:00Z"),
+        task("own", "w1", "done", at="2026-11-07T11:40:00Z", watching=["github:o/r#1"],
+             watch_kind="own", watch_changed_at="2026-11-07T11:30:00Z"),
         task("rev", "w2", "done", watching=["github:o/r#2"], watch_kind="reviewed"),
-        # The same PR for the same worker: one split off the other, say; the newer shows.
+        # Not accepted yet: under Needs you, whatever it follows.
         task("old", "w2", "review", at="2026-11-07T08:00:00Z", watching=["github:o/r#2"],
              watch_kind="reviewed"),
-        task("quiet", "w1", "done", watching=["github:o/r#3"], watch_changed_at=day_ago),
+        task("quiet", "w1", "done", at="2026-11-07T10:00:00Z", watching=["github:o/r#3"],
+             watch_kind="own", watch_changed_at=day_ago, receipts=awaiting),
+        # The same PR for the same worker (split off, say): the newer one has the row.
+        task("split", "w1", "done", at="2026-11-07T09:00:00Z", watching=["github:o/r#3"],
+             watch_kind="own", watch_changed_at=day_ago),
         task("news", "w1", "done", watching=["github:o/r#4"], watch_changed_at=day_ago,
              news={"at": "2026-11-07T11:00:00Z", "text": "merged"}),
         task("wait", "w1", watching=["github:o/r#5"], at="2026-11-07T11:58:00Z"),
@@ -315,15 +324,115 @@ def test_monitoring_keeps_deliveries_and_reviewed_prs_apart_and_lets_quiet_ones_
     ]  # fmt: skip
     found = board(tasks, workers)
     assert found["phases"] == {
-        "own": "monitoring/delivered", "rev": "monitoring/reviewed",
-        "old": "finished/still-following", "quiet": "finished/still-following",
+        "own": "monitoring/delivered", "rev": "finished/reviewed", "old": "needs/review",
+        "quiet": "monitoring/delivered", "split": "finished/still-following",
         "news": "needs/update", "wait": "monitoring/watching", "late": "monitoring/overdue",
     }  # fmt: skip
-    assert found["monitoring"] == {"waiting": ["late", "wait"], "delivered": ["own"],
-                                   "reviewed": ["rev"]}  # fmt: skip
-    assert found["whys"]["quiet"] == "Still following; nothing new there for 26h"
-    assert found["whys"]["old"] == "Still following, for “rev”"
-    assert found["sidebar"] == {"w1": "needs", "w2": "monitoring"}
+    assert found["sections"]["monitoring"] == ["late", "wait", "own", "quiet"]
+    assert found["whys"]["quiet"] == "Waiting for approval · No updates for 26h"
+    assert found["whys"]["own"] == "Following o/r#1", "quiet for less than an hour: not said"
+    assert found["whys"]["split"] == "Still following, for “quiet”"
+    assert found["sidebar"] == {"w1": "needs", "w2": "needs"}
+
+
+def test_monitoring_follows_the_servers_obligations():
+    """QA E16/E18: what a task waits on is the server's `monitoring` when it has it: an empty
+    list is nothing to wait on (finished), whatever it still follows; one there is monitored,
+    said by what it waits for."""
+    workers = [{"id": "w1", "status": "idle"}]
+    pr = {"key": "github:o/r#9", "kind": "pr", "label": "o/r#9",
+          "url": "https://github.com/o/r/pull/9", "waiting_for": "CI",
+          "last_check": "2026-11-07T11:55:00Z", "next_check": "2026-11-07T12:10:00Z",
+          "trigger": "CI finishing wakes it", "changed_at": "2026-11-07T09:00:00Z"}  # fmt: skip
+    tasks = [
+        task("ci", "w1", "done", monitoring=[pr]),
+        # Followed, but the server says it waits on nothing of the owner's.
+        task("none", "w1", "done", watching=["github:o/r#8"], watch_kind="own", monitoring=[]),
+        # A check-back is said apart: what it waits for is its PR (one it waits on alone, that).
+        task("back", "w1", "done", monitoring=[
+            {**pr, "key": "checkback:back", "kind": "check_back", "waiting_for": "the rerun"},
+            {**pr, "key": "github:o/r#10", "waiting_for": "review", "changed_at": None}]),
+        task("alone", "w1", "done", monitoring=[
+            {**pr, "key": "checkback:alone", "kind": "check_back", "waiting_for": "the rerun",
+             "changed_at": None}]),
+        # Open and following a PR for itself: it waits on it, whatever the server counts.
+        task("open", "w1", "running", started=True, watching=["github:o/r#5"], monitoring=[]),
+        # Running, its worker idle: waiting on a flow it started.
+        task("flow", "w1", "running", started=True, monitoring=[{
+            "key": "flow:abc", "kind": "flow", "label": "Nightly", "url": "", "waiting_for":
+            "the nightly run", "last_check": None, "next_check": None, "trigger": "",
+            "changed_at": None}]),
+    ]  # fmt: skip
+    found = board(tasks, workers)
+    assert found["phases"] == {
+        "ci": "monitoring/delivered", "none": "finished/done", "flow": "monitoring/watching",
+        "open": "monitoring/watching", "back": "monitoring/delivered",
+        "alone": "monitoring/delivered",
+    }  # fmt: skip
+    assert found["whys"]["back"] == "Waiting for review"
+    assert found["whys"]["alone"] == "Waiting for the rerun"
+    assert found["whys"]["open"] == "Following o/r#5"
+    assert found["whys"]["ci"] == "Waiting for CI · No updates for 3h"
+    assert found["whys"]["flow"] == "Waiting for the nightly run"
+
+
+def test_every_result_waits_for_accept_and_is_never_finished_before_it():
+    """QA E1/E2: a report that only informs went to Recently finished on its own, with a Done
+    button; every result is under Needs you as "Awaiting acceptance" until Accept, then it is
+    finished (or monitored while it still waits on others). Cancelled or set aside is over,
+    never done."""
+    workers = [{"id": "w1", "status": "idle"}]
+    tasks = [
+        task("report", "w1", "review", result="The flag is on in prod."),
+        task("asked", "w1", "review", review_required=True, attention="acceptance",
+             attention_why="You asked to see it first"),
+        task("accepted", "w1", "done", result="The flag is on in prod."),
+        task("cancelled", "w1", "cancelled", result="Cancelled by you."),
+        task("aside", "w1", "done", set_aside=True, watching=["github:o/r#1"]),
+    ]  # fmt: skip
+    found = board(tasks, workers)
+    assert found["phases"] == {
+        "report": "needs/review", "asked": "needs/review", "accepted": "finished/done",
+        "cancelled": "finished/cancelled", "aside": "finished/set-aside",
+    }  # fmt: skip
+    assert found["whys"]["asked"] == "You asked to see it first"
+    words = tasks_js(
+        "const phase = (section, marker) => ({ section, marker, why: '' });\n"
+        "const b = await import('" + (STATIC / "board.js").as_uri() + "');\n"
+        "return [b.statusWord(phase('needs', 'review')), b.statusWord(phase('running', '')),"
+        " b.statusWord(phase('finished', 'cancelled')),"
+        " b.statusWord(phase('finished', 'set-aside')),"
+        " k.finishedWords({ status: 'done', set_aside: true, result: 'Wrote it.' },"
+        " phase('finished', 'set-aside')),"
+        " k.finishedWords({ status: 'done', result: '' }, phase('finished', 'done'))];"
+    )
+    assert words == ["Awaiting acceptance", "Running", "Cancelled", "Set aside",
+                     "Set aside, not accepted: Wrote it.", "Accepted"]  # fmt: skip
+
+
+def test_running_is_a_row_per_task_and_a_background_process_is_said():
+    """QA E16/E19/E20, E13: Running has a row per task (two workers, two rows; not a box per
+    worker), in the order they came, not by their latest step; a worker whose turn is over
+    while a command it left running goes on is waiting for that process, not idle."""
+    workers = [
+        {"id": "w1", "status": "working", "turn_task": "a"},
+        {"id": "w2", "status": "idle", "background": True, "turn_task": "b"},
+        {"id": "w3", "status": "working", "turn_task": "c"},
+    ]
+    tasks = [
+        task("a", "w1", started=True, at="2026-11-07T11:00:00Z"),
+        task("b", "w2", started=True, at="2026-11-07T11:30:00Z"),
+        task("c", "w3", started=True, at="2026-11-07T11:58:00Z"),
+        # Another task of a worker whose process runs: not what that process is for.
+        task("d", "w2", started=True, at="2026-11-07T11:20:00Z"),
+    ]
+    tasks[0]["updated_at"] = "2026-11-07T11:59:00Z"  # Its latest step: it does not move up.
+    found = board(tasks, workers)
+    assert found["phases"] == {
+        "a": "running", "b": "running/background", "c": "running", "d": "monitoring/idle",
+    }  # fmt: skip
+    assert found["sections"]["running"] == ["c", "b", "a"]
+    assert found["whys"]["b"] == "Waiting for background process"
 
 
 def test_a_delivered_task_is_placed_by_where_its_own_pr_stands():
@@ -343,7 +452,7 @@ def test_a_delivered_task_is_placed_by_where_its_own_pr_stands():
         own(3, checks="passing", merge_state="CLEAN"),
         own(4, checks="pending"),
         own(5, checks="failing", draft=True),  # A draft: not done yet, whatever its CI says.
-        # Someone else's PR it reviewed: what the author does about it is theirs.
+        # Someone else's PR it reviewed: what the author does about it is theirs (finished).
         task(
             "t6",
             "w1",
@@ -358,14 +467,14 @@ def test_a_delivered_task_is_placed_by_where_its_own_pr_stands():
     found = board(tasks, workers)
     assert found["phases"] == {
         "t1": "needs/pr-failing", "t2": "needs/pr-changes", "t3": "monitoring/mergeable",
-        "t4": "monitoring/delivered", "t5": "monitoring/delivered", "t6": "monitoring/reviewed",
+        "t4": "monitoring/delivered", "t5": "monitoring/delivered", "t6": "finished/reviewed",
     }  # fmt: skip
     assert found["whys"]["t1"] == "CI failing on r#1 (lint)"
     assert found["whys"]["t2"] == "Changes requested on r#2"
     assert found["whys"]["t3"] == "Ready to merge: r#3"
-    # Ready to merge waits on no one else: a row of its own, not in "Delivered" (R8).
-    assert found["monitoring"]["delivered"] == ["t4", "t5"]
-    assert "t3" in found["monitoring"]["waiting"]
+    assert found["whys"]["t4"] == "Waiting for CI · No updates for 1h"
+    assert found["whys"]["t5"] == "Waiting for review · No updates for 1h"
+    assert sorted(found["sections"]["monitoring"]) == ["t3", "t4", "t5"]
     # Its status in Artifacts is the same word.
     words = run_js(
         f"const a = await import({json.dumps((STATIC / 'board.js').as_uri())});\n"
@@ -453,12 +562,22 @@ def test_artifacts_in_one_list_with_where_each_stands():
         const tasks = [
           { id: "t1", status: "running", title: "Run the ICP flow",
             updated_at: "2026-11-07T11:30:00Z",
-            receipts: { prs: [pr(1, { own: true, checks: "failing" }), pr(2, { own: false })] },
+            receipts: { prs: [pr(1, { own: true, checks: "failing" }), pr(2, { own: false }),
+              pr(4, { role: "referenced" }),
+              pr(5, { role: "reviewed", at: "2026-11-07T11:25:00Z" })] },
             artifacts: [
               { url: "https://flyte.example.com/console/projects/p/domains/d/executions/abc",
                 name: "ICP flow", status: "running", at: "2026-11-07T11:20:00Z" },
               { url: sheet, name: "Weekly sheet", status: "draft", at: "2026-11-07T11:00:00Z" },
+              // Not deliverables: a mockup file, a plain link, a CI run.
+              { url: "file:///work/mock5.html", path: "/work/mock5.html", name: "mock5.html",
+                status: "draft", at: "2026-11-07T11:00:00Z" },
+              { url: "https://example.com/dash", name: "Dashboard", status: "live",
+                at: "2026-11-07T11:00:00Z" },
+              { url: "https://github.com/acme/app/actions/runs/77", name: "CI", status: "failed",
+                at: "2026-11-07T11:00:00Z" },
             ],
+            files: [{ path: "/work/out.csv", name: "out.csv", size: 2048 }],
             // A doc an earlier report said it made (the latest does not repeat it), named as
             // that report linked it, the same document again with a query; one it only
             // mentions, docs.google.com itself, a Spark application under the run, links in
@@ -482,7 +601,7 @@ def test_artifacts_in_one_list_with_where_each_stands():
             given_links: ["https://docs.google.com/document/d/1GivenDocC"],
             result: "Read https://docs.google.com/document/d/1GivenDocC/edit?usp=sharing",
             goal: "See https://docs.google.com/document/d/1GivenDocC" },
-          // A report that only informs (Home says so): "reported", not "to review".
+          // A report that only informs: accepted all the same.
           { id: "t3", status: "review", title: "Explain the flow",
             updated_at: "2026-11-07T09:00:00Z",
             result: "Wrote [the plan](https://docs.google.com/document/d/1PlanDoc/edit) and "
@@ -490,21 +609,25 @@ def test_artifacts_in_one_list_with_where_each_stands():
             made_links: ["https://docs.google.com/document/d/1PlanDoc/edit?usp=sharing",
               "https://docs.google.com/spreadsheets/d/1NumbersSheet/edit"] },
         ];
-        const phases = new Map([["t3", { section: "finished", marker: "report" }]]);
+        const phases = new Map([["t3", { section: "needs", marker: "review" }]]);
         return a.collectArtifacts(tasks, phases)
-          .map((i) => [i.kind, i.name, i.status, i.tone, i.task.id]);
+          .map((i) => [i.kind, i.role, i.name, i.status, i.tone, i.task.id]);
         """
     )
     assert found == [
-        ["PR", "app#1", "CI failing", "bad", "t1"],
-        ["Doc", "Early doc", "in progress", "active", "t1"],
-        ["Flyte", "ICP flow", "running", "active", "t1"],
-        ["PR", "app#3", "draft", "active", "t2"],
-        ["Doc", "the plan", "reported", "neutral", "t3"],
-        ["Sheet", "Sheet", "reported", "neutral", "t3"],
-        ["Sheet", "Weekly sheet", "final", "good", "t2"],
-        ["PR", "app#2", "merged", "good", "t2"],
-    ], "worst first, then newest; own PRs only; one row per document, the newer word on it"
+        ["PR", "created", "app#1", "CI failing", "bad", "t1"],
+        ["Doc", "", "the plan", "to accept", "wait", "t3"],
+        ["Doc", "", "Sheet", "to accept", "wait", "t3"],
+        ["Doc", "", "Early doc", "in progress", "active", "t1"],
+        ["PR", "reviewed", "app#5", "in review", "active", "t1"],
+        ["Flow", "", "ICP flow", "running", "active", "t1"],
+        ["PR", "created", "app#3", "draft", "active", "t2"],
+        ["Doc", "", "Weekly sheet", "final", "good", "t2"],
+        ["PR", "created", "app#2", "merged", "good", "t2"],
+    ], (
+        "PRs it made, changed or reviewed, docs and flows only (no file, link, log or CI run); "
+        "worst first, then newest; one row per document, the newer word on it"
+    )
 
 
 def test_a_pr_is_ready_to_merge_when_github_would_merge_it():
@@ -788,7 +911,7 @@ def test_queued_rows_in_start_order_and_a_follow_up_is_up_next():
     assert found["phases"]["again"] == "monitoring/turn"
     assert found["whys"]["again"] == "Up next: following up after “on”"
     assert found["phases"]["left"] == "monitoring/paused"
-    assert found["monitoring"]["waiting"] == ["again", "left", "q1", "q2", "q3"]
+    assert found["sections"]["monitoring"] == ["again", "left", "q1", "q2", "q3"]
 
 
 def tasks_js(body: str):
@@ -812,36 +935,50 @@ def test_slack_conversations_it_follows_are_named_once():
     assert found == ["DM with Bob", "DM with Ann", "a thread in #deploys", "app#7", "a Slack DM"]
 
 
-def test_a_ci_run_shows_where_its_checks_stand_not_its_task():
-    """S19: a failed CI run its report linked read "to review" (its task's state) in Artifacts;
-    a result set aside reads so, not "delivered"."""
+def test_artifacts_are_the_deliverables_the_server_names():
+    """QA E17/E25/E26: Artifacts and a card's chips are a task's `deliverables`: its PRs with
+    their part in it (created, modified, reviewed; never one it only referenced), the docs it
+    wrote and the flows it ran, each by its title; a PR two tasks share is the one that made
+    it; a set-aside task's doc reads so, not "delivered"."""
     found = run_js(
         f"const a = await import({json.dumps((STATIC / 'artifacts.js').as_uri())});\n"
         """
         s.state.snapshot = { pr_titles: {} };
-        const run = (n) => `https://github.com/o/cos-approve-test/actions/runs/${n}`;
+        const url = (n) => `https://github.com/o/app/pull/${n}`;
         const doc = "https://docs.google.com/document/d/1SetAsideDoc/edit";
-        const pr = { label: "o/cos-approve-test#62", url: "https://github.com/o/cos-approve-test/pull/62",
-          state: "OPEN", checks: "failing", own: true, at: "2026-11-07T11:00:00Z" };
+        const receipt = { label: "o/app#7", url: url(7), state: "OPEN", checks: "passing",
+          review: "APPROVED", own: true, at: "2026-11-07T11:00:00Z" };
         const tasks = [
-          { id: "t1", status: "review", title: "Probe CI", updated_at: "2026-11-07T11:30:00Z",
-            receipts: { prs: [pr] }, made_links: [run(1)], result: `Run: ${run(1)}` },
-          { id: "t2", status: "review", title: "Other", updated_at: "2026-11-07T11:20:00Z",
-            made_links: [run(2)], result: `Run: ${run(2)}` },
-          { id: "t3", status: "done", title: "Not wanted", updated_at: "2026-11-07T11:10:00Z",
-            made_links: [doc], result: `Wrote ${doc}` },
+          { id: "t1", status: "done", title: "Fix it", updated_at: "2026-11-07T11:30:00Z",
+            receipts: { prs: [receipt] },
+            deliverables: [
+              { kind: "pr", url: url(7), title: "Fix the exporter", role: "created" },
+              { kind: "pr", url: url(8), title: "Their PR", role: "referenced" },
+              // Named as the server names it (its number first): not "app#9 · app#9 · …".
+              { kind: "pr", url: url(9), title: "app#9 · Bob's PR", role: "reviewed",
+                status: "approved" },
+              { kind: "flow", url: "https://airflow.example.com/dags/nightly/grid",
+                title: "Nightly export", status: "succeeded", at: "2026-11-07T11:10:00Z" },
+              { kind: "file", url: "file:///work/mock.html", title: "mock.html" },
+              { kind: "link", url: "https://example.com/x", title: "A link" },
+            ] },
+          // Pushed to the PR t1 opened: t1's row (it made it).
+          { id: "t2", status: "review", title: "Push a fix", updated_at: "2026-11-07T11:40:00Z",
+            deliverables: [{ kind: "pr", url: url(7), title: "Fix the exporter",
+              role: "modified" }] },
+          { id: "t3", status: "done", set_aside: true, title: "Not wanted",
+            updated_at: "2026-11-07T11:05:00Z",
+            deliverables: [{ kind: "doc", url: doc, title: "The plan" }] },
         ];
-        const phases = new Map([["t1", { section: "needs", marker: "review" }],
-          ["t2", { section: "needs", marker: "review" }],
-          ["t3", { section: "finished", marker: "set-aside" }]]);
-        return a.collectArtifacts(tasks, phases).filter((i) => i.kind !== "PR")
-          .map((i) => [i.task.id, i.status, i.tone]);
+        return a.collectArtifacts(tasks, new Map())
+          .map((i) => [i.kind, i.role, i.name, i.status, i.tone, i.task.id]);
         """
     )
     assert found == [
-        ["t1", "failed", "bad"],
-        ["t2", "to review", "wait"],  # No PR of its own there: as its task stands.
-        ["t3", "set aside", "muted"],
+        ["PR", "reviewed", "app#9 · Bob's PR", "approved", "good", "t1"],
+        ["Flow", "", "Nightly export", "succeeded", "good", "t1"],
+        ["PR", "created", "app#7 · Fix the exporter", "approved", "good", "t1"],
+        ["Doc", "", "The plan", "set aside", "muted", "t3"],
     ]
 
 
@@ -909,16 +1046,32 @@ def test_what_cancelling_came_to_and_a_cancelled_line_said_once():
 
 def test_an_unreadable_follow_says_why():
     """E11: "Can't read app#72" whatever the reason; it reads the PR when only its CI checks
-    could not be read, and no access is not GitHub being slow."""
+    could not be read, and no access is not GitHub being slow. QA E10: by the server's kind,
+    with its sentence for the owner; GitHub slow or its rate limit passes by itself (Retry),
+    no access or not found does not (stop following)."""
     found = tasks_js(
         "const key = 'github:acme/app#72';\n"
-        "return [{kind: 'access', step: 'pull request', error: 'HTTP 404'},"
+        "const kinds = [{kind: 'access', step: 'pull request', error: 'HTTP 404'},"
         " {kind: 'access', step: 'CI checks', error: 'HTTP 403'},"
-        " {kind: 'transient', step: 'reviews', error: 'GitHub request timed out.'}, {}]"
-        ".map((why) => k.failingWords(key, why)[0]);"
+        " {kind: 'transient', step: 'reviews', error: 'GitHub request timed out.'}, {},"
+        " {kind: 'permission', error: 'Your accounts cannot see acme/app.'},"
+        " {kind: 'not_found', error: 'acme/app#72 is gone.'},"
+        " {kind: 'rate_limited', error: 'Too many requests.', retry_at: '2026-11-07T12:30:00Z'},"
+        " {kind: 'permission', step: 'CI checks', error: 'Its checks are private.'}];\n"
+        "return [kinds.map((why) => k.failingWords(key, why)[0]),"
+        " k.failingWords(key, kinds[4])[1], k.failingWords(key, kinds[6])[1].includes('Too many'),"
+        " kinds.map((why) => k.PASSING.has(why.kind)), k.failingWords(key, kinds[7])[1]];"
     )
-    assert found == ["No access to app#72", "Can't read app#72's CI checks",
-                     "GitHub not answering for app#72", "Can't read app#72"]  # fmt: skip
+    assert found[0] == [
+        "No access to app#72", "Can't read app#72's CI checks",
+        "GitHub not answering for app#72", "Can't read app#72", "No access to app#72",
+        "app#72 not found", "GitHub's rate limit for app#72", "Can't read app#72's CI checks",
+    ]  # fmt: skip
+    assert found[1].endswith("Your accounts cannot see acme/app."), "the server's own words"
+    assert "GitHub said" not in found[1]
+    assert found[2]
+    assert found[3] == [False, False, True, False, False, False, True, False]
+    assert found[4].endswith(" Its checks are private."), "the server's words, not GitHub's"
 
 
 def test_one_row_for_a_followed_pr_keeps_the_task_that_needs_you():
@@ -960,3 +1113,65 @@ def test_python_and_the_page_say_where_a_pr_stands_the_same_way():
         f"return {json.dumps(prs)}.map((pr) => b.prStatus(pr)[0]);"
     )
     assert page == [pr_status(pr) for pr in prs]
+
+
+def test_a_result_to_accept_with_news_or_its_pr_to_fix_is_still_awaiting_acceptance():
+    """QA round 10: a review task with news, or whose own PR has changes requested, showed as
+    "Update" or "Changes requested", with no Request changes and Accept hidden."""
+    workers = [{"id": "w1", "status": "idle"}]
+    news = {"at": "2026-11-07T11:55:00Z", "text": "CI passes now"}
+    label = "o/r#1"
+    prs = [{"label": label, "own": True, "state": "OPEN", "review": "CHANGES_REQUESTED"}]
+    tasks = [
+        task("n", "w1", "review", news=news),
+        task("p", "w1", "review", watching=[f"github:{label}"], watch_kind="own",
+             receipts={"prs": prs}),
+        task("d", "w1", "done", news=news),
+    ]  # fmt: skip
+    found = board(tasks, workers)
+    assert found["phases"] == {"n": "needs/review", "p": "needs/review", "d": "needs/update"}
+    assert found["whys"]["n"] == "News: CI passes now"
+    assert found["whys"]["p"] == "Changes requested on r#1"
+
+
+def test_a_monitored_task_checked_a_moment_ago_says_just_now():
+    """QA round 10 review: "checked just ago"."""
+    words = run_js(
+        f"const k = await import({json.dumps((STATIC / 'tasks.js').as_uri())});\n"
+        "const at = (minutes) => new Date(Date.now() + minutes * 60000).toISOString();\n"
+        "const row = (last) => ({ id: 't', status: 'done', monitoring: [{ key: 'github:o/app#7',"
+        " kind: 'pr', label: 'o/app#7', url: '', waiting_for: 'approval', last_check: last,"
+        " next_check: at(10.5), trigger: 'A review', changed_at: at(-60) }] });\n"
+        "return [k.monitorBits(row(at(0))).checks, k.monitorBits(row(at(-5))).checks];"
+    )
+    assert words == ["checked just now · next in 10 min", "checked 5 min ago · next in 10 min"]
+
+
+def test_a_rows_delivery_line_follows_the_owners_message_only():
+    """QA round 10 review: the time was taken after the request (a slow one left "Sending…"
+    for ten minutes), a Router message took the row's place, and "Handled" never showed."""
+    found = run_js(
+        f"const k = await import({json.dumps((STATIC / 'tasks.js').as_uri())});\n"
+        f"const s = await import({json.dumps((STATIC / 'state.js').as_uri())});\n"
+        "const task = { id: 't1', session_id: 'w1' };\n"
+        "const at = Date.now();\n"
+        "k.noteSent(task, at);\n"
+        "const out = [k.sentState(task)];\n"
+        "const msg = (id, kind, delivery, ms) => s.noteDelivery({ id, kind, delivery,"
+        " session_id: 'w1', created_at: new Date(at + ms).toISOString() });\n"
+        "msg(5, 'owner', 'received', 7000);  // Stored 7 s into a slow request.\n"
+        "out.push(k.sentState(task));\n"
+        "msg(6, 'router', 'sent', 8000);\n"
+        "out.push(k.sentState(task));\n"
+        "msg(5, 'owner', 'processed', 7000);\n"
+        "out.push(k.sentState(task), k.sentState(task, Date.now() + 61000));\n"
+        "return out;"
+    )
+    assert found == ["sending", "received", "received", "processed", ""]
+    gone = run_js(
+        f"const k = await import({json.dumps((STATIC / 'tasks.js').as_uri())});\n"
+        "const task = { id: 't2', session_id: 'w2' };\n"
+        "k.noteSent(task, Date.now());  // Nothing sent after all (a Go on clicked twice).\n"
+        "return [k.sentState(task), k.sentState(task, Date.now() + 31000)];"
+    )
+    assert gone == ["sending", ""]

@@ -12,19 +12,21 @@ import { openSettings, watchGaps } from "./settings.js";
 function sessionItem(session, label, where) {
   const dot = where?.dot || "idle";
   const named = label !== session.title ? `\nStarted as “${session.title}”` : "";
+  // Its turn over, a command it left running (a dev server) goes on: not at work, not idle.
+  const background = session.background && session.status !== "working";
   return el(
     "button",
     {
       type: "button",
       class: `item ${dot.split(" ")[0]}${state.selected === session.id ? " selected" : ""}`,
-      title: [where?.text, session.activity].filter(Boolean).join(" · ") + named,
+      title: [where?.text, background ? "Waiting for background process" : session.activity].filter(Boolean).join(" · ") + named,
       "data-id": session.id,
       onclick: () => select(session.id),
     },
     el("span", { class: `dot ${dot}`, title: where?.text || "" }),
     el("span", { class: "label", text: label }),
     // A marker in words (queued, overdue…), not a color of its own.
-    where?.sub ? el("span", { class: "sub", text: where.sub }) : null,
+    where?.sub || background ? el("span", { class: "sub", text: where?.sub || "background" }) : null,
   );
 }
 const ORDER = Object.fromEntries([...WORKER_STATES.map(([dot]) => dot), "open"].map((dot, index) => [dot, index]));

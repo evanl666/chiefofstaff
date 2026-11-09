@@ -561,6 +561,10 @@ class Unfollow(StrictModel):
     task_id: str = Field(default="", max_length=20)  # For this task only (else for all).
 
 
+class FollowRetry(StrictModel):
+    key: str = Field(min_length=1, max_length=500)  # The PR it follows: github:owner/repo#n.
+
+
 class ArtifactHide(StrictModel):
     key: str = Field(max_length=2100)
     hidden: bool = True

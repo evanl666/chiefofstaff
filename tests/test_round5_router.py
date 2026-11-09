@@ -51,18 +51,20 @@ async def test_what_needs_the_owner_is_what_home_lists(harness):
 
     listed = json.loads((await call_tool(runtime, "list_sessions", router)).text_result_for_llm)
     found = listed["needs_owner"]
-    assert found["count"] == needs_you(runtime) == 4
+    # A report that only informs is a result to accept too (E28).
+    assert found["count"] == needs_you(runtime) == 5
     [card] = found["cards"]
     assert card["result_to_review"].startswith(f"{answer['task_id']} “Answer Alice”")
     assert [(t["task"], t["needs"]) for t in found["tasks"]] == [
-        (f"{fix['task_id']} “Fix login”", "to review")
+        (f"{fix['task_id']} “Fix login”", "to review"),
+        (f"{compare['task_id']} “Compare libraries”", "to review"),
     ]
     assert [q["question"] for q in found["questions"]] == ["Postgres or MySQL?"]
     assert [note["text"] for note in found["your_notes"]] == ["Renew your token today."]
-    assert "1 result to review" in found["summary"] and "1 draft to approve" in found["summary"]
+    assert "2 results to review" in found["summary"] and "1 draft to approve" in found["summary"]
     status = {task["title"]: task["status"] for task in listed["tasks"]}
     assert status["Fix login"] == "review, to review (needs you)"
-    assert status["Compare libraries"].startswith("review, report (read only")
+    assert status["Compare libraries"] == "review, to review (needs you)"
     assert status["Answer Alice"] == "review, to review on its draft's card (needs you)"
     assert status["Pick a database"] == "waiting, question (needs you)"
 
@@ -161,6 +163,9 @@ async def test_idle_workers_whose_results_wait_for_the_owner_stay_open(harness):
         await call_tool(runtime, "report", worker["session_id"], status="done", summary="Done.")
     harness.store.set(f"reviewreq:{review['task_id']}", "1")
     await settle(runtime)
+    # A report that only informs waits for Accept too (E28): until then, both stay.
+    assert await runtime.workers.tidy(time.time() + 2 * 86400) == []
+    runtime.task_actions.accept(report["task_id"])
     assert await runtime.workers.tidy(time.time() + 2 * 86400) == [report["session_id"]]
     assert not harness.store.session(review["session_id"])["closed_at"]
 

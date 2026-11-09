@@ -1,11 +1,12 @@
-// Home → Tasks → Artifacts: what the owner's tasks made or run, in one list, each with where it
-// stands now: a PR as GitHub has it; a doc or a run as its worker last said, else as its task
-// stands. The owner takes one off the list (its task keeps it) and can bring it back.
+// Home → Artifacts: what the owner's tasks delivered (their PRs, the documents they wrote, the
+// flows they ran), in one list, each with where it stands now: a PR as GitHub has it; a doc or
+// a flow as its worker last said, else as its task stands. The owner takes one off the list
+// (its task keeps it) and can bring it back. Not what a task only mentions, nor its files,
+// mockups, logs or single CI runs: those are on its card.
 
 import { api, el, toast } from "./dom.js";
-import { ago, linkKey, linkName, prTitle, shorten, taskLinks } from "./text.js";
+import { ago, linkKey, linkName, prTitle, taskLinks } from "./text.js";
 import { state } from "./state.js";
-import { openFile } from "./files.js";
 import { prStatus } from "./board.js";
 
 // What a PR's state comes to: one rule with where its task is placed (board.js).
@@ -28,77 +29,96 @@ export function toneOf(status) {
   if (words !== said && !has("but|except")) return "good";  // "no errors", "error-free".
   return "neutral";
 }
-// As its task stands, for a link its worker said nothing about; a result that only informs
-// (a report, Home says) is not one to review.
+// As its task stands, for a doc or a flow its worker said nothing about.
 const BY_TASK = {
   running: ["in progress", "active"],
   queued: ["queued", "active"],
   waiting: ["waiting on you", "wait"],
-  review: ["to review", "wait"],
-  reported: ["reported", "neutral"],
+  review: ["to accept", "wait"],
   done: ["delivered", "good"],
   failed: ["task failed", "bad"],
   cancelled: ["task cancelled", "muted"],
   "set-aside": ["set aside", "muted"],
 };
-const byTask = (task, phase) => BY_TASK[phase?.marker === "set-aside" ? "set-aside" : task.status === "review" && phase && phase.section !== "needs" ? "reported" : task.status] || ["", "neutral"];
-// A CI run on GitHub its worker said nothing about: as the checks of its task's PR in that
-// repository stand (failed, passed, running), not as its task does.
-const CI_RUN = { failing: ["failed", "bad"], passing: ["passed", "good"], pending: ["running", "active"] };
-function ciRun(task, url) {
-  const repo = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/actions\/runs\//.exec(url)?.[1]?.toLowerCase();
-  const prs = repo ? (task.receipts?.prs || []).filter((pr) => pr.label.toLowerCase().startsWith(`${repo}#`) && CI_RUN[pr.checks]) : [];
-  return prs.length ? CI_RUN[prs[0].checks] : null;
-}
+const byTask = (task, phase) => BY_TASK[phase?.marker === "set-aside" || task.set_aside ? "set-aside" : task.status] || ["", "neutral"];
 const RANK = { bad: 0, wait: 1, active: 2, neutral: 3, good: 4, muted: 5 };
-// What kind of thing a link is, in a word.
-const KINDS = { pr: "PR", issue: "Issue", ticket: "Ticket", file: "File", slack: "Slack", link: "Link" };
-function kindOf(found) {
-  if (!found) return "Link";
-  if (KINDS[found.kind]) return KINDS[found.kind];
-  const first = found.label.split(" · ")[0];
-  return { "Google Doc": "Doc", "CI run": "CI", "Spark history": "Spark", "Airflow run": "Airflow", "Flyte run": "Flyte" }[first] || first;
-}
-// Its name: what its worker or a report called it, else what it says beside its kind ("abc123"
-// of "Flyte · abc123"), else what it is ("Google Doc"); never a piece of a document's id.
+// A PR's part in a task, in a word: it opened it, pushed to it, or reviewed it. A PR it only
+// mentions ("referenced") is not something it delivered.
+export const PR_ROLES = { created: "Created", modified: "Modified", reviewed: "Reviewed" };
+const KIND_WORDS = { pr: "PR", doc: "Doc", flow: "Flow" };
+// A PR's word (prStatus's), when the server gives it without the PR as GitHub has it.
+const PR_TONES = { merged: "good", closed: "muted", draft: "active", "changes requested": "bad", "merge conflicts": "bad", "CI failing": "bad", "awaiting approval": "wait", "CI running": "active", "ready to merge": "good", approved: "good", "in review": "active" };
+const prLabelOf = (url) => {
+  const found = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)/.exec(url || "");
+  return found ? `${found[1]}#${found[2]}` : "";
+};
+// A link's name in the list: what its worker or a report called it, else what it says beside
+// its kind ("abc123" of "Flyte · abc123"), else what it is ("Google Doc"); never a piece of a
+// document's id.
 function nameOf(link) {
   if (link.name) return link.name;
   const found = link.found;
-  if (["issue", "ticket", "file", "link", "doc"].includes(found.kind) || !found.label.includes(" · ")) return linkName(link);
+  if (found.kind === "doc" || !found.label.includes(" · ")) return linkName(link);
   return found.label.split(" · ").slice(1).join(" · ");
 }
+function prItem(task, pr, role, url = pr?.url, title = "") {
+  const label = pr?.label || prLabelOf(url);
+  const [status, tone] = pr ? prStatus(pr) : ["", "neutral"];
+  const named = title || pr?.title || prTitle(label);
+  const short = label.replace(/^[^/]+\//, "");
+  // The server's title names the PR already ("app#7 · Fix it").
+  const name = !named ? short : named.toLowerCase().startsWith(short.toLowerCase()) ? named : `${short} · ${named}`;
+  return { key: `pr:${label.toLowerCase()}`, kind: "PR", role, name, url, status, tone, at: pr?.changed_at || pr?.at || task.updated_at, said: Boolean(pr), pr: pr || null, task };
+}
 
-// Every artifact of these tasks, once each (a PR two tasks share: the one that made it; a
-// document linked in two ways: one row), the ones that need a look first: { key, kind, name,
-// url, path, status, tone, at, said, task }. What a task made: its PRs, what its worker declared
-// or its reports say it made, the runs it gives; not what it was given or only mentions.
-// `phases`: where each task is on Home (a report is "reported", not "to review").
+// What one task delivered, its PRs first: { key, kind ("PR", "Doc", "Flow"), role (a PR's:
+// created, modified, reviewed), name, url, status, tone, at, said, pr (its receipt), task }.
+// The server's `deliverables`; from an older server, the same out of its receipts (its own PRs)
+// and the documents and flows it made. `phase`: where it is on Home.
+export function deliverablesOf(task, phase) {
+  const prs = task.receipts?.prs || [];
+  const receipt = (url) => prs.find((pr) => pr.url === url || pr.label.toLowerCase() === prLabelOf(url).toLowerCase());
+  const [taskStatus, taskTone] = byTask(task, phase);
+  if (Array.isArray(task.deliverables)) {
+    return task.deliverables
+      .filter((item) => KIND_WORDS[item.kind] && item.url && (item.kind !== "pr" || PR_ROLES[item.role || "created"]))
+      .map((item) => {
+        if (item.kind === "pr") {
+          const found = prItem(task, receipt(item.url), item.role || "created", item.url, item.title);
+          return found.pr || !item.status ? found : { ...found, status: item.status, tone: PR_TONES[item.status] || toneOf(item.status), said: true };
+        }
+        const status = item.status || taskStatus;
+        // When its worker last said where it stands (what needs a look first is the newest).
+        const declared = (task.artifacts || []).find((said) => linkKey(said.url) === linkKey(item.url));
+        return { key: linkKey(item.url), kind: KIND_WORDS[item.kind], role: "", name: item.title || item.url, url: item.url, status, tone: item.status ? toneOf(item.status) : taskTone, at: item.at || declared?.at || task.updated_at, said: Boolean(item.status), pr: null, task };
+      });
+  }
+  const found = [];
+  for (const pr of prs) {
+    const role = pr.role || (pr.own ? "created" : "");
+    if (PR_ROLES[role]) found.push(prItem(task, pr, role));
+  }
+  for (const link of taskLinks(task)) {
+    // A document it wrote, a flow it ran; not a file of its folder, a log or a CI run.
+    const kind = link.found.kind === "doc" && link.role === "output" ? "Doc" : link.found.kind === "run" && link.role === "run" ? "Flow" : "";
+    if (!kind) continue;
+    const status = link.said?.status || (link.said ? "linked" : taskStatus);
+    found.push({ key: link.key, kind, role: "", name: nameOf(link), url: link.url, status, tone: link.said ? toneOf(link.said.status) : taskTone, at: link.said?.at || task.updated_at, said: Boolean(link.said), pr: null, task });
+  }
+  return found;
+}
+// Every task's deliverables, once each (a PR two tasks share: the one that made it, else the
+// newer word; a document linked in two ways: one row), the ones that need a look first.
+// `phases`: where each task is on Home.
+const ROLE_RANK = { created: 0, modified: 1, reviewed: 2, "": 3 };
 export function collectArtifacts(tasks, phases = new Map()) {
   const found = new Map();
-  const add = (item, own = false) => {
-    const known = found.get(item.key);
-    // The worker's own word beats a link in a report; between two, the newer.
-    if (known && (known.own && !own)) return;
-    if (known && known.own === own && String(known.at) >= String(item.at)) return;
-    found.set(item.key, { ...item, own });
-  };
   for (const task of tasks) {
-    for (const pr of task.receipts?.prs || []) {
-      if (!pr.own) continue;
-      const [status, tone] = prStatus(pr);
-      const title = pr.title || prTitle(pr.label);
-      const short = pr.label.replace(/^[^/]+\//, "");
-      add({ key: `pr:${pr.label.toLowerCase()}`, kind: "PR", name: title ? `${short} · ${title}` : short, url: pr.url, status, tone, at: pr.changed_at || pr.at || task.updated_at, said: true, task }, true);
-    }
-    const [status, tone] = byTask(task, phases.get(task.id));
-    for (const link of taskLinks(task)) {
-      if (link.said) {
-        add({ key: link.key, kind: kindOf(link.found), name: nameOf(link), url: link.url, path: link.path, status: link.said.status || "linked", tone: toneOf(link.said.status), at: link.said.at, said: true, task }, true);
-      } else if (!link.file && ["output", "run"].includes(link.role)) {
-        // Named only in its reports: as its task stands (a CI run: as its PR's checks do).
-        const ci = ciRun(task, link.url);
-        add({ key: link.key, kind: kindOf(link.found), name: nameOf(link), url: link.url, path: link.path, status: ci ? ci[0] : status, tone: ci ? ci[1] : tone, at: task.updated_at, said: Boolean(ci), ci: Boolean(ci), task });
-      }
+    for (const item of deliverablesOf(task, phases.get(task.id))) {
+      const known = found.get(item.key);
+      if (known && (ROLE_RANK[known.role] < ROLE_RANK[item.role] || (known.role === item.role && (known.said && !item.said)))) continue;
+      if (known && known.role === item.role && known.said === item.said && String(known.at) >= String(item.at)) continue;
+      found.set(item.key, item);
     }
   }
   return [...found.values()].sort((a, b) => RANK[a.tone] - RANK[b.tone] || String(b.at).localeCompare(String(a.at)));
@@ -152,10 +172,10 @@ export async function setHidden(key, hidden, tone = "") {
 }
 function artifactRow(item, hidden, focusTask) {
   const when = item.at ? ago(item.at) : "";
-  const help = item.said ? (item.kind === "PR" ? "As GitHub has it" : item.ci ? "As GitHub has its PR's checks" : "As its worker last said") : "As its task stands: its worker has not said where this stands";
+  const help = item.said ? (item.kind === "PR" ? "As GitHub has it" : "As its worker last said") : "As its task stands: its worker has not said where this stands";
   return {
     key: `art:${item.key}:${hidden ? 1 : 0}`,
-    version: `${item.name}:${item.status}:${item.tone}:${when}:${item.task.id}:${item.task.title}`,
+    version: `${item.name}:${item.role}:${item.status}:${item.tone}:${when}:${item.task.id}:${item.task.title}`,
     build: () => {
       const node = el("div", { class: `artifact tone-${item.tone}${hidden ? " hidden-artifact" : ""}`, "data-key": item.key });
       fill(node, item, hidden, focusTask, when, help);
@@ -164,22 +184,24 @@ function artifactRow(item, hidden, focusTask) {
     refresh: (node) => fill(node, item, hidden, focusTask, when, help),
   };
 }
+// Its tooltips are Home's own (data-tip): one that cannot be left pointing at another row.
 function fill(node, item, hidden, focusTask, when, help) {
   node.className = `artifact tone-${item.tone}${hidden ? " hidden-artifact" : ""}`;
+  const role = PR_ROLES[item.role] || "";
   node.replaceChildren(
     el("span", { class: "a-kind", text: item.kind }),
-    item.path
-      ? el("button", { type: "button", class: "a-name link", text: shorten(item.name, 90), title: `${item.name}\n${item.path}\nClick to open it`, onclick: () => openFile(item.path, item.task.session_id) })
-      : el("a", { class: "a-name", href: item.url, target: "_blank", rel: "noreferrer", text: shorten(item.name, 90), title: `${item.name}\n${item.url}` }),
-    el("span", { class: `a-status${item.said ? "" : " derived"}`, text: item.status, title: `${help}${item.at ? ` · ${new Date(item.at).toLocaleString()}` : ""}` }),
+    el("a", { class: "a-name", href: item.url, target: "_blank", rel: "noreferrer", text: item.name, "data-tip": `${item.name}\n${item.url}` }),
+    el("span", { class: `a-status${item.said ? "" : " derived"}`, text: item.status, "data-tip": `${help}${item.at ? ` · ${new Date(item.at).toLocaleString()}` : ""}` }),
     hidden
-      ? el("button", { type: "button", class: "a-hide link", text: "Bring back", title: "Back on this list", onclick: () => setHidden(item.key, false) })
-      : el("button", { type: "button", class: "a-hide", text: "✕", "aria-label": `Take ${item.name} off this list`, title: "Take it off this list (its task keeps it; it comes back if it fails)", onclick: () => setHidden(item.key, true, item.tone) }),
+      ? el("button", { type: "button", class: "a-hide link", text: "Bring back", "data-tip": "Back on this list", onclick: () => setHidden(item.key, false) })
+      : el("button", { type: "button", class: "a-hide", text: "✕", "aria-label": `Take ${item.name} off this list`, "data-tip": "Take it off this list (its task keeps it; it comes back if it fails)", onclick: () => setHidden(item.key, true, item.tone) }),
     el(
       "div",
       { class: "a-meta" },
-      el("button", { type: "button", class: "a-task link", text: item.task.title, title: "Open its task", onclick: () => focusTask(item.task.id, item.task.session_id) }),
-      when ? el("span", { class: "a-when", text: ` · ${when === "now" ? "just now" : `${when} ago`}` }) : "",
+      role ? el("span", { class: `a-role role-${item.role}`, text: role, "data-tip": { created: "Its task opened this PR", modified: "Its task pushed to this PR", reviewed: "Its task reviewed this PR" }[item.role] }) : "",
+      role ? el("span", { text: "·" }) : "",
+      el("button", { type: "button", class: "a-task link", text: item.task.title, "data-tip": "Show its task", onclick: () => focusTask(item.task.id, item.task.session_id) }),
+      when ? el("span", { class: "a-when", text: `· ${when === "now" ? "just now" : `${when} ago`}` }) : "",
     ),
   );
 }

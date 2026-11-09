@@ -72,9 +72,10 @@ def test_a_result_to_review_whose_pr_wants_changes_says_so_under_needs_you():
     ]
     tasks[4]["updated_at"] = "2026-11-07T11:55:00Z"
     found = board(tasks, workers)
-    assert found["phases"]["t1"] == "needs/pr-changes"
+    # Still a result to accept, with Accept and Request changes (QA round 10): its PR is why.
+    assert found["phases"]["t1"] == "needs/review"
     assert found["whys"]["t1"] == "Changes requested on r#1"
-    assert found["phases"]["t2"] == "needs/pr-failing"
+    assert found["phases"]["t2"] == "needs/review"
     assert found["whys"]["t2"] == "CI failing on r#2 (lint)"
     # Ready to merge or CI still running: a result to review, as before.
     assert found["phases"]["t3"] == "needs/review"

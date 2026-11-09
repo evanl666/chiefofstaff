@@ -74,7 +74,12 @@ over the child's stdin and stdout (LSP-style `Content-Length` framing). Calls go
 The CLI's processes (the npm loader and the program it runs) are remembered (`copilot_pids`):
 a session they have open never counts as open in the owner's terminal, even once orphaned, and
 they are stopped with everything they started when Chief of Staff disconnects (or, left over
-from an abrupt stop, when it connects). `Runtime.watch_process` checks that the CLI still runs;
+from an abrupt stop, when it connects). Each is recorded with its command line, start time,
+parent chain, the instance that started it and the data directory's identity (real path,
+device, inode): one is stopped only by an instance on that same data directory, while it still
+runs with that start time and command line, and when the instance that started it is gone. A
+copied data directory, or a reused PID, never gets another instance's processes stopped;
+records in the old format are let go, not stopped. `Runtime.watch_process` checks that the CLI still runs;
 when it stops by itself, the owner sees an error and it connects again, waiting longer after
 each failure.
 
@@ -106,7 +111,19 @@ Sessions never talk directly. A session calls a tool, and the runtime delivers t
   change, or *Stop*, reconnects such a session at once.
 - **Modes.** The owner's messages steer a working session (`immediate`, within its turn).
   Events and reports for the Router are batched: held while it works and briefly after, so a
-  burst becomes one turn. Everything else is queued (`enqueue`).
+  burst becomes one turn. Everything else is queued (`enqueue`). A worker whose turn ended with
+  a command left running attached (a dev server) is *held*: Copilot defers `session.idle`, and
+  every queued message with it, until that command ends. Its turn's end is taken from
+  `assistant.idle` (or a last `assistant.turn_end`) while `tasks.list` shows such a command, and
+  what is sent to it then goes in `immediate`, which starts a turn; what Copilot had queued for
+  it is taken back from its queue (`session.queue`) and sent that way (`Events.held_idle`,
+  `Delivery.take_back`). Stop, Cancel and Close stop the command too.
+- **Delivery states.** A message sent to a session goes queued (not sent yet), sent, received
+  (its conversation shows it: `user.message`), processed (the turn it was in ended). One its
+  conversation does not show within `CHIEFOFSTAFF_ECHO_CHECK` seconds (20), and that Copilot
+  does not hold in its queue either, is sent again, the same text (so one echo settles it), up
+  to twice; then it is marked undelivered and the owner is told (`Delivery.check_echo`). The
+  chats show each state; changes arrive as amended `message` events.
 - **Workers that work together.** `works_with` on `spawn_worker` links tasks that run at the
   same time and need each other. A worker's `tell_session` (and `ask_session`) goes straight to
   the other worker, within its turn; the Router gets a copy held in its outbox (`Delivery.hold`:
@@ -147,7 +164,8 @@ to the handler for its type:
 | --- | --- |
 | `user.message` | Whether this turn includes the owner (else the Router's closing words are a footnote); the task a worker sees now is taken up (its turn task, unless the message steered the turn in progress; a followed thread's news, the task it is for, which a stop does not resume; back on a finished task from other work, what it changes counts from there). A message sent while a worker works is only taken up here, when it sees it; if the turn is stopped first (Copilot drops it), it is sent again with the next message. |
 | `assistant.message` | The session's words, into its timeline (the Router's closing words in a turn without the owner are a footnote; none when they only say it has nothing to say). |
-| `assistant.turn_start` | A worker's slot is busy; status `working`. |
+| `assistant.turn_start` | A worker's slot is busy; status `working`. A turn a worker starts on its own when a command it left running ends, with its task stopped or cancelled and nothing else open, is stopped again. |
+| `assistant.turn_end`, `assistant.idle` | Not a sub-agent's: a check shortly after whether a command it left running holds `session.idle` (see Modes). |
 | `tool.execution_start` | A step in the timeline and the session's activity; shell commands are recorded for receipts; files an edit tool writes count as the turn task's (in a folder shared with the owner, only those are its changes). |
 | `tool.execution_complete` | Exit code for receipts (a command left running keeps its shell id; reading or stopping that shell settles it); last output for the Watchdog. |
 | `system.notification` | A command left running ended (`shell_completed`): its exit code. |

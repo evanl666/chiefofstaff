@@ -99,9 +99,11 @@ def test_a_task_whose_pr_has_merge_conflicts_needs_you():
         own("t3", 95, merge_state="DIRTY", checks="failing", failing=["docs"]),
     ]
     found = board(tasks, workers)
-    assert found["phases"] == {"t1": "needs/pr-conflicts", "t2": "needs/pr-conflicts",
-                               "t3": "needs/pr-conflicts"}  # fmt: skip
+    # A result to accept stays one (QA round 10): its PR's conflicts are why it needs a look.
+    assert found["phases"] == {"t1": "needs/review", "t2": "needs/pr-conflicts",
+                               "t3": "needs/review"}  # fmt: skip
     assert found["whys"]["t1"] == "Merge conflicts on app#92"
+    assert found["whys"]["t2"] == "Merge conflicts on app#94"
 
 
 def test_a_reviews_summary_shows_its_code_as_code():

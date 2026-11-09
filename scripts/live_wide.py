@@ -168,7 +168,7 @@ SHARDS = {
     "I": (18799, 18929), "J": (18800, 18930), "K": (18801, 18931),
     "L": (18802, 18932), "M": (18803, 18933), "N": (18804, 18934), "O": (18805, 18935),
     "P": (18806, 18936), "Q": (18807, 18937), "R": (18808, 18938),
-    "S": (18809, 18939),
+    "S": (18809, 18939), "T": (18810, 18940),
 }  # fmt: skip
 MODEL = "claude-sonnet-5.5"
 CJK = re.compile(r"[\u4e00-\u9fff]")
@@ -2654,9 +2654,11 @@ async def e15_browser(ctx: Ctx):
         title = (await ctx.app.get(f"/api/tasks/{ctx.notes['e13_task']}"))["title"]
         card = page.locator(".card.task", has_text=title).first
         await card.scroll_into_view_if_needed(timeout=20000)
-        # Its number and title, then where it stands.
-        await expect(card.locator(".receipt.pr")).to_contain_text(
-            re.compile(r"cos-approve-test#1 · .+ · ✓ CI")
+        # Opened whole (a row by itself, QA round 10): the PR it was about is no deliverable of
+        # it, but what its CI came to is part of its result.
+        await card.locator(".head .title").click()
+        await expect(card).to_contain_text(
+            "but the checks on evan666-lgtm/cos-approve-test#1 pass now", timeout=20000
         )
         await expect(card.locator(".receipt.warn", has_text="✗ tests locally")).to_be_visible()
         await card.screenshot(path=SCRIPTS.parent / "browser-shots" / "live-e-ci-card.png")
@@ -2815,7 +2817,8 @@ async def g2_news_stays_in_sight(ctx: Ctx):
             card = page.locator("#needs .card.task").filter(
                 has=page.locator(".head .title", has_text=news["title"])
             )
-            await expect(card.locator(".news .chip")).to_have_text("Update", timeout=20000)
+            # A compact row (QA round 10): its status says it, its news is its reason.
+            await expect(card.locator(".head .meta")).to_contain_text("Update", timeout=20000)
             await card.screenshot(path=SCRIPTS.parent / "browser-shots" / "live-g-news.png")
             await card.get_by_role("button", name="Got it").click()
             await expect(card).to_have_count(0, timeout=10000)
@@ -2973,7 +2976,8 @@ async def g6_two_tasks_one_worker(ctx: Ctx):
         page.on("pageerror", lambda error: errors.append(str(error)))
         await page.goto(f"{ctx.app_base}/#token={ctx.app.launch_token}")
         worker_id = first["session_id"]
-        running = page.locator(f'#tasks-running .card.worker-box[data-session="{worker_id}"]')
+        # A row per task in every area (QA round 10): no worker boxes.
+        running = page.locator(f'#tasks-running .items > .card.task[data-session="{worker_id}"]')
         # Monitoring is a row per task (not a box per worker).
         queued = page.locator(f'#tasks-monitoring .card.task[data-session="{worker_id}"]')
         open_now = [t for t in (await state(ctx))["tasks"] if t["session_id"] == worker_id
@@ -2982,18 +2986,20 @@ async def g6_two_tasks_one_worker(ctx: Ctx):
         if len(open_now) >= 2:
             # A box per section: the task it is on under Running, the other under Monitoring,
             # up next.
-            await expect(running.locator(".card.task")).to_have_count(1, timeout=20000)
+            await expect(running).to_have_count(1, timeout=20000)
             await expect(queued).to_have_count(1, timeout=20000)
             # Still in the sleep it began before the second task came: on the first one.
             if "sleep" in ((await session(ctx, worker_id)).get("step_command") or ""):
-                await expect(running.locator(".card.task .head .title")).to_have_text(
+                await expect(running.locator(".head .title")).to_have_text(
                     re.compile("Twin Tasks", re.IGNORECASE)
                 )
+                # Its status says Up next; its reason, why (QA round 10: said once).
+                await expect(queued.locator(".head .meta")).to_contain_text("Up next")
                 await expect(queued).to_contain_text(
-                    re.compile(r"Up next: its worker is on “Twin Tasks", re.IGNORECASE)
+                    re.compile(r"its worker is on “Twin Tasks", re.IGNORECASE)
                 )
             await running.screenshot(path=SCRIPTS.parent / "browser-shots" / "live-g-group.png")
-            row = running.locator(".card.task").first
+            row = running.first
             await row.locator(".more-button").click()
             danger = row.locator(".menu button.danger")
             colors = await danger.evaluate(
@@ -3052,7 +3058,8 @@ async def h1_question_survives_cancel(ctx: Ctx):
 
 async def h2_ready_to_merge(ctx: Ctx):
     """A worker opens a PR for the owner; once GitHub would merge it, it comes as a card, and
-    Merge merges it on GitHub: its task is done."""
+    Merge merges it on GitHub. Merging is not accepting (QA round 10): its task waits for the
+    owner's Accept, then is finished with nothing left to monitor."""
     branch = f"cos-live-merge-{int(time.time())}"
     number = 0
     try:
@@ -3084,8 +3091,12 @@ async def h2_ready_to_merge(ctx: Ctx):
         log(f"H2: {merged['outcome']}")
         pull = json.loads(author_gh("api", f"repos/{APPROVE_REPO}/pulls/{number}"))
         assert pull["merged"], "merged on GitHub"
-        done = await task_status(ctx, task["id"], {"done"}, "its task done", 300)
-        log(f"H2: task {done['status']}")
+        await asyncio.sleep(20)  # Its PR read again as merged.
+        after = await ctx.app.get(f"/api/tasks/{task['id']}")
+        assert after["status"] == "review" and after["attention"] == "acceptance", after["status"]
+        done = await ctx.app.post(f"/api/tasks/{task['id']}/accept")
+        log(f"H2: task {done['status']}, monitoring {done.get('monitoring')}")
+        assert done["status"] == "done" and not done.get("monitoring"), done.get("monitoring")
         log("H2 passed")
     finally:
         if number:
@@ -3354,10 +3365,10 @@ async def j2_second_task_and_a_note(ctx: Ctx):
         errors: list[str] = []
         page.on("pageerror", lambda error: errors.append(str(error)))
         await page.goto(f"{ctx.app_base}/#token={ctx.app.launch_token}")
-        running = page.locator(f'#tasks-running .card.worker-box[data-session="{worker}"]')
+        running = page.locator(f'#tasks-running .items > .card.task[data-session="{worker}"]')
         waiting = page.locator(f'#tasks-monitoring .card.task[data-session="{worker}"]')
         if "sleep 100" in ((await session(ctx, worker)).get("step_command") or ""):
-            await expect(running.locator(".card.task .head .title")).to_have_text(
+            await expect(running.locator(".head .title")).to_have_text(
                 first["title"], timeout=20000
             )
             await expect(waiting).to_contain_text("Up next")
@@ -3372,7 +3383,7 @@ async def j2_second_task_and_a_note(ctx: Ctx):
         log(f"J2: after the note, turn {row['turn_task']}, step {row.get('step_command')!r}")
         if "sleep 75" in (row.get("step_command") or ""):
             assert row["turn_task"] == other["id"], (row["turn_task"], other["id"], first["id"])
-            await expect(running.locator(".card.task .head .title")).to_have_text(
+            await expect(running.locator(".head .title")).to_have_text(
                 other["title"], timeout=20000
             )
             stale = page.locator(
@@ -4610,6 +4621,41 @@ async def r5_an_away_send_with_a_link_in_it_is_sent(ctx: Ctx):
 # Round 9: what the ninth bug bash fixed, on real Copilot.
 
 
+async def t1_a_worker_that_left_a_server_running_hears_the_owner(ctx: Ctx):
+    """Bug E13: a worker started a dev server attached (not detached) and asked a question.
+    Copilot held its session's end of turn while the server ran: it showed "Thinking…" for ever,
+    and the owner's answer never reached it."""
+    port = 19077
+    since = now()
+    await say(ctx, "Start a worker titled 'Preview Server' in the textkit project, in a worktree. "
+              "It starts a preview server with its bash tool in async mode and NOT detached "
+              f"(exactly `python3 -m http.server {port}` in its folder), checks with curl that it "
+              "answers, and leaves it running. Then it asks me (a report with status question) "
+              "whether to add a README line about it. Nothing else until I answer.")  # fmt: skip
+    task = await titled(ctx, since, "preview")
+    await task_status(ctx, task["id"], {"waiting"}, "its question", 500)
+    worker = task["session_id"]
+
+    async def held():
+        row = await session(ctx, worker)
+        return row if row["status"] != "working" and not row["slot"] and row["background"] else None
+
+    # The case under test: the server it left running holds Copilot's end of its turn.
+    row = await wait_for("its turn to end, the server still running", held, 90, ctx.app)
+    serving = subprocess.run(["lsof", "-ti", f":{port}"], capture_output=True, text=True).stdout
+    log(f"T1: status {row['status']}, server pids {serving.split()}")
+    await ctx.app.post(f"/api/sessions/{worker}/messages", {
+        "text": "Yes: add the line 'Preview: python3 -m http.server' to README.md and commit it. "
+        "Then stop the server and report done."})  # fmt: skip
+    await task_status(ctx, task["id"], FINISHED, "the README line after my answer", 500)
+    said = [m["text"] for m in await messages(ctx, worker) if m["kind"] == "owner"]
+    assert any("README" in text for text in said), said
+    log("T1 passed")
+    for pid in subprocess.run(["lsof", "-ti", f":{port}"], capture_output=True,
+                              text=True).stdout.split():  # fmt: skip
+        subprocess.run(["kill", pid], check=False)
+
+
 async def s1_an_away_reply_without_a_code_answers_the_only_one(ctx: Ctx):
     """Round 9: "yes send that one" to a notification with one code was dropped (no code)."""
     await away_on(ctx)
@@ -4817,6 +4863,7 @@ SCENARIOS = {
         s2_an_away_reply_in_the_notifications_thread_is_read,
         s3_a_chinese_owner_is_told_away_in_chinese,
     ],
+    "T": [t1_a_worker_that_left_a_server_running_hears_the_owner],
 }  # fmt: skip
 
 

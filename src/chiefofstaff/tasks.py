@@ -62,6 +62,9 @@ class TaskBook:
     def __init__(self, store: Store, on_change: Callable[[dict], None] = lambda task: None):
         self.store = store
         self.on_change = on_change  # Called with every created or changed task.
+        # Whether an accepted task still has something followed up for it (a PR waiting for
+        # its review, a run under way): set by TaskActions, see its `monitoring`.
+        self.monitored: Callable[[dict], bool] = lambda task: False
 
     # Reading
 
@@ -90,17 +93,36 @@ class TaskBook:
         )
 
     def listed(self, *, include_ended_since: str = "") -> list[dict]:
-        """Open and in-review tasks, those that ended since the given time, and finished ones
-        with news the owner has not seen (not the placeholder task of an adopted session, until
-        it is continued)."""
-        return self.store.all(
+        """Open and in-review tasks (a result to accept, however old), those that ended since
+        the given time, finished ones with news the owner has not seen, and accepted ones
+        still monitored (however long ago they were accepted: what is followed up for them
+        does not go quiet out of sight). Not the placeholder task of an adopted session, until
+        it is continued."""
+        since = include_ended_since or now()
+        found = self.store.all(
             f"""SELECT * FROM tasks WHERE (status IN ('queued','running','waiting','review')
             OR (ended_at IS NOT NULL AND ended_at>=?)
             OR 'news:' || id IN (SELECT key FROM kv WHERE key LIKE 'news:%'))
             AND NOT (status='done' AND result=?) AND session_id NOT IN ({HELPERS})
             ORDER BY created_at""",  # noqa: S608  (HELPERS: constant SQL)
-            (include_ended_since or now(), ADOPTED),
+            (since, ADOPTED),
         )
+        # Only a worker still open follows anything up: what it follows, the runs it said go
+        # on. So the list stays as long as the open workers' work, not every task ever.
+        older = self.store.all(
+            f"""SELECT * FROM tasks WHERE status='done' AND (ended_at IS NULL OR ended_at<?)
+            AND result!=? AND session_id NOT IN ({HELPERS})
+            AND session_id IN (SELECT id FROM sessions WHERE closed_at IS NULL)
+            AND (session_id IN (SELECT session_id FROM subscriptions)
+                OR 'artifacts:' || id IN (SELECT key FROM kv WHERE key LIKE 'artifacts:%'))
+            ORDER BY created_at""",  # noqa: S608  (HELPERS: constant SQL)
+            (since, ADOPTED),
+        )
+        known = {task["id"] for task in found}
+        kept = [task for task in older if task["id"] not in known and self.monitored(task)]
+        if not kept:
+            return found
+        return sorted([*found, *kept], key=lambda task: task["created_at"])
 
     def run(self, session_id: str) -> dict | None:
         """The run in progress for a session."""

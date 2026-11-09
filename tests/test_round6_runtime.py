@@ -15,7 +15,13 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from chiefofstaff import runtime as runtime_module
-from chiefofstaff.backend import CopilotBackend, descendants, process_table, running
+from chiefofstaff.backend import (
+    CopilotBackend,
+    copilot_records,
+    descendants,
+    process_table,
+    running,
+)
 from chiefofstaff.models import AS_SAVED, DraftDecision, Settings
 from chiefofstaff.roles import WORKER
 from chiefofstaff.runtime import Runtime
@@ -245,7 +251,8 @@ async def test_a_cli_an_earlier_start_left_running_is_stopped_when_connecting(tm
     tree = descendants(process_table(), orphan)
     try:
         harness = Harness(tmp_path / "data")
-        harness.store.set("copilot_pids", json.dumps({orphan: process_table()[orphan][1]}))
+        records = copilot_records({orphan: process_table()[orphan][1]}, tmp_path / "data")
+        harness.store.set("copilot_pids", json.dumps(records))
         runtime = await harness.connect()
         assert runtime.ready()
         assert not any(running(pid) for pid in tree)

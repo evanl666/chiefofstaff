@@ -282,6 +282,36 @@ def test_the_owner_reviews_and_follows_up_on_tasks(app_client):
     assert refused.status_code == 400
 
 
+def test_the_owner_requests_changes_and_sees_where_a_message_stands(app_client):
+    sign_in(app_client)
+    runtime = app_client.app.state.runtime
+    router = app_client.get("/api/state").json()["router_id"]
+    result = app_client.portal.call(
+        lambda: call_tool(runtime, "spawn_worker", router, title="Docs", instructions="Write docs")
+    )
+    spawned = json.loads(result.text_result_for_llm)
+    task_id, worker = spawned["task_id"], spawned["session_id"]
+    app_client.portal.call(
+        lambda: call_tool(runtime, "report", worker, status="done", summary="Docs written")
+    )
+    empty = app_client.post(f"/api/tasks/{task_id}/request-changes", json={"text": " "},
+                            headers=ORIGIN)  # fmt: skip
+    assert empty.status_code == 422, "what to change is said"
+    changed = app_client.post(
+        f"/api/tasks/{task_id}/request-changes", json={"text": "Shorter, please"}, headers=ORIGIN
+    )
+    assert changed.status_code == 200 and changed.json()["status"] == "running"
+    assert "Shorter, please" in app_client.fake.sessions[worker].sent[-1]
+    shown = app_client.get(f"/api/sessions/{worker}/messages").json()
+    [asked] = [m for m in shown if m["kind"] == "owner"]
+    assert asked["delivery"] == "", "a backend that shows no echo: nothing to claim"
+    assert "prompt" not in asked["meta"]
+
+    refused = app_client.post(f"/api/sessions/{worker}/follow-retry",
+                              json={"key": "github:acme/app#7"}, headers=ORIGIN)  # fmt: skip
+    assert refused.status_code == 400, "a PR it does not follow"
+
+
 async def test_closing_the_bus_ends_every_event_stream():
     bus = Bus()
     bus.bind(asyncio.get_running_loop())

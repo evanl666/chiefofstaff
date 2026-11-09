@@ -546,26 +546,29 @@ export function renderConnections() {
   $("#watch-activity").hidden = !connector.session_id;
   const away = connector.away || {};
   const tried = away.last || {};
-  $("#away-summary").textContent = settings.away_notify ? `On${away.where ? ` · ${away.where}` : ""}` : "Off";
-  $("#away-state").textContent = tried.at ? (tried.ok ? `Reached you${tried.where ? ` via ${tried.where}` : ""} ${since(tried.at)}` : `Could not reach you ${since(tried.at)}: ${tried.error || "unknown error"}`) : "";
-  $("#away-state").classList.toggle("error", Boolean(tried.at && !tried.ok));
-  // What this way can do, as tried: sending, reading your replies, new requests.
+  // What this way can do, as tried (the test, and notifications and reads as they happen).
   const can = away.can || {};
-  const rows = !settings.away_notify || !tried.at
+  const coverage = can.coverage || {};
+  $("#away-summary").textContent = settings.away_notify ? ["On", away.where, can.send_only ? "Send only" : ""].filter(Boolean).join(" · ") : "Off";
+  const reached = tried.at ? (tried.ok ? `Reached you${tried.where ? ` via ${tried.where}` : ""} ${since(tried.at)}` : `Could not reach you ${since(tried.at)}: ${tried.error || "unknown error"}`) : "";
+  const limited = settings.away_notify && coverage.limited ? `Coverage limited: ${coverage.detail}` : "";
+  $("#away-state").textContent = [reached, limited].filter(Boolean).join(" · ");
+  $("#away-state").classList.toggle("error", Boolean((tried.at && !tried.ok) || limited));
+  const STATES = { yes: "Yes", no: "No", untested: "Not tested" };
+  const row = (label, entry = {}) => [
+    entry.state || "untested",
+    `${label}: ${STATES[entry.state] || STATES.untested}${entry.detail ? ` (${entry.detail})` : ""}${entry.at ? `, tested ${since(entry.at)}` : ""}`,
+  ];
+  const rows = !settings.away_notify
     ? []
     : [
-        [can.sends, can.sends ? `Sends: yes, last ${since(can.sent_at)}` : "Sends: not working now"],
-        [
-          can.reads_replies,
-          !can.reads_replies
-            ? "Reads your replies: no — answer in Chief of Staff"
-            : can.replies_verified_at
-              ? `Reads your replies: yes (a reply came back ${since(can.replies_verified_at)})`
-              : "Reads your replies: said so, not tried yet — Send a test and answer it",
-        ],
-        [false, "New requests by reply: no — a reply answers what was sent, by its code"],
+        ...(can.send_only ? [["no", "Send only: your replies there are not read. Answer in Chief of Staff."]] : []),
+        row("Send", can.send),
+        row("Delivery", can.delivery),
+        row("Read replies", can.replies),
+        row("New commands", can.commands || { state: "no" }),
       ];
-  $("#away-can").replaceChildren(...rows.map(([ok, text]) => el("li", { class: ok ? "ok" : "no", text })));
+  $("#away-can").replaceChildren(...rows.map(([status, text]) => el("li", { class: status === "yes" ? "ok" : status, text })));
   $("#away-can").hidden = !rows.length;
   $("#slack-activity").hidden = !sessions().some((session) => session.role === "slack");
   $("#watchdog-activity").hidden = !sessions().some((session) => session.role === "watchdog");

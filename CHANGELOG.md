@@ -1,5 +1,61 @@
 # Changelog
 
+## 0.1.35 (2026-11-09)
+
+A tenth round from the owner's own QA: no message is lost, everything that needs you is under
+*Needs you*, every task stands where it really is, and Artifacts lists what was delivered.
+
+- **Messages always get through** (E13, E14):
+  - A worker that started a dev server (or a watcher) attached and then asked a question showed
+    "Thinking…" for ever, and what you, the Router and the Watchdog sent it was lost: Copilot
+    holds a session's end of turn, and every message it queues, until such a command ends.
+    Chief of Staff now takes the turn's end when its last step ends with a command still
+    running (*Waiting for background process*), sends what comes next at once, and takes back
+    and resends what Copilot had queued. A sub-agent's last step is no longer taken for it.
+    While it waits for that command it is neither reconnected (a settings change waits) nor
+    asked for a report: the command's end wakes it to go on.
+  - Every message to a session shows where it stands: *Waiting to be sent*, *Sent*,
+    *Received*, *Handled*. One its conversation never shows (and Copilot does not hold) is sent
+    again after 20 seconds, with its images, up to twice; then it says *Not delivered* and
+    you are told. *Go on* and replies show the same on the task's row.
+  - Stop, Cancel and Close stop a command it left running, also once its turn is over. A
+    stopped or cancelled worker that starts again on its own when such a command ends is
+    stopped again; what a cancelled task's aborted turn never saw is not sent again.
+  - Workers are told to start servers detached and stop them when done.
+- **Every result waits for your Accept** (E28): a research report, an analysis or a PR review
+  too, under *Needs you* as *Awaiting acceptance*, with *Accept*, *View report*, *Follow up* and
+  the new *Request changes* (its worker is told you did not accept it, and what to change).
+  Nothing accepts it for you: not time, not its worker going on to other work, not its PR
+  being merged (merging and accepting are separate). Its PR's changes requested or failing CI,
+  or news on it, are why it needs a look, on the same row. Reports an earlier version counted
+  as finished once read are accepted once on upgrade (those you read, or older than Home
+  showed). A worker's question keeps why it asks, its choices (buttons) and what it does next.
+- **Home** (E16, E19, E20, E27): five areas, *Needs you*, *Running*, *Monitoring*, *Recently
+  finished* and *Artifacts* (last); one compact row per task everywhere (its worker a small
+  link, no worker boxes, no bare *Open*); 12px apart, each folds, the long lists scroll on their
+  own, nothing runs past a narrow panel. Its tooltips are its own and go as soon as the list
+  changes; under the mouse rows keep their places (what is new comes in at the end).
+- **Monitoring** (E12, E16, E18): a task you accepted whose PR still waits for review, CI or the
+  merge stays here, however long (*Waiting for approval · No updates for 26h*), with when it was
+  checked, when next and what wakes it: no more moving to *Recently finished* after a quiet
+  day. A PR you reviewed for someone else is finished once your review is in (news there comes
+  back as an *Update*). A run counts only while its worker says it is still going.
+- **Artifacts** (E17, E25, E26): only PRs, documents and runs, by their real names, each PR with
+  what its task did (*Created*, *Modified*, *Reviewed*), decided from evidence, never from a
+  mention; a document site's home page, files, mockups, screenshots, CSVs and logs stay on the
+  task's card. Task cards and Artifacts use the same list.
+- **GitHub** (E11, E23, E24): a PR that cannot be read says why (no access, not found, rate
+  limit, GitHub not answering), is read again with growing waits (a rate limit: when it
+  resets), offers *Retry*, and clears at the first good read. *Stop following* affects that
+  task only; once nobody follows a PR, what was kept for reading it is cleared; a PR that does
+  not exist, or that a task only mentions, is not read again and again.
+- **A copied data folder cannot stop another instance's processes** (E22): Copilot processes
+  are recorded with their start time, parents, instance and data folder, and stopped only by
+  the instance that owns them, once the one that started them is gone.
+- **Away**: Settings shows what the way you gave can do, as tried: *Send*, *Delivery*, *Read
+  replies*, *New commands*. *Send only* sends no codes and says to answer in Chief of Staff;
+  *Coverage limited* says what could not be read, and nothing unread is taken for read.
+
 ## 0.1.34 (2026-11-08)
 
 A ninth live bug bash on real Copilot (regressions of the last release, a busy day of an owner

@@ -84,8 +84,8 @@ def test_github_not_answering_is_told_apart_from_no_access():
 
     assert failure_kind("HTTP 502: Bad Gateway") == "transient"
     assert failure_kind("GitHub request timed out.") == "transient"
-    assert failure_kind("gh: Resource not accessible (HTTP 403)") == "access"
-    assert failure_kind("API rate limit exceeded (HTTP 403)") == "transient"
+    assert failure_kind("gh: Resource not accessible (HTTP 403)") == "permission"
+    assert failure_kind("API rate limit exceeded (HTTP 403)") == "rate_limited"
 
 
 def test_a_cited_test_command_is_shown_without_its_redirections():

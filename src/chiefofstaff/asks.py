@@ -15,7 +15,7 @@ import json
 import logging
 import os
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -49,6 +49,10 @@ DECLINED = {
 }
 # After the owner says "Not now" to a sign-in, other sessions do not ask again for a while.
 SIGNIN_QUIET = 600
+# A worker's question to the owner, besides what it asks: why it needs them, the choices it
+# gives (none: their own words), what it does once answered, and whether it is blocked. Those
+# kept before these were asked for read as empty.
+QUESTION_FIELDS: dict[str, Any] = {"kind": "question", "why": "", "options": [], "next": ""}
 
 
 class RecordSetup(BaseModel):
@@ -161,10 +165,21 @@ class Asks:
             self.store.delete(f"ownerq:{key}")
 
     def record_question(
-        self, session_id: str, text: str, task_id: str = "", about_draft: bool = False
+        self,
+        session_id: str,
+        text: str,
+        task_id: str = "",
+        about_draft: bool = False,
+        *,
+        why: str = "",
+        options: Sequence[str] = (),
+        next_step: str = "",
+        kind: str = "question",
     ):
         """`about_draft`: its session says it only asks the owner to decide its draft (see
-        Drafts.asked_with)."""
+        Drafts.asked_with). `why` the owner is needed, the `options` it gives (none: their own
+        words), what it does `next_step` once answered, and its `kind` ("question", or
+        "blocked": it cannot go on without them): kept with it until it is answered."""
         text = text.strip()[:6000]
         key = f"ownerq:{session_id}:{task_id}"
         if not task_id:
@@ -175,7 +190,17 @@ class Asks:
                 if not question.get("task_id") and question.get("text") == text
             ]
             key = f"ownerq:{same[-1]}" if same else f"ownerq:{session_id}:-:{uuid4().hex[:8]}"
-        question: dict[str, str | bool] = {"text": text, "task_id": task_id, "at": now()}
+        question: dict[str, Any] = {
+            "text": text,
+            "task_id": task_id,
+            "at": now(),
+            "kind": kind,
+            "why": " ".join(why.split())[:1000],
+            "options": [clean for option in options if (clean := " ".join(option.split())[:200])][
+                :8
+            ],
+            "next": " ".join(next_step.split())[:1000],
+        }
         if about_draft:
             question["about_draft"] = True
         self.store.set(key, json.dumps(question))
@@ -186,7 +211,7 @@ class Asks:
         when it has one only (of several, which one is meant is not known); by a worker's id,
         its only one (or its newest)."""
         if found := self.store.get(f"ownerq:{question_id}"):
-            return {**json.loads(found), "id": question_id}
+            return {**QUESTION_FIELDS, **json.loads(found), "id": question_id}
         session_id, _, task = question_id.partition(":")
         mine = self.session_questions(session_id)
         if task == "-":
@@ -204,7 +229,7 @@ class Asks:
                 continue  # Another session whose id starts the same.
             question = json.loads(self.store.get(key) or "null")
             if question:
-                found.append({**question, "id": key.removeprefix("ownerq:")})
+                found.append({**QUESTION_FIELDS, **question, "id": key.removeprefix("ownerq:")})
         return sorted(found, key=lambda question: question["at"])
 
     def answered(self, session_id: str, task_id: str | None = None, by: str = "owner"):
@@ -352,6 +377,7 @@ class Asks:
                     "task_id": task["id"] if task else "",
                     "task_title": task["title"] if task else "",
                     "task_status": task["status"] if task else "",
+                    **QUESTION_FIELDS,
                     **question,
                     "id": question_id,
                 }

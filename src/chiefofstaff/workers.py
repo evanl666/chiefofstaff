@@ -611,15 +611,14 @@ class Workers:
 
     def finished(self, session_id: str) -> bool:
         """Nothing of it is open: no task at work, waiting or queued, no result the owner has
-        not reviewed yet (read, or accepted when it waits for that), no card for the owner, no
-        question of it unanswered. Only then may it close by itself (after a merge, say)."""
+        not accepted yet (every one waits for that: having read it is not accepting it), none
+        still monitored (a run it said goes on), no card for the owner, no question of it
+        unanswered. Only then may it close by itself (after a merge, say)."""
+        actions = self.runtime.task_actions
         for task in self.tasks.for_session(session_id):
-            if task["status"] in OPEN:
+            if task["status"] in OPEN or actions.needs_acceptance(task):
                 return False
-            if task["status"] == "review" and (
-                not self.store.get(f"read:{task['id']}")
-                or self.runtime.task_actions.needs_acceptance(task)
-            ):
+            if task["status"] == "done" and actions.monitoring(task):
                 return False
         if any(draft["session_id"] == session_id for draft in self.store.drafts()):
             return False
@@ -635,7 +634,8 @@ class Workers:
             return
         async with self.states[session_id].lifecycle:
             if session := self.states.take_handle(session_id):
-                if row["status"] == "working":
+                # At work, or its turn over and a command it left running holding the session.
+                if row["status"] == "working" or self.states[session_id].held:
                     with suppress(Exception):
                         await session.abort()
                     await stop_background(session)
@@ -900,7 +900,8 @@ class Workers:
         self.states[session_id].after_refresh = ""  # Not "go on" once it is stopped.
         if row["role"] == WORKER:
             self.states[session_id].after_abort = True
-        if row["status"] in {"working", "queued", "starting"}:
+        if row["status"] in {"working", "queued", "starting"} or self.states[session_id].held:
+            # (Held: its turn over, a command it left running goes on: that is what stops.)
             # Recorded before the abort: the turn's end (idle) can arrive before the abort
             # returns, and must find a deliberate stop, not a worker that ended without a report
             # (nor a silent stall for the Watchdog).
@@ -1324,6 +1325,7 @@ class Workers:
             if (
                 not self.states.is_live(row["id"])
                 or state.busy
+                or state.held  # A command it left running would end with none to wake.
                 or row["status"] in {"working", "starting", "queued"}
                 or self.runtime.special(row)
                 or self.runtime.copilot_id(row["id"]) in self.runtime.elsewhere
@@ -1343,7 +1345,9 @@ class Workers:
     async def tidy(self, moment: float | None = None) -> list[str]:
         """Close finished workers that follow nothing and have been quiet for a day; not one
         with something under the owner's Needs you (a result to review, news, a question, a
-        failed task, a card): it stays in the sidebar and the @ list until that is settled."""
+        failed task, a card): it stays in the sidebar and the @ list until that is settled.
+        Nor one still monitoring for an accepted task (a run it said goes on): being quiet
+        does not end that."""
         from .digest import needs
 
         moment = time.time() if moment is None else moment
@@ -1357,7 +1361,7 @@ class Workers:
             if row["status"] in {"done", "failed"} and quiet and not self.store.follows(row["id"]):
                 if waiting is None:
                     waiting = needs(self.runtime).sessions()
-                if row["id"] in waiting:
+                if row["id"] in waiting or not self.finished(row["id"]):
                     continue
                 await self.close(row["id"])
                 closed.append(row["id"])

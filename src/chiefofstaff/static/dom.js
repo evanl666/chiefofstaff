@@ -159,6 +159,11 @@ export function hideTip() {
   if (box) box.hidden = true;
 }
 function showTip(node) {
+  // Gone or moved from under the mouse while it waited: nothing to say about it.
+  if (!node.isConnected || !node.matches(":hover")) {
+    hideTip();
+    return;
+  }
   const box = tipBox();
   box.textContent = node.dataset.tip;
   box.hidden = false;
@@ -176,16 +181,38 @@ export function checkTip() {
   if (!at || Math.abs(at.top - tip.at.top) > 1 || Math.abs(at.left - tip.at.left) > 1) hideTip();
   else if (tipBox().textContent !== tip.node.dataset.tip) showTip(tip.node);
 }
-document.addEventListener("pointerover", (event) => {
+function armTip(event) {
   const node = event.target.closest?.("[data-tip]");
   if (node && node === tip?.node) return;
   hideTip();
   if (node?.dataset.tip) tip = { node, timer: setTimeout(() => showTip(node), 350) };
-});
+}
+document.addEventListener("pointerover", armTip);
+// Gone because the page changed under it: the next move of the mouse shows what is there now.
+document.addEventListener("pointermove", (event) => !tip && armTip(event));
 document.addEventListener("pointerout", (event) => {
   if (tip && !tip.node.contains(event.relatedTarget)) hideTip();
 });
 for (const type of ["pointerdown", "keydown", "scroll", "wheel"]) document.addEventListener(type, hideTip, true);
+// Home's panel: its tooltips are all ours (a native one stays where it was shown, over whatever
+// moved there since), and any change in it (a redraw, a row patched, one gone) takes the one
+// shown away, so it never points at another item than its own.
+function ownTips(root) {
+  for (const node of [root, ...root.querySelectorAll("[title]")]) {
+    if (!node.hasAttribute?.("title")) continue;
+    if (!node.dataset.tip) node.dataset.tip = node.getAttribute("title");
+    node.removeAttribute("title");
+  }
+}
+export function watchPanel(panel) {
+  ownTips(panel);
+  new window.MutationObserver((records) => {
+    // One shown goes (what it points at may have moved or changed); one about to show checks
+    // its element is still there, under the mouse, when it does.
+    if (tip?.at || (tip && !tip.node.isConnected)) hideTip();
+    for (const record of records) for (const node of record.addedNodes) if (node.nodeType === 1) ownTips(node);
+  }).observe(panel, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["class", "hidden", "open", "style"] });
+}
 // Long text shows its start, with Show more. `wrapper` gets the content and the toggle.
 export function foldable(wrapper, content, text, { chars = 700, lines = 10 } = {}) {
   wrapper.append(content);

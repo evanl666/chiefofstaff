@@ -300,15 +300,19 @@ async def test_a_task_card_shows_its_prs_as_they_are_now(harness):
         rollup = [
             {"name": "validate", "conclusion": conclusion, "completedAt": "2026-11-05T09:00Z"}
         ]
-        return json.dumps({"url": url, "state": "OPEN", "statusCheckRollup": rollup})
+        # Opened by the owner's account since the task began: its own PR, refreshed (one it
+        # only mentions is not).
+        mine = {"author": {"login": "me"}, "createdAt": "2999-01-01T00:00:00Z"}
+        return json.dumps({"url": url, "state": "OPEN", "statusCheckRollup": rollup, **mine})
 
+    harness.own_pull("acme/app", 7)
     harness.gh_replies[f"pr view {url}"] = pr("FAILURE")
     await call_tool(runtime, "report", worker, status="done", summary=f"Opened {url}")
     await settle(runtime)
     task = runtime.tasks.current(worker)
     found = runtime.task_actions.receipts(task)
     assert found["prs"][0]["checks"] == "failing" and found["prs"][0]["failing"] == ["validate"]
-    assert "Checks are failing on acme/app#7: validate." in found["flags"]
+    assert found["prs"][0]["role"] == "created", "its failing checks are on its own chip"
 
     harness.gh_replies[f"pr view {url}"] = pr("SUCCESS")
     await runtime.task_actions.refresh_open_prs(every=3600)

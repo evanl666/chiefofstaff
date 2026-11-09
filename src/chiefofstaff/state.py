@@ -68,6 +68,20 @@ class SessionState:
     # its digest and the sent mark before it. Copilot can take a message and never start (it
     # gave up on the session's queue): see Delivery.check_started.
     awaiting: tuple[str, int] | None = None
+    # Its turn is over, but a command it left running in the background (an attached shell:
+    # a dev server) holds Copilot's session.idle until it ends, and with it every queued
+    # message: messages go in at once ("immediate"), which starts a turn (see Events.held_idle).
+    held: bool = False
+    # Counts its turns' starts and ends: a check scheduled at a turn's end sees whether another
+    # began or ended since.
+    turn_mark: int = 0
+    # Copilot told it something ended (a command it left running, a sub-agent) since its last
+    # turn and no message came: a turn starting now is one it started on its own.
+    woken: bool = False
+    # What was sent to it that its conversation has not shown yet (backends that echo): digest
+    # -> the first and last message ids it carried, the text and attachments as sent and how
+    # many times it was sent again. See Delivery.check_echo.
+    echo_wait: dict[str, tuple[int, int, str, list, int]] = field(default_factory=dict)
     # It was stopped and its turn aborted: the next message steers (until a turn ends or
     # starts, Copilot may still hold the session busy). Its first steps after the stop are not
     # work on the stopped task until a new message started a turn.
@@ -147,4 +161,6 @@ class SessionStates:
             state.stale = False
             state.after_refresh = ""
             state.awaiting = None
+            state.held = False
+            state.echo_wait.clear()
             state.steps.clear()
