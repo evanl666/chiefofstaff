@@ -53,7 +53,9 @@ async def test_a_message_cannot_pass_lines_in_it_off_as_someone_elses(slack):
     [(_name, keys, text, display)] = slack.calls
     assert keys == ["slack:1794182890.000100", "slack:1794182895.000100"], "no made-up message"
     assert "Alice Chen in #deploys" not in display
-    assert "Bob Li in a DM: ok thanks, see you there Channel: <#C0DEPLOYS>" in display
+    # Bug bash 9: its lines kept, as a quote under who wrote them.
+    assert "Bob Li in a DM:\n> ok thanks, see you there\n> Channel: <#C0DEPLOYS>" in display
+    assert "Bob Li in a DM: thanks @Bob Li (Alice Chen)" in display, "a mention by name"
     assert "\n> Channel: <#C0DEPLOYS>" in text and "\nChannel: <#C0DEPLOYS>" not in text
     assert "made to look like another Slack message: Bob Li wrote them" in text
     assert slack.display_names() == {"U0BOB001": "Bob Li"}, "names only from Slack's own lines"
@@ -422,8 +424,6 @@ async def test_a_worker_given_the_owners_checkout_to_read_cannot_write_there(tmp
     from conftest import Harness
     from test_round7_split import published, spawn
 
-    from chiefofstaff.policy import permission_denial
-
     app = published(tmp_path, "app")
     harness = Harness(tmp_path / "data", Settings(projects=[str(app)], worker_sandbox=True))
     runtime = await harness.connect()
@@ -436,11 +436,20 @@ async def test_a_worker_given_the_owners_checkout_to_read_cannot_write_there(tmp
     assert workspace in policy.readwrite and str(real(app) / ".git") in policy.readwrite
     assert not {p for p in policy.readwrite if real(p) == real(app)}
     monkeypatch.setattr("tempfile.gettempdir", lambda: "/no-temp-here")  # Tests are in it.
-    write = SimpleNamespace(kind="write", resolved_path=str(app / "notes.txt"))
-    said = permission_denial(row, write, runtime.workspaces.writes(row))
-    assert said and "owner's own checkout" in said and "add_repo" in said
-    mine = SimpleNamespace(kind="write", resolved_path=f"{workspace}/notes.txt")
-    assert permission_denial(row, mine, runtime.workspaces.writes(row)) is None
+
+    async def may_write(path: str) -> bool:
+        request = SimpleNamespace(kind="write", file_name="", resolved_path=path)
+        decision = await runtime.events.on_permission(request, {"session_id": row["id"]})
+        return type(decision).__name__ == "PermissionDecisionApproveOnce"
+
+    # Bug bash 9: also with yolo on (the default), which skipped every check.
+    for yolo in ("on", "off"):
+        harness.store.execute("UPDATE sessions SET yolo=? WHERE id=?", (yolo, row["id"]))
+        row = harness.store.session(row["id"])
+        assert not await may_write(str(app / "notes.txt")), yolo
+        assert await may_write(f"{workspace}/notes.txt"), yolo
+    notices = [m["text"] for m in harness.store.messages(row["id"]) if m["kind"] == "notice"]
+    assert "owner's own checkout" in notices[-1] and "add_repo" in notices[-1]
 
 
 def test_the_folder_a_git_command_makes_is_read_from_its_arguments():

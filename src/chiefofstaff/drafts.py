@@ -17,6 +17,7 @@ from . import threads
 from .asks import REQUEST_KINDS
 from .envelope import short, wrap
 from .models import DraftDecision
+from .peers import clip
 from .roles import ROUTER, SLACK, WORKER
 from .sources.github import REVIEW_EVENTS, merge_refusal
 from .sources.slack import describe, message_keys
@@ -265,18 +266,22 @@ class Drafts:
                 self.bus.publish("draft", draft)
                 await self.tell_drafter(
                     draft,
-                    f"Sending draft {draft_id} failed: {error[:400]}. It waits on its card for "
-                    "the owner to send again, have redone or drop; do not draft it again unless "
-                    "asked.",
+                    f"Sending draft {draft_id} failed: {error[:400].rstrip('.')}. It waits on its "
+                    "card for the owner to send again, have redone or drop; do not draft it again "
+                    "unless asked.",
                     display=f"Sending failed: {self.shown(draft)}. {error[:400]}",
                 )
-            raise RuntimeError(f"Sending failed: {error}. Check before retrying.") from exc
+            stale = STALE_DRAFT.search(error)
+            # Failed for good when stale: nothing to check before sending it again.
+            then = "" if stale else " Check before retrying."
+            raise RuntimeError(f"Sending failed: {error.rstrip('.')}.{then}") from exc
         draft = self.store.update_draft(
             draft_id, status="sent", outcome=(outcome or "")[:1000], resolved_at=now()
         )
         self.bus.publish("draft", draft)
         self.after_sent(draft, outcome or "")
         await self.settle_others(draft, sent=True)
+        await self.settle_reviews(draft)
         self.settle_question(draft)
         if comments_edited and (task := self.task_of(draft)):
             # Its line comments or verdict changed: not accepted as it was.
@@ -448,20 +453,28 @@ class Drafts:
     def kept_beside(self, draft: dict, older: dict) -> bool:
         """An older reply a newer one does not replace: one the owner edited (their words stay
         sendable), or one for another task (it answers another question)."""
+        return bool(self.owner_edited(older)) or self.other_task(draft, older)
+
+    def other_task(self, draft: dict, older: dict) -> bool:
         mine, theirs = self.task_of(draft), self.task_of(older)
-        return bool(self.owner_edited(older)) or bool(
-            mine and theirs and mine["id"] != theirs["id"]
-        )
+        return bool(mine and theirs and mine["id"] != theirs["id"])
+
+    @staticmethod
+    def answers_other(draft: dict, older: dict) -> bool:
+        """Whether two replies in one conversation answer different messages there: each was
+        drafted when another message was its newest (Bob's question, then his next one)."""
+        mine, theirs = draft["target"].get("latest_ts"), older["target"].get("latest_ts")
+        return bool(mine and theirs and mine != theirs)
 
     async def supersede(self, draft: dict) -> list[str]:
         """A newer Slack reply its session drafted for the same task and conversation replaces
-        the older ones still waiting: the owner gets one card, the latest. In a DM, a reply in
-        the DM and one in a thread of it are the same conversation; two threads are not. Not one
-        for another of its tasks, nor one the owner edited: both cards stay (beside_note tells
-        the session). A worker's reply settles the Slack session's waiting there
-        (settle_others); the Slack session's is refused where a worker follows the conversation
-        (took it over)."""
-        replaced, edits = [], []
+        the older ones still waiting that answer the same message: the owner gets one card, the
+        latest. In a DM, a reply in the DM and one in a thread of it are the same conversation;
+        two threads are not. Not one that answers another message there, one for another of its
+        tasks, nor one the owner edited: both cards stay (beside_note tells the session). A
+        worker's reply settles the Slack session's waiting there (settle_others); the Slack
+        session's is refused where a worker follows the conversation (took it over)."""
+        replaced, edits, others = [], [], []
         async with self.draft_lock:
             if owner := self.taken_over(draft):
                 worker, task = owner
@@ -485,25 +498,37 @@ class Drafts:
                     if edited := self.owner_edited(older):
                         edits.append(edited)
                     continue
+                if self.answers_other(draft, older):
+                    # It answers another message there (Bob's first question, not his next):
+                    # both wait, and the new card says so.
+                    others.append(older)
+                    continue
+                said = clip(" ".join(str(older["target"].get("latest") or "").split()), 200)
+                why = f": it answers the same message (\u201c{said}\u201d)" if said else ""
                 older = self.store.update_draft(
                     older["id"],
                     status="rejected",
-                    outcome="Replaced by a newer draft.",
+                    outcome=f"Replaced by a newer draft{why}.",
                     resolved_at=now(),
                 )
                 self.store.set(f"replacedby:{older['id']}", draft["id"])
                 self.bus.publish("draft", older)
                 replaced.append(older["id"])
+            notes = []
             if edits:
                 said = edits[-1] if len(edits[-1]) <= 300 else edits[-1][:299] + "\u2026"
-                # In place: the caller publishes this card.
-                draft.update(
-                    self.store.update_draft(
-                        draft["id"],
-                        outcome="Your edited reply there still waits on its own card: "
-                        f"\u201c{said}\u201d",
-                    )
+                notes.append(
+                    f"Your edited reply there still waits on its own card: \u201c{said}\u201d"
                 )
+            if others:
+                said = clip(" ".join(str(others[-1]["target"].get("latest") or "").split()), 200)
+                notes.append(
+                    "Another reply there waits too, on its own card: it answers an earlier "
+                    "message" + (f" (\u201c{said}\u201d)." if said else ".")
+                )
+            if notes:
+                # In place: the caller publishes this card.
+                draft.update(self.store.update_draft(draft["id"], outcome=" ".join(notes)))
             await self.settle_others(draft, sent=False)
         self.link_reviews()
         draft.update(self.store.draft(draft["id"]))  # In place: the caller publishes this card.
@@ -519,7 +544,7 @@ class Drafts:
                     f" Your draft {older['id']} there, which the owner edited, still waits on "
                     "its card with their text: yours waits beside it, and the owner chooses."
                 )
-            elif task := self.task_of(older):
+            elif self.other_task(draft, older) and (task := self.task_of(older)):
                 notes.append(
                     f" Your draft {older['id']} there, for task {task['id']} "
                     f"\u201c{task['title']}\u201d, still waits too: both cards stay, and the "
@@ -527,7 +552,81 @@ class Drafts:
                     f"one also says what {older['id']} says, then withdraw_draft {older['id']} "
                     '(reason: "merged into the newer reply").'
                 )
+            elif self.answers_other(draft, older):
+                said = clip(" ".join(str(older["target"].get("latest") or "").split()), 160)
+                notes.append(
+                    f" Your draft {older['id']} there answers an earlier message"
+                    + (f" (\u201c{said}\u201d)" if said else "")
+                    + " and still waits too: both cards stay, and the owner may send both. If "
+                    f"this one answers that message too, withdraw_draft {older['id']} (reason: "
+                    '"answered in the newer reply").'
+                )
         return "".join(notes)
+
+    @staticmethod
+    def same_review(draft: dict, other: dict) -> bool:
+        """Two reviews (not replies to a comment) one session drafted of the same PR."""
+
+        def review(found: dict) -> bool:
+            target = found["target"] or {}
+            reply = target.get("in_reply_to") or target.get("reply_to_comment")
+            return found["kind"] == "github" and not reply
+
+        mine, theirs = draft["target"] or {}, other["target"] or {}
+        return (
+            other["id"] != draft["id"]
+            and review(draft)
+            and review(other)
+            and other["session_id"] == draft["session_id"]
+            and str(mine.get("repo", "")).lower() == str(theirs.get("repo", "")).lower()
+            and mine.get("number") == theirs.get("number")
+        )
+
+    async def supersede_review(self, draft: dict) -> list[str]:
+        """A newer review its session drafted of a PR replaces its older ones still waiting
+        there (one review per PR: never posted twice). Not one the owner edited: their words
+        leave only by their hand."""
+        replaced = []
+        async with self.draft_lock:
+            for older in self.store.drafts("pending"):
+                if not self.same_review(draft, older) or self.owner_edited(older):
+                    continue
+                older = self.store.update_draft(
+                    older["id"],
+                    status="rejected",
+                    outcome="Replaced by a newer draft of this review.",
+                    resolved_at=now(),
+                )
+                self.store.set(f"replacedby:{older['id']}", draft["id"])
+                self.bus.publish("draft", older)
+                replaced.append(older["id"])
+        return replaced
+
+    async def settle_reviews(self, draft: dict):
+        """A review of a PR sent: its session's other reviews of that PR still waiting are
+        withdrawn (never posted twice), but one the owner edited. The caller holds
+        draft_lock."""
+        for other in self.store.drafts("pending"):
+            if not self.same_review(draft, other) or self.owner_edited(other):
+                continue
+            other = self.store.update_draft(
+                other["id"],
+                status="rejected",
+                outcome="Withdrawn: a review of this PR was sent already.",
+                resolved_at=now(),
+            )
+            self.bus.publish("draft", other)
+            await self.tell_drafter(
+                other,
+                f"Draft {other['id']} was withdrawn: your review {draft['id']} of the same PR "
+                "was sent. Do not draft it again unless asked.",
+                display=f"Withdrawn: {self.shown(other)}, a review of this PR was sent already.",
+            )
+            self.tell_router(
+                other,
+                f"Withdrawn: review {draft['id']} of the same PR was sent.",
+                display="Withdrawn",
+            )
 
     def in_conversation(self, target: dict, key: str) -> bool:
         """Whether a followed Slack key is the conversation a reply's target goes to."""
@@ -1526,7 +1625,8 @@ class Drafts:
             name = self.runtime.slack.display_names().get(channel, "")
             if channel and channel in name:
                 name = ""  # A raw id is no name: never shown to the owner.
-            if channel.startswith("D"):
+            # A DM: its id (D…), or the id of the user it goes to (U… or W…).
+            if channel.startswith(("D", "U", "W")):
                 place = f"your {threads.dm_with(name)}" if name else "a DM"
                 # "to Alice Chen (DM)" says where already.
                 said = bool(to) and re.search(r"\bDM\b|direct", to, re.IGNORECASE) is not None

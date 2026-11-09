@@ -1,7 +1,7 @@
 // Task cards on Home: what runs and what it does now, what waits, what is finished.
 
 import { api, el, foldable, moreMenu, once, reconcile, submits, toast } from "./dom.js";
-import { MARKERS, SECTION_DOT, SECTIONS, taskPhase, workerContext } from "./board.js";
+import { MARKERS, PR_TO_FIX, SECTION_DOT, SECTIONS, taskPhase, workerContext } from "./board.js";
 import { ago, changesText, compactPaths, displayPath, gist, linkName, markdown, notCountedText, plural, prTitle, shorten, since, taskLinks, threadLabel } from "./text.js";
 import { isHidden, prStatus, setHidden, toneOf } from "./artifacts.js";
 import { openFile } from "./files.js";
@@ -435,10 +435,11 @@ function taskCard(task, phase = phaseOf(task)) {
     if (task.status === "review" && task.news) {
       main = el("button", { type: "button", text: "Got it", onclick: () => act(`/api/tasks/${task.id}/news-seen`, {}, "") });
       more = [{ text: "Accept", onclick: () => act(`/api/tasks/${task.id}/accept`, {}, "Accepted.") }, followUp, copy, pr, named, splitOff, worker];
-    } else if (["review", "done"].includes(task.status) && ["pr-failing", "pr-changes"].includes(phase.marker)) {
-      // Its PR has failing CI or changes asked for: tell its worker what to do about it (a result
-      // not accepted yet can be, as it is, under ⋯).
-      main = el("button", { type: "button", text: "Ask it to fix…", onclick: () => reply(phase.marker === "pr-failing" ? "What should it do about the failing checks?" : "What should it do about the changes asked for?", "Sent to the worker.") });
+    } else if (["review", "done"].includes(task.status) && PR_TO_FIX.includes(phase.marker)) {
+      // Its PR has failing CI, merge conflicts or changes asked for: tell its worker what to do
+      // about it (a result not accepted yet can be, as it is, under ⋯).
+      const about = { "pr-failing": "the failing checks", "pr-conflicts": "the merge conflicts", "pr-changes": "the changes asked for" }[phase.marker];
+      main = el("button", { type: "button", text: "Ask it to fix…", onclick: () => reply(`What should it do about ${about}?`, "Sent to the worker.") });
       more = task.status === "review" ? [{ text: "Accept", onclick: () => act(`/api/tasks/${task.id}/accept`, {}, "Accepted.") }, followUp, copy, named, splitOff, worker] : [followUp, copy, named, worker];
     } else if (task.status === "review" && phase.section === "needs") {
       main = el("button", { type: "button", text: "Accept", onclick: () => act(`/api/tasks/${task.id}/accept`, {}, "Accepted.") });
@@ -494,7 +495,7 @@ function taskBody(task, phase = {}) {
     // it made, the threads it still follows).
     const first = isRow(phase) ? gist(task.result || "") : "";
     // Monitoring: what it waits on; under Needs you for its PR: what is wrong there.
-    const waits = phase.section === "monitoring" || ["pr-failing", "pr-changes"].includes(phase.marker) ? waitLine(task, worker, phase) : null;
+    const waits = phase.section === "monitoring" || PR_TO_FIX.includes(phase.marker) ? waitLine(task, worker, phase) : null;
     const found = artifacts(task, worker, { active: phase.section === "monitoring" || phase.marker === "still-following" });
     const nodes = [first ? el("div", { class: "outcome", text: first }) : null, waits, found].filter(Boolean);
     return nodes.length ? el("div", { class: "task-body" }, ...nodes) : null;
@@ -503,7 +504,7 @@ function taskBody(task, phase = {}) {
     // What came out, in its first sentences (past a "## Summary" title); the report on demand.
     const first = gist(task.result || task.progress || "");
     // Under Needs you for its PR: what is wrong there.
-    const waits = phase.section === "monitoring" || ["pr-failing", "pr-changes"].includes(phase.marker) ? waitLine(task, worker, phase) : null;
+    const waits = phase.section === "monitoring" || PR_TO_FIX.includes(phase.marker) ? waitLine(task, worker, phase) : null;
     const nodes = [first ? el("div", { class: "outcome", text: first }) : null, waits].filter(Boolean);
     return nodes.length ? el("div", { class: "task-body" }, ...nodes) : null;
   }
@@ -600,10 +601,19 @@ const waitsOnOwner = (task, worker) => {
 async function stopFollowing(key, label, task) {
   try {
     const { all } = await api(`/api/sessions/${task.session_id}/unfollow`, { method: "POST", body: { text: key, task_id: task.id } });
-    toast(all ? `Stopped following ${label}: new messages there go to the Router.` : `Stopped following ${label} for this task; its worker still follows it for another task.`);
+    toast(unfollowedWords(key, label, all, task));
   } catch (error) {
     toast(error.message, "error");
   }
+}
+// What stopping comes to: a Slack thread's new messages go to the Router; a PR is read only
+// while someone follows it, so with nobody left its news reaches no one.
+export function unfollowedWords(key, label, all, task) {
+  if (!all) return `Stopped following ${label} for this task; its worker still follows it for another task.`;
+  if (!/^github:[^/#]+\/[^#]+#\d+$/i.test(key)) return `Stopped following ${label}: new messages there go to the Router.`;
+  const same = (watched) => watched.toLowerCase() === key.toLowerCase();
+  const others = tasks().some((other) => other.session_id !== task.session_id && (other.watching || []).some(same));
+  return others ? `Stopped following ${label}; another worker still follows it.` : `Stopped following ${label}. Nobody follows it now: its news reaches no one.`;
 }
 const stopButton = (key, label, task) => el("button", { type: "button", class: "link unfollow", text: "✕", title: `Stop following ${label}`, "aria-label": `Stop following ${label}`, onclick: () => stopFollowing(key, label, task) });
 function watchingChip(key, task) {
@@ -778,9 +788,9 @@ function waitWords(task, worker, phase) {
   } else if (marker === "paused") {
     help = "Its worker took it up, then went on to another task: it reports this one (done, a question) or goes back to it after";
   }
-  if (["pr-failing", "pr-changes"].includes(marker)) help = "Its PR, as GitHub has it now: tell its worker what to do about it here, or act on GitHub";
+  if (PR_TO_FIX.includes(marker)) help = "Its PR, as GitHub has it now: tell its worker what to do about it here, or act on GitHub";
   else if (marker === "mergeable") help = "GitHub would merge it now; you can merge it on GitHub (Merge cards come once per new commit)";
-  return { text, help: help || text, warn: ["idle", "overdue", "stalled", "check-failed", "pr-failing", "pr-changes"].includes(marker) };
+  return { text, help: help || text, warn: ["idle", "overdue", "stalled", "check-failed", ...PR_TO_FIX].includes(marker) };
 }
 function waitLine(task, worker, phase) {
   const { text, help, warn } = waitWords(task, worker, phase);
@@ -875,15 +885,15 @@ function prChip(pr) {
   const state = pr.state === "MERGED" ? "merged" : pr.state === "CLOSED" ? "closed" : "";
   const ci = state ? "" : { passing: "✓ CI", failing: "✗ CI", pending: "CI running" }[pr.checks] || "";
   // Where it stands in a word, as Artifacts and Monitoring say it (changes requested wins over
-  // failing CI); a word only about CI is not said again beside the CI mark, and "in review"
-  // (nothing to say yet) is left out.
+  // merge conflicts and failing CI); a word only about CI is not said again beside the CI mark,
+  // and "in review" (nothing to say yet) is left out.
   const [word] = prStatus(pr);
   const stands = word === "in review" || (word === "CI failing" && ci) || (word === "CI running" && ci) ? "" : word;
   const review = { APPROVED: "approved", CHANGES_REQUESTED: "changes requested" }[pr.review] || "";
   const failing = pr.checks === "failing" && pr.failing?.length ? `\nFailing: ${pr.failing.join(", ")}` : "";
   const ciWords = { passing: "Checks pass", failing: "Checks fail", pending: "Checks are running", none: "No checks" }[pr.checks] || "";
   const seen = pr.at ? `\nAs of ${new Date(pr.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` : "";
-  const title = [pr.label, named ? `“${named}”` : "", ciWords + failing, !state && pr.awaiting?.length && `Waiting for approval: ${pr.awaiting.join(", ")}`, review && `Review: ${review}`, word === "ready to merge" && "GitHub would merge it now", state && `PR ${state}`, reviewedWords(pr)].filter(Boolean).join("\n") + seen;
+  const title = [pr.label, named ? `“${named}”` : "", ciWords + failing, !state && pr.awaiting?.length && `Waiting for approval: ${pr.awaiting.join(", ")}`, review && `Review: ${review}`, word === "ready to merge" && "GitHub would merge it now", word === "merge conflicts" && "It conflicts with its base branch: GitHub cannot merge it", state && `PR ${state}`, reviewedWords(pr)].filter(Boolean).join("\n") + seen;
   // Its number and title (shortened to fit), then where it stands (always in sight).
   const where = [state || ci, stands !== state ? stands : ""].filter(Boolean).join(" · ");
   return el(
@@ -894,7 +904,7 @@ function prChip(pr) {
   );
 }
 // What was observed while it worked, at a glance: the verdict, tests, changes and PRs.
-function chips(task) {
+export function chips(task) {
   const receipts = task.receipts;
   const items = [];
   if (receipts?.verdict) {
@@ -904,6 +914,12 @@ function chips(task) {
   }
   const result = (label, item) => {
     if (!item) return;
+    if (item.no_tests) {
+      // It ran, and found no test to run: no pass, and no failure.
+      const again = item.running ? "\nRunning again now" : "";
+      items.push(el("span", { class: "receipt warn", title: `${item.command}\n(${plural(item.runs, "run")})\nNo test ran${again}`, text: `no ${label} ran${item.running ? " · running again" : ""}` }));
+      return;
+    }
     if (item.passed === null) {
       items.push(el("span", { class: "receipt warn", title: `${item.command}\nRunning now`, text: `… ${label} running` }));
       return;
@@ -970,7 +986,7 @@ function report(task) {
 // found, as evidence; where, and how they ended, on hover.
 function testsElsewhere(item) {
   const where = item.cwd ? displayPath(item.cwd).split("/").filter(Boolean).pop() : "";
-  const outcome = item.passed === null ? "running" : item.summary || (item.passed ? "passed" : `failed${item.exit_code ? ` (exit ${item.exit_code})` : ""}`);
+  const outcome = item.passed === null ? "running" : item.summary || (item.no_tests ? "no tests ran" : item.passed ? "passed" : `failed${item.exit_code ? ` (exit ${item.exit_code})` : ""}`);
   const help = [`Ran in ${item.cwd || "a folder that is not its checkout"}: not tests of this task's own changes`, item.summary || "", item.command, plural(item.runs || 1, "run")].filter(Boolean).join("\n");
   return el("span", { class: `receipt tests-elsewhere ${item.passed === false ? "warn" : "none"}`, title: help, text: `Ran tests${where ? ` in ${where}` : ""} · ${outcome}` });
 }

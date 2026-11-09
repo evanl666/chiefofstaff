@@ -588,7 +588,8 @@ class DraftDecision(StrictModel):
 class WithdrawDraft(BaseModel):
     draft_id: str = Field(description="Your draft that waits for the owner (d…)")
     reason: str = Field(
-        description="Why, in a line the owner reads, e.g. 'Alice no longer needs the approval'"
+        description="Why, in one line addressed to the owner (you), in their language, e.g. "
+        "'Alice no longer needs your approval'"
     )
 
 

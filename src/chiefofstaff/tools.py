@@ -94,6 +94,12 @@ class SpawnWorker(BaseModel):
         description="Create a dedicated git worktree and branch: for any change to files, and "
         "whenever the owner asks for a worktree or a branch",
     )
+    in_place: bool = Field(
+        default=False,
+        description="Only when the owner asks in so many words for the work to be done directly "
+        "in their own project folder (no worktree): the worker may change files there. "
+        "Otherwise a worker given the folder only reads it",
+    )
     more_projects: list[str] = Field(
         default_factory=list,
         description="Other configured project folders this task also changes; each gets its own "
@@ -494,6 +500,13 @@ class SplitTask(BaseModel):
     title: str = Field(description="Title of the new task for its latest result")
 
 
+# What a draft's card says it answers: the owner reads it, not the person the draft is for.
+OWNER_NOTE = (
+    "One line for the owner: what this answers, in the owner's language (Chinese for an owner "
+    "who writes Chinese, even when the reply itself is in English)"
+)
+
+
 class DraftSlackReply(BaseModel):
     channel_id: str = Field(description="Slack conversation id, e.g. C0123ABC or D0123ABC")
     text: str = Field(description="The exact reply in the owner's voice")
@@ -510,7 +523,7 @@ class DraftSlackReply(BaseModel):
     to: str = Field(
         default="", description="Where it goes, for the owner, e.g. 'Alice Chen (DM)' or '#deploys'"
     )
-    note: str = Field(default="", description="One line for the owner: what this answers")
+    note: str = Field(default="", description=OWNER_NOTE)
 
 
 class DraftReply(BaseModel):
@@ -520,7 +533,7 @@ class DraftReply(BaseModel):
         description="Where the owner sends it, e.g. 'Slack DM', '#deploys thread', 'email'"
     )
     link: str = Field(default="", description="A link to the conversation it answers")
-    note: str = Field(default="", description="One line for the owner: what this answers")
+    note: str = Field(default="", description=OWNER_NOTE)
 
 
 class DistillProfile(BaseModel):
@@ -869,7 +882,22 @@ IDS_IN_BRACKETS = re.compile(rf"\s*\(\s*({DRAFT_ID}(?:\s*,\s*{DRAFT_ID})*)\s*\)"
 ID_FIRST = re.compile(rf"\(\s*({DRAFT_ID})\s*,\s*")
 ID_LISTED = re.compile(rf"\s*,\s*({DRAFT_ID})\b")
 DRAFT_NAMED = re.compile(rf"\b(?:(\w+)\s+)?draft\s+({DRAFT_ID})\b", re.IGNORECASE)
-TS_MENTION = re.compile(r"\s*\(?\b(?:ts|thread_ts|thread)\s*=?\s*\d{10}\.\d{6}\b\)?")
+# "草稿 d3c7ae145": a draft named in Chinese.
+DRAFT_NAMED_ZH = re.compile(rf"(\u8349\u7a3f)\s*({DRAFT_ID})\b")
+# Where a Slack message is, as a session wrote it down for a tool: "channel_id=#deploys",
+# "thread_ts=1794189315.270463".
+SLACK_FIELDS = re.compile(
+    r"[ \t]*[,\uff0c;\uff1b]?[ \t]*\b(?:channel_id[ \t]*[=:][ \t]*#?[\w-]+|"
+    r"(?:thread_ts|message_ts)[ \t]*[=:][ \t]*\d{10}\.\d{6})\b"
+    # Listed after where it is: "(DM D0ALICE01, ts 1794141072.949527)".
+    r"|[ \t]*[,\uff0c][ \t]*\bts[ \t]*[=:]?[ \t]*\d{10}\.\d{6}\b"
+)
+# A Slack timestamp named in text: on its own in parentheses ("(ts 1712345678.000100)", left
+# out), else in a phrase ("message ts …", "the message"). A ")" closes it only with its "(".
+TS_MENTION = re.compile(
+    r"\s*\(\s*(?:ts|thread_ts|thread)\s*[=:]?\s*\d{10}\.\d{6}\s*\)|"
+    r"\s*\b(?:message\s+)?(?:ts|thread_ts|thread)\s*[=:]?\s*\d{10}\.\d{6}\b"
+)
 NAMING = {"the", "a", "this", "that", "your", "my", "its", "slack", "review", "reply"}
 
 
@@ -897,7 +925,11 @@ def owner_words(text: str, drafts: set[str]) -> str:
     text = ID_FIRST.sub(lambda m: "(" if ours(m.group(1)) else m.group(0), text)
     text = ID_LISTED.sub(lambda m: "" if ours(m.group(1)) else m.group(0), text)
     text = DRAFT_NAMED.sub(named, text)
-    return TS_MENTION.sub(lambda m: "" if "(" in m.group(0) else " the message", text)
+    text = DRAFT_NAMED_ZH.sub(lambda m: m.group(1) if ours(m.group(2)) else m.group(0), text)
+    text = SLACK_FIELDS.sub("", text)
+    return TS_MENTION.sub(
+        lambda m: "" if m.group(0).lstrip().startswith("(") else " the message", text
+    )
 
 
 SLACK_TS = re.compile(r"\d{10}\.\d{6}")
@@ -1276,7 +1308,9 @@ class Tools:
                 "withdraw_draft",
                 "Withdraw a draft of yours that still waits for the owner (the conversation "
                 "moved on, it answers the wrong thing): its card leaves, with your reason. A new "
-                "draft_slack_reply to the same conversation replaces your earlier one by itself.",
+                "draft_slack_reply answering the same message replaces your earlier one by "
+                "itself; one answering another message does not: withdraw the earlier one when "
+                "the new reply covers it.",
                 WithdrawDraft,
                 self.t_withdraw_draft,
             ),
@@ -1491,6 +1525,11 @@ class Tools:
                 "has (a company search such as Glean), and drafts with draft_reply."
             )
         self.runtime.check_follow({"role": WORKER, "slack": slack}, follow)
+        if params.in_place and params.isolate:
+            raise ValueError(
+                "in_place (directly in the owner's folder) and isolate (a worktree of its own) "
+                "exclude each other: pass one."
+            )
         workspace, checkouts = await self.workspaces.prepare_directory(
             session_id,
             title,
@@ -1498,6 +1537,9 @@ class Tools:
             params.isolate,
             carry=not slack,  # Gitignored files are often secrets; Slack content is untrusted.
         )
+        if params.in_place:
+            # The owner asked for it: their folder is its to change (see Workspaces.writes).
+            checkouts = [{**c, "in_place": True} if c.get("shared") else c for c in checkouts]
         # It starts in its main checkout; the workspace around it is all its own.
         cwd = checkouts[0]["path"] if checkouts else str(workspace)
         branch = checkouts[0]["branch"] if checkouts else ""
@@ -1688,6 +1730,8 @@ class Tools:
         found = (self.runtime.task_actions.receipts(task) or {}).get("tests") or {}
         if found.get("passed") is not False or found.get("running") or found.get("ci_passing"):
             return ""  # Passed, running again, or the PR's checks passed after it.
+        if found.get("no_tests"):
+            return ""  # No failure to fix: its card says no test ran.
         command = " ".join(found.get("command", "").split())[:160]
         return f"`{command}` exited {found.get('exit_code')}"
 
@@ -3046,6 +3090,8 @@ class Tools:
             elif params.status == "failed":
                 # It cannot be done: under Needs you with why, for the owner to retry or drop.
                 task = self.tasks.move(task["id"], "failed", progress=params.summary[:6000])
+                # Where it stopped: retried later, what other tasks did meanwhile is not its own.
+                self.runtime.background(self.runtime.task_actions.record_end(task))
                 self.runtime.alert(
                     f"“{task['title']}” failed: {params.summary[:160]}",
                     session_id=caller,
@@ -3601,6 +3647,7 @@ class Tools:
         if found := self.runtime.draft_task(caller, target):
             target["task_id"] = found
         draft = self.store.create_draft(caller, "github", target, body)
+        replaced = await self.runtime.drafts.supersede_review(draft)
         if task := self.runtime.tasks.find(draft["target"].get("task_id") or "") or (
             self.runtime.tasks.current(caller)
         ):
@@ -3618,6 +3665,8 @@ class Tools:
             label, session_id=caller, needs_action=True, title="GitHub text to approve"
         )
         result = f"Draft {draft['id']} is waiting for the owner's approval."
+        if replaced:
+            result += f" It replaces your earlier review {', '.join(replaced)} of this PR."
         if target.get("own") and params.verdict != "comment":
             result += (
                 " The PR is by the account that publishes the review, and GitHub does not let "
@@ -3805,10 +3854,17 @@ class Tools:
         nudges = self.runtime.watchdog.state(row["id"]).get("nudges", 0)
         if action in {"nudge", "interrupt"} and nudges >= self.runtime.watch.nudges:
             action = "escalate"  # Earlier nudges did not help; a person or the Router must decide.
+        # Its decision in words (bug bash 9: "on track, none."); "Not sent: …" may follow.
+        decided = {
+            "none": "no action",
+            "nudge": "nudge it",
+            "interrupt": "stop and nudge it",
+            "escalate": "tell the Router",
+        }[action]
         self.runtime.add_message(
             caller,
             "notice",
-            f"“{row['title']}”: {params.verdict.replace('_', ' ')}, {action}. {params.reason}",
+            f"“{row['title']}”: {params.verdict.replace('_', ' ')}: {decided}. {params.reason}",
             {"session_id": row["id"]},
         )
         if action in {"nudge", "interrupt"} and (moved := self.moved_on_since_review(row)):

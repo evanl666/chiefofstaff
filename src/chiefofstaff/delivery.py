@@ -40,6 +40,26 @@ RETRY_DELAY = 2.0
 # down before its first step). One that does not after this long was never started on.
 START_CHECK = float(os.environ.get("CHIEFOFSTAFF_START_CHECK", "90"))
 
+# Errors of a send to a Copilot CLI that stopped (crashed, killed): the connection is gone.
+CONNECTION_LOST = (BrokenPipeError, ConnectionResetError, EOFError)
+
+
+def reason(error: BaseException) -> str:
+    """Why a send failed, in a line (not the CLI's whole output), without a closing period."""
+    lines = describe(error).strip().splitlines() or [type(error).__name__]
+    return lines[0].strip().rstrip(".")[:300]
+
+
+def connection_lost(error: BaseException | None) -> bool:
+    """Whether an error (or one it came from) says the Copilot CLI's connection ended."""
+    for _ in range(10):  # A chain of causes, not a loop.
+        if error is None:
+            return False
+        if type(error).__name__ == "ProcessExitedError" or isinstance(error, CONNECTION_LOST):
+            return True
+        error = error.__cause__ or error.__context__
+    return False
+
 
 class Delivery:
     def __init__(self, runtime: Runtime):
@@ -99,6 +119,7 @@ class Delivery:
             # Stopped: Copilot may hold the session busy (a command it left running) and keep a
             # queued message until then. Steered, it takes it at once.
             mode = "immediate"
+        backend, connection = self.runtime.backend, self.runtime.connections
         try:
             sent = await self.flush(
                 session_id,
@@ -118,10 +139,14 @@ class Delivery:
             if claimed or row["role"] != WORKER:
                 self.states[session_id].busy = False
                 self.runtime.background(self.runtime.workers.pump())  # Its slot is free.
+            if self.copilot_gone(exc, backend, connection):
+                # Kept to send: it goes out once Copilot runs again (Runtime.resume_working).
+                self.copilot_down(session_id)
+                return message
             # Not replayed later: the caller sees the error (a watcher re-polls the event).
             self.store.update_message_meta(message["id"], meta or {})
-            self.runtime.add_message(session_id, "error", f"Delivery failed: {describe(exc)}")
-            raise RuntimeError(f"Could not deliver the message: {describe(exc)}") from exc
+            self.runtime.add_message(session_id, "error", f"Delivery failed: {reason(exc)}.")
+            raise RuntimeError(f"Could not deliver the message: {reason(exc)}.") from exc
         if sent:
             self.runtime.update_session(session_id, status="working")
         return message
@@ -140,19 +165,77 @@ class Delivery:
             if not row or row["closed_at"] or row["status"] == "working":
                 return  # Closed, or busy: it gets them when idle.
             if not self.runtime.ready():
+                if self.runtime.status["state"] == "starting" and not self.runtime.stopping:
+                    # Connecting: its resume (before it is ready) may have come too early.
+                    self.schedule_flush(session_id, 0.5, attempt)
                 return  # Stopping or reconnecting: they are sent once connected (resume).
+            backend, connection = self.runtime.backend, self.runtime.connections
             try:
                 if await self.flush(session_id, await self.runtime.session_for(session_id)):
                     self.runtime.update_session(session_id, status="working")
             except Exception as exc:
                 logger.warning("Could not deliver held messages to %s.", session_id, exc_info=True)
-                if attempt == 0:
-                    self.runtime.add_message(
-                        session_id, "error", f"Delivery failed: {describe(exc)}. Retrying."
+                if self.copilot_gone(exc, backend, connection):
+                    self.copilot_down(session_id)  # Not Copilot's own output: it reconnects.
+                elif attempt == 0:
+                    failed = reason(exc)
+                    note = self.runtime.add_message(
+                        session_id,
+                        "error",
+                        f"Delivery failed: {failed}. Retrying.",
+                        {"undelivered": f"Delivery failed at first ({failed}); sent on a retry."},
                     )
+                    self.note_undelivered(session_id, note["id"])
                 self.schedule_flush(session_id, min(60, RETRY_DELAY * 2**attempt), attempt + 1)
 
         self.runtime.background(later())
+
+    def copilot_gone(self, error: BaseException, backend: object, connection: int) -> bool:
+        """Whether a send failed because Copilot's CLI stopped (crashed, killed) or was
+        reconnected meanwhile: what was not sent goes out once it runs again."""
+        if backend is None:
+            return False  # Not connected when it began: said as it is.
+        if self.runtime.backend is not backend or self.runtime.connections != connection:
+            return True
+        alive = getattr(backend, "alive", None)
+        return (callable(alive) and not alive()) or connection_lost(error)
+
+    def copilot_down(self, session_id: str):
+        """Said once in the session's chat while Copilot is down: what it was given waits."""
+        if self.store.get(f"undelivered:{session_id}"):
+            return
+        mark = int(self.store.get(f"sent:{session_id}") or 0)
+        owner = any(m["kind"] == "owner" for m in self.store.prompts(session_id, after=mark))
+        waiting = (
+            ("Your message", "your message") if owner else ("What is waiting", "what was waiting")
+        )
+        note = self.runtime.add_message(
+            session_id,
+            "notice",
+            f"Copilot stopped; reconnecting. {waiting[0]} goes out when it is back.",
+            {"undelivered": f"Copilot stopped and reconnected; {waiting[1]} went out."},
+        )
+        self.note_undelivered(session_id, note["id"])
+
+    def note_undelivered(self, session_id: str, message_id: int):
+        noted = json.loads(self.store.get(f"undelivered:{session_id}") or "[]")
+        self.store.set(f"undelivered:{session_id}", json.dumps([*noted, message_id]))
+
+    def resolve_undelivered(self, session_id: str):
+        """What was not sent went out: the lines that said so say it did."""
+        noted = json.loads(self.store.get(f"undelivered:{session_id}") or "[]")
+        self.store.delete(f"undelivered:{session_id}")
+        for message_id in noted:
+            try:
+                message = self.store.message(message_id)
+            except LookupError:
+                continue
+            meta = {**message["meta"], "resolved": True}
+            text = meta.pop("undelivered", "") or message["text"]
+            self.store.update_message_meta(message_id, meta)
+            self.runtime.bus.publish(
+                "message", self.store.update_message_text(message_id, text) | {"amended": True}
+            )
 
     def hold(
         self, session_id: str, prompt: str, *, kind: str, display: str, meta: dict | None = None
@@ -167,16 +250,16 @@ class Delivery:
         """Whatever it has not received yet rides along with its next message (it was stopped
         or its task cancelled): a restart must not start a turn for it."""
         mark = int(self.store.get(f"sent:{session_id}") or 0)
-        for message in self.store.messages(session_id, after=mark):
-            if "prompt" in message["meta"] and not message["meta"].get("deferred"):
+        for message in self.store.prompts(session_id, after=mark):
+            if not message["meta"].get("deferred"):
                 self.store.update_message_meta(message["id"], {**message["meta"], "deferred": True})
 
     def undefer(self, session_id: str) -> bool:
         """What was held back for its next message (it was stopped) is due now; whether any."""
         mark = int(self.store.get(f"sent:{session_id}") or 0)
         found = False
-        for message in self.store.messages(session_id, after=mark):
-            if message["meta"].get("deferred") and "prompt" in message["meta"]:
+        for message in self.store.prompts(session_id, after=mark):
+            if message["meta"].get("deferred"):
                 kept = {k: v for k, v in message["meta"].items() if k != "deferred"}
                 self.store.update_message_meta(message["id"], kept)
                 found = True
@@ -202,9 +285,7 @@ class Delivery:
         about that task before."""
         mark = int(self.store.get(f"sent:{session_id}") or 0)
         received = False
-        for message in self.store.messages(session_id):
-            if "prompt" not in message["meta"]:
-                continue
+        for message in self.store.prompts(session_id):
             if task_id and message["meta"].get("task_id") != task_id:
                 continue
             if message["id"] <= mark:
@@ -219,8 +300,7 @@ class Delivery:
         a cancellation, only rides along with the next one)."""
         mark = int(self.store.get(f"sent:{session_id}") or 0)
         return any(
-            "prompt" in m["meta"] and not m["meta"].get("deferred")
-            for m in self.store.messages(session_id, after=mark)
+            not m["meta"].get("deferred") for m in self.store.prompts(session_id, after=mark)
         )
 
     async def flush(
@@ -237,11 +317,7 @@ class Delivery:
             # The Router's Copilot session may have been replaced while this waited.
             session = self.states.handle(session_id) or session
             mark = int(self.store.get(f"sent:{session_id}") or 0)
-            pending = [
-                message
-                for message in self.store.messages(session_id, after=mark)
-                if "prompt" in message["meta"]
-            ]
+            pending = self.store.prompts(session_id, after=mark)
             if not pending:
                 return False
             prompts = [self.runtime.told_prompt(message) for message in pending]
@@ -336,6 +412,8 @@ class Delivery:
             self.store.delete(f"fresh:{self.runtime.copilot_id(session_id)}")
             if preamble:
                 self.store.delete(f"preamble:{session_id}")
+            if self.store.get(f"undelivered:{session_id}"):
+                self.resolve_undelivered(session_id)
             return True
 
     async def reconcile(self, session_id: str) -> bool | None:

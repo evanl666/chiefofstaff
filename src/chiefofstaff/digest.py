@@ -27,7 +27,10 @@ NEEDS_WORDS = {
     "check-failed": "check-back failed",
     "pr-failing": "CI failing on its PR",
     "pr-changes": "changes requested on its PR",
+    "pr-conflicts": "merge conflicts on its PR",
 }
+# A delivered task's own PR to fix (board.js PR_TO_FIX): it goes under Needs you.
+PR_TO_FIX = {"pr-changes", "pr-conflicts", "pr-failing"}
 # Cards whose text goes out once the owner approves it.
 APPROVALS = {"slack", "github", "reply"}
 
@@ -137,7 +140,7 @@ def needs_marker(runtime: Runtime, task: dict, moment: datetime) -> str:
         return "review"
     # Delivered, its own PR to fix (CI failing, changes requested): Home's rule.
     marker, _why = actions.own_pr_standing(task)
-    return marker if marker in {"pr-failing", "pr-changes"} else ""
+    return marker if marker in PR_TO_FIX else ""
 
 
 def needs(runtime: Runtime, moment: datetime | None = None) -> Needs:
@@ -184,7 +187,7 @@ def needs(runtime: Runtime, moment: datetime | None = None) -> Needs:
         if task["id"] in found.markers:
             continue
         marker = needs_marker(runtime, task, moment)
-        if marker in {"pr-failing", "pr-changes"}:
+        if marker in PR_TO_FIX:
             pr_rows.append((task, marker))
         elif marker == "question" and task["id"] in deciding:
             found.markers[task["id"]] = "decision"

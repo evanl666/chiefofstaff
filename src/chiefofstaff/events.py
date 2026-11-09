@@ -20,7 +20,7 @@ from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecis
 from . import prompts, receipts, threads
 from .delivery import digest
 from .envelope import from_owner, news_tasks, tasks_named, wrap
-from .policy import permission_denial, written_file
+from .policy import owners_checkout, permission_denial, written_file
 from .roles import ROUTER, SLACK, WORKER
 from .store import now
 
@@ -719,8 +719,9 @@ class Events:
         row = self.store.find_session(self.runtime.row_id(invocation.get("session_id", "")))
         if not row:
             return PermissionDecisionReject(feedback="Unknown session.")
-        if not self.runtime.yolo(row) and (
-            reason := permission_denial(row, request, self.workspaces.writes(row))
+        if (reason := owners_checkout(row, request, self.workspaces.checkouts(row))) or (
+            not self.runtime.yolo(row)
+            and (reason := permission_denial(row, request, self.workspaces.writes(row)))
         ):
             self.runtime.add_message(row["id"], "notice", reason)
             return PermissionDecisionReject(feedback=reason)

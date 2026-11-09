@@ -201,8 +201,11 @@ class SlackMcp:
 
 # One message as Slack's MCP server lists it: where and who, then its text (then its permalink).
 MESSAGE = re.compile(
-    r"(?:Channel: <#(?P<channel>[A-Z0-9]+)>(?: \((?P<where>[^)\n]*)\))?[^\n]*?\| )?"
-    r"From: <@(?P<user>[A-Z0-9]+)>(?: \((?P<name>[^)\n]*)\))?(?P<rest>[^\n]*?)"
+    r"(?:Channel: <#(?P<channel>[A-Z0-9]+)>(?: \((?P<where>(?:[^()\n]|\([^()\n]*\))*)\))?"
+    r"[^\n]*?\| )?"
+    # A name may hold parentheses of its own: "Alice Chen (she/her)".
+    r"From: <@(?P<user>[A-Z0-9]+)>(?: \((?P<name>(?:[^()\n]|\([^()\n]*\))*)\))?"
+    r"(?P<rest>[^\n]*?)"
     r"(?:\n| \| )Text: (?P<text>.*?)"
     r"(?:\nPermalink: (?P<link>\S+)|(?=\n\S[^\n]*\| From: )|$)",
     re.DOTALL,
@@ -211,8 +214,13 @@ STAMP = re.compile(r"(?<!\w)ts: (\d{10}\.\d{6})")
 THREAD_STAMP = re.compile(r"thread_ts[:=] ?(\d{10}\.\d{6})")
 # Names Slack gives next to its ids: "<@U0BOB001> (Bob Li)", "<#C0DEPLOYS> (deploys)",
 # "<@U0BOB001|bob>".
-NAMED = re.compile(r"<([@#])([UWCDG][A-Z0-9]{2,})(?:\|([^>\n]{1,80}))?>(?: \(([^)\n]{1,80})\))?")
+NAMED = re.compile(
+    r"<([@#])([UWCDG][A-Z0-9]{2,})(?:\|([^>\n]{1,80}))?>"
+    r"(?: \(((?:[^()\n]|\([^()\n]{0,40}\)){1,80})\))?"
+)
 MAX_NAMES = 2000
+# A person or conversation a message names ("<@U0ALICE1>", "<#C0DEPLOYS|deploys>").
+MENTIONED = re.compile(r"<([@#])([UWCDG][A-Z0-9]{2,})(?:\|([^>\n]{1,80}))?>")
 # Someone a message mentions ("<@U0ALICE1>"), and who they are by their Slack profile.
 MENTION = re.compile(r"<@([UW][A-Z0-9]{2,})(?:\|[^>\n]*)?>")
 PROFILE_TOOL = "slack_read_user_profile"
@@ -379,7 +387,7 @@ def for_session(listed: str, stamps: set[str], limit: int = MAX_RESULT_CHARS) ->
     share = max(600, limit // len(kept))
     blocks = [FORGED_NOTE] if forged else []
     for entry in kept:
-        text = entry["raw"]
+        text = entry["said"]
         if len(text) > share:
             left = len(text) - share
             text = f"{text[:share].rstrip()} … ({left} more characters: read the message for all)"
@@ -445,7 +453,21 @@ def readable(
         if entry["thread_ts"] and entry["thread_ts"] != entry["ts"]:
             where += ", in a thread" if where else "in a thread"
         head = f"{who} {where}".strip()
-        lines.append(f"{head}: {entry['text']}" + (f"\n{entry['link']}" if entry["link"] else ""))
+        said = MENTIONED.sub(
+            lambda found: (
+                f"{'@' if found[1] == '@' else '#'}{name}"
+                if (name := names.get(found[2]) or found[3])
+                else found[0]
+            ),
+            entry["said"],
+        )
+        if "\n" in said:
+            # Its lines as a quote under who wrote it: a list or code block reads as written,
+            # and a line in it that looks like another message stays inside this one.
+            said = "\n" + "\n".join(f"> {line}" if line else ">" for line in said.splitlines())
+        else:
+            said = f" {said}"
+        lines.append(f"{head}:{said}" + (f"\n{entry['link']}" if entry["link"] else ""))
     if lines and forged:
         lines.insert(0, f"⚠ {FORGED_NOTE}")
     return "\n\n".join(lines) or listed
@@ -590,6 +612,7 @@ class SlackSource:
         unseen: list[str] = []
         thread_keys: list[str] = []
         for_followers: dict[str, tuple[list[str], list[tuple[str, str]]]] = {}
+        crowded: list[tuple[str, str]] = []  # Notes on matches past a page within one second.
         # How far this poll got: short of now when a query had more pages than it reads.
         reached = started
         for query in self.queries():
@@ -635,18 +658,23 @@ class SlackSource:
                     shown.append(readable(text, self.display_names(), stamps))
                 # A full page may hide newer matches: continue after the newest one returned.
                 newest = int(max((float(key.removeprefix("slack:")) for key in found), default=0))
-                if len(found) < PAGE_SIZE:
-                    break
-                if newest <= after:
+                if len(found) < PAGE_SIZE or newest < after:
+                    break  # All of it, or nothing past where it asked from.
+                if newest == after:
                     # A page of matches within one second: past it, a search by time can only
                     # go on from the next second. Said, so the rest is looked for.
                     logger.warning(
                         "More than %s Slack matches at %s for %s", PAGE_SIZE, after, query
                     )
-                    sections.append(
-                        f"More than {PAGE_SIZE} messages for `{query}` came within one second "
-                        f"({after}): the ones past these {PAGE_SIZE} are not listed here. Read "
-                        "those conversations to find them."
+                    where = sorted({entry["channel"] for entry in parse(text)[0]} - {""})
+                    crowded.append(
+                        (
+                            f"slack-crowded:{query}:{after}",
+                            f"More than {PAGE_SIZE} messages for `{query}` came within one "
+                            f"second ({after}): the ones past these {PAGE_SIZE} are not listed "
+                            "here. Read those conversations to find them"
+                            + (f" ({', '.join(where)})." if where else "."),
+                        )
                     )
                     newest = after + 1
                 after = newest
@@ -671,6 +699,18 @@ class SlackSource:
                 unseen += [key for key in keys if not self.seen(key)]
                 sections.append(body)
                 shown.append(said)
+        crowded = [(key, note) for key, note in crowded if not self.seen(key)]  # Said once.
+        if crowded and not unseen:
+            # Nothing else new to carry it (they were handled, or went to followers): said on
+            # its own, once, so the ones past that page are looked for.
+            await self.host.on_trigger(
+                "slack",
+                [key for key, _ in crowded],
+                "\n".join(note for _, note in crowded),
+                "More Slack messages came at once than one search lists; the Router looks for "
+                "the rest.",
+            )
+        sections += [note for _, note in crowded]
         if unseen:
             keys_line = (
                 f"Thread keys: {', '.join(dict.fromkeys(thread_keys))}\n" if thread_keys else ""
@@ -686,6 +726,8 @@ class SlackSource:
                 + "\n\n".join(sections),
                 "\n\n".join(dict.fromkeys(shown)),
             )
+            for key, note in crowded:  # Said with them: not again on its own next time.
+                self.store.add_trigger("slack", key, note)
         if settings.slack_delegate_emoji:
             await self.poll_delegated(settings.slack_delegate_emoji)
         else:

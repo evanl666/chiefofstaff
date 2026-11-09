@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from fastapi import Body, FastAPI, HTTPException, Request, Response
+from fastapi import Body, FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -89,6 +89,14 @@ def settings_from(values: dict[str, Any], old: Settings) -> Settings:
 
 
 MODEL_FIELDS = {"router": "Router", "worker": "Workers", "slack": "Slack", "watchdog": "Watchdog"}
+
+
+def shown(message: dict) -> dict:
+    """A message as the page shows it: without the prompt it was sent as (as long again)."""
+    meta = message.get("meta")
+    if not isinstance(meta, dict) or "prompt" not in meta:
+        return message
+    return {**message, "meta": {key: value for key, value in meta.items() if key != "prompt"}}
 
 
 async def check_models(runtime: Runtime, old: Settings, new: Settings):
@@ -235,17 +243,44 @@ def create_app(
         return runtime.view(store.session(session_id))
 
     @app.get("/api/sessions/{session_id}/messages")
-    async def messages(session_id: str, after: int = 0):
-        store.session(session_id)
-        return store.messages(session_id, after)
+    async def messages(
+        session_id: str,
+        after: int | None = None,
+        before: int = 0,
+        limit: Annotated[int, Query(ge=1, le=1000)] = 400,
+        prompts: bool = False,
+    ):
+        """A page of a session's messages, oldest first: its latest (before `before`, when
+        given); with `after`, the next ones after it, to read on page by page. Without the
+        prompts they were sent as (as long again; the chat shows what they say)."""
+        session_id = store.session(session_id)["id"]
+        rows = store.messages(session_id, after or 0, limit, before=before, first=after is not None)
+        return rows if prompts else [shown(row) for row in rows]
+
+    @app.get("/api/sessions/{session_id}/messages/count")
+    async def message_count(session_id: str, before: int = 0):
+        """How many messages a session has before one (the earlier ones a chat can load)."""
+        return {"count": store.count_messages(store.session(session_id)["id"], before)}
+
+    @app.get("/api/workers/closed")
+    async def closed_workers():
+        """Every closed worker of the owner's, the latest first (the sidebar has the latest)."""
+        return [
+            {**row, "helper": "", "display_title": runtime.display_title(row)}
+            for row in runtime.workers.recently_closed(None, helpers=False)
+        ]
 
     @app.post("/api/sessions/{session_id}/messages")
     async def send(session_id: str, payload: OwnerMessage):
         if payload.to:
-            return await runtime.owner_send_to(
-                session_id, payload.to, payload.text, payload.attachments
+            return shown(
+                await runtime.owner_send_to(
+                    session_id, payload.to, payload.text, payload.attachments
+                )
             )
-        return await runtime.owner_send(session_id, payload.text, attachments=payload.attachments)
+        return shown(
+            await runtime.owner_send(session_id, payload.text, attachments=payload.attachments)
+        )
 
     @app.get("/api/attachments/{name}")
     async def attachment(name: str):

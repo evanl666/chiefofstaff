@@ -3,7 +3,7 @@
 import { $, api, el, toast } from "./dom.js";
 import { ago, shortPath, since } from "./text.js";
 import { closedWorkers, DOT_HELP, HOME, loadState, sessions, state, workerTitle } from "./state.js";
-import { IN_TERMINAL, readOnlyTimeline, scrollToBottom, select, setComposer, setLayout } from "./session.js";
+import { IN_TERMINAL, readOnlyTimeline, scrollToBottom, select, setComposer, setLayout, showDraft } from "./session.js";
 import { homeItem, needsCount, WORKER_STATES, workerStates } from "./inbox.js";
 import { closeMentions, setRecipient } from "./mention.js";
 import { openSettings, watchGaps } from "./settings.js";
@@ -101,10 +101,29 @@ export function bindSidebarToggle() {
   window.matchMedia(NARROW).addEventListener("change", (event) => event.matches || show(false));
   renderSidebar();
 }
+// Every closed worker of yours, once asked for (the snapshot has the latest 20).
+let allClosed = null;
+async function showAllClosed() {
+  try {
+    allClosed = await api("/api/workers/closed");
+  } catch (error) {
+    toast(error.message, "error");
+    return;
+  }
+  renderClosed();
+}
 function renderClosed() {
-  const closed = closedWorkers().filter((session) => !session.helper);
+  const latest = closedWorkers().filter((session) => !session.helper);
+  // Those shown now first (as they are now); none reopened since.
+  const open = new Set(sessions().map((session) => session.id));
+  const known = new Map([...(allClosed || []).filter((session) => !open.has(session.id)), ...latest].map((session) => [session.id, session]));
+  const closed = [...known.values()].sort((a, b) => b.closed_at.localeCompare(a.closed_at));
+  // The snapshot's list stops at 20 (helpers included): how many there are is counted apart.
+  const capped = closedWorkers().length >= 20;
+  const total = state.snapshot?.closed_count ?? (capped ? null : closed.length);
+  const more = allClosed ? 0 : total === null ? 1 : total - closed.length;
   $("#closed").hidden = !closed.length;
-  $("#closed-count").textContent = `· ${closed.length}`;
+  $("#closed-count").textContent = `· ${Math.max(total ?? 0, closed.length)}${total === null && !allClosed ? "+" : ""}`;
   $("#closed-list").replaceChildren(
     ...closed.map((session) =>
       el(
@@ -120,6 +139,7 @@ function renderClosed() {
         el("span", { class: "sub", text: ago(session.closed_at) }),
       ),
     ),
+    more > 0 ? el("button", { type: "button", class: "link show-all", text: total === null ? "Show all" : `Show all ${total}`, title: "Older closed workers too", onclick: showAllClosed }) : [],
   );
 }
 export function renderStatusLine() {
@@ -221,6 +241,7 @@ function showExternal(item) {
   closeMentions();
   setRecipient(null);
   state.selected = item.id;
+  showDraft(item.id);
   setLayout(false);
   renderSidebar();
   $("#back-home").hidden = false;

@@ -241,6 +241,8 @@ You set one **code folder**: where your repositories live, like `~/workspace`.
   would overwrite each other's files and switch each other's branches. A task that changes no
   code may read your own checkout, but nothing it does writes there (its edits are refused and,
   sandboxed, its commands cannot): to run tests or install, it takes a worktree of its own.
+  Ask in so many words for the work to be done directly in your folder (no worktree), and that
+  worker may change it.
 - Follow-ups on a task go to the same worker and folder. When a worker closes, its worktrees
   are removed if they hold nothing uncommitted (the branches stay); reopening it brings them
   back. A worktree with ignored files you may want (an edited `.env`, a report) is kept;
@@ -643,9 +645,12 @@ Slack DM it asks Chief of Staff to send the message there (nothing else, to nobo
 read what you wrote there since. An item counts as sent only once the messenger
 says it went out; a failed send is tried again ten minutes later. The messenger also reads your
 answers, the way it sent (the bot's DM, your own DM), every few minutes for the first hour
-after a notification, then every half hour, while you are away and for a day after; through
-your own DM, only when you wrote something new there. The chat notes each one. When sending fails, the chat says so once and Settings
-shows the latest attempt.
+after a notification, then every half hour, while you are away and for a day after; your own
+DM (and the threads of the notifications in it) is checked every few minutes all day, and read
+when you wrote something new there. A reply with no code answers the only code that waits;
+with several waiting, you are asked which. Written in Chinese, you
+get the notifications in Chinese. The chat notes each one. When sending fails, the chat says so
+once and Settings shows the latest attempt.
 
 ## Abilities: skills, plugins and MCP servers
 

@@ -81,6 +81,148 @@ READ_OFTEN_SECONDS = 3600
 READ_LATER_SECONDS = 1800
 # Where a notification sent with send_owner_slack_dm went, as the owner reads it.
 OWN_SLACK_DM = "your own Slack DM"
+# The threads of the notifications sent there are read too (the newest this many).
+MAX_THREADS = 10
+# What the owner reads away (fixed words: a notification's, what became of a reply) in Chinese
+# (simplified) for an owner who writes it; English otherwise. Written with ASCII punctuation:
+# Chinese gets its own (FULLWIDTH). Reply keywords ("send", "no") stay, with what they mean.
+FULLWIDTH = str.maketrans(
+    {":": "\uff1a", ",": "\uff0c", "(": "\uff08", ")": "\uff09", "?": "\uff1f"}
+)
+CHINESE = {
+    english: chinese.translate(FULLWIDTH)
+    for english, chinese in {
+        "Chief of Staff needs you ({count})": "Chief of Staff 需要你({count})",
+        "Reply: `{code} {hint}`": "回复:`{code} {hint}`",
+        "Reply in this conversation with the code and your answer.": (
+            "在这个对话里回复代码和你的答复。"
+        ),
+        "Answer in Chief of Staff on your computer: replies here are not read.": (
+            "请在电脑上的 Chief of Staff 里答复:这里的回复不会被读取。"
+        ),
+        "{more} more waiting: open Chief of Staff. ": "还有 {more} 项在等你:打开 Chief of Staff。",
+        "Not merged yet": "还没合并",
+        "Not sent yet": "还没发送",
+        "Not answered yet": "还没答复",
+        "Test from Chief of Staff": "Chief of Staff 的测试",
+        "This is how you hear from it when you are away.": "你不在电脑前时,会这样收到它的消息。",
+        "Chief of Staff asks": "Chief of Staff 问你",
+        "Urgent · Chief of Staff": "紧急 · Chief of Staff",
+        "Review of {pr}": "{pr} 的评审",
+        "Approve": "批准",
+        "Request changes": "要求修改",
+        "Comment": "评论",
+        "Reply on {pr}": "在 {pr} 上回复",
+        "Reply to {author} on {pr}": "在 {pr} 上回复 {author}",
+        "Draft to approve": "待批准的草稿",
+        "Decision": "决定",
+        "Ready to merge · {label}": "可以合并 · {label}",
+        "checks pass": "检查通过",
+        "checks fail": "检查失败",
+        "checks still running": "检查还在运行",
+        "no checks": "没有检查",
+        "Which folder for “{title}”": "“{title}”用哪个文件夹",
+        "Folders: ": "文件夹:",
+        "none: no project, or a folder's path": "none:不用项目,或写文件夹路径",
+        "Question": "问题",
+        "“{about}” asks": "“{about}”问你",
+        "Failed · “{title}”": "失败 · “{title}”",
+        "Stopped · “{title}”": "已停止 · “{title}”",
+        "<your answer>": "<你的答复>",
+        "<number or your answer>": "<编号或你的答复>",
+        "<number, none or a path>": "<编号、none 或文件夹路径>",
+        "<none or a path>": "<none 或文件夹路径>",
+        "<words for the blanks> · no": "<空白处要填的话> · no",
+        "Which one? Reply with its code: {codes}": "是哪一项?请带上它的代码回复:{codes}",
+        "{code} was already sent at {clock}: this reply changes nothing.": (
+            "{code} 已在 {clock} 发出:这条回复不会改变什么。"
+        ),
+        "{code} was answered already at {clock}: this reply changes nothing.": (
+            "{code} 已在 {clock} 答复过:这条回复不会改变什么。"
+        ),
+        "{code} was answered already at {clock} ({became}): this reply changes nothing.": (
+            "{code} 已在 {clock} 答复过({became}):这条回复不会改变什么。"
+        ),
+        "not done: {reason}": "未完成:{reason}",
+        "not done: you answered this code already": "未完成:你已经答复过这个代码",
+        "not done: you answered this code already ({became})": (
+            "未完成:你已经答复过这个代码({became})"
+        ),
+        "nothing waits for that code (answered already?)": "这个代码没有在等的事(已经答复过了?)",
+        "your answers come back: replies here work": "你的答复能传回来:在这里回复有效",
+        "write your answer after the code": "请在代码后写你的答复",
+        'not merged: answer "merge" when it should be merged, or "no"': (
+            '未合并:要合并时回复 "merge",不合并回复 "no"'
+        ),
+        'not merged: “{held}” sounds like not now: answer "merge" when it should be merged, '
+        'or "no"': '未合并:“{held}”听起来是现在先不合并:要合并时回复 "merge",不合并回复 "no"',
+        'not posted: this review is {verdict}, not an approval: answer "post" to post it as it '
+        'is, or "no"': '未发布:这条评审是“{verdict}”,不是批准:回复 "post" 按原样发布,或回复 "no"',
+        'not sent: “{held}” sounds like not now, or not as it is: answer "send" when it should '
+        'go, or "no"': (
+            '未发送:“{held}”听起来是现在先不发,或不按原样发:要发送时回复 "send",不发回复 "no"'
+        ),
+        "not sent: the draft still has a blank to fill (“{blank}”): say the words to use "
+        "instead, or edit it on Home": (
+            "未发送:草稿里还有要填的空白(“{blank}”):说出要填的话,或在 Home 上编辑"
+        ),
+        'not sent: say the words for its blanks ({blanks}), or "no"': (
+            '未发送:说出空白处要填的话({blanks}),或回复 "no"'
+        ),
+        "not sent: “{held}” sounds like not now, or not as it is: say the words for its blanks "
+        '({blanks}), or "no"': (
+            "未发送:“{held}”听起来是现在先不发,或不按原样发:"
+            '说出空白处要填的话({blanks}),或回复 "no"'
+        ),
+        'not sent: answer "send" when it should go, or "no"': (
+            '未发送:要发送时回复 "send",不发回复 "no"'
+        ),
+        'answer with the number of a folder, "none" for no project, or the path of a folder': (
+            '回复文件夹的编号,不用项目回复 "none",或写文件夹的路径'
+        ),
+        'answer "none" for no project, or the path of a folder': (
+            '不用项目回复 "none",或写文件夹的路径'
+        ),
+        'answer "retry"': '回复 "retry"(重试)',
+        'answer "go on" or "cancel"': '回复 "go on"(继续)或 "cancel"(取消)',
+        "sent to the Router": "已转给 Router",
+        "sent to the worker": "已转给 worker",
+        "merged": "已合并",
+        "left as it is": "保持原样",
+        "sent": "已发送",
+        "marked as sent": "已标记为已发送",
+        "dropped": "已放弃",
+        "to be drafted again as you say": "会按你说的重新起草",
+        "decided: {answer}": "已决定:{answer}",
+        "chose {choice}": "已选择 {choice}",
+        "no project: it starts in a folder of its own": "不用项目:它在自己的文件夹里开始",
+        "answered": "已答复",
+        "retrying": "正在重试",
+        "cancelled": "已取消",
+        "going on": "继续进行",
+        "sent already": "已经发出",
+        "being sent: see Home": "正在发送:见 Home",
+        "its sending failed": "发送失败",
+        "its sending failed: {outcome}": "发送失败:{outcome}",
+        "withdrawn: {reason}": "已撤回:{reason}",
+        "you asked for it again: {reason}": "你要求重写:{reason}",
+        "dropped already": "已经放弃",
+        "dropped already ({outcome})": "已经放弃({outcome})",
+    }.items()
+}
+# What a reply keyword means, shown after it for an owner who writes Chinese.
+GLOSS = {
+    "send · no": "发送 · 不发",
+    "post · no": "发布 · 不发",
+    "approve · no": "批准 · 不发",
+    "merge · no": "合并 · 不合并",
+    "<words for the blanks> · no": "no 即不发",
+    "retry": "重试",
+    "go on · cancel": "继续 · 取消",
+    "ok": "好",
+}
+# Words a notification's reason starts with that its "Not sent yet" heading says already.
+NOT_DONE = re.compile(r"^(?:not (?:sent|merged|posted)|未发送|未合并|未发布)\s*[:\uff1a]\s*")
 
 
 def yours(where: str) -> str:
@@ -208,6 +350,7 @@ def reply_key(code: str, text: str) -> str:
 
 
 CANCEL_WORDS = {"cancel", "取消"}
+RETRY_WORDS = {"retry", "重试"}
 HID_IDLE = re.compile(r'"HIDIdleTime" = (\d+)')
 
 
@@ -222,6 +365,15 @@ def later(first: str, second: str) -> bool:
         return False
 
 
+def epoch(when: str) -> float:
+    """An ISO time in seconds (one without its zone is local); 0 when it cannot be read."""
+    try:
+        moment = datetime.fromisoformat(when.strip().replace("Z", "+00:00"))  # noqa: FURB162
+    except (ValueError, TypeError, AttributeError):
+        return 0
+    return moment.timestamp()
+
+
 def watch_key(what: str) -> str:
     """A watch by what it watches (renumbering or reordering watches does not reset it)."""
     return hashlib.sha256(" ".join(what.lower().split()).encode()).hexdigest()[:16]
@@ -234,8 +386,14 @@ def without_code(text: str, code: str) -> str:
     found = re.search(rf"\[?\b{re.escape(code)}\b\]?", text, flags=re.IGNORECASE)
     if not found:
         return text.strip()
-    before = BEFORE_CODE.sub("", text[: found.start()])
-    after = AFTER_CODE.sub("", text[found.end() :], count=1)
+    head = text[: found.start()]
+    before = BEFORE_CODE.sub("", head)
+    rest = text[found.end() :]
+    after = AFTER_CODE.sub("", rest, count=1)
+    # Words on both sides keep what separated them ("no 52YVY, too long": "no, too long").
+    mark = rest[: len(rest) - len(after)].strip() or head[len(before) :].strip()
+    if before.strip() and after and mark:
+        return f"{before}{mark} {after}" if mark[0] in ",;:." else f"{before} {mark} {after}"
     return f"{before} {after}".strip()
 
 
@@ -330,7 +488,10 @@ class ReadOwnerSlackDm(BaseModel):
 
 
 class OwnerReply(BaseModel):
-    code: str = Field(description="The five-letter code the owner's reply names")
+    code: str = Field(
+        description="The five-letter code the owner's reply names, or the one it answers when "
+        'it names none (the job says which); "" when the job says so'
+    )
     text: str = Field(description="The owner's reply, exactly")
     at: str = Field(
         default="",
@@ -898,9 +1059,9 @@ class Connector:
 
     @staticmethod
     def router_asks(messages: list[dict]) -> list[dict]:
-        """The Router's messages that ask the owner something or need them. Its answer to the
-        owner's own question (a turn of theirs: its words there are not internal) asks nothing
-        by its lists: they are the answer (what the team asked them, say)."""
+        """The Router's messages that ask the owner something or need them (an urgent note
+        too). Its answer to the owner's own question (a turn of theirs: its words there are not
+        internal) asks nothing by its lists: they are the answer (what the team asked them)."""
         found, asked = [], False
         for m in sorted(messages, key=lambda m: m["id"]):
             if m["kind"] == "owner":
@@ -908,7 +1069,11 @@ class Connector:
             if m["kind"] not in {"assistant", "update"} or m["meta"].get("internal"):
                 continue
             answer = asked and m["kind"] == "assistant"
-            if m["meta"].get("needs_action") or asks_owner(m["text"], answer=answer):
+            if (
+                m["meta"].get("needs_action")
+                or m["meta"].get("urgent")
+                or asks_owner(m["text"], answer=answer)
+            ):
                 found.append(m)
         return found
 
@@ -930,8 +1095,12 @@ class Connector:
         if named:
             pending = {draft["id"] for draft in self.store.drafts()}
             return not (named & pending)
-        if asks_owner(ask["text"]):
-            return False  # A question is answered by the owner, not by a card.
+        if self.store.get(f"updateseen:{ask['id']}"):
+            return True  # The owner said they saw it (it left Needs you).
+        if asks_owner(ask["text"]) or (ask.get("meta") or {}).get("urgent"):
+            # A question is answered by the owner, not by a card; an urgent note stays under
+            # Needs you until they saw it.
+            return False
         return bool(
             self.store.one(
                 "SELECT id FROM drafts WHERE resolved_at>? AND status IN ('sent', 'answered') "
@@ -1038,12 +1207,15 @@ class Connector:
         """An item as a notification line: (what, its gist, how to answer by code)."""
         if item.get("test"):
             return (
-                "Test from Chief of Staff",
-                "This is how you hear from it when you are away.",
+                self.say("Test from Chief of Staff"),
+                self.say("This is how you hear from it when you are away."),
                 "ok",
             )
         if ask := item.get("ask"):
-            return "Chief of Staff asks", self.gist(ask["text"]), "<your answer>"
+            # An urgent note asks nothing: an answer to it still goes to the Router.
+            urgent = (ask.get("meta") or {}).get("urgent") and not asks_owner(ask["text"])
+            head = "Urgent · Chief of Staff" if urgent else "Chief of Staff asks"
+            return self.say(head), self.gist(ask["text"]), "<your answer>"
         if draft := item.get("draft"):
             target = draft["target"]
             kind = draft["kind"]
@@ -1055,64 +1227,97 @@ class Connector:
                 verdict = str(target.get("verdict") or "comment")
                 title = (target.get("pr") or {}).get("title") or ""
                 pr = f"{str(target.get('repo', '')).split('/')[-1]}#{target.get('number', '')}"
-                head = f"Review of {pr}" + (f" \u201c{title}\u201d" if title else "")
-                head += f": {VERDICTS.get(verdict, 'Comment')}"
+                head = self.say("Review of {pr}", pr=pr) + (
+                    f" \u201c{title}\u201d" if title else ""
+                )
+                head += f": {self.say(VERDICTS.get(verdict, 'Comment'))}"
                 word = "approve" if verdict == "approve" else "post"
                 return head, self.gist(draft["text"]), fill or f"{word} · no"
             if kind == "github":
                 author = (target.get("comment") or {}).get("author") or ""
                 pr = f"{str(target.get('repo', '')).split('/')[-1]}#{target.get('number', '')}"
                 title = (target.get("pr") or {}).get("title") or ""
-                head = f"Reply{f' to {author}' if author else ''} on {pr}"
+                head = (
+                    self.say("Reply to {author} on {pr}", author=author, pr=pr)
+                    if author
+                    else self.say("Reply on {pr}", pr=pr)
+                )
                 head += f" \u201c{title}\u201d" if title and not reply else ""
                 return head, self.gist(draft["text"]), fill or "send · no"
             if kind in {"slack", "reply"}:
                 where = target.get("to") or target.get("where") or target.get("url") or ""
-                head = f"Draft to approve{f' · {where}' if where else ''}"
+                head = self.say("Draft to approve") + (f" · {where}" if where else "")
                 return head, self.gist(draft["text"]), fill or "send · no"
             if kind == "decision":
                 options = target.get("options") or []
                 listed = " ".join(f"{n}) {o.get('choice', '')}" for n, o in enumerate(options, 1))
                 text = f"{target.get('question', draft['text'])} {listed}".strip()
-                return "Decision", self.gist(text), "<number or your answer>"
+                return self.say("Decision"), self.gist(text), "<number or your answer>"
             if kind == "merge":
-                head = f"Ready to merge · {target['label']}"
-                checks = CHECK_WORDS.get(target.get("checks") or "", "")
+                head = self.say("Ready to merge · {label}", label=target["label"])
+                checks = self.say(CHECK_WORDS.get(target.get("checks") or "", ""))
                 said = target.get("title", "") + (f" ({checks})" if checks else "")
                 return head, gist(said), "merge · no"
             if kind == "workspace":
                 options = target.get("options") or []
                 # Not at the start of the line: gist would take "1)" for a list's marker.
-                listed = "Folders: " + " ".join(
+                listed = self.say("Folders: ") + " ".join(
                     f"{n}) {o['path']}" for n, o in enumerate(options, 1)
                 )
                 listed = " · ".join(
                     x
-                    for x in (listed if options else "", "none: no project, or a folder's path")
+                    for x in (
+                        listed if options else "",
+                        self.say("none: no project, or a folder's path"),
+                    )
                     if x
                 )
                 hint = "<number, none or a path>" if options else "<none or a path>"
-                return f"Which folder for “{target.get('title', '')}”", gist(listed), hint
-            return "Question", self.gist(draft["text"]), "<your answer>"
+                title = target.get("title", "")
+                return self.say("Which folder for “{title}”", title=title), gist(listed), hint
+            return self.say("Question"), self.gist(draft["text"]), "<your answer>"
         if question := item.get("question"):
             about = question.get("task_title") or question["worker"]
-            return f"“{about}” asks", self.gist(question["text"]), "<your answer>"
+            return (
+                self.say("“{about}” asks", about=about),
+                self.gist(question["text"]),
+                "<your answer>",
+            )
         task = item["task"]
         said = self.gist(task.get("progress") or "")
         if task["status"] == "failed":
-            return f"Failed · “{task['title']}”", said, "retry"
+            return self.say("Failed · “{title}”", title=task["title"]), said, "retry"
         if self.store.get(f"stopped:{task['id']}"):
             # Stopped mid-work: it asks nothing, it waits for Go on or Cancel.
-            return f"Stopped · “{task['title']}”", said, "go on · cancel"
-        return f"“{task['title']}” asks", said, "<your answer>"
+            return self.say("Stopped · “{title}”", title=task["title"]), said, "go on · cancel"
+        return self.say("“{about}” asks", about=task["title"]), said, "<your answer>"
 
     def gist(self, text: str) -> str:
         """gist, of a text sessions wrote: without draft ids or Slack timestamps."""
         return gist(self.runtime.drafts.owner_text(text))
 
-    def render(self, items: list[dict], more: int, codes: bool) -> tuple[str, dict]:
+    def chinese(self) -> bool:
+        return self.store.get("owner_language") == "Chinese"
+
+    def say(self, english: str, **fields: Any) -> str:
+        """Fixed words the owner reads away, in their language (see CHINESE)."""
+        text = CHINESE.get(english, english) if self.chinese() else english
+        return text.format(**fields) if fields else text
+
+    def reply_line(self, code: str, hint: str) -> str:
+        """How to answer an item, in the owner's language: its reply keywords stay, with what
+        they mean after them for an owner who writes Chinese (see GLOSS)."""
+        line = self.say("Reply: `{code} {hint}`", code=code, hint=self.say(hint))
+        gloss = GLOSS.get(hint, "") if self.chinese() else ""
+        return line + (f"\uff08{gloss}\uff09" if gloss else "")
+
+    def render(
+        self, items: list[dict], more: int, codes: bool, notes: list[str] | None = None
+    ) -> tuple[str, dict]:
         """A notification as Slack text (mrkdwn) and as Block Kit, with answer codes or
-        without (then the owner answers in Chief of Staff)."""
+        without (then the owner answers in Chief of Staff). `notes`: lines for the owner that
+        are no items (see tell_away)."""
+        notes = notes or []
         sections = []
         for item in items:
             what, said, hint = self.describe(item)
@@ -1125,23 +1330,34 @@ class Connector:
                     if self.decides_draft(item)
                     else "Not answered yet"
                 )
-                what, said = f"{again} \u00b7 {what}", f"{reason.rstrip('.')}. {said}".strip()
+                # Its heading says "not sent" already; the draft goes on its own line.
+                reason = NOT_DONE.sub("", reason.strip()).rstrip(".\u3002")
+                reason = reason[:1].upper() + reason[1:]
+                end = "\u3002" if self.chinese() else "."
+                what = f"{self.say(again)} \u00b7 {what}"
+                said = "\n".join(part for part in (reason + end if reason else "", said) if part)
             code = item["code"]
             head = f"*[{code}]* {mrkdwn(what)}" if codes else f"*{mrkdwn(what)}*"
             lines = [head]
             if said:
                 lines.append(said)
             if codes:
-                lines.append(f"Reply: `{code} {hint}`")
+                lines.append(self.reply_line(code, hint))
             sections.append("\n".join(lines))
-        title = f"Chief of Staff needs you ({len(items) + more})"
-        footer = (
+        # Lines for the owner that are no items to answer (a reply answered already, say).
+        sections = [mrkdwn(note) for note in notes] + sections
+        title = (
+            self.say("Chief of Staff needs you ({count})", count=len(items) + more)
+            if items or more
+            else "Chief of Staff"
+        )
+        footer = self.say(
             "Reply in this conversation with the code and your answer."
             if codes
             else "Answer in Chief of Staff on your computer: replies here are not read."
         )
         if more:
-            footer = f"{more} more waiting: open Chief of Staff. " + footer
+            footer = self.say("{more} more waiting: open Chief of Staff. ", more=more) + footer
         text = "\n\n".join([f"*{title}*", *sections, f"_{footer}_"])
         blocks = [
             {"type": "header", "text": {"type": "plain_text", "text": title[:150]}},
@@ -1180,12 +1396,13 @@ class Connector:
         ]
         if test:
             fresh = [{"id": f"test:{int(time.time())}", "test": True}]
-        if not fresh:
+        notes = [] if test else self.away_notes()
+        if not fresh and not notes:
             return
         shown, more = fresh[:MAX_AWAY_ITEMS], max(0, len(fresh) - MAX_AWAY_ITEMS)
         for item in shown:
             item["code"] = self.code_for(item["id"])
-        files = await asyncio.to_thread(self.write_notification, shown, more)
+        files = await asyncio.to_thread(self.write_notification, shown, more, notes)
         self.store.set(
             "away_pending",
             json.dumps(
@@ -1194,6 +1411,7 @@ class Connector:
                     "items": [item["id"] for item in shown],
                     "test": test,
                     "files": files,
+                    "notes": notes,
                 }
             ),
         )
@@ -1222,14 +1440,16 @@ class Connector:
         )
         await self.runtime.toolset.start_special(MESSENGER, MESSENGER_TITLE, "\n\n".join(lines))
 
-    def write_notification(self, items: list[dict], more: int) -> dict[str, str]:
+    def write_notification(
+        self, items: list[dict], more: int, notes: list[str] | None = None
+    ) -> dict[str, str]:
         """The message in files of its own: with and without answer codes, as Slack text and
         as Block Kit (the last 20 notifications are kept)."""
         folder = self.runtime.role_dir("away")
         stamp = int(time.time() * 1000)
         files = {}
         for name, codes in (("codes", True), ("plain", False)):
-            text, blocks = self.render(items, more, codes)
+            text, blocks = self.render(items, more, codes, notes)
             path = folder / f"notification-{stamp}-{name}"
             path.with_suffix(".txt").write_text(text + "\n", encoding="utf-8")
             path.with_suffix(".json").write_text(json.dumps(blocks, ensure_ascii=False))
@@ -1245,6 +1465,42 @@ class Connector:
         codes = self.open_codes()
         codes += [code for code in self.told_codes() if code not in codes]
         return codes + [code for code in self.used_codes() if code not in codes]
+
+    def followed_codes(self, written: float = 0) -> list[str]:
+        """The codes a reply that names no code may answer: every code still open that was
+        issued before it was written (`written`; all open ones when that is unknown). Not only
+        the latest notification's: it lists new items only, and an earlier one's may be what
+        the reply answers (code review: "yes, send it" to the first sent the second)."""
+        found = []
+        for code in self.open_codes():
+            issued = json.loads(self.store.get(f"awaycode:{code}") or "null")
+            if not (written and issued and written < issued["at"]):
+                found.append(code)
+        return found
+
+    def away_notes(self) -> list[str]:
+        """Lines for the owner waiting for the next notification (see tell_away)."""
+        notes = json.loads(self.store.get("away_notes") or "[]")
+        return [
+            note["text"] for note in notes if time.time() - note["at"] < READ_REPLIES_HOURS * 3600
+        ]
+
+    async def tell_away(self, text: str):
+        """A line for the owner where they are, about a reply of theirs there (no item to
+        answer): at once in their own Slack DM, else with the next notification."""
+        if self.store.get("away_where") == OWN_SLACK_DM and self.slack_dm():
+            try:
+                user = await self.owner_slack_id()
+                result = await self.runtime.slack.send({"channel_id": user}, text)
+            except Exception:
+                logger.warning("Could not write to the owner's own Slack DM.", exc_info=True)
+            else:
+                for key in message_keys(result):
+                    self.store.add_trigger("slack-sent", key, text)  # Not a reply of theirs.
+                return
+        notes = json.loads(self.store.get("away_notes") or "[]")
+        notes = [note for note in notes if note["text"] != text]
+        self.store.set("away_notes", json.dumps([*notes, {"text": text, "at": time.time()}][-10:]))
 
     def messenger_busy(self) -> bool:
         row = self.runtime.toolset.last_special(MESSENGER)
@@ -1268,16 +1524,25 @@ class Connector:
         if not codes:
             return
         read_at = float(self.store.get("away_read_at") or 0)
-        # Each read is a run of the messenger (a fresh Copilot conversation): every few minutes
-        # in the hour after a notification, then every half hour.
+        # Each read by the messenger is a run (a fresh Copilot conversation): every few minutes
+        # in the hour after a notification, then every half hour. The owner's own Slack DM is
+        # read here first, without a run, every few minutes all day: a run once they wrote.
         every = max(1, settings.watch_minutes) * 60
+        runs_every = every
         if time.time() - told > READ_OFTEN_SECONDS:
-            every = max(every, READ_LATER_SECONDS)
-        if time.time() - read_at < every:
+            runs_every = max(every, READ_LATER_SECONDS)
+        own = "read_owner_slack_dm" in how
+        if time.time() - read_at < (every if own else runs_every):
             return
         self.store.set("away_read_at", str(time.time()))
-        if "read_owner_slack_dm" in how and not await self.owner_dm_news():
-            return  # Their own Slack DM, read here: nothing new from them, no run.
+        if own:
+            news = await self.owner_dm_news()
+            if news is False:
+                return  # Nothing new from them there: no run.
+            ran = float(self.store.get("away_ran_at") or 0)
+            if news is None and time.time() - ran < runs_every:
+                return  # It could not be read here: the messenger looks, at its own pace.
+        self.store.set("away_ran_at", str(time.time()))
         where = self.store.get("away_where") or "the conversation you sent Chief of Staff's "
         # Kept as the owner reads it ("your own Slack DM"); the messenger reads it as theirs.
         where = re.sub(r"\byour\b", "the owner's", where, flags=re.IGNORECASE)
@@ -1297,13 +1562,27 @@ class Connector:
                 if self.decides_draft(item)
                 else code
             )
+        latest = self.followed_codes()
+        if len(latest) == 1:
+            codeless = (
+                " A reply that names no code answers the only code that waits: pass one written "
+                f"after it was sent with {latest[0]}."
+            )
+        elif latest:
+            codeless = (
+                " A reply that names no code: pass it with code \"\" and intent 'unclear' (codes "
+                f"{', '.join(latest)} wait: the owner is asked which one it answers)."
+            )
+        else:
+            codeless = " Leave out replies that name no code."
         text = (
             f"Read the owner's replies to Chief of Staff's notifications in {where} with: {how}\n\n"
             f"Pass each reply that names one of these codes with report_owner_replies (the code, "
             f"the reply exactly, when it was written, and what it means as intent): "
-            f"{', '.join(listed)}. Only what the owner themself wrote there. Each reply is judged "
-            "once, and a code's newest reply is the one that counts, so passing one again is "
-            "harmless. If there is none, end without calling it. Send nothing."
+            f"{', '.join(listed)}.{codeless} Only what the owner themself wrote there (replies "
+            "in a notification's thread too). Each reply is judged once, and a code's newest "
+            "reply is the one that counts, so passing one again is harmless. If there is none, "
+            "end without calling it. Send nothing."
         )
         await self.runtime.toolset.start_special(MESSENGER, MESSENGER_TITLE, text)
 
@@ -1343,6 +1622,15 @@ class Connector:
         sent = max((float(key.removeprefix("slack:")) for key in keys), default=time.time())
         before = json.loads(self.store.get("away_slack_dm") or "null") or {}
         recent = time.time() - before.get("after", 0) < READ_REPLIES_HOURS * 3600
+        # Each notification's own ts: replies in its thread are read too.
+        stamps = [key.removeprefix("slack:") for key in keys]
+        notified = [
+            stamp
+            for stamp in (before.get("threads") or [] if recent else [])
+            if time.time() - float(stamp) < READ_REPLIES_HOURS * 3600
+        ]
+        if stamps:
+            notified.append(max(stamps, key=float))
         self.store.set(
             "away_slack_dm",
             json.dumps(
@@ -1351,6 +1639,7 @@ class Connector:
                     "channel": (PERMALINK_CHANNEL.findall(result) or [user])[0],
                     # Replies to every notification still answerable are read.
                     "after": min(before["after"], sent) if recent else sent,
+                    "threads": notified[-MAX_THREADS:],
                 }
             ),
         )
@@ -1362,15 +1651,15 @@ class Connector:
             f'own Slack DM", method="send_owner_slack_dm", replies="{replies}").'
         )
 
-    async def owner_dm_news(self) -> bool:
+    async def owner_dm_news(self) -> bool | None:
         """Whether the owner wrote in their own Slack DM since it was last looked at (read
-        through Chief of Staff's own Slack connection: no messenger run). When it cannot be
-        read, True: the messenger looks."""
+        through Chief of Staff's own Slack connection: no messenger run); None when it cannot
+        be read here (the messenger looks)."""
         try:
             found = await self.owner_dm_messages()
         except Exception:
             logger.warning("Could not read the owner's own Slack DM.", exc_info=True)
-            return True
+            return None
         newest = max((float(entry["ts"]) for entry in found), default=0.0)
         # Seen once the messenger read it (see t_read_owner_slack_dm): a run that failed
         # first leaves it for the next.
@@ -1378,17 +1667,39 @@ class Connector:
 
     async def owner_dm_messages(self) -> list[dict]:
         """The owner's own messages in their own Slack DM since a notification was sent
-        there, oldest first."""
+        there, and in the threads of the notifications, oldest first."""
         dm = json.loads(self.store.get("away_slack_dm") or "null")
         if not dm:
             raise ValueError("Nothing was sent to the owner's own Slack DM.")
         user = await self.owner_slack_id()
-        listed = await self.runtime.slack.mcp.call(
-            "slack_read_channel", {"channel_id": dm["channel"], "limit": 50}
+        mcp = self.runtime.slack.mcp
+        listed = await mcp.call("slack_read_channel", {"channel_id": dm["channel"], "limit": 50})
+        stamps = dm.get("threads") or []
+        replies = await asyncio.gather(
+            *(
+                mcp.call("slack_read_thread", {"channel_id": dm["channel"], "message_ts": stamp})
+                for stamp in stamps
+            ),
+            return_exceptions=True,
         )
-        found = [
-            entry
-            for entry in messages(listed)
+        entries = messages(listed)
+        gone = []
+        for stamp, thread in zip(stamps, replies, strict=True):
+            if isinstance(thread, BaseException):
+                # One that cannot be read (deleted, a passing error) does not stop the rest;
+                # one Slack says is not there is not read again.
+                logger.info("Could not read the notification thread %s: %s", stamp, thread)
+                if re.search(r"thread_not_found|not found", str(thread), re.IGNORECASE):
+                    gone.append(stamp)
+                continue
+            # Its replies, not the notification itself.
+            entries += [e for e in messages(thread) if e["ts"] and float(e["ts"]) > float(stamp)]
+        if gone:
+            kept = [stamp for stamp in stamps if stamp not in gone]
+            self.store.set("away_slack_dm", json.dumps({**dm, "threads": kept}))
+        found = {
+            entry["ts"]: entry
+            for entry in entries
             if entry["user"] == user
             and entry["ts"]
             and float(entry["ts"]) > dm["after"]
@@ -1396,8 +1707,8 @@ class Connector:
                 "SELECT id FROM triggers WHERE key=? AND source='slack-sent'",
                 (f"slack:{entry['ts']}",),
             )
-        ]
-        return sorted(found, key=lambda entry: float(entry["ts"]))
+        }
+        return sorted(found.values(), key=lambda entry: float(entry["ts"]))
 
     async def t_read_owner_slack_dm(self, params: ReadOwnerSlackDm, caller: str):
         """What the owner wrote in their own Slack DM since a notification was sent there:
@@ -1409,12 +1720,18 @@ class Connector:
         newest = str(max(float(entry["ts"]) for entry in found))
         seen = float(self.store.get("away_dm_seen") or 0)
         codes = {code.lower() for code in self.reply_codes()}
-        if any(
-            code in codes
-            for entry in found
-            if float(entry["ts"]) > seen
-            for code in re.findall(r"[a-z2-7]{5}", entry["text"].lower())
-        ):
+        fresh = [entry for entry in found if float(entry["ts"]) > seen]
+        coded = [
+            entry
+            for entry in fresh
+            if any(code in codes for code in re.findall(r"[a-z2-7]{5}", entry["text"].lower()))
+        ]
+        # One that names no code answers the notification before it while that waits (see
+        # followed_codes): read again once if it was not reported, then seen (no endless runs).
+        codeless = any(
+            self.followed_codes(float(entry["ts"])) for entry in fresh if entry not in coded
+        )
+        if coded or (codeless and self.store.get("away_dm_reading") != newest):
             # Seen once it reported them: a run that fails before that leaves them for the next.
             self.store.set("away_dm_reading", newest)
         else:
@@ -1454,6 +1771,20 @@ class Connector:
                 self.store.set("away_sent", json.dumps((sent + pending["items"])[-200:]))
                 for item_id in pending["items"]:
                     self.store.delete(f"awayreask:{item_id}")  # Asked again now.
+                if pending["items"]:
+                    # What a reply naming no code answers (followed_codes).
+                    notified = [
+                        notified
+                        for notified in json.loads(self.store.get("away_notified") or "[]")
+                        if time.time() - notified["at"] < READ_REPLIES_HOURS * 3600
+                    ]
+                    notified.append({"at": pending["at"], "items": pending["items"]})
+                    self.store.set("away_notified", json.dumps(notified[-50:]))
+                told = set(pending.get("notes") or [])
+                notes = json.loads(self.store.get("away_notes") or "[]")
+                self.store.set(
+                    "away_notes", json.dumps([note for note in notes if note["text"] not in told])
+                )
         else:
             self.store.set("away_retry_at", str(time.time() + RETRY_SECONDS))
         self.store.set(
@@ -1501,16 +1832,16 @@ class Connector:
                 'No reply was given: pass replies=[{"code": "ABCDE", "text": "the owner\'s '
                 'reply, exactly"}], one item per code.'
             )
-        if reading := self.store.get("away_dm_reading"):
-            # What it read in the owner's own Slack DM reached here: seen.
-            self.store.set("away_dm_seen", reading)
-            self.store.delete("away_dm_reading")
         items = self.open_items()
         test = json.loads(self.store.get("away_test") or "null")
+        known = {*self.open_codes(), *self.told_codes(), *self.used_codes()}
+        if test:
+            known.add(test["code"])
+        replies, unsure = self.place_codeless(params.replies, known)
         # A reply to a draft or a merge card says what it means: the messenger reads it.
         unsaid = [
             reply.code.strip().upper()
-            for reply in params.replies
+            for reply in replies
             if (item := items.get(self.code_item(reply.code.strip().upper()) or ""))
             and self.decides_draft(item)
             and reply.intent not in DRAFT_INTENTS
@@ -1520,12 +1851,14 @@ class Connector:
                 f"{', '.join(unsaid)}: a draft or a PR to merge: pass each reply again with "
                 "intent='send', 'no', 'change' or 'unclear' (what the owner means)."
             )
-        known = {*self.open_codes(), *self.told_codes(), *self.used_codes()}
-        if test:
-            known.add(test["code"])
+        if reading := self.store.get("away_dm_reading"):
+            # What it read in the owner's own Slack DM reached here: seen.
+            self.store.set("away_dm_seen", reading)
+            self.store.delete("away_dm_reading")
+        done = [said for reply, codes in unsure if (said := await self.ask_which(reply, codes))]
         # A code's newest reply is what it says (an earlier one may be a joke taken back);
         # the others are judged as superseded, never applied later.
-        ordered = list(params.replies)
+        ordered = list(replies)
         if all(reply.at for reply in ordered):
             ordered.sort(key=lambda reply: reply.at)
         newest = {reply.code.strip().upper(): reply for reply in ordered}
@@ -1536,7 +1869,6 @@ class Connector:
                 key = f"awayjudged:{reply_key(code, part)}"
                 if not self.store.get(key):
                     self.store.set(key, "superseded by a later reply")
-        done = []
         for code, reply in newest.items():
             part = answer_part(reply.text, code, known)
             key = f"awayjudged:{reply_key(code, part)}"
@@ -1549,7 +1881,7 @@ class Connector:
                 continue  # Judged before: never again (a second reading could differ).
             outcome = ""
             if gone:
-                outcome = self.what_became(item_id) or (
+                outcome = self.what_became(item_id) or self.say(
                     "nothing waits for that code (answered already?)"
                 )
                 # Nothing to apply: said again only once what became of it changes (the PR
@@ -1562,15 +1894,19 @@ class Connector:
                 self.store.delete("away_test")
                 self.store.delete(f"awaycode:{code}")
                 done.append(f"{code}: your answer came back")
-                outcome = "your answers come back: replies here work"
+                outcome = self.say("your answers come back: replies here work")
                 self.verified_replies()
             elif used:
-                # Answered already: this reply changes nothing; said once.
+                # Answered already: this reply changes nothing; said once, here and where the
+                # owner is (they may think it held something back).
                 became = self.what_became(used["item"]) if isinstance(used, dict) else ""
-                outcome = "not done: you answered this code already" + (
-                    f" ({became})" if became else ""
+                outcome = (
+                    self.say("not done: you answered this code already ({became})", became=became)
+                    if became
+                    else self.say("not done: you answered this code already")
                 )
                 done.append(f"{code}: {outcome}")
+                await self.tell_away(self.answered_already(code, used, became))
             elif not item:
                 done.append(f"{code}: {outcome}")
                 if self.store.get(f"awaynoted:{code}") == outcome:
@@ -1588,7 +1924,7 @@ class Connector:
                     )
                     self.store.delete(f"awayreask:{item_id}")
                 except (ValueError, LookupError, RuntimeError) as exc:
-                    outcome = f"not done: {exc}"
+                    outcome = self.say("not done: {reason}", reason=exc)
                     # Asked again where the owner is, not only here (see notify_away).
                     self.store.set(f"awayreask:{item_id}", str(exc)[:200])
                 done.append(f"{code}: {outcome}")
@@ -1602,6 +1938,77 @@ class Connector:
             )
         self.runtime.publish_state()
         return "\n".join(done) or "Nothing to apply."
+
+    def place_codeless(
+        self, replies: list[OwnerReply], known: set[str]
+    ) -> tuple[list[OwnerReply], list[tuple[OwnerReply, list[str]]]]:
+        """Replies with the code each answers. One that names no code answers the only code
+        that waited when it was written (see followed_codes), whatever code the messenger gave
+        it; one that could answer several is asked about (the second list: with those codes);
+        one that answers nothing that waits is left out."""
+        placed, unsure = [], []
+        for reply in replies:
+            code = reply.code.strip().upper()
+            named = {found.upper() for found in ANY_CODE.findall(reply.text)}
+            if (code and code in named) or named & known:
+                placed.append(reply)
+                continue
+            # It names no code: whatever code the messenger gave it, it answers the only one open
+            # then; with several, the owner is asked which.
+            codes = self.followed_codes(epoch(reply.at))
+            if len(codes) == 1:
+                placed.append(reply.model_copy(update={"code": codes[0]}))
+            elif codes:
+                unsure.append((reply, codes))
+        return placed, unsure
+
+    async def ask_which(self, reply: OwnerReply, codes: list[str]) -> str:
+        """A reply that names no code after a notification with several: the owner is asked
+        which code it answers, once per reply."""
+        key = hashlib.sha256(f"{reply.at}\n{reply.text.strip()}".encode()).hexdigest()[:16]
+        if self.store.get(f"awayasked:{key}"):
+            return ""
+        self.store.set(f"awayasked:{key}", now())
+        listed = ", ".join(codes)
+        await self.tell_away(self.say("Which one? Reply with its code: {codes}", codes=listed))
+        said = " ".join(reply.text.split())[:200]
+        self.runtime.add_message(
+            self.runtime.router_id(),
+            "notice",
+            f"You answered from {yours(self.store.get('away_where') or 'elsewhere')}: {said} "
+            f"\u2192 it names no code: you were asked which one ({listed})",
+            {"away_reply": True},
+        )
+        return f"(no code) {said[:80]}: the owner is asked which code it answers ({listed})"
+
+    def answered_already(self, code: str, used: Any, became: str) -> str:
+        """For the owner where they are: what became of a code they answered before, when a
+        reply names it again ("wait, don't send that yet")."""
+        at = used.get("at") if isinstance(used, dict) else used
+        clock = datetime.fromtimestamp(float(at or time.time())).astimezone().strftime("%H:%M")
+        outcome = used.get("outcome", "") if isinstance(used, dict) else ""
+        if became == self.say("sent already") or outcome in {
+            self.say("sent"),
+            self.say("marked as sent"),
+        }:
+            return self.say(
+                "{code} was already sent at {clock}: this reply changes nothing.",
+                code=code,
+                clock=clock,
+            )
+        was = became or outcome
+        if not was:
+            return self.say(
+                "{code} was answered already at {clock}: this reply changes nothing.",
+                code=code,
+                clock=clock,
+            )
+        return self.say(
+            "{code} was answered already at {clock} ({became}): this reply changes nothing.",
+            code=code,
+            clock=clock,
+            became=was,
+        )
 
     def what_became(self, item_id: str) -> str:
         """What became of a draft (or a merge card) a code was given for, once it no longer
@@ -1619,9 +2026,13 @@ class Connector:
         if draft["status"] == "pending":
             return ""
         if draft["status"] in {"sent", "sending", "uncertain"}:
-            return "sent already" if draft["status"] == "sent" else "being sent: see Home"
+            return self.say("sent already" if draft["status"] == "sent" else "being sent: see Home")
         if draft["status"] == "failed":
-            return f"its sending failed: {outcome}" if outcome else "its sending failed"
+            return (
+                self.say("its sending failed: {outcome}", outcome=outcome)
+                if outcome
+                else self.say("its sending failed")
+            )
         newer = self.store.get(f"replacedby:{draft['id']}") or ""
         if newer or outcome.startswith("Replaced by"):
             try:
@@ -1642,10 +2053,14 @@ class Connector:
                     then = f" Answer that one with its code {told}, or on Home."
             return f"that draft was replaced by a newer one{said}; nothing was sent.{then}"
         if outcome.startswith("Withdrawn"):
-            return "withdrawn: " + outcome.removeprefix("Withdrawn").lstrip(":. ")
+            reason = outcome.removeprefix("Withdrawn").lstrip(":. ")
+            return self.say("withdrawn: {reason}", reason=reason)
         if outcome.startswith("Redo:"):
-            return "you asked for it again: " + outcome.removeprefix("Redo:").strip()
-        return f"dropped already ({outcome})" if outcome else "dropped already"
+            reason = outcome.removeprefix("Redo:").strip()
+            return self.say("you asked for it again: {reason}", reason=reason)
+        if outcome:
+            return self.say("dropped already ({outcome})", outcome=outcome)
+        return self.say("dropped already")
 
     def verified_replies(self):
         self.store.set(
@@ -1680,31 +2095,34 @@ class Connector:
         OwnerReply); a send it holds back is not sent (holds_send)."""
         answer = without_code(text, code)
         word = answer.lower().strip(" .!")
+        say = self.say
         if item.get("ask"):
             if not answer:
-                raise ValueError("write your answer after the code")
+                raise ValueError(say("write your answer after the code"))
             await self.runtime.owner_send(self.runtime.router_id(), answer)
-            return "sent to the Router"
+            return say("sent to the Router")
         if draft := item.get("draft"):
             kind = draft["kind"]
             drafts = self.runtime.drafts
             if kind == "merge":
-                if intent == "send" and (held := holds_send(answer)):
-                    raise ValueError(
-                        f'not merged: \u201c{held}\u201d sounds like not now: answer "merge" when '
-                        'it should be merged, or "no"'
-                    )
-                if intent == "send":
+                held = holds_send(answer)
+                if intent == "send" and not held:
                     merged = await drafts.resolve(draft["id"], DraftDecision(action="send"))
-                    return merged.get("outcome") or "merged"
+                    return merged.get("outcome") or say("merged")
                 if intent == "no":
                     await drafts.resolve(draft["id"], DraftDecision(action="reject"))
-                    return "left as it is"
+                    return say("left as it is")
                 # Said why when its words say it ("after CI", "tomorrow").
-                held = holds_send(answer)
-                why = f"\u201c{held}\u201d sounds like not now: " if held else ""
+                if held:
+                    raise ValueError(
+                        say(
+                            'not merged: \u201c{held}\u201d sounds like not now: answer "merge" '
+                            'when it should be merged, or "no"',
+                            held=held,
+                        )
+                    )
                 raise ValueError(
-                    f'not merged: {why}answer "merge" when it should be merged, or "no"'
+                    say('not merged: answer "merge" when it should be merged, or "no"')
                 )
             if kind in {"slack", "github", "reply"}:
                 target = draft["target"]
@@ -1715,54 +2133,78 @@ class Connector:
                     if verdict != "approve" and "approve" in re.findall(r"\w+", word):
                         # It would post as it is, not as an approval.
                         raise ValueError(
-                            f"not posted: this review is {VERDICTS.get(verdict, verdict)}, not an "
-                            'approval: answer "post" to post it as it is, or "no"'
+                            say(
+                                "not posted: this review is {verdict}, not an approval: answer "
+                                '"post" to post it as it is, or "no"',
+                                verdict=say(VERDICTS.get(verdict, verdict)),
+                            )
                         )
                 # What it means is the messenger's reading; a send it holds back ("ok wait",
                 # "send it after lunch", "发吗") is not one, nor a draft with blanks.
-                if intent == "send" and (held := holds_send(answer)):
+                held = holds_send(answer)
+                if intent == "send" and held:
                     raise ValueError(
-                        f"not sent: \u201c{held}\u201d sounds like not now, or not as it is: "
-                        'answer "send" when it should go, or "no"'
+                        say(
+                            "not sent: \u201c{held}\u201d sounds like not now, or not as it is: "
+                            'answer "send" when it should go, or "no"',
+                            held=held,
+                        )
                     )
                 if intent == "send" and (blank := BLANKS.search(draft["text"])):
                     raise ValueError(
-                        "not sent: the draft still has a blank to fill "
-                        f"(\u201c{blank.group(0)}\u201d): say the words to use instead, or edit "
-                        "it on Home"
+                        say(
+                            "not sent: the draft still has a blank to fill (\u201c{blank}\u201d): "
+                            "say the words to use instead, or edit it on Home",
+                            blank=blank.group(0),
+                        )
                     )
                 if intent == "send":
                     await drafts.resolve(draft["id"], DraftDecision(action="send"))
-                    return "sent" if kind != "reply" else "marked as sent"
+                    return say("sent" if kind != "reply" else "marked as sent")
                 if intent == "no":
                     # Their words are the reason (on its card, and for how they write).
                     reason = "From away" if word in BARE_NO else answer
                     await drafts.resolve(draft["id"], DraftDecision(action="reject", reason=reason))
-                    return "dropped"
+                    return say("dropped")
                 blanks = blanks_of(draft["text"])
                 if intent != "change" or not answer:
                     # Said why when its words say it ("after lunch"), as for a send held back.
-                    why = (
-                        f"\u201c{held}\u201d sounds like not now, or not as it is: "
-                        if (held := holds_send(answer))
-                        else ""
-                    )
+                    if blanks and held:
+                        raise ValueError(
+                            say(
+                                "not sent: \u201c{held}\u201d sounds like not now, or not as it "
+                                'is: say the words for its blanks ({blanks}), or "no"',
+                                held=held,
+                                blanks=blanks,
+                            )
+                        )
                     if blanks:
                         raise ValueError(
-                            f'not sent: {why}say the words for its blanks ({blanks}), or "no"'
+                            say(
+                                'not sent: say the words for its blanks ({blanks}), or "no"',
+                                blanks=blanks,
+                            )
                         )
-                    raise ValueError(f'not sent: {why}answer "send" when it should go, or "no"')
+                    if held:
+                        raise ValueError(
+                            say(
+                                "not sent: \u201c{held}\u201d sounds like not now, or not as it "
+                                'is: answer "send" when it should go, or "no"',
+                                held=held,
+                            )
+                        )
+                    raise ValueError(say('not sent: answer "send" when it should go, or "no"'))
                 # Anything else is what to change (or the words for its blanks): it is drafted
                 # again that way.
                 reason = f"Fill in its blanks: {answer}" if blanks else answer
                 await drafts.resolve(draft["id"], DraftDecision(action="revise", reason=reason))
-                return "to be drafted again as you say"
+                return say("to be drafted again as you say")
             if kind == "decision":
                 options = draft["target"].get("options") or []
                 if word.isdigit() and 1 <= int(word) <= len(options):
                     answer = options[int(word) - 1]["choice"]
                 await drafts.resolve(draft["id"], DraftDecision(action="answer", text=answer))
-                return f"decided: {answer[:100]}"
+                return say("decided: {answer}", answer=answer[:100])
             if kind == "workspace":
                 # As its card: a folder it offers, no project, or another folder by its path.
                 options = draft["target"].get("options") or []
@@ -1775,41 +2217,47 @@ class Connector:
                     choice = path
                 else:
                     raise ValueError(
-                        ("answer with the number of a folder, " if options else "answer ")
-                        + '"none" for no project, or the path of a folder'
+                        say(
+                            'answer with the number of a folder, "none" for no project, or the '
+                            "path of a folder"
+                            if options
+                            else 'answer "none" for no project, or the path of a folder'
+                        )
                     )
                 await drafts.resolve(draft["id"], DraftDecision(action="choose", choice=choice))
                 return (
-                    f"chose {choice}" if choice else "no project: it starts in a folder of its own"
+                    say("chose {choice}", choice=choice)
+                    if choice
+                    else say("no project: it starts in a folder of its own")
                 )
             await drafts.resolve(draft["id"], DraftDecision(action="answer", text=answer))
-            return "answered"
+            return say("answered")
         if question := item.get("question"):
             if not answer:
-                raise ValueError("write your answer after the code")
+                raise ValueError(say("write your answer after the code"))
             await self.runtime.task_actions.answer_question(question["id"], answer)
-            return "sent to the worker"
+            return say("sent to the worker")
         task = item["task"]
         if task["status"] == "failed":
-            if word != "retry":
-                raise ValueError('answer "retry"')
+            if word not in RETRY_WORDS:
+                raise ValueError(say('answer "retry"'))
             await self.runtime.task_actions.retry(task["id"])
-            return "retrying"
+            return say("retrying")
         if task["status"] == "waiting" and self.store.get(f"stopped:{task['id']}"):
             # Stopped mid-work: Go on (with a note, if they wrote one) or Cancel, as on Home.
             if word in CANCEL_WORDS:
                 await self.runtime.task_actions.cancel(task["id"])
-                return "cancelled"
+                return say("cancelled")
             if word in GO_ON_WORDS:
                 answer = "Go on where you stopped."
             elif not answer or word in REJECT_WORDS:
-                raise ValueError('answer "go on" or "cancel"')
+                raise ValueError(say('answer "go on" or "cancel"'))
             await self.runtime.task_actions.follow_up(task["id"], answer)
-            return "going on"
+            return say("going on")
         if not answer:
-            raise ValueError("write your answer after the code")
+            raise ValueError(say("write your answer after the code"))
         await self.runtime.task_actions.follow_up(task["id"], answer)
-        return "sent to the worker"
+        return say("sent to the worker")
 
     def tools(self) -> list[tuple]:
         return [

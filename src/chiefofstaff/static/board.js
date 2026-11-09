@@ -37,6 +37,7 @@ export const MARKERS = {
   delivered: "Delivered",
   "pr-failing": "CI failing",
   "pr-changes": "Changes requested",
+  "pr-conflicts": "Merge conflicts",
   mergeable: "Ready to merge",
   reviewed: "Reviewed",
   "still-following": "Still following",
@@ -48,12 +49,14 @@ export const MARKERS = {
 
 // What a PR's state comes to, in a word or two, worst first: one rule for Artifacts, a card's
 // PR chip, what Monitoring says it waits on and where its task is placed (changes requested
-// wins over failing CI: the author has to act on the review either way).
+// wins over merge conflicts, and those over failing CI: the author has to act on the review
+// either way, and CI is of little use until the branch merges cleanly).
 export function prStatus(pr) {
   if (pr.state === "MERGED") return ["merged", "good"];
   if (pr.state === "CLOSED") return ["closed", "muted"];
   if (pr.draft) return ["draft", "active"];
   if (pr.review === "CHANGES_REQUESTED") return ["changes requested", "bad"];
+  if (pr.merge_state === "DIRTY") return ["merge conflicts", "bad"];
   if (pr.checks === "failing") return ["CI failing", "bad"];
   if (pr.awaiting?.length) return ["awaiting approval", "wait"];
   if (pr.checks === "pending") return ["CI running", "active"];
@@ -63,11 +66,13 @@ export function prStatus(pr) {
   return ["in review", "active"];
 }
 // Where a delivered task's own open PRs that it follows stand, the one that matters most
-// first: one to fix (changes requested, CI failing), then one ready to merge. Null when none
-// of them asks for anything (in review, awaiting approval, CI running).
-const PR_MARKERS = { "changes requested": "pr-changes", "CI failing": "pr-failing", "ready to merge": "mergeable" };
+// first: one to fix (changes requested, merge conflicts, CI failing), then one ready to merge.
+// Null when none of them asks for anything (in review, awaiting approval, CI running).
+const PR_MARKERS = { "changes requested": "pr-changes", "merge conflicts": "pr-conflicts", "CI failing": "pr-failing", "ready to merge": "mergeable" };
+// Its own PR to fix: the owner asks its worker to (or acts on GitHub).
+export const PR_TO_FIX = ["pr-changes", "pr-conflicts", "pr-failing"];
 // The markers of a delivered task by where its PR stands (one row per followed PR, see boardOf).
-const DELIVERED = ["delivered", "reviewed", "mergeable", "pr-failing", "pr-changes"];
+const DELIVERED = ["delivered", "reviewed", "mergeable", ...PR_TO_FIX];
 function ownPrStanding(task) {
   const watched = new Set(followedKeys(task).map((key) => /^github:(.+#\d+)$/.exec(key)?.[1]?.toLowerCase()).filter(Boolean));
   const found = (task.receipts?.prs || [])
@@ -80,14 +85,14 @@ function ownPrStanding(task) {
   const { pr, word } = first;
   const short = pr.label.replace(/^[^/]+\//, "");
   const failing = word === "CI failing" && pr.failing?.length ? ` (${pr.failing.join(", ")})` : "";
-  const why = { "changes requested": `Changes requested on ${short}`, "CI failing": `CI failing on ${short}${failing}`, "ready to merge": `Ready to merge: ${short}` }[word];
+  const why = { "changes requested": `Changes requested on ${short}`, "merge conflicts": `Merge conflicts on ${short}`, "CI failing": `CI failing on ${short}${failing}`, "ready to merge": `Ready to merge: ${short}` }[word];
   return { marker: PR_MARKERS[word], why };
 }
 
 // What a task follows: those read lately and those that could not be (as they stood last).
 const followedKeys = (task) => [...(task.watching || []), ...(task.watch_unreadable || [])];
 // The most pressing first when one PR's row stands for several tasks (see boardOf).
-const URGENCY = { "pr-changes": 0, "pr-failing": 0, mergeable: 1 };
+const URGENCY = { "pr-changes": 0, "pr-conflicts": 0, "pr-failing": 0, mergeable: 1 };
 
 const hours = (from, now) => (from ? (now - Date.parse(from)) / 3600000 : 0);
 // A delivered task whose PR (or thread) has not changed for this long goes with the finished
@@ -157,8 +162,8 @@ export function taskPhase(task, worker, { active = "", activeTitle = "", stopped
     if (working(worker) && active === task.id && task.follow_up) return at("running", "following", "Following up on your message; its result stays yours to review");
     if (task.news) return at("needs", "update", "");
     if (task.status === "review" && needsAcceptance(task)) {
-      // Its own PR to fix (changes requested, CI failing) is said, as once it is accepted: the
-      // owner asks its worker to fix it, or accepts it as it is.
+      // Its own PR to fix (changes requested, conflicts, failing CI) is said, as once accepted:
+      // the owner asks its worker to fix it, or accepts it as it is.
       const standing = ownPrStanding(task);
       if (standing && standing.marker !== "mergeable") return at("needs", standing.marker, standing.why);
       return at("needs", "review", "");

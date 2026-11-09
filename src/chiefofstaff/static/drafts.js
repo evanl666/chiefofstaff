@@ -615,7 +615,9 @@ function reviewCard(draft) {
     chip.className = `chip ${VERDICT_CHIP[review.verdict]}`;
     chip.hidden = review.verdict === "comment";
     const summary = review.summary.trim();
-    preview.textContent = summary || `${emptySummary(review)}.`;
+    // Its `code` as code, as GitHub shows it (and the rest escaped).
+    if (summary) preview.innerHTML = inlineHtml(summary);
+    else preview.textContent = `${emptySummary(review)}.`;
     preview.classList.toggle("empty", !summary);
     const kept = review.comments.filter((comment) => !comment.removed).length;
     count.textContent = !comments.length ? "No line comments" : kept === comments.length ? `${comments.length} line comment${comments.length === 1 ? "" : "s"}` : `${kept} of ${comments.length} line comments`;

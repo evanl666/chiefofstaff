@@ -85,6 +85,29 @@ def written_file(cwd: str, request: Any) -> str:
     return target
 
 
+def owners_checkout(row: dict, request: Any, checkouts: list[dict]) -> str | None:
+    """Why a worker may not write this file: it is in a git checkout of the owner's it was given
+    only to read (a task that changes no code, see Workspaces.writes). Also when it acts without
+    permission checks (yolo): the owner's checkouts are never written."""
+    if row["role"] != WORKER or getattr(request, "kind", "") != "write":
+        return None
+    target = getattr(request, "resolved_path", None) or getattr(request, "file_name", "")
+    if not Path(target).is_absolute():
+        target = str(Path(row["cwd"]) / target)
+    kept = [
+        c["path"]
+        for c in checkouts
+        if c.get("shared") and c.get("git_dir") and not c.get("in_place")
+    ]
+    if not any(within(target, folder) for folder in kept):
+        return None
+    return (
+        "This folder is the owner's own checkout: nothing is written there. To change it or run "
+        "what writes files (installs, builds, tests), add_repo it: you get your own worktree and "
+        "branch, and work there."
+    )
+
+
 def permission_denial(row: dict, request: Any, writable: list[str] | None = None) -> str | None:
     """Why a session may not do this, or None when it is allowed."""
     kind = getattr(request, "kind", "")
@@ -121,12 +144,6 @@ def permission_denial(row: dict, request: Any, writable: list[str] | None = None
             target = str(Path(cwd) / target)
         folders = [*(writable or [cwd]), tempfile.gettempdir()]
         if not any(within(target, folder) for folder in folders if folder):
-            if writable and within(target, cwd) and (Path(cwd) / ".git").exists():
-                return (
-                    "This folder is the owner's own checkout: nothing is written there. To change "
-                    "it or run what writes files (installs, builds, tests), add_repo it: you get "
-                    "your own worktree and branch, and work there."
-                )
             return (
                 f"Writing outside your working directory ({cwd}) and checkouts needs the owner. "
                 'Ask with report(status="question"), or add_repo for another repository.'

@@ -168,6 +168,7 @@ SHARDS = {
     "I": (18799, 18929), "J": (18800, 18930), "K": (18801, 18931),
     "L": (18802, 18932), "M": (18803, 18933), "N": (18804, 18934), "O": (18805, 18935),
     "P": (18806, 18936), "Q": (18807, 18937), "R": (18808, 18938),
+    "S": (18809, 18939),
 }  # fmt: skip
 MODEL = "claude-sonnet-5.5"
 CJK = re.compile(r"[\u4e00-\u9fff]")
@@ -277,7 +278,7 @@ async def session(ctx: Ctx, session_id: str) -> dict:
 
 
 async def messages(ctx: Ctx, session_id: str) -> list[dict]:
-    return await ctx.app.get(f"/api/sessions/{session_id}/messages")
+    return await ctx.app.get(f"/api/sessions/{session_id}/messages?prompts=true")
 
 
 async def workers_since(ctx: Ctx, since: str) -> list[dict]:
@@ -4606,6 +4607,119 @@ async def r5_an_away_send_with_a_link_in_it_is_sent(ctx: Ctx):
     log("R5 passed")
 
 
+# Round 9: what the ninth bug bash fixed, on real Copilot.
+
+
+async def s1_an_away_reply_without_a_code_answers_the_only_one(ctx: Ctx):
+    """Round 9: "yes send that one" to a notification with one code was dropped (no code)."""
+    await away_on(ctx)
+    try:
+        since, before = now(), len(outbox(ctx))
+        asked = f"Hi! What is the package called in {ctx.project}/pyproject.toml?"
+        draft = await reply_card(ctx, since, "D0ALICE01", "U0ALICE1", asked)
+        await told_away(ctx, before)
+        sent_before = len(ctx.slack.sent)
+        reply_away(ctx, "yes, send that one")
+
+        async def sent():
+            pending = [d["id"] for d in (await state(ctx))["drafts"] if d["status"] == "pending"]
+            return ctx.slack.sent[sent_before:] if draft["id"] not in pending else None
+
+        await wait_for("the reply without a code is applied", sent, 400, ctx.app)
+        log(f"S1: sent {ctx.slack.sent[sent_before:][-1:]}")
+        assert [m for m in ctx.slack.sent[sent_before:] if m["channel"] == "D0ALICE01"]
+    finally:
+        await settings(ctx, away_notify=False)
+        (ctx.root / "idle").write_text("0")
+    log("S1 passed")
+
+
+async def s2_an_away_reply_in_the_notifications_thread_is_read(ctx: Ctx):
+    """Round 9: through the owner's own Slack DM, a reply in the notification's thread was
+    never read."""
+    (ctx.root / "idle").write_text("3600")
+    await settings(ctx, away_notify=True, away_minutes=1, watch_minutes=1,
+                   away_how="send it to my own Slack DM")  # fmt: skip
+    try:
+        since, sent_before = now(), len(ctx.slack.sent)
+        asked = f"Quick one: how many lines does {ctx.project}/AGENTS.md have?"
+        draft = await reply_card(ctx, since, "D0BOB0001", "U0BOB001", asked)
+
+        async def notified():
+            for message in ctx.slack.sent[sent_before:]:
+                # The code on the line of the draft to Bob (the notification may list more).
+                if message["channel"] != "D0BOB0001" and (
+                    found := re.search(r"\[([A-Z2-7]{5})\][^\n]*Draft[^\n]*Bob", message["text"])
+                ):
+                    return message, found.group(1)
+            return None
+
+        note, code = await wait_for("told in the owner's own DM", notified, 400, ctx.app)
+        ctx.slack.post(note["channel"], "U0OWNER1", f"{code} no, I'll answer Bob myself",
+                       thread_ts=note["ts"])  # fmt: skip
+
+        async def dropped():
+            # Only drafts that wait are listed: once answered, it is not there.
+            pending = [d["id"] for d in (await state(ctx))["drafts"] if d["status"] == "pending"]
+            if draft["id"] in pending:
+                return None
+            router = (await state(ctx))["router_id"]
+            said = [m["text"] for m in await messages(ctx, router) if m["kind"] == "notice"]
+            return [text for text in said if text.startswith("Rejected:")] or None
+
+        settled = await wait_for("the reply in its thread is read", dropped, 400, ctx.app)
+        log(f"S2: {code} -> {settled[-1]!r}")
+        assert "Bob Li" in settled[-1], settled
+        assert not [m for m in ctx.slack.sent[sent_before:] if m["channel"] == "D0BOB0001"]
+    finally:
+        await settings(ctx, away_notify=False)
+        (ctx.root / "idle").write_text("0")
+    log("S2 passed")
+
+
+async def s3_a_chinese_owner_is_told_away_in_chinese(ctx: Ctx):
+    """Round 9: away notifications were English only for an owner who writes Chinese."""
+    await ask(ctx, "\u4f60\u597d\uff0c\u4eca\u5929\u6211\u7528\u4e2d\u6587\u3002"
+              "\u73b0\u5728\u4e0d\u7528\u505a\u4efb\u4f55\u4e8b\u3002")  # fmt: skip
+    await away_on(ctx)
+    try:
+        router = (await state(ctx))["router_id"]
+        mark = max((m["id"] for m in await messages(ctx, router)), default=0)
+        since, before = now(), len(outbox(ctx))
+        # One the Slack session drafts a reply to by itself (no code to read).
+        asked = "Hi! Are we still on for lunch tomorrow at noon?"
+        draft = await reply_card(ctx, since, "D0ALICE01", "U0ALICE1", asked)
+
+        async def told():
+            said = "\n".join(outbox(ctx)[before:])
+            found = re.search(r"\[([A-Z2-7]{5})\][^\n]*Alice", said)
+            return (found.group(1), said) if found else None
+
+        code, said = await wait_for("told away", told, 400, ctx.app)
+        log(f"S3: {said[:300]!r}")
+        assert re.search(r"[\u4e00-\u9fff]", re.sub(r"Hi!.*", "", said)), "its own words"
+        reply_away(ctx, f"{code} \u4e0d\u53d1")  # "don't send"
+
+        async def dropped():
+            pending = [d["id"] for d in (await state(ctx))["drafts"] if d["status"] == "pending"]
+            if draft["id"] in pending:
+                return None
+            notices = [
+                m["text"] for m in await messages(ctx, router)
+                if m["id"] > mark and m["kind"] == "notice"
+            ]  # fmt: skip
+            return [text for text in notices if text.startswith("Rejected:")] or None
+
+        settled = await wait_for("the Chinese answer is applied", dropped, 400, ctx.app)
+        log(f"S3: {code} -> {settled[-1]!r}")
+        assert "Alice Chen" in settled[-1], settled
+    finally:
+        await settings(ctx, away_notify=False)
+        (ctx.root / "idle").write_text("0")
+        await ask(ctx, "Back to English now. Nothing to do.")
+    log("S3 passed")
+
+
 SCENARIOS = {
     "A": [
         w1_ask, w2_progress, w3_answered_directly, w4_pasted_orders, w5_chinese_log,
@@ -4697,6 +4811,11 @@ SCENARIOS = {
         r3_a_stopped_task_stays_stopped_past_its_check_back,
         r4_a_task_that_only_reads_leaves_your_checkout_as_it_was,
         r5_an_away_send_with_a_link_in_it_is_sent,
+    ],
+    "S": [
+        s1_an_away_reply_without_a_code_answers_the_only_one,
+        s2_an_away_reply_in_the_notifications_thread_is_read,
+        s3_a_chinese_owner_is_told_away_in_chinese,
     ],
 }  # fmt: skip
 

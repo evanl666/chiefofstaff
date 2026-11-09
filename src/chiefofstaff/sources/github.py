@@ -762,6 +762,16 @@ class GitHubSource:
                 )
             )
         state = "merged" if pull.get("merged") else pull["state"]
+        if state == "open" and pull.get("mergeable_state") == "dirty":
+            # Once per head and base: its author has to merge or rebase (bug bash 9: nobody
+            # was told, and its chips said "approved").
+            onto = (pull.get("base") or {}).get("ref") or "its base"
+            items.append(
+                (
+                    f"github:conflicts:{thread}@{sha}:{(pull.get('base') or {}).get('sha', '')}",
+                    f"It has merge conflicts with {onto}: merge or rebase it and push.",
+                )
+            )
         kept = False
         if state != "open":
             ended = pull.get("merged_at") or pull.get("closed_at")
@@ -789,10 +799,14 @@ class GitHubSource:
                 kept = True
                 self.store.set(f"ghclosed:{thread}", ended or now())
                 if not before:
+                    gone = await self.branch_gone(pull)
                     items.append(
                         (
                             f"github:state:{thread}:closed:{ended}",
-                            f"The PR was closed, not merged. It stays followed for "
+                            f"The PR was closed, not merged, and its branch {gone} was deleted: "
+                            "it can be reopened only once the branch is pushed again."
+                            if gone
+                            else f"The PR was closed, not merged. It stays followed for "
                             f"{KEEP_CLOSED_DAYS} days, so a reopening reaches you.",
                         )
                     )
@@ -815,6 +829,21 @@ class GitHubSource:
         self.store.set(f"ghhead:{thread}", sha)
         if state != "open" and not kept:
             self.host.unfollow(thread, finished=True, merged=state == "merged")
+
+    async def branch_gone(self, pull: dict) -> str:
+        """The name of a closed PR's head branch when it no longer exists (deleted, or its fork
+        gone), else ""."""
+        head = pull.get("head") or {}
+        if "repo" in head and head["repo"] is None:
+            return head.get("ref") or "its branch"  # GitHub's null: the fork is gone.
+        ref, repo = head.get("ref") or "", (head.get("repo") or {}).get("full_name") or ""
+        if not (ref and repo):
+            return ""
+        try:
+            await self.gh("api", f"repos/{repo}/git/ref/heads/{ref}")
+        except RuntimeError as exc:
+            return ref if NOT_FOUND.search(str(exc)) else ""
+        return ""
 
     async def pushed(self, repo: str, old: str, new: str, base: str | None = None) -> str:
         """What was pushed between two heads, by whom; "" when only the account Chief of Staff

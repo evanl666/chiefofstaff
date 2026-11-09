@@ -42,6 +42,11 @@ DRAFT_FIELDS = {"status", "outcome", "final_text", "resolved_at"}
 # Followed Slack conversations stop being followed after this long without activity.
 CONVERSATION_TTL = 12 * 3600
 THREAD_TTL = 3 * 86400
+# The settings as last read are used for this long (seconds); a folder they name may go meanwhile.
+SETTINGS_FRESH = 2.0
+# A session's newest messages read when no mark or limit is given.
+MESSAGES_SHOWN = 400
+LAST_ID = 2**63 - 1
 
 
 def now() -> str:
@@ -90,6 +95,8 @@ class Store:
         self.directory = directory
         rename_database(directory)
         self.lock = threading.RLock()
+        # (until when, settings): read once for many calls (a snapshot makes hundreds).
+        self.cached: tuple[float, Settings] | None = None
         self.db = sqlite3.connect(directory / DB_NAME, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
@@ -335,9 +342,21 @@ class Store:
 
     def execute(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
         with self.lock, self.db:
+            if "settings" in sql:
+                self.cached = None
             return self.db.execute(sql, params)
 
     def settings(self) -> Settings:
+        """The saved settings. Shared by every caller until they change: never change the object
+        returned (save a changed copy, settings.model_copy(update=...))."""
+        with self.lock:
+            if self.cached and time.monotonic() < self.cached[0]:
+                return self.cached[1]
+            settings = self.read_settings()
+            self.cached = (time.monotonic() + SETTINGS_FRESH, settings)
+            return settings
+
+    def read_settings(self) -> Settings:
         row = self.one("SELECT value FROM settings WHERE id=1")
         if not row:
             return Settings()
@@ -491,11 +510,44 @@ class Store:
             (json.dumps(meta, ensure_ascii=False), message_id),
         )
 
-    def messages(self, session_id: str, after: int = 0, limit: int = 400) -> list[dict]:
+    def messages(
+        self,
+        session_id: str,
+        after: int = 0,
+        limit: int | None = None,
+        *,
+        before: int = 0,
+        first: bool = False,
+    ) -> list[dict]:
+        """A session's messages, oldest first: after `after` and before `before` (when given),
+        at most `limit` of them, the newest (or with `first`, the oldest). Without a limit, the
+        newest MESSAGES_SHOWN, and all of them after a mark (`after`); -1: all of them."""
+        if limit is None:
+            limit = -1 if after else MESSAGES_SHOWN
+        order = "ASC" if first else "DESC"
         rows = self.all(
-            """SELECT * FROM (SELECT * FROM messages WHERE session_id=? AND id>?
-            ORDER BY id DESC LIMIT ?) ORDER BY id""",
-            (session_id, after, limit),
+            f"""SELECT * FROM (SELECT * FROM messages WHERE session_id=? AND id>? AND id<?
+            ORDER BY id {order} LIMIT ?) ORDER BY id""",  # noqa: S608  (order: ASC or DESC)
+            (session_id, after, before or LAST_ID, limit),
+        )
+        for row in rows:
+            row["meta"] = json.loads(row["meta"])
+        return rows
+
+    def count_messages(self, session_id: str, before: int = 0) -> int:
+        """How many messages a session has (before `before`, when given)."""
+        return self.value(
+            "SELECT count(*) FROM messages WHERE session_id=? AND id<?",
+            (session_id, before or LAST_ID),
+        )
+
+    def prompts(self, session_id: str, after: int = 0) -> list[dict]:
+        """A session's messages with a prompt to give it (meta.prompt) after a mark, all of them
+        (however many steps came between), oldest first."""
+        rows = self.all(
+            "SELECT * FROM messages WHERE session_id=? AND id>? "
+            "AND json_type(meta, '$.prompt') IS NOT NULL ORDER BY id",
+            (session_id, after),
         )
         for row in rows:
             row["meta"] = json.loads(row["meta"])

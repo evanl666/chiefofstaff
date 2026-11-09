@@ -17,6 +17,11 @@ from .roles import WATCHDOG, WORKER
 
 if TYPE_CHECKING:
     from .runtime import Runtime
+    from .store import Store
+
+# How many of a worker's newest messages its checks read: more when its last instruction is
+# further back (a turn of hundreds of steps).
+WINDOW = 400
 
 
 @dataclass
@@ -48,6 +53,27 @@ def minutes(seconds: float) -> str:
 def instruction(message: dict) -> bool:
     """A prompt that asks the worker to do something (not a thread follow-up it may ignore)."""
     return "prompt" in message["meta"] and not message["meta"].get("thread")
+
+
+def last_instruction(store: Store, session_id: str) -> int:
+    """The id of the last instruction a session received (as instruction() has it), 0 if none."""
+    return store.value(
+        "SELECT coalesce(max(id), 0) FROM messages WHERE session_id=? "
+        "AND json_type(meta, '$.prompt') IS NOT NULL "
+        "AND coalesce(json_extract(meta, '$.thread'), '') IN ('', 0)",
+        (session_id,),
+    )
+
+
+def recent_messages(store: Store, session_id: str) -> list[dict]:
+    """A session's newest messages, back to its last instruction at least: however many steps
+    it took since, its checks see what it was asked."""
+    messages = store.messages(session_id, limit=WINDOW)
+    if len(messages) < WINDOW or any(instruction(m) for m in messages):
+        return messages
+    if found := last_instruction(store, session_id):
+        return store.messages(session_id, after=found - 1, limit=-1)
+    return messages
 
 
 def since_last_instruction(messages: list[dict]) -> list[dict]:
@@ -171,7 +197,7 @@ class Watchdog:
             )
             if row["status"] == "idle" and not running:
                 continue  # Between turns with nothing it owes: finished, waiting or cancelled.
-            messages = self.store.messages(row["id"])
+            messages = recent_messages(self.store, row["id"])
             mark = messages[-1]["id"] if messages else 0
             state = self.state(row["id"])
             if state.get("escalated_mark") == mark:

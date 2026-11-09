@@ -1,5 +1,75 @@
 # Changelog
 
+## 0.1.34 (2026-11-08)
+
+A ninth live bug bash on real Copilot (regressions of the last release, a busy day of an owner
+who writes Chinese, reviewing teammates' PRs on GitHub, and many tasks, long histories and
+recovery) and a code review, all fixed.
+
+- **A report lands on the task it is about**: a worker with a review task and a PR task filed
+  its reports on the review under the PR task (given last, or whose news came last), and one
+  overwrote that task's result. With nothing open, what reached the worker since its last
+  report says which task; when that is several, it is asked which.
+- **Away**:
+  - A reply in the notification's Slack thread is read, not only one in the DM itself.
+  - A reply with no code answers the only code that waits; with several waiting (in one
+    notification or more), you are asked which, whatever code the messenger guessed.
+  - "wait, don't send" on a code already used is answered where you are ("…was already sent
+    at 2:03 PM: this reply changes nothing"), not only on Home.
+  - An urgent note of the Router's (the one thing that gets through Focus) is sent too.
+  - In Chinese for an owner who writes Chinese: the notification's fixed words, the reply
+    hints and the reasons. "Not sent yet" no longer repeats "not sent:".
+  - A reply is never lost when the messenger's run fails before reporting it; your own DM is
+    checked every few minutes all day (only messenger runs slow down after the first hour).
+  - Words around a code keep their own separation ("no, too long").
+- **Drafts**:
+  - A newer Slack draft replaces an older one only when both answer the same message: Bob's
+    second question no longer silently replaced the answer to his first.
+  - A newer review of a PR replaces the older pending one, and once a review is sent the others
+    of that PR are withdrawn: the same review can no longer be posted twice.
+  - A reply drafted on the PR the worker's turn is about is that task's, not a newer task's
+    that only mentions the PR.
+  - A draft's note is in your language; a DM to a person reads as a DM; "Sending failed" after
+    a stale review says why once, without advice to retry.
+- **Receipts**:
+  - Separate work in a worktree made before the task's result (then split off) and a clone
+    another task of the worker made are no longer counted in the task (nor flag it out of
+    date); a task retried after it was cancelled or failed does not claim what other tasks did
+    meanwhile.
+  - A run in which no test ran shows *no tests ran* (not ✗ "failed (exit 5)"), also in a copied
+    report; `pytest | grep FAILED` printing nothing is no claim either way; `pytest --version`
+    and other probes (`--help`, `--collect-only`, `go test -list`…) are not test runs.
+  - Committed generated files (`__pycache__/…`) and a lockfile the project did not have are
+    flagged; "Checks are failing" is no longer said a fourth time beside the PR's own CI chip.
+  - Receipts of a task with thousands of commands are read in milliseconds, not seconds.
+- **Your checkout**: a task that only reads your folder cannot write there also when it acts
+  without asking (yolo, the default). Ask for the work to be done directly in your folder (no
+  worktree), and it can: since 0.1.33 that was refused.
+- **PRs**: merge conflicts with its base are shown (*merge conflicts*, under *Needs you* for a
+  task whose own PR it is, with *Ask it to fix…*) and are news to its worker; a merge card says
+  so; a PR closed by deleting its branch says it can be reopened only once the branch is pushed
+  again; *stop following* a PR says nobody follows it then; a review card's summary shows
+  `code` as code.
+- **Slack**: names with parentheses ("Alice Chen (she/her)") keep them; your chat shows a
+  message's lines (a list, a code block) as a quote under who wrote it, with mentions by name;
+  the Router reads `>` and `&`, not `&gt;` and `&amp;`; more than a page of messages in one
+  second is said even when everything else was handled.
+- **Long chats and long turns**:
+  - A chat with more than 400 messages has *Load earlier messages (N more)* at its top; the
+    step count says when earlier steps are not loaded yet; after a reconnect nothing is
+    skipped.
+  - A worker whose turn took 400+ steps and ended without a report is followed up (its answer
+    filed as its report; the Watchdog sees it), and no older unsent message is skipped.
+  - Copilot stopping mid-send (its CLI killed) leaves no red error with install advice: the
+    message waits and goes out once it is back, and the chat says so in a line.
+  - The sidebar counts every closed worker (*Show all*); what you were typing survives a
+    restart; chat history no longer carries each message's prompt to the browser; settings are
+    read once per snapshot, not hundreds of times.
+- **Questions on Home** read without draft ids, channel ids or timestamps; a worker whose
+  question was settled another way (the draft it asked about sent) no longer "waits for you";
+  the Watchdog's line says what it decided in words ("on track: no action"); the Router gives
+  code work to a worker without Slack access, also when it is more work for one with it.
+
 ## 0.1.33 (2026-11-08)
 
 An eighth live bug bash on real Copilot (regressions of the last release, setup and settings,

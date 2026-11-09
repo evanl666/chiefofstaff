@@ -34,7 +34,7 @@ from pydantic import BaseModel, Field
 
 from . import prompts
 from .models import NestedArguments
-from .receipts import test_runs, words
+from .receipts import NO_TESTS_RAN, test_runs, words
 from .roles import WORKER
 from .store import now
 from .workspaces import PLAIN_DIFF, base_of, command, git, locate
@@ -343,6 +343,8 @@ class Checks:
             return
         top, git_dir, repo = found
         key = f"failing:{row['id']}"
+        if ran["exit_code"] == NO_TESTS_RAN:
+            return  # No test ran: neither a failure to learn from nor its fix.
         if ran["exit_code"] != 0:
             # The latest failing version: what the fix that follows changes is the fix.
             failing = {

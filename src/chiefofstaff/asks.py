@@ -244,6 +244,8 @@ class Asks:
         if not how or not router or not row:
             return
         name = self.runtime.display_title(row)
+        # As the owner reads it: "the Slack session's question", "“Pick a database”'s question".
+        whose = "the Slack session" if row["role"] == "slack" else f"\u201c{name}\u201d"
         for question in questions:
             task = self.runtime.tasks.find(question.get("task_id") or "")
             on = f" on task {task['id']} “{task['title']}”" if task else ""
@@ -259,7 +261,7 @@ class Asks:
                     task=task["id"] if task else None,
                 ),
                 kind="notice",
-                display=f"The owner {how} “{name}”'s question"[:300],
+                display=f"You {how} {whose}'s question"[:300],
                 meta={"session_id": session_id, **({"task_id": task["id"]} if task else {})},
             )
 

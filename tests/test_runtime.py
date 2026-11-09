@@ -1196,8 +1196,11 @@ async def test_a_message_copilot_never_starts_on_fails_its_task_and_goes_out_aga
         return []
 
     stuck.get_events = nothing_written
-    await asyncio.sleep(0.05)
-    await settle(runtime)
+    for _ in range(300):  # Until its start check gave up (slower on a busy machine).
+        await asyncio.sleep(0.01)
+        await settle(runtime)
+        if harness.store.session(worker)["status"] == "failed":
+            break
     assert harness.store.session(worker)["status"] == "failed"
     assert runtime.tasks.get(task_id)["status"] == "failed"
     assert "never started on it" in harness.kinds(worker)[-1][1]

@@ -220,6 +220,24 @@ GIT_VALUED = {
 }  # fmt: skip
 
 
+def works_in(command: str, path: str) -> bool:
+    """Whether a shell command names this folder as where it works: its path (also as
+    ~/…/name, ./name or ../name), or its name as a `cd`, `git -C`, `--git-dir` or `--work-tree`
+    target or the start of a path under it ("name/src/x.py"). Generous: a task's own work there
+    must not be taken for none."""
+    path = path.rstrip("/")
+    name = re.escape(Path(path).name)
+    end = r"(?=[/\s'\";&|)]|$)"
+    return bool(
+        re.search(
+            rf"{re.escape(path)}{end}|(?<![\w.-])(?:~|\.\.?)?/(?:[^\s'\";&|]*/)?{name}{end}|"
+            rf"(?:\bcd|-C|--git-dir=?|--work-tree=?)\s*[\"']?{name}{end}|"
+            rf"(?<![\w./~-]){name}/",
+            command,
+        )
+    )
+
+
 def made_folders(command: str) -> list[str]:
     """The folders a shell command's `git clone` or `git worktree add` makes (by name)."""
     found = []
@@ -476,6 +494,8 @@ def pr_status(pr: dict) -> str:
         return "draft"
     if pr.get("review") == "CHANGES_REQUESTED":
         return "changes requested"
+    if pr.get("merge_state") == "DIRTY":
+        return "merge conflicts"
     if pr.get("checks") == "failing":
         return "CI failing"
     if pr.get("awaiting"):
@@ -490,6 +510,7 @@ def pr_status(pr: dict) -> str:
 # What a delivered task's own PR asks for, most pressing first (board.js PR_MARKERS).
 PR_MARKERS = {
     "changes requested": "pr-changes",
+    "merge conflicts": "pr-conflicts",
     "CI failing": "pr-failing",
     "ready to merge": "mergeable",
 }
@@ -628,7 +649,9 @@ class TaskActions:
         """Why a finished task's own files are not what its result left (or "")."""
         for path, end in ended.items():
             checkout = live.get(path)
-            if not checkout or not (scope := self.scope(task, checkout)):
+            if not checkout or self.not_its(task, checkout):
+                continue
+            if not (scope := self.scope(task, checkout)):
                 continue
             with suppress(Exception):
                 now_ = await snapshot(checkout)
@@ -720,7 +743,7 @@ class TaskActions:
             row = self.store.find_session(task["session_id"]) or row  # Its own clones too.
         checkouts = []
         for checkout in self.workspaces.checkouts(row):
-            if self.split_away(task, row, checkout):
+            if self.not_its(task, checkout):
                 continue
             with suppress(Exception):
                 if found := await changes(checkout, self.scope(task, checkout)):
@@ -978,22 +1001,66 @@ class TaskActions:
                     return True
         return False
 
-    def split_away(self, task: dict, row: dict, checkout: dict) -> bool:
-        """Whether a clone or worktree its worker made is the work split off this task (its
-        `git worktree add`/`git clone` was that task's): counted there, not here too."""
+    def not_its(self, task: dict, checkout: dict) -> bool:
+        """Whether a checkout its worker has is another task's work only: split off this one
+        (see split_away), or a clone or worktree another of its tasks made (`git clone` in a
+        later task's turn) that this one neither ran commands in nor edited."""
+        if self.split_away(task, checkout):
+            return True
+        made = checkout.get("base") in {"a worktree it made itself", "a clone it made itself"}
+        if not made:
+            return False
+        path = checkout["path"].rstrip("/")
+        name = Path(path).name
+        makers = {
+            found["task_id"]
+            for found in self.store.all(
+                "SELECT c.command, r.task_id FROM commands c JOIN runs r ON r.id=c.run_id "
+                "WHERE c.session_id=?",
+                (task["session_id"],),
+            )
+            if name in made_folders(found["command"])
+        }
+        if not makers or task["id"] in makers:
+            return False
+        ran = any(
+            works_in(found["command"], path)
+            for found in self.store.all(
+                "SELECT c.command FROM commands c JOIN runs r ON r.id=c.run_id WHERE "
+                "c.session_id=? AND r.task_id=?",
+                (task["session_id"], task["id"]),
+            )
+        )
+        edited = json.loads(self.store.get(f"touched:{task['id']}") or "[]")
+        return not ran and not any(within(file, path) for file in edited)
+
+    def split_away(self, task: dict, checkout: dict) -> bool:
+        """Whether a clone or worktree its worker made is the work split off this task: that
+        task's `git worktree add`/`git clone` made it, or its commands worked there (`cd
+        …/whisper-wt && git commit`: made before the split) and this task's did not (beyond
+        making it): counted there, not here too."""
         split = self.store.get(f"splitoff:{task['id']}")
         made = checkout.get("base") in {"a worktree it made itself", "a clone it made itself"}
         if not split or not made:
             return False
-        name = Path(checkout["path"]).name
-        return any(
-            name in made_folders(found["command"])
-            for found in self.store.all(
-                "SELECT c.command FROM commands c JOIN runs r ON r.id=c.run_id WHERE "
-                "c.session_id=? AND r.task_id=?",
-                (row["id"], split),
-            )
-        )
+        path = checkout["path"].rstrip("/")
+        name = Path(path).name
+
+        def commands(task_id: str) -> list[str]:
+            return [
+                found["command"]
+                for found in self.store.all(
+                    "SELECT c.command FROM commands c JOIN runs r ON r.id=c.run_id WHERE "
+                    "c.session_id=? AND r.task_id=?",
+                    (task["session_id"], task_id),
+                )
+            ]
+
+        theirs = commands(split)
+        if any(name in made_folders(command) for command in theirs):
+            return True
+        mine = [c for c in commands(task["id"]) if name not in made_folders(c)]
+        return any(works_in(c, path) for c in theirs) and not any(works_in(c, path) for c in mine)
 
     async def adopt_clones(self, row: dict) -> dict:
         """A worker's own clones (see Workspaces.own_clones) become its checkouts."""
@@ -1016,7 +1083,7 @@ class TaskActions:
         ended = {}
         base = json.loads(self.store.get(f"taskbase:{task['id']}") or "{}")
         for checkout in self.workspaces.checkouts(row):
-            if self.split_away(task, row, checkout):
+            if self.not_its(task, checkout):
                 continue
             with suppress(Exception):
                 if (found := await snapshot(checkout)) and found["tree"]:
@@ -1163,9 +1230,9 @@ class TaskActions:
 
     def own_pr_standing(self, task: dict) -> tuple[str, str]:
         """Where a delivered task's own open PRs that it follows stand, as Home places it
-        (board.js ownPrStanding): ("pr-changes" | "pr-failing" | "mergeable", why), the most
-        pressing first; ("", "") when none asks for anything. Unreadable ones count, as they
-        stood when last read."""
+        (board.js ownPrStanding): ("pr-changes" | "pr-conflicts" | "pr-failing" | "mergeable",
+        why), the most pressing first; ("", "") when none asks for anything. Unreadable ones
+        count, as they stood when last read."""
         row = self.store.find_session(task["session_id"])
         if not row:
             return "", ""
@@ -1189,6 +1256,7 @@ class TaskActions:
         )
         return marker, {
             "pr-changes": f"Changes requested on {short}",
+            "pr-conflicts": f"Merge conflicts on {short}",
             "pr-failing": f"CI failing on {short}{failing}",
             "mergeable": f"Ready to merge: {short}",
         }[marker]
@@ -1586,6 +1654,9 @@ class TaskActions:
                     why = (
                         f"The PR is {pr['state'].lower()}."
                         if gone
+                        else "It has merge conflicts with its base: offered again once they "
+                        "are resolved."
+                        if pr.get("merge_state") == "DIRTY"
                         else "The PR changed since: offered again once it is ready."
                     )
                     if pr.get("state") != "MERGED":
@@ -1866,7 +1937,13 @@ class TaskActions:
                 and item.get("passed") is not None
                 and item.get("own", True)
             ):
-                outcome = "passed" if item["passed"] else f"failed (exit {item['exit_code']})"
+                outcome = (
+                    "ran no tests"
+                    if item.get("no_tests")
+                    else "passed"
+                    if item["passed"]
+                    else f"failed (exit {item['exit_code']})"
+                )
                 checks.append(f"- {label}: {code_span(cited_command(item['command']))} {outcome}")
         for item in found.get("criteria") or []:
             if item["state"] == "verified" and not about_pushing(item["criterion"]):
@@ -1951,7 +2028,9 @@ class TaskActions:
         for label, key in (("Tests", "tests"), ("Checks", "checks"), ("Build", "build")):
             if item := found.get(key):
                 mark = (
-                    "running"
+                    "ran no tests"
+                    if item.get("no_tests")
+                    else "running"
                     if item["passed"] is None
                     else "passed"
                     if item["passed"]
@@ -2002,6 +2081,7 @@ class TaskActions:
         for task in self.tasks.for_session(session_id):
             if task["status"] in OPEN:
                 self.tasks.move(task["id"], "failed", progress=message[:500])
+                self.runtime.background(self.record_end(task))  # See cancel.
 
     def report_task(self, caller: str, reference: str) -> dict | None:
         """The task a report is about: the one it names; else its only open task (not the one
@@ -2017,21 +2097,39 @@ class TaskActions:
                     f"You have {len(open_)} open tasks ({listed}): call report again with the "
                     "task_id of the one this is about."
                 )
-            # Nothing open: news on a thread it follows is about the task it follows it for.
+            # Nothing open: what reached it since its last report is about which task (news on
+            # a thread it follows for one, the owner's answer on one's card). Bug bash 9: the
+            # newest news (another task's, queued) or the task given last took a report that
+            # was about another, and overwrote its result.
             last = self.store.one(
                 "SELECT id FROM messages WHERE session_id=? AND kind='report' "
                 "ORDER BY id DESC LIMIT 1",
                 (caller,),
             )
-            news = self.store.one(
-                "SELECT json_extract(meta, '$.task_id') AS task_id FROM messages "
-                "WHERE session_id=? AND kind='inbound' AND id>? "
-                "AND json_extract(meta, '$.thread') IS NOT NULL "
-                "AND json_extract(meta, '$.task_id') IS NOT NULL ORDER BY id DESC LIMIT 1",
-                (caller, last["id"] if last else 0),
-            )
-            if news and (task := self.tasks.find(news["task_id"])):
-                return task
+            named = [
+                found
+                for row in self.store.all(
+                    "SELECT json_extract(meta, '$.task_id') AS task_id FROM messages "
+                    "WHERE session_id=? AND id>? AND json_extract(meta, '$.task_id') IS NOT NULL "
+                    "AND (kind IN ('owner', 'router') OR (kind='inbound' "
+                    "AND json_extract(meta, '$.thread') IS NOT NULL)) ORDER BY id",
+                    (caller, last["id"] if last else 0),
+                )
+                if (found := self.tasks.find(row["task_id"])) and found["session_id"] == caller
+            ]
+            about = list({task["id"]: task for task in named}.values())
+            if len(about) > 1:
+                listed = "; ".join(f"{task['id']} “{task['title']}”" for task in about)
+                raise ValueError(
+                    f"What came since your last report is about {len(about)} tasks ({listed}): "
+                    "call report again with the task_id of the one this is about."
+                )
+            if about:
+                return about[0]
+            if (turn := self.tasks.find(self.runtime.turn_task(caller))) and turn[
+                "session_id"
+            ] == caller:
+                return turn
             return self.tasks.current(caller)
         task = self.tasks.find(reference)
         if not task or task["session_id"] != caller:
@@ -2098,6 +2196,8 @@ class TaskActions:
         else:
             self.withdraw_drafts(task, why)
             task = self.tasks.move(task_id, "cancelled", progress=why)
+            # Where it stopped: retried later, what other tasks did meanwhile is not its own.
+            self.runtime.background(self.record_end(task))
         others = [
             other
             for other in self.tasks.for_session(task["session_id"])
@@ -2671,6 +2771,9 @@ class TaskActions:
             if task["status"] in OPEN and (was := self.store.get(f"reopened:{task['id']}")):
                 self.tasks.move(task["id"], was)
             self.store.set(f"turntask:{task['session_id']}", made["id"])
+        if task["result"]:
+            # Its receipts again, without what was this work (a worktree made for it, say).
+            self.runtime.background(self.collect_evidence(task["id"]))
         self.publish(self.tasks.get(task["id"]))
         return made
 

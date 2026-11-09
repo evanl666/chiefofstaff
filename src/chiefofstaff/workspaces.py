@@ -71,6 +71,22 @@ GENERATED = re.compile(
     r"\.venv|venv|node_modules|\.gradle|\.next|\.turbo|\.cache|\.coverage|htmlcov|"
     r"[^/]+\.egg-info)(/|$)|\.(pyc|pyo|class|o)$|(^|/)(\.DS_Store|uv\.lock)$"
 )
+# What a package manager writes when it runs (`uv run` a uv.lock): one the project did not have
+# is new to it. One it has, updated, is normal.
+LOCKFILES = re.compile(
+    r"(^|/)(uv\.lock|poetry\.lock|Pipfile\.lock|pdm\.lock|package-lock\.json|yarn\.lock|"
+    r"pnpm-lock\.yaml|bun\.lockb?|Cargo\.lock|Gemfile\.lock|composer\.lock)$"
+)
+
+
+def generated_paths(names: list[str]) -> list[str]:
+    """Generated files as one names them: a folder of them once (`pkg/__pycache__/`)."""
+    found: dict[str, None] = {}
+    for name in names:
+        match = GENERATED.search(name)
+        folder = match and match.group(2) and match.group(3) == "/"
+        found[name[: match.end(2)] + "/" if match and folder else name] = None
+    return list(found)
 
 
 def untracked_work(names: list[str]) -> list[str]:
@@ -1031,6 +1047,7 @@ class Share:
         # shown over its own stretches only (start to result, taken up again to end).
         self.split: set[str] = set()
         self.segments: list[tuple[str, str]] = []
+        self.added: set[str] = set()  # Files that were not there at its start.
 
 
 async def own_commits(checkout: dict, path: str, head: str, shared: bool, share: Share, scope):
@@ -1138,6 +1155,7 @@ async def tree_share(
         }
         share.exact = share.exact and not (between & own)
         share.split = set(window) & between & own
+    share.added = {name for name, status in window.items() if status == "A"}
     share.uncommitted = set(uncommitted)
     if share.base:
         await own_commits(checkout, path, end["commit"], False, share, scope)
@@ -1287,6 +1305,19 @@ async def split_lines(checkout: dict, share: Share, total: dict, names: set[str]
             total["deletions"] += edits.get("deletions", 0)
 
 
+MAX_NAMED = 50
+
+
+def added_files(share: Share) -> dict:
+    """Of the new files it keeps, those generated (committed: new ones it did not commit are
+    not counted) and lockfiles the project did not have: counted all the same, and said."""
+    added = sorted(share.added & set(share.keep))
+    lockfiles = [name for name in added if LOCKFILES.search(name)]
+    generated = [name for name in added if GENERATED.search(name) and name not in lockfiles]
+    found: dict = {"generated": generated_paths(generated)[:MAX_NAMED]} if generated else {}
+    return found | ({"lockfiles": lockfiles[:MAX_NAMED]} if lockfiles else {})
+
+
 async def scoped_changes(
     checkout: dict, path: str, head: str, live: bool, shared: bool, scope: Scope
 ) -> dict:
@@ -1323,7 +1354,7 @@ async def scoped_changes(
                 total["files"] -= sum(1 for line in listed.splitlines() if line[:1] == "R")
         total["files"] += len(share.large)
         total["uncommitted"] += len(share.large)
-        return total
+        return total | added_files(share)
     if share.exact and keep and (share.base or live):
         against = share.base if live else f"{share.base}..{head}"
         with suppress(ValueError):
@@ -1817,11 +1848,12 @@ class Workspaces:
         """Where a worker may write (its edits and, sandboxed, its commands): its folders, but
         not a git folder of the owner's it was given only to read (a task that changes no code,
         see make_checkout). Their checkouts are never touched: an install or a test run there
-        would leave .venv, a lockfile or caches behind. Its own worktree is for those."""
+        would leave .venv, a lockfile or caches behind. Its own worktree is for those. One the
+        owner asked it to change in place (spawn_worker in_place) is its to write."""
         kept = {
             os.path.realpath(checkout["path"])
             for checkout in self.checkouts(row)
-            if checkout.get("shared") and checkout.get("git_dir")
+            if checkout.get("shared") and checkout.get("git_dir") and not checkout.get("in_place")
         }
         return [path for path in self.writable(row) if os.path.realpath(path) not in kept]
 

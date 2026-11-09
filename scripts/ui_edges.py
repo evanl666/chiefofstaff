@@ -3108,6 +3108,113 @@ async def round_ten(runtime, browser, failures: list[str]):
     await context.close()
 
 
+async def round_scale(runtime, browser, failures: list[str]):
+    """The 0.1.33 bug bash, round 9 (scale and recovery): a chat of more than a page loads its
+    earlier messages where you read, its fold of steps says it has more (C1); a task far back
+    opens at its report (C1); after the event stream drops, everything since comes in (C1);
+    every closed worker is counted and can be listed (C4); what you typed and did not send is
+    back after a reload, per chat, and gone once sent (C5)."""
+    store = runtime.store
+    router = store.get("router_id")
+    result = await call_tool(runtime, "spawn_worker", router, title="Echo every number",
+                             instructions="Echo 1 to 450", why_new="test")  # fmt: skip
+    worker = json.loads(result.text_result_for_llm)["session_id"]
+    await settle(runtime)
+    task = runtime.tasks.current(worker)
+    store.add_message(worker, "report", "The plan: ten batches of 45.",
+                      {"status": "progress", "task_id": task["id"]})  # fmt: skip
+    for i in range(450):
+        store.add_message(worker, "tool", f"$ echo {i + 1}")
+    store.add_message(worker, "assistant", "Final batch (421-450)", {"narration": True})
+    for i in range(30):  # A chat taller than the window.
+        store.add_message(worker, "assistant", f"Batch {i + 1} printed its numbers.")
+    runtime.update_session(worker, status="idle", activity="")
+    for i in range(25):
+        closed = store.create_session(str(uuid4()), "worker", f"Closed scale {i:02d}", "idle")
+        store.update_session(closed["id"], closed_at=f"2020-01-01T00:00:{i:02d}+00:00")
+    store.set(f"learner:{closed['id']}", "1")  # A helper: not one of yours.
+    total = runtime.workers.closed_count()
+
+    context = await browser.new_context(viewport={"width": 1280, "height": 900})
+    page = await context.new_page()
+    page.on("pageerror", lambda error: failures.append(str(error)))
+    await patch_state(page, {}, {"closed_count": total})
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    await expect(page.locator("#application")).to_be_visible()
+    timeline, scroller = page.locator("#timeline"), page.locator("#scroller")
+
+    # C1: the newest page, a fold that says it has more, and earlier ones above, in place.
+    await page.locator(f'#session-list .item[data-id="{worker}"]').click()
+    earlier = timeline.locator(".earlier button")
+    await expect(earlier).to_have_text(re.compile(r"^Load earlier messages \(\d+ more\)$"))
+    fold = timeline.locator("details.steps").first
+    await expect(fold.locator(".count")).to_have_text("369+ steps")
+    await expect(fold.locator(".said")).to_have_text("Final batch (421-450)")
+    await scroller.evaluate("box => { box.scrollTop = 0; }")
+    before = (await fold.bounding_box())["y"]
+    await earlier.click()
+    await expect(timeline.locator(".earlier")).to_have_count(0)
+    await expect(fold.locator(".count")).to_have_text("450 steps")
+    after = (await fold.bounding_box())["y"]
+    assert abs(after - before) < 2, ("the view moved", before, after)
+    await expect(timeline.locator(".card.report", has_text="ten batches of 45")).to_have_count(1)
+    log("C1: Load earlier messages keeps the view; the fold counts every step")
+
+    # C1: a task whose report is before the newest page: opened there.
+    await page.evaluate(
+        "([id, task]) => import('/static/session.js').then((m) => m.select(id, { task }))",
+        [worker, task["id"]],
+    )
+    report = timeline.locator(f'[data-task="{task["id"]}"][data-kind="report"]')
+    await expect(report).to_have_class(re.compile(r"\bflash\b"))
+    await expect(report).to_be_in_viewport()
+    log("C1: a task far back opens at its report")
+
+    # C1: the event stream drops while more than a page comes: all of it, no gap.
+    await expect(fold.locator(".count")).to_have_text("450 steps")
+    for i in range(450, 900):
+        store.add_message(worker, "tool", f"$ echo {i + 1}")  # Never published: only a resync.
+    for queue in list(runtime.bus.queues):
+        queue.put_nowait(None)
+    await expect(timeline.locator("details.steps .count")).to_have_text(
+        ["450 steps", "450 steps"], timeout=20000
+    )
+    log("C1: after the stream drops, everything since comes in page by page")
+
+    # C4: every closed worker counted; Show all lists the older ones too, never a helper.
+    await page.locator("#closed > summary").click()
+    await expect(page.locator("#closed-count")).to_have_text(f"· {total}")
+    show = page.locator("#closed-list .show-all")
+    await expect(show).to_have_text(f"Show all {total}")
+    await show.click()
+    await expect(page.locator("#closed-list .item")).to_have_count(total)
+    await expect(show).to_have_count(0)
+    await expect(page.locator("#closed-list")).not_to_contain_text("Closed scale 24")
+    await expect(page.locator("#closed-list")).to_contain_text("Closed scale 00")
+    log("C4: every closed worker counted, all of them listed when asked")
+
+    # C5: what you typed stays with its chat, through a reload; sent, it is gone.
+    composer = page.locator("#composer-input")
+    await page.locator("#back-home").click()
+    await expect(page.locator(".home-item.selected")).to_be_visible()
+    await composer.fill("Half a question about the echo")
+    await page.reload()
+    await expect(page.locator("#application")).to_be_visible()
+    await expect(composer).to_have_value("Half a question about the echo", timeout=15000)
+    await page.locator(f'#session-list .item[data-id="{worker}"]').click()
+    await expect(composer).to_have_value("")
+    await page.locator("#back-home").click()
+    await expect(composer).to_have_value("Half a question about the echo")
+    await composer.press("Enter")
+    await expect(timeline.locator(".msg.owner", has_text="Half a question")).to_be_visible()
+    await page.reload()
+    await expect(page.locator("#application")).to_be_visible()
+    await expect(page.locator(".home-item.selected")).to_be_visible(timeout=15000)
+    await expect(composer).to_have_value("")
+    log("C5: unsent text stays with its chat through a reload, and goes once sent")
+    await context.close()
+
+
 async def main():
     with tempfile.TemporaryDirectory(prefix="cos-ui-") as temporary:
         holder: dict = {}
@@ -3444,7 +3551,7 @@ async def main():
             only = set(sys.argv[1:])
             for check in (home, memory, this_round, round_two, round_three, round_four,
                           round_five, round_six, round_seven, round_eight, round_nine,
-                          round_ten):  # fmt: skip
+                          round_ten, round_scale):  # fmt: skip
                 if not only or check.__name__ in only:
                     await check(runtime, browser, failures)
             await browser.close()

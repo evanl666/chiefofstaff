@@ -1807,7 +1807,9 @@ class Runtime:
         ):
             return same  # The same answer again within a minute (a turn retried, say): once.
         message = self.store.add_message(session_id, kind, text, meta)
-        self.bus.publish("message", message)
+        # What the UI shows, without the prompt it was sent as (the same text again, or more).
+        shown = {k: v for k, v in (message.get("meta") or {}).items() if k != "prompt"}
+        self.bus.publish("message", {**message, "meta": shown})
         if unread:
             row = self.store.session(session_id)
             self.update_session(session_id, unread=row["unread"] + 1)
@@ -1843,6 +1845,25 @@ class Runtime:
         self.task_actions.publish(task)
         if task["status"] in ENDED:
             self.decisions.drop_task(task["id"])
+        if task["status"] != "waiting" and self.waits_for_nothing(task["session_id"]):
+            # Its question settled some other way (the draft it asked about sent, say): its
+            # worker no longer waits for the owner (bug bash 9: its box kept "waits for you").
+            self.update_session(task["session_id"], status="idle")
+
+    def waits_for_nothing(self, session_id: str) -> bool:
+        """A session shown as waiting for the owner that waits for nothing of theirs now: no
+        task of it waits, nothing it asked is open (a question, a decision card)."""
+        row = self.store.find_session(session_id)
+        return bool(
+            row
+            and row["status"] == "waiting"
+            and not self.states[session_id].asking
+            and not any(task["status"] == "waiting" for task in self.tasks.for_session(session_id))
+            and not self.store.one(
+                "SELECT id FROM drafts WHERE session_id=? AND kind='decision' AND status='pending'",
+                (session_id,),
+            )
+        )
 
     def fail(self, row: dict, message: str):
         self.states[row["id"]].busy = False
@@ -2871,19 +2892,20 @@ class Runtime:
             thread = f"slack:{channel}:{ts}" if ts else f"slack:{channel}"
         elif target.get("repo") and target.get("number"):
             thread = f"github:{str(target['repo']).lower()}#{target['number']}"
-        if thread and (task := self.thread_task(session_id, thread)):
-            return task["id"]
         turn = self.tasks.find(self.turn_task(session_id))
-        if turn and turn["session_id"] == session_id and turn["status"] != "cancelled":
-            return turn["id"]
-        return ""
+        if not (turn and turn["session_id"] == session_id and turn["status"] != "cancelled"):
+            turn = None
+        if thread and (task := self.thread_task(session_id, thread, turn)):
+            return task["id"]
+        return turn["id"] if turn else ""
 
-    def thread_task(self, session_id: str, thread: str) -> dict | None:
+    def thread_task(self, session_id: str, thread: str, turn: dict | None = None) -> dict | None:
         """Which of a worker's tasks a followed thread is about: for a PR, the task that made
         it (its news is that work's, whichever later task of the worker follows or names it
         too), unless it no longer follows it (stopped for it, or followed for other tasks
         only); else the newest one the follow was made for, else the newest whose PRs or
-        instructions name it."""
+        instructions name it: `turn` (the task its turn is on) first, when it does (another's
+        may only mention it: "not on PR #92's branch")."""
         from .tools import names_pr
 
         maker = self.pr_maker(session_id, thread)
@@ -2899,7 +2921,10 @@ class Runtime:
             if task["id"] in bound:
                 return task
         found = threads.GITHUB_PR.fullmatch(thread)
-        for task in reversed(self.tasks.for_session(session_id)):
+        mine = list(self.tasks.for_session(session_id))
+        if turn and turn["id"] in {task["id"] for task in mine}:
+            mine = [*(task for task in mine if task["id"] != turn["id"]), turn]
+        for task in reversed(mine):
             if found:
                 repo, number = found.groups()
                 if thread in threads.pull_requests(
@@ -3008,7 +3033,11 @@ class Runtime:
             "slack_names": self.slack_names(),
             "artifacts_hidden": self.hidden_artifacts(),
             "thread_links": self.store.items("threadlink:"),
-            "questions": self.asks.owner_questions(),
+            # As the owner reads them: no draft ids, Slack ids or timestamps.
+            "questions": [
+                {**question, "text": self.drafts.owner_text(question.get("text") or "")}
+                for question in self.asks.owner_questions()
+            ],
             "updates": self.owner_updates(),
             "tasks": [
                 self.task_actions.view(task)
@@ -3030,6 +3059,7 @@ class Runtime:
             },
             "github": self.github.status,
             "closed": [self.view(row) for row in self.workers.recently_closed(20)],
+            "closed_count": self.workers.closed_count(),
             "profile": self.store.get("profile", ""),
             "profile_draft": self.store.get("profile_draft", ""),
             "learning": self.learning.view(),

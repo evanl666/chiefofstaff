@@ -8,6 +8,11 @@ import { renderSidebar } from "./sidebar.js";
 import { focusDraft, focusTask, renderHome, renderHomeHeader, showHomeTab, welcomeCard, workerStates } from "./inbox.js";
 import { closeMentions, setRecipient } from "./mention.js";
 import { openSettings } from "./settings.js";
+import { showLength } from "./composer.js";
+// A chat loads a page of its messages at a time: its latest, then earlier ones when asked.
+export const PAGE = 400;
+// The chat shown: its first message loaded, and how many come before it (null: not known).
+const earlier = { session: "", first: null, more: false, count: null, busy: false };
 // A worker's state in the header, as its sidebar dot and Home have it.
 // The four places, as the sidebar dot and Home say them.
 const SHORT_STATE = { waiting: "Needs you", working: "Running", watching: "Monitoring", idle: "Nothing open" };
@@ -248,6 +253,7 @@ export async function select(sessionId, { task = "" } = {}) {
   }
   state.selected = sessionId;
   localStorage.setItem("cos.selected", sessionId);
+  showDraft(sessionId);
   setLayout(sessionId === HOME);
   renderSidebar();
   renderHeader();
@@ -262,7 +268,7 @@ export async function select(sessionId, { task = "" } = {}) {
   if (viewed) {
     state.loading = loading;
     try {
-      messages = await api(`/api/sessions/${viewed}/messages`);
+      messages = await api(`/api/sessions/${viewed}/messages?limit=${PAGE}`);
     } catch (error) {
       toast(error.message, "error");
     }
@@ -271,16 +277,145 @@ export async function select(sessionId, { task = "" } = {}) {
   }
   timeline.replaceChildren();
   state.lastId = 0;
+  Object.assign(earlier, { session: viewed, first: messages[0] || null, more: false, count: null, busy: false });
   appendMessages(messages);
   appendMessages(loading.held);
   scrollToBottom(true);
-  if (task) showTaskInTimeline(task);
+  if (messages.length >= PAGE) await countEarlier(viewed);
+  if (state.selected !== sessionId) return;
+  if (task) await showTaskInTimeline(task);
   if (viewed && byId(viewed)?.unread) markRead(viewed);
   if (!$("#composer").hidden) $("#composer-input").focus();
 }
-function showTaskInTimeline(taskId) {
-  const nodes = [...$("#timeline").querySelectorAll(`[data-task="${taskId}"]`)];
-  const node = nodes.filter((item) => item.dataset.kind === "report").pop() || nodes.pop();
+// How many messages come before the first one shown: a way to load them, if any.
+async function countEarlier(sessionId) {
+  let count = null;
+  try {
+    ({ count } = await api(`/api/sessions/${sessionId}/messages/count?before=${earlier.first.id}`));
+  } catch {
+    // Not known: they can be loaded all the same.
+  }
+  if (earlier.session !== sessionId || viewedId() !== sessionId) return;
+  Object.assign(earlier, { count, more: count !== 0 });
+  renderEarlier();
+}
+// Content added above what is read: the view stays where it was.
+function keepScroll(change) {
+  const scroller = $("#scroller");
+  const fromBottom = scroller.scrollHeight - scroller.scrollTop;
+  change();
+  scroller.scrollTop = scroller.scrollHeight - fromBottom;
+}
+// "Load earlier messages" at the top of a chat that has more; the fold of steps at the top
+// says when more of its steps come before it.
+function renderEarlier() {
+  const timeline = $("#timeline");
+  let control = timeline.querySelector(":scope > .earlier");
+  const top = control ? control.nextElementSibling : timeline.firstElementChild;
+  for (const group of timeline.querySelectorAll(":scope > details.steps[data-partial]")) {
+    delete group.dataset.partial;
+    summarize(group);
+  }
+  if (earlier.more && top?.matches("details.steps")) {
+    top.dataset.partial = "1";
+    summarize(top);
+  }
+  if (!earlier.more) {
+    control?.remove();
+    return;
+  }
+  if (!control) {
+    control = el("div", { class: "line notice earlier" }, el("button", { type: "button", class: "link", onclick: () => loadEarlier() }));
+    keepScroll(() => timeline.prepend(control));
+  }
+  const button = control.querySelector("button");
+  const count = earlier.count ? ` (${earlier.count.toLocaleString("en-US")} more)` : "";
+  button.textContent = earlier.busy ? "Loading earlier messages…" : `Load earlier messages${count}`;
+  button.disabled = earlier.busy;
+}
+// The page before the first message shown, above it (the view stays put). Whether it loaded any.
+async function loadEarlier() {
+  const sessionId = earlier.session;
+  if (earlier.busy || !earlier.more || !earlier.first || viewedId() !== sessionId) return false;
+  earlier.busy = true;
+  renderEarlier();
+  let page = null;
+  try {
+    page = await api(`/api/sessions/${sessionId}/messages?before=${earlier.first.id}&limit=${PAGE}`);
+  } catch (error) {
+    toast(error.message, "error");
+  }
+  earlier.busy = false;
+  if (earlier.session !== sessionId || viewedId() !== sessionId) return false;
+  keepScroll(() => {
+    if (page) {
+      if (page.length) prependMessages(page);
+      earlier.first = page[0] || earlier.first;
+      if (earlier.count !== null) earlier.count = Math.max(0, earlier.count - page.length);
+      earlier.more = page.length >= PAGE && earlier.count !== 0;
+    }
+    renderEarlier();
+  });
+  return Boolean(page?.length);
+}
+// Earlier messages, above those shown: steps that go on into the fold at the top join it.
+function prependMessages(messages) {
+  const timeline = $("#timeline");
+  const shown = state.selected === HOME ? byId(routerId()) : current();
+  const box = el("div");
+  const next = earlier.first;
+  messages.forEach((message, index) => {
+    if (message.id >= next.id || message.session_id !== earlier.session) return;
+    place(box, message, messages[index + 1] || next, shown);
+  });
+  const control = timeline.querySelector(":scope > .earlier");
+  const top = control ? control.nextElementSibling : timeline.firstElementChild;
+  const last = box.lastElementChild;
+  if (last?.matches("details.steps") && top?.matches("details.steps")) {
+    top.querySelector("summary").after(...[...last.children].filter((child) => child.tagName !== "SUMMARY"));
+    if (!top.dataset.said && last.dataset.said) top.dataset.said = last.dataset.said;
+    last.remove();
+    summarize(top);
+  }
+  if (control) control.after(...box.children);
+  else timeline.prepend(...box.children);
+  updateDraftRecords();
+}
+// What you typed and did not send, per chat: back after a reload, or after signing in again.
+const DRAFT = "cos.draft.";
+let drafted = null;  // The chat whose text the composer holds.
+function keepDraft() {
+  if (drafted === null) return;
+  const text = $("#composer-input").value;
+  if (text.trim()) localStorage.setItem(DRAFT + drafted, text);
+  else localStorage.removeItem(DRAFT + drafted);
+}
+export function showDraft(chat) {
+  const input = $("#composer-input");
+  if (drafted === null) {
+    input.addEventListener("input", keepDraft);
+    // Sent: the composer is emptied first (and the text put back if sending fails).
+    $("#composer").addEventListener("submit", () => setTimeout(keepDraft));
+    window.addEventListener("pagehide", keepDraft);
+  } else if (drafted === chat) {
+    return;
+  } else {
+    keepDraft();
+  }
+  drafted = chat;
+  input.value = localStorage.getItem(DRAFT + chat) || "";
+  input.style.height = "auto";
+  if (input.value && input.scrollHeight) input.style.height = `${input.scrollHeight}px`;
+  showLength();
+}
+async function showTaskInTimeline(taskId) {
+  const find = () => {
+    const nodes = [...$("#timeline").querySelectorAll(`[data-task="${taskId}"]`)];
+    return nodes.filter((item) => item.dataset.kind === "report").pop() || nodes.pop();
+  };
+  let node = find();
+  // Not among the latest messages: earlier ones, a page at a time, until it is there.
+  for (let pages = 0; !node && pages < 25 && (await loadEarlier()); pages += 1) node = find();
   if (!node) return;
   node.scrollIntoView({ block: "start" });
   node.classList.remove("flash");
@@ -527,7 +662,8 @@ function renderMessage(original) {
       return el("div", { class: `line notice${open ? " link" : ""}${settings ? " wide" : ""}`, title: clock(time), onclick: open }, el("span", { text: message.text }), settings);
     }
     case "error":
-      return el("div", { class: "line error", text: message.text, title: clock(time) });
+      // Sent after all (on a retry, or once Copilot was back): no longer an error.
+      return el("div", { class: meta.resolved ? "line note" : "line error", text: message.text, title: clock(time) });
     default:
       return el("div", { class: "line", text: message.text, title: clock(time) });
   }
@@ -574,10 +710,18 @@ function addWork(container, kind, text, cwd) {
     // Its words in a line, without markup (and past a lead-in like "Done:").
     group.dataset.said = gist(text) || firstLine(text);
   }
+  group.dataset.latest = latest;
+  summarize(group);
+}
+// A fold's line: how many steps, and the latest of them (or what it said on the way). At the top
+// of a chat with earlier messages not loaded, more of its steps may come before: "386+ steps".
+function summarize(group) {
   const count = group.querySelectorAll(".step").length;
   const said = group.dataset.said;
+  const latest = group.dataset.latest || "";
+  const more = group.dataset.partial ? "+" : "";
   group.querySelector("summary").replaceChildren(
-    count ? el("span", { class: "count", text: `${count} step${count === 1 ? "" : "s"}` }) : "",
+    count ? el("span", { class: "count", text: `${count}${more} step${count === 1 && !more ? "" : "s"}`, title: more ? "More before these: load earlier messages" : undefined }) : "",
     el("span", { class: said ? "said" : "last", text: said || latest, title: said || latest }),
   );
 }
@@ -613,28 +757,31 @@ export function appendMessages(messages) {
   timeline.querySelector(".empty")?.remove();
   timeline.querySelector(".working-line")?.remove();
   const shown = state.selected === HOME ? byId(routerId()) : current();
-  const worker = shown?.role === "worker";
   const viewed = viewedId();
   messages.forEach((message, index) => {
     if (message.id <= state.lastId || message.session_id !== viewed) return;
     state.lastId = message.id;
-    if (message.kind === "tool" || narration(message, messages[index + 1], worker)) {
-      addWork(timeline, message.kind === "tool" ? "tool" : "narration", asShown(message).text, shown?.cwd);
-      return;
-    }
-    const node = renderMessage(message);
-    if (node?.dataset) {
-      node.dataset.id = message.id;
-      node.dataset.kind = message.kind;
-      if (message.meta?.task_id) node.dataset.task = message.meta.task_id;
-    }
-    timeline.append(node);
+    place(timeline, message, messages[index + 1], shown);
   });
   // Nothing said yet: what to ask for (unless Copilot must be set up first).
   if (!timeline.children.length && state.selected === HOME && state.snapshot?.runtime.state !== "error") timeline.append(welcomeCard());
   updateWorkingLine();
   updateDraftRecords();
   scrollToBottom();
+}
+// One message at the end of `container`: a step (or narration) joins the fold before it.
+function place(container, message, next, shown) {
+  if (message.kind === "tool" || narration(message, next, shown?.role === "worker")) {
+    addWork(container, message.kind === "tool" ? "tool" : "narration", asShown(message).text, shown?.cwd);
+    return;
+  }
+  const node = renderMessage(message);
+  if (node?.dataset) {
+    node.dataset.id = message.id;
+    node.dataset.kind = message.kind;
+    if (message.meta?.task_id) node.dataset.task = message.meta.task_id;
+  }
+  container.append(node);
 }
 export function updateWorkingLine() {
   const timeline = $("#timeline");

@@ -3,7 +3,7 @@
 import { $, api, el, toast, withKey } from "./dom.js";
 import { firstLine, shorten } from "./text.js";
 import { renderSidebar } from "./sidebar.js";
-import { appendMessages, refreshChips, renderHeader, replaceMessage, select, updateDraftRecords, updateWorkingLine } from "./session.js";
+import { appendMessages, PAGE, refreshChips, renderHeader, replaceMessage, select, updateDraftRecords, updateWorkingLine } from "./session.js";
 import { scheduleHome } from "./inbox.js";
 import { upsertTask } from "./tasks.js";
 import { refreshUsageLink, renderConnections, renderLearning } from "./settings.js";
@@ -117,10 +117,17 @@ export function connectEvents() {
 }
 async function resync() {
   await loadState();
-  const session = byId(viewedId());
-  if (!session) return;
-  const messages = await api(`/api/sessions/${session.id}/messages?after=${state.lastId}`);
-  appendMessages(messages);
+  const sessionId = viewedId();
+  if (!byId(sessionId)) return;
+  // What came while the page was away, page by page from the last message shown: a busy chat
+  // can have more than a page of it. Far behind, the chat loads again from its latest.
+  for (let pages = 0; pages < 25; pages += 1) {
+    const page = await api(`/api/sessions/${sessionId}/messages?after=${state.lastId}&limit=${PAGE}`);
+    if (viewedId() !== sessionId || state.loading) return;
+    appendMessages(page);
+    if (page.length < PAGE) return;
+  }
+  await select(state.selected);
 }
 function handleEvent({ type, data }) {
   if (type === "hello") {
@@ -200,6 +207,7 @@ export function applyDraft(data) {
 }
 export function upsertSession(session) {
   if (!state.snapshot) return;
+  const was = sessions().some((item) => item.id === session.id) ? "open" : closedWorkers().some((item) => item.id === session.id) ? "closed" : "";
   const list = sessions().filter((item) => item.id !== session.id);
   if (!session.closed_at) list.push(session);
   list.sort((a, b) => a.created_at.localeCompare(b.created_at));
@@ -207,6 +215,11 @@ export function upsertSession(session) {
   const closed = closedWorkers().filter((item) => item.id !== session.id);
   if (session.closed_at && session.role === "worker") closed.unshift(session);
   state.snapshot.closed = closed.slice(0, 20);
+  // The sidebar's count of closed workers, until the next snapshot has it.
+  const now = session.closed_at ? "closed" : "open";
+  if (typeof state.snapshot.closed_count === "number" && session.role === "worker" && !session.helper && was && was !== now) {
+    state.snapshot.closed_count = Math.max(0, state.snapshot.closed_count + (now === "closed" ? 1 : -1));
+  }
   renderSidebar();
   scheduleHome();
   // Settings shows whether Chief of Staff's learning worker is at it.

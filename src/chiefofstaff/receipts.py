@@ -27,13 +27,21 @@ SHELL_DONE = re.compile(r"<shellId: ([^\s>]+) completed with exit code (-?\d+)>"
 # Copilot's own lines about a command (started, still running, ended), not what it printed.
 COPILOT_MARKS = re.compile(r"<(command\b|shellId: |exited with\b)[^<>]*>")
 
+# Asking a test runner about itself or its tests runs none: `pytest --version`, `pytest --co`,
+# `go test -list .`, `jest --listTests`, `cargo test -- --list`, `npm test -- --help`.
+INFO_ONLY = (
+    r"(?!vitest list\b|.*\s(-h|--help|--version|--collect-only|--co|--fixtures|"
+    r"--fixtures-per-test|--markers|-list|--list|--listTests|--showConfig|--no-run|--dry-run)"
+    r"(?=[\s=]|$))"
+)
 # Matched against each simple command, from the program on: `grep pytest`, `pip install jest`
 # or a commit message that mentions tests are not test runs.
 KINDS = [
     (
         "test",
         re.compile(
-            r"^(pytest|py\.test|unittest|tox|nox|jest|vitest|mocha|rspec|phpunit|ctest|"
+            "^" + INFO_ONLY + r"(pytest|py\.test|unittest|tox|nox|jest|vitest|mocha|rspec|"
+            r"phpunit|ctest|"
             r"go test|cargo (test|nextest)|mvnw?( \S+)*? (test|verify)|(li)?gradlew?( \S+)*? "
             r"(\S*:)?(test|check)\b|(npm|pnpm|yarn|bun)( \S+)*? (run )?test(:\S+)?(?=\s|$)|"
             r"make( \S+)*? (test|check)|"
@@ -338,8 +346,9 @@ TESTS_NONE = re.compile(
 NO_TESTS_HERE = re.compile(
     r"\[no test files\]\s*$|\[no tests to run\]\s*$|^test result: ok\. 0 passed", re.MULTILINE
 )
-# The exit code of a run in which no test ran, when the line's says 0 (pytest's and unittest's).
-NO_TESTS_RAN = 5
+# What a test run in which no test ran is stored with in place of its exit code: not a code any
+# program exits with (pytest's own for it is 5, which other runners use for failures).
+NO_TESTS_RAN = -5
 
 
 def masked_failure(command: str, output: str) -> bool:
@@ -402,18 +411,21 @@ def output_kind(command: str, output: str) -> str:
 def test_exit(command: str, output: str, code: int | None) -> int | None:
     """Whether the tests in a command line passed (0) or failed, rather than the line: piped
     into `tail` they exit 0 even when they fail; in `pytest && git push` a rejected push exits
-    1 after every test passed. A run in which no test ran did not pass; one whose output was
-    cut before its summary (`pytest | head`) is not known (None)."""
+    1 after every test passed. A run in which no test ran is NO_TESTS_RAN; one whose output was
+    cut before its summary (`pytest | head`) or filtered to nothing (`pytest | grep FAILED`)
+    is not known (None)."""
     if code is None:
         return None
     summary = last_summary(output)
     if code == 0 and summary == "failed" and masked_failure(command, output):
         return 1
-    if code == 0 and summary == "none":
+    if summary == "none":
         return NO_TESTS_RAN
-    if not summary and piped(command) and COPILOT_MARKS.sub("", output or "").strip():
+    own = COPILOT_MARKS.sub("", output or "").strip()
+    if not summary and piped(command) and (own or not running_shell(output)):
         # What it printed shows no summary (cut by `| head`, filtered by `| grep`), and the
-        # exit code is the last program's: no result.
+        # exit code is the last program's (grep's 1: no line matched): no result. Unless all
+        # there is yet is Copilot's word that it started (a background run that ended since).
         return None
     if code != 0 and summary == "passed":
         parts = simple_commands(command)
@@ -468,11 +480,52 @@ def names(snippet: str, command: str) -> bool:
     `git --no-pager log --oneline --stat -2`. Never by letters: `ls` is not in `tools`. Each
     command of a line counts on its own: in `python -m app 'a b'; pytest`, the `;` is not part
     of the quoted argument before it."""
-    quoted = words(snippet)
-    for ran in [words(command), *simple_commands(command)]:
+    return named(words(snippet), [words(command), *simple_commands(command)])
+
+
+def named(quoted: list[str], parts: list[list[str]]) -> bool:
+    """`names`, from the quoted words and those of the line (whole, then command by command)."""
+    for ran in parts:
         if within_words(quoted, ran) or (len(quoted) >= 2 and set(quoted) <= set(ran)):
             return True
     return False
+
+
+def unquoted(text: str) -> str:
+    """Text without quotes or backslashes. Each word of a command line (as `words` and
+    `simple_commands` split it), so stripped, is part of the line so stripped: a quick test of
+    whether a quoted word can be one of its words, before splitting the line."""
+    return text.replace("'", "").replace('"', "").replace("\\", "")
+
+
+class Lines:
+    """The command lines `backing` reads, worked out once per summary, not once per criterion:
+    a task may have run thousands."""
+
+    def __init__(self, commands: list[dict]):
+        self.commands = commands
+        self.flat: list[str] = []  # Each unquoted, once one is looked for.
+        self.parts: dict[str, list[list[str]]] = {}
+
+    def latest(self, cited: list[tuple[list[str], list[str]]]) -> dict | None:
+        """The latest command that names one of these quoted commands (each its words, and
+        those unquoted): only lines that hold the longest word of one are split into words."""
+        if len(self.flat) != len(self.commands):
+            self.flat = [unquoted(command["command"]) for command in self.commands]
+        found: set[int] = set()
+        for _said, flat in cited:
+            key = max(flat, key=len, default="")
+            found.update(index for index, line in enumerate(self.flat) if key in line)
+        for index in sorted(found, reverse=True):
+            text = self.commands[index]["command"]
+            for said, flat in cited:
+                if not all(word in self.flat[index] for word in flat):
+                    continue
+                if (parts := self.parts.get(text)) is None:
+                    parts = self.parts[text] = [words(text), *simple_commands(text)]
+                if named(said, parts):
+                    return self.commands[index]
+        return None
 
 
 def cited_part(evidence: str, command: str) -> str:
@@ -486,17 +539,22 @@ def cited_part(evidence: str, command: str) -> str:
     return shown(command)
 
 
-def backing(evidence: str, commands: list[dict]) -> dict | None:
+def backing(evidence: str, commands: list[dict], lines: Lines | None = None) -> dict | None:
     """The observed command a criterion's evidence names (in backticks, or verbatim), latest
-    first: what makes a worker's "met" an observation rather than a claim."""
-    quoted = QUOTED.findall(evidence or "")
-    for command in reversed(commands):
-        text = command["command"]
-        if any(names(snippet, text) for snippet in quoted):
-            return command
-        if not quoted and len(text) >= 8 and text in (evidence or ""):
-            return command
-    return None
+    first: what makes a worker's "met" an observation rather than a claim. `lines`: these
+    commands as read for another criterion of the same summary."""
+    evidence = evidence or ""
+    if quoted := QUOTED.findall(evidence):
+        lines = lines if lines and lines.commands is commands else Lines(commands)
+        # A quote with no words in it names nothing.
+        cited = [
+            (said, [unquoted(word) for word in said]) for text in quoted if (said := words(text))
+        ]
+        return lines.latest(cited)
+    return next(
+        (c for c in reversed(commands) if len(c["command"]) >= 8 and c["command"] in evidence),
+        None,
+    )
 
 
 # Programs whose exit 1 means "no match" or "differs", not an error: a search that finds
@@ -554,6 +612,13 @@ def shown(command: str, limit: int = 200) -> str:
     return command if len(command) <= limit else command[: limit - 1].rstrip() + "\u2026"
 
 
+def listed(names: list[str], limit: int = 3) -> str:
+    """ "a", "a and b", "a, b and c", or "a, b, c and 2 more"."""
+    if len(names) > limit:
+        return f"{', '.join(names[:limit])} and {len(names) - limit} more"
+    return " and ".join([", ".join(names[:-1]), names[-1]]) if len(names) > 1 else names[0]
+
+
 def criteria_results(
     criteria: list[str],
     claims: list[dict],
@@ -570,6 +635,7 @@ def criteria_results(
     it holds (it passed as last run, after `since` when the code changed since then).
     """
     results = []
+    lines = Lines(commands)  # Each command read once, whatever the number of criteria.
     for criterion, claim, before in zip(
         criteria, claimed(criteria, claims), claimed(criteria, earlier or []), strict=True
     ):
@@ -582,10 +648,12 @@ def criteria_results(
             claim = before
         result = (claim or {}).get("result") or "not_checked"
         proof = (claim or {}).get("evidence", "")
-        observed = backing(proof, commands) if result == "met" else None
+        observed = backing(proof, commands, lines) if result == "met" else None
+        code = observed["exit_code"] if observed else None
+        # A test run in which no test ran shows nothing: no exit code of its own to name.
+        code = None if code == NO_TESTS_RAN else code
         state = result
         if result == "met":
-            code = observed["exit_code"] if observed else None
             if code is None:
                 state = "claimed"
             elif code == 0:
@@ -611,7 +679,7 @@ def criteria_results(
                 "evidence": proof[:500],
                 "state": state,
                 "command": cited_part(proof, observed["command"]) if observed else "",
-                "exit_code": observed["exit_code"] if observed else None,
+                "exit_code": code,
                 "earlier": carried,
             }
         )
@@ -683,15 +751,21 @@ def summarize(
                     "runs": len(every), "failed_before": False, "running": True}  # fmt: skip
         final = runs[-1]
         ended[name] = final.get("ended_at") or ""
-        return {
+        none = final["exit_code"] == NO_TESTS_RAN
+        found = {
             "command": shown_command(final["command"], name),
-            "exit_code": final["exit_code"],
+            "exit_code": None if none else final["exit_code"],
             "passed": final["exit_code"] == 0,
             "runs": len(every),
-            # Failing first, then passing: what a regression test for a fix shows.
-            "failed_before": final["exit_code"] == 0 and any(c["exit_code"] for c in runs[:-1]),
+            # Failing first, then passing: what a regression test for a fix shows (a run in
+            # which no test ran is no failure).
+            "failed_before": final["exit_code"] == 0
+            and any(c["exit_code"] not in {0, NO_TESTS_RAN} for c in runs[:-1]),
             "running": running,
         }
+        if none:
+            found["no_tests"] = True  # No pass, and no failure (nor exit code) to name.
+        return found
 
     checkouts = evidence.get("checkouts", [])
     changed = {
@@ -708,7 +782,7 @@ def summarize(
     flags = []
     tests = last("test")
     prs = evidence.get("prs", [])
-    if tests and tests["passed"] is False:
+    if tests and tests["passed"] is False and not tests.get("no_tests"):
         # The PR's checks started after it ended, so they tested newer code: what CI says now is
         # the newer word on the tests.
         green = [
@@ -725,6 +799,9 @@ def summarize(
                      "pass now.")  # fmt: skip
     elif tests and tests["running"] and tests["passed"] is not True:
         pass  # Its tests are running again: their result is not in yet.
+    elif tests and tests.get("no_tests"):
+        said = "Says tests pass, but its" if says_tests_pass(report or "") else "Its"
+        flags.append(f"{said} last test run ran no tests (`{tests['command']}`).")
     elif says_tests_pass(report or ""):
         if not tests and by_kind.get("test"):
             # Stopped, or its output cut before its summary (`pytest | head`): no result.
@@ -738,9 +815,20 @@ def summarize(
         flags.append(f"The last test run failed (exit {tests['exit_code']}).")
     if checkouts and said_changed and not any(changed.values()):
         flags.append("Says it made changes, but its checkouts have none.")
+    # Counted all the same (a PR would carry them), and said: not what to commit.
+    if generated := [name for c in checkouts for name in c.get("generated") or []]:
+        flags.append(f"Commits generated files: {listed(generated)}.")
+    if lockfiles := [name for c in checkouts for name in c.get("lockfiles") or []]:
+        flags.append(f"Adds {listed(lockfiles)}, which the project did not have.")
     for pr in prs:
-        # A closed or merged PR's checks are history: nothing to fix there now.
-        if pr.get("checks") == "failing" and pr.get("state") not in {"CLOSED", "MERGED"}:
+        # A closed or merged PR's checks are history: nothing to fix there now. Its own PR's, or
+        # one it reviewed, are on its chip in sight ("✗ CI", which on hover) and, followed, on
+        # its card's line ("CI failing on app#95 (docs)"): not said again here.
+        if (
+            pr.get("checks") == "failing"
+            and pr.get("state") not in {"CLOSED", "MERGED"}
+            and not (pr.get("own") or pr.get("reviewed"))
+        ):
             names = ", ".join(pr.get("failing") or [])
             flags.append(f"Checks are failing on {pr['label']}" + (f": {names}." if names else "."))
     results = criteria_results(criteria or [], claims or [], commands, earlier, since)

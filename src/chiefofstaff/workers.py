@@ -22,8 +22,8 @@ from .events import PLUMBING_TOOLS, describe_tool
 from .roles import ROUTER, WORKER
 from .sources.slack import describe
 from .store import now
-from .tasks import ADOPTED, OPEN
-from .watchdog import instruction, since_last_instruction, timestamp
+from .tasks import ADOPTED, HELPERS, OPEN
+from .watchdog import instruction, recent_messages, since_last_instruction, timestamp
 
 # A worker quiet this long (seconds) lets go of its Copilot session (see release_idle).
 RELEASE_IDLE = float(os.environ.get("CHIEFOFSTAFF_RELEASE_IDLE_MINUTES", "10")) * 60
@@ -157,7 +157,7 @@ class Workers:
     def complete_report(self, session_id: str):
         """A worker that reported done in a line ("Analysis complete") and wrote the answer
         itself in its chat: the owner reads reports, so the report gets that answer."""
-        recent = since_last_instruction(self.store.messages(session_id, limit=400))
+        recent = since_last_instruction(recent_messages(self.store, session_id))
         reports = [m for m in recent if m["kind"] == "report" and m["meta"].get("status") == "done"]
         if not reports or not self.states.handle(session_id):
             return
@@ -202,7 +202,7 @@ class Workers:
     def answer_on_home(self, session_id: str):
         """The owner wrote to a worker on Home (@): its answer shows there too, once, as a line
         that opens the worker (its report, if it made one, is on the task's card)."""
-        recent = since_last_instruction(self.store.messages(session_id, limit=400))
+        recent = since_last_instruction(recent_messages(self.store, session_id))
         if not recent or recent[0]["kind"] != "owner" or not recent[0]["meta"].get("home"):
             return
         asked = recent[0]
@@ -264,7 +264,7 @@ class Workers:
             self.tasks.move(task["id"], "done", result="Stopped without proposing more.")
             await self.close(session_id)
             return
-        recent = since_last_instruction(self.store.messages(session_id, limit=400))
+        recent = since_last_instruction(recent_messages(self.store, session_id))
         if not recent or not instruction(recent[0]):
             return
         asked = recent[0]
@@ -725,11 +725,21 @@ class Workers:
             if row["closed_at"]:
                 await self.workspaces.release(row)
 
-    def recently_closed(self, limit: int) -> list[dict]:
+    def recently_closed(self, limit: int | None, helpers: bool = True) -> list[dict]:
+        """Closed workers, the latest first (None: all of them); `helpers`: Chief of Staff's own
+        helpers too."""
+        mine = "" if helpers else f" AND id NOT IN ({HELPERS})"
         return self.store.all(
-            """SELECT * FROM sessions WHERE role='worker' AND closed_at IS NOT NULL
-            ORDER BY closed_at DESC LIMIT ?""",
-            (limit,),
+            "SELECT * FROM sessions WHERE role='worker' AND closed_at IS NOT NULL"  # noqa: S608
+            f"{mine} ORDER BY closed_at DESC LIMIT ?",  # (HELPERS: constant SQL)
+            (-1 if limit is None else limit,),
+        )
+
+    def closed_count(self) -> int:
+        """How many of the owner's workers are closed (not Chief of Staff's own helpers)."""
+        return self.store.value(
+            "SELECT count(*) FROM sessions WHERE role='worker' AND closed_at IS NOT NULL "  # noqa: S608
+            f"AND id NOT IN ({HELPERS})"  # (HELPERS: constant SQL)
         )
 
     def card(self, row: dict) -> dict:
