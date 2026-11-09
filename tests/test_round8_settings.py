@@ -159,9 +159,11 @@ async def test_a_failed_plugin_install_says_why_in_a_line(harness):
 
 def test_a_slack_token_with_a_space_inside_says_so():
     """S9b: "xoxp-1234 5678" was "not a Slack user token … Bot tokens (xoxb-)…"."""
-    assert SlackToken.model_validate({"token": "  xoxp-1234-5678\n"}).token == "xoxp-1234-5678"
+    # Made-up tokens, low in entropy: a secret scanner takes a random-looking one for a key.
+    fake = "xoxp-" + "test-test"
+    assert SlackToken.model_validate({"token": f"  {fake}\n"}).token == fake
     with pytest.raises(ValidationError, match=r"A Slack token has no spaces: paste it again\."):
-        SlackToken.model_validate({"token": "xoxp-1234 5678"})
+        SlackToken.model_validate({"token": "xoxp-" + "test test"})
 
 
 def test_task_folders_inside_a_repository_are_refused_when_chosen(git_repo):
