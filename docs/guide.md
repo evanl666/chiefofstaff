@@ -39,7 +39,8 @@ On the right, everything has one place:
 | Section | What is there |
 | --- | --- |
 | **Needs you** | Questions and forms from workers, sign-ins, decisions, a folder to pick, Slack replies, PR reviews and replies to approve, PRs of yours ready to merge (*Merge* merges it as shown; anything pushed since stops it: the card says so and goes, and the PR comes back once its new commits are ready), sends a restart interrupted, failed or blocked tasks. A Slack reply someone answered before you sent it is not sent: its card shows what they wrote, marked new, and its one action is *Send anyway* (held again only if someone writes after that); a reply you emptied is not sent either. A draft its worker withdrew or replaced leaves, and its line in the chat says so (after a reload too). A worker's (or the Slack session's) question stays here until you answer or dismiss it, also when its task was cancelled or finished meanwhile: answering means you want the work, and that task goes on with your answer. Each of the Slack session's questions has a card of its own (a new one does not replace the last), and your answer reaches it with the question it answers. A note of the Router's that needs you (*The Router*, marked *Urgent* when it cannot wait) stays here until you say *Got it* or *Open* it (it shows in the chat), or write to the Router after it. Each card has one main action (*Send*, *Answer*, *Accept*…); the rest is behind **⋯**. A card leaves as soon as you act and a short note confirms it; if that did not work, it comes back with the reason. While the page is open, a short note at the bottom also tells you what comes for you (click it to go there): what needs you, and away from Home news too; not what the session you are looking at says itself, and while you [focus](#focus) only what is urgent. |
-| **Tasks** | Task by task, in four areas after *Needs you*, then *Artifacts*. Every area folds (click its title; its count stays in sight, and it stays as you left it; *Needs you* opens again by itself when something new comes). Every task is one row, the same in every area: its title (click it to open the row into its whole card; **▴** or Esc folds it back), where it stands and why, its latest progress (the step it is in and for how long, *Waiting for background process* when its turn is over and a command it left running goes on, or its latest report), its worker as a small link (opens its chat at that task), what it made, and the one action that matters now. A task is finished only once you accepted it and nothing is left to run or monitor. *Needs you*: every finished result (*Awaiting acceptance*: a report that changed no code too; nothing accepts it for you, not time, its worker going on to other work, nor its PR being merged), with *Accept*, *View report*, *Follow up* and *Request changes* (say what to change: its worker is told you did not accept it, and its next report is a new result to accept); questions (why it asks, its choices as buttons, what it does next), tasks stopped, failed or blocked, and news on finished work (*Update*). *Running*: the tasks being worked on now (a worker does one at a time; a result you asked more about shows here, *Following up*, while its worker is at it). *Monitoring*: tasks nobody has to act on now that something still has to come for: a review, CI or the merge of a PR it made (also once you accepted it), a reply on a thread it follows, a time it checks back (`check_back`, for a long run), a run it started, a slot (*Queued*), its turn (*Up next*) or its worker's return (*Paused*). A row says what it waits for and on what (*Waiting for approval · app#594*), when it was last checked and when next, and, hover it, what wakes it; long quiet it says so (*No updates for 26h*) and stays here: it is never taken for finished. A PR of yours to fix (*CI failing*, *changes requested*, *merge conflicts*) is under *Needs you*; one ready to merge is offered on a *Merge* card there. *Overdue*: no activity for *Stalled after* hours (Settings → General, 4 by default) and nothing to wait on: its worker is asked once where it stands, *Nudge* asks again; no answer within the hour brings it to *Needs you*. *Recently finished*: accepted tasks with nothing left to monitor (a PR you reviewed for someone else ends here once your review is in: news on it comes back as an *Update*), and tasks cancelled or set aside, which say so, never *Done*; the newest first, 30 at a time (*Show more*), for three days. *Monitoring* and *Recently finished* scroll on their own and do not move while the mouse is over them. *Artifacts* (last, so it never pushes your tasks down): the PRs, documents and runs your tasks delivered, by their real names, each PR with what the task did to it (*Created*, *Modified*, *Reviewed*) and where it stands now as GitHub has it (*draft*, *in review*, *changes requested*, *CI failing*, *awaiting approval*, *ready to merge*, *merged*…; a document or run as its worker last said); a PR is listed for the task that made, changed or reviewed it, never for one that only mentions it. Files, mockups, screenshots, CSVs, logs, links it only mentions and a document site's home page are not listed: they stay on its card, in its report and files. **✕** takes one off the list; *Show … taken off* brings it back. A PR a task follows that cannot be read says why on its row: no access, not found, GitHub's rate limit or GitHub not answering (with *Retry*); *Stop following* there stops it for that task only. Hover anything for more (its id, worker, credits): the tip goes as soon as the list changes. *Copy report* (markdown for a PR description), *Create PR* (for commits on a branch of its own, a *chief/…* one or one you named, that no PR is from yet), *Rename…* and, when its latest result is about something else, *Move the latest result to a new task…* (with *Undo split* for ten minutes) are under **⋯**. Every count counts tasks. |
+| **Tasks** | Task by task, in four areas after *Needs you*, then *Artifacts*. Every area folds (click its title; its count stays in sight, and it stays as you left it; *Needs you* opens again by itself when something new comes). Every task is one row, the same in every area: its title (click it to open the row into its whole card; **▴** or Esc folds it back), where it stands and why, its latest progress (the step it is in and for how long, *Waiting for background process* when its turn is over and a command it left running goes on, or its latest report), its worker as a small link (its current name, or *Worker chat*; an icon on a narrow panel;
+opens its chat at that task), what it made, and the one action that matters now. A task is finished only once you accepted it and nothing is left to run or monitor. *Needs you*: every finished result (*Awaiting acceptance*: a report that changed no code too; nothing accepts it for you, not time, its worker going on to other work, nor its PR being merged), with *Accept*, *View report*, *Follow up* and *Request changes* (say what to change: its worker is told you did not accept it, and its next report is a new result to accept); questions (why it asks, its choices as buttons, what it does next), tasks stopped, failed or blocked, and news on finished work (*Update*). *Running*: the tasks being worked on now (a worker does one at a time; a result you asked more about shows here, *Following up*, while its worker is at it). *Monitoring*: tasks nobody has to act on now that something still has to come for: a review, CI or the merge of a PR it made (also once you accepted it), a reply on a thread it follows, a time it checks back (`check_back`, for a long run), a run it started, a slot (*Queued*), its turn (*Up next*) or its worker's return (*Paused*). A row says what it waits for and on what (*Waiting for approval · app#594*), when it was last checked and when next, and, hover it, what wakes it; long quiet it says so (*No updates for 26h*) and stays here: it is never taken for finished. A PR of yours to fix (*CI failing*, *changes requested*, *merge conflicts*) is under *Needs you*; one ready to merge is offered on a *Merge* card there. *Overdue*: no activity for *Stalled after* hours (Settings → General, 4 by default) and nothing to wait on: its worker is asked once where it stands, *Nudge* asks again; no answer within the hour brings it to *Needs you*. *Recently finished*: accepted tasks with nothing left to monitor (a PR you reviewed for someone else ends here once your review is in: news on it comes back as an *Update*), and tasks cancelled or set aside, which say so, never *Done*; the newest first, 30 at a time (*Show more*), for three days. *Monitoring* and *Recently finished* scroll on their own and do not move while the mouse is over them. *Artifacts* (last, so it never pushes your tasks down): the PRs, documents and runs your tasks delivered, by their real names, each PR with what the task did to it (*Created*, *Modified*, *Reviewed*) and where it stands now as GitHub has it (*draft*, *in review*, *changes requested*, *CI failing*, *awaiting approval*, *ready to merge*, *merged*…; a document or run as its worker last said); a PR is listed for the task that made, changed or reviewed it, never for one that only mentions it. Files, mockups, screenshots, CSVs, logs, links it only mentions and a document site's home page are not listed: they stay on its card, in its report and files. **✕** takes one off the list; *Show … taken off* brings it back. A PR a task follows that cannot be read says why on its row: no access, not found, GitHub's rate limit or GitHub not answering (with *Retry*); *Stop following* there stops it for that task only. Hover anything for more (its id, worker, credits): the tip goes as soon as the list changes. *Copy report* (markdown for a PR description), *Create PR* (for commits on a branch of its own, a *chief/…* one or one you named, that no PR is from yet), *Rename…* and, when its latest result is about something else, *Move the latest result to a new task…* (with *Undo split* for ten minutes) are under **⋯**. Every count counts tasks. |
 
 When a finished task's worker drafted something for you (a Slack reply, a PR review, a reply on
 your own PR), the draft is the one card: the task's own card is in it (*Result of …*: what it
@@ -67,8 +68,9 @@ and replies show the same on the task's row. When you cancel a task, the Router 
 does not start that work again (nor a new Router after a handover) unless you ask. What you
 write in a worker's chat answers the task that asked you (or the question or decision card it
 waits on), and that task goes on at once; about finished work, its answer is an
-*Update* on the task, which keeps its result, unless it changed code for you: then that is a new
-result to review. A message there that asks for something else ("New, separate task: add mod()
+*Update* on the task, which keeps its result, unless it changed code for you, or redid or
+corrected the work: then that is its new result (to review again when you had not accepted it),
+and the one before is under *Earlier reports* on its card. A message there that asks for something else ("New, separate task: add mod()
 on a new branch", another PR or question) is told apart by the worker that reads it, not by
 its words: it reports that work as a task of its own, with your message and what it ran for
 it, and the task it was on keeps its result (or, still at work, goes on).
@@ -251,8 +253,9 @@ You set one **code folder**: where your repositories live, like `~/workspace`.
   worker may change it.
 - Follow-ups on a task go to the same worker and folder. When a worker closes, its worktrees
   are removed if they hold nothing uncommitted (the branches stay); reopening it brings them
-  back. A worktree with ignored files you may want (an edited `.env`, a report) is kept;
-  dependencies and build output alone do not keep it.
+  back. A worktree with ignored files you may want (an edited `.env`, a report) is kept, with
+  its dependencies and build output deleted; those alone do not keep it (see
+  [Disk space](#disk-space)).
 
 A worktree is a fresh checkout: no dependencies installed, and none of the files git ignores.
 Workers are told to install what the project needs (per its README or `AGENTS.md`). Gitignored
@@ -299,6 +302,33 @@ Inside the sandbox, a worker cannot use your keychain, Docker, Kerberos tickets,
 under `~/.local`, or read your home and other repositories, and `gh` needs Copilot's certificate
 trusted. That is the price of the confinement; with the sandbox off they work as in your
 terminal.
+
+### Disk space
+
+Workers' builds fill folders fast, so Chief of Staff cleans up after them and watches the disk:
+
+- **When a worker closes**, what a build makes again is deleted from its worktrees: build
+  output, dependencies and caches (`build/`, `node_modules/`, `.venv/`, `.gradle/`, `.next/`,
+  `*.egg-info`, `__pycache__`…), and only what git ignores. The worktree itself stays only for
+  your other files (logs, an edited `.env`, a report) or uncommitted changes; why it stays is
+  recorded. Tracked files, new files, a folder with its own `.git` and anything a link leads out
+  to are never deleted.
+- **A worker idle for 3 days** (*After idle (days)*, in Storage) with nothing queued, running or
+  waiting gets the same cleanup, but never while a program runs in its folder (a dev server),
+  another open worker uses it, it is open in a terminal, or it is marked *Keep its files*.
+- **Free space**: below 30 GB or 5% of the disk, whichever is more, you get one alert naming
+  the biggest folders and what can be cleaned. Below 10 GB or 2%, new worker turns wait for
+  space ("waiting for disk space") while running ones go on. Both clear once there is room again.
+- **Storage** (the disk icon at the bottom of the sidebar, amber or red when the disk is low)
+  shows free space, each worker's folder the largest first and what can be cleaned, why a kept
+  worktree stays, recent cleanups, and anything it could not delete (files another user owns,
+  say). From there: review a worktree's files, clean its build
+  output, delete a closed worker's worktree (type "delete"; its branch stays), mark a worker
+  *Keep its files*, and set what counts as build output or must never be cleaned.
+- **uv's cache** is shown with its size, never deleted. Each `uvx chiefofstaff@latest` of a new
+  version leaves an environment there; `uv cache prune` removes the ones nothing uses. Never run
+  `uv cache clean` while Chief of Staff is running: it can delete the environment it runs from.
+  `uv tool install chiefofstaff` once, then `uv tool upgrade chiefofstaff`, avoids the pile-up.
 
 ## Receipts
 
@@ -615,6 +645,13 @@ nothing is handed over twice. A watch whose tool is missing here says so under *
 connector only looks: it never posts, replies or reacts. It reads other people's messages, so
 it runs sandboxed with network to GitHub only, whatever the worker sandbox setting.
 
+Each watch is searched from where its last complete search ended (up to a week back), not only
+the last day, so a slow day of searches does not skip anything: a search that could not cover
+everything (a tool that returns only the newest results, a failed page) does not count as done,
+and that time is searched again. Time that still cannot be searched after a few tries (or that
+the tool cannot reach back to) is kept as a gap: Settings → *Watches* lists it, and you are told
+once ("Could not check “#deploys” between 3:00 PM and 9:00 PM").
+
 It also collects what you write there (your own messages only), so *How you work* learns your
 voice even where Slack is reached through another tool.
 
@@ -659,12 +696,16 @@ with several waiting, you are asked which. Written in Chinese, you
 get the notifications in Chinese. The chat notes each one. When sending fails, the chat says so
 once and Settings shows the latest attempt.
 
+Each item in a notification says what it is (*Needs your input*, *Failed*, *Stopped*…), the
+task it is about, what it needs in a sentence or two (whole sentences, not a heading such as
+"Issue:") and where to answer it (*Open Needs you → Fix deployment compatibility issue*).
+
 Settings → *When you're away* shows what the way you gave can do, as tried (by *Send a test*
 and by every notification since), not as assumed: *Send* (a message goes out), *Delivery* (it
 can be read back where it went), *Read replies* (your answers there are read) and *New
 commands* (no, by design: only answers with a code act). When replies cannot be read it says
-*Send only*: notifications then carry no codes and do not suggest replying; they say to answer
-in Chief of Staff. When some notification threads could not be read (or there was more than
+*Send only*: notifications then carry no codes (none are even made) and do not suggest
+replying; each says where to go in Chief of Staff. When some notification threads could not be read (or there was more than
 one page of messages), it says *Coverage limited* and how much, and those messages are read
 again later: an answer there is not taken for read until it was.
 
@@ -790,6 +831,8 @@ Most settings are in the UI. Environment variables for tuning and tests:
 | `CHIEFOFSTAFF_WATCHDOG_INTERVAL`, `_STALL`, `_LONG`, `_COOLDOWN` | `60`, `900`, `2700`, `600` | Watchdog timing (seconds) |
 | `CHIEFOFSTAFF_MIN_FREE_MEMORY` | `10` | New worker turns wait while less memory than this (percent) is free; `0` turns it off |
 | `CHIEFOFSTAFF_RELEASE_IDLE_MINUTES` | `10` | A quiet worker lets go of its Copilot session after this long |
+| `CHIEFOFSTAFF_DISK_WARNING_GB`, `_WARNING_PERCENT` | `30`, `5` | Below this much free space (whichever is more) the disk is low: an alert |
+| `CHIEFOFSTAFF_DISK_CRITICAL_GB`, `_CRITICAL_PERCENT` | `10`, `2` | Below this, new worker turns wait for space |
 
 Chief of Staff removes its own `CHIEFOFSTAFF_*` variables from the environment Copilot and its
 commands run in.

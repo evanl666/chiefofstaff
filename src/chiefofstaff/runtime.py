@@ -84,6 +84,7 @@ from .sources import Source
 from .sources.github import GitHubSource
 from .sources.slack import SlackSource, describe
 from .state import SessionStates
+from .storage import Storage
 from .store import Store, ago_minutes, hours_ago, now
 from .task_actions import TaskActions
 from .tasks import (
@@ -361,6 +362,7 @@ class Runtime:
         self.watchdog = Watchdog(self)
         self.abilities = Abilities(self)
         self.connector = Connector(self)
+        self.storage = Storage(self)
         self.toolset = Tools(self)
         self.tools = self.toolset.definitions()
 
@@ -2674,6 +2676,8 @@ class Runtime:
                 self.asks.expire_questions,
                 self.focus.check,
                 self.workers.refresh_elsewhere,
+                # Disk space: read, measured and cleaned in the background (see storage.py).
+                self.storage.tick,
             )
             for job in jobs:
                 try:

@@ -1175,3 +1175,88 @@ def test_a_rows_delivery_line_follows_the_owners_message_only():
         "return [k.sentState(task), k.sentState(task, Date.now() + 31000)];"
     )
     assert gone == ["sending", ""]
+
+
+def test_one_row_for_a_followed_pr_is_on_the_task_the_pr_is():
+    """QA E17: two accepted tasks of a worker follow one PR: its row was on the one updated
+    last, which only names it, and the task that made it (or reviewed it) was with the
+    finished ones."""
+    workers = [{"id": "w1", "status": "idle"}, {"id": "w2", "status": "idle"}]
+
+    def prs(label, role):
+        return {"prs": [{"label": label, "role": role, "state": "OPEN"}]}
+
+    tasks = [
+        task("maker", "w1", "done", at="2026-11-07T08:00:00Z", watching=["github:o/r#7"],
+             receipts=prs("o/r#7", "created")),
+        task("namer", "w1", "done", at="2026-11-07T11:00:00Z", watching=["github:o/r#7"],
+             receipts=prs("o/r#7", "referenced")),
+        task("reviewer", "w2", "done", at="2026-11-07T08:00:00Z", watching=["github:o/r#8"],
+             receipts=prs("o/r#8", "reviewed")),
+        task("mention", "w2", "done", at="2026-11-07T11:00:00Z", watching=["github:o/r#8"]),
+    ]  # fmt: skip
+    found = board(tasks, workers)
+    assert found["phases"] == {
+        "maker": "monitoring/delivered", "namer": "finished/still-following",
+        "reviewer": "monitoring/delivered", "mention": "finished/still-following",
+    }  # fmt: skip
+    assert found["whys"]["namer"] == "Still following, for \u201cmaker\u201d"
+
+
+# Just enough of a DOM for tasks.js to draw a part of a row (el in dom.js).
+FAKE_DOM = """
+document.createElement = (tag) => ({ tag, children: [], attributes: {}, className: "",
+  textContent: "", setAttribute(key, value) { this.attributes[key] = value; },
+  addEventListener() {}, append(...nodes) { this.children.push(...nodes); } });
+"""
+
+
+def test_a_reused_worker_is_never_named_on_a_row_by_its_first_task():
+    """QA E32: a worker started for "Old task", then given "New task" (its name now), was
+    "Worker Old task" on that row: named by the first thing it was asked, long done. It is the
+    task's worker chat then; a worker on another task is named for that one."""
+    found = tasks_js(
+        FAKE_DOM
+        + """
+        const reused = { id: "w1", title: "Old task", display_title: "New task" };
+        const ref = (session, title) => {
+          const node = k.workerRef(session, title, "t1");
+          return [node.children.map((part) => part.textContent).join(""),
+            node.attributes["data-tip"]];
+        };
+        return [ref(reused, "New task"), ref(reused, "Earlier task"),
+          ref({ id: "w2", title: "Old task", display_title: "" }, "New task")];
+        """
+    )
+    assert found == [
+        ["Workerchat", "Open its worker's chat at this task"],
+        ["WorkerNew task", "Open its worker's chat at this task\nWorker: \u201cNew task\u201d"],
+        ["Workerchat", "Open its worker's chat at this task"],
+    ]
+
+
+def test_earlier_reports_are_kept_and_a_row_says_the_latest():
+    """QA E34: a newer report on a task is its result; the ones before it are kept
+    (`earlier_results`, newest first), each with when it was said; one without words is
+    left out, a time that is none is not said. A row's latest line is the newest result, and
+    a task that failed after a retry says why, not the result from before it."""
+    found = tasks_js(
+        """
+        const task = { id: "t1", status: "done", result: "Cache at 96 MB.", progress: "",
+          earlier_results: [{ at: "2026-11-09T10:00:00Z", text: "Cache at **64 MB**." },
+            { at: "not a time", text: "Cache at 48 MB." }, { at: "2026-11-08T10:00:00Z",
+            text: "  " }, null, { at: "2026-11-07T10:00:00Z" }] };
+        const failed = { id: "t2", status: "failed", result: "Exported 10k rows.",
+          progress: "The bucket is gone." };
+        return [k.earlierResults(task), k.earlierResults({ id: "t3" }),
+          k.earlierResults({ id: "t4", earlier_results: "Cache at 32 MB." }),
+          k.rowLatest(task, null, { section: "monitoring", marker: "delivered" }).text,
+          k.rowLatest(failed, null, { section: "needs", marker: "failed" }).text];
+        """
+    )
+    assert found[0] == [
+        {"at": "2026-11-09T10:00:00Z", "text": "Cache at **64 MB**."},
+        {"at": "", "text": "Cache at 48 MB."},
+    ]
+    assert found[1:3] == [[], []]
+    assert found[3:] == ["Cache at 96 MB.", "The bucket is gone."]

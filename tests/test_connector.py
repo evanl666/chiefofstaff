@@ -839,7 +839,8 @@ async def test_away_a_failed_task_is_told_and_retried_by_its_code(tmp_path):
     await settle(runtime)
     messenger = runtime.toolset.last_special("messenger")
     body, _plain, _blocks = notification(harness, messenger)
-    code = code_in(body, "Failed · “Build the release”")
+    code = code_in(body, "Task: Build the release")
+    assert f"*[{code}]* Failed\nTask: Build the release\n" in body, body
     assert f"Reply: `{code} retry`" in body
 
 
@@ -858,7 +859,8 @@ async def test_away_a_stopped_task_is_told_as_stopped_and_goes_on_or_is_cancelle
     await settle(runtime)
     messenger = runtime.toolset.last_special("messenger")
     body, _plain, _blocks = notification(harness, messenger)
-    go_on, cancel = code_in(body, "Stopped · “Sum it”"), code_in(body, "Stopped · “Sort it”")
+    go_on, cancel = code_in(body, "Task: Sum it"), code_in(body, "Task: Sort it")
+    assert f"*[{go_on}]* Stopped\nTask: Sum it\n" in body, body
     assert f"Reply: `{go_on} go on · cancel`" in body and "asks" not in body
     await call_tool(runtime, "report_notified", messenger["id"], ok=True, where="DM",
                     method="send", replies="read")  # fmt: skip

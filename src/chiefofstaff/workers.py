@@ -151,6 +151,11 @@ class Workers:
             if not self.runtime.special(row) and (free := machine.short_of_memory()) is not None:
                 self.runtime.update_session(session_id, status="queued", activity=memory_note(free))
                 return False
+            if not self.runtime.special(row) and (room := machine.short_of_disk()) is not None:
+                # The disk is nearly full: a build started now could fail half-written.
+                note = machine.disk_note(room)
+                self.runtime.update_session(session_id, status="queued", activity=note)
+                return False
             self.states[session_id].busy = True
             return True
 
@@ -446,6 +451,7 @@ class Workers:
         async with self.pump_lock:
             limit = self.store.settings().max_workers
             short = machine.short_of_memory()
+            room = machine.short_of_disk()
             for row in self.store.open_sessions(WORKER):
                 if row["status"] != "queued":
                     continue
@@ -455,6 +461,11 @@ class Workers:
                     # More work now could freeze the computer: it starts once memory frees up.
                     if row["activity"] != memory_note(short):
                         self.runtime.update_session(row["id"], activity=memory_note(short))
+                    continue
+                if room is not None and not self.runtime.special(row):
+                    # It starts once the disk has room again (see storage.py).
+                    if row["activity"] != machine.disk_note(room):
+                        self.runtime.update_session(row["id"], activity=machine.disk_note(room))
                     continue
                 if self.running() < limit or self.runtime.special(row):
                     self.states[row["id"]].busy = True
@@ -479,7 +490,7 @@ class Workers:
         )
         activity = f"waiting for {names}" if waiting else ""
         if row["activity"] != activity and not (
-            not waiting and row["activity"].startswith(MEMORY_WAIT)
+            not waiting and row["activity"].startswith((MEMORY_WAIT, machine.DISK_WAIT))
         ):
             self.runtime.update_session(row["id"], activity=activity)
         for task in queued:

@@ -1,6 +1,7 @@
 """Where workers work: a workspace folder each, with worktrees or clones of their repositories."""
 
 import asyncio
+import fnmatch
 import hashlib
 import itertools
 import json
@@ -9,14 +10,17 @@ import os
 import re
 import shutil
 import signal
+import stat
+import sys
 import tempfile
 import time
 import unicodedata
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from pathlib import Path
+from uuid import uuid4
 
-from . import receipts
+from . import machine, receipts
 from .models import Settings
 from .policy import within
 from .roles import WORKER
@@ -24,6 +28,10 @@ from .store import Store
 
 # Workers' branches: chief/<task-slug>-<id>.
 BRANCH_PREFIX = "chief/"
+
+
+class TimedOutError(ValueError):
+    """A command stopped for taking too long (not one that failed by itself)."""
 
 
 async def command(
@@ -48,7 +56,7 @@ async def command(
         with suppress(ProcessLookupError):
             os.killpg(process.pid, signal.SIGKILL)  # Also ssh and other children.
         await process.wait()
-        raise ValueError(f"{arguments[0]} timed out.") from exc
+        raise TimedOutError(f"{arguments[0]} timed out.") from exc
     if process.returncode:
         error = stderr.decode(errors="replace").strip()[:500]
         raise ValueError(f"{arguments[0]} failed: {error}")
@@ -1526,35 +1534,349 @@ def file_sizes(top: Path, names: list[str]) -> list[dict]:
     return found
 
 
-# Ignored folders that are made again by an install or a build: no reason to keep a worktree.
-REGENERABLE = {
+# Ignored folders and files that a build or an install makes again (build output, dependencies,
+# caches), by name anywhere in a worktree: no reason to keep a worktree, and deleted to free
+# space from one that stays. Not logs (`logs/`, `*.log`): the owner decides about those.
+BUILD_OUTPUT = {
     *SKIPPED, ".venv", ".tox", ".nox", ".pytest_cache", ".mypy_cache", ".ruff_cache",
-    ".cache", ".next", ".nuxt", ".turbo", ".parcel-cache", ".gradle", ".idea", ".vscode",
-    "coverage", "htmlcov", ".coverage", ".DS_Store", "out-tsc",
+    ".hypothesis", ".cache", ".next", ".nuxt", ".turbo", ".parcel-cache", ".gradle", ".kotlin",
+    ".cxx", ".externalNativeBuild", ".dart_tool", ".angular", ".svelte-kit", ".expo", ".output",
+    ".vite", ".webpack", ".docusaurus", "storybook-static", ".nyc_output", ".jest-cache",
+    ".eslintcache", ".stylelintcache", ".ipynb_checkpoints", ".sass-cache", "elm-stuff",
+    ".stack-work", "_build", "DerivedData", ".build", "Pods", "CMakeFiles", ".terraform",
+    "__generated__", "coverage", "htmlcov", ".coverage", "out-tsc",
 }  # fmt: skip
+BUILD_PATTERNS = ("*.egg-info", "*.pyc", "*.pyo", "cmake-build-*", "bazel-*")
+# What tools keep to go faster next time (test, type-check and lint caches, coverage, bytecode),
+# not what a worker's next run needs installed or built: all that is cleaned from a worker that
+# still follows a task (a PR's checks, a run under way).
+CACHES = {
+    ".pytest_cache", ".mypy_cache", ".ruff_cache", ".hypothesis", ".cache", ".parcel-cache",
+    ".jest-cache", ".eslintcache", ".stylelintcache", ".nyc_output", ".ipynb_checkpoints",
+    ".sass-cache", ".turbo", "__pycache__", "coverage", "htmlcov", ".coverage",
+}  # fmt: skip
+CACHE_PATTERNS = ("*.pyc", "*.pyo")
+# Editor settings and Finder's notes: no reason to keep a worktree, nor worth deleting from one
+# that stays.
+EDITOR_FILES = {".idea", ".vscode", ".DS_Store"}
+REGENERABLE = BUILD_OUTPUT | EDITOR_FILES
+# At most this many ignored entries and changed files are recorded for a worktree that stays.
+MAX_KEPT_LISTED = 50
+# A build folder is looked through for files the owner never wants cleaned up to this many
+# entries; one bigger is kept whole.
+MAX_LOOKED_INSIDE = 500_000
+# Where a folder being deleted is moved first, in Chief of Staff's workspaces folder (never in a
+# worktree): a turn that starts meanwhile finds it whole or gone, never half deleted. A name only
+# Chief of Staff uses (the workspaces folder may be one the owner chose); what an earlier version
+# called it, of which only its own entries are taken; and the names to_trash gives those.
+TRASH = ".chiefofstaff-trash"
+OLD_TRASH = ".trash"
+TRASHED = re.compile(r"^[0-9a-f]{12}-")
+# How long git may take to remove a worktree (a huge one, a slow disk).
+REMOVE_SECONDS = 900
 
 
-async def kept_ignored(checkout: dict) -> list[str]:
-    """Ignored files in a worker's worktree that may matter (git removes them with it): any
-    outside folders an install or a build makes, and copied-in files it changed (an .env)."""
-    tree = Path(checkout["worktree"])
+def ignored_kind(entry: str, extra: Sequence[str] = (), never: Sequence[str] = ()) -> str:
+    """What an ignored file or folder of a worktree is, by its path there: "never" (one the owner
+    keeps, `never`), "build" (a build or an install makes it again; `extra` names more), "editor"
+    (editor settings), or "" (unknown: it may matter)."""
+    path = entry.rstrip("/")
+    parts = path.split("/")
+
+    def matches(patterns: Sequence[str]) -> bool:
+        return any(
+            fnmatch.fnmatchcase(name, pattern) for pattern in patterns for name in (path, *parts)
+        )
+
+    if matches(never):
+        return "never"
+    if any(part in BUILD_OUTPUT for part in parts) or matches(BUILD_PATTERNS) or matches(extra):
+        return "build"
+    return "editor" if any(part in EDITOR_FILES for part in parts) else ""
+
+
+def holding_never(
+    tree: str, folders: list[str], never: Sequence[str], limit: int = MAX_LOOKED_INSIDE
+) -> set[str]:
+    """Those of these ignored folders of a worktree that hold something the owner never wants
+    cleaned (a never-clean pattern matches a name or a path in them; git lists a folder it
+    ignores whole as one entry), or that are too big to look through: kept whole. In a thread;
+    links in them are not followed (git lists a link itself as a file, never as a folder)."""
+    found = set()
+    root = Path(tree)
+    for folder in folders:
+        top = root / folder.rstrip("/")
+        seen = 0
+        for path, dirs, files in os.walk(top):
+            relative = Path(path).relative_to(root).as_posix()
+            names = [*dirs, *files]
+            seen += len(names)
+            if seen > limit or any(
+                fnmatch.fnmatchcase(name, pattern)
+                or fnmatch.fnmatchcase(f"{relative}/{name}", pattern)
+                for name in names
+                for pattern in never
+            ):
+                found.add(folder)
+                break
+    return found
+
+
+def is_cache(entry: str) -> bool:
+    """Whether an ignored entry a build makes again is only a tool's cache (see CACHES)."""
+    parts = entry.rstrip("/").split("/")
+    return any(
+        part in CACHES or any(fnmatch.fnmatchcase(part, p) for p in CACHE_PATTERNS)
+        for part in parts
+    )
+
+
+async def ignored_listing(checkout: dict, tree: str) -> list[str] | None:
+    """Every ignored file and folder of a worktree (or clone) as git lists them, sorted, before
+    any is sorted out; None when git cannot list them."""
     try:
         listed = await checkout_git(
-            checkout, str(tree), "ls-files", "--others", "--ignored", "--exclude-standard",
-            "--directory", "-z",
+            checkout, tree, "ls-files", "--others", "--ignored", "--exclude-standard",
+            "--directory", "-z", limit=120,
         )  # fmt: skip
     except ValueError:
-        return []
+        return None
+    return sorted(set(filter(None, listed.split("\0"))))
+
+
+async def sort_ignored(
+    checkout: dict,
+    tree: str,
+    extra: Sequence[str] = (),
+    never: Sequence[str] = (),
+    look_inside: bool = True,
+    listing: list[str] | None = None,
+) -> tuple[list[str], list[str]] | None:
+    """The ignored files of a worker's worktree (or clone), as git lists them (`listing`, when
+    read already: see ignored_listing): those a build or an install makes again (safe to
+    delete), and those that may matter (git would delete them with the worktree): anything else,
+    copied-in files it changed (an .env), and a build folder with something in it the owner
+    never wants cleaned (`look_inside`: looked for, in a thread). Never a tracked file, nor a new
+    one git does not ignore. None when git cannot list them."""
+    entries = listing if listing is not None else await ignored_listing(checkout, tree)
+    if entries is None:
+        return None
+    # git also lists a new folder that holds only ignored files ("pkg/"), with what is in it
+    # ("pkg/__pycache__/"): what is in it counts, not the folder.
+    entries = [
+        entry
+        for at, entry in enumerate(entries)
+        if not (entry.endswith("/") and at + 1 < len(entries) and entries[at + 1].startswith(entry))
+    ]
     carried = set(checkout.get("carried") or [])
-    kept = []
-    for entry in filter(None, listed.split("\0")):
-        parts = entry.rstrip("/").split("/")
-        if any(part in REGENERABLE or part.endswith((".egg-info", ".pyc")) for part in parts):
+    cleanable, kept = [], []
+    for entry in entries:
+        kind = ignored_kind(entry, extra, never)
+        if kind == "build":
+            cleanable.append(entry)
+        elif kind == "editor" or (
+            not kind
+            and checkout.get("worktree")
+            and await asyncio.to_thread(
+                only_carried, Path(tree), entry, carried, Path(checkout["repo"])
+            )
+        ):
             continue
-        if await asyncio.to_thread(only_carried, tree, entry, carried, Path(checkout["repo"])):
-            continue
-        kept.append(entry)
-    return kept
+        else:
+            kept.append(entry)
+    folders = [entry for entry in cleanable if entry.endswith("/")]
+    if never and look_inside and folders:
+        held = await asyncio.to_thread(holding_never, tree, folders, never)
+        cleanable = [entry for entry in cleanable if entry not in held]
+        kept = sorted([*kept, *held])
+    return cleanable, kept
+
+
+# git status of a worktree whatever its config hides: new files (status.showUntrackedFiles=no)
+# and changed submodules (diff.ignoreSubmodules, submodule.*.ignore).
+ALL_STATUS = ("status", "--porcelain", "--untracked-files=normal", "--ignore-submodules=none")
+# For git's own check before it removes a worktree (a `git status` it runs without -u).
+SHOW_UNTRACKED = ("-c", "status.showUntrackedFiles=normal")
+
+
+async def status_lines(checkout: dict, tree: str) -> list[str] | None:
+    """A worktree's `git status --porcelain` lines, all of them (see ALL_STATUS); None when git
+    cannot tell."""
+    try:
+        status = await checkout_git(checkout, tree, *ALL_STATUS, limit=REMOVE_SECONDS)
+    except ValueError:
+        return None
+    return [line for line in status.splitlines() if line.strip()]
+
+
+async def uncommitted(checkout: dict, tree: str) -> list[str] | None:
+    """The files git would refuse to lose with a worktree: changed ones, and new ones it does not
+    ignore. None when git cannot tell (then nothing may be taken for clean)."""
+    lines = await status_lines(checkout, tree)
+    return None if lines is None else [status_name(line) for line in lines]
+
+
+def trash_of(folder: Path | None, roots: list[Path]) -> Path | None:
+    """Where folders deleted from a worker's worktrees go first: TRASH in the workspaces folder
+    the worker's own folder is in (never in a repository: see Settings.validate_paths)."""
+    if not folder:
+        return None
+    for root in roots:
+        real = Path(os.path.realpath(root))
+        if folder.is_relative_to(real) and folder != real:
+            return real / TRASH
+    return None
+
+
+def move_ignored(tree: str, entry: str, trash: Path) -> Path | bool:
+    """Take one ignored file or folder out of a worktree (in a thread): a file or a link is
+    removed (a link is never followed); a folder is moved into `trash` in one step (on the same
+    disk only), to be deleted from there. Only inside the worktree, never through a linked folder
+    that leads out of it, never a repository of its own (its commits may be nowhere else). The
+    folder's place in trash, True for a file removed, False for nothing done."""
+    root = Path(tree).resolve()
+    relative = entry.rstrip("/")
+    if not relative or ".." in relative.split("/"):
+        return False
+    path = root / relative
+    if not path.parent.resolve().is_relative_to(root):
+        return False
+    try:
+        if path.is_symlink() or not path.is_dir():
+            path.unlink()
+            return True
+        if (path / ".git").exists() or (path / ".git").is_symlink():
+            return False
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        logger.warning("Could not delete %s: %s", path, exc)
+        return False
+    return to_trash(path, trash) or False
+
+
+def to_trash(path: Path, trash: Path) -> Path | None:
+    """Move a folder into trash in one step (in a thread): only on the same disk, where that is
+    one rename. Its place there, or None (gone already, another disk, an error)."""
+    try:
+        trash.mkdir(exist_ok=True)
+        if trash.stat().st_dev != path.lstat().st_dev:
+            logger.warning("Not deleting %s: it is on another disk than %s.", path, trash)
+            return None
+        target = trash / f"{uuid4().hex[:12]}-{path.name}"
+        path.rename(target)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        logger.warning("Could not delete %s: %s", path, exc)
+        return None
+    DELETING.add(target)  # Its own cleanup deletes it: not a leftover for another to take.
+    return target
+
+
+# What is in trash because a cleanup running now moved it there (until it is deleted).
+DELETING: set[Path] = set()
+
+
+# Folders writable() is deleting again: each only once (never a loop).
+RETRYING: set[str] = set()
+
+
+def writable(function: Callable, path: str, _error: object):
+    """rmtree's handler: what it could not delete or open because it or its folder is read-only
+    or unreadable (Go's module cache, a tool's locked cache, a folder at mode 000) is made
+    writable and readable and tried once more: a file or an empty folder is removed again, a
+    folder it could not open or list is deleted with all in it. Never raises (that would stop
+    the whole delete): one owned by another user stays, and what is left is measured after."""
+    target = Path(path)
+    try:
+        for each in {target.parent, target}:
+            if not each.is_symlink():
+                each.chmod(each.lstat().st_mode | stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+        if function in {os.unlink, os.remove, os.rmdir}:
+            function(path)
+        elif path not in RETRYING and target.is_dir() and not target.is_symlink():
+            RETRYING.add(path)
+            try:
+                rmtree_writable(target)
+            finally:
+                RETRYING.discard(path)
+    except Exception as exc:
+        logger.debug("Could not delete %s: %s", path, exc)
+
+
+def rmtree_writable(folder: Path):
+    """shutil.rmtree with writable() for what it cannot delete at first."""
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(folder, onexc=writable)
+    else:
+        shutil.rmtree(folder, onerror=writable)
+
+
+def delete_moved(item: Path) -> bool:
+    """Delete a file or folder moved into trash (in a thread): whether it is all gone."""
+    try:
+        if item.is_symlink() or not item.is_dir():
+            item.unlink(missing_ok=True)
+        else:
+            rmtree_writable(item)
+    except OSError as exc:
+        logger.warning("Could not delete all of %s: %s", item, exc)
+    finally:
+        DELETING.discard(item)
+    if gone := not (item.exists() or item.is_symlink()):
+        return gone
+    logger.warning("Could not delete all of %s (owned by another user?).", item)
+    return False
+
+
+def leftovers(trash: Path) -> list[Path]:
+    """What a cleanup left in trash: Chief of Staff stopped while deleting it, or it could not
+    delete all of it. Only what to_trash put there (anything else in a folder of that name is
+    not Chief of Staff's), not what a cleanup running now moved there."""
+    with suppress(OSError):
+        return [
+            item
+            for item in sorted(trash.iterdir())
+            if TRASHED.match(item.name) and item not in DELETING
+        ]
+    return []
+
+
+async def clean_tree(
+    tree: str, entries: list[str], trash: Path, stop: Callable[[], str] | None = None
+) -> tuple[list[str], int]:
+    """Delete these ignored entries of a worktree: those deleted and the bytes they took
+    (measured with du just before). Each folder is first moved out into trash in one step, all
+    of them before any is deleted (in a thread, one at a time): a turn that starts meanwhile
+    finds each whole or gone. `stop` says why to stop before the next one (its worker started a
+    turn), or "" to go on."""
+    paths = {entry: str(Path(tree, entry.rstrip("/"))) for entry in entries}
+    sizes = await machine.disk_used(list(paths.values())) or {}
+    removed, freed = [], 0
+    moved: list[tuple[Path, int]] = []
+    left: list[tuple[Path, int]] = []
+    try:
+        for entry in entries:
+            if stop and (why := stop()):
+                logger.info("Stopped cleaning %s: %s.", tree, why)
+                break
+            if done := await asyncio.to_thread(move_ignored, tree, entry, trash):
+                removed.append(entry)
+                freed += sizes.get(paths[entry], 0)
+                if isinstance(done, Path):
+                    moved.append((done, sizes.get(paths[entry], 0)))
+        left = [
+            (item, size) for item, size in moved if not await asyncio.to_thread(delete_moved, item)
+        ]
+    finally:
+        DELETING.difference_update(item for item, _ in moved)  # Stopped: leftovers now.
+    if left:
+        # Only what went counts: what could not be deleted is measured (a leftover the Storage
+        # view shows; see Storage.empty_leftovers).
+        remaining = await machine.disk_used([str(item) for item, _ in left]) or {}
+        freed -= sum(min(size, remaining.get(str(item), size)) for item, size in left)
+    return removed, freed
 
 
 def only_carried(tree: Path, entry: str, carried: set[str], repo: Path) -> bool:
@@ -1618,6 +1940,44 @@ def too_broad(path: str) -> bool:
     return resolved == Path(resolved.anchor) or Path.home().resolve().is_relative_to(resolved)
 
 
+def folder_of(workspace: Path, roots: list[Path]) -> Path | None:
+    """A worker's own folder (its real path) when it is in one of Chief of Staff's roots for
+    them (not a root itself): the only kind it measures and cleans. None for any other, like the
+    folder of a session continued from a terminal."""
+    folder = Path(os.path.realpath(workspace))
+    for root in roots:
+        real = Path(os.path.realpath(root))
+        if folder != real and folder.is_relative_to(real):
+            return folder
+    return None
+
+
+def own_trees(folder: Path | None, checkouts: list[dict]) -> list[tuple[dict, str]]:
+    """A worker's worktrees and clones in its own folder (`folder`, see folder_of) that are on
+    disk: never a project folder of the owner's it works in."""
+    if not folder:
+        return []
+    found = []
+    for checkout in checkouts:
+        tree = checkout.get("worktree") or (checkout.get("remote") and checkout.get("repo"))
+        if checkout.get("shared") or not tree or not os.path.isdir(tree):  # noqa: PTH112
+            continue
+        if Path(os.path.realpath(tree)).is_relative_to(folder):
+            found.append((checkout, tree))
+    return found
+
+
+def overlapping(tree: str, others: list[tuple[str, list[str]]]) -> str:
+    """The first of others (name, the folders it works in) that works in this one: it, or a
+    folder in it (not one around it, like a session continued from a terminal in the code
+    folder)."""
+    real = Path(os.path.realpath(tree))
+    for name, paths in others:
+        if any(Path(os.path.realpath(path)).is_relative_to(real) for path in paths if path):
+            return name
+    return ""
+
+
 class Workspaces:
     def __init__(self, store: Store, work_root: Path):
         self.store = store
@@ -1627,6 +1987,12 @@ class Workspaces:
         self.clone_lock = asyncio.Lock()
         # The token of the gh account that can see a repository ("" for gh's active one).
         self.github_token: Callable[[str], Awaitable[str]] | None = None
+        # Told what release() removed and kept (with why), for the Storage view; and asked why
+        # a closed worker's worktrees must stay as they are ("" when they need not).
+        self.on_release: Callable[[dict, list[str], list[dict]], None] | None = None
+        self.holds: Callable[[dict], str] | None = None
+        # The folders programs run in, read once for a whole cleanup pass (see storage.py).
+        self.known_cwds: set[str] | None = None
 
     async def gh_clone(self, repo: str, destination: Path):
         token = await self.github_token(repo) if self.github_token else ""
@@ -1696,32 +2062,156 @@ class Workspaces:
         return self.work_root / "workspaces"
 
     async def release(self, row: dict) -> list[str]:
-        """A closed worker's worktrees, removed when they hold nothing uncommitted.
+        """A closed worker's worktrees, removed when they hold nothing uncommitted and no ignored
+        file that may matter.
 
         The branches stay in their repositories, and restore() brings the worktrees back when
-        the worker is reopened. git refuses to remove a worktree with changes, so nothing
-        unsaved is lost; that worktree just stays.
+        the worker is reopened. A worktree with changes stays (git status says which; git
+        refuses to remove one anyway), as does one with ignored files no build makes again (git
+        would delete them with it), and one a program runs in or another open worker uses: it
+        is looked at again later. From one that stays, what a build or an install makes again
+        goes (often most of its size); why it stays is recorded (on_release).
         """
-        removed = []
+        settings = self.store.settings()
+        removed: list[str] = []
+        kept: list[dict] = []
+        cwds: set[str] | None = None
+        looked = False
+        hold = self.holds(row) if self.holds else ""
+        roots = self.roots()
+        folder = await asyncio.to_thread(folder_of, self.workspace(row), roots)
+        # Only in Chief of Staff's own folders is anything deleted in place.
+        ours = {tree for _, tree in await asyncio.to_thread(own_trees, folder, self.checkouts(row))}
+        trash = trash_of(folder, roots)
+        others = self.others(row)
         for checkout in self.checkouts(row):
             tree = checkout.get("worktree")
             if not tree or not await asyncio.to_thread(os.path.isdir, tree):
                 continue
-            if kept := await kept_ignored(checkout):
-                # git would delete them with the worktree: it stays instead.
-                logger.info("Kept %s: it has ignored files: %s", tree, ", ".join(kept[:5]))
+            stays = {"path": tree, "repo": checkout["repo"], "branch": checkout.get("branch") or "",
+                     "items": [], "changes": [], "cleaned": [], "freed": 0}  # fmt: skip
+            held = hold
+            if not held:
+                if not looked:
+                    cwds = self.known_cwds
+                    cwds, looked = cwds if cwds is not None else await machine.process_cwds(), True
+                if cwds is None:
+                    held = "which programs run in it could not be read"
+                elif machine.in_use(tree, cwds):
+                    held = "a program runs in it"
+                elif user := await asyncio.to_thread(overlapping, tree, others):
+                    held = f"“{user}” uses it"
+            if held:
+                # As it is, until it is looked at again (see Storage.unreleased).
+                kept.append({**stays, "held": held, "in_use": True})
                 continue
-            try:
-                await checkout_git(
-                    checkout, checkout["repo"], "worktree", "remove", checkout["worktree"]
-                )
-                removed.append(checkout["worktree"])
-            except ValueError:
-                logger.info("Kept %s: it has uncommitted changes.", checkout["worktree"])
+            found = await sort_ignored(
+                checkout, tree, settings.regenerable_patterns, settings.never_clean_patterns
+            )
+            cleanable, unknown = found or ([], [])
+            cleanable = cleanable if tree in ours and trash else []
+            changes = await uncommitted(checkout, tree)
+            if found is not None and not unknown and changes == [] and tree in ours and trash:
+                # Its build output goes first, without a time limit (git's removal has one),
+                # even with automatic cleanup off: removing the worktree deletes it anyway.
+                if cleanable:
+                    stays["cleaned"], stays["freed"] = await clean_tree(tree, cleanable, trash)
+                    cleanable = []
+                if await self.remove_tree(checkout, tree, trash):
+                    removed.append(tree)
+                    continue
+                changes = await uncommitted(checkout, tree)
+            elif found is not None and not unknown and changes == []:
+                # Not in Chief of Staff's folders: git removes it, or it stays.
+                with suppress(ValueError):
+                    await checkout_git(
+                        checkout, checkout["repo"], "worktree", "remove", tree,
+                        limit=REMOVE_SECONDS,
+                    )  # fmt: skip
+                    removed.append(tree)
+                    continue
+            stays |= {
+                "items": unknown[:MAX_KEPT_LISTED],
+                "changes": (changes or [])[:MAX_KEPT_LISTED],
+                "changes_unread": changes is None,
+                "unlisted": found is None,
+            }
+            if cleanable and not settings.auto_cleanup:
+                stays["pending"] = True  # Cleaned if the owner turns automatic cleanup on.
+            elif cleanable and trash:
+                stays["cleaned"], stays["freed"] = await clean_tree(tree, cleanable, trash)
+            kept.append(stays)
+            why = [
+                *(["it has uncommitted changes"] if stays["changes"] else []),
+                *(["its changes could not be read"] if changes is None else []),
+                *(["it has ignored files: " + ", ".join(unknown[:5])] if unknown else []),
+                *(["its ignored files could not be listed"] if found is None else []),
+            ]
+            logger.info(
+                "Kept %s: %s. Deleted %d build and cache folders in it (%s).",
+                tree,
+                "; ".join(why) or "git would not remove it",
+                len(stays["cleaned"]),
+                machine.size_text(stays["freed"]),
+            )
         with suppress(OSError):
             # Only when nothing else is in it, like a worker's notes.
             await asyncio.to_thread(self.workspace(row).rmdir)
+        if self.on_release:
+            self.on_release(row, removed, kept)
         return removed
+
+    async def remove_tree(self, checkout: dict, tree: str, trash: Path) -> bool:
+        """Remove a worktree git status found clean (nothing uncommitted, no ignored file that
+        may matter), by git. git stopped halfway (a huge tree, a slow disk) is finished, not
+        taken for changes: what is left goes too, out of its place in one step, and git forgets
+        it, so a reopened worker gets it back whole from its branch. False when git refuses
+        (changes made meanwhile)."""
+        repo = checkout["repo"]
+        try:
+            await checkout_git(
+                checkout, repo, *SHOW_UNTRACKED, "worktree", "remove", tree, limit=REMOVE_SECONDS
+            )
+            return True
+        except TimedOutError:
+            logger.warning("Removing %s took too long: finishing it.", tree)
+        except ValueError:
+            return False
+        # Only what git itself deleted may be missing: a file that appeared or changed since
+        # it was found clean is kept (the worktree stays, half removed, for the owner to see).
+        lines = await status_lines(checkout, tree)
+        if lines is None or any(not line.startswith(" D ") for line in lines):
+            logger.warning("Not finishing the removal of %s: files changed meanwhile.", tree)
+            return False
+        return await self.force_remove(checkout, tree, trash)
+
+    @staticmethod
+    async def force_remove(checkout: dict, tree: str, trash: Path) -> bool:
+        """Remove a worktree with whatever is in it (`git worktree remove --force`). What git
+        leaves (stopped for taking too long) goes out of its place in one step and is deleted
+        from trash, and git forgets the worktree: never a half tree for a reopened worker to
+        resume in (restore() makes it again from its branch)."""
+        repo = checkout["repo"]
+        with suppress(ValueError):
+            await checkout_git(
+                checkout, repo, "worktree", "remove", "--force", tree, limit=REMOVE_SECONDS
+            )
+        if moved := await asyncio.to_thread(to_trash, Path(tree), trash):
+            await asyncio.to_thread(delete_moved, moved)
+        with suppress(ValueError):
+            await checkout_git(checkout, repo, "worktree", "prune")
+        return not await asyncio.to_thread(os.path.lexists, tree)
+
+    def others(self, row: dict) -> list[tuple[str, list[str]]]:
+        """The other open workers, each with the folders it works in (its own, its checkouts)."""
+        found = []
+        for other in self.store.open_sessions(WORKER):
+            if other["id"] != row["id"]:
+                paths = [str(self.workspace(other)), other["cwd"]]
+                for checkout in self.checkouts(other):
+                    paths += [checkout.get(key) or "" for key in ("path", "worktree", "repo")]
+                found.append((other["title"], paths))
+        return found
 
     async def restore(self, row: dict):
         """The task folder and worktrees release() removed, back on their branches."""
@@ -1744,6 +2234,18 @@ class Workspaces:
                 )  # fmt: skip
             if not row["slack"]:
                 await carry_ignored_files(Path(repo), Path(tree))
+
+    def roots(self) -> list[Path]:
+        """The folders Chief of Staff makes workers' own folders in: the configured one, and
+        those it used by default."""
+        found = [self.scratch_root(), self.work_root / "workspaces"]
+        if code := self.store.settings().code_folder:
+            found.append(Path(code) / TASK_FOLDERS)
+        return list(dict.fromkeys(found))
+
+    def own_folder(self, row: dict) -> Path | None:
+        """A worker's own folder when Chief of Staff made it (see folder_of)."""
+        return folder_of(self.workspace(row), self.roots())
 
     def workspace(self, row: dict) -> Path:
         if stored := self.store.get(f"workspace:{row['id']}"):

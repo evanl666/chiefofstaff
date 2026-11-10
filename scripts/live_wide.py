@@ -4598,7 +4598,8 @@ async def r5_an_away_send_with_a_link_in_it_is_sent(ctx: Ctx):
     await away_on(ctx)
     try:
         since, before = now(), len(outbox(ctx))
-        asked = f"Hi! How many lines does README.md in {ctx.project} have?"
+        # A file the project has: a question about one it lacks may fairly end with no reply.
+        asked = f"Hi! How many lines does pyproject.toml in {ctx.project} have?"
         draft = await reply_card(ctx, since, "D0ALICE01", "U0ALICE1", asked)
         code = await told_away(ctx, before)
         sent_before = len(ctx.slack.sent)

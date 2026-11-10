@@ -2,11 +2,41 @@
 
 import { $, api, el, toast } from "./dom.js";
 import { ago, shortPath, since } from "./text.js";
-import { closedWorkers, DOT_HELP, HOME, loadState, sessions, state, workerTitle } from "./state.js";
+import { closedWorkers, DOT_HELP, HOME, loadState, routerId, sessions, state, workerTitle } from "./state.js";
 import { IN_TERMINAL, readOnlyTimeline, scrollToBottom, select, setComposer, setLayout, showDraft } from "./session.js";
 import { homeItem, needsCount, WORKER_STATES, workerStates } from "./inbox.js";
 import { closeMentions, setRecipient } from "./mention.js";
 import { openSettings, watchGaps } from "./settings.js";
+import { ownTasks } from "./tasks.js";
+import { duck, setMood } from "./mascot.js";
+// The captain beside the name says how Home stands, as the dots do: it salutes when something
+// needs the owner, steers while the Router or a worker is at work, keeps watch while tasks wait
+// on something, and is quiet otherwise; it cheers a moment when a task is done (and nothing
+// needs the owner).
+const CHEER_MS = 6000;
+const cheer = { finished: null, until: 0 };
+export function captainMood({ needs, finished, dots, now = Date.now() }) {
+  if (cheer.finished !== null && finished > cheer.finished) {
+    cheer.until = now + CHEER_MS;
+    setTimeout(renderSidebar, CHEER_MS + 50);
+  }
+  cheer.finished = finished;
+  if (needs) return ["needs", `${needs} need${needs === 1 ? "s" : ""} you`];
+  if (now < cheer.until) return ["done", "Done"];
+  if (dots.includes("working")) return ["working", "At work"];
+  if (dots.includes("watching")) return ["watching", "Keeping watch: tasks wait on CI, a review or a reply"];
+  return ["idle", "All quiet"];
+}
+function captain(needs, where) {
+  const brand = document.querySelector("#sidebar .brand");
+  let node = brand.querySelector(":scope > .duck");
+  if (!node) brand.prepend((node = duck()));
+  // The Router and the owner's workers: not Chief of Staff's own helpers.
+  const dots = sessions().filter((session) => session.id === routerId() || (session.role === "worker" && !session.helper)).map((session) => where.get(session.id)?.dot);
+  const [mood, words] = captainMood({ needs, finished: ownTasks().filter((task) => task.status === "done").length, dots });
+  setMood(node, mood);
+  node.title = words;
+}
 // One count in the whole sidebar, on Home: what needs the owner. Workers show only their dot,
 // which says where each stands as Home does (Needs you, Running, Monitoring).
 function sessionItem(session, label, where) {
@@ -64,6 +94,7 @@ export function renderSidebar() {
   }
   list.replaceChildren(...nodes);
   const count = needsCount();
+  captain(count, where);
   document.title = count ? `(${count}) Chief of Staff` : "Chief of Staff";
   // Folded away on a narrow window: its button says what needs the owner, as Home does here.
   const badge = document.querySelector("#sidebar-toggle .badge");

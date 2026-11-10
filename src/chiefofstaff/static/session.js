@@ -9,6 +9,7 @@ import { focusDraft, focusTask, renderHome, renderHomeHeader, showHomeTab, welco
 import { closeMentions, setRecipient } from "./mention.js";
 import { openSettings } from "./settings.js";
 import { showLength } from "./composer.js";
+import { duck } from "./mascot.js";
 // A chat loads a page of its messages at a time: its latest, then earlier ones when asked.
 export const PAGE = 400;
 // The chat shown: its first message loaded, and how many come before it (null: not known).
@@ -813,7 +814,8 @@ export function updateWorkingLine() {
     el(
       "div",
       { class: `working-line${background ? " background" : ""}` },
-      el("span", { class: `dot ${background ? "watching" : "working"}` }),
+      // The captain at the wheel while it thinks; on watch while its command runs on.
+      duck(background ? "watching" : "working"),
       el("span", { text: background ? "Waiting for background process" : session.activity || "Thinking…", title: background ? "Its turn is over; a command it started (a dev server, a watcher) still runs. Stop ends it." : undefined }),
       el("button", { type: "button", class: "link", text: "Stop", title: "Interrupt what it is doing now", onclick: () => post(`/api/sessions/${session.id}/stop`) }),
     ),

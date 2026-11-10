@@ -32,6 +32,17 @@ def said(text: str) -> str:
     return env("owner", "message", text, reply_in=language(text))
 
 
+@pytest.fixture(autouse=True)
+def terse_titles(request, monkeypatch):
+    """Tests name tasks tersely ("Lint", "A"): a new task's title is checked as a rename's is
+    (it says what it delivers, see deliverable_title) only in tests marked `titles`."""
+    if request.node.get_closest_marker("titles") is None:
+        from chiefofstaff import tools
+        from chiefofstaff.envelope import clean_title
+
+        monkeypatch.setattr(tools, "deliverable_title", clean_title)
+
+
 class FakeSession:
     def __init__(self, session_id: str, options: dict):
         self.session_id = session_id

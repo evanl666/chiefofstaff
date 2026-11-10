@@ -1132,6 +1132,17 @@ button.receipt.needs { background: var(--amber-soft); color: var(--amber); }
 .card.task.expanded .outcome { display: none; }
 .card.task.expanded .chips { margin-top: 0; }
 .card.task .report .body { font-size: var(--body); }
+/* What it reported before its latest result: folded under it, quieter, each read as the result
+   is and with when it was said. */
+.card.task .earlier-reports { min-width: 0; font-size: var(--small); color: var(--muted); }
+.card.task .earlier-reports > summary { display: flex; align-items: center; min-height: 28px; cursor: pointer; list-style: none; }
+.card.task .earlier-reports > summary::-webkit-details-marker { display: none; }
+.card.task .earlier-reports > summary::before { content: "▸"; width: 12px; flex: none; }
+.card.task .earlier-reports[open] > summary::before { content: "▾"; }
+.card.task .earlier-reports > summary:hover { color: var(--text); }
+.card.task .earlier-report { min-width: 0; margin: 4px 0 8px 5px; padding-left: 10px; border-left: 2px solid var(--line); }
+.card.task .earlier-report .body { font-size: var(--body); color: var(--soft); overflow-wrap: anywhere; }
+.card.task .earlier-report .folded { max-height: 7.4em; overflow: hidden; -webkit-mask-image: linear-gradient(to bottom, #000 55%, transparent); mask-image: linear-gradient(to bottom, #000 55%, transparent); }
 #panel .card.task:is(.done, .cancelled) { padding-top: 4px; padding-bottom: 4px; }
 .card.task:is(.done, .cancelled) .head { margin-bottom: 0; }
 .card .actions.inline { margin: 0; flex-wrap: nowrap; }
@@ -1434,21 +1445,36 @@ dialog .row label.hours:not(.grow) { width: auto; flex: none; }
 .card.task .head .meta .when { flex: none; white-space: pre; }
 .card.task.row:not(.unfolded) > :not(.head, .row-line, .row-foot, .asked, .actions), .card.task.row:not(.unfolded) > .head > .fold { display: none; }
 .card.task.row .head .fold { flex: none; font-size: var(--small); }
-/* Its worker, at the end of its second line: a small reference, never the main thing. */
-.card.task .row-line .worker-ref { flex: 0 0 auto; max-width: 40%; margin-left: auto; overflow: hidden; }
 .card.task.row > .actions:not(.inline) { margin-top: 6px; gap: 4px 6px; }
 .card.task.row > .actions:not(.inline) > button.text { padding: 0 4px; }
 /* Nothing to do on it here (its "⋯" is in its head), nothing went wrong: no empty line. */
 .card.task.row > .actions:not(:has(> :not(.error:empty))) { display: none; }
 .card.task.row .head .row-menu:empty { display: none; }
-.card.task .row-line { display: flex; gap: 6px; align-items: baseline; margin-left: 16px; min-width: 0; font-size: var(--small); line-height: 18px; color: var(--muted); white-space: nowrap; overflow: hidden; }
+/* Its second line, as it narrows: its reason keeps its room; its worker gives way first (its
+   name cut, then a chat icon, then not there: the row shown whole has it). A watched row's
+   reason is in parts: what it waits for and on what stay whole (up to about half the line, and
+   a quarter); its latest progress goes (its whole card has it), then how long it has been quiet
+   is cut. */
+.card.task .row-line { container: row-line / inline-size; display: flex; gap: 6px; align-items: baseline; margin-left: 16px; min-width: 0; font-size: var(--small); line-height: 18px; color: var(--muted); white-space: nowrap; overflow: hidden; }
 .card.task .row-line > * { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card.task .row-line .why { flex: 0 1 auto; color: var(--soft); }
+.card.task .row-line .why:has(~ .object) { flex: none; max-width: 45%; }
 .card.task .row-line .why.warn::before { content: "! "; color: var(--amber); font-weight: 600; }
-.card.task .row-line .object { flex: 0 1 auto; color: var(--soft); }
-.card.task .row-line .quiet, .card.task .row-line .also { flex: 0 0 auto; }
+.card.task .row-line .object { flex: none; max-width: 25%; color: var(--soft); }
+.card.task .row-line .also { flex: 0 0 auto; }
+.card.task .row-line .quiet { flex: 0 1 auto; }
 .card.task .row-line .quiet::before, .card.task .row-line .why + .object::before { content: "· "; }
 .card.task .row-line .latest { flex: 1 1 0; min-width: 3em; }
+/* Its worker, at the end of its second line: a small reference, never the main thing. */
+.card.task .row-line .worker-ref { flex: 0 8 auto; min-width: 5em; max-width: 30%; margin-left: auto; overflow: hidden; }
+@container row-line (max-width: 420px) {
+  .card.task .row-line .worker-ref { flex: none; align-self: center; min-width: auto; }
+  .card.task .row-line :is(.worker-ref .who, .worker-ref .name, .object ~ .latest) { display: none; }
+  .card.task .row-line .worker-ref .icon { display: block; }
+}
+@container row-line (max-width: 300px) {
+  .card.task .row-line .worker-ref { display: none; }
+}
 .card.task .row-line .why + .latest::before, .card.task .row-line .quiet + .latest::before, .card.task .row-line .object + .latest::before { content: "— "; }
 .card.task .row-line .step { font-family: var(--mono); }
 .card.task .row-foot { display: flex; flex-wrap: wrap; gap: 2px 8px; align-items: center; margin-left: 16px; min-width: 0; font-size: var(--small); line-height: 18px; color: var(--muted); }
@@ -1458,6 +1484,9 @@ dialog .row label.hours:not(.grow) { width: auto; flex: none; }
 .card.task .worker-ref .who { flex: none; font-weight: 600; }
 .card.task .worker-ref .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card.task .worker-ref:not(:disabled):hover .name { text-decoration: underline; color: var(--text); }
+/* Its chat as an icon, where a narrow row has no room for its name (that is in its tooltip). */
+.card.task .worker-ref .icon { display: none; flex: none; width: 14px; height: 14px; background: currentColor; -webkit-mask: var(--chat-icon) center / contain no-repeat; mask: var(--chat-icon) center / contain no-repeat; --chat-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3 2.5h10A1.5 1.5 0 0 1 14.5 4v6a1.5 1.5 0 0 1-1.5 1.5H7.5L4 14.5v-3H3A1.5 1.5 0 0 1 1.5 10V4A1.5 1.5 0 0 1 3 2.5z' fill='none' stroke='%23000' stroke-width='1.5' stroke-linejoin='round'/%3E%3C/svg%3E"); }
+.card.task .worker-ref:not(:disabled):hover .icon { color: var(--text); }
 .card.task .row-foot .checks { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Its chips wrap rather than squeeze: where a PR stands stays whole, its title gives way. */
 .card.task .row-chips { display: inline-flex; flex-wrap: wrap; gap: 4px; min-width: 0; max-width: 100%; }
@@ -1487,7 +1516,6 @@ dialog .row label.hours:not(.grow) { width: auto; flex: none; }
 .receipt.failing .why-details > summary::-webkit-details-marker { display: none; }
 .receipt.failing .why-details[open] { flex-basis: 100%; }
 .receipt.failing .why-details .detail { white-space: pre-line; overflow-wrap: anywhere; padding: 2px 0; }
-.working-line.background .dot { background: none; }
 /* A report not read yet. */
 .dot.unread { background: var(--accent); opacity: 1; }
 /* Moving a task's latest result to a task of its own: what stays, what moves. */

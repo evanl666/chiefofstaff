@@ -1246,10 +1246,10 @@ async def round_four(runtime, browser, failures: list[str]):
     await runtime.workers.close(repopulate)
 
     # C11: 33 finished tasks of two workers, ended a minute apart, the workers interleaved.
-    batch = {name: await start(name) for name in ("Batch A", "Batch B")}
+    batch = {name: await start(name) for name in ("Batch run A", "Batch run B")}
     stamp = datetime.now(UTC)
     for index in range(33):
-        owner = batch["Batch B" if 10 <= index < 20 else "Batch A"]
+        owner = batch["Batch run B" if 10 <= index < 20 else "Batch run A"]
         made = runtime.tasks.create(owner, f"Finished item {index:02d}", "x", status="running")
         runtime.tasks.move(made["id"], "done", result="ok")
         ended = (stamp - timedelta(minutes=index + 1)).isoformat()
@@ -3544,6 +3544,180 @@ async def round_qa(runtime, browser, failures: list[str]):
     await context.close()
 
 
+# What a narrow row's second line shows of each part: its width, whether its text is whole, and
+# whether it ends inside the line.
+ROW_LINE_PARTS = """line => [...line.children].map((node) => {
+  const box = node.getBoundingClientRect();
+  const outer = line.getBoundingClientRect();
+  const shown = getComputedStyle(node).display !== "none";
+  return { cls: node.className, shown, width: Math.round(box.width),
+    whole: node.scrollWidth <= node.clientWidth + 1, inside: !shown || box.right <= outer.right + 1,
+    text: node.textContent };
+})"""
+
+
+async def round_eleven(runtime, browser, failures: list[str]):
+    """The owner's QA E32-E34: a worker given new work is never named on a row by the first
+    thing it was asked (its old task); at 352-400 px a row's reason keeps its room while its
+    worker's name gives way, then its worker, and nothing runs past it; a newer report is the
+    row's latest and its card's result, the earlier ones folded under it with when each was
+    said."""
+    store = runtime.store
+    router = store.get("router_id")
+    store.save_settings(store.settings().model_copy(update={"max_workers": 90}))
+
+    async def start(title):
+        result = await call_tool(runtime, "spawn_worker", router, title=title,
+                                 instructions=title, why_new="test")  # fmt: skip
+        assert result.result_type == "success", result.text_result_for_llm
+        await settle(runtime)
+        return json.loads(result.text_result_for_llm)["session_id"]
+
+    async def reuse(worker, title):
+        """Its task reported and accepted, the same worker gets a new one and takes it up."""
+        task = runtime.tasks.current(worker)
+        await call_tool(runtime, "report", worker, status="done", summary=f"{task['title']}: done.")
+        runtime.task_actions.accept(task["id"])
+        given = await call_tool(runtime, "message_session", router, session_id=worker,
+                                text=title, task="new", title=title, earlier="keep",
+                                why_new="another PR")  # fmt: skip
+        assert given.result_type == "success", given.text_result_for_llm
+        take_up(runtime, worker, title)
+        await settle(runtime)
+
+    # E32: started for one task, given another: its row's worker link is neutral.
+    reused = await start("E32 old export task")
+    await reuse(reused, "E32 new export task")
+    runtime.update_session(reused, status="working", activity="Reading the exporter")
+    # E33: a delivered task waiting for approval, quiet for 26h; its worker on another task
+    # with a long title.
+    shipper = await start("E33 ship app#594 export fix")
+    await reuse(shipper, "Investigate why the nightly ranking backfill times out on the big shard")
+    runtime.update_session(shipper, status="working", activity="Reading the backfill logs")
+    # E34: a newer report on the same task is its result; the ones before it are kept.
+    tuner = await start("E34 tune the cache size")
+    await call_tool(runtime, "report", tuner, status="done", summary="Cache at 96 MB: p99 -30%.")
+    await settle(runtime)
+    runtime.publish_state()
+
+    ago = lambda **delta: (datetime.now(UTC) - timedelta(**delta)).isoformat()  # noqa: E731
+    earlier = [
+        {"at": ago(hours=2), "text": "Cache at **64 MB**: p99 -12%.\n\n" + "Measured again. " * 60},
+        {"at": ago(days=1, hours=1), "text": "First try at 48 MB: no change."},
+    ]
+    waiting = {"key": "github:acme/app#594", "kind": "pr", "label": "app#594",
+               "url": "https://github.com/acme/app/pull/594", "waiting_for": "approval",
+               "last_check": ago(minutes=5), "next_check": ago(minutes=-10),
+               "trigger": "A review, CI result or merge on it brings it back",
+               "changed_at": ago(hours=26, minutes=5)}  # fmt: skip
+    patches = {
+        "E33 ship app#594 export fix": {"watching": [waiting["key"]], "watch_kind": "own",
+                                        "monitoring": [waiting], "result": "Opened app#594.",
+                                        "earlier_results": [earlier[1]]},
+        "E34 tune the cache size": {"earlier_results": earlier},
+    }  # fmt: skip
+    context = await browser.new_context(viewport={"width": 1440, "height": 900})
+    page = await context.new_page()
+    errors: list[str] = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    await patch_state(page, patches)
+    await page.route("**/api/tasks/*/read", lambda route: route.fulfill(json={"read": True}))
+    await page.goto(f"{BASE}/#token={TOKEN}")
+
+    def card(title):
+        return page.locator("#panel .card.task").filter(
+            has=page.locator(".head .title", has_text=title)
+        )
+
+    # E32: the worker it was started as is not its name here; one on another task is named so.
+    new_row, old_row = card("E32 new export task"), card("E32 old export task")
+    await expect(new_row.locator(".row-line .worker-ref .name")).to_have_text("chat", timeout=15000)
+    await expect(new_row.locator(".row-line .worker-ref")).not_to_contain_text("old export")
+    await expect(new_row.locator(".worker-ref")).not_to_have_attribute(
+        "data-tip", re.compile("old export")
+    )
+    await expect(old_row.locator(".row-line .worker-ref .name")).to_have_text("E32 new export task")
+    await page.locator("#panel").screenshot(path=SHOTS / "ui-edges-worker-links.png")
+    await new_row.locator(".row-line .worker-ref").click()
+    await expect(page.locator("#session-title")).to_have_text("E32 new export task")
+    await page.locator("#back-home").click()
+    log("E32: a reused worker's link is its worker chat, never its old task")
+
+    # E34: the row says its newest result; its report, the earlier ones folded with their time.
+    tuned = card("E34 tune the cache size")
+    await expect(tuned.locator(".row-line .latest")).to_have_text("Cache at 96 MB: p99 -30%.")
+    await tuned.get_by_role("button", name="View report").click()
+    fold = tuned.locator(".report details.earlier-reports")
+    await expect(tuned.locator(".report > .body")).to_contain_text("96 MB")
+    await expect(fold.locator("summary")).to_have_text("Earlier reports (2)")
+    await expect(fold).not_to_have_attribute("open", "")
+    await expect(fold.locator(".earlier-report").first).to_be_hidden()
+    await fold.locator("summary").click()
+    entries = fold.locator(".earlier-report")
+    await expect(entries).to_have_count(2)
+    await expect(entries.nth(0).locator(".when")).to_have_text("Reported 2h ago")
+    await expect(entries.nth(0).locator(".body strong")).to_have_text("64 MB")
+    await expect(entries.nth(0).get_by_role("button", name="Show more")).to_be_visible()
+    await expect(entries.nth(1).locator(".body")).to_have_text("First try at 48 MB: no change.")
+    assert not await tuned.evaluate(OVERFLOWS), await tuned.evaluate(OVERFLOWS)
+    ship = card("E33 ship app#594 export fix")
+    await expect(ship.locator(".row-line .latest")).to_have_text("Opened app#594.")
+    await unfold(ship)
+    await expect(ship.locator(".task-body details.earlier-reports summary")).to_have_text(
+        "Earlier reports (1)"
+    )
+    await ship.locator(":scope > .head .fold").click()
+    log("E34: the newest result on the row and its card; earlier reports folded, with when")
+
+    # E33: on a wide panel its worker named (cut to fit); at 352-400 px its reason stays
+    # readable, its worker gives way (an icon, then not on the line) and nothing runs past it.
+    line = ship.locator(".row-line")
+    await expect(line.locator(".why")).to_have_text("Waiting for approval")
+    await expect(line.locator(".quiet")).to_have_text("No updates for 26h")
+    ref = line.locator(".worker-ref")
+    await expect(ref).to_have_attribute("data-tip", re.compile("Worker: “Investigate why"))
+    for width in (600, 400, 376, 352):
+        await page.evaluate("w => document.querySelector('#panel').style.width = `${w}px`", width)
+        await page.wait_for_timeout(100)
+        # Every row's: its reason readable, nothing squeezed to nothing or past its end.
+        for each in await page.locator("#panel .card.task .row-line").all():
+            parts = await each.evaluate(ROW_LINE_PARTS)
+            shown = [part for part in parts if part["shown"]]
+            assert all(part["inside"] and part["width"] > 0 for part in shown), (width, parts)
+            for why in (part for part in parts if part["cls"].startswith("why")):
+                assert why["whole"] or why["width"] >= 90, (width, why)
+        assert not await page.locator("#panel").evaluate(OVERFLOWS), width
+        parts = await line.evaluate(ROW_LINE_PARTS)
+        shown = [part for part in parts if part["shown"]]
+        # What it waits for, and on what, whole: how long it has been quiet gives way first.
+        why = next(part for part in parts if part["cls"] == "why")
+        assert why["whole"] and parts[1]["whole"], (width, parts)
+        worker = next(part for part in parts if "worker-ref" in part["cls"])
+        if width == 600:
+            await expect(ref.locator(".name")).to_be_visible()
+            cut = await ref.locator(".name").evaluate("n => n.scrollWidth > n.clientWidth")
+            assert cut, ("its long name is cut", worker)
+            assert worker["width"] <= 0.3 * sum(part["width"] + 6 for part in shown), (width, parts)
+        elif worker["shown"]:
+            await expect(ref.locator(".icon")).to_be_visible()
+            await expect(ref.locator(".who")).to_be_hidden()
+            assert worker["width"] < 20, ("only its icon", width, worker)
+        log(f"  {width}px: " + " | ".join(
+            f"{part['cls']} {part['width']}px{'' if part['whole'] else ' (cut)'}"
+            for part in shown))  # fmt: skip
+        if width in (400, 352):
+            await ship.screenshot(path=SHOTS / f"ui-edges-narrow-reason-{width}.png")
+            # At the panel's widest default it is on the line (an icon); at 352 px only in
+            # the row shown whole.
+            await expect(ref).to_be_visible(visible=width == 400)
+    await unfold(ship)
+    await expect(ship.locator(".row-foot .worker-ref .name")).to_be_visible()
+    await page.evaluate("document.querySelector('#panel').style.removeProperty('width')")
+    log("E33: at 352-400 px the reason stays readable; its worker gives way; nothing overflows")
+    assert not errors, errors
+    await context.close()
+
+
 async def main():
     with tempfile.TemporaryDirectory(prefix="cos-ui-") as temporary:
         holder: dict = {}
@@ -3877,7 +4051,8 @@ async def main():
             only = set(sys.argv[1:])
             for check in (home, memory, this_round, round_two, round_three, round_four,
                           round_five, round_six, round_seven, round_eight, round_nine,
-                          round_ten, round_scale, round_qa):  # fmt: skip
+                          round_ten, round_scale, round_qa, round_eleven,
+                          round_storage, round_mascot):  # fmt: skip
                 if not only or check.__name__ in only:
                     await check(runtime, browser, failures)
             await browser.close()
@@ -3886,6 +4061,254 @@ async def main():
         if failures:
             raise AssertionError(f"browser errors: {failures}")
     print("UI EDGE CASES PASSED")
+
+
+async def round_storage(runtime, browser, failures: list[str]):
+    """Disk space: the sidebar's Storage button says the disk is low; its dialog lists workers'
+    folders the largest first with why a closed worker's worktree stays, reviews its files, and
+    deletes it only once "delete" is typed; changes arrive as "storage" events."""
+    import subprocess
+
+    from chiefofstaff import machine, workspaces
+
+    store = runtime.store
+    router = store.get("router_id")
+    code = store.directory.parent / "storage-code"
+    app = code / "app"
+    app.mkdir(parents=True, exist_ok=True)
+    git = ("git", "-c", "user.email=t@t", "-c", "user.name=t")
+    (app / ".gitignore").write_text("build/\nlogs/\n")
+    (app / "main.py").write_text("print(1)\n")
+    for command in (("git", "init", "-q", "-b", "main"), ("git", "add", "."),
+                    (*git, "commit", "-qm", "init")):  # fmt: skip
+        subprocess.run(command, cwd=app, check=True, capture_output=True)
+    before = store.settings()
+    store.save_settings(before.model_copy(update={"code_folder": str(code)}))
+    read_disk = machine.read_disk
+    reading = {"free": 25 * 10**9, "total": 400 * 10**9, "path": "/"}
+    machine.read_disk = lambda paths: dict(reading)
+    machine._disk = (float("-inf"), None)
+    try:
+        spawned = await call_tool(runtime, "spawn_worker", router, title="Storage closed one",
+                                  instructions="x", why_new="test", project=str(app),
+                                  isolate=True)  # fmt: skip
+        closed = json.loads(spawned.text_result_for_llm)
+        await settle(runtime)
+        tree = Path(closed["cwd"])
+        (tree / "logs").mkdir()
+        (tree / "logs" / "run.txt").write_text("y" * 200_000)
+        (tree / "build").mkdir()
+        (tree / "build" / "out.o").write_text("z" * 100_000)
+        await runtime.workers.close(closed["session_id"])
+        await settle(runtime)
+        await runtime.storage.measure(store.session(closed["session_id"]))
+        # What a cleanup could not delete (a container's build, owned by another user).
+        stuck = (code / ".chief").resolve() / ".chiefofstaff-trash" / "0123456789ab-build"
+        stuck.mkdir(parents=True)
+        (stuck / "out.o").write_text("x")
+        store.set("storage:stuck", json.dumps({str(stuck): {
+            "size": 2_500_000_000, "at": "2026-11-09T08:00:00+00:00", "tried": time.time(),
+        }}))  # fmt: skip
+        await runtime.storage.check_disk()
+        await settle(runtime)
+
+        context = await browser.new_context(viewport={"width": 1280, "height": 900})
+        page = await context.new_page()
+        errors: list[str] = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        await page.goto(f"{BASE}/#token={TOKEN}")
+        button = page.locator("#storage-button")
+        await expect(button).to_have_class(re.compile(r"\bwarning\b"))
+        await expect(page.locator("#storage-free")).to_have_text("25 GB free")
+        log("storage: the sidebar button says the disk is low")
+        await button.click()
+        dialog = page.locator("#storage-dialog")
+        await expect(dialog).to_be_visible()
+        await expect(dialog.locator(".storage-disk")).to_contain_text("25 GB free")
+        await expect(dialog.locator(".storage-level")).to_have_text("Low")
+        row = dialog.locator(f'.storage-worker[data-session="{closed["session_id"]}"]')
+        await expect(row.locator(".storage-state")).to_have_text("Closed")
+        await expect(row.locator(".storage-kept")).to_contain_text("ignored files (logs/)")
+        assert (tree / "logs" / "run.txt").exists() and not (tree / "build" / "out.o").exists()
+        await expect(dialog.locator("#storage-uv-path")).not_to_be_empty()
+        await expect(dialog.locator("#storage-stuck")).to_contain_text("0123456789ab-build")
+        await expect(dialog.locator("#storage-stuck")).to_contain_text("2.5 GB")
+        await expect(dialog.locator("#storage-history")).to_contain_text(
+            "Cleaned build artifacts on close"
+        )
+        log("storage: a closed worker's kept worktree says why; its build output went on close")
+
+        await row.get_by_role("button", name="Review files").click()
+        review = row.locator(".storage-review")
+        await expect(review).to_contain_text("logs/")
+        # git cannot read its changes: it says so, and offers no delete.
+        real_git = workspaces.checkout_git
+
+        async def no_status(checkout, path, *arguments, **options):
+            if "status" in arguments:
+                raise ValueError("git failed: index.lock exists")
+            return await real_git(checkout, path, *arguments, **options)
+
+        workspaces.checkout_git = no_status
+        try:
+            await row.get_by_role("button", name="Hide files").click()
+            await row.get_by_role("button", name="Review files").click()
+            await expect(review.locator(".storage-unread")).to_be_visible()
+            await expect(review).to_contain_text("Uncommitted changes could not be read")
+            await expect(review.get_by_role("button", name="Delete worktree")).to_have_count(0)
+        finally:
+            workspaces.checkout_git = real_git
+        await row.get_by_role("button", name="Hide files").click()
+        await row.get_by_role("button", name="Review files").click()
+        await expect(review).to_contain_text("No uncommitted changes")
+        log("storage: changes git cannot read: the review says so and offers no delete")
+        delete = review.get_by_role("button", name="Delete worktree")
+        await expect(delete).to_be_disabled()
+        await review.locator("input[aria-label='Type delete to confirm']").fill("delete")
+        await expect(delete).to_be_enabled()
+        await dialog.screenshot(path=SHOTS / "ui-edges-storage.png")
+        inner = dialog.locator(".storage")
+        width = await inner.evaluate("node => node.scrollWidth - node.clientWidth")
+        assert width <= 0, f"the dialog runs {width}px past its side"
+        await delete.click()
+        await expect(dialog.locator("#storage-history")).to_contain_text("Deleted its worktree")
+        assert not tree.exists(), "deleted once confirmed"
+        log("storage: Review files lists what is kept; delete only once 'delete' is typed")
+
+        reading["free"] = 80 * 10**9
+        machine._disk = (float("-inf"), None)
+        await runtime.storage.check_disk()
+        await expect(dialog.locator(".storage-level")).to_have_count(0)
+        await page.locator("#storage-close").click()
+        await expect(button).not_to_have_class(re.compile(r"\bwarning\b"))
+        log("storage: room again: the dialog and the button say so")
+        assert not errors, errors
+        await context.close()
+    finally:
+        machine.read_disk = read_disk
+        machine._disk = (float("-inf"), None)
+        store.set("storage:level", "normal")
+        store.delete("storage:stuck")
+        store.save_settings(store.settings().model_copy(update={"code_folder": before.code_folder}))
+
+
+async def round_mascot(runtime, browser, failures: list[str]):
+    """The captain, Chief of Staff's duck: beside the name, its mood says how Home stands (it
+    salutes with Home's count when something needs the owner, steers while at work, keeps watch,
+    rests; cheers a moment when a task is done and nothing needs the owner); it is on the
+    "Thinking…" line, in the empty states and the favicon. It moves a while, then only blinks;
+    with reduced motion it does not move at all. It adds no text."""
+    router = runtime.store.get("router_id")
+    context = await browser.new_context(viewport={"width": 1280, "height": 900})
+    page = await context.new_page()
+    errors: list[str] = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.on("console", lambda note: errors.append(note.text) if note.type == "error" else None)
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    captain = page.locator("#sidebar .brand > .duck")
+    await expect(captain).to_have_count(1)
+    await expect(captain).to_be_visible()
+
+    spawned = await call_tool(runtime, "spawn_worker", router, title="Paint the duck pond",
+                              instructions="x", why_new="test")  # fmt: skip
+    asker = json.loads(spawned.text_result_for_llm)["session_id"]
+    await call_tool(runtime, "report", asker, status="question", summary="Blue or green?")
+    await expect(page.locator("#needs .card", has_text="Blue or green?")).to_be_visible()
+    await expect(captain).to_have_attribute("data-mood", "needs")
+    await expect(captain.locator(".d-bubble")).to_be_visible()
+    count, title = await page.evaluate(
+        "() => [document.querySelector('.home-item .badge').textContent,"
+        " document.querySelector('#sidebar .brand > .duck').title]"
+    )
+    assert title == f"{count} need{'s' if count == '1' else ''} you", (count, title)
+    log("captain: it salutes when something needs you, with Home's count")
+
+    # It moves a while after its mood changes, then rests: only its blink runs (free between
+    # blinks).
+    await expect(captain).not_to_have_class(re.compile(r"\bmoving\b"), timeout=15000)
+    running = "d => d.getAnimations({ subtree: true }).map((a) => a.animationName)"
+    assert await captain.evaluate(running) == ["d-blink"], await captain.evaluate(running)
+    await captain.hover()
+    assert len(await captain.evaluate(running)) > 1, "a pointer on it wakes it"
+    await page.mouse.move(600, 600)
+    log("captain: moves a while, then rests blinking; the pointer wakes it")
+
+    moods = await page.evaluate(
+        """async () => {
+          const { captainMood } = await import("/static/sidebar.js");
+          const t = Date.now() + 60000;
+          const mood = (needs, finished, dots, now) =>
+            captainMood({ needs, finished, dots, now }).join(": ");
+          return [
+            mood(0, 0, ["watching", "working"], t),
+            mood(0, 0, ["idle", "watching"], t),
+            mood(0, 0, ["idle", undefined], t),
+            mood(0, 1, ["working"], t),
+            mood(2, 1, ["working"], t + 1000),
+            mood(0, 1, ["working"], t + 5000),
+            mood(0, 1, ["working"], t + 7000),
+            mood(1, 1, [], t + 7000),
+          ];
+        }"""
+    )
+    assert moods == [
+        "working: At work",
+        "watching: Keeping watch: tasks wait on CI, a review or a reply",
+        "idle: All quiet",
+        "done: Done",
+        "needs: 2 need you",
+        "done: Done",
+        "working: At work",
+        "needs: 1 needs you",
+    ], moods
+    log("captain: needs you, then a moment's cheer for a done task, then at work, watch, quiet")
+
+    # On the "Thinking…" line: at the wheel; on watch while a command it left runs on.
+    runtime.update_session(asker, status="working", activity="Mixing the paint")
+    await page.locator(f'#session-list .item[data-id="{asker}"]').click()
+    line = page.locator("#timeline .working-line")
+    await expect(line).to_contain_text("Mixing the paint")
+    await expect(line.locator(".duck")).to_have_attribute("data-mood", "working")
+    await expect(line.locator(".dot")).to_have_count(0)
+    runtime.states[asker].held = True
+    runtime.update_session(asker, status="idle", activity="")
+    await expect(line).to_contain_text("Waiting for background process")
+    await expect(line.locator(".duck")).to_have_attribute("data-mood", "watching")
+    runtime.states[asker].held = False
+    runtime.update_session(asker, status="idle", activity="")
+    await expect(line).to_have_count(0)
+    await page.locator("#back-home").click()
+    log("captain: steers on the Thinking line, keeps watch while a background command runs")
+
+    # The empty states: Home's welcome and Needs you; the duck adds no words to either.
+    hint = page.locator("#needs > .empty-hint")
+    await expect(hint.locator(".duck")).to_have_count(1)
+    await expect(hint).to_have_text("Nothing needs you.")
+    welcome = await page.evaluate(
+        "() => import('/static/inbox.js').then((m) => { const card = m.welcomeCard();"
+        " return [card.querySelector('.duck')?.dataset.mood, card.querySelector('h2').textContent,"
+        " card.textContent.startsWith('Ask for anything')]; })"
+    )
+    assert welcome == ["idle", "Ask for anything", True], welcome
+    assert await page.locator('link[rel="icon"]').get_attribute("href") == "/static/favicon.svg"
+    icon = await page.request.get(f"{BASE}/static/favicon.svg")
+    assert icon.ok and "svg" in icon.headers["content-type"], icon.headers
+    log("captain: in the empty states (no words of its own) and the favicon")
+    assert not errors, errors
+    await context.close()
+
+    # With reduced motion it does not move at all, not even a blink.
+    still = await browser.new_context(viewport={"width": 1280, "height": 900},
+                                      reduced_motion="reduce")  # fmt: skip
+    page = await still.new_page()
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    captain = page.locator("#sidebar .brand > .duck")
+    await expect(captain).to_be_visible()
+    await expect(captain).to_have_class(re.compile(r"\bmoving\b"))
+    assert await captain.evaluate("d => d.getAnimations({ subtree: true }).length") == 0
+    log("captain: still with reduced motion")
+    await still.close()
+    await runtime.task_actions.cancel(runtime.tasks.current(asker)["id"])
 
 
 if __name__ == "__main__":

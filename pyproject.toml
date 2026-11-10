@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "chiefofstaff"
-version = "0.1.35"
+version = "0.1.36"
 description = "One inbox for all your GitHub Copilot sessions: tasks and follow-ups go to the right session, Slack replies wait for your approval, and finished work waits for your review."
 license = "MIT"
 dynamic = ["readme"]
@@ -74,7 +74,10 @@ packages = ["src/chiefofstaff"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-markers = ["copilot: runs against the real GitHub Copilot CLI (set CHIEFOFSTAFF_TEST_COPILOT=1)"]
+markers = [
+    "copilot: runs against the real GitHub Copilot CLI (set CHIEFOFSTAFF_TEST_COPILOT=1)",
+    "titles: new tasks' titles are checked as in use (other tests name tasks tersely)",
+]
 testpaths = ["tests"]
 
 [tool.ruff]

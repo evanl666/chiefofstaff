@@ -9,6 +9,7 @@ import { renderHeader, scrollToBottom, select } from "./session.js";
 import { draftCard, draftKey, uncertainCard } from "./drafts.js";
 import { expandTask, followUpItem, inTerminal, ownTasks, questionParts, taskItem, terminalItem, unfoldTask } from "./tasks.js";
 import { artifactItems } from "./artifacts.js";
+import { duck } from "./mascot.js";
 // What waits for the owner: cards to approve or answer, and the tasks the board puts under
 // Needs you (waiting for an answer, failed, a result to accept, news, no progress); a
 // worker's question whose task does not show it (cancelled, finished, or none); the Router's
@@ -235,7 +236,10 @@ function renderPanel() {
   const tasks = items.board;
 
   let needs = document.getElementById("needs");
-  if (!needs) needs = fold("needs", "Needs you", { help: "What waits for you: results to accept, questions, drafts to approve, decisions, what failed or stopped", empty: "Nothing needs you." });
+  if (!needs) {
+    needs = fold("needs", "Needs you", { help: "What waits for you: results to accept, questions, drafts to approve, decisions, what failed or stopped", empty: "Nothing needs you." });
+    needs.querySelector(":scope > .empty-hint").prepend(duck("idle"));
+  }
   const needCount = needsCount();
   counted(needs, needCount);
   shownIf(needs.querySelector(".empty-hint"), !needCount);
@@ -660,6 +664,7 @@ export function welcomeCard() {
   return el(
     "div",
     { id: "home-welcome", class: "welcome empty" },
+    duck("idle"),
     el("h2", { text: "Ask for anything" }),
     el("p", { text: "Several things at once is fine. Each task gets its own worker and shows up under Tasks; anything sent in your name waits for your OK." }),
     el("div", { class: "examples" }, ...examples.map((text) => el("button", { type: "button", class: "secondary", text, onclick: () => { $("#composer-input").value = text; $("#composer-input").focus(); } }))),

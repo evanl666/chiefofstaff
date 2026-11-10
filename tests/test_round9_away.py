@@ -211,8 +211,9 @@ async def test_asked_again_the_reason_is_not_said_twice_and_the_draft_has_its_li
     section = next(part for part in again.split("\n\n") if code in part)
     lines = section.splitlines()
     assert lines[0] == f"*[{code}]* Not sent yet \u00b7 Draft to approve \u00b7 Bob", section
-    assert lines[1] == 'Answer "send" when it should go, or "no".', section
-    assert lines[2] == "Thanks Bob, shipped.", section
+    assert lines[1] == "Task: Answer the team", section
+    assert lines[2] == 'Answer "send" when it should go, or "no".', section
+    assert lines[3] == "Thanks Bob, shipped.", section
 
 
 async def test_an_urgent_router_note_reaches_the_owner_away(tmp_path):

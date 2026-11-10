@@ -10,6 +10,7 @@ import { scheduleHome, showHomeTab } from "./inbox.js";
 import { attachmentBody, bindAttachments, hasAttachments, restoreAttachments, showLength, takeAttachments, tooLong } from "./composer.js";
 import { bindSettings, openSettings, refreshUsageLink, showUsage } from "./settings.js";
 import { bindSplitter } from "./splitter.js";
+import { bindStorage } from "./storage.js";
 function bindUi() {
   const input = $("#composer-input");
   const autosize = () => {
@@ -129,6 +130,7 @@ function bindUi() {
     input.addEventListener("change", () => showUsage("custom"));
   }
   setInterval(refreshUsageLink, 60000);
+  bindStorage();
   $("#external").addEventListener("toggle", (event) => {
     if (event.target.open) loadExternal(true);
   });

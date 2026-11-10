@@ -350,6 +350,41 @@ class Settings(StrictModel):
     away_notify: bool = False
     away_minutes: int = Field(default=10, ge=1, le=240)
     away_how: str = Field(default="", max_length=500)
+    # Disk space (see storage.py): the owner hears when free space on Chief of Staff's disk is
+    # below the warning level (in GB, or in percent of the disk: whichever is more), and new
+    # worker turns wait below the critical one.
+    disk_warning_gb: float = Field(default=30, ge=1, le=100_000)
+    disk_warning_percent: float = Field(default=5, ge=0, le=50)
+    disk_critical_gb: float = Field(default=10, ge=0.5, le=100_000)
+    disk_critical_percent: float = Field(default=2, ge=0, le=50)
+    # What builds and installs leave in workers' worktrees (build output, dependencies, caches;
+    # only what git ignores) is deleted once a worker has been idle this many days (0: never),
+    # and from a closed worker's worktree that stays.
+    auto_cleanup: bool = True
+    cleanup_idle_days: int = Field(default=3, ge=0, le=30)
+    # More names or globs of ignored folders and files a build makes again ("generated", "*.o"),
+    # and of ones never deleted ("models", "data/*"), matched against each part of a path and
+    # against the whole path in its worktree.
+    regenerable_patterns: list[Annotated[str, Field(max_length=200)]] = Field(
+        default_factory=list, max_length=50
+    )
+    never_clean_patterns: list[Annotated[str, Field(max_length=200)]] = Field(
+        default_factory=list, max_length=50
+    )
+
+    @field_validator("regenerable_patterns", "never_clean_patterns")
+    @classmethod
+    def clean_patterns(cls, value: list[str], info: ValidationInfo) -> list[str]:
+        patterns = list(dict.fromkeys(item.strip() for item in value if item.strip()))
+        if info.field_name == "regenerable_patterns":
+            for pattern in patterns:
+                # "*" would take every ignored file for build output: an .env, logs, data.
+                if not re.sub(r"[*?/.\[\]!]", "", pattern):
+                    raise ValueError(
+                        f"Build output patterns: {pattern} matches everything. Name the "
+                        "folders or files, like generated or *.o."
+                    )
+        return patterns
 
     @model_validator(mode="before")
     @classmethod

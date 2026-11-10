@@ -1,0 +1,58 @@
+/* Storage: the sidebar button (amber or red while the disk is low) and its dialog. */
+.foot-row .storage { width: auto; min-width: 28px; gap: 6px; display: flex; align-items: center; padding: 0 6px; font-size: var(--small); font-weight: 400; font-variant-numeric: tabular-nums; }
+.foot-row .storage svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.foot-row .storage.warning { color: var(--amber); }
+.foot-row .storage.critical { color: var(--red); }
+.foot-row .storage #storage-free:empty { display: none; }
+
+#storage-dialog { width: min(760px, calc(100vw - 32px)); }
+#storage-dialog .storage { padding: 24px; display: grid; gap: 12px; max-height: 86vh; overflow-y: auto; }
+#storage-dialog h3 { margin: 8px 0 0; }
+#storage-dialog h4 { margin: 8px 0 2px; font-size: var(--small); font-weight: 600; color: var(--soft); }
+#storage-dialog code { font: var(--small) var(--mono); overflow-wrap: anywhere; }
+#storage-dialog p { margin: 0; }
+#storage-dialog .bad { color: var(--red); }
+
+.storage-summary { display: grid; gap: 4px; }
+.storage-disk { display: flex; flex-wrap: wrap; gap: 10px; align-items: baseline; }
+.storage-disk strong { font-size: var(--title); font-weight: 600; font-variant-numeric: tabular-nums; }
+.storage-disk span { color: var(--muted); font-size: var(--small); }
+.storage-disk .storage-level { padding: 1px 8px; border-radius: 999px; font-weight: 600; }
+.storage-disk.warning .storage-level { color: var(--amber); background: var(--amber-soft); }
+.storage-disk.critical .storage-level { color: var(--red); background: var(--red-soft); }
+.storage-recoverable { color: var(--green); font-size: var(--small); }
+
+.storage-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.storage-toolbar button { min-height: 28px; padding: 0 12px; }
+.storage-workers { display: grid; gap: 8px; }
+.storage-worker { border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 12px; display: grid; gap: 6px; background: var(--card); }
+.storage-head { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.storage-title { flex: 1; min-width: 0; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.storage-state { font-size: var(--small); color: var(--muted); }
+.storage-state.running { color: var(--accent); }
+.storage-state.closed { color: var(--soft); }
+.storage-size { font-variant-numeric: tabular-nums; font-weight: 600; }
+.storage-meta, .storage-kept, .storage-note { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: var(--small); color: var(--muted); }
+.storage-meta:empty { display: none; }
+.storage-kept { color: var(--soft); display: block; }
+.storage-note { color: var(--accent); }
+.storage-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.storage-actions button { min-height: 28px; padding: 0 10px; font-size: var(--small); }
+#storage-dialog .storage-actions label.check { font-size: var(--small); color: var(--soft); }
+
+.storage-review { border-top: 1px solid var(--line); padding-top: 6px; display: grid; gap: 8px; }
+.storage-review section { display: grid; gap: 2px; }
+.storage-tree { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; font-size: var(--small); color: var(--muted); }
+.storage-review ul, .storage-list { margin: 0; padding-left: 18px; font-size: var(--small); color: var(--soft); max-height: 180px; overflow-y: auto; }
+.storage-delete { margin-top: 6px; padding: 8px 10px; border-radius: var(--radius); background: var(--red-soft); display: grid; gap: 6px; font-size: var(--small); }
+#storage-dialog .storage-delete .row { align-items: center; gap: 8px; }
+#storage-dialog .storage-delete input { width: 120px; }
+.storage-delete button { min-height: 28px; padding: 0 12px; }
+
+#storage-dialog .storage-settings { padding: 8px 0 0; max-height: none; overflow: visible; }
+#storage-dialog .storage-settings .row label:not(.check) { width: 120px; }
+.storage-save { display: flex; justify-content: flex-end; }
+.storage-save button { min-height: 30px; padding: 0 16px; }
+.storage-history { list-style: none; padding-left: 0; display: grid; gap: 2px; }
+.storage-history .when { color: var(--muted); margin-right: 8px; font-variant-numeric: tabular-nums; }
+.storage-unread { margin-top: 6px; padding: 8px 10px; border-radius: var(--radius); background: var(--amber-soft); color: var(--amber); font-size: var(--small); }

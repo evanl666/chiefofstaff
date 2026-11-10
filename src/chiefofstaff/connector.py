@@ -49,6 +49,15 @@ LOOKBACK_HOURS = 24
 # Scans overlap by this much: what arrived while the last one ran is read again (found items are
 # never handed over twice).
 OVERLAP_SECONDS = 600
+# A watch is read from where it was last covered in full (its watermark), however long ago, back
+# to this many days: older than that, what was never covered (scans that kept coming back partial,
+# or Chief of Staff was not running) is a coverage gap, told to the owner.
+RECOVER_DAYS = 7
+# A watch's window that this many scans in a row covered only in part is given up on: a coverage
+# gap, told; the next scans read on from its end.
+GAP_TRIES = 4
+# Coverage gaps kept for Settings, the newest.
+MAX_GAPS = 10
 # A fresh conversation once its context is this large: each scan carries what it needs.
 FRESH_AFTER = 120_000
 # Kinds of needs-you cards a notification lists, and how a reply settles each.
@@ -138,9 +147,21 @@ CHINESE = {
         "Folders: ": "文件夹:",
         "none: no project, or a folder's path": "none:不用项目,或写文件夹路径",
         "Question": "问题",
-        "“{about}” asks": "“{about}”问你",
-        "Failed · “{title}”": "失败 · “{title}”",
-        "Stopped · “{title}”": "已停止 · “{title}”",
+        "Needs your input": "需要你的意见",
+        "Failed": "失败",
+        "Stopped": "已停止",
+        "Task: {title}": "任务:{title}",
+        "About: {about}": "关于:{about}",
+        "Action: Open {place}": "操作:打开 {place}",
+        "Action: Open Chief of Staff → {place}": "操作:打开 Chief of Staff → {place}",
+        "the chat with the Router": "与 Router 的对话",
+        "a note from the Router": "Router 的提醒",
+        "a question from the Router": "Router 的问题",
+        "a question from {who}": "{who} 的问题",
+        "your reply to {to}": "你给 {to} 的回复",
+        "your reply": "你的回复",
+        "your review of {pr}": "你对 {pr} 的评审",
+        "your reply on {pr}": "你在 {pr} 上的回复",
         "<your answer>": "<你的答复>",
         "<number or your answer>": "<编号或你的答复>",
         "<number, none or a path>": "<编号、none 或文件夹路径>",
@@ -392,6 +413,25 @@ def watch_key(what: str) -> str:
     return hashlib.sha256(" ".join(what.lower().split()).encode()).hexdigest()[:16]
 
 
+def clock_of(moment: float) -> str:
+    """A time as the owner reads it: "3:00 PM", with its day when that is not today ("Nov 8,
+    3:00 PM")."""
+    at = datetime.fromtimestamp(moment).astimezone()
+    hour = f"{at.hour % 12 or 12}:{at.minute:02d} {'AM' if at.hour < 12 else 'PM'}"
+    if at.date() == datetime.now().astimezone().date():
+        return hour
+    return f"{at.strftime('%b')} {at.day}, {hour}"
+
+
+def gap_text(gap: dict) -> str:
+    """A watch's coverage gap, for the owner: what could not be checked, when, and why."""
+    reason = str(gap.get("reason") or "").strip().rstrip(".")
+    return (
+        f"Could not check \u201c{gap['watch']}\u201d between {clock_of(gap['from'])} and "
+        f"{clock_of(gap['to'])}" + (f" ({reason})" if reason else "")
+    )
+
+
 def without_code(text: str, code: str) -> str:
     """An answer without its code (any case, with or without brackets) and the separators next
     to it: "URN2F drop them", "[urn2f]: drop them" and "drop them - URN2F" are all "drop them";
@@ -440,6 +480,12 @@ class Incomplete(BaseModel):
         description="What it could not cover: a search that returns only some results (the "
         "newest few threads), a tool that failed, a source it cannot reach"
     )
+    reaches_back_to: str = Field(
+        default="",
+        description="Only when the source cannot search as far back as the watch's time at all "
+        "(it keeps or searches only its last days): the oldest time it can search (ISO). What "
+        "is before it can never be checked. Empty when a later search could still cover it.",
+    )
 
 
 class ReportFound(NestedArguments):
@@ -447,7 +493,8 @@ class ReportFound(NestedArguments):
         default_factory=list,
         max_length=30,
         description="Every new item that needs the owner (a question, a request, a mention "
-        "expecting an answer). Empty when there is none.",
+        "expecting an answer). Empty when there is none. At most 30 a call: with more, call "
+        "report_found again with the rest (each call adds to the same scan).",
     )
     problems: str = Field(
         default="",
@@ -621,21 +668,126 @@ def asks_owner(text: str, answer: bool = False) -> bool:
     return bool(paragraphs) and bool(QUESTION_END.search(paragraphs[-1]))
 
 
-def gist(text: str, limit: int = 300) -> str:
-    """A text's first lines as Slack text (mrkdwn), short: one item of a notification. Its
-    Markdown becomes Slack's (*bold*, <link|text>); &, < and > are escaped."""
+# An item of a notification says this much of what it is about: its first sentences that say
+# something, whole (a first one longer than this is cut at a word, with an ellipsis).
+GIST_CHARS = 200
+# Where a sentence ends: after its stop (and a closing quote or bracket), at a space; a Chinese
+# stop ends one at once.
+SENTENCE_END = re.compile(
+    "([.!?\u2026][\"')\\]\u201d\u2019]*)\\s+|([\u3002\uff01\uff1f][\"')\\]\u201d\u2019\u300d\u300f]*)"
+)
+# Lines that only label what follows them say nothing on their own: a gist that took the first
+# lines read "Issue:", "There are two reasons:" or a heading, without what they introduce.
+HEADING_LINE = re.compile(r"^\s*#{1,6}\s")
+# A line that ends what it says (a stop, a colon or a semicolon); one that does not is wrapped,
+# its sentence going on on the next line (unless a new paragraph or list item comes next).
+STOPPED = re.compile(
+    "[.!?:;\u2026\u3002\uff01\uff1f\uff1a\uff1b][\"')\\]\u201d\u2019\u300d\u300f]*$"
+)
+BOLD_LABEL = re.compile(r"(?:\*\*|__|\*|_)[^*_\n]{1,80}(?:\*\*|__|\*|_)\s*[:\uff1a]?")
+LINE_MARK = re.compile(r"^\s*(?:>+|[-*\u2022+]|\d+[.)])\s+")
+# A line ending with a colon this short (in words; two Chinese characters count as one) is a
+# label ("There are two reasons:"); a longer one leads into what follows it, and a gist never
+# ends on it.
+LABEL_WORDS = 6
+
+
+def label_only(line: str) -> bool:
+    """Whether a line (its list marker taken off) only labels what follows it: a short one
+    ending with a colon, or a few words in bold with no stop ("**Options**")."""
+    if not re.search(r"\w", line):
+        return True
+    bold = BOLD_LABEL.fullmatch(line)
+    if bold:
+        line = re.sub(r"[*_]", "", line).strip()
+    size = len(line.split()) + len(re.findall(r"[\u3400-\u9fff]", line)) // 2
+    if line.endswith((":", "\uff1a")):
+        return size <= LABEL_WORDS
+    return bool(bold) and size <= LABEL_WORDS and not line.endswith(tuple(".!?\u3002\uff01\uff1f"))
+
+
+def shortened(said: str, ends: list[int], limit: int) -> str:
+    """`said` in at most `limit` characters: up to the last sentence end (`ends`) that fits,
+    not on a colon; a first sentence longer than that is cut at a word, with an ellipsis."""
+    if len(said) <= limit:
+        return said
+    fits = [
+        end for end in ends if end <= limit and not said[:end].rstrip().endswith((":", "\uff1a"))
+    ]
+    # Not a few words when most of what fits is the next sentence: that one, cut.
+    if fits and max(fits) >= limit // 2:
+        return said[: max(fits)].rstrip(" ;")
+    cut = said[: limit - 1]
+    if " " in cut.strip():
+        cut = cut.rsplit(" ", 1)[0]
+    return cut.rstrip(" ;,:\uff1a\uff0c") + "\u2026"
+
+
+def gist(text: str, limit: int = GIST_CHARS, ask: bool = False) -> str:
+    """What a text says, in short, as Slack text (mrkdwn): one item of a notification. Its first
+    sentences that say something (labels and headings left out), whole, up to `limit`. `ask`:
+    it asks the owner something, and the question it ends with is kept even when the sentences
+    before it are long. Its Markdown becomes Slack's (*bold*, <link|text>); &, < and > are
+    escaped."""
     plain = re.sub(r"```.*?(```|$)", " ", text or "", flags=re.DOTALL)
-    lines = []
-    for line in plain.splitlines():
-        line = re.sub(r"^\s*(#{1,6}|>+|[-*\u2022+]|\d+[.)])\s+", "", line).strip()
-        if line and not re.fullmatch(r"[|:\- ]+", line):
-            lines.append(line)
-        if len(lines) == 2:
-            break
-    said = " ".join(lines)
-    if len(said) > limit:
-        said = said[: limit - 1].rsplit(" ", 1)[0] + "\u2026"
-    said = mrkdwn(said)
+    said, spans = "", []  # The sentences, by where each starts and ends in `said`.
+    loose = False  # A new paragraph, list item or section: not the line before, wrapped.
+    opened = None  # Where a sentence the last line did not end starts.
+    for raw in plain.splitlines():
+        if not raw.strip() or HEADING_LINE.match(raw):
+            loose = True
+            continue
+        listed = bool(LINE_MARK.match(raw))
+        line = LINE_MARK.sub("", raw).strip()
+        if re.fullmatch(r"[|:\- ]+", line) or label_only(line):
+            loose = True
+            continue
+        joiner = ""
+        if said:
+            ended = said.endswith((".", "!", "?", "\u2026", ":", ";"))
+            joiner = "; " if (loose or listed) and not ended else " "
+            if said.endswith(tuple("\u3002\uff01\uff1f\uff1a\uff1b\uff0c")):
+                joiner = ""  # Chinese punctuation has its own space.
+        if opened is not None and (loose or listed):
+            spans.append((opened, len(said)))  # What the last line left open ends with it.
+            opened = None
+        line_start = len(said) + len(joiner)
+        start = line_start if opened is None else opened
+        said += joiner + line
+        for found in SENTENCE_END.finditer(line):
+            spans.append((start, line_start + found.end(found.lastindex or 0)))
+            start = line_start + found.end()
+        opened = None
+        if start < len(said):
+            if STOPPED.search(line):
+                spans.append((start, len(said)))
+            else:
+                opened = start  # Wrapped: its sentence goes on on the next line.
+        loose = False
+    if opened is not None:
+        spans.append((opened, len(said)))
+    if not said:
+        # Nothing but labels: the first of them, rather than nothing.
+        first = next((line for line in plain.splitlines() if line.strip()), "")
+        said = re.sub(r"^\s*#{1,6}\s+", "", LINE_MARK.sub("", first)).strip()
+        spans = [(0, len(said))]
+    ends = [end for _start, end in spans]
+    short = shortened(said, ends, limit)
+    if ask and len(short) < len(said):
+        # The question it asks, when the sentences that fit end before it.
+        question = next(
+            (
+                said[start:end]
+                for start, end in reversed(spans)
+                if end > len(short) and QUESTION_END.search(said[start:end])
+            ),
+            "",
+        )
+        if question:
+            room = limit - len(question) - 3
+            head = shortened(said, ends, room) if room >= 40 else ""
+            short = f"{head} \u2026 {question}" if head else shortened(question, [], limit)
+    said = mrkdwn(short)
     said = re.sub(r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)", r"<\2|\1>", said)
     parts = re.split(r"(`[^`]*`)", said)
     for index in range(0, len(parts), 2):  # Outside `code`: Markdown's emphasis as Slack's.
@@ -745,23 +897,47 @@ class Connector:
             self.store.set("watch_started_at", str(time.time()))
             # Each watch from where it was last covered in full (a little before: what came in
             # while that scan ran), not from the last scan started: one that failed, or could
-            # see only part of its source, leaves its window to the next.
+            # see only part of its source, leaves its window to the next, however long ago.
             keys = [watch_key(w.what) for w in watches]
+            for watch in watches:
+                key = watch_key(watch.what)
+                started = self.store.get(f"watchdone:{key}") or self.store.get(f"watchfrom:{key}")
+                if not started:
+                    # A watch never covered on its own (new, or its words edited): from a day
+                    # before its first scan, or the last scan of all watches if later; not from
+                    # one long ago that other, partly covered watches hold back.
+                    since = max(
+                        float(self.store.get("watch_done_at") or 0),
+                        time.time() - LOOKBACK_HOURS * 3600,
+                    )
+                    self.store.set(f"watchfrom:{key}", str(since))
+                self.reach_back(watch.what)
             self.store.set("watch_scan", json.dumps(keys))
             # Where each was covered to before it: a later report of this scan that finds one
-            # partial puts it back there, even after an earlier report took it for covered.
+            # partial puts it back there, even after an earlier report took it for covered. And
+            # how many scans in a row had covered each only in part: this scan counts once, from
+            # there, whichever of its reports (one may leave a watch out, another list it).
             self.store.set(
                 "watch_scan_before",
                 json.dumps(
                     {
                         "done_at": self.store.get("watch_done_at"),
                         "done": {key: self.store.get(f"watchdone:{key}") for key in keys},
+                        "what": {watch_key(w.what): w.what for w in watches},
+                        "tries": {
+                            key: json.loads(self.store.get(f"watchpartial:{key}") or "{}").get(
+                                "tries", 0
+                            )
+                            for key in keys
+                        },
                     }
                 ),
             )
             lines = ["Scan now. The owner's watches, each with the time to look from:"]
+            oldest = time.time()
             for number, watch in enumerate(watches, 1):
                 since = self.watch_since(watch.what)
+                oldest = min(oldest, since or time.time() - LOOKBACK_HOURS * 3600)
                 start = (
                     datetime.fromtimestamp(since).astimezone().isoformat(timespec="minutes")
                     if since
@@ -772,6 +948,25 @@ class Connector:
                     + (f" (use: {watch.how})" if watch.how else "")
                     + f": new since {start}"
                 )
+                partly = json.loads(self.store.get(f"watchpartial:{keys[number - 1]}") or "{}")
+                if tries := partly.get("tries"):
+                    lines[-1] += (
+                        f"\n   Not covered in full since then ({tries} scan{'s' * (tries > 1)} "
+                        f"in a row: {partly.get('reason', '')}): search all of it again, from "
+                        "that time."
+                    )
+            day = datetime.fromtimestamp(oldest - 86400).astimezone().date().isoformat()
+            lines.append(
+                "Cover each watch's whole window, from its time: search with the source's own "
+                f"date filter (in a Slack search, after:{day} is the day before the oldest time "
+                "above), not only its latest results, and page through all of them (the next "
+                "page, cursor or offset) until there are no more. When a tool gives only the "
+                "newest few conversations or results and cannot page further, or cannot search "
+                "back that far, that watch is incomplete: list it in incomplete, with what "
+                "limited it (and reaches_back_to when the source cannot search back to its time "
+                "at all). report_found takes 30 items a call: with more, call it again with the "
+                "rest (every call adds to this scan)."
+            )
             if methods := self.store.get("watch_methods"):
                 lines.append(
                     f"How you ran them before (use it again if it still works):\n{methods}"
@@ -789,13 +984,57 @@ class Connector:
         else:
             self.store.delete(key)
 
-    def watch_since(self, what: str) -> float:
-        """Where a watch's next scan starts: a little before the last scan that covered it in
-        full (at most LOOKBACK_HOURS back); 0 for a new one."""
-        done = float(
-            self.store.get(f"watchdone:{watch_key(what)}") or self.store.get("watch_done_at") or 0
+    def watermark(self, key: str) -> float:
+        """Where a watch (by watch_key) was covered to: all before it was covered in full, or is
+        a coverage gap the owner was told of; where its first scan started from, until one
+        covers it; 0 before its first scan."""
+        return float(
+            self.store.get(f"watchdone:{key}")
+            or self.store.get(f"watchfrom:{key}")
+            or self.store.get("watch_done_at")
+            or 0
         )
-        return max(done - OVERLAP_SECONDS, time.time() - LOOKBACK_HOURS * 3600) if done else 0
+
+    def watch_since(self, what: str) -> float:
+        """Where a watch's next scan starts: a little before its watermark, however long ago
+        that is (a window that scans kept covering only in part is searched again, not left
+        behind), back to RECOVER_DAYS (see reach_back); 0 for a new one."""
+        done = self.watermark(watch_key(what))
+        return max(done - OVERLAP_SECONDS, time.time() - RECOVER_DAYS * 86400) if done else 0
+
+    def reach_back(self, what: str):
+        """A watch not covered in full for longer than scans reach back (RECOVER_DAYS): what is
+        older than that is a coverage gap, told; scans read on from there."""
+        key = watch_key(what)
+        done, horizon = self.watermark(key), time.time() - RECOVER_DAYS * 86400
+        if done and done < horizon:
+            partly = json.loads(self.store.get(f"watchpartial:{key}") or "{}")
+            why = partly.get("reason") or "no scan covered it in full"
+            self.gap(what, done, horizon, f"{why}; scans reach back only {RECOVER_DAYS} days")
+            self.store.set(f"watchdone:{key}", str(horizon))
+
+    def gap(self, what: str, start: float, end: float, reason: str):
+        """A stretch of time a watch could not check, and no scan will: kept (Settings shows
+        it) and told to the owner. One that goes on growing (a source that keeps covering only
+        part of it) is told once."""
+        if end - start < 60:
+            return
+        key = watch_key(what)
+        gaps = json.loads(self.store.get("watch_gaps") or "[]")
+        last = next((gap for gap in reversed(gaps) if gap["key"] == key), None)
+        if last and last["from"] <= start <= last["to"] + OVERLAP_SECONDS:
+            last.update({"to": max(last["to"], end), "reason": reason, "at": now()})
+            self.store.set("watch_gaps", json.dumps(gaps))
+            return
+        found = {"key": key, "watch": what, "from": start, "to": end, "reason": reason}
+        self.store.set("watch_gaps", json.dumps([*gaps, {**found, "at": now()}][-MAX_GAPS:]))
+        self.runtime.add_message(
+            self.runtime.router_id(),
+            "notice",
+            f"{gap_text(found)}: anything that came in then may have been missed, so look there "
+            "yourself. Settings → Connections → Watches lists what could not be checked.",
+            {"settings": "connections"},
+        )
 
     async def t_report_found(self, params: ReportFound, caller: str):
         self.check(caller)
@@ -805,23 +1044,32 @@ class Connector:
         partial = {item.watch: item.reason.strip()[:300] for item in params.incomplete}
         if params.problems.strip() and not partial:
             partial = dict.fromkeys(range(1, len(scanned) + 1), params.problems.strip()[:300])
+        reaches = {item.watch: epoch(item.reaches_back_to) for item in params.incomplete}
         before = json.loads(self.store.get("watch_scan_before") or "{}")
         incomplete = []
         for number, key in enumerate(scanned, 1):
             # Partial in an earlier report of this same scan (items come in several reports):
             # still partial, whatever a later one leaves out.
-            earlier = json.loads(self.store.get(f"watchpartial:{key}") or "null") or {}
-            if earlier.get("scan") != started:
-                earlier = {}
+            record = json.loads(self.store.get(f"watchpartial:{key}") or "null") or {}
+            earlier = record if record.get("scan") == started else {}
             if number in partial or earlier:
                 reason = partial.get(number) or earlier["reason"]
                 # Its window stays open: the next scan looks from where it was last covered.
-                self.store.set(
-                    f"watchpartial:{key}",
-                    json.dumps({"reason": reason, "at": now(), "scan": started}),
-                )
                 if key in (before.get("done") or {}):
                     self.restore(f"watchdone:{key}", before["done"][key])
+                # Scans in a row that covered it only in part, this one counted once however
+                # many reports it makes (from before it: an earlier report that left it out took
+                # it for covered).
+                counted = before.get("tries")
+                if counted is not None:
+                    tries = counted.get(key, 0) + 1
+                else:
+                    tries = earlier.get("tries", 1) if earlier else record.get("tries", 0) + 1
+                tries = self.give_up(key, before, reason, reaches.get(number, 0), tries, started)
+                self.store.set(
+                    f"watchpartial:{key}",
+                    json.dumps({"reason": reason, "at": now(), "scan": started, "tries": tries}),
+                )
                 incomplete.append({"watch": number, "reason": reason})
             else:
                 self.store.set(f"watchdone:{key}", started)
@@ -880,6 +1128,37 @@ class Connector:
         self.runtime.publish_state()
         skipped = f" {answered} the owner already answered were left out." if answered else ""
         return f"{new} new item(s) handed to the Router; the rest were seen before.{skipped}"
+
+    def give_up(
+        self, key: str, before: dict, reason: str, reach: float, tries: int, started: str
+    ) -> int:
+        """What of a watch's window a scan covered only in part that no later scan can cover:
+        what is older than its source can search (`reach`); all of it once GAP_TRIES scans in
+        a row (`tries`) covered it only in part. That is a coverage gap (see gap), and the
+        watch's watermark moves past it, for this scan's later reports too. The scans in a row
+        that covered what is left only in part."""
+        what = (before.get("what") or {}).get(key) or next(
+            (w.what for w in self.store.settings().watches if watch_key(w.what) == key), "a watch"
+        )
+        end = float(started)
+        done = self.watermark(key) or end - LOOKBACK_HOURS * 3600
+        moved = 0.0
+        if reach and done < reach:
+            moved = min(reach, end)
+            self.gap(what, done, moved, f"{reason}; the source searches back only to then")
+        if tries >= GAP_TRIES:
+            self.gap(
+                what,
+                moved or done,
+                end,
+                f"{reason}; {tries} scans in a row covered it only in part",
+            )
+            moved, tries = end, 0
+        if moved:
+            self.store.set(f"watchdone:{key}", str(moved))
+            before.setdefault("done", {})[key] = str(moved)
+            self.store.set("watch_scan_before", json.dumps(before))
+        return tries
 
     def thread_line(self, link: str) -> str:
         """The Slack thread a found message is in, as a key a Slack-reading worker can follow;
@@ -940,6 +1219,19 @@ class Connector:
             "last": finished,
             "scanning": self.busy(),
             "session_id": row["id"] if row else "",
+            # What watches could not check, and no scan will: the newest first, for a week after
+            # each was told (or grew), however long before that it was.
+            "gaps": [
+                {
+                    "watch": gap["watch"],
+                    "from": datetime.fromtimestamp(gap["from"], UTC).isoformat(),
+                    "to": datetime.fromtimestamp(gap["to"], UTC).isoformat(),
+                    "reason": gap.get("reason", ""),
+                    "text": gap_text(gap),
+                }
+                for gap in reversed(json.loads(self.store.get("watch_gaps") or "[]"))
+                if time.time() - epoch(gap.get("at") or "") < RECOVER_DAYS * 86400
+            ],
             "away": {
                 "enabled": settings.away_notify,
                 "last": json.loads(self.store.get("away_last") or "{}"),
@@ -1258,7 +1550,7 @@ class Connector:
             # An urgent note asks nothing: an answer to it still goes to the Router.
             urgent = (ask.get("meta") or {}).get("urgent") and not asks_owner(ask["text"])
             head = "Urgent · Chief of Staff" if urgent else "Chief of Staff asks"
-            return self.say(head), self.gist(ask["text"]), "<your answer>"
+            return self.say(head), self.gist(ask["text"], ask=not urgent), "<your answer>"
         if draft := item.get("draft"):
             target = draft["target"]
             kind = draft["kind"]
@@ -1293,9 +1585,14 @@ class Connector:
                 return head, self.gist(draft["text"]), fill or "send · no"
             if kind == "decision":
                 options = target.get("options") or []
-                listed = " ".join(f"{n}) {o.get('choice', '')}" for n, o in enumerate(options, 1))
-                text = f"{target.get('question', draft['text'])} {listed}".strip()
-                return self.say("Decision"), self.gist(text), "<number or your answer>"
+                # Its options whole (the owner answers with one's number), after its question.
+                listed = " ".join(
+                    f"{n}) {shortened(str(o.get('choice', '')), [], 80)}"
+                    for n, o in enumerate(options, 1)
+                )
+                question = self.gist(target.get("question", draft["text"]), ask=True)
+                text = f"{question} {mrkdwn(listed)}".strip()
+                return self.say("Decision"), text, "<number or your answer>"
             if kind == "merge":
                 head = self.say("Ready to merge · {label}", label=target["label"])
                 checks = self.say(CHECK_WORDS.get(target.get("checks") or "", ""))
@@ -1317,27 +1614,99 @@ class Connector:
                 )
                 hint = "<number, none or a path>" if options else "<none or a path>"
                 title = target.get("title", "")
-                return self.say("Which folder for “{title}”", title=title), gist(listed), hint
-            return self.say("Question"), self.gist(draft["text"]), "<your answer>"
+                # Every folder it offers, whole: the owner answers with one's number.
+                return (
+                    self.say("Which folder for “{title}”", title=title),
+                    gist(listed, limit=600),
+                    hint,
+                )
+            return self.say("Question"), self.gist(draft["text"], ask=True), "<your answer>"
         if question := item.get("question"):
-            about = question.get("task_title") or question["worker"]
             return (
-                self.say("“{about}” asks", about=about),
-                self.gist(question["text"]),
+                self.say("Needs your input"),
+                self.gist(question["text"], ask=True),
                 "<your answer>",
             )
         task = item["task"]
-        said = self.gist(task.get("progress") or "")
         if task["status"] == "failed":
-            return self.say("Failed · “{title}”", title=task["title"]), said, "retry"
+            return self.say("Failed"), self.gist(task.get("progress") or ""), "retry"
         if self.store.get(f"stopped:{task['id']}"):
             # Stopped mid-work: it asks nothing, it waits for Go on or Cancel.
-            return self.say("Stopped · “{title}”", title=task["title"]), said, "go on · cancel"
-        return self.say("“{about}” asks", about=task["title"]), said, "<your answer>"
+            return self.say("Stopped"), self.gist(task.get("progress") or ""), "go on · cancel"
+        said = self.gist(task.get("progress") or "", ask=True)
+        return self.say("Needs your input"), said, "<your answer>"
 
-    def gist(self, text: str) -> str:
+    def subject(self, item: dict) -> tuple[str, str]:
+        """Which task an item is (“Task: …”), or, when it is no task's, what it is about
+        (“About: …”); and where it waits in Chief of Staff, to open there."""
+        if item.get("test"):
+            return "", ""
+        title = self.task_title(item)
+        name, about, place = title, "", "Needs you → {name}"
+        if ask := item.get("ask"):
+            if ask.get("kind") == "update":
+                # A note of the Router's waits under Needs you, on its card ("The Router").
+                about, name = self.say("a note from the Router"), "The Router"
+            else:
+                about, place = self.say("a question from the Router"), "the chat with the Router"
+        elif draft := item.get("draft"):
+            target = draft["target"]
+            pr = f"{str(target.get('repo', '')).split('/')[-1]}#{target.get('number', '')}"
+            to = target.get("to") or target.get("where") or ""
+            if draft["kind"] in {"slack", "reply"}:
+                about = self.say("your reply to {to}", to=to) if to else self.say("your reply")
+            elif draft["kind"] == "github":
+                review = not (
+                    target.get("in_reply_to") or target.get("reply_to_comment") or target.get("own")
+                )
+                about = self.say("your review of {pr}" if review else "your reply on {pr}", pr=pr)
+            elif draft["kind"] == "merge":
+                pr_title = target.get("title") or ""
+                about = target.get("label", "") + (f" \u201c{pr_title}\u201d" if pr_title else "")
+            else:
+                who = self.asker(draft.get("session_id") or "")
+                about = self.say("a question from {who}", who=who)
+        elif question := item.get("question"):
+            about = self.say("a question from {who}", who=question["worker"])
+        if title:
+            line = self.say("Task: {title}", title=title)
+        else:
+            line = self.say("About: {about}", about=about) if about else ""
+        return line, self.say(place, name=name or about)
+
+    def task_title(self, item: dict) -> str:
+        """The title of the task an item is (or the tasks, of a decision several wait on); ""
+        when it is none's."""
+        if task := item.get("task"):
+            return task["title"]
+        if question := item.get("question"):
+            return question.get("task_title") or ""
+        tasks = self.runtime.tasks
+        if ask := item.get("ask"):
+            found = tasks.find(str((ask.get("meta") or {}).get("task_id") or ""))
+            return found["title"] if found else ""
+        draft = item.get("draft") or {}
+        target = draft.get("target") or {}
+        if draft.get("kind") == "decision":
+            titles = [asker.get("title") or "" for asker in target.get("askers") or []]
+            return ", ".join(dict.fromkeys(title for title in titles if title))
+        if draft.get("kind") == "workspace":
+            return target.get("title") or ""
+        found = tasks.find(str(target.get("task_id") or ""))
+        if not found and draft.get("kind") == "question":
+            found = tasks.current(draft.get("session_id") or "")
+        return found["title"] if found else ""
+
+    def asker(self, session_id: str) -> str:
+        """Who asks, by its session: a worker by its name, else Chief of Staff."""
+        row = self.store.find_session(session_id)
+        if row and row["role"] == WORKER:
+            return self.runtime.display_title(row)
+        return "Chief of Staff"
+
+    def gist(self, text: str, ask: bool = False) -> str:
         """gist, of a text sessions wrote: without draft ids or Slack timestamps."""
-        return gist(self.runtime.drafts.owner_text(text))
+        return gist(self.runtime.drafts.owner_text(text), ask=ask)
 
     def chinese(self) -> bool:
         return self.store.get("owner_language") == "Chinese"
@@ -1385,14 +1754,22 @@ class Connector:
                 end = "\u3002" if self.chinese() else "."
                 what = f"{self.say(again)} \u00b7 {what}"
                 said = "\n".join(part for part in (reason + end if reason else "", said) if part)
-            code = item["code"]
+            code = item.get("code", "")
             head = f"*[{code}]* {mrkdwn(what)}" if codes else f"*{mrkdwn(what)}*"
-            lines = [head]
-            if said:
-                lines.append(said)
+            # Which task it is, what it says, and where to answer it: in a notification that
+            # reads no replies, there only (Chief of Staff, on the owner's computer).
+            about, place = self.subject(item)
+            action = ""
+            if place:
+                action = (
+                    self.say("Action: Open {place}", place=place)
+                    if codes
+                    else self.say("Action: Open Chief of Staff → {place}", place=place)
+                )
+            lines = [head, mrkdwn(about), said, mrkdwn(action)]
             if codes:
                 lines.append(self.reply_line(code, hint))
-            sections.append("\n".join(lines))
+            sections.append("\n".join(line for line in lines if line))
         # Lines for the owner that are no items to answer (a reply answered already, say).
         sections = [mrkdwn(note) for note in notes] + sections
         title = (
@@ -1422,11 +1799,23 @@ class Connector:
         """The notification the messenger is sending now (until it reports how it went)."""
         pending = json.loads(self.store.get("away_pending") or "null")
         if pending and time.time() - pending["at"] > PENDING_SECONDS:
-            # Its run ended without a word: as good as failed; tried again later.
+            # Its run ended without a word: as good as failed; tried again later. Its codes stay
+            # (it may have gone out with them: the owner's answers by them still count), and
+            # the next try gives the same ones.
             self.store.delete("away_pending")
             self.store.set("away_retry_at", str(time.time() + RETRY_SECONDS))
             return None
         return pending
+
+    def drop_issued(self, pending: dict):
+        """The answer codes made for a notification that did not go out with them (it failed,
+        or went as the version without codes, where replies are not read): none of them can
+        come back, so none is kept. Codes the owner got before stay."""
+        for code in pending.get("issued") or []:
+            item_id = self.code_item(code)
+            self.store.delete(f"awaycode:{code}")
+            if item_id and self.store.get(f"awayitem:{item_id}") == code:
+                self.store.delete(f"awayitem:{item_id}")
 
     async def notify_away(self, test: bool = False):
         """Tell the owner, where they are, what needs them that they have not been told of.
@@ -1449,12 +1838,17 @@ class Connector:
         if not fresh and not notes:
             return
         shown, more = fresh[:MAX_AWAY_ITEMS], max(0, len(fresh) - MAX_AWAY_ITEMS)
-        for item in shown:
+        # Replies where it goes could not be read when last tried (Send only, or Read replies
+        # no): it asks for none and points back to Chief of Staff, and no answer code is made
+        # for it (none could ever come back). A test tries reading them again.
+        plain = not test and self.capabilities()["replies"]["state"] == "no"
+        issued = []  # Codes made for this one: dropped if it goes out without them.
+        for item in [] if plain else shown:
+            known = self.store.get(f"awayitem:{item['id']}")
             item["code"] = self.code_for(item["id"])
-        files = await asyncio.to_thread(self.write_notification, shown, more, notes)
-        # Replies where it goes could not be read when last tried (Send only): it asks for none
-        # and points back to Chief of Staff. A test tries reading them again.
-        plain = not test and self.capabilities()["send_only"]
+            if item["code"] != known:
+                issued.append(item["code"])
+        files = await asyncio.to_thread(self.write_notification, shown, more, notes, not plain)
         self.store.set(
             "away_pending",
             json.dumps(
@@ -1465,6 +1859,7 @@ class Connector:
                     "files": files,
                     "notes": notes,
                     "plain": plain,
+                    "issued": issued,
                 }
             ),
         )
@@ -1509,15 +1904,18 @@ class Connector:
         await self.runtime.toolset.start_special(MESSENGER, MESSENGER_TITLE, "\n\n".join(lines))
 
     def write_notification(
-        self, items: list[dict], more: int, notes: list[str] | None = None
+        self, items: list[dict], more: int, notes: list[str] | None = None, codes: bool = True
     ) -> dict[str, str]:
-        """The message in files of its own: with and without answer codes, as Slack text and
-        as Block Kit (the last 20 notifications are kept)."""
+        """The message in files of its own: with answer codes (unless `codes` is false: replies
+        are not read where it goes) and without, as Slack text and as Block Kit (the last 20
+        notifications are kept)."""
         folder = self.runtime.role_dir("away")
         stamp = int(time.time() * 1000)
         files = {}
-        for name, codes in (("codes", True), ("plain", False)):
-            text, blocks = self.render(items, more, codes, notes)
+        for name, coded in (("codes", True), ("plain", False)):
+            if coded and not codes:
+                continue
+            text, blocks = self.render(items, more, coded, notes)
             path = folder / f"notification-{stamp}-{name}"
             path.with_suffix(".txt").write_text(text + "\n", encoding="utf-8")
             path.with_suffix(".json").write_text(json.dumps(blocks, ensure_ascii=False))
@@ -1693,7 +2091,10 @@ class Connector:
         # asks for none (Send only), nor when reading them failed when last tried.
         replies = self.capabilities_of(OWN_SLACK_DM).get("replies") or {}
         codes = (
-            params.version == "A" and not pending.get("plain") and replies.get("ok") is not False
+            params.version == "A"
+            and not pending.get("plain")
+            and "codes.txt" in pending["files"]
+            and replies.get("ok") is not False
         )
         name = "codes.txt" if codes else "plain.txt"
         text = (await asyncio.to_thread(Path(pending["files"][name]).read_text, "utf-8")).strip()
@@ -1743,8 +2144,10 @@ class Connector:
                     self.store.add_trigger("slack-sent", key, note)
             codes = False
         replies = "read_owner_slack_dm" if codes else ""
-        # Where it went, in the owner's words, whatever the messenger reports.
-        self.store.set("away_pending", json.dumps({**pending, "slack_dm": True}))
+        # Where it went, in the owner's words, whatever the messenger reports; and whether the
+        # owner got its codes (kept then, even when their replies cannot be read now).
+        coded = name == "codes.txt"
+        self.store.set("away_pending", json.dumps({**pending, "slack_dm": True, "coded": coded}))
         return (
             "Sent to the owner's own Slack DM. Now call report_notified(ok=true, where=\"your "
             f'own Slack DM", method="send_owner_slack_dm", replies="{replies}").'
@@ -1938,6 +2341,13 @@ class Connector:
         where = yours(params.where.strip())[:300]
         if params.ok and pending and pending.get("slack_dm"):
             where = OWN_SLACK_DM
+        if pending:
+            # Its codes are kept only when the owner got them: it went out as the version with
+            # codes (as send_owner_slack_dm sent it; another way, the messenger sent version A
+            # when it says how it reads the replies).
+            coded = pending.get("coded") if pending.get("slack_dm") else params.replies.strip()
+            if not (params.ok and coded):
+                self.drop_issued(pending)
         if params.ok:
             # A message went out (the send tool said so, for the owner's own Slack DM).
             self.tried("send", True, "", where)
@@ -1956,8 +2366,8 @@ class Connector:
             self.store.delete("away_retry_at")
             if pending and pending.get("test"):
                 [item] = pending["items"]
-                code = self.store.get(f"awayitem:{item}")
-                self.store.set("away_test", json.dumps({"item": item, "code": code}))
+                if code := self.store.get(f"awayitem:{item}"):
+                    self.store.set("away_test", json.dumps({"item": item, "code": code}))
             elif pending:
                 sent = json.loads(self.store.get("away_sent") or "[]")
                 self.store.set("away_sent", json.dumps((sent + pending["items"])[-200:]))

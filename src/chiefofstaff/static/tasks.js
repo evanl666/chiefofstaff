@@ -72,20 +72,29 @@ export function followUpItem(session) {
   const status = `Following up${session.step_since ? ` · ${ago(session.step_since)}` : ""}`;
   return workerRow({ key: `followup:${session.id}`, className: "followup", dot: "working", dotTip: "Working", name: session.display_title || session.task?.title || session.title, status, statusTip: "Its task is finished; it works on what came up about it (news on its PR, a question)", line: stepText(session.step || session.activity || "Working…", session.cwd), session, taskId: session.task?.task_id || "" });
 }
+// What a row calls its worker: what the worker is on now (the server's `display_title`) when
+// that is another task, else nothing (its "worker chat"). Never the task again, and never the
+// first thing it was asked (its `title`): a worker given new work keeps that, and it may be
+// about something long done.
+export function workerName(session, title) {
+  const named = session?.display_title || "";
+  return named !== title ? named : "";
+}
 // The worker a row's task is with, as a small reference at its foot: it opens that worker's
-// chat at the task. Named as the worker is, never as the task again: a worker named for this
-// very task is its "worker chat".
+// chat at the task.
 export function workerRef(session, title, taskId = "") {
   if (!session) return "";
-  const name = [session.display_title, session.title].find((words) => words && words !== title) || "";
+  const name = workerName(session, title);
+  const tip = [`Open its worker's chat${taskId ? " at this task" : ""}`, name ? `Worker: “${name}”` : ""].filter(Boolean).join("\n");
   return el(
     "button",
-    { type: "button", class: "worker-ref link", "data-tip": `Open its worker's chat${taskId ? " at this task" : ""}${session.title && session.title !== name ? `\nStarted as “${session.title}”` : ""}`, "aria-label": `Open the worker of “${title}”`, onclick: (event) => {
+    { type: "button", class: "worker-ref link", "data-tip": tip, "aria-label": `Open the worker of “${title}”`, onclick: (event) => {
       event.stopPropagation();
       select(session.id, taskId ? { task: taskId } : {});
     } },
+    el("span", { class: "icon", "aria-hidden": "true" }),
     el("span", { class: "who", text: "Worker" }),
-    name ? el("span", { class: "name", text: name }) : el("span", { class: "name", text: "chat" }),
+    el("span", { class: "name", text: name || "chat" }),
   );
 }
 // Where a task is when no board placed it (a card elsewhere): as the board would place it.
@@ -120,7 +129,7 @@ export function taskItem(task, phase = phaseOf(task)) {
     key: `task:${task.id}:${task.status}:${phase.section}:${phase.marker}:${task.stopped ? 1 : 0}:${task.blocked ? 1 : 0}:${createsPr(task) ? 1 : 0}:${task.news?.at || ""}:${task.splittable ? 1 : 0}:${undoUntil(task) ? 1 : 0}`,
     id: task.id,
     // For live rows the minute too: "6m" and "3m ago" move on by themselves.
-    version: `${task.updated_at}:${task.title}:${phase.why}:${meta.join("|")}:${help}:${task.read ? 1 : 0}:${worker?.status || ""}:${worker?.activity || ""}:${worker?.step || ""}:${worker?.step_since || ""}:${worker?.turn_task || ""}:${worker?.background ? 1 : 0}:${worker?.display_title || ""}:${task.credits}:${task.runs}:${JSON.stringify(task.receipts?.prs || null)}:${task.status === "review" ? JSON.stringify(task.receipts || null) : ""}:${live ? `${Math.floor(Date.now() / 60000)}:${queuedKey()}` : ""}:${waitsOnOwner(task, worker)}:${(task.watching || []).join(",")}:${(task.watch_failing || []).join(",")}:${(task.watch_unreadable || []).join(",")}:${JSON.stringify(task.watch_failing_why || null)}:${JSON.stringify(task.check_back || null)}:${task.nudged_at || ""}:${JSON.stringify(task.receipts?.changed || null)}:${JSON.stringify(made)}:${JSON.stringify(asked)}:${deliveryKey(task)}`,
+    version: `${task.updated_at}:${task.title}:${phase.why}:${meta.join("|")}:${help}:${task.read ? 1 : 0}:${worker?.status || ""}:${worker?.activity || ""}:${worker?.step || ""}:${worker?.step_since || ""}:${worker?.turn_task || ""}:${worker?.background ? 1 : 0}:${worker?.display_title || ""}:${task.credits}:${task.runs}:${JSON.stringify(task.receipts?.prs || null)}:${task.status === "review" ? JSON.stringify(task.receipts || null) : ""}:${live ? `${Math.floor(Date.now() / 60000)}:${queuedKey()}` : ""}:${waitsOnOwner(task, worker)}:${(task.watching || []).join(",")}:${(task.watch_failing || []).join(",")}:${(task.watch_unreadable || []).join(",")}:${JSON.stringify(task.watch_failing_why || null)}:${JSON.stringify(task.check_back || null)}:${task.nudged_at || ""}:${JSON.stringify(task.receipts?.changed || null)}:${JSON.stringify(made)}:${JSON.stringify(asked)}:${deliveryKey(task)}:${earlierResults(task).length}`,
     build: () => taskCard(task, phase),
     refresh: (node) => refreshTaskCard(node, task, phase),
   };
@@ -603,12 +612,12 @@ function taskBody(task, phase = {}) {
   }
   if (task.status === "done" || task.status === "cancelled") {
     // Over: what it came to, and what it delivered in reach (its PRs, its documents, the run
-    // it made, the threads it still follows).
+    // it made, the threads it still follows); on a row, what it reported before, folded.
     const first = isRow(phase) ? gist(task.result || "") : "";
     // Monitoring: what it waits on; under Needs you for its PR: what is wrong there.
     const waits = phase.section === "monitoring" || PR_TO_FIX.includes(phase.marker) ? waitLine(task, worker, phase) : null;
     const found = artifacts(task, worker, { active: phase.section === "monitoring" || phase.marker === "still-following" });
-    const nodes = [first ? el("div", { class: "outcome", text: first }) : null, waits, found].filter(Boolean);
+    const nodes = [first ? el("div", { class: "outcome", text: first }) : null, waits, found, isRow(phase) ? earlierBlock(task) : null].filter(Boolean);
     return nodes.length ? el("div", { class: "task-body" }, ...nodes) : null;
   }
   if (task.status === "review") {
@@ -955,7 +964,7 @@ function rowLine(task, worker, phase) {
         el("span", { class: "why", text: watched.what, "data-tip": why.help || watched.what }),
         watched.href ? el("a", { class: "object", href: watched.href, target: "_blank", rel: "noreferrer", text: watched.label, "data-tip": `${watched.first.label || watched.first.key}${watched.first.trigger ? `\n${watched.first.trigger}` : ""}` }) : el("span", { class: "object", text: watched.label }),
         watched.more ? el("span", { class: "also", text: `+${watched.more}`, "data-tip": why.help }) : "",
-        watched.quiet ? el("span", { class: "quiet", text: watched.quiet }) : "",
+        watched.quiet ? el("span", { class: "quiet", text: watched.quiet, "data-tip": why.help || watched.quiet }) : "",
       ]
     : [why.text ? el("span", { class: `why${why.warn ? " warn" : ""}`, text: why.text, "data-tip": tip(why.text, why.help) }) : ""];
   const session = worker || closedWorkers().find((item) => item.id === task.session_id);
@@ -1001,8 +1010,9 @@ function rowWhy(task, worker, phase) {
   return { text: phase.marker === "background" ? "" : phase.why, help: "" };
 }
 // A row's latest progress: what its worker does now (Running), else the latest it said of this
-// task: its result, its question, what came of it.
-function rowLatest(task, worker, phase) {
+// task: its question or why it failed, its result (the newest: a newer report on it took the
+// place of the one before, which its card keeps folded), what came of it.
+export function rowLatest(task, worker, phase) {
   if (phase.section === "running") {
     if (phase.marker === "terminal") return { text: compactPaths(worker?.terminal?.activity || "Working in a terminal", worker?.cwd) };
     const line = activityLine(worker);
@@ -1012,7 +1022,8 @@ function rowLatest(task, worker, phase) {
   if (phase.marker === "update") return { text: gist(task.news?.text || ""), help: task.news?.text };
   // Its question is said in full on the row.
   if (phase.section === "needs" && questionOf(task)) return { text: "" };
-  const said = task.status === "waiting" ? task.progress || task.result : ["review", "done", "failed"].includes(task.status) ? task.result || task.progress : task.progress;
+  // Failed after a retry, a result from before it is older than why it failed.
+  const said = ["waiting", "failed"].includes(task.status) ? task.progress || task.result : ["review", "done"].includes(task.status) ? task.result || task.progress : task.progress;
   return { text: gist(said || ""), help: "" };
 }
 // What a finished task came to, in its first words ("Cancelled by you." is not said twice);
@@ -1169,7 +1180,32 @@ function report(task) {
         }),
       )
     : null;
-  return el("div", { class: "report" }, text ? el("div", { class: "body markdown", html: markdown(text) }) : null, criteria, more.length ? el("div", { class: "receipts" }, ...more) : null);
+  return el("div", { class: "report" }, text ? el("div", { class: "body markdown", html: markdown(text) }) : null, criteria, more.length ? el("div", { class: "receipts" }, ...more) : null, earlierBlock(task));
+}
+// What it reported before its result (a newer report on the same task took their place), as
+// the server keeps them (`earlier_results`): newest first, each when it was said and what.
+export function earlierResults(task) {
+  const list = Array.isArray(task?.earlier_results) ? task.earlier_results : [];
+  return list.filter((item) => typeof item?.text === "string" && item.text.trim()).map((item) => ({ at: typeof item.at === "string" && !Number.isNaN(Date.parse(item.at)) ? item.at : "", text: item.text }));
+}
+// Its earlier reports, folded under its result and read as it is; open, they stay open while
+// the card is redrawn.
+const openEarlier = new Set();
+function earlierBlock(task) {
+  const list = earlierResults(task);
+  if (!list.length) return null;
+  const fold = el(
+    "details",
+    { class: "earlier-reports", open: openEarlier.has(task.id) },
+    el("summary", { text: `Earlier reports (${list.length})`, "data-tip": "What it reported on this task before its latest result, newest first" }),
+    ...list.map((item) => {
+      const entry = el("div", { class: "earlier-report" }, item.at ? el("div", { class: "when", text: `Reported ${since(item.at)}`, "data-tip": new Date(item.at).toLocaleString() }) : "");
+      foldable(entry, el("div", { class: "body markdown", html: markdown(item.text) }), item.text, { chars: 360, lines: 5 });
+      return entry;
+    }),
+  );
+  fold.addEventListener("toggle", () => openEarlier[fold.open ? "add" : "delete"](task.id));
+  return fold;
 }
 // Tests it ran outside its own checkout (someone's source, to check what it reports): what they
 // found, as evidence; where, and how they ended, on hover.

@@ -1195,8 +1195,8 @@ class Drafts:
         if task["status"] != "review":
             return
         receipts = self.runtime.task_actions.receipts(task) or {}
-        # Its own work, not the PR it reviewed (its report links to that one too).
-        reviewed = self.runtime.task_actions.reviewed_prs(task["session_id"])
+        # Its own work, not the PR it reviewed for it (its report links to that one too).
+        reviewed = self.runtime.task_actions.reviewed_prs(task["session_id"], task["id"])
         changed = any(
             pr.get("label", "").lower() not in reviewed for pr in receipts.get("prs") or []
         ) or any(

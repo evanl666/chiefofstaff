@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.1.36 (2026-11-10)
+
+An eleventh round from the owner's QA, and a report of a disk filled by workers' folders.
+
+- **PRs belong to the task that did the work** (E29, E30, E17, E18, E25):
+  - A PR's *Merge* card no longer vanishes and comes back every few minutes: only the task that
+    made the PR, from what it read itself, can keep or take away its card; another task's old
+    copy of the PR (one that only mentions it) never does.
+  - *Reviewed* is the task that reviewed the PR, not every task of the same worker; a PR a task
+    pushed to is *Modified* even when its branch was never in the worker's own folder.
+  - A PR followed from before follows were tied to tasks belongs to one task (the one that made,
+    changed or reviewed it), not to every task that names it; the most recent no longer wins.
+  - A PR GitHub cannot read for a while keeps what it is to its task.
+- **A task's result is its latest**: a worker that redid or corrected finished work after you
+  wrote to it gives its whole result again, which replaces the one shown (*Earlier reports*
+  keeps the ones before); an answer to a question about it stays an *Update*.
+- **Task titles say what they deliver**: a new task is checked as a rename is, so "Fix issue",
+  "Check PR" or "111" are refused before the task is made (the Router names it again).
+- **Away**: each notified item says what it is (*Needs your input*, *Failed*…), its task, a
+  whole sentence or two of what it needs (not "Issue:" or "There are two reasons:") and where
+  to answer; a way that cannot read replies gets no codes at all, only where to go.
+- **Watches**: a watch is searched from where its last complete search ended, not only the last
+  day; what could not be searched is kept as a gap, searched again, and named to you when it
+  cannot be ("Could not check #deploys between 3:00 PM and 9:00 PM").
+- **Home**: a worker's link is its current name or *Worker chat*, never the first thing it was
+  asked; on a narrow panel what a task waits for stays readable and the link shrinks to an icon.
+- **Away and watches, more**: a watch reported over several calls still counts its partial
+  scans; a new or reworded watch looks back at most a day; gaps stay listed in Settings for a
+  week; codes you already got keep working when a send times out; a gist no longer stops at a
+  line wrap.
+- **Disk space** (a disk filled by closed workers' folders):
+  - Closing a worker deletes what a build makes again (`build/`, `node_modules/`, `.venv/`,
+    `.gradle/`, `.next/`, `*.egg-info`, caches…), only what git ignores, and keeps the worktree
+    only for your other files or uncommitted changes; why it stays is recorded. Worktrees an
+    earlier version kept whole are cleaned once.
+  - A worker idle 3 days (Settings) with nothing queued, running or waiting gets the same
+    cleanup, never while a program runs in its folder, another worker uses it, it is open in a
+    terminal, or it is marked *Keep its files*.
+  - Free space is watched: below 30 GB or 5% of the disk you get one alert naming the biggest
+    folders and what can be cleaned; below 10 GB or 2% new worker turns wait for space (running
+    ones go on). Both clear once there is room again.
+  - *Storage* (the disk icon at the bottom of the sidebar) shows free space, each worker's
+    folder the largest first, why a worktree stays, and lets you review its files, clean it,
+    delete a closed worker's worktree (typing "delete"; its branch stays) or keep a worker's
+    files. uv's cache is shown with how to prune it safely; it is never deleted.
+- **Meet the captain**: Chief of Staff's duck, in a captain's cap, sits beside the name and
+  shows how Home stands: it salutes when something needs you, takes the wheel while work runs,
+  keeps watch through a spyglass while tasks wait, and cheers when a task is done. It is on the
+  *Thinking…* line, in the empty states and the tab's icon too. It moves a while after a change,
+  then rests (costing nothing), and stays still with reduced motion.
+
 ## 0.1.35 (2026-11-09)
 
 A tenth round from the owner's own QA: no message is lost, everything that needs you is under

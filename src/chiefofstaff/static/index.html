@@ -5,6 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Chief of Staff</title>
     <link rel="stylesheet" href="/static/style.css" />
+    <link rel="stylesheet" href="/static/storage.css" />
+    <link rel="stylesheet" href="/static/mascot.css" />
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
     <script type="module" src="/static/app.js"></script>
   </head>
   <body>
@@ -34,6 +37,10 @@
             <button id="usage-button" class="icon usage" type="button" title="Usage" aria-label="Usage">
               <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 16V10M8.7 16V5M13.3 16v-8M18 16H2" /></svg>
               <span id="usage-today"></span>
+            </button>
+            <button id="storage-button" class="icon storage" type="button" title="Storage" aria-label="Storage">
+              <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 12.5h14M3 12.5 5 5h10l2 7.5v3a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1Z" /><path d="M13.5 14.5h.01" /></svg>
+              <span id="storage-free"></span>
             </button>
           </div>
         </footer>
@@ -349,6 +356,56 @@
         <div id="usage-tables" class="usage-tables"></div>
         <footer><button type="submit" class="secondary">Close</button></footer>
       </form>
+    </dialog>
+
+    <dialog id="storage-dialog" aria-labelledby="storage-heading">
+      <div class="storage">
+        <h2 id="storage-heading">Storage</h2>
+        <div id="storage-summary" class="storage-summary"></div>
+        <div class="storage-toolbar">
+          <h3>Workers' folders, the largest first</h3>
+          <button type="button" class="secondary" id="storage-measure">Measure now</button>
+        </div>
+        <div id="storage-workers" class="storage-workers"></div>
+        <section id="storage-others" hidden>
+          <h3>Other folders (no worker's)</h3>
+          <p class="hint">Left from earlier in the workspaces folder: Chief of Staff does not delete them. Delete one yourself if you no longer need it.</p>
+          <ul id="storage-others-list" class="storage-list"></ul>
+        </section>
+        <section id="storage-stuck" hidden>
+          <h3>Could not delete</h3>
+          <p class="hint">Cleaned up, but some files in them are not Chief of Staff's to delete (owned by another user, like a container's build). Delete them yourself (with sudo, say); Chief of Staff tries again once a day.</p>
+          <ul id="storage-stuck-list" class="storage-list"></ul>
+        </section>
+        <details class="storage-settings-box">
+          <summary>Cleanup settings</summary>
+          <form id="storage-settings" class="storage-settings">
+            <label class="check"><input type="checkbox" name="auto_cleanup" /><span>Clean build output automatically</span></label>
+            <small>Deletes only what git ignores and a build or an install makes again (build/, node_modules/, .gradle/, caches…), never logs, your files or uncommitted changes: from idle workers' worktrees, and from a closed worker's worktree that stays.</small>
+            <div class="row">
+              <label><span>After idle (days)</span><input type="number" name="cleanup_idle_days" min="0" max="30" /></label>
+              <label><span>Warn below (GB)</span><input type="number" name="disk_warning_gb" min="1" step="any" /></label>
+              <label><span>or (% of disk)</span><input type="number" name="disk_warning_percent" min="0" max="50" step="any" /></label>
+              <label><span>Hold work below (GB)</span><input type="number" name="disk_critical_gb" min="0.5" step="any" /></label>
+              <label><span>or (% of disk)</span><input type="number" name="disk_critical_percent" min="0" max="50" step="any" /></label>
+            </div>
+            <small>0 days: never automatically. Below the second level, new worker turns wait until there is room.</small>
+            <label><span>Also build output (one name or pattern per line)</span><textarea name="regenerable_patterns" rows="2" placeholder="generated&#10;*.o"></textarea></label>
+            <label><span>Never clean (one name or pattern per line)</span><textarea name="never_clean_patterns" rows="2" placeholder="models&#10;data/*"></textarea></label>
+            <div class="storage-save"><button type="submit">Save</button></div>
+          </form>
+        </details>
+        <section class="storage-uv">
+          <h3>Package cache (uv)</h3>
+          <p><code id="storage-uv-path"></code> · <span id="storage-uv-size"></span> <button type="button" class="link" id="storage-uv-measure">Measure</button></p>
+          <p class="hint">Shared by everything uv installs; Chief of Staff never deletes it. To free space, run <code>uv cache prune</code> (removes only unused entries). Never run <code>uv cache clean</code> while Chief of Staff runs: it can delete the environment it runs from. Install it once with <code>uv tool install chiefofstaff</code> and update with <code>uv tool upgrade chiefofstaff</code>, instead of launching <code>uvx chiefofstaff@latest</code> again and again (each new version adds an environment to the cache).</p>
+        </section>
+        <section>
+          <h3>Cleanup history</h3>
+          <ul id="storage-history" class="storage-list storage-history"></ul>
+        </section>
+        <footer><button type="button" class="secondary" id="storage-close">Close</button></footer>
+      </div>
     </dialog>
 
     <div id="toasts" aria-live="polite"></div>

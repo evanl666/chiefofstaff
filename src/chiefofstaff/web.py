@@ -35,6 +35,7 @@ from .models import (
     Unfollow,
 )
 from .runtime import Runtime
+from .storage import StorageDelete, StorageKeep, StorageSession
 from .store import Store
 
 logger = logging.getLogger(__name__)
@@ -319,6 +320,37 @@ def create_app(
     @app.get("/api/usage")
     async def usage(since: float, until: float | None = None):
         return runtime.usage(since, time.time() + 1 if until is None else until)
+
+    # Disk space (see storage.py): its own report, from what was measured; never in /api/state.
+    @app.get("/api/storage")
+    async def storage():
+        return await runtime.storage.view()
+
+    @app.post("/api/storage/measure")
+    async def storage_measure():
+        return runtime.storage.measure_now()
+
+    @app.post("/api/storage/clean")
+    async def storage_clean(payload: StorageSession):
+        return await runtime.storage.clean_now(payload.session_id)
+
+    @app.get("/api/storage/files")
+    async def storage_files(session_id: Annotated[str, Query(min_length=1, max_length=64)]):
+        return await runtime.storage.files(session_id)
+
+    @app.post("/api/storage/delete-worktree")
+    async def storage_delete(payload: StorageDelete):
+        return await runtime.storage.delete_worktree(
+            payload.session_id, payload.path, payload.confirm, payload.seen
+        )
+
+    @app.post("/api/storage/keep")
+    async def storage_keep(payload: StorageKeep):
+        return runtime.storage.keep(payload.session_id, payload.keep)
+
+    @app.post("/api/storage/uv-measure")
+    async def storage_uv():
+        return await runtime.storage.uv_measure()
 
     @app.post("/api/profile")
     async def save_profile(payload: ProfileText):

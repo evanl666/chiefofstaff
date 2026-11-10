@@ -105,6 +105,17 @@ function ownPrStanding(task) {
 const followedKeys = (task) => [...(task.watching || []), ...(task.watch_unreadable || [])];
 // The most pressing first when one PR's row stands for several tasks (see boardOf).
 const URGENCY = { "pr-changes": 0, "pr-conflicts": 0, "pr-failing": 0, mergeable: 1 };
+// Then the task the PR is: 0 it made or changed one it follows, 1 it reviewed one, 2 it only
+// names them (receipts from before roles were kept: by their flags).
+const PR_OWNERSHIP = { created: 0, modified: 0, reviewed: 1 };
+function ownership(task) {
+  const keys = [...followedKeys(task), ...(Array.isArray(task.monitoring) ? task.monitoring.map((item) => item.key) : [])];
+  const followedPrs = new Set(keys.map(prKey).filter(Boolean));
+  const ranks = (task.receipts?.prs || [])
+    .filter((pr) => followedPrs.has(String(pr.label).toLowerCase()))
+    .map((pr) => PR_OWNERSHIP[pr.role || (pr.own ? "created" : pr.reviewed ? "reviewed" : "")] ?? 2);
+  return Math.min(2, ...ranks);
+}
 
 const hours = (from, now) => (from ? (now - Date.parse(from)) / 3600000 : 0);
 export const howLong = (hours) => (hours >= 48 ? `${Math.floor(hours / 24)}d` : `${Math.floor(hours)}h`);
@@ -286,11 +297,13 @@ export function boardOf(tasks, workers, { now = Date.now(), stallHours = 4, onCa
     for (const task of list) phases.set(task.id, taskPhase(task, worker, { ...context, now, stallHours, onCard: onCards.has(task.id) }));
   }
   // A PR a worker follows for two of its accepted tasks (one split off the other, say) is one
-  // row, on the newest (or the one it needs the owner for): the other is with the finished
+  // row, on the one it needs the owner for, else the one the PR is (it made or changed it, else
+  // reviewed it: not one that only names it), else the newest: the other is with the finished
   // ones, still followed.
   const followed = new Map();
   const urgency = (task) => URGENCY[phases.get(task.id).marker] ?? 2;
-  for (const task of [...tasks].sort((a, b) => urgency(a) - urgency(b) || b.updated_at.localeCompare(a.updated_at))) {
+  const owning = new Map(tasks.map((task) => [task.id, ownership(task)]));
+  for (const task of [...tasks].sort((a, b) => urgency(a) - urgency(b) || owning.get(a.id) - owning.get(b.id) || b.updated_at.localeCompare(a.updated_at))) {
     if (task.status !== "done" || !DELIVERED.includes(phases.get(task.id).marker)) continue;
     const keys = obligationsOf(task).filter((item) => item.kind !== "check_back").map((item) => String(item.key).toLowerCase());
     const key = `${task.session_id}|${(keys.length ? keys : followedKeys(task)).sort().join(",")}`;

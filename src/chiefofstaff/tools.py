@@ -40,6 +40,7 @@ from .policy import within
 from .roles import ROUTER, SLACK, WATCHDOG, WORKER
 from .sources.github import NO_ACCESS, diff_lines, snippet
 from .store import ago_minutes, now
+from .task_actions import deliverable_title
 from .tasks import ADOPTED, OPEN
 from .workspaces import resolve_project
 
@@ -412,6 +413,14 @@ class Report(NestedArguments):
         "It becomes a task of its own with this result; the task keeps its result and PR (one "
         "still at work goes on, reported by itself). Never for the task's own result, nor for "
         "an answer to a question (answer that in your reply)",
+    )
+    replaces_result: bool = Field(
+        default=False,
+        description="With status done on a task already finished, after the owner wrote to you "
+        "about it: true when this report is the task's whole result again, redone or "
+        "corrected (it replaces the one they have; the earlier one is kept); false when it "
+        "only answers a question about the finished work (that is news on it, and its result "
+        "stays)",
     )
     changed_code: bool | None = Field(
         default=None,
@@ -1486,7 +1495,8 @@ class Tools:
                 "is the owner's click on the PR's Merge card on Home: tell them where it is. For "
                 "something destructive, give the owner the exact command to run themselves."
             )
-        title = clean_title(params.title)
+        # Checked as a rename or split is: it says what the task delivers.
+        title = deliverable_title(params.title)
         follow = [threads.normalize(key) for key in params.follow]
         after = [self.runtime.task_actions.task_for(reference) for reference in params.after]
         replaced = self.replaced_tasks(params.replaces)
@@ -1938,6 +1948,8 @@ class Tools:
                 "on after the new one, 'superseded' when the new task replaces it (it is "
                 "cancelled)."
             )
+        # Checked before anything changes: a closed worker is not reopened for a refused title.
+        title = deliverable_title(params.title) if params.task == "new" else ""
         if target["closed_at"]:
             await self.runtime.workers.reopen(
                 target["id"]
@@ -1972,7 +1984,6 @@ class Tools:
         # The worker as the owner knows it now, before a new task renames it.
         worker_name = self.runtime.display_title(target)
         if params.task == "new":
-            title = clean_title(params.title)
             criteria = clean_criteria(params.done_when)
             decisions = self.with_turn_decisions(caller, params.decisions)
             task = self.tasks.create(
@@ -3043,12 +3054,21 @@ class Tools:
                 and task["status"] in {"review", "done"}
                 and not changed
             ):
-                # The owner's chat about finished work: what it says is news on that task. The
-                # result the owner reviews (or accepted) stays as it is.
+                # The owner's chat about finished work: an answer is news on that task, and the
+                # result the owner reviews (or accepted) stays. Its work redone or corrected is
+                # its result now (bug E34: that stayed news, the old result in sight), the
+                # earlier one kept with it; accepted, it is news too: the owner sees it came.
                 self.store.delete(f"followup:{task['id']}")
                 self.store.delete(f"morefor:{task['id']}")
                 self.runtime.task_actions.remember_prs(task["id"], params.summary)
-                self.runtime.task_actions.news(task["id"], params.summary)
+                if params.replaces_result:
+                    self.runtime.task_actions.keep_earlier_result(task, clip_report(shown))
+                    if task["status"] != "done":
+                        self.store.delete(f"read:{task['id']}")  # A new result, not read yet.
+                    task = self.tasks.update(task["id"], result=clip_report(shown))
+                if task["status"] == "done" or not params.replaces_result:
+                    self.runtime.task_actions.news(task["id"], params.summary)
+                self.runtime.task_actions.publish(task)
                 others = [
                     other
                     for other in self.tasks.for_session(caller)
@@ -3062,6 +3082,7 @@ class Tools:
                 # Accepted, or its PR merged: news about it does not reopen the review.
                 self.runtime.task_actions.remember_prs(task["id"], params.summary)
                 self.runtime.task_actions.news(task["id"], params.summary)
+                self.runtime.task_actions.keep_earlier_result(task, clip_report(shown))
                 task = self.tasks.update(task["id"], result=clip_report(shown))
             elif params.status == "done":
                 self.store.delete(f"followup:{task['id']}")
@@ -3070,6 +3091,7 @@ class Tools:
                 self.store.delete(f"read:{task['id']}")  # A new result, not read yet.
                 self.states[caller].turn_reported.add(task["id"])
                 self.runtime.task_actions.remember_prs(task["id"], params.summary)
+                self.runtime.task_actions.keep_earlier_result(task, clip_report(shown))
                 task = self.tasks.move(task["id"], "review", result=clip_report(shown))
                 # The workers it works with that are still at it get its result.
                 self.runtime.background(self.runtime.peers.finished(caller, task, params.summary))
@@ -3162,6 +3184,11 @@ class Tools:
             self.runtime.background(
                 self.runtime.task_actions.collect_evidence(task["id"], keep_stale=True)
             )
+            if params.replaces_result:
+                return (
+                    f"Task {task['id']}'s result is this report now (the owner asked in chat); "
+                    "the earlier one is kept with it."
+                )
             return (
                 f"Noted as an update on task {task['id']} (the owner asked in chat; its "
                 "result stays as it is)."

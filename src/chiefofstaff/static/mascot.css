@@ -1,0 +1,119 @@
+/* The captain, Chief of Staff's duck (mascot.js). Each mood shows its own parts and moves a
+   while, then stands still in it (see MOVE_MS); every loop's length divides a minute, so the
+   clock-set --sync keeps its beat when it is drawn again. */
+
+.duck {
+  --d-feather: #ffd84a;
+  --d-wing: #f5c430;
+  --d-beak: #ff9f40;
+  --d-mouth: #c66a1c;
+  --d-ink: #26201c;
+  --d-navy: #1f3a7a;
+  --d-visor: #1b2330;
+  --d-gold: #f5b300;
+  --d-wood: #a8682a;
+  --d-brass: #d9a441;
+  --d-amber: #e08a00;
+  display: inline-block;
+  flex: none;
+  width: 32px;
+  line-height: 0;
+  vertical-align: middle;
+}
+.duck-art { width: 100%; height: auto; overflow: visible; }
+
+.duck .d-shadow { fill: rgb(0 0 0 / 12%); transform-origin: 81px 160px; }
+.duck .d-foot, .duck .d-beak { fill: var(--d-beak); }
+.duck .d-body { fill: var(--d-feather); }
+.duck .d-wing { fill: var(--d-wing); }
+.duck .d-eye { fill: var(--d-ink); }
+.duck .d-glint { fill: #fff; }
+.duck .d-happy { fill: none; stroke: var(--d-ink); stroke-width: 2.8; stroke-linecap: round; }
+.duck .d-cheek { fill: #ff8f9c; opacity: 0.55; }
+.duck .d-open { fill: var(--d-mouth); }
+.duck .d-smile { fill: none; stroke: var(--d-mouth); stroke-width: 1.6; stroke-linecap: round; }
+.duck .d-cap { fill: #fff; stroke: #d7dbe2; stroke-width: 2; }
+.duck .d-band { fill: var(--d-navy); }
+.duck .d-visor { fill: var(--d-visor); }
+.duck .d-badge { fill: var(--d-gold); }
+.duck .d-badge-in { fill: #fff; }
+.duck .d-spoke { fill: none; stroke: var(--d-wood); stroke-width: 3.4; stroke-linecap: round; }
+.duck .d-rim { fill: none; stroke: var(--d-wood); stroke-width: 4.4; }
+.duck .d-hub { fill: var(--d-gold); }
+.duck .d-knob { fill: var(--d-wood); }
+.duck .d-tube { fill: var(--d-brass); }
+.duck .d-tube-band, .duck .d-eyepiece { fill: #8a5f38; }
+.duck .d-lens { fill: #bfe3ff; }
+.duck .d-bubble path { fill: var(--d-amber); }
+.duck .d-bang { fill: #fff; }
+.duck .d-sparks path { fill: var(--d-gold); }
+
+/* What each mood shows. */
+.duck .d-bubble, .duck .d-sparks, .duck .d-helm, .duck .d-scope, .duck .d-salute,
+.duck .d-cheer-l, .duck .d-cheer-r, .duck .d-happy, .duck .d-open { display: none; }
+.duck.is-working .d-helm, .duck.is-watching .d-scope, .duck.is-needs .d-bubble,
+.duck.is-needs .d-salute, .duck.is-done .d-sparks, .duck.is-done .d-cheer-l,
+.duck.is-done .d-cheer-r, .duck.is-done .d-happy, .duck.is-done .d-open { display: inline; }
+.duck.is-working .d-wings, .duck.is-done .d-wings, .duck.is-done .d-eyes,
+.duck.is-done .d-smile, .duck.is-watching .d-right { display: none; }
+.duck.is-needs .d-wings > :last-child { display: none; }
+
+/* Every mood: it blinks, always (between blinks that costs nothing). The rest moves only while
+   it is .moving (a while after its mood changes, see MOVE_MS) or the pointer is on it. */
+.duck .d-eyes { transform-box: fill-box; transform-origin: center; animation: d-blink 5s var(--sync, 0s) infinite; }
+.duck .d-all { transform-origin: 80px 158px; }
+@keyframes d-blink { 0%, 93%, 100% { transform: scaleY(1); } 96% { transform: scaleY(0.1); } }
+
+/* Idle: it sways from foot to foot. */
+.duck:is(.moving, :hover) .d-all { animation: d-sway 4s var(--sync, 0s) ease-in-out infinite; }
+@keyframes d-sway { 0%, 100% { transform: rotate(-3deg); } 50% { transform: rotate(3deg); } }
+
+/* Working: at the helm, eyes on the course, the wheel turning one way and back. */
+.duck.is-working .d-look { transform: translateY(2px); }
+.duck.is-working:is(.moving, :hover) .d-all { animation: d-bob 1.5s var(--sync, 0s) ease-in-out infinite; }
+.duck.is-working:is(.moving, :hover) .d-wheel { transform-origin: 80px 130px; animation: d-steer 3s var(--sync, 0s) ease-in-out infinite; }
+@keyframes d-bob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-2px); } }
+@keyframes d-steer { 0%, 100% { transform: rotate(-45deg); } 50% { transform: rotate(45deg); } }
+
+/* Needs you: a salute, a bounce, and an amber "!" above. */
+.duck.is-needs:is(.moving, :hover) .d-all { animation: d-bounce 1.2s var(--sync, 0s) ease-in-out infinite; }
+.duck.is-needs:is(.moving, :hover) .d-salute { transform-origin: 104px 104px; animation: d-salute 1.2s var(--sync, 0s) ease-in-out infinite; }
+.duck.is-needs:is(.moving, :hover) .d-bubble { transform-origin: 128px 45px; animation: d-pop 1.2s var(--sync, 0s) ease-in-out infinite; }
+@keyframes d-bounce { 0%, 100% { transform: translateY(0); } 40% { transform: translateY(-4px); } }
+@keyframes d-salute { 0%, 100% { transform: rotate(0); } 40% { transform: rotate(-6deg); } }
+@keyframes d-pop { 0%, 100% { transform: translateY(0) scale(1); } 40% { transform: translateY(-3px) scale(1.06); } }
+
+/* Watching: the spyglass up, looking one way, then the other. */
+.duck.is-watching:is(.moving, :hover) .d-all { animation: none; }
+.duck.is-watching:is(.moving, :hover) .d-head { transform-origin: 80px 104px; animation: d-scan 6s var(--sync, 0s) ease-in-out infinite; }
+@keyframes d-scan { 0%, 15%, 100% { transform: rotate(0); } 30%, 45% { transform: rotate(-7deg); } 65%, 80% { transform: rotate(6deg); } }
+
+/* Done: a hop, wings up, sparkles. */
+.duck.is-done:is(.moving, :hover) .d-all { animation: d-hop 2s var(--sync, 0s) cubic-bezier(0.3, 0, 0.3, 1) infinite; }
+.duck.is-done:is(.moving, :hover) .d-shadow { animation: d-shadow 2s var(--sync, 0s) cubic-bezier(0.3, 0, 0.3, 1) infinite; }
+.duck.is-done:is(.moving, :hover) .d-cheer-l { transform-origin: 50px 118px; animation: d-flap-l 0.5s var(--sync, 0s) ease-in-out infinite alternate; }
+.duck.is-done:is(.moving, :hover) .d-cheer-r { transform-origin: 110px 118px; animation: d-flap-r 0.5s var(--sync, 0s) ease-in-out infinite alternate; }
+.duck.is-done:is(.moving, :hover) .d-sparks path { transform-box: fill-box; transform-origin: center; animation: d-spark 2s var(--sync, 0s) ease-in-out infinite; }
+.duck.is-done:is(.moving, :hover) .d-sparks .s2 { animation-delay: calc(var(--sync, 0s) + 0.4s); }
+.duck.is-done:is(.moving, :hover) .d-sparks .s3 { animation-delay: calc(var(--sync, 0s) + 0.8s); }
+@keyframes d-hop {
+  0%, 60%, 100% { transform: translateY(0) scale(1, 1); }
+  10% { transform: translateY(0) scale(1.04, 0.95); }
+  30% { transform: translateY(-14px) scale(0.97, 1.03); }
+  50% { transform: translateY(0) scale(1.03, 0.97); }
+}
+@keyframes d-shadow { 0%, 60%, 100% { transform: scale(1); opacity: 1; } 30% { transform: scale(0.7); opacity: 0.5; } }
+@keyframes d-flap-l { from { transform: rotate(0); } to { transform: rotate(-14deg); } }
+@keyframes d-flap-r { from { transform: rotate(0); } to { transform: rotate(14deg); } }
+@keyframes d-spark { 0%, 100% { transform: scale(0.4); opacity: 0.2; } 50% { transform: scale(1.1); opacity: 1; } }
+
+/* Where it stands. */
+.brand { display: flex; align-items: center; gap: 8px; }
+.brand .duck { width: 36px; margin: -10px 0 -8px -6px; }
+.welcome .duck { display: block; width: 84px; margin: 0 auto 8px; }
+.working-line .duck { width: 22px; margin: -4px 0 -2px; }
+.empty-hint .duck { width: 24px; margin: -4px 6px -2px 0; }
+
+@media (prefers-reduced-motion: reduce) {
+  .duck * { animation: none !important; }
+}

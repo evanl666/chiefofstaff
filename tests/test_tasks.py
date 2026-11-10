@@ -483,7 +483,7 @@ def test_a_short_title_in_chinese_says_what_it_delivers():
     for good in ("修复登录日期", "改日期", "登录页"):
         assert deliverable_title(good) == good
     for bad in ("111", "修", "哈哈", "Fix it"):
-        with pytest.raises(ValueError, match="what it delivers"):
+        with pytest.raises(ValueError, match=r"what it delivers|what it is about"):
             deliverable_title(bad)
 
 

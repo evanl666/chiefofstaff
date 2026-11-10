@@ -8,6 +8,8 @@ One home for all your GitHub Copilot sessions. Say what you need: each task gets
 Copilot session, follow-ups go to the session that already has the context, and you are asked
 only when a decision is yours or something is ready to review.
 
+<p align="center"><img src="docs/images/captain.svg" width="600" alt="The captain, Chief of Staff's duck, in its five moods: idle, working, needs you, watching, done"></p>
+
 ![Home: the chat, what needs you, and every task's live progress](docs/images/home.png)
 
 ```bash
@@ -27,6 +29,9 @@ Staff keeps track of the rest.
 - Splits a request into tasks and runs each in its own Copilot session, in parallel or in order.
 - Sends a follow-up to the session that did the work, with its history and checkout.
 - Shows every task live on one board: what it is doing now, what waits and why, what is done.
+- The captain, the duck beside the name, shows how things stand at a glance: it salutes when
+  something needs you, takes the wheel while work runs, keeps watch while tasks wait, and
+  cheers when a task is done.
 
 **Results you can check**
 - Shows what was observed next to each report (test runs, commits, diff, PR checks), and flags
@@ -64,7 +69,7 @@ You need macOS or Linux, Python 3.11+, [uv](https://docs.astral.sh/uv/getting-st
 ```bash
 npm install -g @github/copilot
 copilot login
-uvx chiefofstaff           # or: pipx install chiefofstaff && chiefofstaff
+uv tool install chiefofstaff && chiefofstaff   # or: pipx install chiefofstaff
 ```
 
 Your browser opens Chief of Staff through a private link printed in the terminal (keep it to
@@ -73,7 +78,11 @@ yourself). Tell it where your code lives, like `~/workspace`, and type what you 
 Everything runs on your machine; data stays in `~/Library/Application Support/chiefofstaff`
 (macOS) or `~/.local/share/chiefofstaff` (Linux). Ctrl+C stops it, and sessions pick up where
 they left off next time. Options: `--port`, `--data-dir`, `--no-browser`, `--demo`. Update with
-`uvx chiefofstaff@latest`.
+`uv tool upgrade chiefofstaff`. Launching `uvx chiefofstaff@latest` again and again works too,
+but each new version leaves a cached environment behind in uv's cache: `uv cache prune` removes
+the ones nothing uses. Never run `uv cache clean` while Chief of Staff is running: it can delete
+the environment it runs from. Workers' folders, and how much disk they take, are under Storage
+(the disk icon at the bottom of the sidebar).
 
 **Optional sign-ins**
 - **GitHub**: `gh auth login` with every account you use, to review PRs and open them.
