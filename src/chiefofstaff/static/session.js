@@ -2,9 +2,9 @@
 
 import { $, api, blobLive, blobUrl, el, foldable, toast, whenNearScreen } from "./dom.js";
 import { clock, compactPaths, firstLine, gist, headOf, markdown, slackText, threadLabel } from "./text.js";
-import { byId, current, DELIVERY_WORDS, HOME, markRead, pendingDrafts, routerId, state, STATUS_TEXT, tasks, upsertSession, viewedId, workerTitle } from "./state.js";
+import { byId, current, DELIVERY_WORDS, HOME, markRead, otherItem, pendingDrafts, routerId, state, STATUS_TEXT, tasks, upsertSession, viewedId, workerTitle } from "./state.js";
 import { MARKERS } from "./board.js";
-import { renderSidebar } from "./sidebar.js";
+import { renderSidebar, showExternal } from "./sidebar.js";
 import { focusDraft, focusTask, renderHome, renderHomeHeader, showHomeTab, welcomeCard, workerStates } from "./inbox.js";
 import { closeMentions, setRecipient } from "./mention.js";
 import { openSettings } from "./settings.js";
@@ -247,6 +247,12 @@ export async function select(sessionId, { task = "" } = {}) {
   // A worker chosen with @ is for messages sent from Home.
   if (sessionId !== HOME) setRecipient(null);
   if (sessionId !== HOME && !byId(sessionId)) {
+    // One of the owner's other Copilot sessions (with the setting on): its view.
+    const other = otherItem(sessionId);
+    if (other) {
+      showExternal(other);
+      return;
+    }
     try {
       state.viewing = await api(`/api/sessions/${sessionId}`);
     } catch {

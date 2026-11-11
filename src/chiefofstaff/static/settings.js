@@ -2,7 +2,7 @@
 
 import { $, api, el, submits, toast } from "./dom.js";
 import { lines, plural, since } from "./text.js";
-import { closedWorkers, HOME, loadState, sessions, state } from "./state.js";
+import { closedWorkers, followOthers, HOME, loadState, sessions, state } from "./state.js";
 import { renderSidebar } from "./sidebar.js";
 import { EFFORTS, renderHeader, select } from "./session.js";
 // Settings opens on the tab last used, or the one asked for ("you" for what was learned).
@@ -303,6 +303,11 @@ export function fillSettings() {
   form.worker_idle_hours.value = settings.worker_idle_hours;
   form.stall_hours.value = settings.stall_hours ?? 4;
   form.mac_notifications.checked = settings.mac_notifications;
+  form.other_sessions.checked = Boolean(settings.other_sessions);
+  // When none of them can say where it stands, its line says why.
+  const why = settings.other_sessions ? state.othersWhy : "";
+  if (why) form.other_sessions.parentElement.title = why;
+  else form.other_sessions.parentElement.removeAttribute("title");
   form.watchdog_enabled.checked = settings.watchdog_enabled;
   form.slack_enabled.checked = settings.slack_enabled;
   form.slack_token.value = "";
@@ -786,6 +791,7 @@ export function settingsBody() {
     worker_idle_hours: number("worker_idle_hours"),
     stall_hours: number("stall_hours", settings.stall_hours ?? 4),
     mac_notifications: form.mac_notifications.checked,
+    other_sessions: form.other_sessions.checked,
     watchdog_enabled: form.watchdog_enabled.checked,
     slack_enabled: form.slack_enabled.checked,
     slack_poll_seconds: number("slack_poll_seconds"),
@@ -844,6 +850,7 @@ async function saveSettings(event) {
     }
     state.snapshot = { ...state.snapshot, ...snapshot };
     $("#settings-dialog").close();
+    followOthers();
     renderSidebar();
     renderHeader();
   } catch (error) {

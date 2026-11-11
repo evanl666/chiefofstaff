@@ -8,6 +8,7 @@ import asyncio
 import base64
 import itertools
 import json
+import os
 import re
 import struct
 import sys
@@ -16,6 +17,7 @@ import time
 import zlib
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 import uvicorn
@@ -23,7 +25,14 @@ from playwright.async_api import async_playwright, expect
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tests"))
-from conftest import FakeClient, FakeSlackMcp, FakeTokens, call_tool, settle  # noqa: E402
+from conftest import (  # noqa: E402
+    FakeClient,
+    FakeSession,
+    FakeSlackMcp,
+    FakeTokens,
+    call_tool,
+    settle,
+)
 
 from chiefofstaff.runtime import Runtime  # noqa: E402
 from chiefofstaff.sources.slack import SlackSource  # noqa: E402
@@ -48,7 +57,7 @@ SETTINGS_FIELDS = {
 }  # fmt: skip
 SETTINGS_FIELDS |= {
     "skill_folders", "plugins", "mcp_servers", "watches", "watch_hours", "watch_minutes",
-    "watch_after_hours_minutes", "away_notify", "away_minutes", "away_how",
+    "watch_after_hours_minutes", "away_notify", "away_minutes", "away_how", "other_sessions",
 }  # fmt: skip
 FORM_NAMES = SETTINGS_FIELDS - {"role_models", "role_efforts", "watches", "watch_hours"} | {
     "slack_token", "profile", "setup_notes", "report_footer",
@@ -4093,7 +4102,7 @@ async def main():
             for check in (home, memory, this_round, round_two, round_three, round_four,
                           round_five, round_six, round_seven, round_eight, round_nine,
                           round_ten, round_scale, round_qa, round_eleven,
-                          round_storage, round_mascot):  # fmt: skip
+                          round_storage, round_mascot, round_others):  # fmt: skip
                 if not only or check.__name__ in only:
                     await check(runtime, browser, failures)
             await browser.close()
@@ -4350,6 +4359,935 @@ async def round_mascot(runtime, browser, failures: list[str]):
     log("captain: still with reduced motion")
     await still.close()
     await runtime.task_actions.cancel(runtime.tasks.current(asker)["id"])
+
+
+def terminal(client, summary: str, events: list, *, is_open: bool = True, made="github/cli",
+             last="", head: bool = True, folder: str = "/work/app") -> str:  # fmt: skip
+    """One of the owner's Copilot sessions run in a terminal: its log (each event `minutes` ago,
+    as the CLI writes it, in the client's Copilot home and for its view) and its listing."""
+    session_id = str(uuid4())
+    now = datetime.now(UTC)
+    start = events[0][1] if events else 0
+    if head:
+        header = {"sessionId": session_id, "version": 1, "producer": "copilot-agent",
+                  "copilotVersion": "1.0.109",
+                  "context": {"cwd": folder, "branch": "main"}}  # fmt: skip
+        events = [("session.start", start, header), *events]
+    log, parent, at = [], None, now
+    for kind, minutes, data in events:
+        at = now - timedelta(minutes=minutes)
+        stamp = at.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        event = {"type": kind, "data": data, "id": str(uuid4()), "timestamp": stamp,
+                 "parentId": parent}  # fmt: skip
+        log.append(event)
+        parent = event["id"]
+    path = client.home / "session-state" / session_id / "events.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(event, separators=(",", ":")) + "\n" for event in log))
+    os.utime(path, (at.timestamp(), at.timestamp()))
+    client.logs[session_id] = log
+    context = SimpleNamespace(working_directory=folder, repository="", branch="main")
+    meta = SimpleNamespace(session_id=session_id, summary=summary, is_remote=False,
+                           modified_time=at, context=context)  # fmt: skip
+    vars(meta).update(client_name=made, last_client_name=last, clients_listed=True)
+    client.metas.append(meta)
+    if is_open:
+        client.in_use[session_id] = 4242
+    client.sessions[session_id] = FakeSession(session_id, {})  # A message can continue it.
+    return session_id
+
+
+def step(call: str, tool: str, minutes: float, **arguments) -> list:
+    """A step the session's model asked for and started, `minutes` ago."""
+    request = {"toolCallId": call, "name": tool, "arguments": arguments, "type": "function"}
+    return [
+        ("assistant.message", minutes, {"content": "", "toolRequests": [request]}),
+        ("tool.execution_start", minutes,
+         {"toolCallId": call, "toolName": tool, "arguments": arguments}),
+    ]  # fmt: skip
+
+
+def turn(text: str, minutes: float) -> list:
+    return [
+        ("user.message", minutes, {"content": text, "interactionId": "i-1", "turnId": "0"}),
+        ("assistant.turn_start", minutes, {"turnId": "0", "interactionId": "i-1"}),
+    ]
+
+
+def answer(text: str, minutes: float) -> list:
+    return [
+        ("assistant.message", minutes, {"content": text, "turnId": "0"}),
+        ("assistant.turn_end", minutes, {"turnId": "0"}),
+    ]
+
+
+QUESTION = "Should the fix go to main or to the release branch?"
+
+
+def asking(client, summary="Fix the login test", minutes=12) -> str:
+    """Open in a terminal, asking the owner (ask_user) for `minutes`."""
+    return terminal(client, summary, [
+        *turn("Make the login test pass", minutes + 3),
+        *step("c-1", "bash", minutes + 2, command="npm test"),
+        ("tool.execution_complete", minutes + 1, {"toolCallId": "c-1", "success": True}),
+        ("assistant.turn_end", minutes + 1, {"turnId": "0"}),
+        ("assistant.turn_start", minutes, {"turnId": "0"}),
+        *step("c-2", "ask_user", minutes, message=QUESTION),
+    ])  # fmt: skip
+
+
+def finished(client, summary="Write the API changelog", minutes=180) -> str:
+    """Closed in its terminal after it answered, `minutes` ago."""
+    return terminal(client, summary, [
+        *turn("Draft a changelog entry for the login API.", minutes + 5),
+        *answer("Drafted it in CHANGELOG.md, not committed yet.", minutes + 1),
+        ("session.shutdown", minutes, {"shutdownType": "routine"}),
+    ], is_open=False)  # fmt: skip
+
+
+async def others_setting(runtime, on: bool):
+    old = runtime.store.settings()
+    new = old.model_copy(update={"other_sessions": on})
+    runtime.store.save_settings(new)
+    await runtime.settings_changed(old, new)
+    runtime.workers.external_cache = (float("-inf"), [])
+
+
+async def others_page(browser, requests: list[str] | None = None, **options):
+    context = await browser.new_context(viewport={"width": 1280, "height": 900}, **options)
+    page = await context.new_page()
+    errors: list[str] = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.on("console", lambda note: errors.append(note.text) if note.type == "error" else None)
+    if requests is not None:
+        page.on("request", lambda r: requests.append(f"{r.method} {r.url.split(str(PORT), 1)[-1]}"))
+    page.errors = errors  # type: ignore[attr-defined]
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    await expect(page.locator("#application")).to_be_visible()
+    return context, page
+
+
+# Each row of the sidebar's Other Copilot sessions, as its DOM has it.
+ROWS = """() => [...document.querySelectorAll('#external-list button.item')].map((row) => ({
+  id: row.dataset.id || '', classes: row.className, title: row.title,
+  name: row.getAttribute('aria-label') || '', dot: row.querySelector('.dot').className,
+  tip: row.querySelector('.dot').title, label: row.querySelector('.label').textContent,
+  sub: row.querySelector('.sub')?.textContent ?? null,
+  folded: Boolean(row.closest('details.idle-workers')) }))"""
+
+
+async def others_pins(runtime, browser, ask: str, done: str):
+    """With the setting off, the sidebar's Other Copilot sessions and their view are today's:
+    pinned before the setting existed, and kept."""
+    requests: list[str] = []
+    context, page = await others_page(browser, requests)
+    group = page.locator("#external")
+    await page.wait_for_timeout(400)
+    assert await group.get_attribute("open") is None, "folded at load"
+    assert not [r for r in requests if "/api/external" in r or "/api/others" in r], requests
+    await expect(page.locator("#external-list .item")).to_have_count(0)
+    await expect(page.locator("#external-count")).to_have_text("")
+    async with page.expect_request("**/api/external?refresh=true"):
+        await page.locator("#external > summary").click()
+    await expect(page.locator("#external-list .item")).to_have_count(2)
+    await expect(page.locator("#external-count")).to_have_text("1 open")
+    await expect(page.locator("#external > summary")).to_have_attribute(
+        "title", "2 sessions, 1 open"
+    )
+    rows = await page.evaluate(ROWS)
+    assert rows == [
+        {"id": "", "classes": "item", "title": "Open in a terminal now · /work/app", "name": "",
+         "dot": "dot open", "tip": "Open in a terminal right now (shown read-only)",
+         "label": "Fix the login test", "sub": "open", "folded": False},
+        {"id": "", "classes": "item", "title": "/work/app", "name": "", "dot": "dot",
+         "tip": "Not open anywhere", "label": "Write the API changelog", "sub": "3h",
+         "folded": False},
+    ], rows  # fmt: skip
+    log("others off: the group folded at load, read only when unfolded; its rows as today")
+
+    meta = page.locator("#session-meta")
+    history = page.locator(".external-history")
+    await page.locator("#external-list .item", has_text="Fix the login test").click()
+    await expect(history.locator(".working-line")).to_have_text("Working in a terminal…")
+    await expect(history.locator(".working-line")).to_be_visible()
+    assert await history.locator(".working-line").get_attribute("hidden") is None
+    await expect(meta).to_have_text(
+        re.compile(r"^Open in a terminal · /work/app · main · updated 1[23]m ago$")
+    )
+    await expect(history).to_contain_text("ask_user")
+    await expect(history).not_to_contain_text(QUESTION)
+    await expect(history.locator(".line.note")).to_have_count(0)
+    await expect(page.locator("#composer-note")).to_contain_text("exit it there (/exit)")
+    await expect(page.locator("#composer-input")).to_be_disabled()
+    await page.locator("#external-list .item", has_text="Write the API changelog").click()
+    await expect(history.locator(".line.notice")).to_have_text(
+        "A message continues it here, still in /work/app"
+    )
+    await expect(meta).to_have_text("Not managed yet · /work/app · main · updated 3h ago")
+    await expect(page.locator("#composer-input")).to_be_enabled()
+    placeholder = await page.locator("#composer-input").get_attribute("placeholder")
+    assert placeholder == "Message to continue this session here…", placeholder
+    assert await page.evaluate("localStorage.getItem('cos.selected')") == "home"
+    log("others off: the view's meta line, timeline (ask_user as a step) and message box")
+    await page.reload()
+    await expect(page.locator(".home-item.selected")).to_be_visible()
+    await expect(page.locator("#back-home")).to_be_hidden()
+    log("others off: a reload while viewing one shows Home")
+    assert not page.errors, page.errors  # type: ignore[attr-defined]
+    await context.close()
+
+    # The group never unfolded: the message box knows nothing of these sessions, a submission
+    # to one sends nothing, and a toast about one opens nothing.
+    requests.clear()
+    context, page = await others_page(browser, requests)
+    await page.wait_for_timeout(300)
+    requests.clear()
+    found = await page.evaluate(
+        """async (id) => {
+          const { state } = await import('/static/state.js');
+          const { externalItem } = await import('/static/sidebar.js');
+          state.selected = id;
+          const item = externalItem();
+          const input = document.querySelector('#composer-input');
+          input.value = 'Commit it';
+          document.querySelector('#composer').requestSubmit();
+          await new Promise((done) => setTimeout(done, 300));
+          state.selected = 'home';
+          return [item === undefined, input.value];
+        }""",
+        done,
+    )
+    assert found == [True, "Commit it"], found
+    assert not [r for r in requests if r.startswith("POST") or "/api/external" in r], requests
+    await page.fill("#composer-input", "")
+    for session_id in (done, str(uuid4())):
+        runtime.bus.publish("toast", {"text": f"About {session_id}", "session_id": session_id,
+                                      "needs_action": True})  # fmt: skip
+        note = page.locator(".toast", has_text=session_id)
+        await note.click()
+        await expect(note).to_have_count(0)
+        await expect(page.locator(".home-item.selected")).to_be_visible()
+        await expect(page.locator("#back-home")).to_be_hidden()
+    assert not page.errors, page.errors  # type: ignore[attr-defined]
+    await context.close()
+    log("others off: externalItem() and a submission with the group never unfolded; a toast "
+        "for one stays on Home")  # fmt: skip
+
+
+def more_sessions(client) -> dict[str, str]:
+    """A session in every status, and three without one: their ids by what they show."""
+    return {
+        "your_turn": terminal(client, "Explain the cache misses", [
+            *turn("Why does the cache miss so often?", 9),
+            *answer("Keys include the request id, so no two requests share one.", 5),
+        ]),
+        "working": terminal(client, "Run the integration suite", [
+            *turn("Run the integration suite", 3),
+            *step("c-3", "bash", 1, command="make integration"),
+            ("session.usage_info", 0.5, {"tokenLimit": 1000}),
+        ]),
+        "no_progress": terminal(client, "Upgrade the payments SDK", [
+            *turn("Upgrade the payments SDK to version 5", 45),
+            *step("c-4", "bash", 40, command="make build"),
+        ]),
+        "idle": terminal(client, "Tidy the README", [
+            *turn("Tidy the README", 125), *answer("Tidied: shorter install steps.", 120),
+        ]),
+        "stopped": terminal(client, "Profile the orders page", [
+            *turn("Profile the orders page", 70), *step("c-5", "bash", 60, command="npm run e2e"),
+        ], is_open=False),
+        "unknown": terminal(client, "Draft the release notes", turn("Draft them", 30), made=""),
+        "another": terminal(client, "Bump the linter", turn("Bump it", 50), last="chiefofstaff"),
+        "format": terminal(client, "Translate the docs", turn("Translate", 90), head=False),
+    }  # fmt: skip
+
+
+# A time as the page shows it: "2:10 PM", or "Nov 10, 11:06 PM" on another day.
+TIME = r"(?:[A-Z][a-z]{2} \d{1,2}, )?\d{1,2}:\d{2}\s?[AP]M"
+
+
+async def others_statuses(runtime, browser, ids: dict[str, str]):
+    """Every status: its dot, small word, tooltip and name; rows without one say why; five at
+    rest, the rest folded; the order held under the pointer; folding's first-load default; the
+    view's meta and note lines; reduced motion; the keyboard."""
+    requests: list[str] = []
+    context, page = await others_page(browser, requests)
+    group = page.locator("#external")
+    await expect(group).to_have_attribute("open", "")
+    await expect(page.locator("#external-count")).to_have_text("8 open")
+    assert any(r.startswith("GET /api/external?refresh=true") for r in requests), requests
+    row = lambda key: page.locator(f'#external-list button.item[data-id="{ids[key]}"]')  # noqa: E731
+    await expect(row("asks").locator(".dot")).to_have_class("dot waiting", timeout=8000)
+    await expect(row("idle").locator(".dot")).to_have_class("dot open", timeout=8000)
+    shown = {item["id"]: item for item in await page.evaluate(ROWS)}
+    by = {key: shown[session_id] for key, session_id in ids.items()}
+    expected = {
+        "asks": ("dot waiting", "12m", "Asks you, for 12 minutes",
+                 f"from its log: asked at {TIME}, no answer since\n{re.escape(QUESTION)}"),
+        "your_turn": ("dot waiting", "5m", "Your turn, for 5 minutes",
+                      f"from its log: its turn ended at {TIME}\nKeys include the request id"),
+        "working": ("dot open busy", "open", "Working, for 3 minutes",
+                    f"from its log: at work since {TIME}\nbash make integration"),
+        "no_progress": ("dot stalled", "40m", "No progress for 40 minutes",
+                        f"from its log: nothing written since {TIME}\nbash make build\n"
+                        "A slow step, a hang or a prompt in its terminal look the same"),
+        "idle": ("dot open", "open", "Idle, for 2 hours",
+                 f"from its log: its turn ended at {TIME}\nTidied: shorter install steps."),
+        "finished": ("dot done", "3h", "Finished, 3 hours ago",
+                     f"from its log: last written at {TIME}\nDrafted it in CHANGELOG.md"),
+        "stopped": ("dot", "1h", "Stopped, 1 hour ago",
+                    f"from its log: last written at {TIME}\nbash npm run e2e"),
+    }  # fmt: skip
+    for key, (dot, sub, words, more) in expected.items():
+        item = by[key]
+        assert (item["dot"], item["sub"], item["tip"]) == (dot, sub, words), (key, item)
+        tooltip = f"{re.escape(words)} · {more}.*\n/work/app"
+        assert re.fullmatch(tooltip, item["title"], re.DOTALL), (key, item["title"])
+        name = f"{item['label']}, {words[0].lower()}{words[1:]}"
+        assert item["name"] == name, (key, item["name"])
+        named = page.get_by_role("button", name=name, exact=True, include_hidden=True)
+        await expect(named).to_have_count(1)
+    why = {
+        "unknown": "Copilot did not say which app started it.",
+        "another": "Another Chief of Staff ran it last.",
+        "format": "Its log is in a format this version does not read.",
+    }
+    for key, words in why.items():
+        item = by[key]
+        assert (item["dot"], item["sub"], item["name"]) == ("dot open", "open", ""), (key, item)
+        assert item["title"] == f"Open in a terminal now · /work/app\n{words}", (key, item)
+        assert item["tip"] == "Open in a terminal right now (shown read-only)", (key, item)
+    log("others on: every status's dot, small word, tooltip and name; rows without one say why")
+
+    # Five at rest: waiting (the longest first), no progress, at work, then the list's order;
+    # the rest folded as workers with nothing open are.
+    rest = [item["id"] for item in await page.evaluate(ROWS) if not item["folded"]]
+    assert rest == [ids[k] for k in ("asks", "your_turn", "no_progress", "working", "unknown")]
+    fold = page.locator("#external-list > details.idle-workers")
+    await expect(fold.locator("> summary")).to_have_text("5 more")
+    assert await fold.get_attribute("open") is None
+    await expect(fold.locator("button.item").first).to_be_hidden()
+    await fold.locator("> summary").click()
+    await expect(fold.locator("button.item").first).to_be_visible()
+    folded = [item["id"] for item in await page.evaluate(ROWS) if item["folded"]]
+    assert folded == [ids[k] for k in ("another", "format", "idle", "stopped", "finished")]
+    await fold.locator("> summary").click()
+    log("others on: five rows at rest, the rest behind “5 more”, in the list's order")
+    (SHOTS / "others").mkdir(parents=True, exist_ok=True)
+    await page.screenshot(path=SHOTS / "others" / "edges-statuses.png")
+
+    # Under the pointer the order holds; a session that starts asking moves up once it leaves.
+    await row("asks").hover()
+    readme = ids["idle"]
+    terminal_ask(runtime.backend, readme, "Keep the old badge?")
+    await expect(row("idle").locator(".dot")).to_have_class("dot waiting", timeout=8000)
+    rest = [item["id"] for item in await page.evaluate(ROWS) if not item["folded"]]
+    assert readme not in rest, "the order holds under the pointer"
+    await page.mouse.move(900, 600)
+    await expect(page.locator("#external-list > button.item").nth(2)).to_have_attribute(
+        "data-id", readme
+    )
+    log("others on: the order holds under the pointer, sorted again once it leaves")
+
+    # The row the keyboard is on keeps the focus when it moves up (it starts asking).
+    await row("working").focus()
+    terminal_ask(runtime.backend, ids["working"], "Run the slow tests too?", done="c-3")
+    await expect(row("working").locator(".dot")).to_have_class("dot waiting", timeout=8000)
+    rest = [item["id"] for item in await page.evaluate(ROWS) if not item["folded"]]
+    assert rest.index(ids["working"]) == 3, rest
+    focused = await page.evaluate("() => document.activeElement?.dataset?.id")
+    assert focused == ids["working"], "the focus moves with its row"
+    # Answered in its terminal, it works again.
+    terminal_write(runtime.backend, ids["working"], [
+        ("tool.execution_complete", 0, {"toolCallId": "c-9", "success": True}),
+        *step("c-10", "bash", 0, command="make test-slow"),
+    ])  # fmt: skip
+    await expect(row("working").locator(".dot")).to_have_class("dot open busy", timeout=8000)
+    log("others on: a row that moves keeps the keyboard's focus")
+    assert not page.errors, page.errors  # type: ignore[attr-defined]
+    await context.close()
+
+
+async def others_view(runtime, browser, ids: dict[str, str], old: str):
+    """The view behind a row: its meta line says where it stands, and while it asks its timeline
+    ends with the question; a toast opens it, a reload keeps it, and a closed session is
+    continued, the group never unfolded; folding is kept; the keyboard; reduced motion."""
+    requests: list[str] = []
+    context, page = await others_page(browser, requests)
+    row = lambda key: page.locator(f'#external-list button.item[data-id="{ids[key]}"]')  # noqa: E731
+    meta = page.locator("#session-meta")
+    history = page.locator(".external-history")
+    await expect(row("asks").locator(".dot")).to_have_class("dot waiting", timeout=8000)
+    await row("asks").click()
+    await expect(meta).to_have_text(
+        re.compile(f"^Asks you since {TIME} · /work/app · main · updated 12m ago$")
+    )
+    await expect(history.locator(":scope > :last-child")).to_have_text(f"Asks you: {QUESTION}")
+    await expect(history.locator(":scope > :last-child")).to_have_class("line note")
+    # In place of "Working in a terminal…", which would say the opposite.
+    await expect(history.get_by_text("Working in a terminal…")).to_be_hidden()
+    await expect(history.locator(":scope > :nth-last-child(2)")).to_have_class("working-line")
+    await expect(history).to_contain_text("ask_user")
+    await expect(page.locator("#composer-input")).to_be_disabled()
+    await row("no_progress").click()
+    await expect(meta).to_have_text("No progress for 40 min · /work/app · main · updated 40m ago")
+    await expect(history.locator(".line.note")).to_have_count(0)
+    await expect(history.locator(".working-line")).to_be_visible()  # As without the setting.
+    await page.locator("#external-list > details.idle-workers > summary").click()
+    await row("unknown").click()
+    await expect(meta).to_have_text("Open in a terminal · /work/app · main · updated 30m ago")
+    await page.locator("#external-list > details.idle-workers > summary").click()
+    await expect(history.locator(".working-line")).to_be_visible()
+    log("others on: the view's meta line says where it stands; asking, the question ends it")
+
+    # The keyboard: rows are buttons, Enter opens one, and a redraw keeps the focus on it.
+    await page.locator("#back-home").click()
+    first = page.locator("#external-list > button.item").first
+    await first.focus()
+    await page.keyboard.press("Enter")
+    await expect(page.locator("#back-home")).to_be_visible()
+    focused = "() => document.activeElement?.dataset?.id || document.activeElement?.tagName"
+    chosen = await page.evaluate(focused)
+    assert chosen == await first.get_attribute("data-id"), chosen
+    await page.evaluate("import('/static/sidebar.js').then((m) => m.renderOthers())")
+    await page.wait_for_timeout(2500)  # An event from the index meanwhile, too.
+    assert await page.evaluate(focused) == chosen, "a redraw keeps the focus"
+    await page.keyboard.press("Tab")
+    assert await page.evaluate(focused) == await page.locator(
+        "#external-list > button.item").nth(1).get_attribute("data-id")  # fmt: skip
+    log("others on: rows are buttons in words; Enter opens one; a redraw keeps the focus")
+
+    # Folded by the owner, it stays folded (and unread) at the next load; unfolded, unfolded.
+    await page.locator("#external > summary").click()
+    await expect(page.locator("#external")).not_to_have_attribute("open", "")
+    await page.wait_for_function("() => localStorage.getItem('cos.section.external') === '0'")
+    requests.clear()
+    await page.reload()
+    await expect(page.locator("#application")).to_be_visible()
+    await page.wait_for_timeout(500)
+    assert await page.locator("#external").get_attribute("open") is None
+    assert not [r for r in requests if re.search(r"/api/external(\?|$)", r)], requests
+    await expect(page.locator("#external-count")).to_have_text("")  # As before it is read.
+    await page.locator("#external > summary").click()
+    await page.wait_for_function("() => localStorage.getItem('cos.section.external') === '1'")
+    await page.reload()
+    await expect(page.locator("#external")).to_have_attribute("open", "")
+    log("others on: unfolded on the first load, then folded or not as the owner left it")
+    assert not page.errors, page.errors  # type: ignore[attr-defined]
+    await context.close()
+
+    # The group never unfolded: a toast opens the view, a reload keeps it, and one found only by
+    # its id (closed for long) is continued here.
+    requests.clear()
+    context, page = await others_page(browser, requests)
+    meta, history = page.locator("#session-meta"), page.locator(".external-history")
+    await page.evaluate("localStorage.setItem('cos.section.external', '0')")
+    await page.reload()
+    await expect(page.locator("#application")).to_be_visible()
+    requests.clear()
+    runtime.bus.publish("toast", {"text": "Look at the login test", "session_id": ids["asks"],
+                                  "needs_action": True})  # fmt: skip
+    await page.locator(".toast", has_text="Look at the login test").click()
+    await expect(meta).to_have_text(re.compile(f"^Asks you since {TIME} · "))
+    await expect(page.locator("#session-title")).to_have_text("Fix the login test")
+    await page.reload()
+    await expect(page.locator("#session-title")).to_have_text("Fix the login test")
+    await expect(meta).to_have_text(re.compile(f"^Asks you since {TIME} · "))
+    await expect(history.locator(":scope > :last-child")).to_have_text(f"Asks you: {QUESTION}")
+    runtime.bus.publish("toast", {"text": "About something else", "session_id": str(uuid4()),
+                                  "needs_action": True})  # fmt: skip
+    await page.locator(".toast", has_text="About something else").click()
+    await expect(page.locator("#session-title")).to_have_text("Fix the login test")
+    await page.evaluate(f"localStorage.setItem('cos.selected', '{old}')")
+    await page.reload()
+    await expect(page.locator("#session-title")).to_have_text("Keep the old notes")
+    await expect(meta).to_have_text(
+        re.compile(r"^Not managed yet · /work/app · main · updated 1d ago$")
+    )
+    assert f"GET /api/others/{old}" in requests, requests
+    await page.fill("#composer-input", "Carry on")
+    await page.press("#composer-input", "Enter")
+    continued = page.locator("#session-list .item", has_text="Keep the old notes")
+    await expect(continued).to_be_visible(timeout=10000)
+    await expect(continued).to_have_class(re.compile(r"\bselected\b"))
+    assert f"POST /api/external/{old}/messages" in requests, requests
+    assert not [r for r in requests if re.search(r"/api/external(\?|$)", r)], requests
+    await page.fill("#composer-input", "And tidy it")
+    await page.press("#composer-input", "Enter")
+    await expect(page.locator("#timeline .msg.owner", has_text="And tidy it")).to_be_visible()
+    assert f"POST /api/sessions/{old}/messages" in requests, "now a worker of its own"
+    assert requests.count(f"POST /api/external/{old}/messages") == 1, requests
+    await expect(page.locator(f'#external-list [data-id="{old}"]')).to_have_count(0)
+    assert not page.errors, page.errors  # type: ignore[attr-defined]
+    await context.close()
+    log("others on, the group never unfolded: a toast opens the view, a reload keeps it, one "
+        "closed for long is found by its id and continued here")  # fmt: skip
+
+    # The pulsing ring of one at work is still with reduced motion.
+    for motion, moving in (("no-preference", True), ("reduce", False)):
+        context, page = await others_page(browser, reduced_motion=motion)
+        dot = page.locator(f'#external-list [data-id="{ids["working"]}"] .dot')
+        await expect(dot).to_have_class("dot open busy", timeout=8000)
+        assert bool(await dot.evaluate("d => d.getAnimations().length")) is moving, motion
+        await context.close()
+    log("others on: one at work pulses, still with reduced motion")
+
+
+def leased(session_id: str, key: str = "asks", words: str = QUESTION, valid_for: float = 15.0):
+    """A row as /api/others gives it, its status held for `valid_for` seconds."""
+    since = datetime.now(UTC) - timedelta(minutes=12)
+    return {"id": session_id, "summary": "Fix the login test", "cwd": "/work/app",
+            "repository": "", "branch": "main", "modified": since.isoformat(), "open": True,
+            "status": {"key": key, "elapsed": 720.0, "since": since.isoformat(), "before": False,
+                       "words": words},
+            "reason": "", "why": "", "valid_for": valid_for}  # fmt: skip
+
+
+async def others_leases(runtime, browser, ask: str):
+    """A status is shown only while its lease holds: a stream open but silent past 15 s, a stream
+    dropped, a tab hidden then shown, a back-forward cache return, back online, a laptop that
+    slept (renewals sent before it ignored) and a clock moved back. The index is stopped here:
+    the test says what it would."""
+    others = runtime.others
+    await others.stop()
+    feed = {"run": "leases", "pass": 10, "why": "", "rows": [leased(ask)]}
+    others.view = lambda: feed  # type: ignore[method-assign]
+    requests: list[str] = []
+    context = await browser.new_context(viewport={"width": 1280, "height": 900})
+    try:
+        await context.clock.install()
+        page = await context.new_page()
+        errors: list[str] = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        page.on("request", lambda r: requests.append(f"{r.method} {r.url.split(str(PORT), 1)[-1]}"))
+        # What changed between the first read and the stream's start is read again then.
+        stale = {**feed, "pass": 9, "rows": [leased(ask, "your_turn", "Merged it.")]}
+        await page.route("**/api/others", lambda route: route.fulfill(json=stale), times=1)
+        await page.goto(f"{BASE}/#token={TOKEN}")
+        row = page.locator(f'#external-list button.item[data-id="{ask}"]')
+        dot, meta = row.locator(".dot"), page.locator("#session-meta")
+        note = page.locator(".external-history [data-question]")
+        working = page.locator(".external-history .working-line")
+        await expect(row).to_have_attribute("aria-label", re.compile("asks you"))
+        await row.click()
+        await expect(meta).to_have_text(re.compile("^Asks you since "))
+        await expect(note).to_have_text(f"Asks you: {QUESTION}")
+        log("others leases: what changed before the stream started is read once it starts")
+
+        async def shown():
+            await expect(dot).to_have_class("dot waiting")
+            await expect(row).to_have_attribute("aria-label", re.compile("asks you"))
+            await expect(meta).to_have_text(re.compile("^Asks you since "))
+            await expect(note).to_have_count(1)
+            await expect(working).to_be_hidden()  # The question in its place.
+
+        async def today():
+            """Every part drawn from a status, as without the setting."""
+            await expect(dot).to_have_class("dot open")
+            await expect(row.locator(".sub")).to_have_text("open")
+            await expect(row).to_have_attribute("title", "Open in a terminal now · /work/app")
+            assert await row.get_attribute("aria-label") is None
+            await expect(meta).to_have_text(re.compile("^Open in a terminal · /work/app · main"))
+            await expect(note).to_have_count(0)
+            await expect(working).to_have_text("Working in a terminal…")
+            await expect(working).to_be_visible()
+            assert await working.get_attribute("hidden") is None
+
+        await page.clock.run_for(14000)
+        await shown()
+        await page.clock.run_for(2000)
+        await today()
+        log("others leases: the stream open but silent past 15 s: back to today's drawing")
+        runtime.bus.publish("others", {"run": "leases", "pass": 9, "rows": [], "gone": [],
+                                       "leases": {ask: 15}})  # fmt: skip
+        await page.wait_for_timeout(300)
+        await today()
+        runtime.bus.publish("others", {"run": "leases", "pass": 11, "rows": [], "gone": [],
+                                       "leases": {ask: 15}})  # fmt: skip
+        await shown()
+        log("others leases: a renewal of an older pass is ignored, of a newer one shown")
+        changed = {**leased(ask, "your_turn", "Merged it."), "valid_for": None}
+        runtime.bus.publish("others", {"run": "leases", "pass": 12, "rows": [changed],
+                                       "gone": [], "leases": {}})  # fmt: skip
+        await today()
+        runtime.bus.publish("others", {"run": "leases", "pass": 13, "rows": [leased(ask)],
+                                       "gone": [], "leases": {ask: 15}})  # fmt: skip
+        await shown()
+        log("others leases: a status changed without its lease is not shown")
+        feed["pass"] = 13
+
+        async def lost(how, cause):
+            """`cause` loses every lease: gone at once, back once /api/others answers."""
+            gate = asyncio.Event()
+
+            async def hold(route):
+                await gate.wait()
+                await route.continue_()
+
+            feed["pass"] += 2
+            await page.route("**/api/others", hold)
+            async with page.expect_request("**/api/others"):
+                await cause()
+            await today()
+            # A renewal sent before (delivered while /api/others is read): it waits, and goes.
+            runtime.bus.publish("others", {"run": "leases", "pass": feed["pass"] - 1, "rows": [],
+                                           "gone": [], "leases": {ask: 15}})  # fmt: skip
+            await page.wait_for_timeout(200)
+            await today()
+            gate.set()
+            await shown()
+            await page.unroute("**/api/others")
+            log(f"others leases: {how}: gone at once, back after /api/others")
+
+        async def drop():
+            for queue in list(runtime.bus.queues):
+                queue.put_nowait(None)
+
+        async def visibility(state: str):
+            await page.evaluate(
+                """(state) => { Object.defineProperty(document, 'visibilityState',
+                  { value: state, configurable: true });
+                  document.dispatchEvent(new Event('visibilitychange')); }""",
+                state,
+            )
+
+        async def hidden_then_shown():
+            await visibility("hidden")
+            await page.clock.run_for(1500)
+            await visibility("visible")
+
+        async def dispatch(script: str):
+            await page.evaluate(script)
+
+        await lost("the stream dropped", drop)
+        await page.wait_for_timeout(3500)  # The stream back meanwhile (and read again).
+        await shown()
+        await lost("the tab hidden then shown", hidden_then_shown)
+        restored = "new PageTransitionEvent('pageshow', { persisted: true })"
+        await lost("back from the back-forward cache",
+                   lambda: dispatch(f"window.dispatchEvent({restored})"))  # fmt: skip
+        await lost("back online", lambda: dispatch("window.dispatchEvent(new Event('online'))"))
+
+        now = await page.evaluate("Date.now()")
+        await lost("a laptop that slept (the wall clock an hour ahead)",
+                   lambda: page.clock.set_system_time(now / 1000 + 3600))  # fmt: skip
+        late = leased(ask, "your_turn", "Merged it.")
+        runtime.bus.publish("others", {"run": "leases", "pass": feed["pass"] - 1, "rows": [late],
+                                       "gone": [], "leases": {ask: 15}})  # fmt: skip
+        await page.wait_for_timeout(300)
+        await shown()
+        await expect(row).to_have_attribute("aria-label", re.compile("asks you"))
+        runtime.bus.publish("others", {"run": "leases", "pass": feed["pass"] + 1, "rows": [late],
+                                       "gone": [], "leases": {ask: 15}})  # fmt: skip
+        await expect(row).to_have_attribute("aria-label", re.compile("your turn"))
+        await expect(note).to_have_count(0)
+        await expect(working).to_be_hidden()  # Its turn ended: no "Working…", the meta says it.
+        await expect(meta).to_have_text(re.compile("^Your turn since "))
+        log("others leases: renewals sent before the sleep, delivered after it, are ignored")
+        feed["rows"] = [leased(ask)]
+        feed["pass"] += 1
+        now = await page.evaluate("Date.now()")
+        await lost("the wall clock moved back an hour",
+                   lambda: page.clock.set_system_time(now / 1000 - 3600))  # fmt: skip
+
+        # A wall clock that creeps ahead, under 2 s at a time: no jump, but its deadline passes
+        # (the monotonic clock 8 s on, the wall clock 20 s).
+        now = await page.evaluate("Date.now()")
+        await page.clock.pause_at(now / 1000)
+        requests.clear()
+        for _ in range(8):
+            now = await page.evaluate("Date.now()")
+            await page.clock.set_system_time(now / 1000 + 1.5)
+            await page.clock.run_for(1000)
+        await today()
+        assert "GET /api/others" not in requests, requests
+        log("others leases: a wall clock creeping ahead: its deadline passes first")
+        runtime.bus.publish("others", {"run": "leases", "pass": feed["pass"] + 1, "rows": [],
+                                       "gone": [], "leases": {ask: 15}})  # fmt: skip
+        await page.clock.run_for(100)
+        await shown()
+        # And one creeping back: the monotonic deadline passes (16 s on, the wall clock 8 s back).
+        for _ in range(16):
+            now = await page.evaluate("Date.now()")
+            await page.clock.set_system_time(now / 1000 - 1.5)
+            await page.clock.run_for(1000)
+        await today()
+        assert "GET /api/others" not in requests, requests
+        await page.clock.resume()
+        log("others leases: a wall clock creeping back: the monotonic deadline passes first")
+        assert not errors, errors
+    finally:
+        await context.close()
+        del others.view
+        others.start()
+
+
+# The heading's lines: of its words and of its count (their text's line boxes), and whether the
+# two share one; whether either is cut; how far the count is from the rows' small words.
+HEADING = """() => {
+  const summary = document.querySelector('#external > summary');
+  const words = summary.querySelector('.group-name');
+  const count = document.querySelector('#external-count');
+  const lines = (node) => {
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    return new Set([...range.getClientRects()].map((box) => Math.round(box.top))).size;
+  };
+  const box = (node) => node.getBoundingClientRect();
+  const sub = document.querySelector('#external-list button.item .sub');
+  return {
+    lines: Math.max(lines(words), lines(count)) + (Math.abs(box(words).top - box(count).top) > 3),
+    height: box(summary).height, width: box(document.querySelector('#sidebar')).width,
+    wordsCut: words.scrollWidth > words.clientWidth,
+    countCut: count.scrollWidth > count.clientWidth,
+    right: box(count).right - (sub ? box(sub).right : NaN),
+  };
+}"""
+
+
+async def others_heading(runtime, browser):
+    """The group's heading is one line at 252 px with 40 sessions, 12 open, setting on or off,
+    light and dark: the words whole, the count on the right in line with the rows' small words
+    and in full in its tooltip; in a narrower sidebar (a wider font, say) the words are cut, never
+    the count, and it stays one line."""
+    client = runtime.backend
+    client.metas.clear()
+    client.in_use.clear()
+    for index in range(40):
+        terminal(client, f"Session {index + 1}", turn("Go", 5 + index * 30), is_open=index < 12)
+    runtime.others.listed_at = float("-inf")
+    await runtime.workers.refresh_elsewhere()
+    for on in (True, False):
+        await others_setting(runtime, on)
+        for scheme in ("light", "dark"):
+            context, page = await others_page(browser, color_scheme=scheme)
+            if not on:
+                await page.locator("#external > summary").click()
+            summary = page.locator("#external > summary")
+            await expect(page.locator("#external-count")).to_have_text("12 open")
+            await expect(summary).to_have_attribute("title", "40 sessions, 12 open")
+            await expect(summary).to_have_attribute(
+                "aria-label", "Other Copilot sessions, 40 sessions, 12 open"
+            )
+            found = await page.evaluate(HEADING)
+            where = f"{'on' if on else 'off'} {scheme}"
+            assert found["width"] == 252 and found["lines"] == 1, (where, found)
+            assert found["height"] <= 28.5, (where, found)  # Its 28 px target, one line.
+            assert not found["wordsCut"] and not found["countCut"], (where, found)
+            assert abs(found["right"]) <= 1, ("in line with the rows' small words", where, found)
+            await page.evaluate(
+                "() => { document.querySelector('#application').style.gridTemplateColumns ="
+                " '190px 1fr'; }"
+            )
+            found = await page.evaluate(HEADING)
+            assert found["lines"] == 1 and found["height"] <= 28.5, (where, found)
+            assert found["wordsCut"] and not found["countCut"], (where, found)
+            assert not page.errors, page.errors  # type: ignore[attr-defined]
+            await context.close()
+    log("others: the heading is one line at 252 px (on and off, light and dark); narrower, "
+        "its words are cut, never the count")  # fmt: skip
+
+
+def held(gate: asyncio.Event):
+    """A route handler that answers once `gate` is set."""
+
+    async def hold(route):
+        await gate.wait()
+        await route.continue_()
+
+    return hold
+
+
+# What has the focus: a row's id, else its tag.
+FOCUSED = "() => document.activeElement?.dataset?.id || document.activeElement?.tagName"
+# The group as it is (for a failure's message): what has the focus, each row's dot and fold.
+GROUP = """() => ({
+  focused: document.activeElement?.dataset?.id || document.activeElement?.tagName,
+  rows: [...document.querySelectorAll('#external-list button.item')].map((row) =>
+    `${row.dataset.id.slice(0, 8)} ${row.querySelector('.dot').className}`
+    + (row.closest('details.idle-workers') ? ' (folded)' : '')) })"""
+
+
+async def shown_again(page):
+    """The tab hidden, then shown again."""
+    for state in ("hidden", "visible"):
+        await page.evaluate(
+            """(state) => { Object.defineProperty(document, 'visibilityState',
+              { value: state, configurable: true });
+              document.dispatchEvent(new Event('visibilitychange')); }""",
+            state,
+        )
+
+
+async def others_focus(runtime, browser):
+    """The keyboard's focus is never lost in the fold: the order holds while the keyboard is in
+    the list (sorted again once it leaves), and the row it is on stays at rest, also when every
+    status goes at once (the tab shown again) and the order is not held (no focus shown)."""
+    client = runtime.backend
+    await others_setting(runtime, True)
+
+    async def sessions(made: list) -> list[str]:
+        client.metas.clear()
+        client.in_use.clear()
+        found = [terminal(client, title, events, made=maker) for title, events, maker in made]
+        runtime.others.listed_at = float("-inf")
+        runtime.workers.external_cache = (float("-inf"), [])
+        await runtime.workers.refresh_elsewhere()
+        return found
+
+    def rows(page):
+        return page.evaluate(
+            "() => [...document.querySelectorAll('#external-list button.item')]"
+            ".map((row) => [row.dataset.id, Boolean(row.closest('details.idle-workers'))])"
+        )
+
+    # One asks, six idle: A to E at rest. The keyboard on E, F starts working: the order holds.
+    asking = [("Asks A", [*turn("Go", 12), *step("c-1", "ask_user", 10, message="Ship?")], "")]
+    idle = [(f"Idle {name}", [*turn("Go", 125 + i), *answer("Done.", 120 + i)], "")
+            for i, name in enumerate("BCDEFG")]  # fmt: skip
+    ids = await sessions([(t, e, "github/cli") for t, e, _ in [*asking, *idle]])
+    a, b, c, d, e, f, g = ids
+    context, page = await others_page(browser)
+    await expect(page.locator(f'#external-list [data-id="{a}"] .dot')).to_have_class(
+        "dot waiting", timeout=8000
+    )
+    assert await rows(page) == [[a, False], [b, False], [c, False], [d, False], [e, False],
+                                [f, True], [g, True]]  # fmt: skip
+    await page.locator("#external > summary").focus()
+    for _ in range(5):
+        await page.keyboard.press("Tab")
+    assert await page.evaluate(FOCUSED) == e
+    terminal_write(client, f, [*turn("Again", 0), *step("c-2", "bash", 0, command="make")])
+    await expect(page.locator(f'#external-list [data-id="{f}"] .dot')).to_have_class(
+        "dot open busy", timeout=8000
+    )
+    await page.wait_for_timeout(300)
+    assert await rows(page) == [[a, False], [b, False], [c, False], [d, False], [e, False],
+                                [f, True], [g, True]], "held under the keyboard"  # fmt: skip
+    assert await page.evaluate(FOCUSED) == e
+    # Sorted again as the keyboard leaves (the index quiet meanwhile: no event redraws it).
+    await runtime.others.stop()
+    try:
+        for _ in range(5):
+            await page.keyboard.press("Shift+Tab")  # Back to the heading: out of the list.
+        await page.wait_for_timeout(300)
+        assert await rows(page) == [[a, False], [f, False], [b, False], [c, False], [d, False],
+                                    [e, True], [g, True]], "sorted again once it left"  # fmt: skip
+    finally:
+        runtime.others.start()
+    assert not page.errors, page.errors  # type: ignore[attr-defined]
+    await context.close()
+    log("others focus: the order holds while the keyboard is in the list, sorted once it leaves")
+
+    # One asks, five newer without a status. The keyboard on it, the tab shown again: every
+    # status goes at once and the rows fall back to the list's order, but not that row.
+    newer = [(f"No status {i}", turn("Go", 2 + i), "") for i in range(5)]
+    asks = [*turn("Go", 62), *step("c-1", "ask_user", 60, message="Ship?")]
+    ids = await sessions([("Asks A", asks, "github/cli"), *newer])
+    a = ids[0]
+    row = f'#external-list [data-id="{a}"]'
+    for how in ("keyboard", "pointer"):
+        context, page = await others_page(browser)
+        await expect(page.locator(f"{row} .dot")).to_have_class("dot waiting", timeout=8000)
+        # The one that asks is first at rest, so the first row after the heading.
+        first = page.locator("#external-list > button.item").first
+        await expect(first).to_have_attribute("data-id", a)
+        if how == "keyboard":
+            await page.locator("#external > summary").focus()
+            await page.keyboard.press("Tab")
+        else:
+            # Focus from a press of the pointer, let go away from it (no click, so not chosen):
+            # no focus shown, so the order is not held. On screen first: in a full run, the
+            # workers of earlier rounds push the group below the window.
+            await page.locator(row).scroll_into_view_if_needed()
+            box = await page.locator(row).bounding_box()
+            x, y = box["x"] + 20, box["y"] + box["height"] / 2
+            pressed = "([x, y]) => document.elementFromPoint(x, y)?.closest('button')?.dataset.id"
+            assert await page.evaluate(pressed, [x, y]) == a, (how, "the press lands on it")
+            await page.mouse.move(x, y)
+            await page.mouse.down()
+            await page.mouse.move(900, 500)
+            await page.mouse.up()
+            assert not await page.locator(row).evaluate("r => r.matches(':focus-visible')")
+            assert not await page.locator("#external-list").evaluate("l => l.matches(':hover')")
+        assert await page.evaluate(FOCUSED) == a, (how, "focused", await page.evaluate(GROUP))
+        gate = asyncio.Event()
+        await page.route("**/api/others", held(gate))
+        async with page.expect_request("**/api/others"):
+            await shown_again(page)
+        await expect(page.locator(f"{row} .dot")).to_have_class("dot open")  # Its lease gone.
+        assert [folded for _, folded in await rows(page) if _ == a] == [False], (
+            how,
+            "at rest",
+            await page.evaluate(GROUP),
+        )
+        assert await page.evaluate(FOCUSED) == a, (
+            how,
+            "kept while every status is gone",
+            await page.evaluate(GROUP),
+        )
+        gate.set()
+        await expect(page.locator(f"{row} .dot")).to_have_class("dot waiting")
+        assert await page.evaluate(FOCUSED) == a, (
+            how,
+            "kept once /api/others answered",
+            await page.evaluate(GROUP),
+        )
+        await page.unroute("**/api/others")
+        assert not page.errors, page.errors  # type: ignore[attr-defined]
+        await context.close()
+    log("others focus: the tab shown again, the row the keyboard is on stays at rest, focused")
+
+
+def terminal_ask(client, session_id: str, question: str, done: str = ""):
+    """The session's owner asks it something more (once its step `done` ended), and it asks
+    back (now)."""
+    ended = [("tool.execution_complete", 0, {"toolCallId": done, "success": True}),
+             ("assistant.turn_end", 0, {"turnId": "0"})] if done else []  # fmt: skip
+    asked = step("c-9", "ask_user", 0, message=question)
+    terminal_write(client, session_id, [*ended, *turn("And the badge?", 0), *asked])
+
+
+def terminal_write(client, session_id: str, events: list):
+    """More of a session's log, written now."""
+    path = client.home / "session-state" / session_id / "events.jsonl"
+    stamp = datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    parent = client.logs[session_id][-1]["id"]
+    for kind, _, data in events:
+        event = {"type": kind, "data": data, "id": str(uuid4()), "timestamp": stamp,
+                 "parentId": parent}  # fmt: skip
+        client.logs[session_id].append(event)
+        parent = event["id"]
+        with path.open("a") as file:
+            file.write(json.dumps(event, separators=(",", ":")) + "\n")
+
+
+async def round_others(runtime, browser, failures: list[str]):
+    """The sidebar's Other Copilot sessions (docs/design/adopt-sessions.md): with the setting
+    off, exactly as before it existed; on, where each stands."""
+    client = runtime.backend
+    client.home = runtime.store.directory / "copilot-home"
+    ask, done = asking(client), finished(client)
+    await runtime.workers.refresh_elsewhere()
+    try:
+        await others_setting(runtime, False)
+        await others_pins(runtime, browser, ask, done)
+        await others_setting(runtime, True)
+        ids = {"asks": ask, "finished": done, **more_sessions(client)}
+        await runtime.workers.refresh_elsewhere()
+        await others_statuses(runtime, browser, ids)
+        old = finished(client, "Keep the old notes", minutes=30 * 60)
+        runtime.workers.external_cache = (float("-inf"), [])
+        await runtime.others.list_sessions()  # In the index's latest listing (not followed).
+        await others_view(runtime, browser, ids, old)
+        await others_leases(runtime, browser, ask)
+        await others_heading(runtime, browser)
+        await others_focus(runtime, browser)
+    finally:
+        client.metas.clear()
+        client.in_use.clear()
+        await others_setting(runtime, True)
+        await runtime.workers.refresh_elsewhere()
 
 
 if __name__ == "__main__":

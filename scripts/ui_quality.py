@@ -1,5 +1,7 @@
 """Browser checks of how the UI looks and reads, with no accounts: a realistic Home (three
-tasks, cards that need the owner) on a fake Copilot, at 800 to 1440 px, light and dark.
+tasks, cards that need the owner) on a fake Copilot, at 800 to 1440 px, light and dark; and the
+sidebar's Other Copilot sessions with 3, 12 and 40 of them, before and after where each stands
+is shown (browser-shots/others/: a title keeps its width).
 
 Fails on: horizontal scrolling; elements overflowing their card or overlapping each other;
 more than one main (filled) button per card or dialog footer; controls under 28 px tall or
@@ -541,6 +543,145 @@ async def cards(runtime, seeded, browser, quality: Quality, phase: str):
         runtime.update_seen(update["id"])
 
 
+# Titles as owners write them: short, long, right to left.
+TITLES = (
+    "Fix the flaky login test",
+    "Investigate why the nightly export to the analytics warehouse drops rows after midnight",
+    "إصلاح اختبار تسجيل الدخول المتقطع في خدمة الحسابات",
+    "Upgrade the payments SDK to version 5",
+    "תקן את בדיקת ההתחברות שנכשלת לפעמים",
+    "Profile the slow orders page",
+    "Rate-limit login attempts per IP address and per account, with a clear message",
+    "Write the API changelog",
+    "Tidy the README",
+    "Explain the cache misses",
+)
+# Eight that wait or work, then the rest.
+KINDS = ("asks", "your_turn", "working", "no_progress", "asks", "working", "your_turn", "asks")
+REST = ("idle", "finished", "unknown", "stopped", "old")
+# Each title's box and text widths, by row.
+LABELS = """() => Object.fromEntries([...document.querySelectorAll('#external-list button.item')]
+  .map((row) => [row.querySelector('.label').textContent,
+    [row.querySelector('.label').getBoundingClientRect().width,
+     row.querySelector('.sub').getBoundingClientRect().width]]))"""
+
+
+def other_sessions(client, count: int) -> list[str]:
+    """`count` of the owner's other Copilot sessions, eight of them (at most) waiting or at work."""
+    from ui_edges import answer, step, terminal, turn
+
+    client.metas.clear()
+    client.in_use.clear()
+    ids = []
+    for index in range(count):
+        kind = KINDS[index] if index < len(KINDS) else REST[index % len(REST)]
+        title = TITLES[index % len(TITLES)] + (
+            f" {index // len(TITLES) + 1}" if index >= len(TITLES) else ""
+        )
+        minutes = 3 + index * 7
+        events = {
+            "asks": [
+                *turn("Go", minutes + 2),
+                *step(f"c{index}", "ask_user", minutes, message="Ship it?"),
+            ],
+            "your_turn": [*turn("Go", minutes + 2), *answer("Done: the tests pass.", minutes)],
+            "working": [*turn("Go", minutes), *step(f"c{index}", "bash", 0.2, command="make test")],
+            "no_progress": [*turn("Go", 50), *step(f"c{index}", "bash", 45, command="make build")],
+            "idle": [*turn("Go", 130), *answer("Tidied.", 125)],
+            "finished": [*turn("Go", 125), *answer("Drafted.", 121), ("session.shutdown", 120, {})],
+            "unknown": turn("Go", minutes),
+            "stopped": [*turn("Go", 70), *step(f"c{index}", "bash", 65, command="npm run e2e")],
+            "old": [*turn("Go", 2000), *answer("Done.", 1990), ("session.shutdown", 1990, {})],
+        }[kind]
+        closed = kind in {"finished", "stopped", "old"}
+        ids.append(terminal(client, title, events, is_open=not closed,
+                            made="" if kind == "unknown" else "github/cli"))  # fmt: skip
+    return ids
+
+
+async def others(runtime, client, browser, quality: Quality):
+    """The sidebar's Other Copilot sessions, where each stands: at 252 px in windows of 800 to
+    1440 px, light and dark, with 3, 12 and 40 sessions (8 waiting or at work); the group folded
+    and unfolded, its "N more" folded and unfolded; long and right-to-left titles keep the room
+    they had without the setting (browser-shots/others/, before = off, after = on)."""
+    from ui_edges import others_setting
+
+    folder = SHOTS / "others"
+    folder.mkdir(exist_ok=True)
+    client.home = runtime.store.directory / "copilot-home"
+    shrunk = {}
+    try:
+        for count in (3, 12, 40):
+            ids = other_sessions(client, count)
+            runtime.others.listed_at = float("-inf")  # Listed again at its next pass.
+            await runtime.workers.refresh_elsewhere()
+            widths = {}
+            for when, on in (("before", False), ("after", True)):
+                await others_setting(runtime, on)
+                for scheme in ("light", "dark"):
+                    context = await browser.new_context(
+                        viewport={"width": 1440, "height": 900},
+                        color_scheme=scheme,
+                        bypass_csp=True,
+                    )
+                    page = await context.new_page()
+                    await page.goto(f"{BASE}/#token={TOKEN}")
+                    if not on:
+                        await page.locator("#external > summary").click()
+                    await expect(page.locator("#external-count")).not_to_have_text("")
+                    if on:
+                        waiting = page.locator(
+                            "#external-list .dot.waiting, #external-list .dot.open.busy, #external-list .dot.stalled"
+                        )
+                        await expect(waiting).to_have_count(min(count, 8), timeout=15000)
+                    more = page.locator("#external-list > details.idle-workers")
+                    for width in WIDTHS:
+                        await page.set_viewport_size({"width": width, "height": 900})
+                        await page.wait_for_timeout(100)
+                        name = f"{when}-{count}-{width}-{scheme}"
+                        await page.locator("#external > summary").scroll_into_view_if_needed()
+                        await page.locator("#sidebar").screenshot(path=folder / f"{name}.png")
+                        await quality.check(page, f"others {name}", "#sidebar")
+                        if await more.count():
+                            await more.locator("> summary").click()
+                            await page.locator("#sidebar").screenshot(
+                                path=folder / f"{name}-more.png"
+                            )
+                            await quality.check(page, f"others {name} more", "#sidebar")
+                            await more.locator("> summary").click()
+                        await page.locator("#external > summary").click()
+                        await page.locator("#sidebar").screenshot(
+                            path=folder / f"{name}-folded.png"
+                        )
+                        await page.locator("#external > summary").click()
+                    if await more.count():
+                        await more.locator("> summary").click()
+                    await page.set_viewport_size({"width": 1280, "height": 900})
+                    await page.screenshot(path=folder / f"{when}-{count}-page-{scheme}.png")
+                    widths[when] = await page.evaluate(LABELS)
+                    await quality.contrast(page, f"others {when} {count} {scheme}", "#sidebar")
+                    await context.close()
+            # The title keeps its room: as wide as without the setting, row by row.
+            assert set(widths["after"]) == set(widths["before"]), widths
+            for title, (label, _) in widths["after"].items():
+                before = widths["before"][title][0]
+                if label < before - 0.5:
+                    quality.failures.append(
+                        f"others {count}: “{title}” {label:.1f}px, {before:.1f}px before"
+                    )
+            shrunk[count] = max(
+                widths["before"][title][0] - label for title, (label, _) in widths["after"].items()
+            )
+            assert len(ids) == count
+    finally:
+        client.metas.clear()
+        client.in_use.clear()
+        await others_setting(runtime, True)
+    log(
+        f"other Copilot sessions: 3, 12 and 40 at 252 px, titles as wide as before (most lost: {shrunk} px); browser-shots/others/"
+    )
+
+
 async def main():
     phase = sys.argv[1] if len(sys.argv) > 1 else "check"
     SHOTS.mkdir(exist_ok=True)
@@ -579,6 +720,7 @@ async def main():
             log("Home, a worker, Settings and Usage: 800 to 1440 px, light and dark")
             await cards(runtime, seeded, browser, quality, phase)
             log("every kind of card that needs the owner")
+            await others(runtime, holder["client"], browser, quality)
             await browser.close()
         server.should_exit = True
         await serving

@@ -20,6 +20,12 @@ OWNER = re.compile(r'(?m)^<message from="owner"')
 UNTRUSTED = "untrusted"
 
 
+def sendable(text: str) -> str:
+    """Text as UTF-8 can hold it: a lone surrogate, which JSON can carry (a title or message cut
+    in the middle of an emoji), becomes "?". Sent as it is, it fails the whole answer it is in."""
+    return text.encode("utf-8", "replace").decode("utf-8")
+
+
 def short(session_id: str) -> str:
     """The id sessions see and tools accept: the first 8 characters of a session id."""
     return session_id[:8]

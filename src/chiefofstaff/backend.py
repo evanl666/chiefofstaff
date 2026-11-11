@@ -152,6 +152,11 @@ class AgentBackend(Protocol):
         offset to read from next time."""
         ...
 
+    def session_log(self, session_id: str) -> Path | None:
+        """Where a session's log is, for others.py to read without attaching to it (one JSON
+        event a line, as the Copilot CLI writes it); None when the backend keeps none for it."""
+        ...
+
 
 @dataclass(frozen=True)
 class SandboxPolicy:
@@ -243,7 +248,9 @@ class CopilotBackend:
         return await self.client.list_models()
 
     async def list_sessions(self) -> list[Any]:
-        """Every session, each marked `made_by_us` (see made_by_us): the SDK's list leaves out
+        """Every session, each marked `made_by_us` (see made_by_us), with the client that made
+        it (`client_name`) and the one that last ran a turn in it (`last_client_name`, "" when
+        none is recorded); `clients_listed` says these were read. The SDK's list leaves out
         which client made a session, the CLI's answer has it. Unmarked when that cannot be read."""
         try:
             answer = await self.client._client.request("session.list", {})  # type: ignore[union-attr]
@@ -251,6 +258,11 @@ class CopilotBackend:
             for item in answer.get("sessions", []):
                 meta = SessionMetadata.from_dict(item)
                 meta.made_by_us = made_by_us(item)  # type: ignore[attr-defined]
+                vars(meta).update(
+                    client_name=str(item.get("clientName") or ""),
+                    last_client_name=str(item.get("lastClientName") or ""),
+                    clients_listed=True,
+                )
                 listed.append(meta)
             return listed
         except Exception:
@@ -286,6 +298,11 @@ class CopilotBackend:
             raise ValueError("Not a Copilot session id.")
         log = copilot_home() / "session-state" / session_id / "events.jsonl"
         return await asyncio.to_thread(scan_log, log, offset, USAGE_RECORD)
+
+    def session_log(self, session_id: str) -> Path | None:
+        if not SESSION_ID.fullmatch(session_id):
+            return None
+        return copilot_home() / "session-state" / session_id / "events.jsonl"
 
     def sandbox(self, policy: SandboxPolicy) -> SandboxConfig:
         return SandboxConfig(

@@ -51,6 +51,7 @@ tool allowlist, permission and request callbacks, sandbox, model.
 | `peers.py` | Workers that work together (`works_with`): told about each other, passing information straight to each other (`tell_session`), a copy for the Router riding along with its next turn, a finished one's result for the others. |
 | `decisions.py` | Decision cards (answered on the card or in the asking worker's chat, not by a question back; closed once the tasks that asked ended); the owner's decisions and the tasks that rely on them; telling those tasks when one changes. |
 | `learning.py` | The owner's feedback; lessons a learning worker proposes and the owner approves; how often the owner agrees. |
+| `others.py` | Where the owner's other Copilot sessions stand (asks them, their turn, working, no progress…), for the sidebar (`other_sessions`): read from the logs Copilot writes, in one thread within caps, only while a tab is open; no model call, words kept in memory only. `GET /api/others` and `others` events; each status is shown only while its lease (renewed every pass, ≤ 15 s) holds. |
 | `habits.py` | The owner's own words, read from Slack, GitHub, git and their Copilot sessions; the style learned from them (versioned, undoable) and which sessions get it. |
 | `connector.py` | The connector: one helper worker that reaches the owner's world with whatever tools Copilot has (Slack, Glean, mail). Runs the owner's watches on a schedule and hands findings to the Router as `watch` events; collects the owner's own words for `habits.py`; when the owner is away (idle keyboard), tells them what needs them (a gist of up to five items, each with a random single-use code), and applies their answers. It reads untrusted content, so it is sandboxed like a Slack reader (network to GitHub only); the away message itself goes through a separate `messenger` helper, given only Chief of Staff's text in a file and sandboxed as the owner's workers are, so a company bot's CLI can send it; the messenger alone reports that it sent (`report_notified`) and reads the owner's answers the same way (`report_owner_replies`). With Slack connected it gets no Slack tools of its own: `send_owner_slack_dm` and `read_owner_slack_dm` send the notification being sent to the owner's own Slack DM through Chief of Staff's Slack connection, and read only the owner's own messages there since. |
 | `abilities.py` | Skills the owner uploads or names, Copilot plugins installed from Settings (`copilot plugin install`), and MCP servers from Settings, added to workers' options. |
@@ -233,7 +234,11 @@ sidebar's dots and the cards all use it. `tasks.js` draws a box per worker in *N
 *Running* with its task cards, and a row per task in *Monitoring* and *Recently finished*
 (scrolling lists; a row opens its card in place); every section folds (`inbox.js` fold); `artifacts.js` the Artifacts list (the PRs a task owns, from their receipts; docs and runs as
 their workers declared them with `report(artifacts=…)` or linked in any report, kept per task;
-links the task was given are references, not output). `session.js`, `sidebar.js`,
+links the task was given are references, not output). Where the owner's other Copilot
+sessions stand comes with a lease (`state.js` `otherStatus`, the one way to it): it holds until
+the earlier of two deadlines, on the monotonic and the wall clock, and every lease goes when the
+stream breaks, the tab is shown again, the computer wakes or the clock jumps, until
+`/api/others` is read again; `sidebar.js` draws it in today's rows. `session.js`, `sidebar.js`,
 `drafts.js`,
 `composer.js` (the message box, with images) and `settings.js` render their parts; `dom.js` and `text.js` are helpers (the Markdown subset is
 escaped first). Writes are REST calls. Cards are reconciled by key and refreshed in place, so a

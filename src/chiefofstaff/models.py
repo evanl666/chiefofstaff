@@ -384,6 +384,10 @@ class Settings(StrictModel):
     never_clean_patterns: list[Annotated[str, Field(max_length=200)]] = Field(
         default_factory=list, max_length=50
     )
+    # The sidebar's Other Copilot sessions say where each of the owner's own stands (asks them,
+    # their turn, working…), read from the logs Copilot keeps (see others.py): local files, no
+    # model call, nothing stored.
+    other_sessions: bool = True
 
     @field_validator("regenerable_patterns", "never_clean_patterns")
     @classmethod

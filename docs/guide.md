@@ -204,6 +204,15 @@ more than four searches.
 ones you started in a terminal. Those open in a terminal right now come first, marked *open*.
 Opening one shows its latest conversation, and keeps it current while it works.
 
+**Where each stands.** Each row's dot says it, read from the log Copilot keeps on this computer
+(no model call; nothing stored or sent): amber when it asks you something or it is your turn, a
+pulsing ring while it works, dashed when it has made no progress for 15 minutes, a ring when
+idle, green once it finished; for a wait, how long replaces *open*. Hover a row for the question
+or its last answer; the first line of its view says it too. At most five rows show at once,
+those waiting for you first, the rest under *N more*. A row whose status cannot be told for
+sure looks as before, and its tooltip says why. Turn it off with *Show where my other Copilot
+sessions stand* in Settings → General.
+
 **Send it a message to continue it here.** It becomes a worker, with its conversation so far in
 its timeline, and keeps working in its own folder, inside your code folder or not: nothing is
 moved or copied. *Copy resume command* gives `copilot --resume <id>` to continue it in a

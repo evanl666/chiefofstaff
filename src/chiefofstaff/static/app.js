@@ -1,7 +1,7 @@
 // Chief of Staff's web UI: starts the page and wires its controls.
 
 import { $, api, closeMenus, closeOnBackdrop, rememberKey, submits, toast } from "./dom.js";
-import { byId, connectEvents, current, HOME, loadModels, loadState, markRead, routerId, state, viewedId } from "./state.js";
+import { byId, connectEvents, current, HOME, loadModels, loadState, markRead, othersOn, routerId, state, viewedId } from "./state.js";
 import { externalItem, bindSidebarToggle, loadExternal } from "./sidebar.js";
 import { appendMessages, renderHeader, scrollToBottom, select } from "./session.js";
 import { closeMentions, mention, onComposerInput, onMentionKey, routerSide, setRecipient } from "./mention.js";
@@ -11,6 +11,8 @@ import { attachmentBody, bindAttachments, hasAttachments, restoreAttachments, sh
 import { bindSettings, openSettings, refreshUsageLink, showUsage } from "./settings.js";
 import { bindSplitter } from "./splitter.js";
 import { bindStorage } from "./storage.js";
+// Whether Other Copilot sessions are unfolded (kept with the setting on).
+const FOLD = "cos.section.external";
 function bindUi() {
   const input = $("#composer-input");
   const autosize = () => {
@@ -69,6 +71,7 @@ function bindUi() {
         input.placeholder = "Continuing it here…";
         await api(`/api/external/${sessionId}/messages`, { method: "POST", body: { text } });
         state.external = state.external.filter((item) => item.id !== sessionId);
+        state.others.delete(sessionId);
         await loadState();
         await select(sessionId);
         return;
@@ -133,6 +136,8 @@ function bindUi() {
   bindStorage();
   $("#external").addEventListener("toggle", (event) => {
     if (event.target.open) loadExternal(true);
+    // With the setting on, folded or not is the owner's choice, kept.
+    if (othersOn()) localStorage.setItem(FOLD, event.target.open ? "1" : "0");
   });
   window.addEventListener("focus", () => {
     const session = byId(viewedId());
@@ -198,6 +203,9 @@ async function boot() {
     return;
   }
   $("#application").hidden = false;
+  // With the setting on, Other Copilot sessions start unfolded (read as on unfolding), until
+  // the owner folds them.
+  if (othersOn()) $("#external").open = localStorage.getItem(FOLD) !== "0";
   bindUi();
   bindSidebarToggle();
   bindSplitter();

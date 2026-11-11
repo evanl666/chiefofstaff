@@ -1,6 +1,7 @@
 """Browser test of the demo: Home through a whole scenario, with no accounts.
 
     uv run --with playwright python scripts/demo_smoke.py
+    DEMO_SMOKE_OTHER_SESSIONS=off uv run --with playwright python scripts/demo_smoke.py
 
 Starts `chiefofstaff --demo`, then drives the UI like an owner: watches tasks start and wait
 on each other, answers a worker's question, approves a Slack reply, checks the receipts on the
@@ -21,6 +22,11 @@ from playwright.async_api import async_playwright, expect
 ROOT = Path(__file__).resolve().parent.parent
 SHOTS = ROOT / "browser-shots"
 PORT = int(os.environ.get("DEMO_SMOKE_PORT", "8797"))
+# Where the owner's other Copilot sessions stand (the sidebar): on by default; "off" runs the
+# demo with the setting off, as it was before it existed.
+OTHERS = os.environ.get("DEMO_SMOKE_OTHER_SESSIONS", "on") != "off"
+# The off run's screenshots end in "-off", beside the on run's.
+OFF = "" if OTHERS else "-off"
 
 
 def log(text: str):
@@ -60,6 +66,14 @@ async def run(scheme: str):
             page = await context.new_page()
             errors: list[str] = []
             page.on("pageerror", lambda error: errors.append(str(error)))
+            if not OTHERS:
+                base, token = url.split("/#token=")
+                answer = await page.request.post(
+                    f"{base}/api/settings",
+                    data={"other_sessions": False},
+                    headers={"X-Chief-Key": token, "Origin": base},
+                )
+                assert answer.ok, await answer.text()
             await page.goto(url)
 
             # Home: the chat with the Router, and beside it Needs you and the task board.
@@ -77,7 +91,7 @@ async def run(scheme: str):
             log("three tasks on the board as they start, a line each in the chat; one waits")
             dots = page.locator("#session-list .item .dot")
             assert all([await dot.get_attribute("title") for dot in await dots.all()]), "dot help"
-            await page.screenshot(path=SHOTS / f"demo-{scheme}-1-running.png")
+            await page.screenshot(path=SHOTS / f"demo-{scheme}-1-running{OFF}.png")
 
             # A half-typed note survives updates of its card as the worker moves on.
             # Its result may come meanwhile (then it is under Needs you): the note goes along.
@@ -105,7 +119,7 @@ async def run(scheme: str):
             await expect(question).to_contain_text("lets anyone lock a user out")
             await expect(page.locator(".home-item .badge")).to_be_visible()
             await expect(page.locator("#sidebar .badge")).to_have_count(1)
-            await page.screenshot(path=SHOTS / f"demo-{scheme}-2-question.png")
+            await page.screenshot(path=SHOTS / f"demo-{scheme}-2-question{OFF}.png")
             await question.locator(".option", has_text="Per account").click()
             await expect(question).to_have_count(0)
             await expect(page.locator(".toast", has_text="Decided.")).to_be_visible()
@@ -114,7 +128,7 @@ async def run(scheme: str):
             slack = page.locator("#needs .card.draft.slack")
             await expect(slack).to_be_visible(timeout=60000)
             await expect(slack).to_contain_text("Maya Chen")
-            await page.screenshot(path=SHOTS / f"demo-{scheme}-3-approve.png")
+            await page.screenshot(path=SHOTS / f"demo-{scheme}-3-approve{OFF}.png")
             await slack.get_by_role("button", name="Send", exact=True).click()
             await expect(slack).to_have_count(0)
             await expect(page.locator(".toast", has_text="Sent on Slack.")).to_be_visible()
@@ -135,7 +149,7 @@ async def run(scheme: str):
                 "n.getBoundingClientRect().right > v.getBoundingClientRect().right + 1)"
             )
             assert not wide, "nothing runs past the review view"
-            await page.screenshot(path=SHOTS / f"demo-{scheme}-3-review.png")
+            await page.screenshot(path=SHOTS / f"demo-{scheme}-3-review{OFF}.png")
             await rows.last.get_by_role("button", name="✕ Remove").click()
             await view.locator("footer button.send").click()
             await expect(view).to_have_count(0)
@@ -172,7 +186,7 @@ async def run(scheme: str):
                 page.locator("#timeline .event.done", has_text="Fix the flaky login test")
             ).to_contain_text("finished")
             log("results wait for review: compact, verified criteria apart from claimed ones")
-            await page.screenshot(path=SHOTS / f"demo-{scheme}-4-review.png")
+            await page.screenshot(path=SHOTS / f"demo-{scheme}-4-review{OFF}.png")
 
             await fix.locator(".actions .more-button").click()
             await fix.get_by_role("menuitem", name="Copy report").click()
@@ -194,7 +208,7 @@ async def run(scheme: str):
             await changes.locator(".diff-compose textarea").fill("Call the clock parameter now.")
             await changes.get_by_role("button", name="Comment").click()
             await expect(changes.locator("footer")).to_contain_text("1 comment")
-            await page.screenshot(path=SHOTS / f"demo-{scheme}-5-changes.png")
+            await page.screenshot(path=SHOTS / f"demo-{scheme}-5-changes{OFF}.png")
             await changes.get_by_role("button", name="Send to the worker").click()
             await expect(changes).to_have_count(0)
             await expect(fix).to_contain_text("Review comments on your changes", timeout=30000)
@@ -239,6 +253,21 @@ async def run(scheme: str):
             )
             log("changed a decision: the affected result was redone, and its worker confirmed")
 
+            # Settings → General: the switch for where other Copilot sessions stand, on by default.
+            await page.click("#settings-button")
+            await page.click("#settings-tabs [data-tab=general]")
+            switch = page.locator("#settings-form input[name=other_sessions]")
+            line = page.locator("#settings-form label.check").filter(
+                has=page.locator("input[name=other_sessions]")
+            )
+            await expect(line).to_have_text("Show where my other Copilot sessions stand")
+            assert await switch.is_checked() is OTHERS
+            await page.locator("#settings-dialog").screenshot(
+                path=SHOTS / f"demo-{scheme}-5-settings-general{OFF}.png"
+            )
+            await page.click("#settings-cancel")
+            log("Settings → General: one switch line for other Copilot sessions")
+
             # Learn now: "Learning…" at once in the open dialog, then how it went.
             await page.click("#settings-button")
             await page.click("#settings-tabs [data-tab=you]")
@@ -258,7 +287,7 @@ async def run(scheme: str):
             lessons = page.locator("#needs .card.lessons")
             await expect(lessons).to_be_visible(timeout=30000)
             await expect(lessons).to_contain_text("because you said")
-            await page.screenshot(path=SHOTS / f"demo-{scheme}-5-lessons.png")
+            await page.screenshot(path=SHOTS / f"demo-{scheme}-5-lessons{OFF}.png")
             rows = lessons.locator("li")
             texts = await rows.evaluate_all(
                 "rs => rs.map((r) => (r.querySelector('textarea, input[type=text]') || {}).value"
@@ -277,7 +306,7 @@ async def run(scheme: str):
             await expect(page.locator("#lessons")).to_contain_text("pricing for a team of 50")
             await expect(page.locator("#lessons")).not_to_contain_text("Rate-limit")
             await expect(page.locator("#agreement")).to_contain_text("recommendations you took")
-            await page.screenshot(path=SHOTS / f"demo-{scheme}-5-learned.png")
+            await page.screenshot(path=SHOTS / f"demo-{scheme}-5-learned{OFF}.png")
             await page.click("#settings-cancel")
             log("learned from the owner's feedback; the owner kept one lesson of two")
 
@@ -288,24 +317,52 @@ async def run(scheme: str):
             await expect(page.locator("#focus-summary")).to_contain_text("While you focused")
             log("focused, then got one summary")
 
-            # A session open in the owner's terminal: shown read-only, never taken over.
-            await page.locator("#external summary").click()
-            await page.locator("#external-list .item", has_text="Profile the slow orders").click()
+            # A session open in the owner's terminal: shown read-only, never taken over. With
+            # the setting on, the group starts unfolded and says where each stands: this one
+            # asks the owner something, the other finished.
+            group = page.locator("#external")
+            asking = page.locator("#external-list .item", has_text="Profile the slow orders")
+            closed = page.locator("#external-list .item", has_text="Write the API changelog")
+            if OTHERS:
+                await expect(group).to_have_attribute("open", "")
+                await expect(asking.locator(".dot")).to_have_class("dot waiting", timeout=15000)
+                await expect(closed.locator(".dot")).to_have_class("dot done")
+                await expect(asking).to_have_attribute("aria-label", re.compile("asks you, for"))
+                await page.locator("#sidebar").screenshot(
+                    path=SHOTS / f"demo-{scheme}-6-others{OFF}.png"
+                )
+                log("other Copilot sessions: one asks you, one finished")
+            else:
+                assert await group.get_attribute("open") is None, "folded, as before"
+                await page.locator("#external summary").click()
+            await asking.click()
             await expect(page.locator("#panel")).to_be_hidden()
             await expect(page.locator("#back-home")).to_be_visible()
             await expect(page.locator(".external-history")).to_contain_text("ten times faster")
-            await expect(page.locator("#session-meta")).to_contain_text("Open in a terminal")
+            working = page.locator(".external-history .working-line")
+            if OTHERS:
+                await expect(page.locator("#session-meta")).to_contain_text("Asks you since")
+                await expect(page.locator(".external-history > :last-child")).to_have_text(
+                    "Asks you: Batch the order-line queries in app/orders.py now?"
+                )
+                await expect(working).to_be_hidden()  # The question in its place.
+            else:
+                await expect(page.locator("#session-meta")).to_contain_text("Open in a terminal")
+                await expect(working).to_have_text("Working in a terminal…")
             await expect(page.locator("#composer-note")).to_contain_text("exit it there (/exit)")
             await expect(page.locator("#composer-input")).to_be_hidden()
-            await page.screenshot(path=SHOTS / f"demo-{scheme}-6-terminal.png")
+            await page.screenshot(path=SHOTS / f"demo-{scheme}-6-terminal{OFF}.png")
             log("opened a session that is open in a terminal, read-only")
 
             # An older session of the owner's: a message continues it here.
-            await page.locator("#external-list .item", has_text="Write the API changelog").click()
+            await closed.click()
+            await expect(page.locator("#session-meta")).to_contain_text(
+                "Finished at" if OTHERS else "Not managed yet"
+            )
             history = page.locator(".external-history")
             await expect(history).to_contain_text("CHANGELOG.md, not committed yet")
             await expect(history.locator(".steps .said")).to_contain_text("Reading the recent")
-            await page.screenshot(path=SHOTS / f"demo-{scheme}-6-other-session.png")
+            await page.screenshot(path=SHOTS / f"demo-{scheme}-6-other-session{OFF}.png")
             await page.fill("#composer-input", "Commit it")
             await page.press("#composer-input", "Enter")
             continued = page.locator("#session-list .item", has_text="Write the API changelog")
@@ -319,7 +376,7 @@ async def run(scheme: str):
 
             await page.locator(".home-item").click()
             await expect(page.locator("#timeline")).to_contain_text("Started three tasks")
-            await page.screenshot(path=SHOTS / f"demo-{scheme}-7-chat.png")
+            await page.screenshot(path=SHOTS / f"demo-{scheme}-7-chat{OFF}.png")
             assert not errors, errors
             await browser.close()
     except BaseException:

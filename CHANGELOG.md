@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.1.38 (2026-11-11)
+
+Where your other Copilot sessions stand, in the sidebar.
+
+- **Where your other Copilot sessions stand**: the sidebar's *Other Copilot sessions* says, for
+  each, whether it asks you something, it is your turn, it works, it made no progress for 15
+  minutes, it is idle, finished or stopped: in the row's dot and small word, its tooltip and the
+  first line of its view, which ends with the question while it asks. Read from the logs Copilot
+  keeps on this computer: no model call, nothing stored or sent. At most five rows at rest, those
+  waiting for you first, the rest under *N more*; the group starts unfolded the first time, then
+  stays as you leave it. A status shows only while it is known to be current. On by default:
+  *Show where my other Copilot sessions stand* in Settings → General turns it off.
+- **A session title or message cut in the middle of an emoji** no longer breaks the sidebar's
+  *Other Copilot sessions* list, the view behind one of its rows, a worker's timeline read from its
+  log (open in a terminal, or adopted), nor the Router's list of your sessions open in a terminal:
+  the half emoji shows as "?". Nothing sent to the page can end its live updates that way.
+- **Other Copilot sessions' heading fits on one line** in the sidebar: how many are open (else how
+  many there are) on the right, as the rows say theirs, the full count in its tooltip. It wrapped
+  into four short lines.
+
 ## 0.1.37 (2026-11-10)
 
 Fixes found in a security review and in live runs.

@@ -498,7 +498,10 @@ export function compactPaths(text, cwd) {
   return home ? result.replaceAll(home, "~") : result;
 }
 export function ago(iso) {
-  const seconds = (Date.now() - new Date(iso).getTime()) / 1000;
+  return span((Date.now() - new Date(iso).getTime()) / 1000);
+}
+// How long, in the sidebar's units: "now", "12m", "3h", "2d".
+export function span(seconds) {
   if (seconds < 60) return "now";
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
   if (seconds < 86400) return `${Math.floor(seconds / 3600)}h`;

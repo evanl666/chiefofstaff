@@ -77,6 +77,7 @@ from .habits import Habits
 from .learning import Learning
 from .models import AS_SAVED, Attachment, Settings
 from .notify import mac_notification
+from .others import Others
 from .peers import Peers
 from .policy import GITHUB_MCP, within
 from .roles import ROUTER, SLACK, WATCHDOG, WORKER
@@ -363,6 +364,8 @@ class Runtime:
         self.abilities = Abilities(self)
         self.connector = Connector(self)
         self.storage = Storage(self)
+        # Where the owner's other Copilot sessions stand (the sidebar), while the setting is on.
+        self.others = Others(self)
         self.toolset = Tools(self)
         self.tools = self.toolset.definitions()
 
@@ -383,6 +386,7 @@ class Runtime:
             await source.start()
         self.watch_job = asyncio.create_task(self.watch_loop())
         self.mirror_job = asyncio.create_task(self.workers.mirror_loop())
+        self.others.start()
         await self.habits.start()
         await self.connector.start()
         self.background(self.abilities.sync())
@@ -398,6 +402,7 @@ class Runtime:
             if job:
                 job.cancel()
                 await asyncio.gather(job, return_exceptions=True)
+        await self.others.stop()
         for source in self.all_sources():
             await source.stop()
         await self.habits.stop()
@@ -3157,6 +3162,9 @@ class Runtime:
         }
 
     async def settings_changed(self, old: Settings, new: Settings):
+        if old.other_sessions != new.other_sessions:
+            # First, before anything awaits: once the save returns, nothing more is told.
+            self.others.switch(new.other_sessions)
         defaults = ("model", "role_models", "role_efforts")
         if any(getattr(old, key) != getattr(new, key) for key in defaults):
             # Models and efforts chosen now are tried, even where Copilot refused one before.
