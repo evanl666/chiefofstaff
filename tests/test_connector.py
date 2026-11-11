@@ -986,10 +986,10 @@ async def test_only_a_whole_message_the_owner_wrote_names_the_code_of_a_reply(tm
     connector.own_dm_read = [
         {"ts": str(start + 1), "text": f"{carol} send it now, not later"},
         {"ts": str(start + 2), "text": f"[{dan}]: no"},
-        {"ts": str(start + 3), "text": "no"},
+        {"ts": str(start + 2.5), "text": "no"},
     ]
     assert place(erin, "now") == asked, "a word of a message is not the message"
-    assert place(erin, "no", when(3)) == asked, "the one written then names no code"
+    assert place(erin, "no", when(2.5)) == asked, "the one written then names no code"
     assert place("", "no", when(2)) == [dan]
     assert place(erin, "no") == asked, "of two, one names no code"
     assert place(dan, "no") == [dan], "the owner wrote it so"

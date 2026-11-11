@@ -2605,7 +2605,8 @@ class Connector:
             if loose_words(rest) == said:
                 found.append((float(entry["ts"]), codes))
         at = epoch(reply.at) if reply.at else 0
-        if len(found) > 1 and (then := [one for one in found if abs(one[0] - at) < 1]):
+        # Its time as the messenger was shown it (to the microsecond); one rounded narrows nothing.
+        if len(found) > 1 and (then := [one for one in found if abs(one[0] - at) < 0.001]):
             found = then
         return [codes for _, codes in found]
 
