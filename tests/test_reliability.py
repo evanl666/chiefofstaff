@@ -11,7 +11,7 @@ import pytest
 from conftest import Harness, call_tool, settle
 
 from chiefofstaff.models import DraftDecision, Settings
-from chiefofstaff.workspaces import changes, checkout_git, protected_git_paths
+from chiefofstaff.workspaces import changes, checkout_git, command, protected_git_paths
 
 
 async def spawn(runtime, router, title, **extra):
@@ -217,6 +217,17 @@ async def test_a_worker_cannot_point_chief_of_staffs_git_at_its_own_config(tmp_p
     assert (await changes(checkout))["branch"] == "chief/x", "its work is still read"
     paths = protected_git_paths(str(repo / ".git"), [checkout])
     assert str(repo / ".git" / "commondir") in paths
+
+
+async def test_commands_chief_of_staff_runs_never_see_its_own_variables(monkeypatch):
+    # A git filter or helper a repository configured runs in what git runs: a token Chief of
+    # Staff holds in its environment must not reach it.
+    monkeypatch.setenv("CHIEFOFSTAFF_SLACK_USER_TOKEN", "xoxp-secret")
+    monkeypatch.setenv("KEEP_ME", "1")
+    seen = await command("sh", "-c", "env")
+    assert "xoxp-secret" not in seen and "CHIEFOFSTAFF_" not in seen
+    assert "KEEP_ME=1" in seen
+    assert "GIT_TERMINAL_PROMPT=0" in (await command("sh", "-c", "env", env={"A": "b"}))
 
 
 async def test_a_clone_whose_config_would_run_code_is_not_read(tmp_path):

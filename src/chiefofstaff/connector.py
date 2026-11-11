@@ -408,6 +408,11 @@ def epoch(when: str) -> float:
     return moment.timestamp()
 
 
+def loose_words(text: str) -> str:
+    """Words as compared: case, spacing and the punctuation around them aside."""
+    return " ".join(text.lower().split()).strip(" :;,.!?-\u2013\u2014\u00b7|")
+
+
 def watch_key(what: str) -> str:
     """A watch by what it watches (renumbering or reordering watches does not reset it)."""
     return hashlib.sha256(" ".join(what.lower().split()).encode()).hexdigest()[:16]
@@ -810,6 +815,9 @@ class Connector:
         self.job: asyncio.Task | None = None
         self.lock = asyncio.Lock()
         self.last_seen = time.time()  # The owner's last activity in the app.
+        # What the owner wrote in their own Slack DM, as Chief of Staff last read it itself (not
+        # as the messenger copied it): which code a reply names (see place_codeless).
+        self.own_dm_read: list[dict] = []
 
     async def start(self):
         self.job = asyncio.create_task(self.loop())
@@ -2018,6 +2026,7 @@ class Connector:
             if news is None and time.time() - ran < runs_every:
                 return  # It could not be read here: the messenger looks, at its own pace.
         self.store.set("away_ran_at", str(time.time()))
+        self.own_dm_read = []  # What this run reads there, not an earlier run.
         where = self.store.get("away_where") or "the conversation you sent Chief of Staff's "
         # Kept as the owner reads it ("your own Slack DM"); the messenger reads it as theirs.
         where = re.sub(r"\byour\b", "the owner's", where, flags=re.IGNORECASE)
@@ -2302,6 +2311,7 @@ class Connector:
             self.store.delete("away_dm_reading")
             if found:
                 self.store.set("away_dm_looked", str(max(float(e["ts"]) for e in found)))
+        self.own_dm_read = [{"ts": entry["ts"], "text": entry["text"]} for entry in found]
         if not found:
             return "No reply from the owner there yet." + limited
         newest = str(max(float(entry["ts"]) for entry in found))
@@ -2556,6 +2566,17 @@ class Connector:
             if (code and code in named) or named & known:
                 placed.append(reply)
                 continue
+            # The messenger may leave the code out of the owner's words: their own message, as
+            # Chief of Staff read it, says which; never the messenger's code for it.
+            own = self.own_dm_codes(reply, known)
+            named = set().union(*own)
+            if code and code in named:
+                placed.append(reply)
+                continue
+            waiting = named - set(self.used_codes())
+            if own and all(own) and len(named) == 1 and waiting:
+                placed.append(reply.model_copy(update={"code": waiting.pop()}))
+                continue
             # It names no code: whatever code the messenger gave it, it answers the only one open
             # then; with several, the owner is asked which.
             codes = self.followed_codes(epoch(reply.at))
@@ -2564,6 +2585,29 @@ class Connector:
             elif codes:
                 unsure.append((reply, codes))
         return placed, unsure
+
+    def own_dm_codes(self, reply: OwnerReply, known: set[str]) -> list[set[str]]:
+        """The codes of each message the owner wrote in their own Slack DM that is this reply,
+        whole, with its codes left out ("no, I'll answer Bob myself" is "S443M no, I'll answer Bob
+        myself"; "no" is not "AAAAA no, not now"), from what Chief of Staff read there itself in
+        this run; of several, the one written when the reply was, if one is. Nothing for a way
+        only the messenger reads: there its copy is all there is."""
+        said = loose_words(reply.text)
+        if not said:
+            return []
+        found = []
+        for entry in self.own_dm_read:
+            codes = {name.upper() for name in ANY_CODE.findall(entry["text"])} & known
+            rest = ANY_CODE.sub(
+                lambda name, codes=codes: "" if name.group(1).upper() in codes else name.group(0),
+                entry["text"],
+            )
+            if loose_words(rest) == said:
+                found.append((float(entry["ts"]), codes))
+        at = epoch(reply.at) if reply.at else 0
+        if len(found) > 1 and (then := [one for one in found if abs(one[0] - at) < 1]):
+            found = then
+        return [codes for _, codes in found]
 
     async def ask_which(self, reply: OwnerReply, codes: list[str]) -> str:
         """A reply that names no code after a notification with several: the owner is asked

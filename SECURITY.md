@@ -68,8 +68,16 @@ sandbox. Add only what you would install for yourself.
 
 ## The web UI
 
-- It listens on `127.0.0.1` only. Opening it needs the launch URL's one-time token, which becomes
-  an `HttpOnly`, `SameSite=Strict` cookie.
+- It listens on `127.0.0.1` only, and answers only requests addressed to `127.0.0.1` or
+  `localhost` (a page on another name that resolves there is refused).
+- Opening it needs the key in the private launch URL, new each time Chief of Staff starts (also
+  kept in the data directory's `launch-url` file, readable only by you). The page keeps the key in
+  its own storage and sends it in a header with every request, or in the address only for the
+  event stream, where a browser cannot send a header and which is never shown or opened. Images
+  and files you attached are fetched with the header and shown from addresses of the page itself,
+  so no link, copied address or history entry carries the key; the server accepts the key in no
+  other address. It is never a cookie: a browser would send a cookie for `127.0.0.1` to every
+  server on it.
 - Requests that change anything must come from the same origin; responses carry a strict
   Content-Security-Policy.
 

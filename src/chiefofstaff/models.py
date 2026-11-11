@@ -1,4 +1,5 @@
 import json
+import os
 import re
 from contextlib import suppress
 from pathlib import Path
@@ -131,30 +132,42 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
 
+def copilot_folders(home: Path) -> list[Path]:
+    """Copilot's own folder: ~/.copilot, and the one COPILOT_HOME names when it is set (where the
+    CLI then keeps everything)."""
+    folders = [home / ".copilot"]
+    if configured := os.environ.get("COPILOT_HOME"):
+        folders.append(Path(configured).expanduser().resolve())
+    return list(dict.fromkeys(folders))
+
+
 def private_folders(home: Path) -> list[Path]:
     """Never writable by workers: SSH keys, and Copilot's settings, sign-ins, session logs and
     plugin code (hooks run from there outside the sandbox). A plugin's own data folder, such as
     a journal in ~/.copilot/<name>, may be opened."""
-    copilot = home / ".copilot"
+    names = (
+        "session-state",
+        "mcp-oauth-config",
+        "installed-plugins",
+        "servers",
+        "ide",
+        "logs",
+        "pkg",
+        "marketplaces",
+    )
     return [
         home / ".ssh",
         home / "Library" / "Caches" / "copilot",
         *(
-            copilot / name
-            for name in (
-                "session-state",
-                "mcp-oauth-config",
-                "installed-plugins",
-                "servers",
-                "ide",
-                "logs",
-                "pkg",
-                "marketplaces",
+            found
+            for copilot in copilot_folders(home)
+            for found in (
+                *(copilot / name for name in names),
+                *copilot.glob("*.json"),
+                *copilot.glob("*.db*"),
+                *copilot.glob("*.lock"),
             )
         ),
-        *copilot.glob("*.json"),
-        *copilot.glob("*.db*"),
-        *copilot.glob("*.lock"),
     ]
 
 
@@ -494,7 +507,7 @@ class Settings(StrictModel):
             home = Path.home().resolve()
             if path == Path(path.anchor) or home.is_relative_to(path):
                 raise ValueError("The sandbox cannot open your whole home or a folder above it.")
-            if path == home / ".copilot" or any(
+            if path in copilot_folders(home) or any(
                 private.is_relative_to(path) or path.is_relative_to(private)
                 for private in private_folders(home)
             ):

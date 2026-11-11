@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from conftest import Harness, call_tool, settle
 
-from chiefofstaff.connector import after_hours, in_hours
+from chiefofstaff.connector import OwnerReply, after_hours, in_hours
 from chiefofstaff.models import DraftDecision, Settings, Watch
 from chiefofstaff.runtime import CONNECTOR_TOOLS
 from chiefofstaff.store import now
@@ -887,6 +887,123 @@ async def test_a_failed_test_send_is_said_as_the_test(tmp_path):
     assert not any("while you were away" in text for text in said)
     assert any("The test notification did not reach you: no bot" in text for text in said)
     assert harness.store.get("away_failing") != "1", "a real one failing later is still said"
+
+
+async def test_a_code_the_messenger_left_out_is_read_from_the_owner_s_own_dm(tmp_path):
+    """Live run r39: the owner replied "S443M no, I'll answer Bob myself" in their own Slack DM;
+    the messenger passed the reply on as "no, I'll answer Bob myself", and with two items
+    waiting the owner was asked which one. Chief of Staff read that message itself: the code
+    in it counts, never the messenger's code for it. Words the owner never wrote, or wrote
+    with no code, name nothing."""
+    settings = Settings(away_notify=True, away_how="send it to my own Slack DM", slack_enabled=True)
+    harness = Harness(tmp_path / "data", settings)
+    runtime = await away(harness)
+    for name in ("Carol", "Dan", "Erin"):
+        writer = await spawn(runtime, harness.router_id, f"Answer {name}")
+        await call_tool(runtime, "draft_reply", writer, text="friday works", to=name,
+                        where="email")  # fmt: skip
+    await runtime.connector.notify_away()
+    await settle(runtime)
+    messenger = runtime.toolset.last_special("messenger")["id"]
+    harness.mcp.sent_link = "https://acme.slack.com/archives/D0SELF001/p1712345678000200"
+    await call_tool(runtime, "send_owner_slack_dm", messenger, version="A")
+    [sent] = [args for tool, args in harness.mcp.calls if tool == "slack_send_message"]
+    carol, dan, erin = (code_in(sent["message"], name) for name in ("Carol", "Dan", "Erin"))
+    await call_tool(runtime, "report_notified", messenger, ok=True, where="your own Slack DM",
+                    method="send_owner_slack_dm", replies="read_owner_slack_dm")  # fmt: skip
+    dm = "Channel: <#D0SELF001> | From: <@U0OWNER1> (Me) | ts: {} | Text: {}\nPermalink: x\n"
+    harness.mcp.reads["D0SELF001"] = "".join(
+        dm.format(f"17123456{90 + n}.000100", text)
+        for n, text in enumerate(
+            [
+                "never mind Carol for now",
+                f"{carol} no, I'll write it myself, tell them",
+                f"{dan} no, I'll write it myself",
+            ]
+        )
+    )
+    await call_tool(runtime, "read_owner_slack_dm", messenger)
+
+    def pending():
+        return {d["target"].get("to") for d in harness.store.drafts() if d["status"] == "pending"}
+
+    async def report(code, text):
+        replies = [{"code": code, "text": text, "intent": "no"}]
+        done = await call_tool(runtime, "report_owner_replies", messenger, replies=replies)
+        assert done.result_type == "success", done.text_result_for_llm
+
+    await report(carol, "no, something the owner never wrote")
+    await report(carol, "never mind Carol for now")
+    assert pending() == {"Carol", "Dan", "Erin"}, "nothing the owner wrote names a code"
+    await report(dan, "no, I'll write it myself")
+    assert pending() == {"Carol", "Erin"}, "the whole message: not the longer one holding it"
+    await report(erin, "no, I'll write it myself, tell them")
+    assert pending() == {"Erin"}, "the code the owner wrote, not the messenger's"
+    said = [m["text"] for m in harness.store.messages(harness.router_id) if m["kind"] == "notice"]
+    assert any(f"[{carol}] no, I'll write it myself, tell them" in text for text in said), said
+    # Code review: what an earlier run read named codes for a later run's replies.
+    harness.session(messenger).emit("session.idle")
+    await settle(runtime)
+    harness.mcp.reads["D0SELF001"] += dm.format("1712345699.000100", "one more thing")
+    harness.store.set("away_read_at", "0")
+    runs = len(runtime.tasks.for_session(messenger))
+    await runtime.connector.read_replies()
+    await settle(runtime)
+    assert len(runtime.tasks.for_session(messenger)) == runs + 1, "a new run"
+    assert runtime.connector.own_dm_read == [], "it reads for itself"
+
+
+async def test_only_a_whole_message_the_owner_wrote_names_the_code_of_a_reply(tmp_path):
+    """Code review: "no" was any message holding it ("AAAAA send it now") and went to that code,
+    one answered already, instead of asking which. Only a whole message is the reply; of two
+    with its words, the one written when it was; an answered code is never given to one."""
+    settings = Settings(away_notify=True, away_how="send it to my own Slack DM", slack_enabled=True)
+    harness = Harness(tmp_path / "data", settings)
+    runtime = await away(harness)
+    for name in ("Carol", "Dan", "Erin"):
+        writer = await spawn(runtime, harness.router_id, f"Answer {name}")
+        await call_tool(runtime, "draft_reply", writer, text="friday works", to=name,
+                        where="email")  # fmt: skip
+    await runtime.connector.notify_away()
+    await settle(runtime)
+    messenger = runtime.toolset.last_special("messenger")["id"]
+    harness.mcp.sent_link = "https://acme.slack.com/archives/D0SELF001/p1712345678000200"
+    await call_tool(runtime, "send_owner_slack_dm", messenger, version="A")
+    [sent] = [args for tool, args in harness.mcp.calls if tool == "slack_send_message"]
+    carol, dan, erin = (code_in(sent["message"], name) for name in ("Carol", "Dan", "Erin"))
+    await call_tool(runtime, "report_notified", messenger, ok=True, where="your own Slack DM",
+                    method="send_owner_slack_dm", replies="read_owner_slack_dm")  # fmt: skip
+    connector, known, start = runtime.connector, {carol, dan, erin}, time.time() + 5
+
+    def when(second):
+        return datetime.fromtimestamp(start + second, UTC).isoformat()
+
+    def place(code, text, at=""):
+        placed, unsure = connector.place_codeless([OwnerReply(code=code, text=text, at=at)], known)
+        return [reply.code for reply in placed] or [sorted(codes) for _, codes in unsure]
+
+    asked = [sorted(known)]
+    connector.own_dm_read = [
+        {"ts": str(start + 1), "text": f"{carol} send it now, not later"},
+        {"ts": str(start + 2), "text": f"[{dan}]: no"},
+        {"ts": str(start + 3), "text": "no"},
+    ]
+    assert place(erin, "now") == asked, "a word of a message is not the message"
+    assert place(erin, "no", when(3)) == asked, "the one written then names no code"
+    assert place("", "no", when(2)) == [dan]
+    assert place(erin, "no") == asked, "of two, one names no code"
+    assert place(dan, "no") == [dan], "the owner wrote it so"
+    assert place("", "send it now, not later") == [carol], "words of five letters are words"
+    used = {"at": time.time(), "item": "x", "outcome": "sent"}
+    harness.store.set(f"awayused:{dan}", json.dumps(used))
+    assert place("", "no", when(2)) == asked, "never given to a code answered already"
+    connector.own_dm_read = [
+        {"ts": str(start + 4), "text": f"{carol} no"},
+        {"ts": str(start + 5), "text": f"{erin} no"},
+    ]
+    assert place("", "no") == asked, "two codes: the owner says which"
+    connector.own_dm_read = []
+    assert place(carol, "send it now, not later") == asked, "nothing read: the messenger's copy"
 
 
 async def test_away_the_owner_is_reached_in_their_own_slack_dm(tmp_path):

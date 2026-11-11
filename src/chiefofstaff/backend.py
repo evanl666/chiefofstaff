@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from copilot import CopilotClient, RuntimeConnection
+from copilot.client import SessionMetadata
 from copilot.generated.rpc import (
     MCPOauthLoginRequest,
     QueueRemoveAtRequest,
@@ -179,6 +180,18 @@ TESTED_CLI = "1.0.107"
 OLDEST_CLI = "1.0.100"
 
 
+# What Chief of Staff calls itself to Copilot (work-buddy: its earlier name), which the CLI keeps
+# with each session as the client that made it and the one that last resumed it.
+OWN_CLIENTS = frozenset({"chiefofstaff", "work-buddy"})
+
+
+def made_by_us(item: dict) -> bool:
+    """A session Chief of Staff made, under any data directory, that no other client (a terminal)
+    has resumed since."""
+    made = item.get("clientName") or ""
+    return made in OWN_CLIENTS and (item.get("lastClientName") or made) in OWN_CLIENTS
+
+
 class CopilotBackend:
     """GitHub Copilot through its Python SDK: one CLI process runs every session."""
 
@@ -230,7 +243,18 @@ class CopilotBackend:
         return await self.client.list_models()
 
     async def list_sessions(self) -> list[Any]:
-        return await self.client.list_sessions()
+        """Every session, each marked `made_by_us` (see made_by_us): the SDK's list leaves out
+        which client made a session, the CLI's answer has it. Unmarked when that cannot be read."""
+        try:
+            answer = await self.client._client.request("session.list", {})  # type: ignore[union-attr]
+            listed = []
+            for item in answer.get("sessions", []):
+                meta = SessionMetadata.from_dict(item)
+                meta.made_by_us = made_by_us(item)  # type: ignore[attr-defined]
+                listed.append(meta)
+            return listed
+        except Exception:
+            return await self.client.list_sessions()
 
     async def get_session_metadata(self, session_id: str) -> Any:
         return await self.client.get_session_metadata(session_id)

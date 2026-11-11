@@ -13,12 +13,19 @@ from conftest import FakeSession, Harness, call_tool, env, said, settle, task_of
 
 from chiefofstaff import backend as backend_module
 from chiefofstaff import delivery as delivery_module
-from chiefofstaff.backend import USAGE_RECORD, read_log, scan_log, sessions_in_use
+from chiefofstaff.backend import (
+    USAGE_RECORD,
+    CopilotBackend,
+    read_log,
+    scan_log,
+    sessions_in_use,
+)
 from chiefofstaff.models import DraftDecision, Settings
 from chiefofstaff.policy import permission_denial
 from chiefofstaff.runtime import ROUTER_TOOLS
 from chiefofstaff.sources.github import marked
 from chiefofstaff.tasks import settle_followups
+from chiefofstaff.workers import turn_open
 
 
 async def test_router_routes_work_and_worker_reports_back(harness):
@@ -847,6 +854,15 @@ async def test_external_sessions_can_be_adopted(harness, tmp_path):
             modified_time=datetime(2026, 10, 2, tzinfo=UTC),
             context=None,
         ),
+        # Chief of Staff's own worker under another data directory (a test run's).
+        SimpleNamespace(
+            session_id="other-data-dir",
+            summary="Fix the flaky test",
+            is_remote=False,
+            modified_time=datetime(2026, 10, 3, tzinfo=UTC),
+            context=None,
+            made_by_us=True,
+        ),
     ]
     items = await runtime.workers.external(refresh=True)
     assert [item["id"] for item in items] == ["ext-1"]
@@ -1620,6 +1636,71 @@ async def test_other_sessions_show_their_latest_conversation(harness):
         {"kind": "owner", "text": "Shorter"},
         {"kind": "narration", "text": "Trimming."},
     ], "read on from the last look; said on the way to a step is narration"
+
+
+async def test_a_session_closed_in_the_middle_of_a_turn_is_not_working(harness):
+    runtime = await harness.connect()
+    # Its terminal closed during a turn: the log ends with the shutdown, no end of the turn.
+    harness.client.logs["ext-2"] = [
+        logged("user.message", content="Rename the module"),
+        logged("assistant.turn_end"),
+        logged("assistant.turn_start"),
+        logged("session.shutdown"),
+    ]
+    # Killed during a turn: not even a shutdown.
+    harness.client.logs["ext-3"] = [logged("assistant.turn_start")]
+    harness.client.log_changed = {"ext-2": time.time(), "ext-3": time.time()}
+    await runtime.workers.refresh_elsewhere()
+    for closed in ("ext-2", "ext-3"):
+        history = await runtime.workers.history(closed)
+        assert history["open"] is False and history["working"] is False, closed
+    # Open in a terminal with a turn going: at work, as before.
+    harness.client.in_use = {"ext-3": 4242}
+    await runtime.workers.refresh_elsewhere()
+    assert (await runtime.workers.history("ext-3"))["working"] is True
+    assert turn_open([logged("assistant.turn_start"), logged("session.shutdown")], False) is False
+
+
+async def test_the_cli_tells_which_sessions_chief_of_staff_made():
+    def item(session_id, made="", last=""):
+        found = {"sessionId": session_id, "startTime": "2026-11-01T00:00:00Z",
+                 "modifiedTime": "2026-11-01T00:00:00Z", "isRemote": False}  # fmt: skip
+        return (
+            found
+            | ({"clientName": made} if made else {})
+            | ({"lastClientName": last} if last else {})
+        )
+
+    answer = {"sessions": [
+        item("ours", "chiefofstaff", "chiefofstaff"), item("older-name", "work-buddy"),
+        item("terminal", "github/cli", "github/cli"),
+        item("taken-over", "chiefofstaff", "github/cli"),
+        item("adopted", "github/cli", "chiefofstaff"), item("unknown", "sdk"), item("unnamed"),
+    ]}  # fmt: skip
+
+    class Rpc:
+        fails = False
+
+        async def request(self, method, payload):
+            assert (method, payload) == ("session.list", {})
+            if self.fails:
+                raise RuntimeError("no such method")
+            return answer
+
+    class Client:
+        _client = Rpc()
+
+        async def list_sessions(self):
+            return ["from the SDK"]
+
+    backend = CopilotBackend(Client())  # type: ignore[arg-type]
+    listed = await backend.list_sessions()
+    assert {meta.session_id: meta.made_by_us for meta in listed} == {
+        "ours": True, "older-name": True, "terminal": False, "taken-over": False,
+        "adopted": False, "unknown": False, "unnamed": False,
+    }  # fmt: skip
+    Client._client.fails = True
+    assert await backend.list_sessions() == ["from the SDK"], "as before when it cannot be read"
 
 
 def test_a_first_look_at_a_long_log_reads_its_latest_events(tmp_path, monkeypatch):

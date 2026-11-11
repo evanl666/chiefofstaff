@@ -52,7 +52,9 @@ MIRROR_SECONDS = 3
 ELSEWHERE_EVERY = 3  # mirror rounds
 # A log that changed this recently means the session is busy (its sub-agents, say).
 BUSY_SECONDS = 20
-TURN_ENDS = {"assistant.turn_end", "session.idle", "session.error", "abort"}
+# session.shutdown: its process ended the session, a turn it started included (a terminal closed
+# in the middle of one).
+TURN_ENDS = {"assistant.turn_end", "session.idle", "session.error", "abort", "session.shutdown"}
 
 
 def own_event(event: dict) -> bool:
@@ -975,7 +977,9 @@ class Workers:
         for meta in sorted(
             listed, key=lambda m: (m.session_id in elsewhere, m.modified_time), reverse=True
         ):
-            if meta.session_id in managed or meta.is_remote:
+            # Chief of Staff's own, from another data directory (a test run's, an older
+            # install's): not the owner's to see, nor their words to learn from.
+            if meta.session_id in managed or meta.is_remote or getattr(meta, "made_by_us", False):
                 continue
             context = meta.context
             items.append(
@@ -1266,10 +1270,13 @@ class Workers:
         self.histories[session_id] = (after, entries, turn)
         while len(self.histories) > 20:
             self.histories.pop(next(iter(self.histories)))
+        # Open in no process, nothing can be at work in it, whatever its log ended with (a
+        # process killed in the middle of a turn writes no end).
+        open_now = session_id in self.runtime.elsewhere
         return {
             "entries": [{"kind": kind, "text": text[:20000]} for kind, text, _ in entries],
-            "open": session_id in self.runtime.elsewhere,
-            "working": turn or time.time() - changed < BUSY_SECONDS,
+            "open": open_now,
+            "working": open_now and (turn or time.time() - changed < BUSY_SECONDS),
         }
 
     async def refresh_elsewhere(self):

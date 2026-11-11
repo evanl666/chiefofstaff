@@ -49,7 +49,13 @@ def test_api_needs_the_launch_token_and_a_trusted_origin(app_client):
     )
     assert app_client.get("/api/state").status_code == 401, "the token comes with each request"
     assert app_client.get("/api/state", cookies={"chiefofstaff_8765": TOKEN}).status_code == 401
-    assert app_client.get(f"/api/state?key={TOKEN}").status_code == 200, "an image, the stream"
+    # In the address only for the event stream (a browser cannot send it a header): never for a
+    # link or an image, whose address would land in the history or a copied link.
+    assert app_client.get(f"/api/state?key={TOKEN}").status_code == 401
+    assert app_client.get(f"/api/attachments/shot.png?key={TOKEN}").status_code == 401
+    with app_client.stream("GET", f"/api/events?key={TOKEN}") as stream:
+        assert stream.status_code == 200
+        assert next(stream.iter_lines()) == 'data: {"type": "hello"}'
     sign_in(app_client)
     state = app_client.get("/api/state").json()
     assert state["runtime"]["state"] == "ready"

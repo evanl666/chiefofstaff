@@ -37,8 +37,11 @@ class TimedOutError(ValueError):
 async def command(
     *arguments: str, limit: float = 60, stdin_data: bytes | None = None, env: dict | None = None
 ) -> str:
-    """Run a command without a terminal (it can never wait for a password prompt)."""
-    env = {**os.environ, **(env or {}), "GIT_TERMINAL_PROMPT": "0", "GH_PROMPT_DISABLED": "1"}
+    """Run a command without a terminal (it can never wait for a password prompt), and without
+    Chief of Staff's own CHIEFOFSTAFF_* variables (a token one may hold): what it runs can run code
+    a repository or a worker configured (a git filter)."""
+    own = {key: value for key, value in os.environ.items() if not key.startswith("CHIEFOFSTAFF_")}
+    env = {**own, **(env or {}), "GIT_TERMINAL_PROMPT": "0", "GH_PROMPT_DISABLED": "1"}
     # ssh asks for passphrases and host keys on the terminal, not stdin: make it fail instead.
     env.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
     process = await asyncio.create_subprocess_exec(

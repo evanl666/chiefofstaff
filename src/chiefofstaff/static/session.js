@@ -1,6 +1,6 @@
 // The main pane: Home or one session, with its header, model settings and timeline.
 
-import { $, api, el, foldable, toast, withKey } from "./dom.js";
+import { $, api, blobLive, blobUrl, el, foldable, toast, whenNearScreen } from "./dom.js";
 import { clock, compactPaths, firstLine, gist, headOf, markdown, slackText, threadLabel } from "./text.js";
 import { byId, current, DELIVERY_WORDS, HOME, markRead, pendingDrafts, routerId, state, STATUS_TEXT, tasks, upsertSession, viewedId, workerTitle } from "./state.js";
 import { MARKERS } from "./board.js";
@@ -431,6 +431,35 @@ export function scrollToBottom(force = false) {
     scroller.scrollTop = scroller.scrollHeight;
   }
 }
+// An attached file, from a blob: address of this page (dom.js blobUrl), never one with the key:
+// an image shows once near the screen and opens full size; another file downloads on a click.
+function attachmentLink(file) {
+  const image = file.type?.startsWith("image/");
+  const link = el(
+    "a",
+    { href: "#", target: "_blank", rel: "noreferrer", title: file.name, download: image ? undefined : file.name },
+    image ? el("img", { alt: file.name, onload: imageLoaded }) : el("span", { class: "file", text: file.name }),
+  );
+  const load = () =>
+    blobUrl(file.url).then((url) => {
+      link.href = url;
+      const picture = link.querySelector("img");
+      if (picture) picture.src = url;
+    });
+  if (image) {
+    whenNearScreen(link, () => load().catch((error) => link.replaceChildren(el("span", { class: "file", text: file.name, title: error.message }))));
+  }
+  link.addEventListener("click", (event) => {
+    if (blobLive(link.getAttribute("href"))) return;
+    // Not loaded yet (a file, or an image off screen) or let go since: load it, then open or
+    // download it.
+    event.preventDefault();
+    load()
+      .then(() => link.click())
+      .catch((error) => toast(error.message, "error"));
+  });
+  return link;
+}
 // An image has no height until it loads: one that loads with the chat at its end keeps it there.
 function imageLoaded(event) {
   const scroller = $("#scroller");
@@ -680,13 +709,7 @@ function ownerMessage(text, meta = {}, time = "", delivery = "") {
       el(
         "div",
         { class: "attachments" },
-        ...files.map((file) =>
-          el(
-            "a",
-            { href: withKey(file.url), target: "_blank", rel: "noreferrer", title: file.name },
-            file.type?.startsWith("image/") ? el("img", { src: withKey(file.url), alt: file.name, loading: "lazy", onload: imageLoaded }) : el("span", { class: "file", text: file.name }),
-          ),
-        ),
+        ...files.map(attachmentLink),
       ),
     );
   }

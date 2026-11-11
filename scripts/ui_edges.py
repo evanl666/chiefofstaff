@@ -481,6 +481,47 @@ async def home(runtime, browser, failures: list[str]):
     # Served back by the server: it loads.
     await page.wait_for_function("img => img.complete && img.naturalWidth === 1", arg=image)
     log("images: picked, pasted and dropped, one removed; sent along; shown in the bubble")
+    # No address in the page carries the launch key (a link would put it in the history or a
+    # copied link): the image is fetched with the key in a header and shown from a blob: address.
+    assert (await image.get_attribute("src")).startswith("blob:")
+    keyed = await page.evaluate(
+        "() => [...document.querySelectorAll('[href], [src]')]"
+        ".map((n) => n.getAttribute('href') || n.getAttribute('src') || '')"
+        ".filter((value) => value.includes('key='))"
+    )
+    assert keyed == [], keyed
+    async with page.expect_popup() as opened:
+        await bubble.locator(".attachments a").first.click()
+    full = await opened.value
+    assert full.url.startswith("blob:") and "key=" not in full.url, full.url
+    await full.close()
+    # Code review: once 200 newer files were loaded, an image still on screen opened an address
+    # let go (nothing there); it is fetched again.
+    first = bubble.locator(".attachments a").first
+    evicted = await first.get_attribute("href")
+    await page.evaluate(
+        "async () => { const dom = await import('/static/dom.js');"
+        " for (let n = 0; n < 200; n++) await dom.blobUrl(`/static/favicon.svg?n=${n}`); }"
+    )
+    live = "async (address) => (await import('/static/dom.js')).blobLive(address)"
+    assert not await page.evaluate(live, evicted), "let go"
+    async with page.expect_popup() as opened:
+        await first.click()
+    again = await opened.value
+    await again.wait_for_load_state()
+    assert again.url.startswith("blob:") and again.url != evicted, again.url
+    assert await again.evaluate("() => document.images[0]?.naturalWidth === 1"), "it shows"
+    await again.close()
+    kept = await page.evaluate(
+        "async () => { const dom = await import('/static/dom.js');"
+        " const used = await dom.blobUrl('/static/favicon.svg?used');"
+        " for (let n = 0; n < 199; n++) await dom.blobUrl(`/static/favicon.svg?m=${n}`);"
+        " await dom.blobUrl('/static/favicon.svg?used');"
+        " await dom.blobUrl('/static/favicon.svg?newer');"
+        " return dom.blobLive(used); }"
+    )
+    assert kept, "the ones used last are kept, not the ones loaded last"
+    log("images: shown and opened full size from blob: addresses, never one with the key")
 
     # A reply only the owner can send (mail, say): copied, and marked sent, in one click.
     reply = store.create_draft(

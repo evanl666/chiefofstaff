@@ -57,10 +57,63 @@ function tooLongText({ input, ctx }) {
 const KEY = "cos.key";
 export const launchKey = () => localStorage.getItem(KEY) || "";
 export const rememberKey = (key) => localStorage.setItem(KEY, key);
-// A URL of ours the browser loads itself (an image, the event stream): with the token.
+// A URL of ours the browser loads itself where it cannot send a header (the event stream): with
+// the token. Never for a link or an image: an address with the key would land in the history, a
+// copied link or anything the page hands on (see blobUrl).
 export function withKey(url) {
   if (!url || !url.startsWith("/api/")) return url;
   return `${url}${url.includes("?") ? "&" : "?"}key=${encodeURIComponent(launchKey())}`;
+}
+// A file of ours (an attachment) fetched with the token in a header, as a blob: address of this
+// page: shown and opened from there, no address carries the key. The BLOBS used last are kept;
+// one let go is fetched again when asked for (see blobLive).
+const BLOBS = 200;
+const blobs = new Map();
+const live = new Set();
+export function blobUrl(url) {
+  const known = blobs.get(url);
+  if (known) {
+    blobs.delete(url);
+    blobs.set(url, known);
+    return known;
+  }
+  const pending = fetch(url, { headers: { "X-Chief-Key": launchKey() }, credentials: "omit" }).then((response) => {
+    if (!response.ok) throw new Error(response.status === 404 ? "That file is no longer here." : `Could not load the file (${response.status}).`);
+    return response.blob().then((blob) => {
+      const address = URL.createObjectURL(blob);
+      live.add(address);
+      return address;
+    });
+  });
+  blobs.set(url, pending);
+  pending.catch(() => blobs.delete(url));
+  if (blobs.size > BLOBS) {
+    const [oldest, gone] = blobs.entries().next().value;
+    blobs.delete(oldest);
+    gone.then((address) => {
+      live.delete(address);
+      URL.revokeObjectURL(address);
+    }, () => {});
+  }
+  return pending;
+}
+// Whether a blob: address from blobUrl still opens (one let go no longer does).
+export const blobLive = (address) => live.has(address);
+// Once a node comes near the screen (images load as they would with loading="lazy"). The observer
+// is made on first use: importing this module does nothing.
+const watching = new WeakMap();
+let nearScreen = null;
+export function whenNearScreen(node, callback) {
+  nearScreen ||= new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      nearScreen.unobserve(entry.target);
+      watching.get(entry.target)?.();
+      watching.delete(entry.target);
+    }
+  }, { rootMargin: "600px" });
+  watching.set(node, callback);
+  nearScreen.observe(node);
 }
 export async function api(path, { method = "GET", body } = {}) {
   const init = { method, headers: { "X-Chief-Key": launchKey() }, credentials: "omit" };

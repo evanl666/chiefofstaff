@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.1.37 (2026-11-10)
+
+Fixes found in a security review and in live runs.
+
+- **Your other Copilot sessions**: a session whose terminal closed in the middle of a turn no
+  longer shows as "Working in a terminal…"; it can be continued here. Sessions Chief of Staff made
+  under another data directory (a test run's, an older install's) are no longer listed as yours,
+  nor read as your own words when learning how you write.
+- **Sandbox**: with `COPILOT_HOME` set, its folder (sign-ins, session logs, plugins) can no longer
+  be made writable for workers under *Also writable in the sandbox*, as `~/.copilot` cannot.
+- **The launch key stays out of addresses**: images and files attached to your messages are
+  fetched with the key in a header and shown or opened from the page's own addresses, so opening
+  one, copying its link or your browser history no longer carries the key. Only the event stream
+  still has it in its address, which is never shown or opened, and the server accepts the key in
+  no other address.
+- **Chief of Staff's own variables stay its own**: the commands it runs (git, gh, checks) no
+  longer inherit its `CHIEFOFSTAFF_*` variables (a Slack token set there, say), so a git filter or
+  helper a repository configured cannot read them.
+- **Away replies in your own Slack DM**: a reply whose code the messenger left out ("no, I'll
+  answer Bob myself" for "S443M no, I'll answer Bob myself") is applied to the code you wrote,
+  from Chief of Staff's own reading of that message, instead of asking you which one. Only a
+  whole message of yours counts: a short "no" is never taken for a longer message holding it,
+  nor given to a code you answered already; when it could be several, you are asked as before.
+- **SECURITY.md** describes how the web UI's launch key is kept and sent (never a cookie).
+
 ## 0.1.36 (2026-11-10)
 
 An eleventh round from the owner's QA, and a report of a disk filled by workers' folders.

@@ -583,6 +583,21 @@ def test_folders_the_sandbox_never_opens():
     ]
 
 
+def test_a_copilot_home_set_elsewhere_is_never_opened_either(tmp_path, monkeypatch):
+    elsewhere = tmp_path / "copilot-home"
+    (elsewhere / "installed-plugins").mkdir(parents=True)
+    (elsewhere / "config.json").write_text("{}")
+    monkeypatch.setenv("COPILOT_HOME", str(elsewhere))
+    # Its plugins' hooks run outside the sandbox: a worker writing there would escape it.
+    for path in (elsewhere, elsewhere / "installed-plugins", elsewhere / "config.json"):
+        with pytest.raises(ValueError, match="The sandbox cannot open"):
+            Settings(sandbox_writable=[str(path)])
+    with pytest.raises(ValueError, match="The sandbox cannot open"):
+        Settings(sandbox_writable=["~/.copilot/session-state"])
+    journal = elsewhere / "journal"
+    assert Settings(sandbox_writable=[str(journal)]).sandbox_writable == [str(journal.resolve())]
+
+
 async def test_news_about_a_finished_task_does_not_reopen_it(harness):
     runtime = await harness.connect()
     worker = await spawn(runtime, harness.router_id, "Ship it")

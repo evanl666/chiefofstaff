@@ -171,10 +171,14 @@ def create_app(
         ):
             return JSONResponse({"detail": "Untrusted request origin."}, status_code=403)
         if path.startswith("/api/") and path not in {"/api/auth", "/api/health"}:
-            # The launch token, sent by the page in a header (or, where a browser cannot send
-            # one: the event stream, an image, in the query). Never a cookie: a browser sends
-            # cookies for 127.0.0.1 to every port on it, to any other local server too.
-            candidate = request.headers.get("x-chief-key") or request.query_params.get("key", "")
+            # The launch token, sent by the page in a header (or, for the event stream, where a
+            # browser cannot send one, in the query: nowhere else, so no link or image address
+            # carries it). Never a cookie: a browser sends cookies for 127.0.0.1 to every port on
+            # it, to any other local server too.
+            streamed = path == "/api/events" and request.method == "GET"
+            candidate = request.headers.get("x-chief-key") or (
+                request.query_params.get("key", "") if streamed else ""
+            )
             if not secrets.compare_digest(candidate.encode(), token.encode()):
                 return JSONResponse({"detail": "Open the private launch URL to sign in."}, 401)
         response = await call_next(request)
@@ -183,7 +187,7 @@ def create_app(
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; script-src 'self'; style-src 'self'; "
-            "connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; "
+            "connect-src 'self'; img-src 'self' data: blob:; frame-ancestors 'none'; "
             "base-uri 'none'; form-action 'self'"
         )
         return response
