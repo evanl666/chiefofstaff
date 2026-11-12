@@ -58,6 +58,7 @@ SETTINGS_FIELDS = {
 SETTINGS_FIELDS |= {
     "skill_folders", "plugins", "mcp_servers", "watches", "watch_hours", "watch_minutes",
     "watch_after_hours_minutes", "away_notify", "away_minutes", "away_how", "other_sessions",
+    "send_to_chief",
 }  # fmt: skip
 FORM_NAMES = SETTINGS_FIELDS - {"role_models", "role_efforts", "watches", "watch_hours"} | {
     "slack_token", "profile", "setup_notes", "report_footer",
@@ -4102,7 +4103,7 @@ async def main():
             for check in (home, memory, this_round, round_two, round_three, round_four,
                           round_five, round_six, round_seven, round_eight, round_nine,
                           round_ten, round_scale, round_qa, round_eleven,
-                          round_storage, round_mascot, round_others):  # fmt: skip
+                          round_storage, round_mascot, round_others, round_send):  # fmt: skip
                 if not only or check.__name__ in only:
                     await check(runtime, browser, failures)
             await browser.close()
@@ -5288,6 +5289,362 @@ async def round_others(runtime, browser, failures: list[str]):
         client.in_use.clear()
         await others_setting(runtime, True)
         await runtime.workers.refresh_elsewhere()
+
+
+async def round_send(runtime, browser, failures: list[str]):
+    """Send to Chief (docs/design/send-anywhere.md): what reached the Router from Slack, GitHub
+    and a watch reads on Home as it did before; the switch is one line at the end of Settings →
+    Connections whose consent unfolds in place, saved only with Turn on; on, a small line with
+    the command (or why the socket stays closed); a sent item is one line in the Router chat that
+    opens in place, and nothing else on Home."""
+    await send_pins(runtime, browser)
+    try:
+        for scheme in ("light", "dark"):
+            await send_setting(runtime, browser, scheme)
+        await send_home(runtime, browser)
+    finally:
+        await send_switch(runtime, False)
+
+
+async def until(check, seconds: float = 5):
+    """What the page changed on the server, once its request was answered."""
+    deadline = time.monotonic() + seconds
+    while not check():
+        assert time.monotonic() < deadline, "not in time"
+        await asyncio.sleep(0.05)
+
+
+async def send_switch(runtime, on: bool):
+    old = runtime.store.settings()
+    new = old.model_copy(update={"send_to_chief": on})
+    runtime.store.save_settings(new)
+    await runtime.settings_changed(old, new)
+
+
+async def send_setting(runtime, browser, scheme: str):
+    """The line: off, unfolding, cancelled, turned on, broken, turned off."""
+    from chiefofstaff import send
+
+    data = runtime.store.directory
+    socket_path = data / "send" / "socket"
+    context = await browser.new_context(
+        viewport={"width": 1280, "height": 900}, color_scheme=scheme
+    )
+    page = await context.new_page()
+    errors: list[str] = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.on("console", lambda note: errors.append(note.text) if note.type == "error" else None)
+    saved: list[dict] = []
+    page.on(
+        "request",
+        lambda r: saved.append(r.post_data_json) if r.url.endswith("/api/settings") else None,
+    )
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    await expect(page.locator("#application")).to_be_visible()
+    await page.locator("#settings-button").click()
+    await page.locator("#settings-tabs [data-tab=connections]").click()
+    tab = page.locator("#settings-pane .tab[data-tab=connections]")
+    line = tab.locator("#send-line")
+    switch = line.locator("input[name=send_to_chief]")
+    # Off: one line, the tab's last, after When you're away; nothing else of it.
+    last = await tab.evaluate(
+        "t => [...t.children].filter((n) => n.getBoundingClientRect().height > 0).at(-1).id"
+    )
+    assert last == "send-line", last
+    assert await tab.evaluate(
+        "t => t.querySelector('#conn-away').compareDocumentPosition(t.querySelector('#send-line'))"
+        " & Node.DOCUMENT_POSITION_FOLLOWING"
+    )
+    await expect(line.locator("label.check")).to_have_text("Send to Chief from the command line")
+    await expect(switch).not_to_be_checked()
+    for hidden in ("#send-consent", "#send-how", "#send-problem"):
+        await expect(line.locator(hidden)).to_be_hidden()
+    # On: the consent unfolds in place, one sentence, Turn on the one main button; not saved.
+    await switch.check()
+    consent = line.locator("#send-consent")
+    await expect(consent).to_be_visible()
+    await expect(consent.locator("p")).to_have_text(
+        "What you send (your note, and any link or text you pass) goes to Chief of Staff on this "
+        "computer, which hands it to GitHub Copilot under your account; the work it starts runs "
+        "with your settings, as any task does."
+    )
+    buttons = consent.locator("button")
+    await expect(buttons).to_have_count(2)
+    await expect(buttons.nth(0)).to_have_text("Turn on")
+    await expect(buttons.nth(1)).to_have_text("Cancel")
+    assert await buttons.nth(1).evaluate("b => b.classList.contains('link')")
+    assert not await buttons.nth(0).evaluate("b => b.classList.contains('link')")
+    await page.screenshot(path=SHOTS / f"ui-edges-send-consent-{scheme}.png")
+    assert saved == [] and not runtime.store.settings().send_to_chief
+    await consent.get_by_role("button", name="Cancel").click()
+    await expect(consent).to_be_hidden()
+    await expect(switch).not_to_be_checked()
+    await expect(switch).to_be_focused()
+    # Unchecked while it is unfolded: the same as Cancel.
+    await switch.check()
+    await switch.uncheck()
+    await expect(consent).to_be_hidden()
+    assert saved == [] and not socket_path.exists()
+    await switch.check()
+    await consent.get_by_role("button", name="Turn on").click()
+    await expect(consent).to_be_hidden()
+    how = line.locator("#send-how")
+    await expect(how).to_be_visible()
+    await expect(how.locator("code")).to_have_text('chiefofstaff send "…"')
+    await expect(how.locator("a")).to_have_attribute(
+        "href", "https://github.com/evanl666/chiefofstaff/blob/main/docs/guide.md#send-to-chief"
+    )
+    await expect(switch).to_be_checked()
+    await expect(switch).to_be_focused()
+    assert saved[-1]["send_to_chief"] is True and set(saved[-1]) == {"send_to_chief", "base"}
+    assert runtime.store.settings().send_to_chief and socket_path.is_socket()
+    await page.screenshot(path=SHOTS / f"ui-edges-send-on-{scheme}.png")
+    # Saving the rest of Settings keeps it as saved.
+    await page.locator("#settings-form footer button[type=submit]").click()
+    await expect(page.locator("#settings-dialog")).to_be_hidden()
+    assert saved[-1]["send_to_chief"] is True and runtime.store.settings().send_to_chief
+    await page.locator("#settings-button").click()
+    await page.locator("#settings-tabs [data-tab=connections]").click()
+    await expect(switch).to_be_checked()
+    await expect(how).to_be_visible()
+    # Off: saved at once, the socket closed, the line alone.
+    await switch.uncheck()
+    await expect(how).to_be_hidden()
+    await expect(consent).to_be_hidden()
+    await until(lambda: not socket_path.exists())
+    assert saved[-1] == {"send_to_chief": False, "base": saved[-1]["base"]}
+    assert not runtime.store.settings().send_to_chief
+    # A folder others can write: the reason in place of the command; nothing else.
+    data.chmod(0o770)
+    try:
+        await switch.check()
+        await consent.get_by_role("button", name="Turn on").click()
+        problem = line.locator("#send-problem")
+        await expect(problem).to_have_text(f"{data} is writable by others: the command stays off.")
+        await expect(how).to_be_hidden()
+        await expect(switch).to_be_checked()
+        assert not socket_path.exists()
+        await page.screenshot(path=SHOTS / f"ui-edges-send-problem-{scheme}.png")
+    finally:
+        data.chmod(0o700)
+    await switch.uncheck()
+    await expect(problem).to_be_hidden()
+    await expect(how).to_be_hidden()
+    await until(lambda: not runtime.store.settings().send_to_chief)
+    # The folder put right, on again: the command, not the old reason.
+    await switch.check()
+    await consent.get_by_role("button", name="Turn on").click()
+    await expect(how).to_be_visible()
+    await expect(problem).to_be_hidden()
+    assert socket_path.is_socket()
+    await switch.uncheck()
+    await expect(how).to_be_hidden()
+    await until(lambda: not runtime.store.settings().send_to_chief)
+    assert send.main(["hi", "--data-dir", str(data)]) == send.ABSENT
+    await page.locator("#settings-cancel").click()
+    assert not errors, errors
+    await context.close()
+    log(
+        f"send ({scheme}): one line at the end of Connections; its consent unfolds; on, off, broken"
+    )
+
+
+async def send_home(runtime, browser):
+    """A sent item: one line in the Router chat with the ↘ mark, cut short as the others are
+    (opened too), in full in its tooltip. It opens in place to the note only when the line does
+    not show all of it, then the link and the page's title as a label and words, and only the text
+    passed along in a code block; a note alone opens only while its line cuts it short. No
+    badge, count or toast."""
+    from chiefofstaff import send
+
+    await send_switch(runtime, True)
+    data = runtime.store.directory
+    trap = "[Approve](https://evil.example) **now** `x`"
+    issue = "https://github.com/acme/api/issues/117"
+    # Notes alone (sent once: ten items a minute is the most), a short one and a long one.
+    alone = "Ship the release notes"
+    long = (
+        "Ask Maya whether the payments SDK upgrade can wait until after Friday's release, and "
+        "if not, which of its breaking changes we must handle first"
+    )
+    for note in (alone, long):
+        assert await asyncio.to_thread(send.main, [note, "--data-dir", str(data)]) == send.SENT
+    await settle(runtime)
+    for scheme in ("light", "dark"):
+        passed = f"Steps ({scheme}):\n1. log in on a slow network\n```\nnot the end\n````\n{trap}"
+        copied = f"Copied from the incident ({scheme})\nThe exporter drops rows past 10k\n`rows`"
+        (data.parent / "passed.txt").write_text(passed)
+        (data.parent / "copied.txt").write_text(copied)
+        short = f"Fix the flaky login test ({scheme})"
+        two = f"Take the runbook ({scheme})\nand check its rollback steps still work"
+        title = f"Login times out · Issue #117 · acme/api {trap}"
+        context = await browser.new_context(
+            viewport={"width": 1280, "height": 900}, color_scheme=scheme
+        )
+        page = await context.new_page()
+        errors: list[str] = []
+        page.on("pageerror", lambda error: errors.append(str(error)))  # noqa: B023
+        await page.goto(f"{BASE}/#token={TOKEN}")
+        await expect(page.locator("#application")).to_be_visible()
+        badge = await page.locator(".home-item .badge").all_inner_texts()
+        await page.wait_for_timeout(300)
+        before = await page.locator("#timeline > *").count()
+        for arguments in (
+            [
+                short,
+                "--url",
+                issue,
+                "--title",
+                title,
+                "--text-from",
+                str(data.parent / "passed.txt"),
+            ],
+            [two, "--url", "https://example.com/runbook"],
+            ["--text-from", str(data.parent / "copied.txt")],
+        ):
+            code = await asyncio.to_thread(send.main, [*arguments, "--data-dir", str(data)])
+            assert code == send.SENT
+        await settle(runtime)
+        await expect(page.locator("#timeline > *")).to_have_count(before + 3)
+        lines = page.locator("#timeline .event.sent", has_text=f"({scheme})")
+        await expect(lines).to_have_count(3)
+        await expect(lines.locator(".mark")).to_have_text(["\u2198"] * 3)
+        for line in await lines.all():
+            await expect(line.locator("time")).to_have_count(1)
+            said = await line.locator(".what").text_content()
+            await expect(line.locator(".what")).to_have_attribute("title", said or "")
+        await page.screenshot(path=SHOTS / f"ui-edges-send-home-{scheme}.png")
+        # Note, link, title and text: the line shows all of the note, so the card starts with
+        # the link; the title is a label and words; only the text is a code block, as it was.
+        entry = lines.filter(has_text=short)
+        await expect(entry.locator(".what")).to_have_text(f"Sent from the command line: {short}")
+        row = entry.locator(".row")
+        height = (await row.bounding_box() or {})["height"]
+        await entry.locator("button.line").click()
+        body = entry.locator(".markdown")
+        await expect(body).to_be_visible()
+        assert (await row.bounding_box() or {})["height"] == height, "one line, opened too"
+        await expect(body.locator(".sent-note")).to_be_hidden()
+        await expect(body.locator("> p:visible")).to_have_count(2)
+        link, named = body.locator("> p:visible").nth(0), body.locator("> p:visible").nth(1)
+        await expect(link.locator("strong.key")).to_have_text("Link:")
+        await expect(link.locator("a")).to_have_attribute("href", issue)
+        await expect(named.locator("strong.key")).to_have_text("Title:")
+        await expect(named).to_have_text(f"Title: {title}")
+        await expect(named.locator("a, code, em, strong:not(.key)")).to_have_count(0)
+        await expect(body.locator("a")).to_have_count(1)
+        await expect(body.locator("pre")).to_have_count(1)
+        assert await body.locator("pre code").text_content() == passed
+        assert await row.evaluate("r => getComputedStyle(r.querySelector('.what')).whiteSpace") == (
+            "nowrap"
+        )
+        # Narrower, the line cuts the note short: the card shows it, and hides it again.
+        await page.evaluate("document.querySelector('#timeline').style.maxWidth = '320px'")
+        await expect(body.locator(".sent-note")).to_be_visible()
+        await expect(body.locator(".sent-note")).to_have_text(short)
+        await page.evaluate("document.querySelector('#timeline').style.removeProperty('max-width')")
+        await expect(body.locator(".sent-note")).to_be_hidden()
+        await page.screenshot(path=SHOTS / f"ui-edges-send-home-open-{scheme}.png")
+        await entry.locator("button.line").click()
+        # A note of two lines: its first is the line; the card has it all, then the link.
+        entry = lines.filter(has_text=two.splitlines()[0])
+        await expect(entry.locator(".what")).to_have_text(
+            f"Sent from the command line: {two.splitlines()[0]}"
+        )
+        assert await entry.locator(".what").evaluate("w => w.scrollWidth <= w.clientWidth")
+        await entry.locator("button.line").click()
+        await expect(entry.locator(".sent-note")).to_be_visible()
+        assert await entry.locator(".sent-note").text_content() == two
+        await expect(entry.locator(".markdown > p:visible")).to_have_count(2)
+        await entry.locator("button.line").click()
+        # Text alone: its first line is the line; the card is the text, as it was.
+        entry = lines.filter(has_text=copied.splitlines()[0])
+        await expect(entry.locator(".what")).to_have_text(
+            f"Sent from the command line: {copied.splitlines()[0]}"
+        )
+        await entry.locator("button.line").click()
+        await expect(entry.locator(".markdown > *")).to_have_count(1)
+        assert await entry.locator("pre code").text_content() == copied
+        await entry.locator("button.line").click()
+        # Notes alone: the short one shows whole and does not open; the long one is cut short
+        # and opens to it all; at 800 px and 1440 px.
+        short_line = page.locator("#timeline .event.sent", has_text=f": {alone}")
+        long_line = page.locator("#timeline .event.sent", has_text=long[:40])
+        for width in (800, 1440):
+            await page.set_viewport_size({"width": width, "height": 900})
+            if width < 1100:
+                await page.locator("#home-tabs [data-tab=chat]").click()
+            await long_line.scroll_into_view_if_needed()
+            await expect(short_line.locator("button.line")).to_be_disabled()
+            await expect(short_line.locator("button.line")).to_have_css("opacity", "1")
+            await short_line.locator(".what").click(force=True)
+            await expect(short_line.locator(".markdown")).to_be_hidden()
+            what = long_line.locator(".what")
+            assert await what.evaluate("w => w.scrollWidth > w.clientWidth"), ("cut", width)
+            await expect(long_line.locator("button.line")).to_be_enabled()
+            await long_line.locator("button.line").click()
+            await expect(long_line.locator(".sent-note")).to_be_visible()
+            assert await long_line.locator(".sent-note").text_content() == long
+            assert await what.evaluate("w => getComputedStyle(w).whiteSpace") == "nowrap"
+            await page.screenshot(path=SHOTS / f"ui-edges-send-alone-{width}-{scheme}.png")
+            await long_line.locator("button.line").click()
+            await expect(long_line.locator(".markdown")).to_be_hidden()
+        # Wide enough to show it whole: folded, and no longer opens.
+        await long_line.locator("button.line").click()
+        await page.evaluate("document.querySelector('#timeline').style.maxWidth = '2000px'")
+        await page.set_viewport_size({"width": 2400, "height": 900})
+        await expect(long_line.locator("button.line")).to_be_disabled()
+        await expect(long_line.locator(".markdown")).to_be_hidden()
+        await page.evaluate("document.querySelector('#timeline').style.removeProperty('max-width')")
+        await page.set_viewport_size({"width": 1280, "height": 900})
+        assert await page.locator(".home-item .badge").all_inner_texts() == badge
+        await expect(page.locator("#toasts .toast")).to_have_count(0)
+        assert not errors, errors
+        await context.close()
+    log("send: one line each, opening in place to what the line does not show; nothing else")
+
+
+async def send_pins(runtime, browser):
+    """Pins: a delegated Slack message, a GitHub event and a watch's finding are one line each
+    in the Router chat, with the ↘ mark, opening in place to what came."""
+    events = [
+        ("slack", "delegated", "Bob: can you look at the flaky login test?\nIt fails on CI.",
+         "Handed over from Slack: Bob: can you look at the flaky login test?"),
+        ("github", "event", "Review requested on acme/api#12: Speed up exports\nBy @maya.",
+         "From GitHub: Review requested on acme/api#12: Speed up exports"),
+        ("watch", "event", "Bob asked when the release ships\nIn #releases.",
+         "From a watch: Bob asked when the release ships"),
+    ]  # fmt: skip
+    for source, kind, text, _ in events:
+        await runtime.on_trigger(source, [f"pin:{uuid4().hex}"], text, kind=kind)
+    await settle(runtime)
+    for scheme in ("light", "dark"):
+        context = await browser.new_context(
+            viewport={"width": 1280, "height": 900}, color_scheme=scheme
+        )
+        page = await context.new_page()
+        errors: list[str] = []
+        page.on("pageerror", lambda error: errors.append(str(error)))  # noqa: B023
+        page.on("console", lambda m: errors.append(m.text) if m.type == "error" else None)  # noqa: B023
+        await page.goto(f"{BASE}/#token={TOKEN}")
+        await expect(page.locator("#application")).to_be_visible()
+        timeline = page.locator("#timeline")
+        for _, _, text, line in events:
+            entry = timeline.locator(".event.opens", has_text=line)
+            await expect(entry).to_have_count(1)
+            await expect(entry.locator(".mark")).to_have_text("\u2198")
+            await expect(entry.locator(".what")).to_have_text(line)
+            body = entry.locator(".markdown")
+            await expect(body).to_be_hidden()
+            await entry.locator("button.line").click()
+            await expect(body).to_be_visible()
+            await expect(body).to_contain_text(text.splitlines()[1])
+            await expect(entry.locator("button.line")).to_have_attribute("aria-expanded", "true")
+            await entry.locator("button.line").click()
+            await expect(body).to_be_hidden()
+        assert not errors, errors
+        await context.close()
+    log("send: Slack, GitHub and watch lines on Home as before, each opening in place")
 
 
 if __name__ == "__main__":

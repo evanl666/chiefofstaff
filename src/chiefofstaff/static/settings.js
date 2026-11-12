@@ -147,6 +147,25 @@ export function bindSettings() {
       select(sessionId);
     });
   }
+  // Send to Chief: turning it on unfolds its consent in place, saved only with Turn on; off is
+  // saved at once (its socket closes).
+  const sendSwitch = $("#settings-form").send_to_chief;
+  sendSwitch.addEventListener("change", () => {
+    if (sendSwitch.checked) {
+      $("#send-how").hidden = true;
+      $("#send-problem").hidden = true;
+      $("#send-consent").hidden = false;
+    } else if (!$("#send-consent").hidden) {
+      renderSendLine();
+    } else {
+      saveSend(false);
+    }
+  });
+  $("#send-on").addEventListener("click", () => saveSend(true));
+  $("#send-cancel").addEventListener("click", () => {
+    renderSendLine();
+    sendSwitch.focus();
+  });
   $("#slack-token-save").addEventListener("click", async () => {
     try {
       settingsError("");
@@ -365,6 +384,7 @@ export function fillSettings() {
   form.away_notify.checked = Boolean(settings.away_notify);
   form.away_minutes.value = settings.away_minutes ?? 10;
   form.away_how.value = settings.away_how || "";
+  renderSendLine();
   renderConnections();
   showSlackToken();
   const github = state.snapshot.github;
@@ -915,6 +935,30 @@ async function saveAway() {
     settingsError(error.message);
     return false;
   }
+}
+// Send to Chief's line as saved: off, the switch alone; on, the command and the recipes, or why
+// its socket could not open.
+function renderSendLine() {
+  const on = Boolean(state.snapshot.settings.send_to_chief);
+  const problem = on ? state.snapshot.send_problem || "" : "";
+  $("#settings-form").send_to_chief.checked = on;
+  $("#send-consent").hidden = true;
+  $("#send-how").hidden = !on || Boolean(problem);
+  $("#send-problem").textContent = problem;
+  $("#send-problem").hidden = !problem;
+}
+async function saveSend(on) {
+  settingsError("");
+  try {
+    const snapshot = await api("/api/settings", { method: "POST", body: { send_to_chief: on, base: shown } });
+    // Its problem is in the answer only while there is one.
+    state.snapshot = { ...state.snapshot, send_problem: "", ...snapshot };
+    savedHere({ send_to_chief: on });
+  } catch (error) {
+    settingsError(error.message);
+  }
+  renderSendLine();
+  $("#settings-form").send_to_chief.focus();
 }
 async function saveWatches() {
   settingsError("");

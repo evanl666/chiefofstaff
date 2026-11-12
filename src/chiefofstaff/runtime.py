@@ -22,6 +22,7 @@ wires together the parts that do the rest, each in its own module:
 import asyncio
 import base64
 import binascii
+import hashlib
 import json
 import logging
 import os
@@ -75,12 +76,17 @@ from .events import EFFORT_REFUSED, MODEL_REFUSED, ROUTER_CONTEXT, Events
 from .focus import Focus
 from .habits import Habits
 from .learning import Learning
-from .models import AS_SAVED, Attachment, Settings
+from .models import AS_SAVED, Attachment, SentItem, Settings
 from .notify import mac_notification
 from .others import Others
 from .peers import Peers
 from .policy import GITHUB_MCP, within
 from .roles import ROUTER, SLACK, WATCHDOG, WORKER
+from .sendsocket import LimitedError, SendSocket
+from .sendsocket import headline as sent_headline
+from .sendsocket import parts as sent_parts
+from .sendsocket import prompt as sent_prompt
+from .sendsocket import shown as sent_shown
 from .sources import Source
 from .sources.github import GitHubSource
 from .sources.slack import SlackSource, describe
@@ -223,6 +229,10 @@ MODEL_NOT_OFFERED = re.compile(r"\bnot (?:available|supported|enabled|allowed)\b
 PROCESS_CHECK = float(os.environ.get("CHIEFOFSTAFF_PROCESS_CHECK", "2"))
 RECONNECT_DELAY = float(os.environ.get("CHIEFOFSTAFF_RECONNECT_DELAY", "3"))
 RECONNECT_MOST = 300.0
+# Items sent with Send to Chief: at most this many in a while (seconds) are taken; the same
+# note and capture again within SENT_AGAIN_SECONDS is the command run twice.
+SENT_RATES = ((60, 10, "a minute"), (86400, 300, "a day"))
+SENT_AGAIN_SECONDS = 600
 
 
 class OpenElsewhereError(RuntimeError):
@@ -366,6 +376,8 @@ class Runtime:
         self.storage = Storage(self)
         # Where the owner's other Copilot sessions stand (the sidebar), while the setting is on.
         self.others = Others(self)
+        # Send to Chief's socket, while the setting is on.
+        self.send = SendSocket(self)
         self.toolset = Tools(self)
         self.tools = self.toolset.definitions()
 
@@ -387,6 +399,8 @@ class Runtime:
         self.watch_job = asyncio.create_task(self.watch_loop())
         self.mirror_job = asyncio.create_task(self.workers.mirror_loop())
         self.others.start()
+        if self.store.settings().send_to_chief:
+            self.send.open()
         await self.habits.start()
         await self.connector.start()
         self.background(self.abilities.sync())
@@ -398,6 +412,7 @@ class Runtime:
 
     async def stop(self):
         self.stopping = True
+        self.send.close()
         for job in (self.recovery, self.process_job, self.watch_job, self.mirror_job):
             if job:
                 job.cancel()
@@ -941,6 +956,8 @@ class Runtime:
                 gh_acting=self.store.items("ghaccount:"),
                 slack=bool(sandbox) and bool(row["slack"]),
             )
+        if row["role"] == ROUTER and settings.send_to_chief:
+            prompt = prompts.with_send_rule(prompt)
         if (profile := self.store.get("profile", "")) and row["role"] != WATCHDOG:
             prompt += f"\n<owner_profile>\n{profile}\n</owner_profile>"
         prompt += self.learning.block(row)
@@ -2309,6 +2326,64 @@ class Runtime:
             raise
         return True
 
+    async def on_sent(self, item: SentItem, client: str) -> dict:
+        """An item sent with Send to Chief (sendsocket.py): one batched message for the Router,
+        delegated, taken once. Its receipt says when it was taken, and whether it had been
+        already (`duplicate`): under this item id (a retry), or with the same note and capture
+        under another within ten minutes (the command run twice: `earlier` names that item).
+        Refused while Copilot is not connected, and over the rates, with nothing kept."""
+        key = f"send:{item.item}"
+        if found := self.store.sent(key):
+            return self.receipt(item.item, {"taken": False, **found})
+        self.require_ready()
+        for seconds, most, said in SENT_RATES:
+            since = datetime.fromtimestamp(time.time() - seconds, UTC).isoformat()
+            sent = self.store.value(
+                "SELECT count(*) FROM triggers WHERE source='capture' AND created_at>=?", (since,)
+            )
+            if sent >= most:
+                raise LimitedError(f"Chief of Staff takes at most {most} items {said}: not taken.")
+        content = json.dumps([item.note, item.url, item.title, item.text])
+        digest = hashlib.sha256(content.encode()).hexdigest()
+        window = datetime.fromtimestamp(time.time() - SENT_AGAIN_SECONDS, UTC).isoformat()
+        taken = self.store.take_sent(key, digest, window)
+        if not taken["taken"]:
+            return self.receipt(item.item, taken)
+        # In the language of the note when it is clear; the owner's remembered one is left as it
+        # is (a note sent from outside is not what they wrote here).
+        reply_in = language(item.note) or self.store.get("owner_language", "")
+        meta = {
+            "source": "capture",
+            "delegated": True,
+            "client": client,
+            "item": item.item,
+            "line": sent_headline(item),
+            "sent": sent_parts(item),
+        }
+        try:
+            await self.delivery.deliver(
+                self.router_id(),
+                sent_prompt(item, client, reply_in),
+                batch=True,
+                kind="inbound",
+                display=sent_shown(item),
+                meta=meta,
+            )
+        except Exception:
+            self.store.execute("DELETE FROM triggers WHERE key=?", (key,))
+            raise
+        return self.receipt(item.item, taken)
+
+    @staticmethod
+    def receipt(item: str, taken: dict) -> dict:
+        earlier = taken["key"].removeprefix("send:")
+        return {
+            "item": item,
+            "taken_at": taken["created_at"],
+            "duplicate": not taken["taken"],
+            **({"earlier": earlier} if earlier != item else {}),
+        }
+
     # Thread subscriptions
 
     @staticmethod
@@ -3094,6 +3169,8 @@ class Runtime:
     def snapshot(self) -> dict:
         return {
             "runtime": self.status,
+            # Why Send to Chief's socket is not open, while the setting is on.
+            **({"send_problem": self.send.problem} if self.send.problem else {}),
             "demo": getattr(self, "demo", False),
             "focus": self.focus.state(),
             "router_id": self.store.get("router_id"),
@@ -3165,6 +3242,11 @@ class Runtime:
         if old.other_sessions != new.other_sessions:
             # First, before anything awaits: once the save returns, nothing more is told.
             self.others.switch(new.other_sessions)
+        if old.send_to_chief != new.send_to_chief:
+            # Off: the socket closes before anything awaits; the Router's rule goes with its
+            # next turn.
+            self.send.switch(new.send_to_chief)
+            await self.refresh(ROUTER)
         defaults = ("model", "role_models", "role_efforts")
         if any(getattr(old, key) != getattr(new, key) for key in defaults):
             # Models and efforts chosen now are tried, even where Copilot refused one before.

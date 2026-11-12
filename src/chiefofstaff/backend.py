@@ -448,6 +448,8 @@ def process_table() -> dict[int, tuple[int, str]]:
             ["ps", "-axo", "pid=,ppid=,command="],  # noqa: S607  (a fixed command, found on PATH)
             capture_output=True,
             text=True,
+            # Any program's command line, which need not be UTF-8.
+            errors="replace",
             check=True,
             timeout=5,
         ).stdout

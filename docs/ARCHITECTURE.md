@@ -30,7 +30,7 @@ tool allowlist, permission and request callbacks, sandbox, model.
 
 | Module | Responsibility |
 | --- | --- |
-| `__main__.py`, `web.py` | Command line; HTTP API, auth (the launch key kept by the page and sent as an `X-Chief-Key` header, or `?key=` where a header cannot go: SSE, images; same-origin writes, CSP), SSE. |
+| `__main__.py`, `web.py` | Running Chief of Staff; HTTP API, auth (the launch key kept by the page and sent as an `X-Chief-Key` header, or `?key=` where a header cannot go: SSE, images; same-origin writes, CSP), SSE. |
 | `runtime.py` | `Runtime`: the Copilot connection, each session's lifecycle (create, resume, rotate), session options, external events and threads, the UI snapshot. It creates the parts below; each keeps a reference to it. |
 | `events.py` | What sessions report as they work: one small handler per event type. |
 | `delivery.py` | Messages to sessions: stored, batched, sent, checked after a restart. |
@@ -57,6 +57,7 @@ tool allowlist, permission and request callbacks, sandbox, model.
 | `abilities.py` | Skills the owner uploads or names, Copilot plugins installed from Settings (`copilot plugin install`), and MCP servers from Settings, added to workers' options. |
 | `checks.py` | Failure cases kept from workers' test runs; checks proposed from them, proven in a sandbox on both versions, approved, then run when a worker reports done. |
 | `envelope.py` | The envelope every message to a session is wrapped in. |
+| `cli.py`, `send.py`, `sendsocket.py` | Send to Chief (`send_to_chief`, off by default). The `chiefofstaff` command is `cli.py`: `send …` runs `send.py`, standard library only so it starts at once; anything else runs `__main__.py` as before. `send.py` checks the data directory's folders, `send/` and the socket, and that the process answering runs as the owner, before it writes the item (an id it makes once and keeps for retries). `sendsocket.py` serves `send/socket` in the runtime's own event loop while the setting is on: opened (at a start, or when turned on) only where the folders on the way are the owner's alone, each connection's peer user id checked before it is read, one request (h11), two routes; and what an item becomes for the Router. `Runtime.on_sent` takes it once (a `capture` trigger keyed by its id, with its content's digest), refuses it while Copilot is not connected (`503`) or over the rates (`429`), and delivers it batched: the note as the owner's (`via="command line"`), the capture as untrusted. While on, the Router's prompt ends with a rule for `from="capture"` (`prompts.with_send_rule`). |
 | `machine.py` | How much memory the computer has left: new worker turns wait while it is low (`Workers.claim_slot`, `pump`); quiet workers let go of their Copilot session (`Workers.release_idle`). |
 | `catalog.py` | Keyword ranking that finds the worker that owns a subject. |
 | `watchdog.py` | Cheap checks that decide when a worker deserves a review, and the Watchdog session that reviews it. |

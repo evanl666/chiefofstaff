@@ -266,6 +266,15 @@
               </div>
             </details>
             <div id="connections-extra"></div>
+            <div id="send-line" class="send-line">
+              <label class="check"><input name="send_to_chief" type="checkbox" aria-describedby="send-how send-problem" /> Send to Chief from the command line</label>
+              <div id="send-consent" class="send-consent" hidden>
+                <p class="hint">What you send (your note, and any link or text you pass) goes to Chief of Staff on this computer, which hands it to GitHub Copilot under your account; the work it starts runs with your settings, as any task does.</p>
+                <div class="inline-actions"><button id="send-on" type="button">Turn on</button><button id="send-cancel" type="button" class="link">Cancel</button></div>
+              </div>
+              <small id="send-how" hidden><code>chiefofstaff send "…"</code> from a terminal, or a hotkey: <a class="link" href="https://github.com/evanl666/chiefofstaff/blob/main/docs/guide.md#send-to-chief" target="_blank" rel="noreferrer">recipes</a></small>
+              <small id="send-problem" class="error" role="status" hidden></small>
+            </div>
           </section>
 
           <section class="tab" data-tab="you" hidden>

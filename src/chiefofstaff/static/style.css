@@ -810,6 +810,14 @@ label.hours input { width: 118px; }
 #learn-state { font-size: var(--small); color: var(--soft); }
 #learn-state.error { color: var(--red); }
 #learn-state:empty { display: none; }
+/* Send to Chief: one line at the end of Connections; its consent, and what it says once on,
+   unfold under its words. */
+.send-line { display: grid; gap: 6px; }
+.send-line > :not(label) { margin-left: 28px; }
+.send-consent { display: grid; gap: 8px; margin-bottom: 4px; }
+.send-consent .hint { max-width: 60ch; line-height: 1.5; }
+#send-how code { font: var(--small) var(--mono); background: var(--hover); padding: 1px 5px; border-radius: 5px; }
+#send-how a { text-decoration: underline; text-underline-offset: 2px; }
 #learn-last-run, #watch-activity { margin-left: auto; padding: 0 4px; font-size: var(--small); }
 #learn-now.busy:disabled { opacity: 0.8; }
 #learn-now.busy::before {
@@ -929,6 +937,12 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
 .event:hover time { opacity: 1; }
 .event.opens .line:hover .what { color: var(--text); }
 .event.opens.open .what { white-space: normal; }
+/* A sent item's line stays one line, opened too: what it cuts short is in what it opens to. */
+.event.opens.open.sent .what { white-space: nowrap; }
+/* A note alone its line shows whole: nothing to open, and it reads as any other line. */
+.event.opens.sent .line:disabled { opacity: 1; }
+.event.opens.sent .line:disabled .what { color: var(--soft); }
+.markdown.sent .sent-note { white-space: pre-wrap; }
 .event.opens > .markdown { margin: 4px 0 8px 24px; padding: 8px 12px; font-size: var(--body); color: var(--text); background: var(--card); border: 1px solid var(--line); border-radius: var(--radius-lg); }
 
 /* Home: the conversation, and the panel with Needs you and Tasks */

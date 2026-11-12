@@ -157,4 +157,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # `python -m chiefofstaff` as the `chiefofstaff` command: `send …` sends (cli.py).
+    from .cli import main as command
+
+    sys.exit(command())

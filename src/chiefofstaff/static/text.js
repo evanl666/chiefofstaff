@@ -223,7 +223,7 @@ export function taskLinks(task) {
 // ("Google Doc", "Flyte · abc123", a PR with its title).
 export const linkName = (link) => link.name || (link.found.title ? `${link.found.label} · ${shorten(link.found.title, 40)}` : link.found.label);
 // A link's text in a message: a PR by its number and title; a Slack message as one.
-function linkLabel(url) {
+export function linkLabel(url) {
   let match;
   if ((match = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/(?:pull|issues)\/(\d+)(?:[/?#].*)?$/.exec(url))) {
     const title = /\/pull\//.test(url) ? prTitle(`${match[1]}#${match[2]}`) : "";

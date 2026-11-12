@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.1.39 (2026-11-11)
+
+Send to Chief from anywhere.
+
+- **Send to Chief**: `chiefofstaff send "fix the flaky login test in acme/api"` hands the running
+  Chief of Staff a note from any terminal or launcher, with a link and its title (`--url`,
+  `--title`) or text (`--text-from FILE`, or `-` for standard input) if you like: one request for
+  the Router, as a message on Home is, which shows it as one line in the chat. The note is your
+  request; what you pass along is material, never instructions, and anything risky is confirmed
+  with you first. It goes through a socket in the data directory that only your user can use,
+  checked at both ends, and is taken once (a retry, or the same note sent again within ten
+  minutes, is not taken twice). The guide has recipes for a hotkey (Shortcuts, Raycast, Alfred, a
+  Linux shortcut) and for sending the front browser tab. Off by default: *Send to Chief from the
+  command line*, at the end of Settings → Connections, turns it on.
+- **Connecting to Copilot again** no longer fails, leaving Chief of Staff not connected, while
+  another program on the computer has a command line that is not UTF-8 (found by the new live
+  suite `scripts/live_send.py`, in a reconnect).
+
 ## 0.1.38 (2026-11-11)
 
 Where your other Copilot sessions stand, in the sidebar.

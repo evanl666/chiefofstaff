@@ -4,9 +4,10 @@ differences the feature declares by name in FEATURES below.
 
     uv run --with playwright python scripts/differential.py [--feature NAME] [--mode off|on] [--out DIR]
 
---mode off (the default): the baseline (git tag v0.1.37, checked out with `git worktree add` and
+--mode off (the default): the baseline (git tag v0.1.38, checked out with `git worktree add` and
 run in its own `uv run` environment) against this working tree with every registered feature (or
-only --feature) at its off settings, allowing only those features' `allow_off`.
+only --feature) at its off settings, allowing only those features' `allow_off`. The baseline runs
+with those of the settings it has: a feature it shipped with is off on both sides.
 --mode on: this working tree with --feature off against the same with it on, allowing only that
 feature's `allow_on` (and its own settings keys).
 
@@ -30,8 +31,10 @@ tick) and once more after the page was looked at:
 
 Normalized on both sides alike before comparing: paths (the tree, the run folder, home), ports,
 ids (uuids, task t…, run r…, decision dec…, question q…, owner refs o…, message ids, hex tokens
-and commit hashes become <task-1>, <uuid-2>... in order of first appearance), and times (ISO
-times, epoch seconds and Slack ts become their offset from the fixed clock, <T+3m>).
+and commit hashes become <task-1>, <uuid-2>... in order of first appearance), times (ISO
+times, epoch seconds and Slack ts become their offset from the fixed clock, <T+3m>), and the
+number of events published on the wall clock while the page is open (TIMED_EVENTS): whether there
+were any.
 
 FIXES: deliberate fixes of how the baseline looks (not a feature's), allowed in every run.
 
@@ -76,7 +79,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = Path(__file__).resolve()
-BASELINE = "v0.1.37"
+BASELINE = "v0.1.38"
 PORTS = range(8810, 8820)
 TOKEN = "differential-token"
 WORK = ROOT / "browser-shots" / "differential-work"
@@ -224,6 +227,36 @@ FEATURES["other_sessions"] = Feature(
             value="GET /api/others",
         ),
         Allow("the `others` events", data=r"^steps\.\w+\.bus\.others$"),
+    ],
+)
+
+# Send to Chief (sendsocket.py, docs/design/send-anywhere.md): off by default. Off, only its
+# switch line at the end of Settings → Connections is new, and no socket opens. On, with nothing
+# sent: that line checked, the command under it, and the Router's rule for what is sent, the last
+# line of its role (its socket opens in the run's data directory, which nothing here reads).
+FEATURES["send_to_chief"] = Feature(
+    off={"send_to_chief": False},
+    on={"send_to_chief": True},
+    allow_off=[
+        Allow("its setting, off", setting="send_to_chief", value=False),
+        Allow(
+            "its switch line at the end of Settings → Connections",
+            element="#settings-dialog #send-line",
+            views=r"^settings-connections-",
+        ),
+    ],
+    allow_on=[
+        Allow(
+            "its line in Settings → Connections, checked, with the command under it",
+            element="#settings-dialog #send-line",
+            views=r"^settings-connections-",
+        ),
+        Allow(
+            "the Router's rule for what is sent with it",
+            data=r"\.system_message\.content$",
+            lines=r'^- from="capture" type="delegated": something the owner sent you with Send to '
+            r"Chief from outside this UI ",
+        ),
     ],
 )
 
@@ -660,10 +693,13 @@ class Scenario:
             "projects": [project], "code_folder": str(self.run / "code"), "max_workers": 1,
             "slack_enabled": True, "slack_poll_seconds": 900, "mac_notifications": True,
         }  # fmt: skip
-        unknown = set(self.spec["settings"]) - set(Settings.model_fields)
-        if unknown:
+        given = self.spec["settings"]
+        unknown = set(given) - set(Settings.model_fields)
+        if unknown and self.spec.get("baseline"):
+            given = {key: value for key, value in given.items() if key not in unknown}
+        elif unknown:
             raise RuntimeError(f"No such settings in {self.spec['tree']}: {sorted(unknown)}")
-        settings = Settings.model_validate({**wanted, **self.spec["settings"]})
+        settings = Settings.model_validate({**wanted, **given})
         scenario = self
 
         class Recording(ScriptedBackend):
@@ -1002,6 +1038,7 @@ def make_run(run: Path) -> dict:
 async def start_side(side: Side, run: Path, port: int, folder: Path, env: dict):
     spec = {
         "tree": str(side.tree), "run": str(run), "port": port, "settings": side.settings,
+        "baseline": side.name == "baseline",
         "capture": str(folder / "capture.json"), "gh_log": env["DIFFERENTIAL_GH_LOG"],
     }  # fmt: skip
     process = await asyncio.create_subprocess_exec(
@@ -1650,7 +1687,18 @@ async def run_sides(
     return captures, pages, folders, run
 
 
+# Events published on the wall clock while a page is open, not because of anything that
+# happened: how many depends on how long the page was looked at. `others`: where the owner's other
+# Copilot sessions stand, renewed every 2 s pass while a tab is open (others.STEADY, shorter than
+# PERIODIC), so a page looked at a moment longer gets one more.
+TIMED_EVENTS = {"others"}
+
+
 def normalized(capture: dict, page: dict, side: Side, run: Path) -> dict:
+    for step in capture.get("steps", {}).values():
+        published = step.get("bus", {})
+        for kind in TIMED_EVENTS & set(published):
+            published[kind] = "some" if published[kind] else 0
     home = str(Path.home())
     paths = [(str(run.resolve()), "<run>"), (str(run), "<run>"), (str(side.tree.resolve()), "<tree>"),
              (str(side.tree), "<tree>"), (home, "~")]  # fmt: skip
@@ -1688,7 +1736,7 @@ def plan(args, parser, port: int) -> tuple[list[Side], dict[str, Allow], str]:
         allowances = fixes | {
             f"{name}: {a.name}": a for name in chosen for a in FEATURES[name].allow_off
         }
-        sides = [Side("baseline", WORK / f"baseline-{port}", {}), Side("current", tree, off)]
+        sides = [Side("baseline", WORK / f"baseline-{port}", off), Side("current", tree, off)]
         title = f"Differential test, off: {args.baseline} against {tree}"
         return sides, allowances, title + (f", {', '.join(chosen)} off" if chosen else "")
     feature = FEATURES[args.feature]

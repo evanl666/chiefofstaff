@@ -1,7 +1,8 @@
 """Browser checks of how the UI looks and reads, with no accounts: a realistic Home (three
 tasks, cards that need the owner) on a fake Copilot, at 800 to 1440 px, light and dark; and the
 sidebar's Other Copilot sessions with 3, 12 and 40 of them, before and after where each stands
-is shown (browser-shots/others/: a title keeps its width).
+is shown (browser-shots/others/: a title keeps its width); Send to Chief's line in Settings and a
+sent item's line on Home (browser-shots/send/).
 
 Fails on: horizontal scrolling; elements overflowing their card or overlapping each other;
 more than one main (filled) button per card or dialog footer; controls under 28 px tall or
@@ -682,6 +683,102 @@ async def others(runtime, client, browser, quality: Quality):
     )
 
 
+async def send_views(runtime, browser, quality: Quality):
+    """Send to Chief (docs/design/send-anywhere.md): its line at the end of Settings →
+    Connections off, unfolded to its consent, on, and with the socket closed for a reason; a sent
+    item's line in the Router chat, folded and open; 800 to 1440 px, light and dark
+    (browser-shots/send/)."""
+    from ui_edges import send_switch, until
+
+    from chiefofstaff import send
+
+    folder = SHOTS / "send"
+    folder.mkdir(exist_ok=True)
+    data = runtime.store.directory
+    note = "Fix the flaky login test in acme/api, it blocks Friday's release"
+    passed = data.parent / "passed.txt"
+    passed.write_text(
+        "Steps to reproduce:\n1. Throttle the network to 3G\n2. Log in\n"
+        "Expected: signed in. Actual: `TimeoutError` after 30 s"
+    )
+    copied = data.parent / "copied.txt"
+    copied.write_text(
+        "From the incident channel: logins time out for users on mobile networks\nStarted after Tuesday's deploy"
+    )
+    try:
+        await send_switch(runtime, True)
+        for arguments in (
+            [note, "--url", "https://github.com/acme/api/issues/117",
+             "--title", "Login times out on slow networks · Issue #117 · acme/api",
+             "--text-from", str(passed)],
+            ["--text-from", str(copied)],
+        ):  # fmt: skip
+            code = await asyncio.to_thread(send.main, [*arguments, "--data-dir", str(data)])
+            assert code == send.SENT
+        await send_switch(runtime, False)
+        for scheme in ("light", "dark"):
+            context = await browser.new_context(
+                viewport={"width": 1280, "height": 900}, color_scheme=scheme, bypass_csp=True
+            )
+            page = await context.new_page()
+            await page.goto(f"{BASE}/#token={TOKEN}")
+            await expect(page.locator("#application")).to_be_visible()
+            switch = page.locator("#settings-form input[name=send_to_chief]")
+            for state in ("off", "consent", "on", "problem"):
+                await page.locator("#settings-button").click()
+                await page.locator("#settings-tabs [data-tab=connections]").click()
+                if state == "consent":
+                    await switch.check()
+                elif state in {"on", "problem"}:
+                    if state == "problem":
+                        data.chmod(0o770)
+                    await switch.check()
+                    await page.locator("#send-on").click()
+                    shown = "#send-problem" if state == "problem" else "#send-how"
+                    await expect(page.locator(shown)).to_be_visible()
+                    data.chmod(0o700)
+                await page.locator("#send-line").scroll_into_view_if_needed()
+                for width in WIDTHS:
+                    await page.set_viewport_size({"width": width, "height": 900})
+                    await page.wait_for_timeout(100)
+                    name = f"settings-{state}-{width}-{scheme}"
+                    await page.screenshot(path=folder / f"{name}.png")
+                    await quality.check(page, f"send {name}", "#settings-dialog")
+                await quality.contrast(page, f"send settings {state} {scheme}", "#settings-dialog")
+                await page.set_viewport_size({"width": 1280, "height": 900})
+                if state in {"on", "problem"}:
+                    await switch.uncheck()
+                    await until(lambda: not runtime.store.settings().send_to_chief)
+                await page.locator("#settings-cancel").click()
+            entry = page.locator("#timeline .event.opens", has_text=note)
+            text = page.locator("#timeline .event.opens", has_text="From the incident channel")
+            await expect(entry).to_have_count(1, timeout=10000)
+            await expect(text).to_have_count(1)
+            for view in ("line", "open", "text"):
+                if view == "open":
+                    await entry.locator("button.line").click()
+                elif view == "text":
+                    await entry.locator("button.line").click()
+                    await text.locator("button.line").click()
+                for width in WIDTHS:
+                    await page.set_viewport_size({"width": width, "height": 900})
+                    if width < 1100:
+                        await page.locator("#home-tabs [data-tab=chat]").click()
+                    await (text if view == "text" else entry).scroll_into_view_if_needed()
+                    await page.wait_for_timeout(150)
+                    name = f"home-{view}-{width}-{scheme}"
+                    await page.screenshot(path=folder / f"{name}.png")
+                    await quality.check(page, f"send {name}")
+            await quality.contrast(page, f"send home {scheme}")
+            await context.close()
+    finally:
+        data.chmod(0o700)
+        await send_switch(runtime, False)
+    log(
+        "Send to Chief: its Settings line off, unfolded, on and broken; a sent line; browser-shots/send/"
+    )
+
+
 async def main():
     phase = sys.argv[1] if len(sys.argv) > 1 else "check"
     SHOTS.mkdir(exist_ok=True)
@@ -721,6 +818,7 @@ async def main():
             await cards(runtime, seeded, browser, quality, phase)
             log("every kind of card that needs the owner")
             await others(runtime, holder["client"], browser, quality)
+            await send_views(runtime, browser, quality)
             await browser.close()
         server.should_exit = True
         await serving

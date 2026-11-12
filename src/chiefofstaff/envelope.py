@@ -132,12 +132,17 @@ JOINERS = {"\u200c", "\u200d"}
 MAX_TITLE = 80
 
 
+def visible(text: str) -> str:
+    """Text on one line, without control or hidden format characters."""
+    return " ".join(
+        "".join(c for c in text if c in JOINERS or unicodedata.category(c)[0] != "C").split()
+    )
+
+
 def clean_title(title: str) -> str:
     """A title safe for an envelope attribute (quote() escapes it there) and a session name:
     no control or hidden format characters; a long one cut at a word, marked with "…"."""
-    text = " ".join(
-        "".join(c for c in title if c in JOINERS or unicodedata.category(c)[0] != "C").split()
-    )
+    text = visible(title)
     if len(text) > MAX_TITLE:
         cut = text[: MAX_TITLE - 1]
         if " " in cut[MAX_TITLE // 2 :]:

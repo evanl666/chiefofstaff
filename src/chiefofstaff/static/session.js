@@ -1,7 +1,7 @@
 // The main pane: Home or one session, with its header, model settings and timeline.
 
 import { $, api, blobLive, blobUrl, el, foldable, toast, whenNearScreen } from "./dom.js";
-import { clock, compactPaths, firstLine, gist, headOf, markdown, slackText, threadLabel } from "./text.js";
+import { clock, compactPaths, firstLine, gist, headOf, linkLabel, markdown, slackText, threadLabel } from "./text.js";
 import { byId, current, DELIVERY_WORDS, HOME, markRead, otherItem, pendingDrafts, routerId, state, STATUS_TEXT, tasks, upsertSession, viewedId, workerTitle } from "./state.js";
 import { MARKERS } from "./board.js";
 import { renderSidebar, showExternal } from "./sidebar.js";
@@ -519,18 +519,19 @@ function card({ label, body, className = "", status, task = "", time, open }) {
   }
   return node;
 }
-// One line in the Home chat: a mark, what happened, a link to where it is; with `body`, it opens
-// in place to read it all.
-function eventLine({ mark = "·", kind = "", text, time, view = null, viewText = "View", body = "" }) {
+// One line in the Home chat: a mark, what happened, a link to where it is; with `body` (or
+// `content`, drawn already), it opens in place to read it all.
+function eventLine({ mark = "·", kind = "", text, time, view = null, viewText = "View", body = "", content = null }) {
   const parts = [
     el("span", { class: "mark", text: mark }),
     el("span", { class: "what", text, title: text }),
     view ? el("button", { type: "button", class: "link", text: viewText, onclick: (event) => { event.preventDefault(); event.stopPropagation(); view(); } }) : null,
     time ? el("time", { text: clock(time), title: new Date(time).toLocaleString() }) : null,
   ];
-  if (!body) return el("div", { class: `event ${kind}`.trim() }, ...parts);
+  if (!body && !content) return el("div", { class: `event ${kind}`.trim() }, ...parts);
   // Its line opens it; its View is beside that toggle, not in it (no button in a button).
-  const content = el("div", { class: "markdown", html: markdown(body), hidden: true });
+  if (content) content.hidden = true;
+  else content = el("div", { class: "markdown", html: markdown(body), hidden: true });
   const node = el("div", { class: `event opens ${kind}`.trim() });
   const toggle = el("button", { type: "button", class: "line", "aria-expanded": "false", onclick: () => {
     content.hidden = !content.hidden;
@@ -584,6 +585,7 @@ function homeEntry(message) {
       if (meta.answered_by) return eventLine({ mark: "↩", text: `Answer from ${meta.title}: ${firstLine(text)}`, time, body: text, view: () => select(meta.answered_by), viewText: "Open" });
       if (meta.review) return eventLine({ mark: "·", text: `Review · ${meta.title}: ${firstLine(text)}`, time, body: text, view: () => select(meta.review), viewText: "Open" });
       if (meta.thread) return eventLine({ mark: "↘", text: `${threadLabel(meta.thread)}: ${firstLine(text)}`, time, body: text });
+      if (meta.source === "capture") return sentEntry(meta, text, time);
       const source = SOURCES[meta.source] || "Event";
       const more = meta.count > 1 ? ` (+${meta.count - 1} more)` : "";
       return eventLine({ mark: "↘", text: `${meta.delegated ? `Handed over from ${source}` : `From ${source}`}: ${firstLine(text)}${more}`, time, body: text });
@@ -622,6 +624,56 @@ function homeEntry(message) {
     default:
       return null;
   }
+}
+// Sent with Send to Chief: one line, cut as the others are (in full in its tooltip): the note's
+// first line, else what it passed along. It opens to the note only when the line does not show
+// all of it, then the link, the page's title and the text passed along, each drawn as words
+// (the text as it was, in a code block): nothing passed along shows as formatting or a link. A
+// note alone opens only while its line cuts it short.
+function sentEntry(meta, text, time) {
+  const line = `Sent from the ${meta.client || "command line"}: ${meta.line || firstLine(text)}`;
+  if (!meta.sent) return eventLine({ mark: "↘", kind: "sent", text: line, time, body: text });
+  const { note = "", link = "", title = "", text: passed = "" } = meta.sent;
+  const whole = !note.includes("\n") && note === meta.line;
+  const alone = !link && !title && !passed;
+  const field = (label, ...value) => el("p", {}, el("strong", { class: "key", text: `${label}:` }), " ", ...value);
+  const said = note ? el("p", { class: "sent-note", text: note }) : null;
+  const content = el(
+    "div",
+    { class: "markdown sent" },
+    said,
+    link ? field("Link", /^https?:\/\//i.test(link) ? el("a", { href: link, title: link, target: "_blank", rel: "noreferrer", text: linkLabel(link) }) : link) : null,
+    title ? field("Title", title) : null,
+    passed ? el("pre", {}, el("code", { text: passed })) : null,
+  );
+  const node = eventLine({ mark: "↘", kind: "sent", text: line, time, content });
+  if (!said || !whole) return node;
+  // Its note shows only while the line cuts it short: measured as it opens, and as its width
+  // changes while open. A note alone is all it opens to, so it opens only then: measured from
+  // the start, and folded again once the line shows it whole.
+  const what = node.querySelector(".what");
+  const toggle = node.querySelector("button.line");
+  let watching = null;
+  const fit = () => {
+    const cut = what.scrollWidth > what.clientWidth;
+    said.hidden = !content.hidden && !cut;
+    if (!alone) return;
+    if (!cut && !content.hidden) toggle.click();
+    toggle.disabled = !cut;
+  };
+  const watch = () => {
+    watching ||= new window.ResizeObserver(() => requestAnimationFrame(fit));
+    watching.observe(what);
+  };
+  toggle.addEventListener("click", () => {
+    fit();
+    watch();
+  });
+  if (alone) {
+    toggle.disabled = true;
+    watch();
+  }
+  return node;
 }
 function renderMessage(original) {
   const message = asShown(original);
@@ -662,6 +714,7 @@ function renderMessage(original) {
       if (meta.from) {
         return card({ label: meta.title, body: message.text, className: `report ${meta.status}`, status: meta.status, task: meta.task_id, time, open: () => select(meta.from) });
       }
+      if (meta.source === "capture") return card({ label: `You sent this from the ${meta.client || "command line"}`, body: message.text, className: "inbound", time });
       const source = SOURCES[meta.source] || "Event";
       return card({ label: meta.delegated ? `You handed this over from ${source}` : `From ${source}`, body: readable(meta, message.text), className: "inbound", time });
     }
