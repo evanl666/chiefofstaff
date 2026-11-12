@@ -159,12 +159,10 @@ def main():
         action="store_true",
         help="try it without Copilot or Slack: scripted sessions in a temporary folder",
     )
-    parser.add_argument(
-        "--prepare-downgrade",
-        action="store_true",
-        help="before installing an earlier version: stop the workers on other coding agents "
-        "(Codex) and check that none of their processes runs",
-    )
+    # Before installing an earlier version: the workers on other coding agents stop and none of
+    # their processes may run (more-agents.md 8). Said where it applies (the guide, the Coding
+    # agents group), not in --help, which stays as it was without agents.
+    parser.add_argument("--prepare-downgrade", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.prepare_downgrade:
         sys.exit(prepare_downgrade(parser, args.data_dir or default_data_dir()))

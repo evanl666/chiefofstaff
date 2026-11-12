@@ -61,7 +61,7 @@ SETTINGS_FIELDS |= {
     "send_to_chief",
 }  # fmt: skip
 FORM_NAMES = SETTINGS_FIELDS - {"role_models", "role_efforts", "watches", "watch_hours"} | {
-    "slack_token", "profile", "setup_notes", "report_footer",
+    "slack_token", "profile", "setup_notes", "report_footer", "agent_new_workers",
     *(f"{kind}_{role}" for kind in ("model", "effort")
       for role in ("router", "worker", "slack", "watchdog")),
 }  # fmt: skip
@@ -6431,10 +6431,17 @@ async def agents_usage(runtime, browser, worker: str):
             ranged = part.locator("tr", has_text="gpt-mini")
             await expect(ranged).to_contain_text("80,000\u2013120,000 tokens")
             await expect(part.locator("tr").last).to_contain_text("unknown (agent crashed at ")
-            await expect(dialog.locator("#usage-total strong")).to_have_text("0.0 credits")
-            await expect(dialog.locator("#usage-tables .line")).to_have_text(
-                "No Copilot model calls in this range."
+            # Copilot's totals are Copilot's alone (today's, as the dialog opens on).
+            local = datetime.now().astimezone()  # The page's midnight is the computer's.
+            midnight = local.replace(hour=0, minute=0, second=0, microsecond=0)
+            copilot = store.usage(midnight.timestamp(), time.time() + 1)["total"]
+            await expect(dialog.locator("#usage-total strong")).to_have_text(
+                f"{copilot['credits']:.1f} credits"
             )
+            if not copilot["calls"]:
+                await expect(dialog.locator("#usage-tables .line")).to_have_text(
+                    "No Copilot model calls in this range."
+                )
             for width in AGENT_WIDTHS:
                 await shoot(page, "usage-codex", scheme, width, "#usage-dialog")
             await page.keyboard.press("Escape")
@@ -6508,7 +6515,22 @@ async def agents_stopped_by_settings(runtime, browser, spawned):
     box = group.locator("input[name=agent_codex_enabled]")
     await expect(box).to_be_checked(timeout=20000)
     await box.uncheck()
+    # What the save answers is the page's at once (the state it reloads after comes later).
+    held = asyncio.Event()
+
+    async def later(route):
+        await held.wait()
+        await route.continue_()
+
+    await page.route("**/api/state", later)
     await page.locator("#settings-form footer button[type=submit]").click()
+    await expect(page.locator("#settings-dialog")).to_be_hidden()
+    assert not await page.evaluate(
+        "() => import('/static/state.js').then((m) => 'agents' in m.state.snapshot "
+        "&& m.state.snapshot.agents !== undefined)"
+    ), "none on: the page drops what it knew of them"
+    held.set()
+    await page.unroute("**/api/state", later)
     toast = page.locator(".toast")
     await expect(toast).to_have_text(
         "Stopped 1 worker: Codex is turned off in Settings → Models. Tell it to go on from Needs "
