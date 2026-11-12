@@ -94,6 +94,8 @@ class Supervisor:
         self.adopting = False
 
     def run(self) -> int:
+        if sys.platform == "win32":
+            raise RuntimeError("Another agent's workers need macOS or Linux for now.")
         for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
             signal.signal(signum, self.on_signal)
         self.adopting = adopt_orphans()
@@ -164,6 +166,8 @@ class Supervisor:
 
     def reap(self):
         """What came to this process (a subreaper) and ended is let go of (not a zombie)."""
+        if sys.platform == "win32":
+            return
         own = self.process.pid if self.process else 0
         for pid in list(self.tree):
             if pid not in {own, os.getpid()}:
@@ -172,6 +176,8 @@ class Supervisor:
 
     def end(self):
         """The CLI asked to stop, then everything it ran ended (killed when it does not)."""
+        if sys.platform == "win32":
+            return
         # Its processes now, while they are still its own (or, on Linux, come to this one).
         self.look()
         if self.process and self.process.poll() is None:

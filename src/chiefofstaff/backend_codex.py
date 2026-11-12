@@ -10,7 +10,9 @@ cannot tell the difference:
   `approvalsReviewer: user` (also pinned on the app-server's command line), and the thread's
   response must say so: every command no rule of the owner's allows, every edit and, with Ask
   first, every MCP call then asks Chief of Staff's permission callback (Events.on_permission),
-  as Copilot's requests do. A refusal's reason reaches the model as a note steered into its turn.
+  as Copilot's requests do (each file an edit writes, a move's destination too). With Ask first,
+  ChatGPT's apps are off for the thread, as read back. A refusal's reason reaches the model as a
+  note steered into its turn.
 - Items are events with Copilot's names: a `userMessage` is the message's acknowledgement
   (user.message), commands are `bash` with their exact exit codes, each changed file an edit,
   Chief of Staff's own tools (`dynamicTools`) and MCP calls tool calls. A child thread (a
@@ -20,11 +22,14 @@ cannot tell the difference:
   (assistant.idle) until it ends, which settles its receipt (system.notification).
 - Messages sent while a turn runs steer into it (`turn/steer`) or wait in the adapter's queue;
   the next turn on them starts only once Chief of Staff admits it (`admit`, Runtime.admit_turn).
-- Usage arrives as cumulative counters per thread (`agent.usage` events), in tokens.
+- Usage arrives as cumulative counters per thread (`agent.usage` events, in tokens, with this
+  process as their epoch and what a resumed thread restored), and `agent.settled` once nothing
+  of the session spends (Runtime.record_agent_usage keeps the ledger).
 
-The repository's own `.codex/` configuration loads only where the owner trusts that repository
-in Codex: each thread is told its folder's trust explicitly, because Codex otherwise marks a
-folder it starts a writable thread in as trusted in the owner's config.toml (0.167.2).
+A repository's own `.codex/` configuration loads only where Codex itself would trust it for the
+owner (trust_levels): each thread is told its folders' trust explicitly, because Codex otherwise
+records a folder it starts a writable thread in as trusted in the owner's config.toml (0.167.2).
+Each Codex version is checked once, offline, before its workers run (check, codex_check.py).
 """
 
 from __future__ import annotations
