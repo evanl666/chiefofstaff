@@ -1669,7 +1669,9 @@ async def test_a_crash_mid_turn_leaves_its_spend_unknown_until_the_owner_goes_on
         backend, _ = runtime.connection("codex")
         os.kill(backend.process.pid, signal.SIGKILL)  # Codex crashes mid-turn.
         await until(lambda: runtime.connection("codex")[0] not in {None, backend}, 30)
-        assert ledger(harness, worker)[-1][0] == "unknown"
+        # Recorded as Codex started again (it may already be spending again since).
+        kinds = [kind for kind, *_ in ledger(harness, worker)]
+        assert kinds.count("unknown") == 1 and kinds.index("unknown") >= 1
         task = runtime.tasks.for_session(worker)[-1]
         if not limited:
             await until(lambda: harness.store.session(worker)["status"] == "working", 30)
