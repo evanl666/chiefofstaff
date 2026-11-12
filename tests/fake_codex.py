@@ -1072,7 +1072,8 @@ def wire(side: str, message: dict):
     """Every message either way (tests check each against Codex's protocol schema)."""
     if log := os.environ.get("FAKE_CODEX_WIRE"):
         with Path(log).open("a") as file:
-            file.write(json.dumps({"from": side, "message": message}) + "\n")
+            entry = {"from": side, "pid": os.getpid(), "message": message}
+            file.write(json.dumps(entry) + "\n")
 
 
 def logged(message: dict):

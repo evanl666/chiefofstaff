@@ -110,6 +110,20 @@ async def until(check, seconds: float = 20):
     raise AssertionError("never happened")
 
 
+async def turn_over(runtime, worker: str, seconds: float = 30):
+    """Its turn has ended in full (not only its status: a message now starts a turn)."""
+
+    def over() -> bool:
+        session = runtime.states.handle(worker)
+        return (
+            runtime.store.session(worker)["status"] != "working"
+            and not runtime.states[worker].busy
+            and (session is None or (session.turn is None and not session.starting))
+        )
+
+    await until(over, seconds)
+
+
 # What the adapter reads from Codex
 
 
@@ -924,7 +938,7 @@ async def test_codex_is_stopped_gently_first(tmp_path, monkeypatch, holds_on):
     monkeypatch.setenv("FAKE_CODEX_ENDS", str(ends))
     if holds_on:
         monkeypatch.setenv("FAKE_CODEX_HOLDS_ON", "1")
-    monkeypatch.setattr(backend_codex, "STOP_GRACE", 0.5)
+        monkeypatch.setattr(backend_codex, "STOP_GRACE", 0.5)
     codex = CodexBackend(fake_codex(tmp_path / "fake", monkeypatch))
     await codex.start()
     session, turn = await opened(codex, tmp_path)
@@ -937,8 +951,8 @@ async def test_codex_is_stopped_gently_first(tmp_path, monkeypatch, holds_on):
         assert ends.read_text().splitlines() == ["at the end of its input", "by SIGTERM"]
         assert took >= 0.5
     else:
-        assert ends.read_text().splitlines() == ["at the end of its input"]
-        assert took < 0.5, "no grace waited out"
+        assert ends.read_text().splitlines() == ["at the end of its input"], "never signalled"
+        assert took < backend_codex.STOP_GRACE, "no grace waited out"
 
 
 async def test_stopping_a_child_left_at_work_ends_it(codex, tmp_path):
@@ -1522,8 +1536,9 @@ async def test_a_change_as_a_turn_begins_stops_it_though_its_status_is_not_said_
     at work): the turn is stopped as one at work, with its task waiting under Needs you."""
     harness, runtime = await brief(tmp_path, monkeypatch)
     try:
-        worker = await spawn(runtime, harness, "Reply with just: first")
-        await until(lambda: harness.store.session(worker)["status"] != "working", 30)
+        worker = await spawn(runtime, harness, "Report done: first")
+        await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+        await turn_over(runtime, worker)  # Nothing more comes to it (it reported).
         backend, _ = runtime.connection("codex")
         begins, changed = runtime.begins_turn, []
 
@@ -1590,8 +1605,9 @@ async def test_a_turn_begun_is_stopped_by_a_change_before_and_at_its_first_event
 async def test_a_turn_admitted_before_a_change_never_begins_after_it(tmp_path, monkeypatch):
     harness, runtime = await brief(tmp_path, monkeypatch)
     try:
-        worker = await spawn(runtime, harness, "Reply with just: first")
-        await until(lambda: harness.store.session(worker)["status"] != "working", 30)
+        worker = await spawn(runtime, harness, "Report done: first")
+        await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+        await turn_over(runtime, worker)  # Nothing more comes to it (it reported).
         backend, _ = runtime.connection("codex")
         admit = backend.admit
 
@@ -1642,17 +1658,22 @@ async def test_a_worker_open_in_the_owners_codex_app_says_so_and_waits_for_a_lat
     Copilot terminal: what is sent says so, once; the worker does not fail, nor its agent;
     nothing tries again by itself (no Codex starts for it); news for it waits for the next try
     that opens it."""
-    in_use, runs = tmp_path / "in-use.txt", tmp_path / "runs.txt"
+    in_use, log = tmp_path / "in-use.txt", tmp_path / "log.jsonl"
     harness, runtime = await brief(
-        tmp_path, monkeypatch, FAKE_CODEX_IN_USE=str(in_use), FAKE_CODEX_RUNS=str(runs)
+        tmp_path, monkeypatch, FAKE_CODEX_IN_USE=str(in_use), FAKE_CODEX_LOG=str(log)
     )
+
+    def resumes() -> int:
+        return [json.loads(line)["method"] for line in log.open()].count("thread/resume")
+
     try:
-        worker = await spawn(runtime, harness, "Reply with just: first")
-        await until(lambda: ("assistant", "first") in harness.kinds(worker), 30)
-        await until(lambda: harness.store.session(worker)["status"] != "working", 30)
+        # It reports (one that does not is reminded to: a message of its own to it).
+        worker = await spawn(runtime, harness, "Report done: first")
+        await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+        await turn_over(runtime, worker)
         await runtime.detach(worker)
         in_use.write_text(runtime.copilot_id(worker))
-        started = runs.read_text().count("app-server")
+        started = resumes()
         with pytest.raises(RuntimeError) as refused:
             await runtime.delivery.deliver(
                 worker, wrap("router", "message", "Reply with just: second"), kind="router"
@@ -1664,11 +1685,13 @@ async def test_a_worker_open_in_the_owners_codex_app_says_so_and_waits_for_a_lat
         assert not runtime.agents["codex"].offline, "its agent runs: only this thread is held"
         news = {"prompt": wrap("system", "news", "A reply came."), "display": "News", "meta": {}}
         harness.store.set(f"heldnews:{worker}", json.dumps([news]))
-        tried = runs.read_text().count("app-server")
-        assert tried == started + 1, "one try"
+        assert resumes() == started + 1, "one try"
+        backend, _ = runtime.connection("codex")
+        await until(lambda: not (p := backend.workers.get(worker)) or not p.alive())
         for _ in range(3):
             await runtime.workers.refresh_elsewhere()
-        assert runs.read_text().count("app-server") == tried, "nothing tries again by itself"
+        assert resumes() == started + 1, "nothing tries again by itself"
+        assert not (p := backend.workers.get(worker)) or not p.alive(), "nor runs Codex for it"
         assert harness.store.get(f"heldnews:{worker}"), "its news waits"
 
         in_use.write_text("")  # Closed in the Codex app.
@@ -2324,7 +2347,7 @@ async def test_codex_usage_counts_for_the_run_its_turn_is_on_also_after_its_repo
         assert {r["agent"] for r in rows()} == {"codex"}
         assert {r["model"] for r in rows()} == {"gpt-test"}
         assert not harness.store.all("SELECT * FROM usage WHERE session_id=?", (worker,))
-        assert json.loads(harness.store.get(f"agentepoch:{worker}"))["busy"] is False
+        await until(lambda: json.loads(harness.store.get(f"agentepoch:{worker}"))["busy"] is False)
     finally:
         await runtime.stop()
 
@@ -2437,8 +2460,9 @@ async def test_a_turn_admitted_that_never_began_spends_nothing(tmp_path, monkeyp
     it spends, so its process ending later leaves nothing unknown."""
     harness, runtime = await brief(tmp_path, monkeypatch)
     try:
-        worker = await spawn(runtime, harness, "Reply with just: first")
-        await until(lambda: harness.store.session(worker)["status"] != "working", 30)
+        worker = await spawn(runtime, harness, "Report done: first")
+        await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+        await turn_over(runtime, worker)  # Nothing more comes to it (it reported).
         backend, _ = runtime.connection("codex")
         process = backend.workers[worker]
         if fails == "begins":

@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 
 import pytest
@@ -202,22 +203,33 @@ def test_what_a_crashing_agent_started_in_its_last_moments_ends_too(tmp_path, le
     assert gone(cli["child"])
 
 
+def own(seconds: str) -> str:
+    """A command's duration no other test run's has (runs side by side see each other's
+    processes): its own processes are told apart by it."""
+    return f"{seconds}.{uuid.uuid4().int % 10**6:06d}"
+
+
 def test_what_its_commands_started_since_they_were_seen_ends_too(tmp_path, leftovers):
-    process, out = supervise(tmp_path, look="600", cli=STARTING_LATER)
+    late_one = own("302")
+    process, out = supervise(
+        tmp_path, look="600", cli=STARTING_LATER.replace("sleep 302", f"sleep {late_one}")
+    )
     leftovers.append(process.pid)
     cli = started(out)
     leftovers.append(cli["child"])
     process.wait(30)
-    late = [pid for pid, (_, line) in process_table().items() if line == "sleep 302"]
+    late = [pid for pid, (_, line) in process_table().items() if line == f"sleep {late_one}"]
     leftovers += late
     assert gone(cli["child"]) and not late, "the shell, and the server it started since"
 
 
-@pytest.mark.parametrize(("cli", "left"), [(NOHUP, "sleep 3031"), (DAEMON, "sleep 3032")])
-def test_what_a_command_left_to_another_parent_ends_too(tmp_path, leftovers, cli, left):
+@pytest.mark.parametrize(("cli", "seconds"), [(NOHUP, "3031"), (DAEMON, "3032")])
+def test_what_a_command_left_to_another_parent_ends_too(tmp_path, leftovers, cli, seconds):
     """Review: `nohup server &` from a shell that exited, or a daemon that forked into a session
     of its own, is another parent's before the supervisor looks again: it still ends with the
     agent once Chief of Staff goes away."""
+    mine = own(seconds)
+    cli, left = cli.replace(seconds, mine), f"sleep {mine}"
     read, write = os.pipe()
     process, out = supervise(tmp_path, lifeline=read, cli=cli)
     os.close(read)

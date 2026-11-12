@@ -102,25 +102,26 @@ class Protocol:
     def problems(self, wire: Path) -> list[str]:
         """What on the wire does not match the protocol, one line each."""
         found: list[str] = []
-        asked: dict[tuple[str, object], str] = {}  # (who asked, id) -> method
+        # (its process, who asked, id) -> method: each worker's process numbers its own.
+        asked: dict[tuple[object, str, object], str] = {}
         lines = wire.read_text().splitlines() if wire.exists() else []
         for line in lines:
             try:
                 entry = json.loads(line)
             except ValueError:
                 continue  # A last line still being written by a fake that was not stopped.
-            side, message = entry["from"], entry["message"]
+            side, message, process = entry["from"], entry["message"], entry.get("pid")
             other = "codex" if side == "client" else "client"
             method = message.get("method")
             if method is not None and "id" in message:
-                asked[(side, message["id"])] = method
+                asked[(process, side, message["id"])] = method
                 known = self.requests if side == "client" else self.server_requests
                 found += self.check(side, method, known, message)
             elif method is not None:
                 known = self.client_notifications if side == "client" else self.notifications
                 found += self.check(side, method, known, message)
             else:
-                method = asked.get((other, message.get("id")))
+                method = asked.get((process, other, message.get("id")))
                 if method is None or "error" in message:
                     continue
                 known = self.server_requests if side == "client" else self.requests
