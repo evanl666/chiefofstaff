@@ -855,8 +855,10 @@ class CodexBackend:
         elif method == "item/completed" and item.get("type") == "fileChange":
             self.changes.pop(item.get("id", ""), None)
         if item.get("type") == "subAgentActivity" and item.get("agentThreadId"):
-            # A child thread (a subagent) of this one: its work is its worker's.
+            # A child thread (a subagent) of this one: its work is its worker's. Multi-agent v2
+            # (as OpenAI's models choose) says a spawn only so: no spawnAgent call names it.
             self.parents.setdefault(item["agentThreadId"], params.get("threadId", ""))
+            self.adopt(params.get("threadId") or "", str(item["agentThreadId"]))
         if item.get("type") == "collabAgentToolCall":
             self.collab(method, item, params.get("threadId") or "")
 
@@ -870,14 +872,20 @@ class CodexBackend:
             return
         if item.get("tool") == "spawnAgent":
             for child in threads:
-                if child not in session.tree:
-                    session.tree.add(child)
-                    self.parents.setdefault(child, thread)
-                    session.emit("agent.child", thread_id=child)
+                self.adopt(thread, child)
             return
         foreign = [t for t in threads if t not in session.tree]
         if method == "item/started" and item.get("tool") != "listAgents" and foreign:
             session.reached_out(str(item.get("tool")), foreign)
+
+    def adopt(self, thread: str, child: str):
+        """A child `thread` spawned joins its worker's tree, recorded for later resumes."""
+        session = self.session_of(thread, {})
+        if session is None or session.closed or child in session.tree:
+            return
+        session.tree.add(child)
+        self.parents.setdefault(child, thread)
+        session.emit("agent.child", thread_id=child)
 
     def root(self, thread: str) -> str:
         seen = set()

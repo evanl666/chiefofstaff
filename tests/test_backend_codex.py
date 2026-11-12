@@ -2169,12 +2169,14 @@ def test_subagents_offered_to_a_thread_that_asks_first_keep_it_from_asking_first
         {"type": "function", "name": "exec_command"},
         {"type": "namespace", "name": "multi_agent_v1", "tools": [{"name": "spawn_agent"}]},
         {"type": "namespace", "name": "multi_agent_v2_x", "tools": [{"name": "other"}]},
+        {"type": "namespace", "name": "collaboration", "tools": [{"name": "later_tool"}]},
         {"type": "function", "name": "send_input"},
         {"type": "namespace", "name": "mcp__notes", "tools": [{"name": "write"}]},
     ]
     assert subagent_tools(tools) == {
         "multi_agent_v1::spawn_agent",
         "multi_agent_v2_x::other",
+        "collaboration::later_tool",  # Multi-agent v2's namespace: any tool of it.
         "send_input",
     }
     every = ["tool", "shell", "mcp", "write added-1.marker", "write added-2.marker"]
@@ -2275,15 +2277,17 @@ async def test_a_codex_worker_that_reaches_another_thread_is_stopped_alone(tmp_p
         await runtime.stop()
 
 
+@pytest.mark.parametrize("how", ["", "v2 "])
 async def test_a_codex_worker_reaches_its_own_children_also_from_a_new_process(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, how
 ):
     """The child agents a worker spawned are its own (kept with it): in a new process of its
-    own (resumed), its turns may still reach them."""
+    own (resumed), its turns may still reach them. Multi-agent v2 (OpenAI's models) says a
+    spawn only by the child's activity."""
     harness, runtime = await brief(tmp_path, monkeypatch)
     try:
         worker = await spawn(
-            runtime, harness, "Have a child agent call the report_done tool with text 'x'."
+            runtime, harness, f"Have a {how}child agent call the report_done tool with text 'x'."
         )
         await until(lambda: harness.store.get(f"agentchildren:{worker}"), 30)
         (child,) = json.loads(harness.store.get(f"agentchildren:{worker}"))

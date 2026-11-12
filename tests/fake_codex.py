@@ -604,7 +604,8 @@ class Server:
         ):
             await self.mcp(thread_id, turn_id, match.group(2), match.group(1), bool(match.group(3)))
         if found := re.search(
-            r"Have a (quiet |detached )?child agent call the (\w+) tool with text '([^']*)'", prompt
+            r"Have a (quiet |detached |v2 )?child agent call the (\w+) tool with text '([^']*)'",
+            prompt,
         ):
             how = (found.group(1) or "").strip()
             if subagents_off(thread.get("config") or {}):
@@ -923,7 +924,8 @@ class Server:
 
     async def child(self, thread_id, turn_id, tool, words, prompt, how=""):
         """A child thread at work for this one. "quiet": its start is not said (it is known only
-        by the turn that led to it); "detached": its parent's turn does not wait for it."""
+        by the turn that led to it); "detached": its parent's turn does not wait for it; "v2":
+        as multi-agent v2 says it, by its activity alone (no spawnAgent call names it)."""
         child = str(uuid.uuid4())
         activity = {
             "type": "subAgentActivity",
@@ -934,8 +936,9 @@ class Server:
         }
         # As Codex's spawn_agent: its call names the child once it is made.
         spawn = collab("spawnAgent", thread_id, [])
-        self.item("item/started", thread_id, turn_id, spawn)
-        self.item("item/completed", thread_id, turn_id, {**spawn, "receiverThreadIds": [child]})
+        if how != "v2":
+            self.item("item/started", thread_id, turn_id, spawn)
+            self.item("item/completed", thread_id, turn_id, {**spawn, "receiverThreadIds": [child]})
         if how != "quiet":
             self.item("item/started", thread_id, turn_id, activity)
             self.item("item/completed", thread_id, turn_id, activity)
@@ -963,7 +966,7 @@ class Server:
         if how == "detached":
             return
         # As Codex: interrupting the parent's turn does not end the child's (wait_agent).
-        waiting = collab("wait", thread_id, [child])
+        waiting = collab("wait", thread_id, [] if how == "v2" else [child])
         self.item("item/started", thread_id, turn_id, waiting)
         await asyncio.wait({self.turns[child]})
         self.item("item/completed", thread_id, turn_id, waiting)

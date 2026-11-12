@@ -959,9 +959,10 @@ async def test_an_mcp_call_chief_of_staff_approves_is_approved_for_that_call_alo
 
 
 @pytest.mark.codex
+@pytest.mark.parametrize("version", ["v1", "v2"])
 @pytest.mark.parametrize("ask_first", [True, False])
 async def test_a_worker_that_asks_first_is_offered_no_subagents_by_a_model_that_wants_them(
-    tmp_path, monkeypatch, ask_first
+    tmp_path, monkeypatch, ask_first, version
 ):
     """A model whose catalog entry asks for subagents (`multi_agent_version`) gets them though
     `features.multi_agent` is off (config/mod.rs): `agents.enabled` off keeps them from a
@@ -971,7 +972,7 @@ async def test_a_worker_that_asks_first_is_offered_no_subagents_by_a_model_that_
     home = tmp_path / "codex-home"
     home.mkdir()
     monkeypatch.setenv("CODEX_HOME", str(home))
-    model = scripted_model.Model(multi_agent_version="v1")
+    model = scripted_model.Model(multi_agent_version=version)
     codex = CodexBackend(shutil.which("codex") or "codex")
     codex.arguments += model.arguments(tmp_path)
     codex.needs_sign_in = False

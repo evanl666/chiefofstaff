@@ -35,11 +35,15 @@ PROMPT = (
 )
 # Its turn's last words: the check ran to its end only once they are said.
 REPLY = "checked"
-# Codex's tools for subagents (multi_agent_v1's; v2's go by a namespace of the same start): a
+# Codex's tools for subagents (multi-agent v1's, in multi_agent_v1; v2's, in collaboration): a
 # worker that asks first is offered none.
 SUBAGENT_TOOLS = frozenset(
-    {"spawn_agent", "send_input", "resume_agent", "wait_agent", "close_agent", "list_agents"}
-)
+    {
+        "spawn_agent", "send_input", "resume_agent", "wait_agent", "close_agent", "list_agents",
+        "send_message", "followup_task", "interrupt_agent",
+    }
+)  # fmt: skip
+SUBAGENT_NAMESPACES = ("multi_agent", "collaboration")
 
 
 def subagent_tools(tools: Any) -> set[str]:
@@ -51,7 +55,7 @@ def subagent_tools(tools: Any) -> set[str]:
         namespace = str(tool.get("name") or "") if tool.get("type") == "namespace" else ""
         for inner in (tool.get("tools") or [tool]) if namespace else [tool]:
             name = str(inner.get("name") or "") if isinstance(inner, dict) else ""
-            if name in SUBAGENT_TOOLS or namespace.startswith("multi_agent"):
+            if name in SUBAGENT_TOOLS or namespace.startswith(SUBAGENT_NAMESPACES):
                 found.add(f"{namespace}::{name}" if namespace else name)
     return found
 
@@ -83,9 +87,9 @@ def catalog() -> dict:
                 "auto_compact_token_limit": None,
                 "effective_context_window_percent": 95,
                 "experimental_supported_tools": [],
-                # A model that asks for subagents (as some of OpenAI's do): the check's thread,
-                # which asks first, is offered none all the same (agents.enabled overrides it).
-                "multi_agent_version": "v1",
+                # A model that asks for subagents (multi-agent v2, as OpenAI's do): the check's
+                # thread, which asks first, is offered none all the same (agents.enabled).
+                "multi_agent_version": "v2",
             }
         ]
     }
