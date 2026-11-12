@@ -48,6 +48,31 @@ def test_in_use_recognizes_windows_descendants_and_other_drives(tmp_path):
     assert not in_use(str(tree), {str(tmp_path / "worktree-other"), "Z:\\other"})
 
 
+def test_other_session_log_reads_from_requested_offset(tmp_path):
+    import os
+
+    from chiefofstaff.others import read_chunk
+
+    path = tmp_path / "events.jsonl"
+    path.write_bytes(b"first\nsecond\n")
+    fd = os.open(path, os.O_RDONLY | os.O_BINARY)
+    try:
+        assert read_chunk(fd, 6, 6) == b"second"
+        assert read_chunk(fd, 5, 0) == b"first"
+    finally:
+        os.close(fd)
+
+
+def test_send_to_chief_is_explicitly_unavailable(tmp_path, capsys):
+    from chiefofstaff import send
+    from chiefofstaff.sendsocket import NotOpenedError, prepare
+
+    with pytest.raises(NotOpenedError, match="not supported on Windows"):
+        prepare(tmp_path)
+    assert send.main(["hello", "--data-dir", str(tmp_path)]) == send.ABSENT
+    assert "not supported on Windows" in capsys.readouterr().err
+
+
 async def test_unknown_windows_process_directory_prevents_cleanup(monkeypatch, tmp_path):
     import psutil
 

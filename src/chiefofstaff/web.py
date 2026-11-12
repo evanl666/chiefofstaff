@@ -582,6 +582,15 @@ def create_app(
     async def external(refresh: bool = False):
         return await runtime.workers.external(refresh)
 
+    @app.get("/api/others")
+    async def others():
+        """Where the owner's other Copilot sessions stand (see others.py)."""
+        return runtime.others.view()
+
+    @app.get("/api/others/{session_id}")
+    async def other(session_id: str):
+        return await runtime.others.find(session_id)
+
     @app.post("/api/external/{session_id}/adopt")
     async def adopt(session_id: str):
         return await runtime.workers.adopt(session_id)

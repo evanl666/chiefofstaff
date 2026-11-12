@@ -25,7 +25,7 @@
           <div id="closed-list"></div>
         </details>
         <details id="external">
-          <summary>Other Copilot sessions <span id="external-count"></span></summary>
+          <summary><span class="group-name">Other Copilot sessions</span><span id="external-count"></span></summary>
           <div id="external-list"></div>
         </details>
         <footer id="sidebar-foot">
@@ -134,6 +134,7 @@
             </div>
             <small>More tasks wait in the queue, and new work also waits while this computer is low on memory. Idle finished workers close; you can reopen them. Clear <em>Daily summary at</em> to turn the summary off.</small>
             <label class="check"><input name="mac_notifications" type="checkbox" /> Desktop notifications</label>
+            <label class="check"><input name="other_sessions" type="checkbox" /> Show where my other Copilot sessions stand</label>
           </section>
 
           <section class="tab" data-tab="workers" hidden>
@@ -265,6 +266,15 @@
               </div>
             </details>
             <div id="connections-extra"></div>
+            <div id="send-line" class="send-line">
+              <label class="check"><input name="send_to_chief" type="checkbox" aria-describedby="send-how send-problem" /> Send to Chief from the command line</label>
+              <div id="send-consent" class="send-consent" hidden>
+                <p class="hint">What you send (your note, and any link or text you pass) goes to Chief of Staff on this computer, which hands it to GitHub Copilot under your account; the work it starts runs with your settings, as any task does.</p>
+                <div class="inline-actions"><button id="send-on" type="button">Turn on</button><button id="send-cancel" type="button" class="link">Cancel</button></div>
+              </div>
+              <small id="send-how" hidden><code>chiefofstaff send "…"</code> from a terminal, or a hotkey: <a class="link" href="https://github.com/evanl666/chiefofstaff/blob/main/docs/guide.md#send-to-chief" target="_blank" rel="noreferrer">recipes</a></small>
+              <small id="send-problem" class="error" role="status" hidden></small>
+            </div>
           </section>
 
           <section class="tab" data-tab="you" hidden>

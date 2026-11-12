@@ -2041,7 +2041,18 @@ async def w53_router_asks_while_away(ctx: Ctx):
 
 async def w43_test_notification(ctx: Ctx):
     before = len(outbox(ctx))
-    await ctx.app.post("/api/away/test")
+    # W53's messenger may still be finishing its run (its message is out, its turn not ended):
+    # a test then is refused until it is done, as the owner is told ("try again in a minute").
+    deadline = time.monotonic() + 120
+    while True:
+        try:
+            await ctx.app.post("/api/away/test")
+            break
+        except RuntimeError as exc:
+            if "being sent now" not in str(exc) or time.monotonic() > deadline:
+                raise
+            log("W43: a notification is still being sent; trying again")
+            await asyncio.sleep(5)
 
     async def sent():
         return outbox(ctx)[before:] or None

@@ -1,5 +1,51 @@
 # Changelog
 
+## Unreleased
+
+- **A worker closed as it reports done, or as its turn ends** (its PR merged), has its clean
+  worktree removed once what it holds is read. That was read while the removal looked at the
+  worktree, so it stayed, as one a program runs in, until looked at again; or it went in the
+  middle of the read, and what the worker changed could be missing from the task's receipts
+  (found by CI on a slow machine).
+
+## 0.1.39 (2026-11-11)
+
+Send to Chief from anywhere.
+
+- **Send to Chief**: `chiefofstaff send "fix the flaky login test in acme/api"` hands the running
+  Chief of Staff a note from any terminal or launcher, with a link and its title (`--url`,
+  `--title`) or text (`--text-from FILE`, or `-` for standard input) if you like: one request for
+  the Router, as a message on Home is, which shows it as one line in the chat. The note is your
+  request; what you pass along is material, never instructions, and anything risky is confirmed
+  with you first. It goes through a socket in the data directory that only your user can use,
+  checked at both ends, and is taken once (a retry, or the same note sent again within ten
+  minutes, is not taken twice). The guide has recipes for a hotkey (Shortcuts, Raycast, Alfred, a
+  Linux shortcut) and for sending the front browser tab. Off by default: *Send to Chief from the
+  command line*, at the end of Settings → Connections, turns it on.
+- **Connecting to Copilot again** no longer fails, leaving Chief of Staff not connected, while
+  another program on the computer has a command line that is not UTF-8 (found by the new live
+  suite `scripts/live_send.py`, in a reconnect).
+
+## 0.1.38 (2026-11-11)
+
+Where your other Copilot sessions stand, in the sidebar.
+
+- **Where your other Copilot sessions stand**: the sidebar's *Other Copilot sessions* says, for
+  each, whether it asks you something, it is your turn, it works, it made no progress for 15
+  minutes, it is idle, finished or stopped: in the row's dot and small word, its tooltip and the
+  first line of its view, which ends with the question while it asks. Read from the logs Copilot
+  keeps on this computer: no model call, nothing stored or sent. At most five rows at rest, those
+  waiting for you first, the rest under *N more*; the group starts unfolded the first time, then
+  stays as you leave it. A status shows only while it is known to be current. On by default:
+  *Show where my other Copilot sessions stand* in Settings → General turns it off.
+- **A session title or message cut in the middle of an emoji** no longer breaks the sidebar's
+  *Other Copilot sessions* list, the view behind one of its rows, a worker's timeline read from its
+  log (open in a terminal, or adopted), nor the Router's list of your sessions open in a terminal:
+  the half emoji shows as "?". Nothing sent to the page can end its live updates that way.
+- **Other Copilot sessions' heading fits on one line** in the sidebar: how many are open (else how
+  many there are) on the right, as the rows say theirs, the full count in its tooltip. It wrapped
+  into four short lines.
+
 ## 0.1.37 (2026-11-10)
 
 Fixes found in a security review and in live runs.

@@ -154,6 +154,8 @@ class FakeClient:
         self.logs: dict[str, list[dict]] = {}  # Their logs (events as the CLI writes them).
         self.log_changed: dict[str, float] = {}
         self.cli_version = TESTED_CLI
+        # A Copilot home of its own, where others.py reads sessions' logs (session_log).
+        self.home: Path | None = None
         self.pids: set[int] = set()  # Its CLI's processes.
         self.crashed = False  # Its CLI exited by itself.
 
@@ -194,6 +196,9 @@ class FakeClient:
         events = self.logs.get(session_id, [])
         found = [e for e in events[offset:] if e.get("type") == "session.usage_record"]
         return found, len(events)
+
+    def session_log(self, session_id):
+        return self.home / "session-state" / session_id / "events.jsonl" if self.home else None
 
     async def mcp_sign_in_url(self, session, server):
         login = await session.rpc.mcp.oauth.login(SimpleNamespace(server_name=server))

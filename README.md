@@ -84,7 +84,7 @@ the ones nothing uses. Never run `uv cache clean` while Chief of Staff is runnin
 the environment it runs from. Workers' folders, and how much disk they take, are under Storage
 (the disk icon at the bottom of the sidebar).
 
-On Windows, the Copilot command sandbox, sandboxed checks, and some storage management features
+On Windows, Send to Chief, the Copilot command sandbox, sandboxed checks, and some storage management features
 are unavailable. Workers can access files and networks available to your Windows account.
 Unix permission bits do not protect the data directory on Windows: check its Windows access
 control list restricts access to trusted users, especially when using `--data-dir`.

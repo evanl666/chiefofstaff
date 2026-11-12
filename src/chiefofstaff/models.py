@@ -1,9 +1,13 @@
+import ipaddress
 import json
 import os
 import re
+import socket
+import unicodedata
 from contextlib import suppress
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypeVar, cast, get_origin
+from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import (
     AfterValidator,
@@ -15,6 +19,8 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+
+from .envelope import visible
 
 # owner/repo, also from its github.com address (https://github.com/acme/app, git@github.com:…).
 GITHUB_URL = re.compile(
@@ -384,6 +390,13 @@ class Settings(StrictModel):
     never_clean_patterns: list[Annotated[str, Field(max_length=200)]] = Field(
         default_factory=list, max_length=50
     )
+    # The sidebar's Other Copilot sessions say where each of the owner's own stands (asks them,
+    # their turn, working…), read from the logs Copilot keeps (see others.py): local files, no
+    # model call, nothing stored.
+    other_sessions: bool = True
+    # Send to Chief: `chiefofstaff send` hands the Router a note, a link or text through a socket
+    # in the data directory only the owner's user can use (see sendsocket.py); none while off.
+    send_to_chief: bool = False
 
     @field_validator("regenerable_patterns", "never_clean_patterns")
     @classmethod
@@ -582,6 +595,59 @@ class OwnerMessage(StrictModel):
     def something(self) -> "OwnerMessage":
         if not self.text.strip() and not self.attachments:
             raise ValueError("Write a message or attach an image.")
+        return self
+
+
+def sent_link(value: str) -> str:
+    """A link sent with Send to Chief: http or https, to a host. One to this computer loses its
+    query and fragment, where a key of Chief of Staff's could be."""
+    if not value:
+        return ""
+    if any(c.isspace() or unicodedata.category(c)[0] == "C" for c in value):
+        raise ValueError("a web address, without spaces")
+    parts = urlsplit(value)
+    if parts.scheme.lower() not in {"http", "https"} or not parts.hostname:
+        raise ValueError("an http or https address")
+    if this_computer(parts.hostname):
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+    return value
+
+
+def this_computer(host: str) -> bool:
+    """Whether a link's host is this computer: localhost, a loopback or unspecified address,
+    however it is written (127.1 and 2130706433 are 127.0.0.1 to a browser)."""
+    host = host.rstrip(".")
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        try:
+            address = ipaddress.IPv4Address(socket.inet_aton(host))
+        except OSError:
+            return False
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+        address = address.ipv4_mapped
+    return address.is_loopback or address.is_unspecified
+
+
+class SentItem(StrictModel):
+    """What `chiefofstaff send` sends (send.py): the client makes its id, once, and keeps it when
+    it tries again. A note is the owner's words; a link, its title and text are what they pass
+    along (capture). A note or a capture is required."""
+
+    item: str = Field(pattern=r"^[0-9a-f]{32}$")
+    note: str = Field(default="", max_length=20000)
+    url: Annotated[str, AfterValidator(sent_link)] = Field(default="", max_length=2048)
+    title: Annotated[str, AfterValidator(lambda title: visible(" ".join(title.split())))] = Field(
+        default="", max_length=300
+    )
+    text: str = Field(default="", max_length=20000)
+
+    @model_validator(mode="after")
+    def something(self) -> "SentItem":
+        if not (self.note or self.url or self.title or self.text):
+            raise ValueError("Send a note, a link or text.")
         return self
 
 

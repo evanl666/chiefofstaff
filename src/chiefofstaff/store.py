@@ -564,6 +564,49 @@ class Store:
             return None
         return trigger_id
 
+    def sent(self, key: str) -> dict | None:
+        """An item sent with Send to Chief under this key, as it was taken: its own trigger, or
+        the earlier one it repeated (its key and when it was taken)."""
+        with self.lock:
+            return self.sent_as(key)
+
+    def sent_as(self, key: str) -> dict | None:
+        found = self.db.execute(
+            "SELECT key, text, created_at FROM triggers WHERE key=?", (key,)
+        ).fetchone()
+        if not found:
+            return None
+        if found["text"].startswith("same as "):
+            earlier = self.db.execute(
+                "SELECT key, created_at FROM triggers WHERE key=?",
+                (found["text"].removeprefix("same as "),),
+            ).fetchone()
+            found = earlier or found
+        return {"key": found["key"], "created_at": found["created_at"]}
+
+    def take_sent(self, key: str, digest: str, since: str) -> dict:
+        """An item sent with Send to Chief (Runtime.on_sent), taken once: checked and recorded
+        in one transaction, as a trigger of its own with its content's digest. `taken` is False
+        for one taken already: under the same key, or with the same content since `since`
+        (recorded as the same as that one); `key` names the one taken."""
+        with self.lock, self.db:
+            if found := self.sent_as(key):
+                return {"taken": False, **found}
+            same = self.db.execute(
+                "SELECT key, created_at FROM triggers WHERE source='capture' AND text=? "
+                "AND created_at>=? ORDER BY created_at LIMIT 1",
+                (digest, since),
+            ).fetchone()
+            stamp = now()
+            text = f"same as {same['key']}" if same else digest
+            self.db.execute(
+                "INSERT INTO triggers VALUES(?,?,?,?,?)",
+                ("t" + identifier()[:8], "capture", key, text, stamp),
+            )
+        if same:
+            return {"taken": False, "key": same["key"], "created_at": same["created_at"]}
+        return {"taken": True, "key": key, "created_at": stamp}
+
     def create_draft(
         self, session_id: str, kind: str, target: dict, text: str, note: str = ""
     ) -> dict:

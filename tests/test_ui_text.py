@@ -1260,3 +1260,88 @@ def test_earlier_reports_are_kept_and_a_row_says_the_latest():
     ]
     assert found[1:3] == [[], []]
     assert found[3:] == ["Cache at 96 MB.", "The bucket is gone."]
+
+
+def other_looks(cases: dict) -> dict:
+    """How the sidebar draws each of the owner's other Copilot sessions (sidebar.js otherLook):
+    `cases` maps a name to (open, status or None, why)."""
+    return run_js(
+        f"const b = await import({json.dumps((STATIC / 'sidebar.js').as_uri())});\n"
+        "const modified = new Date(Date.now() - 3 * 3600e3).toISOString();\n"
+        f"return Object.fromEntries(Object.entries({json.dumps(cases)}).map(([name, [open,"
+        " status, why]]) => [name, b.otherLook({ summary: 'Fix the login test', cwd: '/w/app',"
+        " open, modified, why }, status)]));"
+    )
+
+
+def status(key: str, elapsed: float | None, words: str = "", before: bool = False) -> dict:
+    return {"key": key, "elapsed": elapsed, "since": None, "before": before, "words": words}
+
+
+def test_where_an_other_session_stands_is_in_its_row_dot_word_tooltip_and_name():
+    looks = other_looks({
+        "asks": [True, status("asks", 725, "Main or release?"), ""],
+        "your_turn": [True, status("your_turn", 30, "Done."), ""],
+        "working": [True, status("working", 200, "bash make test"), ""],
+        "before": [True, status("working", 200, "", before=True), ""],
+        "no_progress": [True, status("no_progress", 2400, "bash make build"), ""],
+        "idle": [True, status("idle", 7300, "Tidied."), ""],
+        "finished": [False, status("finished", 10900, "Drafted it."), ""],
+        "stopped": [False, status("stopped", None, "Stopped by you"), ""],
+        "unknown key": [True, status("thinking", 10), "Not caught up with its log yet."],
+        "no status": [True, None, "Not caught up with its log yet."],
+        "closed": [False, None, ""],
+    })  # fmt: skip
+    drawn = {name: (look["dot"], look["sub"], look["dotTitle"]) for name, look in looks.items()}
+    assert drawn == {
+        "asks": ("dot waiting", "12m", "Asks you, for 12 minutes"),
+        "your_turn": ("dot waiting", "now", "Your turn, for less than a minute"),
+        "working": ("dot open busy", "open", "Working, for 3 minutes"),
+        "before": ("dot open busy", "open", "Working, for at least 3 minutes"),
+        "no_progress": ("dot stalled", "40m", "No progress for 40 minutes"),
+        "idle": ("dot open", "open", "Idle, for 2 hours"),
+        "finished": ("dot done", "3h", "Finished, 3 hours ago"),
+        "stopped": ("dot", "3h", "Stopped"),
+        "unknown key": ("dot open", "open", "Open in a terminal right now (shown read-only)"),
+        "no status": ("dot open", "open", "Open in a terminal right now (shown read-only)"),
+        "closed": ("dot", "3h", "Not open anywhere"),
+    }  # fmt: skip
+    assert looks["asks"]["name"] == "Fix the login test, asks you, for 12 minutes"
+    assert looks["no_progress"]["name"] == "Fix the login test, no progress for 40 minutes"
+    assert looks["asks"]["title"] == "Asks you, for 12 minutes\nMain or release?\n/w/app"
+    assert looks["no_progress"]["title"].splitlines()[1:] == [
+        "bash make build",
+        "A slow step, a hang or a prompt in its terminal look the same from its log.",
+        "/w/app",
+    ]
+    # Without a status, as before the setting, and why in its tooltip.
+    assert looks["no status"]["title"] == (
+        "Open in a terminal now · /w/app\nNot caught up with its log yet."
+    )
+    assert looks["closed"]["title"] == "/w/app" and looks["closed"]["name"] == ""
+
+
+def test_five_other_sessions_at_rest_those_waiting_first():
+    found = run_js(
+        f"const b = await import({json.dumps((STATIC / 'sidebar.js').as_uri())});\n"
+        "const items = 'abcdefgh'.split('').map((id) => ({ id }));\n"
+        "const statuses = { b: ['working', 50], c: ['asks', 10], d: ['no_progress', 900],"
+        " e: ['your_turn', 40], f: ['idle', 9000], g: ['working', 300] };\n"
+        "const of = (id) => statuses[id] && { key: statuses[id][0], elapsed: statuses[id][1] };\n"
+        "const ids = ([rest, more]) => [rest.map((i) => i.id).join(''),"
+        " more.map((i) => i.id).join('')];\n"
+        "return [ids(b.restingOthers(items, of)), ids(b.restingOthers(items, of, ['h'])),"
+        " ids(b.restingOthers(items, of, ['f'], 3)), ids(b.restingOthers(items.slice(0, 4), of)),"
+        " ids(b.restingOthers(items, of, ['h', 'a'])),"
+        " ids(b.restingOthers(items, of, ['b', 'h']))];"
+    )
+    assert found == [
+        # Waiting (the longest first), no progress, at work (the longest first); then the
+        # list's order; the rest folded in the list's order.
+        ["ecdgb", "afh"],
+        ["ecdgh", "abf"],  # The one shown is always at rest.
+        ["ecf", "abdgh"],
+        ["cdba", ""],
+        ["ecdah", "bfg"],  # And the one the keyboard is on: each takes the room of the last.
+        ["ecdbh", "afg"],  # One at work kept at rest keeps its place; the next goes.
+    ]

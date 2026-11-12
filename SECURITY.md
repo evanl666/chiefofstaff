@@ -37,6 +37,7 @@ makes a mistake.
 | A worker does not write outside its folders with Copilot's file-edit tool | **Chief of Staff** (permission check) and Copilot (best effort) | Yolo is off for the worker |
 | The connector (watches, notifications when you are away) only looks, and messages nobody but you | **The model**, guided by instructions; it runs as a worker that reads Slack (sandboxed, permission checks on, Slack writes refused) | As far as the model follows its instructions. It can use every MCP server your Copilot has, including ones that can send: give it a way to reach you that can message only you if you can |
 | A message cannot pretend to come from you or the Router | **Chief of Staff** (envelopes: only the app writes the sender; text inside is escaped) | Always |
+| Only your user can send to Chief of Staff with `chiefofstaff send`, and only a request, never an approval | **OS** (the socket and its folders) and **Chief of Staff** (who connected, checked at both ends; two routes) | Send to Chief is on (off by default). Programs running as you can send too (see [Send to Chief](#send-to-chief)) |
 | Content from Slack, GitHub and the web is treated as data, not instructions | **The model**, guided by marked envelopes (`trust="untrusted"`) | As far as the model follows its instructions |
 | Only your own reaction delegates a Slack message (others reacting with the same emoji do nothing) | **Chief of Staff** (the watcher searches `hasmy::emoji:`, your reactions only) | Always |
 | A delegated message is acted on for what it asks, but risky requests in it are confirmed with you | **The model**, guided by instructions | As far as the model follows its instructions. Delegate only messages you would forward to a colleague |
@@ -80,6 +81,44 @@ sandbox. Add only what you would install for yourself.
   server on it.
 - Requests that change anything must come from the same origin; responses carry a strict
   Content-Security-Policy.
+
+## Send to Chief
+
+`chiefofstaff send` (off by default; Settings → Connections) is a way in, so it is narrow:
+
+- **Where:** a Unix socket, `send/socket` in the data directory, open only while the setting is
+  on and Chief of Staff runs: no network port, and no web page can reach a Unix socket (a
+  request carrying an `Origin` is refused anyway). Turning the setting off closes it and removes
+  the file.
+- **Who:** Chief of Staff opens it only when the data directory and every folder above it are
+  owned by you or root and writable by no one else (no group or other write bit, no macOS
+  access control list letting others write), in a `send/` folder of yours (`0700`, its access
+  control list removed), the socket itself `0600`. It removes only a socket of yours left by a
+  Chief of Staff that stopped; anything else at those paths is left alone and Settings says why
+  the socket stays closed. On each connection, the user id of the process connecting is checked
+  before anything is read, and another user's connection is closed. The command checks the same
+  folders, that the socket is yours and that the process answering runs as you, before it
+  writes a byte: *Something other than your Chief of Staff is at …: nothing was sent*.
+- **What:** two routes, `POST /v1/send` and `POST /v1/hello` (the API version); one request a
+  connection, at most 64 KB, read within 5 seconds; at most 10 items a minute and 300 a day.
+  Nothing there reads state, chats or results, answers a card, approves a draft, merges,
+  cancels or changes a setting. An item can at most start work, as a message on Home can.
+- **As what:** the note you type is wrapped as yours (`from="owner"`); a link, its title and
+  text are wrapped `from="capture" trust="untrusted"`, escaped, by Chief of Staff (a client
+  cannot send envelope text). The Router treats both as delegated: risky requests, the note's
+  too, are confirmed with you first. A link to this computer (`127.0.0.1`, `localhost`, `::1`)
+  loses its query and fragment. On Home, what was passed along shows in a code block, never as
+  formatting or a link.
+- **No key, on purpose:** the checks above are the credential. A key file would add nothing, as
+  any program able to read it runs as you and could connect anyway.
+- **Limits:** programs running as you can use the socket, unsandboxed workers included, as they
+  can read `launch-url` and the database today; what they send is handled as delegated and Home
+  shows where each item came from. Sandboxed workers cannot reach the data directory or Unix
+  sockets. Sent work runs under your settings like any task: with yolo on and the sandbox off (the
+  defaults), passed text that persuades a worker reaches what your account can. What Chief of
+  Staff receives goes to GitHub Copilot under your account, as every message to the Router does.
+  curl and other tools that speak HTTP over the socket do not check who answers; the command
+  does.
 
 ## Your data
 

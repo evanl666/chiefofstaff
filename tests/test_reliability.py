@@ -5,11 +5,14 @@ import asyncio
 import json
 import shutil
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
 from conftest import Harness, call_tool, settle
 
+from chiefofstaff.backend import process_table
 from chiefofstaff.models import DraftDecision, Settings
 from chiefofstaff.workspaces import changes, checkout_git, command, protected_git_paths
 
@@ -334,3 +337,18 @@ async def test_a_project_folder_that_is_a_linked_worktree_is_read_as_itself(tmp_
     assert top.strip() == "feature"
     main = {**shared, "project": str(repo), "path": str(repo)}
     assert "main-only.txt" in await checkout_git(main, str(repo), "status", "--porcelain")
+
+
+def test_a_command_line_that_is_not_utf8_does_not_keep_copilot_from_connecting():
+    """Found by scripts/live_send.py (S6, a send while Copilot reconnects): connecting reads
+    every process's command line, and one that was not UTF-8 (any program's on the computer)
+    failed the reconnect and left Chief of Staff not connected."""
+    sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", b"caf\xe9"])
+    try:
+        deadline = time.monotonic() + 10
+        while sleeper.pid not in (table := process_table()) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert "time.sleep(30)" in table[sleeper.pid][1]
+    finally:
+        sleeper.kill()
+        sleeper.wait()

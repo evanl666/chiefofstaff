@@ -5,7 +5,7 @@ const browser = Object.fromEntries(
     "URL", "URLSearchParams", "Blob", "ClipboardItem", "setTimeout", "clearTimeout",
     "setInterval", "clearInterval", "requestAnimationFrame", "Intl", "console", "HTMLElement",
     "Node", "getComputedStyle", "matchMedia", "CSS", "Notification", "Event", "history",
-    "confirm", "HTMLDialogElement", "IntersectionObserver",
+    "confirm", "HTMLDialogElement", "IntersectionObserver", "performance", "AbortController",
   ].map((name) => [name, "readonly"]),
 );
 

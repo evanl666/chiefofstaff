@@ -20,6 +20,12 @@ OWNER = re.compile(r'(?m)^<message from="owner"')
 UNTRUSTED = "untrusted"
 
 
+def sendable(text: str) -> str:
+    """Text as UTF-8 can hold it: a lone surrogate, which JSON can carry (a title or message cut
+    in the middle of an emoji), becomes "?". Sent as it is, it fails the whole answer it is in."""
+    return text.encode("utf-8", "replace").decode("utf-8")
+
+
 def short(session_id: str) -> str:
     """The id sessions see and tools accept: the first 8 characters of a session id."""
     return session_id[:8]
@@ -126,12 +132,17 @@ JOINERS = {"\u200c", "\u200d"}
 MAX_TITLE = 80
 
 
+def visible(text: str) -> str:
+    """Text on one line, without control or hidden format characters."""
+    return " ".join(
+        "".join(c for c in text if c in JOINERS or unicodedata.category(c)[0] != "C").split()
+    )
+
+
 def clean_title(title: str) -> str:
     """A title safe for an envelope attribute (quote() escapes it there) and a session name:
     no control or hidden format characters; a long one cut at a word, marked with "…"."""
-    text = " ".join(
-        "".join(c for c in title if c in JOINERS or unicodedata.category(c)[0] != "C").split()
-    )
+    text = visible(title)
     if len(text) > MAX_TITLE:
         cut = text[: MAX_TITLE - 1]
         if " " in cut[MAX_TITLE // 2 :]:

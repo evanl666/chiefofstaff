@@ -18,6 +18,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from uuid import uuid4
 
 from .bus import Bus
 from .models import Settings
@@ -652,8 +653,10 @@ class DemoRuntime(Runtime):
         super().__init__(
             store,
             bus,
+            # The owner's own sessions write their logs in a Copilot home of the demo's own,
+            # where the sidebar reads where each stands.
             backend_factory=lambda settings: ScriptedBackend(
-                brain, others=terminal_sessions(project)
+                brain, others=terminal_sessions(project), home=store.directory / "copilot-home"
             ),
             watch=watch or WatchConfig(interval=3, stall=12, long=600, cooldown=30),
         )
@@ -688,68 +691,72 @@ class DemoRuntime(Runtime):
 
 
 def terminal_sessions(project: Path) -> list[dict]:
-    """The owner's own Copilot sessions: one open in a terminal, shown read-only, and an older
-    one that a message continues in Chief of Staff."""
+    """The owner's own Copilot sessions: one open in a terminal that asks the owner something,
+    shown read-only, and one closed after it finished, which a message continues in Chief of
+    Staff. Their logs are as the Copilot CLI writes them, each event at its time."""
+    now = datetime.now(UTC)
 
-    def event(kind: str, **data) -> dict:
-        return {"type": kind, "data": data}
+    def session(session_id: str, summary: str, events: list, minutes: float) -> dict:
+        context = SimpleNamespace(working_directory=str(project), repository="", branch="main")
+        meta = SimpleNamespace(
+            session_id=session_id,
+            summary=summary,
+            is_remote=False,
+            modified_time=now - timedelta(minutes=minutes),
+            context=context,
+        )
+        # Made in a terminal (the Copilot CLI), as Copilot's list says it.
+        vars(meta).update(client_name="github/cli", last_client_name="", clients_listed=True)
+        start = {
+            "sessionId": session_id,
+            "version": 1,
+            "producer": "copilot-agent",
+            "copilotVersion": "1.0.109",
+            "context": {"cwd": str(project), "branch": "main"},
+        }
+        log, parent = [], None
+        for kind, ago, data in [("session.start", events[0][1] + 1, start), *events]:
+            at = (now - timedelta(minutes=ago)).isoformat(timespec="milliseconds")
+            event = {"type": kind, "data": data, "id": str(uuid4()), "parentId": parent,
+                     "timestamp": at.replace("+00:00", "Z")}  # fmt: skip
+            log.append(event)
+            parent = event["id"]
+        return {"meta": meta, "log": log}
 
-    return [
-        {
-            "meta": SimpleNamespace(
-                session_id="0d3e8c7a-5b1f-4c2e-9a6d-2f8b1c4e7a90",
-                summary="Profile the slow orders page",
-                is_remote=False,
-                modified_time=datetime.now(UTC),
-                context=SimpleNamespace(
-                    working_directory=str(project), repository="", branch="main"
-                ),
-            ),
-            "open": True,
-            "log": [
-                event("user.message", content="Why is the orders page slow for big accounts?"),
-                event(
-                    "tool.execution_start",
-                    toolName="bash",
-                    arguments={"command": "uv run python -m cProfile app/orders.py"},
-                ),
-                event(
-                    "assistant.message",
-                    content="Most of the time goes to one query per order line. Batching "
-                    "them into a single query should make it about ten times faster.",
-                ),
-            ],
-        },
-        {
-            "meta": SimpleNamespace(
-                session_id="7b2e4f1a-9c3d-4e8b-a5f6-1d0c9e8b7a64",
-                summary="Write the API changelog",
-                is_remote=False,
-                modified_time=datetime.now(UTC) - timedelta(days=1),
-                context=SimpleNamespace(
-                    working_directory=str(project), repository="", branch="main"
-                ),
-            ),
-            "log": [
-                event("user.message", content="Draft a changelog entry for the login API."),
-                event(
-                    "assistant.message",
-                    content="Reading the recent commits first.",
-                    toolRequests=[{"name": "bash"}],
-                ),
-                event(
-                    "tool.execution_start",
-                    toolName="bash",
-                    arguments={"command": "git log --oneline -10"},
-                ),
-                event(
-                    "assistant.message",
-                    content="Drafted: “Login tokens expire on the server's clock.” It is in "
-                    "CHANGELOG.md, not committed yet.",
-                ),
-            ],
-        },
-    ]
+    def step(call: str, tool: str, ago: float, words: str = "", **arguments) -> list:
+        request = {"toolCallId": call, "name": tool, "arguments": arguments, "type": "function"}
+        return [
+            ("assistant.message", ago, {"content": words, "toolRequests": [request]}),
+            ("tool.execution_start", ago,
+             {"toolCallId": call, "toolName": tool, "arguments": arguments}),
+        ]  # fmt: skip
+
+    profiling = session("0d3e8c7a-5b1f-4c2e-9a6d-2f8b1c4e7a90", "Profile the slow orders page", [
+        ("user.message", 19, {"content": "Why is the orders page slow for big accounts?"}),
+        ("assistant.turn_start", 19, {"turnId": "0"}),
+        *step("call-1", "bash", 18, command="uv run python -m cProfile app/orders.py"),
+        ("tool.execution_complete", 15, {"toolCallId": "call-1", "success": True}),
+        ("assistant.turn_end", 15, {"turnId": "0"}),
+        ("assistant.turn_start", 15, {"turnId": "0"}),
+        *step("call-2", "ask_user", 14,
+              "Most of the time goes to one query per order line. Batching them into a single "
+              "query should make it about ten times faster.",
+              message="Batch the order-line queries in app/orders.py now?"),
+    ], 14)  # fmt: skip
+    changelog = session("7b2e4f1a-9c3d-4e8b-a5f6-1d0c9e8b7a64", "Write the API changelog", [
+        ("user.message", 190, {"content": "Draft a changelog entry for the login API."}),
+        ("assistant.turn_start", 190, {"turnId": "0"}),
+        *step("call-3", "bash", 189, "Reading the recent commits first.",
+              command="git log --oneline -10"),
+        ("tool.execution_complete", 188, {"toolCallId": "call-3", "success": True}),
+        ("assistant.turn_end", 188, {"turnId": "0"}),
+        ("assistant.turn_start", 188, {"turnId": "0"}),
+        ("assistant.message", 186, {"content": "Drafted: “Login tokens expire on the server's "
+                                    "clock.” It is in CHANGELOG.md, not committed yet."}),
+        ("assistant.turn_end", 186, {"turnId": "0"}),
+        ("session.shutdown", 180, {"shutdownType": "routine"}),
+    ], 180)  # fmt: skip
+    return [{**profiling, "open": True}, changelog]
 
 
 def factory(project: Path, autoplay: bool = True):

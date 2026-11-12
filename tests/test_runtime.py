@@ -1221,13 +1221,15 @@ async def test_a_message_copilot_never_starts_on_fails_its_task_and_goes_out_aga
     assert runtime.tasks.get(task_id)["status"] == "failed"
     assert "never started on it" in harness.kinds(worker)[-1][1]
     assert stuck.disconnected, "the next message goes on a new connection"
+    # Stuck again from here: nothing it is sent is checked on before the test ends (the retried
+    # task's check could otherwise find it started on a slow machine).
+    monkeypatch.setattr(delivery_module, "START_CHECK", 60)
     await runtime.task_actions.retry(task_id)
     assert harness.session(worker) is not stuck
     assert "Run the probe" in harness.session(worker).sent[-1], "its task goes out again"
 
     # Stuck again: a settings change sends it again on a new connection at once.
     again = harness.session(worker)
-    monkeypatch.setattr(delivery_module, "START_CHECK", 60)
     await runtime.owner_send(worker, "And the second probe")
     old = harness.store.settings()
     fixed = {"probe": {"command": "probe", "tools": ["*"]}}

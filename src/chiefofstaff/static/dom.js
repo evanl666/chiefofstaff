@@ -1,6 +1,6 @@
 // DOM helpers, the API client and toasts.
 
-import { byId } from "./state.js";
+import { byId, otherItem } from "./state.js";
 import { select } from "./session.js";
 export const $ = (selector) => document.querySelector(selector);
 // Controls that reorder the text after them (embeddings, overrides and isolates: U+202A–U+202E,
@@ -340,7 +340,7 @@ export function toast(text, kind = "", sessionId = null) {
     class: `toast ${kind}`,
     text,
     onclick: () => {
-      if (sessionId && byId(sessionId)) select(sessionId);
+      if (sessionId && (byId(sessionId) || otherItem(sessionId))) select(sessionId);
       node.remove();
     },
   });

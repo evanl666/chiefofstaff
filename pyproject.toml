@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "chiefofstaff"
-version = "0.1.37"
+version = "0.1.39"
 description = "One inbox for all your GitHub Copilot sessions: tasks and follow-ups go to the right session, Slack replies wait for your approval, and finished work waits for your review."
 license = "MIT"
 dynamic = ["readme"]
@@ -29,7 +29,7 @@ dependencies = [
   "fastapi>=0.115,<1",
   "uvicorn>=0.34,<1",
   "pydantic>=2.10,<3",
-  "platformdirs>=4,<5",
+  "platformdirs>=4.12,<5",
   "keyring>=25,<26",
   "mcp>=1.24,<2",
   "github-copilot-sdk>=1.0.28,<1.1",
@@ -53,7 +53,7 @@ dev = [
 ]
 
 [project.scripts]
-chiefofstaff = "chiefofstaff.__main__:main"
+chiefofstaff = "chiefofstaff.cli:main"
 
 # The README links images and docs relatively, which works on GitHub (private or public); PyPI
 # gets absolute links.
@@ -115,8 +115,9 @@ ignore = ["SIM905", "PERF401"]
     "T201",  # Drivers print their progress.
     "PT017", "PT018",  # Not pytest: drivers assert on what an error says, several facts at once.
 ]
-# The command line prints where Chief of Staff runs.
+# The command line prints where Chief of Staff runs, and what became of what was sent.
 "src/chiefofstaff/__main__.py" = ["T201"]
+"src/chiefofstaff/send.py" = ["T201"]
 
 [tool.pyright]
 include = ["src"]

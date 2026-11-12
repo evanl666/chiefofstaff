@@ -1,8 +1,10 @@
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Any
+
+from .envelope import sendable
 
 
 class Bus:
@@ -12,12 +14,17 @@ class Bus:
         self.queues: set[asyncio.Queue] = set()
         self.loop: asyncio.AbstractEventLoop | None = None
         self.closed = False
+        # Told when a tab connects (others.py starts reading then); None while nothing asks.
+        self.on_subscribe: Callable[[], None] | None = None
 
     def bind(self, loop: asyncio.AbstractEventLoop):
         self.loop = loop
 
     def publish(self, kind: str, data: Any = None):
-        payload = json.dumps({"type": kind, "data": data}, ensure_ascii=False, default=str)
+        # Every tab's stream sends it: one that UTF-8 cannot hold would end them all.
+        payload = sendable(
+            json.dumps({"type": kind, "data": data}, ensure_ascii=False, default=str)
+        )
         if not self.loop:
             return
         try:
@@ -51,6 +58,8 @@ class Bus:
         if self.closed:
             queue.put_nowait(None)
         self.queues.add(queue)
+        if self.on_subscribe:
+            self.on_subscribe()
         try:
             yield queue
         finally:

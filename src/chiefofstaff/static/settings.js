@@ -2,7 +2,7 @@
 
 import { $, api, el, submits, toast } from "./dom.js";
 import { lines, plural, since } from "./text.js";
-import { closedWorkers, HOME, loadState, sessions, state } from "./state.js";
+import { closedWorkers, followOthers, HOME, loadState, sessions, state } from "./state.js";
 import { renderSidebar } from "./sidebar.js";
 import { EFFORTS, renderHeader, select } from "./session.js";
 // Settings opens on the tab last used, or the one asked for ("you" for what was learned).
@@ -147,6 +147,25 @@ export function bindSettings() {
       select(sessionId);
     });
   }
+  // Send to Chief: turning it on unfolds its consent in place, saved only with Turn on; off is
+  // saved at once (its socket closes).
+  const sendSwitch = $("#settings-form").send_to_chief;
+  sendSwitch.addEventListener("change", () => {
+    if (sendSwitch.checked) {
+      $("#send-how").hidden = true;
+      $("#send-problem").hidden = true;
+      $("#send-consent").hidden = false;
+    } else if (!$("#send-consent").hidden) {
+      renderSendLine();
+    } else {
+      saveSend(false);
+    }
+  });
+  $("#send-on").addEventListener("click", () => saveSend(true));
+  $("#send-cancel").addEventListener("click", () => {
+    renderSendLine();
+    sendSwitch.focus();
+  });
   $("#slack-token-save").addEventListener("click", async () => {
     try {
       settingsError("");
@@ -303,6 +322,11 @@ export function fillSettings() {
   form.worker_idle_hours.value = settings.worker_idle_hours;
   form.stall_hours.value = settings.stall_hours ?? 4;
   form.mac_notifications.checked = settings.mac_notifications;
+  form.other_sessions.checked = Boolean(settings.other_sessions);
+  // When none of them can say where it stands, its line says why.
+  const why = settings.other_sessions ? state.othersWhy : "";
+  if (why) form.other_sessions.parentElement.title = why;
+  else form.other_sessions.parentElement.removeAttribute("title");
   form.watchdog_enabled.checked = settings.watchdog_enabled;
   form.slack_enabled.checked = settings.slack_enabled;
   form.slack_token.value = "";
@@ -360,6 +384,7 @@ export function fillSettings() {
   form.away_notify.checked = Boolean(settings.away_notify);
   form.away_minutes.value = settings.away_minutes ?? 10;
   form.away_how.value = settings.away_how || "";
+  renderSendLine();
   renderConnections();
   showSlackToken();
   const github = state.snapshot.github;
@@ -786,6 +811,7 @@ export function settingsBody() {
     worker_idle_hours: number("worker_idle_hours"),
     stall_hours: number("stall_hours", settings.stall_hours ?? 4),
     mac_notifications: form.mac_notifications.checked,
+    other_sessions: form.other_sessions.checked,
     watchdog_enabled: form.watchdog_enabled.checked,
     slack_enabled: form.slack_enabled.checked,
     slack_poll_seconds: number("slack_poll_seconds"),
@@ -844,6 +870,7 @@ async function saveSettings(event) {
     }
     state.snapshot = { ...state.snapshot, ...snapshot };
     $("#settings-dialog").close();
+    followOthers();
     renderSidebar();
     renderHeader();
   } catch (error) {
@@ -908,6 +935,30 @@ async function saveAway() {
     settingsError(error.message);
     return false;
   }
+}
+// Send to Chief's line as saved: off, the switch alone; on, the command and the recipes, or why
+// its socket could not open.
+function renderSendLine() {
+  const on = Boolean(state.snapshot.settings.send_to_chief);
+  const problem = on ? state.snapshot.send_problem || "" : "";
+  $("#settings-form").send_to_chief.checked = on;
+  $("#send-consent").hidden = true;
+  $("#send-how").hidden = !on || Boolean(problem);
+  $("#send-problem").textContent = problem;
+  $("#send-problem").hidden = !problem;
+}
+async function saveSend(on) {
+  settingsError("");
+  try {
+    const snapshot = await api("/api/settings", { method: "POST", body: { send_to_chief: on, base: shown } });
+    // Its problem is in the answer only while there is one.
+    state.snapshot = { ...state.snapshot, send_problem: "", ...snapshot };
+    savedHere({ send_to_chief: on });
+  } catch (error) {
+    settingsError(error.message);
+  }
+  renderSendLine();
+  $("#settings-form").send_to_chief.focus();
 }
 async function saveWatches() {
   settingsError("");

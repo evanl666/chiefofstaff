@@ -20,13 +20,17 @@ uv run chiefofstaff --demo          # the whole product, scripted, no accounts
 | Command | What | Needs |
 | --- | --- | --- |
 | `uv run pytest -q` | Unit and scenario tests (fake and scripted backends) | Nothing |
-| `uv run --with playwright python scripts/demo_smoke.py` | The UI through the demo scenario, light and dark | `playwright install chromium` once |
+| `uv run --with playwright python scripts/demo_smoke.py` | The UI through the demo scenario, light and dark (`DEMO_SMOKE_OTHER_SESSIONS=off`: with where other Copilot sessions stand turned off) | `playwright install chromium` once |
 | `CHIEFOFSTAFF_TEST_COPILOT=1 uv run pytest -q -m copilot` | Contract tests against the real Copilot CLI | Copilot; a few small model calls |
 | `uv run python scripts/live_e2e.py` | Every feature end to end with real Copilot | Copilot; ~10 minutes of model use |
 | `uv run --with playwright python scripts/browser_smoke.py` | The UI with real Copilot | Copilot |
 | `uv run --with playwright python scripts/ui_edges.py` | UI edge cases (long reviews, memory cards and settings), light and dark | `playwright install chromium` once |
+| `uv run --with playwright python scripts/differential.py` | A feature switched off is the baseline release (API, store, prompts, page, screenshots), apart from what it declares; `--mode on --feature NAME` compares it on | `playwright install chromium` once; ~2 minutes |
 | `uv run python scripts/live_routing.py` | Does the Router give work to the worker that knows the subject? | Copilot |
 | `uv run python scripts/live_usecases.py` | Everyday flows: revise, cancel and retry, questions, Create PR, long answers | Copilot; a GitHub test repository |
+| `uv run --with pexpect --with pyte python scripts/live_others.py` | Other Copilot sessions' statuses against a real `copilot` in a terminal: asks, answered, no progress, stopped, idle, an error, killed and resumed, whose session it is; never a wrong status | Copilot; ~4 minutes |
+| `uv run --with playwright python scripts/live_send.py` | Send to Chief with `chiefofstaff send`: a review that follows its PR, an issue link, a Slack reply drafted in its thread, a capture that gives orders (none done), batching, a reconnect, the same options as typed on Home, exit codes, time to sent | Copilot; a GitHub test repository; ~7 minutes |
+| `uv run python scripts/bench_others.py` | The other-sessions reader against its budgets (bytes, event-loop time, memory, freshness) on a generated set of logs | ~1 minute |
 | `uv run python scripts/live_more.py` | 24 everyday scenarios: several tasks at once, cancel, restart mid-step, focus, Slack orders, languages, diffs… | Copilot; a GitHub test repository |
 | `uv run --with playwright python scripts/live_wide.py A\|B\|C\|D\|E\|F\|G\|H` | 90 scenarios of a working day in eight shards (B, E and G one after the other) | Copilot; a GitHub test repository |
 | `uv run python scripts/live_memory.py` | How you write is learned and used; a fixed mistake becomes a check that catches it again | Copilot; macOS or `bwrap` |

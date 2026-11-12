@@ -802,25 +802,26 @@ class TaskActions:
         """check_fresh for one worker's own finished tasks."""
         session_id = row["id"]
         live = {checkout["path"]: checkout for checkout in self.workspaces.checkouts(row)}
-        for task in self.tasks.for_session(session_id):
-            if task["status"] not in {"review", "done"}:
-                continue
-            run = self.store.one(
-                """SELECT id, evidence FROM runs WHERE task_id=? AND evidence!=''
-                ORDER BY started_at DESC""",
-                (task["id"],),
-            )
-            evidence = json.loads(run["evidence"]) if run else {}
-            if not evidence or evidence.get("stale"):
-                continue
-            ended = json.loads(self.store.get(f"taskend:{task['id']}") or "{}")
-            if ended:
-                # Its result's own files, since its result: not a later task's work.
-                reason = await self.own_files_changed(task, live, ended)
-            else:
-                reason = await self.changed_since(evidence, live)
-            if reason:
-                self.stale(task["id"], reason)
+        async with self.states[session_id].checkouts:  # Not while its worktrees are removed.
+            for task in self.tasks.for_session(session_id):
+                if task["status"] not in {"review", "done"}:
+                    continue
+                run = self.store.one(
+                    """SELECT id, evidence FROM runs WHERE task_id=? AND evidence!=''
+                    ORDER BY started_at DESC""",
+                    (task["id"],),
+                )
+                evidence = json.loads(run["evidence"]) if run else {}
+                if not evidence or evidence.get("stale"):
+                    continue
+                ended = json.loads(self.store.get(f"taskend:{task['id']}") or "{}")
+                if ended:
+                    # Its result's own files, since its result: not a later task's work.
+                    reason = await self.own_files_changed(task, live, ended)
+                else:
+                    reason = await self.changed_since(evidence, live)
+                if reason:
+                    self.stale(task["id"], reason)
 
     async def own_files_changed(self, task: dict, live: dict[str, dict], ended: dict) -> str:
         """Why a finished task's own files are not what its result left (or "")."""
@@ -919,12 +920,14 @@ class TaskActions:
             await self.record_end(task)  # Its result: its share ends here.
             row = self.store.find_session(task["session_id"]) or row  # Its own clones too.
         checkouts = []
-        for checkout in self.workspaces.checkouts(row):
-            if self.not_its(task, checkout):
-                continue
-            with suppress(Exception):
-                if found := await changes(checkout, self.scope(task, checkout)):
-                    checkouts.append(found)
+        # Not while its worktrees are removed (a worker closed as it reported).
+        async with self.states[row["id"]].checkouts:
+            for checkout in self.workspaces.checkouts(row):
+                if self.not_its(task, checkout):
+                    continue
+                with suppress(Exception):
+                    if found := await changes(checkout, self.scope(task, checkout)):
+                        checkouts.append(found)
         # Offered to merge only as read now: a PR GitHub could not answer for keeps its last
         # read (see read_prs), which may be of a head pushed over since.
         read = now()
@@ -1274,26 +1277,28 @@ class TaskActions:
         row = await self.adopt_clones(row)
         ended = {}
         base = json.loads(self.store.get(f"taskbase:{task['id']}") or "{}")
-        for checkout in self.workspaces.checkouts(row):
-            if self.not_its(task, checkout):
-                continue
-            with suppress(Exception):
-                if (found := await snapshot(checkout)) and found["tree"]:
-                    with suppress(ValueError):
-                        # The branch it is on (see elsewhere_now).
-                        on = await checkout_git(
-                            checkout, checkout["path"], "symbolic-ref", "-q", "HEAD"
-                        )
-                        found["branch"] = on.strip()
-                    if checkout.get("shared") and (
-                        start := base.get("trees", {}).get(checkout["path"])
-                    ):
-                        # When each file it changed was last written, as of its result: a
-                        # later task writing it again does not move it out of this one's time.
-                        top = await checkout_top(checkout)
-                        names = list(await tree_names(checkout, top, start, found["tree"]))
-                        found["mtimes"] = await asyncio.to_thread(file_times, top, names[:2000])
-                    ended[checkout["path"]] = found
+        async with self.states[row["id"]].checkouts:  # Not while its worktrees are removed.
+            for checkout in self.workspaces.checkouts(row):
+                if self.not_its(task, checkout):
+                    continue
+                with suppress(Exception):
+                    if (found := await snapshot(checkout)) and found["tree"]:
+                        with suppress(ValueError):
+                            # The branch it is on (see elsewhere_now).
+                            on = await checkout_git(
+                                checkout, checkout["path"], "symbolic-ref", "-q", "HEAD"
+                            )
+                            found["branch"] = on.strip()
+                        if checkout.get("shared") and (
+                            start := base.get("trees", {}).get(checkout["path"])
+                        ):
+                            # When each file it changed was last written, as of its result: a
+                            # later task writing it again does not move it out of this one's
+                            # time.
+                            top = await checkout_top(checkout)
+                            names = list(await tree_names(checkout, top, start, found["tree"]))
+                            found["mtimes"] = await asyncio.to_thread(file_times, top, names[:2000])
+                        ended[checkout["path"]] = found
         if ended:
             self.store.set(f"taskend:{task['id']}", json.dumps(ended))
             self.store.delete(f"restarted:{task['id']}")  # A new result: checked again.

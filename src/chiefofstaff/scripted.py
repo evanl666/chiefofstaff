@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import itertools
+import json
 from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -28,7 +29,7 @@ from uuid import uuid4
 from copilot.generated.rpc import PermissionDecisionReject
 from copilot.tools import ToolInvocation
 
-from .backend import Capabilities
+from .backend import SESSION_ID, Capabilities
 
 
 @dataclass
@@ -322,16 +323,32 @@ async def nothing(session: ScriptedSession, prompt: str) -> AsyncGenerator[Step,
 class ScriptedBackend:
     capabilities = SCRIPTED
 
-    def __init__(self, brain: Brain = nothing, others: list[dict] | None = None):
+    def __init__(
+        self, brain: Brain = nothing, others: list[dict] | None = None, home: Path | None = None
+    ):
         self.brain = brain
         self.histories: dict[str, list[tuple[str, str]]] = {}
         self.sessions: dict[str, ScriptedSession] = {}
         # Sessions of the owner that Chief of Staff does not manage: their metadata (as
         # list_sessions returns it), "open" (in a terminal) and "log" (their events).
         self.others = others or []
+        # A Copilot home of its own: start() writes those sessions' logs there, as the CLI
+        # would, for others.py to read (session_log). Without one they have no log file.
+        self.home = home
 
     async def start(self):
-        pass
+        if self.home:
+            await asyncio.to_thread(self.write_logs)
+
+    def write_logs(self):
+        for other in self.others:
+            log = self.session_log(other["meta"].session_id)
+            if log and "log" in other:
+                log.parent.mkdir(parents=True, exist_ok=True)
+                lines = [
+                    json.dumps(e, ensure_ascii=False, separators=(",", ":")) for e in other["log"]
+                ]
+                log.write_bytes("".join(line + "\n" for line in lines).encode())
 
     async def stop(self):
         for session in self.sessions.values():
@@ -409,6 +426,11 @@ class ScriptedBackend:
 
     async def read_usage(self, session_id: str, offset: int) -> tuple[list[dict], int]:
         return [], offset
+
+    def session_log(self, session_id: str) -> Path | None:
+        if not self.home or not SESSION_ID.fullmatch(session_id):
+            return None
+        return self.home / "session-state" / session_id / "events.jsonl"
 
     async def read_history(self, session_id: str, offset: int) -> tuple[list[dict], int, float]:
         if other := self.other(session_id):

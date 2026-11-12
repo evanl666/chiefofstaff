@@ -6,6 +6,7 @@ bounds, see [SECURITY.md](../SECURITY.md).
 
 - [Home](#home)
 - [Giving work](#giving-work)
+- [Send to Chief](#send-to-chief)
 - [Tasks and workers](#tasks-and-workers)
 - [Where workers work](#where-workers-work)
 - [Receipts](#receipts)
@@ -203,6 +204,15 @@ more than four searches.
 *Other Copilot sessions* in the sidebar lists the sessions Chief of Staff does not manage, the
 ones you started in a terminal. Those open in a terminal right now come first, marked *open*.
 Opening one shows its latest conversation, and keeps it current while it works.
+
+**Where each stands.** Each row's dot says it, read from the log Copilot keeps on this computer
+(no model call; nothing stored or sent): amber when it asks you something or it is your turn, a
+pulsing ring while it works, dashed when it has made no progress for 15 minutes, a ring when
+idle, green once it finished; for a wait, how long replaces *open*. Hover a row for the question
+or its last answer; the first line of its view says it too. At most five rows show at once,
+those waiting for you first, the rest under *N more*. A row whose status cannot be told for
+sure looks as before, and its tooltip says why. Turn it off with *Show where my other Copilot
+sessions stand* in Settings → General.
 
 **Send it a message to continue it here.** It becomes a worker, with its conversation so far in
 its timeline, and keeps working in its own folder, inside your code folder or not: nothing is
@@ -709,6 +719,106 @@ replying; each says where to go in Chief of Staff. When some notification thread
 one page of messages), it says *Coverage limited* and how much, and those messages are read
 again later: an answer there is not taken for read until it was.
 
+## Send to Chief
+
+Hand Chief of Staff work from wherever you are, without switching to Home: a note, and a link
+or text you pass along. Turn it on at the end of Settings → Connections (*Send to Chief from the
+command line*); it says once what it does and saves only when you press *Turn on*. Then:
+
+```
+chiefofstaff send "fix the flaky login test in acme/api"
+chiefofstaff send "review this" --url https://github.com/acme/api/pull/7 --title "Speed up exports"
+pbpaste | chiefofstaff send "answer Maya with the outcome" --text-from -
+```
+
+What you send becomes one request for the Router, as a message on Home does: the note is your
+request; the link, its title and the text (`--text-from FILE`, or `-` for what comes in on
+standard input) are material it passes along, never instructions, and without a note the Router
+takes the item as "take care of this". A pull request link is followed as a delegated Slack
+message's thread is, a Slack message link names its thread, and an issue is named by its
+reference. Anything risky it asks for, your note's requests too, is confirmed with you first: a
+note sent from outside Chief of Staff is only as surely yours as your computer is. The work it
+starts runs with your settings, as any task does. It waits for the Router to finish what it is
+doing, and several sent at once come as one turn. Home shows one line per item in the chat
+(*Sent from the command line: …*), which opens to what you sent; nothing else.
+
+It reaches the running Chief of Staff on this computer only, through a socket in its data
+directory that only your user can use (see [SECURITY.md](../SECURITY.md#send-to-chief)); pass
+`--data-dir` when Chief of Staff runs with one. The command prints *Sent to Chief of Staff.* when
+Chief of Staff took the item, and otherwise why not, with your note so nothing is lost. It
+exits with:
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Sent, or taken already (the same note and link sent again within ten minutes is taken once) |
+| 2 | Usage: nothing to send, a link that is not http or https, a note longer than 20,000 characters |
+| 3 | Chief of Staff isn't running, Send to Chief is off, or something other than your Chief of Staff is at its socket: nothing was sent |
+| 4 | More than 10 items in a minute or 300 in a day: not taken |
+| 5 | Chief of Staff is reconnecting to Copilot: not taken, try again in a moment |
+| 6 | *Delivery unconfirmed*: the request went out and no answer came, even after two more tries with the same item |
+
+After *Delivery unconfirmed*, run the same command with the `--item` it prints: Chief of Staff
+takes an item once, and answers a repeat with the same receipt. Nothing is queued: when Chief of
+Staff is not running, the command says so at once. Text longer than an item holds (20,000
+characters, or 64 KB) is cut, and the command says so.
+
+Other tools can send with plain HTTP over the socket (`POST /v1/send`, JSON with `item`, 32
+hexadecimal characters you make once and keep for retries, and `note`, `url`, `title`, `text`):
+
+```
+curl --unix-socket "$HOME/Library/Application Support/chiefofstaff/send/socket" \
+  -H 'Content-Type: application/json' -d '{"item": "…", "note": "…"}' http://chief/v1/send
+```
+
+curl does not check who answers at that path; `chiefofstaff send` does, before it writes a byte.
+
+### From a hotkey
+
+Each of these calls the command by its full path (`command -v chiefofstaff` prints it), since
+launchers do not read your shell's `PATH`:
+
+- **Shortcuts (macOS):** a new shortcut with *Ask for Input* (text, "What should Chief of Staff
+  do?"), then *Run Shell Script* with *Pass Input* set to *as arguments* and the script
+  `/full/path/to/chiefofstaff send "$1"`. Shortcuts asks once to let it run scripts (Settings
+  → Advanced → *Allow Running Scripts*). In the shortcut's details, *Add Keyboard Shortcut*.
+- **Raycast:** a script command (save it in a script folder you added to Raycast):
+
+  ```bash
+  #!/bin/bash
+  # @raycast.schemaVersion 1
+  # @raycast.title Send to Chief
+  # @raycast.mode compact
+  # @raycast.argument1 { "type": "text", "placeholder": "What should Chief of Staff do?" }
+  exec /full/path/to/chiefofstaff send "$1"
+  ```
+
+  Give it a hotkey in Raycast's settings; its last line of output is shown when it ends.
+- **Alfred:** a workflow with a *Keyword* input (with an argument), connected to *Run Script*
+  (`/bin/bash`, input *as argv*) running `/full/path/to/chiefofstaff send "$1"`, and a
+  *Hotkey* trigger if you like; a *Post Notification* output shows what it printed.
+- **Linux:** a custom keyboard shortcut (GNOME: Settings → Keyboard → Custom Shortcuts) running
+  `sh -c 'note=$(zenity --entry --title="Send to Chief" --text="What should Chief of Staff do?") && notify-send "Chief of Staff" "$(/full/path/to/chiefofstaff send "$note" 2>&1)"'`.
+
+**The front browser tab** (macOS): the same, with the tab's link and title read by AppleScript
+and passed along. In a *Run Shell Script* (or the script above), before the command:
+
+```bash
+# Chrome:
+url=$(osascript -e 'tell application "Google Chrome" to get URL of active tab of front window')
+title=$(osascript -e 'tell application "Google Chrome" to get title of active tab of front window')
+# Safari:
+url=$(osascript -e 'tell application "Safari" to get URL of current tab of front window')
+title=$(osascript -e 'tell application "Safari" to get name of current tab of front window')
+
+/full/path/to/chiefofstaff send "$1" --url "$url" --title "$title"
+```
+
+To add text you copied first, pipe the clipboard in: `LC_ALL=en_US.UTF-8 pbpaste |
+/full/path/to/chiefofstaff send "$1" --url "$url" --title "$title" --text-from -` (launchers run
+scripts without a locale, and `pbpaste` then writes accents and curly quotes in Mac Roman, not
+UTF-8). macOS asks once to let the launcher control the browser (Automation); no browser
+extension is involved, and the browser only answers the launcher's question.
+
 ## Abilities: skills, plugins and MCP servers
 
 Workers load everything your own Copilot sessions load: your plugins, skills, MCP servers and
@@ -841,6 +951,7 @@ commands run in.
 
 Everything stays on your machine, in the data directory (`--data-dir`, default per
 `platformdirs`, e.g. `~/Library/Application Support/chiefofstaff`): a SQLite database with
-sessions, tasks and timelines, and workspaces under `work/`. Conversations themselves are
+sessions, tasks and timelines, workspaces under `work/` and, while Send to Chief is on, its
+socket in `send/`. Conversations themselves are
 stored by Copilot in `~/.copilot/session-state`; every session is a real Copilot session
 (`copilot --resume <id>` works).

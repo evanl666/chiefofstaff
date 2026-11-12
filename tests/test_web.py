@@ -1,9 +1,11 @@
 import asyncio
 import json
 import socket
+from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
-from conftest import FakeClient, FakeSlackMcp, FakeTokens, call_tool, env, said
+from conftest import FakeClient, FakeSession, FakeSlackMcp, FakeTokens, call_tool, env, said
 from fastapi.testclient import TestClient
 
 from chiefofstaff.__main__ import LAUNCH_FILE, running_instance
@@ -423,3 +425,95 @@ def test_a_router_note_that_needs_the_owner_stays_until_seen(app_client):
         refused = app_client.post(f"/api/messages/{message_id}/seen", headers=ORIGIN)
         assert refused.status_code == status, "only the Router's updates"
     assert app_client.get("/api/state").json()["updates"] == [], "the owner wrote after it"
+
+
+def test_a_session_title_cut_in_the_middle_of_an_emoji_does_not_break_its_list(app_client):
+    """JSON can carry a lone surrogate (the CLI cut a title in the middle of an emoji); UTF-8
+    cannot: the sidebar's list and the Router's list_sessions failed whole."""
+    sign_in(app_client)
+    context = SimpleNamespace(
+        working_directory="/work/app \udc00", repository="o/app\ud800", branch="fix-\udbff"
+    )
+    app_client.fake.metas = [
+        SimpleNamespace(
+            session_id=session_id,
+            summary=summary,
+            is_remote=False,
+            modified_time=datetime(2026, 11, day, tzinfo=UTC),
+            context=context,
+        )
+        for session_id, summary, day in [
+            ("cut-\udc00", "Ship the release \ud83d", 2),
+            ("whole", "Plan 🚀", 1),
+        ]
+    ]
+    app_client.fake.in_use = {"cut-\udc00": 4242, "whole": 4243}
+    listed = app_client.get("/api/external?refresh=true")
+    assert listed.status_code == 200
+    fields = ("id", "summary", "cwd", "repository", "branch", "open")
+    assert [tuple(item[key] for key in fields) for item in listed.json()] == [
+        ("cut-?", "Ship the release ?", "/work/app ?", "o/app?", "fix-?", True),
+        ("whole", "Plan 🚀", "/work/app ?", "o/app?", "fix-?", True),
+    ], "a whole emoji as it was"
+    runtime = app_client.app.state.runtime
+    router = app_client.get("/api/state").json()["router_id"]
+    result = app_client.portal.call(call_tool, runtime, "list_sessions", router)
+    assert result.result_type == "success"
+    told = json.loads(result.text_result_for_llm.encode("utf-8"))["terminal_sessions"]
+    assert [session["title"] for session in told] == ["Ship the release ?", "Plan 🚀"]
+
+
+def test_a_session_log_with_half_an_emoji_still_shows(app_client, monkeypatch):
+    """What a session's log says, in the view behind a row of Other Copilot sessions and in a
+    worker's timeline (mirrored from its terminal, or brought along when it is adopted)."""
+    sign_in(app_client)
+    runtime = app_client.app.state.runtime
+    logged = [
+        {"type": "user.message", "data": {"content": "Ship it \ud83d"}},
+        {"type": "assistant.message", "data": {"content": "Shipped 🚀 \udc00"}},
+    ]
+    app_client.fake.logs["ext-1"] = logged
+    history = app_client.get("/api/external/ext-1/history")
+    assert history.status_code == 200
+    assert [entry["text"] for entry in history.json()["entries"]] == ["Ship it ?", "Shipped 🚀 ?"]
+
+    runtime.store.create_session("term-1", "worker", "Ship", "idle", cwd="/tmp")
+    app_client.fake.in_use = {"term-1": 4242}
+    app_client.fake.logs["term-1"] = logged
+    app_client.portal.call(runtime.workers.refresh_elsewhere)
+    app_client.portal.call(runtime.workers.mirror)
+    mirrored = app_client.get("/api/sessions/term-1/messages")
+    assert mirrored.status_code == 200
+    assert [m["text"] for m in mirrored.json()][1:] == ["Ship it ?", "Shipped 🚀 ?"]
+
+    async def events(session):
+        said = SimpleNamespace(content="Fix it \ud83d", parent_tool_call_id=None)
+        return [SimpleNamespace(type=SimpleNamespace(value="user.message"), data=said)]
+
+    monkeypatch.setattr(FakeSession, "get_events", events)
+    app_client.fake.metas = [
+        SimpleNamespace(
+            session_id="ext-2",
+            summary="Fix it",
+            is_remote=False,
+            modified_time=datetime(2026, 11, 1, tzinfo=UTC),
+            context=None,
+        )
+    ]
+    app_client.fake.sessions["ext-2"] = FakeSession("ext-2", {})
+    assert app_client.post("/api/external/ext-2/adopt", headers=ORIGIN).status_code == 200
+    adopted = app_client.get("/api/sessions/ext-2/messages")
+    assert adopted.status_code == 200 and "Fix it ?" in [m["text"] for m in adopted.json()]
+
+
+async def test_no_event_can_end_the_tabs_live_updates():
+    """Every tab's stream sends the same events: one UTF-8 cannot hold ended all of them."""
+    bus = Bus()
+    bus.bind(asyncio.get_running_loop())
+    data = {"text": "Done \ud83d", "emoji": "Shipped 🚀", "words": "é漢字"}
+    async with bus.subscribe() as tab:
+        bus.publish("message", data)
+        payload = tab.get_nowait()
+    payload.encode("utf-8")  # As the stream sends it.
+    sent = {"type": "message", "data": {**data, "text": "Done ?"}}
+    assert payload == json.dumps(sent, ensure_ascii=False), "the rest exactly as before"

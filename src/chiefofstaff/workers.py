@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from . import catalog, machine
 from .backend import stop_background
-from .envelope import clean_title, owner_text, short, wrap
+from .envelope import clean_title, owner_text, sendable, short, wrap
 from .events import PLUMBING_TOOLS, describe_tool
 from .roles import ROUTER, WORKER
 from .sources.slack import describe
@@ -86,7 +86,7 @@ def terminal_timeline(events: list[dict], ours: Collection[str] = ()) -> list[En
             name = data.get("toolName") or "tool"
             if name not in PLUMBING_TOOLS and name not in ours:
                 shown.append(("tool", describe_tool(name, data.get("arguments")), at))
-    return shown
+    return [(kind, sendable(text), at) for kind, text, at in shown]
 
 
 def moment(iso: str) -> float | None:
@@ -984,11 +984,11 @@ class Workers:
             context = meta.context
             items.append(
                 {
-                    "id": meta.session_id,
-                    "summary": (meta.summary or "Untitled session")[:200],
-                    "cwd": (context.working_directory if context else "") or "",
-                    "repository": (context.repository if context else "") or "",
-                    "branch": (context.branch if context else "") or "",
+                    "id": sendable(meta.session_id),
+                    "summary": sendable((meta.summary or "Untitled session")[:200]),
+                    "cwd": sendable((context.working_directory if context else "") or ""),
+                    "repository": sendable((context.repository if context else "") or ""),
+                    "branch": sendable((context.branch if context else "") or ""),
                     "modified": meta.modified_time.isoformat(),
                     "open": meta.session_id in elsewhere,
                 }
@@ -1055,7 +1055,7 @@ class Workers:
             kind = {"user.message": "owner", "assistant.message": "assistant"}.get(
                 getattr(event.type, "value", str(event.type))
             )
-            text = (getattr(event.data, "content", "") or "").strip()
+            text = sendable((getattr(event.data, "content", "") or "").strip())
             if kind == "owner":
                 text = owner_text(text)
             if not kind or not text or getattr(event.data, "parent_tool_call_id", None):

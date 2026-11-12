@@ -811,6 +811,100 @@ async def test_a_closed_workers_changes_are_still_shown(tmp_path):
     assert changed["files"] == 1 and changed["commits"] == 1
 
 
+def slow_reads(monkeypatch) -> dict[str, str]:
+    """Reading a worker's worktree (git's snapshot, its changes) takes a while, and lsof sees
+    the git doing it run in it. The worktree read now -> by which."""
+    from chiefofstaff import machine
+    from chiefofstaff import task_actions as task_actions_module
+
+    reading: dict[str, str] = {}
+
+    def slow(name, real):
+        async def read(checkout, *args):
+            tree = checkout.get("worktree") or checkout["path"]
+            if not exists(tree):
+                return await real(checkout, *args)  # Removed: read from its branch.
+            reading[tree] = name
+            try:
+                await asyncio.sleep(0.05)
+                assert exists(tree), f"removed while {name} read it"
+                return await real(checkout, *args)
+            finally:
+                reading.pop(tree, None)
+
+        return read
+
+    for name in ("snapshot", "changes"):
+        monkeypatch.setattr(
+            task_actions_module, name, slow(name, getattr(task_actions_module, name))
+        )
+
+    async def cwds(limit=30):
+        return set(reading)
+
+    monkeypatch.setattr(machine, "process_cwds", cwds)
+    return reading
+
+
+async def until_read(reading: dict[str, str], by: str):
+    for _ in range(400):
+        if by in reading.values():
+            return
+        await asyncio.sleep(0.005)
+    raise AssertionError(f"its worktree was not read ({by})")
+
+
+@pytest.mark.parametrize("closed_during", ["snapshot", "changes"])
+async def test_a_worker_closed_as_its_result_is_read_has_its_worktree_removed_after(
+    tmp_path, monkeypatch, closed_during
+):
+    """CI on 0.1.39: a worker closed right after it reported done had its worktree looked at for
+    removal while its result was still read from it (record_end's snapshot, then its changes).
+    The git reading it ran in it, so it stayed, as one a program runs in; or it went from under
+    the read. Its removal waits for the read."""
+    reading = slow_reads(monkeypatch)
+    _, app = published(tmp_path, "app")
+    harness = Harness(tmp_path / "data", Settings(projects=[str(app)]))
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, title="Fix", instructions="x",
+                         project=str(app), isolate=True)  # fmt: skip
+    commit(Path(worker["cwd"]), "fix.py", "fixed = True\n")
+    await call_tool(runtime, "report", worker["session_id"], status="done", summary="Fixed.")
+    await until_read(reading, closed_during)
+    await runtime.workers.close(worker["session_id"])
+    await settle(runtime)
+    assert not reading
+    assert not exists(Path(worker["cwd"])), "its clean worktree was removed once read"
+    task_id = task_of(harness, worker["session_id"])
+    changed = runtime.task_actions.view(runtime.tasks.get(task_id))["receipts"]["changed"]
+    assert changed["files"] == 1 and changed["commits"] == 1
+
+
+async def test_a_worker_closed_after_its_turn_has_its_worktree_removed_after_it_is_read(
+    tmp_path, monkeypatch
+):
+    """A worker closed as its turn ends (its PR merged): whether its finished task's files
+    changed is read from its worktree then too (check_fresh). Its removal waits for that."""
+    _, app = published(tmp_path, "app")
+    harness = Harness(tmp_path / "data", Settings(projects=[str(app)]))
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, title="Fix", instructions="x",
+                         project=str(app), isolate=True)  # fmt: skip
+    session_id = worker["session_id"]
+    commit(Path(worker["cwd"]), "fix.py", "fixed = True\n")
+    await call_tool(runtime, "report", session_id, status="done", summary="Fixed.")
+    await settle(runtime)
+    runtime.task_actions.accept(task_of(harness, session_id))  # Nothing of it is open.
+    reading = slow_reads(monkeypatch)
+    runtime.states[session_id].close_after_turn = True
+    harness.session(session_id).emit("session.idle")
+    await until_read(reading, "snapshot")
+    await settle(runtime)
+    assert harness.store.session(session_id)["closed_at"]
+    assert not reading
+    assert not exists(Path(worker["cwd"])), "its clean worktree was removed once read"
+
+
 async def restarted(runtime, task_id: str):
     """Until a finished task taken up again was checked for work done in between (as it is
     before its worker's first step)."""
