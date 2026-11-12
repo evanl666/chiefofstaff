@@ -637,6 +637,20 @@ class Server:
             self.on_its_own.add(thread_id)
         if "A stranger starts a turn after this one" in prompt:
             self.strangers.add(thread_id)
+        if found := re.search(r"The MCP server (\w+) is not signed in", prompt):
+            # As Codex says it of a server whose OAuth sign-in it does not have.
+            name = found.group(1)
+            self.notify(
+                "mcpServer/startupStatus/updated",
+                {
+                    "threadId": thread_id,
+                    "name": name,
+                    "status": "failed",
+                    "error": f"The {name} MCP server is not logged in. "
+                    f"Run `codex mcp login {name}`.",
+                    "failureReason": None,
+                },
+            )
         for found in re.finditer(r"(Resume|Wait for|Send to) the agent ([0-9a-f-]+)", prompt):
             tool = {"Resume": "resumeAgent", "Wait for": "wait", "Send to": "sendInput"}
             call = collab(tool[found.group(1)], thread_id, [found.group(2)])

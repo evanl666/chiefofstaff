@@ -33,7 +33,7 @@ from chiefofstaff.backend_codex import (
     version_of,
 )
 from chiefofstaff.envelope import wrap
-from chiefofstaff.models import Settings
+from chiefofstaff.models import DraftDecision, Settings
 from chiefofstaff.policy import GITHUB_MCP
 from chiefofstaff.roles import WORKER
 from chiefofstaff.runtime import AgentConnection
@@ -1813,6 +1813,32 @@ async def test_a_codex_worker_reaches_its_own_children_also_from_a_new_process(
         await until(lambda: "waited" in str(harness.kinds(worker)), 30)
         assert harness.store.session(worker)["status"] != "failed"
         assert child in runtime.states.handle(worker).tree
+    finally:
+        await runtime.stop()
+
+
+async def test_a_codex_worker_whose_mcp_server_needs_sign_in_has_the_owner_asked(
+    tmp_path, monkeypatch
+):
+    """As for Copilot's: a card under Needs you, here with what signs in (Codex keeps it); the
+    worker is told, and once the owner signed in, its tools work from its next turn."""
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    try:
+        worker = await spawn(
+            runtime, harness, "The MCP server notes is not signed in. Wait 3 s. Report done: x."
+        )
+        await until(lambda: harness.store.drafts(), 30)
+        (card,) = harness.store.drafts()
+        assert card["kind"] == "signin"
+        assert card["target"] == {
+            "server": "notes",
+            "url": "",
+            "command": "codex mcp login notes",
+        }
+        assert "run `codex mcp login notes` in a terminal" in card["text"]
+        assert "the owner now has a sign-in card" in str(harness.kinds(worker))
+        await runtime.drafts.resolve(card["id"], DraftDecision(action="answer"))
+        await until(lambda: "its tools work from your next turn" in str(harness.kinds(worker)))
     finally:
         await runtime.stop()
 

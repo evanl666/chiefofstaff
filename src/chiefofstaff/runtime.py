@@ -2003,6 +2003,7 @@ class Runtime:
             "on_permission_request": self.events.on_permission,
             "on_user_input_request": self.asks.on_user_input,
             "on_elicitation_request": self.asks.on_elicitation,
+            "on_mcp_auth_request": self.asks.on_mcp_auth,
             "ask_first": not self.yolo(row),
             "folders": folders,
             # The worker (its own process of the agent), and the child agents it had: the only

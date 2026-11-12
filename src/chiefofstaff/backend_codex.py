@@ -83,6 +83,8 @@ ASK_FIRST_BEFORE = "0.168.0"
 REQUEST_TIMEOUT = float(os.environ.get("CHIEFOFSTAFF_CODEX_TIMEOUT", "60"))
 # How long the check of a Codex version may take, all told (seconds).
 CHECK_TIMEOUT = 90.0
+# What Codex says of an MCP server that needs the owner to sign in (codex-mcp startup.rs).
+NOT_SIGNED_IN = re.compile(r"MCP server (?:is not logged in|requires OAuth reauthentication)")
 # How often a worker's process is looked at to see whether its supervisor still runs.
 WATCH_SECONDS = 0.5
 # What a thread's settings must read back as (thread/start and thread/resume answers).
@@ -1507,8 +1509,10 @@ class CodexSession:
         # their requests is granted, nothing of them is shown.
         self.sent: set[str] = set()
         self.refused_turns: set[str] = set()
-        # The MCP calls asked about, by server, not yet ended (each one asks first, if so).
+        # The MCP calls asked about, by server, not yet ended (each one asks first, if so); and
+        # the servers the owner was asked to sign in to.
         self.asked_mcp: dict[str, int] = {}
+        self.signing_in: set[str] = set()
         # Its child agents (threads it spawned, also before this process): the only threads
         # besides its own its turns may reach.
         self.tree: set[str] = {thread_id, *(options.get("children") or [])}
@@ -1814,10 +1818,29 @@ class CodexSession:
                 epoch=self.backend.epoch,
                 restored=self.restored.pop(thread, None),
             )
+        elif method == "mcpServer/startupStatus/updated" and not child:
+            self.mcp_started(params)
         elif method == "model/rerouted" and not child:
             self.current_model = params.get("toModel") or params.get("model") or self.current_model
         elif method == "thread/closed" and child:
             await self.let_go(thread)
+
+    def mcp_started(self, params: dict):
+        """One of its MCP servers did not start for want of the owner's sign-in: the owner is
+        asked as for Copilot's, with what signs in (Codex keeps the sign-in; Chief of Staff
+        never sees it). Once per server."""
+        name, error = str(params.get("name") or ""), str(params.get("error") or "")
+        signs_in = params.get("failureReason") == "reauthenticationRequired" or bool(
+            NOT_SIGNED_IN.search(error)
+        )
+        if params.get("status") != "failed" or not signs_in or not name or name in self.signing_in:
+            return
+        self.signing_in.add(name)
+        if ask := self.options.get("on_mcp_auth_request"):
+            request = {"serverName": name, "command": f"codex mcp login {shlex.quote(name)}"}
+            task = asyncio.ensure_future(ask(request, {"sessionId": self.session_id}))
+            self.backend.tasks.add(task)
+            task.add_done_callback(self.backend.tasks.discard)
 
     async def known_turn(self, turn: str, thread: str) -> bool:
         """Whether a request comes from a turn that may run: on its own thread, once its start

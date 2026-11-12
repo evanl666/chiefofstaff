@@ -597,35 +597,41 @@ class Asks:
         return result or {"action": "cancel"}
 
     async def on_mcp_auth(self, request: dict, context: dict) -> dict:
-        """An MCP server needs sign-in: one card per server; later sessions reuse the sign-in."""
+        """An MCP server needs sign-in: one card per server; later sessions reuse the sign-in.
+        Another agent's sign-in is the owner's to run (its `command`): its card says it."""
         cancelled = {"kind": "cancelled"}
+        command = str(request.get("command") or "")
         session_id = self.runtime.row_id(context.get("sessionId", ""))
         row = self.store.find_session(session_id)
         server = request.get("serverName", "")
+        key = command or server  # Another agent's sign-in is not Copilot's, nor serves it.
         if not row or row["role"] != "worker" or not server:
             return cancelled  # Only workers use MCP tools; others must not prompt the owner.
         for _ in range(3):
-            if pending := self.signin_pending.get(server):
+            if pending := self.signin_pending.get(key):
                 await pending.wait()  # Another session's card: its sign-in serves this one too.
-            if time.monotonic() - self.signin_declined.get(server, -SIGNIN_QUIET) < SIGNIN_QUIET:
+            if time.monotonic() - self.signin_declined.get(key, -SIGNIN_QUIET) < SIGNIN_QUIET:
                 return cancelled
-            async with self.signin_locks.setdefault(server, asyncio.Lock()):
-                if server in self.signin_pending:
+            async with self.signin_locks.setdefault(key, asyncio.Lock()):
+                if key in self.signin_pending:
                     continue
                 session = self.states.handle(session_id)
                 if not session:
                     return cancelled
                 try:
-                    backend = self.runtime.connected()  # Also while still connecting.
-                    url = await backend.mcp_sign_in_url(session, server)
-                    url = http_url(url) if url else ""
+                    if command:
+                        url = ""  # The owner runs it; the agent keeps the sign-in.
+                    else:
+                        backend = self.runtime.connected()  # Also while still connecting.
+                        url = await backend.mcp_sign_in_url(session, server)
+                        url = http_url(url) if url else ""
                 except Exception:
                     logger.warning("Could not start sign-in to %s.", server, exc_info=True)
                     return cancelled
-                if not url:
+                if not url and not command:
                     return cancelled  # Signed in already: Copilot keeps the credentials.
                 finished = asyncio.Event()
-                self.signin_pending[server] = finished
+                self.signin_pending[key] = finished
             connected = asyncio.Event()
             self.signins[(session_id, server)] = connected
             await self.tell_session(
@@ -636,21 +642,28 @@ class Asks:
             )
             try:
                 target = {"server": server, "url": url}
-                result = await self.ask_owner(
-                    session_id, "signin", target, f"{server} needs you to sign in", done=connected
-                )
+                text = f"{server} needs you to sign in"
+                if command:
+                    target["command"] = command
+                    text += f": run `{command}` in a terminal."
+                result = await self.ask_owner(session_id, "signin", target, text, done=connected)
             finally:
                 self.signins.pop((session_id, server), None)
-                self.signin_pending.pop(server, None)
+                self.signin_pending.pop(key, None)
                 finished.set()
             action = (result or {}).get("action")
             if action == "closed":
                 return cancelled  # The session closed; another session may still ask.
-            if connected.is_set() or action == "done":
+            if command and action == "done":
+                # Its MCP servers start with its next connection: after this turn.
+                message = f"You are signed in to {server}; its tools work from your next turn."
+                if row := self.store.find_session(session_id):
+                    await self.runtime.refresh_session(row)
+            elif connected.is_set() or action == "done":
                 message = f"You are signed in to {server}; its tools are available now."
             else:
                 if action == "cancel":
-                    self.signin_declined[server] = time.monotonic()  # The owner said not now.
+                    self.signin_declined[key] = time.monotonic()  # The owner said not now.
                 message = (
                     f"The owner did not sign in to {server}. Go on without it, or ask with "
                     "ask_user if you really need it."

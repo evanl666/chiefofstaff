@@ -208,7 +208,8 @@ function requestCard(draft) {
     node.append(actionRow(error, link(target.url, "Open link"), [{ text: "Done", onclick: () => decide({ action: "answer" }, "Done.") }, decline("Decline")]));
   } else {
     node.append(
-      el("div", { class: "note", text: "This card closes by itself once you're signed in." }),
+      // Another agent's sign-in is run in a terminal: the card cannot tell when it is done.
+      el("div", { class: "note", text: target.command ? "Then press I signed in." : "This card closes by itself once you're signed in." }),
       actionRow(error, link(target.url, `Sign in to ${target.server}`), [{ text: "I signed in", onclick: () => decide({ action: "answer" }, "Done.") }, decline("Not now")]),
     );
   }
