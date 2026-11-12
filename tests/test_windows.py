@@ -52,13 +52,17 @@ def test_a_new_data_directory_and_its_launch_link_are_the_owners_alone(tmp_path)
 
     user = subprocess.run(["whoami", "/user", "/fo", "csv", "/nh"], capture_output=True, text=True)
     me = user.stdout.strip().rsplit(",", 1)[-1].strip('"')
+    # SDDL names the built-in Administrator account (RID 500, CI runners' user) LA.
+    mine = {me, "LA"} if me.endswith("-500") else {me}
+    # OW (Owner Rights) only reaches whoever owns it: this user, as with POSIX's owner bits.
+    allowed = mine | {"SY", "BA", "OW"}
     folder = tmp_path / "data"
     folder.mkdir()
     make_private(folder)
     (folder / "launch-url").write_text("http://127.0.0.1:8765/#token=secret")
     sids, protected = readers(folder)
-    assert protected and me in sids and sids <= {me, "SY", "BA"}, sids
-    assert readers(folder / "launch-url")[0] <= {me, "SY", "BA"}, "it inherits the folder's"
+    assert protected and sids & mine and sids <= allowed, sids
+    assert readers(folder / "launch-url")[0] <= allowed, "it inherits the folder's"
 
 
 @windows

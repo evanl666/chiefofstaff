@@ -213,7 +213,7 @@ def low_priority() -> list[str]:
 def processes(*attrs: str) -> list[dict]:
     """Windows: every process this user can list, with its pid and these attributes (None
     where it may not read one: an administrator's, another user's, the system's)."""
-    import psutil
+    import psutil  # pyright: ignore[reportMissingModuleSource]  (installed on Windows only)
 
     return [process.info for process in psutil.process_iter(["pid", *attrs])]
 
