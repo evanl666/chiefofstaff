@@ -619,7 +619,7 @@ class Runtime:
             return self.require_ready()
         return self.backend
 
-    def background(self, coroutine: Awaitable):
+    def background(self, coroutine: Awaitable) -> asyncio.Task:
         task = asyncio.ensure_future(coroutine)
         self.jobs.add(task)
 
@@ -629,6 +629,7 @@ class Runtime:
                 logger.error("Background task failed", exc_info=finished.exception())
 
         task.add_done_callback(done)
+        return task
 
     # Sessions
 
@@ -2917,7 +2918,8 @@ class Runtime:
                 self.store.set(f"goingon:{task_id}", "1")
         if fresh:
             # Where its checkouts are now: what comes after is this task's (see Scope).
-            self.background(self.task_actions.record_base(session_id, fresh, time.time()))
+            job = self.background(self.task_actions.record_base(session_id, fresh, time.time()))
+            self.task_actions.basing.update(dict.fromkeys(fresh, job))
         if not switch:
             on = self.tasks.find(self.turn_task(session_id))
             if on and on["session_id"] == session_id and on["status"] in OPEN_WORK:
