@@ -528,6 +528,16 @@ async def run(number: int) -> list[str]:
             untouched = not changed and commits == "1"
             summary.append(f"the owner's checkout untouched: {'yes' if untouched else 'NO'}")
             assert untouched, f"the owner's checkout changed: {changed or commits + ' commits'}"
+        except BaseException:
+            try:  # What each session did, to tell the product from the run.
+                for session in (await app.get("/api/state"))["sessions"]:
+                    rows = await app.get(f"/api/sessions/{session['id']}/messages")
+                    print(f"--- {session['role']} {session['title']} [{session['status']}]")
+                    for message in rows[-25:]:
+                        print(f"   {message['kind']:>9}: {message['text'][:300]!r}")
+            except Exception as exc:  # Best effort: the app may be down.
+                print(f"(sessions not shown: {exc})")
+            raise
         finally:
             await app.stop()
             git(project, "worktree", "prune")

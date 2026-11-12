@@ -70,6 +70,23 @@ async def new_draft(app: App, before: set[str], kind: str = "github") -> dict:
     return await wait_for(f"a {kind} draft", found, 900, app)
 
 
+async def settled_draft(app: App, worker: str, before: set[str], kind: str = "github") -> dict:
+    """The worker's latest pending draft once its turn is over: asked again (a report without
+    a draft), it drafts anew, and the newer draft supersedes the first."""
+
+    async def idle():
+        session = await app.get(f"/api/sessions/{worker}")
+        return session["status"] not in {"queued", "starting", "working"} or None
+
+    await wait_for("the drafting turn ends", idle, 600, app)
+    drafts = [
+        d for d in (await app.get("/api/state"))["drafts"]
+        if d["id"] not in before and d["kind"] == kind
+    ]  # fmt: skip
+    assert drafts, "a pending draft"
+    return drafts[-1]
+
+
 def gh_as_second(*arguments: str) -> str:
     env = {**os.environ, "GH_TOKEN": second_account_token()}
     return subprocess.run(
@@ -107,7 +124,8 @@ async def scenario_a_chinese_company_review(app: App):
     assert sent["status"] == "sent", sent
     review = sent["outcome"].rsplit("pullrequestreview-", 1)[1]
     published = json.loads(gh_as_second("api", f"repos/{COMPANY_REPO}/pulls/1/reviews/{review}"))
-    assert published["body"] == edited
+    # What Chief of Staff posts ends with its mark (sources/github.py, POSTED_MARK).
+    assert published["body"].removesuffix("\n\n<!-- chief-of-staff -->") == edited, published
     mine = json.loads(
         gh_as_second("api", "--paginate", f"repos/{COMPANY_REPO}/pulls/1/reviews/{review}/comments")
     )
@@ -120,7 +138,8 @@ async def scenario_b_pr_moves(app: App):
     name = COMPANY_REPO.split("/")[1]
     mark = await say(app, f"Review {name} PR #1 again and draft a short review.")
     worker = await assigned(app, mark)
-    draft = await new_draft(app, before)
+    await new_draft(app, before)
+    draft = await settled_draft(app, worker, before)
     push_unrelated_commit()
 
     async def moved():
@@ -148,7 +167,9 @@ async def scenario_c_no_access(app: App):
 
     async def settled():
         tasks = [t for t in (await app.get("/api/state"))["tasks"] if t["session_id"] == worker]
-        return next((t for t in tasks if t["status"] in {"waiting", "review", "done"}), None)
+        # A task it cannot do is failed, under Needs you with why (or it asks, or reports).
+        settled = {"waiting", "review", "done", "failed"}
+        return next((t for t in tasks if t["status"] in settled), None)
 
     task = await wait_for("the worker says it cannot", settled, 600, app)
     text = (task.get("progress") or "") + (task.get("result") or "")
