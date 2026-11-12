@@ -16,6 +16,7 @@ from test_runtime import at
 
 from chiefofstaff import delivery, events
 from chiefofstaff import runtime as runtime_module
+from chiefofstaff.backend import COPILOT_AGENT
 from chiefofstaff.delivery import HELD_STOPPED
 from chiefofstaff.models import Settings
 from chiefofstaff.roles import WORKER
@@ -696,3 +697,71 @@ async def test_a_restart_resumes_another_agents_worker_once_copilot_runs(tmp_pat
     session = live(again.runtime, worker)
     await until(lambda: any("Chief of Staff restarted" in text for text in received(session)))
     await again.runtime.stop()
+
+
+async def test_an_agents_sessions_at_work_are_known_before_their_status_says_so(harness):
+    """An agent that stops and cannot start again fails its sessions at work: one in a turn its
+    status does not say yet, or sent a message it has not started on, is at work too (a CI run
+    on a slow machine left such a worker idle, its turn gone)."""
+    runtime = await harness.connect()
+    on(harness, "codex-like")
+    store = harness.store
+    ids = {}
+    for name in ("working", "busy", "awaiting", "resting", "closed"):
+        ids[name] = await spawn(runtime, harness, "Noted")
+    await until(lambda: all(store.session(key)["status"] != "queued" for key in ids.values()))
+    for key in ids.values():
+        store.update_session(key, status="idle")
+        runtime.states[key].busy, runtime.states[key].awaiting = False, None
+    store.update_session(ids["working"], status="working")
+    runtime.states[ids["busy"]].busy = True
+    runtime.states[ids["awaiting"]].awaiting = ("sent", 1)
+    runtime.states[ids["closed"]].busy = True
+    store.update_session(ids["closed"], closed_at="2026-11-12T00:00:00+00:00")
+    runtime.states[harness.router_id].busy = True  # Copilot's: not this agent's.
+    assert sorted(runtime.at_work_on("codex-like")) == sorted(
+        [ids["working"], ids["busy"], ids["awaiting"]]
+    )
+    assert runtime.at_work_on(COPILOT_AGENT) == [harness.router_id]
+
+
+async def test_an_agent_that_cannot_start_again_fails_a_worker_it_had_not_started_on(harness):
+    """A worker sent a message it had not started on as its agent stopped (its status still
+    says idle) fails with why when the agent cannot start again: ending the agent's turns
+    forgets what was sent, so who was at work is known before."""
+    runtime = await harness.connect()
+    started = on(harness, "codex-like")
+    worker = await spawn(runtime, harness, "Noted")
+    await until(lambda: harness.store.session(worker)["status"] not in {"queued", "starting"})
+    await until(lambda: harness.store.session(worker)["status"] != "working")
+    runtime.states[worker].awaiting = ("sent", 1)
+    tried = cannot_start(harness, "codex-like")
+    started[-1].crashed = True
+    await until(lambda: harness.store.session(worker)["status"] == "failed")
+    assert tried == ["codex"]
+    assert harness.kinds(worker)[-1] == (
+        "error",
+        "Its agent stopped and could not start again: codex: command not found",
+    )
+
+
+async def test_a_worker_closed_while_its_agent_starts_again_is_left_closed(harness, monkeypatch):
+    """At work as its agent stopped, then closed by the owner before the agent's start failed:
+    it stays closed, with no error."""
+    runtime = await harness.connect()
+    started = on(harness, "codex-like")
+    worker = await spawn(runtime, harness, "Ponder at length")
+    await until(lambda: in_turn(runtime, worker))
+    await until(lambda: harness.store.session(worker)["status"] == "working")
+
+    async def closed_then_failed(agent):
+        await runtime.workers.close(worker, "you")
+        raise FileNotFoundError("codex: command not found")
+
+    monkeypatch.setattr(runtime, "connect_agent", closed_then_failed)
+    kinds = len(harness.kinds(worker))
+    started[-1].crashed = True
+    await until(lambda: harness.store.session(worker)["closed_at"])
+    await asyncio.sleep(0.2)
+    assert harness.store.session(worker)["status"] != "failed"
+    assert "error" not in [kind for kind, _ in harness.kinds(worker)[kinds:]]

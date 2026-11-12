@@ -654,13 +654,16 @@ class Runtime:
         while entry.backend is backend and entry.connections == connection:
             if not backend.alive():
                 logger.warning("%s stopped by itself; starting it again.", agent)
+                # Its sessions at work as it stopped: what ending their turns sets off may change
+                # their status before it is known whether it starts again.
+                working = self.at_work_on(agent)
                 await self.disconnect_agent(agent)
                 try:
                     await self.connect_agent(agent)
                 except Exception as exc:
                     logger.warning("Starting %s again failed.", agent, exc_info=True)
                     why = f"Its agent stopped and could not start again: {describe(exc)}"
-                    self.fail_working(agent, why)
+                    self.fail_working(agent, why, working)
                 return
             await asyncio.sleep(PROCESS_CHECK)
 
@@ -684,12 +687,23 @@ class Runtime:
                     logger.warning("%s could not start.", agent, exc_info=True)
                     self.fail_working(agent, f"Could not resume after restart: {describe(exc)}")
 
-    def fail_working(self, agent: str, why: str):
-        """The agent cannot start: its sessions at work fail, with why (nothing else would end
-        their turns, and only its own sessions are touched)."""
+    def at_work_on(self, agent: str) -> list[str]:
+        """This agent's open sessions at work now: in a turn (also one its status does not say
+        yet), or sent a message they have not started on."""
         rows = self.store.open_sessions()
-        for key in self.on_agent(agent, [row["id"] for row in rows if row["status"] == "working"]):
-            self.fail(self.store.session(key), why)
+        found = [row["id"] for row in rows if row["status"] == "working"]
+        found += [
+            key for key in self.states.ids() if self.states[key].busy or self.states[key].awaiting
+        ]
+        open_now = {row["id"] for row in rows}
+        return self.on_agent(agent, [key for key in dict.fromkeys(found) if key in open_now])
+
+    def fail_working(self, agent: str, why: str, working: list[str] | None = None):
+        """The agent cannot start: its sessions at work (as of `working`, else now) fail, with
+        why (nothing else would end their turns, and only its own sessions are touched)."""
+        for key in self.at_work_on(agent) if working is None else working:
+            if (row := self.store.find_session(key)) and not row["closed_at"]:
+                self.fail(row, why)
 
     def end_commands(self, agent: str):
         """An agent's process starts afresh: the commands its sessions' shells were running
