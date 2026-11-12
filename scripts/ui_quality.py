@@ -3,7 +3,8 @@ tasks, cards that need the owner) on a fake Copilot, at 800 to 1440 px, light an
 sidebar's Other Copilot sessions with 3, 12 and 40 of them, before and after where each stands
 is shown (browser-shots/others/: a title keeps its width); Send to Chief's line in Settings and a
 sent item's line on Home (browser-shots/send/); Monitoring's runs and Artifacts' folded runs
-(browser-shots/qa-e41/).
+(browser-shots/qa-e41/); the Coding agents group in Settings → Models and a worker on Codex
+(browser-shots/agents-m2/).
 
 Fails on: horizontal scrolling; elements overflowing their card or overlapping each other;
 more than one main (filled) button per card or dialog footer; controls under 28 px tall or
@@ -863,6 +864,94 @@ async def runs_views(runtime, browser, quality: Quality):
         await context.close()
 
 
+async def agents_views(runtime, browser, quality: Quality):
+    """Other coding agents (docs/design/more-agents.md 5.10): the last line of Settings →
+    Models; the Coding agents group it unfolds, found and being turned on; on, folded and open;
+    a worker on Codex, its header and ⋯; 800 to 1440 px, light and dark
+    (browser-shots/agents-m2/quality-*)."""
+    from copilot.tools import ToolInvocation
+    from ui_edges import agents_saved, codex_on_path, until
+
+    folder = SHOTS / "agents-m2"
+    folder.mkdir(exist_ok=True)
+    codex_on_path()
+    try:
+        for scheme in ("light", "dark"):
+            context = await browser.new_context(
+                viewport={"width": 1280, "height": 900}, color_scheme=scheme, bypass_csp=True
+            )
+            page = await context.new_page()
+            await page.goto(f"{BASE}/#token={TOKEN}")
+            await expect(page.locator("#application")).to_be_visible()
+            for state in ("off", "found", "enabling", "on-folded", "on-open"):
+                await page.locator("#settings-button").click()
+                await page.locator("#settings-tabs [data-tab=models]").click()
+                group = page.locator("#agents-group")
+                if state in {"found", "enabling"}:
+                    await page.locator("#agents-open").click()
+                    await expect(group.locator(".agent-row small[role=status]")).to_have_text(
+                        "0.167.2 · signed in with ChatGPT", timeout=20000
+                    )
+                if state == "enabling":
+                    await group.locator("input[name=agent_codex_enabled]").check()
+                if state == "on-open":
+                    await group.locator("summary").click()
+                    await expect(group.locator("input[name=agent_codex_enabled]")).to_be_checked(
+                        timeout=20000
+                    )
+                await page.locator("#agents-line").scroll_into_view_if_needed()
+                for width in WIDTHS:
+                    await page.set_viewport_size({"width": width, "height": 900})
+                    await page.wait_for_timeout(100)
+                    name = f"quality-settings-{state}-{width}-{scheme}"
+                    await page.screenshot(path=folder / f"{name}.png")
+                    await quality.check(page, f"agents {name}", "#settings-dialog")
+                await quality.contrast(
+                    page, f"agents settings {state} {scheme}", "#settings-dialog"
+                )
+                await page.set_viewport_size({"width": 1280, "height": 900})
+                if state == "enabling":
+                    await page.locator("#settings-form footer button[type=submit]").click()
+                    await expect(page.locator("#settings-dialog")).to_be_hidden()
+                    await until(lambda: bool(runtime.agents_on()), 10)
+                else:
+                    await page.locator("#settings-cancel").click()
+            # A worker on Codex: its header and its ⋯.
+            router = runtime.store.get("router_id")
+            result = await runtime.toolset.spawn_on(["codex"]).handler(
+                ToolInvocation(session_id=router, tool_call_id="t", tool_name="spawn_worker",
+                               arguments={"title": f"Check the cache ({scheme})", "why_new": "t",
+                                          "instructions": "Report done: Checked.", "agent": "codex"})
+            )  # fmt: skip
+            worker = json.loads(result.text_result_for_llm)["session_id"]  # Queued, or at work.
+            await page.evaluate(
+                "id => import('/static/session.js').then((m) => m.select(id))", worker
+            )
+            await expect(page.locator("#session-meta")).to_contain_text("Codex", timeout=10000)
+            for view in ("header", "menu"):
+                if view == "menu":
+                    await page.locator("#session-more-button").click()
+                    await expect(page.locator("#session-model option").nth(1)).to_have_text(
+                        "GPT-TEST"
+                    )
+                for width in WIDTHS:
+                    await page.set_viewport_size({"width": width, "height": 900})
+                    await page.wait_for_timeout(100)
+                    name = f"quality-worker-{view}-{width}-{scheme}"
+                    await page.screenshot(path=folder / f"{name}.png")
+                    await quality.check(page, f"agents {name}", "#session-header")
+                await quality.contrast(page, f"agents worker {view} {scheme}", "#session-header")
+                await page.set_viewport_size({"width": 1280, "height": 900})
+            await page.keyboard.press("Escape")
+            await agents_saved(runtime, {"codex": {"enabled": False}})
+            await context.close()
+    finally:
+        await agents_saved(runtime, {"codex": {"enabled": False}})
+    log(
+        "Coding agents: the Models line, the group's states, a Codex worker; browser-shots/agents-m2/"
+    )
+
+
 async def main():
     phase = sys.argv[1] if len(sys.argv) > 1 else "check"
     SHOTS.mkdir(exist_ok=True)
@@ -905,6 +994,7 @@ async def main():
             await send_views(runtime, browser, quality)
             await runs_views(runtime, browser, quality)
             log("runs nothing told of for a day, a task's runs under its PR (qa-e41/)")
+            await agents_views(runtime, browser, quality)
             await browser.close()
         server.should_exit = True
         await serving

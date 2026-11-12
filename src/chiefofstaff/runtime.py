@@ -1105,11 +1105,14 @@ class Runtime:
 
     async def stop_for_spend(self, row: dict, why: str):
         """A worker past what its limit lets it spend stops, as after any stop (Go on, or
-        cancel); the owner hears why."""
+        cancel); the owner hears why, and its stopped task says which: spent, or not known."""
         if row["status"] in {"working", "queued", "starting"} or self.held(row["id"]):
             self.add_message(row["id"], "notice", why)
+            by = "its token limit"
+            if self.store.agent_unknown(row["id"]):
+                by += f" ({agents.display(self.agent(row['id']))} stopped mid-turn)"
             with suppress(Exception):
-                await self.workers.interrupt(row["id"], by="its token limit")
+                await self.workers.interrupt(row["id"], by=by)
 
     def record_agent_usage(self, row: dict, data: Any):
         """One usage update of another agent's session: what it spent since the one before, in

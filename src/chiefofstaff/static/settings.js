@@ -168,6 +168,7 @@ export function bindSettings() {
     $("#agents-group").hidden = false;
     $("#agents-group").open = true;
     $("#agents-group").querySelector("summary").focus();
+    if (!agentsLooked) lookForAgents();
   });
   $("#agents-group").addEventListener("toggle", () => {
     // Only the owner's opening looks (never a hidden group opened with the others).
@@ -310,9 +311,10 @@ export async function showUsage(range) {
         usageTable("By role", usage.by_role, (row) => roles[row.role] || row.role),
       ].filter(Boolean),
     );
-    if (!total.calls) $("#usage-tables").replaceChildren(el("div", { class: "line", text: "No model calls in this range." }));
     // Other coding agents', each a part of its own (tokens, never credits): only with rows.
-    $("#usage-tables").append(...(usage.agents || []).map(agentUsage));
+    const agents = (usage.agents || []).map(agentUsage);
+    if (!total.calls) $("#usage-tables").replaceChildren(el("div", { class: "line", text: agents.length ? "No Copilot model calls in this range." : "No model calls in this range." }));
+    $("#usage-tables").append(...agents);
   } catch (error) {
     toast(error.message, "error");
   }

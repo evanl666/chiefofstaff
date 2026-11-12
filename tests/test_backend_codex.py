@@ -1684,7 +1684,8 @@ async def test_a_crash_mid_turn_leaves_its_spend_unknown_until_the_owner_goes_on
             await until(lambda: harness.store.session(worker)["status"] == "working", 30)
             assert runtime.agent_block(harness.store.session(worker)) == ""
             return
-        await until(lambda: "Stopped by its token limit." in str(harness.kinds(worker)), 30)
+        stopped = "Stopped by its token limit (Codex stopped mid-turn)."
+        await until(lambda: stopped in str(harness.kinds(worker)), 30)
         why = runtime.agent_block(harness.store.session(worker))
         assert "what this worker spent then is not known" in why and "Go on" in why
         assert any(why == text for _, text in harness.kinds(worker))

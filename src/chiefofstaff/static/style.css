@@ -813,6 +813,8 @@ label.hours input { width: 118px; }
 /* Send to Chief: one line at the end of Connections; its consent, and what it says once on,
    unfold under its words. */
 .agents-line { display: grid; gap: 12px; }
+/* A link inside its sentence, told apart in both themes by more than its colour. */
+.agents-line small a { text-decoration: underline; }
 .agents-rows { display: grid; gap: 14px; }
 .agent-row { display: grid; gap: 6px; }
 .agent-row > :not(label) { margin-left: 28px; }
