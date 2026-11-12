@@ -4,9 +4,12 @@ Windows itself run there."""
 import asyncio
 import os
 import re
+import shutil
+import socket
 import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -188,3 +191,64 @@ async def test_chiefs_own_git_runs_none_of_a_repositorys_hooks(tmp_path):
     plain = ["git", "-C", str(repo), *identity, "commit", "-q", "--allow-empty", "-m", "b"]
     await asyncio.to_thread(subprocess.run, plain, check=True)
     assert ran.exists(), "the hook itself works: git without SAFE_GIT runs it"
+
+
+@windows
+def test_a_native_hook_planted_where_dev_null_would_point_never_runs(tmp_path):
+    """Git for Windows can read /dev/null as <drive>:\\dev\\null, a folder any user may make
+    at a drive's root, and runs a hook there with .exe added: Chief's git never looks there."""
+    from chiefofstaff.workspaces import git
+
+    root = tmp_path / "drive"
+    (root / "dev" / "null").mkdir(parents=True)
+    hostname = Path(os.environ["SYSTEMROOT"], "System32", "hostname.exe")
+    shutil.copy(hostname, root / "dev" / "null" / "post-commit.exe")
+    drive = next(f"{c}:" for c in "QRSTUVWXYZ" if not Path(f"{c}:\\").exists())
+    subprocess.run(["subst", drive, str(root)], check=True)
+    try:
+        repo = Path(drive + "\\", "repo")
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        (repo / "a.txt").write_text("a")
+        trace = tmp_path / "trace.txt"
+        identity = ("-c", "user.name=t", "-c", "user.email=t@t")
+        os.environ["GIT_TRACE"] = str(trace)
+        try:
+            asyncio.run(git("-C", str(repo), "add", "a.txt"))
+            asyncio.run(git("-C", str(repo), *identity, "commit", "-qm", "a"))
+            assert "post-commit" not in trace.read_text(), "Chief's git ran the planted hook"
+            planted = f"core.hooksPath={drive}/dev/null"
+            again = ["commit", "-q", "--allow-empty", "-m", "b"]
+            subprocess.run(["git", "-C", str(repo), "-c", planted, *identity, *again], check=True)
+            assert "post-commit.exe" in trace.read_text(), "the planted hook itself runs"
+        finally:
+            del os.environ["GIT_TRACE"]
+    finally:
+        subprocess.run(["subst", drive, "/d"], check=False)
+
+
+@windows
+def test_no_other_socket_can_share_the_port_chief_listens_on(tmp_path):
+    """On Windows SO_REUSEADDR would let another user's socket bind the same port and take
+    the page with its token: Chief binds it exclusively."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    chief = subprocess.Popen(
+        [sys.executable, "-m", "chiefofstaff", "--demo", "--no-browser", "--port", str(port),
+         "--data-dir", str(tmp_path / "data")],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )  # fmt: skip
+    try:
+        for _ in range(300):
+            if (tmp_path / "data" / "launch-url").exists():
+                break
+            time.sleep(0.1)
+        else:
+            raise AssertionError("Chief of Staff did not start")
+        with socket.socket() as other:
+            other.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            with pytest.raises(PermissionError):  # WSAEACCES
+                other.bind(("127.0.0.1", port))
+    finally:
+        chief.kill()
+        chief.wait()

@@ -157,8 +157,13 @@ def main():
     url = f"http://127.0.0.1:{args.port}/#token={token}"
     # Bind before opening the browser so an unrelated listener cannot receive the launch token.
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    # Allows an immediate restart (port in TIME_WAIT); a live listener still blocks the bind.
-    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    if sys.platform == "win32":
+        # There SO_REUSEADDR would let another user bind the same port and take the page (and
+        # its token); a port in TIME_WAIT can be bound again without it.
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    else:
+        # Allows an immediate restart (port in TIME_WAIT); a live listener still blocks the bind.
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         listener.bind(("127.0.0.1", args.port))
         listener.listen(128)

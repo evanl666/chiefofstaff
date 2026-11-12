@@ -36,7 +36,7 @@ from .models import NestedArguments
 from .receipts import NO_TESTS_RAN, test_runs, words
 from .roles import WORKER
 from .store import now
-from .workspaces import PLAIN_DIFF, base_of, command, git, locate
+from .workspaces import NO_HOOKS, PLAIN_DIFF, base_of, command, git, locate
 
 if TYPE_CHECKING:
     from .runtime import Runtime
@@ -457,7 +457,7 @@ class Checks:
                 # Without the repository's hooks (a post-checkout hook would run outside the
                 # sandbox) and without fetching large files.
                 await command(
-                    "git", "-c", "core.hooksPath=/dev/null", "--git-dir", git_dir, "worktree",
+                    "git", "-c", f"core.hooksPath={NO_HOOKS}", "--git-dir", git_dir, "worktree",
                     "add", "--detach", "--quiet", str(path), commit,
                     limit=120, env={"GIT_LFS_SKIP_SMUDGE": "1"},
                 )  # fmt: skip

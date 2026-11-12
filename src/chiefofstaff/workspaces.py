@@ -69,8 +69,11 @@ async def git(*arguments: str, limit: float = 60, stdin_data: bytes | None = Non
 
 
 # Chief of Staff's own git runs outside any sandbox: nothing in a repository's config may run
-# code for it (a file-system monitor, hooks).
-SAFE_GIT = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null")
+# code for it (a file-system monitor, hooks). Git for Windows can read /dev/null as a folder at
+# the drive's root, which any user may make (as in CVE-2022-24765): there hooks are looked for
+# in this file instead, which nothing can be put in.
+NO_HOOKS = Path(__file__).as_posix() if sys.platform == "win32" else "/dev/null"
+SAFE_GIT = ("-c", "core.fsmonitor=false", "-c", f"core.hooksPath={NO_HOOKS}")
 if sys.platform == "win32":
     SAFE_GIT += ("-c", "core.longpaths=true")
 # What running code leaves behind in a project without a .gitignore for it: not work to commit,
