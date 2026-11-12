@@ -703,6 +703,9 @@ class TaskActions:
         # those changed again meanwhile (checked once more after).
         self.checking: set[str] = set()
         self.recheck: set[str] = set()
+        # Tasks' starts being recorded (record_base): a result reported meanwhile waits for
+        # its start, or it would have no share.
+        self.basing: dict[str, asyncio.Future] = {}
         # An accepted task stays listed while something is followed up for it.
         self.tasks.monitored = lambda task: bool(self.monitoring(task))
         # The one task each follow tied to no task is for (legacy_follower), as worked out in
@@ -1259,6 +1262,9 @@ class TaskActions:
     async def record_end(self, task: dict):
         """Its checkouts as its result left them: its share ends there (a later task on the
         same branch or folder does not add to it)."""
+        if job := self.basing.pop(task["id"], None):
+            with suppress(Exception):
+                await asyncio.shield(job)
         row = self.store.find_session(task["session_id"])
         if not row or not self.store.get(f"taskbase:{task['id']}"):
             return
