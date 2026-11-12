@@ -83,6 +83,8 @@ ASK_FIRST_BEFORE = "0.168.0"
 REQUEST_TIMEOUT = float(os.environ.get("CHIEFOFSTAFF_CODEX_TIMEOUT", "60"))
 # How long the check of a Codex version may take, all told (seconds).
 CHECK_TIMEOUT = 90.0
+# How often a worker's process is looked at to see whether its supervisor still runs.
+WATCH_SECONDS = 0.5
 # What a thread's settings must read back as (thread/start and thread/resume answers).
 APPROVAL_POLICY = "untrusted"
 REVIEWER = "user"
@@ -416,6 +418,16 @@ def codex_refused(version: str) -> str:
     return ""
 
 
+def ask_first_refusal(version: str, checked: dict | None) -> str:
+    if not ask_first_tested(version):
+        return (
+            f"Codex {version} has not passed Chief of Staff's checks for Ask first (tested from "
+            f"{OLDEST_CODEX}, before {ASK_FIRST_BEFORE}): let this worker act on its own, or use "
+            "a tested version."
+        )
+    return (checked or {}).get("ask_first") or ""
+
+
 def ask_first_tested(version: str) -> bool:
     found = release(version)
     oldest, before = release(OLDEST_CODEX) or (), release(ASK_FIRST_BEFORE) or ()
@@ -424,12 +436,15 @@ def ask_first_tested(version: str) -> bool:
 
 
 class CodexBackend:
-    """The owner's Codex CLI: one app-server process runs every thread."""
+    """One app-server process of the owner's Codex CLI, and the threads it runs. Workers each
+    have one of their own (CodexAgent); Chief of Staff's check and Settings' look use one too."""
 
     capabilities = CODEX
 
-    def __init__(self, command: str):
+    def __init__(self, command: str, owner: CodexAgent | None = None):
         self.command = command
+        # The worker processes this belongs to (CodexAgent), which keeps its verdicts and hooks.
+        self.owner = owner
         # Approvals are Chief of Staff's to answer, never a reviewer agent's.
         self.arguments = ["app-server", "-c", f'approvals_reviewer="{REVIEWER}"']
         self.process: asyncio.subprocess.Process | None = None
@@ -462,6 +477,17 @@ class CodexBackend:
         self.checked: dict | None = None
         # Whether it needs the owner's sign-in (not for the check's model, on this machine).
         self.needs_sign_in = True
+        # Told once its process has ended: whether by itself (a crash) rather than stopped.
+        self.on_end: Callable[[bool], None] | None = None
+        self.stopping = False
+        self.by_itself = False
+        self.told_end = False
+        self.ending: asyncio.Task | None = None
+        self.ended_process: asyncio.subprocess.Process | None = None
+        # Why Chief of Staff stopped it at once (a turn reached outside its worker's threads),
+        # and how many threads are being opened on it now.
+        self.refusal = ""
+        self.opening = 0
 
     # The process
 
@@ -496,6 +522,8 @@ class CodexBackend:
         self.epoch = uuid4().hex
         self.reader = asyncio.ensure_future(self.read())
         self.errors = asyncio.ensure_future(self.read_errors())
+        if self.owner is not None:
+            self.tasks.add(asyncio.ensure_future(self.watch(self.process)))
         try:
             answer = await self.request(
                 "initialize",
@@ -537,7 +565,16 @@ class CodexBackend:
                 )
 
     async def stop(self) -> None:
-        process, self.process = self.process, None
+        """It ends, in a task of its own (what asks again waits for that one; one that was
+        cancelled is done again)."""
+        self.stopping = True
+        if self.ending is None or self.ending.cancelled():
+            self.ending = asyncio.ensure_future(self.end())
+        await asyncio.shield(self.ending)
+
+    async def end(self) -> None:
+        process = self.process or self.ended_process
+        self.process, self.ended_process = None, process
         for session in list(self.sessions.values()):
             session.closed = True
             if session.pump:
@@ -583,9 +620,9 @@ class CodexBackend:
             and not self.reader.done()
         )
 
-    def processes(self) -> dict[int, str]:
+    def processes(self, table: dict | None = None) -> dict[int, str]:
         if self.process and self.process.returncode is None:
-            table = process_table()
+            table = process_table() if table is None else table
             self.started |= {
                 pid: table[pid][1] for pid in descendants(table, self.process.pid) if pid in table
             }
@@ -662,6 +699,37 @@ class CodexBackend:
             self.fail_pending(ConnectionResetError("Codex stopped."))
             for session in list(self.sessions.values()):
                 session.lost()
+            if not self.stopping and self.owner is not None:
+                self.by_itself = True  # What is left of it ends (its supervisor ends its tree).
+                self.tasks.add(asyncio.ensure_future(self.stop()))
+            self.ended()
+
+    async def watch(self, process: asyncio.subprocess.Process):
+        """Its supervisor ended by itself (killed): Codex, left without it, is ended with it.
+        (Its exit is seen as it happens; wait() would wait for Codex's output to close too.)"""
+        while True:  # Polled: nothing is told when its returncode is set.
+            if process.returncode is not None or self.stopping:
+                break
+            await asyncio.sleep(WATCH_SECONDS)
+        if not self.stopping:
+            self.by_itself = True
+            await self.stop()
+
+    def ended(self):
+        if self.on_end and not self.told_end:
+            self.told_end = True
+            self.on_end(self.by_itself)
+
+    def release_if_idle(self):
+        """A worker's own process whose threads are all let go of, with nothing of them
+        running (and none being opened on it): it ends (the worker's next message starts
+        another, which resumes them)."""
+        if self.owner is None or self.stopping or self.opening:
+            return
+        if all(session.closed and session.idle() for session in self.sessions.values()):
+            self.stopping = True  # From now on no thread is opened on it (CodexAgent).
+            task = asyncio.ensure_future(self.stop())
+            self.tasks.add(task)
 
     async def read_errors(self):
         if not (self.process and self.process.stderr):
@@ -703,6 +771,27 @@ class CodexBackend:
         if item.get("type") == "subAgentActivity" and item.get("agentThreadId"):
             # A child thread (a subagent) of this one: its work is its worker's.
             self.parents.setdefault(item["agentThreadId"], params.get("threadId", ""))
+        if item.get("type") == "collabAgentToolCall":
+            self.collab(method, item, params.get("threadId") or "")
+
+    def collab(self, method: str, item: dict, thread: str):
+        """A turn's call on other threads, seen before it acts: a child it spawns joins its
+        worker's tree; any other thread it names must be in that tree (Codex lets a turn
+        resume any thread it can name, from disk). Handled as read, not in turn."""
+        session = self.session_of(thread, {})
+        threads = [str(t) for t in item.get("receiverThreadIds") or [] if t]
+        if session is None or session.closed:
+            return
+        if item.get("tool") == "spawnAgent":
+            for child in threads:
+                if child not in session.tree:
+                    session.tree.add(child)
+                    self.parents.setdefault(child, thread)
+                    session.emit("agent.child", thread_id=child)
+            return
+        foreign = [t for t in threads if t not in session.tree]
+        if method == "item/started" and item.get("tool") != "listAgents" and foreign:
+            session.reached_out(str(item.get("tool")), foreign)
 
     def root(self, thread: str) -> str:
         seen = set()
@@ -860,20 +949,18 @@ class CodexBackend:
     def ask_first_refused(self) -> str:
         """Why its workers cannot ask first ("" when they can): only a version tested for it,
         whose check here showed every kind of action asking Chief of Staff first, runs them
-        (Runtime.agent_block)."""
-        if not ask_first_tested(self.cli_version):
-            return (
-                f"Codex {self.cli_version} has not passed Chief of Staff's checks for Ask first "
-                f"(tested from {OLDEST_CODEX}, before {ASK_FIRST_BEFORE}): let this worker act "
-                "on its own, or use a tested version."
-            )
-        return (self.checked or {}).get("ask_first") or ""
+        (Runtime.agent_block). A worker's process answers as its owner does."""
+        if self.owner is not None:
+            return self.owner.ask_first_refused
+        return ask_first_refusal(self.cli_version, self.checked)
 
     @property
     def acting_refused(self) -> str:
         """Why none of its workers runs, even acting on its own ("" when they do): its check
         here showed edits not asking Chief of Staff first (the owner's checkouts are kept by
         that ask, also for a worker acting on its own)."""
+        if self.owner is not None:
+            return self.owner.acting_refused
         return (self.checked or {}).get("acting") or ""
 
     async def check(self, folder: Path) -> dict:
@@ -907,12 +994,17 @@ class CodexBackend:
                 if (work / name).exists()
             ]
         except Exception as exc:  # Whatever stops the check, it says why.
-            why = str(exc) or type(exc).__name__
+            why = (
+                f"Chief of Staff's check of Codex {self.cli_version} could not run ("
+                + ((str(exc) or type(exc).__name__)[:200])
+            )
             return {
                 "ran": False,
-                "ask_first": f"Chief of Staff's check of Codex {self.cli_version} could not run "
-                f"({why[:200]}): workers that ask first do not run on it until it does.",
-                "acting": "",
+                "ask_first": f"{why}): workers that ask first do not run on it until it does.",
+                # A version newer than those tested runs no worker until its check has run.
+                "acting": ""
+                if ask_first_tested(self.cli_version)
+                else f"{why}): no worker runs on this newer version until it does.",
             }
         finally:
             if other:
@@ -961,17 +1053,33 @@ class CodexBackend:
             on_permission_request=check,
         )
 
+        said: list[str] = []
+        failed: list[str] = []
+
         def on_event(event: Any):
-            if event.type.value in {"session.idle", "session.error"}:
+            kind = event.type.value
+            if kind == "assistant.message":
+                said.append(str(getattr(event.data, "content", "") or "").strip())
+            elif kind == "session.error":
+                failed.append(str(getattr(event.data, "message", "") or "its turn failed"))
+            if kind in {"session.idle", "session.error"}:
                 ended.set()
 
         session.on(on_event)
         await session.send(codex_check.PROMPT.format(work=work))
         await ended.wait()
+        if failed or not said or said[-1] != codex_check.REPLY:
+            # Its turn did not run to its end: what it found is not all there is.
+            raise RuntimeError(failed[0] if failed else "its turn ended before its last step")
 
     async def thread_params(self, options: dict) -> dict:
-        if options.get("ask_first") and (why := self.ask_first_refused):
-            raise RuntimeError(why)
+        # Chief of Staff's check opens its thread as a worker that asks first, on whatever
+        # version it checks: the verdicts it is to find do not apply to it.
+        if not options.get("checking"):
+            if why := self.acting_refused:
+                raise RuntimeError(why)
+            if options.get("ask_first") and (why := self.ask_first_refused):
+                raise RuntimeError(why)
         cwd = options.get("working_directory") or str(Path.home())
         config = await self.thread_config(options, cwd)
         prompt = (options.get("system_message") or {}).get("content") or ""
@@ -1015,26 +1123,66 @@ class CodexBackend:
                 owner.get("project_doc_max_bytes"),
                 owner.get("project_doc_fallback_filenames"),
             )
-        # Nested, this replaces the owner's table for the thread (only its folders matter there).
+        # Codex merges a table given here into the owner's, key by key (config/src/merge.rs);
+        # a dotted key would split a name with a dot in it (overrides.rs), so tables are nested.
         config: dict[str, Any] = {"projects": projects}
         if options.get("ask_first"):
             config["features.apps"] = False
-            for server, entry in (owner.get("mcp_servers") or {}).items():
-                if "." in server or not isinstance(entry, dict):
-                    continue  # Not addressable as a dotted key: left as configured.
-                # Dotted keys merge into the owner's server; a nested one would replace it.
-                config[f"mcp_servers.{server}.default_tools_approval_mode"] = "prompt"
-                for tool in entry.get("tools") or {}:
-                    if "." not in tool:
-                        config[f"mcp_servers.{server}.tools.{tool}.approval_mode"] = "prompt"
-                if options.get("checking"):
-                    config[f"mcp_servers.{server}.enabled"] = False  # Not started for it.
+            servers = {
+                str(server): asking(entry, checking=bool(options.get("checking")))
+                for server, entry in mapping(owner.get("mcp_servers")).items()
+            }
+            if servers:
+                config["mcp_servers"] = servers
+            # A plugin's MCP servers have their policy in its own table: each asks too.
+            plugins = {} if options.get("checking") else await self.plugin_servers(cwd)
+            configured = mapping(owner.get("plugins"))
+            if plugins:
+                config["plugins"] = {
+                    plugin: {
+                        "mcp_servers": {
+                            name: asking(mapping(configured.get(plugin)).get("mcp_servers"), name)
+                            for name in names
+                        }
+                    }
+                    for plugin, names in plugins.items()
+                }
         if checking := options.get("checking"):
-            server = f"mcp_servers.{codex_check.SERVER}"
-            config[f"{server}.command"] = sys.executable
-            config[f"{server}.args"] = ["-m", "chiefofstaff.codex_check", "--mcp", checking]
-            config[f"{server}.default_tools_approval_mode"] = "prompt"
+            # In the same table as the owner's servers' policies (one key per table here).
+            config.setdefault("mcp_servers", {})[codex_check.SERVER] = {
+                "command": sys.executable,
+                "args": ["-m", "chiefofstaff.codex_check", "--mcp", checking],
+                "default_tools_approval_mode": "prompt",
+            }
         return config
+
+    async def plugin_servers(self, cwd: str) -> dict[str, list[str]]:
+        """The MCP servers each of Codex's plugins on for this folder adds (plugin id -> their
+        names); raises with why when they cannot all be read (Ask first is then refused: a
+        server whose calls cannot be made to ask is not let run unasked)."""
+        try:
+            answer = await self.request("plugin/installed", {"cwds": [cwd]})
+            found: dict[str, list[str]] = {}
+            for market in answer.get("marketplaces") or []:
+                for plugin in market.get("plugins") or []:
+                    if not (plugin.get("installed") and plugin.get("enabled")):
+                        continue
+                    where = (
+                        {"marketplacePath": market["path"]}
+                        if market.get("path")
+                        else {"remoteMarketplaceName": market.get("name")}
+                    )
+                    read = await self.request(
+                        "plugin/read", {"pluginName": plugin.get("name") or "", **where}
+                    )
+                    if names := mapping(read.get("plugin")).get("mcpServers") or []:
+                        found[str(plugin.get("id"))] = [str(name) for name in names]
+        except CodexError as exc:
+            raise RuntimeError(
+                "Codex's plugins could not be read, so Chief of Staff can't make their MCP "
+                f"tools ask first ({exc}): let this worker act on its own."
+            ) from None
+        return found
 
     def opened(self, answer: dict, options: dict) -> CodexSession:
         thread = answer.get("thread") or {}
@@ -1084,6 +1232,224 @@ class CodexBackend:
     async def archive(self, session_id: str):
         """Put a thread away in Codex (its history is kept there)."""
         await self.request("thread/archive", {"threadId": session_id})
+
+
+class CodexAgent:
+    """Codex for Chief of Staff's workers: an app-server process of each worker's own (its child
+    agents run in it), so no thread can reach another worker's through Codex's thread registry
+    (more-agents.md 5.3). Each is started with the worker's first turn or resume and ends once
+    its threads are let go of with nothing of them running; when one stops by itself, only its
+    worker is affected (`ended`, Runtime.agent_process_ended)."""
+
+    capabilities = CODEX
+
+    def __init__(self, command: str):
+        self.command = command
+        self.arguments: list[str] = []  # More `-c` settings for each process (the check's).
+        self.needs_sign_in = True
+        self.cli_version = ""
+        self.checked: dict | None = None
+        self.admit: Callable[[CodexSession], Awaitable[str]] | None = None
+        self.begins: Callable[[CodexSession], bool] | None = None
+        # Told when a worker's process ends: the worker, the process (its usage epoch), and
+        # why: "" when let go of or stopped, "crash" when it stopped by itself, else why
+        # Chief of Staff stopped it at once; and when one has started.
+        self.ended: Callable[[str, str, str], None] | None = None
+        self.on_start: Callable[[], None] | None = None
+        self.workers: dict[str, CodexBackend] = {}
+        self.locks: dict[str, asyncio.Lock] = {}
+        self.running = False
+        # Workers' processes that ended or are ending (their stop is awaited with this one's).
+        self.retired: set[CodexBackend] = set()
+
+    def process(self) -> CodexBackend:
+        process = CodexBackend(self.command, owner=self)
+        process.arguments += self.arguments
+        process.needs_sign_in = self.needs_sign_in
+        process.admit, process.begins = self.admit_turn, self.begins_turn
+        return process
+
+    async def admit_turn(self, session: CodexSession) -> str:
+        return await self.admit(session) if self.admit else ""
+
+    def begins_turn(self, session: CodexSession) -> bool:
+        return self.begins(session) if self.begins else True
+
+    async def start(self) -> None:
+        """What each worker's process checks as it starts (the CLI, its version, the
+        administrator's requirements, the sign-in), once now in a process of its own: a Codex
+        that cannot run says why here."""
+        probe = self.process()
+        try:
+            await probe.start()
+            self.cli_version = probe.cli_version
+        finally:
+            await probe.stop()
+        self.running = True
+
+    async def stop(self) -> None:
+        self.running = False
+        workers, self.workers = [*self.workers.values(), *self.retired], {}
+        self.retired = set()
+        await asyncio.gather(*(process.stop() for process in workers), return_exceptions=True)
+
+    def alive(self) -> bool:
+        return self.running
+
+    def epochs(self) -> set[str]:
+        """Its workers' processes running now, as usage epochs."""
+        return {process.epoch for process in self.workers.values() if process.alive()}
+
+    def processes(self) -> dict[int, str]:
+        """The processes its workers' processes run now (each supervisor and its tree)."""
+        found: dict[int, str] = {}
+        if running := [process for process in list(self.workers.values()) if process.alive()]:
+            table = process_table()
+            for process in running:
+                found |= {
+                    pid: command
+                    for pid, command in process.processes(table).items()
+                    if table.get(pid, (0, ""))[1] == command
+                }
+        return found
+
+    async def process_for(self, worker: str) -> CodexBackend:
+        """A worker's own process, started on first use (and after it ended)."""
+        lock = self.locks.setdefault(worker, asyncio.Lock())
+        async with lock:
+            if (process := self.workers.get(worker)) and process.alive() and not process.stopping:
+                process.opening += 1  # Until its thread is open (opened): not let go of.
+                return process
+            if not self.running:
+                raise RuntimeError("Codex is not running for Chief of Staff.")
+            process = self.process()
+            await process.start()
+            if process.cli_version != self.cli_version:
+                await process.stop()
+                self.running = False  # Checked again before its workers go on (Runtime).
+                raise RuntimeError(
+                    f"Codex was updated ({self.cli_version} to {process.cli_version}): Chief "
+                    "of Staff checks it again first; send it again."
+                )
+            process.on_end = lambda by_itself: self.process_ended(worker, process, by_itself)
+            self.workers[worker] = process
+            process.opening += 1
+            if self.on_start:
+                self.on_start()
+            return process
+
+    def process_ended(self, worker: str, process: CodexBackend, by_itself: bool):
+        if self.workers.get(worker) is process:
+            del self.workers[worker]
+        self.retired = {p for p in self.retired if not (p.ending and p.ending.done())}
+        self.retired.add(process)
+        if self.ended:
+            why = process.refusal or ("crash" if by_itself else "")
+            try:
+                self.ended(worker, process.epoch, why)
+            except Exception:
+                logger.exception("Ending %s's Codex process failed.", worker)
+
+    async def any_process(self, call: Callable[[CodexBackend], Awaitable[Any]]) -> Any:
+        """What any process can answer (models, a thread's metadata): a worker's running one,
+        else one started for it."""
+        for process in list(self.workers.values()):
+            if process.alive():
+                return await call(process)
+        process = self.process()
+        try:
+            await process.start()
+            return await call(process)
+        finally:
+            await process.stop()
+
+    @property
+    def ask_first_refused(self) -> str:
+        return ask_first_refusal(self.cli_version, self.checked)
+
+    @property
+    def acting_refused(self) -> str:
+        return (self.checked or {}).get("acting") or ""
+
+    async def check(self, folder: Path) -> dict:
+        checker = self.process()
+        checker.cli_version = self.cli_version
+        checker.owner = None  # Its own verdicts are to be found, not the owner's.
+        return await checker.check(folder)
+
+    async def version(self) -> str:
+        return self.cli_version
+
+    async def get_auth_status(self) -> Any:
+        return await self.any_process(lambda process: process.get_auth_status())
+
+    async def about(self) -> dict:
+        return await self.any_process(lambda process: process.about())
+
+    async def list_models(self) -> list[Any]:
+        return await self.any_process(lambda process: process.list_models())
+
+    async def list_sessions(self) -> list[Any]:
+        return []
+
+    async def get_session_metadata(self, session_id: str) -> Any:
+        return await self.any_process(lambda process: process.get_session_metadata(session_id))
+
+    async def create_session(self, *, session_id: str, name: str, **options: Any) -> CodexSession:
+        process = await self.process_for(options.get("worker") or session_id)
+        try:
+            return await process.create_session(session_id=session_id, name=name, **options)
+        finally:
+            self.opened(process)
+
+    async def resume_session(self, session_id: str, **options: Any) -> CodexSession:
+        process = await self.process_for(options.get("worker") or session_id)
+        try:
+            return await process.resume_session(session_id, **options)
+        finally:
+            self.opened(process)
+
+    def opened(self, process: CodexBackend):
+        """A thread was opened on a worker's process (or could not be): one that has none
+        open ends."""
+        process.opening -= 1
+        process.release_if_idle()
+
+    async def archive(self, session_id: str):
+        await self.any_process(lambda process: process.archive(session_id))
+
+    async def mcp_sign_in_url(self, session: Any, server: str) -> str:
+        return ""
+
+    def sandbox(self, policy: Any) -> None:
+        return None
+
+    async def gh_works_in_sandbox(self) -> bool | None:
+        return None
+
+    async def open_elsewhere(self) -> dict[str, int]:
+        return {}
+
+    async def read_history(self, session_id: str, offset: int) -> tuple[list[dict], int, float]:
+        return [], offset, 0.0
+
+    async def read_usage(self, session_id: str, offset: int) -> tuple[list[dict], int]:
+        return [], offset
+
+    def session_log(self, session_id: str) -> Path | None:
+        return None
+
+
+def asking(entry: Any, name: str = "", checking: bool = False) -> dict:
+    """An MCP server's policy for a worker that asks first: every tool of it asks (also those
+    the owner set to run unasked); `name`: the entry of `entry` (a plugin's servers) to read."""
+    entry = mapping(mapping(entry).get(name)) if name else mapping(entry)
+    policy: dict[str, Any] = {"default_tools_approval_mode": "prompt"}
+    if tools := mapping(entry.get("tools")):
+        policy["tools"] = {str(tool): {"approval_mode": "prompt"} for tool in tools}
+    if checking:
+        policy["enabled"] = False  # Not started for Chief of Staff's check.
+    return policy
 
 
 def client_version() -> str:
@@ -1136,6 +1502,16 @@ class CodexSession:
         self.unshown: str = ""
         # The usage its thread restored when resumed in this process: its epoch's offset.
         self.restored: dict[str, dict] = {}
+        # The ids of the messages Chief of Staff sent it (a message with another id, or none,
+        # is never the owner's), and turns it did not start that were stopped at once: none of
+        # their requests is granted, nothing of them is shown.
+        self.sent: set[str] = set()
+        self.refused_turns: set[str] = set()
+        # The MCP calls asked about, by server, not yet ended (each one asks first, if so).
+        self.asked_mcp: dict[str, int] = {}
+        # Its child agents (threads it spawned, also before this process): the only threads
+        # besides its own its turns may reach.
+        self.tree: set[str] = {thread_id, *(options.get("children") or [])}
 
     def carry(self, previous: CodexSession):
         """The thread was open on another handle (detached, then resumed): what runs on it is
@@ -1153,6 +1529,9 @@ class CodexSession:
             "child_turns",
             "child_threads",
             "own",
+            "sent",
+            "refused_turns",
+            "asked_mcp",
         ):
             setattr(self, name, getattr(previous, name))
 
@@ -1197,6 +1576,7 @@ class CodexSession:
             "clientUserMessageId": sent,
         }
         self.steered.add(sent)
+        self.sent.add(sent)
         try:
             await self.backend.request("turn/steer", params)
         except CodexError:
@@ -1205,10 +1585,12 @@ class CodexSession:
         return True
 
     async def start_turn(self, items: list[dict], sent: str):
-        """A turn on these, once Chief of Staff admits it; refused, it raises why."""
-        self.starting = True
+        """A turn on these, once Chief of Staff admits it; refused, it raises why. Admitted but
+        not begun, nothing of it spends."""
+        self.starting = admitted = True
         try:
             if self.backend.admit and (why := await self.backend.admit(self)):
+                admitted = False
                 raise RuntimeError(why)
             params: dict[str, Any] = {
                 "threadId": self.session_id,
@@ -1223,12 +1605,18 @@ class CodexSession:
             # that makes this worker ineligible never begins after it.
             if self.backend.begins and not self.backend.begins(self):
                 raise RuntimeError("Chief of Staff's settings changed; send it again.")
+            self.sent.add(sent)
             future = self.backend.send_request("turn/start", params)
             answer = await self.backend.answer("turn/start", future)
             turn = (answer.get("turn") or {}).get("id")
             if turn and not self.turn and turn not in self.ended:
                 self.turn = turn  # Its events may come before this answer is read: not after.
                 self.turns.add(turn)
+        except BaseException:
+            self.starting = False
+            if admitted:
+                self.spent()  # Admitted, it began nothing.
+            raise
         finally:
             self.starting = False
 
@@ -1264,8 +1652,13 @@ class CodexSession:
             del self.backend.sessions[self.session_id]
             with suppress(Exception):
                 await self.backend.request("thread/unsubscribe", {"threadId": self.session_id})
+        self.backend.release_if_idle()
         if self.pump and self.pump is not asyncio.current_task():
             self.pump.cancel()
+
+    def idle(self) -> bool:
+        """Nothing of it runs: no turn, no command it left running, no child agent at work."""
+        return not (self.turn or self.starting or self.left_running or self.child_turns)
 
     def lost(self):
         """Its app-server stopped: no turn of it runs any more."""
@@ -1299,7 +1692,8 @@ class CodexSession:
         for turn in reversed(turns):
             for item in turn.get("items") or []:
                 text = text_of(item.get("content"))
-                if item.get("type") == "userMessage" and not text.startswith(REFUSED_NOTE):
+                ours = str(item.get("clientId") or "").startswith("cos-")
+                if item.get("type") == "userMessage" and ours and not text.startswith(REFUSED_NOTE):
                     found.append(event("user.message", content=text))
                 elif item.get("type") == "agentMessage" and item.get("text"):
                     found.append(event("assistant.message", content=item["text"]))
@@ -1380,10 +1774,16 @@ class CodexSession:
 
     async def handle(self, method: str, params: dict, thread: str):
         child = thread != self.session_id
+        if (params.get("turnId") or (params.get("turn") or {}).get("id")) in self.refused_turns:
+            if method == "turn/completed":
+                self.spent()  # Admitted before it was stopped, it spends no more.
+            return  # A turn it was stopped in: nothing of it is shown.
         if method == "turn/started":
             turn = (params.get("turn") or {}).get("id", "")
             if child:
                 self.child_started(thread, turn)
+                return
+            if not await self.solicited(params.get("turn") or {}):
                 return
             self.turn = turn
             self.turns.add(turn)
@@ -1418,6 +1818,66 @@ class CodexSession:
             self.current_model = params.get("toModel") or params.get("model") or self.current_model
         elif method == "thread/closed" and child:
             await self.let_go(thread)
+
+    async def known_turn(self, turn: str, thread: str) -> bool:
+        """Whether a request comes from a turn that may run: on its own thread, once its start
+        has been told apart (its events are handled in order, a request at once)."""
+        if not turn or thread != self.session_id:
+            return turn not in self.refused_turns
+        for _ in range(300):
+            if turn in self.refused_turns:
+                return False
+            if turn == self.turn or turn in self.turns:
+                return True
+            await asyncio.sleep(0.01)
+        return False
+
+    def reached_out(self, tool: str, threads: list[str]):
+        """Its turn tried to reach a thread outside its own tree (another worker's, or one of
+        the owner's own Codex sessions, read from disk): its worker stops at once."""
+        logger.warning("%s tried %s on %s: stopped.", self.session_id, tool, ", ".join(threads))
+        self.stop_worker(
+            "Stopped: it tried to reach a Codex conversation that is not its own (another "
+            "worker's, or one of yours), which Chief of Staff does not allow."
+        )
+
+    def stop_worker(self, why: str):
+        """Something Chief of Staff does not let a worker do: its process ends at once, with
+        whatever it loaded and runs, nothing more of its turn is granted, and its worker stops
+        with why (Runtime.agent_process_ended)."""
+        if self.turn:
+            self.refused_turns.add(self.turn)
+        self.backend.refusal = self.backend.refusal or why
+        task = asyncio.ensure_future(self.backend.stop())
+        self.backend.tasks.add(task)
+
+    async def solicited(self, turn: dict) -> bool:
+        """Whether a turn that started on its thread may run: one Chief of Staff starts, or one
+        Codex starts on the worker's own work (it follows a turn of its own: admitted as any).
+        Any other (another thread's input) is stopped at once, and none of its requests is
+        granted."""
+        turn_id, led_by = turn.get("id", ""), turn.get("rootTurnId") or ""
+        if turn_id == self.turn or turn_id in self.turns:
+            return True
+        if self.starting and led_by in {"", turn_id}:
+            return True  # Its own, its start not answered yet.
+        why = "Chief of Staff did not start this turn."
+        if led_by and led_by != turn_id and led_by in self.turns:
+            why = await self.backend.admit(self) if self.backend.admit else ""
+            if not why and (not self.backend.begins or self.backend.begins(self)):
+                return True
+            why = why or "Chief of Staff's settings changed."
+        await self.refuse_turn(turn_id, why)
+        return False
+
+    async def refuse_turn(self, turn_id: str, why: str):
+        self.refused_turns.add(turn_id)
+        logger.warning("Stopped a turn of %s at its start: %s", self.session_id, why)
+        with suppress(Exception):
+            await self.backend.request(
+                "turn/interrupt", {"threadId": self.session_id, "turnId": turn_id}
+            )
+        self.emit("agent.notice", text=f"Stopped a turn Codex began on its own: {why}")
 
     def shows_turn(self, method: str, params: dict) -> bool:
         """Whether this is the turn's first step that is not its message (Codex says other
@@ -1475,16 +1935,20 @@ class CodexSession:
         turn runs, its session is idle."""
         if self.turn is None and not self.child_turns and not self.left_running:
             self.emit("session.idle")
+            if self.closed:
+                self.backend.release_if_idle()  # Let go of meanwhile: its process may end.
 
     def item_started(self, item: dict, thread: str):
         kind, item_id = item.get("type"), item.get("id", "")
         parent = self.parent_call(thread)
         if kind == "userMessage" and not parent:
             sent = item.get("clientId") or ""
-            if sent in self.own:
+            if sent in self.own or sent not in self.sent:
+                # The adapter's own note, or input Chief of Staff did not send (from Codex,
+                # another thread): never shown as the owner's, nor taken up as a task.
                 if self.unshown:
                     self.show_turn()
-                return  # The adapter's own note: not a message Chief of Staff sent.
+                return
             delivery = SimpleNamespace(value="steering") if sent in self.steered else None
             self.steered.discard(sent)
             self.emit("user.message", content=text_of(item.get("content")), delivery=delivery)
@@ -1565,6 +2029,18 @@ class CodexSession:
     async def item_completed(self, item: dict, thread: str):
         kind, item_id = item.get("type"), item.get("id", "")
         parent = self.parent_call(thread)
+        if (
+            kind == "mcpToolCall"
+            and self.options.get("ask_first")
+            and not self.options.get("checking")  # The check finds out what asks itself.
+            and self.ran_unasked(item)
+        ):
+            server = item.get("server") or "an MCP server"
+            self.stop_worker(
+                f"Stopped: Codex ran a tool of {server} without asking first, though this worker "
+                "asks first. Check that server's settings in Codex, or let it act on its own."
+            )
+            return
         if kind == "agentMessage":
             text = item.get("text") or ""
             if text.strip():
@@ -1708,6 +2184,8 @@ class CodexSession:
     # Codex's requests
 
     async def request(self, method: str, params: dict, thread: str) -> dict:
+        if not await self.known_turn(params.get("turnId") or "", thread):
+            raise CodexError("Chief of Staff did not start this turn.")  # Declined, all of it.
         context = {"session_id": self.session_id, "sessionId": self.session_id}
         if method == "item/commandExecution/requestApproval":
             return await self.command_approval(params, context)
@@ -1802,10 +2280,20 @@ class CodexSession:
                     return {"decision": "decline"}
         return {"decision": "accept"}
 
+    def ran_unasked(self, item: dict) -> bool:
+        """Whether this MCP call ran with no question about it (Ask first: each one asks)."""
+        server = str(item.get("server") or "")
+        if self.asked_mcp.get(server):
+            self.asked_mcp[server] -= 1
+            return False
+        return item.get("status") == "completed" or item.get("result") is not None
+
     async def elicitation(self, params: dict, context: dict) -> dict:
         meta = mapping(params.get("_meta"))
         server = params.get("serverName") or ""
         if meta.get("codex_approval_kind") == "mcp_tool_call":
+            # Asked before its call runs (its end comes only once this is answered).
+            self.asked_mcp[server] = self.asked_mcp.get(server, 0) + 1
             read_only = bool(mapping(meta.get("tool_annotations")).get("readOnlyHint"))
             github = self.github(server) or (server == CODEX_APPS and github_app(meta))
             if (
@@ -1933,15 +2421,15 @@ def check_verdict(version: str, asked: list[str], happened: list[str]) -> dict:
     return {"ran": True, "ask_first": ask_first, "acting": acting}
 
 
-def codex_backend(command: str = "codex") -> CodexBackend:
-    return CodexBackend(shutil.which(command) or command)
+def codex_backend(command: str = "codex") -> CodexAgent:
+    return CodexAgent(shutil.which(command) or command)
 
 
 async def look(command: str = "codex") -> dict:
     """What Settings shows of the Codex on this computer, from an app-server started for this
     and stopped: its version, how it is signed in and its models; raises with why its workers
     cannot run (not found, too old, signed out, an administrator's requirements)."""
-    backend = codex_backend(command)
+    backend = CodexBackend(shutil.which(command) or command)
     try:
         await asyncio.wait_for(backend.start(), LOOK_SECONDS)
         return await asyncio.wait_for(backend.about(), LOOK_SECONDS)

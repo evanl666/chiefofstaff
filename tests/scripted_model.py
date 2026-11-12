@@ -104,6 +104,14 @@ def plan(prompt: str) -> list[dict]:
         )
     for found in re.finditer(r"call the MCP tool (\w+) of (\w+)", prompt, re.IGNORECASE):
         steps.append(call("function_call", found.group(1), {}, f"mcp__{found.group(2)}"))
+    for found in re.finditer(r"Send the text '([^']*)' to the agent ([0-9a-f-]+)", prompt):
+        # Another thread, named by its id (as a worker could read it from Codex's files).
+        message = {"target": found.group(2), "message": found.group(1)}
+        steps.append(call("function_call", "send_input", message, "multi_agent_v1"))
+    for found in re.finditer(r"Resume the agent ([0-9a-f-]+)", prompt):
+        steps.append(
+            call("function_call", "resume_agent", {"id": found.group(1)}, "multi_agent_v1")
+        )
     if found := re.search(
         r"Have a child agent call the (\w+) tool with text '([^']*)'(?: and run `([^`]+)`)?", prompt
     ):

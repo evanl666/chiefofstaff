@@ -33,6 +33,8 @@ PROMPT = (
     f"and the file `{ADDED[1]}`. Move the file `{MOVED_FROM}` to `{MOVED_TO}`. Then reply with "
     "just: checked"
 )
+# Its turn's last words: the check ran to its end only once they are said.
+REPLY = "checked"
 
 
 def catalog() -> dict:
@@ -93,7 +95,7 @@ def steps(work: Path) -> list[dict]:
         "type": "message",
         "role": "assistant",
         "id": "check-reply",
-        "content": [{"type": "output_text", "text": "checked"}],
+        "content": [{"type": "output_text", "text": REPLY}],
     }
     return [*calls, reply]
 

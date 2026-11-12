@@ -241,6 +241,11 @@ SENT_AGAIN_SECONDS = 600
 
 # How long a turn of another agent waits for what the last one spent (seconds).
 USAGE_SETTLES = 60.0
+# How soon an agent's check that could not run is tried again, at the earliest (seconds); and
+# how soon after its last a worker's process stopping by itself again fails it instead of
+# starting another (never a loop of starts).
+AGENT_CHECK_AGAIN = 60.0
+AGENT_LOST_AGAIN = 120.0
 
 
 def counters(totals: Any) -> dict[str, int]:
@@ -404,6 +409,15 @@ class Runtime:
         self.admission = asyncio.Lock()
         self.admission_generation = 0
         self.admitted: dict[str, int] = {}
+        # Workers whose admitted turn has begun, until their agent says nothing of it spends
+        # (a turn Codex has not yet said started is stopped too: stop_ineligible).
+        self.begun: set[str] = set()
+        # When each agent's check last ran (recheck_agent), and when each worker's own process
+        # last stopped by itself (worker_lost).
+        self.agent_checked_at: dict[str, float] = {}
+        self.lost_at: dict[str, float] = {}
+        # Each agent's processes as last recorded (kv `agentpids:<agent>`).
+        self.agent_pids: dict[str, dict[int, str]] = {}
         # Other agents' usage: the run each turn's usage counts for, and the workers being
         # stopped at their limit.
         self.turn_runs: dict[tuple[str, str], str] = {}
@@ -710,9 +724,17 @@ class Runtime:
         connect); refused with why when the session may not run on it now (agent_block). Not
         while holding the session's locks: recovering that agent's sessions may take them."""
         if (agent := self.agent(session_id)) != COPILOT_AGENT:
-            if (row := self.store.find_session(session_id)) and (why := self.agent_block(row)):
-                raise RuntimeError(why)
-            await self.connect_agent(agent)
+            await self.agent_ready(agent, self.store.find_session(session_id))
+
+    async def agent_ready(self, agent: str, row: dict | None):
+        """Its agent started for this worker, which may run on it: asked before and again once
+        it runs (what its version's check found is known only then)."""
+        if row and (why := self.agent_block(row)):
+            raise RuntimeError(why)
+        await self.connect_agent(agent)
+        await self.recheck_agent(agent)
+        if row and (why := self.agent_block(row)):
+            raise RuntimeError(why)
 
     async def connect_agent(self, agent: str) -> AgentBackend:
         """Another agent's backend, started on first use, as connect starts Copilot's: the
@@ -750,11 +772,19 @@ class Runtime:
             pids = await asyncio.to_thread(backend.processes)
             records = await asyncio.to_thread(copilot_records, pids, directory)
             self.store.set(key, json.dumps(records))
+            self.agent_pids[agent] = pids
             # Its turns begin only once admitted (the next message in its own queue too).
             if hasattr(backend, "admit"):
                 backend.admit = self.admit_turn  # type: ignore[attr-defined]
             if hasattr(backend, "begins"):
                 backend.begins = self.begins_turn  # type: ignore[attr-defined]
+            if hasattr(backend, "ended"):
+                # A worker's own process ended: only that worker is affected.
+                backend.ended = lambda worker, process, why: self.agent_process_ended(  # type: ignore[attr-defined]
+                    agent, worker, process, why
+                )
+            if hasattr(backend, "on_start"):
+                backend.on_start = lambda: self.agent_process_started(agent, backend)  # type: ignore[attr-defined]
             entry.backend = backend
             entry.offline = False
             entry.watch = asyncio.ensure_future(self.watch_agent(agent, backend, entry.connections))
@@ -769,20 +799,44 @@ class Runtime:
     async def check_agent(self, agent: str, backend: Any):
         """What Chief of Staff's checks rely on, checked once per version of another agent (its
         backend's `check`, on this machine without a model call) and remembered; what it found
-        keeps its workers from running (agent_block). A check that could not run is tried again
-        at its next start."""
+        keeps its workers from running (agent_block), also before its next start (kv
+        `agentrefused:<agent>`). A check that could not run is tried again (recheck_agent)."""
         if not hasattr(backend, "check"):
             return
-        key = f"agentcheck:{agent}:{await backend.version()}"
+        version = await backend.version()
+        key = f"agentcheck:{agent}:{version}"
         try:
             found = json.loads(self.store.get(key) or "null")
         except ValueError:
             found = None
         if not isinstance(found, dict):
+            self.agent_checked_at[agent] = time.monotonic()
             found = await backend.check(self.work_root / f"{agent}-check")
             if found.get("ran"):
                 self.store.set(key, json.dumps(found))
         backend.checked = found
+        refused = {
+            "version": version,
+            "acting": getattr(backend, "acting_refused", ""),
+            "ask_first": getattr(backend, "ask_first_refused", ""),
+        }
+        if self.store.get(f"agentrefused:{agent}") != json.dumps(refused):
+            self.store.set(f"agentrefused:{agent}", json.dumps(refused))
+
+    async def recheck_agent(self, agent: str):
+        """A check that could not run (its version's workers wait meanwhile) is tried again
+        with a worker's start, a minute after the last try at most once."""
+        entry = self.agents.get(agent)
+        backend = entry.backend if entry else None
+        checked = getattr(backend, "checked", None)
+        if entry is None or backend is None or not isinstance(checked, dict) or checked.get("ran"):
+            return
+        if time.monotonic() - self.agent_checked_at.get(agent, 0.0) < AGENT_CHECK_AGAIN:
+            return
+        async with entry.lock:
+            if entry.backend is backend and not (backend.checked or {}).get("ran"):  # type: ignore[attr-defined]
+                with suppress(Exception):
+                    await self.check_agent(agent, backend)
 
     async def disconnect_agent(self, agent: str):
         """As disconnect, for another agent's backend: only its own sessions' handles and turns
@@ -808,6 +862,8 @@ class Runtime:
         end and it starts again, recovering them; Copilot's sessions are not touched."""
         entry = self.agents[agent]
         while entry.backend is backend and entry.connections == connection:
+            if backend.alive():
+                await self.record_agent_processes(agent, backend)
             if not backend.alive():
                 logger.warning("%s stopped by itself; starting it again.", agent)
                 # Its sessions at work as it stopped: what ending their turns sets off may change
@@ -823,6 +879,85 @@ class Runtime:
                     self.fail_working(agent, why, working)
                 return
             await asyncio.sleep(PROCESS_CHECK)
+
+    async def record_agent_processes(self, agent: str, backend: Any):
+        """What its workers' processes run now (each its own: its supervisor and their tree),
+        recorded as they change, for a later start or a downgrade to end if Chief of Staff and
+        those supervisors were all killed."""
+        pids = await asyncio.to_thread(backend.processes)
+        entry = self.agents.get(agent)
+        if not entry or entry.backend is not backend or self.agent_pids.get(agent) == pids:
+            return
+        self.agent_pids[agent] = pids
+        records = await asyncio.to_thread(copilot_records, pids, self.store.directory)
+        if entry.backend is backend:
+            self.store.set(f"agentpids:{agent}", json.dumps(records))
+
+    def agent_process_started(self, agent: str, backend: Any):
+        """A worker's own process of another agent started: it runs again (Settings stops
+        saying it stopped), and what it runs is recorded."""
+        if entry := self.agents.get(agent):
+            entry.offline = False
+        self.background(self.record_agent_processes(agent, backend))
+
+    def agent_process_ended(self, agent: str, worker: str, process: str, why: str):
+        """A worker's own process of another agent ended: its usage epoch ends (unknown if a
+        turn was spending); one that stopped by itself, or that Chief of Staff stopped at once
+        (`why`), affects that worker alone (worker_lost)."""
+        with suppress(Exception):
+            self.end_epoch(worker, process)
+        if why and not self.stopping:
+            self.background(self.worker_lost(agent, worker, why))
+
+    async def worker_lost(self, agent: str, worker: str, why: str):
+        """Its process stopped by itself ("crash") or was stopped at once (why): its turns and
+        commands end, and no other worker's. One at work goes on in a new process, as after a
+        restart of its agent, unless its process stopped by itself shortly after the last time
+        (it fails then: never a loop of starts) or Chief of Staff stopped it (it fails, with
+        why); one with a limit and what it spent unknown waits for Go on."""
+        working = [key for key in self.at_work_on(agent) if key == worker]
+        sessions = self.states.take_handles([worker])
+        self.states.end_turns([worker])
+        await asyncio.gather(*(s.disconnect() for s in sessions), return_exceptions=True)
+        self.store.execute(
+            "UPDATE commands SET ended_at=? WHERE ended_at IS NULL AND session_id=?",
+            (now(), worker),
+        )
+        row = self.store.find_session(worker)
+        self.background(self.workers.pump())  # Its slot is free.
+        if not row or row["closed_at"]:
+            return
+        if why != "crash":
+            if working or row["status"] in {"working", "queued", "starting"}:
+                self.fail(row, why)
+            else:
+                self.add_message(worker, "notice", why)
+            return
+        name = agents.display(agent)
+        logger.warning("%s's %s process stopped by itself.", worker, name)
+        again = time.monotonic() - self.lost_at.get(worker, -AGENT_LOST_AGAIN) < AGENT_LOST_AGAIN
+        self.lost_at[worker] = time.monotonic()
+        if agents.limit(self.store, agent) and self.store.agent_unknown(worker):
+            await self.stop_for_spend(row, self.agent_block(row))
+            return
+        if not working:
+            return
+        if again:
+            self.fail(
+                row,
+                f"{name} stopped unexpectedly twice within {int(AGENT_LOST_AGAIN / 60)} minutes; "
+                "send it a message to try again.",
+            )
+            return
+        try:
+            await self.reconcile_sends(agent, only=[worker])
+            await self.resume_working(agent, only=[worker])  # Failed with why if it can't.
+        except Exception as exc:
+            logger.warning("Resuming %s failed.", worker, exc_info=True)
+            self.fail(row, f"{name} stopped and could not start again: {describe(exc)}")
+        after = self.store.find_session(worker)
+        if after and after["status"] == "failed" and (entry := self.agents.get(agent)):
+            entry.offline = True  # Settings says so until one of its processes starts.
 
     async def recover_agents(self):
         """At start: other agents whose sessions were at work, or had messages on their way, are
@@ -902,9 +1037,10 @@ class Runtime:
                 f"{name} can't run while workers are sandboxed: its sandbox has not passed Chief "
                 "of Staff's checks yet. Turn the sandbox off in Settings → Workers to go on."
             )
-        if why := getattr(entry.backend, "acting_refused", ""):
+        refused = self.agent_refused(agent)
+        if why := refused.get("acting"):
             return why
-        if not self.yolo(row) and (why := getattr(entry.backend, "ask_first_refused", "")):
+        if not self.yolo(row) and (why := refused.get("ask_first")):
             return why
         if limit := agents.limit(self.store, agent):
             if self.store.agent_unknown(row["id"]):
@@ -916,6 +1052,22 @@ class Runtime:
             if (spent := self.store.agent_spent(row["id"])) >= limit:
                 return f"This worker used its {name} token limit ({spent:,} of {limit:,})."
         return ""
+
+    def agent_refused(self, agent: str) -> dict:
+        """What the check of an agent's version found it may not do (acting on its own, Ask
+        first): from its backend while it runs, else as it was last found (a worker may be
+        refused before any process of it starts; a new version is checked as it starts)."""
+        entry = self.agents.get(agent)
+        if entry and entry.backend and getattr(entry.backend, "checked", None) is not None:
+            return {
+                "acting": getattr(entry.backend, "acting_refused", ""),
+                "ask_first": getattr(entry.backend, "ask_first_refused", ""),
+            }
+        try:
+            found = json.loads(self.store.get(f"agentrefused:{agent}") or "{}")
+        except ValueError:
+            return {}
+        return found if isinstance(found, dict) else {}
 
     async def new_worker_agent(self, named: str, slack: bool) -> tuple[str, str]:
         """The agent a new worker of the owner's runs on, and what its timeline says of it: the
@@ -933,6 +1085,7 @@ class Runtime:
         if not (why := self.blocked_on(chosen, row)):
             try:
                 await self.connect_agent(chosen)
+                await self.recheck_agent(chosen)
             except Exception as exc:
                 why = f"{agents.display(chosen)} could not start: {describe(exc)}"
             else:
@@ -967,7 +1120,10 @@ class Runtime:
             if why := self.agent_block(row):
                 return why
             self.admitted[row["id"]] = self.admission_generation
-            self.spending(row["id"], True)
+            # Its process (the epoch its usage counts in), stamped now: if it ends before its
+            # first usage update, what the turn spent is known to be unknown.
+            process = getattr(getattr(session, "backend", None), "epoch", "") or ""
+            self.spending(row["id"], True, process)
             return ""
 
     async def usage_settled(self, row: dict, session: Any):
@@ -991,7 +1147,10 @@ class Runtime:
         """Just before the turn admitted begins (nothing awaited in between): whether its
         admission still holds."""
         key = self.row_id(session.session_id)
-        return self.admitted.pop(key, None) == self.admission_generation
+        if self.admitted.pop(key, None) != self.admission_generation:
+            return False
+        self.begun.add(key)
+        return True
 
     async def stop_ineligible(self) -> list[str]:
         """Something changed (a Settings save): the generation moves first, so no turn admitted
@@ -1007,11 +1166,25 @@ class Runtime:
                 continue
             if not (why := self.agent_block(row)):
                 continue
-            if row["status"] in {"working", "queued", "starting"} or self.held(row["id"]):
+            if (
+                row["status"] in {"working", "queued", "starting"}
+                or self.held(row["id"])
+                # A turn that began as this came, its status not said yet (its first event
+                # stops it as one at work: Events.turn_start).
+                or self.states[row["id"]].busy
+                or row["id"] in self.begun
+            ):
                 with suppress(Exception):
                     await self.workers.interrupt(row["id"], by="Settings")
                 stopped[row["id"]] = why
         return list(stopped.values())
+
+    async def stop_blocked(self, session_id: str, why: str):
+        """A turn of a worker that may not run now began anyway (its admission held as a change
+        came): stopped at its first event, as stop_ineligible stops one at work."""
+        self.add_message(session_id, "notice", why)
+        with suppress(Exception):
+            await self.workers.interrupt(session_id, by="Settings")
 
     async def agents_saved(self, before: dict[str, dict]) -> list[str]:
         """The owner saved the Coding agents group (Settings → Models): an agent turned on
@@ -1058,14 +1231,50 @@ class Runtime:
             return {}
         return epoch if isinstance(epoch, dict) else {}
 
-    def spending(self, session_id: str, busy: bool):
+    def spending(self, session_id: str, busy: bool, process: str = ""):
         """Whether a turn of it may be spending now (admitted, until its agent says nothing of
-        it runs): its process ending then leaves what it spent unknown."""
+        it runs), in which process: its process ending then leaves what it spent unknown."""
+        epoch, entries = self.epoch_of(session_id), []
+        if process and (epoch.get("process") != process or epoch.get("ended")):
+            epoch, entries = self.next_epoch(session_id, epoch, process)
+        if bool(epoch.get("busy")) != busy or entries or process:
+            self.store.record_agent_usage(
+                entries, f"agentepoch:{session_id}", epoch | {"busy": busy}
+            )
+
+    def next_epoch(self, session_id: str, epoch: dict, process: str) -> tuple[dict, list]:
+        """Its epoch in a new process: the totals each thread had in the one before are where
+        its counts go on from; that one ended (if nothing said so, it ended as it was: with
+        what it spent unknown if a turn was spending)."""
+        # Not stamped with a process: nothing of it ran in one yet (its turn was admitted).
+        lost = epoch.get("process") and not epoch.get("ended") and epoch.get("busy")
+        ended = epoch.get("ended") or ("crash" if lost else "clean")
+        entries = [self.unknown(session_id)] if lost else []
+        before = (epoch.get("before") or {}) | (epoch.get("threads") or {})
+        fresh = {
+            "process": process,
+            "threads": {},
+            "before": before,
+            "crashed": ended == "crash",
+            "busy": False,
+        }
+        return fresh, entries
+
+    def end_epoch(self, session_id: str, process: str) -> bool:
+        """A process of its agent ended: its epoch there ends, cleanly when nothing of it was
+        spending, else with what it spent then unknown. Whether it was spending."""
         epoch = self.epoch_of(session_id)
-        if bool(epoch.get("busy")) != busy:
-            self.store.record_agent_usage([], f"agentepoch:{session_id}", epoch | {"busy": busy})
+        if not epoch or epoch.get("ended") or epoch.get("process", "") != process:
+            return False
+        crashed = bool(epoch.get("busy"))
+        epoch = epoch | {"ended": "crash" if crashed else "clean", "busy": False}
+        self.store.record_agent_usage(
+            [self.unknown(session_id)] if crashed else [], f"agentepoch:{session_id}", epoch
+        )
+        return crashed
 
     def agent_settled(self, row: dict):
+        self.begun.discard(row["id"])
         self.spending(row["id"], False)
 
     def unknown(self, session_id: str) -> dict:
@@ -1079,29 +1288,21 @@ class Runtime:
         }
 
     async def end_epochs(self, agent: str, backend: Any):
-        """Its process started afresh: each of its sessions' epochs on the one before ended,
-        cleanly when nothing of it was spending, else with what it spent then unknown; a
-        worker with a limit is then stopped until the owner accepts that."""
-        process = getattr(backend, "epoch", "")
-        for key, value in self.store.items("agentepoch:").items():
-            session_id = key.removeprefix("agentepoch:")
-            try:
-                epoch = json.loads(value)
-            except ValueError:
+        """It started afresh: each of its sessions' epochs in a process that no longer runs
+        ended (as end_epoch; also one stamped before its process said anything); a worker with
+        a limit whose spend is then unknown is stopped until the owner accepts that."""
+        if hasattr(backend, "epochs"):
+            live: set[str] = set(backend.epochs())
+        else:
+            live = {getattr(backend, "epoch", "")}
+        for session_id in self.on_agent(agent, self.store.items("agentepoch:")):
+            epoch = self.epoch_of(session_id)
+            if epoch.get("process") in live:
                 continue
-            if (
-                not isinstance(epoch, dict)
-                or epoch.get("process") in {process, None}
-                or epoch.get("ended")
-                or self.agent(session_id) != agent
-            ):
-                continue
-            crashed = bool(epoch.get("busy"))
-            epoch = epoch | {"ended": "crash" if crashed else "clean", "busy": False}
-            row = self.store.find_session(session_id)
-            self.store.record_agent_usage([self.unknown(session_id)] if crashed else [], key, epoch)
-            if crashed and row and agents.limit(self.store, agent) and not row["closed_at"]:
-                await self.stop_for_spend(row, self.agent_block(row))
+            if self.end_epoch(session_id, epoch.get("process", "")):
+                row = self.store.find_session(session_id)
+                if row and agents.limit(self.store, agent) and not row["closed_at"]:
+                    await self.stop_for_spend(row, self.agent_block(row))
 
     async def stop_for_spend(self, row: dict, why: str):
         """A worker past what its limit lets it spend stops, as after any stop (Go on, or
@@ -1127,15 +1328,11 @@ class Runtime:
         thread = getattr(data, "thread_id", "") or row["id"]
         total = counters(getattr(data, "total", None))
         restored = getattr(data, "restored", None)
+        entries: list[dict] = []
         if epoch.get("process") != process:
-            ended = epoch.get("ended") or ("crash" if epoch.get("busy") else "clean")
-            epoch = {
-                "process": process,
-                "threads": {},
-                "before": epoch.get("threads") or {},
-                "crashed": ended == "crash",
-                "busy": epoch.get("busy", False),
-            }
+            busy = bool(epoch.get("busy"))
+            epoch, entries = self.next_epoch(row["id"], epoch, process)
+            epoch["busy"] = busy
         last = epoch["threads"].get(thread)
         before = epoch.get("before", {}).get(thread)
         spent, least, kind, unknown = total, None, "exact", False
@@ -1152,7 +1349,8 @@ class Runtime:
             else:
                 spent = difference(total, before)
         epoch["threads"][thread] = total
-        entries = [self.unknown(row["id"])] if unknown else []
+        if unknown:
+            entries.append(self.unknown(row["id"]))
         if spent["tokens"] or kind != "exact":
             entries.append(
                 {
@@ -1401,8 +1599,8 @@ class Runtime:
         if mode == "off" and not self.on_copilot(session_id):
             # Ask first, only where its agent's version was shown to ask before every action
             # (started to find out).
-            backend = await self.connect_agent(self.agent(session_id))
-            if why := getattr(backend, "ask_first_refused", ""):
+            await self.connect_agent(self.agent(session_id))
+            if why := self.agent_refused(self.agent(session_id)).get("ask_first"):
                 raise ValueError(why)
         row = self.update_session(session_id, yolo=mode)
         await self.refresh_session(row)  # Its instructions mention the mode.
@@ -1807,12 +2005,33 @@ class Runtime:
             "on_elicitation_request": self.asks.on_elicitation,
             "ask_first": not self.yolo(row),
             "folders": folders,
+            # The worker (its own process of the agent), and the child agents it had: the only
+            # other threads its turns may reach.
+            "worker": row["id"],
+            "children": self.agent_children(row["id"]),
         }
         if model := chosen.get("model"):
             options["model"] = model
         if effort := chosen.get("effort"):
             options["reasoning_effort"] = effort
         return options
+
+    def agent_children(self, session_id: str) -> list[str]:
+        try:
+            children = json.loads(self.store.get(f"agentchildren:{session_id}") or "[]")
+        except ValueError:
+            return []
+        return [str(child) for child in children] if isinstance(children, list) else []
+
+    def agent_notice(self, row: dict, text: str):
+        self.add_message(row["id"], "notice", text)
+
+    def agent_child(self, row: dict, thread: str):
+        """A child agent a worker on another agent spawned: its turns may reach it, also from
+        another process of that agent later (a resumed worker)."""
+        children = self.agent_children(row["id"])
+        if thread and thread not in children:
+            self.store.set(f"agentchildren:{row['id']}", json.dumps([*children, thread]))
 
     def agent_choice(self, session_id: str) -> dict:
         """The model and effort a worker on another agent was given for itself (the Router's
@@ -2437,9 +2656,7 @@ class Runtime:
         if session := self.states.handle(session_id):
             return session
         if (agent := self.agent(session_id)) != COPILOT_AGENT:
-            if (row := self.store.find_session(session_id)) and (why := self.agent_block(row)):
-                raise RuntimeError(why)
-            await self.connect_agent(agent)  # Started on first use.
+            await self.agent_ready(agent, self.store.find_session(session_id))  # On first use.
         elif not self.backend:
             self.require_ready()
         async with self.states[session_id].lifecycle:
@@ -2776,12 +2993,12 @@ class Runtime:
             await self.ensure_slack_session()
         self.publish_state()
 
-    async def reconcile_sends(self, agent: str = COPILOT_AGENT):
-        """Sends to the agent's sessions that a stop interrupted: check whether they arrived
-        before anything is resent."""
+    async def reconcile_sends(self, agent: str = COPILOT_AGENT, only: list[str] | None = None):
+        """Sends to the agent's sessions (`only` these) that a stop interrupted: check whether
+        they arrived before anything is resent."""
         for key in self.store.keys("sending:"):
             session_id = key.removeprefix("sending:")
-            if self.agent(session_id) != agent:
+            if self.agent(session_id) != agent or (only is not None and session_id not in only):
                 continue
             row = self.store.find_session(session_id)
             if not row or row["closed_at"]:
@@ -2791,14 +3008,17 @@ class Runtime:
             outcome = {True: "it arrived", False: "resending", None: "unknown, resending"}
             logger.info("Interrupted send to %s: %s.", session_id, outcome[arrived])
 
-    async def resume_working(self, agent: str = COPILOT_AGENT):
+    async def resume_working(self, agent: str = COPILOT_AGENT, only: list[str] | None = None):
         """After a restart, the agent's sessions that were mid-turn continue, with what they had
-        not handled. What restarted: this app, or (connected before) only the agent."""
+        not handled. What restarted: this app, or (connected before) only the agent; `only`
+        these sessions: their own process of the agent."""
         backend, connections = self.connection(agent)
         named = backend.capabilities.name if backend and agent != COPILOT_AGENT else "Copilot"
-        what = f"{named} was restarted" if connections else "Chief of Staff restarted"
+        what = f"{named} was restarted" if connections or only else "Chief of Staff restarted"
         rows = self.store.open_sessions()
         mine = set(self.on_agent(agent, [row["id"] for row in rows]))
+        if only is not None:
+            mine &= set(only)
         for row in rows:
             if row["id"] not in mine:
                 continue
@@ -4310,8 +4530,11 @@ class Runtime:
             # next turn.
             self.send.switch(new.send_to_chief)
             await self.refresh(ROUTER)
-        if self.agents and old.worker_sandbox != new.worker_sandbox:
-            # Other agents' workers do not run sandboxed: stopped at once, with their commands.
+        if self.agents and (
+            old.worker_sandbox != new.worker_sandbox or old.worker_yolo != new.worker_yolo
+        ):
+            # Other agents' workers do not run sandboxed, and act on their own or ask first only
+            # where their version's check allows it: stopped at once, with their commands.
             stopped = await self.stop_ineligible()
         defaults = ("model", "role_models", "role_efforts")
         if any(getattr(old, key) != getattr(new, key) for key in defaults):

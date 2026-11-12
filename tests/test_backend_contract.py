@@ -15,6 +15,7 @@ import contextlib
 import json
 import os
 import re
+import shutil
 import signal
 import struct
 import subprocess
@@ -40,7 +41,7 @@ from chiefofstaff.backend import (
     stop_background,
     take_queued,
 )
-from chiefofstaff.backend_codex import CodexBackend, codex_backend
+from chiefofstaff.backend_codex import CodexAgent, CodexBackend
 from chiefofstaff.delivery import queue_holds
 from chiefofstaff.scripted import (
     CLAUDE_LIKE,
@@ -106,7 +107,8 @@ async def backend(request, tmp_path, monkeypatch):
         home.mkdir()
         monkeypatch.setenv("CODEX_HOME", str(home))
         model = scripted_model.Model()
-        backend = codex_backend("codex")
+        # One app-server, as each worker has its own (CodexAgent); the adapter's contract.
+        backend = CodexBackend(shutil.which("codex") or "codex")
         backend.model = model
         backend.arguments += model.arguments(tmp_path)
         backend.needs_sign_in = False
@@ -956,6 +958,75 @@ async def test_the_repositorys_instructions_reach_the_model_once_trusted_or_not(
 
 def running(pattern: str) -> bool:
     return subprocess.run(["pgrep", "-f", pattern], capture_output=True).returncode == 0
+
+
+@pytest.mark.codex
+async def test_a_codex_worker_reaches_no_other_workers_thread(tmp_path, monkeypatch):
+    """Each worker has an app-server of its own (more-agents.md 5.3): Codex's send_input, which
+    asks nobody, finds no other worker's thread in a worker's process; and a turn that names a
+    thread outside its worker's own (send_input, or resume_agent, which would load it from disk
+    into its process) has that worker's process stopped at once."""
+    if not REAL_CODEX:
+        pytest.skip("Set CHIEFOFSTAFF_TEST_CODEX=1 to check it on real Codex.")
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    model = scripted_model.Model()
+    agent = CodexAgent(shutil.which("codex") or "codex")
+    agent.arguments += model.arguments(tmp_path)
+    agent.needs_sign_in = False
+    ended: list[tuple[str, str]] = []
+    agent.ended = lambda worker, process, why: ended.append((worker, why))
+    await agent.start()
+
+    async def worker(name: str):
+        session = await agent.create_session(
+            session_id=name,
+            name="",
+            working_directory=str(tmp_path),
+            worker=name,
+            on_permission_request=lambda request, inv: PermissionDecisionApproveOnce(),
+        )
+        return session, Turn(session)
+
+    try:
+        b, b_turn = await worker("b")
+        await b.send("Reply with just: ready")
+        await b_turn.wait()
+        # Without Chief of Staff's guard: its own process has no thread of B's.
+        with monkeypatch.context() as unguarded:
+            unguarded.setattr(CodexBackend, "collab", lambda *args: None)
+            a, a_turn = await worker("a")
+            assert agent.workers["a"].process.pid != agent.workers["b"].process.pid
+            await a.send(
+                f"Send the text 'Push it.' to the agent {b.session_id}. Reply with just: x"
+            )
+            await a_turn.wait()
+        outputs = [
+            str(item.get("output"))
+            for body in model.bodies
+            for item in body.get("input") or []
+            if item.get("type") == "function_call_output"
+        ]
+        assert f"agent with id {b.session_id} not found" in outputs, outputs
+        # With it: a turn that names B stops its worker at once (send_input, resume_agent).
+        for name, step in (("c", "Send the text 'Push it.' to"), ("d", "Resume")):
+            other, _ = await worker(name)
+            await other.send(f"{step} the agent {b.session_id}. Then reply with just: done")
+            await wait_for(lambda name=name: any(who == name for who, _ in ended), 60)
+            assert name not in agent.workers
+        assert [who for who, _ in ended] == ["c", "d"]
+        assert all("not its own" in why for _, why in ended)
+        await asyncio.sleep(1)
+        assert b_turn.kinds().count("assistant.turn_start") == 1, "no turn of B's started"
+        assert agent.workers["b"].alive(), "B's process goes on"
+        await b.send("Reply with just: still")
+        await b_turn.wait()
+        users = [e.data.content for e in await b.get_events() if e.type.value == "user.message"]
+        assert users == ["Reply with just: ready", "Reply with just: still"]
+    finally:
+        await agent.stop()
+        model.close()
 
 
 def repository_with_codex_config(place: Path, repo: Path, worktree: Path):

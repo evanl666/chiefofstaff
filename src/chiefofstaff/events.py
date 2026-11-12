@@ -185,6 +185,8 @@ class Events:
             # Another agent's usage, in its own ledger (never Copilot's), and its turns' end.
             "agent.usage": lambda row, event: self.runtime.record_agent_usage(row, event.data),
             "agent.settled": lambda row, event: self.runtime.agent_settled(row),
+            "agent.notice": lambda row, event: self.runtime.agent_notice(row, event.data.text),
+            "agent.child": lambda row, event: self.runtime.agent_child(row, event.data.thread_id),
             "session.mcp_server_status_changed": self.mcp_status,
             "session.mcp_server_tools_loaded": self.mcp_status,
             "session.idle": self.idle,
@@ -462,6 +464,9 @@ class Events:
             self.states[row["id"]].busy = True
         if row["status"] == "idle":
             self.runtime.update_session(row["id"], status="working")
+        if self.runtime.agents and (why := self.runtime.agent_block(row)):
+            # Another agent's worker that may not run now (a change came as its turn began).
+            self.runtime.background(self.runtime.stop_blocked(row["id"], why))
 
     def tool_start(self, row: dict, event: Any):
         data = event.data

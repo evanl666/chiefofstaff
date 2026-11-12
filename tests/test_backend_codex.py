@@ -22,7 +22,9 @@ from chiefofstaff import runtime as runtime_module
 from chiefofstaff.backend import process_table, running
 from chiefofstaff.backend_codex import (
     REFUSED_NOTE,
+    CodexAgent,
     CodexBackend,
+    CodexError,
     github_server,
     inner_command,
     text_of,
@@ -342,6 +344,81 @@ async def test_a_turn_codex_starts_by_itself_shows_as_it_goes(codex, tmp_path):
     ]
 
 
+async def test_input_chief_of_staff_did_not_send_is_never_the_owners(codex, tmp_path):
+    """A turn Codex starts on its own work brings input of its own (a child's mail): never
+    shown as the owner's message (nor taken up as a task), live or in its history."""
+    session, turn = await opened(codex, tmp_path)
+    await session.send("Start a turn by yourself after this one. Reply with just: first")
+    await until(lambda: turn.kinds().count("session.idle") == 2)
+    users = [d.content for d in turn.data("user.message")]
+    assert users == ["Start a turn by yourself after this one. Reply with just: first"]
+    history = [e.data.content for e in await session.get_events() if e.type.value == "user.message"]
+    assert history == users, "its history: only what Chief of Staff sent"
+
+
+async def test_a_turn_it_did_not_start_is_stopped_and_nothing_of_it_is_granted(
+    codex, tmp_path, monkeypatch
+):
+    """Another thread's input (Codex's send_input, from a thread that could name this one)
+    starts a turn on it: stopped at once, its requests declined before anyone is asked, nothing
+    of it shown; the worker goes on as before."""
+    asked = []
+
+    def check(request, invocation):
+        asked.append(request.kind)
+        return approve(request, invocation)
+
+    session, turn = await opened(codex, tmp_path, on_permission_request=check)
+    await session.send("A stranger starts a turn after this one. Reply with just: first")
+    await until(lambda: "agent.notice" in turn.kinds())
+    assert "Chief of Staff did not start this turn" in turn.data("agent.notice")[0].text
+    await session.send("Reply with just: after")
+    await until(lambda: "after" in [d.content for d in turn.data("assistant.message")])
+    assert asked == [], "its command was never put to the owner"
+    said = [d.content for d in turn.data("assistant.message")]
+    assert said == ["first", "after"], "nothing of the stranger's turn is shown"
+    users = [d.content for d in turn.data("user.message")]
+    assert not any("Push it" in text for text in users)
+    assert turn.kinds().count("assistant.turn_start") == 2
+
+
+async def test_a_turn_codex_starts_on_its_own_work_is_admitted_as_any(codex, tmp_path):
+    """One Codex starts by itself on the worker's own work goes through Chief of Staff's
+    admission: refused (the worker may not run now), it is stopped at its start."""
+    session, turn = await opened(codex, tmp_path)
+    admitted = []
+
+    async def admit(session):
+        admitted.append(session.session_id)
+        return "" if len(admitted) == 1 else "Codex is turned off in Settings → Models."
+
+    codex.admit = admit
+    await session.send("Start a turn by yourself after this one. Reply with just: first")
+    await until(lambda: "agent.notice" in turn.kinds())
+    assert len(admitted) == 2, "its own turn was asked about too"
+    assert "turned off" in turn.data("agent.notice")[0].text
+    assert "On my own." not in [d.content for d in turn.data("assistant.message")]
+
+
+async def test_a_turn_that_names_a_thread_outside_its_own_stops_its_worker(codex, tmp_path):
+    """Codex lets a turn resume any thread it can name, from disk, into its own process (and
+    send it input there): naming one that is not its own or its children's stops its process
+    at once, with why. Its own children (spawned, waited for) it may reach."""
+    session, turn = await opened(codex, tmp_path, tools=[echo_tool([])])
+    await session.send("Have a child agent call the echo tool with text 'hi'. Reply with just: ok")
+    await turn.wait()
+    assert len(session.tree) == 2 and turn.data("agent.child"), "its child joined its tree"
+    child = turn.data("agent.child")[0].thread_id
+    await session.send(f"Wait for the agent {child}. Reply with just: waited")
+    await turn.wait()
+    assert codex.alive()
+    other = "0190aaaa-0000-7000-8000-000000000000"
+    await session.send(f"Resume the agent {other}. Reply with just: resumed")
+    await until(lambda: not codex.alive())
+    assert "not its own" in codex.refusal
+    assert "resumed" not in [d.content for d in turn.data("assistant.message")]
+
+
 async def test_what_cannot_be_understood_or_answered_is_said_and_skipped(
     codex, tmp_path, monkeypatch
 ):
@@ -408,10 +485,16 @@ async def test_with_ask_first_every_server_it_can_name_asks(tmp_path, monkeypatc
         config = await codex.thread_config({"ask_first": True}, str(tmp_path))
     finally:
         await codex.stop()
+    prompt = {"default_tools_approval_mode": "prompt"}
     assert {key: value for key, value in config.items() if key != "projects"} == {
         "features.apps": False,
-        "mcp_servers.notes.default_tools_approval_mode": "prompt",
-        "mcp_servers.notes.tools.write.approval_mode": "prompt",
+        # Nested: a name with a dot in it is one name (a dotted key would split it).
+        "mcp_servers": {
+            "notes": prompt
+            | {"tools": {"write": {"approval_mode": "prompt"}, "a.b": {"approval_mode": "prompt"}}},
+            "dotted.name": prompt,
+            "odd": prompt,
+        },
     }
 
 
@@ -1089,7 +1172,7 @@ async def brief(tmp_path, monkeypatch, settings: Settings | None = None, **env):
     agents.configure(harness.store, "codex", enabled=True)
     runtime = await harness.connect()
     runtime.agents["codex"] = AgentConnection(
-        lambda: CodexBackend(command), enabled=lambda: agents.enabled(harness.store, "codex")
+        lambda: CodexAgent(command), enabled=lambda: agents.enabled(harness.store, "codex")
     )
     create = harness.store.create_session
 
@@ -1139,8 +1222,10 @@ async def test_a_codex_worker_works_reports_and_has_receipts(tmp_path, monkeypat
         assert commands(harness, worker) == [("echo tested; exit 0", 0, True)]
         task = runtime.tasks.for_session(worker)[-1]
         assert task["result"] == "Fixed it." and task["status"] not in {"running", "queued"}
+        # Its own process's, recorded once it started.
+        await until(lambda: json.loads(harness.store.get("agentpids:codex") or "{}"))
         records = json.loads(harness.store.get("agentpids:codex"))
-        assert records and all(record["data_dir"] for record in records.values())
+        assert all(record["data_dir"] for record in records.values())
         options = runtime.agent_options(harness.store.session(worker))
         copilot = runtime.options(harness.store.session(worker))
         assert options["system_message"]["content"] == copilot["system_message"]["content"]
@@ -1313,6 +1398,75 @@ def logged(log) -> list[dict]:
     return [json.loads(line) for line in log.read_text().splitlines()]
 
 
+async def test_a_newer_codex_is_checked_too_and_runs_no_worker_until_it_is(tmp_path, monkeypatch):
+    """A version newer than those tested refuses Ask first, yet its check (whose thread asks
+    first) runs: what it finds keeps workers that act on their own from running, and a check
+    that could not run keeps every worker from running on it until one has."""
+    harness, runtime = await brief(
+        tmp_path, monkeypatch, FAKE_CODEX_VERSION="0.168.1", FAKE_CODEX_UNASKED="patch"
+    )
+    try:
+        await runtime.connect_agent("codex")
+        found = json.loads(harness.store.get("agentcheck:codex:0.168.1") or "{}")
+        assert found["ran"] is True and "keeps your checkouts unchanged" in found["acting"]
+        row = harness.store.create_session("w1", WORKER, "Fix", "/tmp")
+        assert "keeps your checkouts unchanged" in runtime.agent_block({**row, "yolo": "on"})
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.parametrize("version", ["0.168.1", "0.167.2"])
+async def test_a_check_whose_turn_failed_did_not_run(tmp_path, monkeypatch, version):
+    """A check whose stand-in turn failed before its last step found nothing to remember: it
+    did not run (tried again later); on a newer version than tested, no worker runs meanwhile."""
+    harness, runtime = await brief(
+        tmp_path, monkeypatch, FAKE_CODEX_VERSION=version, FAKE_CODEX_FAILS_ON="Move the file"
+    )
+    try:
+        await runtime.connect_agent("codex")
+        assert harness.store.get(f"agentcheck:codex:{version}") is None, "tried again later"
+        row = harness.store.create_session("w1", WORKER, "Fix", "/tmp")
+        acting = runtime.agent_block({**row, "yolo": "on"})
+        assert ("until it does" in acting) is (version == "0.168.1")
+        assert "could not run (The model is overloaded.)" in runtime.agent_block(
+            {**row, "yolo": "off"}
+        )
+    finally:
+        await runtime.stop()
+
+
+async def test_what_a_check_found_holds_before_codex_starts_again(tmp_path, monkeypatch):
+    """Its verdict is known before any process of it starts (Chief of Staff restarted): a
+    worker it keeps from running is refused without starting Codex, and a version whose verdict
+    is not known yet is checked before the worker's own process starts."""
+    harness, runtime = await brief(tmp_path, monkeypatch, FAKE_CODEX_UNASKED="patch")
+    try:
+        await runtime.connect_agent("codex")
+        await runtime.disconnect_agent("codex")
+        runtime.agents["codex"].backend = None
+        row = harness.store.create_session("w1", WORKER, "Fix", "/tmp")
+        assert "keeps your checkouts unchanged" in runtime.agent_block({**row, "yolo": "on"})
+        harness.store.delete("agentrefused:codex")
+        assert runtime.agent_block({**row, "yolo": "on"}) == "", "not known: not refused yet"
+        with pytest.raises(RuntimeError, match="keeps your checkouts unchanged"):
+            await runtime.start_agent_of("w1")  # Known once it started: refused then.
+        assert not runtime.agents["codex"].backend.workers, "no worker's process started"
+    finally:
+        await runtime.stop()
+
+
+async def test_a_thread_refuses_a_worker_its_check_keeps_from_acting(tmp_path, monkeypatch):
+    codex = CodexBackend(fake_codex(tmp_path / "fake", monkeypatch))
+    await codex.start()
+    try:
+        codex.checked = {"ran": True, "ask_first": "", "acting": "It acts unasked."}
+        with pytest.raises(RuntimeError, match="It acts unasked"):
+            await opened(codex, tmp_path)
+        assert not codex.sessions
+    finally:
+        await codex.stop()
+
+
 async def test_each_codex_version_is_checked_once_before_its_workers_run(tmp_path, monkeypatch):
     """The owner's decision: the first time a Codex version starts, Chief of Staff checks what
     its checks rely on, offline (a stand-in model; Codex's own approvals), and remembers it."""
@@ -1339,9 +1493,10 @@ async def test_each_codex_version_is_checked_once_before_its_workers_run(tmp_pat
     assert len(starts) == 2, "the check's thread, then the worker's"
     config = check["config"]
     assert check["approvalPolicy"] == "untrusted" and config["features.apps"] is False
-    assert config["mcp_servers.notes.enabled"] is False, "the owner's servers do not start"
-    assert config["mcp_servers.chiefofstaff_check.default_tools_approval_mode"] == "prompt"
-    assert "mcp_servers.notes.enabled" not in starts[1]["config"]
+    servers = config["mcp_servers"]
+    assert servers["notes"]["enabled"] is False, "the owner's servers do not start"
+    assert servers["chiefofstaff_check"]["default_tools_approval_mode"] == "prompt"
+    assert "enabled" not in starts[1]["config"].get("mcp_servers", {}).get("notes", {})
     assert not (tmp_path / "data" / "work" / "codex-check").exists(), "nothing of it is left"
 
 
@@ -1674,13 +1829,16 @@ async def test_a_crash_mid_turn_leaves_its_spend_unknown_until_the_owner_goes_on
         )
         await until(lambda: harness.store.all("SELECT 1 FROM agent_usage"), 30)
         backend, _ = runtime.connection("codex")
-        os.kill(backend.process.pid, signal.SIGKILL)  # Codex crashes mid-turn.
-        await until(lambda: runtime.connection("codex")[0] not in {None, backend}, 30)
-        # Recorded as Codex started again (it may already be spending again since).
+        process = backend.workers[worker]
+        os.kill(process.process.pid, signal.SIGKILL)  # Its Codex crashes mid-turn.
+        await until(lambda: "unknown" in [kind for kind, *_ in ledger(harness, worker)], 30)
+        assert runtime.connection("codex")[0] is backend, "only its own process ended"
+        # Recorded as its process ended (it may already be spending again since).
         kinds = [kind for kind, *_ in ledger(harness, worker)]
         assert kinds.count("unknown") == 1 and kinds.index("unknown") >= 1
         task = runtime.tasks.for_session(worker)[-1]
         if not limited:
+            await until(lambda: backend.workers.get(worker) not in {None, process}, 30)
             await until(lambda: harness.store.session(worker)["status"] == "working", 30)
             assert runtime.agent_block(harness.store.session(worker)) == ""
             return
@@ -1692,6 +1850,57 @@ async def test_a_crash_mid_turn_leaves_its_spend_unknown_until_the_owner_goes_on
         await runtime.task_actions.follow_up(task["id"], "Go on where you stopped.")
         assert runtime.agent_block(harness.store.session(worker)) == ""
         await until(lambda: harness.store.session(worker)["status"] == "working", 30)
+    finally:
+        await runtime.stop()
+
+
+async def test_a_process_that_ends_before_its_turn_said_any_usage_leaves_it_unknown(
+    tmp_path, monkeypatch
+):
+    """Admitted, its turn counts in its process's epoch from then: that process stopping
+    before Codex said what the turn spent leaves that spend unknown."""
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    try:
+        worker = await spawn(runtime, harness, "Wait 30 s. Then reply with just: on")
+        backend, _ = runtime.connection("codex")
+        await until(lambda: worker in backend.workers and runtime.states.handle(worker).turn, 30)
+        process = backend.workers[worker]
+        epoch = json.loads(harness.store.get(f"agentepoch:{worker}"))
+        assert epoch["busy"] is True and epoch["process"] == process.epoch
+        assert ledger(harness, worker) == [], "nothing said yet"
+        os.kill(process.process.pid, signal.SIGKILL)
+        await until(lambda: ledger(harness, worker), 30)
+        assert ledger(harness, worker)[0][0] == "unknown"
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.parametrize("fails", ["begins", "start"])
+async def test_a_turn_admitted_that_never_began_spends_nothing(tmp_path, monkeypatch, fails):
+    """Admitted, its turn did not begin (a change came first, or Codex refused it): nothing of
+    it spends, so its process ending later leaves nothing unknown."""
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    try:
+        worker = await spawn(runtime, harness, "Reply with just: first")
+        await until(lambda: harness.store.session(worker)["status"] != "working", 30)
+        backend, _ = runtime.connection("codex")
+        process = backend.workers[worker]
+        if fails == "begins":
+            monkeypatch.setattr(backend, "begins", lambda session: False)
+        else:
+            sending = process.send_request
+
+            def refused(method, params):
+                if method == "turn/start":
+                    raise CodexError("thread not loaded")
+                return sending(method, params)
+
+            monkeypatch.setattr(process, "send_request", refused)
+        with pytest.raises(RuntimeError):
+            await runtime.owner_send(worker, "Reply with just: second")
+        await until(lambda: json.loads(harness.store.get(f"agentepoch:{worker}"))["busy"] is False)
+        await process.stop()
+        assert "unknown" not in [kind for kind, *_ in ledger(harness, worker)]
     finally:
         await runtime.stop()
 

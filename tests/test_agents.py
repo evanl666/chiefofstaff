@@ -7,6 +7,7 @@ import asyncio
 import json
 import os
 import re
+import signal
 import sqlite3
 import sys
 import time
@@ -801,19 +802,28 @@ def test_a_save_that_stops_workers_says_how_many_and_why():
 async def test_codex_that_stopped_by_itself_and_could_not_start_again_says_so(
     tmp_path, codex_on_path, monkeypatch
 ):
-    _, runtime = await started(tmp_path)
+    """A worker's own Codex process stopped by itself in the middle of its turn and could not
+    start again (signed out meanwhile): that worker fails, with why, and the group says so
+    until a worker's process starts again."""
+    harness, runtime = await started(tmp_path)
     try:
-        await saved(runtime, {"codex": {"enabled": True}})
-        backend = await runtime.connect_agent("codex")
+        await saved(runtime, {"codex": {"enabled": True}, "new_workers": "codex"})
+        result = await spawn_on(harness, runtime, title="Fix it", instructions="Wait 30 s.")
+        worker = result["session_id"]
+        backend = runtime.agents["codex"].backend
+        await until(lambda: harness.store.session(worker)["status"] == "working", 20)
         monkeypatch.setenv("FAKE_CODEX_SIGNED_OUT", "1")
-        backend.process.kill()
+        os.kill(backend.workers[worker].process.pid, signal.SIGKILL)
         await until(lambda: runtime.agents["codex"].offline, 20)
+        assert harness.store.session(worker)["status"] == "failed"
+        assert "Codex is not signed in" in str(harness.kinds(worker))
+        assert runtime.agents["codex"].backend is backend, "the agent itself goes on"
         monkeypatch.delenv("FAKE_CODEX_SIGNED_OUT")
         (codex,) = (await runtime.look_for_agents())["agents"]
         assert codex["problem"] == (
             "Stopped unexpectedly; starts again with its next worker's message."
         )
-        await runtime.connect_agent("codex")
+        await runtime.owner_send(worker, "Reply with just: back")
         assert not runtime.agents["codex"].offline
         (codex,) = (await runtime.look_for_agents())["agents"]
         assert codex["state"] == "0.167.2 · signed in with ChatGPT", "asked of the one running"
