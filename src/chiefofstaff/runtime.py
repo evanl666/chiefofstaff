@@ -417,6 +417,9 @@ class Runtime:
         # Workers whose admitted turn has begun, until their agent says nothing of it spends
         # (a turn Codex has not yet said started is stopped too: stop_ineligible).
         self.begun: set[str] = set()
+        # Workers Chief of Staff stopped (their spend, a change) whose turn has not settled:
+        # what their turn says meanwhile (its start shown late) does not stop them again.
+        self.halted: set[str] = set()
         # When each agent's check last ran (recheck_agent), and when each worker's own process
         # last stopped by itself (worker_lost).
         self.agent_checked_at: dict[str, float] = {}
@@ -1179,6 +1182,12 @@ class Runtime:
                 or self.states[row["id"]].busy
                 or row["id"] in self.begun
             ):
+                at_work = row["status"] in {"working", "queued", "starting"}
+                if row["id"] in self.begun and not at_work and not self.held(row["id"]):
+                    # Its turn began, its status not said yet: stopped as one at work (its task
+                    # waits under Needs you).
+                    self.update_session(row["id"], status="working")
+                self.halted.add(row["id"])
                 with suppress(Exception):
                     await self.workers.interrupt(row["id"], by="Settings")
                 stopped[row["id"]] = why
@@ -1187,6 +1196,7 @@ class Runtime:
     async def stop_blocked(self, session_id: str, why: str):
         """A turn of a worker that may not run now began anyway (its admission held as a change
         came): stopped at its first event, as stop_ineligible stops one at work, saying why."""
+        self.halted.add(session_id)
         with suppress(Exception):
             await self.workers.interrupt(session_id, by="Settings", notice=f"Stopped: {why}")
 
@@ -1290,6 +1300,7 @@ class Runtime:
 
     def agent_settled(self, row: dict):
         self.begun.discard(row["id"])
+        self.halted.discard(row["id"])
         self.spending(row["id"], False)
 
     def unknown(self, session_id: str) -> dict:
@@ -1330,6 +1341,7 @@ class Runtime:
             else:
                 limit = agents.limit(self.store, self.agent(row["id"]))
                 notice = f"Stopped: it used its {limit:,}-token limit."
+            self.halted.add(row["id"])
             with suppress(Exception):
                 await self.workers.interrupt(row["id"], by=agents.SPEND_STOP, notice=notice)
 
@@ -1343,8 +1355,8 @@ class Runtime:
             when = f" since {clock_time(since)}" if since else ""
             return {
                 "spend_stop": "unknown",
-                "spend_why": f"{name} stopped mid-turn, so what this worker spent{when} isn't "
-                "known. Go on accepts that and continues.",
+                "spend_why": f"{name} stopped mid-turn, so what it spent{when} isn't known. "
+                "Go on accepts that and continues.",
                 "go_on": True,
             }
         if not limit:

@@ -1437,10 +1437,18 @@ async def test_a_turn_begun_is_stopped_by_a_change_before_and_at_its_first_event
         agents.configure(harness.store, "codex", enabled=False)
         await runtime.stop_ineligible()
         assert stopped == [("w1", "Settings")], "its turn began: stopped"
+        assert harness.store.session("w1")["status"] == "working", "as one at work"
         stopped.clear()
+        harness.store.update_session("w1", status="idle")  # As its stop leaves it.
         runtime.agent_settled(harness.store.session("w1"))
         await runtime.stop_ineligible()
         assert stopped == [], "nothing of it runs any more"
+        runtime.halted.add("w1")  # Stopped, its turn not settled yet:
+        runtime.events.turn_start(harness.store.session("w1"), SimpleNamespace(data=None))
+        await asyncio.sleep(0.1)
+        assert stopped == [], "its turn's start said late stops it no more"
+        runtime.halted.clear()
+        runtime.states["w1"].busy = False
         runtime.events.turn_start(harness.store.session("w1"), SimpleNamespace(data=None))
         await until(lambda: stopped == [("w1", "Settings")])
         assert "turned off" in notices[-1], "one line in its timeline says why"
@@ -2113,7 +2121,7 @@ async def test_a_crash_mid_turn_leaves_its_spend_unknown_until_the_owner_goes_on
         assert "what this worker spent then is not known" in why and "Go on" in why
         view = runtime.task_actions.view(runtime.tasks.get(task["id"]))
         assert re.fullmatch(
-            r"Codex stopped mid-turn, so what this worker spent since \d{1,2}:\d\d [AP]M isn't "
+            r"Codex stopped mid-turn, so what it spent since \d{1,2}:\d\d [AP]M isn't "
             r"known\. Go on accepts that and continues\.",
             view["spend_why"],
         ), view["spend_why"]

@@ -1042,7 +1042,7 @@ function checkLimit(input) {
   const count = tokenCount(input.value);
   const error = $(`#${input.getAttribute("aria-describedby")}`);
   const wrong = count === null;
-  error.textContent = wrong ? `Enter a whole number of tokens, up to ${grouped(MOST_TOKENS)}, or leave it empty for no limit.` : "";
+  error.textContent = wrong ? "A whole number of tokens, or empty for no limit." : "";
   error.hidden = !wrong;
   if (wrong) input.setAttribute("aria-invalid", "true");
   else input.removeAttribute("aria-invalid");

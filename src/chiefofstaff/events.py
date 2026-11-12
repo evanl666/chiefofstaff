@@ -464,8 +464,10 @@ class Events:
             self.states[row["id"]].busy = True
         if row["status"] == "idle":
             self.runtime.update_session(row["id"], status="working")
-        if self.runtime.agents and (why := self.runtime.agent_block(row)):
-            # Another agent's worker that may not run now (a change came as its turn began).
+        stopped = row["id"] in self.runtime.halted or state.after_abort
+        if self.runtime.agents and not stopped and (why := self.runtime.agent_block(row)):
+            # Another agent's worker that may not run now (a change came as its turn began);
+            # not one stopped already (its turn's start said late).
             self.runtime.background(self.runtime.stop_blocked(row["id"], why))
 
     def tool_start(self, row: dict, event: Any):

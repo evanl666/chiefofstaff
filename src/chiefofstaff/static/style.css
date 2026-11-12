@@ -823,7 +823,7 @@ label.hours input { width: 118px; }
 .agent-row.disabled > label.check { color: var(--muted); cursor: default; }
 .agent-row.disabled > label.check input { opacity: 0.4; }
 .agents-line small code, .card.signin .note code { font: var(--small) var(--mono); background: var(--hover); padding: 1px 5px; border-radius: 5px; }
-.agent-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 220px); gap: 8px 12px; max-width: 580px; }
+.agent-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 220px); align-items: start; gap: 8px 12px; max-width: 580px; }
 .agent-limit { display: grid; gap: 4px; align-content: start; }
 .agent-limit .field-error { color: var(--red); }
 /* The line at the end of Models starts where the hint above it does. */

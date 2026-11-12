@@ -6210,9 +6210,7 @@ async def agents_off(runtime, browser, scheme: str, runs: Path):
     error = fields.locator("#agent-codex-limit-error")
     await limit.fill("20k")
     await page.locator("#settings-form footer button[type=submit]").click()
-    await expect(error).to_have_text(
-        "Enter a whole number of tokens, up to 1,000,000,000,000, or leave it empty for no limit."
-    )
+    await expect(error).to_have_text("A whole number of tokens, or empty for no limit.")
     await expect(limit).to_have_attribute("aria-invalid", "true")
     await expect(limit).to_have_attribute("aria-describedby", "agent-codex-limit-error")
     await expect(limit).to_be_focused()
@@ -6556,7 +6554,7 @@ async def agents_unknown_spend(runtime, browser, spawned):
         card = page.locator("#needs .card.task", has_text="Measure the build time")
         await expect(card).to_contain_text(
             re.compile(
-                r"Codex stopped mid-turn, so what this worker spent since \d{1,2}:\d\d [AP]M "
+                r"Codex stopped mid-turn, so what it spent since \d{1,2}:\d\d [AP]M "
                 r"isn't known\. Go on accepts that and continues\."
             ),
             timeout=15000,
@@ -6634,6 +6632,7 @@ async def agents_limit_used(runtime, browser, spawned):
         assert not errors, errors
         await context.close()
     # Raised: Go on goes on.
+    stopped_at = store.messages(worker)[-1]["id"]
     await agents_saved(runtime, {"codex": {"enabled": True, "limit": 1_000_000}})
     context, page, errors, _ = await agents_page(browser, "light")
     if await page.locator("#home-tabs").is_visible():
@@ -6646,7 +6645,12 @@ async def agents_limit_used(runtime, browser, spawned):
             await page.locator("#home-tabs [data-tab=needs]").click()
         await shoot(page, "limit-raised-card", "light", width, "#main")
     await card.get_by_role("button", name="Go on", exact=True).click()
-    await until(lambda: store.session(worker)["status"] == "working", 15)
+    # Admitted: its turn on it ran (the stand-in says nothing to it, and is asked to report).
+    await until(
+        lambda: any(m["kind"] == "report" and m["id"] > stopped_at for m in store.messages(worker)),
+        15,
+    )
+    assert not [m for m in store.messages(worker) if m["kind"] == "error" and m["id"] > stopped_at]
     assert not errors, errors
     await context.close()
     await runtime.workers.interrupt(worker, by="you")
