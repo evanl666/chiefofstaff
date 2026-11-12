@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from chiefofstaff import agentrun
-from chiefofstaff.backend import running
+from chiefofstaff.backend import process_table, running
 
 # A stand-in agent CLI: it says who it is, starts a command in a session of its own (as Codex
 # runs a command left running, in a terminal of its own), prints a line on its stdout and waits;
@@ -44,6 +44,18 @@ late = subprocess.Popen(["sleep", "301"], start_new_session=True)
 with open(sys.argv[1], "w") as f:
     json.dump({"pid": os.getpid(), "child": late.pid}, f)
 time.sleep(0.3)
+os.kill(os.getpid(), signal.SIGKILL)
+"""
+
+
+# One whose command starts another later (a dev server's own process), then crashes: its command
+# was seen, what that started since was not.
+STARTING_LATER = r"""
+import json, os, signal, subprocess, sys, time
+shell = subprocess.Popen(["sh", "-c", "sleep 0.6; sleep 302"], start_new_session=True)
+with open(sys.argv[1], "w") as f:
+    json.dump({"pid": os.getpid(), "child": shell.pid}, f)
+time.sleep(1.2)
 os.kill(os.getpid(), signal.SIGKILL)
 """
 
@@ -155,6 +167,17 @@ def test_what_a_crashing_agent_started_in_its_last_moments_ends_too(tmp_path, le
     leftovers.append(cli["child"])
     assert process.wait(30) == -signal.SIGKILL % 256, "it ended as the agent did"
     assert gone(cli["child"])
+
+
+def test_what_its_commands_started_since_they_were_seen_ends_too(tmp_path, leftovers):
+    process, out = supervise(tmp_path, look="600", cli=STARTING_LATER)
+    leftovers.append(process.pid)
+    cli = started(out)
+    leftovers.append(cli["child"])
+    process.wait(30)
+    late = [pid for pid, (_, line) in process_table().items() if line == "sleep 302"]
+    leftovers += late
+    assert gone(cli["child"]) and not late, "the shell, and the server it started since"
 
 
 def test_when_chief_of_staff_goes_away_the_agent_does_too(tmp_path, leftovers):

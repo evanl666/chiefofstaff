@@ -3,10 +3,11 @@ JSON-RPC over stdio, with a tiny scripted model that understands the prompts the
 
 Run as `fake_codex.py app-server [-c key=value]...`. Its threads are kept in FAKE_CODEX_HOME
 (threads.json), so a new process resumes them. FAKE_CODEX_* variables shape it: VERSION,
-SIGNED_OUT, REQUIREMENTS (JSON), CONFIG (JSON: what config/read answers), ANSWER (JSON merged
-into thread/start and thread/resume answers: an administrator's override), FEATURES (JSON: the
-features an administrator keeps on or off), UNASKED (actions taken without asking), LOG (a file
-each request's method and params are appended to, one JSON line each).
+SIGNED_OUT, REQUIREMENTS (JSON), CONFIG and LAYERS (JSON: what config/read answers), ANSWER (JSON
+merged into thread/start and thread/resume answers: an administrator's override), FEATURES (JSON:
+the features an administrator keeps on or off), UNASKED (actions taken without asking),
+RESTORES_LESS (what a resumed thread's totals lose), LOG (a file each request's method and params
+are appended to, one JSON line each).
 """
 
 import asyncio
@@ -145,7 +146,10 @@ class Server:
         }
 
     async def on_config_read(self, params):
-        return {"config": json.loads(os.environ.get("FAKE_CODEX_CONFIG") or "{}")}
+        answer = {"config": json.loads(os.environ.get("FAKE_CODEX_CONFIG") or "{}")}
+        if params.get("includeLayers"):
+            answer["layers"] = json.loads(os.environ.get("FAKE_CODEX_LAYERS") or "[]")
+        return answer
 
     async def on_experimentalfeature_list(self, params):
         """Each feature as the thread has it (its config's `features.<name>`, else on), or as

@@ -9,7 +9,8 @@ Chief of Staff over the stdin and stdout it inherits. When the CLI exits, or whe
 goes away however it stopped (its end of the lifeline pipe closes, or this process is orphaned),
 it ends the CLI's whole process tree, commands left running in the background included, as
 backend.end_processes does for Copilot's; then it exits with the CLI's code. It never writes to
-stdout: that is the CLI's.
+stdout: that is the CLI's. macOS and Linux only (another agent's workers do not run on Windows
+yet: Runtime.agent_block).
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ import time
 from contextlib import suppress
 
 from .backend import descendants, end_processes, process_table
+from .machine import kill_process_tree
 
 # How often the CLI's process tree is looked at (seconds): what it started is ended with it,
 # also once the CLI itself is gone and they were left to another parent. It also looks the
@@ -179,7 +181,7 @@ class Supervisor:
                 self.process.wait(3)
             if self.process.poll() is None:
                 with suppress(OSError):
-                    os.killpg(self.process.pid, signal.SIGKILL)
+                    kill_process_tree(self.process.pid)
                 with suppress(subprocess.TimeoutExpired):
                     self.process.wait(3)
         if self.process:

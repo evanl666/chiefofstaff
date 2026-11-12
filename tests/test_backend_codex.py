@@ -7,6 +7,7 @@ import asyncio
 import json
 import os
 import signal
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -228,6 +229,60 @@ def test_a_worktree_is_trusted_by_its_main_checkout_only_when_git_says_they_belo
     odd.mkdir()
     (odd / ".git").write_text(f"gitdir: {main / '.git'}\n")
     assert level(trust_levels(owners, [str(odd)]), odd) == "untrusted"
+    # Git's own files saying so, but not in its worktrees folder: not one of its worktrees.
+    admin = main / ".git" / "elsewhere" / "fake"
+    admin.mkdir(parents=True)
+    fake = tmp_path / "fake"
+    fake.mkdir()
+    (fake / ".git").write_text(f"gitdir: {admin}\n")
+    (admin / "gitdir").write_text(f"{fake / '.git'}\n")
+    (admin / "commondir").write_text("../..\n")
+    assert level(trust_levels(owners, [str(fake)]), fake) == "untrusted"
+    # A worktree whose `.git` is a link (to its own, moved): as Codex, no longer its repository's.
+    git_repository_worktree(main, tmp_path / "wt2")
+    moved = tmp_path / "moved-git"
+    (tmp_path / "wt2" / ".git").rename(moved)
+    (tmp_path / "wt2" / ".git").symlink_to(moved)
+    assert level(trust_levels(owners, [str(tmp_path / "wt2")]), tmp_path / "wt2") == "untrusted"
+
+
+def git_repository_worktree(main, worktree):
+    import subprocess
+
+    subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", str(worktree)], check=True)
+
+
+def test_a_folder_named_git_that_is_no_repository_is_no_project_root(tmp_path):
+    main = git_repository(tmp_path / "main")
+    (main / "inner" / ".git").mkdir(parents=True)  # No HEAD in it.
+    levels = trust_levels({str(main): {"trust_level": "trusted"}}, [str(main / "inner")])
+    assert level(levels, main / "inner") == level(levels, main) == "trusted"
+
+
+async def test_what_codex_says_of_a_folders_trust_is_asked_for_and_wins(tmp_path, monkeypatch):
+    """Prefer Codex's own answer (config/read with its layers): a `.codex/` folder it found and
+    does not load is untrusted, whatever the owner's entries look like to Chief of Staff."""
+    main = git_repository(tmp_path / "main")
+    config = {"projects": {str(main): {"trust_level": "trusted"}}}
+    layers = [
+        {"name": {"type": "user"}, "disabledReason": None},
+        {
+            "name": {"type": "project", "dotCodexFolder": str(main / ".codex")},
+            "disabledReason": "no",
+        },
+    ]
+    monkeypatch.setenv("FAKE_CODEX_CONFIG", json.dumps(config))
+    monkeypatch.setenv("FAKE_CODEX_LAYERS", json.dumps(layers))
+    codex = CodexBackend(fake_codex(tmp_path / "fake", monkeypatch))
+    await codex.start()
+    try:
+        told = await codex.thread_config({"folders": [str(main)]}, str(main))
+    finally:
+        await codex.stop()
+    assert told["projects"][str(main)] == {"trust_level": "untrusted"}
+    assert backend_codex.trust_answered([*layers, "odd", {"name": "odd"}]) == {
+        str(main): "untrusted"
+    }
 
 
 # The adapter on the stand-in
@@ -669,6 +724,17 @@ async def test_a_stop_ends_what_every_thread_it_can_ask_runs(tmp_path, closed):
     session.backend.request = request  # type: ignore[method-assign]
     assert await session.stop_background() == 2
     assert cleaned == ["own", "m-live"]
+    # One that cannot be ended now is not counted as ended.
+    session.child_threads.add(closed)
+    refusing = request
+
+    async def request_refusing_clean(method, params):
+        if method.endswith("clean") and params["threadId"] == "m-live":
+            raise backend_codex.CodexError("busy")
+        return await refusing(method, params)
+
+    session.backend.request = request_refusing_clean  # type: ignore[method-assign]
+    assert await session.stop_background() == 1
     assert session.child_threads == {"m-live"} and not session.left_running
     assert [n.data.kind.shell_id for n in notes if n.type.value == "system.notification"] == ["cmd"]
 
@@ -993,6 +1059,18 @@ async def test_when_its_process_dies_what_waited_on_it_fails_and_nothing_is_left
     await asyncio.sleep(0.5)
     table = await asyncio.to_thread(process_table)
     assert not [pid for pid, command in tree.items() if table.get(pid, (0, ""))[1] == command]
+
+
+async def test_once_nothing_reads_codex_a_request_fails_at_once(codex, tmp_path):
+    """Not after a minute (REQUEST_TIMEOUT): nothing would read its answer (Codex's output
+    ended, or its reading was stopped while Codex still runs)."""
+    codex.reader.cancel()
+    await until(lambda: codex.reader.done())
+    assert codex.process.returncode is None, "Codex itself still runs"
+    started = asyncio.get_running_loop().time()
+    with pytest.raises(ConnectionResetError):
+        await codex.request("thread/backgroundTerminals/list", {"threadId": "t"})
+    assert asyncio.get_running_loop().time() - started < 1
 
 
 # The runtime with a Codex worker
@@ -1403,6 +1481,19 @@ async def test_nothing_of_codex_is_stored_or_started_until_it_is_turned_on(harne
     with pytest.raises(RuntimeError, match="does not run"):
         agents.backend("gemini")
     assert agents.display("codex") == "Codex" and agents.display("other") == "other"
+
+    def tables():
+        return {r["name"] for r in harness.store.all("SELECT name FROM sqlite_master")}
+
+    assert "agent_usage" not in tables(), "the release before's database, as it was"
+    agents.configure(harness.store, "codex", model="gpt-test")
+    assert "agent_usage" not in tables()
+    agents.configure(harness.store, "codex", enabled=True)
+    assert "agent_usage" in tables(), "its usage's own table, made when first turned on"
+    assert agents.limit(harness.store, "codex") == 0
+    for limit, kept in ((5000, 5000), (-1, 0), ("9", 0), (True, 0)):
+        agents.configure(harness.store, "codex", limit=limit)
+        assert agents.limit(harness.store, "codex") == kept
     await runtime.stop()
 
 
@@ -1632,5 +1723,45 @@ async def test_a_clean_restart_counts_on_from_what_codex_restored(tmp_path, monk
         await until(lambda: len(ledger(harness, worker)) == 4, 30)
         assert ledger(harness, worker) == [("exact", 110, None, 100, 10)] * 4
         assert not harness.store.agent_unknown(worker)
+    finally:
+        await runtime.stop()
+
+
+async def test_codex_workers_need_macos_or_linux_for_now(tmp_path, monkeypatch):
+    """Windows (experimental since 0.1.42) runs Copilot's workers only, for now: nothing of
+    Codex starts there, and its workers say why."""
+    harness, runtime, row = await codex_worker(tmp_path, monkeypatch)
+    try:
+        why = "Codex workers need macOS or Linux for now."
+        with monkeypatch.context() as windows:
+            windows.setattr(sys, "platform", "win32")
+            assert runtime.agent_block(row) == why
+            with pytest.raises(RuntimeError, match=why):
+                await runtime.connect_agent("codex")
+            with pytest.raises(RuntimeError, match=why):
+                await runtime.start_agent_of("w1")
+            assert runtime.agent_block(harness.store.session(harness.router_id)) == ""
+        assert runtime.connection("codex") == (None, 0), "never started"
+        assert runtime.agent_block(row) == ""
+    finally:
+        await runtime.stop()
+
+
+async def test_what_codex_said_before_a_turn_is_admitted_is_counted_first(tmp_path, monkeypatch):
+    """Its events reach the runtime a moment after the adapter has them (Runtime.open_live's
+    forward): the usage Codex said before the turn's end is recorded before the next turn's
+    admission."""
+    harness, runtime, _ = await codex_worker(tmp_path, monkeypatch)
+    try:
+        agents.configure(harness.store, "codex", limit=100)
+        harness.store.set("copilot:w1", "thread-w1")
+        harness.store.set("alias:thread-w1", "w1")
+        data = SimpleNamespace(
+            thread_id="t", turn_id="u", total=tokens(150), model="m", epoch="p1", restored=None
+        )
+        event = SimpleNamespace(type=SimpleNamespace(value="agent.usage"), data=data)
+        asyncio.get_running_loop().call_soon(runtime.events.on_event, "w1", event)
+        why = await runtime.admit_turn(SimpleNamespace(session_id="thread-w1"))
+        assert why == "This worker used its Codex token limit (150 of 100)."
     finally:
         await runtime.stop()

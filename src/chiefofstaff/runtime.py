@@ -703,6 +703,8 @@ class Runtime:
                 return entry.backend
             if self.stopping:
                 raise RuntimeError("Chief of Staff is stopping.")
+            if sys.platform == "win32":
+                raise RuntimeError(self.not_on_windows(agent))
             if not entry.enabled():
                 raise RuntimeError(self.turned_off(agent))
             self.end_commands(agent)
@@ -838,17 +840,23 @@ class Runtime:
     def turned_off(self, agent: str) -> str:
         return f"{agents.display(agent)} is turned off in Settings → Models."
 
+    @staticmethod
+    def not_on_windows(agent: str) -> str:
+        return f"{agents.display(agent)} workers need macOS or Linux for now."
+
     def agent_block(self, row: dict) -> str:
         """Why this session may not run now ("" when it may): never for Copilot's. Another
-        agent's runs only the owner's own workers, only while that agent is on and the worker
-        sandbox off (its sandbox has not passed Chief of Staff's checks), only on a version whose
-        check found nothing unsafe, with Ask first only on a version whose every kind of action
-        was shown to ask first (its backend says so), and within its token limit (none spent
-        unknown that the owner has not accepted)."""
+        agent's runs only the owner's own workers, not on Windows yet, only while that agent is
+        on and the worker sandbox off (its sandbox has not passed Chief of Staff's checks), only
+        on a version whose check found nothing unsafe, with Ask first only on a version whose
+        every kind of action was shown to ask first (its backend says so), and within its token
+        limit (none spent unknown that the owner has not accepted)."""
         agent = self.agent(row["id"])
         if agent == COPILOT_AGENT:
             return ""
         name = agents.display(agent)
+        if sys.platform == "win32":
+            return self.not_on_windows(agent)
         entry = self.agents.get(agent)
         if entry is None:
             return f"This session runs on {agent}, which is not available."

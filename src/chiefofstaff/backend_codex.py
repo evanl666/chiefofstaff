@@ -525,7 +525,10 @@ class CodexBackend:
         self.process.stdin.write((json.dumps(message, ensure_ascii=False) + "\n").encode())
 
     def send_request(self, method: str, params: dict) -> asyncio.Future:
-        """Write a request now (nothing awaited before it is written); its answer comes later."""
+        """Write a request now (nothing awaited before it is written); its answer comes later.
+        Once nothing reads its answers (Codex stopped), it fails at once."""
+        if self.reader is not None and self.reader.done():
+            raise ConnectionResetError("Codex stopped.")
         self.ids += 1
         future = asyncio.get_running_loop().create_future()
         self.pending[self.ids] = future

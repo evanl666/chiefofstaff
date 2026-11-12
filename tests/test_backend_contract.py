@@ -4,8 +4,10 @@ The scripted backend always runs, as Copilot and as other coding agents' adapter
 agents (scripted.CODEX_LIKE, CLAUDE_LIKE), and so does the Codex adapter on a stand-in CLI
 (tests/fake_codex.py). The real GitHub Copilot backend runs when CHIEFOFSTAFF_TEST_COPILOT=1 (it
 uses a few small model calls; CHIEFOFSTAFF_TEST_MODEL picks the model), and the Codex adapter on
-the owner's own Codex CLI when CHIEFOFSTAFF_TEST_CODEX=1 (its default model; its own config and
-sign-in, never changed). Run them before upgrading the Copilot SDK or CLI, or Codex.
+the real Codex CLI when CHIEFOFSTAFF_TEST_CODEX=1: its app-server, approvals, commands, child
+agents and resumes, with a CODEX_HOME of the test's own and a stand-in model on this machine
+(tests/scripted_model.py): no sign-in, no model call, the owner's ~/.codex untouched. Run them
+before upgrading the Copilot SDK or CLI, or Codex.
 """
 
 import asyncio
@@ -23,6 +25,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+import scripted_model
 from conftest import fake_codex
 from copilot import define_tool
 from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
@@ -99,7 +102,14 @@ async def backend(request, tmp_path, monkeypatch):
     elif request.param == "codex":
         if not REAL_CODEX:
             pytest.skip("Set CHIEFOFSTAFF_TEST_CODEX=1 to check the Codex adapter on real Codex.")
+        home = tmp_path / "codex-home"
+        home.mkdir()
+        monkeypatch.setenv("CODEX_HOME", str(home))
+        model = scripted_model.Model()
         backend = codex_backend("codex")
+        backend.model = model
+        backend.arguments += model.arguments(tmp_path)
+        backend.needs_sign_in = False
     elif request.param == "fake-codex":
         backend = CodexBackend(fake_codex(tmp_path / "fake", monkeypatch))
     elif request.param in PROFILES:
@@ -114,10 +124,9 @@ async def backend(request, tmp_path, monkeypatch):
         if request.param == "copilot":
             with contextlib.suppress(Exception):
                 await backend.client.delete_session(session_id)
-        if request.param == "codex":
-            with contextlib.suppress(Exception):
-                await backend.archive(session_id)  # Its history stays in Codex, put away.
     await backend.stop()
+    if model := getattr(backend, "model", None):
+        model.close()
 
 
 class Echo(BaseModel):
@@ -181,7 +190,8 @@ class Turn:
 
 async def open_session(backend, tmp_path, **options):
     session_id = str(uuid4())
-    backend.created.append(session_id)
+    if not isinstance(backend, CodexBackend):
+        backend.created.append(session_id)  # Codex chooses its threads' ids (below).
     options.setdefault(
         "on_permission_request", lambda request, inv: PermissionDecisionApproveOnce()
     )
@@ -525,7 +535,8 @@ async def another_codex(backend, tmp_path, monkeypatch, *arguments: str, **env: 
     for name, value in env.items():
         monkeypatch.setenv(name, value)
     other = CodexBackend(backend.command)
-    other.arguments += arguments
+    other.arguments = [*backend.arguments, *arguments]
+    other.needs_sign_in = backend.needs_sign_in
     other.created = []
     return other
 
