@@ -33,8 +33,9 @@ import threading
 import time
 from contextlib import suppress
 
-from .backend import descendants, end_processes, process_table
+# Not the backend module: the supervisor of each worker's process stays light (no Copilot SDK).
 from .machine import kill_process_tree
+from .processes import descendants, end_processes, process_table
 
 # How often the CLI's process tree is looked at (seconds): what it started is ended with it,
 # also once the CLI itself is gone and they were left to another parent. It also looks the
@@ -76,6 +77,8 @@ def fork_watch(pid: int, lifeline: int | None):
 
 def proc_event(pid: int):
     """A process's forks and exit, as a kqueue event (macOS)."""
+    if sys.platform != "darwin":
+        raise OSError("macOS only")
     return select.kevent(
         pid,
         filter=select.KQ_FILTER_PROC,
@@ -100,24 +103,28 @@ def children(pid: int) -> list[int]:
     return [found for found in buffer[: max(used, 0) // ctypes.sizeof(ctypes.c_int)] if found]
 
 
-def process_groups() -> dict[int, int]:
-    """Every process's group: pid -> process group id."""
+def process_groups() -> tuple[dict[int, tuple[int, str]], dict[int, int]]:
+    """Every process (as process_table has it) and its group: pid -> process group id. One
+    `ps` for both."""
     try:
         listed = subprocess.run(
-            ["ps", "-axo", "pid=,pgid="],  # noqa: S607  (a fixed command, found on PATH)
+            ["ps", "-axo", "pid=,ppid=,pgid=,command="],  # noqa: S607  (a fixed command)
             capture_output=True,
             text=True,
+            errors="replace",
             check=True,
             timeout=5,
         ).stdout
     except (OSError, subprocess.SubprocessError):
-        return {}
-    found = {}
+        return {}, {}
+    table, groups = {}, {}
     for line in listed.splitlines():
-        parts = line.split()
-        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
-            found[int(parts[0])] = int(parts[1])
-    return found
+        parts = line.split(None, 3)
+        if len(parts) >= 3 and all(part.isdigit() for part in parts[:3]):
+            pid = int(parts[0])
+            table[pid] = (int(parts[1]), parts[3] if len(parts) > 3 else "")
+            groups[pid] = int(parts[2])
+    return table, groups
 
 
 def own_environment() -> dict[str, str]:
@@ -207,6 +214,8 @@ class Supervisor:
 
     def watching(self):
         """macOS: what the kqueue says, as it happens, until the supervisor ends."""
+        if sys.platform != "darwin":
+            return
         while self.watch is not None and not self.ending:
             try:
                 events = self.watch.control(None, 64, 0.5)
@@ -246,10 +255,9 @@ class Supervisor:
         is asked outside its lock: a fork is followed meanwhile.)"""
         if not self.process:
             return
-        table = process_table()
+        table, groups = process_groups() if self.watch is not None else (process_table(), {})
         if not table:
             return
-        groups = process_groups() if self.watch is not None else {}
         with self.lock:
             self.tree = {pid: c for pid, c in self.tree.items() if table.get(pid, (0, ""))[1] == c}
             # This process's own (the CLI's, and on Linux what they left), and each known
@@ -271,6 +279,8 @@ class Supervisor:
     def in_groups(self, table: dict[int, tuple[int, str]], groups: dict[int, int]):
         """macOS: the tree's process groups (and those its processes may have made) and what
         runs in them, though no longer the tree's."""
+        if sys.platform == "win32":
+            return
         own = os.getpid()
         theirs = {os.getpgrp(), 0, 1}  # Chief of Staff's group (this one's), and the system's.
         self.groups |= {pid for pid in self.tree if pid != own}
