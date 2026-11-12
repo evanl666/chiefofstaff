@@ -281,6 +281,18 @@ def test_orphaned_it_ends_the_agent_even_without_a_lifeline(tmp_path, leftovers)
     assert gone(supervisor, cli["pid"], cli["child"])
 
 
+def test_it_stays_light_without_the_copilot_sdk():
+    """One supervisor runs per Codex worker: it imports nothing of Copilot's SDK (25 MB rather
+    than 80, and no wait for that import as each worker starts)."""
+    loaded = subprocess.run(
+        [sys.executable, "-c", "import sys, chiefofstaff.agentrun; print(sorted(sys.modules))"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert "'copilot'" not in loaded and "'chiefofstaff.backend'" not in loaded
+
+
 def test_a_command_is_needed():
     with pytest.raises(SystemExit):
         agentrun.main([])
