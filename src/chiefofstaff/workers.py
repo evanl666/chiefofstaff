@@ -475,7 +475,7 @@ class Workers:
             for row in self.store.open_sessions(WORKER):
                 if row["status"] != "queued":
                     continue
-                if not self.store.get(f"created:{row['id']}") and self.waiting_for(row):
+                if not self.runtime.made(row["id"]) and self.waiting_for(row):
                     continue
                 if short is not None and not self.runtime.special(row):
                     # More work now could freeze the computer: it starts once memory frees up.
@@ -602,7 +602,7 @@ class Workers:
             return
         _, connection = self.runtime.connection(agent)
         try:
-            if self.store.get(f"created:{session_id}"):
+            if self.runtime.made(session_id):
                 session = await self.runtime.session_for(session_id)
             else:
                 async with self.states[session_id].lifecycle:
@@ -880,7 +880,7 @@ class Workers:
             raise ValueError("Only workers can be reopened.")
         if not row["closed_at"]:
             return self.runtime.view(row)
-        if not self.store.get(f"created:{session_id}"):
+        if not self.runtime.made(session_id):
             raise ValueError("That worker never started; start a new one instead.")
         # Held until it is open again: a removal of its folders that was started when it closed
         # waits, then sees that it is open and leaves them.

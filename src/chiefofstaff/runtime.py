@@ -672,6 +672,15 @@ class Runtime:
     def on_copilot(self, session_id: str) -> bool:
         return self.agent(session_id) == COPILOT_AGENT
 
+    def made(self, session_id: str) -> bool:
+        """Whether its session was made on its agent (else it is made at its start). Copilot's:
+        `created:`. Another agent's rows have `created:` from the start, so an earlier version,
+        which reads every worker as Copilot's, only ever tries to resume them, never makes one
+        in their place (more-agents.md 8); theirs is made once the id it chose is known."""
+        if self.agents and not self.on_copilot(session_id):
+            return bool(self.store.get(f"copilot:{session_id}"))
+        return bool(self.store.get(f"created:{session_id}"))
+
     def on_agent(self, agent: str, session_ids: Iterable[str]) -> list[str]:
         """Of these sessions, those that run on this agent."""
         named = self.store.items("agent:")
@@ -2434,7 +2443,7 @@ class Runtime:
             if session := self.states.handle(session_id):
                 return session
             row = self.store.session(session_id)
-            created = self.store.get(f"created:{session_id}")
+            created = self.made(session_id)
             if row["role"] == WORKER and not created:
                 # Cancelled, stopped or failed before it ever started: it starts now.
                 return await self.open_live(row, create=True)

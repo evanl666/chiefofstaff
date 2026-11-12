@@ -24,7 +24,9 @@ from conftest import (
 from copilot.tools import ToolInvocation
 from fastapi.testclient import TestClient
 
-from chiefofstaff import agents, prompts
+from chiefofstaff import agents, backend, prompts
+from chiefofstaff.__main__ import lock_data_file, main
+from chiefofstaff.backend import copilot_records, process_table
 from chiefofstaff.digest import digest
 from chiefofstaff.models import Settings
 from chiefofstaff.roles import ROUTER
@@ -881,3 +883,123 @@ def test_an_agents_models_are_listed_only_while_it_is_on(web, codex_on_path):
     listed = web.get("/api/models?agent=codex")
     assert listed.status_code == 200, listed.text
     assert [model["id"] for model in listed.json()] == ["gpt-test", "gpt-mini"]
+
+
+# Before a downgrade (section 8)
+
+
+def prepare(monkeypatch, directory):
+    """`chiefofstaff --prepare-downgrade --data-dir directory`."""
+    arguments = ["chiefofstaff", "--prepare-downgrade", "--data-dir", str(directory)]
+    monkeypatch.setattr(sys, "argv", arguments)
+    main()
+
+
+async def test_prepare_downgrade_stops_codex_workers_at_work_and_leaves_copilots(
+    tmp_path, codex_on_path, monkeypatch, capsys
+):
+    harness, runtime = await started(tmp_path, Settings(max_workers=1))
+    await saved(runtime, {"codex": {"enabled": True}, "new_workers": "codex"})
+    done = await spawn_on(harness, runtime, title="Done", instructions="Report done: Fixed it.")
+    await until(lambda: harness.store.session(done["session_id"])["status"] == "done", 30)
+    working = await spawn_on(harness, runtime, title="Busy", instructions="Wait 60 s")
+    await until(lambda: harness.store.session(working["session_id"])["status"] == "working", 30)
+    queued = await spawn_on(harness, runtime, title="Later", instructions="Report done: Later.")
+    copilot = await spawn_on(harness, runtime, title="Mine", instructions="Do it.", agent="copilot")
+    assert harness.store.session(queued["session_id"])["status"] == "queued"
+    rows = {key: harness.store.session(key) for key in harness.store.items("agent:")}
+    # Chief of Staff stops (the supervisor ends Codex), leaving the store as it was.
+    harness.store.set("agentpids:codex", harness.store.get("agentpids:codex") or "{}")
+    runtime.stopping = True
+    await runtime.agents["codex"].backend.stop()
+    copilot_before = harness.store.session(copilot["session_id"])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["chiefofstaff", "--prepare-downgrade", "--data-dir", str(harness.store.directory)],
+    )
+    with pytest.raises(SystemExit) as ended:
+        main()
+    assert ended.value.code == 0
+    said = capsys.readouterr().out
+    assert "Stopped 2 worker(s) on other coding agents: “Busy”, “Later”." in said
+    assert "No process of another coding agent is running." in said
+    store = Store(harness.store.directory)
+    for key in (working["session_id"], queued["session_id"]):
+        assert store.session(key)["status"] == "idle"
+        assert store.messages(key)[-1]["text"] == "Stopped by you, before a downgrade."
+    for task in (working["task_id"], queued["task_id"]):
+        assert store.one("SELECT status FROM tasks WHERE id=?", (task,))["status"] == "waiting"
+        assert store.get(f"stopped:{task}") == "you"
+    assert store.session(done["session_id"]) == rows[done["session_id"]], "an idle one stays"
+    assert store.session(copilot["session_id"]) == copilot_before, "Copilot's are not touched"
+    assert store.get("agentpids:codex") is None
+    await runtime.stop()
+
+
+async def test_prepare_downgrade_says_what_is_left_running_and_fails(tmp_path, monkeypatch, capsys):
+    store = Store(tmp_path / "data")
+    left = await asyncio.create_subprocess_exec("sleep", "30")
+    try:
+        command = process_table()[left.pid][1]
+        store.set(
+            "agentpids:codex", json.dumps(copilot_records({left.pid: command}, store.directory))
+        )
+        monkeypatch.setattr(backend, "end_processes", lambda tree, wait=3.0: None)
+        monkeypatch.setattr(
+            sys, "argv", ["chiefofstaff", "--prepare-downgrade", "--data-dir", str(store.directory)]
+        )
+        with pytest.raises(SystemExit) as ended:
+            main()
+        assert ended.value.code == 1
+        assert f"  {left.pid} {command}" in capsys.readouterr().err
+        assert store.get("agentpids:codex"), "kept for the next start to end"
+        monkeypatch.undo()
+        stopped, found = agents.prepare_downgrade(store)
+        assert stopped == [] and found == {}, "ended now"
+        assert await asyncio.wait_for(left.wait(), 10) is not None
+    finally:
+        if left.returncode is None:
+            left.kill()
+            await left.wait()
+
+
+def test_prepare_downgrade_waits_for_chief_of_staff_to_stop(tmp_path, monkeypatch):
+    store = Store(tmp_path / "data")
+    held = (store.directory / "service.lock").open("a")
+    lock_data_file(held)
+    try:
+        monkeypatch.setattr(
+            sys, "argv", ["chiefofstaff", "--prepare-downgrade", "--data-dir", str(store.directory)]
+        )
+        with pytest.raises(SystemExit) as ended:
+            main()
+        assert ended.value.code == 2
+    finally:
+        held.close()
+
+
+async def test_a_queued_codex_worker_reads_as_made_to_earlier_versions_and_is_made_at_its_start(
+    tmp_path, codex_on_path
+):
+    harness, runtime = await started(tmp_path, Settings(max_workers=1))
+    try:
+        await saved(runtime, {"codex": {"enabled": True}, "new_workers": "codex"})
+        first = await spawn_on(harness, runtime, title="First", instructions="Wait 2 s")
+        later = (await spawn_on(harness, runtime, title="Later", instructions="Report done: Ok."))[
+            "session_id"
+        ]
+        assert harness.store.session(later)["status"] == "queued"
+        assert harness.store.get(f"created:{later}") == "1", "an earlier version resumes it"
+        assert not runtime.made(later) and harness.store.get(f"copilot:{later}") is None
+        never = (await spawn_on(harness, runtime, title="Never", instructions="Wait 9 s"))[
+            "session_id"
+        ]
+        await runtime.workers.close(never, by="you")
+        with pytest.raises(ValueError, match="never started"):
+            await runtime.workers.reopen(never)
+        await until(lambda: harness.store.session(later)["status"] == "done", 30)
+        assert runtime.made(later) and harness.store.get(f"copilot:{later}")
+        assert runtime.made(first["session_id"])
+    finally:
+        await runtime.stop()

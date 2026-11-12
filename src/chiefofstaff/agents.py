@@ -177,6 +177,46 @@ async def look(name: str) -> dict[str, Any]:
     raise RuntimeError(f"This Chief of Staff does not run {name}.")
 
 
+def prepare_downgrade(store: Store) -> tuple[list[str], dict[int, str]]:
+    """Before an earlier Chief of Staff, which runs every worker on Copilot, opens this data
+    directory (more-agents.md 8), with this one not running: each worker on another agent that
+    was at work stops, as after any stop (its tasks wait under Needs you; the earlier version
+    never starts it on Copilot), and none of those agents' processes may remain (what is left of
+    them is ended). Returns the workers stopped, by title, and the processes still running."""
+    from .backend import copilot_orphans, copilot_tree, end_processes
+    from .tasks import TaskBook
+
+    named = {key: agent for key, agent in store.items("agent:").items() if agent != COPILOT}
+    tasks = TaskBook(store)
+    stopped = []
+    for row in store.open_sessions():
+        if row["id"] not in named or row["status"] not in {"working", "queued", "starting"}:
+            continue
+        store.update_session(row["id"], status="idle", activity="")
+        store.add_message(
+            row["id"], "notice", "Stopped by you, before a downgrade.", {"stopped": True}
+        )
+        for task in tasks.for_session(row["id"]):
+            if task["status"] in {"queued", "running"}:
+                store.set(f"stopped:{task['id']}", "you")
+                store.delete(f"goingon:{task['id']}")
+                tasks.move(task["id"], "waiting", progress="Stopped by you.")
+        stopped.append(row["title"])
+    left: dict[int, str] = {}
+    for agent, value in store.items("agentpids:").items():
+        try:
+            records = json.loads(value)
+        except ValueError:
+            continue
+        if found := copilot_orphans(records, store.directory):
+            end_processes(copilot_tree(found))
+        if found := copilot_orphans(records, store.directory):
+            left |= found
+        else:
+            store.delete(f"agentpids:{agent}")  # None runs: nothing for a later start to end.
+    return stopped, left
+
+
 def backend(name: str) -> AgentBackend:
     """An agent's backend, its module imported now."""
     if name == "codex":

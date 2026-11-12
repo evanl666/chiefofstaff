@@ -956,6 +956,52 @@ and role for any date range; every task shows its own credits (hover its time). 
 read from Copilot's log (also from before Chief of Staff was running). An optional credit
 limit per worker stops runaway workers.
 
+## Workers on other coding agents
+
+Your workers can also run on [Codex](https://developers.openai.com/codex/cli), OpenAI's coding
+agent, with your own Codex sign-in. The Router, the Slack session, the Watchdog, workers that
+read Slack and Chief of Staff's own helpers stay on Copilot. Off by default: nothing of it runs,
+and nothing is looked for, until you turn it on.
+
+**Turning it on.** Settings → *Models* → *Use another coding agent for workers…* opens the
+*Coding agents* group, which only then looks for the Codex CLI (its version and how it is signed
+in). Check *Use Codex for workers*; choose whether *New workers use* Copilot or Codex; give Codex
+workers a *Model* (empty: Codex's default) and a *Limit per worker* in tokens (empty: none). To
+use it for one task only, say so ("do this with Codex"): the Router then starts that worker on
+Codex. A worker keeps its agent for life; follow-ups go to it as to any worker. Codex needs macOS
+or Linux, the Codex CLI 0.167.2 or later, signed in (`codex login`), and the worker sandbox off;
+an agent you named that cannot run is said by the Router, never moved to Copilot. When the agent
+new workers use cannot run, they start on Copilot and their chat says why.
+
+**What differs from a Copilot worker:**
+
+- **Spend** is in tokens, never credits: the worker's header, its tasks' hover tips and a part of
+  its own in *Usage*; the daily summary adds them on a day with some. A worker with a limit stops
+  once it has spent it; it may pass it by the model call in flight and what its child agents
+  spend before they stop. If Codex stops in the middle of a turn, what it spent then is not
+  known: a worker with a limit then waits under *Needs you* until you say *Go on*.
+- **Ask first** works on Codex versions before 0.168 (the ones tested): every command none of
+  your Codex rules allows, every edit and every MCP call ask Chief of Staff, which answers as for
+  a Copilot worker; ChatGPT's apps are off for such a worker. Your own Codex rules and
+  `PermissionRequest` hooks can allow what those checks would refuse, as in your Codex sessions.
+  Newer versions run workers that act on their own; their **⋯** says why *Ask first* is off.
+- **Sandbox:** Codex workers run as Copilot workers do with the sandbox off, with your caches,
+  tools and network (`danger-full-access`); your own Codex `sandbox_mode` is not applied to them.
+  Every edit still asks Chief of Staff first, so your own checkouts stay read-only to them.
+- **Repositories:** a repository's `.codex/` settings, hooks and rules load only where you trust
+  its folder in Codex (a worktree as its repository is trusted). Elsewhere Codex reads none of
+  them, and Chief of Staff gives the worker the repository's `AGENTS.md` files as text.
+- **Questions:** a Codex worker asks you with a report's question (Codex has no `ask_user` here).
+  An MCP server that needs a sign-in is signed in with `codex mcp login <name>`.
+
+**Turning it off** stops its workers at once, with what they left running, and ends its process;
+their chats, tasks and usage stay. *Go on* works again once it is back on.
+
+**Before installing an earlier version**, stop Chief of Staff and run
+`chiefofstaff --prepare-downgrade`: it stops the workers on Codex that were at work and checks
+that no Codex process is left. Earlier versions run every worker on Copilot and cannot resume
+Codex workers: close those you no longer need.
+
 ## Daily summary and your profile
 
 At the configured time (default 09:00) the Router posts one summary: what finished (your tasks,

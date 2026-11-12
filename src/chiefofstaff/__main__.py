@@ -103,6 +103,49 @@ def default_data_dir() -> Path:
     return legacy if legacy.is_dir() and not current.exists() else current
 
 
+def prepare_downgrade(parser: argparse.ArgumentParser, data_dir: Path) -> int:
+    """--prepare-downgrade (more-agents.md 8), with Chief of Staff not running on this data
+    directory: 0 when no process of another agent is left, else 1, saying which."""
+    from . import agents
+    from .store import Store
+
+    directory = data_dir.expanduser().resolve()
+    if not (directory / "chiefofstaff.db").exists():
+        print(f"Nothing to prepare: no Chief of Staff data in {directory}.", flush=True)
+        return 0
+    data_lock = (directory / "service.lock").open("a")
+    try:
+        lock_data_file(data_lock)
+    except BlockingIOError:
+        data_lock.close()
+        parser.error(
+            "Chief of Staff is running on this data directory: stop it (Ctrl+C in its "
+            "terminal), then run this again."
+        )
+    try:
+        stopped, left = agents.prepare_downgrade(Store(directory))
+    finally:
+        data_lock.close()
+    if stopped:
+        named = ", ".join(f"“{title}”" for title in stopped)
+        print(f"Stopped {len(stopped)} worker(s) on other coding agents: {named}.", flush=True)
+    if left:
+        print(
+            "These processes of other coding agents are still running; end them before you "
+            "downgrade:\n" + "\n".join(f"  {pid} {command}" for pid, command in left.items()),
+            file=sys.stderr,
+            flush=True,
+        )
+        return 1
+    print(
+        "No process of another coding agent is running. An earlier Chief of Staff runs every "
+        "worker on Copilot: close the workers on other agents you no longer need, then install "
+        "it.",
+        flush=True,
+    )
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Run Chief of Staff: a Router that coordinates your Copilot sessions."
@@ -116,7 +159,15 @@ def main():
         action="store_true",
         help="try it without Copilot or Slack: scripted sessions in a temporary folder",
     )
+    parser.add_argument(
+        "--prepare-downgrade",
+        action="store_true",
+        help="before installing an earlier version: stop the workers on other coding agents "
+        "(Codex) and check that none of their processes runs",
+    )
     args = parser.parse_args()
+    if args.prepare_downgrade:
+        sys.exit(prepare_downgrade(parser, args.data_dir or default_data_dir()))
     args.port = args.port or (8799 if args.demo else 8765)
     extra = {}
     if args.demo:

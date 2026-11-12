@@ -1652,6 +1652,9 @@ class Tools:
         )
         if agent != agents.COPILOT:
             self.store.set(f"agent:{session_id}", agent)  # For its life.
+            # Read by an earlier version, which runs every worker on Copilot: one to resume,
+            # never to make anew there (Runtime.made).
+            self.store.set(f"created:{session_id}", "1")
         self.store.set(f"workspace:{session_id}", str(workspace))
         self.store.update_session(
             session_id,

@@ -55,6 +55,37 @@ strangers, say), turn it off in Settings.
 in your own Copilot sessions: a plugin's hooks and an MCP server run as you, outside the
 sandbox. Add only what you would install for yourself.
 
+## Workers on other coding agents
+
+Workers can also run on Codex (off by default; Settings → Models). For such a worker:
+
+- **No sandbox.** They never run while the worker sandbox is on. With it off they run as Copilot
+  workers do then: a Codex worker can do anything your account can (`danger-full-access`).
+- **Your checkouts.** Codex asks Chief of Staff before every edit, wherever it lands, a file
+  move's destination included, and the same check as for Copilot workers keeps your own
+  checkouts read-only to it; one of your own Codex `PermissionRequest` hooks can approve an edit
+  first.
+- **Ask first** (Codex versions before 0.168, the ones tested): every command none of your Codex
+  rules allows, every edit and every MCP call ask Chief of Staff, which refuses what it refuses
+  for a Copilot worker (`gh` writes and GitHub MCP writes among them, so PR reviews stay drafts);
+  ChatGPT's apps are off for that worker. Your own Codex rules and hooks can allow what those
+  checks would refuse. Chief of Staff checks once per Codex version, on this machine and without
+  a model, that each kind of action asks it first, and reads back each worker's settings; a
+  version that fails runs no worker that asks first (or none at all, when its edits do not ask).
+- **Repository settings** (`.codex/` settings, hooks, rules, MCP servers) load only where you
+  trust the folder in Codex; a worktree is trusted as its repository is. Elsewhere none of them
+  loads, and the repository's `AGENTS.md` reaches the worker as text only.
+- **Spend limit:** Chief of Staff's own ledger, in tokens. It may be passed by the model call in
+  flight and by what child agents spend before they stop; spend lost when Codex stops mid-turn
+  is recorded as unknown, and a worker with a limit then waits for your *Go on*.
+- **Its processes** run under a small supervisor of Chief of Staff's, without Chief of Staff's
+  `CHIEFOFSTAFF_*` variables (your Slack token among them), and end when Chief of Staff's process
+  goes away, however it stops.
+- **Its settings folder** (`~/.codex`, and `$CODEX_HOME`) cannot be added to *Also writable in
+  the sandbox* while Codex is on: its hooks run outside any sandbox.
+- **Sign-in** is Codex's own; Chief of Staff never reads or stores it. What a Codex worker reads
+  and writes goes to OpenAI under your Codex account, as with your own Codex sessions.
+
 ## Sign-ins and credentials
 
 - **MCP sign-ins are shared.** When a worker asks you to sign in to an MCP server, Copilot keeps
