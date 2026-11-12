@@ -186,7 +186,7 @@ class Server:
                 "stage": "stable",
                 "enabled": kept.get(name, config.get(f"features.{name}", True)),
             }
-            for name in ("apps", "multi_agent")
+            for name in ("apps", "multi_agent", "memories")
         ]
         return {"data": data, "nextCursor": None}
 
@@ -817,6 +817,8 @@ class Server:
                         "tool_name": tool,
                         "tool_annotations": {"readOnlyHint": read_only},
                         "tool_params": {},
+                        # As Codex offers it: remembered for the thread, or in the config.
+                        "persist": ["session", "always"],
                     },
                 },
             )
@@ -958,9 +960,14 @@ def approval_mode(config: dict, server: str, tool: str) -> str:
 
 
 def logged(message: dict):
+    """A request's method and params, or an answer the client gave (`answer`, `error`)."""
     if log := os.environ.get("FAKE_CODEX_LOG"):
+        if "method" in message:
+            entry = {k: message.get(k) for k in ("method", "params")}
+        else:
+            entry = {"method": None, "answer": message.get("result"), "error": message.get("error")}
         with Path(log).open("a") as file:
-            file.write(json.dumps({k: message.get(k) for k in ("method", "params")}) + "\n")
+            file.write(json.dumps(entry) + "\n")
 
 
 def text(items) -> str:

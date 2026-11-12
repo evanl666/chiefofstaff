@@ -507,6 +507,27 @@ async def test_with_ask_first_a_server_the_owner_lets_run_unasked_still_asks(
         await codex.stop()
 
 
+async def test_an_mcp_call_is_answered_once_never_remembered(tmp_path, monkeypatch):
+    """Codex offers to remember an MCP tool's approval for the thread or in the owner's config
+    (`persist`): Chief of Staff answers each call alone, as Copilot's permission checks do."""
+    log = tmp_path / "log.jsonl"
+    monkeypatch.setenv("FAKE_CODEX_LOG", str(log))
+    monkeypatch.setenv("FAKE_CODEX_CONFIG", json.dumps({"mcp_servers": {"notes": {}}}))
+    codex = CodexBackend(fake_codex(tmp_path / "fake", monkeypatch))
+    await codex.start()
+    try:
+        session, turn = await opened(codex, tmp_path, ask_first=True)
+        await session.send("Call the MCP tool write of notes. Reply with just: done")
+        await turn.wait()
+    finally:
+        await codex.stop()
+    entries = [json.loads(line) for line in log.read_text().splitlines()]
+    answers = [e["answer"] for e in entries if e["method"] is None and e.get("answer")]
+    approvals = [a for a in answers if a.get("action") in {"accept", "decline"}]
+    assert approvals == [{"action": "accept"}], answers
+    assert "persist" not in json.dumps(answers) and "_meta" not in json.dumps(answers)
+
+
 async def test_with_ask_first_a_plugin_whose_servers_cannot_be_read_is_refused(
     tmp_path, monkeypatch
 ):
@@ -554,6 +575,8 @@ async def test_with_ask_first_every_server_it_can_name_asks(tmp_path, monkeypatc
     prompt = {"default_tools_approval_mode": "prompt"}
     assert {key: value for key, value in config.items() if key != "projects"} == {
         "features.apps": False,
+        "features.memories": False,
+        "memories": {"generate_memories": False},
         # Nested: a name with a dot in it is one name (a dotted key would split it).
         "mcp_servers": {
             "notes": prompt
@@ -582,13 +605,27 @@ async def test_chatgpts_apps_are_off_for_a_worker_that_asks_first_as_read_back(
             listed = await codex.request(
                 "experimentalFeature/list", {"threadId": session.session_id}
             )
-            features[session] = {f["name"]: f["enabled"] for f in listed["data"]}["apps"]
-        assert (features[asking], features[acting]) == (False, True)
+            features[session] = {f["name"]: f["enabled"] for f in listed["data"]}
+        assert (features[asking]["apps"], features[acting]["apps"]) == (False, True)
+        # Codex's memories too (their background agent asks nobody): the owner's for one acting.
+        assert (features[asking]["memories"], features[acting]["memories"]) == (False, True)
+        starts = [json.loads(line).get("params") for line in log.read_text().splitlines()]
+        configs = [p["config"] for p in starts if p and "config" in p and "threadId" not in p]
+        assert configs[0]["memories"] == {"generate_memories": False}, "its own never kept"
+        assert "memories" not in configs[1] and "features.memories" not in configs[1]
         resumed = await codex.resume_session(asking.session_id, ask_first=True)
         assert resumed.session_id == asking.session_id
     finally:
         await codex.stop()
     # Kept on by an administrator: such a thread is not used (nor kept), and says why.
+    monkeypatch.setenv("FAKE_CODEX_FEATURES", json.dumps({"memories": True}))
+    codex = CodexBackend(fake_codex(tmp_path / "fake", monkeypatch))
+    await codex.start()
+    try:
+        with pytest.raises(RuntimeError, match="did not turn its memories off"):
+            await opened(codex, tmp_path, ask_first=True)
+    finally:
+        await codex.stop()
     monkeypatch.setenv("FAKE_CODEX_FEATURES", json.dumps({"apps": True}))
     codex = CodexBackend(fake_codex(tmp_path / "fake", monkeypatch))
     await codex.start()
@@ -601,7 +638,7 @@ async def test_chatgpts_apps_are_off_for_a_worker_that_asks_first_as_read_back(
     finally:
         await codex.stop()
     methods = [json.loads(line)["method"] for line in log.read_text().splitlines()]
-    assert methods.count("thread/archive") == 1 and "thread/unsubscribe" in methods
+    assert methods.count("thread/archive") == 2 and "thread/unsubscribe" in methods
 
 
 @pytest.mark.parametrize("ask_first", [True, False])

@@ -929,7 +929,8 @@ class CodexBackend:
         return self.opened(answer, options)
 
     async def apps_off(self, answer: dict, options: dict):
-        """With Ask first, the thread must read back with ChatGPT's apps off, as set."""
+        """With Ask first, the thread must read back with ChatGPT's apps off, as set, and Codex's
+        memories off where this Codex has them."""
         if not options.get("ask_first"):
             return
         thread = (answer.get("thread") or {}).get("id") or ""
@@ -939,12 +940,18 @@ class CodexBackend:
             raise RuntimeError(
                 f"Codex could not say which features this worker has: {exc}"
             ) from exc
-        apps = [f for f in listed.get("data") or [] if mapping(f).get("name") == "apps"]
-        if not apps or apps[0].get("enabled") is not False:
+        features = {mapping(f).get("name"): mapping(f) for f in listed.get("data") or []}
+        if features.get("apps", {}).get("enabled") is not False:
             raise RuntimeError(
                 "Codex did not turn ChatGPT's apps off for this worker, which Ask first needs "
                 "(their actions are not checked by Chief of Staff): an administrator's Codex "
                 "settings may keep them on."
+            )
+        if "memories" in features and features["memories"].get("enabled") is not False:
+            raise RuntimeError(
+                "Codex did not turn its memories off for this worker, which Ask first needs "
+                "(their background agent runs commands nobody is asked about): an "
+                "administrator's Codex settings may keep them on."
             )
 
     @property
@@ -1130,6 +1137,12 @@ class CodexBackend:
         config: dict[str, Any] = {"projects": projects}
         if options.get("ask_first"):
             config["features.apps"] = False
+            # Codex's memories: in a process with them on, a consolidation agent of its own runs
+            # commands with no approval asked (and, under this thread's full access, without a
+            # sandbox); generate_memories alone does not stop it starting (0.167.2). Off here,
+            # and this thread never feeds the owner's memories (memory_mode "disabled").
+            config["features.memories"] = False
+            config["memories"] = {"generate_memories": False}
             servers = {
                 str(server): asking(entry, checking=bool(options.get("checking")))
                 for server, entry in mapping(owner.get("mcp_servers")).items()

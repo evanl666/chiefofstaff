@@ -760,6 +760,105 @@ async def test_with_ask_first_codex_asks_for_dotted_and_plugin_servers_set_to_ru
         model.close()
 
 
+@pytest.mark.codex
+async def test_an_mcp_call_chief_of_staff_approves_is_approved_for_that_call_alone(
+    tmp_path, monkeypatch
+):
+    """Codex offers to remember an approval (`persist`: for the thread, or "always", in the
+    owner's config): Chief of Staff approves each call alone, so the next one asks again and the
+    owner's config is as it was."""
+    if not REAL_CODEX:
+        pytest.skip("Set CHIEFOFSTAFF_TEST_CODEX=1 to check it on real Codex.")
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    marks = tmp_path / "marks"
+    marks.mkdir()
+    (home / "config.toml").write_text(
+        f"[mcp_servers.notes]\ncommand = {json.dumps(sys.executable)}\n"
+        f"args = [{json.dumps(str(MARKERS))}]\n"
+        f'env = {{ MARKER_DIR = {json.dumps(str(marks))}, MARKER_NAME = "notes" }}\n'
+    )
+    before = (home / "config.toml").read_bytes()
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    model = scripted_model.Model()
+    codex = CodexBackend(shutil.which("codex") or "codex")
+    codex.arguments += model.arguments(tmp_path)
+    codex.needs_sign_in = False
+    codex.created = []
+    await codex.start()
+    try:
+        asked = []
+
+        def check(request, invocation):
+            asked.append((request.kind, request.tool_name))
+            return PermissionDecisionApproveOnce()
+
+        session, turn = await open_session(
+            codex, tmp_path, on_permission_request=check, ask_first=True
+        )
+        for _ in range(2):
+            await session.send(
+                "Call the MCP tool create_pull_request_review of notes. Then reply with just: ok"
+            )
+            await turn.wait()
+        assert asked == [("mcp", "create_pull_request_review")] * 2, asked
+        assert (marks / "review-published").exists(), "approved: it ran"
+        assert (home / "config.toml").read_bytes() == before, "nothing kept in the config"
+    finally:
+        await codex.stop()
+        model.close()
+
+
+@pytest.mark.codex
+@pytest.mark.parametrize("ask_first", [True, False])
+async def test_codex_memories_never_run_their_agent_for_a_worker_that_asks_first(
+    tmp_path, monkeypatch, ask_first
+):
+    """The owner's Codex has memories on: in a process that has them, Codex runs a background
+    agent of its own (consolidation) with no approval asked, and, under a worker's full access,
+    no sandbox. A worker that asks first has them off (nothing of the pipeline starts in its
+    process) and its thread never feeds them; one acting on its own keeps the owner's."""
+    if not REAL_CODEX:
+        pytest.skip("Set CHIEFOFSTAFF_TEST_CODEX=1 to check it on real Codex.")
+    import sqlite3
+
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    (home / "config.toml").write_text("[features]\nmemories = true\n")
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    model = scripted_model.Model()
+    codex = CodexBackend(shutil.which("codex") or "codex")
+    codex.arguments += model.arguments(tmp_path)
+    codex.needs_sign_in = False
+    codex.created = []
+    await codex.start()
+    try:
+        session, turn = await open_session(codex, tmp_path, ask_first=ask_first)
+        await session.send("Reply with just: ok")
+        await turn.wait()
+        listed = await codex.request("experimentalFeature/list", {"threadId": session.session_id})
+        enabled = {f["name"]: f["enabled"] for f in listed["data"]}["memories"]
+    finally:
+        await codex.stop()
+        model.close()
+
+    def rows(name: str, query: str) -> list:
+        found = []
+        for path in home.glob(f"{name}_*.sqlite"):
+            with contextlib.closing(sqlite3.connect(path)) as db:
+                found += db.execute(query).fetchall()
+        return found
+
+    modes = rows("state", "SELECT memory_mode FROM threads")
+    jobs = sum(count for (count,) in rows("memories", "SELECT count(*) FROM jobs"))
+    if ask_first:
+        assert enabled is False and modes == [("disabled",)], (enabled, modes)
+        assert jobs == 0, "nothing of the memories pipeline started in its process"
+    else:
+        assert enabled is True and modes == [("enabled",)], (enabled, modes)
+        assert jobs > 0, "the owner's memories, as in their own sessions"
+
+
 async def test_a_command_it_leaves_running_holds_its_turns_end_until_it_ends(backend, tmp_path):
     only_codex(backend)
     session, turn = await open_session(backend, tmp_path)
