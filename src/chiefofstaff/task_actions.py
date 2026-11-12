@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qsl, urlsplit
 
-from . import prompts, receipts, threads
+from . import agents, prompts, receipts, threads
 from .backend import stop_background
 from .envelope import wrap
 from .policy import within
@@ -3967,6 +3967,18 @@ class TaskActions:
         """Why each of its unreadable PRs could not be read (see Runtime.follow_why)."""
         return {key: why for key in keys if (why := self.runtime.follow_why(key))}
 
+    def agent_spend(self, task: dict, row: dict) -> dict:
+        """For a task whose worker runs on another agent: which, and the tokens it spent (its
+        credits are Copilot's). Nothing for Copilot's."""
+        if not (self.runtime.agents and row) or self.runtime.on_copilot(row["id"]):
+            return {}
+        agent = self.runtime.agent(row["id"])
+        return {
+            "agent": agent,
+            "agent_name": agents.display(agent),
+            "tokens": self.store.task_tokens(task["id"]),
+        }
+
     def view(self, task: dict) -> dict:
         row = self.store.find_session(task["session_id"]) or {}
         follows = self.store.follows(row["id"]) if row else []
@@ -4002,6 +4014,7 @@ class TaskActions:
             "after": [dep["id"] for dep in self.tasks.deps(task["id"])],
             "runs": len(self.tasks.runs(task["id"])),
             "credits": self.tasks.credits(task["id"]),
+            **self.agent_spend(task, row),
             "blocked": task["status"] == "queued" and bool(self.tasks.broken(task)),
             "receipts": shown_receipts,
             # What it reported before its latest result (see keep_earlier_result).

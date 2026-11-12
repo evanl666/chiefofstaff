@@ -165,6 +165,19 @@
             </div>
             <small id="effort-hint" hidden>Auto picks a model for each turn and takes no thinking effort: choose a model where you want to set one.</small>
             <small>Effort applies where the model supports it. Change one session's model in its ⋯ menu.</small>
+            <div id="agents-line" class="agents-line">
+              <div><button id="agents-open" type="button" class="link quiet" aria-controls="agents-group">Use another coding agent for workers…</button></div>
+              <details class="section" id="agents-group" hidden>
+                <summary><span>Coding agents</span><small id="agents-summary"></small></summary>
+                <div class="section-body">
+                  <small>Workers can run on another coding agent you have installed and signed in to. The Router, Slack and the Watchdog stay on Copilot. <a class="link" href="https://github.com/evanl666/chiefofstaff/blob/main/docs/guide.md#workers-on-other-coding-agents" target="_blank" rel="noreferrer">What differs</a></small>
+                  <label class="short"><span>New workers use</span><select name="agent_new_workers"></select></label>
+                  <div id="agents-rows" class="agents-rows"></div>
+                  <small id="agents-sandboxed" hidden>Other agents can't run while workers are sandboxed: their sandboxes have not passed Chief of Staff's checks yet.</small>
+                  <small id="agents-downgrade" hidden>Before you install an older Chief of Staff, run <code>chiefofstaff --prepare-downgrade</code> and close the workers on other agents.</small>
+                </div>
+              </details>
+            </div>
           </section>
 
           <section class="tab" data-tab="connections" hidden>

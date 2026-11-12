@@ -131,7 +131,7 @@ export function taskItem(task, phase = phaseOf(task)) {
     key: `task:${task.id}:${task.status}:${phase.section}:${phase.marker}:${task.stopped ? 1 : 0}:${task.blocked ? 1 : 0}:${createsPr(task) ? 1 : 0}:${task.news?.at || ""}:${task.splittable ? 1 : 0}:${undoUntil(task) ? 1 : 0}${unknownRuns(task).map((url) => `:${url}`).join("")}`,
     id: task.id,
     // For live rows the minute too: "6m" and "3m ago" move on by themselves.
-    version: `${task.updated_at}:${task.title}:${phase.why}:${meta.join("|")}:${help}:${task.read ? 1 : 0}:${worker?.status || ""}:${worker?.activity || ""}:${worker?.step || ""}:${worker?.step_since || ""}:${worker?.turn_task || ""}:${worker?.background ? 1 : 0}:${worker?.display_title || ""}:${task.credits}:${task.runs}:${JSON.stringify(task.receipts?.prs || null)}:${task.status === "review" ? JSON.stringify(task.receipts || null) : ""}:${live ? `${Math.floor(Date.now() / 60000)}:${queuedKey()}` : ""}:${waitsOnOwner(task, worker)}:${(task.watching || []).join(",")}:${(task.watch_failing || []).join(",")}:${(task.watch_unreadable || []).join(",")}:${JSON.stringify(task.watch_failing_why || null)}:${JSON.stringify(task.check_back || null)}:${task.nudged_at || ""}:${JSON.stringify(task.receipts?.changed || null)}:${JSON.stringify(made)}:${JSON.stringify(asked)}:${deliveryKey(task)}:${earlierResults(task).length}`,
+    version: `${task.updated_at}:${task.title}:${phase.why}:${meta.join("|")}:${help}:${task.read ? 1 : 0}:${worker?.status || ""}:${worker?.activity || ""}:${worker?.step || ""}:${worker?.step_since || ""}:${worker?.turn_task || ""}:${worker?.background ? 1 : 0}:${worker?.display_title || ""}:${task.credits}${task.agent ? `/${task.tokens}` : ""}:${task.runs}:${JSON.stringify(task.receipts?.prs || null)}:${task.status === "review" ? JSON.stringify(task.receipts || null) : ""}:${live ? `${Math.floor(Date.now() / 60000)}:${queuedKey()}` : ""}:${waitsOnOwner(task, worker)}:${(task.watching || []).join(",")}:${(task.watch_failing || []).join(",")}:${(task.watch_unreadable || []).join(",")}:${JSON.stringify(task.watch_failing_why || null)}:${JSON.stringify(task.check_back || null)}:${task.nudged_at || ""}:${JSON.stringify(task.receipts?.changed || null)}:${JSON.stringify(made)}:${JSON.stringify(asked)}:${deliveryKey(task)}:${earlierResults(task).length}`,
     build: () => taskCard(task, phase),
     refresh: (node) => refreshTaskCard(node, task, phase),
   };
@@ -198,7 +198,11 @@ function taskMeta(task, phase = {}) {
     [`Task ${task.id}`, ended ? `finished ${since(task.ended_at || task.updated_at)}` : `started ${since(task.created_at)}`].join(" · "),
     task.worker && task.worker !== task.title ? `Worker: ${shorten(task.worker, 60)}` : "",
     earlier ? `Earlier names: ${shorten(earlier, 80)}` : "",
-    [task.credits >= 0.05 ? `${task.credits.toFixed(1)} credits` : "", task.runs > 1 ? `${task.runs} runs` : ""].filter(Boolean).join(" · "),
+    // On another coding agent: which, and its tokens (its credits are Copilot's).
+    (task.agent
+      ? [`on ${task.agent_name}`, task.tokens ? `${task.tokens.toLocaleString()} tokens` : "", task.runs > 1 ? `${task.runs} runs` : ""]
+      : [task.credits >= 0.05 ? `${task.credits.toFixed(1)} credits` : "", task.runs > 1 ? `${task.runs} runs` : ""]
+    ).filter(Boolean).join(" · "),
   ];
   let when = since(task.ended_at || task.updated_at);
   if (phase.section === "running" && task.status === "running") when = ago(task.created_at) === "now" ? "just now" : ago(task.created_at);

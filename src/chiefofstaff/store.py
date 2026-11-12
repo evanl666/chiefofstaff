@@ -857,6 +857,49 @@ class Store:
             (session_id,),
         )
 
+    def agent_usage_in(self, since: float, until: float) -> list[dict]:
+        """Other agents' usage in a range, by agent and model: tokens (a range's most and, with
+        `least`, its least), and each interval whose spend is unknown, with when."""
+        self.agent_usage_table()
+        window = (since, until)
+        rows = self.all(
+            """SELECT agent, model, count(*) AS updates, sum(tokens) AS tokens,
+            sum(coalesce(least, tokens)) AS least, sum(input_tokens) AS input_tokens,
+            sum(cached_input_tokens) AS cached_input_tokens, sum(output_tokens) AS output_tokens
+            FROM agent_usage WHERE at>=? AND at<? AND kind!='unknown' GROUP BY agent, model
+            ORDER BY tokens DESC""",
+            window,
+        )
+        unknown = self.all(
+            """SELECT a.agent, a.session_id, s.title, a.at FROM agent_usage a
+            LEFT JOIN sessions s ON s.id=a.session_id
+            WHERE a.at>=? AND a.at<? AND a.kind='unknown' ORDER BY a.at""",
+            window,
+        )
+        return [*rows, *({**row, "unknown": True} for row in unknown)]
+
+    def agent_tokens(self, since: float, until: float) -> dict[str, int]:
+        """The tokens each other agent spent in a range (a range's most), for the daily
+        summary."""
+        self.agent_usage_table()
+        rows = self.all(
+            "SELECT agent, sum(tokens) AS tokens FROM agent_usage WHERE at>=? AND at<? "
+            "AND kind!='unknown' GROUP BY agent",
+            (since, until),
+        )
+        return {row["agent"]: int(row["tokens"] or 0) for row in rows if row["tokens"]}
+
+    def task_tokens(self, task_id: str) -> int:
+        """The tokens another agent spent on a task's runs (a range's most)."""
+        self.agent_usage_table()
+        return int(
+            self.value(
+                "SELECT coalesce(sum(a.tokens), 0) FROM agent_usage a JOIN runs r "
+                "ON r.id=a.run_id WHERE r.task_id=? AND a.kind!='unknown'",
+                (task_id,),
+            )
+        )
+
     def usage(self, since: float, until: float) -> dict:
         # Constant SQL: the queries below put no outside value in their text.
         totals = """sum(credits) AS credits, sum(premium) AS premium, count(*) AS calls,

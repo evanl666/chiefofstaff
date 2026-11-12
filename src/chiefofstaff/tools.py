@@ -18,9 +18,9 @@ from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 from copilot import ToolResult, define_tool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, create_model
 
-from . import prompts, receipts, threads
+from . import agents, prompts, receipts, threads
 from .asks import AnswerSession, AskSession, RecordSetup
 from .checks import ProposeChecks
 from .decisions import AckDecision, AskDecision, RecordDecision
@@ -82,6 +82,9 @@ WHY_NEW_WORDS = (
 
 
 logger = logging.getLogger(__name__)
+
+
+SPAWN_WORKER = "Start a new worker session for one task. Returns its session id."
 
 
 class SpawnWorker(BaseModel):
@@ -1090,6 +1093,8 @@ class Tools:
         # The Router's notes refused as asking a worker's open question again (shown when sent
         # again unchanged).
         self.refused_notes: set[str] = set()
+        # spawn_worker with `agent`, by the agents on (spawn_on).
+        self.spawn_tools: dict[tuple[str, ...], Any] = {}
 
     async def t_add_repo(self, params: AddRepo, caller: str):
         self.caller(caller, WORKER)
@@ -1138,12 +1143,7 @@ class Tools:
     def definitions(self) -> dict:
         definitions = [
             *self.runtime.connector.tools(),
-            (
-                "spawn_worker",
-                "Start a new worker session for one task. Returns its session id.",
-                SpawnWorker,
-                self.t_spawn_worker,
-            ),
+            ("spawn_worker", SPAWN_WORKER, SpawnWorker, self.t_spawn_worker),
             (
                 "add_repo",
                 "Add a repository to your workspace, as a worktree on your branch: of a project, "
@@ -1418,6 +1418,36 @@ class Tools:
             for name, description, params, handler in definitions
         }
 
+    def spawn_on(self, names: Sequence[str]) -> Any:
+        """spawn_worker as the Router has it while other coding agents are on: with `agent`,
+        set only when the owner named one (more-agents.md 5.9). Without them, the tool is as
+        it always was (definitions)."""
+        key = tuple(names)
+        if key not in self.spawn_tools:
+            choices: Any = Literal.__getitem__(("", agents.COPILOT, *key))  # type: ignore[attr-defined]
+            named = ", ".join(agents.display(name) for name in (agents.COPILOT, *key))
+            params = create_model(
+                "SpawnWorker",
+                __base__=SpawnWorker,
+                agent=(
+                    choices,
+                    Field(
+                        default="",
+                        description=f"The coding agent it runs on ({named}): only when the "
+                        "owner named one for this task; empty for the one Settings chose",
+                    ),
+                ),
+            )
+            params.__doc__ = SpawnWorker.__doc__
+            self.spawn_tools[key] = define_tool(
+                "spawn_worker",
+                description=SPAWN_WORKER,
+                params_type=leak_proof(params),
+                handler=self.handler(self.t_spawn_worker),
+                skip_permission=True,
+            )
+        return self.spawn_tools[key]
+
     def handler(self, handler):
         async def run(params, invocation):
             try:
@@ -1553,7 +1583,16 @@ class Tools:
                 if row["id"] not in known
             ]
         decisions = self.with_turn_decisions(caller, params.decisions)
-        await self.runtime.check_model(params.model)
+        agent, agent_notice = agents.COPILOT, ""
+        if not special and (self.runtime.agents or getattr(params, "agent", "")):
+            agent, agent_notice = await self.runtime.new_worker_agent(
+                getattr(params, "agent", ""),
+                bool((params.slack and self.runtime.slack.configured()) or untrusted),
+            )
+        if agent == agents.COPILOT:
+            await self.runtime.check_model(params.model)
+        else:
+            await self.runtime.check_agent_model(agent, params.model)
         project = (
             str(resolve_project(params.project, self.workspaces.projects()))
             if (params.project)
@@ -1611,6 +1650,8 @@ class Tools:
         self.store.create_session(
             session_id, WORKER, title, "queued", cwd=cwd, branch=branch, slack=slack
         )
+        if agent != agents.COPILOT:
+            self.store.set(f"agent:{session_id}", agent)  # For its life.
         self.store.set(f"workspace:{session_id}", str(workspace))
         self.store.update_session(
             session_id,
@@ -1624,11 +1665,18 @@ class Tools:
         )
         floor = self.store.settings().role_efforts.get(WORKER, "")
         lowered = bool(effort and floor and EFFORTS.index(effort) < EFFORTS.index(floor))
-        if lowered:
+        if agent != agents.COPILOT:
+            # Its agent's models (the one named, else its default); not Copilot's effort floor.
+            info, lowered = self.runtime.agent_model_info(agent, params.model), False
+        elif lowered:
             effort = ""  # The owner's choice for workers is the least they get.
         if effort and info and effort not in info["efforts"]:
             effort = ""  # Reported below; the model's default effort applies.
-        if params.model or effort:
+        if (params.model or effort) and agent != agents.COPILOT:
+            # Kept apart from its row's model and effort, which are Copilot's.
+            choice = {"model": params.model, "effort": effort}
+            self.store.set(f"agentmodel:{session_id}", json.dumps(choice))
+        elif params.model or effort:
             self.store.update_session(session_id, model=params.model, effort=effort)
         criteria = clean_criteria(params.done_when)
         task = self.tasks.create(
@@ -1688,6 +1736,8 @@ class Tools:
         if images := self.runtime.attachments_in(params.instructions):
             meta["attachments"] = images  # The owner's images it names come with it.
         self.runtime.add_message(session_id, "router", params.instructions, meta)
+        if agent_notice:  # The agent Settings chose could not run it.
+            self.runtime.add_message(session_id, "notice", agent_notice)
         if not special:  # Chief of Staff's own helpers come and go quietly.
             # Not "Started" for work that waits: for the tasks it comes after, or for a slot.
             waits = [dep["title"] for dep in self.tasks.unmet(task)]
@@ -2304,6 +2354,12 @@ class Tools:
             "now": self.runtime.progress_line(row) or row["status"],
             "open_in_terminal": self.runtime.copilot_id(row["id"]) in self.runtime.elsewhere,
             "latest": entries[-params.items :],
+            **(
+                {"agent": agent}
+                if self.runtime.agents_on()
+                and (agent := self.runtime.agent(row["id"])) != agents.COPILOT
+                else {}
+            ),
         }
 
     async def t_check_prs(self, params: CheckPrs, caller: str):
@@ -2423,6 +2479,10 @@ class Tools:
             "projects": await self.workspaces.project_cards(),
             "models": models,
             "default_worker_model": settings.role_models.get(WORKER) or settings.model or "auto",
+            # Only while other coding agents are on: who new workers use, and their models.
+            **(
+                {"agents": await self.agents_listed(on)} if (on := self.runtime.agents_on()) else {}
+            ),
             "slack_connected": self.runtime.slack.configured(),
             "github_repos": settings.github_repos if settings.github_enabled else [],
             # What Chief of Staff looks out for on the owner's behalf (add_watch proposes more).
@@ -2434,6 +2494,16 @@ class Tools:
             ],
         }
         return shortened(listed)
+
+    async def agents_listed(self, on: list[str]) -> dict:
+        """The other coding agents on, for the Router: who new workers use, and their models."""
+        models = {}
+        for name in on:
+            try:
+                models[name] = [item["id"] for item in await self.runtime.agent_models(name)]
+            except Exception:
+                models[name] = []
+        return {"new_workers": agents.new_workers(self.store), "models": models}
 
     def needs_owner(self, found: Needs | None = None) -> dict:
         """What waits for the owner, item by item as Home's Needs you lists it (digest.needs),
@@ -2535,8 +2605,14 @@ class Tools:
             entry["follows"] = follows
         if peers := self.runtime.peers.of(row["id"]):
             entry["works_with"] = [short(peer) for peer in peers]
-        if model := self.runtime.model_for(row):
+        agent = self.runtime.agent(row["id"]) if self.runtime.agents else agents.COPILOT
+        if agent == agents.COPILOT and (model := self.runtime.model_for(row)):
             entry["model"] = model
+        elif agent != agents.COPILOT and self.runtime.agents_on():
+            # Named while other agents are on (as the Router's spawn_worker has them).
+            entry["agent"] = agent
+            if model := self.runtime.agent_choice(row["id"]).get("model"):
+                entry["model"] = model
         if task := self.tasks.current(row["id"]):
             entry["task"] = {
                 "task_id": task["id"],

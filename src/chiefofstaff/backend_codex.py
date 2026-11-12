@@ -76,6 +76,8 @@ CODEX = Capabilities(
 # the next minor version, whose every kind of action was shown to ask Chief of Staff first.
 # Newer ones run workers that act on their own.
 OLDEST_CODEX = "0.167.2"
+# How long Settings waits for a Codex started to say what it is (look).
+LOOK_SECONDS = 30
 ASK_FIRST_BEFORE = "0.168.0"
 # How long a request to the app-server may take (seconds), and one that starts a thread.
 REQUEST_TIMEOUT = float(os.environ.get("CHIEFOFSTAFF_CODEX_TIMEOUT", "60"))
@@ -748,6 +750,15 @@ class CodexBackend:
         return SimpleNamespace(
             isAuthenticated=bool(account), authType=account.get("type", "") if account else ""
         )
+
+    async def about(self) -> dict:
+        """Its version, how it is signed in (the kind of account, never who) and its models."""
+        auth = await self.get_auth_status()
+        return {
+            "version": self.cli_version,
+            "account": auth.authType if auth.isAuthenticated else "",
+            "models": await self.list_models(),
+        }
 
     async def list_models(self) -> list[Any]:
         models, cursor = [], None
@@ -1924,3 +1935,18 @@ def check_verdict(version: str, asked: list[str], happened: list[str]) -> dict:
 
 def codex_backend(command: str = "codex") -> CodexBackend:
     return CodexBackend(shutil.which(command) or command)
+
+
+async def look(command: str = "codex") -> dict:
+    """What Settings shows of the Codex on this computer, from an app-server started for this
+    and stopped: its version, how it is signed in and its models; raises with why its workers
+    cannot run (not found, too old, signed out, an administrator's requirements)."""
+    backend = codex_backend(command)
+    try:
+        await asyncio.wait_for(backend.start(), LOOK_SECONDS)
+        return await asyncio.wait_for(backend.about(), LOOK_SECONDS)
+    except TimeoutError:
+        raise RuntimeError("Codex did not answer in time: try again.") from None
+    finally:
+        with suppress(Exception):
+            await backend.stop()

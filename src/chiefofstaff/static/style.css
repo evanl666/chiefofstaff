@@ -812,6 +812,12 @@ label.hours input { width: 118px; }
 #learn-state:empty { display: none; }
 /* Send to Chief: one line at the end of Connections; its consent, and what it says once on,
    unfold under its words. */
+.agents-line { display: grid; gap: 12px; }
+.agents-rows { display: grid; gap: 14px; }
+.agent-row { display: grid; gap: 6px; }
+.agent-row > :not(label) { margin-left: 28px; }
+.agent-row .agent-problem { color: var(--soft); }
+.agent-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 200px); gap: 8px 12px; max-width: 560px; }
 .send-line { display: grid; gap: 6px; }
 .send-line > :not(label) { margin-left: 28px; }
 .send-consent { display: grid; gap: 8px; margin-bottom: 4px; }

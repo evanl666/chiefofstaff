@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
+from . import agents
 from .drafts import CARD_WORDS
 from .store import Store, hours_ago
 from .tasks import HELPERS
@@ -310,7 +311,11 @@ def digest(runtime: Runtime, since: float, until: float) -> str:
             f"• Handled: {sent} repl{'ies' if sent != 1 else 'y'} sent, "
             f"{follow_ups} thread follow-up{'s' if follow_ups != 1 else ''} without the Router"
         )
-    lines.append(
-        f"• {running} task{'s' if running != 1 else ''} running · {credits_used:.1f} credits"
-    )
+    spent = f"• {running} task{'s' if running != 1 else ''} running · {credits_used:.1f} credits"
+    if runtime.agents and (tokens := store.agent_tokens(since, until)):
+        # Only on a day another coding agent spent some: its tokens, never as credits.
+        spent += "".join(
+            f" and {count:,} tokens on {agents.display(agent)}" for agent, count in tokens.items()
+        )
+    lines.append(spent)
     return "\n".join(lines)

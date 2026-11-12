@@ -1346,10 +1346,15 @@ class Workers:
                 # would interleave its history). The mirror shows it; news waits for it.
                 with suppress(Exception):
                     await self.runtime.detach(row["id"])
-            # Closed there (also while this app was not running): what waited for it goes.
-            if copilot not in self.runtime.elsewhere and (
-                self.store.get(f"heldnews:{row['id']}")
-                or self.store.get(f"refusedopen:{row['id']}")
+            # Closed there (also while this app was not running): what waited for it goes; for a
+            # worker on another agent, once that agent may run it again.
+            if (
+                copilot not in self.runtime.elsewhere
+                and (
+                    self.store.get(f"heldnews:{row['id']}")
+                    or self.store.get(f"refusedopen:{row['id']}")
+                )
+                and not (self.runtime.agents and self.runtime.agent_block(row))
             ):
                 await self.closed_elsewhere(row)
 

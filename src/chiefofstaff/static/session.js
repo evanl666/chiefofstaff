@@ -76,12 +76,16 @@ export function renderHeader() {
     }
   }
   if (session.credits >= 0.05) meta.push(`${session.credits.toFixed(1)} credits`);
+  // On another coding agent: its name and model there after its state, and its tokens.
+  if (session.agent) meta.splice(1, 0, AGENT, session.model);
+  if (session.agent && session.tokens) meta.push(`${tokenCount(session.tokens)} tokens`);
   const follows = session.follows || [];
   if (follows.length && !session.closed_at) meta.push(`following ${follows.length}`);
   const titles = { router: "Chat with your chief of staff", slack: "Slack", watchdog: "Watchdog" };
   $("#session-title").textContent = titles[session.role] || workerTitle(session);
   $("#session-title").title = session.role === "worker" && session.title !== workerTitle(session) ? `Started as “${session.title}”` : "";
-  $("#session-meta").textContent = meta.filter(Boolean).join(" · ");
+  if (session.agent) agentMeta(session, meta.filter(Boolean));
+  else $("#session-meta").textContent = meta.filter(Boolean).join(" · ");
   const where = session.role === "worker" ? (session.checkouts?.length ? session.checkouts.map((checkout) => `${checkout.path}${checkout.branch ? ` (${checkout.branch})` : ""}`) : [session.cwd]) : [];
   $("#session-meta").title = [...where, ...follows.map(threadLabel)].filter(Boolean).join("\n");
   // Stop is on the line that shows it working, at the end of its timeline.
@@ -101,6 +105,14 @@ export function renderHeader() {
       el("option", { value: "off", text: "Ask first (permission checks)" }),
     );
     checks.value = session.yolo_choice || "";
+    // Ask first only where its agent's checks can run: else disabled, with why.
+    const why = session.agent ? session.ask_first_refused : "";
+    const reason = why ? el("small", { id: "ask-first-why", hidden: true, text: why }) : null;
+    if (why) {
+      checks.querySelector('option[value="off"]').disabled = true;
+      checks.title = why;
+      checks.setAttribute("aria-describedby", reason.id);
+    }
     checks.onchange = async () => {
       try {
         const view = await api(`/api/sessions/${session.id}/yolo`, { method: "POST", body: { mode: checks.value } });
@@ -110,7 +122,7 @@ export function renderHeader() {
         toast(error.message, "error");
       }
     };
-    items.push(el("label", {}, el("span", { text: "Permission checks" }), checks));
+    items.push(el("label", {}, el("span", { text: "Permission checks" }), checks, reason));
   }
   if (session.role === "worker" && session.cwd) {
     const open = (app) => api(`/api/sessions/${session.id}/open`, { method: "POST", body: { app } }).catch((error) => toast(error.message, "error"));
@@ -157,13 +169,32 @@ export function setComposer({ placeholder = "", locked = "", attach = true } = {
   input.disabled = Boolean(locked);
   input.placeholder = placeholder;
 }
+// The agent's name in the meta line of a worker on another coding agent: where it works
+// differently from a Copilot worker, its tooltip (and description) says how, a line each.
+const AGENT = Symbol("agent");
+function agentMeta(session, parts) {
+  const notes = session.agent_notes || [];
+  const name = el("span", { text: session.agent_name, title: notes.join("\n") || undefined });
+  const nodes = parts.flatMap((part, index) => [index ? " · " : "", part === AGENT ? name : part]);
+  if (notes.length) {
+    name.setAttribute("aria-describedby", "session-agent-notes");
+    nodes.push(el("span", { id: "session-agent-notes", hidden: true, text: notes.join(". ") }));
+  }
+  $("#session-meta").replaceChildren(...nodes);
+}
+const tokenCount = (count) => (count >= 1e6 ? `${+(count / 1e6).toFixed(1)}M` : count >= 1000 ? `${Math.round(count / 1000)}k` : String(count));
 export const EFFORTS = { none: "none", low: "low", medium: "medium", high: "high", xhigh: "extra high", max: "max" };
-const modelInfo = (id) => state.models.find((model) => model.id === id);
+// A worker's models: its agent's (listed once asked), or Copilot's.
+const modelsOf = (session) => (session?.agent ? state.agentModels?.[session.agent] || [] : state.models);
+let shownModels = state.models;
+const modelInfo = (id) => shownModels.find((model) => model.id === id);
 const tokens = (count) => (count >= 1e6 ? `${+(count / 1e6).toFixed(1)}M` : `${Math.round(count / 1000)}k`);
 // Model, thinking effort and context window of the selected session. Each applies from its next message.
 function renderTuning(session) {
   const box = $("#session-tuning");
-  box.hidden = Boolean(session.closed_at || session.elsewhere) || !state.models.length;
+  if (session.agent && !state.agentModels?.[session.agent]) agentModels(session);
+  shownModels = modelsOf(session);
+  box.hidden = Boolean(session.closed_at || session.elsewhere) || !shownModels.length;
   if (box.hidden) return;
   const model = $("#session-model");
   const effort = $("#session-effort");
@@ -174,7 +205,7 @@ function renderTuning(session) {
   };
   model.replaceChildren(
     el("option", { value: "", text: `Default${fallback ? ` · ${fallback}` : ""}` }),
-    ...state.models.map((item) => el("option", { value: item.id, text: item.name })),
+    ...shownModels.map((item) => el("option", { value: item.id, text: item.name })),
   );
   model.value = session.model_choice || "";
   const info = modelInfo(session.model);
@@ -213,6 +244,17 @@ function renderTuning(session) {
     save({ model: session.model_choice, effort: effort.value, context: keptContext }, `Thinking effort: ${EFFORTS[effort.value] || "default"}`);
   context.onchange = () =>
     save({ model: session.model_choice, effort: keptEffort, context: context.value }, `Context window: ${context.selectedOptions[0].text.replace(" tokens", "")}`);
+}
+// Another agent's models, listed once a worker on it shows its ⋯ menu.
+async function agentModels(session) {
+  state.agentModels = { ...state.agentModels, [session.agent]: [] };
+  try {
+    state.agentModels[session.agent] = await api(`/api/models?agent=${encodeURIComponent(session.agent)}`);
+  } catch {
+    delete state.agentModels[session.agent];  // Asked again next time.
+    return;
+  }
+  if (current()?.id === session.id) renderTuning(current());
 }
 async function reopen(sessionId) {
   try {

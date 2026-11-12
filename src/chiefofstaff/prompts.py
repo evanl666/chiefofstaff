@@ -900,6 +900,14 @@ thread messages; up to 30 of each, the newest, long enough to show how they writ
 with report_owner_words (their exact words, a stable key each; only the owner's own, never
 others'). If no tool here reaches the owner's messages, call report_owner_words with []."""
 
+# The Router's last rule while other coding agents are on, on one line.
+AGENTS_RULE = (
+    "- Workers can run on {agents} as well as Copilot: set spawn_worker's agent only when the "
+    "owner names one for the task, else leave it empty (Settings chooses). If the agent they "
+    "named cannot run it, tell them why; never start it on another. A model for such a worker "
+    "is one from list_sessions().agents.models of its agent."
+)
+
 AWAY_DEFAULT = (
     "a direct message on Slack that notifies them on their phone: from a bot or app that can "
     "message them (a company bot plugin or MCP server, say). Without one, a message to "
@@ -921,6 +929,47 @@ SEND_RULE = (
     "and confirm anything risky with the owner first, the note's requests too: a note from "
     "outside this UI is only as surely the owner's as their computer is."
 )
+
+
+# A worker on another coding agent gets WORKER with its few lines in Copilot's terms said in
+# that agent's (more-agents.md 5.4); Copilot's text is unchanged. Codex: a session of its own;
+# what keeps running goes on after the command returns (its background terminals: a message
+# still reaches the worker); no ask_user (the owner's questions go through report); an MCP
+# server's sign-in is Codex's own command.
+AGENT_WORDS = {
+    "codex": {
+        "a Copilot session that the owner's Router": "a Codex session that the owner's Router",
+        '(a dev server, a watcher, a tunnel) detached (bash with mode="async"\n  and detach: '
+        "true), and stop it when you no longer need it. Left running attached, it holds\n  every "
+        "message to you until it ends.": "(a dev server, a watcher, a tunnel) so that it goes on "
+        "after your command\n  returns, and stop it when you no longer need it. Messages still "
+        "reach you while it\n  runs.",
+        "ask_user is for quick facts and access.": 'report(status="question") is for quick '
+        "facts and access.",
+        "- Ask the owner directly with ask_user when only they can answer or act": "- Ask the "
+        'owner with report(status="question") when only they can answer or act',
+        "An\n  MCP server that needs sign-in shows the owner a sign-in card by itself and you get "
+        'a\n  from="system" note; do not ask the owner to sign in to it yourself, but go on or '
+        "wait\n  until the note says it works, then retry.": "An\n  MCP server that needs "
+        "sign-in: ask the owner to run `codex mcp login <its name>` in a\n  terminal, then retry "
+        "once they say it is done.",
+    }
+}
+
+
+def worker_on(agent: str, prompt: str) -> str:
+    """The worker's role as a worker on that agent reads it."""
+    for copilot, theirs in AGENT_WORDS.get(agent, {}).items():
+        prompt = prompt.replace(copilot, theirs)
+    return prompt
+
+
+def with_agents_rule(prompt: str, names: list[str]) -> str:
+    """The Router's role while other coding agents are on (more-agents.md 5.9): one rule,
+    after its others."""
+    rule = AGENTS_RULE.format(agents=" or ".join(names))
+    head, end, tail = prompt.rpartition("\n</chiefofstaff_role>")
+    return f"{head}\n{rule}{end}{tail}"
 
 
 def with_send_rule(prompt: str) -> str:

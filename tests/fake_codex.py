@@ -7,7 +7,7 @@ SIGNED_OUT, REQUIREMENTS (JSON), CONFIG and LAYERS (JSON: what config/read answe
 merged into thread/start and thread/resume answers: an administrator's override), FEATURES (JSON:
 the features an administrator keeps on or off), UNASKED (actions taken without asking),
 RESTORES_LESS (what a resumed thread's totals lose), LOG (a file each request's method and params
-are appended to, one JSON line each).
+are appended to, one JSON line each), RUNS (a file each run's arguments are appended to).
 """
 
 import asyncio
@@ -804,6 +804,9 @@ def text(items) -> str:
 
 
 def main():
+    if runs := os.environ.get("FAKE_CODEX_RUNS"):
+        with Path(runs).open("a") as file:
+            file.write(" ".join(sys.argv[1:]) + "\n")
     if sys.argv[1:2] != ["app-server"]:
         sys.stdout.write(f"codex-cli {VERSION}\n")
         return

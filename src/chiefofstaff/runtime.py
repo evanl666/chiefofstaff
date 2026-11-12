@@ -278,6 +278,13 @@ class AgentConnection:
     watch: asyncio.Task | None = None
     # Whether the owner has it turned on (Settings → Models): off, none of its workers runs.
     enabled: Callable[[], bool] = lambda: True
+    # It stopped by itself and could not start again: it is tried again with its next worker's
+    # message (Settings says so).
+    offline: bool = False
+
+
+class IneligibleError(RuntimeError):
+    """A worker on another agent may not run now (Runtime.agent_block says why)."""
 
 
 class OpenElsewhereError(RuntimeError):
@@ -347,6 +354,12 @@ def describe_model(model: Any) -> dict:
     }
 
 
+def described(model: Any) -> dict:
+    """One of another agent's models, as describe_model has Copilot's, and whether it is that
+    agent's default."""
+    return describe_model(model) | {"default": bool(getattr(model, "is_default", False))}
+
+
 class Runtime:
     def __init__(
         self,
@@ -382,12 +395,10 @@ class Runtime:
         # Other coding agents' backends, by agent (see backends): those the owner turned on at
         # some point (agents.py); none until then.
         self.agents: dict[str, AgentConnection] = {
-            name: AgentConnection(
-                lambda name=name: agents.backend(name),
-                enabled=lambda name=name: agents.enabled(store, name),
-            )
-            for name in agents.configured(store)
+            name: self.agent_connection(name) for name in agents.configured(store)
         }
+        # Each agent's models, as last listed (Copilot's are in models_cache).
+        self.agent_models_cache: dict[str, tuple[float, list[dict]]] = {}
         # Every turn of another agent's worker begins only once admitted (admit_turn), one at a
         # time; what can make a worker ineligible bumps the generation under this lock first.
         self.admission = asyncio.Lock()
@@ -648,6 +659,11 @@ class Runtime:
             name: entry.backend for name, entry in self.agents.items() if entry.backend
         }
 
+    def agent_connection(self, name: str) -> AgentConnection:
+        return AgentConnection(
+            lambda: agents.backend(name), enabled=lambda: agents.enabled(self.store, name)
+        )
+
     def agent(self, session_id: str) -> str:
         """The agent a session runs on, for its life: Copilot, unless its row names another (an
         `agent:<id>` entry, made with the row)."""
@@ -731,6 +747,7 @@ class Runtime:
             if hasattr(backend, "begins"):
                 backend.begins = self.begins_turn  # type: ignore[attr-defined]
             entry.backend = backend
+            entry.offline = False
             entry.watch = asyncio.ensure_future(self.watch_agent(agent, backend, entry.connections))
             try:
                 await self.end_epochs(agent, backend)
@@ -792,6 +809,7 @@ class Runtime:
                     await self.connect_agent(agent)
                 except Exception as exc:
                     logger.warning("Starting %s again failed.", agent, exc_info=True)
+                    entry.offline = True
                     why = f"Its agent stopped and could not start again: {describe(exc)}"
                     self.fail_working(agent, why, working)
                 return
@@ -854,13 +872,17 @@ class Runtime:
         agent = self.agent(row["id"])
         if agent == COPILOT_AGENT:
             return ""
+        return self.blocked_on(agent, row)
+
+    def blocked_on(self, agent: str, row: dict) -> str:
+        """Why this worker (or one about to be made) may not run on that agent now."""
         name = agents.display(agent)
         if sys.platform == "win32":
             return self.not_on_windows(agent)
         entry = self.agents.get(agent)
-        if entry is None:
+        if entry is None and agent not in agents.NAMES:
             return f"This session runs on {agent}, which is not available."
-        if not entry.enabled():
+        if entry is None or not entry.enabled():
             return self.turned_off(agent)
         if row["role"] != WORKER or self.special(row):
             return f"Only your own workers run on {name}."
@@ -885,6 +907,43 @@ class Runtime:
             if (spent := self.store.agent_spent(row["id"])) >= limit:
                 return f"This worker used its {name} token limit ({spent:,} of {limit:,})."
         return ""
+
+    async def new_worker_agent(self, named: str, slack: bool) -> tuple[str, str]:
+        """The agent a new worker of the owner's runs on, and what its timeline says of it: the
+        one the owner named (refused with why when it cannot run it now: never moved to
+        another), else the one Settings chose for new workers, or Copilot with why when that one
+        cannot run it. One that reads Slack runs on Copilot."""
+        chosen = named or (agents.new_workers(self.store) if self.agents else COPILOT_AGENT)
+        if chosen == COPILOT_AGENT:
+            return chosen, ""
+        if slack and not named:
+            return COPILOT_AGENT, ""  # Not this agent's to run: nothing to say.
+        if chosen not in agents.NAMES:
+            raise ValueError(f"Chief of Staff does not run {chosen!r}.")
+        row = {"id": "", "role": WORKER, "slack": slack, "yolo": "", "closed_at": None}
+        if not (why := self.blocked_on(chosen, row)):
+            try:
+                await self.connect_agent(chosen)
+            except Exception as exc:
+                why = f"{agents.display(chosen)} could not start: {describe(exc)}"
+            else:
+                why = self.blocked_on(chosen, row)  # What its version showed, now known.
+        if not why:
+            return chosen, ""
+        if named:
+            raise ValueError(why)
+        return COPILOT_AGENT, f"Started on Copilot: {why}"
+
+    async def check_agent_model(self, agent: str, model: str):
+        """A model the Router picked for a worker on another agent: one that agent offers."""
+        if not model:
+            return
+        offered = [item["id"] for item in await self.agent_models(agent, start=True)]
+        if model not in offered:
+            raise ValueError(
+                f"Unknown model {model!r} for {agents.display(agent)}. Available: "
+                f"{', '.join(offered) or 'none listed'}"
+            )
 
     async def admit_turn(self, session: Any) -> str:
         """The one door for a turn of another agent's worker (what CoS sends, and the next
@@ -925,19 +984,58 @@ class Runtime:
         key = self.row_id(session.session_id)
         return self.admitted.pop(key, None) == self.admission_generation
 
-    async def stop_ineligible(self):
+    async def stop_ineligible(self) -> list[str]:
         """Something changed (a Settings save): the generation moves first, so no turn admitted
         before can begin, then every other agent's worker that may not run now is stopped with
-        what it left running. Its tasks wait under Needs you, as after any stop."""
+        what it left running. Its tasks wait under Needs you, as after any stop. Returns why
+        each one stopped, by worker."""
         async with self.admission:
             self.admission_generation += 1
         named = self.store.items("agent:")
+        stopped = {}
         for row in self.store.open_sessions():
-            if named.get(row["id"], COPILOT_AGENT) == COPILOT_AGENT or not self.agent_block(row):
+            if named.get(row["id"], COPILOT_AGENT) == COPILOT_AGENT:
+                continue
+            if not (why := self.agent_block(row)):
                 continue
             if row["status"] in {"working", "queued", "starting"} or self.held(row["id"]):
                 with suppress(Exception):
                     await self.workers.interrupt(row["id"], by="Settings")
+                stopped[row["id"]] = why
+        return list(stopped.values())
+
+    async def agents_saved(self, before: dict[str, dict]) -> list[str]:
+        """The owner saved the Coding agents group (Settings → Models): an agent turned on
+        starts with its first worker; one turned off drains (more-agents.md 5.11): its workers
+        stop at once with their commands, its process ends, and with none on the Router's tools
+        and prompt are as without agents. Workers whose model came from the group take the new
+        one with their next turn. Returns why each worker stopped."""
+        after = agents.configured(self.store)
+        was_on = sorted(name for name, entry in before.items() if entry.get("enabled"))
+        now = agents.turned_on(self.store)
+        for name in now:
+            if name not in self.agents:
+                self.agents[name] = self.agent_connection(name)
+        stopped = await self.stop_ineligible()
+        for name in sorted(set(was_on) - set(now)):
+            if self.agents[name].backend:
+                await self.disconnect_agent(name)
+            # Its process is gone, and what it ran with it: its records go, its commands end.
+            self.end_commands(name)
+            self.store.delete(f"agentpids:{name}")
+            self.agents[name].offline = False
+        if was_on != now:
+            await self.refresh(ROUTER)  # Its spawn_worker and prompt name the agents on.
+        retuned = {
+            name
+            for name in now
+            if before.get(name, {}).get("model") != after.get(name, {}).get("model")
+        }
+        for row in self.store.open_sessions(WORKER):
+            if self.agent(row["id"]) in retuned and not self.agent_choice(row["id"]).get("model"):
+                await self.refresh_session(row)
+        self.publish_state()
+        return stopped
 
     # Other agents' usage (more-agents.md 5.8): a ledger of their own (agent_usage), kept per
     # accounting epoch (each process of a session: kv `agentepoch:<session>`), whose totals per
@@ -1289,8 +1387,9 @@ class Runtime:
         if row["role"] != WORKER:
             raise ValueError("Only workers have permission checks to switch.")
         if mode == "off" and not self.on_copilot(session_id):
-            # Ask first, only where its agent's version was shown to ask before every action.
-            backend, _ = self.connection(self.agent(session_id))
+            # Ask first, only where its agent's version was shown to ask before every action
+            # (started to find out).
+            backend = await self.connect_agent(self.agent(session_id))
             if why := getattr(backend, "ask_first_refused", ""):
                 raise ValueError(why)
         row = self.update_session(session_id, yolo=mode)
@@ -1548,6 +1647,12 @@ class Runtime:
         folders, sandbox and the owner (the same for every agent a worker runs on)."""
         settings = self.store.settings()
         prompt = PROMPTS[row["role"]]
+        if (
+            self.agents
+            and row["role"] == WORKER
+            and (agent := self.agent(row["id"])) != COPILOT_AGENT
+        ):
+            prompt = prompts.worker_on(agent, prompt)  # Its few Copilot lines in its words.
         if self.special(row) == "connector":
             prompt = prompts.CONNECTOR  # Not a worker with tasks to report.
         elif self.special(row) == "messenger":
@@ -1568,6 +1673,8 @@ class Runtime:
             )
         if row["role"] == ROUTER and settings.send_to_chief:
             prompt = prompts.with_send_rule(prompt)
+        if row["role"] == ROUTER and (on := self.agents_on()):
+            prompt = prompts.with_agents_rule(prompt, [agents.display(name) for name in on])
         if (profile := self.store.get("profile", "")) and row["role"] != WATCHDOG:
             prompt += f"\n<owner_profile>\n{profile}\n</owner_profile>"
         prompt += self.learning.block(row)
@@ -1585,6 +1692,10 @@ class Runtime:
         sandbox = self.sandbox_policy(row)
         prompt = self.session_prompt(row, sandbox)
         tools = [self.tools[name] for name in self.tool_names(row)]
+        if row["role"] == ROUTER and (on := self.agents_on()):
+            # Its spawn_worker names the agents on (as without them otherwise).
+            spawn = self.toolset.spawn_on(on)
+            tools = [spawn if tool.name == "spawn_worker" else tool for tool in tools]
         options: dict[str, Any] = {
             # Copilot's record of past sessions, which the owner's own sessions can search: for
             # workers that do not read Slack. Sessions that read Slack are not recorded in it,
@@ -1672,6 +1783,9 @@ class Runtime:
             if checkout.get("path") and checkout["path"] != cwd
         ]
         chosen = agents.configured(self.store).get(self.agent(row["id"]), {})
+        chosen = chosen | {
+            key: value for key, value in self.agent_choice(row["id"]).items() if value
+        }
         options: dict[str, Any] = {
             "system_message": {"content": self.session_prompt(row, None)},
             "tools": [self.tools[name] for name in self.tool_names(row)],
@@ -1687,6 +1801,181 @@ class Runtime:
         if effort := chosen.get("effort"):
             options["reasoning_effort"] = effort
         return options
+
+    def agent_choice(self, session_id: str) -> dict:
+        """The model and effort a worker on another agent was given for itself (the Router's
+        or the owner's choice; else its agent's in Settings): kept apart from its row's, which
+        are Copilot's."""
+        try:
+            choice = json.loads(self.store.get(f"agentmodel:{session_id}") or "{}")
+        except ValueError:
+            return {}
+        return choice if isinstance(choice, dict) else {}
+
+    async def agent_models(self, name: str, *, start: bool = False) -> list[dict]:
+        """An agent's models (as available_models has Copilot's): from its process while it
+        runs (`start`: started for this), else as last listed."""
+        cached_at, models = self.agent_models_cache.get(name, (0.0, []))
+        if models and time.monotonic() - cached_at < 600:
+            return models
+        backend, _ = self.connection(name)
+        if backend is None and start:
+            backend = await self.connect_agent(name)
+        if backend is None:
+            return models
+        models = [described(model) for model in await backend.list_models()]
+        self.agent_models_cache[name] = (time.monotonic(), models)
+        return models
+
+    def agent_model_info(self, agent: str, model: str) -> dict | None:
+        """One of an agent's models as last listed (its default for ""), as model_info."""
+        models = self.agent_models_cache.get(agent, (0.0, []))[1]
+        wanted = [m for m in models if (m["id"] == model if model else m["default"])]
+        return wanted[0] if wanted else None
+
+    async def look_for_agents(self) -> dict:
+        """What the Coding agents group in Settings → Models shows, looked for only once the
+        owner opens it: each supported agent found on this computer (or on), with its version
+        and sign-in or why its workers cannot run here, and its models."""
+        settings = self.store.settings()
+        found = [await self.look_for_agent(name) for name in agents.NAMES]
+        return {
+            "agents": [entry for entry in found if entry["found"] or entry["enabled"]],
+            "new_workers": agents.new_workers(self.store),
+            "sandboxed": bool(settings.worker_sandbox and self.sandbox_host),
+        }
+
+    async def look_for_agent(self, name: str) -> dict:
+        chosen = agents.configured(self.store).get(name, {})
+        entry: dict[str, Any] = {
+            "name": name,
+            "label": agents.display(name),
+            "enabled": bool(chosen.get("enabled")),
+            "model": chosen.get("model") or "",
+            "limit": agents.limit(self.store, name),
+            "found": True,
+            "state": "",
+            "problem": "",
+            "models": [],
+        }
+        if sys.platform == "win32":  # Said without looking for it.
+            entry["problem"] = self.not_on_windows(name)
+            return entry
+        if not shutil.which(agents.command(name)):
+            entry["found"] = False
+            entry["problem"] = f"Not found on this computer: install {agents.INSTALL[name]}."
+            return entry
+        connection = self.agents.get(name)
+        try:
+            if connection and connection.backend:
+                facts = await connection.backend.about()  # type: ignore[attr-defined]
+            else:
+                facts = await agents.look(name)
+        except Exception as exc:
+            entry["problem"] = describe(exc)
+            return entry
+        models = [described(model) for model in facts["models"]]
+        self.agent_models_cache[name] = (time.monotonic(), models)
+        try:
+            checked = json.loads(self.store.get(f"agentcheck:{name}:{facts['version']}") or "{}")
+        except ValueError:
+            checked = {}
+        signed = agents.SIGNED_IN.get(facts["account"], "signed in")
+        entry |= {"version": facts["version"], "models": models}
+        if isinstance(checked, dict) and checked.get("acting"):
+            entry["problem"] = checked["acting"]
+        elif connection and connection.offline:
+            entry["problem"] = "Stopped unexpectedly; starts again with its next worker's message."
+        else:
+            entry["state"] = f"{facts['version']} · {signed}"
+        return entry
+
+    def check_agents(self, plan: dict | None, settings: Settings):
+        """A Settings save as it leaves the agents (`plan`: the Coding agents group saved, or
+        None): one turned on must be able to run here (not on Windows, nor while workers are
+        sandboxed, nor while its own folder is in Also writable in the sandbox); while one is
+        on, its folder stays out of that list. Turning one off is never refused."""
+        before = agents.turned_on(self.store)
+        after = (
+            before
+            if plan is None
+            else [n for n in agents.NAMES if (plan.get(n) or {}).get("enabled")]
+        )
+        home = Path.home().resolve()
+        for name in after:
+            label, fresh = agents.display(name), name not in before
+            if fresh and sys.platform == "win32":
+                raise ValueError(f"Use {label} for workers: {self.not_on_windows(name)}")
+            if fresh and settings.worker_sandbox and self.sandbox_host:
+                raise ValueError(
+                    f"Use {label} for workers: other agents can't run while workers are "
+                    "sandboxed: their sandboxes have not passed Chief of Staff's checks yet."
+                )
+            for own in agents.folders(name, home):
+                for folder in map(Path, settings.sandbox_writable):
+                    if not (own.is_relative_to(folder) or folder.is_relative_to(own)):
+                        continue
+                    if fresh:
+                        raise ValueError(
+                            f"Use {label} for workers: first take {folder} out of Also writable "
+                            f"in the sandbox: it holds {label}'s settings and hooks."
+                        )
+                    raise ValueError(
+                        f"Also writable in the sandbox: the sandbox cannot open {folder}: it "
+                        "holds keys or settings."
+                    )
+
+    async def check_agent_models(self, plan: dict):
+        """A model newly named for an agent must be one it offers (as check_models does for
+        Copilot's), where its models are known."""
+        for name in agents.NAMES:
+            model = (plan.get(name) or {}).get("model") or ""
+            if not model or model == agents.configured(self.store).get(name, {}).get("model"):
+                continue
+            try:
+                offered = [item["id"] for item in await self.agent_models(name)]
+            except Exception:
+                offered = []  # Unchecked while they cannot be listed.
+            if offered and model not in offered:
+                raise ValueError(
+                    f"Model: {agents.display(name)} offers no model {model!r}. Available: "
+                    f"{', '.join(offered)}."
+                )
+
+    def agents_on(self) -> list[str]:
+        """The other coding agents on now (none, at no cost, when none was ever on)."""
+        return agents.turned_on(self.store) if self.agents else []
+
+    def agents_view(self) -> dict:
+        """What the page knows of the agents on (in the snapshot only while one is)."""
+        on = agents.turned_on(self.store)
+        return {
+            "on": on,
+            "names": {name: agents.display(name) for name in on},
+            "new_workers": agents.new_workers(self.store),
+        }
+
+    def agent_view(self, row: dict, agent: str) -> dict:
+        """What a worker's view says of the agent it runs on, when that is not Copilot: its
+        model there, its tokens (no credits), what it does differently and why it cannot ask
+        first, where that applies."""
+        own = self.agent_choice(row["id"])
+        backend, _ = self.connection(agent)
+        running = getattr(self.states.handle(row["id"]), "current_model", "")
+        chosen = agents.configured(self.store).get(agent, {})
+        return {
+            "agent": agent,
+            "agent_name": agents.display(agent),
+            "model": own.get("model") or running or chosen.get("model") or "",
+            "model_choice": own.get("model") or "",
+            "effort": own.get("effort") or "",
+            "effort_choice": own.get("effort") or "",
+            "context": "",
+            "credits": 0,
+            "tokens": self.store.agent_spent(row["id"]),
+            "agent_notes": list(getattr(backend, "notes", ())),
+            "ask_first_refused": getattr(backend, "ask_first_refused", "") if backend else "",
+        }
 
     def chosen_model(self, row: dict) -> str:
         """The model chosen for the session: its own, its role's, or the default ("" for
@@ -1938,6 +2227,8 @@ class Runtime:
     async def set_session_model(
         self, session_id: str, model: str, effort: str = "", context: str = ""
     ) -> dict:
+        if self.agents and not self.on_copilot(session_id):
+            return await self.set_agent_model(session_id, model, effort, context)
         await self.check_model(model)
         row = self.store.session(session_id)
         info = self.model_info(self.effective_model({**row, "model": model}))
@@ -1952,6 +2243,30 @@ class Runtime:
         self.unrefuse(model)
         await self.apply_model(row)
         return self.view(row)
+
+    async def set_agent_model(self, session_id: str, model: str, effort: str, context: str) -> dict:
+        """A worker on another agent: its model and effort there, from its next turn (kept apart
+        from its row's, which are Copilot's; none of Copilot's model state changes)."""
+        agent = self.agent(session_id)
+        if context:
+            raise ValueError("That model has no long-context option.")
+        await self.check_agent_model(agent, model)
+        configured = agents.configured(self.store).get(agent, {}).get("model") or ""
+        info = self.agent_model_info(agent, model or configured)
+        if effort and effort not in (info["efforts"] if info else []):
+            supported = ", ".join(info["efforts"]) if info and info["efforts"] else "none"
+            raise ValueError(f"That model's thinking efforts: {supported}.")
+        if model or effort:
+            self.store.set(
+                f"agentmodel:{session_id}", json.dumps({"model": model, "effort": effort})
+            )
+        else:
+            self.store.delete(f"agentmodel:{session_id}")
+        if session := self.states.handle(session_id):
+            # Back to the default: its agent's model in Settings, else that agent's own.
+            fallback = model or configured or (self.agent_model_info(agent, "") or {}).get("id", "")
+            await session.set_model(fallback, reasoning_effort=effort or None)
+        return self.view(self.store.session(session_id))
 
     def unrefuse(self, *models: str):
         """Models the owner chose again since Copilot refused them are tried again."""
@@ -2902,7 +3217,35 @@ class Runtime:
         for item in found["by_session"]:
             if item.get("role") == WORKER and (row := self.store.find_session(item["session_id"])):
                 item["title"] = self.display_title(row)
+        if self.agents and (parts := self.agent_usage_parts(since, until)):
+            found["agents"] = parts  # Only where another agent has rows in the range.
         return found
+
+    def agent_usage_parts(self, since: float, until: float) -> list[dict]:
+        """The Usage view's part for each other agent with rows in a range: its models' tokens
+        (a range as a range) and each interval whose spend is unknown."""
+        parts: dict[str, dict] = {}
+        for row in self.store.agent_usage_in(since, until):
+            part = parts.setdefault(
+                row["agent"],
+                {
+                    "agent": row["agent"],
+                    "name": agents.display(row["agent"]),
+                    "models": [],
+                    "unknown": [],
+                },
+            )
+            if row.get("unknown"):
+                found = self.store.find_session(row["session_id"])
+                title = self.display_title(found) if found else row["title"] or ""
+                part["unknown"].append(
+                    {"session_id": row["session_id"], "title": title, "at": row["at"]}
+                )
+            else:
+                part["models"].append(
+                    {key: row[key] for key in ("model", "updates", "tokens", "least")}
+                )
+        return list(parts.values())
 
     def told_prompt(self, message: dict) -> str:
         """What the owner told a worker directly, as the Router hears of it: with what the
@@ -3383,6 +3726,9 @@ class Runtime:
             try:
                 # Also when live here: the owner may have opened it in a terminal since.
                 await self.refuse_if_open_elsewhere(self.store.session(session_id), False)
+                if self.agents and (why := self.agent_block(self.store.session(session_id))):
+                    # Its agent may not run it now (turned off, say): it gets this once it may.
+                    raise IneligibleError(why)
                 await self.delivery.deliver(
                     session_id, held["prompt"], batch=True, kind="inbound",
                     display=held["display"], meta=held["meta"],
@@ -3393,6 +3739,10 @@ class Runtime:
                 news = json.loads(self.store.get(f"heldnews:{session_id}") or "[]")
                 self.store.set(f"heldnews:{session_id}", json.dumps([*news, held][-20:]))
                 delivered.append(f"{title} (held: open in a terminal)")
+            except IneligibleError:
+                news = json.loads(self.store.get(f"heldnews:{session_id}") or "[]")
+                self.store.set(f"heldnews:{session_id}", json.dumps([*news, held][-20:]))
+                delivered.append(f"{title} (held: its agent cannot run it now)")
             except Exception:
                 # A follower that cannot take messages stops following; others still get them.
                 logger.warning("Could not deliver a thread follow-up.", exc_info=True)
@@ -3516,6 +3866,12 @@ class Runtime:
             "elsewhere": self.copilot_id(row["id"]) in self.elsewhere and not row["closed_at"],
             "terminal": self.terminal.get(row["id"]),
             **(self.progress(row) if row["role"] == WORKER else {}),
+            # Only for a worker on another agent (none without agents).
+            **(
+                self.agent_view(row, agent)
+                if self.agents and (agent := self.agent(row["id"])) != COPILOT_AGENT
+                else {}
+            ),
         }
 
     async def read_file(self, raw: str, session_id: str = "") -> dict:
@@ -3899,6 +4255,8 @@ class Runtime:
                 for task in self.tasks.listed(include_ended_since=hours_ago(TASKS_SHOWN_HOURS))
             ],
             "settings": self.store.settings().model_dump(),
+            # Only while another coding agent is on: Settings → Models shows its group.
+            **({"agents": self.agents_view()} if self.agents_on() else {}),
             # Configured projects and the code folder's repositories (where a habit applies).
             "projects": self.workspaces.projects(),
             # Configured projects whose folder is gone: Settings says so.
@@ -3929,7 +4287,9 @@ class Runtime:
             },
         }
 
-    async def settings_changed(self, old: Settings, new: Settings):
+    async def settings_changed(self, old: Settings, new: Settings) -> list[str]:
+        """Returns why each worker it stopped stopped (another agent's, made ineligible)."""
+        stopped: list[str] = []
         if old.other_sessions != new.other_sessions:
             # First, before anything awaits: once the save returns, nothing more is told.
             self.others.switch(new.other_sessions)
@@ -3940,7 +4300,7 @@ class Runtime:
             await self.refresh(ROUTER)
         if self.agents and old.worker_sandbox != new.worker_sandbox:
             # Other agents' workers do not run sandboxed: stopped at once, with their commands.
-            await self.stop_ineligible()
+            stopped = await self.stop_ineligible()
         defaults = ("model", "role_models", "role_efforts")
         if any(getattr(old, key) != getattr(new, key) for key in defaults):
             # Models and efforts chosen now are tried, even where Copilot refused one before.
@@ -3959,7 +4319,8 @@ class Runtime:
         if self.ready() and any(getattr(old, key) != getattr(new, key) for key in defaults):
             for session_id in self.states.live_ids():
                 row = self.store.find_session(session_id)
-                if row and not (row["model"] and row["effort"]):
+                # Copilot's models: not for a worker on another agent (its own, in its group).
+                if row and not (row["model"] and row["effort"]) and self.on_copilot(row["id"]):
                     with suppress(Exception):
                         await self.apply_model(row)
         changed = (
@@ -3981,3 +4342,4 @@ class Runtime:
             self.background(self.habits.catch_up())
         self.background(self.workers.pump())
         self.publish_state()
+        return stopped

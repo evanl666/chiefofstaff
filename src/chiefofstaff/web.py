@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from . import agents
 from .bus import Bus
 from .models import (
     ArtifactHide,
@@ -134,6 +135,17 @@ async def check_models(runtime: Runtime, old: Settings, new: Settings):
         if offered and model not in offered
     ]:
         raise RequestValidationError(problems)
+
+
+def stopped_text(reasons: list[str]) -> str:
+    """What a Settings save that stopped workers on other agents says (their tasks wait under
+    Needs you, as after any stop)."""
+    many = len(reasons) > 1
+    why = " ".join(dict.fromkeys(reasons))
+    return (
+        f"Stopped {len(reasons)} worker{'s' if many else ''}: {why} Tell "
+        f"{'them' if many else 'it'} to go on from Needs you once that changes."
+    )
 
 
 def create_app(
@@ -319,8 +331,17 @@ def create_app(
         )
 
     @app.get("/api/models")
-    async def models():
+    async def models(agent: str = ""):
+        if agent:  # A worker's agent, not Copilot (its ⋯ menu).
+            if agent not in agents.NAMES or not agents.enabled(store, agent):
+                raise LookupError(f"No coding agent {agent!r} is on.")
+            return await runtime.agent_models(agent, start=True)
         return await runtime.available_models()
+
+    # The Coding agents group in Settings → Models, once the owner opens it: never before.
+    @app.get("/api/agents")
+    async def coding_agents():
+        return await runtime.look_for_agents()
 
     @app.get("/api/usage")
     async def usage(since: float, until: float | None = None):
@@ -624,6 +645,8 @@ def create_app(
         as the page showed them when the owner began: one changed since (in another tab) stays
         as it is now unless the owner changed it here too, which is refused, not overwritten."""
         base = changes.pop("base", None)
+        # The Coding agents group, sent only once the owner opened it: not a setting.
+        agents_change = changes.pop("agents", None)
         async with settings_lock:
             old = store.settings()
             saved = old.model_dump(mode="json")
@@ -657,9 +680,22 @@ def create_app(
                     )
             await asyncio.to_thread(runtime.workspaces.check_scratch, settings)
             await check_models(runtime, old, settings)
+            plan = None if agents_change is None else agents.planned(store, agents_change)
+            if runtime.agents or plan is not None:
+                runtime.check_agents(plan, settings)
+            if plan is not None:
+                await runtime.check_agent_models(plan)
             store.save_settings(settings)
-        await runtime.settings_changed(old, settings)
-        return runtime.snapshot()
+            before = agents.configured(store)
+            changed = plan is not None and agents.save(store, plan)
+        stopped = await runtime.settings_changed(old, settings)
+        if changed:
+            stopped += await runtime.agents_saved(before)
+        snapshot = runtime.snapshot()
+        if stopped:
+            # One toast says how many it stopped, and why.
+            snapshot["stopped"] = stopped_text(stopped)
+        return snapshot
 
     @app.post("/api/slack/token")
     async def save_slack_token(payload: SlackToken):
