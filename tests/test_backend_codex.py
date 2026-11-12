@@ -2640,6 +2640,40 @@ async def test_a_process_that_ends_before_its_turn_said_any_usage_leaves_it_unkn
         await runtime.stop()
 
 
+async def test_a_restart_mid_turn_with_a_limit_waits_for_go_on_not_failed(tmp_path, monkeypatch):
+    """Live: Chief of Staff stopped (cleanly) while a worker with a token limit was mid-turn,
+    so what it spent then is not known. At its next start the worker is stopped as after a
+    crash, its task under Needs you for Go on; not failed by its resume being refused."""
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    agents.configure(harness.store, "codex", limit=1_000_000)
+    worker = await spawn(runtime, harness, "Wait 20 s. Then reply with just: first")
+    await until(lambda: (s := runtime.states.handle(worker)) and s.turn, 30)
+    await runtime.stop()
+    assert harness.store.agent_unknown(worker), "what it spent then is not known"
+    command = str(tmp_path / "fake" / "codex")
+    harness = Harness(tmp_path / "data")
+    runtime = await harness.connect()
+    runtime.agents["codex"] = AgentConnection(
+        lambda: CodexAgent(command), enabled=lambda: agents.enabled(harness.store, "codex")
+    )
+    try:
+        await runtime.recover_agents()
+        task = runtime.tasks.for_session(worker)[-1]
+        await until(lambda: runtime.tasks.get(task["id"])["status"] == "waiting", 30)
+        assert harness.store.session(worker)["status"] == "idle", "stopped, not failed"
+        view = runtime.task_actions.view(runtime.tasks.get(task["id"]))
+        assert view["spend_stop"] == "unknown" and view["go_on"]
+        before = len(harness.kinds(worker))
+        await runtime.task_actions.follow_up(task["id"], "Go on where you stopped.")
+        await until(lambda: not harness.store.agent_unknown(worker), 30)  # Accepted.
+        # Its turn ran (the stand-in says nothing to "Go on": it is asked for its report).
+        await until(lambda: "report" in [k for k, _ in harness.kinds(worker)[before:]], 30)
+        assert "error" not in [k for k, _ in harness.kinds(worker)[before:]]
+        assert harness.store.session(worker)["status"] != "failed"
+    finally:
+        await runtime.stop()
+
+
 @pytest.mark.parametrize("fails", ["begins", "start"])
 async def test_a_turn_admitted_that_never_began_spends_nothing(tmp_path, monkeypatch, fails):
     """Admitted, its turn did not begin (a change came first, or Codex refused it): nothing of

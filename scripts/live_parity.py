@@ -5,7 +5,11 @@ It compares what each can do (plugins, MCP servers, skills, agents, the owner's 
 answers they give, and how long they take. Uses a temporary Copilot home holding a copy of
 your sign-in plus a test plugin, MCP servers, skills and agents; nothing of yours is changed.
 
-    uv run python scripts/live_parity.py
+    uv run python scripts/live_parity.py [--agent codex]
+
+With `--agent codex`, the workers are on Codex (turned on in Settings) and the standalone runs
+are the owner's own Codex (`codex exec`, full access, not kept), each with the owner's own
+Codex configuration; the Router stays on Copilot. PARITY_PORT sets its port.
 """
 
 import asyncio
@@ -28,8 +32,12 @@ import live_e2e
 from live_e2e import App, git, log, wait_for
 
 # Its own port, so it can run next to the live end-to-end test.
-live_e2e.PORT = 18767
+live_e2e.PORT = int(os.environ.get("PARITY_PORT", "18767"))
+live_e2e.SLACK_PORT = live_e2e.PORT + 50
 live_e2e.BASE = f"http://127.0.0.1:{live_e2e.PORT}"
+# The agent workers (and the standalone runs) are on: copilot, or codex (--agent codex).
+AGENT = sys.argv[sys.argv.index("--agent") + 1] if "--agent" in sys.argv else "copilot"
+CODEX = shutil.which("codex") or "codex"
 
 MODEL = os.environ.get("PARITY_MODEL", "claude-sonnet-5.5")
 COPILOT = shutil.which("copilot") or "copilot"
@@ -374,6 +382,24 @@ async def standalone_run(name: str, task: str, home: Path, project: Path, root: 
     checkout = root / "standalone" / name
     git(project, "worktree", "add", "-q", "-b", f"standalone-{name}", str(checkout))
     started = time.monotonic()
+    if AGENT == "codex":
+        answer = root / "standalone" / f"{name}.answer"
+        process = await asyncio.create_subprocess_exec(
+            CODEX, "exec", "--dangerously-bypass-approvals-and-sandbox", "--ephemeral",
+            "-C", str(checkout), "-o", str(answer), task,
+            stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )  # fmt: skip
+        stdout, stderr = await asyncio.wait_for(process.communicate(), 1500)
+        seconds = time.monotonic() - started
+        log(f"standalone {name}: {seconds:.0f}s")
+        said = answer.read_text().strip() if answer.exists() else ""
+        return {
+            "seconds": seconds,
+            "answer": said or stderr.decode().strip()[-3000:],
+            "cwd": checkout,
+            "timeline": ["(standalone Codex: no timeline)"],
+        }
     process = await asyncio.create_subprocess_exec(
         COPILOT, "-p", task, "--model", MODEL, "--allow-all-tools", "-s",
         cwd=checkout, env={**os.environ, "COPILOT_HOME": str(home)},
@@ -464,6 +490,8 @@ async def worker_run(app: App, router: str, name: str, task: str, project: Path)
     ]
     branched = [c["path"] for c in row.get("checkouts") or [] if c.get("branch")]
     changed_in = branched[-1] if branched else row["cwd"]
+    on = row.get("agent") or "copilot"
+    assert on == AGENT, f"{name}: the worker is on {on}, not {AGENT}"
     log(f"worker {name}: {seconds:.0f}s (started after {spawned_after:.0f}s) [{found['status']}]")
     return {
         "seconds": seconds,
@@ -505,6 +533,12 @@ async def run(number: int) -> list[str]:
                 {"projects": [str(project)], "model": MODEL, "max_workers": 5,
                  "mac_notifications": False, "digest_time": ""},
             )  # fmt: skip
+            if AGENT == "codex":
+                current = (await app.get("/api/state"))["settings"]
+                codex = {"codex": {"enabled": True, "model": "", "limit": 0}}
+                await app.post(
+                    "/api/settings", {**current, "agents": {**codex, "new_workers": "codex"}}
+                )
             standalone = {
                 name: asyncio.create_task(standalone_run(name, task, home, project, root))
                 for name, task in TASKS.items()
@@ -513,7 +547,7 @@ async def run(number: int) -> list[str]:
             for name, task in TASKS.items():
                 workers[name] = await worker_run(app, router, name, task, project)
             done = {name: await job for name, job in standalone.items()}
-            print(f"\n================ PARITY REPORT, run {number} ================")
+            print(f"\n================ PARITY REPORT, run {number} ({AGENT}) ================")
             print(f"model {MODEL}; truth for the analysis: {json.dumps(truth)}")
             for name in TASKS:
                 one, other = done[name], workers[name]

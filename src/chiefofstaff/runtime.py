@@ -1316,7 +1316,9 @@ class Runtime:
     async def end_epochs(self, agent: str, backend: Any):
         """It started afresh: each of its sessions' epochs in a process that no longer runs
         ended (as end_epoch; also one stamped before its process said anything); a worker with
-        a limit whose spend is then unknown is stopped until the owner accepts that."""
+        a limit whose spend is then unknown is stopped until the owner accepts that. So is one
+        still at work whose epoch ended as Chief of Staff stopped (its turn cut short then):
+        resumed, its turn would be refused (agent_block) and the worker failed."""
         if hasattr(backend, "epochs"):
             live: set[str] = set(backend.epochs())
         else:
@@ -1325,10 +1327,12 @@ class Runtime:
             epoch = self.epoch_of(session_id)
             if epoch.get("process") in live:
                 continue
-            if self.end_epoch(session_id, epoch.get("process", "")):
-                row = self.store.find_session(session_id)
-                if row and agents.limit(self.store, agent) and not row["closed_at"]:
-                    await self.stop_for_spend(row)
+            ended = self.end_epoch(session_id, epoch.get("process", ""))
+            row = self.store.find_session(session_id)
+            if not row or row["closed_at"] or not agents.limit(self.store, agent):
+                continue
+            if ended or self.store.agent_unknown(session_id):
+                await self.stop_for_spend(row)
 
     async def stop_for_spend(self, row: dict):
         """A worker past what its limit lets it spend stops, as after any stop; its timeline
