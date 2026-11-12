@@ -364,8 +364,12 @@ async def scenario_slack(app: App, workspace: Workspace):
     assert len(sends) == 1, "only the approved send may reach Slack"
 
     async def told_about_edit():
-        messages = await app.get(f"/api/sessions/{slack['id']}/messages")
-        return any("edited draft" in m["text"] for m in messages)
+        # What it was told (the prompt); its timeline shows "Sent with your edits: …".
+        messages = await app.get(f"/api/sessions/{slack['id']}/messages?prompts=true")
+        return any(
+            "edited draft" in (m["meta"].get("prompt") or "") and "with your edits" in m["text"]
+            for m in messages
+        )
 
     await wait_for("Slack session told about the edit", told_about_edit, 30)
     await asyncio.sleep(45)
@@ -448,7 +452,7 @@ async def scenario_thread(app: App, workspace: Workspace):
     assert len(router_slack_events(router_messages)) == before, "the Router was not involved"
     new_router = router_messages[router_sent_before:]
     assert any(
-        m["kind"] == "notice" and m["text"].startswith("Slack thread in C0DEPLOYS")
+        m["kind"] == "notice" and m["text"].startswith("Slack thread in #deploys")
         for m in new_router
     ), new_router
     assert not [m for m in new_router if m["kind"] == "assistant"], "no Router turn"
@@ -570,12 +574,13 @@ async def scenario_dependencies(app: App, project: Path):
 
     async def both_done():
         messages = (await app.get(f"/api/sessions/{router}/messages"))[before:]
+        # A task that waits for another is announced as "Queued “…” · after “…”".
         started = [
             m["meta"]["session_id"]
             for m in messages
-            if m["kind"] == "notice" and m["text"].startswith("Started")
+            if m["kind"] == "notice" and m["text"].startswith(("Started", "Queued"))
         ]
-        workers = [await app.get(f"/api/sessions/{sid}") for sid in started]
+        workers = [await app.get(f"/api/sessions/{sid}") for sid in dict.fromkeys(started)]
         if len(workers) >= 2 and all(w["status"] == "done" for w in workers[:2]):
             return workers[:2]
         if len(workers) == 1 and workers[0]["status"] == "done":
@@ -937,8 +942,9 @@ async def scenario_company_review(app: App):
         env=env, capture_output=True, text=True, check=True,
     ).stdout  # fmt: skip
     published = [json.loads(line) for line in listed.splitlines() if line.strip()]
+    # Each comment Chief of Staff posts ends with its mark (sources/github.py, POSTED_MARK).
     mine = {
-        (c["path"], c["line"], c["body"])
+        (c["path"], c["line"], c["body"].removesuffix("\n\n<!-- chief-of-staff -->"))
         for c in published
         if c["pull_request_review_id"] == review
     }
@@ -1087,7 +1093,10 @@ async def scenario_owner_flow(app: App, root: Path):
     await asyncio.sleep(25)
     await app.post(f"/api/sessions/{slow['id']}/messages", {"text": "progress?"})
     timeline = await app.get(f"/api/sessions/{slow['id']}/messages")
-    assert timeline[-1]["text"].startswith("It reads this when its current step ends"), timeline[-1]
+    # It steers: the message reaches it within the step (0.1.29); else it waits for the step's end.
+    assert timeline[-1]["text"].startswith(
+        ("It reads this now", "It reads this when its current step ends")
+    ), timeline[-1]
     log(f"a message to the busy worker says so at once: {timeline[-1]['text'][:160]!r}")
     mark = await router_mark(app, router)
     asked = time.monotonic()
@@ -1150,6 +1159,7 @@ async def scenario_owner_flow(app: App, root: Path):
     try:
         line = await asyncio.wait_for(asyncio.to_thread(helper.stdout.readline), 200)
         assert line.startswith("READY"), line
+        await asyncio.sleep(16)  # The list of the owner's sessions is kept for 15 s.
         mark = await router_mark(app, router)
         await app.post(
             f"/api/sessions/{router}/messages",

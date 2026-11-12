@@ -79,7 +79,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .backend import OWN_CLIENTS, SESSION_ID, made_by_us
+from .backend import OWN_CLIENTS, SESSION_ID, made_by_a_program, made_by_us
 from .events import PLUMBING_TOOLS, describe_tool
 from .workers import own_event
 
@@ -937,10 +937,11 @@ class Row:
 
 
 def whose(meta: Any, managed: set[str]) -> str:
-    """Section 4.2: whose a listed session is, the first rule that matches. ours and remote are
-    left out; unlisted (the raw answer was not read), unknown (no maker named) and another (made
-    by another client and last run by a Chief of Staff) are listed without a status; owner: the
-    owner's own, with one."""
+    """Section 4.2: whose a listed session is, the first rule that matches. ours, remote and
+    program (a script's through Copilot's SDK, see made_by_a_program) are left out (LEFT_OUT);
+    unlisted (the raw answer was not read), unknown (no maker named) and another (made by another
+    client and last run by a Chief of Staff) are listed without a status; owner: the owner's own,
+    with one."""
     if meta.session_id in managed:
         return "ours"
     if getattr(meta, "is_remote", False):
@@ -955,9 +956,17 @@ def whose(meta: Any, managed: set[str]) -> str:
         {"clientName": made, "lastClientName": last}
     ):
         return "ours"
+    if getattr(meta, "made_by_program", False) or made_by_a_program(
+        {"clientName": made, "lastClientName": last}
+    ):
+        return "program"
     if last in OWN_CLIENTS:
         return "another"
     return "owner"
+
+
+# Whose sessions are not listed at all (see whose).
+LEFT_OUT = frozenset({"ours", "remote", "program"})
 
 
 def item_of(meta: Any) -> dict:
@@ -1286,7 +1295,7 @@ class Others:
         found = []
         for meta in self.listing:
             owner = whose(meta, self.managed)
-            if owner in {"ours", "remote"}:
+            if owner in LEFT_OUT:
                 continue
             modified = getattr(meta, "modified_time", None)
             changed = modified.timestamp() if isinstance(modified, datetime) else 0.0
@@ -1393,7 +1402,7 @@ class Others:
             await self.list_sessions()
         meta = next((m for m in self.listing or [] if m.session_id == session_id), None)
         owner = whose(meta, self.managed) if meta else "ours"
-        if meta is None or owner in {"ours", "remote"}:
+        if meta is None or owner in LEFT_OUT:
             raise LookupError("Session not found.")
         found = "closed" if owner == "owner" else owner
         is_open = session_id in self.runtime.elsewhere

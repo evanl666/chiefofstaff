@@ -17,7 +17,7 @@ import re
 import time
 from contextlib import suppress
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
@@ -473,10 +473,12 @@ class Habits:
         return added
 
     async def collect_sessions(self) -> int:
-        """What the owner asked their own Copilot sessions (not Chief of Staff's)."""
+        """What the owner asked their own Copilot sessions (not Chief of Staff's, nor a
+        program's)."""
         backend = self.runtime.backend
         if not backend:
             return 0
+        await self.forget_programs(backend)
         added = 0
         for item in await self.runtime.workers.external(refresh=True):
             with suppress(ValueError):
@@ -501,6 +503,22 @@ class Habits:
                 offset = after
                 self.store.set(key, str(offset))
         return added
+
+    async def forget_programs(self, backend: Any) -> None:
+        """What was read from a program's sessions (see backend.made_by_a_program) as the owner's
+        instructions, and not learned from yet, is dropped: before 0.1.40 they were listed as the
+        owner's, and the fallback listing cannot tell them apart. From a listing that can."""
+        listed = await backend.list_sessions()
+        if not all(getattr(meta, "clients_listed", False) for meta in listed):
+            return  # Not known whose they are: looked at again next time.
+        for meta in listed:
+            if getattr(meta, "made_by_program", False):
+                prefix = f"copilot:{meta.session_id}:"
+                self.store.execute(
+                    "DELETE FROM observations WHERE learned=0 AND source='copilot' "
+                    "AND substr(ref, 1, ?)=?",
+                    (len(prefix), prefix),
+                )
 
     # What the learning worker reads
 

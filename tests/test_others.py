@@ -985,6 +985,10 @@ def listed(
         ("chiefofstaff", "", "ours"),
         ("work-buddy", "chiefofstaff", "ours"),
         ("", "github/cli", "unknown"),
+        ("sdk", "", "program"),  # A script's, through Copilot's SDK (a batch job's).
+        ("sdk", "sdk", "program"),
+        ("sdk", "github/cli", "owner"),  # Continued in a terminal.
+        ("sdk", "chiefofstaff", "another"),
     ],
 )
 def test_whose_session_it_is(made, last, expected):
@@ -998,6 +1002,9 @@ def test_what_is_ours_here_or_not_known_is_never_the_owners():
     flagged = listed("s", "github/cli", "github/cli")
     flagged.made_by_us = True
     assert whose(flagged, set()) == "ours"
+    flagged = listed("s", "github/cli", "github/cli")
+    flagged.made_by_program = True
+    assert whose(flagged, set()) == "program"
 
 
 def test_a_session_changing_hands_changes_whose_it_is():
@@ -1228,6 +1235,23 @@ async def test_sessions_of_this_chief_of_staff_are_never_listed(index):
     index.harness.store.set(f"copilot:{router}", fresh.id)
     await index.step()
     assert index.others.view()["rows"] == []
+
+
+async def test_sessions_a_program_made_are_never_listed(index):
+    """QA on 0.1.38: a script labelling data through Copilot's SDK made a session per item, and
+    the sidebar listed over a hundred of them as the owner's. One the owner continued in a
+    terminal is theirs."""
+    batch = [index.terminal(made="sdk", last="sdk", open_=False) for _ in range(3)]
+    continued = index.terminal(made="sdk", last="github/cli", open_=False)
+    for term in [*batch, continued]:
+        term.prompt()
+        term.answer()
+        term.exit()
+    await index.step()
+    assert [row["id"] for row in index.others.view()["rows"]] == [continued.id]
+    assert set(index.others.logs) == {continued.id}, "nothing read for the others"
+    with pytest.raises(LookupError):
+        await index.others.find(batch[0].id)
 
 
 async def test_a_session_continued_here_leaves_the_rows_at_the_next_pass(index, monkeypatch):
