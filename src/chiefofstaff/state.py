@@ -1,8 +1,8 @@
 """What the runtime knows about each session beyond the database.
 
 The database keeps what must survive a restart: status, messages and the delivery marks. This
-module keeps what belongs to the running process: the Copilot connection, the turn in progress
-and what to do when it ends. It is lost on restart by design.
+module keeps what belongs to the running process: the connection to the session's backend, the
+turn in progress and what to do when it ends. It is lost on restart by design.
 
 Everything runs on one asyncio loop, yet coroutines interleave at every await, so state that is
 read, awaited on and then written needs a lock. When more than one is needed they are taken in
@@ -16,6 +16,7 @@ this order, and none is held while waiting for the owner:
 """
 
 import asyncio
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -147,15 +148,20 @@ class SessionStates:
         handle, state.handle = state.handle, None
         return handle
 
+    def ids(self) -> list[str]:
+        return list(self._states)
+
     def live_ids(self) -> list[str]:
         return [key for key, state in self._states.items() if state.handle is not None]
 
-    def take_all_handles(self) -> list[Any]:
-        return [handle for key in self.live_ids() if (handle := self.take_handle(key))]
+    def take_handles(self, session_ids: Iterable[str]) -> list[Any]:
+        """These sessions' live handles, now detached from their states."""
+        return [handle for key in session_ids if (handle := self.take_handle(key))]
 
-    def end_turns(self):
-        """Every session is disconnected: no turn is running, none holds a worker slot."""
-        for state in self._states.values():
+    def end_turns(self, session_ids: Iterable[str]):
+        """These sessions are disconnected (their backend's connection ended): no turn of theirs
+        is running, none holds a worker slot."""
+        for state in (self._states[key] for key in session_ids if key in self._states):
             state.busy = False
             state.retuned = False
             state.stale = False

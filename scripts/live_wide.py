@@ -4062,8 +4062,12 @@ async def n2_quoted_names_and_a_search_that_finds_nothing(ctx: Ctx):
 async def n3_a_removed_worktree_is_back(ctx: Ctx):
     """Bug bash 4: a worker's worktree deleted under it stayed gone until Close and Reopen."""
     task = ctx.notes["quote"]
-    row = await session(ctx, task["session_id"])
-    tree = Path(row["cwd"])
+    # Its own worktree, from its diff: the Router may have given the task to a worker that works
+    # in the owner's folder (its cwd), which must never be deleted.
+    diff = await ctx.app.get(f"/api/tasks/{task['id']}/diff")
+    trees = [Path(found["path"]) for found in diff if "/work/workspaces/" in found["path"]]
+    assert len(trees) == 1, [found["path"] for found in diff]
+    tree = trees[0]
     assert tree.exists(), tree
     shutil.rmtree(tree)
     mark = max(m["id"] for m in await messages(ctx, task["session_id"]))

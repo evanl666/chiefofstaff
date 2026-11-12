@@ -251,7 +251,9 @@ class Events:
             return
         execution = getattr(data, "shell_execution", None)
         code = getattr(execution, "exit_code", None)
-        if code is None:
+        if code is None and self.runtime.on_copilot(session_id):
+            # From what Copilot's shell tool printed, else from its success. Another agent's
+            # command without one has none: unknown stays unknown.
             code = receipts.exit_code(output, getattr(data, "success", None))
         self.settle_command(session_id, ran, code, output)
 
@@ -718,11 +720,13 @@ class Events:
         self.states[session_id].retuned = False
         self.states[session_id].awaiting = None  # Copilot said what went wrong.
         self.states[session_id].steps.clear()
-        if EFFORT_REFUSED.search(message) and self.runtime.effort_clearable(row):
+        # Copilot's model and effort fallbacks: another agent's models are not Copilot's.
+        copilot = self.runtime.on_copilot(session_id)
+        if copilot and EFFORT_REFUSED.search(message) and self.runtime.effort_clearable(row):
             self.runtime.update_session(session_id, status="idle", activity="")
             self.runtime.background(self.runtime.clear_effort(row))
             return
-        if MODEL_REFUSED.search(message):
+        if copilot and MODEL_REFUSED.search(message):
             # The company's policy, say: it recovers on another model instead of failing again
             # on every message.
             self.runtime.update_session(session_id, status="idle", activity="")

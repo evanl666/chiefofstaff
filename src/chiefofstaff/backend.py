@@ -2,8 +2,9 @@
 
 Chief of Staff uses a small part of what an agent SDK offers. This module names that part, so the
 rest of the code depends on these Protocols rather than on the Copilot SDK. GitHub Copilot is the
-backend that ships; the scripted backend (`scripted.py`) runs the demo mode, and
-tests/test_backend_contract.py checks that both behave the way the runtime relies on.
+backend that ships; the scripted backend (`scripted.py`) runs the demo mode and shows the runtime
+other coding agents as their adapters would, and tests/test_backend_contract.py checks that they
+all behave the way the runtime relies on.
 """
 
 from __future__ import annotations
@@ -61,6 +62,11 @@ SendMode = Literal["enqueue", "immediate"]
 
 
 class AgentSession(Protocol):
+    """A session may also answer running_background, take_queued, stop_background and
+    queue_holds itself (async methods of those names, without arguments, answering as the
+    helpers of those names do): another agent's adapter does, over its own queue and the commands
+    it runs. Copilot's sessions do not; the helpers reach them through their RPCs."""
+
     session_id: str
 
     async def send(
@@ -173,6 +179,9 @@ class SandboxPolicy:
     # Neither readable nor writable.
     denied: tuple[str, ...] = ()
 
+
+# The agent a session runs on unless its row names another (Runtime.agent): every session today.
+COPILOT_AGENT = "copilot"
 
 COPILOT = Capabilities(
     name="GitHub Copilot",
@@ -370,6 +379,11 @@ async def running_background(session: Any) -> int:
     """How many things a session left running in the background that hold its end of turn
     (shells attached to it, sub-agents), not a call its turn waits for nor a detached
     process; 0 when it cannot say."""
+    if own := getattr(session, "running_background", None):
+        try:
+            return await own()
+        except Exception:
+            return 0
     tasks = getattr(getattr(session, "rpc", None), "tasks", None)
     if tasks is None:
         return 0
@@ -388,6 +402,11 @@ async def running_background(session: Any) -> int:
 async def take_queued(session: Any) -> int | None:
     """Take back what Copilot queued for a session and has not started on (sent while it
     worked): how many, None when it cannot say."""
+    if own := getattr(session, "take_queued", None):
+        try:
+            return await own()
+        except Exception:
+            return None
     try:
         queue = session.rpc.queue
         listed = await queue.pending_items()
@@ -403,6 +422,11 @@ async def stop_background(session: Any) -> int:
     """Cancel what a session left running in the background (a command its turn went on from,
     a sub-agent): after a stop, a background command would end in a turn of its own, and until
     then the session takes no queued message. How many were cancelled."""
+    if own := getattr(session, "stop_background", None):
+        try:
+            return await own()
+        except Exception:
+            return 0
     tasks = getattr(getattr(session, "rpc", None), "tasks", None)
     if tasks is None:
         return 0

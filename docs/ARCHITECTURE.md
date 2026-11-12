@@ -45,8 +45,8 @@ tool allowlist, permission and request callbacks, sandbox, model.
 | `receipts.py` | Observed commands, changes and PR checks next to a report; whether its worker said it changed files (`changed_code`, kept per run) against its checkouts; acceptance criteria as verified, claimed or not met; a test run's outcome from its runner's summary (piped, chained, run by a script). |
 | `workspaces.py` | The code folder (its repositories, clones into it), each worker's task folder and worktrees (removed on close, restored on reopen), change stats. |
 | `policy.py` | Pure permission rules for actions without the sandbox. |
-| `backend.py` | The `AgentBackend`/`AgentSession` protocols, Copilot backend, sandbox policy. |
-| `scripted.py` | A backend without a model (scripts); runs `demo.py` and contract tests. |
+| `backend.py` | The `AgentBackend`/`AgentSession` protocols, Copilot backend, sandbox policy; what a session left running or queued, through Copilot's RPCs unless the session answers itself. |
+| `scripted.py` | A backend without a model (scripts); runs `demo.py` and contract tests. `AgentLikeBackend` shows the runtime another coding agent as its adapter would (tests only). |
 | `asks.py` | Cards for the owner (questions, forms, sign-ins); workers' (and the Slack session's) questions to the owner, kept under *Needs you* until answered whatever becomes of their task (one per task; each of a session's questions without a task on its own); a task whose question or decision the owner answered goes on at once (`Asks.go_on`; finished work it asked about goes back where it was, and its worker restates the whole result in its next report); cards applied whenever they are answered, with nothing waiting (`Asks.offer`: a watch the Router proposes); questions between sessions; environment notes. |
 | `peers.py` | Workers that work together (`works_with`): told about each other, passing information straight to each other (`tell_session`), a copy for the Router riding along with its next turn, a finished one's result for the others. |
 | `decisions.py` | Decision cards (answered on the card or in the asking worker's chat, not by a question back; closed once the tasks that asked ended); the owner's decisions and the tasks that rely on them; telling those tasks when one changes. |
@@ -92,7 +92,11 @@ Python callback registered for that session and answers with the result.
 The runtime depends on the `AgentBackend` and `AgentSession` protocols, not the SDK.
 `tests/test_backend_contract.py` checks what it relies on (event order, tools with parameters,
 permission requests, resume, abort ending the running command, steering) against the scripted
-backend always and against real Copilot with `CHIEFOFSTAFF_TEST_COPILOT=1`.
+backend always (also as other coding agents' adapters would show them) and against real Copilot
+with `CHIEFOFSTAFF_TEST_COPILOT=1`. Copilot is the one backend that ships. `Runtime.backends`
+holds it first and leaves room for others beside it: a session whose row names no other agent
+(an `agent:<id>` entry) is Copilot's, and each backend has its own connections, sessions'
+handles and turns, command ends and recovery (`Runtime.connection`, `connect_agent`).
 
 ## Messages between sessions
 

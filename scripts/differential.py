@@ -4,7 +4,7 @@ differences the feature declares by name in FEATURES below.
 
     uv run --with playwright python scripts/differential.py [--feature NAME] [--mode off|on] [--out DIR]
 
---mode off (the default): the baseline (git tag v0.1.39, checked out with `git worktree add` and
+--mode off (the default): the baseline (git tag v0.1.40, checked out with `git worktree add` and
 run in its own `uv run` environment) against this working tree with every registered feature (or
 only --feature) at its off settings, allowing only those features' `allow_off`. The baseline runs
 with those of the settings it has: a feature it shipped with is off on both sides.
@@ -79,7 +79,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = Path(__file__).resolve()
-BASELINE = "v0.1.39"
+BASELINE = "v0.1.40"
 PORTS = range(8810, 8820)
 TOKEN = "differential-token"
 WORK = ROOT / "browser-shots" / "differential-work"

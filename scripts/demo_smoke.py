@@ -82,8 +82,15 @@ async def run(scheme: str):
             await expect(page.locator("#session-list .item", has_text="Chat")).to_have_count(0)
             board = page.locator("#tasks-running .card.task, #tasks-monitoring .card.task")
             await expect(board).to_have_count(3, timeout=20000)
-            queued = page.locator("#tasks-monitoring .card.task.marker-queued")
-            await expect(queued).to_contain_text("Waiting for “Fix the flaky login test”")
+            # The task that waits for another, as the Router's chat records it (its card says
+            # so only until that one is done, seven seconds in, which a slow machine may pass);
+            # what it waits for is on hover.
+            waiting = page.locator(
+                "#timeline .event", has_text="Queued “Rate-limit login attempts”"
+            ).locator(".what")
+            await expect(waiting).to_have_attribute(
+                "title", re.compile(r"· after “Fix the flaky login test”")
+            )
             started = page.locator(
                 "#timeline .event", has_text="Started “Fix the flaky login test”"
             )

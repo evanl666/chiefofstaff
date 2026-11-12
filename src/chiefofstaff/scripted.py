@@ -11,6 +11,13 @@ Steps go through the same callbacks as a real agent's actions: custom tools run 
 handlers, shell commands and file writes ask on_permission_request first, and AskOwner asks
 on_user_input_request. Events mirror the Copilot CLI's names and fields, so the runtime cannot
 tell the difference.
+
+AgentLikeBackend follows a script the way another coding agent's adapter would show that agent
+to the runtime (a Profile: CODEX_LIKE, CLAUDE_LIKE): the same events, but steering only if the
+agent can, a queue of its own whose next turn it starts only once admitted, commands left running
+that end with end messages of its own (Background), child agents (Child), exit codes only if the
+agent gives them, no Copilot credits, and session ids the agent may choose itself. Tests run the
+runtime's paths that do not depend on the agent on them.
 """
 
 from __future__ import annotations
@@ -19,11 +26,11 @@ import asyncio
 import inspect
 import itertools
 import json
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, ClassVar
 from uuid import uuid4
 
 from copilot.generated.rpc import PermissionDecisionReject
@@ -74,7 +81,27 @@ class Wait:
     seconds: float
 
 
-Step = Say | CallTool | Shell | WriteFile | AskOwner | Wait
+@dataclass
+class Background:
+    """A command another agent leaves running (a dev server): the step returns at once, and the
+    command ends after `seconds`, or when it is stopped, with the agent's own end message."""
+
+    command: str
+    seconds: float = 3600.0
+    exit_code: int = 0
+    # Once it ends by itself, the agent starts a turn of its own on that.
+    wakes: bool = False
+
+
+@dataclass
+class Child:
+    """A child agent of the session (a subagent, a child thread) taking these steps: its events
+    are its parent call's, and its calls to Chief of Staff's tools are its session's."""
+
+    steps: list[Any] = field(default_factory=list)
+
+
+Step = Say | CallTool | Shell | WriteFile | AskOwner | Wait | Background | Child
 Brain = Callable[["ScriptedSession", str], AsyncGenerator[Step, Any]]
 
 SCRIPTED = Capabilities(
@@ -87,7 +114,7 @@ SCRIPTED = Capabilities(
 )
 
 
-def event(kind: str, **data: Any) -> SimpleNamespace:
+def event(kind: str, /, **data: Any) -> SimpleNamespace:
     return SimpleNamespace(type=SimpleNamespace(value=kind), data=SimpleNamespace(**data))
 
 
@@ -118,7 +145,7 @@ class ScriptedSession:
         self.handlers.append(handler)
         return lambda: self.handlers.remove(handler)
 
-    def emit(self, kind: str, **data: Any):
+    def emit(self, kind: str, /, **data: Any):
         if self.closed:
             return
         for handler in list(self.handlers):
@@ -300,9 +327,12 @@ class ScriptedSession:
             raw, _ = await process.communicate()
             output, code = raw.decode(errors="replace").strip(), process.returncode or 0
         await asyncio.sleep(step.seconds)
+        self.end_shell(call_id, output, code)
+        return output
+
+    def end_shell(self, call_id: str, output: str, code: int):
         text = f"{output}\n<shellId: {next(self.calls)} completed with exit code {code}>".lstrip()
         self.end_tool(call_id, text, code == 0)
-        return output
 
     async def write(self, step: WriteFile) -> str:
         target = (self.cwd / step.path).resolve()
@@ -322,6 +352,7 @@ async def nothing(session: ScriptedSession, prompt: str) -> AsyncGenerator[Step,
 
 class ScriptedBackend:
     capabilities = SCRIPTED
+    session_type: ClassVar[type[ScriptedSession]] = ScriptedSession
 
     def __init__(
         self, brain: Brain = nothing, others: list[dict] | None = None, home: Path | None = None
@@ -387,7 +418,7 @@ class ScriptedBackend:
 
     async def create_session(self, *, session_id: str, name: str, **options: Any):
         self.histories[session_id] = []
-        session = ScriptedSession(self, session_id, options)
+        session = self.session_type(self, session_id, options)
         self.sessions[session_id] = session
         return session
 
@@ -402,7 +433,7 @@ class ScriptedBackend:
             ]
         if session_id not in self.histories:
             raise RuntimeError("Session not found")
-        session = ScriptedSession(self, session_id, options)
+        session = self.session_type(self, session_id, options)
         self.sessions[session_id] = session
         return session
 
@@ -437,3 +468,236 @@ class ScriptedBackend:
             log = other.get("log", [])
             return log[offset:], len(log), 0.0
         return [], offset, 0.0
+
+
+@dataclass(frozen=True)
+class Profile:
+    """How another coding agent shows to the runtime through its adapter."""
+
+    capabilities: Capabilities
+    # Its commands' ends carry their exit codes.
+    exit_codes: bool
+    # It chooses its sessions' ids (Chief of Staff's is not taken).
+    assigns_ids: bool
+
+
+def agent_capabilities(name: str, steering: bool) -> Capabilities:
+    return Capabilities(
+        name=name,
+        steering=steering,
+        resume=True,
+        permission_callbacks=True,
+        mcp_sign_in=False,
+        sandbox=False,
+    )
+
+
+# Codex through its app-server: it steers, gives exact exit codes and chooses its threads' ids.
+CODEX_LIKE = Profile(
+    agent_capabilities("Codex-like", steering=True), exit_codes=True, assigns_ids=True
+)
+# Claude Code through its SDK: a message waits for the turn's end, no exit codes, and its
+# sessions take Chief of Staff's ids.
+CLAUDE_LIKE = Profile(
+    agent_capabilities("Claude-like", steering=False), exit_codes=False, assigns_ids=False
+)
+
+
+# What a child agent's steps show as: its parent call's (as a Copilot sub-agent's do).
+CHILD_EVENTS = frozenset({"assistant.message", "tool.execution_start", "tool.execution_complete"})
+
+
+class AgentLikeSession(ScriptedSession):
+    """A session of another coding agent, as its adapter shows it (see Profile)."""
+
+    backend: AgentLikeBackend
+
+    def __init__(self, backend: AgentLikeBackend, session_id: str, options: dict):
+        super().__init__(backend, session_id, options)
+        self.profile = backend.profile
+        # Commands it left running: shell id -> set to stop it.
+        self.left_running: dict[str, asyncio.Event] = {}
+        self.ends: set[asyncio.Task] = set()
+        self.shells = itertools.count(1)
+        # The call of the child agent whose steps it takes now.
+        self.child_of = ""
+        # Its model is at work on a turn (a steer reaches it), not between turns.
+        self.answering = False
+
+    async def send(
+        self, prompt: str, *, mode: str | None = "enqueue", attachments: list | None = None
+    ) -> str:
+        if self.closed:
+            raise RuntimeError("The session is disconnected.")
+        if not self.turn or self.turn.done():
+            self.turn = asyncio.ensure_future(self.turns(prompt))  # A turn on it starts now.
+        elif mode == "immediate" and self.profile.capabilities.steering and self.answering:
+            self.steering.append(prompt)
+        else:
+            self.inbox.append(prompt)  # In its queue, for its turn's end.
+        return f"m-{uuid4().hex[:8]}"
+
+    def emit(self, kind: str, /, **data: Any):
+        if self.child_of and kind in CHILD_EVENTS:
+            data.setdefault("parent_tool_call_id", self.child_of)
+        super().emit(kind, **data)
+
+    async def turns(self, prompt: str, woken: bool = False):
+        """A turn on what it was sent (`woken`: one it starts by itself on a notice of its own),
+        then one on each message it queued meanwhile, each only once admitted; at the end, idle
+        unless a command it left running holds the session."""
+        try:
+            await self.answer(prompt, woken)
+            while self.inbox and not self.closed:
+                if not await self.admitted():
+                    self.inbox.clear()  # Given back: Chief of Staff sends it again.
+                    break
+                await self.answer(self.inbox.pop(0))
+        except Exception as exc:
+            self.emit("session.error", message=f"{type(exc).__name__}: {exc}")
+            return
+        self.turn_over()
+
+    async def answer(self, prompt: str, woken: bool = False):
+        self.answering = True
+        try:
+            if not woken:
+                await super().answer(prompt)
+                return
+            self.emit("assistant.turn_start", turn_id=str(next(self.calls)))
+            await self.follow(self.backend.brain(self, prompt))
+            await self.take_steering()
+            self.emit("assistant.turn_end")
+        finally:
+            self.answering = False
+
+    async def admitted(self) -> bool:
+        admit = self.backend.admit
+        return admit is None or await admit(self)
+
+    async def abort(self):
+        """Its turn ends (and its child agents with it); what it left running goes on until
+        stopped (stop_background)."""
+        if self.turn and not self.turn.done():
+            self.turn.cancel()
+            await asyncio.gather(self.turn, return_exceptions=True)
+            self.inbox.clear()
+            self.emit("abort", reason="user initiated")
+            self.turn_over()
+
+    def turn_over(self):
+        if self.left_running:
+            self.emit("assistant.idle")  # What it left running holds session.idle.
+        else:
+            self.emit("session.idle")
+
+    def usage(self, text: str):
+        """Its usage is in its own unit, not Copilot's credits: no assistant.usage."""
+
+    async def do(self, step: Step) -> Any:
+        if isinstance(step, Background):
+            await asyncio.sleep(0)
+            return await self.leave_running(step)
+        if isinstance(step, Child):
+            await asyncio.sleep(0)
+            return await self.child(step)
+        return await super().do(step)
+
+    def end_shell(self, call_id: str, output: str, code: int):
+        self.history.append(("tool", output))
+        self.emit(
+            "tool.execution_complete",
+            tool_call_id=call_id,
+            success=code == 0,
+            result=SimpleNamespace(content=output),
+            shell_execution=SimpleNamespace(exit_code=code) if self.profile.exit_codes else None,
+        )
+
+    async def leave_running(self, step: Background) -> str:
+        request = SimpleNamespace(
+            kind="shell", full_command_text=step.command, possible_urls=[], intention=""
+        )
+        if denied := await self.permitted(request):
+            return f"Permission denied: {denied}"
+        call_id = self.start_tool("bash", {"command": step.command})
+        shell = f"bg-{next(self.shells)}"
+        self.left_running[shell] = asyncio.Event()
+        ending = asyncio.ensure_future(self.keep_running(shell, step))
+        self.ends.add(ending)
+        ending.add_done_callback(self.ends.discard)
+        # Shaped as Copilot says it, so receipts know the command runs on.
+        self.end_tool(call_id, f"<command started in background with shellId: {shell}>", True)
+        return shell
+
+    async def keep_running(self, shell: str, step: Background):
+        try:
+            await asyncio.wait_for(self.left_running[shell].wait(), step.seconds)
+            stopped = True
+        except TimeoutError:
+            stopped = False
+        del self.left_running[shell]
+        code = step.exit_code if self.profile.exit_codes and not stopped else None
+        kind = SimpleNamespace(type="shell_completed", shell_id=shell, exit_code=code)
+        self.emit("system.notification", kind=kind)
+        if self.turn and not self.turn.done():
+            return  # Its turn goes on.
+        if step.wakes and not stopped and not self.closed:
+            self.turn = asyncio.ensure_future(self.turns(f"`{step.command}` ended.", woken=True))
+        elif not self.left_running:
+            self.emit("session.idle")
+
+    async def child(self, step: Child) -> None:
+        call_id = self.start_tool("task", {"description": "a child agent"})
+        self.child_of = call_id
+        try:
+            for inner in step.steps:
+                await self.do(inner)
+        finally:
+            self.child_of = ""
+        self.end_tool(call_id, "The child agent finished.", True)
+
+    async def running_background(self) -> int:
+        return len(self.left_running)
+
+    async def stop_background(self) -> int:
+        stopping = list(self.left_running.values())
+        for stop in stopping:
+            stop.set()
+        await asyncio.gather(*self.ends, return_exceptions=True)
+        return len(stopping)
+
+    async def take_queued(self) -> int:
+        taken, self.inbox = len(self.inbox), []
+        return taken
+
+    async def queue_holds(self) -> bool:
+        return bool(self.inbox or self.steering)
+
+
+class AgentLikeBackend(ScriptedBackend):
+    """Another coding agent's backend, scripted (see Profile)."""
+
+    session_type = AgentLikeSession
+
+    def __init__(self, brain: Brain = nothing, profile: Profile = CODEX_LIKE):
+        super().__init__(brain)
+        self.profile = profile
+        self.capabilities = profile.capabilities
+        # Chief of Staff's admission, asked before a turn on what it queued: refused, it gives
+        # what it queued back.
+        self.admit: Callable[[AgentLikeSession], Awaitable[bool]] | None = None
+        self.crashed = False
+
+    def alive(self) -> bool:
+        return not self.crashed
+
+    async def create_session(self, *, session_id: str, name: str, **options: Any):
+        if self.profile.assigns_ids:
+            session_id = str(uuid4())
+        return await super().create_session(session_id=session_id, name=name, **options)
+
+    async def stop(self):
+        for session in self.sessions.values():
+            if isinstance(session, AgentLikeSession):
+                await session.stop_background()
+        await super().stop()

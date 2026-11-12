@@ -570,7 +570,19 @@ class Workers:
                 {"prompt": wrap("router", "results", text, task=task["id"]), "task_id": task["id"]},
             )
             self.store.set(f"handed:{task['id']}", "1")
-        connection = self.runtime.connections
+        agent = self.runtime.agent(session_id)
+        try:
+            # Another agent's backend first (started on first use): one that cannot start (not
+            # found, failing) fails this start with why, as any start that fails; tried again
+            # only when the worker is given work again.
+            await self.runtime.start_agent_of(session_id)
+        except asyncio.CancelledError:
+            self.requeue(session_id)
+            raise
+        except Exception as exc:
+            self.runtime.fail(row, f"Could not start: {describe(exc)}")
+            return
+        _, connection = self.runtime.connection(agent)
         try:
             if self.store.get(f"created:{session_id}"):
                 session = await self.runtime.session_for(session_id)
@@ -606,8 +618,11 @@ class Workers:
             self.requeue(session_id)
             raise
         except Exception as exc:
-            if not self.runtime.backend or self.runtime.connections != connection:
-                self.requeue(session_id)  # Copilot disconnected meanwhile: not its failure.
+            backend, connections = self.runtime.connection(agent)
+            if not backend or connections != connection:
+                # Its backend (Copilot, or its agent, running when this began) disconnected
+                # meanwhile: not its failure.
+                self.requeue(session_id)
                 return
             if self.runtime.refused_at_start(row, describe(exc)):
                 self.requeue(session_id)  # It starts again, on Copilot's default model.
@@ -856,8 +871,16 @@ class Workers:
                 await self.workspaces.restore(row)
             if row["cwd"] and not await asyncio.to_thread(os.path.isdir, row["cwd"]):
                 raise ValueError("That worker's directory is gone; start a new one instead.")
-            backend = self.runtime.require_ready()
-            if not await backend.get_session_metadata(session_id):
+            self.runtime.require_ready()
+            await self.runtime.start_agent_of(session_id)
+            backend = self.runtime.backend_for(row)
+            # Copilot's: by the row's own conversation, as always (also for a helper run again
+            # on a fresh one, Tools.rerun_special). Another agent's: by the id it chose.
+            if self.runtime.on_copilot(session_id):
+                conversation = session_id
+            else:
+                conversation = self.runtime.copilot_id(session_id)
+            if not await backend.get_session_metadata(conversation):
                 raise ValueError(
                     "Copilot no longer has that conversation; start a new one instead."
                 )
@@ -1127,6 +1150,8 @@ class Workers:
         copilot = self.runtime.copilot_id(row["id"])
         if not backend or row["role"] != WORKER or copilot in self.runtime.elsewhere:
             return  # Open in a terminal: the mirror shows it.
+        if not self.runtime.on_copilot(row["id"]):
+            return  # Another agent's: it has no Copilot log.
         async with self.mirror_lock:
             key = f"mirror:{row['id']}"
             mirrored = self.store.get(key)
@@ -1162,6 +1187,8 @@ class Workers:
         backend = self.runtime.backend
         if not backend or self.states.handle(row["id"]):
             return  # Attached: its usage arrives as Copilot events.
+        if not self.runtime.on_copilot(row["id"]):
+            return  # Another agent's: no Copilot log, no credits.
         key = f"usage_log:{row['id']}"
         start = int(self.store.get(key) or 0)
         try:
