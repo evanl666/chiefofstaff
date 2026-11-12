@@ -1765,3 +1765,83 @@ async def test_what_codex_said_before_a_turn_is_admitted_is_counted_first(tmp_pa
         assert why == "This worker used its Codex token limit (150 of 100)."
     finally:
         await runtime.stop()
+
+
+def test_the_checks_stand_in_model_answers_each_step_in_turn(tmp_path):
+    """What real Codex talks to in the check (the fake CLI never does): one answer a request,
+    the next action once the one before was answered, then the reply."""
+    import urllib.request
+
+    from chiefofstaff import codex_check
+
+    model = codex_check.Model(tmp_path)
+    try:
+        arguments = model.arguments(tmp_path)
+        assert json.loads((tmp_path / "catalog.json").read_text())["models"][0]["slug"] == (
+            codex_check.MODEL
+        )
+        assert f'model="{codex_check.MODEL}"' in arguments
+
+        def ask(outputs: int) -> dict:
+            body = {"input": [{"type": "function_call_output"}] * outputs + ["odd"]}
+            url = f"http://127.0.0.1:{model.server_address[1]}/v1/responses"
+            request = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST")
+            with urllib.request.urlopen(request, timeout=10) as answer:  # noqa: S310
+                events = [
+                    json.loads(line.removeprefix("data: "))
+                    for line in answer.read().decode().splitlines()
+                    if line.startswith("data: ")
+                ]
+            assert [e["type"] for e in events] == [
+                "response.created",
+                "response.output_item.done",
+                "response.completed",
+            ]
+            return events[1]["item"]
+
+        names = [ask(n).get("name") for n in range(5)]
+        assert (
+            names
+            == [codex_check.TOOL, "exec_command", codex_check.SERVER_TOOL] + ["apply_patch"] * 2
+        )
+        assert "*** Move to:" in ask(4)["input"] and ask(5)["type"] == "message"
+        assert ask(9)["type"] == "message", "past its steps: its reply"
+    finally:
+        model.close()
+
+
+def test_the_checks_stand_in_mcp_server_writes_only_when_its_tool_is_called(tmp_path):
+    import subprocess
+
+    lines = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "x"}},
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+        {"jsonrpc": "2.0", "id": 3, "method": "ping"},
+        {"jsonrpc": "2.0", "id": 4, "method": "resources/list"},
+    ]
+    feed = "\n".join(json.dumps(line) for line in lines) + "\nnot json\n"
+    ran = subprocess.run(
+        [sys.executable, "-m", "chiefofstaff.codex_check", "--mcp", str(tmp_path)],
+        input=feed,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    )
+    answers = [json.loads(line) for line in ran.stdout.splitlines()]
+    assert [a["id"] for a in answers] == [1, 2, 3, 4]
+    assert answers[0]["result"]["protocolVersion"] == "x"
+    assert answers[1]["result"]["tools"][0]["annotations"] == {"readOnlyHint": False}
+    assert answers[3]["error"]["code"] == -32601
+    assert not (tmp_path / "server.marker").exists()
+    called = json.dumps({"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {}})
+    subprocess.run(
+        [sys.executable, "-m", "chiefofstaff.codex_check", "--mcp", str(tmp_path)],
+        input=called + "\n",
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    )
+    assert (tmp_path / "server.marker").exists()
