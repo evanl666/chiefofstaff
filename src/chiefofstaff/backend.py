@@ -38,6 +38,8 @@ from copilot.generated.rpc import (
     TasksCancelRequest,
 )
 
+from . import machine
+
 
 @dataclass(frozen=True)
 class Capabilities:
@@ -479,6 +481,12 @@ def copilot_trusts(path: str) -> bool:
 
 def process_table() -> dict[int, tuple[int, str]]:
     """Every process: pid -> (parent pid, command line)."""
+    if sys.platform == "win32":
+        return {
+            p["pid"]: (p["ppid"], subprocess.list2cmdline(p["cmdline"]))
+            for p in machine.processes("ppid", "cmdline")
+            if p["cmdline"]
+        }
     try:
         table = subprocess.run(
             ["ps", "-axo", "pid=,ppid=,command="],  # noqa: S607  (a fixed command, found on PATH)
@@ -543,7 +551,9 @@ def end_processes(tree: dict[int, str], wait: float = 3.0):
     def same(table: dict[int, tuple[int, str]]) -> list[int]:
         return [pid for pid, command in tree.items() if pid in table and table[pid][1] == command]
 
-    for signum in (signal.SIGTERM, signal.SIGKILL):
+    # On Windows any signal os.kill sends is TerminateProcess, which cannot be ignored: both
+    # passes force it, the second for any the first could not reach.
+    for signum in (signal.SIGTERM, getattr(signal, "SIGKILL", signal.SIGTERM)):
         left = same(process_table())
         for pid in left:
             with suppress(OSError):
@@ -557,6 +567,10 @@ def end_processes(tree: dict[int, str], wait: float = 3.0):
 
 
 def running(pid: int) -> bool:
+    if sys.platform == "win32":
+        import psutil
+
+        return psutil.pid_exists(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -575,6 +589,8 @@ SERVICE = re.compile(r"(?:^|[\s/])chiefofstaff(?:\s|$)")
 def start_times() -> dict[int, str]:
     """When each process started: pid -> a time to compare, not to show. A pid is reused, and
     the process that has it now started after the one recorded."""
+    if sys.platform == "win32":
+        return {p["pid"]: str(p["create_time"]) for p in machine.processes("create_time")}
     try:
         table = subprocess.run(
             ["ps", "-axo", "pid=,lstart="],  # noqa: S607  (a fixed command, found on PATH)

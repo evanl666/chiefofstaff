@@ -70,6 +70,25 @@ jobs:
           --cov=chiefofstaff --cov-branch --cov-report=term-missing:skip-covered
           --cov-fail-under=88
 
+  test-windows:
+    # Windows support is experimental: the tests of what it does differently, and of the parts
+    # that touch processes, files and git most (see README, "On Windows").
+    name: Tests (Python 3.13, windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          python-version: "3.13"
+      - run: uv sync --locked --extra dev
+      - name: Tests
+        run: >-
+          uv run --locked --extra dev pytest -q --timeout 120
+          tests/test_windows.py tests/test_repos.py tests/test_others.py tests/test_web.py
+
   package:
     name: Package
     runs-on: ubuntu-latest
@@ -148,7 +167,7 @@ jobs:
     # for dependency review, did not apply).
     name: CI passed
     if: always()
-    needs: [lint, test, package, demo-ui, secrets, dependencies]
+    needs: [lint, test, test-windows, package, demo-ui, secrets, dependencies]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

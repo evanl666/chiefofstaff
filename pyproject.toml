@@ -33,6 +33,7 @@ dependencies = [
   "mcp>=1.24,<2",
   "github-copilot-sdk>=1.0.28,<1.1",
   "httpx>=0.28,<1",
+  "psutil>=7,<8; sys_platform == 'win32'",
 ]
 
 [project.urls]

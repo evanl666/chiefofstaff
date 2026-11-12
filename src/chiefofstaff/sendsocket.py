@@ -21,6 +21,7 @@ import os
 import re
 import socket
 import stat
+import sys
 import time
 from contextlib import suppress
 from pathlib import Path
@@ -33,7 +34,16 @@ from pydantic import ValidationError
 from . import threads
 from .envelope import UNTRUSTED, wrap
 from .models import SentItem
-from .send import FOLDER, MAX_PATH, MAX_REQUEST, NAME, open_folder, peer_uid, remove_acl
+from .send import (
+    FOLDER,
+    MAX_PATH,
+    MAX_REQUEST,
+    NAME,
+    UNSUPPORTED,
+    open_folder,
+    peer_uid,
+    remove_acl,
+)
 
 if TYPE_CHECKING:
     from .runtime import Runtime
@@ -75,6 +85,8 @@ def prepare(directory: Path) -> tuple[socket.socket, tuple[int, int]]:
     """The send socket, bound and listening, and what identifies its file; under the data
     directory's lock (service.lock), which no other Chief of Staff can hold. NotOpenedError when
     the folders on the way are not the owner's alone, or something else is where it goes."""
+    if sys.platform == "win32":
+        raise NotOpenedError(UNSUPPORTED)
     me = os.geteuid()
     path = directory / FOLDER / NAME
     if len(os.fsencode(path)) > MAX_PATH:
@@ -179,7 +191,7 @@ class SendSocket:
     def accept(self):
         """A connection: its peer's user id is checked before a byte of it is read; another
         user's is closed at once."""
-        if not self.listener:
+        if sys.platform == "win32" or not self.listener:  # Windows: prepare refused.
             return
         try:
             connection, _ = self.listener.accept()

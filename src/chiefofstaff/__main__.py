@@ -1,9 +1,9 @@
 import argparse
-import fcntl
 import logging
 import os
 import secrets
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -21,6 +21,35 @@ from .web import create_app
 
 # The running instance's private URL, so starting Chief of Staff again opens it.
 LAUNCH_FILE = "launch-url"
+
+
+def lock_data_file(file):
+    if sys.platform == "win32":
+        import msvcrt
+
+        file.seek(0)
+        try:
+            msvcrt.locking(file.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError as exc:
+            raise BlockingIOError from exc
+    else:
+        import fcntl
+
+        fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def make_private(folder: Path):
+    """On Windows, what umask 077 and mode 0700 do elsewhere: only this user (and, as root can
+    elsewhere, SYSTEM and Administrators) may read the folder and what is made in it."""
+    user = subprocess.run(
+        ["whoami", "/user", "/fo", "csv", "/nh"],  # noqa: S607  (a system command)
+        capture_output=True, text=True, check=True, timeout=10,
+    ).stdout.strip().rsplit(",", 1)[-1].strip('"')  # fmt: skip
+    grants = [f"*{sid}:(OI)(CI)F" for sid in (user, "S-1-5-18", "S-1-5-32-544")]
+    subprocess.run(  # noqa: S603  (fixed arguments: this user's id and well-known ids)
+        ["icacls", str(folder), "/inheritance:r", "/grant:r", *grants],  # noqa: S607
+        capture_output=True, check=True, timeout=30,
+    )  # fmt: skip
 
 
 def open_when_ready(port: int, url: str):
@@ -97,16 +126,22 @@ def main():
         project = demo.make_project(args.data_dir.expanduser().resolve() / "projects")
         extra["runtime_factory"] = demo.factory(project)
     args.data_dir = args.data_dir or default_data_dir()
-    if sys.platform == "win32":
-        parser.error("This prototype currently supports macOS and Linux process management.")
     if not 1024 <= args.port <= 65535:
         parser.error("Choose a port between 1024 and 65535.")
     os.umask(0o077)
     directory = args.data_dir.expanduser().resolve()
+    created = not directory.exists()
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if created and sys.platform == "win32":
+        # Only when made: icacls goes through everything already in a folder (seconds for a
+        # data directory with worktrees).
+        try:
+            make_private(directory)
+        except (OSError, subprocess.SubprocessError) as exc:
+            print(f"Could not make {directory} private: {exc}", file=sys.stderr, flush=True)
     data_lock = (directory / "service.lock").open("a")
     try:
-        fcntl.flock(data_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        lock_data_file(data_lock)
     except BlockingIOError:
         data_lock.close()
         if url := running_instance(directory):
@@ -122,8 +157,13 @@ def main():
     url = f"http://127.0.0.1:{args.port}/#token={token}"
     # Bind before opening the browser so an unrelated listener cannot receive the launch token.
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    # Allows an immediate restart (port in TIME_WAIT); a live listener still blocks the bind.
-    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    if sys.platform == "win32":
+        # There SO_REUSEADDR would let another user bind the same port and take the page (and
+        # its token); a port in TIME_WAIT can be bound again without it.
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    else:
+        # Allows an immediate restart (port in TIME_WAIT); a live listener still blocks the bind.
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         listener.bind(("127.0.0.1", args.port))
         listener.listen(128)

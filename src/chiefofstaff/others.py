@@ -507,6 +507,11 @@ class Facts:
 
 
 def read_chunk(fd: int, size: int, position: int) -> bytes:
+    if sys.platform == "win32":
+        # No pread on Windows. Seeking then reading is safe: each descriptor is opened by
+        # one Log.read and read only by it, in the one reading thread.
+        os.lseek(fd, position, os.SEEK_SET)
+        return os.read(fd, size)
     return os.pread(fd, size, position)
 
 
@@ -619,7 +624,12 @@ class Log:
         since it was sampled), while it is still the file sampled."""
         if self.path is None:
             return None
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+            | getattr(os, "O_BINARY", 0)
+        )
         try:
             fd = os.open(self.path, flags | getattr(os, "O_CLOEXEC", 0))
         except OSError:

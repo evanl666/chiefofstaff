@@ -210,6 +210,29 @@ def low_priority() -> list[str]:
     return found
 
 
+def processes(*attrs: str) -> list[dict]:
+    """Windows: every process this user can list, with its pid and these attributes (None
+    where it may not read one: an administrator's, another user's, the system's)."""
+    import psutil  # pyright: ignore[reportMissingModuleSource]  (installed on Windows only)
+
+    return [process.info for process in psutil.process_iter(["pid", *attrs])]
+
+
+def kill_process_tree(pid: int) -> None:
+    """Stop a process and everything it started, at once."""
+    if sys.platform != "win32":
+        with suppress(ProcessLookupError):
+            os.killpg(pid, signal.SIGKILL)
+        return
+    import psutil
+
+    with suppress(psutil.Error):
+        parent = psutil.Process(pid)
+        for process in [*parent.children(recursive=True), parent]:
+            with suppress(psutil.Error):
+                process.kill()
+
+
 async def run_quietly(arguments: list[str], limit: float) -> tuple[int, str] | None:
     """A command's exit code and output, or None when it cannot run or takes longer than
     `limit` seconds (it is stopped then, with its children)."""
@@ -227,14 +250,12 @@ async def run_quietly(arguments: list[str], limit: float) -> tuple[int, str] | N
         async with asyncio.timeout(limit):
             output, _ = await process.communicate()
     except TimeoutError:
-        with suppress(ProcessLookupError):
-            os.killpg(process.pid, signal.SIGKILL)
+        kill_process_tree(process.pid)
         await process.wait()
         return None
     except asyncio.CancelledError:
         # Chief of Staff is stopping: a du of a huge folder must not run on after it.
-        with suppress(ProcessLookupError):
-            os.killpg(process.pid, signal.SIGKILL)
+        kill_process_tree(process.pid)
         raise
     return process.returncode or 0, output.decode(errors="replace")
 
@@ -262,6 +283,8 @@ async def process_cwds(limit: float = 30) -> set[str] | None:
     """The folders this computer's programs run in (their working directory), as one
     `lsof -d cwd -Fn` lists them (on Linux without lsof: /proc). None when they cannot be read:
     then every folder may be in use."""
+    if sys.platform == "win32":
+        return await asyncio.to_thread(windows_cwds)
     if shutil.which("lsof"):
         ran = await run_quietly(["lsof", "-w", "-d", "cwd", "-Fn"], limit)
         if ran and ran[0] == 0:
@@ -269,6 +292,12 @@ async def process_cwds(limit: float = 30) -> set[str] | None:
     if sys.platform.startswith("linux"):
         return await asyncio.to_thread(proc_cwds)
     return None
+
+
+def windows_cwds() -> set[str]:
+    """The folders programs run in, as far as this user may read them: as lsof and /proc
+    without root, other users', the system's and administrators' programs are left out."""
+    return {p["cwd"] for p in processes("cwd") if p["cwd"]}
 
 
 def proc_cwds() -> set[str]:
@@ -282,6 +311,10 @@ def proc_cwds() -> set[str]:
 
 
 def in_use(folder: str, cwds: set[str]) -> bool:
-    """Whether a program runs in this folder or in one inside it."""
-    paths = {folder.rstrip("/"), os.path.realpath(folder)}
-    return any(cwd == path or cwd.startswith(path + "/") for cwd in cwds for path in paths)
+    """Whether a program runs in this folder or in one inside it (any case, on Windows)."""
+    paths = {os.path.normcase(path).rstrip(os.sep) for path in (folder, os.path.realpath(folder))}
+    return any(
+        cwd == path or cwd.startswith(path + os.sep)
+        for cwd in map(os.path.normcase, cwds)
+        for path in paths
+    )

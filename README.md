@@ -63,7 +63,7 @@ Staff keeps track of the rest.
 
 ## Install
 
-You need macOS or Linux, Python 3.11+, [uv](https://docs.astral.sh/uv/getting-started/installation/)
+You need macOS, Linux or Windows (experimental), Python 3.11+, [uv](https://docs.astral.sh/uv/getting-started/installation/)
 (or pipx) and the [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli):
 
 ```bash
@@ -76,13 +76,31 @@ Your browser opens Chief of Staff through a private link printed in the terminal
 yourself). Tell it where your code lives, like `~/workspace`, and type what you need.
 
 Everything runs on your machine; data stays in `~/Library/Application Support/chiefofstaff`
-(macOS) or `~/.local/share/chiefofstaff` (Linux). Ctrl+C stops it, and sessions pick up where
-they left off next time. Options: `--port`, `--data-dir`, `--no-browser`, `--demo`. Update with
+(macOS), `~/.local/share/chiefofstaff` (Linux), or `%LOCALAPPDATA%\chiefofstaff\chiefofstaff`
+(Windows; with a Python installed from the Store app, Windows keeps it under that Python's
+`%LOCALAPPDATA%\Packages\...\LocalCache` instead: the `Data:` line at startup says where).
+Ctrl+C stops it, and sessions pick up where they left off next time. Options: `--port`,
+`--data-dir`, `--no-browser`, `--demo`. Update with
 `uv tool upgrade chiefofstaff`. Launching `uvx chiefofstaff@latest` again and again works too,
 but each new version leaves a cached environment behind in uv's cache: `uv cache prune` removes
 the ones nothing uses. Never run `uv cache clean` while Chief of Staff is running: it can delete
 the environment it runs from. Workers' folders, and how much disk they take, are under Storage
 (the disk icon at the bottom of the sidebar).
+
+On Windows (experimental), Send to Chief, the Copilot command sandbox, sandboxed checks and
+the folder sizes under Storage (measured with `du`) are unavailable. Workers can access files
+and networks available to your Windows account.
+A new data directory, and the private launch link in it, are made readable only by you (and
+SYSTEM and Administrators) with an access control list; a `--data-dir` that already exists
+keeps its own, so check it. Storage cleanup cannot see programs running as administrator in a
+worker's folder: close those before closing the worker. Git can still hit path length limits
+in deeply nested folders; use a shorter project or data directory if that happens.
+
+To start this checkout after `uv sync --extra dev`:
+
+```powershell
+.\.venv\Scripts\python.exe -m chiefofstaff
+```
 
 **Optional sign-ins**
 - **GitHub**: `gh auth login` with every account you use, to review PRs and open them.

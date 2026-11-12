@@ -292,6 +292,7 @@ workspace, checkouts and the repositories' `.git` (not their hooks, config, or y
 `HEAD` and index), never see your
 GitHub token, and cannot read `~/.ssh`. On macOS, run `copilot sandbox ca create && copilot
 sandbox ca trust` once so `gh` works inside the sandbox; Settings tells you when it is needed.
+The sandbox needs macOS or Linux (`bwrap`): on Windows workers' commands run unsandboxed.
 
 Workers can start servers on localhost (a test's server, Gradle's daemon); the token files of
 your own Gradle daemons and Jupyter servers stay unreadable to them (their folders,
@@ -538,7 +539,8 @@ applies to, the check runs on a clean copy of its work. If it fails, the worker 
 once to fix it (or to say why it does not apply); if it still fails, the review card flags it.
 Settings → *You* lists the checks, how often each ran and caught something, and turns
 any off. Checks run in a sandbox: no network, no writes, and nothing in your home folder but the
-repository is readable. They need macOS (`sandbox-exec`) or `bwrap` on Linux.
+repository is readable. They need macOS (`sandbox-exec`) or `bwrap` on Linux, so none run on
+Windows.
 
 ## Focus
 
@@ -725,7 +727,8 @@ again later: an answer there is not taken for read until it was.
 
 Hand Chief of Staff work from wherever you are, without switching to Home: a note, and a link
 or text you pass along. Turn it on at the end of Settings → Connections (*Send to Chief from the
-command line*); it says once what it does and saves only when you press *Turn on*. Then:
+command line*); it says once what it does and saves only when you press *Turn on*. It needs
+macOS or Linux: on Windows a Unix socket cannot tell who connects, so it stays off. Then:
 
 ```
 chiefofstaff send "fix the flaky login test in acme/api"

@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from datetime import UTC, datetime
@@ -82,7 +83,7 @@ async def test_one_workspace_with_a_worktree_per_repository(tmp_path, monkeypatc
     assert all(c["base"] == "origin/main" for c in checkouts)
     workspace = Path(harness.store.get(f"workspace:{row['id']}"))
     assert all(Path(c["path"]).parent == workspace for c in checkouts)
-    assert info["cwd"] == checkouts[0]["path"] and info["checkouts"][1].endswith("/web")
+    assert info["cwd"] == checkouts[0]["path"] and Path(info["checkouts"][1]).name == "web"
     assert (Path(checkouts[0]["path"]) / "LATEST.md").exists(), "started from origin's latest"
     assert not (api / "LATEST.md").exists(), "the owner's checkout is untouched"
     assert not tracks_anything(checkouts[0]["path"]), "the branch must not track main"
@@ -313,8 +314,10 @@ async def test_workers_run_sandboxed_in_their_own_folders(tmp_path, git_repo):
     git_dir = str(git_repo.resolve() / ".git")
     workspace = str(runtime.workspaces.workspace(harness.store.session(info["session_id"])))
     assert {info["cwd"], workspace, git_dir} <= set(policy.readwrite)
-    protected = {f"{git_dir}/{name}" for name in ("hooks", "config", "modules", "worktrees/mine")}
-    assert protected <= set(policy.readonly), "these run code outside the sandbox: never writable"
+    protected = {Path(git_dir) / name for name in ("hooks", "config", "modules", "worktrees/mine")}
+    assert protected <= {Path(path) for path in policy.readonly}, (
+        "these run code outside the sandbox: never writable"
+    )
     assert own_git_dir(info["cwd"]) not in resolved(policy.readonly), "its own stays writable"
     assert policy.allowed_hosts == ()
     prompt = worker.options["system_message"]["content"]
@@ -535,7 +538,7 @@ async def test_the_code_folder_holds_projects_task_folders_and_clones(tmp_path):
         "notes",
     ], "the second task reuses that clone"
     projects = await call_tool(runtime, "list_sessions", harness.router_id)
-    assert str(lib.resolve()) in projects.text_result_for_llm
+    assert json.dumps(str(lib.resolve())) in projects.text_result_for_llm
 
 
 def exists(path) -> bool:
@@ -769,7 +772,11 @@ async def test_editing_a_new_file_changes_the_version(tmp_path, git_repo):
     (git_repo / "new_test.py").write_text("assert True\n")
     (git_repo / "nested").mkdir()
     run("git", "init", "-q", cwd=git_repo / "nested")  # Listed as "nested/".
-    (git_repo / "gone").symlink_to(git_repo / "missing")  # A broken link.
+    try:
+        (git_repo / "gone").symlink_to(git_repo / "missing")  # A broken link.
+    except OSError as exc:
+        if sys.platform != "win32" or exc.winerror != 1314:
+            raise
     first = await workspaces_module.version(checkout)
     (git_repo / "new_test.py").write_text("assert False\n")
     assert (await workspaces_module.version(checkout))["edits"] != first["edits"]
@@ -1700,6 +1707,7 @@ async def test_a_tasks_start_commit_amended_away_does_not_count_earlier_commits(
     assert found and found["commits"] == 2, found
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows forbids quotes in file names")
 async def test_files_named_with_quotes_and_backslashes_are_in_a_tasks_changes(tmp_path):
     """Bug bash 4: git quotes a name with `"` even with core.quotePath off; such files were
     left out of a task's changes ("+0 −0", an empty diff)."""

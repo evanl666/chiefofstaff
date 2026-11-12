@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 from uuid import uuid4
 
 from . import prompts, threads
@@ -951,7 +952,7 @@ class Runtime:
         await asyncio.to_thread(workspace.mkdir, parents=True, exist_ok=True)
         slug = row["branch"].removeprefix(BRANCH_PREFIX) if row["branch"] else workspace.name
         checkouts = self.workspaces.checkouts(row)
-        if repo.startswith(("/", "~")):
+        if repo.startswith("~") or Path(repo).is_absolute():
             local: Path | None = Path(repo)
         else:
             if row["slack"] and not self.yolo(row):
@@ -1058,6 +1059,13 @@ class Runtime:
                 if row["closed_at"]
                 else "This session's folder does not exist."
             )
+        if sys.platform == "win32":
+            # Through the shell: File Explorer, or VS Code by its URL (no code.cmd, so no cmd.exe).
+            target = (
+                folder if app != "vscode" else "vscode://file/" + quote(Path(folder).as_posix())
+            )
+            await asyncio.to_thread(os.startfile, target)
+            return {"ok": True}
         if app == "vscode":
             command = ["code", folder] if shutil.which("code") else None
             if not command and sys.platform == "darwin":

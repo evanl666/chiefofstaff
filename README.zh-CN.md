@@ -54,7 +54,7 @@ uvx chiefofstaff --demo    # 用脚本模拟的 session 先体验，不需要登
 
 ## 安装
 
-需要 macOS 或 Linux、Python 3.11+、[uv](https://docs.astral.sh/uv/getting-started/installation/)
+需要 macOS、Linux 或 Windows（实验性支持）、Python 3.11+、[uv](https://docs.astral.sh/uv/getting-started/installation/)
 （或 pipx），以及 [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli)：
 
 ```bash
@@ -66,7 +66,20 @@ uvx chiefofstaff           # 或者：pipx install chiefofstaff && chiefofstaff
 浏览器会通过终端里打印的私密链接打开 Chief of Staff（这个链接别给别人）。告诉它你的代码放在哪，比如 `~/workspace`，然后说你要做什么。
 
 所有东西都在你的电脑上跑，数据存在 `~/Library/Application Support/chiefofstaff`（macOS）或
-`~/.local/share/chiefofstaff`（Linux）。Ctrl+C 停止，下次启动时 session 会接着之前的进度。参数：`--port`、`--data-dir`、`--no-browser`、`--demo`。升级：`uvx chiefofstaff@latest`。
+`~/.local/share/chiefofstaff`（Linux）或 `%LOCALAPPDATA%\chiefofstaff\chiefofstaff`（Windows；若使用从应用商店安装的 Python，Windows 会把它放在该 Python 的 `%LOCALAPPDATA%\Packages\...\LocalCache` 下，启动时 `Data:` 一行会显示实际位置）。Ctrl+C 停止，下次启动时 session 会接着之前的进度。参数：`--port`、`--data-dir`、`--no-browser`、`--demo`。升级：`uvx chiefofstaff@latest`。
+
+Windows 支持为实验性：暂不支持 Send to Chief、Copilot 命令沙箱、沙箱内的自动检查，以及 Storage
+中的目录大小统计（依赖 `du`）；worker
+仍可以访问当前用户有权访问的文件和网络。新建的数据目录及其中的私密启动链接会通过访问控制列表设为
+仅你本人（以及 SYSTEM 和 Administrators）可读；已存在的 `--data-dir` 保留原有权限，请自行确认。
+存储清理看不到以管理员身份运行、位于 worker 目录中的程序：关闭 worker 前请先关掉它们。
+Git 在很深的路径下仍可能遇到路径长度限制；遇到此问题时请使用较短的项目或数据目录。
+
+从源码目录启动（完成 `uv sync --extra dev` 后）：
+
+```powershell
+.\.venv\Scripts\python.exe -m chiefofstaff
+```
 
 **可选的登录**
 - **GitHub**：用你所有的账号各 `gh auth login` 一次，用来 review 和开 PR。

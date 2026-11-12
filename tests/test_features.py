@@ -1,6 +1,7 @@
 import asyncio
 import json
 import shutil
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -681,6 +682,7 @@ async def test_scratch_folder_and_opening_a_workers_folder(tmp_path, monkeypatch
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
     monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(sys, "platform", "linux")  # Windows opens it through the shell.
     await runtime.open_folder(worker["session_id"], "vscode")
     assert calls == [("code", worker["cwd"])]
 
