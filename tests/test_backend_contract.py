@@ -568,15 +568,18 @@ async def test_codex_threads_keep_the_settings_its_checks_need(backend, tmp_path
         await reviewer.stop()
     if real_codex(backend):
         return  # An administrator's override is the stand-in's to show.
-    overridden = await another_codex(
-        backend, tmp_path, monkeypatch, FAKE_CODEX_ANSWER='{"approvalsReviewer": "auto_review"}'
-    )
-    await overridden.start()
-    try:
-        with pytest.raises(RuntimeError, match="reviewer auto_review"):
-            await open_session(overridden, tmp_path)
-    finally:
-        await overridden.stop()
+    for answer, said in (
+        ('{"approvalsReviewer": "auto_review"}', "reviewer auto_review"),
+        # The model would choose when to ask: Ask first's checks would not all happen.
+        ('{"approvalPolicy": "on-request"}', "approval policy on-request"),
+    ):
+        overridden = await another_codex(backend, tmp_path, monkeypatch, FAKE_CODEX_ANSWER=answer)
+        await overridden.start()
+        try:
+            with pytest.raises(RuntimeError, match=said):
+                await open_session(overridden, tmp_path)
+        finally:
+            await overridden.stop()
     forbidding = await another_codex(
         backend,
         tmp_path,
@@ -758,6 +761,66 @@ async def test_with_ask_first_codex_asks_for_dotted_and_plugin_servers_set_to_ru
     finally:
         await codex.stop()
         model.close()
+
+
+@pytest.mark.codex
+async def test_a_codex_thread_open_in_another_app_server_is_said_to_be(tmp_path, monkeypatch):
+    """The owner's Codex app (another app-server on the same CODEX_HOME) has a worker's thread
+    open: its resume here is refused as open elsewhere (Runtime shows it as such)."""
+    if not REAL_CODEX:
+        pytest.skip("Set CHIEFOFSTAFF_TEST_CODEX=1 to check it on real Codex.")
+    from chiefofstaff.backend_codex import OpenInCodexError
+
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    model = scripted_model.Model()
+    servers = []
+    for _ in range(2):
+        server = CodexBackend(shutil.which("codex") or "codex")
+        server.arguments += model.arguments(tmp_path)
+        server.needs_sign_in = False
+        server.created = []
+        await server.start()
+        servers.append(server)
+    try:
+        session, turn = await open_session(servers[0], tmp_path)
+        await session.send("Reply with just: ok")
+        await turn.wait()
+        with pytest.raises(OpenInCodexError, match="already has an active writer"):
+            await servers[1].resume_session(session.session_id, working_directory=str(tmp_path))
+        await servers[0].stop()  # The owner's app closed (unsubscribing keeps it loaded there).
+        resumed = await servers[1].resume_session(
+            session.session_id, working_directory=str(tmp_path)
+        )
+        assert resumed.session_id == session.session_id, "closed there: it opens here"
+    finally:
+        for server in servers:
+            await server.stop()
+        model.close()
+
+
+@pytest.mark.codex
+async def test_codexs_check_of_a_tested_version_finds_nothing(tmp_path, monkeypatch):
+    """Chief of Staff's check of the Codex on this computer, as it runs once per version: its
+    protocol's schema has what Chief of Staff uses; its thread reads back untrusted with
+    Chief of Staff answering; each action of the stand-in model's turn asks first."""
+    if not REAL_CODEX:
+        pytest.skip("Set CHIEFOFSTAFF_TEST_CODEX=1 to check it on real Codex.")
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    codex = CodexBackend(shutil.which("codex") or "codex")
+    codex.needs_sign_in = False
+    await codex.start()
+    try:
+        assert await codex.check(tmp_path / "check") == {
+            "ran": True,
+            "ask_first": "",
+            "acting": "",
+        }
+    finally:
+        await codex.stop()
 
 
 @pytest.mark.codex

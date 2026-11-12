@@ -126,6 +126,9 @@ def test_agents_are_looked_for_only_once_the_group_is_opened(web, codex_on_path)
     assert stored(web.data) == {} and "agent_usage" not in tables(web.data), (
         "looking stores nothing"
     )
+    wire = [json.loads(line)["message"] for line in (runs.parent / "fake" / "wire.jsonl").open()]
+    (hello,) = [m["params"] for m in wire if m.get("method") == "initialize"]
+    assert hello["capabilities"] == {"experimentalApi": False}, "Codex's stable API is enough"
 
 
 @pytest.mark.parametrize(
@@ -134,7 +137,7 @@ def test_agents_are_looked_for_only_once_the_group_is_opened(web, codex_on_path)
         ({"FAKE_CODEX_SIGNED_OUT": "1"}, "Codex is not signed in: run codex login in a terminal."),
         ({"FAKE_CODEX_VERSION": "0.167.1"}, "Codex 0.167.1 is older than the versions tested"),
         (
-            {"FAKE_CODEX_REQUIREMENTS": json.dumps({"allowedApprovalsReviewers": ["auto"]})},
+            {"FAKE_CODEX_REQUIREMENTS": json.dumps({"allowedApprovalsReviewers": ["auto_review"]})},
             "Your organization's Codex settings do not allow the approvals reviewer",
         ),
     ],

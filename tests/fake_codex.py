@@ -20,6 +20,7 @@ import re
 import shlex
 import signal
 import sys
+import time
 import uuid
 from pathlib import Path
 
@@ -43,6 +44,7 @@ class Server:
         # Background terminals: item id -> (thread, process, turn, command, task)
         self.terminals: dict[str, tuple] = {}
         self.serving: set[asyncio.Task] = set()
+        self.experimental = False
         # Threads that start a turn of their own once their current one ends.
         self.on_its_own: set[str] = set()
         self.strangers: set[str] = set()
@@ -62,13 +64,25 @@ class Server:
     # JSON-RPC
 
     def write(self, message: dict):
+        wire("codex", message)
         self.out.write((json.dumps(message) + "\n").encode())
         self.out.flush()
 
     def notify(self, method: str, params: dict):
+        # What Codex always sends with these (tests/codex_schema.py checks every message).
+        if method in {"turn/started", "turn/completed"}:
+            params["turn"].setdefault("items", [])
+        elif method == "item/started":
+            params.setdefault("startedAtMs", now_ms())
+        elif method == "item/completed":
+            params.setdefault("completedAtMs", now_ms())
+        elif method == "thread/status/changed" and params["status"]["type"] == "active":
+            params["status"].setdefault("activeFlags", [])
         self.write({"jsonrpc": "2.0", "method": method, "params": params})
 
     async def ask(self, method: str, params: dict) -> dict:
+        if method.endswith("/requestApproval"):
+            params = {"startedAtMs": now_ms(), **params}
         self.ids += 1
         future = asyncio.get_running_loop().create_future()
         self.pending[self.ids] = future
@@ -82,8 +96,15 @@ class Server:
         loop = asyncio.get_running_loop()
         reader = asyncio.StreamReader(limit=64 * 1024 * 1024)
         await loop.connect_read_pipe(lambda: asyncio.StreamReaderProtocol(reader), sys.stdin)
-        while line := await reader.readline():
+        while True:
+            line = await reader.readline()
+            if not line:
+                ended("at the end of its input")
+                if os.environ.get("FAKE_CODEX_HOLDS_ON"):
+                    await asyncio.sleep(3600)  # Does not end by itself.
+                break
             message = json.loads(line)
+            wire("client", message)
             logged(message)
             if "method" not in message:
                 future = self.pending.pop(message.get("id"), None)
@@ -103,6 +124,11 @@ class Server:
         try:
             if handler is None:
                 raise RuntimeError(f"unknown method {method}")
+            # As Codex (experimental_api.rs): only for a client that asked for it at initialize.
+            gated = method.startswith("thread/backgroundTerminals/") and method
+            gated = gated or (method == "thread/start" and "dynamicTools" in params and method)
+            if gated and not self.experimental:
+                raise RuntimeError(f"{gated} requires experimentalApi capability")
             result = await handler(params)
             self.write({"jsonrpc": "2.0", "id": message["id"], "result": result})
         except Exception as exc:
@@ -118,7 +144,13 @@ class Server:
 
     async def on_initialize(self, params):
         name = params.get("clientInfo", {}).get("name", "client")
-        return {"userAgent": f"{name}/{VERSION} (fake)", "codexHome": str(HOME)}
+        self.experimental = bool((params.get("capabilities") or {}).get("experimentalApi"))
+        return {
+            "userAgent": f"{name}/{VERSION} (fake)",
+            "codexHome": str(HOME),
+            "platformFamily": "unix",
+            "platformOs": "macos",
+        }
 
     async def on_configrequirements_read(self, params):
         return {"requirements": json.loads(os.environ.get("FAKE_CODEX_REQUIREMENTS") or "null")}
@@ -126,7 +158,8 @@ class Server:
     async def on_account_read(self, params):
         if os.environ.get("FAKE_CODEX_SIGNED_OUT"):
             return {"account": None, "requiresOpenaiAuth": True}
-        return {"account": {"type": "chatgpt", "planType": "plus"}, "requiresOpenaiAuth": True}
+        account = {"type": "chatgpt", "email": None, "planType": "plus"}
+        return {"account": account, "requiresOpenaiAuth": True}
 
     async def on_model_list(self, params):
         if not params.get("cursor"):
@@ -142,6 +175,7 @@ class Server:
             "id": name,
             "model": name,
             "displayName": name.upper(),
+            "description": f"The model {name}.",
             "hidden": hidden,
             "isDefault": default,
             "defaultReasoningEffort": "low",
@@ -149,7 +183,7 @@ class Server:
         }
 
     async def on_config_read(self, params):
-        answer = {"config": json.loads(os.environ.get("FAKE_CODEX_CONFIG") or "{}")}
+        answer = {"config": json.loads(os.environ.get("FAKE_CODEX_CONFIG") or "{}"), "origins": {}}
         if params.get("includeLayers"):
             answer["layers"] = json.loads(os.environ.get("FAKE_CODEX_LAYERS") or "[]")
         return answer
@@ -158,18 +192,17 @@ class Server:
         """The plugins FAKE_CODEX_PLUGINS names (id -> name, servers, and whether it is on;
         "unreadable": plugin/read fails), each in a local marketplace."""
         plugins = json.loads(os.environ.get("FAKE_CODEX_PLUGINS") or "{}")
-        listed = [
-            {"id": key, "name": entry["name"], "installed": True, "enabled": entry.get("on", True)}
-            for key, entry in plugins.items()
-        ]
+        listed = [summary(key, entry) for key, entry in plugins.items()]
         return {"marketplaces": [{"name": "local", "path": str(HOME), "plugins": listed}]}
 
     async def on_plugin_read(self, params):
-        for entry in json.loads(os.environ.get("FAKE_CODEX_PLUGINS") or "{}").values():
+        for key, entry in json.loads(os.environ.get("FAKE_CODEX_PLUGINS") or "{}").items():
             if entry["name"] == params["pluginName"]:
                 if entry.get("unreadable"):
                     raise RuntimeError("plugin manifest could not be read")
-                return {"plugin": {"mcpServers": entry.get("servers", [])}}
+                detail = {"summary": summary(key, entry), "marketplaceName": "local"}
+                detail |= {name: [] for name in ("apps", "appTemplates", "hooks", "skills")}
+                return {"plugin": {**detail, "mcpServers": entry.get("servers", [])}}
         raise RuntimeError("plugin not found")
 
     async def on_experimentalfeature_list(self, params):
@@ -184,6 +217,7 @@ class Server:
             {
                 "name": name,
                 "stage": "stable",
+                "defaultEnabled": True,
                 "enabled": kept.get(name, config.get(f"features.{name}", True)),
             }
             for name in ("apps", "multi_agent", "memories")
@@ -193,13 +227,9 @@ class Server:
     def answer(self, thread_id: str, params: dict) -> dict:
         thread = self.threads[thread_id]
         answer = {
-            "thread": {
-                "id": thread_id,
-                "cwd": thread["cwd"],
-                "turns": [],
-                "status": {"type": "idle"},
-            },
+            "thread": self.view(thread_id),
             "model": thread.get("model") or "gpt-test",
+            "modelProvider": "openai",
             "cwd": thread["cwd"],
             "approvalPolicy": params.get("approvalPolicy") or "on-request",
             "approvalsReviewer": params.get("approvalsReviewer") or "user",
@@ -210,9 +240,31 @@ class Server:
         }
         return answer | json.loads(os.environ.get("FAKE_CODEX_ANSWER") or "{}")
 
+    def view(self, thread_id: str, parent: str | None = None) -> dict:
+        """A thread as Codex shows it."""
+        thread = self.threads.get(thread_id) or {}
+        return {
+            "id": thread_id,
+            "cwd": thread.get("cwd") or str(Path.cwd()),
+            "turns": [],
+            "status": {"type": "idle"},
+            "cliVersion": VERSION,
+            "createdAt": thread.get("created", 0),
+            "updatedAt": thread.get("created", 0),
+            "ephemeral": False,
+            "modelProvider": "openai",
+            "model": thread.get("model"),
+            "preview": "",
+            "projectId": None,
+            "sessionId": parent or thread_id,
+            "source": "appServer",
+            "parentThreadId": parent,
+        }
+
     async def on_thread_start(self, params):
         thread_id = str(uuid.uuid4())
         self.threads[thread_id] = {
+            "created": int(time.time()),
             "cwd": params.get("cwd") or str(Path.cwd()),
             "model": params.get("model"),
             "tools": [tool["name"] for tool in params.get("dynamicTools") or []],
@@ -223,13 +275,16 @@ class Server:
         }
         self.save()
         self.loaded[thread_id] = params
-        self.notify("thread/started", {"thread": {"id": thread_id, "parentThreadId": None}})
+        self.notify("thread/started", {"thread": self.view(thread_id)})
         return self.answer(thread_id, params)
 
     async def on_thread_resume(self, params):
         thread_id = params["threadId"]
         if thread_id not in self.threads:
             raise RuntimeError(f"no rollout found for thread id {thread_id}")
+        # Open in another app-server (the owner's Codex app): FAKE_CODEX_IN_USE lists them.
+        if thread_id in in_use():
+            raise RuntimeError(f"thread {thread_id} already has an active writer")
         if (used := self.threads[thread_id].get("usage")) and thread_id not in self.loaded:
             # As Codex: the totals it restored, said before the answer (FAKE_CODEX_RESTORES_LESS:
             # less than was spent, by that many input tokens).
@@ -253,8 +308,7 @@ class Server:
         thread_id = params["threadId"]
         if thread_id not in self.threads:
             raise RuntimeError(f"no rollout found for thread id {thread_id}")
-        thread = self.threads[thread_id]
-        return {"thread": {"id": thread_id, "cwd": thread["cwd"], "model": thread.get("model")}}
+        return {"thread": self.view(thread_id)}
 
     async def on_thread_name_set(self, params):
         self.threads[params["threadId"]]["name"] = params["name"]
@@ -286,7 +340,7 @@ class Server:
     async def on_thread_backgroundterminals_list(self, params):
         self.loaded_thread(params["threadId"])
         found = [
-            {"itemId": item, "processId": str(process.pid), "command": command}
+            {"itemId": item, "processId": str(process.pid), "command": command, "cwd": str(HOME)}
             for item, (thread, process, _, command, _) in self.terminals.items()
             if thread == params["threadId"]
         ]
@@ -559,7 +613,10 @@ class Server:
                             "id": "q1",
                             "header": "Choice",
                             "question": found.group(1) + "?",
-                            "options": [{"label": "Red"}, {"label": "Blue"}],
+                            "options": [
+                                {"label": "Red", "description": "The red one."},
+                                {"label": "Blue", "description": "The blue one."},
+                            ],
                         },
                         {"id": "q2", "header": "Secret", "question": "A token?", "isSecret": True},
                     ],
@@ -588,7 +645,9 @@ class Server:
                 "type": "commandExecution",
                 "id": f"exec-{uuid.uuid4()}",
                 "command": f"curl {found.group(1)}",
+                "cwd": thread["cwd"],
                 "status": "inProgress",
+                "commandActions": [],
             }
             self.item("item/started", thread_id, turn_id, item)
             decision = await self.ask(
@@ -607,15 +666,28 @@ class Server:
         if "Ask for more permissions" in prompt:
             granted = await self.ask(
                 "item/permissions/requestApproval",
-                {"threadId": thread_id, "turnId": turn_id, "itemId": "p-1", "permissions": {}},
+                {
+                    "threadId": thread_id,
+                    "turnId": turn_id,
+                    "itemId": "p-1",
+                    "cwd": self.threads[thread_id]["cwd"],
+                    "permissions": {},
+                },
             )
             await self.say(thread_id, turn_id, "Granted: " + json.dumps(granted))
         if "Ask something odd" in prompt:
-            try:
-                await self.ask("item/somethingNew", {"threadId": thread_id, "turnId": turn_id})
-                await self.say(thread_id, turn_id, "Odd: answered")
-            except RuntimeError as exc:
-                await self.say(thread_id, turn_id, f"Odd: {exc}")
+            for _ in range(2):
+                try:
+                    await self.ask("item/somethingNew", {"threadId": thread_id, "turnId": turn_id})
+                    await self.say(thread_id, turn_id, "Odd: answered")
+                except RuntimeError as exc:
+                    await self.say(thread_id, turn_id, f"Odd: {exc}")
+        if "Ask the time" in prompt:
+            now = await self.ask("currentTime/read", {"threadId": thread_id})
+            off = abs(now["currentTimeAt"] - time.time()) >= 2 or not isinstance(
+                now["currentTimeAt"], int
+            )
+            await self.say(thread_id, turn_id, "Time: " + ("off" if off else "now"))
         if found := re.search(r"Search the web for (\w+)", prompt):
             await self.step(thread_id, turn_id, {"type": "webSearch", "query": found.group(1)})
         if found := re.search(r"View the image (\S+?)\.?(?:\s|$)", prompt):
@@ -660,7 +732,13 @@ class Server:
         if found := re.search(r"Reroute to (\S+)", prompt):
             self.notify(
                 "model/rerouted",
-                {"threadId": thread_id, "turnId": turn_id, "toModel": found.group(1)},
+                {
+                    "threadId": thread_id,
+                    "turnId": turn_id,
+                    "fromModel": self.threads[thread_id].get("model") or "gpt-test",
+                    "toModel": found.group(1),
+                    "reason": "highRiskCyberActivity",
+                },
             )
         if found := re.search(r"Wait ([\d.]+) s", prompt):
             for _ in range(int(float(found.group(1)) * 10)):
@@ -708,6 +786,7 @@ class Server:
             "type": "commandExecution",
             "id": f"exec-{uuid.uuid4()}",
             "command": "/bin/zsh -lc " + shlex.quote(command),
+            "cwd": self.threads[thread_id]["cwd"],
             "status": "inProgress",
             "commandActions": [{"type": "unknown", "command": command}],
         }
@@ -959,6 +1038,43 @@ def approval_mode(config: dict, server: str, tool: str) -> str:
     return mode or policy.get("default_tools_approval_mode") or "auto"
 
 
+def ended(how: str):
+    """How it ended, to FAKE_CODEX_ENDS."""
+    if path := os.environ.get("FAKE_CODEX_ENDS"):
+        with Path(path).open("a") as file:
+            file.write(how + "\n")
+
+
+def in_use() -> list[str]:
+    """The threads FAKE_CODEX_IN_USE (a file) says another app-server has open."""
+    path = Path(os.environ.get("FAKE_CODEX_IN_USE") or "")
+    return path.read_text().split() if path.is_file() else []
+
+
+def now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def summary(key: str, entry: dict) -> dict:
+    """A plugin of FAKE_CODEX_PLUGINS as plugin/installed lists it."""
+    return {
+        "id": key,
+        "name": entry["name"],
+        "installed": True,
+        "enabled": entry.get("on", True),
+        "source": {"type": "local", "path": str(HOME / "plugins" / entry["name"])},
+        "installPolicy": "AVAILABLE",
+        "authPolicy": "ON_USE",
+    }
+
+
+def wire(side: str, message: dict):
+    """Every message either way (tests check each against Codex's protocol schema)."""
+    if log := os.environ.get("FAKE_CODEX_WIRE"):
+        with Path(log).open("a") as file:
+            file.write(json.dumps({"from": side, "message": message}) + "\n")
+
+
 def logged(message: dict):
     """A request's method and params, or an answer the client gave (`answer`, `error`)."""
     if log := os.environ.get("FAKE_CODEX_LOG"):
@@ -981,7 +1097,15 @@ def main():
     if sys.argv[1:2] != ["app-server"]:
         sys.stdout.write(f"codex-cli {VERSION}\n")
         return
-    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    if sys.argv[2:3] == ["generate-json-schema"]:
+        # Its protocol's schema: a copy of FAKE_CODEX_SCHEMA's folder; without one, it fails.
+        if not (schema := os.environ.get("FAKE_CODEX_SCHEMA")):
+            sys.exit(1)
+        import shutil
+
+        shutil.copytree(schema, sys.argv[sys.argv.index("--out") + 1], dirs_exist_ok=True)
+        return
+    signal.signal(signal.SIGTERM, lambda *_: (ended("by SIGTERM"), sys.exit(0)))
     asyncio.run(Server().run())
 
 

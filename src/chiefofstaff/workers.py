@@ -1357,6 +1357,9 @@ class Workers:
                     or self.store.get(f"refusedopen:{row['id']}")
                 )
                 and not (self.runtime.agents and self.runtime.agent_block(row))
+                # Open in the owner's app of another agent: no way to see it closed, so its news
+                # waits until a later try opens it here (Runtime.open_live).
+                and not self.store.get(f"agentopen:{row['id']}")
             ):
                 await self.closed_elsewhere(row)
 

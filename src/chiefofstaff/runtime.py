@@ -2609,7 +2609,16 @@ class Runtime:
                     options,
                     lambda tuned: self.backend_for(row).resume_session(copilot_id, **tuned),
                 )
-            except Exception:
+            except Exception as exc:
+                if elsewhere := getattr(exc, "elsewhere", ""):
+                    # Open in the owner's own app of that agent: left to it until a later try
+                    # opens it here (nothing tries again by itself; its news waits for that).
+                    self.store.set(f"agentopen:{row['id']}", now())
+                    raise OpenElsewhereError(
+                        f"“{row['title']}” is open in another {elsewhere} window: close it "
+                        "there, then try again.",
+                        0,
+                    ) from None
                 if not self.store.get(f"fresh:{copilot_id}"):
                     raise
                 session = await self.without_unsupported_effort(
@@ -2635,6 +2644,8 @@ class Runtime:
 
         session.on(forward)
         self.states[session_id].handle = session
+        if agent != COPILOT_AGENT and self.store.get(f"agentopen:{session_id}"):
+            self.store.delete(f"agentopen:{session_id}")  # Closed there: its news goes now.
         model = self.model_for(row) if agent == COPILOT_AGENT else ""
         if not create and model and (info := self.model_info(model)) and not info["efforts"]:
             # Resumed on a model that takes no thinking effort: Copilot would keep the one it

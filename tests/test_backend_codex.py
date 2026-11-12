@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import codex_schema
 import pytest
 from conftest import Harness, call_tool, fake_codex
 from copilot import Tool, define_tool
@@ -269,9 +270,16 @@ async def test_what_codex_says_of_a_folders_trust_is_asked_for_and_wins(tmp_path
     main = git_repository(tmp_path / "main")
     config = {"projects": {str(main): {"trust_level": "trusted"}}}
     layers = [
-        {"name": {"type": "user"}, "disabledReason": None},
+        {
+            "name": {"type": "user", "file": str(tmp_path / "home" / "config.toml")},
+            "version": "1",
+            "config": {},
+            "disabledReason": None,
+        },
         {
             "name": {"type": "project", "dotCodexFolder": str(main / ".codex")},
+            "version": "1",
+            "config": {},
             "disabledReason": "no",
         },
     ]
@@ -731,7 +739,7 @@ async def test_every_kind_of_request_is_answered(codex, tmp_path):
     )
     await session.send(
         "Fetch https://example.com now. Fill the form of deploy. Ask me red or blue? "
-        "Ask for more permissions. Ask something odd. Then reply with just: done"
+        "Ask for more permissions. Ask something odd. Ask the time. Then reply with just: done"
     )
     await turn.wait()
     assert [(r.kind, r.url) for r in asked] == [("url", "https://example.com")]
@@ -739,7 +747,13 @@ async def test_every_kind_of_request_is_answered(codex, tmp_path):
     assert 'Form: {"action": "accept", "content": {"env": "staging"}}' in said
     assert 'Answered: {"q1": {"answers": ["Blue"]}}' in said, "a secret is never asked"
     assert 'Granted: {"permissions": {}}' in said
-    assert any(text.startswith("Odd: item/somethingNew is not supported") for text in said)
+    odd = [text for text in said if text.startswith("Odd: ")]
+    assert odd == ["Odd: item/somethingNew is not supported by Chief of Staff."] * 2, odd
+    assert [d.text for d in turn.data("agent.notice")] == [
+        "Codex asked for something Chief of Staff does not handle (item/somethingNew); "
+        "it was told no."
+    ], "said once"
+    assert "Time: now" in said, "the time, as whole Unix seconds"
     context = next(context for kind, context in answered if kind == "form")
     assert (context["mode"], context["elicitationSource"], context["session_id"]) == (
         "form",
@@ -845,6 +859,86 @@ async def test_a_child_agent_at_work_after_its_turn_holds_it(codex, tmp_path):
     await turn.wait()
     assert calls == [("later", session.session_id)]
     assert await session.running_background() == 0
+
+
+def test_codexs_protocol_check_finds_a_misnamed_field(tmp_path_factory, tmp_path):
+    """Codex ignores a field it does not know without a word: the check of every fake test's
+    wire (conftest.codex_wire_checked) does not. A thread's sandbox is a mode's name, a turn's
+    is a policy (sandboxPolicy): each, sent to the other, is found."""
+    protocol = codex_schema.protocol(tmp_path_factory.getbasetemp() / "codex-schema")
+    if protocol is None:
+        pytest.skip("No Codex on this computer to say what its protocol is.")
+    wire = tmp_path / "wire.jsonl"
+    sent = [
+        ("thread/start", {"cwd": str(tmp_path), "sandbox": "danger-full-access"}),
+        ("thread/start", {"cwd": str(tmp_path), "sandboxPolicy": {"type": "dangerFullAccess"}}),
+        ("turn/start", {"threadId": "t", "input": [], "sandbox": "danger-full-access"}),
+        ("turn/start", {"threadId": "t", "input": [], "sandboxPolicy": "danger-full-access"}),
+    ]
+    wire.write_text(
+        "".join(
+            json.dumps({"from": "client", "message": {"id": n, "method": m, "params": p}}) + "\n"
+            for n, (m, p) in enumerate(sent)
+        )
+    )
+    found = protocol.problems(wire)
+    assert len(found) == 3, found
+    assert "'sandboxPolicy' was unexpected" in found[0] and "thread/start" in found[0]
+    assert "'sandbox' was unexpected" in found[1] and "turn/start" in found[1]
+    assert "sandboxPolicy" in found[2] and "turn/start" in found[2]
+
+
+async def test_only_what_needs_it_is_of_codexs_experimental_api(codex, tmp_path, tmp_path_factory):
+    """Chief of Staff opts in to Codex's experimental API (capabilities.experimentalApi) for
+    what needs it: its own tools (thread/start's dynamicTools) and the commands a turn left
+    running (thread/backgroundTerminals/*). Checked against the stable protocol, what it sends
+    is off it there and only there."""
+    stable = codex_schema.protocol(tmp_path_factory.getbasetemp() / "codex-schema", False)
+    if stable is None:
+        pytest.skip("No Codex on this computer to say what its protocol is.")
+    session, turn = await opened(codex, tmp_path)
+    await session.send("Leave the command `sleep 30` running. Then reply with just: started")
+    await until(lambda: "assistant.idle" in turn.kinds())
+    assert await session.stop_background() == 1
+    await turn.wait()
+    wire = tmp_path / "fake" / "wire.jsonl"
+    off = {
+        re.sub(r"^client: ([^:]+?)(?: is not in Codex's protocol|: (\w+)/?.*)$", r"\1 \2", p)
+        for p in stable.problems(wire)
+        if p.startswith("client: ")
+    }
+    assert {line.strip() for line in off} == {
+        "thread/start params",
+        "thread/backgroundTerminals/list",
+        "thread/backgroundTerminals/clean",
+    }, off
+    stable_dynamic = [p for p in stable.problems(wire) if p.startswith("client: thread/start")]
+    assert all("'dynamicTools' was unexpected" in p for p in stable_dynamic), stable_dynamic
+
+
+@pytest.mark.parametrize("holds_on", [False, True])
+async def test_codex_is_stopped_gently_first(tmp_path, monkeypatch, holds_on):
+    """Stopping a worker's app-server ends its input, and it ends by itself (its threads
+    written down); only one that does not, after a grace, has its tree ended."""
+    ends = tmp_path / "ends.txt"
+    monkeypatch.setenv("FAKE_CODEX_ENDS", str(ends))
+    if holds_on:
+        monkeypatch.setenv("FAKE_CODEX_HOLDS_ON", "1")
+    monkeypatch.setattr(backend_codex, "STOP_GRACE", 0.5)
+    codex = CodexBackend(fake_codex(tmp_path / "fake", monkeypatch))
+    await codex.start()
+    session, turn = await opened(codex, tmp_path)
+    await session.send("Reply with just: ok")
+    await turn.wait()
+    began = asyncio.get_running_loop().time()
+    await codex.stop()
+    took = asyncio.get_running_loop().time() - began
+    if holds_on:
+        assert ends.read_text().splitlines() == ["at the end of its input", "by SIGTERM"]
+        assert took >= 0.5
+    else:
+        assert ends.read_text().splitlines() == ["at the end of its input"]
+        assert took < 0.5, "no grace waited out"
 
 
 async def test_stopping_a_child_left_at_work_ends_it(codex, tmp_path):
@@ -1540,6 +1634,56 @@ async def test_a_turn_queued_in_codex_never_begins_once_its_worker_may_not_run(
         await runtime.stop()
 
 
+async def test_a_worker_open_in_the_owners_codex_app_says_so_and_waits_for_a_later_try(
+    tmp_path, monkeypatch
+):
+    """Codex lets one app-server write a thread at a time: one the owner opened in their Codex
+    app is refused there (0.167.2: "already has an active writer"). As a worker open in a
+    Copilot terminal: what is sent says so, once; the worker does not fail, nor its agent;
+    nothing tries again by itself (no Codex starts for it); news for it waits for the next try
+    that opens it."""
+    in_use, runs = tmp_path / "in-use.txt", tmp_path / "runs.txt"
+    harness, runtime = await brief(
+        tmp_path, monkeypatch, FAKE_CODEX_IN_USE=str(in_use), FAKE_CODEX_RUNS=str(runs)
+    )
+    try:
+        worker = await spawn(runtime, harness, "Reply with just: first")
+        await until(lambda: ("assistant", "first") in harness.kinds(worker), 30)
+        await until(lambda: harness.store.session(worker)["status"] != "working", 30)
+        await runtime.detach(worker)
+        in_use.write_text(runtime.copilot_id(worker))
+        started = runs.read_text().count("app-server")
+        with pytest.raises(RuntimeError) as refused:
+            await runtime.delivery.deliver(
+                worker, wrap("router", "message", "Reply with just: second"), kind="router"
+            )
+        said = "“Fix it” is open in another Codex window: close it there, then try again."
+        assert str(refused.value) == f"Could not deliver the message: {said}"
+        assert harness.kinds(worker)[-1] == ("error", f"Delivery failed: {said}")
+        assert harness.store.session(worker)["status"] not in {"failed", "working"}
+        assert not runtime.agents["codex"].offline, "its agent runs: only this thread is held"
+        news = {"prompt": wrap("system", "news", "A reply came."), "display": "News", "meta": {}}
+        harness.store.set(f"heldnews:{worker}", json.dumps([news]))
+        tried = runs.read_text().count("app-server")
+        assert tried == started + 1, "one try"
+        for _ in range(3):
+            await runtime.workers.refresh_elsewhere()
+        assert runs.read_text().count("app-server") == tried, "nothing tries again by itself"
+        assert harness.store.get(f"heldnews:{worker}"), "its news waits"
+
+        in_use.write_text("")  # Closed in the Codex app.
+        await runtime.delivery.deliver(
+            worker, wrap("router", "message", "Reply with just: second"), kind="router"
+        )
+        await until(lambda: ("assistant", "second") in harness.kinds(worker), 30)
+        assert harness.store.get(f"agentopen:{worker}") is None
+        await until(lambda: harness.store.session(worker)["status"] != "working", 30)
+        await runtime.workers.refresh_elsewhere()
+        assert harness.store.get(f"heldnews:{worker}") is None, "its news went"
+    finally:
+        await runtime.stop()
+
+
 async def test_a_blocked_codex_worker_never_starts_codex(tmp_path, monkeypatch):
     harness, runtime = await brief(tmp_path, monkeypatch)
     try:
@@ -1750,6 +1894,102 @@ async def test_a_check_that_could_not_run_holds_only_ask_first_and_runs_again(
         assert runtime.agent_block({**row, "yolo": "off"}) == ""
     finally:
         await runtime.stop()
+
+
+def protocol_schema(folder: Path, without: tuple[str, str] | None = None) -> Path:
+    """A protocol schema with just what Chief of Staff uses of Codex, less `without`
+    ((method, field), or (method, "") for the method itself), as generate-json-schema writes."""
+
+    def entries(methods, fields=None) -> dict:
+        found, definitions = [], {}
+        for method in methods:
+            if without == (method, ""):
+                continue
+            name = re.sub(r"\W", "", method.title()) + "Params"
+            used = [f for f in (fields or {}).get(method, ()) if without != (method, f)]
+            definitions[name] = {"type": "object", "properties": {field: {} for field in used}}
+            params = {"$ref": f"#/definitions/{name}"}
+            found.append({"properties": {"method": {"enum": [method]}, "params": params}})
+        return {"oneOf": found, "definitions": definitions}
+
+    folder.mkdir(parents=True, exist_ok=True)
+    for name, methods, fields in (
+        ("ClientRequest.json", backend_codex.CODEX_SENDS, backend_codex.CODEX_SENDS),
+        ("ClientNotification.json", backend_codex.CODEX_NOTIFIES, None),
+        ("ServerRequest.json", backend_codex.CODEX_ANSWERS, None),
+        ("ServerNotification.json", backend_codex.CODEX_FOLLOWS, None),
+    ):
+        (folder / name).write_text(json.dumps(entries(methods, fields)))
+    return folder
+
+
+@pytest.mark.parametrize(
+    ("without", "said"),
+    [
+        (None, ""),
+        (("thread/start", "dynamicTools"), "thread/start dynamicTools"),
+        (("turn/steer", ""), "turn/steer"),
+        (("item/fileChange/requestApproval", ""), "item/fileChange/requestApproval"),
+        (("turn/completed", ""), "turn/completed"),
+    ],
+)
+async def test_a_version_without_what_chief_of_staff_uses_of_it_runs_no_worker(
+    tmp_path, monkeypatch, without, said
+):
+    """Each version's check first finds what Chief of Staff uses in that version's own protocol
+    schema (offline: no thread, no model): a request, a field, a request it answers or news it
+    follows that is not there keeps every worker off it, saying what; all there, it checks on."""
+    schema = protocol_schema(tmp_path / "schema", without)
+    monkeypatch.setenv("FAKE_CODEX_SCHEMA", str(schema))
+    runs = tmp_path / "runs.txt"
+    monkeypatch.setenv("FAKE_CODEX_RUNS", str(runs))
+    codex = CodexBackend(fake_codex(tmp_path / "fake", monkeypatch))
+    await codex.start()
+    try:
+        found = await codex.check(tmp_path / "check")
+    finally:
+        await codex.stop()
+    started = runs.read_text().splitlines()
+    threads = sum(1 for line in started if "generate-json-schema" not in line)
+    if not said:
+        assert found == {"ran": True, "ask_first": "", "acting": ""}
+        assert threads == 2, "then its check went on (a process of its own)"
+    else:
+        assert found["ran"] is True and found["acting"] == found["ask_first"]
+        assert found["acting"].startswith("Codex 0.167.2 does not have what Chief of Staff uses")
+        assert f"({said}): no worker runs on it" in found["acting"]
+        assert threads == 1, "nothing more was started"
+    assert "app-server generate-json-schema --experimental --out" in runs.read_text()
+    assert not (tmp_path / "check").exists()
+
+
+async def test_a_version_whose_schema_cannot_be_had_is_checked_as_before(tmp_path, monkeypatch):
+    monkeypatch.delenv("FAKE_CODEX_SCHEMA", raising=False)
+    codex = CodexBackend(fake_codex(tmp_path / "fake", monkeypatch))
+    await codex.start()
+    try:
+        assert await codex.check(tmp_path / "check") == {
+            "ran": True,
+            "ask_first": "",
+            "acting": "",
+        }
+    finally:
+        await codex.stop()
+
+
+def test_this_codex_has_what_chief_of_staff_uses_of_it(tmp_path_factory):
+    """The Codex on this computer, by its own schema: all there (0.167.2's is)."""
+    if codex_schema.protocol(tmp_path_factory.getbasetemp() / "codex-schema") is None:
+        pytest.skip("No Codex on this computer to say what its protocol is.")
+    folder = tmp_path_factory.getbasetemp() / "codex-schema" / "experimental"
+    assert backend_codex.protocol_missing(folder) == []
+    stable = tmp_path_factory.getbasetemp() / "codex-schema" / "stable"
+    if codex_schema.protocol(tmp_path_factory.getbasetemp() / "codex-schema", False):
+        assert backend_codex.protocol_missing(stable) == [
+            "thread/start dynamicTools",
+            "thread/backgroundTerminals/list",
+            "thread/backgroundTerminals/clean",
+        ], "what needs Codex's experimental API (asked for at initialize)"
 
 
 def test_what_a_check_found_is_said_plainly():

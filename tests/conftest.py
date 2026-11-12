@@ -12,6 +12,7 @@ import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
+import codex_schema
 import pytest
 from copilot.tools import ToolInvocation
 
@@ -496,4 +497,26 @@ def fake_codex(directory: Path, monkeypatch) -> str:
     command.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n')
     command.chmod(0o755)
     monkeypatch.setenv("FAKE_CODEX_HOME", str(directory / "home"))
+    monkeypatch.setenv("FAKE_CODEX_WIRE", str(directory / "wire.jsonl"))
+    WIRES.append(directory / "wire.jsonl")
     return str(command)
+
+
+WIRES: list[Path] = []
+
+
+@pytest.fixture(autouse=True)
+def codex_wire_checked(tmp_path_factory):
+    """Each message either way between Chief of Staff and a fake Codex is as Codex's protocol
+    has it (tests/codex_schema.py), when a Codex on this computer can say what that is."""
+    WIRES.clear()
+    yield
+    wires, WIRES[:] = list(WIRES), []
+    if not wires:
+        return
+    unlisted = [problem for wire in dict.fromkeys(wires) for problem in codex_schema.unlisted(wire)]
+    assert not unlisted, "What a version's check would not look for:\n" + "\n".join(unlisted)
+    if (checked := codex_schema.protocol(tmp_path_factory.getbasetemp() / "codex-schema")) is None:
+        return
+    problems = [problem for wire in dict.fromkeys(wires) for problem in checked.problems(wire)]
+    assert not problems, "Off Codex's protocol:\n" + "\n".join(problems[:20])

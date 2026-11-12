@@ -43,6 +43,7 @@ import re
 import shlex
 import shutil
 import sys
+import time
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from pathlib import Path
@@ -87,6 +88,75 @@ CHECK_TIMEOUT = 90.0
 NOT_SIGNED_IN = re.compile(r"MCP server (?:is not logged in|requires OAuth reauthentication)")
 # How often a worker's process is looked at to see whether its supervisor still runs.
 WATCH_SECONDS = 0.5
+# What Chief of Staff uses of Codex's app-server protocol: each request it sends with the fields
+# it may give, the requests of Codex it answers, the news it follows. A version's check finds
+# each in that version's own schema (`codex app-server generate-json-schema`, offline) before
+# anything else; the tests keep it to what is sent.
+CODEX_SENDS: dict[str, tuple[str, ...]] = {
+    "initialize": ("clientInfo", "capabilities"),
+    "configRequirements/read": (),
+    "account/read": (),
+    "model/list": ("cursor",),
+    "config/read": ("cwd", "includeLayers"),
+    "plugin/installed": ("cwds",),
+    "plugin/read": ("marketplacePath", "pluginName"),
+    "experimentalFeature/list": ("threadId",),
+    "thread/start": (
+        "cwd",
+        "model",
+        "approvalPolicy",
+        "approvalsReviewer",
+        "sandbox",
+        "config",
+        "developerInstructions",
+        "dynamicTools",
+        "ephemeral",
+    ),
+    "thread/resume": (
+        "threadId",
+        "cwd",
+        "model",
+        "approvalPolicy",
+        "approvalsReviewer",
+        "sandbox",
+        "config",
+        "developerInstructions",
+        "excludeTurns",
+    ),
+    "thread/read": ("threadId",),
+    "thread/turns/list": ("threadId", "itemsView", "limit", "sortDirection"),
+    "thread/name/set": ("threadId", "name"),
+    "thread/archive": ("threadId",),
+    "thread/unsubscribe": ("threadId",),
+    "thread/backgroundTerminals/list": ("threadId",),
+    "thread/backgroundTerminals/clean": ("threadId",),
+    "turn/start": ("threadId", "input", "clientUserMessageId", "model", "effort"),
+    "turn/steer": ("threadId", "input", "clientUserMessageId", "expectedTurnId"),
+    "turn/interrupt": ("threadId", "turnId"),
+}
+CODEX_NOTIFIES = ("initialized",)
+CODEX_ANSWERS = (
+    "item/commandExecution/requestApproval",
+    "item/fileChange/requestApproval",
+    "item/permissions/requestApproval",
+    "item/tool/call",
+    "item/tool/requestUserInput",
+    "mcpServer/elicitation/request",
+)
+CODEX_FOLLOWS = (
+    "turn/started",
+    "turn/completed",
+    "item/started",
+    "item/completed",
+    "thread/tokenUsage/updated",
+    "mcpServer/startupStatus/updated",
+    "model/rerouted",
+    "thread/closed",
+)
+SCHEMA_SECONDS = 20.0
+# How long a stopping app-server has to end by itself at the end of its input (graceful: its
+# threads written down) before its supervisor is told to end its tree.
+STOP_GRACE = 5.0
 # What a thread's settings must read back as (thread/start and thread/resume answers).
 APPROVAL_POLICY = "untrusted"
 REVIEWER = "user"
@@ -107,6 +177,13 @@ CODEX_APPS = "codex_apps"
 
 class CodexError(RuntimeError):
     """An error the app-server answered a request with."""
+
+
+class OpenInCodexError(CodexError):
+    """A thread another app-server has open (the owner's Codex app or IDE): Codex lets one
+    write it at a time (0.167.2: "thread <id> already has an active writer")."""
+
+    elsewhere = "Codex"
 
 
 def inner_command(command: str) -> str:
@@ -449,6 +526,9 @@ class CodexBackend:
         self.owner = owner
         # Approvals are Chief of Staff's to answer, never a reviewer agent's.
         self.arguments = ["app-server", "-c", f'approvals_reviewer="{REVIEWER}"']
+        # Codex's experimental API: Chief of Staff's own tools (dynamicTools) and the commands a
+        # turn left running (thread/backgroundTerminals/*) need it; Settings' look does not.
+        self.experimental = True
         self.process: asyncio.subprocess.Process | None = None
         # Chief of Staff's end of the supervisor's lifeline: closed with this process.
         self.lifeline: int | None = None
@@ -535,8 +615,7 @@ class CodexBackend:
                         "title": "Chief of Staff",
                         "version": client_version(),
                     },
-                    # Chief of Staff's own tools and commands left running need it.
-                    "capabilities": {"experimentalApi": True},
+                    "capabilities": {"experimentalApi": self.experimental},
                 },
             )
             self.notify("initialized")
@@ -552,7 +631,7 @@ class CodexBackend:
 
     async def check_requirements(self):
         """An administrator's requirements may forbid what Chief of Staff's checks rely on."""
-        answer = await self.request("configRequirements/read", {})
+        answer = await self.request("configRequirements/read", None)
         required = answer.get("requirements") or {}
         allowed = {
             "approval policy": (required.get("allowedApprovalPolicies"), APPROVAL_POLICY),
@@ -585,7 +664,7 @@ class CodexBackend:
             if process.stdin and not process.stdin.is_closing():
                 process.stdin.close()  # The app-server ends at the end of its input.
             try:
-                await asyncio.wait_for(process.wait(), 5)
+                await asyncio.wait_for(process.wait(), STOP_GRACE)
             except TimeoutError:
                 with suppress(ProcessLookupError):
                     process.terminate()  # The supervisor ends the CLI's tree.
@@ -637,22 +716,24 @@ class CodexBackend:
             raise ConnectionResetError("Codex is not running.")
         self.process.stdin.write((json.dumps(message, ensure_ascii=False) + "\n").encode())
 
-    def send_request(self, method: str, params: dict) -> asyncio.Future:
+    def send_request(self, method: str, params: dict | None) -> asyncio.Future:
         """Write a request now (nothing awaited before it is written); its answer comes later.
-        Once nothing reads its answers (Codex stopped), it fails at once."""
+        Once nothing reads its answers (Codex stopped), it fails at once. `params` None: a
+        method that takes none."""
         if self.reader is not None and self.reader.done():
             raise ConnectionResetError("Codex stopped.")
         self.ids += 1
         future = asyncio.get_running_loop().create_future()
         self.pending[self.ids] = future
         try:
-            self.write({"jsonrpc": "2.0", "id": self.ids, "method": method, "params": params})
+            given = {} if params is None else {"params": params}
+            self.write({"jsonrpc": "2.0", "id": self.ids, "method": method, **given})
         except BaseException:
             self.pending.pop(self.ids, None)
             raise
         return future
 
-    async def request(self, method: str, params: dict) -> dict:
+    async def request(self, method: str, params: dict | None) -> dict:
         return await self.answer(method, self.send_request(method, params))
 
     async def answer(self, method: str, future: asyncio.Future) -> dict:
@@ -816,6 +897,10 @@ class CodexBackend:
         return None
 
     async def serve(self, request_id: Any, method: str, params: dict):
+        if method == "currentTime/read":
+            # Asked when the owner's Codex takes its time from its client (an external clock).
+            self.respond(request_id, {"currentTimeAt": int(time.time())})
+            return
         thread = params.get("threadId") or ""
         session = self.session_of(thread, params)
         try:
@@ -918,7 +1003,12 @@ class CodexBackend:
     async def resume_session(self, session_id: str, **options: Any) -> CodexSession:
         params = await self.thread_params(options)
         params.update(threadId=session_id, excludeTurns=True)
-        answer = await self.request("thread/resume", params)
+        try:
+            answer = await self.request("thread/resume", params)
+        except CodexError as exc:
+            if "already has an active writer" in str(exc):
+                raise OpenInCodexError(str(exc)) from None
+            raise
         try:
             await self.apps_off(answer, options)
         except RuntimeError:
@@ -986,6 +1076,14 @@ class CodexBackend:
         try:
             await asyncio.to_thread(shutil.rmtree, folder, True)
             await asyncio.to_thread(work.mkdir, parents=True)
+            if missing := await self.protocol_missing(folder / "schema"):
+                why = (
+                    f"Codex {self.cli_version} does not have what Chief of Staff uses of it ("
+                    + ", ".join(missing[:4])
+                    + (", …" if len(missing) > 4 else "")
+                    + "): no worker runs on it. Use a tested version."
+                )
+                return {"ran": True, "ask_first": why, "acting": why}
             (work / codex_check.MOVED_FROM).write_text("a\n")
             model = await asyncio.to_thread(codex_check.Model, work)
             other = CodexBackend(self.command)
@@ -1022,6 +1120,36 @@ class CodexBackend:
                 await asyncio.to_thread(model.close)
             await asyncio.to_thread(shutil.rmtree, folder, True)
         return check_verdict(self.cli_version, asked, happened)
+
+    async def protocol_missing(self, folder: Path) -> list[str]:
+        """What Chief of Staff uses of Codex's protocol (CODEX_SENDS and the rest) this version's
+        own schema does not have, found offline; nothing when its schema cannot be had."""
+        try:
+            process = await asyncio.create_subprocess_exec(
+                self.command,
+                "app-server",
+                "generate-json-schema",
+                "--experimental",
+                "--out",
+                str(folder),
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+        except OSError:
+            return []
+        try:
+            if await asyncio.wait_for(process.wait(), SCHEMA_SECONDS) != 0:
+                return []
+        except TimeoutError:
+            with suppress(ProcessLookupError):
+                process.kill()
+            await process.wait()
+            return []
+        try:
+            return await asyncio.to_thread(protocol_missing, folder)
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return []
 
     async def checking(self, other: CodexBackend, work: Path, asked: list[str]):
         await other.start()
@@ -1512,6 +1640,8 @@ class CodexSession:
         # Ids of what it was sent: steered into a turn, and the adapter's own notes (refusals).
         self.steered: set[str] = set()
         self.own: set[str] = set()
+        # Requests of Codex it does not handle, each said once (refused, never left waiting).
+        self.unhandled: set[str] = set()
         # A turn Codex said started, shown once its message is (as Copilot shows a turn: the
         # message first, then its start).
         self.unshown: str = ""
@@ -2236,6 +2366,13 @@ class CodexSession:
         if method == "item/permissions/requestApproval":
             # More access than full access is not a thing; nothing more is granted.
             return {"permissions": {}}
+        if method not in self.unhandled:
+            self.unhandled.add(method)
+            self.emit(
+                "agent.notice",
+                text=f"Codex asked for something Chief of Staff does not handle ({method}); "
+                "it was told no.",
+            )
         raise CodexError(f"{method} is not supported by Chief of Staff.")
 
     async def permitted(self, request: SimpleNamespace, context: dict) -> str:
@@ -2421,6 +2558,38 @@ class CodexSession:
         return {"answers": answers}
 
 
+def protocol_missing(folder: Path) -> list[str]:
+    """What of CODEX_SENDS, CODEX_NOTIFIES, CODEX_ANSWERS and CODEX_FOLLOWS the protocol schema
+    in `folder` does not have: "<method>" or "<method> <field>"."""
+
+    def methods(name: str) -> dict[str, set[str]]:
+        whole = json.loads((folder / name).read_text())
+        definitions = whole.get("definitions") or {}
+        found = {}
+        for entry in whole.get("oneOf") or []:
+            method = entry["properties"]["method"]["enum"][0]
+            params = (entry["properties"].get("params") or {}).get("$ref", "")
+            schema = definitions.get(params.rsplit("/", 1)[-1], {}) if params else {}
+            found[method] = set(schema.get("properties") or {})
+        return found
+
+    requests = methods("ClientRequest.json")
+    missing = []
+    for method, fields in CODEX_SENDS.items():
+        if method not in requests:
+            missing.append(method)
+        else:
+            missing += [f"{method} {field}" for field in fields if field not in requests[method]]
+    for name, used in (
+        ("ClientNotification.json", CODEX_NOTIFIES),
+        ("ServerRequest.json", CODEX_ANSWERS),
+        ("ServerNotification.json", CODEX_FOLLOWS),
+    ):
+        known = methods(name)
+        missing += [method for method in used if method not in known]
+    return missing
+
+
 def check_verdict(version: str, asked: list[str], happened: list[str]) -> dict:
     """What a check showed (CodexBackend.check): why workers that ask first may not run on
     this version, and why none may (an edit that did not ask, or happened though refused)."""
@@ -2466,6 +2635,7 @@ async def look(command: str = "codex") -> dict:
     and stopped: its version, how it is signed in and its models; raises with why its workers
     cannot run (not found, too old, signed out, an administrator's requirements)."""
     backend = CodexBackend(shutil.which(command) or command)
+    backend.experimental = False
     try:
         await asyncio.wait_for(backend.start(), LOOK_SECONDS)
         return await asyncio.wait_for(backend.about(), LOOK_SECONDS)
