@@ -3623,6 +3623,9 @@ class TaskActions:
             return task
         if task["status"] == "cancelled" and not resume:
             raise ValueError("That task was cancelled. Ask the Router for new work instead.")
+        if going_on:
+            # Another agent's worker whose spend is not all known: the owner accepts it.
+            self.runtime.accept_spend(task["session_id"])
         row = self.store.session(task["session_id"])
         if row["closed_at"]:
             await self.runtime.workers.reopen(row["id"])

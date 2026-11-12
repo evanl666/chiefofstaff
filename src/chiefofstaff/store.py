@@ -50,6 +50,12 @@ MESSAGES_SHOWN = 400
 LAST_ID = 2**63 - 1
 
 
+AGENT_USAGE_COLUMNS = (
+    "agent", "session_id", "run_id", "model", "input_tokens", "cached_input_tokens",
+    "cache_write_tokens", "output_tokens", "tokens", "least", "usd", "kind", "accepted", "at",
+)  # fmt: skip
+
+
 def now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -781,6 +787,74 @@ class Store:
                 time.time() if at is None else at,
                 run_id,
             ),
+        )
+
+    # Other coding agents' usage (more-agents.md 5.8), apart from Copilot's `usage`: made when
+    # an agent is first turned on. Tokens each row counts toward a worker's limit (`tokens`: a
+    # range's most, `least` its least); `kind` "unknown": what an agent spent before it stopped
+    # mid-turn, with no number, until the owner accepts it (Go on).
+    AGENT_USAGE = """
+        CREATE TABLE IF NOT EXISTS agent_usage (
+            id INTEGER PRIMARY KEY, agent TEXT NOT NULL, session_id TEXT NOT NULL,
+            run_id TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '',
+            input_tokens INTEGER NOT NULL DEFAULT 0, cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_write_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
+            tokens INTEGER NOT NULL DEFAULT 0, least INTEGER, usd REAL,
+            kind TEXT NOT NULL DEFAULT 'exact', accepted INTEGER NOT NULL DEFAULT 0,
+            at REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS agent_usage_by_session ON agent_usage(session_id, kind);
+        CREATE INDEX IF NOT EXISTS agent_usage_by_time ON agent_usage(at);
+    """
+
+    def agent_usage_table(self):
+        if not getattr(self, "agent_usage_made", False):
+            with self.lock:
+                self.db.executescript(self.AGENT_USAGE)
+            self.agent_usage_made = True
+
+    def record_agent_usage(self, rows: list[dict], key: str, epoch: dict):
+        """One update of an agent's usage: its rows (none when it spent nothing) and its epoch's
+        new state (kv `key`), in one transaction: a stop between them neither loses nor
+        doubles."""
+        self.agent_usage_table()
+        with self.lock, self.db:
+            for row in rows:
+                columns = [column for column in AGENT_USAGE_COLUMNS if column in row]
+                self.db.execute(
+                    f"INSERT INTO agent_usage({', '.join(columns)}) "
+                    f"VALUES({', '.join('?' for _ in columns)})",
+                    tuple(row[column] for column in columns),
+                )
+            self.db.execute("INSERT OR REPLACE INTO kv VALUES (?, ?)", (key, json.dumps(epoch)))
+
+    def agent_spent(self, session_id: str) -> int:
+        """The tokens a worker on another agent spent, as its limit counts them (a range's
+        most)."""
+        self.agent_usage_table()
+        return int(
+            self.value(
+                "SELECT coalesce(sum(tokens), 0) FROM agent_usage WHERE session_id=? "
+                "AND kind!='unknown'",
+                (session_id,),
+            )
+        )
+
+    def agent_unknown(self, session_id: str) -> bool:
+        """Whether it spent an amount nobody knows that the owner has not accepted."""
+        self.agent_usage_table()
+        return bool(
+            self.one(
+                "SELECT 1 FROM agent_usage WHERE session_id=? AND kind='unknown' AND accepted=0",
+                (session_id,),
+            )
+        )
+
+    def accept_agent_unknown(self, session_id: str):
+        self.agent_usage_table()
+        self.execute(
+            "UPDATE agent_usage SET accepted=1 WHERE session_id=? AND kind='unknown'",
+            (session_id,),
         )
 
     def usage(self, since: float, until: float) -> dict:

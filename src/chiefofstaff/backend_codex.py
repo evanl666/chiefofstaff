@@ -371,6 +371,11 @@ class CodexBackend:
         self.parents: dict[str, str] = {}
         # The paths each file change touches, by item id (its approval does not name them).
         self.changes: dict[str, list[dict]] = {}
+        # This process, as its usage's accounting epoch (5.8): its own id, from its start; and
+        # the usage each thread resumed here restored (thread/tokenUsage/updated before the
+        # resume's answer).
+        self.epoch = ""
+        self.restored: dict[str, dict] = {}
         self.tasks: set[asyncio.Task] = set()
         # The supervisor's process and those it started, as last seen: pid -> command line.
         self.started: dict[int, str] = {}
@@ -414,6 +419,7 @@ class CodexBackend:
         finally:
             os.close(read)
         self.lifeline = write
+        self.epoch = uuid4().hex
         self.reader = asyncio.ensure_future(self.read())
         self.errors = asyncio.ensure_future(self.read_errors())
         try:
@@ -606,6 +612,9 @@ class CodexBackend:
         thread = params.get("threadId") or (params.get("thread") or {}).get("id") or ""
         if session := self.session_of(thread, params):
             session.inbox.put_nowait((method, params, thread))
+        elif method == "thread/tokenUsage/updated" and thread:
+            # What a thread resumed in this process restored, said before the resume's answer.
+            self.restored[thread] = mapping(mapping(params.get("tokenUsage")).get("total"))
 
     def observe(self, method: str, params: dict):
         """What requests and routing need before the session's events are handled in order."""
@@ -943,6 +952,8 @@ class CodexBackend:
             )
         session = CodexSession(self, thread["id"], options)
         session.current_model = answer.get("model") or ""
+        if (restored := self.restored.pop(session.session_id, None)) is not None:
+            session.restored[session.session_id] = restored
         if previous := self.sessions.get(session.session_id):
             session.carry(previous)
         self.sessions[session.session_id] = session
@@ -1023,6 +1034,8 @@ class CodexSession:
         # A turn Codex said started, shown once its message is (as Copilot shows a turn: the
         # message first, then its start).
         self.unshown: str = ""
+        # The usage its thread restored when resumed in this process: its epoch's offset.
+        self.restored: dict[str, dict] = {}
 
     def carry(self, previous: CodexSession):
         """The thread was open on another handle (detached, then resumed): what runs on it is
@@ -1298,6 +1311,8 @@ class CodexSession:
                 last=usage.get("last") or {},
                 model=self.current_model,
                 child=child,
+                epoch=self.backend.epoch,
+                restored=self.restored.pop(thread, None),
             )
         elif method == "model/rerouted" and not child:
             self.current_model = params.get("toModel") or params.get("model") or self.current_model
@@ -1346,7 +1361,14 @@ class CodexSession:
                 success=done,
                 result=SimpleNamespace(content="The child agent finished." if done else ""),
             )
+        self.spent()
         self.after_background()
+
+    def spent(self):
+        """Nothing of it spends now (no turn of its own, no child agent at work): what its
+        turns spent has all been said (Codex says a turn's usage before its end)."""
+        if self.turn is None and not self.starting and not self.child_turns:
+            self.emit("agent.settled")
 
     def after_background(self):
         """Something its turn left (a command, a child agent) ended: once nothing is left and no
@@ -1382,6 +1404,7 @@ class CodexSession:
                 and self.child_turns.get(child, "-") == ""
             ):  # Done without a turn of its own seen.
                 del self.child_turns[child]
+                self.spent()
                 self.after_background()
             return
         self.items[item_id] = {**item, "_thread": thread}
@@ -1518,6 +1541,7 @@ class CodexSession:
         await self.settle_items(status == "interrupted")
         self.turn = None
         self.ended.add(turn.get("id", ""))
+        self.spent()
         if status == "failed":
             self.queue.clear()  # Given back: what it was sent is sent again (Delivery).
             error = turn.get("error") or {}

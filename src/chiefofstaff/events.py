@@ -182,6 +182,9 @@ class Events:
             "tool.execution_start": self.tool_start,
             "tool.execution_complete": self.tool_complete,
             "assistant.usage": self.usage,
+            # Another agent's usage, in its own ledger (never Copilot's), and its turns' end.
+            "agent.usage": lambda row, event: self.runtime.record_agent_usage(row, event.data),
+            "agent.settled": lambda row, event: self.runtime.agent_settled(row),
             "session.mcp_server_status_changed": self.mcp_status,
             "session.mcp_server_tools_loaded": self.mcp_status,
             "session.idle": self.idle,

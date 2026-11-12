@@ -239,6 +239,32 @@ SENT_RATES = ((60, 10, "a minute"), (86400, 300, "a day"))
 SENT_AGAIN_SECONDS = 600
 
 
+# How long a turn of another agent waits for what the last one spent (seconds).
+USAGE_SETTLES = 60.0
+
+
+def counters(totals: Any) -> dict[str, int]:
+    """An agent's cumulative token counts (Codex's `tokenUsage.total`), as the ledger keeps
+    them; `tokens`: what counts toward a limit (input and output)."""
+    totals = totals if isinstance(totals, dict) else {}
+
+    def count(name: str) -> int:
+        value = totals.get(name)
+        return value if isinstance(value, int) and value > 0 else 0
+
+    found = {
+        "input": count("inputTokens"),
+        "cached": count("cachedInputTokens"),
+        "cache_write": count("cacheWriteInputTokens"),
+        "output": count("outputTokens"),
+    }
+    return found | {"tokens": count("totalTokens") or found["input"] + found["output"]}
+
+
+def difference(now: dict[str, int], then: dict[str, int]) -> dict[str, int]:
+    return {name: max(0, value - then.get(name, 0)) for name, value in now.items()}
+
+
 @dataclass
 class AgentConnection:
     """Another coding agent's backend in the registry (Runtime.backends), started on first use:
@@ -367,6 +393,10 @@ class Runtime:
         self.admission = asyncio.Lock()
         self.admission_generation = 0
         self.admitted: dict[str, int] = {}
+        # Other agents' usage: the run each turn's usage counts for, and the workers being
+        # stopped at their limit.
+        self.turn_runs: dict[tuple[str, str], str] = {}
+        self.spend_stopping: set[str] = set()
         self.states = SessionStates()
         # Whether this machine can run Copilot's command sandbox, and whether gh works inside it.
         self.sandbox_host = sandbox_supported()
@@ -701,6 +731,7 @@ class Runtime:
             entry.backend = backend
             entry.watch = asyncio.ensure_future(self.watch_agent(agent, backend, entry.connections))
             try:
+                await self.end_epochs(agent, backend)
                 await self.reconcile_sends(agent)
                 await self.resume_working(agent)
             except Exception:
@@ -811,8 +842,9 @@ class Runtime:
         """Why this session may not run now ("" when it may): never for Copilot's. Another
         agent's runs only the owner's own workers, only while that agent is on and the worker
         sandbox off (its sandbox has not passed Chief of Staff's checks), only on a version whose
-        check found nothing unsafe, and with Ask first only on a version whose every kind of
-        action was shown to ask first (its backend says so)."""
+        check found nothing unsafe, with Ask first only on a version whose every kind of action
+        was shown to ask first (its backend says so), and within its token limit (none spent
+        unknown that the owner has not accepted)."""
         agent = self.agent(row["id"])
         if agent == COPILOT_AGENT:
             return ""
@@ -835,6 +867,15 @@ class Runtime:
             return why
         if not self.yolo(row) and (why := getattr(entry.backend, "ask_first_refused", "")):
             return why
+        if limit := agents.limit(self.store, agent):
+            if self.store.agent_unknown(row["id"]):
+                return (
+                    f"{name} stopped in the middle of a turn, so what this worker spent then is "
+                    "not known and its token limit can't be kept: say Go on to accept that and "
+                    "let it continue."
+                )
+            if (spent := self.store.agent_spent(row["id"])) >= limit:
+                return f"This worker used its {name} token limit ({spent:,} of {limit:,})."
         return ""
 
     async def admit_turn(self, session: Any) -> str:
@@ -845,11 +886,30 @@ class Runtime:
         row = self.store.find_session(self.row_id(session.session_id))
         if not row or row["closed_at"]:
             return "That session is closed."
+        await self.usage_settled(row, session)
         async with self.admission:
             if why := self.agent_block(row):
                 return why
             self.admitted[row["id"]] = self.admission_generation
+            self.spending(row["id"], True)
             return ""
+
+    async def usage_settled(self, row: dict, session: Any):
+        """A turn begins once what the last one spent is recorded: what its agent said is
+        handled first (Codex says a turn's usage before its end); an agent whose usage comes
+        after the turn (`usage_pending`) is waited for, a minute at most, then recorded as
+        unknown."""
+        await asyncio.sleep(0)  # What the agent said so far is handled before this goes on.
+        pending = getattr(session, "usage_pending", None)
+        deadline = time.monotonic() + USAGE_SETTLES
+        while pending and pending():
+            if time.monotonic() >= deadline:
+                epoch = self.epoch_of(row["id"])
+                self.store.record_agent_usage(
+                    [self.unknown(row["id"])], f"agentepoch:{row['id']}", epoch
+                )
+                return
+            await asyncio.sleep(0.2)
 
     def begins_turn(self, session: Any) -> bool:
         """Just before the turn admitted begins (nothing awaited in between): whether its
@@ -870,6 +930,169 @@ class Runtime:
             if row["status"] in {"working", "queued", "starting"} or self.held(row["id"]):
                 with suppress(Exception):
                     await self.workers.interrupt(row["id"], by="Settings")
+
+    # Other agents' usage (more-agents.md 5.8): a ledger of their own (agent_usage), kept per
+    # accounting epoch (each process of a session: kv `agentepoch:<session>`), whose totals per
+    # thread give each update's difference; a stop in the middle of a turn leaves what it spent
+    # then unknown.
+
+    def epoch_of(self, session_id: str) -> dict:
+        try:
+            epoch = json.loads(self.store.get(f"agentepoch:{session_id}") or "{}")
+        except ValueError:
+            return {}
+        return epoch if isinstance(epoch, dict) else {}
+
+    def spending(self, session_id: str, busy: bool):
+        """Whether a turn of it may be spending now (admitted, until its agent says nothing of
+        it runs): its process ending then leaves what it spent unknown."""
+        epoch = self.epoch_of(session_id)
+        if bool(epoch.get("busy")) != busy:
+            self.store.record_agent_usage([], f"agentepoch:{session_id}", epoch | {"busy": busy})
+
+    def agent_settled(self, row: dict):
+        self.spending(row["id"], False)
+
+    def unknown(self, session_id: str) -> dict:
+        """A row of the ledger for what a session spent that is not known: with a limit, it
+        runs no turn until the owner accepts that (Go on)."""
+        return {
+            "agent": self.agent(session_id),
+            "session_id": session_id,
+            "kind": "unknown",
+            "at": time.time(),
+        }
+
+    async def end_epochs(self, agent: str, backend: Any):
+        """Its process started afresh: each of its sessions' epochs on the one before ended,
+        cleanly when nothing of it was spending, else with what it spent then unknown; a
+        worker with a limit is then stopped until the owner accepts that."""
+        process = getattr(backend, "epoch", "")
+        for key, value in self.store.items("agentepoch:").items():
+            session_id = key.removeprefix("agentepoch:")
+            try:
+                epoch = json.loads(value)
+            except ValueError:
+                continue
+            if (
+                not isinstance(epoch, dict)
+                or epoch.get("process") in {process, None}
+                or epoch.get("ended")
+                or self.agent(session_id) != agent
+            ):
+                continue
+            crashed = bool(epoch.get("busy"))
+            epoch = epoch | {"ended": "crash" if crashed else "clean", "busy": False}
+            row = self.store.find_session(session_id)
+            self.store.record_agent_usage([self.unknown(session_id)] if crashed else [], key, epoch)
+            if crashed and row and agents.limit(self.store, agent) and not row["closed_at"]:
+                await self.stop_for_spend(row, self.agent_block(row))
+
+    async def stop_for_spend(self, row: dict, why: str):
+        """A worker past what its limit lets it spend stops, as after any stop (Go on, or
+        cancel); the owner hears why."""
+        if row["status"] in {"working", "queued", "starting"} or self.held(row["id"]):
+            self.add_message(row["id"], "notice", why)
+            with suppress(Exception):
+                await self.workers.interrupt(row["id"], by="its token limit")
+
+    def record_agent_usage(self, row: dict, data: Any):
+        """One usage update of another agent's session: what it spent since the one before, in
+        its epoch (each thread's totals; a child agent's counts for its worker), for the run its
+        turn is on; within the limit, or the worker is stopped."""
+        agent = self.agent(row["id"])
+        if agent == COPILOT_AGENT:
+            return
+        key = f"agentepoch:{row['id']}"
+        epoch = self.epoch_of(row["id"])
+        process = getattr(data, "epoch", "") or ""
+        thread = getattr(data, "thread_id", "") or row["id"]
+        total = counters(getattr(data, "total", None))
+        restored = getattr(data, "restored", None)
+        if epoch.get("process") != process:
+            ended = epoch.get("ended") or ("crash" if epoch.get("busy") else "clean")
+            epoch = {
+                "process": process,
+                "threads": {},
+                "before": epoch.get("threads") or {},
+                "crashed": ended == "crash",
+                "busy": epoch.get("busy", False),
+            }
+        last = epoch["threads"].get(thread)
+        before = epoch.get("before", {}).get(thread)
+        spent, least, kind, unknown = total, None, "exact", False
+        if last is not None:
+            if total["tokens"] >= last["tokens"]:
+                spent = difference(total, last)
+            else:  # Its totals went down within one process: as a crash.
+                unknown, least, kind = True, 0, "range"
+        elif restored is not None:
+            spent = difference(total, counters(restored))  # Its offset, as Codex restored it.
+        elif before is not None:
+            if epoch.get("crashed") or total["tokens"] < before["tokens"]:
+                least, kind = max(0, total["tokens"] - before["tokens"]), "range"
+            else:
+                spent = difference(total, before)
+        epoch["threads"][thread] = total
+        entries = [self.unknown(row["id"])] if unknown else []
+        if spent["tokens"] or kind != "exact":
+            entries.append(
+                {
+                    "agent": agent,
+                    "session_id": row["id"],
+                    "run_id": self.run_for_turn(row["id"], getattr(data, "turn_id", "") or ""),
+                    "model": getattr(data, "model", "") or "",
+                    "input_tokens": spent["input"],
+                    "cached_input_tokens": spent["cached"],
+                    "cache_write_tokens": spent["cache_write"],
+                    "output_tokens": spent["output"],
+                    "tokens": spent["tokens"],
+                    "least": least,
+                    "kind": kind,
+                    "at": time.time(),
+                }
+            )
+        self.store.record_agent_usage(entries, key, epoch)
+        limit = agents.limit(self.store, agent)
+        if (
+            limit
+            and row["id"] not in self.spend_stopping
+            and (self.store.agent_unknown(row["id"]) or self.store.agent_spent(row["id"]) >= limit)
+        ):
+            self.spend_stopping.add(row["id"])
+            self.background(self.stop_spending(row["id"]))
+
+    async def stop_spending(self, session_id: str):
+        try:
+            if row := self.store.find_session(session_id):
+                await self.stop_for_spend(row, self.agent_block(row))
+        finally:
+            self.spend_stopping.discard(session_id)
+
+    def run_for_turn(self, session_id: str, turn: str) -> str:
+        """The run a turn's usage counts for: that of the task the turn is on when it first
+        spends (Runtime.turn_task), also once the run ended (a report before its usage)."""
+        key = (session_id, turn)
+        if key not in self.turn_runs:
+            task = self.turn_task(session_id)
+            found = (
+                self.store.one(
+                    "SELECT id FROM runs WHERE task_id=? AND session_id=? "
+                    "ORDER BY started_at DESC LIMIT 1",
+                    (task, session_id),
+                )
+                if task
+                else self.tasks.run(session_id)
+            )
+            if len(self.turn_runs) > 2000:
+                self.turn_runs.clear()
+            self.turn_runs[key] = found["id"] if found else ""
+        return self.turn_runs[key]
+
+    def accept_spend(self, session_id: str):
+        """The owner said Go on to a worker whose spend is not all known: they accept it."""
+        if not self.on_copilot(session_id):
+            self.store.accept_agent_unknown(session_id)
 
     def end_commands(self, agent: str):
         """An agent's process starts afresh: the commands its sessions' shells were running

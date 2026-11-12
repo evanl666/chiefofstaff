@@ -39,7 +39,6 @@ class Server:
         self.steers: dict[str, list[tuple[str, str]]] = {}
         # Background terminals: item id -> (thread, process, turn, command, task)
         self.terminals: dict[str, tuple] = {}
-        self.usage: dict[str, int] = {}
         self.serving: set[asyncio.Task] = set()
         # Threads that start a turn of their own once their current one ends.
         self.on_its_own: set[str] = set()
@@ -206,6 +205,19 @@ class Server:
         thread_id = params["threadId"]
         if thread_id not in self.threads:
             raise RuntimeError(f"no rollout found for thread id {thread_id}")
+        if (used := self.threads[thread_id].get("usage")) and thread_id not in self.loaded:
+            # As Codex: the totals it restored, said before the answer (FAKE_CODEX_RESTORES_LESS:
+            # less than was spent, by that many input tokens).
+            less = int(os.environ.get("FAKE_CODEX_RESTORES_LESS") or 0)
+            self.threads[thread_id]["usage"] = used = [used[0] - less, used[1]]
+            self.notify(
+                "thread/tokenUsage/updated",
+                {
+                    "threadId": thread_id,
+                    "turnId": "",
+                    "tokenUsage": {"total": usage(*used), "last": usage(0, 0)},
+                },
+            )
         self.threads[thread_id]["config"] = params.get("config") or {}
         if params.get("model"):
             self.threads[thread_id]["model"] = params["model"]
@@ -322,15 +334,20 @@ class Server:
         self.save()
 
     def spend(self, thread_id, turn_id, tokens=100):
-        self.usage[thread_id] = self.usage.get(thread_id, 0) + tokens
-        last = {"inputTokens": tokens, "cachedInputTokens": 0, "outputTokens": 10}
-        total = {"inputTokens": self.usage[thread_id], "cachedInputTokens": 0, "outputTokens": 10}
+        """A model call's usage, as Codex says it: the thread's totals (kept with the thread,
+        so a new process restores them) and the call's own."""
+        thread = self.threads.get(thread_id) or {}
+        used = thread.get("usage") or [0, 0]
+        used = [used[0] + tokens, used[1] + 10]
+        thread["usage"] = used
+        self.save()
+        last = usage(tokens, 10)
         self.notify(
             "thread/tokenUsage/updated",
             {
                 "threadId": thread_id,
                 "turnId": turn_id,
-                "tokenUsage": {"total": total, "last": last},
+                "tokenUsage": {"total": usage(*used), "last": last},
             },
         )
 
@@ -746,6 +763,17 @@ class Server:
             self.threads.pop(child, None)
             if not found.group(1):
                 self.notify("thread/closed", {"threadId": child})
+
+
+def usage(given: int, said: int) -> dict:
+    return {
+        "inputTokens": given,
+        "cachedInputTokens": 0,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": said,
+        "reasoningOutputTokens": 0,
+        "totalTokens": given + said,
+    }
 
 
 def apply_changes(changes: list[tuple[str, dict]]):

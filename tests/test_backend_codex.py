@@ -8,6 +8,7 @@ import json
 import os
 import signal
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from conftest import Harness, call_tool, fake_codex
@@ -277,7 +278,13 @@ async def test_a_turn_codex_starts_by_itself_shows_as_it_goes(codex, tmp_path):
     await session.send("Start a turn by yourself after this one. Reply with just: first")
     await until(lambda: turn.kinds().count("session.idle") == 2)
     second = turn.kinds()[turn.kinds().index("session.idle") + 1 :]
-    assert second == ["assistant.turn_start", "assistant.message", "agent.usage", "session.idle"]
+    assert second == [
+        "assistant.turn_start",
+        "assistant.message",
+        "agent.usage",
+        "agent.settled",
+        "session.idle",
+    ]
 
 
 async def test_what_cannot_be_understood_or_answered_is_said_and_skipped(
@@ -1397,3 +1404,233 @@ async def test_nothing_of_codex_is_stored_or_started_until_it_is_turned_on(harne
         agents.backend("gemini")
     assert agents.display("codex") == "Codex" and agents.display("other") == "other"
     await runtime.stop()
+
+
+# Its usage: a ledger of its own, per accounting epoch, and the spend limit (more-agents.md 5.8)
+
+
+def tokens(given: int, said: int = 0) -> dict:
+    return {
+        "inputTokens": given,
+        "cachedInputTokens": given // 2,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": said,
+        "totalTokens": given + said,
+    }
+
+
+def update(runtime, row, epoch, total, thread="t", turn="u1", restored=None):
+    data = SimpleNamespace(
+        thread_id=thread,
+        turn_id=turn,
+        total=total,
+        last={},
+        model="gpt-test",
+        child=thread != "t",
+        epoch=epoch,
+        restored=restored,
+    )
+    runtime.record_agent_usage(row, data)
+
+
+def ledger(harness, session_id) -> list[tuple]:
+    return [
+        (r["kind"], r["tokens"], r["least"], r["input_tokens"], r["output_tokens"])
+        for r in harness.store.all(
+            "SELECT * FROM agent_usage WHERE session_id=? ORDER BY id", (session_id,)
+        )
+    ]
+
+
+async def codex_worker(tmp_path, monkeypatch, **env):
+    harness, runtime = await brief(tmp_path, monkeypatch, **env)
+    harness.store.create_session("w1", WORKER, "Fix", "idle", cwd=str(tmp_path))
+    harness.store.set("agent:w1", "codex")
+    return harness, runtime, harness.store.session("w1")
+
+
+async def test_codex_usage_counts_each_update_once_per_epoch(tmp_path, monkeypatch):
+    """Each process of a session is an epoch: an update counts its difference from the one
+    before; repeated and missed updates count once; a clean restart knows its offset, a crash
+    leaves what was spent then unknown and its next first update a range."""
+    harness, runtime, row = await codex_worker(tmp_path, monkeypatch)
+    try:
+        update(runtime, row, "p1", tokens(100, 10))
+        update(runtime, row, "p1", tokens(100, 10))  # Said twice: once.
+        update(runtime, row, "p1", tokens(300, 30))  # One missed: still counted.
+        update(runtime, row, "p1", tokens(50, 5), thread="child")  # A child agent's: its own.
+        assert ledger(harness, "w1") == [
+            ("exact", 110, None, 100, 10),
+            ("exact", 220, None, 200, 20),
+            ("exact", 55, None, 50, 5),
+        ]
+        # A clean end (nothing spending): the next process's offset is what was last seen.
+        await runtime.end_epochs("codex", SimpleNamespace(epoch="p2"))
+        update(runtime, row, "p2", tokens(350, 30))
+        # Or what the agent said it restored, when it says so.
+        await runtime.end_epochs("codex", SimpleNamespace(epoch="p3"))
+        update(runtime, row, "p3", tokens(400, 30), restored=tokens(340, 30))
+        assert ledger(harness, "w1")[3:] == [("exact", 50, None, 50, 0), ("exact", 60, None, 60, 0)]
+        # A crash in the middle of a turn: what it spent then is unknown, and the next first
+        # update without an offset is a range (at most its totals).
+        runtime.spending("w1", True)
+        await runtime.end_epochs("codex", SimpleNamespace(epoch="p4"))
+        update(runtime, row, "p4", tokens(420, 40))
+        # Totals that go down within a process: as a crash.
+        update(runtime, row, "p4", tokens(100, 0))
+        assert ledger(harness, "w1")[5:] == [
+            ("unknown", 0, None, 0, 0),
+            ("range", 460, 30, 420, 40),
+            ("unknown", 0, None, 0, 0),
+            ("range", 100, 0, 100, 0),
+        ]
+        assert harness.store.agent_spent("w1") == 110 + 220 + 55 + 50 + 60 + 460 + 100
+        assert harness.store.agent_unknown("w1")
+        assert not harness.store.all("SELECT * FROM usage"), "never Copilot's usage"
+        assert not harness.store.get("copilot_default_model")
+    finally:
+        await runtime.stop()
+
+
+async def test_a_stop_between_a_ledger_row_and_its_epoch_neither_loses_nor_doubles(
+    tmp_path, monkeypatch
+):
+    harness, runtime, row = await codex_worker(tmp_path, monkeypatch)
+    try:
+        update(runtime, row, "p1", tokens(100))
+        dumps = json.dumps
+
+        def stopped(value, *args, **kwargs):
+            raise OSError("stopped here")
+
+        monkeypatch.setattr("chiefofstaff.store.json.dumps", stopped)
+        with pytest.raises(OSError, match="stopped here"):
+            update(runtime, row, "p1", tokens(250))
+        monkeypatch.setattr("chiefofstaff.store.json.dumps", dumps)
+        assert ledger(harness, "w1") == [("exact", 100, None, 100, 0)], "its row went too"
+        update(runtime, row, "p1", tokens(250))
+        assert harness.store.agent_spent("w1") == 250
+    finally:
+        await runtime.stop()
+
+
+async def test_codex_usage_counts_for_the_run_its_turn_is_on_also_after_its_report(
+    tmp_path, monkeypatch
+):
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    try:
+        worker = await spawn(
+            runtime,
+            harness,
+            "Have a child agent call the report tool with text 'x'. Report done: Fixed it.",
+        )
+        await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+        (run,) = runtime.tasks.runs(runtime.tasks.for_session(worker)[-1]["id"])
+        assert run["ended_at"], "its report ended the run"
+        rows = harness.store.all("SELECT * FROM agent_usage WHERE session_id=?", (worker,))
+        # The report's own call spent after the report: still that run's.
+        assert len(rows) == 2 and {r["run_id"] for r in rows} == {run["id"]}
+        assert {r["agent"] for r in rows} == {"codex"} and {r["model"] for r in rows} == {
+            "gpt-test"
+        }
+        assert not harness.store.all("SELECT * FROM usage WHERE session_id=?", (worker,))
+        assert json.loads(harness.store.get(f"agentepoch:{worker}"))["busy"] is False
+    finally:
+        await runtime.stop()
+
+
+async def test_a_codex_worker_stops_at_its_token_limit(tmp_path, monkeypatch):
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    try:
+        agents.configure(harness.store, "codex", limit=150)
+        worker = await spawn(
+            runtime,
+            harness,
+            "Run the shell command `echo 1`. Run the shell command `echo 2`. Wait 20 s. "
+            "Then reply with just: done",
+        )
+        await until(lambda: "Stopped by its token limit." in str(harness.kinds(worker)), 30)
+        notices = [text for kind, text in harness.kinds(worker) if kind == "notice"]
+        assert "This worker used its Codex token limit (220 of 150)." in notices
+        task = runtime.tasks.for_session(worker)[-1]
+        assert task["status"] == "waiting" and harness.store.get(f"stopped:{task['id']}")
+        assert harness.store.session(worker)["status"] == "idle"
+        with pytest.raises(RuntimeError, match="token limit"):
+            await runtime.start_agent_of(worker)
+        agents.configure(harness.store, "codex", limit=10_000)
+        assert runtime.agent_block(harness.store.session(worker)) == ""
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.parametrize("limited", [True, False])
+async def test_a_crash_mid_turn_leaves_its_spend_unknown_until_the_owner_goes_on(
+    tmp_path, monkeypatch, limited
+):
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    try:
+        if limited:
+            agents.configure(harness.store, "codex", limit=1_000_000)
+        worker = await spawn(
+            runtime, harness, "Run the shell command `echo 1`. Wait 30 s. Then reply with just: on"
+        )
+        await until(lambda: harness.store.all("SELECT 1 FROM agent_usage"), 30)
+        backend, _ = runtime.connection("codex")
+        os.kill(backend.process.pid, signal.SIGKILL)  # Codex crashes mid-turn.
+        await until(lambda: runtime.connection("codex")[0] not in {None, backend}, 30)
+        assert ledger(harness, worker)[-1][0] == "unknown"
+        task = runtime.tasks.for_session(worker)[-1]
+        if not limited:
+            await until(lambda: harness.store.session(worker)["status"] == "working", 30)
+            assert runtime.agent_block(harness.store.session(worker)) == ""
+            return
+        await until(lambda: "Stopped by its token limit." in str(harness.kinds(worker)), 30)
+        why = runtime.agent_block(harness.store.session(worker))
+        assert "what this worker spent then is not known" in why and "Go on" in why
+        assert any(why == text for _, text in harness.kinds(worker))
+        await runtime.task_actions.follow_up(task["id"], "Go on where you stopped.")
+        assert runtime.agent_block(harness.store.session(worker)) == ""
+        await until(lambda: harness.store.session(worker)["status"] == "working", 30)
+    finally:
+        await runtime.stop()
+
+
+async def test_a_turn_waits_for_what_the_last_one_spent(tmp_path, monkeypatch):
+    harness, runtime, _ = await codex_worker(tmp_path, monkeypatch)
+    try:
+        harness.store.set("copilot:w1", "thread-w1")
+        harness.store.set("alias:thread-w1", "w1")
+        pending = [True, True, False]
+        late = SimpleNamespace(session_id="w1", usage_pending=lambda: pending.pop(0))
+        assert await runtime.admit_turn(late) == ""
+        assert pending == [], "waited until it was said"
+        assert json.loads(harness.store.get("agentepoch:w1"))["busy"] is True
+        monkeypatch.setattr(runtime_module, "USAGE_SETTLES", 0.3)
+        agents.configure(harness.store, "codex", limit=1000)
+        never = SimpleNamespace(session_id="w1", usage_pending=lambda: True)
+        assert "not known" in await runtime.admit_turn(never), "a minute without it: unknown"
+        assert ledger(harness, "w1") == [("unknown", 0, None, 0, 0)]
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.parametrize("less", ["0", "50"])
+async def test_a_clean_restart_counts_on_from_what_codex_restored(tmp_path, monkeypatch, less):
+    """Codex restores a thread's totals when it resumes it in a new process (said before the
+    resume's answer); less than was spent too: the new process counts from what it restored."""
+    harness, runtime = await brief(tmp_path, monkeypatch, FAKE_CODEX_RESTORES_LESS=less)
+    try:
+        worker = await spawn(runtime, harness, "Run the shell command `echo 1`. Report done: one.")
+        await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+        await until(lambda: json.loads(harness.store.get(f"agentepoch:{worker}"))["busy"] is False)
+        await runtime.disconnect_agent("codex")
+        await runtime.connect_agent("codex")
+        task = runtime.tasks.for_session(worker)[-1]
+        await runtime.task_actions.follow_up(
+            task["id"], "Run the shell command `echo 2`. Report done: two."
+        )
+        await until(lambda: len(ledger(harness, worker)) == 4, 30)
+        assert ledger(harness, worker) == [("exact", 110, None, 100, 10)] * 4
+        assert not harness.store.agent_unknown(worker)
+    finally:
+        await runtime.stop()

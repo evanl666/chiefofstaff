@@ -21,7 +21,8 @@ NAMES = {"codex": "Codex"}
 
 def configured(store: Store) -> dict[str, dict[str, Any]]:
     """Each agent the owner has turned on at some point, with its settings ("enabled" while on,
-    "model" and "effort" for its new workers)."""
+    "model" and "effort" for its new workers, "limit": the tokens each of its workers may spend,
+    none when 0 or absent)."""
     try:
         value = json.loads(store.get(CONFIG) or "{}")
     except ValueError:
@@ -37,12 +38,20 @@ def enabled(store: Store, name: str) -> bool:
     return bool(configured(store).get(name, {}).get("enabled"))
 
 
+def limit(store: Store, name: str) -> int:
+    """The tokens each of its workers may spend (0: no limit)."""
+    value = configured(store).get(name, {}).get("limit")
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
 def configure(store: Store, name: str, **values: Any) -> dict[str, Any]:
     """Change an agent's settings (made on first use); the rest is kept."""
     if name not in NAMES:
         raise ValueError(f"Unknown agent {name!r}.")
     agents = configured(store)
     agents[name] = {**agents.get(name, {}), **values}
+    if agents[name].get("enabled"):
+        store.agent_usage_table()  # Its usage's own table, from its first use.
     store.set(CONFIG, json.dumps(agents, sort_keys=True))
     return agents[name]
 
