@@ -136,7 +136,8 @@ class Delivery:
             # Stopped: Copilot may hold the session busy (a command it left running) and keep a
             # queued message until then. Steered, it takes it at once.
             mode = "immediate"
-        backend, connection = self.runtime.backend, self.runtime.connections
+        agent = self.runtime.agent(session_id)
+        backend, connection = self.runtime.connection(agent)
         try:
             sent = await self.flush(
                 session_id,
@@ -156,7 +157,7 @@ class Delivery:
             if claimed or row["role"] != WORKER:
                 self.states[session_id].busy = False
                 self.runtime.background(self.runtime.workers.pump())  # Its slot is free.
-            if self.copilot_gone(exc, backend, connection):
+            if self.copilot_gone(exc, backend, connection, agent):
                 # Kept to send: it goes out once Copilot runs again (Runtime.resume_working).
                 self.copilot_down(session_id)
                 return message
@@ -186,13 +187,14 @@ class Delivery:
                     # Connecting: its resume (before it is ready) may have come too early.
                     self.schedule_flush(session_id, 0.5, attempt)
                 return  # Stopping or reconnecting: they are sent once connected (resume).
-            backend, connection = self.runtime.backend, self.runtime.connections
+            agent = self.runtime.agent(session_id)
+            backend, connection = self.runtime.connection(agent)
             try:
                 if await self.flush(session_id, await self.runtime.session_for(session_id)):
                     self.runtime.update_session(session_id, status="working")
             except Exception as exc:
                 logger.warning("Could not deliver held messages to %s.", session_id, exc_info=True)
-                if self.copilot_gone(exc, backend, connection):
+                if self.copilot_gone(exc, backend, connection, agent):
                     self.copilot_down(session_id)  # Not Copilot's own output: it reconnects.
                 elif attempt == 0:
                     failed = reason(exc)
@@ -207,12 +209,16 @@ class Delivery:
 
         self.runtime.background(later())
 
-    def copilot_gone(self, error: BaseException, backend: object, connection: int) -> bool:
-        """Whether a send failed because Copilot's CLI stopped (crashed, killed) or was
-        reconnected meanwhile: what was not sent goes out once it runs again."""
+    def copilot_gone(
+        self, error: BaseException, backend: object, connection: int, agent: str
+    ) -> bool:
+        """Whether a send failed because the session's backend (Copilot's CLI, or its agent's)
+        stopped (crashed, killed) or was reconnected meanwhile: what was not sent goes out once
+        it runs again."""
         if backend is None:
             return False  # Not connected when it began: said as it is.
-        if self.runtime.backend is not backend or self.runtime.connections != connection:
+        running, connections = self.runtime.connection(agent)
+        if running is not backend or connections != connection:
             return True
         alive = getattr(backend, "alive", None)
         return (callable(alive) and not alive()) or connection_lost(error)
@@ -365,7 +371,7 @@ class Delivery:
         # A turn starts on it now: its conversation shows it soon, or Copilot gave up on it.
         # Marked before the send (its echo may come before the send returns).
         starts = (
-            self.runtime.backend_echoes()
+            self.runtime.backend_echoes(session_id)
             and not joins
             and not mid_turn
             and not (busy and state.echoes)
@@ -421,7 +427,7 @@ class Delivery:
                 about = message["meta"].get("task_id") if message["kind"] == "owner" else ""
                 if about and self.store.get(f"stopped:{about}"):
                     self.store.set(f"goingon:{about}", "1")
-        if state.echoes or self.runtime.backend_echoes():
+        if state.echoes or self.runtime.backend_echoes(session_id):
             # Until its conversation shows it: lost on the way, it is sent again.
             state.echo_wait[marker["digest"]] = (
                 pending[0]["id"],
@@ -431,7 +437,7 @@ class Delivery:
                 0,
             )
             self.check_echo_later(session_id, session, marker["digest"])
-        if row["role"] == WORKER and (state.echoes or self.runtime.backend_echoes()):
+        if row["role"] == WORKER and (state.echoes or self.runtime.backend_echoes(session_id)):
             # Until its conversation shows it: a stop before then sends it again.
             state.unseen[marker["digest"]] = pending[0]["id"]
         if mid_turn:
@@ -778,7 +784,13 @@ def digest(text: str) -> str:
 
 async def queue_holds(session) -> bool:
     """Whether Copilot holds messages for the session (queued for after its turn, or steers
-    for its next step); True when it cannot say (so nothing is sent twice)."""
+    for its next step); True when it cannot say (so nothing is sent twice). A session that
+    queues by itself (another agent's adapter) says so itself."""
+    if own := getattr(session, "queue_holds", None):
+        try:
+            return await own()
+        except Exception:
+            return True
     try:
         listed = await session.rpc.queue.pending_items()
     except Exception:

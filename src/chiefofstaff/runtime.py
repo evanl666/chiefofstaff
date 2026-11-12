@@ -30,8 +30,9 @@ import re
 import shutil
 import sys
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from contextlib import suppress
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,7 @@ from . import prompts, threads
 from .abilities import Abilities
 from .asks import Asks
 from .backend import (
+    COPILOT_AGENT,
     OLDEST_CLI,
     AgentBackend,
     SandboxPolicy,
@@ -235,6 +237,19 @@ SENT_RATES = ((60, 10, "a minute"), (86400, 300, "a day"))
 SENT_AGAIN_SECONDS = 600
 
 
+@dataclass
+class AgentConnection:
+    """Another coding agent's backend in the registry (Runtime.backends), started on first use:
+    while it runs, and how many times it was disconnected, as Runtime.backend and
+    Runtime.connections are Copilot's."""
+
+    start: Callable[[], AgentBackend]
+    backend: AgentBackend | None = None
+    connections: int = 0
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    watch: asyncio.Task | None = None
+
+
 class OpenElsewhereError(RuntimeError):
     """A session is open in another Copilot window (a terminal): `pid` runs it."""
 
@@ -331,6 +346,8 @@ class Runtime:
         self.stopping = False
         self.backend: AgentBackend | None = None
         self.connections = 0  # Counts disconnects: a session opened before one is not usable.
+        # Other coding agents' backends, by agent (see backends): none ships yet.
+        self.agents: dict[str, AgentConnection] = {}
         self.states = SessionStates()
         # Whether this machine can run Copilot's command sandbox, and whether gh works inside it.
         self.sandbox_host = sandbox_supported()
@@ -394,6 +411,7 @@ class Runtime:
         self.asks.expire_requests()
         self.task_actions.settle_old_reports(TASKS_SHOWN_HOURS)
         await self.connect()
+        await self.recover_agents()
         for source in self.all_sources():
             await source.start()
         self.watch_job = asyncio.create_task(self.watch_loop())
@@ -422,6 +440,8 @@ class Runtime:
             await source.stop()
         await self.habits.stop()
         await self.connector.stop()
+        for agent in self.agents:
+            await self.disconnect_agent(agent)
         await self.disconnect()
         for task in list(self.jobs):
             task.cancel()
@@ -431,7 +451,7 @@ class Runtime:
         async with self.connect_lock:
             # Copilot starts afresh (at start, or reconnecting): the commands its shells were
             # running ended with the one before.
-            self.store.execute("UPDATE commands SET ended_at=? WHERE ended_at IS NULL", (now(),))
+            self.end_commands(COPILOT_AGENT)
             self.status = {"state": "starting", "error": ""}
             self.publish_state()
             try:
@@ -513,9 +533,10 @@ class Runtime:
         # Not ready from the first moment: nothing starts (a pump, a delivery) while it stops.
         backend, self.backend = self.backend, None
         self.connections += 1
-        sessions = self.states.take_all_handles()
+        mine = self.on_agent(COPILOT_AGENT, self.states.ids())
+        sessions = self.states.take_handles(mine)
         # Their turns end with the connection: no idle event will come to free their slots.
-        self.states.end_turns()
+        self.states.end_turns(mine)
         await asyncio.gather(*(s.disconnect() for s in sessions), return_exceptions=True)
         if backend:
             with suppress(Exception):
@@ -524,6 +545,163 @@ class Runtime:
     async def reconnect(self):
         await self.disconnect()
         await self.connect()
+
+    # Backends: Copilot's, and other coding agents' beside it (none ships yet). Each has its own
+    # connections, and its sessions' handles, turns, commands and recovery are its own.
+
+    @property
+    def backends(self) -> dict[str, AgentBackend]:
+        """The backends running now, by agent: Copilot's first (connected first, as `backend`),
+        then other agents', each started on first use."""
+        running = {COPILOT_AGENT: self.backend} if self.backend else {}
+        return running | {
+            name: entry.backend for name, entry in self.agents.items() if entry.backend
+        }
+
+    def agent(self, session_id: str) -> str:
+        """The agent a session runs on, for its life: Copilot, unless its row names another (an
+        `agent:<id>` entry, made with the row)."""
+        return self.store.get(f"agent:{session_id}") or COPILOT_AGENT
+
+    def on_copilot(self, session_id: str) -> bool:
+        return self.agent(session_id) == COPILOT_AGENT
+
+    def on_agent(self, agent: str, session_ids: Iterable[str]) -> list[str]:
+        """Of these sessions, those that run on this agent."""
+        named = self.store.items("agent:")
+        return [key for key in session_ids if named.get(key, COPILOT_AGENT) == agent]
+
+    def connection(self, agent: str) -> tuple[AgentBackend | None, int]:
+        """An agent's backend while it runs (None otherwise), and how many times it was
+        disconnected: a session opened on it before one is not usable."""
+        if agent == COPILOT_AGENT:
+            return self.backend, self.connections
+        entry = self.agents.get(agent)
+        return (entry.backend, entry.connections) if entry else (None, 0)
+
+    def backend_for(self, row: dict) -> AgentBackend:
+        """The backend a session runs on: Copilot's (also while connecting, as connected()), or
+        its agent's while that runs."""
+        agent = self.agent(row["id"])
+        if agent == COPILOT_AGENT:
+            return self.connected()
+        backend, _ = self.connection(agent)
+        if backend is None:
+            raise RuntimeError(f"This session's agent ({agent}) is not running.")
+        return backend
+
+    async def start_agent_of(self, session_id: str):
+        """Another agent's backend for this session, started on first use (Copilot's runs from
+        connect). Not while holding the session's locks: recovering that agent's sessions may
+        take them."""
+        if (agent := self.agent(session_id)) != COPILOT_AGENT:
+            await self.connect_agent(agent)
+
+    async def connect_agent(self, agent: str) -> AgentBackend:
+        """Another agent's backend, started on first use, as connect starts Copilot's: the
+        commands its sessions ran ended with its process before, and their interrupted sends and
+        turns are recovered."""
+        entry = self.agents.get(agent)
+        if entry is None:
+            raise RuntimeError(f"This session runs on {agent}, which is not available.")
+        if entry.backend:
+            return entry.backend
+        async with entry.lock:
+            if entry.backend:
+                return entry.backend
+            if self.stopping:
+                raise RuntimeError("Chief of Staff is stopping.")
+            self.end_commands(agent)
+            backend = entry.start()
+            try:
+                await backend.start()
+            except BaseException:
+                with suppress(Exception):
+                    await backend.stop()
+                raise
+            entry.backend = backend
+            entry.watch = asyncio.ensure_future(self.watch_agent(agent, backend, entry.connections))
+            try:
+                await self.reconcile_sends(agent)
+                await self.resume_working(agent)
+            except Exception:
+                logger.exception("Recovering the sessions of %s failed", agent)
+        return backend
+
+    async def disconnect_agent(self, agent: str):
+        """As disconnect, for another agent's backend: only its own sessions' handles and turns
+        end."""
+        entry = self.agents[agent]
+        backend, entry.backend = entry.backend, None
+        entry.connections += 1
+        if entry.watch and entry.watch is not asyncio.current_task():
+            entry.watch.cancel()
+        entry.watch = None
+        mine = self.on_agent(agent, self.states.ids())
+        sessions = self.states.take_handles(mine)
+        self.states.end_turns(mine)
+        await asyncio.gather(*(s.disconnect() for s in sessions), return_exceptions=True)
+        if backend:
+            with suppress(Exception):
+                await backend.stop()
+        if not self.stopping:
+            self.background(self.workers.pump())  # Their worker slots are free.
+
+    async def watch_agent(self, agent: str, backend: AgentBackend, connection: int):
+        """Another agent's backend stopped by itself (crashed, killed): its own sessions' turns
+        end and it starts again, recovering them; Copilot's sessions are not touched."""
+        entry = self.agents[agent]
+        while entry.backend is backend and entry.connections == connection:
+            if not backend.alive():
+                logger.warning("%s stopped by itself; starting it again.", agent)
+                await self.disconnect_agent(agent)
+                try:
+                    await self.connect_agent(agent)
+                except Exception as exc:
+                    logger.warning("Starting %s again failed.", agent, exc_info=True)
+                    why = f"Its agent stopped and could not start again: {describe(exc)}"
+                    self.fail_working(agent, why)
+                return
+            await asyncio.sleep(PROCESS_CHECK)
+
+    async def recover_agents(self):
+        """At start: other agents whose sessions were at work, or had messages on their way, are
+        started now, so their sessions go on as Copilot's do (resume_working). One that cannot
+        start (or that this Chief of Staff does not run) fails its sessions at work, with why."""
+        if not (named := set(self.store.items("agent:").values()) - {COPILOT_AGENT}):
+            return
+        rows = {row["id"]: row for row in self.store.open_sessions()}
+        for agent in sorted(named):
+            if any(
+                rows[key]["status"] == "working"
+                or self.store.get(f"sending:{key}")
+                or self.delivery.has_unsent(key)
+                for key in self.on_agent(agent, rows)
+            ):
+                try:
+                    await self.connect_agent(agent)
+                except Exception as exc:
+                    logger.warning("%s could not start.", agent, exc_info=True)
+                    self.fail_working(agent, f"Could not resume after restart: {describe(exc)}")
+
+    def fail_working(self, agent: str, why: str):
+        """The agent cannot start: its sessions at work fail, with why (nothing else would end
+        their turns, and only its own sessions are touched)."""
+        rows = self.store.open_sessions()
+        for key in self.on_agent(agent, [row["id"] for row in rows if row["status"] == "working"]):
+            self.fail(self.store.session(key), why)
+
+    def end_commands(self, agent: str):
+        """An agent's process starts afresh: the commands its sessions' shells were running
+        ended with the one before. Only its own sessions'."""
+        # Copilot's: every session not named for another agent. Another's: those named for it.
+        named = "SELECT substr(key, 7) FROM kv WHERE key >= 'agent:' AND key < 'agent;' AND value"
+        mine = f"NOT IN ({named} != ?)" if agent == COPILOT_AGENT else f"IN ({named} = ?)"
+        self.store.execute(
+            "UPDATE commands SET ended_at=? WHERE ended_at IS NULL "  # noqa: S608
+            f"AND session_id {mine}",  # (mine: constant SQL)
+            (now(), agent),
+        )
 
     def recorded_processes(self) -> dict:
         """What connect recorded of the processes of the Copilot CLI it started last (see
@@ -1145,7 +1323,10 @@ class Runtime:
     def refused_at_start(self, row: dict, error: str) -> bool:
         """Copilot would not start the session on its model ("Model X is not available"): it
         starts on Copilot's default model instead, and so do others given that model, and the
-        owner hears it in plain words. False when it had no model of its own to drop."""
+        owner hears it in plain words. False when it had no model of its own to drop, and for
+        another agent's session (Copilot's models are not its own)."""
+        if not self.on_copilot(row["id"]):
+            return False
         if not (chosen := self.model_for(row)) or not (
             MODEL_REFUSED.search(error) or (chosen in error and MODEL_NOT_OFFERED.search(error))
         ):
@@ -1329,24 +1510,34 @@ class Runtime:
         copilot_id = copilot or self.copilot_id(row["id"])
         # Copilot refuses a session name with a double quote ("Write "x" to y").
         name = ("Chief of Staff · " + clean_title(row["title"]).replace('"', "'"))[:100]
-        connection = self.connections
+        agent = self.agent(row["id"])
+        _, connection = self.connection(agent)
         if create:
             session = await self.without_unsupported_effort(
                 row,
                 options | self.trust(row),
-                lambda tuned: self.connected().create_session(
+                lambda tuned: self.backend_for(row).create_session(
                     session_id=copilot_id, name=name, **tuned
                 ),
             )
             self.store.set(f"created:{row['id']}", "1")
-            # Copilot keeps a session only once it has had a message: until then it cannot
-            # be resumed after a restart, and is created again instead.
-            self.store.set(f"fresh:{copilot_id}", "1")
+            if session.session_id != copilot_id:
+                # The agent chose its session's id (Copilot takes ours): found as the Router's
+                # successive Copilot sessions are.
+                copilot_id = session.session_id
+                self.store.set(f"alias:{copilot_id}", row["id"])
+                self.store.set(f"copilot:{row['id']}", copilot_id)
+            if agent == COPILOT_AGENT:
+                # Copilot keeps a session only once it has had a message: until then it cannot
+                # be resumed after a restart, and is created again instead.
+                self.store.set(f"fresh:{copilot_id}", "1")
         else:
             await self.refuse_if_open_elsewhere(row)
             try:
                 session = await self.without_unsupported_effort(
-                    row, options, lambda tuned: self.connected().resume_session(copilot_id, **tuned)
+                    row,
+                    options,
+                    lambda tuned: self.backend_for(row).resume_session(copilot_id, **tuned),
                 )
             except Exception:
                 if not self.store.get(f"fresh:{copilot_id}"):
@@ -1354,12 +1545,12 @@ class Runtime:
                 session = await self.without_unsupported_effort(
                     row,
                     options | self.trust(row),
-                    lambda tuned: self.connected().create_session(
+                    lambda tuned: self.backend_for(row).create_session(
                         session_id=copilot_id, name=name, **tuned
                     ),
                 )
-        if self.connections != connection:
-            # Copilot reconnected meanwhile: this session belongs to the old connection.
+        if self.connection(agent)[1] != connection:
+            # Its backend reconnected meanwhile: this session belongs to the old connection.
             with suppress(Exception):
                 await session.disconnect()
             raise RuntimeError("Copilot reconnected meanwhile; try again.")
@@ -1407,7 +1598,11 @@ class Runtime:
         try:
             return await open_session(options)
         except Exception as exc:
-            if "reasoning_effort" not in options or not EFFORT_REFUSED.search(str(exc)):
+            if (
+                "reasoning_effort" not in options
+                or not EFFORT_REFUSED.search(str(exc))
+                or not self.on_copilot(row["id"])  # Copilot's default model is not its own.
+            ):
                 raise
         options = {key: value for key, value in options.items() if key != "reasoning_effort"}
         session = await open_session(options)
@@ -1424,7 +1619,10 @@ class Runtime:
     async def refuse_if_open_elsewhere(self, row: dict, tell: bool = True):
         """Two programs writing to one Copilot session would interleave its history: a session
         open in a terminal is left alone until it is closed there. `tell`: once it is closed,
-        the Router hears it can be reached again (what was refused came from it)."""
+        the Router hears it can be reached again (what was refused came from it). Only Copilot's
+        sessions: another agent's is never open in a Copilot terminal."""
+        if not self.on_copilot(row["id"]):
+            return
         self.elsewhere = await self.open_elsewhere()
         if pid := self.elsewhere.get(self.copilot_id(row["id"])):
             if tell:
@@ -1438,7 +1636,9 @@ class Runtime:
     async def session_for(self, session_id: str):
         if session := self.states.handle(session_id):
             return session
-        if not self.backend:
+        if (agent := self.agent(session_id)) != COPILOT_AGENT:
+            await self.connect_agent(agent)  # Started on first use.
+        elif not self.backend:
             self.require_ready()
         async with self.states[session_id].lifecycle:
             if session := self.states.handle(session_id):
@@ -1535,9 +1735,10 @@ class Runtime:
         self.background(self.delivery.resume(router_id))
         return True
 
-    def backend_echoes(self) -> bool:
+    def backend_echoes(self, session_id: str) -> bool:
         """Whether a message sent shows in the session's conversation when it is taken up."""
-        capabilities = getattr(self.backend, "capabilities", None)
+        backend, _ = self.connection(self.agent(session_id))
+        capabilities = getattr(backend, "capabilities", None)
         return bool(getattr(capabilities, "echoes", False))
 
     def router_context_limit(self, row: dict) -> int:
@@ -1773,10 +1974,13 @@ class Runtime:
             await self.ensure_slack_session()
         self.publish_state()
 
-    async def reconcile_sends(self):
-        """Sends that a stop interrupted: check whether they arrived before anything is resent."""
+    async def reconcile_sends(self, agent: str = COPILOT_AGENT):
+        """Sends to the agent's sessions that a stop interrupted: check whether they arrived
+        before anything is resent."""
         for key in self.store.keys("sending:"):
             session_id = key.removeprefix("sending:")
+            if self.agent(session_id) != agent:
+                continue
             row = self.store.find_session(session_id)
             if not row or row["closed_at"]:
                 self.store.delete(key)
@@ -1785,11 +1989,17 @@ class Runtime:
             outcome = {True: "it arrived", False: "resending", None: "unknown, resending"}
             logger.info("Interrupted send to %s: %s.", session_id, outcome[arrived])
 
-    async def resume_working(self):
-        """After a restart, sessions that were mid-turn continue, with what they had not handled.
-        What restarted: this app, or (connected before) only Copilot."""
-        what = "Copilot was restarted" if self.connections else "Chief of Staff restarted"
-        for row in self.store.open_sessions():
+    async def resume_working(self, agent: str = COPILOT_AGENT):
+        """After a restart, the agent's sessions that were mid-turn continue, with what they had
+        not handled. What restarted: this app, or (connected before) only the agent."""
+        backend, connections = self.connection(agent)
+        named = backend.capabilities.name if backend and agent != COPILOT_AGENT else "Copilot"
+        what = f"{named} was restarted" if connections else "Chief of Staff restarted"
+        rows = self.store.open_sessions()
+        mine = set(self.on_agent(agent, [row["id"] for row in rows]))
+        for row in rows:
+            if row["id"] not in mine:
+                continue
             if row["role"] == SLACK and not self.slack.configured():
                 continue
             if row["status"] != "working":
