@@ -4,6 +4,7 @@ workers that phase 1 adds: its options, its admission, its processes. What every
 is in test_backend_contract.py, also on real Codex."""
 
 import asyncio
+import contextlib
 import json
 import os
 import signal
@@ -1355,6 +1356,91 @@ async def test_a_settings_save_stops_codex_workers_it_makes_ineligible(tmp_path,
         with pytest.raises(RuntimeError, match="sandboxed"):
             await runtime.owner_send(worker, "Go on")
         assert runtime.begins_turn(session) is False, "admitted before: never begins after"
+    finally:
+        await runtime.stop()
+
+
+async def test_turning_ask_first_on_stops_codex_workers_whose_version_refuses_it(
+    tmp_path, monkeypatch
+):
+    """Settings' Ask first turned on for workers: those on a Codex version that has not passed
+    the checks for it are stopped at once (as a sandbox switched on stops them all)."""
+    harness, runtime = await brief(
+        tmp_path, monkeypatch, Settings(worker_yolo=True), FAKE_CODEX_VERSION="0.168.1"
+    )
+    try:
+        worker = await spawn(runtime, harness, "Wait 30 s. Then reply with just: done")
+        await until(lambda: (s := runtime.states.handle(worker)) and s.turn, 30)
+        session = runtime.states.handle(worker)
+        old = harness.store.settings()
+        new = old.model_copy(update={"worker_yolo": False})
+        harness.store.save_settings(new)
+        stopped = await runtime.settings_changed(old, new)
+        assert stopped and "checks for Ask first" in stopped[0]
+        await until(lambda: session.turn is None)
+        assert ("notice", "Stopped by Settings.") in harness.kinds(worker)
+    finally:
+        await runtime.stop()
+
+
+async def test_a_change_as_a_turn_begins_stops_it_though_its_status_is_not_said_yet(
+    tmp_path, monkeypatch
+):
+    """A Settings save between a turn's start and its first event (its worker not yet shown
+    at work): the turn is stopped as one at work, with its task waiting under Needs you."""
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    try:
+        worker = await spawn(runtime, harness, "Reply with just: first")
+        await until(lambda: harness.store.session(worker)["status"] != "working", 30)
+        backend, _ = runtime.connection("codex")
+        begins, changed = runtime.begins_turn, []
+
+        def begun_then_changed(session):
+            began = begins(session)
+            if began and not changed:
+                changed.append(harness.store.session(worker)["status"])
+                agents.configure(harness.store, "codex", enabled=False)
+                runtime.background(runtime.stop_ineligible())
+            return began
+
+        monkeypatch.setattr(backend, "begins", begun_then_changed)
+        with contextlib.suppress(RuntimeError):
+            await runtime.owner_send(worker, "Wait 3 s. Then reply with just: second")
+        assert changed and changed[0] != "working", "its status did not say it yet"
+        await until(lambda: ("notice", "Stopped by Settings.") in harness.kinds(worker), 30)
+        await until(lambda: harness.store.session(worker)["status"] != "working", 30)
+        await asyncio.sleep(4)
+        assert "second" not in [text for kind, text in harness.kinds(worker) if kind == "assistant"]
+    finally:
+        await runtime.stop()
+
+
+async def test_a_turn_begun_is_stopped_by_a_change_before_and_at_its_first_event(
+    tmp_path, monkeypatch
+):
+    """Both doors: a change stops a worker whose turn has begun though its status does not say
+    so; and a turn whose worker may not run is stopped at its first event."""
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    try:
+        harness.store.create_session("w1", WORKER, "Fix", "idle", cwd=str(tmp_path))
+        stopped = []
+
+        async def interrupt(session_id, by="you"):
+            stopped.append((session_id, by))
+
+        monkeypatch.setattr(runtime.workers, "interrupt", interrupt)
+        runtime.admitted["w1"] = runtime.admission_generation
+        assert runtime.begins_turn(SimpleNamespace(session_id="w1"))
+        agents.configure(harness.store, "codex", enabled=False)
+        await runtime.stop_ineligible()
+        assert stopped == [("w1", "Settings")], "its turn began: stopped"
+        stopped.clear()
+        runtime.agent_settled(harness.store.session("w1"))
+        await runtime.stop_ineligible()
+        assert stopped == [], "nothing of it runs any more"
+        runtime.events.turn_start(harness.store.session("w1"), SimpleNamespace(data=None))
+        await until(lambda: stopped == [("w1", "Settings")])
+        assert "turned off" in harness.kinds("w1")[-1][1]
     finally:
         await runtime.stop()
 

@@ -60,6 +60,39 @@ os.kill(os.getpid(), signal.SIGKILL)
 """
 
 
+# One whose command, in a session of its own, puts a server in the background with nohup and
+# exits (the server is another parent's from then on), as a worker starting a dev server does.
+NOHUP = r"""
+import json, os, subprocess, sys, time
+shell = subprocess.Popen(
+    ["sh", "-c", "sleep 0.5; nohup sleep 3031 >/dev/null 2>&1 &"], start_new_session=True
+)
+with open(sys.argv[1], "w") as f:
+    json.dump({"pid": os.getpid(), "child": shell.pid}, f)
+time.sleep(300)
+"""
+
+# One whose command starts a daemon: it forks, the child makes a session of its own and forks
+# the daemon, then exits at once (the daemon is another parent's, in another group).
+DAEMON = r"""
+import json, os, subprocess, sys, time
+script = (
+    "import os, time\n"
+    "time.sleep(0.5)\n"
+    "if os.fork() == 0:\n"
+    "    os.setsid()\n"
+    "    if os.fork() == 0:\n"
+    "        os.execvp('sleep', ['sleep', '3032'])\n"
+    "    os._exit(0)\n"
+    "os.wait()\n"
+)
+command = subprocess.Popen([sys.executable, "-c", script], start_new_session=True)
+with open(sys.argv[1], "w") as f:
+    json.dump({"pid": os.getpid(), "child": command.pid}, f)
+time.sleep(300)
+"""
+
+
 @pytest.fixture(autouse=True)
 def no_subreaper(monkeypatch):
     """In this process (pytest's), the supervisor does not take what others leave."""
@@ -178,6 +211,28 @@ def test_what_its_commands_started_since_they_were_seen_ends_too(tmp_path, lefto
     late = [pid for pid, (_, line) in process_table().items() if line == "sleep 302"]
     leftovers += late
     assert gone(cli["child"]) and not late, "the shell, and the server it started since"
+
+
+@pytest.mark.parametrize(("cli", "left"), [(NOHUP, "sleep 3031"), (DAEMON, "sleep 3032")])
+def test_what_a_command_left_to_another_parent_ends_too(tmp_path, leftovers, cli, left):
+    """Review: `nohup server &` from a shell that exited, or a daemon that forked into a session
+    of its own, is another parent's before the supervisor looks again: it still ends with the
+    agent once Chief of Staff goes away."""
+    read, write = os.pipe()
+    process, out = supervise(tmp_path, lifeline=read, cli=cli)
+    os.close(read)
+    leftovers.append(process.pid)
+    cli_ = started(out)
+    leftovers += [cli_["pid"], cli_["child"]]
+    deadline = time.monotonic() + 15
+    while not (found := [p for p, (_, line) in process_table().items() if line == left]):
+        assert time.monotonic() < deadline, "it never started"
+        time.sleep(0.1)
+    leftovers += found
+    assert all(process_table()[pid][0] == 1 for pid in found), "another parent's now"
+    os.close(write)  # As when Chief of Staff's process ends, however it stopped.
+    process.wait(15)
+    assert gone(*found, seconds=10), "nothing of the agent is left"
 
 
 def test_when_chief_of_staff_goes_away_the_agent_does_too(tmp_path, leftovers):

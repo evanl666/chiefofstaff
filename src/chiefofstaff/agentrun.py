@@ -11,6 +11,13 @@ it ends the CLI's whole process tree, commands left running in the background in
 backend.end_processes does for Copilot's; then it exits with the CLI's code. It never writes to
 stdout: that is the CLI's. macOS and Linux only (another agent's workers do not run on Windows
 yet: Runtime.agent_block).
+
+What a command left behind may be another parent's by then: a shell that ran `nohup server &`
+and exited, or a daemon that forked into a session of its own and let its first child exit. On
+Linux they come to the supervisor (a subreaper). On macOS it watches every process of the tree
+(kqueue: each one's forks and exit), and takes the process groups it saw the tree in, and
+those its processes made (a group's id is the pid of the process that made it), as the
+agent's: what runs in them ends with it.
 """
 
 from __future__ import annotations
@@ -22,6 +29,7 @@ import select
 import signal
 import subprocess
 import sys
+import threading
 import time
 from contextlib import suppress
 
@@ -55,14 +63,7 @@ def fork_watch(pid: int, lifeline: int | None):
         return None
     try:
         queue = select.kqueue()
-        events = [
-            select.kevent(
-                pid,
-                filter=select.KQ_FILTER_PROC,
-                flags=select.KQ_EV_ADD,
-                fflags=select.KQ_NOTE_FORK | select.KQ_NOTE_EXIT,
-            )
-        ]
+        events = [proc_event(pid)]
         if lifeline is not None:
             events.append(
                 select.kevent(lifeline, filter=select.KQ_FILTER_READ, flags=select.KQ_EV_ADD)
@@ -71,6 +72,52 @@ def fork_watch(pid: int, lifeline: int | None):
     except OSError:
         return None  # It has exited already: nothing more to watch.
     return queue
+
+
+def proc_event(pid: int):
+    """A process's forks and exit, as a kqueue event (macOS)."""
+    return select.kevent(
+        pid,
+        filter=select.KQ_FILTER_PROC,
+        flags=select.KQ_EV_ADD,
+        fflags=select.KQ_NOTE_FORK | select.KQ_NOTE_EXIT,
+    )
+
+
+def children(pid: int) -> list[int]:
+    """macOS: the processes a process started that run now, asked of the kernel at once (a
+    command's first child may live only for a moment)."""
+    buffer = (ctypes.c_int * 256)()
+    try:
+        used = ctypes.CDLL(None, use_errno=True).proc_listpids(
+            6,
+            pid,
+            buffer,
+            ctypes.sizeof(buffer),  # PROC_PPID_ONLY
+        )
+    except (OSError, AttributeError):
+        return []
+    return [found for found in buffer[: max(used, 0) // ctypes.sizeof(ctypes.c_int)] if found]
+
+
+def process_groups() -> dict[int, int]:
+    """Every process's group: pid -> process group id."""
+    try:
+        listed = subprocess.run(
+            ["ps", "-axo", "pid=,pgid="],  # noqa: S607  (a fixed command, found on PATH)
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=5,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    found = {}
+    for line in listed.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            found[int(parts[0])] = int(parts[1])
+    return found
 
 
 def own_environment() -> dict[str, str]:
@@ -92,6 +139,17 @@ class Supervisor:
         self.forked = False
         # What the CLI's processes leave comes to this one (Linux).
         self.adopting = False
+        # macOS: the processes whose forks and exit wake it, and the process groups taken as
+        # the agent's: those the tree was seen in, and those its processes may have made (each
+        # pid seen; a group's id is its maker's pid). One is let go of once no process has it
+        # (nor runs with that pid), so its number is never another's while it is kept.
+        self.watched: set[int] = set()
+        self.groups: set[int] = set()
+        # macOS: the kqueue is read by a thread of its own, so a fork is followed the moment it
+        # happens (not after a look in progress); it wakes the main loop.
+        self.lock = threading.Lock()
+        self.woken = threading.Event()
+        self.watcher: threading.Thread | None = None
 
     def run(self) -> int:
         if sys.platform == "win32":
@@ -103,6 +161,10 @@ class Supervisor:
             self.command, env=own_environment(), start_new_session=True
         )
         self.watch = fork_watch(self.process.pid, self.lifeline)
+        if self.watch is not None:
+            self.watched.add(self.process.pid)
+            self.watcher = threading.Thread(target=self.watching, daemon=True)
+            self.watcher.start()
         next_look = 0.0
         while (code := self.process.poll()) is None:
             if self.ending or self.gone():
@@ -131,12 +193,11 @@ class Supervisor:
             return True
 
     def wait(self, seconds: float):
-        """Sleep, waking when the lifeline closes, or the CLI starts a process or exits."""
-        if sys.platform == "darwin" and self.watch is not None:
-            with suppress(OSError, InterruptedError):
-                for event in self.watch.control(None, 8, seconds):
-                    if event.filter == select.KQ_FILTER_PROC and event.fflags & select.KQ_NOTE_FORK:
-                        self.forked = True
+        """Sleep, waking when the lifeline closes, or a process of the tree starts another or
+        exits."""
+        if self.watcher is not None:
+            self.woken.wait(seconds)
+            self.woken.clear()
             return
         if self.lifeline is None:
             time.sleep(seconds)
@@ -144,25 +205,82 @@ class Supervisor:
         with suppress(OSError, InterruptedError):
             select.select([self.lifeline], [], [], seconds)
 
+    def watching(self):
+        """macOS: what the kqueue says, as it happens, until the supervisor ends."""
+        while self.watch is not None and not self.ending:
+            try:
+                events = self.watch.control(None, 64, 0.5)
+            except InterruptedError:
+                continue
+            except OSError:
+                return
+            for event in events:
+                if event.filter == select.KQ_FILTER_PROC and event.fflags & select.KQ_NOTE_FORK:
+                    self.follow(event.ident)
+                    self.forked = True
+                self.woken.set()
+
+    def follow(self, pid: int):
+        """macOS: a process of the tree started another: it (and what that started already) is
+        watched at once, before it can leave the tree (a daemon's first child, which makes a
+        session of its own and lets its own child go)."""
+        todo, own = [pid], os.getpid()
+        while todo and len(self.watched) < 4096:
+            for child in children(todo.pop()):
+                if child != own and child not in self.watched:
+                    with self.lock:
+                        self.groups.add(child)
+                    self.add_watch(child)
+                    todo.append(child)
+
+    def add_watch(self, pid: int):
+        if self.watch is None or pid in self.watched or pid == os.getpid():
+            return
+        self.watched.add(pid)
+        with suppress(OSError):
+            self.watch.control([proc_event(pid)], 0, 0)
+
     def look(self):
         """What the CLI runs now, added to what it ran that still runs (left to another parent
-        once what started it ended), and what those started since."""
+        once what started it ended), and what those started since. (What it asks the system
+        is asked outside its lock: a fork is followed meanwhile.)"""
         if not self.process:
             return
         table = process_table()
         if not table:
             return
-        self.tree = {pid: c for pid, c in self.tree.items() if table.get(pid, (0, ""))[1] == c}
-        # This process's own (the CLI's, and on Linux what they left), and each known one's;
-        # not the `ps` that made the table.
-        own = os.getpid()
-        for root in {own, *self.tree}:
-            self.tree |= {
-                pid: table[pid][1]
-                for pid in descendants(table, root)
-                if pid in table and not (table[pid][0] == own and table[pid][1].startswith("ps "))
-            }
+        groups = process_groups() if self.watch is not None else {}
+        with self.lock:
+            self.tree = {pid: c for pid, c in self.tree.items() if table.get(pid, (0, ""))[1] == c}
+            # This process's own (the CLI's, and on Linux what they left), and each known
+            # one's; not the `ps` that made the table.
+            own = os.getpid()
+            for root in {own, *self.tree}:
+                self.tree |= {
+                    pid: table[pid][1]
+                    for pid in descendants(table, root)
+                    if pid in table
+                    and not (table[pid][0] == own and table[pid][1].startswith("ps "))
+                }
+            if groups:
+                self.in_groups(table, groups)
+        for pid in list(self.tree):
+            self.add_watch(pid)
         self.reap()
+
+    def in_groups(self, table: dict[int, tuple[int, str]], groups: dict[int, int]):
+        """macOS: the tree's process groups (and those its processes may have made) and what
+        runs in them, though no longer the tree's."""
+        own = os.getpid()
+        theirs = {os.getpgrp(), 0, 1}  # Chief of Staff's group (this one's), and the system's.
+        self.groups |= {pid for pid in self.tree if pid != own}
+        self.groups |= {groups[pid] for pid in self.tree if pid in groups and pid != own}
+        self.groups = {g for g in self.groups - theirs if g in table or g in groups.values()}
+        self.tree |= {
+            pid: table[pid][1]
+            for pid, group in groups.items()
+            if group in self.groups and pid in table and pid != own
+        }
 
     def reap(self):
         """What came to this process (a subreaper) and ended is let go of (not a zombie)."""
@@ -180,6 +298,7 @@ class Supervisor:
             return
         # Its processes now, while they are still its own (or, on Linux, come to this one).
         self.look()
+        self.ending = True  # Its kqueue's reader stops.
         if self.process and self.process.poll() is None:
             with suppress(OSError):
                 os.killpg(self.process.pid, signal.SIGTERM)
