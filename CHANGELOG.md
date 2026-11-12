@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.41 (2026-11-11)
+
+A fix from a contributor, and groundwork for workers on other coding agents.
+
+- **A task's result keeps its own changes** when its worker reports before Chief of Staff has
+  recorded where the task started (it records that in the background as the task is taken up):
+  such a result had no start, so its changes fell back to the whole checkout, a later task's
+  commits included, and its evidence could read "Out of date" (#7, thanks @xiongwj14).
+- **Groundwork for workers on other coding agents**, with no visible change: sessions are opened,
+  recovered and stopped through a registry of backends with Copilot alone in it. Copilot's
+  options, prompts, tools and behaviour are pinned by tests and unchanged.
+
 ## 0.1.40 (2026-11-11)
 
 Other Copilot sessions lists yours only, and two fixes found by QA and CI.
