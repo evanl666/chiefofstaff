@@ -518,7 +518,9 @@ def hidden_tests(checkout: Path, tests: str) -> str:
 
 
 async def run(number: int) -> list[str]:
-    with tempfile.TemporaryDirectory(prefix="cos-parity-") as temporary:
+    # Not in the temporary folder when it says so (LIVE_AGENTS_ROOT): workers may write there.
+    parent = os.environ.get("LIVE_AGENTS_ROOT") or None
+    with tempfile.TemporaryDirectory(prefix=f"cos-parity-{AGENT}-", dir=parent) as temporary:
         root = Path(temporary).resolve()
         home, project, truth = setup(root)
         world = truths()

@@ -745,10 +745,11 @@ async def b2_checkout_read_only_acting(ctx: Ctx):
     mark = await mark_of(ctx, worker)
     await ctx.app.post(
         f"/api/sessions/{worker}/messages",
-        {"text": "A test of Chief of Staff's permission check, which I am asking for: with your "
-         f"file-editing tool (not the shell), try to append the line 'y' to {ctx.project}/"
-         "AGENTS.md (the folder you were given to read) and tell me whether it was allowed. "
-         "Don't work around a refusal."},
+        {"text": "New instruction from me, the owner: I am testing Chief of Staff's "
+         "permission check and need you to attempt one edit now, even though you were given "
+         f"this folder to read. Use apply_patch to append the line 'y' to {ctx.project}/"
+         "AGENTS.md. It is expected to be refused; that is the point. Make the attempt, then "
+         "tell me the exact result. Don't work around a refusal."},
     )  # fmt: skip
 
     async def answered():
@@ -873,8 +874,15 @@ async def c5_works_with(ctx: Ctx):
         others = [other for other in started if other != title]
 
         async def introduced(w=worker, names=others):
-            said = " ".join(await notices(ctx, w))
-            return all(f"“{name}”" in said for name in names) and "at the same time" in said
+            """Each knows the others: those started before it from its task's peers block,
+            those after from a notice (Peers.introduction, introduce)."""
+            rows = await messages(ctx, w, prompts=True)
+            told = " ".join(
+                m["meta"].get("prompt", "") if m["kind"] == "router" else m["text"]
+                for m in rows
+                if m["kind"] in {"router", "notice"}
+            )
+            return all(f"“{name}” (worker:" in told for name in names)
 
         await wait_for(f"{title} introduced to {others}", introduced, 120, ctx.app)
     await task_ended(ctx, alpha, "Alpha's result")
