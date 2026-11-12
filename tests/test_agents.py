@@ -24,13 +24,15 @@ from conftest import (
 from copilot.tools import ToolInvocation
 from fastapi.testclient import TestClient
 
-from chiefofstaff import agents
+from chiefofstaff import agents, prompts
+from chiefofstaff.digest import digest
 from chiefofstaff.models import Settings
 from chiefofstaff.roles import ROUTER
 from chiefofstaff.runtime import Runtime
 from chiefofstaff.sources.github import GitHubSource
 from chiefofstaff.sources.slack import SlackSource
-from chiefofstaff.web import create_app
+from chiefofstaff.store import Store
+from chiefofstaff.web import create_app, stopped_text
 
 TOKEN = "launch-token"
 ORIGIN = {"origin": "http://127.0.0.1:8765"}
@@ -384,6 +386,12 @@ async def test_a_task_runs_on_the_agent_the_owner_named(tmp_path, codex_on_path)
         listed = json.loads(listed.text_result_for_llm)
         entries = {entry["session_id"]: entry for entry in listed["sessions"]}
         assert entries[worker]["agent"] == "codex" and "agent" not in entries[copilot["session_id"]]
+        read = await call_tool(runtime, "read_session", harness.router_id, session_id=worker)
+        assert json.loads(read.text_result_for_llm)["agent"] == "codex"
+        other = await call_tool(
+            runtime, "read_session", harness.router_id, session_id=copilot["session_id"]
+        )
+        assert "agent" not in json.loads(other.text_result_for_llm)
         assert listed["agents"] == {
             "new_workers": "copilot",
             "models": {"codex": ["gpt-test", "gpt-mini"]},
@@ -446,6 +454,7 @@ async def test_new_workers_use_the_default_agent_and_workers_that_read_slack_cop
         assert [k for k, _ in harness.kinds(worker)].count("notice") == 0
         reads = await spawn_on(harness, runtime, title="Answer", instructions="Do it.", slack=True)
         assert runtime.agent(reads["session_id"]) == "copilot"
+        assert "notice" not in [k for k, _ in harness.kinds(reads["session_id"])], "nothing to say"
     finally:
         await runtime.stop()
 
@@ -611,3 +620,264 @@ def drained_only(changed: list) -> list:
             )
         )
     ]
+
+
+# Workers on Codex in the page and the Router's tools (5.4, 5.8, 5.10)
+
+
+async def codex_worker(tmp_path, instructions="Report done: Fixed it.", settings=None):
+    harness, runtime = await started(tmp_path, settings)
+    await saved(runtime, {"codex": {"enabled": True}, "new_workers": "codex"})
+    result = await spawn_on(harness, runtime, title="Fix it", instructions=instructions)
+    worker = result["session_id"]
+    await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+    return harness, runtime, worker, result["task_id"]
+
+
+def test_a_codex_worker_is_told_in_codex_terms_what_copilot_is_told_in_its_own():
+    for copilot in prompts.AGENT_WORDS["codex"]:
+        assert prompts.WORKER.count(copilot) == 1, copilot
+    said = prompts.worker_on("codex", prompts.WORKER)
+    for word in ("Copilot", "ask_user", 'mode="async"', "detach: true"):
+        assert word not in said, word
+    assert 'report(status="question")' in said and "codex mcp login" in said
+    assert prompts.worker_on("copilot", prompts.WORKER) == prompts.WORKER
+
+
+async def test_a_codex_worker_has_its_words_and_a_copilot_worker_its_own(tmp_path, codex_on_path):
+    harness, runtime, worker, _ = await codex_worker(tmp_path)
+    try:
+        copilot = (
+            await spawn_on(harness, runtime, title="Other", instructions="Do it.", agent="copilot")
+        )["session_id"]
+        on_codex = runtime.agent_options(harness.store.session(worker))
+        assert on_codex["system_message"]["content"].startswith(
+            prompts.worker_on("codex", prompts.WORKER)
+        )
+        own = runtime.options(harness.store.session(copilot))["system_message"]["content"]
+        assert own.startswith(prompts.WORKER), "a Copilot worker's prompt is as it was"
+    finally:
+        await runtime.stop()
+
+
+async def test_a_codex_workers_view_says_its_agent_model_and_tokens(tmp_path, codex_on_path):
+    harness, runtime, worker, task_id = await codex_worker(tmp_path)
+    try:
+        view = runtime.view(harness.store.session(worker))
+        assert view["agent"] == "codex" and view["agent_name"] == "Codex"
+        assert view["model"] == "gpt-test", "the model Codex runs it on"
+        assert view["credits"] == 0 and view["tokens"] > 0
+        assert view["agent_notes"] == [] and view["ask_first_refused"] == ""
+        task = runtime.task_actions.view(runtime.tasks.get(task_id))
+        assert task["agent"] == "codex" and task["agent_name"] == "Codex"
+        assert task["tokens"] == view["tokens"] and task["credits"] == 0
+        router = runtime.view(harness.store.session(harness.router_id))
+        assert "agent" not in router and "tokens" not in router
+        usage = runtime.usage(0, time.time() + 1)
+        (part,) = usage["agents"]
+        assert part["agent"] == "codex" and part["name"] == "Codex" and part["unknown"] == []
+        assert [(row["model"], row["tokens"]) for row in part["models"]] == [
+            ("gpt-test", view["tokens"])
+        ]
+        assert usage["total"]["credits"] == 0, "Copilot's totals have none of it"
+    finally:
+        await runtime.stop()
+
+
+async def test_without_agents_views_and_usage_are_as_before(tmp_path):
+    harness, runtime = await started(tmp_path)
+    try:
+        assert "agents" not in runtime.usage(0, time.time() + 1)
+        assert "agents" not in runtime.snapshot()
+        assert "agent" not in runtime.view(harness.store.session(harness.router_id))
+        assert "agent_usage" not in tables(harness.store.directory)
+    finally:
+        await runtime.stop()
+
+
+async def test_the_daily_summary_says_codex_tokens_only_on_a_day_it_spent_some(
+    tmp_path, codex_on_path
+):
+    harness, runtime, worker, _ = await codex_worker(tmp_path)
+    try:
+        tokens = harness.store.agent_spent(worker)
+        said = digest(runtime, 0, time.time() + 1)
+        assert said.splitlines()[-1].endswith(f"credits and {tokens:,} tokens on Codex")
+        quiet = digest(runtime, time.time() + 10, time.time() + 20)
+        assert "tokens on" not in quiet
+    finally:
+        await runtime.stop()
+
+
+async def test_a_codex_workers_model_is_chosen_from_codex_and_kept_apart(tmp_path, codex_on_path):
+    harness, runtime, worker, _ = await codex_worker(tmp_path)
+    try:
+        refused_models = harness.store.get("refused_models")
+        with pytest.raises(ValueError, match="Unknown model 'gpt-5' for Codex"):
+            await runtime.set_session_model(worker, "gpt-5")
+        with pytest.raises(ValueError, match=r"That model's thinking efforts: low, medium, high\."):
+            await runtime.set_session_model(worker, "gpt-mini", "max")
+        with pytest.raises(ValueError, match="no long-context option"):
+            await runtime.set_session_model(worker, "gpt-mini", "", "long_context")
+        view = await runtime.set_session_model(worker, "gpt-mini", "high")
+        assert view["model"] == "gpt-mini" and view["model_choice"] == "gpt-mini"
+        assert view["effort_choice"] == "high"
+        row = harness.store.session(worker)
+        assert row["model"] == "" and row["effort"] == ""
+        assert harness.store.get("refused_models") == refused_models
+        assert runtime.agent_options(row)["model"] == "gpt-mini"
+        await runtime.set_session_model(worker, "")
+        assert harness.store.get(f"agentmodel:{worker}") is None
+        assert "model" not in runtime.agent_options(harness.store.session(worker))
+    finally:
+        await runtime.stop()
+
+
+async def test_a_settings_model_change_leaves_codex_workers_on_their_model(tmp_path, codex_on_path):
+    harness, runtime, worker, _ = await codex_worker(tmp_path)
+    try:
+        session = runtime.states.handle(worker)
+        assert session is not None
+        old = harness.store.settings()
+        new = old.model_copy(update={"model": "claude-test"})
+        harness.store.save_settings(new)
+        await runtime.settings_changed(old, new)
+        assert session.model == "", "Copilot's default model is not a Codex worker's"
+        assert harness.store.get(f"pinned:{worker}") is None
+    finally:
+        await runtime.stop()
+
+
+async def test_news_for_a_codex_worker_that_cannot_run_waits_for_it(tmp_path, codex_on_path):
+    harness, runtime, worker, task_id = await codex_worker(tmp_path)
+    try:
+        key = "github:acme/api#7"
+        runtime.follow(worker, [key], task_id=task_id)
+        await saved(runtime, {"codex": {"enabled": False}})
+        took = await runtime.on_thread("github", key, ["github:issuecomment:1"], "bob: a test?")
+        assert took and harness.store.follows(worker) == [key], "it still follows the PR"
+        (held,) = json.loads(harness.store.get(f"heldnews:{worker}"))
+        assert "bob: a test?" in held["display"]
+        await runtime.workers.refresh_elsewhere()
+        assert harness.store.get(f"heldnews:{worker}"), "kept while it cannot run"
+        await saved(runtime, {"codex": {"enabled": True}})
+        await runtime.workers.refresh_elsewhere()
+        await settle(runtime)
+        assert not harness.store.get(f"heldnews:{worker}"), "delivered once it can"
+        await until(
+            lambda: any("bob: a test?" in m["text"] for m in harness.store.messages(worker))
+        )
+    finally:
+        await runtime.stop()
+
+
+async def test_ask_first_on_a_codex_worker_asks_its_agent_first(
+    tmp_path, codex_on_path, monkeypatch
+):
+    harness, runtime, worker, _ = await codex_worker(tmp_path)
+    try:
+        await runtime.disconnect_agent("codex")
+        monkeypatch.setenv("FAKE_CODEX_VERSION", "0.168.1")
+        with pytest.raises(ValueError, match="has not passed Chief of Staff's checks for Ask"):
+            await runtime.set_session_yolo(worker, "off")
+        assert runtime.view(harness.store.session(worker))["ask_first_refused"]
+    finally:
+        await runtime.stop()
+
+
+def test_a_save_that_stops_workers_says_how_many_and_why():
+    assert stopped_text(["Codex is turned off in Settings → Models."]) == (
+        "Stopped 1 worker: Codex is turned off in Settings → Models. Tell it to go on from Needs "
+        "you once that changes."
+    )
+    assert stopped_text(["Codex is turned off in Settings → Models."] * 2) == (
+        "Stopped 2 workers: Codex is turned off in Settings → Models. Tell them to go on from "
+        "Needs you once that changes."
+    )
+
+
+async def test_codex_that_stopped_by_itself_and_could_not_start_again_says_so(
+    tmp_path, codex_on_path, monkeypatch
+):
+    _, runtime = await started(tmp_path)
+    try:
+        await saved(runtime, {"codex": {"enabled": True}})
+        backend = await runtime.connect_agent("codex")
+        monkeypatch.setenv("FAKE_CODEX_SIGNED_OUT", "1")
+        backend.process.kill()
+        await until(lambda: runtime.agents["codex"].offline, 20)
+        monkeypatch.delenv("FAKE_CODEX_SIGNED_OUT")
+        (codex,) = (await runtime.look_for_agents())["agents"]
+        assert codex["problem"] == (
+            "Stopped unexpectedly; starts again with its next worker's message."
+        )
+        await runtime.connect_agent("codex")
+        assert not runtime.agents["codex"].offline
+        (codex,) = (await runtime.look_for_agents())["agents"]
+        assert codex["state"] == "0.167.2 · signed in with ChatGPT", "asked of the one running"
+    finally:
+        await runtime.stop()
+
+
+async def test_a_codex_whose_check_found_edits_not_asking_says_why(tmp_path, codex_on_path):
+    harness, runtime = await started(tmp_path)
+    try:
+        why = "Codex 0.167.2 applied an edit without asking Chief of Staff first."
+        harness.store.set("agentcheck:codex:0.167.2", json.dumps({"ran": True, "acting": why}))
+        (codex,) = (await runtime.look_for_agents())["agents"]
+        assert codex["problem"] == why and codex["state"] == ""
+    finally:
+        await runtime.stop()
+
+
+def test_new_workers_use_an_agent_only_while_it_is_on(tmp_path):
+    store = Store(tmp_path / "data")
+    assert agents.new_workers(store) == "copilot"
+    agents.save(store, agents.planned(store, {"codex": {"enabled": True}, "new_workers": "codex"}))
+    assert agents.new_workers(store) == "codex"
+    agents.configure(store, "codex", enabled=False)  # Its choice is left as it was.
+    assert agents.stored(store)["new_workers"] == "codex"
+    assert agents.new_workers(store) == "copilot"
+
+
+async def test_an_agent_never_turned_on_is_said_to_be_off(tmp_path, codex_on_path):
+    harness, runtime = await started(tmp_path)
+    try:
+        assert "codex" not in runtime.agents
+        refused = await runtime.toolset.spawn_on(["codex"]).handler(
+            ToolInvocation(
+                session_id=harness.router_id,
+                tool_call_id="t1",
+                tool_name="spawn_worker",
+                arguments={"title": "Fix it", "instructions": "Do it.", "agent": "codex"},
+            )
+        )
+        assert refused.error == "Codex is turned off in Settings → Models."
+    finally:
+        await runtime.stop()
+
+
+async def test_codex_workers_take_a_new_model_from_the_group_with_their_next_turn(
+    tmp_path, codex_on_path
+):
+    harness, runtime, worker, _ = await codex_worker(tmp_path)
+    try:
+        own = (await spawn_on(harness, runtime, title="Own", instructions="Report done: Ok.",
+                              model="gpt-test"))["session_id"]  # fmt: skip
+        await until(lambda: harness.store.session(own)["status"] == "done", 30)
+        assert runtime.states.handle(worker) and runtime.states.handle(own)
+        await saved(runtime, {"codex": {"enabled": True, "model": "gpt-mini"}})
+        assert runtime.states.handle(worker) is None, "reconnects with the new model"
+        assert runtime.states.handle(own), "its own model stays"
+        assert runtime.agent_options(harness.store.session(worker))["model"] == "gpt-mini"
+    finally:
+        await runtime.stop()
+
+
+def test_an_agents_models_are_listed_only_while_it_is_on(web, codex_on_path):
+    assert web.get("/api/models?agent=codex").status_code == 404
+    assert web.get("/api/models?agent=claude").status_code == 404
+    assert save(web, {"codex": {"enabled": True}}).status_code == 200
+    listed = web.get("/api/models?agent=codex")
+    assert listed.status_code == 200, listed.text
+    assert [model["id"] for model in listed.json()] == ["gpt-test", "gpt-mini"]
