@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **A worker closed as it reports done, or as its turn ends** (its PR merged), has its clean
+  worktree removed once what it holds is read. That was read while the removal looked at the
+  worktree, so it stayed, as one a program runs in, until looked at again; or it went in the
+  middle of the read, and what the worker changed could be missing from the task's receipts
+  (found by CI on a slow machine).
+
 ## 0.1.39 (2026-11-11)
 
 Send to Chief from anywhere.
