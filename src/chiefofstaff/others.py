@@ -622,7 +622,12 @@ class Log:
         since it was sampled), while it is still the file sampled."""
         if self.path is None:
             return None
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+            | getattr(os, "O_BINARY", 0)
+        )
         try:
             fd = os.open(self.path, flags | getattr(os, "O_CLOEXEC", 0))
         except OSError:

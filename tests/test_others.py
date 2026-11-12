@@ -31,6 +31,7 @@ from chiefofstaff.sources.slack import SlackSource
 from chiefofstaff.web import create_app
 
 START = datetime(2026, 11, 10, 9, 0, tzinfo=UTC)
+READ_CHUNK = others.read_chunk
 
 
 def iso(seconds: float) -> str:
@@ -53,6 +54,8 @@ class Clocks:
 
 @pytest.fixture
 def clocks(monkeypatch):
+    if sys.platform == "win32":
+        monkeypatch.setattr(others, "PASS_SECONDS", 2.0)
     return Clocks(monkeypatch)
 
 
@@ -96,7 +99,7 @@ class Terminal:
 
     def line(self, text: str):
         # A lone surrogate (JSON can carry one) is written escaped, as the CLI writes it.
-        with self.path.open("a", errors="backslashreplace") as log:
+        with self.path.open("a", encoding="utf-8", errors="backslashreplace", newline="\n") as log:
             log.write(text + "\n")
         os.utime(self.path, (self.clocks.wall, self.clocks.wall))  # Written now, by its clock.
 
@@ -658,6 +661,7 @@ def test_a_log_rewritten_replaced_or_gone_is_looked_at_again(home, clocks):
 # Files it reads (section 5)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="requires symlink privileges and FIFO")
 def test_a_link_or_a_pipe_is_never_read(home, clocks, tmp_path):
     elsewhere = Terminal(tmp_path / "elsewhere", clocks)
     elsewhere.prompt()
@@ -674,6 +678,7 @@ def test_a_link_or_a_pipe_is_never_read(home, clocks, tmp_path):
     assert {f.reason for f in found.values()} == {"unreadable"} and read == 0
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="requires FIFO")
 def test_a_pipe_put_in_its_place_after_it_was_sampled_does_not_block(home, clocks):
     term = Terminal(home, clocks)
     log = Log(term.id, term.path)
@@ -757,6 +762,8 @@ def test_an_event_time_not_to_trust_is_not_shown_or_counted(home, clocks, stamp,
 
 @pytest.fixture
 def utc(monkeypatch):
+    if sys.platform == "win32":
+        pytest.skip("requires tzset")
     """The machine's time zone is UTC: a time without its zone would read as the right one."""
     monkeypatch.setenv("TZ", "UTC")
     time.tzset()
@@ -884,7 +891,7 @@ def test_a_pass_stops_at_its_time_cap(home, clocks, monkeypatch):
     def slow(fd, size, position):
         reads.append(size)
         threading.Event().wait(0.02)
-        return os.pread(fd, size, position)
+        return READ_CHUNK(fd, size, position)
 
     monkeypatch.setattr(others, "read_chunk", slow)
     sessions = busy(home, clocks, 2, 30_000)
@@ -919,7 +926,7 @@ def test_a_stop_ends_a_pass_between_reads(home, clocks, monkeypatch):
         reads.append(position)
         if len(reads) == 2:
             stop.set()
-        return os.pread(fd, size, position)
+        return READ_CHUNK(fd, size, position)
 
     monkeypatch.setattr(others, "read_chunk", counted)
     sessions = busy(home, clocks, 2, 30_000)
@@ -1285,7 +1292,7 @@ class Blocked:
         if self.reads == 2:
             self.inside.set()
             self.release.wait(10)
-        return os.pread(fd, size, position)
+        return READ_CHUNK(fd, size, position)
 
 
 async def save(runtime: Runtime, **changes):
@@ -1589,7 +1596,7 @@ def test_lines_across_reads_are_read_whole_or_passed_over(home, clocks, monkeypa
 
     def read(fd, size, position):
         reads.append(position)
-        return os.pread(fd, size, position)
+        return READ_CHUNK(fd, size, position)
 
     monkeypatch.setattr(others, "read_chunk", read)
     reader = Follow(term)
@@ -1690,7 +1697,7 @@ def test_a_first_look_cut_short_by_its_pass_goes_on_in_the_next(home, clocks, sm
 
     def read(fd, size, position):
         reads.append(position)
-        return os.pread(fd, size, position)
+        return READ_CHUNK(fd, size, position)
 
     monkeypatch.setattr(others, "read_chunk", read)
     reader = Follow(term)
