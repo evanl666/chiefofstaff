@@ -738,7 +738,7 @@ class Runtime:
         await asyncio.to_thread(workspace.mkdir, parents=True, exist_ok=True)
         slug = row["branch"].removeprefix(BRANCH_PREFIX) if row["branch"] else workspace.name
         checkouts = self.workspaces.checkouts(row)
-        if repo.startswith(("/", "~")):
+        if repo.startswith("~") or Path(repo).is_absolute():
             local: Path | None = Path(repo)
         else:
             if row["slack"] and not self.yolo(row):
@@ -845,6 +845,9 @@ class Runtime:
                 if row["closed_at"]
                 else "This session's folder does not exist."
             )
+        if app != "vscode" and sys.platform == "win32":
+            await asyncio.to_thread(os.startfile, folder)
+            return {"ok": True}
         if app == "vscode":
             command = ["code", folder] if shutil.which("code") else None
             if not command and sys.platform == "darwin":

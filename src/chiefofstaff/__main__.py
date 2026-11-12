@@ -1,5 +1,4 @@
 import argparse
-import fcntl
 import logging
 import os
 import secrets
@@ -21,6 +20,21 @@ from .web import create_app
 
 # The running instance's private URL, so starting Chief of Staff again opens it.
 LAUNCH_FILE = "launch-url"
+
+
+def lock_data_file(file):
+    if sys.platform == "win32":
+        import msvcrt
+
+        file.seek(0)
+        try:
+            msvcrt.locking(file.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError as exc:
+            raise BlockingIOError from exc
+    else:
+        import fcntl
+
+        fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
 def open_when_ready(port: int, url: str):
@@ -97,16 +111,14 @@ def main():
         project = demo.make_project(args.data_dir.expanduser().resolve() / "projects")
         extra["runtime_factory"] = demo.factory(project)
     args.data_dir = args.data_dir or default_data_dir()
-    if sys.platform == "win32":
-        parser.error("This prototype currently supports macOS and Linux process management.")
     if not 1024 <= args.port <= 65535:
         parser.error("Choose a port between 1024 and 65535.")
     os.umask(0o077)
     directory = args.data_dir.expanduser().resolve()
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    data_lock = (directory / "service.lock").open("a")
+    data_lock = (directory / "service.lock").open("a+b")
     try:
-        fcntl.flock(data_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        lock_data_file(data_lock)
     except BlockingIOError:
         data_lock.close()
         if url := running_instance(directory):

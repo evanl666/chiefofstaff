@@ -426,6 +426,18 @@ def copilot_trusts(path: str) -> bool:
 
 def process_table() -> dict[int, tuple[int, str]]:
     """Every process: pid -> (parent pid, command line)."""
+    if sys.platform == "win32":
+        import psutil
+
+        found = {}
+        for process in psutil.process_iter(["pid", "ppid", "cmdline"]):
+            try:
+                info = process.info
+                if info["ppid"] is not None and info["cmdline"]:
+                    found[info["pid"]] = (info["ppid"], subprocess.list2cmdline(info["cmdline"]))
+            except (psutil.Error, OSError):
+                continue
+        return found
     try:
         table = subprocess.run(
             ["ps", "-axo", "pid=,ppid=,command="],  # noqa: S607  (a fixed command, found on PATH)
@@ -488,7 +500,8 @@ def end_processes(tree: dict[int, str], wait: float = 3.0):
     def same(table: dict[int, tuple[int, str]]) -> list[int]:
         return [pid for pid, command in tree.items() if pid in table and table[pid][1] == command]
 
-    for signum in (signal.SIGTERM, signal.SIGKILL):
+    signals = (signal.SIGTERM,) if sys.platform == "win32" else (signal.SIGTERM, signal.SIGKILL)
+    for signum in signals:
         left = same(process_table())
         for pid in left:
             with suppress(OSError):
@@ -502,6 +515,10 @@ def end_processes(tree: dict[int, str], wait: float = 3.0):
 
 
 def running(pid: int) -> bool:
+    if sys.platform == "win32":
+        import psutil
+
+        return psutil.pid_exists(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -520,6 +537,18 @@ SERVICE = re.compile(r"(?:^|[\s/])chiefofstaff(?:\s|$)")
 def start_times() -> dict[int, str]:
     """When each process started: pid -> a time to compare, not to show. A pid is reused, and
     the process that has it now started after the one recorded."""
+    if sys.platform == "win32":
+        import psutil
+
+        found = {}
+        for process in psutil.process_iter(["pid", "create_time"]):
+            try:
+                info = process.info
+                if info["create_time"] is not None:
+                    found[info["pid"]] = str(info["create_time"])
+            except (psutil.Error, OSError):
+                continue
+        return found
     try:
         table = subprocess.run(
             ["ps", "-axo", "pid=,lstart="],  # noqa: S607  (a fixed command, found on PATH)

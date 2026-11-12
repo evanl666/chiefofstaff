@@ -9,7 +9,6 @@ import logging
 import os
 import re
 import shutil
-import signal
 import stat
 import sys
 import tempfile
@@ -56,10 +55,13 @@ async def command(
         async with asyncio.timeout(limit):
             stdout, stderr = await process.communicate(stdin_data)
     except TimeoutError as exc:
-        with suppress(ProcessLookupError):
-            os.killpg(process.pid, signal.SIGKILL)  # Also ssh and other children.
+        machine.kill_process_tree(process.pid)
         await process.wait()
         raise TimedOutError(f"{arguments[0]} timed out.") from exc
+    except asyncio.CancelledError:
+        machine.kill_process_tree(process.pid)
+        await process.wait()
+        raise
     if process.returncode:
         error = stderr.decode(errors="replace").strip()[:500]
         raise ValueError(f"{arguments[0]} failed: {error}")
@@ -73,6 +75,8 @@ async def git(*arguments: str, limit: float = 60, stdin_data: bytes | None = Non
 # Chief of Staff's own git runs outside any sandbox: nothing in a repository's config may run
 # code for it (a file-system monitor, hooks).
 SAFE_GIT = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null")
+if sys.platform == "win32":
+    SAFE_GIT += ("-c", "core.longpaths=true")
 # What running code leaves behind in a project without a .gitignore for it: not work to commit,
 # review or count (`__pycache__/`, `.pytest_cache/`, `node_modules/`, `*.pyc`, and a `uv.lock`
 # that `uv run` wrote where the project keeps none). Only new files: a tracked one that changed
@@ -346,7 +350,7 @@ def clone_source(repo: str) -> tuple[str, str]:
         url = repo
     else:
         raise ValueError("Give a configured project folder, a git URL or GitHub owner/name.")
-    return url, re.split(r"[/:]", url.rstrip("/").removesuffix(".git"))[-1]
+    return url, re.split(r"[/:\\]", url.rstrip("/\\").removesuffix(".git"))[-1]
 
 
 def repository_key(url: str) -> str:
@@ -477,7 +481,7 @@ async def common_git_dir(path: Path) -> str:
         )
     except ValueError:
         return ""
-    return found.strip()
+    return str(Path(found.strip())) if found.strip() else ""
 
 
 def git_dirs(checkouts: list[dict]) -> list[str]:

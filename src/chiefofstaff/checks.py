@@ -21,7 +21,6 @@ import math
 import os
 import re
 import shutil
-import signal
 import sys
 import time
 from contextlib import asynccontextmanager, suppress
@@ -32,7 +31,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
-from . import prompts
+from . import machine, prompts
 from .models import NestedArguments
 from .receipts import NO_TESTS_RAN, test_runs, words
 from .roles import WORKER
@@ -186,8 +185,7 @@ async def run_sandboxed(
             async with asyncio.timeout(limit):
                 output, _ = await process.communicate()
         except TimeoutError:
-            with suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGKILL)
+            machine.kill_process_tree(process.pid)
             await process.wait()
             return None, f"Timed out after {int(limit)} s."
         return process.returncode, output.decode(errors="replace")[-OUTPUT_CHARS:]

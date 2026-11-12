@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from datetime import UTC, datetime
@@ -82,7 +83,7 @@ async def test_one_workspace_with_a_worktree_per_repository(tmp_path, monkeypatc
     assert all(c["base"] == "origin/main" for c in checkouts)
     workspace = Path(harness.store.get(f"workspace:{row['id']}"))
     assert all(Path(c["path"]).parent == workspace for c in checkouts)
-    assert info["cwd"] == checkouts[0]["path"] and info["checkouts"][1].endswith("/web")
+    assert info["cwd"] == checkouts[0]["path"] and Path(info["checkouts"][1]).name == "web"
     assert (Path(checkouts[0]["path"]) / "LATEST.md").exists(), "started from origin's latest"
     assert not (api / "LATEST.md").exists(), "the owner's checkout is untouched"
     assert not tracks_anything(checkouts[0]["path"]), "the branch must not track main"
@@ -313,8 +314,10 @@ async def test_workers_run_sandboxed_in_their_own_folders(tmp_path, git_repo):
     git_dir = str(git_repo.resolve() / ".git")
     workspace = str(runtime.workspaces.workspace(harness.store.session(info["session_id"])))
     assert {info["cwd"], workspace, git_dir} <= set(policy.readwrite)
-    protected = {f"{git_dir}/{name}" for name in ("hooks", "config", "modules", "worktrees/mine")}
-    assert protected <= set(policy.readonly), "these run code outside the sandbox: never writable"
+    protected = {Path(git_dir) / name for name in ("hooks", "config", "modules", "worktrees/mine")}
+    assert protected <= {Path(path) for path in policy.readonly}, (
+        "these run code outside the sandbox: never writable"
+    )
     assert own_git_dir(info["cwd"]) not in resolved(policy.readonly), "its own stays writable"
     assert policy.allowed_hosts == ()
     prompt = worker.options["system_message"]["content"]
@@ -535,7 +538,7 @@ async def test_the_code_folder_holds_projects_task_folders_and_clones(tmp_path):
         "notes",
     ], "the second task reuses that clone"
     projects = await call_tool(runtime, "list_sessions", harness.router_id)
-    assert str(lib.resolve()) in projects.text_result_for_llm
+    assert json.dumps(str(lib.resolve())) in projects.text_result_for_llm
 
 
 def exists(path) -> bool:
@@ -549,6 +552,7 @@ async def test_closing_a_worker_removes_its_clean_worktrees_and_reopening_restor
     run("git", "clone", "-q", str(git_repo), str(code / "app"))
     harness = Harness(tmp_path / "data", Settings(code_folder=str(code)))
     runtime = await harness.connect()
+    runtime.workspaces.known_cwds = set()
     app = str((code / "app").resolve())
     clean, busy = [
         await spawn(
@@ -636,6 +640,7 @@ async def test_new_worktrees_get_the_gitignored_files_they_need(tmp_path, git_re
     (app / "notes.txt").write_text("untracked, not ignored")
     harness = Harness(tmp_path / "data", Settings(code_folder=str(code), slack_enabled=True))
     runtime = await harness.connect()
+    runtime.workspaces.known_cwds = set()
     project = str(app.resolve())
 
     first = await spawn(runtime, harness.router_id, title="A", instructions="a", project=project,
@@ -769,7 +774,11 @@ async def test_editing_a_new_file_changes_the_version(tmp_path, git_repo):
     (git_repo / "new_test.py").write_text("assert True\n")
     (git_repo / "nested").mkdir()
     run("git", "init", "-q", cwd=git_repo / "nested")  # Listed as "nested/".
-    (git_repo / "gone").symlink_to(git_repo / "missing")  # A broken link.
+    try:
+        (git_repo / "gone").symlink_to(git_repo / "missing")  # A broken link.
+    except OSError as exc:
+        if sys.platform != "win32" or exc.winerror != 1314:
+            raise
     first = await workspaces_module.version(checkout)
     (git_repo / "new_test.py").write_text("assert False\n")
     assert (await workspaces_module.version(checkout))["edits"] != first["edits"]
@@ -786,6 +795,7 @@ async def test_a_closed_workers_changes_are_still_shown(tmp_path):
     _, app = published(tmp_path, "app")
     harness = Harness(tmp_path / "data", Settings(projects=[str(app)]))
     runtime = await harness.connect()
+    runtime.workspaces.known_cwds = set()
     worker = await spawn(runtime, harness.router_id, title="Fix", instructions="x",
                          project=str(app), isolate=True)  # fmt: skip
     commit(Path(worker["cwd"]), "fix.py", "fixed = True\n")
@@ -827,6 +837,23 @@ async def receipts_of(runtime, task_id, ready=lambda found: bool(found["version"
             return found
         await asyncio.sleep(0.03)
     raise AssertionError(f"No receipts for {task_id}: {found}")
+
+
+async def test_a_result_recorded_before_its_base_keeps_its_snapshot(tmp_path, git_repo):
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    runtime = await harness.connect()
+    info = await spawn(
+        runtime, harness.router_id, title="Fix", instructions="fix", project=str(git_repo),
+        isolate=True,
+    )  # fmt: skip
+    await settle(runtime)
+    task = runtime.tasks.get(info["task_id"])
+    harness.store.delete(f"taskbase:{task['id']}")
+    commit(Path(info["cwd"]), "fix.py", "fixed = True\n")
+    await runtime.task_actions.record_end(task)
+    ended = json.loads(harness.store.get(f"taskend:{task['id']}"))
+    assert ended[info["cwd"]]["commit"] == run("git", "rev-parse", "HEAD", cwd=info["cwd"]).strip()
+    assert ended[info["cwd"]]["tree"]
 
 
 async def test_evidence_is_about_one_version_of_the_code(tmp_path, git_repo):
@@ -1573,6 +1600,7 @@ async def test_a_tasks_start_commit_amended_away_does_not_count_earlier_commits(
     assert found and found["commits"] == 2, found
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows forbids quotes in file names")
 async def test_files_named_with_quotes_and_backslashes_are_in_a_tasks_changes(tmp_path):
     """Bug bash 4: git quotes a name with `"` even with core.quotePath off; such files were
     left out of a task's changes ("+0 −0", an empty diff)."""

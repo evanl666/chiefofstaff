@@ -1257,7 +1257,19 @@ class TaskActions:
         """Its checkouts as its result left them: its share ends there (a later task on the
         same branch or folder does not add to it)."""
         row = self.store.find_session(task["session_id"])
-        if not row or not self.store.get(f"taskbase:{task['id']}"):
+        if not row:
+            return
+        if not self.store.get(f"taskbase:{task['id']}"):
+            first = self.tasks.for_session(task["session_id"])[:1]
+            checkouts = self.workspaces.checkouts(row)
+            if (
+                first
+                and first[0]["id"] == task["id"]
+                and not any(checkout.get("shared") for checkout in checkouts)
+            ):
+                at = datetime.fromisoformat(task["created_at"]).timestamp()
+                await self.record_base(task["session_id"], [task["id"]], at)
+        if not self.store.get(f"taskbase:{task['id']}"):
             return
         row = await self.adopt_clones(row)
         ended = {}
