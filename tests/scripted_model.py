@@ -102,8 +102,10 @@ def plan(prompt: str) -> list[dict]:
         steps.append(
             call("custom_tool_call", "apply_patch", f"*** Begin Patch\n{added}*** End Patch\n")
         )
-    for found in re.finditer(r"call the MCP tool (\w+) of (\w+)", prompt, re.IGNORECASE):
-        steps.append(call("function_call", found.group(1), {}, f"mcp__{found.group(2)}"))
+    for found in re.finditer(r"call the MCP tool (\w+) of (\w+(?:\.\w+)*)", prompt, re.IGNORECASE):
+        # As Codex names a server's tools for the model: a dot in its name is not allowed.
+        namespace = "mcp__" + found.group(2).replace(".", "_")
+        steps.append(call("function_call", found.group(1), {}, namespace))
     for found in re.finditer(r"Send the text '([^']*)' to the agent ([0-9a-f-]+)", prompt):
         # Another thread, named by its id (as a worker could read it from Codex's files).
         message = {"target": found.group(2), "message": found.group(1)}

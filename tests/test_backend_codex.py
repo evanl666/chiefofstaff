@@ -472,6 +472,70 @@ async def test_a_failing_tool_and_an_unknown_one_answer_as_copilots_do(codex, tm
     }
 
 
+@pytest.mark.parametrize("server", ["team.notes", "plugin_notes"])
+async def test_with_ask_first_a_server_the_owner_lets_run_unasked_still_asks(
+    tmp_path, monkeypatch, server
+):
+    """The owner's config lets a server's tools run unasked (a name with a dot in it, or a
+    plugin's server, whose policy is its plugin's): a worker that asks first is asked."""
+    approve_all = {
+        "default_tools_approval_mode": "approve",
+        "tools": {"write": {"approval_mode": "approve"}},
+    }
+    owner = {"mcp_servers": {"team.notes": approve_all}}
+    owner["plugins"] = {"notes@local": {"mcp_servers": {"plugin_notes": approve_all}}}
+    monkeypatch.setenv("FAKE_CODEX_CONFIG", json.dumps(owner))
+    plugins = {"notes@local": {"name": "notes", "servers": ["plugin_notes"]}}
+    monkeypatch.setenv("FAKE_CODEX_PLUGINS", json.dumps(plugins))
+    codex = CodexBackend(fake_codex(tmp_path / "fake", monkeypatch))
+    await codex.start()
+    asked = []
+
+    def check(request, invocation):
+        asked.append((request.kind, request.server_name, request.tool_name))
+        return PermissionDecisionReject(feedback="no")
+
+    try:
+        session, turn = await opened(codex, tmp_path, ask_first=True, on_permission_request=check)
+        await session.send(f"Call the MCP tool write of {server}. Reply with just: done")
+        await turn.wait()
+        assert asked == [("mcp", server, "write")]
+        assert codex.alive(), "it asked: the worker goes on"
+    finally:
+        await codex.stop()
+
+
+async def test_with_ask_first_a_plugin_whose_servers_cannot_be_read_is_refused(
+    tmp_path, monkeypatch
+):
+    plugins = {"notes@local": {"name": "notes", "servers": ["n"], "unreadable": True}}
+    monkeypatch.setenv("FAKE_CODEX_PLUGINS", json.dumps(plugins))
+    codex = CodexBackend(fake_codex(tmp_path / "fake", monkeypatch))
+    await codex.start()
+    try:
+        with pytest.raises(RuntimeError, match="Codex's plugins could not be read"):
+            await opened(codex, tmp_path, ask_first=True)
+        session, _ = await opened(codex, tmp_path)  # Acting on its own: it runs.
+        assert session.session_id
+    finally:
+        await codex.stop()
+
+
+async def test_with_ask_first_an_mcp_call_that_ran_unasked_stops_the_worker(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_CODEX_UNASKED", "mcp")
+    monkeypatch.setenv("FAKE_CODEX_CONFIG", json.dumps({"mcp_servers": {"notes": {}}}))
+    codex = CodexBackend(fake_codex(tmp_path / "fake", monkeypatch))
+    await codex.start()
+    try:
+        session, turn = await opened(codex, tmp_path, ask_first=True)
+        await session.send("Call the MCP tool write of notes. Reply with just: done")
+        await until(lambda: not codex.alive())
+        assert "ran a tool of notes without asking first" in codex.refusal
+        assert "done" not in [d.content for d in turn.data("assistant.message")]
+    finally:
+        await codex.stop()
+
+
 async def test_with_ask_first_every_server_it_can_name_asks(tmp_path, monkeypatch):
     servers = {
         "notes": {"command": "notes", "tools": {"write": {"approval_mode": "approve"}, "a.b": {}}},
@@ -1591,6 +1655,79 @@ async def test_what_codex_left_after_an_abrupt_stop_is_ended_at_its_next_start(
     finally:
         if sleeper.returncode is None:
             sleeper.kill()
+        await runtime.stop()
+
+
+async def test_each_codex_worker_has_its_own_process_and_its_crash_is_its_own(
+    tmp_path, monkeypatch
+):
+    """Workers run in processes of their own: one stopping by itself mid-turn ends only its
+    own turn and commands, and it goes on in a new process; the other's turn goes on. Its
+    process stopping by itself again soon after fails it instead (never a loop of starts)."""
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    try:
+        first = await spawn(runtime, harness, "Leave the command `sleep 300` running. Wait 30 s.")
+        second = await spawn(runtime, harness, "Wait 3 s. Then report done: Fixed it.")
+        backend, _ = runtime.connection("codex")
+        await until(lambda: {first, second} <= set(backend.workers), 30)
+        await until(lambda: commands(harness, first), 30)
+        mine, theirs = backend.workers[first], backend.workers[second]
+        assert mine.process.pid != theirs.process.pid
+        os.kill(mine.process.pid, signal.SIGKILL)
+        await until(lambda: backend.workers.get(first) not in {None, mine}, 30)
+        assert commands(harness, first)[0][2] is True, "its command ended with its process"
+        assert backend.workers[second] is theirs and theirs.alive(), "the other's goes on"
+        await until(lambda: harness.store.session(second)["status"] == "done", 30)
+        assert runtime.connection("codex")[0] is backend, "Codex itself was not restarted"
+        await until(lambda: harness.store.session(first)["status"] == "working", 30)
+        again = backend.workers[first]
+        os.kill(again.process.pid, signal.SIGKILL)  # Again, at once.
+        await until(lambda: harness.store.session(first)["status"] == "failed", 30)
+        assert "stopped unexpectedly twice" in harness.kinds(first)[-1][1]
+        assert first not in backend.workers, "not started again"
+    finally:
+        await runtime.stop()
+
+
+async def test_a_codex_worker_that_reaches_another_thread_is_stopped_alone(tmp_path, monkeypatch):
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    try:
+        other = await spawn(runtime, harness, "Wait 3 s. Then report done: Fixed it.")
+        backend, _ = runtime.connection("codex")
+        await until(lambda: other in backend.workers, 30)
+        thread = harness.store.get(f"copilot:{other}")
+        worker = await spawn(runtime, harness, f"Resume the agent {thread}. Report done: x.")
+        await until(lambda: harness.store.session(worker)["status"] == "failed", 30)
+        assert "not its own" in harness.kinds(worker)[-1][1]
+        assert worker not in backend.workers
+        await until(lambda: harness.store.session(other)["status"] == "done", 30)
+        assert runtime.connection("codex")[0] is backend
+    finally:
+        await runtime.stop()
+
+
+async def test_a_codex_worker_reaches_its_own_children_also_from_a_new_process(
+    tmp_path, monkeypatch
+):
+    """The child agents a worker spawned are its own (kept with it): in a new process of its
+    own (resumed), its turns may still reach them."""
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    try:
+        worker = await spawn(
+            runtime, harness, "Have a child agent call the report_done tool with text 'x'."
+        )
+        await until(lambda: harness.store.get(f"agentchildren:{worker}"), 30)
+        (child,) = json.loads(harness.store.get(f"agentchildren:{worker}"))
+        await until(lambda: harness.store.session(worker)["status"] != "working", 30)
+        backend, _ = runtime.connection("codex")
+        before = backend.workers.get(worker)
+        await runtime.detach(worker)
+        await until(lambda: backend.workers.get(worker) is not before, 30)
+        await runtime.owner_send(worker, f"Wait for the agent {child}. Reply with just: waited")
+        await until(lambda: "waited" in str(harness.kinds(worker)), 30)
+        assert harness.store.session(worker)["status"] != "failed"
+        assert child in runtime.states.handle(worker).tree
+    finally:
         await runtime.stop()
 
 

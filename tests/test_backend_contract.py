@@ -678,6 +678,88 @@ async def test_with_ask_first_every_mcp_call_asks_and_githubs_writes_stay_refuse
         await owner.stop()
 
 
+@pytest.mark.codex
+async def test_with_ask_first_codex_asks_for_dotted_and_plugin_servers_set_to_run_unasked(
+    tmp_path, monkeypatch
+):
+    """The owner's config lets two servers' tools run unasked: one whose name has a dot in it,
+    and one a plugin adds (its policy is its plugin's). With Ask first each call still reaches
+    Chief of Staff (and is refused here); acting on its own, each runs as configured."""
+    if not REAL_CODEX:
+        pytest.skip("Set CHIEFOFSTAFF_TEST_CODEX=1 to check it on real Codex.")
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    marks = tmp_path / "marks"
+    marks.mkdir()
+    market = tmp_path / "market"
+    (market / ".agents" / "plugins").mkdir(parents=True)
+    entry = {"name": "notes", "source": {"source": "local", "path": "./plugins/notes"}}
+    (market / ".agents" / "plugins" / "marketplace.json").write_text(
+        json.dumps({"name": "cos", "plugins": [entry]})
+    )
+    plugin = market / "plugins" / "notes"
+    (plugin / ".codex-plugin").mkdir(parents=True)
+    (plugin / ".codex-plugin" / "plugin.json").write_text(
+        json.dumps({"name": "notes", "mcpServers": "./.mcp.json"})
+    )
+    launch = {"command": sys.executable, "args": [str(MARKERS)]}
+    servers = {"plugin_notes": launch | {"env": {"MARKER_DIR": str(marks), "MARKER_NAME": "p"}}}
+    (plugin / ".mcp.json").write_text(json.dumps({"mcpServers": servers}))
+    for step in (["marketplace", "add", str(market)], ["add", "notes@cos"]):
+        await asyncio.to_thread(
+            subprocess.run, ["codex", "plugin", *step], check=True, capture_output=True
+        )
+    review = "tools.create_pull_request_review"
+    with (home / "config.toml").open("a") as config:
+        config.write(
+            f'\n[mcp_servers."team.github"]\ncommand = {json.dumps(sys.executable)}\n'
+            f"args = [{json.dumps(str(MARKERS))}]\n"
+            f'env = {{ MARKER_DIR = {json.dumps(str(marks))}, MARKER_NAME = "team" }}\n'
+            'default_tools_approval_mode = "approve"\n'
+            f'[mcp_servers."team.github".{review}]\napproval_mode = "approve"\n'
+            '[plugins."notes@cos".mcp_servers.plugin_notes]\n'
+            'default_tools_approval_mode = "approve"\n'
+            f'[plugins."notes@cos".mcp_servers.plugin_notes.{review}]\napproval_mode = "approve"\n'
+        )
+    model = scripted_model.Model()
+    codex = CodexBackend(shutil.which("codex") or "codex")
+    codex.arguments += model.arguments(tmp_path)
+    codex.needs_sign_in = False
+    codex.created = []
+    await codex.start()
+    try:
+        asked = []
+
+        def check(request, invocation):
+            asked.append((request.kind, request.server_name, request.tool_name))
+            return PermissionDecisionReject(feedback="Not now.")
+
+        prompt = (
+            "Call the MCP tool create_pull_request_review of team.github, then call the MCP "
+            "tool create_pull_request_review of plugin_notes. Then reply with just: done"
+        )
+        session, turn = await open_session(
+            codex, tmp_path, on_permission_request=check, ask_first=True
+        )
+        await session.send(prompt)
+        await turn.wait()
+        # (Its name makes it GitHub's server to Chief of Staff: asked about as GitHub's.)
+        assert ("mcp", "github-mcp-server", "create_pull_request_review") in asked, asked
+        assert ("mcp", "plugin_notes", "create_pull_request_review") in asked, asked
+        assert not (marks / "review-published").exists(), "refused: neither ran"
+        assert codex.alive()
+        asked.clear()
+        session, turn = await open_session(codex, tmp_path, on_permission_request=check)
+        await session.send(prompt)
+        await turn.wait()
+        assert not [a for a in asked if a[0] == "mcp"], "acting on its own: as configured"
+        assert (marks / "review-published").exists()
+    finally:
+        await codex.stop()
+        model.close()
+
+
 async def test_a_command_it_leaves_running_holds_its_turns_end_until_it_ends(backend, tmp_path):
     only_codex(backend)
     session, turn = await open_session(backend, tmp_path)

@@ -537,7 +537,9 @@ class Server:
             await self.patch(thread_id, turn_id, [(match.group(1), moved)])
         for match in re.finditer(r"Delete the file `([^`]+)`", prompt):
             await self.patch(thread_id, turn_id, [(match.group(1), {"type": "delete"})])
-        for match in re.finditer(r"Call the MCP tool (\w+) of (\w+)(?: \((read-only)\))?", prompt):
+        for match in re.finditer(
+            r"Call the MCP tool (\w+) of (\w+(?:\.\w+)*)(?: \((read-only)\))?", prompt
+        ):
             await self.mcp(thread_id, turn_id, match.group(2), match.group(1), bool(match.group(3)))
         if found := re.search(
             r"Have a (quiet |detached )?child agent call the (\w+) tool with text '([^']*)'", prompt
