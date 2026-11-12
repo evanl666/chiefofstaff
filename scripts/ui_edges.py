@@ -6083,11 +6083,21 @@ async def open_models(page):
     return page.locator("#settings-pane .tab[data-tab=models]")
 
 
-async def shoot(page, name: str, scheme: str, width: int, target: str = "#settings-dialog"):
+async def shoot(
+    page, name: str, scheme: str, width: int, target: str = "#settings-dialog", focus=None
+):
+    """A screenshot of the page at this width; `focus` (a locator): what it is of, centred in
+    view and wholly in it."""
     AGENT_SHOTS.mkdir(parents=True, exist_ok=True)
     await page.set_viewport_size({"width": width, "height": 900})
     await page.mouse.move(1, 1)  # No hover where the last click left the pointer.
+    if focus is not None:
+        await focus.evaluate("n => n.scrollIntoView({block: 'center', inline: 'nearest'})")
     await quiet_for(page)
+    if focus is not None:
+        box = await focus.bounding_box()
+        assert box and box["y"] >= 0 and box["y"] + box["height"] <= 900, (name, width, box)
+        assert box["x"] >= 0 and box["x"] + box["width"] <= width, (name, width, box)
     found = await page.locator(target).evaluate(OVERFLOWS)
     assert not found, (name, width, found)
     await page.screenshot(path=AGENT_SHOTS / f"{name}-{width}-{scheme}.png")
@@ -6566,7 +6576,7 @@ async def agents_unknown_spend(runtime, browser, spawned):
             if await page.locator("#home-tabs").is_visible():
                 await page.locator("#home-tabs [data-tab=needs]").click()
             await expect(card).to_be_visible()
-            await shoot(page, "unknown-spend-go-on", scheme, width, "#main")
+            await shoot(page, "unknown-spend-go-on", scheme, width, "#main", card)
         await page.set_viewport_size({"width": 1280, "height": 900})
         await page.evaluate("id => import('/static/session.js').then((m) => m.select(id))", worker)
         notices = page.locator("#timeline .notice")
@@ -6622,7 +6632,7 @@ async def agents_limit_used(runtime, browser, spawned):
             if await page.locator("#home-tabs").is_visible():
                 await page.locator("#home-tabs [data-tab=needs]").click()
             await expect(card).to_be_visible()
-            await shoot(page, "limit-used-card", scheme, width, "#main")
+            await shoot(page, "limit-used-card", scheme, width, "#main", card)
         await page.set_viewport_size({"width": 1280, "height": 900})
         await page.evaluate("id => import('/static/session.js').then((m) => m.select(id))", worker)
         notices = page.locator("#timeline .notice")
@@ -6634,16 +6644,20 @@ async def agents_limit_used(runtime, browser, spawned):
     # Raised: Go on goes on.
     stopped_at = store.messages(worker)[-1]["id"]
     await agents_saved(runtime, {"codex": {"enabled": True, "limit": 1_000_000}})
-    context, page, errors, _ = await agents_page(browser, "light")
-    if await page.locator("#home-tabs").is_visible():
-        await page.locator("#home-tabs [data-tab=needs]").click()
-    card = page.locator("#needs .card.task", has_text="Profile the importer")
-    await expect(card).to_contain_text("Its token limit is 1,000,000 now: Go on continues.")
-    for width in AGENT_WIDTHS:
-        await page.set_viewport_size({"width": width, "height": 900})
+    for scheme in ("dark", "light"):
+        context, page, errors, _ = await agents_page(browser, scheme)
         if await page.locator("#home-tabs").is_visible():
             await page.locator("#home-tabs [data-tab=needs]").click()
-        await shoot(page, "limit-raised-card", "light", width, "#main")
+        card = page.locator("#needs .card.task", has_text="Profile the importer")
+        await expect(card).to_contain_text("Its token limit is 1,000,000 now: Go on continues.")
+        for width in AGENT_WIDTHS:
+            await page.set_viewport_size({"width": width, "height": 900})
+            if await page.locator("#home-tabs").is_visible():
+                await page.locator("#home-tabs [data-tab=needs]").click()
+            await shoot(page, "limit-raised-card", scheme, width, "#main", card)
+        if scheme == "dark":
+            assert not errors, errors
+            await context.close()
     await card.get_by_role("button", name="Go on", exact=True).click()
     # Admitted: its turn on it ran (the stand-in says nothing to it, and is asked to report).
     await until(
