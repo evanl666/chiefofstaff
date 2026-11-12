@@ -986,7 +986,7 @@ class CodexBackend:
         ]
         answer = await self.request("thread/start", params)
         try:
-            await self.apps_off(answer, options)
+            await self.read_back(answer, options)
             session = self.opened(answer, options)
         except RuntimeError:
             if thread := (answer.get("thread") or {}).get("id"):
@@ -1010,7 +1010,7 @@ class CodexBackend:
                 raise OpenInCodexError(str(exc)) from None
             raise
         try:
-            await self.apps_off(answer, options)
+            await self.read_back(answer, options)
         except RuntimeError:
             if thread := (answer.get("thread") or {}).get("id"):
                 with suppress(Exception):
@@ -1018,11 +1018,9 @@ class CodexBackend:
             raise
         return self.opened(answer, options)
 
-    async def apps_off(self, answer: dict, options: dict):
-        """With Ask first, the thread must read back with ChatGPT's apps off, as set, and Codex's
-        memories off where this Codex has them."""
-        if not options.get("ask_first"):
-            return
+    async def read_back(self, answer: dict, options: dict):
+        """The thread must read back with Codex's memories off where this Codex has them, and,
+        with Ask first, ChatGPT's apps and its subagents off, as set (thread_config)."""
         thread = (answer.get("thread") or {}).get("id") or ""
         try:
             listed = await self.request("experimentalFeature/list", {"threadId": thread})
@@ -1031,17 +1029,26 @@ class CodexBackend:
                 f"Codex could not say which features this worker has: {exc}"
             ) from exc
         features = {mapping(f).get("name"): mapping(f) for f in listed.get("data") or []}
+        kept = "an administrator's Codex settings may keep them on."
+        if "memories" in features and features["memories"].get("enabled") is not False:
+            raise RuntimeError(
+                "Codex did not turn its memories off for this worker (their background agent "
+                f"runs commands nobody is asked about, and Stop does not end it): {kept}"
+            )
+        if not options.get("ask_first"):
+            return
         if features.get("apps", {}).get("enabled") is not False:
             raise RuntimeError(
                 "Codex did not turn ChatGPT's apps off for this worker, which Ask first needs "
-                "(their actions are not checked by Chief of Staff): an administrator's Codex "
-                "settings may keep them on."
+                f"(their actions are not checked by Chief of Staff): {kept}"
             )
-        if "memories" in features and features["memories"].get("enabled") is not False:
+        if any(
+            features.get(name, {}).get("enabled") not in {False, None}
+            for name in ("multi_agent", "multi_agent_v2")
+        ):
             raise RuntimeError(
-                "Codex did not turn its memories off for this worker, which Ask first needs "
-                "(their background agent runs commands nobody is asked about): an "
-                "administrator's Codex settings may keep them on."
+                "Codex did not turn its subagents off for this worker, which Ask first needs "
+                f"(one could open another worker's conversation): {kept}"
             )
 
     @property
@@ -1119,7 +1126,8 @@ class CodexBackend:
             if model:
                 await asyncio.to_thread(model.close)
             await asyncio.to_thread(shutil.rmtree, folder, True)
-        return check_verdict(self.cli_version, asked, happened)
+        offered = sorted(model.subagents) if model else []
+        return check_verdict(self.cli_version, asked, happened, offered)
 
     async def protocol_missing(self, folder: Path) -> list[str]:
         """What Chief of Staff uses of Codex's protocol (CODEX_SENDS and the rest) this version's
@@ -1265,14 +1273,23 @@ class CodexBackend:
         # so tables are nested. (With the process's own `-c` flags it makes one layer, where a
         # table replaces what is at its key: none of those set what is set here.)
         config: dict[str, Any] = {"projects": projects}
+        if self.owner is not None:
+            self.owner.owner_memories = feature_on(owner, "memories")
+        # Codex's memories, for every worker: in a process with them on, a consolidation agent
+        # of its own runs commands with no approval asked (and, under a worker's full access,
+        # without a sandbox), which Stop does not end and no receipt shows; generate_memories
+        # alone does not stop it starting (0.167.2). Off here, and the thread never feeds the
+        # owner's memories (memory_mode "disabled").
+        config["features.memories"] = False
+        config["memories"] = {"generate_memories": False}
         if options.get("ask_first"):
             config["features.apps"] = False
-            # Codex's memories: in a process with them on, a consolidation agent of its own runs
-            # commands with no approval asked (and, under this thread's full access, without a
-            # sandbox); generate_memories alone does not stop it starting (0.167.2). Off here,
-            # and this thread never feeds the owner's memories (memory_mode "disabled").
-            config["features.memories"] = False
-            config["memories"] = {"generate_memories": False}
+            # Its subagents: a child's resume_agent opens any thread Codex can name (another
+            # worker's): none for a worker that asks first. `agents.enabled` overrides what a
+            # model's own catalog entry says; v2 would win over both (config/mod.rs).
+            config["features.multi_agent"] = False
+            config["features.multi_agent_v2"] = False
+            config["agents"] = {"enabled": False}
             servers = {
                 str(server): asking(entry, checking=bool(options.get("checking")))
                 for server, entry in mapping(owner.get("mcp_servers")).items()
@@ -1406,6 +1423,14 @@ class CodexAgent:
         self.running = False
         # Workers' processes that ended or are ending (their stop is awaited with this one's).
         self.retired: set[CodexBackend] = set()
+        # Whether the owner's own Codex has its memories on (as its last thread read it): then
+        # a worker's header says they are off for it (thread_config).
+        self.owner_memories = False
+
+    def notes_for(self, ask_first: bool) -> list[str]:
+        """What a worker of it does differently from a Copilot worker, a short line each."""
+        notes = ["Its Codex memories are off"] if self.owner_memories else []
+        return [*notes, "Its subagents are off"] if ask_first else notes
 
     def process(self) -> CodexBackend:
         process = CodexBackend(self.command, owner=self)
@@ -2477,7 +2502,7 @@ class CodexSession:
                 and not read_only
                 and self.options.get("ask_first")
             ):
-                # Apps are off for it (apps_off): one that still asks is not let act.
+                # Apps are off for it (read_back): one that still asks is not let act.
                 await self.tell("ChatGPT's apps do not act for a worker that asks first.")
                 return {"action": "decline"}
             request = SimpleNamespace(
@@ -2560,6 +2585,15 @@ class CodexSession:
         return {"answers": answers}
 
 
+def feature_on(config: dict, name: str) -> bool:
+    """Whether a config (config/read's) has the feature on: `features.<name>` true, or a table
+    of it whose `enabled` is not false."""
+    value = mapping(config.get("features")).get(name)
+    if isinstance(value, dict):
+        return value.get("enabled") is not False
+    return value is True
+
+
 def protocol_missing(folder: Path) -> list[str]:
     """What of CODEX_SENDS, CODEX_NOTIFIES, CODEX_ANSWERS and CODEX_FOLLOWS the protocol schema
     in `folder` does not have: "<method>" or "<method> <field>"."""
@@ -2592,9 +2626,13 @@ def protocol_missing(folder: Path) -> list[str]:
     return missing
 
 
-def check_verdict(version: str, asked: list[str], happened: list[str]) -> dict:
+def check_verdict(
+    version: str, asked: list[str], happened: list[str], subagents: list[str] | None = None
+) -> dict:
     """What a check showed (CodexBackend.check): why workers that ask first may not run on
-    this version, and why none may (an edit that did not ask, or happened though refused)."""
+    this version (an action not asked about, one that happened though refused, subagents
+    offered to its thread), and why none may (an edit that did not ask, or happened though
+    refused)."""
     wanted = {
         "tool": "a call of Chief of Staff's own tools",
         "shell": "a command",
@@ -2610,12 +2648,14 @@ def check_verdict(version: str, asked: list[str], happened: list[str]) -> dict:
     )
     said = f"Chief of Staff's check of Codex {version}"
     ask_first = ""
-    if missing or happened:
+    if missing or happened or subagents:
         found = []
         if missing:
             found.append("did not ask first for " + ", ".join(missing))
         if happened:
             found.append("did what was refused (" + ", ".join(happened) + ")")
+        if subagents:
+            found.append("offered subagents though they were turned off")
         ask_first = (
             f"{said} found that it {' and '.join(found)}: workers that ask first do not run on it."
         )

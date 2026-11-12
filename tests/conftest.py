@@ -506,9 +506,9 @@ WIRES: list[Path] = []
 
 
 @pytest.fixture(autouse=True)
-def codex_wire_checked(tmp_path_factory):
+def codex_wire_checked():
     """Each message either way between Chief of Staff and a fake Codex is as Codex's protocol
-    has it (tests/codex_schema.py), when a Codex on this computer can say what that is."""
+    has it (the tested version's, kept in tests/codex_protocol: tests/codex_schema.py)."""
     WIRES.clear()
     yield
     wires, WIRES[:] = list(WIRES), []
@@ -516,7 +516,6 @@ def codex_wire_checked(tmp_path_factory):
         return
     unlisted = [problem for wire in dict.fromkeys(wires) for problem in codex_schema.unlisted(wire)]
     assert not unlisted, "What a version's check would not look for:\n" + "\n".join(unlisted)
-    if (checked := codex_schema.protocol(tmp_path_factory.getbasetemp() / "codex-schema")) is None:
-        return
+    checked = codex_schema.protocol()
     problems = [problem for wire in dict.fromkeys(wires) for problem in checked.problems(wire)]
     assert not problems, "Off Codex's protocol:\n" + "\n".join(problems[:20])

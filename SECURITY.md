@@ -68,16 +68,20 @@ Workers can also run on Codex (off by default; Settings → Models). For such a 
 - **Ask first** (Codex versions before 0.168, the ones tested): every command none of your Codex
   rules allows, every edit and every MCP call ask Chief of Staff, which refuses what it refuses
   for a Copilot worker (`gh` writes and GitHub MCP writes among them, so PR reviews stay drafts);
-  ChatGPT's apps are off for that worker. Your own Codex rules and hooks can allow what those
-  checks would refuse. Chief of Staff checks once per Codex version, on this machine and without
-  a model, that each kind of action asks it first, and reads back each worker's settings; a
-  version that fails runs no worker that asks first (or none at all, when its edits do not ask).
+  ChatGPT's apps and Codex's subagents (which could open another worker's conversation) are off
+  for that worker. Your own Codex rules and hooks can allow what those checks would refuse.
+  Chief of Staff checks once per Codex version, on this machine and without a model, that each
+  kind of action asks it first and that no subagent is offered, and reads back each worker's
+  settings; a version that fails runs no worker that asks first (or none at all, when its edits
+  do not ask).
 - **Repository settings** (`.codex/` settings, hooks, rules, MCP servers) load only where you
   trust the folder in Codex; a worktree is trusted as its repository is. Elsewhere none of them
   loads, and the repository's `AGENTS.md` reaches the worker as text only.
 - **Spend limit:** Chief of Staff's own ledger, in tokens. It may be passed by the model call in
   flight and by what child agents spend before they stop; spend lost when Codex stops mid-turn
   is recorded as unknown, and a worker with a limit then waits for your *Go on*.
+- **Codex's memories** are off for every Codex worker: their background agent runs commands no
+  approval reaches, outside any receipt.
 - **Its processes** run under a small supervisor of Chief of Staff's, without Chief of Staff's
   `CHIEFOFSTAFF_*` variables (your Slack token among them), and end when Chief of Staff's process
   goes away, however it stops.
@@ -189,3 +193,5 @@ the checks you approved run.
   that way.
 - Agents can be persuaded. Approve drafts with care, and keep yolo off for workers that read
   untrusted content.
+- On macOS, a command that daemonizes in two forks whose first child exits before Chief of
+  Staff's supervisor sees it can outlive a stopped worker, as with Copilot workers.

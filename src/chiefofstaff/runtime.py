@@ -1342,8 +1342,11 @@ class Runtime:
                 limit = agents.limit(self.store, self.agent(row["id"]))
                 notice = f"Stopped: it used its {limit:,}-token limit."
             self.halted.add(row["id"])
+            full = self.spend_stop(row)["spend_why"]  # As its card says it (cut there at 1440).
             with suppress(Exception):
-                await self.workers.interrupt(row["id"], by=agents.SPEND_STOP, notice=notice)
+                await self.workers.interrupt(
+                    row["id"], by=agents.SPEND_STOP, notice=notice, full=full
+                )
 
     def spend_stop(self, row: dict) -> dict:
         """A worker its token limit stopped, as its task under Needs you says it: what spent
@@ -2257,7 +2260,9 @@ class Runtime:
             "context": "",
             "credits": 0,
             "tokens": self.store.agent_spent(row["id"]),
-            "agent_notes": list(getattr(backend, "notes", ())),
+            "agent_notes": notes(not self.yolo(row))
+            if (notes := getattr(backend, "notes_for", None))
+            else [],
             "ask_first_refused": getattr(backend, "ask_first_refused", "") if backend else "",
         }
 

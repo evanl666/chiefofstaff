@@ -10,6 +10,7 @@ import os
 import re
 import signal
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -22,6 +23,7 @@ from pydantic import BaseModel
 
 from chiefofstaff import agents, backend_codex, events
 from chiefofstaff import runtime as runtime_module
+from chiefofstaff import workers as workers_module
 from chiefofstaff.backend import process_table, running
 from chiefofstaff.backend_codex import (
     REFUSED_NOTE,
@@ -599,6 +601,9 @@ async def test_with_ask_first_every_server_it_can_name_asks(tmp_path, monkeypatc
         "features.apps": False,
         "features.memories": False,
         "memories": {"generate_memories": False},
+        "features.multi_agent": False,
+        "features.multi_agent_v2": False,
+        "agents": {"enabled": False},
         # Nested: a name with a dot in it is one name (a dotted key would split it).
         "mcp_servers": {
             "notes": prompt
@@ -613,8 +618,9 @@ async def test_chatgpts_apps_are_off_for_a_worker_that_asks_first_as_read_back(
     tmp_path, monkeypatch
 ):
     """Review: an app's call (GitHub's, say) takes approval from Codex's own `apps` settings,
-    not Chief of Staff's: a worker that asks first has none; one acting on its own keeps the
-    owner's."""
+    not Chief of Staff's: a worker that asks first has none, nor subagents (one could open
+    another worker's thread); one acting on its own keeps the owner's. Codex's memories are off
+    for every worker (their agent asks nobody, and Stop does not end it)."""
     log = tmp_path / "log.jsonl"
     monkeypatch.setenv("FAKE_CODEX_LOG", str(log))
     codex = CodexBackend(fake_codex(tmp_path / "fake", monkeypatch))
@@ -629,12 +635,13 @@ async def test_chatgpts_apps_are_off_for_a_worker_that_asks_first_as_read_back(
             )
             features[session] = {f["name"]: f["enabled"] for f in listed["data"]}
         assert (features[asking]["apps"], features[acting]["apps"]) == (False, True)
-        # Codex's memories too (their background agent asks nobody): the owner's for one acting.
-        assert (features[asking]["memories"], features[acting]["memories"]) == (False, True)
+        assert (features[asking]["multi_agent"], features[acting]["multi_agent"]) == (False, True)
+        assert (features[asking]["memories"], features[acting]["memories"]) == (False, False)
         starts = [json.loads(line).get("params") for line in log.read_text().splitlines()]
         configs = [p["config"] for p in starts if p and "config" in p and "threadId" not in p]
-        assert configs[0]["memories"] == {"generate_memories": False}, "its own never kept"
-        assert "memories" not in configs[1] and "features.memories" not in configs[1]
+        for config in configs:
+            assert config["memories"] == {"generate_memories": False}, "its own never kept"
+        assert configs[0]["agents"] == {"enabled": False} and "agents" not in configs[1]
         resumed = await codex.resume_session(asking.session_id, ask_first=True)
         assert resumed.session_id == asking.session_id
     finally:
@@ -644,8 +651,18 @@ async def test_chatgpts_apps_are_off_for_a_worker_that_asks_first_as_read_back(
     codex = CodexBackend(fake_codex(tmp_path / "fake", monkeypatch))
     await codex.start()
     try:
-        with pytest.raises(RuntimeError, match="did not turn its memories off"):
+        for ask_first in (True, False):
+            with pytest.raises(RuntimeError, match="did not turn its memories off"):
+                await opened(codex, tmp_path, ask_first=ask_first)
+    finally:
+        await codex.stop()
+    monkeypatch.setenv("FAKE_CODEX_FEATURES", json.dumps({"multi_agent": True}))
+    codex = CodexBackend(fake_codex(tmp_path / "fake", monkeypatch))
+    await codex.start()
+    try:
+        with pytest.raises(RuntimeError, match="did not turn its subagents off"):
             await opened(codex, tmp_path, ask_first=True)
+        assert (await opened(codex, tmp_path))[0].session_id, "acting on its own, it has them"
     finally:
         await codex.stop()
     monkeypatch.setenv("FAKE_CODEX_FEATURES", json.dumps({"apps": True}))
@@ -660,7 +677,7 @@ async def test_chatgpts_apps_are_off_for_a_worker_that_asks_first_as_read_back(
     finally:
         await codex.stop()
     methods = [json.loads(line)["method"] for line in log.read_text().splitlines()]
-    assert methods.count("thread/archive") == 2 and "thread/unsubscribe" in methods
+    assert methods.count("thread/archive") == 4 and "thread/unsubscribe" in methods
 
 
 @pytest.mark.parametrize("ask_first", [True, False])
@@ -875,13 +892,11 @@ async def test_a_child_agent_at_work_after_its_turn_holds_it(codex, tmp_path):
     assert await session.running_background() == 0
 
 
-def test_codexs_protocol_check_finds_a_misnamed_field(tmp_path_factory, tmp_path):
+def test_codexs_protocol_check_finds_a_misnamed_field(tmp_path):
     """Codex ignores a field it does not know without a word: the check of every fake test's
     wire (conftest.codex_wire_checked) does not. A thread's sandbox is a mode's name, a turn's
     is a policy (sandboxPolicy): each, sent to the other, is found."""
-    protocol = codex_schema.protocol(tmp_path_factory.getbasetemp() / "codex-schema")
-    if protocol is None:
-        pytest.skip("No Codex on this computer to say what its protocol is.")
+    protocol = codex_schema.protocol()
     wire = tmp_path / "wire.jsonl"
     sent = [
         ("thread/start", {"cwd": str(tmp_path), "sandbox": "danger-full-access"}),
@@ -902,14 +917,12 @@ def test_codexs_protocol_check_finds_a_misnamed_field(tmp_path_factory, tmp_path
     assert "sandboxPolicy" in found[2] and "turn/start" in found[2]
 
 
-async def test_only_what_needs_it_is_of_codexs_experimental_api(codex, tmp_path, tmp_path_factory):
+async def test_only_what_needs_it_is_of_codexs_experimental_api(codex, tmp_path):
     """Chief of Staff opts in to Codex's experimental API (capabilities.experimentalApi) for
     what needs it: its own tools (thread/start's dynamicTools) and the commands a turn left
     running (thread/backgroundTerminals/*). Checked against the stable protocol, what it sends
     is off it there and only there."""
-    stable = codex_schema.protocol(tmp_path_factory.getbasetemp() / "codex-schema", False)
-    if stable is None:
-        pytest.skip("No Codex on this computer to say what its protocol is.")
+    stable = codex_schema.protocol(experimental=False)
     session, turn = await opened(codex, tmp_path)
     await session.send("Leave the command `sleep 30` running. Then reply with just: started")
     await until(lambda: "assistant.idle" in turn.kinds())
@@ -919,7 +932,7 @@ async def test_only_what_needs_it_is_of_codexs_experimental_api(codex, tmp_path,
     off = {
         re.sub(r"^client: ([^:]+?)(?: is not in Codex's protocol|: (\w+)/?.*)$", r"\1 \2", p)
         for p in stable.problems(wire)
-        if p.startswith("client: ")
+        if p.startswith("client: ") and "no schema for the answer" not in p  # (Kept: requests.)
     }
     assert {line.strip() for line in off} == {
         "thread/start params",
@@ -1707,6 +1720,56 @@ async def test_a_worker_open_in_the_owners_codex_app_says_so_and_waits_for_a_lat
         await runtime.stop()
 
 
+async def test_a_quiet_codex_worker_lets_go_of_its_codex_and_its_next_message_resumes_it(
+    tmp_path, monkeypatch
+):
+    """As a quiet Copilot worker lets go of its session (Workers.release_idle): its own Codex
+    process, supervisor and all, ends; its next message resumes the same thread, as it was."""
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    try:
+        worker = await spawn(runtime, harness, "Remember the word 'tulip'. Report done: kept")
+        await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+        await turn_over(runtime, worker)
+        backend, _ = runtime.connection("codex")
+        process = backend.workers[worker]
+        tree = set(process.processes())
+        assert process.process.pid in tree and len(tree) >= 2, "its supervisor and Codex"
+        assert await runtime.workers.release_idle(time.time()) == [], "not quiet for long yet"
+        later = time.time() + workers_module.RELEASE_IDLE + 1
+        assert await runtime.workers.release_idle(later) == [worker]
+        await until(lambda: not process.alive() and not tree & set(process_table()), 15)
+        assert not runtime.states.is_live(worker)
+        thread = runtime.copilot_id(worker)
+        await runtime.owner_send(worker, "What word did I ask you to remember?")
+        await until(lambda: ("assistant", "tulip") in harness.kinds(worker), 30)
+        assert runtime.copilot_id(worker) == thread, "the same thread, resumed"
+        assert backend.workers[worker] is not process and backend.workers[worker].alive()
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.parametrize("left", ["command", "child"])
+async def test_a_codex_worker_with_work_left_running_is_not_let_go_of(tmp_path, monkeypatch, left):
+    """Not while a command it left running goes on (a server), nor a child agent it left at
+    work: letting go would end them with none to wake it."""
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    try:
+        prompt = {
+            "command": "Leave the command `sleep 30` running. Report done: serving",
+            "child": "Have a detached child agent call the echo tool with text 'x' and run "
+            "`sleep 30`. Report done: delegated",
+        }[left]
+        worker = await spawn(runtime, harness, prompt)
+        await until(lambda: runtime.states[worker].held, 30)
+        backend, _ = runtime.connection("codex")
+        process = backend.workers[worker]
+        assert await runtime.workers.release_idle(time.time() + 86400) == []
+        assert process.alive() and runtime.states.is_live(worker)
+        assert await runtime.states.handle(worker).stop_background() == 1
+    finally:
+        await runtime.stop()
+
+
 async def test_a_blocked_codex_worker_never_starts_codex(tmp_path, monkeypatch):
     harness, runtime = await brief(tmp_path, monkeypatch)
     try:
@@ -2000,19 +2063,36 @@ async def test_a_version_whose_schema_cannot_be_had_is_checked_as_before(tmp_pat
         await codex.stop()
 
 
-def test_this_codex_has_what_chief_of_staff_uses_of_it(tmp_path_factory):
-    """The Codex on this computer, by its own schema: all there (0.167.2's is)."""
-    if codex_schema.protocol(tmp_path_factory.getbasetemp() / "codex-schema") is None:
-        pytest.skip("No Codex on this computer to say what its protocol is.")
-    folder = tmp_path_factory.getbasetemp() / "codex-schema" / "experimental"
-    assert backend_codex.protocol_missing(folder) == []
-    stable = tmp_path_factory.getbasetemp() / "codex-schema" / "stable"
-    if codex_schema.protocol(tmp_path_factory.getbasetemp() / "codex-schema", False):
-        assert backend_codex.protocol_missing(stable) == [
-            "thread/start dynamicTools",
-            "thread/backgroundTerminals/list",
-            "thread/backgroundTerminals/clean",
-        ], "what needs Codex's experimental API (asked for at initialize)"
+def test_the_tested_codex_has_what_chief_of_staff_uses_of_it():
+    """The tested version, by its own schema: all there; in its stable API, all but what needs
+    the experimental one (asked for at initialize)."""
+    assert backend_codex.protocol_missing(codex_schema.vendored()) == []
+    assert backend_codex.protocol_missing(codex_schema.vendored(experimental=False)) == [
+        "thread/start dynamicTools",
+        "thread/backgroundTerminals/list",
+        "thread/backgroundTerminals/clean",
+    ]
+
+
+@pytest.mark.parametrize("experimental", [True, False])
+def test_the_protocol_kept_here_is_what_that_codex_writes_trimmed(tmp_path, experimental):
+    """tests/codex_protocol is the tested Codex's own schema, trimmed (nothing edited by hand),
+    for what Chief of Staff uses now (CODEX_*): checked wherever that Codex is installed."""
+    import subprocess
+
+    if not codex_schema.CODEX:
+        pytest.skip("No Codex on this computer to write its schema.")
+    said = subprocess.run([codex_schema.CODEX, "--version"], capture_output=True, text=True)
+    if said.stdout.split()[-1:] != [codex_schema.VERSION]:
+        pytest.skip(f"Codex {codex_schema.VERSION} is not the one on this computer.")
+    generated = codex_schema.generate(tmp_path / "generated", experimental)
+    assert generated
+    fresh = tmp_path / "trimmed"
+    codex_schema.trim(generated, fresh, codex_schema.VERSION, experimental)
+    kept = codex_schema.vendored(experimental)
+    assert sorted(p.name for p in kept.iterdir()) == sorted(p.name for p in fresh.iterdir())
+    for path in fresh.iterdir():
+        assert (kept / path.name).read_text() == path.read_text(), path.name
 
 
 def test_what_a_check_found_is_said_plainly():
@@ -2032,6 +2112,52 @@ def test_what_a_check_found_is_said_plainly():
     assert quiet["acting"] == ""
     done = verdict("0.167.2", every + moves, ["server.marker"])
     assert done["acting"] == "" and "did what was refused (server.marker)" in done["ask_first"]
+
+
+def test_subagents_offered_to_a_thread_that_asks_first_keep_it_from_asking_first():
+    """The check's stand-in model sees the tools Codex offers its thread (which asks first):
+    subagents among them, though turned off, and no worker asks first on that version."""
+    from chiefofstaff.codex_check import subagent_tools
+
+    tools = [
+        {"type": "function", "name": "exec_command"},
+        {"type": "namespace", "name": "multi_agent_v1", "tools": [{"name": "spawn_agent"}]},
+        {"type": "namespace", "name": "multi_agent_v2_x", "tools": [{"name": "other"}]},
+        {"type": "function", "name": "send_input"},
+        {"type": "namespace", "name": "mcp__notes", "tools": [{"name": "write"}]},
+    ]
+    assert subagent_tools(tools) == {
+        "multi_agent_v1::spawn_agent",
+        "multi_agent_v2_x::other",
+        "send_input",
+    }
+    every = ["tool", "shell", "mcp", "write added-1.marker", "write added-2.marker"]
+    every += ["write from.txt", "write moved.txt"]
+    found = backend_codex.check_verdict("0.167.2", every, [], ["multi_agent_v1::spawn_agent"])
+    assert found["ask_first"] == (
+        "Chief of Staff's check of Codex 0.167.2 found that it offered subagents though they "
+        "were turned off: workers that ask first do not run on it."
+    )
+    assert found["acting"] == "", "acting on its own, a worker has them anyway"
+
+
+@pytest.mark.parametrize("memories", [True, False])
+async def test_a_codex_workers_header_says_what_is_off_for_it(tmp_path, monkeypatch, memories):
+    """Its name's tooltip, a line for each thing that differs: its subagents (asking first),
+    and Codex's memories, only when the owner has them on in their own Codex."""
+    config = {"features": {"memories": True}} if memories else {}
+    harness, runtime = await brief(tmp_path, monkeypatch, FAKE_CODEX_CONFIG=json.dumps(config))
+    try:
+        worker = await spawn(runtime, harness, "Report done: first")
+        await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+        runtime.update_session(worker, yolo="on")
+        acting = runtime.view(harness.store.session(worker))["agent_notes"]
+        runtime.update_session(worker, yolo="off")
+        asking = runtime.view(harness.store.session(worker))["agent_notes"]
+        off = ["Its Codex memories are off"] if memories else []
+        assert (acting, asking) == (off, [*off, "Its subagents are off"])
+    finally:
+        await runtime.stop()
 
 
 async def test_what_codex_left_after_an_abrupt_stop_is_ended_at_its_next_start(
@@ -2366,6 +2492,10 @@ async def test_a_codex_worker_stops_at_its_token_limit(tmp_path, monkeypatch):
         await until(lambda: stopped in str(harness.kinds(worker)), 30)
         notices = [text for kind, text in harness.kinds(worker) if kind == "notice"]
         assert notices == [stopped], "one line says it"
+        (said,) = [m for m in harness.store.messages(worker) if m["text"] == stopped]
+        assert said["meta"]["full"] == (
+            "Used its 150-token limit. Raise it in Settings → Models, or cancel."
+        ), "its card's words, in full, on hover"
         task = runtime.tasks.for_session(worker)[-1]
         assert task["status"] == "waiting" and harness.store.get(f"stopped:{task['id']}")
         assert harness.store.session(worker)["status"] == "idle"
@@ -2417,6 +2547,12 @@ async def test_a_crash_mid_turn_leaves_its_spend_unknown_until_the_owner_goes_on
         await until(lambda: stopped in str(harness.kinds(worker)), 30)
         notices = [text for kind, text in harness.kinds(worker) if kind == "notice"]
         assert notices.count(stopped) == 1 and not [n for n in notices if "limit" in n]
+        (said,) = [m for m in harness.store.messages(worker) if m["text"] == stopped]
+        assert re.fullmatch(
+            r"Codex stopped mid-turn, so what it spent since \d{1,2}:\d\d [AP]M isn't "
+            r"known\. Go on accepts that and continues\.",
+            said["meta"]["full"],
+        ), said["meta"]
         why = runtime.agent_block(harness.store.session(worker))
         assert "what this worker spent then is not known" in why and "Go on" in why
         view = runtime.task_actions.view(runtime.tasks.get(task["id"]))

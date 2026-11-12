@@ -42,6 +42,7 @@ from chiefofstaff.backend import (
     take_queued,
 )
 from chiefofstaff.backend_codex import CodexAgent, CodexBackend
+from chiefofstaff.codex_check import subagent_tools
 from chiefofstaff.delivery import queue_holds
 from chiefofstaff.scripted import (
     CLAUDE_LIKE,
@@ -826,6 +827,37 @@ async def test_codexs_check_of_a_tested_version_finds_nothing(tmp_path, monkeypa
 
 
 @pytest.mark.codex
+async def test_codexs_check_finds_subagents_offered_to_a_thread_that_asks_first(
+    tmp_path, monkeypatch
+):
+    """A version whose features read back off yet whose model still gets subagents (as one
+    without `agents.enabled` would: the check's model asks for them): the check sees them in
+    what its model is sent, and no worker asks first on it."""
+    if not REAL_CODEX:
+        pytest.skip("Set CHIEFOFSTAFF_TEST_CODEX=1 to check it on real Codex.")
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    configured = CodexBackend.thread_config
+
+    async def without_agents_off(self, options, cwd):
+        config = await configured(self, options, cwd)
+        config.pop("agents", None)
+        return config
+
+    monkeypatch.setattr(CodexBackend, "thread_config", without_agents_off)
+    codex = CodexBackend(shutil.which("codex") or "codex")
+    codex.needs_sign_in = False
+    await codex.start()
+    try:
+        found = await codex.check(tmp_path / "check")
+    finally:
+        await codex.stop()
+    assert found["ran"] is True and found["acting"] == ""
+    assert "offered subagents though they were turned off" in found["ask_first"], found
+
+
+@pytest.mark.codex
 async def test_an_mcp_call_chief_of_staff_approves_is_approved_for_that_call_alone(
     tmp_path, monkeypatch
 ):
@@ -876,13 +908,42 @@ async def test_an_mcp_call_chief_of_staff_approves_is_approved_for_that_call_alo
 
 @pytest.mark.codex
 @pytest.mark.parametrize("ask_first", [True, False])
-async def test_codex_memories_never_run_their_agent_for_a_worker_that_asks_first(
+async def test_a_worker_that_asks_first_is_offered_no_subagents_by_a_model_that_wants_them(
     tmp_path, monkeypatch, ask_first
 ):
+    """A model whose catalog entry asks for subagents (`multi_agent_version`) gets them though
+    `features.multi_agent` is off (config/mod.rs): `agents.enabled` off keeps them from a
+    worker that asks first all the same; one acting on its own has them."""
+    if not REAL_CODEX:
+        pytest.skip("Set CHIEFOFSTAFF_TEST_CODEX=1 to check it on real Codex.")
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    model = scripted_model.Model(multi_agent_version="v1")
+    codex = CodexBackend(shutil.which("codex") or "codex")
+    codex.arguments += model.arguments(tmp_path)
+    codex.needs_sign_in = False
+    codex.created = []
+    await codex.start()
+    try:
+        session, turn = await open_session(codex, tmp_path, ask_first=ask_first)
+        await session.send("Reply with just: ok")
+        await turn.wait()
+    finally:
+        await codex.stop()
+        model.close()
+    offered = set().union(*(subagent_tools(body.get("tools")) for body in model.bodies))
+    assert bool(offered) is not ask_first, offered
+
+
+@pytest.mark.codex
+@pytest.mark.parametrize("ask_first", [True, False])
+async def test_codex_memories_never_run_their_agent_for_a_worker(tmp_path, monkeypatch, ask_first):
     """The owner's Codex has memories on: in a process that has them, Codex runs a background
     agent of its own (consolidation) with no approval asked, and, under a worker's full access,
-    no sandbox. A worker that asks first has them off (nothing of the pipeline starts in its
-    process) and its thread never feeds them; one acting on its own keeps the owner's."""
+    no sandbox, which Stop does not end. Every worker has them off (nothing of the pipeline
+    starts in its process) and its thread never feeds them; subagents are off only for one
+    that asks first (the tools its model is offered)."""
     if not REAL_CODEX:
         pytest.skip("Set CHIEFOFSTAFF_TEST_CODEX=1 to check it on real Codex.")
     import sqlite3
@@ -916,12 +977,13 @@ async def test_codex_memories_never_run_their_agent_for_a_worker_that_asks_first
 
     modes = rows("state", "SELECT memory_mode FROM threads")
     jobs = sum(count for (count,) in rows("memories", "SELECT count(*) FROM jobs"))
+    assert enabled is False and modes == [("disabled",)], (enabled, modes)
+    assert jobs == 0, "nothing of the memories pipeline started in its process"
+    offered = set().union(*(subagent_tools(body.get("tools")) for body in model.bodies))
     if ask_first:
-        assert enabled is False and modes == [("disabled",)], (enabled, modes)
-        assert jobs == 0, "nothing of the memories pipeline started in its process"
+        assert offered == set(), "no subagents for a worker that asks first"
     else:
-        assert enabled is True and modes == [("enabled",)], (enabled, modes)
-        assert jobs > 0, "the owner's memories, as in their own sessions"
+        assert "multi_agent_v1::spawn_agent" in offered, offered
 
 
 async def test_a_command_it_leaves_running_holds_its_turns_end_until_it_ends(backend, tmp_path):

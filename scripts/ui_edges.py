@@ -6571,6 +6571,7 @@ async def agents_unknown_spend(runtime, browser, spawned):
         )
         assert "Stopped by" not in await card.inner_text(), "said once, not again after it"
         await expect(card.get_by_role("button", name="Go on", exact=True)).to_be_visible()
+        full = await whole_on_hover(card)
         for width in AGENT_WIDTHS:
             await page.set_viewport_size({"width": width, "height": 900})
             if await page.locator("#home-tabs").is_visible():
@@ -6583,6 +6584,7 @@ async def agents_unknown_spend(runtime, browser, spawned):
         await expect(notices).to_have_text(
             ["Stopped: Codex stopped mid-turn, so what it spent is unknown."]
         )
+        assert (await notices.get_attribute("title") or "").startswith(full + "\n")
         for width in AGENT_WIDTHS:
             await shoot(page, "unknown-spend-worker", scheme, width, "#main")
             assert await notices.locator("span").evaluate("n => n.scrollWidth <= n.clientWidth"), (
@@ -6602,6 +6604,14 @@ async def agents_unknown_spend(runtime, browser, spawned):
     await agents_limit_used(runtime, browser, spawned)
     await agents_saved(runtime, {"codex": {"enabled": True, "limit": 0}})
     log("agents: unknown spend with a limit waits under Needs you for Go on, which accepts it")
+
+
+async def whole_on_hover(card) -> str:
+    """A stopped task's card says why on one line (cut where narrow): all of it on hover."""
+    why = card.locator(".why")
+    text = await why.text_content() or ""
+    assert text and await why.get_attribute("data-tip") == text, (text, "its tooltip")
+    return text
 
 
 async def agents_limit_used(runtime, browser, spawned):
@@ -6627,6 +6637,7 @@ async def agents_limit_used(runtime, browser, spawned):
         )
         assert "Stopped by" not in await card.inner_text()
         await expect(card.get_by_role("button", name="Go on", exact=True)).to_have_count(0)
+        full = await whole_on_hover(card)
         for width in AGENT_WIDTHS:
             await page.set_viewport_size({"width": width, "height": 900})
             if await page.locator("#home-tabs").is_visible():
@@ -6637,6 +6648,7 @@ async def agents_limit_used(runtime, browser, spawned):
         await page.evaluate("id => import('/static/session.js').then((m) => m.select(id))", worker)
         notices = page.locator("#timeline .notice")
         await expect(notices).to_have_text(["Stopped: it used its 1,000-token limit."])
+        assert (await notices.get_attribute("title") or "").startswith(full + "\n")
         for width in AGENT_WIDTHS:
             await shoot(page, "limit-used-worker", scheme, width, "#main")
         assert not errors, errors

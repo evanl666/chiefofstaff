@@ -789,7 +789,9 @@ function renderMessage(original) {
       const settings = meta.settings
         ? el("button", { type: "button", class: "link", text: "Open Settings", onclick: (event) => { event.stopPropagation(); openSettings(meta.settings); } })
         : null;
-      return el("div", { class: `line notice${open ? " link" : ""}${settings ? " wide" : ""}`, title: clock(time), onclick: open }, el("span", { text: message.text }), settings);
+      // A stop its task's card says more of (another agent's spend): that, in full, on hover.
+      const title = meta.full ? `${meta.full}\n${clock(time)}` : clock(time);
+      return el("div", { class: `line notice${open ? " link" : ""}${settings ? " wide" : ""}`, title, onclick: open }, el("span", { text: message.text }), settings);
     }
     case "error":
       // Sent after all (on a retry, or once Copilot was back): no longer an error.

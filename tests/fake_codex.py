@@ -213,14 +213,15 @@ class Server:
             raise RuntimeError("thread not found")
         config = (thread or {}).get("config") or {}
         kept = json.loads(os.environ.get("FAKE_CODEX_FEATURES") or "{}")
+        default = {"multi_agent_v2": False}
         data = [
             {
                 "name": name,
                 "stage": "stable",
-                "defaultEnabled": True,
-                "enabled": kept.get(name, config.get(f"features.{name}", True)),
+                "defaultEnabled": default.get(name, True),
+                "enabled": kept.get(name, config.get(f"features.{name}", default.get(name, True))),
             }
-            for name in ("apps", "multi_agent", "memories")
+            for name in ("apps", "multi_agent", "multi_agent_v2", "memories")
         ]
         return {"data": data, "nextCursor": None}
 
@@ -599,7 +600,10 @@ class Server:
             r"Have a (quiet |detached )?child agent call the (\w+) tool with text '([^']*)'", prompt
         ):
             how = (found.group(1) or "").strip()
-            await self.child(thread_id, turn_id, found.group(2), found.group(3), prompt, how)
+            if subagents_off(thread.get("config") or {}):
+                await self.say(thread_id, turn_id, "No subagents here.")  # Not offered (Codex).
+            else:
+                await self.child(thread_id, turn_id, found.group(2), found.group(3), prompt, how)
         if found := re.search(r"Ask me (.+?)\?", prompt):
             answer = await self.ask(
                 "item/tool/requestUserInput",
@@ -1043,6 +1047,13 @@ def ended(how: str):
     if path := os.environ.get("FAKE_CODEX_ENDS"):
         with Path(path).open("a") as file:
             file.write(how + "\n")
+
+
+def subagents_off(config: dict) -> bool:
+    """As Codex: a thread's subagent tools are not offered with `agents.enabled` false or
+    `features.multi_agent` false (and v2 off)."""
+    agents = config.get("agents") if isinstance(config.get("agents"), dict) else {}
+    return agents.get("enabled") is False or config.get("features.multi_agent") is False
 
 
 def in_use() -> list[str]:

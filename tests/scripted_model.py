@@ -191,16 +191,20 @@ def message(text: str) -> dict:
 class Model(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self):
+    def __init__(self, **entry: Any):
         self.requests = 0
         self.bodies: list[dict] = []  # What Codex sent, in order.
+        self.entry = entry  # More of each model's catalog entry (multi_agent_version, say).
         super().__init__(("127.0.0.1", 0), Answer)
         threading.Thread(target=self.serve_forever, daemon=True).start()
 
     def arguments(self, folder: Path) -> list[str]:
         """The app-server's `-c` settings that make this its model."""
         file = folder / "contract-models.json"
-        file.write_text(json.dumps(catalog()))
+        listed = catalog()
+        for model in listed["models"]:
+            model.update(self.entry)
+        file.write_text(json.dumps(listed))
         url = f"http://127.0.0.1:{self.server_address[1]}/v1"
         return [
             "-c",

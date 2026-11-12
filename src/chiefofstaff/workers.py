@@ -950,8 +950,9 @@ class Workers:
                 self.runtime.add_message(self.runtime.router_id(), "notice", display, meta)
         return self.runtime.view(row)
 
-    async def interrupt(self, session_id: str, by: str = "you", notice: str = ""):
-        """`notice`: what its timeline and its stopped task say instead of "Stopped by <by>."."""
+    async def interrupt(self, session_id: str, by: str = "you", notice: str = "", full: str = ""):
+        """`notice`: what its timeline and its stopped task say instead of "Stopped by <by>.";
+        `full`: what its task's card says of it, in full (the notice's tooltip)."""
         row = self.store.session(session_id)
         self.runtime.asks.cancel_requests(session_id, f"Stopped by {by}.")
         self.states[session_id].after_refresh = ""  # Not "go on" once it is stopped.
@@ -964,7 +965,8 @@ class Workers:
             # (nor a silent stall for the Watchdog).
             self.runtime.update_session(session_id, status="idle", activity="")
             said = notice or f"Stopped by {by}."
-            self.runtime.add_message(session_id, "notice", said, {"stopped": True})
+            meta = {"stopped": True, **({"full": full} if full else {})}
+            self.runtime.add_message(session_id, "notice", said, meta)
             # The task it was on (not one given last that it has not started), or, before it
             # started, those it was given: stopped, waiting for the owner to say go on or cancel.
             on = self.runtime.working_on(session_id) if row["role"] == WORKER else ""

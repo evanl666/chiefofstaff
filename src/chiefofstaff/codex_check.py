@@ -35,6 +35,25 @@ PROMPT = (
 )
 # Its turn's last words: the check ran to its end only once they are said.
 REPLY = "checked"
+# Codex's tools for subagents (multi_agent_v1's; v2's go by a namespace of the same start): a
+# worker that asks first is offered none.
+SUBAGENT_TOOLS = frozenset(
+    {"spawn_agent", "send_input", "resume_agent", "wait_agent", "close_agent", "list_agents"}
+)
+
+
+def subagent_tools(tools: Any) -> set[str]:
+    """Which of a request's tools (Responses API, namespaces included) are Codex's subagents'."""
+    found = set()
+    for tool in tools if isinstance(tools, list) else []:
+        if not isinstance(tool, dict):
+            continue
+        namespace = str(tool.get("name") or "") if tool.get("type") == "namespace" else ""
+        for inner in (tool.get("tools") or [tool]) if namespace else [tool]:
+            name = str(inner.get("name") or "") if isinstance(inner, dict) else ""
+            if name in SUBAGENT_TOOLS or namespace.startswith("multi_agent"):
+                found.add(f"{namespace}::{name}" if namespace else name)
+    return found
 
 
 def catalog() -> dict:
@@ -64,6 +83,9 @@ def catalog() -> dict:
                 "auto_compact_token_limit": None,
                 "effective_context_window_percent": 95,
                 "experimental_supported_tools": [],
+                # A model that asks for subagents (as some of OpenAI's do): the check's thread,
+                # which asks first, is offered none all the same (agents.enabled overrides it).
+                "multi_agent_version": "v1",
             }
         ]
     }
@@ -133,6 +155,7 @@ class Model(ThreadingHTTPServer):
     def __init__(self, work: Path):
         self.answers = steps(work)
         self.requests = 0
+        self.subagents: set[str] = set()  # Subagent tools the thread was offered.
         super().__init__(("127.0.0.1", 0), Answer)
         self.thread = threading.Thread(target=self.serve_forever, daemon=True)
         self.thread.start()
@@ -174,6 +197,7 @@ class Answer(BaseHTTPRequestHandler):
         if not isinstance(model, Model):
             return
         model.requests += 1
+        model.subagents |= subagent_tools(body.get("tools"))
         answers = model.answers
         data = stream(model.requests, answers[min(answered(body), len(answers) - 1)])
         self.send_response(200)

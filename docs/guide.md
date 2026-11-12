@@ -982,9 +982,13 @@ new workers use cannot run, they start on Copilot and their chat says why.
   known: a worker with a limit then waits under *Needs you* until you say *Go on*.
 - **Ask first** works on Codex versions before 0.168 (the ones tested): every command none of
   your Codex rules allows, every edit and every MCP call ask Chief of Staff, which answers as for
-  a Copilot worker; ChatGPT's apps are off for such a worker. Your own Codex rules and
-  `PermissionRequest` hooks can allow what those checks would refuse, as in your Codex sessions.
-  Newer versions run workers that act on their own; their **⋯** says why *Ask first* is off.
+  a Copilot worker; ChatGPT's apps and Codex's subagents are off for such a worker. Your own
+  Codex rules and `PermissionRequest` hooks can allow what those checks would refuse, as in your
+  Codex sessions. Newer versions run workers that act on their own; their **⋯** says why *Ask
+  first* is off.
+- **Codex's memories are off in Chief of Staff's workers:** their background agent would run
+  commands nobody is asked about, which *Stop* does not end and no receipt shows. Your own Codex
+  sessions keep them; a Codex worker's name says so in its tooltip when you have them on.
 - **Sandbox:** Codex workers run as Copilot workers do with the sandbox off, with your caches,
   tools and network (`danger-full-access`); your own Codex `sandbox_mode` is not applied to them.
   Every edit still asks Chief of Staff first, so your own checkouts stay read-only to them.
