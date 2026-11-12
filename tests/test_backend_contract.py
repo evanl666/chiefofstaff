@@ -903,6 +903,57 @@ async def test_a_worktree_loads_its_repositorys_codex_config_only_where_the_owne
     assert (config.read_bytes() if config.exists() else None) == before, "never written"
 
 
+async def test_the_repositorys_instructions_reach_the_model_once_trusted_or_not(
+    backend, tmp_path, monkeypatch
+):
+    """Where Codex trusts the folder it gives the repository's AGENTS.md itself; where it does
+    not, Chief of Staff gives the same text in the thread's instructions: never both."""
+    only_codex(backend)
+    if not real_codex(backend):
+        pytest.skip("What reaches the model is Codex's own: the real one shows it.")
+    repo = tmp_path / "repo"
+    (repo / "sub").mkdir(parents=True)
+    await asyncio.to_thread(subprocess.run, ["git", "init", "-q", str(repo)], check=True)
+    (repo / "AGENTS.md").write_text("Use tabs.\n")
+    (repo / "sub" / "AGENTS.override.md").write_text("Here, spaces.\n")
+    seen = {}
+    for trusted in (True, False):
+        owner = (
+            ["-c", f'projects={{"{repo.resolve()}"={{trust_level="trusted"}}}}'] if trusted else []
+        )
+        codex = await another_codex(backend, tmp_path, monkeypatch, *owner)
+        await codex.start()
+        try:
+            session, turn = await open_session(
+                codex,
+                repo / "sub",
+                system_message={"content": "Chief's rules."},
+                folders=[str(repo / "sub")],
+            )
+            sent = len(backend.model.bodies)
+            await session.send("Reply with just: ok")
+            await turn.wait()
+        finally:
+            await codex.stop()
+        body = backend.model.bodies[sent]
+        texts = {  # Each part of each message.
+            role: [
+                str(part.get("text") or "")
+                for item in body["input"]
+                if item.get("role") == role
+                for part in item.get("content") or []
+            ]
+            for role in ("developer", "user")
+        }
+        seen[trusted] = texts
+    own = [t for t in seen[True]["user"] if t.startswith("# AGENTS.md instructions")]
+    assert len(own) == 1 and "Use tabs." in own[0] and "Here, spaces." in own[0]
+    assert not any("<repository_instructions>" in t for t in seen[True]["developer"])
+    assert not any(t.startswith("# AGENTS.md instructions") for t in seen[False]["user"])
+    given = [t for t in seen[False]["developer"] if "<repository_instructions>" in t]
+    assert len(given) == 1 and own[0] in given[0], "the same text Codex itself gives"
+
+
 def running(pattern: str) -> bool:
     return subprocess.run(["pgrep", "-f", pattern], capture_output=True).returncode == 0
 

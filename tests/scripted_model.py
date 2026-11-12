@@ -183,6 +183,7 @@ class Model(ThreadingHTTPServer):
 
     def __init__(self):
         self.requests = 0
+        self.bodies: list[dict] = []  # What Codex sent, in order.
         super().__init__(("127.0.0.1", 0), Answer)
         threading.Thread(target=self.serve_forever, daemon=True).start()
 
@@ -221,6 +222,7 @@ class Answer(BaseHTTPRequestHandler):
         if not isinstance(model, Model):
             return
         model.requests += 1
+        model.bodies.append(body)
         number = model.requests
         item = answer(body)
         if item.get("type") == "message":

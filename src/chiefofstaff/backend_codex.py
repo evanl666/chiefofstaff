@@ -311,6 +311,73 @@ def trust_levels(
     return projects
 
 
+# The repository's instructions, as Codex 0.167.2 reads them where it trusts a folder
+# (codex-rs/core/src/agents_md.rs: agents_md_paths, candidate_filenames, read_agents_md;
+# codex-rs/core/src/context/user_instructions.rs): in each folder from the project root (the
+# nearest with a marker, `.git` by default; none: the folder alone) down to the thread's own, the
+# first of AGENTS.override.md, AGENTS.md and the owner's project_doc_fallback_filenames that is a
+# file; their text in that order, at most project_doc_max_bytes (32 KiB) in all, the last cut.
+DOC_NAMES = ("AGENTS.override.md", "AGENTS.md")
+DOC_BYTES = 32 * 1024
+
+
+def doc_names(fallbacks: Any) -> list[str]:
+    names: list[str] = list(DOC_NAMES)
+    for given in fallbacks if isinstance(fallbacks, list) else []:
+        name = given.strip() if isinstance(given, str) else ""
+        path_like = name in {".", ".."} or "/" in name or "\0" in name
+        if name and not path_like and name not in names:
+            names.append(name)
+    return names
+
+
+def project_docs(folder: str, markers: Any, budget: Any, fallbacks: Any) -> str:
+    """The repository's instructions Codex would give a thread in `folder` it trusts: each
+    file's text, joined as Codex joins them ("" for none)."""
+    if not isinstance(markers, list) or not all(isinstance(m, str) for m in markers):
+        markers = [".git"]
+    remaining = budget if isinstance(budget, int) and budget >= 0 else DOC_BYTES
+    place = Path(folder)
+    chain = [place, *place.parents]
+    # Any marker that exists makes a project root here (no HEAD asked of a `.git` folder).
+    root = next((a for a in chain if any(metadata(a / m) for m in markers)), None)
+    folders = chain[: chain.index(root) + 1] if root is not None else [place]
+    names = doc_names(fallbacks)
+    found = []
+    for directory in reversed(folders):
+        for name in names:
+            if (info := metadata(directory / name)) is not None and S_ISREG(info.st_mode):
+                found.append(directory / name)
+                break
+    texts = []
+    for path in found:
+        if remaining <= 0:
+            break
+        try:
+            data = path.read_bytes()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return ""  # As Codex: an unreadable one leaves out all of them.
+        data = data[:remaining]
+        text = data.decode("utf-8", errors="replace")
+        if text.strip():
+            texts.append(text)
+            remaining -= len(data)
+    return "\n\n".join(texts)
+
+
+def repository_block(cwd: str, docs: str) -> str:
+    """The repository's instructions in a thread's developer instructions, as Codex itself
+    gives them where it trusts the folder, marked as the repository's."""
+    return (
+        "\n\n<repository_instructions>\nThe repository's own instructions (its AGENTS.md "
+        "files), as a coding agent reads them in this folder; they are its text, not Chief of "
+        f"Staff's.\n# AGENTS.md instructions for {cwd}\n\n<INSTRUCTIONS>\n{docs}\n"
+        "</INSTRUCTIONS>\n</repository_instructions>"
+    )
+
+
 def trust_answered(layers: Any) -> dict[str, str]:
     """What Codex said of each folder whose `.codex/` it found (config/read's layers): trusted
     when that layer loads, else untrusted."""
@@ -895,7 +962,10 @@ class CodexBackend:
         if options.get("ask_first") and (why := self.ask_first_refused):
             raise RuntimeError(why)
         cwd = options.get("working_directory") or str(Path.home())
+        config = await self.thread_config(options, cwd)
         prompt = (options.get("system_message") or {}).get("content") or ""
+        if docs := options.get("repository_docs"):
+            prompt += repository_block(cwd, docs)
         return {
             "cwd": cwd,
             "sandbox": "danger-full-access",
@@ -904,7 +974,7 @@ class CodexBackend:
             **({"model": options["model"]} if options.get("model") else {}),
             **({"developerInstructions": prompt} if prompt else {}),
             **({"ephemeral": True} if options.get("ephemeral") else {}),
-            "config": await self.thread_config(options, cwd),
+            "config": config,
         }
 
     async def thread_config(self, options: dict, cwd: str) -> dict:
@@ -923,6 +993,17 @@ class CodexBackend:
             owner.get("project_root_markers"),
             trust_answered(read.get("layers")),
         )
+        # Untrusted, Codex reads none of the repository's AGENTS.md: its text is given here, as a
+        # Copilot worker's repository instructions are (nothing of the repository is run).
+        options["repository_docs"] = ""
+        if projects.get(cwd, {}).get("trust_level") != "trusted":
+            options["repository_docs"] = await asyncio.to_thread(
+                project_docs,
+                cwd,
+                owner.get("project_root_markers"),
+                owner.get("project_doc_max_bytes"),
+                owner.get("project_doc_fallback_filenames"),
+            )
         # Nested, this replaces the owner's table for the thread (only its folders matter there).
         config: dict[str, Any] = {"projects": projects}
         if options.get("ask_first"):

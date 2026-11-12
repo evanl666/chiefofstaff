@@ -1854,3 +1854,59 @@ def test_the_checks_stand_in_mcp_server_writes_only_when_its_tool_is_called(tmp_
         check=True,
     )
     assert (tmp_path / "server.marker").exists()
+
+
+# The repository's instructions where Codex does not trust the folder (the owner's decision:
+# what a Copilot worker reads, a Codex worker reads too)
+
+
+def test_the_repositorys_instructions_are_read_as_codex_reads_them(tmp_path):
+    from chiefofstaff.backend_codex import project_docs
+
+    main = git_repository(tmp_path / "main")
+    (main / "AGENTS.md").write_text("Root rules.\n")
+    sub = main / "sub" / "deeper"
+    sub.mkdir(parents=True)
+    (main / "sub" / "AGENTS.override.md").write_text("Local override.\n")
+    (main / "sub" / "AGENTS.md").write_text("Shadowed by the override.\n")
+    (sub / "AGENTS.md").mkdir()  # Not a file: the next name is tried.
+    (sub / "NOTES.md").write_text("Fallback notes.\n")
+    (main / "blank").mkdir()
+    (main / "blank" / "AGENTS.md").write_text("  \n")
+    docs = project_docs(str(sub), None, None, ["", "../x", " NOTES.md ", "AGENTS.md"])
+    assert docs == "Root rules.\n\n\nLocal override.\n\n\nFallback notes.\n"
+    # Root down to the folder, the project root's first; nothing above the root.
+    (tmp_path / "AGENTS.md").write_text("Above the root.\n")
+    assert project_docs(str(main / "sub"), None, None, None) == "Root rules.\n\n\nLocal override.\n"
+    # Blank files count for nothing; no marker list: the folder alone.
+    assert project_docs(str(main / "blank"), None, None, None) == "Root rules.\n"
+    assert project_docs(str(main / "sub"), [], None, None) == "Local override.\n"
+    # At most project_doc_max_bytes in all, the last cut; none at 0.
+    assert project_docs(str(main / "sub"), None, 15, None) == "Root rules.\n\n\nLoc"
+    assert project_docs(str(main / "sub"), None, 0, None) == ""
+    assert project_docs(str(tmp_path / "nowhere"), None, None, None) == ""
+
+
+async def test_a_codex_worker_gets_the_repositorys_instructions_only_where_codex_would_not(
+    tmp_path, monkeypatch
+):
+    main = git_repository(tmp_path / "main")
+    (main / "AGENTS.md").write_text("Run `make check` before you report.\n")
+    log = tmp_path / "log.jsonl"
+    monkeypatch.setenv("FAKE_CODEX_LOG", str(log))
+    for trusted in (False, True):
+        projects = {str(main): {"trust_level": "trusted"}} if trusted else {}
+        monkeypatch.setenv("FAKE_CODEX_CONFIG", json.dumps({"projects": projects}))
+        codex = CodexBackend(fake_codex(tmp_path / "fake", monkeypatch))
+        await codex.start()
+        try:
+            await opened(codex, main, system_message={"content": "Chief's rules."})
+        finally:
+            await codex.stop()
+    starts = [m["params"] for m in logged(log) if m["method"] == "thread/start"]
+    untrusted, trusted = (start["developerInstructions"] for start in starts)
+    assert untrusted == "Chief's rules." + backend_codex.repository_block(
+        str(main), "Run `make check` before you report.\n"
+    )
+    assert "<repository_instructions>" in untrusted and "make check" in untrusted
+    assert trusted == "Chief's rules.", "Codex reads them itself there: not twice"
