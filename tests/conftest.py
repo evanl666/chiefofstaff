@@ -3,6 +3,7 @@ import inspect
 import json
 import os
 import re
+import sys
 
 # Events are batched in the app; tests deliver them at once.
 os.environ.setdefault("CHIEFOFSTAFF_EVENT_DEBOUNCE", "0")
@@ -484,3 +485,15 @@ def git_repo(tmp_path):
         subprocess.run(command, cwd=repo, check=True)
     (repo / "pkg").mkdir()
     return repo
+
+
+def fake_codex(directory: Path, monkeypatch) -> str:
+    """A stand-in Codex CLI (tests/fake_codex.py) in `directory`, its threads kept there too:
+    the command a Codex backend runs."""
+    directory.mkdir(parents=True, exist_ok=True)
+    command = directory / "codex"
+    script = Path(__file__).parent / "fake_codex.py"
+    command.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n')
+    command.chmod(0o755)
+    monkeypatch.setenv("FAKE_CODEX_HOME", str(directory / "home"))
+    return str(command)

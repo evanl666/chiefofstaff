@@ -738,3 +738,43 @@ async def test_a_helper_run_again_reopens_by_its_own_first_conversation(harness)
     )):  # fmt: skip
         await runtime.workers.reopen(helper)
     assert harness.store.session(helper)["closed_at"]
+
+
+async def test_a_settings_save_leaves_copilot_workers_at_work_as_it_did(harness):
+    """Turning the worker sandbox on or off while Copilot workers work stops none of them: each
+    picks up its new options once its turn ends, and what it is sent goes in as before."""
+    runtime = await harness.connect()
+    result = await call_tool(
+        runtime, "spawn_worker", harness.router_id, title="Lint", instructions="Lint", why_new="t"
+    )
+    worker = json.loads(result.text_result_for_llm)["session_id"]
+    await settle(runtime)
+    assert harness.store.session(worker)["status"] == "working"
+    session = harness.client.sessions[worker]
+    for sandbox in (True, False):
+        old = harness.store.settings()
+        new = old.model_copy(update={"worker_sandbox": sandbox})
+        harness.store.save_settings(new)
+        await runtime.settings_changed(old, new)
+        await settle(runtime)
+        assert harness.store.session(worker)["status"] == "working"
+        assert runtime.states[worker].stale and not session.aborted
+        assert not [text for kind, text in harness.kinds(worker) if text.startswith("Stopped")]
+    await runtime.owner_send(worker, "Also the docs")
+    assert session.modes[-1] == "immediate" and "Also the docs" in session.sent[-1]
+
+
+async def test_a_session_made_while_copilot_reconnects_is_let_go_as_it_was(harness):
+    runtime = await harness.connect()
+    create = harness.client.create_session
+
+    async def reconnecting(**options):
+        session = await create(**options)
+        runtime.connections += 1  # Copilot reconnected meanwhile.
+        return session
+
+    harness.client.create_session = reconnecting
+    harness.store.create_session("w1", WORKER, "W", "starting", cwd=str(harness.store.directory))
+    with pytest.raises(RuntimeError, match=exactly("Copilot reconnected meanwhile; try again.")):
+        await runtime.open_live(harness.store.session("w1"), create=True)
+    assert harness.client.sessions["w1"].disconnected

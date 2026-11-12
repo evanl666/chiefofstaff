@@ -1,19 +1,29 @@
 """What the runtime relies on from an agent backend, checked against every backend.
 
 The scripted backend always runs, as Copilot and as other coding agents' adapters show those
-agents (scripted.CODEX_LIKE, CLAUDE_LIKE). The real GitHub Copilot backend runs when
-CHIEFOFSTAFF_TEST_COPILOT=1 (it uses a few small model calls; CHIEFOFSTAFF_TEST_MODEL picks the
-model). Run both before upgrading the Copilot SDK or CLI.
+agents (scripted.CODEX_LIKE, CLAUDE_LIKE), and so does the Codex adapter on a stand-in CLI
+(tests/fake_codex.py). The real GitHub Copilot backend runs when CHIEFOFSTAFF_TEST_COPILOT=1 (it
+uses a few small model calls; CHIEFOFSTAFF_TEST_MODEL picks the model), and the Codex adapter on
+the owner's own Codex CLI when CHIEFOFSTAFF_TEST_CODEX=1 (its default model; its own config and
+sign-in, never changed). Run them before upgrading the Copilot SDK or CLI, or Codex.
 """
 
 import asyncio
 import contextlib
+import json
 import os
 import re
+import signal
+import struct
 import subprocess
+import sys
+import tempfile
+import zlib
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from conftest import fake_codex
 from copilot import define_tool
 from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
 from pydantic import BaseModel
@@ -21,11 +31,13 @@ from pydantic import BaseModel
 from chiefofstaff.backend import (
     SandboxPolicy,
     copilot_backend,
+    process_table,
     running_background,
     sandbox_supported,
     stop_background,
     take_queued,
 )
+from chiefofstaff.backend_codex import CodexBackend, codex_backend
 from chiefofstaff.delivery import queue_holds
 from chiefofstaff.scripted import (
     CLAUDE_LIKE,
@@ -42,6 +54,7 @@ from chiefofstaff.workspaces import protected_git_paths
 
 REAL = os.environ.get("CHIEFOFSTAFF_TEST_COPILOT") == "1"
 MODEL = os.environ.get("CHIEFOFSTAFF_TEST_MODEL", "claude-haiku-5.5")
+REAL_CODEX = os.environ.get("CHIEFOFSTAFF_TEST_CODEX") == "1"
 
 
 async def contract_brain(session, prompt):
@@ -69,12 +82,26 @@ async def contract_brain(session, prompt):
 PROFILES = {"codex-like": CODEX_LIKE, "claude-like": CLAUDE_LIKE}
 
 
-@pytest.fixture(params=["scripted", *PROFILES, pytest.param("copilot", marks=pytest.mark.copilot)])
-async def backend(request):
+@pytest.fixture(
+    params=[
+        "scripted",
+        *PROFILES,
+        "fake-codex",
+        pytest.param("copilot", marks=pytest.mark.copilot),
+        pytest.param("codex", marks=pytest.mark.codex),
+    ]
+)
+async def backend(request, tmp_path, monkeypatch):
     if request.param == "copilot":
         if not REAL:
             pytest.skip("Set CHIEFOFSTAFF_TEST_COPILOT=1 to check the real Copilot backend.")
         backend = copilot_backend("copilot")
+    elif request.param == "codex":
+        if not REAL_CODEX:
+            pytest.skip("Set CHIEFOFSTAFF_TEST_CODEX=1 to check the Codex adapter on real Codex.")
+        backend = codex_backend("codex")
+    elif request.param == "fake-codex":
+        backend = CodexBackend(fake_codex(tmp_path / "fake", monkeypatch))
     elif request.param in PROFILES:
         backend = AgentLikeBackend(contract_brain, PROFILES[request.param])
     else:
@@ -87,6 +114,9 @@ async def backend(request):
         if request.param == "copilot":
             with contextlib.suppress(Exception):
                 await backend.client.delete_session(session_id)
+        if request.param == "codex":
+            with contextlib.suppress(Exception):
+                await backend.archive(session_id)  # Its history stays in Codex, put away.
     await backend.stop()
 
 
@@ -94,16 +124,31 @@ class Echo(BaseModel):
     text: str
 
 
+def unique_seconds(about: int) -> str:
+    """How long a command sleeps, told apart from any other run's (pgrep finds it by that)."""
+    return f"{about}.{uuid4().int % 10**6:06d}"
+
+
 def agent_like(backend) -> bool:
     """Another coding agent's backend, as its adapter shows it (not Copilot's)."""
-    return isinstance(backend, AgentLikeBackend)
+    return isinstance(backend, AgentLikeBackend | CodexBackend)
 
 
 def only_agent_like(backend):
-    if not agent_like(backend):
+    if not isinstance(backend, AgentLikeBackend):
         pytest.skip(
-            "How another coding agent's adapter shows it: Copilot's are in test_held_turns."
+            "How a scripted agent's profile shows it: Copilot's are in test_held_turns, "
+            "Codex's below."
         )
+
+
+def only_codex(backend):
+    if not isinstance(backend, CodexBackend):
+        pytest.skip("Codex's adapter only.")
+
+
+def real_codex(backend) -> bool:
+    return isinstance(backend, CodexBackend) and "fake" not in backend.command
 
 
 class Turn:
@@ -140,13 +185,12 @@ async def open_session(backend, tmp_path, **options):
     options.setdefault(
         "on_permission_request", lambda request, inv: PermissionDecisionApproveOnce()
     )
+    if not isinstance(backend, CodexBackend):
+        options.setdefault("model", MODEL)  # Codex: its default model.
     session = await backend.create_session(
-        session_id=session_id,
-        name="contract test",
-        model=MODEL,
-        working_directory=str(tmp_path),
-        **options,
+        session_id=session_id, name="contract test", working_directory=str(tmp_path), **options
     )
+    backend.created.append(session.session_id)  # The id the agent chose, when it does.
     return session, Turn(session)
 
 
@@ -222,6 +266,10 @@ async def test_abort_ends_the_turn_and_its_command(backend, tmp_path):
     assert "tool.execution_start" in turn.kinds()
     await asyncio.sleep(1)
     await session.abort()
+    if isinstance(backend, CodexBackend):
+        # Codex keeps a turn's commands running after it is interrupted (background terminals,
+        # 0.167.2): what the runtime does on every stop ends them.
+        await stop_background(session)
     await turn.wait(30)
     assert "slept" not in turn.said().lower()
     await asyncio.sleep(1)
@@ -397,7 +445,7 @@ async def test_what_it_queued_is_taken_back_and_its_next_turn_waits_to_be_admitt
 
     async def refuse(asking):
         asked.append(asking.session_id)
-        return False
+        return "Refused in this test."
 
     backend.admit = refuse
     await session.send("Run the shell command `sleep 1` and then reply with just: first")
@@ -463,3 +511,414 @@ async def test_the_agent_chooses_its_sessions_ids_or_takes_ours(backend, tmp_pat
     await session.disconnect()
     resumed = await backend.resume_session(session.session_id)
     assert [e.data.content for e in await resumed.get_events()] == ["Reply with just: ok", "ok"]
+
+
+# Codex's adapter: what it relies on from the app-server, on the stand-in CLI always and on the
+# owner's own Codex with CHIEFOFSTAFF_TEST_CODEX=1 (design: more-agents.md, section 7).
+
+MARKERS = Path(__file__).parent / "marker_mcp.py"
+
+
+async def another_codex(backend, tmp_path, monkeypatch, *arguments: str, **env: str):
+    """A second app-server like this one's, with more of the owner's configuration (`-c`
+    arguments, as their config.toml would give) or, for the stand-in, its FAKE_CODEX_* settings."""
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    other = CodexBackend(backend.command)
+    other.arguments += arguments
+    other.created = []
+    return other
+
+
+async def wait_for(check, seconds: float = 120):
+    for _ in range(int(seconds * 10)):
+        if check():
+            return
+        await asyncio.sleep(0.1)
+    raise AssertionError("never happened")
+
+
+async def test_codex_threads_keep_the_settings_its_checks_need(backend, tmp_path, monkeypatch):
+    """Full access, every action asked about, and Chief of Staff the one who answers: also when
+    the owner's configuration hands approvals to a reviewer agent. A thread that does not read
+    back as asked is refused, and so is an organization's requirement that forbids it."""
+    only_codex(backend)
+    reviewer = await another_codex(
+        backend, tmp_path, monkeypatch, "-c", 'approvals_reviewer="auto_review"'
+    )
+    await reviewer.start()
+    try:
+        session, _ = await open_session(reviewer, tmp_path)
+        assert session.session_id, "read back as full access, untrusted, reviewer user"
+        await reviewer.archive(session.session_id)
+    finally:
+        await reviewer.stop()
+    if real_codex(backend):
+        return  # An administrator's override is the stand-in's to show.
+    overridden = await another_codex(
+        backend, tmp_path, monkeypatch, FAKE_CODEX_ANSWER='{"approvalsReviewer": "auto_review"}'
+    )
+    await overridden.start()
+    try:
+        with pytest.raises(RuntimeError, match="reviewer auto_review"):
+            await open_session(overridden, tmp_path)
+    finally:
+        await overridden.stop()
+    forbidding = await another_codex(
+        backend,
+        tmp_path,
+        monkeypatch,
+        FAKE_CODEX_ANSWER="{}",
+        FAKE_CODEX_REQUIREMENTS='{"allowedSandboxModes": ["read-only"]}',
+    )
+    with pytest.raises(RuntimeError, match="do not allow the sandbox mode"):
+        await forbidding.start()
+    assert not forbidding.alive()
+
+
+async def test_every_edit_asks_with_each_file_and_a_refused_one_is_not_written(backend, tmp_path):
+    only_codex(backend)
+    asked = []
+    # One of them where the thread's own folder is not: a checkout under the temporary folder.
+    elsewhere = Path(tempfile.gettempdir()) / f"cos-contract-{uuid4().hex[:8]}" / "b.txt"
+
+    def deny(request, invocation):
+        asked.append((request.kind, getattr(request, "file_name", "")))
+        if request.kind == "write" and Path(request.file_name).name == "b.txt":
+            return PermissionDecisionReject(feedback="Not in this test.")
+        return PermissionDecisionApproveOnce()
+
+    session, turn = await open_session(backend, tmp_path, on_permission_request=deny)
+    await session.send(
+        f"Write the file `a.txt` and the file `{elsewhere}` with your file editing tool "
+        "(apply_patch), not the shell, each with the text 'x'. Then reply with just: written"
+    )
+    await turn.wait()
+    writes = {Path(path).name for kind, path in asked if kind == "write"}
+    assert writes == {"a.txt", "b.txt"}, asked
+    assert not elsewhere.exists(), "refused: not written"
+    edits = [e.data for e in turn.events if e.type.value == "tool.execution_start"]
+    assert {d.tool_name for d in edits} <= {"create", "edit", "bash"}, edits
+
+
+async def test_with_ask_first_every_mcp_call_asks_and_githubs_writes_stay_refused(
+    backend, tmp_path, monkeypatch
+):
+    """The owner's config lets a GitHub write tool run without asking: with Ask first it still
+    asks, and Chief of Staff's checks refuse it; acting on its own, it runs as configured."""
+    only_codex(backend)
+    marks = tmp_path / "marks"
+    marks.mkdir()
+    server = {
+        "command": sys.executable,
+        "args": [str(MARKERS)],
+        "env": {"MARKER_DIR": str(marks)},
+        "tools": {"create_pull_request_review": {"approval_mode": "approve"}},
+    }
+    owner = await another_codex(
+        backend,
+        tmp_path,
+        monkeypatch,
+        "-c",
+        f'mcp_servers.github.command="{sys.executable}"',
+        "-c",
+        f'mcp_servers.github.args=["{MARKERS}"]',
+        "-c",
+        f'mcp_servers.github.env={{MARKER_DIR="{marks}"}}',
+        "-c",
+        'mcp_servers.github.tools.create_pull_request_review.approval_mode="approve"',
+        FAKE_CODEX_CONFIG=json.dumps({"mcp_servers": {"github": server}}),
+    )
+    await owner.start()
+    try:
+        asked = []
+
+        def check(request, invocation):
+            asked.append(request)
+            if request.kind == "mcp" and not request.read_only:
+                return PermissionDecisionReject(feedback="Publishing goes through a draft.")
+            return PermissionDecisionApproveOnce()
+
+        prompt = (
+            "Call the MCP tool create_pull_request_review of github, then call the MCP tool "
+            "get_me of github (read-only). Then reply with what each returned."
+        )
+        session, turn = await open_session(
+            owner, tmp_path, on_permission_request=check, ask_first=True
+        )
+        await session.send(prompt)
+        await turn.wait()
+        mcp = [(r.server_name, r.tool_name, r.read_only) for r in asked if r.kind == "mcp"]
+        assert ("github-mcp-server", "create_pull_request_review", False) in mcp, asked
+        assert not (marks / "review-published").exists(), "refused: never published"
+        await owner.archive(session.session_id)
+
+        asked.clear()
+        session, turn = await open_session(owner, tmp_path, on_permission_request=check)
+        await session.send(prompt)
+        await turn.wait()
+        assert not [r for r in asked if r.kind == "mcp"], "acting on its own: as configured"
+        if real_codex(owner):
+            assert (marks / "review-published").exists()
+        await owner.archive(session.session_id)
+    finally:
+        await owner.stop()
+
+
+async def test_a_command_it_leaves_running_holds_its_turns_end_until_it_ends(backend, tmp_path):
+    only_codex(backend)
+    session, turn = await open_session(backend, tmp_path)
+    await session.send(
+        "Leave the command `sleep 4; exit 3` running in the background: start it, do not wait "
+        "for it to finish and do not use &. As soon as it has started, reply with just: started"
+    )
+    await wait_for(lambda: "assistant.idle" in turn.kinds())
+    assert "session.idle" not in turn.kinds(), "what it left running holds the session"
+    assert await running_background(session) == 1
+    left = [
+        e.data
+        for e in turn.events
+        if e.type.value == "tool.execution_complete"
+        and "started in background" in e.data.result.content
+    ]
+    assert len(left) == 1
+    await turn.wait(60)
+    ended = next(e.data.kind for e in turn.events if e.type.value == "system.notification")
+    assert (ended.type, ended.shell_id, ended.exit_code) == (
+        "shell_completed",
+        left[0].tool_call_id,
+        3,
+    )
+    assert turn.kinds()[-2:] == ["system.notification", "session.idle"]
+
+
+async def test_stopping_what_it_left_running_ends_it(backend, tmp_path):
+    only_codex(backend)
+    marker = f"sleep {unique_seconds(200)}"
+    session, turn = await open_session(backend, tmp_path)
+    await session.send(
+        f"Leave the command `{marker}` running in the background: start it, do not wait for "
+        "it to finish and do not use &. As soon as it has started, reply with just: started"
+    )
+    await wait_for(lambda: "assistant.idle" in turn.kinds())
+    assert await stop_background(session) == 1
+    await turn.wait(30)
+    ended = next(e.data.kind for e in turn.events if e.type.value == "system.notification")
+    assert ended.exit_code is None, "stopped: no result"
+    found = await asyncio.to_thread(
+        subprocess.run, ["pgrep", "-f", marker], capture_output=True, text=True
+    )
+    assert not found.stdout.strip()
+
+
+async def test_a_child_agents_calls_and_usage_are_its_workers(backend, tmp_path):
+    only_codex(backend)
+    calls = []
+
+    def echo(params: Echo, invocation):
+        calls.append((params.text, invocation.session_id))
+        return f"echo: {params.text}"
+
+    tool = define_tool("echo", description="Echo text back", params_type=Echo, handler=echo)
+    session, turn = await open_session(backend, tmp_path, tools=[tool])
+    await session.send(
+        "Have a child agent call the echo tool with text 'deep': spawn one sub-agent for it and "
+        "wait for it to finish. Then reply with just: done"
+    )
+    await turn.wait()
+    assert ("deep", session.session_id) in calls, "a child's call is its worker's"
+    starts = [e.data for e in turn.events if e.type.value == "tool.execution_start"]
+    task = next(d for d in starts if d.tool_name == "task")
+    echoed = next(d for d in starts if d.tool_name == "echo")
+    assert echoed.parent_tool_call_id == task.tool_call_id
+    usage = [e.data for e in turn.events if e.type.value == "agent.usage"]
+    assert any(u.child for u in usage) and any(not u.child for u in usage)
+    assert all(u.total.get("inputTokens", 0) >= u.last.get("inputTokens", 0) for u in usage)
+
+
+async def test_stop_ends_its_child_agents_too(backend, tmp_path):
+    only_codex(backend)
+    marker = f"sleep {unique_seconds(300)}"
+    session, turn = await open_session(backend, tmp_path)
+    await session.send(
+        f"Have a child agent call the echo tool with text 'x' and run `{marker}`: spawn one "
+        "sub-agent that runs that shell command and waits for it. Wait for the sub-agent, then "
+        "reply with just: done"
+    )
+    await wait_for(lambda: running(marker))
+    await session.abort()
+    await stop_background(session)  # As the runtime stops a worker: with what it left running.
+    await turn.wait(30)
+    await asyncio.sleep(1)
+    assert not await asyncio.to_thread(running, marker), "the child's command ended with the turn"
+
+
+async def test_two_sessions_calling_one_tool_are_told_apart(backend, tmp_path):
+    only_codex(backend)
+    calls = []
+
+    def echo(params: Echo, invocation):
+        calls.append((params.text, invocation.session_id))
+        return "ok"
+
+    tool = define_tool("echo", description="Echo text back", params_type=Echo, handler=echo)
+    first, one = await open_session(backend, tmp_path, tools=[tool])
+    second, two = await open_session(backend, tmp_path, tools=[tool])
+    await first.send("Call the echo tool with text 'one', then reply with just: done")
+    await second.send("Call the echo tool with text 'two', then reply with just: done")
+    await one.wait()
+    await two.wait()
+    assert sorted(calls) == [("one", first.session_id), ("two", second.session_id)]
+
+
+async def test_models_are_listed_and_a_switch_holds_from_the_next_turn(backend, tmp_path):
+    only_codex(backend)
+    models = await backend.list_models()
+    assert models and all(model.id for model in models)
+    assert any(model.supported_reasoning_efforts for model in models)
+    session, turn = await open_session(backend, tmp_path)
+    other = next(model.id for model in models if not model.is_default)
+    await session.set_model(other, reasoning_effort="low")
+    await session.send("Reply with just: ok")
+    await turn.wait()
+    assert (await backend.request("thread/read", {"threadId": session.session_id}))["thread"][
+        "model"
+    ] == other
+
+
+async def test_an_image_reaches_the_model(backend, tmp_path):
+    only_codex(backend)
+    image = tmp_path / "red.png"
+    image.write_bytes(red_png())
+    session, turn = await open_session(backend, tmp_path)
+    await session.send(
+        "What colour is this image? Reply with just: red, green or blue.",
+        attachments=[{"type": "file", "path": str(image), "displayName": "red.png"}],
+    )
+    await turn.wait()
+    if real_codex(backend):
+        assert "red" in turn.said().lower()
+
+
+async def test_a_thread_resumes_after_its_app_server_is_killed_mid_turn(
+    backend, tmp_path, monkeypatch
+):
+    only_codex(backend)
+    session, turn = await open_session(backend, tmp_path)
+    await session.send("Remember the word 'pineapple'. Reply with just: ok")
+    await turn.wait()
+    await session.send("Run the shell command `sleep 30` and then reply with just: slept")
+    await wait_for(lambda: "tool.execution_start" in turn.kinds())
+    table = await asyncio.to_thread(process_table)
+    cli = next(pid for pid, (parent, _) in table.items() if parent == backend.process.pid)
+    os.kill(cli, signal.SIGKILL)  # The CLI the supervisor runs.
+    await wait_for(lambda: not backend.alive(), 30)
+    again = await another_codex(backend, tmp_path, monkeypatch)
+    await again.start()
+    try:
+        resumed = await again.resume_session(
+            session.session_id,
+            on_permission_request=lambda request, inv: PermissionDecisionApproveOnce(),
+            working_directory=str(tmp_path),
+        )
+        turn = Turn(resumed)
+        await resumed.send("What word did I ask you to remember? Reply with just the word.")
+        await turn.wait()
+        assert "pineapple" in turn.said().lower()
+        users = [
+            e.data.content for e in await resumed.get_events() if e.type.value == "user.message"
+        ]
+        assert any("pineapple" in text for text in users), users
+    finally:
+        if real_codex(again):
+            with contextlib.suppress(Exception):
+                await again.archive(session.session_id)  # Its first app-server is gone.
+        await again.stop()
+
+
+async def test_its_shell_sees_no_chief_of_staff_variable(backend, tmp_path, monkeypatch):
+    only_codex(backend)
+    monkeypatch.setenv("CHIEFOFSTAFF_CONTRACT_SECRET", "s3cret")
+    clean = await another_codex(backend, tmp_path, monkeypatch)
+    await clean.start()
+    try:
+        session, turn = await open_session(clean, tmp_path)
+        await session.send(
+            "Run the shell command `env | grep -c CHIEFOFSTAFF_ || true` and then reply with "
+            "just: counted"
+        )
+        await turn.wait()
+        done = next(e.data for e in turn.events if e.type.value == "tool.execution_complete")
+        assert done.result.content.strip() == "0", done.result.content
+        await clean.archive(session.session_id)
+    finally:
+        await clean.stop()
+
+
+async def test_a_worktree_loads_its_repositorys_codex_config_only_where_the_owner_trusts_it(
+    backend, tmp_path, monkeypatch
+):
+    """Codex marks a folder it starts a writable thread in as trusted in the owner's config:
+    every thread is told its folders' trust instead, as the owner trusts the repository."""
+    only_codex(backend)
+    if not real_codex(backend):
+        pytest.skip("Which configuration loads is Codex's own: the real one shows it.")
+    config = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "config.toml"
+    before = config.read_bytes() if config.exists() else None
+    for trusted in (True, False):
+        place = tmp_path / ("trusted" if trusted else "untrusted")
+        repo, worktree = place / "repo", place / "work"
+        await asyncio.to_thread(repository_with_codex_config, place, repo, worktree)
+        # The owner's trust, as their config.toml says it (a dotted -c key would split the path).
+        trust = f'projects={{"{repo.resolve()}"={{trust_level="trusted"}}}}'
+        owner = ["-c", trust] if trusted else []
+        codex = await another_codex(backend, tmp_path, monkeypatch, *owner)
+        await codex.start()
+        try:
+            session = await codex.create_session(
+                session_id="t",
+                name="trust",
+                working_directory=str(worktree),
+                trust=[(str(worktree), str(repo))],
+                on_permission_request=lambda request, inv: PermissionDecisionApproveOnce(),
+            )
+            await asyncio.sleep(5)  # Its MCP servers start with the thread.
+            assert (place / "started-project").exists() == trusted
+            await codex.archive(session.session_id)
+        finally:
+            await codex.stop()
+    assert (config.read_bytes() if config.exists() else None) == before, "never written"
+
+
+def running(pattern: str) -> bool:
+    return subprocess.run(["pgrep", "-f", pattern], capture_output=True).returncode == 0
+
+
+def repository_with_codex_config(place: Path, repo: Path, worktree: Path):
+    """A repository whose own .codex/config.toml starts an MCP server (leaving `started-project`
+    in `place`), with a worktree."""
+    (repo / ".codex").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / ".codex" / "config.toml").write_text(
+        f'[mcp_servers.project]\ncommand = "{sys.executable}"\nargs = ["{MARKERS}"]\n'
+        f'env = {{ MARKER_DIR = "{place}", MARKER_NAME = "project" }}\n'
+    )
+    git = ["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t"]
+    subprocess.run([*git, "add", "-A"], check=True)
+    subprocess.run([*git, "commit", "-qm", "init"], check=True)
+    subprocess.run([*git, "worktree", "add", "-q", "-b", "w", str(worktree)], check=True)
+
+
+def red_png() -> bytes:
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        body = kind + data
+        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body))
+
+    rows = b"".join(b"\x00" + bytes((220, 20, 20)) * 32 for _ in range(32))
+    header = struct.pack(">IIBBBBB", 32, 32, 8, 2, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", zlib.compress(rows))
+        + chunk(b"IEND", b"")
+    )

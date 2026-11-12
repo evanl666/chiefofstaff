@@ -77,6 +77,7 @@ packages = ["src/chiefofstaff"]
 asyncio_mode = "auto"
 markers = [
     "copilot: runs against the real GitHub Copilot CLI (set CHIEFOFSTAFF_TEST_COPILOT=1)",
+    "codex: runs against the owner's real Codex CLI (set CHIEFOFSTAFF_TEST_CODEX=1)",
     "titles: new tasks' titles are checked as in use (other tests name tasks tersely)",
 ]
 testpaths = ["tests"]

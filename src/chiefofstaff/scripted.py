@@ -573,7 +573,7 @@ class AgentLikeSession(ScriptedSession):
 
     async def admitted(self) -> bool:
         admit = self.backend.admit
-        return admit is None or await admit(self)
+        return admit is None or not await admit(self)
 
     async def abort(self):
         """Its turn ends (and its child agents with it); what it left running goes on until
@@ -683,9 +683,9 @@ class AgentLikeBackend(ScriptedBackend):
         super().__init__(brain)
         self.profile = profile
         self.capabilities = profile.capabilities
-        # Chief of Staff's admission, asked before a turn on what it queued: refused, it gives
-        # what it queued back.
-        self.admit: Callable[[AgentLikeSession], Awaitable[bool]] | None = None
+        # Chief of Staff's admission, asked before a turn on what it queued ("" when admitted,
+        # else why not): refused, it gives what it queued back.
+        self.admit: Callable[[AgentLikeSession], Awaitable[str]] | None = None
         self.crashed = False
 
     def alive(self) -> bool:

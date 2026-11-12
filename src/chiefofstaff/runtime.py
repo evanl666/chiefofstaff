@@ -39,7 +39,7 @@ from typing import Any
 from urllib.parse import quote
 from uuid import uuid4
 
-from . import prompts, threads
+from . import agents, prompts, threads
 from .abilities import Abilities
 from .asks import Asks
 from .backend import (
@@ -250,6 +250,8 @@ class AgentConnection:
     connections: int = 0
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     watch: asyncio.Task | None = None
+    # Whether the owner has it turned on (Settings → Models): off, none of its workers runs.
+    enabled: Callable[[], bool] = lambda: True
 
 
 class OpenElsewhereError(RuntimeError):
@@ -351,8 +353,20 @@ class Runtime:
         self.stopping = False
         self.backend: AgentBackend | None = None
         self.connections = 0  # Counts disconnects: a session opened before one is not usable.
-        # Other coding agents' backends, by agent (see backends): none ships yet.
-        self.agents: dict[str, AgentConnection] = {}
+        # Other coding agents' backends, by agent (see backends): those the owner turned on at
+        # some point (agents.py); none until then.
+        self.agents: dict[str, AgentConnection] = {
+            name: AgentConnection(
+                lambda name=name: agents.backend(name),
+                enabled=lambda name=name: agents.enabled(store, name),
+            )
+            for name in agents.configured(store)
+        }
+        # Every turn of another agent's worker begins only once admitted (admit_turn), one at a
+        # time; what can make a worker ineligible bumps the generation under this lock first.
+        self.admission = asyncio.Lock()
+        self.admission_generation = 0
+        self.admitted: dict[str, int] = {}
         self.states = SessionStates()
         # Whether this machine can run Copilot's command sandbox, and whether gh works inside it.
         self.sandbox_host = sandbox_supported()
@@ -638,9 +652,11 @@ class Runtime:
 
     async def start_agent_of(self, session_id: str):
         """Another agent's backend for this session, started on first use (Copilot's runs from
-        connect). Not while holding the session's locks: recovering that agent's sessions may
-        take them."""
+        connect); refused with why when the session may not run on it now (agent_block). Not
+        while holding the session's locks: recovering that agent's sessions may take them."""
         if (agent := self.agent(session_id)) != COPILOT_AGENT:
+            if (row := self.store.find_session(session_id)) and (why := self.agent_block(row)):
+                raise RuntimeError(why)
             await self.connect_agent(agent)
 
     async def connect_agent(self, agent: str) -> AgentBackend:
@@ -657,7 +673,15 @@ class Runtime:
                 return entry.backend
             if self.stopping:
                 raise RuntimeError("Chief of Staff is stopping.")
+            if not entry.enabled():
+                raise RuntimeError(self.turned_off(agent))
             self.end_commands(agent)
+            # What its processes left when Chief of Staff last stopped abruptly (the supervisor
+            # ends them unless it was killed too): only this data directory's, as for Copilot.
+            key, directory = f"agentpids:{agent}", self.store.directory
+            records = self.recorded(key)
+            if left := await asyncio.to_thread(copilot_orphans, records, directory):
+                await asyncio.to_thread(lambda: end_processes(copilot_tree(left)))
             backend = entry.start()
             try:
                 await backend.start()
@@ -665,6 +689,14 @@ class Runtime:
                 with suppress(Exception):
                     await backend.stop()
                 raise
+            pids = await asyncio.to_thread(backend.processes)
+            records = await asyncio.to_thread(copilot_records, pids, directory)
+            self.store.set(key, json.dumps(records))
+            # Its turns begin only once admitted (the next message in its own queue too).
+            if hasattr(backend, "admit"):
+                backend.admit = self.admit_turn  # type: ignore[attr-defined]
+            if hasattr(backend, "begins"):
+                backend.begins = self.begins_turn  # type: ignore[attr-defined]
             entry.backend = backend
             entry.watch = asyncio.ensure_future(self.watch_agent(agent, backend, entry.connections))
             try:
@@ -751,6 +783,72 @@ class Runtime:
             if (row := self.store.find_session(key)) and not row["closed_at"]:
                 self.fail(row, why)
 
+    # Admission: whether another agent's worker may run now. Copilot's sessions always may.
+
+    def turned_off(self, agent: str) -> str:
+        return f"{agents.display(agent)} is turned off in Settings → Models."
+
+    def agent_block(self, row: dict) -> str:
+        """Why this session may not run now ("" when it may): never for Copilot's. Another
+        agent's runs only the owner's own workers, only while that agent is on and the worker
+        sandbox off (its sandbox has not passed Chief of Staff's checks), and with Ask first only
+        on a version whose every kind of action was shown to ask first (its backend says so)."""
+        agent = self.agent(row["id"])
+        if agent == COPILOT_AGENT:
+            return ""
+        name = agents.display(agent)
+        entry = self.agents.get(agent)
+        if entry is None:
+            return f"This session runs on {agent}, which is not available."
+        if not entry.enabled():
+            return self.turned_off(agent)
+        if row["role"] != WORKER or self.special(row):
+            return f"Only your own workers run on {name}."
+        if row["slack"]:
+            return f"Workers that read Slack run on Copilot only, not {name}."
+        if self.store.settings().worker_sandbox and self.sandbox_host:
+            return (
+                f"{name} can't run while workers are sandboxed: its sandbox has not passed Chief "
+                "of Staff's checks yet. Turn the sandbox off in Settings → Workers to go on."
+            )
+        if not self.yolo(row) and (why := getattr(entry.backend, "ask_first_refused", "")):
+            return why
+        return ""
+
+    async def admit_turn(self, session: Any) -> str:
+        """The one door for a turn of another agent's worker (what CoS sends, and the next
+        message in the agent's own queue): "" when it may begin now, else why not. Under the
+        admission lock, so a change that makes it ineligible (stop_ineligible) is either seen
+        here or comes after, and then stops it."""
+        row = self.store.find_session(self.row_id(session.session_id))
+        if not row or row["closed_at"]:
+            return "That session is closed."
+        async with self.admission:
+            if why := self.agent_block(row):
+                return why
+            self.admitted[row["id"]] = self.admission_generation
+            return ""
+
+    def begins_turn(self, session: Any) -> bool:
+        """Just before the turn admitted begins (nothing awaited in between): whether its
+        admission still holds."""
+        key = self.row_id(session.session_id)
+        return self.admitted.pop(key, None) == self.admission_generation
+
+    async def stop_ineligible(self):
+        """Something changed (a Settings save): the generation moves first, so no turn admitted
+        before can begin, then every other agent's worker that may not run now is stopped with
+        what it left running. Its tasks wait under Needs you, as after any stop."""
+        async with self.admission:
+            self.admission_generation += 1
+        named = self.store.items("agent:")
+        for row in self.store.open_sessions():
+            if named.get(row["id"], COPILOT_AGENT) == COPILOT_AGENT or not self.agent_block(row):
+                continue
+            if row["status"] in {"working", "queued", "starting"} or self.held(row["id"]):
+                with suppress(Exception):
+                    await self.workers.interrupt(row["id"], by="Settings")
+
     def end_commands(self, agent: str):
         """An agent's process starts afresh: the commands its sessions' shells were running
         ended with the one before. Only its own sessions'."""
@@ -762,6 +860,15 @@ class Runtime:
             f"AND session_id {mine}",  # (mine: constant SQL)
             (now(), agent),
         )
+
+    def recorded(self, key: str) -> dict:
+        """Another agent's process records (backend.copilot_records), as connect_agent kept
+        them."""
+        try:
+            records = json.loads(self.store.get(key) or "{}")
+        except ValueError:
+            return {}
+        return records if isinstance(records, dict) else {}
 
     def recorded_processes(self) -> dict:
         """What connect recorded of the processes of the Copilot CLI it started last (see
@@ -928,6 +1035,11 @@ class Runtime:
         row = self.store.session(session_id)
         if row["role"] != WORKER:
             raise ValueError("Only workers have permission checks to switch.")
+        if mode == "off" and not self.on_copilot(session_id):
+            # Ask first, only where its agent's version was shown to ask before every action.
+            backend, _ = self.connection(self.agent(session_id))
+            if why := getattr(backend, "ask_first_refused", ""):
+                raise ValueError(why)
         row = self.update_session(session_id, yolo=mode)
         await self.refresh_session(row)  # Its instructions mention the mode.
         return self.view(row)
@@ -1178,16 +1290,15 @@ class Runtime:
             names.append("withdraw_draft")  # Its own draft that turned out wrong.
         return names
 
-    def options(self, row: dict) -> dict:
-        if self.special(row) in TOOLLESS:
-            return self.helper_options(row)
+    def session_prompt(self, row: dict, sandbox: SandboxPolicy | None) -> str:
+        """The instructions a session runs with: its role's, with what it needs to know of its
+        folders, sandbox and the owner (the same for every agent a worker runs on)."""
         settings = self.store.settings()
         prompt = PROMPTS[row["role"]]
         if self.special(row) == "connector":
             prompt = prompts.CONNECTOR  # Not a worker with tasks to report.
         elif self.special(row) == "messenger":
             prompt = prompts.MESSENGER
-        sandbox = self.sandbox_policy(row)
         if row["role"] == WORKER:
             prompt += "\n" + prompts.worker_context(
                 row["cwd"],
@@ -1212,6 +1323,14 @@ class Runtime:
             prompt += self.drafts.style_examples()
         if row["role"] in {ROUTER, WORKER}:
             prompt += self.asks.setup_block()
+        return prompt
+
+    def options(self, row: dict) -> dict:
+        if self.special(row) in TOOLLESS:
+            return self.helper_options(row)
+        settings = self.store.settings()
+        sandbox = self.sandbox_policy(row)
+        prompt = self.session_prompt(row, sandbox)
         tools = [self.tools[name] for name in self.tool_names(row)]
         options: dict[str, Any] = {
             # Copilot's record of past sessions, which the owner's own sessions can search: for
@@ -1285,6 +1404,38 @@ class Runtime:
         if model := self.model_for(row):
             options["model"] = model
         options.update(self.tuning(row))
+        return options
+
+    def agent_options(self, row: dict) -> dict:
+        """What another agent's worker runs with, in neutral form for its adapter to map: the
+        same instructions and tools as a Copilot worker's, its folder, the owner's permission
+        checks and questions, whether it acts on its own, which repository each of its folders is
+        a checkout of (the agent trusts a folder as the owner trusts that repository in it), and
+        the model chosen for that agent. Copilot's options and model state are not used."""
+        checkouts = self.workspaces.checkouts(row)
+        cwd = row["cwd"] or str(self.role_dir("scratch"))
+        trust = [
+            (checkout["path"], checkout.get("project") or checkout.get("repo") or checkout["path"])
+            for checkout in checkouts
+            if checkout.get("path")
+        ]
+        if cwd not in {folder for folder, _ in trust}:
+            trust.append((cwd, cwd))
+        chosen = agents.configured(self.store).get(self.agent(row["id"]), {})
+        options: dict[str, Any] = {
+            "system_message": {"content": self.session_prompt(row, None)},
+            "tools": [self.tools[name] for name in self.tool_names(row)],
+            "working_directory": cwd,
+            "on_permission_request": self.events.on_permission,
+            "on_user_input_request": self.asks.on_user_input,
+            "on_elicitation_request": self.asks.on_elicitation,
+            "ask_first": not self.yolo(row),
+            "trust": trust,
+        }
+        if model := chosen.get("model"):
+            options["model"] = model
+        if effort := chosen.get("effort"):
+            options["reasoning_effort"] = effort
         return options
 
     def chosen_model(self, row: dict) -> str:
@@ -1571,18 +1722,21 @@ class Runtime:
 
         Callers hold the session's lifecycle lock, or the session is new and nobody else knows it.
         """
-        with suppress(Exception):
-            await self.available_models()  # Efforts and context tiers depend on the model.
-        options = self.options(row)
+        agent = self.agent(row["id"])
+        if agent == COPILOT_AGENT:
+            with suppress(Exception):
+                await self.available_models()  # Efforts and context tiers depend on the model.
+            options, trusted = self.options(row), self.trust(row)
+        else:
+            options, trusted = self.agent_options(row), {}
         copilot_id = copilot or self.copilot_id(row["id"])
         # Copilot refuses a session name with a double quote ("Write "x" to y").
         name = ("Chief of Staff · " + clean_title(row["title"]).replace('"', "'"))[:100]
-        agent = self.agent(row["id"])
         _, connection = self.connection(agent)
         if create:
             session = await self.without_unsupported_effort(
                 row,
-                options | self.trust(row),
+                options | trusted,
                 lambda tuned: self.backend_for(row).create_session(
                     session_id=copilot_id, name=name, **tuned
                 ),
@@ -1611,7 +1765,7 @@ class Runtime:
                     raise
                 session = await self.without_unsupported_effort(
                     row,
-                    options | self.trust(row),
+                    options | trusted,
                     lambda tuned: self.backend_for(row).create_session(
                         session_id=copilot_id, name=name, **tuned
                     ),
@@ -1620,7 +1774,9 @@ class Runtime:
             # Its backend reconnected meanwhile: this session belongs to the old connection.
             with suppress(Exception):
                 await session.disconnect()
-            raise RuntimeError("Copilot reconnected meanwhile; try again.")
+            if agent == COPILOT_AGENT:
+                raise RuntimeError("Copilot reconnected meanwhile; try again.")
+            raise RuntimeError(f"{agents.display(agent)} started again meanwhile; try again.")
         session_id = row["id"]
         loop = self.loop or asyncio.get_running_loop()
 
@@ -1630,7 +1786,7 @@ class Runtime:
 
         session.on(forward)
         self.states[session_id].handle = session
-        model = self.model_for(row)
+        model = self.model_for(row) if agent == COPILOT_AGENT else ""
         if not create and model and (info := self.model_info(model)) and not info["efforts"]:
             # Resumed on a model that takes no thinking effort: Copilot would keep the one it
             # had (from before the owner chose this model) and refuse every turn.
@@ -1704,6 +1860,8 @@ class Runtime:
         if session := self.states.handle(session_id):
             return session
         if (agent := self.agent(session_id)) != COPILOT_AGENT:
+            if (row := self.store.find_session(session_id)) and (why := self.agent_block(row)):
+                raise RuntimeError(why)
             await self.connect_agent(agent)  # Started on first use.
         elif not self.backend:
             self.require_ready()
@@ -3530,6 +3688,9 @@ class Runtime:
             # next turn.
             self.send.switch(new.send_to_chief)
             await self.refresh(ROUTER)
+        if self.agents and old.worker_sandbox != new.worker_sandbox:
+            # Other agents' workers do not run sandboxed: stopped at once, with their commands.
+            await self.stop_ineligible()
         defaults = ("model", "role_models", "role_efforts")
         if any(getattr(old, key) != getattr(new, key) for key in defaults):
             # Models and efforts chosen now are tried, even where Copilot refused one before.

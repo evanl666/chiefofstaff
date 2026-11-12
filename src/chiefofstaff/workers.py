@@ -15,8 +15,8 @@ from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from . import catalog, machine
-from .backend import stop_background
+from . import agents, catalog, machine
+from .backend import COPILOT_AGENT, stop_background
 from .envelope import clean_title, owner_text, sendable, short, wrap
 from .events import PLUMBING_TOOLS, describe_tool
 from .provenance import LEFT_OUT, managed, whose
@@ -899,8 +899,10 @@ class Workers:
             else:
                 conversation = self.runtime.copilot_id(session_id)
             if not await backend.get_session_metadata(conversation):
+                agent = self.runtime.agent(session_id)
+                name = "Copilot" if agent == COPILOT_AGENT else agents.display(agent)
                 raise ValueError(
-                    "Copilot no longer has that conversation; start a new one instead."
+                    f"{name} no longer has that conversation; start a new one instead."
                 )
             status = row["status"] if row["status"] in {"done", "failed", "waiting"} else "idle"
             row = self.runtime.update_session(

@@ -186,6 +186,10 @@ async def test_with_no_other_agent_nothing_of_one_is_looked_for_imported_or_stor
         return which(name, *args, **kwargs)
 
     monkeypatch.setattr(shutil, "which", looking)
+    # Imported by another test in this process, an agent's module is taken out to be seen if
+    # this run imports it again.
+    for name in [name for name in sys.modules if re.search(r"claude|codex|agent_client", name)]:
+        monkeypatch.delitem(sys.modules, name)
     runtime = await harness.connect()
     await runtime.recover_agents()
     worker = await spawn(runtime, harness, "Fix the login test")
@@ -329,7 +333,7 @@ async def test_what_it_queued_as_its_turn_ended_is_taken_back_from_its_own_queue
 
     async def admit(asking):
         await gate.wait()
-        return True
+        return ""
 
     started[0].admit = admit
     sent = []
@@ -366,7 +370,7 @@ async def test_a_message_its_agent_gave_back_is_sent_again(harness, monkeypatch)
     async def refuse(asking):
         refused.append(asking)
         started[0].admit = None  # Once.
-        return False
+        return "Refused in this test."
 
     started[0].admit = refuse
     await runtime.owner_send(worker, "And the changelog.")
@@ -435,6 +439,13 @@ async def test_a_start_another_agent_refuses_is_not_copilots_to_fall_back_from(
     harness = Harness(tmp_path / "data", Settings(model="gpt-6", role_efforts={WORKER: "high"}))
     runtime = await harness.connect()
     on(harness, "claude-like")
+    # The model and effort chosen for that agent (Copilot's are not its own: agent_options).
+    chosen = runtime.agent_options
+    monkeypatch.setattr(
+        runtime,
+        "agent_options",
+        lambda row: chosen(row) | {"model": "gpt-6", "reasoning_effort": "high"},
+    )
     create = AgentLikeBackend.create_session
 
     async def refuse(self, **options):
@@ -516,7 +527,7 @@ async def test_a_send_its_agent_failed_is_said_and_one_its_reconnect_cut_short_w
     await runtime.owner_send(worker, "One more thing")
     assert harness.kinds(worker)[-1] == (
         "notice",
-        "Copilot stopped; reconnecting. Your message goes out when it is back.",
+        "claude-like stopped; starting it again. Your message goes out when it is back.",
     )
 
 

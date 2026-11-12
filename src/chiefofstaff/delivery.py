@@ -20,7 +20,8 @@ import os
 from contextlib import suppress
 from typing import TYPE_CHECKING
 
-from .backend import running_background, stop_background, take_queued
+from . import agents
+from .backend import COPILOT_AGENT, running_background, stop_background, take_queued
 from .envelope import news_tasks, tasks_named
 from .roles import ROUTER, SLACK, WORKER
 from .sources.slack import describe
@@ -224,7 +225,8 @@ class Delivery:
         return (callable(alive) and not alive()) or connection_lost(error)
 
     def copilot_down(self, session_id: str):
-        """Said once in the session's chat while Copilot is down: what it was given waits."""
+        """Said once in the session's chat while its backend (Copilot, or its agent) is down:
+        what it was given waits."""
         if self.store.get(f"undelivered:{session_id}"):
             return
         mark = int(self.store.get(f"sent:{session_id}") or 0)
@@ -232,12 +234,15 @@ class Delivery:
         waiting = (
             ("Your message", "your message") if owner else ("What is waiting", "what was waiting")
         )
-        note = self.runtime.add_message(
-            session_id,
-            "notice",
-            f"Copilot stopped; reconnecting. {waiting[0]} goes out when it is back.",
-            {"undelivered": f"Copilot stopped and reconnected; {waiting[1]} went out."},
-        )
+        agent = self.runtime.agent(session_id)
+        if agent == COPILOT_AGENT:
+            down = f"Copilot stopped; reconnecting. {waiting[0]} goes out when it is back."
+            back = f"Copilot stopped and reconnected; {waiting[1]} went out."
+        else:
+            name = agents.display(agent)
+            down = f"{name} stopped; starting it again. {waiting[0]} goes out when it is back."
+            back = f"{name} stopped and started again; {waiting[1]} went out."
+        note = self.runtime.add_message(session_id, "notice", down, {"undelivered": back})
         self.note_undelivered(session_id, note["id"])
 
     def note_undelivered(self, session_id: str, message_id: int):
