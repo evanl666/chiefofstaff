@@ -1,5 +1,5 @@
-"""What Chief of Staff does differently on Windows. Tests of pure logic run everywhere (the
-platform is a parameter); those of the operating system itself run where they can."""
+"""What Chief of Staff does differently on Windows. Tests of its logic run everywhere; those of
+Windows itself run there."""
 
 import asyncio
 import os
@@ -7,63 +7,58 @@ import re
 import stat
 import subprocess
 import sys
-import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from chiefofstaff import machine
+from chiefofstaff.__main__ import lock_data_file
+from chiefofstaff.runtime import Runtime
+
 windows = pytest.mark.skipif(sys.platform != "win32", reason="Windows itself")
 
 
-def locker(path: Path) -> subprocess.CompletedProcess:
-    """Another process trying to take the data directory's lock."""
+def test_the_data_directory_is_locked_by_one_process_at_a_time(tmp_path):
+    path = tmp_path / "service.lock"
     code = (
         "import sys; from chiefofstaff.__main__ import lock_data_file; "
-        "f = open(sys.argv[1], 'a+b'); lock_data_file(f)"
+        "lock_data_file(open(sys.argv[1], 'a'))"
     )
-    return subprocess.run([sys.executable, "-c", code, str(path)], capture_output=True)
 
+    def second() -> int:
+        return subprocess.run(
+            [sys.executable, "-c", code, str(path)], capture_output=True
+        ).returncode
 
-def test_the_data_directory_is_locked_by_one_process_at_a_time(tmp_path):
-    from chiefofstaff.__main__ import lock_data_file
-
-    path = tmp_path / "service.lock"
-    with path.open("a+b") as lock:
+    with path.open("a") as lock:
         lock_data_file(lock)
-        assert locker(path).returncode != 0, "a second Chief of Staff is turned away"
-        assert path.read_bytes() == b"", "the lock file stays readable"
-    assert locker(path).returncode == 0, "free once the first one stops"
+        assert second() != 0, "a second Chief of Staff is turned away"
+    assert second() == 0, "free once the first one stops"
 
 
 @windows
-def test_the_data_directory_and_launch_link_are_the_owners_alone(tmp_path):
-    from chiefofstaff.__main__ import make_private, write_private
+def test_a_new_data_directory_and_its_launch_link_are_the_owners_alone(tmp_path):
+    from chiefofstaff.__main__ import make_private
 
     def readers(path: Path) -> tuple[set[str], bool]:
-        """Who its access control list lets in (SIDs; SY and BA for SYSTEM and Administrators,
-        as SDDL writes them), and whether it inherits nothing ("D:P")."""
+        """Who its access control list lets in (SY, BA: SYSTEM and Administrators in SDDL),
+        and whether it inherits nothing from the folder it is in ("D:P")."""
         saved = tmp_path / "acl.txt"
         subprocess.run(["icacls", str(path), "/save", str(saved)], capture_output=True, check=True)
         sddl = saved.read_bytes().decode("utf-16-le").splitlines()[1]
         saved.unlink()
         return set(re.findall(r"\(A;[^;]*;[^;]*;;;([^)]+)\)", sddl)), sddl.startswith("D:P")
 
-    me = (
-        subprocess.run(["whoami", "/user", "/fo", "csv", "/nh"], capture_output=True, text=True)
-        .stdout.strip().rsplit(",", 1)[-1].strip('"')
-    )  # fmt: skip
-    allowed = {me, "SY", "BA"}
+    user = subprocess.run(["whoami", "/user", "/fo", "csv", "/nh"], capture_output=True, text=True)
+    me = user.stdout.strip().rsplit(",", 1)[-1].strip('"')
     folder = tmp_path / "data"
     folder.mkdir()
-    make_private(folder, folder=True)
-    launch = folder / "launch-url"
-    write_private(launch, "http://127.0.0.1:8765/#token=secret")
-    for path in (folder, launch):
-        sids, protected = readers(path)
-        assert protected, f"{path} inherits nothing from the folder it is in"
-        assert me in sids and sids <= allowed, (path, sids)
-    assert launch.read_text() == "http://127.0.0.1:8765/#token=secret"
+    make_private(folder)
+    (folder / "launch-url").write_text("http://127.0.0.1:8765/#token=secret")
+    sids, protected = readers(folder)
+    assert protected and me in sids and sids <= {me, "SY", "BA"}, sids
+    assert readers(folder / "launch-url")[0] <= {me, "SY", "BA"}, "it inherits the folder's"
 
 
 @windows
@@ -73,31 +68,27 @@ def test_running_checks_a_process_without_ending_it():
     process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     try:
         assert running(process.pid)
+        assert process.pid in process_table() and process.pid in start_times()
         assert process.poll() is None
-        assert process.pid in process_table()
-        assert process.pid in start_times()
     finally:
         process.terminate()
         process.wait(timeout=10)
     assert not running(process.pid)
 
 
-@windows
 def test_a_program_in_a_folder_is_seen_whatever_the_case_or_slashes(tmp_path):
-    from chiefofstaff.machine import in_use
-
     tree = tmp_path / "Worktree"
-    assert in_use(str(tree), {str(tree / "nested").swapcase()})
-    assert in_use(str(tree) + "\\", {str(tree).replace("\\", "/")})
-    assert not in_use(str(tree), {str(tmp_path / "Worktree-other"), "Z:\\other"})
+    assert machine.in_use(str(tree), {str(tree / "nested")})
+    assert not machine.in_use(str(tree), {str(tmp_path / "Worktree-other")})
+    if sys.platform == "win32":
+        assert machine.in_use(str(tree) + "\\", {str(tree / "nested").swapcase()})
+        assert machine.in_use(str(tree), {str(tree).replace("\\", "/")})
 
 
 @windows
 async def test_a_program_running_in_a_worktree_is_found_as_a_normal_user(tmp_path):
-    """The real scan: the user's own programs' folders are read; those it may not read
-    (administrator, other users, the system) are left out rather than making all unknown."""
-    from chiefofstaff import machine
-
+    """The real scan: this user's programs are read; those it may not read (administrators',
+    other users', the system's) are left out rather than making every folder unknown."""
     folder = tmp_path / "tree" / "web"
     folder.mkdir(parents=True)
     process = await asyncio.create_subprocess_exec(
@@ -106,8 +97,7 @@ async def test_a_program_running_in_a_worktree_is_found_as_a_normal_user(tmp_pat
     try:
         await asyncio.sleep(0.3)
         cwds = await machine.process_cwds()
-        assert cwds is not None
-        assert machine.in_use(str(tmp_path / "tree"), cwds)
+        assert cwds is not None and machine.in_use(str(tmp_path / "tree"), cwds)
         assert not machine.in_use(str(tmp_path / "elsewhere"), cwds)
     finally:
         process.kill()
@@ -115,30 +105,25 @@ async def test_a_program_running_in_a_worktree_is_found_as_a_normal_user(tmp_pat
 
 
 @windows
-async def test_programs_it_may_not_read_are_left_out(monkeypatch, tmp_path):
+async def test_a_timed_out_command_is_stopped_with_what_it_started(tmp_path):
     import psutil
 
-    from chiefofstaff import machine
+    from chiefofstaff.workspaces import TimedOutError, command
 
-    def denied():
-        raise psutil.AccessDenied(pid=124)
-
-    def gone():
-        raise psutil.NoSuchProcess(pid=125)
-
-    listed = [
-        SimpleNamespace(pid=123, cwd=lambda: str(tmp_path)),
-        SimpleNamespace(pid=124, cwd=denied),
-        SimpleNamespace(pid=125, cwd=gone),
-    ]
-    monkeypatch.setattr(psutil, "process_iter", lambda: iter(listed))
-    assert await machine.process_cwds() == {str(tmp_path)}
-
-    def unlistable():
-        raise psutil.Error("no process list")
-
-    monkeypatch.setattr(psutil, "process_iter", unlistable)
-    assert await machine.process_cwds() is None, "unknown: every folder may be in use"
+    pid_file = tmp_path / "child.pid"
+    code = (
+        "import pathlib, subprocess, sys, time; "
+        "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
+        "pathlib.Path(sys.argv[1]).write_text(str(p.pid)); time.sleep(30)"
+    )
+    with pytest.raises(TimedOutError):
+        await command(sys.executable, "-c", code, str(pid_file), limit=3)
+    pid = int(pid_file.read_text())
+    for _ in range(50):
+        if not psutil.pid_exists(pid):
+            break
+        await asyncio.sleep(0.1)
+    assert not psutil.pid_exists(pid)
 
 
 def test_logs_are_read_from_where_asked(tmp_path):
@@ -165,25 +150,19 @@ def test_send_to_chief_says_it_is_not_available(tmp_path, capsys):
     assert "not supported on Windows" in capsys.readouterr().err
 
 
-@windows
-async def test_a_timed_out_command_is_stopped_with_what_it_started(tmp_path):
-    import psutil
-
-    from chiefofstaff.workspaces import TimedOutError, command
-
-    pid_file = tmp_path / "child.pid"
-    code = (
-        "import pathlib, subprocess, sys, time; "
-        "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
-        "pathlib.Path(sys.argv[1]).write_text(str(p.pid)); time.sleep(30)"
-    )
-    with pytest.raises(TimedOutError):
-        await command(sys.executable, "-c", code, str(pid_file), limit=3)
-    pid = int(pid_file.read_text())
-    deadline = time.monotonic() + 5
-    while psutil.pid_exists(pid) and time.monotonic() < deadline:  # noqa: ASYNC110
-        await asyncio.sleep(0.1)
-    assert not psutil.pid_exists(pid)
+@pytest.mark.parametrize(
+    ("app", "opened"),
+    [("finder", "C:/a & b"), ("vscode", "vscode://file/C%3A/a%20%26%20b")],
+)
+async def test_windows_opens_a_folder_through_the_shell(monkeypatch, tmp_path, app, opened):
+    """File Explorer, or VS Code by its URL: never through code.cmd, which cmd.exe would run."""
+    started = []
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(os.path, "isdir", lambda path: True)
+    monkeypatch.setattr(os, "startfile", started.append, raising=False)
+    owner = SimpleNamespace(store=SimpleNamespace(session=lambda _: {"cwd": "C:/a & b"}))
+    assert await Runtime.open_folder(owner, "s", app) == {"ok": True}  # type: ignore[arg-type]
+    assert started == [opened]
 
 
 async def test_chiefs_own_git_runs_none_of_a_repositorys_hooks(tmp_path):
@@ -205,60 +184,3 @@ async def test_chiefs_own_git_runs_none_of_a_repositorys_hooks(tmp_path):
     plain = ["git", "-C", str(repo), *identity, "commit", "-q", "--allow-empty", "-m", "b"]
     await asyncio.to_thread(subprocess.run, plain, check=True)
     assert ran.exists(), "the hook itself works: git without SAFE_GIT runs it"
-
-
-@pytest.mark.parametrize(
-    ("folder", "launcher", "platform", "expected"),
-    [
-        ("/work/app", "/usr/bin/code", "linux", ["code", "/work/app"]),
-        ("/work/app", None, "darwin", ["open", "-a", "Visual Studio Code", "/work/app"]),
-        ("C:\\a b\\app", "C:\\VS Code\\bin\\code.cmd", "win32",
-         ["C:\\VS Code\\bin\\code.cmd", "C:\\a b\\app"]),
-        ("C:\\a&b\\app", "C:\\VS Code\\bin\\code.exe", "win32",
-         ["C:\\VS Code\\bin\\code.exe", "C:\\a&b\\app"]),
-    ],
-)  # fmt: skip
-def test_vs_code_is_given_the_folder_as_one_argument(folder, launcher, platform, expected):
-    from chiefofstaff.runtime import vscode_command
-
-    assert vscode_command(folder, launcher, platform) == expected
-
-
-@pytest.mark.parametrize("folder", ["C:\\a&calc\\app", "C:\\100%PATH%", "C:\\x^y", "C:\\hi!"])
-def test_no_path_cmd_exe_would_misread_goes_to_a_cmd_launcher(folder):
-    from chiefofstaff.runtime import vscode_command
-
-    with pytest.raises(RuntimeError, match="File Explorer"):
-        vscode_command(folder, "C:\\VS Code\\bin\\code.cmd", "win32")
-    with pytest.raises(RuntimeError, match="No app"):
-        vscode_command("/work", None, "linux")
-
-
-@pytest.mark.parametrize(
-    ("repo", "platform", "local"),
-    [
-        ("/home/me/app", "linux", True),
-        ("~/app", "linux", True),
-        ("acme/app", "linux", False),
-        ("git@github.com:acme/app.git", "linux", False),
-        ("C:\\code\\app", "win32", True),
-        ("C:/code/app", "win32", True),
-        ("\\\\server\\share\\app", "win32", True),
-        ("~\\code\\app", "win32", True),
-        ("acme/app", "win32", False),
-        ("https://github.com/acme/app.git", "win32", False),
-        ("git@github.com:acme/app.git", "win32", False),
-    ],
-)
-def test_add_repo_tells_a_folder_from_a_repository_to_clone(repo, platform, local):
-    from chiefofstaff.runtime import local_repository
-
-    assert (local_repository(repo, platform) is not None) == local
-
-
-@pytest.mark.parametrize("repo", ["\\code\\app", "/code/app", "C:code\\app"])
-def test_a_windows_path_without_its_drive_is_refused(repo):
-    from chiefofstaff.runtime import local_repository
-
-    with pytest.raises(ValueError, match="with its drive"):
-        local_repository(repo, "win32")

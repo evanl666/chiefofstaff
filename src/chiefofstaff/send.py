@@ -170,8 +170,6 @@ def open_folder(directory: Path) -> str:
 def peer_uid(connection: socket.socket) -> int:
     """The user id of the process at the other end of a connected Unix socket, as the kernel
     recorded it when it connected."""
-    if sys.platform == "win32":
-        raise OSError(errno.ENOTSUP, "Peer credentials are not supported here")
     if sys.platform == "darwin":
         # struct xucred: cr_version (XUCRED_VERSION, 0), then cr_uid; level 0 is SOL_LOCAL.
         raw = connection.getsockopt(0, socket.LOCAL_PEERCRED, 76)
@@ -179,7 +177,7 @@ def peer_uid(connection: socket.socket) -> int:
         if version != 0:
             raise OSError(errno.EPROTO, "Unknown peer credentials")
         return uid
-    if sys.platform.startswith("linux"):
+    if sys.platform == "linux":
         # struct ucred: pid, uid, gid.
         raw = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
         return struct.unpack("=iII", raw)[1]

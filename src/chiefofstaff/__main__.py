@@ -21,16 +21,13 @@ from .web import create_app
 
 # The running instance's private URL, so starting Chief of Staff again opens it.
 LAUNCH_FILE = "launch-url"
-# Windows locks a byte range, which no other process can read meanwhile: one far past the end
-# of the (empty) file, so the lock file itself stays readable.
-LOCK_OFFSET = 1 << 30
 
 
 def lock_data_file(file):
     if sys.platform == "win32":
         import msvcrt
 
-        file.seek(LOCK_OFFSET)
+        file.seek(0)
         try:
             msvcrt.locking(file.fileno(), msvcrt.LK_NBLCK, 1)
         except OSError as exc:
@@ -41,33 +38,18 @@ def lock_data_file(file):
         fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
-def make_private(path: Path, folder: bool = False):
+def make_private(folder: Path):
     """On Windows, what umask 077 and mode 0700 do elsewhere: only this user (and, as root can
-    elsewhere, SYSTEM and Administrators) may read it, whatever the folder it is in allows."""
-    if sys.platform != "win32":
-        return
+    elsewhere, SYSTEM and Administrators) may read the folder and what is made in it."""
     user = subprocess.run(
         ["whoami", "/user", "/fo", "csv", "/nh"],  # noqa: S607  (a system command)
         capture_output=True, text=True, check=True, timeout=10,
     ).stdout.strip().rsplit(",", 1)[-1].strip('"')  # fmt: skip
-    if not user.startswith("S-1-"):
-        raise OSError(f"Could not read this user's id: {user!r}")
-    inherit = "(OI)(CI)" if folder else ""
-    grants = [f"*{sid}:{inherit}F" for sid in (user, "S-1-5-18", "S-1-5-32-544")]
+    grants = [f"*{sid}:(OI)(CI)F" for sid in (user, "S-1-5-18", "S-1-5-32-544")]
     subprocess.run(  # noqa: S603  (fixed arguments: this user's id and well-known ids)
-        ["icacls", str(path), "/inheritance:r", "/grant:r", *grants],  # noqa: S607
+        ["icacls", str(folder), "/inheritance:r", "/grant:r", *grants],  # noqa: S607
         capture_output=True, check=True, timeout=30,
     )  # fmt: skip
-
-
-def write_private(path: Path, text: str):
-    """A file only its owner can read, made so before anything is written to it."""
-    path.write_text("")
-    try:
-        make_private(path)
-    except (OSError, subprocess.SubprocessError) as exc:
-        logging.getLogger(__name__).warning("Could not make %s private: %s", path, exc)
-    path.write_text(text)
 
 
 def open_when_ready(port: int, url: str):
@@ -150,12 +132,14 @@ def main():
     directory = args.data_dir.expanduser().resolve()
     created = not directory.exists()
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if created:
+    if created and sys.platform == "win32":
+        # Only when made: icacls goes through everything already in a folder (seconds for a
+        # data directory with worktrees).
         try:
-            make_private(directory, folder=True)
+            make_private(directory)
         except (OSError, subprocess.SubprocessError) as exc:
             print(f"Could not make {directory} private: {exc}", file=sys.stderr, flush=True)
-    data_lock = (directory / "service.lock").open("a+b")
+    data_lock = (directory / "service.lock").open("a")
     try:
         lock_data_file(data_lock)
     except BlockingIOError:
@@ -183,8 +167,7 @@ def main():
         parser.error(f"Port {args.port} is unavailable. Choose another --port.")
     app = create_app(directory, token, args.port, **extra)
     launch = directory / LAUNCH_FILE
-    # Readable only by the owner (umask 077, like the data directory; an ACL on Windows).
-    write_private(launch, url)
+    launch.write_text(url)  # Readable only by the owner (umask 077, like the data directory).
     print(
         f"Chief of Staff\nPrivate launch URL (do not share): {url}\nData: {directory}", flush=True
     )

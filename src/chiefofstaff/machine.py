@@ -210,6 +210,14 @@ def low_priority() -> list[str]:
     return found
 
 
+def processes(*attrs: str) -> list[dict]:
+    """Windows: every process this user can list, with its pid and these attributes (None
+    where it may not read one: an administrator's, another user's, the system's)."""
+    import psutil
+
+    return [process.info for process in psutil.process_iter(["pid", *attrs])]
+
+
 def kill_process_tree(pid: int) -> None:
     """Stop a process and everything it started, at once."""
     if sys.platform != "win32":
@@ -218,27 +226,11 @@ def kill_process_tree(pid: int) -> None:
         return
     import psutil
 
-    try:
-        tree = {psutil.Process(pid)}
-    except psutil.NoSuchProcess:
-        return
-    # Windows has no process groups: the tree is found by parent ids. Each process found is
-    # suspended before the tree is listed again, so none starts another unseen in between.
-    # psutil refuses to signal a pid that another process has taken since it was listed.
-    for _ in range(5):
-        for process in tree:
+    with suppress(psutil.Error):
+        parent = psutil.Process(pid)
+        for process in [*parent.children(recursive=True), parent]:
             with suppress(psutil.Error):
-                process.suspend()
-        found = set(tree)
-        for process in tree:
-            with suppress(psutil.Error):
-                found.update(process.children(recursive=True))
-        if found == tree:
-            break
-        tree = found
-    for process in tree:
-        with suppress(psutil.Error):
-            process.kill()
+                process.kill()
 
 
 async def run_quietly(arguments: list[str], limit: float) -> tuple[int, str] | None:
@@ -264,7 +256,6 @@ async def run_quietly(arguments: list[str], limit: float) -> tuple[int, str] | N
     except asyncio.CancelledError:
         # Chief of Staff is stopping: a du of a huge folder must not run on after it.
         kill_process_tree(process.pid)
-        await process.wait()
         raise
     return process.returncode or 0, output.decode(errors="replace")
 
@@ -293,10 +284,7 @@ async def process_cwds(limit: float = 30) -> set[str] | None:
     `lsof -d cwd -Fn` lists them (on Linux without lsof: /proc). None when they cannot be read:
     then every folder may be in use."""
     if sys.platform == "win32":
-        try:
-            return await asyncio.wait_for(asyncio.to_thread(windows_cwds), limit)
-        except TimeoutError:
-            return None
+        return await asyncio.to_thread(windows_cwds)
     if shutil.which("lsof"):
         ran = await run_quietly(["lsof", "-w", "-d", "cwd", "-Fn"], limit)
         if ran and ran[0] == 0:
@@ -306,25 +294,10 @@ async def process_cwds(limit: float = 30) -> set[str] | None:
     return None
 
 
-def windows_cwds() -> set[str] | None:
-    """The folders programs run in, on Windows, as far as this user can read them: programs
-    run as administrator, other users' and the system's cannot be read without administrator
-    rights and are left out, as Linux's /proc and lsof without root leave them out. None when
-    the processes cannot be listed at all."""
-    if sys.platform != "win32":
-        return None
-    import psutil
-
-    found = set()
-    try:
-        processes = list(psutil.process_iter())
-    except (psutil.Error, OSError):
-        return None
-    for process in processes:
-        with suppress(psutil.NoSuchProcess, psutil.AccessDenied):
-            if cwd := process.cwd():
-                found.add(cwd)
-    return found
+def windows_cwds() -> set[str]:
+    """The folders programs run in, as far as this user may read them: as lsof and /proc
+    without root, other users', the system's and administrators' programs are left out."""
+    return {p["cwd"] for p in processes("cwd") if p["cwd"]}
 
 
 def proc_cwds() -> set[str]:
@@ -338,17 +311,10 @@ def proc_cwds() -> set[str]:
 
 
 def in_use(folder: str, cwds: set[str]) -> bool:
-    """Whether a program runs in this folder or in one inside it."""
-    if sys.platform == "win32":
-        # Paths in any case, with either slash; the folder resolved once, not every cwd.
-        paths = {
-            os.path.normcase(os.path.normpath(path)) for path in (folder, os.path.realpath(folder))
-        }
-        for cwd in cwds:
-            cwd = os.path.normcase(os.path.normpath(cwd))
-            for path in paths:
-                if cwd == path or cwd.startswith(path.rstrip("\\") + "\\"):
-                    return True
-        return False
-    paths = {folder.rstrip("/"), os.path.realpath(folder)}
-    return any(cwd == path or cwd.startswith(path + "/") for cwd in cwds for path in paths)
+    """Whether a program runs in this folder or in one inside it (any case, on Windows)."""
+    paths = {os.path.normcase(path).rstrip(os.sep) for path in (folder, os.path.realpath(folder))}
+    return any(
+        cwd == path or cwd.startswith(path + os.sep)
+        for cwd in map(os.path.normcase, cwds)
+        for path in paths
+    )

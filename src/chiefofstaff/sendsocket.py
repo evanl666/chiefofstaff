@@ -191,9 +191,7 @@ class SendSocket:
     def accept(self):
         """A connection: its peer's user id is checked before a byte of it is read; another
         user's is closed at once."""
-        if sys.platform == "win32":
-            return  # Never registered there: prepare refuses.
-        if not self.listener:
+        if sys.platform == "win32" or not self.listener:  # Windows: prepare refused.
             return
         try:
             connection, _ = self.listener.accept()

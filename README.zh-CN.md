@@ -66,7 +66,7 @@ uvx chiefofstaff           # 或者：pipx install chiefofstaff && chiefofstaff
 浏览器会通过终端里打印的私密链接打开 Chief of Staff（这个链接别给别人）。告诉它你的代码放在哪，比如 `~/workspace`，然后说你要做什么。
 
 所有东西都在你的电脑上跑，数据存在 `~/Library/Application Support/chiefofstaff`（macOS）或
-`~/.local/share/chiefofstaff`（Linux）或 `%LOCALAPPDATA%\chiefofstaff\chiefofstaff`（Windows）。Ctrl+C 停止，下次启动时 session 会接着之前的进度。参数：`--port`、`--data-dir`、`--no-browser`、`--demo`。升级：`uvx chiefofstaff@latest`。
+`~/.local/share/chiefofstaff`（Linux）或 `%LOCALAPPDATA%\chiefofstaff\chiefofstaff`（Windows；若使用 Microsoft Store 版 Python，Windows 会把它放在该 Python 的 `%LOCALAPPDATA%\Packages\...\LocalCache` 下，启动时 `Data:` 一行会显示实际位置）。Ctrl+C 停止，下次启动时 session 会接着之前的进度。参数：`--port`、`--data-dir`、`--no-browser`、`--demo`。升级：`uvx chiefofstaff@latest`。
 
 Windows 支持为实验性：暂不支持 Send to Chief、Copilot 命令沙箱、沙箱内的自动检查，以及 Storage
 中的目录大小统计（依赖 `du`）；worker

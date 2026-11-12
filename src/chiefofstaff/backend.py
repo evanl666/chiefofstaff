@@ -37,6 +37,8 @@ from copilot.generated.rpc import (
     TasksCancelRequest,
 )
 
+from . import machine
+
 
 @dataclass(frozen=True)
 class Capabilities:
@@ -444,17 +446,11 @@ def copilot_trusts(path: str) -> bool:
 def process_table() -> dict[int, tuple[int, str]]:
     """Every process: pid -> (parent pid, command line)."""
     if sys.platform == "win32":
-        import psutil
-
-        found = {}
-        for process in psutil.process_iter(["pid", "ppid", "cmdline"]):
-            try:
-                info = process.info
-                if info["ppid"] is not None and info["cmdline"]:
-                    found[info["pid"]] = (info["ppid"], subprocess.list2cmdline(info["cmdline"]))
-            except (psutil.Error, OSError):
-                continue
-        return found
+        return {
+            p["pid"]: (p["ppid"], subprocess.list2cmdline(p["cmdline"]))
+            for p in machine.processes("ppid", "cmdline")
+            if p["cmdline"]
+        }
     try:
         table = subprocess.run(
             ["ps", "-axo", "pid=,ppid=,command="],  # noqa: S607  (a fixed command, found on PATH)
@@ -558,17 +554,7 @@ def start_times() -> dict[int, str]:
     """When each process started: pid -> a time to compare, not to show. A pid is reused, and
     the process that has it now started after the one recorded."""
     if sys.platform == "win32":
-        import psutil
-
-        found = {}
-        for process in psutil.process_iter(["pid", "create_time"]):
-            try:
-                info = process.info
-                if info["create_time"] is not None:
-                    found[info["pid"]] = str(info["create_time"])
-            except (psutil.Error, OSError):
-                continue
-        return found
+        return {p["pid"]: str(p["create_time"]) for p in machine.processes("create_time")}
     try:
         table = subprocess.run(
             ["ps", "-axo", "pid=,lstart="],  # noqa: S607  (a fixed command, found on PATH)

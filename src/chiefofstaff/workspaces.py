@@ -58,10 +58,6 @@ async def command(
         machine.kill_process_tree(process.pid)
         await process.wait()
         raise TimedOutError(f"{arguments[0]} timed out.") from exc
-    except asyncio.CancelledError:
-        machine.kill_process_tree(process.pid)
-        await process.wait()
-        raise
     if process.returncode:
         error = stderr.decode(errors="replace").strip()[:500]
         raise ValueError(f"{arguments[0]} failed: {error}")

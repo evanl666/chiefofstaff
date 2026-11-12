@@ -76,7 +76,9 @@ Your browser opens Chief of Staff through a private link printed in the terminal
 yourself). Tell it where your code lives, like `~/workspace`, and type what you need.
 
 Everything runs on your machine; data stays in `~/Library/Application Support/chiefofstaff`
-(macOS), `~/.local/share/chiefofstaff` (Linux), or `%LOCALAPPDATA%\chiefofstaff\chiefofstaff` (Windows). Ctrl+C stops it, and sessions pick up where
+(macOS), `~/.local/share/chiefofstaff` (Linux), or `%LOCALAPPDATA%\chiefofstaff\chiefofstaff` (Windows; with Python from the Microsoft Store,
+Windows keeps it under that Python's `%LOCALAPPDATA%\Packages\...\LocalCache` instead: the
+`Data:` line at startup says where). Ctrl+C stops it, and sessions pick up where
 they left off next time. Options: `--port`, `--data-dir`, `--no-browser`, `--demo`. Update with
 `uv tool upgrade chiefofstaff`. Launching `uvx chiefofstaff@latest` again and again works too,
 but each new version leaves a cached environment behind in uv's cache: `uv cache prune` removes

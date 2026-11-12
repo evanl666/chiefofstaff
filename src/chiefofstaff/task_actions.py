@@ -703,9 +703,6 @@ class TaskActions:
         # those changed again meanwhile (checked once more after).
         self.checking: set[str] = set()
         self.recheck: set[str] = set()
-        # Where tasks' checkouts were when taken up, still being recorded (record_base): a
-        # result reported meanwhile waits for it, or its share would have no start.
-        self.basing: dict[str, asyncio.Future] = {}
         # An accepted task stays listed while something is followed up for it.
         self.tasks.monitored = lambda task: bool(self.monitoring(task))
         # The one task each follow tied to no task is for (legacy_follower), as worked out in
@@ -1262,9 +1259,6 @@ class TaskActions:
     async def record_end(self, task: dict):
         """Its checkouts as its result left them: its share ends there (a later task on the
         same branch or folder does not add to it)."""
-        if basing := self.basing.get(task["id"]):
-            with suppress(Exception):
-                await asyncio.shield(basing)
         row = self.store.find_session(task["session_id"])
         if not row or not self.store.get(f"taskbase:{task['id']}"):
             return
@@ -1356,20 +1350,6 @@ class TaskActions:
         self.runtime.background(self.collect_evidence(made["id"]))
         self.runtime.background(self.collect_evidence(task["id"]))
         return undo
-
-    def begin_base(self, session_id: str, task_ids: list[str], at: float):
-        """record_base in the background, known to record_end until it is done."""
-        job = asyncio.ensure_future(self.record_base(session_id, task_ids, at))
-        for task_id in task_ids:
-            self.basing[task_id] = job
-
-        def done(_):
-            for task_id in task_ids:
-                if self.basing.get(task_id) is job:
-                    del self.basing[task_id]
-
-        job.add_done_callback(done)
-        self.runtime.background(job)
 
     async def record_base(self, session_id: str, task_ids: list[str], at: float):
         """Where its checkouts are when a worker takes a task up: that task's changes are what
