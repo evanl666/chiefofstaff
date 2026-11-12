@@ -863,6 +863,15 @@ async def test_external_sessions_can_be_adopted(harness, tmp_path):
             context=None,
             made_by_us=True,
         ),
+        # A script's, through Copilot's SDK (one of a batch job's many): not the owner's either.
+        SimpleNamespace(
+            session_id="batch-item",
+            summary="You are labelling a support ticket",
+            is_remote=False,
+            modified_time=datetime(2026, 10, 4, tzinfo=UTC),
+            context=None,
+            made_by_program=True,
+        ),
     ]
     items = await runtime.workers.external(refresh=True)
     assert [item["id"] for item in items] == ["ext-1"]
@@ -871,6 +880,43 @@ async def test_external_sessions_can_be_adopted(harness, tmp_path):
     assert row["role"] == "worker" and row["title"] == "Refactor parser"
     assert "ext-1" in harness.client.resumed
     assert await runtime.workers.external(refresh=True) == []
+
+
+async def test_what_was_read_from_a_programs_sessions_is_never_learned_from(harness):
+    """QA on 0.1.38: a script's sessions were listed as the owner's, so their prompts were read
+    as the owner's instructions. Those not learned from yet are dropped; the owner's stay."""
+    runtime = await harness.connect()
+
+    def listed(session_id, program):
+        return SimpleNamespace(
+            session_id=session_id, summary="", is_remote=False, context=None,
+            modified_time=datetime(2026, 10, 1, tzinfo=UTC), made_by_program=program,
+            clients_listed=True,
+        )  # fmt: skip
+
+    harness.client.metas = [listed("batch", True), listed("terminal", False)]
+    habits = runtime.habits
+    habits.add("copilot", "instruction", "copilot:batch:e1", "You are labelling a support ticket")
+    habits.add("copilot", "instruction", "copilot:batch:e2", "You are labelling another ticket")
+    harness.store.execute("UPDATE observations SET learned=1 WHERE ref='copilot:batch:e2'")
+    habits.add(
+        "copilot", "instruction", "copilot:terminal:e1", "Run the smoke test first, then all"
+    )
+    habits.add("chief", "instruction", "chief:1", "Answer me briefly, the conclusion first")
+    await habits.collect_sessions()
+    refs = {row["ref"] for row in harness.store.all("SELECT ref FROM observations")}
+    assert refs == {"copilot:batch:e2", "copilot:terminal:e1", "chief:1"}, "learned stays"
+
+    # Not known whose they are (the fallback listing): nothing dropped, looked at again later.
+    habits.add("copilot", "instruction", "copilot:batch:e3", "You are labelling one more ticket")
+    harness.client.metas = [
+        SimpleNamespace(**{**vars(listed("batch", True)), "clients_listed": False})
+    ]
+    await habits.collect_sessions()
+    assert harness.store.one("SELECT 1 FROM observations WHERE ref='copilot:batch:e3'")
+    harness.client.metas = [listed("batch", True)]
+    await habits.collect_sessions()
+    assert not harness.store.one("SELECT 1 FROM observations WHERE ref='copilot:batch:e3'")
 
 
 def event(kind, text, parent=None):
@@ -1678,6 +1724,7 @@ async def test_the_cli_tells_which_sessions_chief_of_staff_made():
         item("terminal", "github/cli", "github/cli"),
         item("taken-over", "chiefofstaff", "github/cli"),
         item("adopted", "github/cli", "chiefofstaff"), item("unknown", "sdk"), item("unnamed"),
+        item("script", "sdk", "sdk"), item("script-continued", "sdk", "github/cli"),
     ]}  # fmt: skip
 
     class Rpc:
@@ -1699,8 +1746,10 @@ async def test_the_cli_tells_which_sessions_chief_of_staff_made():
     listed = await backend.list_sessions()
     assert {meta.session_id: meta.made_by_us for meta in listed} == {
         "ours": True, "older-name": True, "terminal": False, "taken-over": False,
-        "adopted": False, "unknown": False, "unnamed": False,
+        "adopted": False, "unknown": False, "unnamed": False, "script": False,
+        "script-continued": False,
     }  # fmt: skip
+    assert [meta.session_id for meta in listed if meta.made_by_program] == ["unknown", "script"]
     Client._client.fails = True
     assert await backend.list_sessions() == ["from the SDK"], "as before when it cannot be read"
 

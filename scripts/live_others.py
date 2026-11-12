@@ -15,10 +15,11 @@ O3 reading changes nothing in the home: every file of the sessions read, before 
    passes, fresh listings and first looks.
 O2 whose session it is (section 4.2), with a second Chief of Staff on the same home: this one's
    own sessions are never listed (a); the other's are left out (b); fake_terminal.py, another
-   app, is the owner's (c); a terminal session last run by the other Chief of Staff gets no
-   status (d, rule 5) and gets one again once run in a terminal (e, rule 6); the other's own
-   session taken over in a terminal is the owner's (f, rule 6) until it runs it again (g,
-   rule 4).
+   app that names itself, is the owner's (c); a terminal session last run by the other Chief of
+   Staff gets no status (d, rule 5) and gets one again once run in a terminal (e, rule 6); the
+   other's own session taken over in a terminal is the owner's (f, rule 6) until it runs it
+   again (g, rule 4); a script's session (through the SDK, naming no app) is never listed, open
+   or closed, until continued in a terminal (h).
 O4 a closed session continued here works and leaves the list (a); an open one is refused (b).
 
 They run in the order O1, O5, O3, O2, O4, four to six minutes in all; each logs "O1a
@@ -1347,10 +1348,16 @@ async def o2_provenance(ctx: Ctx, first: str) -> str:
     watch.assert_right("O2b")
     log(f"O2b passed: the other's Router ({made.get('client_name')}) is not listed, and 404")
 
-    # c. Another app (fake_terminal.py, through the SDK): the owner's.
+    # c. Another app that names itself (fake_terminal.py, through the SDK): the owner's.
     folder = ctx.folder("fake-terminal")
     helper = subprocess.Popen(
-        [sys.executable, str(Path(__file__).parent / "fake_terminal.py"), str(folder), OK],
+        [
+            sys.executable,
+            str(Path(__file__).parent / "fake_terminal.py"),
+            str(folder),
+            OK,
+            "acme-notes",
+        ],
         stdout=subprocess.PIPE,
         text=True,
         env={**os.environ, "COPILOT_HOME": str(ctx.home)},
@@ -1445,6 +1452,54 @@ async def o2_provenance(ctx: Ctx, first: str) -> str:
     ctx.banned.add(router)
     log(f"O2g passed: {made.get('client_name')} → {made.get('last_client_name')}: left out "
         f"{wall() - stopped:.0f}s after the other stopped")  # fmt: skip
+
+    # h. A script's session, through the SDK naming no app (one of a batch job's many): never
+    # listed, open or closed; continued in a terminal, the owner's (rule 6).
+    script = subprocess.Popen(
+        [sys.executable, str(Path(__file__).parent / "fake_terminal.py"), str(ctx.folder("script")),
+         OK, ""],
+        stdout=subprocess.PIPE,
+        text=True,
+        env={**os.environ, "COPILOT_HOME": str(ctx.home)},
+        start_new_session=True,
+    )  # fmt: skip
+    ctx.helpers.append(script)
+    line = await asyncio.wait_for(asyncio.to_thread(script.stdout.readline), 240)
+    assert line.startswith("READY"), line
+    batch = line.split()[1]
+    ctx.banned.add(batch)
+    made = workspace(ctx.home, batch)
+    assert made.get("client_name") == "sdk", made
+    for state in ("open", "closed"):
+        await asyncio.sleep(FOUND_TARGET)  # Its opening (or closing) brought a listing.
+        response = await ctx.app.http.get(f"/api/others/{batch}")
+        assert response.status_code == 404, (state, response.text)
+        external = await ctx.app.get("/api/external?refresh=true")
+        assert batch not in {item["id"] for item in external}, state
+        if state == "open":
+            os.killpg(script.pid, signal.SIGTERM)
+            script.wait(30)
+            ctx.helpers.remove(script)  # O4 takes the other app's, the last one.
+    truth = ctx.track(batch, "the script's")
+    term = Terminal(ctx, "S", ctx.folder("terminal-s"), batch, ["--resume", batch, *CLI])
+    ctx.banned.discard(batch)  # Once its terminal runs a turn, it is the owner's.
+    await term.resumed(ctx, truth, OK)
+    state = await truth.until("its turn ends", lambda s: s.turn == "ended", 120)
+    await term.exit()
+    exited = wall()
+    made = workspace(ctx.home, batch)
+    assert made.get("last_client_name") == "github/cli", made
+    # Whose it is follows Copilot's listing (as for g).
+    row = await watch.until(
+        "listed, closed, finished (at a listing)",
+        batch,
+        lambda r: r and not r["open"] and key_of(r) == "finished",
+        LISTING,
+    )
+    assert words_of(row) == state.words[:SHOWN], row
+    log(f"O2h passed: a script's session ({made.get('client_name')}) never listed, open or "
+        f"closed; continued in a terminal ({made.get('last_client_name')}): listed "
+        f"{wall() - exited:.0f}s after it exited, finished {words_of(row)!r}")  # fmt: skip
     watch.assert_right("O2")
     log(f"O2a passed: this Chief of Staff's {len(ctx.own)} sessions never listed in "
         f"{watch.observations} rows read")  # fmt: skip
@@ -1528,7 +1583,16 @@ async def main():
         os.environ.pop(key)
     root = Path(tempfile.mkdtemp(prefix="cos-others-", dir=os.environ.get("LIVE_OTHERS_TMP")))
     root = root.resolve()
-    names = ["terminal-a", "terminal-b", "terminal-e", "terminal-x", "terminal-r", "fake-terminal"]
+    names = [
+        "terminal-a",
+        "terminal-b",
+        "terminal-e",
+        "terminal-x",
+        "terminal-r",
+        "fake-terminal",
+        "script",
+        "terminal-s",
+    ]
     for name in names:
         (root / name).mkdir()
     home = make_home(root, [root, *(root / name for name in names)])

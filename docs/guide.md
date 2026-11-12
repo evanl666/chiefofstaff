@@ -203,7 +203,9 @@ more than four searches.
 
 *Other Copilot sessions* in the sidebar lists the sessions Chief of Staff does not manage, the
 ones you started in a terminal. Those open in a terminal right now come first, marked *open*.
-Opening one shows its latest conversation, and keeps it current while it works.
+Opening one shows its latest conversation, and keeps it current while it works. Sessions a
+program made through Copilot's SDK (a script's, one per item of a batch, say) are not yours to
+continue and are not listed, unless you continued one in a terminal.
 
 **Where each stands.** Each row's dot says it, read from the log Copilot keeps on this computer
 (no model call; nothing stored or sent): amber when it asks you something or it is your turn, a

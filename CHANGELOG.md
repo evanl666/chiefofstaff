@@ -1,7 +1,16 @@
 # Changelog
 
-## Unreleased
+## 0.1.40 (2026-11-11)
 
+Other Copilot sessions lists yours only, and two fixes found by QA and CI.
+
+- **Other Copilot sessions no longer lists a script's sessions.** A program that runs Copilot
+  through its SDK (a batch job labelling data, an eval) makes a session for each item; the sidebar
+  listed them all as yours (over a hundred rows of the same prompt), the Router saw them among
+  your sessions, and learning how you write read their prompts as your words. Sessions a program
+  made without naming itself are left out of all three, as Chief of Staff's own are, unless you
+  continued one in a terminal; what was read from them and not learned from yet is dropped
+  (found by QA on 0.1.38).
 - **A worker closed as it reports done, or as its turn ends** (its PR merged), has its clean
   worktree removed once what it holds is read. That was read while the removal looked at the
   worktree, so it stayed, as one a program runs in, until looked at again; or it went in the

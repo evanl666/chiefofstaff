@@ -188,6 +188,9 @@ OLDEST_CLI = "1.0.100"
 # What Chief of Staff calls itself to Copilot (work-buddy: its earlier name), which the CLI keeps
 # with each session as the client that made it and the one that last resumed it.
 OWN_CLIENTS = frozenset({"chiefofstaff", "work-buddy"})
+# What the CLI records as the maker of a session a program made through Copilot's SDK without
+# naming itself: a script's (a batch job, an eval), often one of many.
+SDK_CLIENT = "sdk"
 
 
 def made_by_us(item: dict) -> bool:
@@ -195,6 +198,13 @@ def made_by_us(item: dict) -> bool:
     has resumed since."""
     made = item.get("clientName") or ""
     return made in OWN_CLIENTS and (item.get("lastClientName") or made) in OWN_CLIENTS
+
+
+def made_by_a_program(item: dict) -> bool:
+    """A session a program made through Copilot's SDK without naming itself, that no other client
+    (a terminal) has run a turn in since: not the owner's own."""
+    made = item.get("clientName") or ""
+    return made == SDK_CLIENT and (item.get("lastClientName") or made) == SDK_CLIENT
 
 
 class CopilotBackend:
@@ -248,16 +258,18 @@ class CopilotBackend:
         return await self.client.list_models()
 
     async def list_sessions(self) -> list[Any]:
-        """Every session, each marked `made_by_us` (see made_by_us), with the client that made
-        it (`client_name`) and the one that last ran a turn in it (`last_client_name`, "" when
-        none is recorded); `clients_listed` says these were read. The SDK's list leaves out
-        which client made a session, the CLI's answer has it. Unmarked when that cannot be read."""
+        """Every session, each marked `made_by_us` (see made_by_us) and `made_by_program` (see
+        made_by_a_program), with the client that made it (`client_name`) and the one that last ran
+        a turn in it (`last_client_name`, "" when none is recorded); `clients_listed` says these
+        were read. The SDK's list leaves out which client made a session, the CLI's answer has it.
+        Unmarked when that cannot be read."""
         try:
             answer = await self.client._client.request("session.list", {})  # type: ignore[union-attr]
             listed = []
             for item in answer.get("sessions", []):
                 meta = SessionMetadata.from_dict(item)
                 meta.made_by_us = made_by_us(item)  # type: ignore[attr-defined]
+                meta.made_by_program = made_by_a_program(item)  # type: ignore[attr-defined]
                 vars(meta).update(
                     client_name=str(item.get("clientName") or ""),
                     last_client_name=str(item.get("lastClientName") or ""),

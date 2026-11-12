@@ -978,8 +978,14 @@ class Workers:
             listed, key=lambda m: (m.session_id in elsewhere, m.modified_time), reverse=True
         ):
             # Chief of Staff's own, from another data directory (a test run's, an older
-            # install's): not the owner's to see, nor their words to learn from.
-            if meta.session_id in managed or meta.is_remote or getattr(meta, "made_by_us", False):
+            # install's), or a program's through Copilot's SDK (a script's batch): not the
+            # owner's to see, nor their words to learn from.
+            if (
+                meta.session_id in managed
+                or meta.is_remote
+                or getattr(meta, "made_by_us", False)
+                or getattr(meta, "made_by_program", False)
+            ):
                 continue
             context = meta.context
             items.append(
