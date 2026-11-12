@@ -123,6 +123,15 @@ def in_turn(runtime, worker) -> bool:
     return bool(session and session.turn and not session.turn.done())
 
 
+FILED = ("notice", "It stopped again without a report: filed as one.")
+
+
+def settled(harness, runtime, worker) -> bool:
+    """A worker that answers without a report is through with its turns: also the one it is
+    asked for a report in (between the two it is in no turn, yet not through)."""
+    return FILED in harness.kinds(worker) and not in_turn(runtime, worker)
+
+
 def received(session) -> list[str]:
     return [text for who, text in session.history if who == "user"]
 
@@ -658,7 +667,7 @@ async def test_another_agent_that_stops_by_itself_starts_again_and_its_worker_go
     assert runtime.connection("codex-like") == (started[1], 1)
 
     # Stopped again, and it cannot start now: its worker at work fails with why, once.
-    await until(lambda: not in_turn(runtime, worker))
+    await until(lambda: settled(harness, runtime, worker))
     await runtime.owner_send(worker, "Ponder at length")
     await until(lambda: in_turn(runtime, worker))
     tried = cannot_start(harness, "codex-like")
@@ -726,14 +735,13 @@ async def test_an_agents_sessions_at_work_are_known_before_their_status_says_so(
 
 
 async def test_an_agent_that_cannot_start_again_fails_a_worker_it_had_not_started_on(harness):
-    """A worker sent a message it had not started on as its agent stopped (its status still
-    says idle) fails with why when the agent cannot start again: ending the agent's turns
+    """A worker sent a message it had not started on as its agent stopped (its status does
+    not say working) fails with why when the agent cannot start again: ending the agent's turns
     forgets what was sent, so who was at work is known before."""
     runtime = await harness.connect()
     started = on(harness, "codex-like")
     worker = await spawn(runtime, harness, "Noted")
-    await until(lambda: harness.store.session(worker)["status"] not in {"queued", "starting"})
-    await until(lambda: harness.store.session(worker)["status"] != "working")
+    await until(lambda: settled(harness, runtime, worker))
     runtime.states[worker].awaiting = ("sent", 1)
     tried = cannot_start(harness, "codex-like")
     started[-1].crashed = True
