@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.42 (2026-11-12)
+
+Windows support, experimental, from a contributor.
+
+- **Chief of Staff runs on Windows (experimental).** It used to refuse to start there. A new data
+  directory is made readable only by you (and SYSTEM and Administrators), Chief of Staff's own
+  git runs none of a repository's hooks, its port can't be shared by another program, and a
+  worker's folder opens in File Explorer or VS Code. Send to Chief, the command sandbox, sandboxed
+  checks and Storage's folder sizes are not available there, and workers can reach whatever your
+  Windows account can: the README says what differs (#6, thanks @xiongwj14).
+- macOS and Linux behave as in 0.1.41.
+
 ## 0.1.41 (2026-11-11)
 
 A fix from a contributor, and groundwork for workers on other coding agents.

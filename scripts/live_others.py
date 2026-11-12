@@ -748,8 +748,11 @@ class Watch:
                 log(f"ok: {label}: {what} ({wall() - began:.1f}s)")
                 return row
             await asyncio.sleep(0.1)
+        made = workspace(self.ctx.home, session_id)
         raise AssertionError(f"{label}: {what}: not within {timeout:.0f}s; the row: "
-                             f"{self.shown(session_id)}")  # fmt: skip
+                             f"{self.shown(session_id)}; made by "
+                             f"{made.get('client_name')!r}, last run by "
+                             f"{made.get('last_client_name')!r}")  # fmt: skip
 
     def assert_right(self, scenario: str):
         assert not self.wrong, f"{scenario}: {len(self.wrong)} wrong: {self.wrong[:5]}"

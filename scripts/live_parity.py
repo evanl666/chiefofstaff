@@ -9,10 +9,12 @@ your sign-in plus a test plugin, MCP servers, skills and agents; nothing of your
 """
 
 import asyncio
+import base64
 import csv
 import json
 import os
 import random
+import re
 import shutil
 import subprocess
 import sys
@@ -189,9 +191,10 @@ WEB = (
     "Look up the latest released version of the Python package `requests` on PyPI (fetch "
     "https://pypi.org/pypi/requests/json) and tell me the version and its release date."
 )
+# A read every GitHub MCP toolset has (get_file_contents), of an answer no model knows.
 MCP_READ = (
-    "Using the GitHub MCP server's tools (not the gh command), find the three most recent "
-    "releases of cli/cli and list their tag names."
+    "Using the GitHub MCP server's tools (not the gh command), read pyproject.toml in "
+    "evanl666/chiefofstaff and say which version it declares."
 )
 INVESTIGATE = (
     "Users say textkit.chunk() sometimes drops items at the end. Find out exactly why, with "
@@ -224,15 +227,17 @@ def truths() -> dict:
             found["requests"] = json.load(page)["info"]["version"]
     except Exception:
         found["requests"] = ""
-    tags = subprocess.run(
-        ["gh", "api", "repos/cli/cli/releases?per_page=3", "--jq", ".[].tag_name"],
+    pyproject = subprocess.run(
+        ["gh", "api", "repos/evanl666/chiefofstaff/contents/pyproject.toml", "--jq", ".content"],
         capture_output=True, text=True,
-    ).stdout.split()  # fmt: skip
-    found["releases"] = tags
+    ).stdout  # fmt: skip
+    text = base64.b64decode(pyproject or "").decode()
+    declared = re.search(r'^version = "([^"]+)"', text, re.MULTILINE)
+    found["version"] = declared.group(1) if declared else ""
     return found
 
 
-def score(name: str, answer: str, truth: dict, world: dict) -> str:
+def score(name: str, answer: str, truth: dict, world: dict, tools: list[str] | None) -> str:
     """How much of what was asked the answer has (beyond the hidden tests and the analysis)."""
     plain = answer.replace(",", "")
     if name == "chinese":
@@ -247,8 +252,13 @@ def score(name: str, answer: str, truth: dict, world: dict) -> str:
         version = world.get("requests", "")
         return f"version {'ok' if version and version in answer else 'MISSING'} ({version})"
     if name == "mcp_read":
-        tags = world.get("releases") or []
-        return f"tags {sum(tag in answer for tag in tags)}/{len(tags)}"
+        version = world.get("version", "")
+        found = bool(version) and re.search(rf"\b{re.escape(version)}\b", answer) is not None
+        line = f"version {'ok' if found else 'MISSING'} ({version})"
+        if tools is None:  # A standalone run: its tool calls are not recorded.
+            return line
+        mcp = any(tool.startswith("github-mcp-server-") for tool in tools)
+        return f"{line}, read through MCP {'yes' if mcp else 'NO'}"
     if name == "investigate":
         cause = "len(items) - size" in answer or "len(items)-size" in answer
         return f"cause {'ok' if cause else 'MISSING'}"
@@ -431,9 +441,13 @@ async def worker_run(app: App, router: str, name: str, task: str, project: Path)
             for t in (await app.get("/api/state"))["tasks"]
             if t["session_id"] == worker and t["id"] not in known
         ]
-        return next((t for t in tasks if t["status"] in {"review", "done", "waiting"}), None)
+        ended = {"review", "done", "waiting", "failed", "cancelled"}
+        return next((t for t in tasks if t["status"] in ended), None)
 
     found = await wait_for(f"{name}: the worker reports", reported, 1500, app)
+    if found["status"] in {"failed", "cancelled"}:  # Nothing more will come: say why now.
+        report = await app.get(f"/api/tasks/{found['id']}/report")
+        raise AssertionError(f"{name}: the task {found['status']}: {json.dumps(report)[:1500]}")
     seconds = time.monotonic() - started
     report = await app.get(f"/api/tasks/{found['id']}/report")
     row = await app.get(f"/api/sessions/{worker}")
@@ -460,6 +474,7 @@ async def worker_run(app: App, router: str, name: str, task: str, project: Path)
         "status": found["status"],
         "instructions": found.get("goal") or row.get("task", ""),
         "timeline": timeline,
+        "tools": [m["text"] for m in messages if m["kind"] == "tool"],
     }
 
 
@@ -520,7 +535,7 @@ async def run(number: int) -> list[str]:
                         )
                     if name == "analysis":
                         line += f"\n    {label}: {analysis_score(result['answer'], truth)}"
-                    if extra := score(name, result["answer"], truth, world):
+                    if extra := score(name, result["answer"], truth, world, result.get("tools")):
                         line += f"\n    {label}: {extra}"
                 summary.append(line)
             changed = git(project, "status", "--porcelain", "--untracked-files=no").strip()
