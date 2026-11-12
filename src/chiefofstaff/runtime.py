@@ -685,6 +685,7 @@ class Runtime:
             backend = entry.start()
             try:
                 await backend.start()
+                await self.check_agent(agent, backend)
             except BaseException:
                 with suppress(Exception):
                     await backend.stop()
@@ -705,6 +706,24 @@ class Runtime:
             except Exception:
                 logger.exception("Recovering the sessions of %s failed", agent)
         return backend
+
+    async def check_agent(self, agent: str, backend: Any):
+        """What Chief of Staff's checks rely on, checked once per version of another agent (its
+        backend's `check`, on this machine without a model call) and remembered; what it found
+        keeps its workers from running (agent_block). A check that could not run is tried again
+        at its next start."""
+        if not hasattr(backend, "check"):
+            return
+        key = f"agentcheck:{agent}:{await backend.version()}"
+        try:
+            found = json.loads(self.store.get(key) or "null")
+        except ValueError:
+            found = None
+        if not isinstance(found, dict):
+            found = await backend.check(self.work_root / f"{agent}-check")
+            if found.get("ran"):
+                self.store.set(key, json.dumps(found))
+        backend.checked = found
 
     async def disconnect_agent(self, agent: str):
         """As disconnect, for another agent's backend: only its own sessions' handles and turns
@@ -791,8 +810,9 @@ class Runtime:
     def agent_block(self, row: dict) -> str:
         """Why this session may not run now ("" when it may): never for Copilot's. Another
         agent's runs only the owner's own workers, only while that agent is on and the worker
-        sandbox off (its sandbox has not passed Chief of Staff's checks), and with Ask first only
-        on a version whose every kind of action was shown to ask first (its backend says so)."""
+        sandbox off (its sandbox has not passed Chief of Staff's checks), only on a version whose
+        check found nothing unsafe, and with Ask first only on a version whose every kind of
+        action was shown to ask first (its backend says so)."""
         agent = self.agent(row["id"])
         if agent == COPILOT_AGENT:
             return ""
@@ -811,6 +831,8 @@ class Runtime:
                 f"{name} can't run while workers are sandboxed: its sandbox has not passed Chief "
                 "of Staff's checks yet. Turn the sandbox off in Settings → Workers to go on."
             )
+        if why := getattr(entry.backend, "acting_refused", ""):
+            return why
         if not self.yolo(row) and (why := getattr(entry.backend, "ask_first_refused", "")):
             return why
         return ""
@@ -1409,18 +1431,15 @@ class Runtime:
     def agent_options(self, row: dict) -> dict:
         """What another agent's worker runs with, in neutral form for its adapter to map: the
         same instructions and tools as a Copilot worker's, its folder, the owner's permission
-        checks and questions, whether it acts on its own, which repository each of its folders is
-        a checkout of (the agent trusts a folder as the owner trusts that repository in it), and
-        the model chosen for that agent. Copilot's options and model state are not used."""
-        checkouts = self.workspaces.checkouts(row)
+        checks and questions, whether it acts on its own, the folders it works in (the agent
+        trusts each as it would for the owner), and the model chosen for that agent. Copilot's
+        options and model state are not used."""
         cwd = row["cwd"] or str(self.role_dir("scratch"))
-        trust = [
-            (checkout["path"], checkout.get("project") or checkout.get("repo") or checkout["path"])
-            for checkout in checkouts
-            if checkout.get("path")
+        folders = [cwd] + [
+            checkout["path"]
+            for checkout in self.workspaces.checkouts(row)
+            if checkout.get("path") and checkout["path"] != cwd
         ]
-        if cwd not in {folder for folder, _ in trust}:
-            trust.append((cwd, cwd))
         chosen = agents.configured(self.store).get(self.agent(row["id"]), {})
         options: dict[str, Any] = {
             "system_message": {"content": self.session_prompt(row, None)},
@@ -1430,7 +1449,7 @@ class Runtime:
             "on_user_input_request": self.asks.on_user_input,
             "on_elicitation_request": self.asks.on_elicitation,
             "ask_first": not self.yolo(row),
-            "trust": trust,
+            "folders": folders,
         }
         if model := chosen.get("model"):
             options["model"] = model

@@ -859,19 +859,21 @@ async def test_a_worktree_loads_its_repositorys_codex_config_only_where_the_owne
     backend, tmp_path, monkeypatch
 ):
     """Codex marks a folder it starts a writable thread in as trusted in the owner's config:
-    every thread is told its folders' trust instead, as the owner trusts the repository."""
+    every thread is told its folders' trust instead, as Codex itself trusts them for the owner:
+    a worktree by its main checkout's entry, never a folder by an ancestor's."""
     only_codex(backend)
     if not real_codex(backend):
         pytest.skip("Which configuration loads is Codex's own: the real one shows it.")
     config = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "config.toml"
     before = config.read_bytes() if config.exists() else None
-    for trusted in (True, False):
-        place = tmp_path / ("trusted" if trusted else "untrusted")
+    for trusted in ("repository", "", "ancestor"):
+        place = tmp_path / (trusted or "untrusted")
         repo, worktree = place / "repo", place / "work"
         await asyncio.to_thread(repository_with_codex_config, place, repo, worktree)
         # The owner's trust, as their config.toml says it (a dotted -c key would split the path).
-        trust = f'projects={{"{repo.resolve()}"={{trust_level="trusted"}}}}'
-        owner = ["-c", trust] if trusted else []
+        folder = {"repository": repo.resolve(), "ancestor": place.resolve()}.get(trusted)
+        trust = f'projects={{"{folder}"={{trust_level="trusted"}}}}'
+        owner = ["-c", trust] if folder else []
         codex = await another_codex(backend, tmp_path, monkeypatch, *owner)
         await codex.start()
         try:
@@ -879,11 +881,11 @@ async def test_a_worktree_loads_its_repositorys_codex_config_only_where_the_owne
                 session_id="t",
                 name="trust",
                 working_directory=str(worktree),
-                trust=[(str(worktree), str(repo))],
+                folders=[str(worktree)],
                 on_permission_request=lambda request, inv: PermissionDecisionApproveOnce(),
             )
             await asyncio.sleep(5)  # Its MCP servers start with the thread.
-            assert (place / "started-project").exists() == trusted
+            assert (place / "started-project").exists() == (trusted == "repository"), trusted
             await codex.archive(session.session_id)
         finally:
             await codex.stop()

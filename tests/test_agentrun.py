@@ -36,12 +36,37 @@ time.sleep(300)
 """
 
 
-def supervise(tmp_path: Path, *extra: str, lifeline: int | None = None, look: str = "0.2", **popen):
+# One that crashes a moment after it starts a command (after the supervisor's first look).
+CRASHING = r"""
+import json, os, signal, subprocess, sys, time
+time.sleep(0.5)
+late = subprocess.Popen(["sleep", "301"], start_new_session=True)
+with open(sys.argv[1], "w") as f:
+    json.dump({"pid": os.getpid(), "child": late.pid}, f)
+time.sleep(0.3)
+os.kill(os.getpid(), signal.SIGKILL)
+"""
+
+
+@pytest.fixture(autouse=True)
+def no_subreaper(monkeypatch):
+    """In this process (pytest's), the supervisor does not take what others leave."""
+    monkeypatch.setattr(agentrun, "adopt_orphans", lambda: False)
+
+
+def supervise(
+    tmp_path: Path,
+    *extra: str,
+    lifeline: int | None = None,
+    look: str = "0.2",
+    cli: str = CLI,
+    **popen,
+):
     out = tmp_path / "cli.json"
     command = [sys.executable, "-m", "chiefofstaff.agentrun"]
     if lifeline is not None:
         command += ["--lifeline", str(lifeline)]
-    command += ["--", sys.executable, "-c", CLI, str(out), *extra]
+    command += ["--", sys.executable, "-c", cli, str(out), *extra]
     env = {
         **os.environ,
         "CHIEFOFSTAFF_AGENTRUN_LOOK": look,
@@ -117,6 +142,18 @@ def test_when_the_agent_exits_what_it_left_running_ends_with_it(tmp_path, leftov
     cli = started(out)
     leftovers.append(cli["child"])
     assert process.wait(30) == 7, "its exit code is the agent's"
+    assert gone(cli["child"])
+
+
+def test_what_a_crashing_agent_started_in_its_last_moments_ends_too(tmp_path, leftovers):
+    """Review: a command started within the last look's interval before the CLI crashed was
+    left running. The supervisor looks the moment the CLI starts a process (macOS), or takes
+    what the CLI leaves (Linux)."""
+    process, out = supervise(tmp_path, look="600", cli=CRASHING)
+    leftovers.append(process.pid)
+    cli = started(out)
+    leftovers.append(cli["child"])
+    assert process.wait(30) == -signal.SIGKILL % 256, "it ended as the agent did"
     assert gone(cli["child"])
 
 

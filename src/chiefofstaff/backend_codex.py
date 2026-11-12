@@ -41,14 +41,16 @@ import sys
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from pathlib import Path
+from stat import S_ISDIR, S_ISREG
 from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
-from copilot.generated.rpc import PermissionDecisionReject
+from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
 from copilot.tools import ToolInvocation
 
-from .backend import Capabilities, descendants, end_processes, older, process_table
+from . import codex_check
+from .backend import Capabilities, descendants, end_processes, process_table
 from .envelope import wrap
 from .policy import GITHUB_MCP
 
@@ -64,13 +66,16 @@ CODEX = Capabilities(
     mcp_sign_in=False,
     sandbox=False,
 )
-# The Codex CLI versions this release was tested with (the contract test, live runs). Older ones
-# do not run; with Ask first, only those up to the next minor version, whose every kind of
-# action was shown to ask Chief of Staff first.
+# The Codex CLI versions this release was tested with (the contract test, live runs): older
+# ones (and one whose version cannot be told) do not run; workers that ask first run only up to
+# the next minor version, whose every kind of action was shown to ask Chief of Staff first.
+# Newer ones run workers that act on their own.
 OLDEST_CODEX = "0.167.2"
-ASK_FIRST_BEFORE = "0.168"
+ASK_FIRST_BEFORE = "0.168.0"
 # How long a request to the app-server may take (seconds), and one that starts a thread.
 REQUEST_TIMEOUT = float(os.environ.get("CHIEFOFSTAFF_CODEX_TIMEOUT", "60"))
+# How long the check of a Codex version may take, all told (seconds).
+CHECK_TIMEOUT = 90.0
 # What a thread's settings must read back as (thread/start and thread/resume answers).
 APPROVAL_POLICY = "untrusted"
 REVIEWER = "user"
@@ -84,6 +89,9 @@ QUIET_ITEMS = frozenset({"reasoning", "plan", "hookPrompt", "contextCompaction",
 REFUSED_NOTE = '<message from="system" type="refused">'
 # A server that is GitHub's (its name, command or URL): its writes are the owner's to approve.
 GITHUB = re.compile(r"github", re.IGNORECASE)
+# Codex's own server for ChatGPT's apps (connectors): their calls take approval from Codex's
+# `apps` settings, not a server's approval mode, so a worker that asks first runs without them.
+CODEX_APPS = "codex_apps"
 
 
 class CodexError(RuntimeError):
@@ -138,29 +146,207 @@ def github_server(name: str, config: Any) -> bool:
     return any(isinstance(part, str) and GITHUB.search(part) for part in parts)
 
 
-def trust_levels(owners: dict, pairs: list[tuple[str, str]]) -> dict[str, dict]:
-    """Each folder's trust for a thread (`projects` in its config): as the owner trusts, in Codex,
-    the repository it is a checkout of (`pairs`: folder, repository), under both paths."""
-    trusted = [
-        Path(path).expanduser().resolve()
-        for path, project in owners.items()
-        if isinstance(project, dict) and project.get("trust_level") == "trusted"
-    ]
-    projects = {}
-    for folder, origin in pairs:
-        target = Path(origin).expanduser().resolve()
-        level = "trusted" if any(target.is_relative_to(root) for root in trusted) else "untrusted"
-        for path in {folder, origin, str(Path(folder).resolve()), str(target)}:
-            projects[path] = {"trust_level": level}
+def github_app(meta: dict) -> bool:
+    """Whether a call of ChatGPT's apps is GitHub's: by its connector or its tool."""
+    parts = [meta.get(key) for key in ("connector_id", "connector_name", "tool_name", "tool_title")]
+    return any(isinstance(part, str) and GITHUB.search(part) for part in parts)
+
+
+# Trust, as Codex 0.167.2 decides it (codex-rs/config/src/loader/mod.rs: project_trust_context,
+# ProjectTrustContext::decision_for_dir, normalized_project_trust_keys, discover_project_root;
+# codex-rs/git-utils/src/trust.rs: resolve_root_git_project_for_trust). A folder Codex reads a
+# `.codex/` from is trusted by the entry for that very folder, else by the one for its project
+# root (the nearest folder with a marker, `.git` by default), else by the one for its
+# repository's root (for a linked worktree, its main checkout's); never by an ancestor's entry.
+# Each folder is looked up by its canonical path first, then as spelled.
+GIT_METADATA_LIMIT = 64 * 1024
+
+
+def metadata(path: Path) -> os.stat_result | None:
+    try:
+        return path.stat()
+    except (OSError, ValueError):
+        return None
+
+
+def is_folder(path: Path) -> bool:
+    return (found := metadata(path)) is not None and S_ISDIR(found.st_mode)
+
+
+def canonical(path: Path | str) -> str:
+    try:
+        return os.path.realpath(path, strict=True)
+    except (OSError, ValueError):
+        return ""
+
+
+def trust_keys(path: str) -> list[str]:
+    real = canonical(path)
+    return [path] if not real or real == path else [real, path]
+
+
+def project_root(folder: Path, markers: list[str]) -> Path | None:
+    """The nearest folder (this one or above) with one of the markers."""
+    for ancestor in [folder, *folder.parents]:
+        for marker in markers:
+            if (found := metadata(ancestor / marker)) is None:
+                continue
+            if marker == ".git" and S_ISDIR(found.st_mode) and not metadata(ancestor / ".git/HEAD"):
+                continue  # A folder named .git that is not a repository.
+            return ancestor
+    return None
+
+
+def metadata_file(path: Path) -> bytes:
+    """A small regular file of git's (not a link to one), as Codex reads it; b"" otherwise."""
+    found = metadata(path)
+    if found is None or not S_ISREG(found.st_mode) or path.is_symlink():
+        return b""
+    if found.st_size > GIT_METADATA_LIMIT:
+        return b""
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return b""
+    return data if len(data) <= GIT_METADATA_LIMIT else b""
+
+
+def joined(base: Path, named: bytes) -> Path:
+    """A path a git file names, from `base` (as Codex joins them: `..` taken away)."""
+    return Path(os.path.normpath(base / os.fsdecode(named)))
+
+
+def gitdir_file(path: Path) -> Path | None:
+    """Where a `.git` file points (`gitdir: <path>`, from its folder)."""
+    contents = metadata_file(path).strip()
+    if not contents.startswith(b"gitdir:"):
+        return None
+    if not (target := contents.removeprefix(b"gitdir:").strip()):
+        return None
+    return joined(path.parent, target)
+
+
+def repository_root(folder: Path) -> Path | None:
+    """The root Codex trusts a folder's repository by: its checkout's, or for a linked worktree
+    its main checkout's, once git's files show they belong together."""
+    base = folder if is_folder(folder) else folder.parent
+    while True:
+        found = [a for a in [base, *base.parents] if metadata(a / ".git") is not None]
+        if not found or (dot_git := metadata(found[0] / ".git")) is None:
+            return None
+        candidate = found[0]
+        if not S_ISDIR(dot_git.st_mode) or metadata(candidate / ".git/HEAD"):
+            break
+        if (base := candidate.parent) == candidate:
+            return None
+    if S_ISDIR(dot_git.st_mode):
+        return candidate
+    git_dir = gitdir_file(candidate / ".git")
+    if git_dir is None or not is_folder(git_dir) or git_dir.is_symlink():
+        return None
+    real_git_dir = Path(canonical(git_dir) or "/")
+    if real_git_dir.parent.name != "worktrees":
+        return None
+    common = str(real_git_dir.parent.parent)
+    registered = metadata_file(real_git_dir / "gitdir").strip()
+    common_named = metadata_file(real_git_dir / "commondir").strip()
+    if not registered or not common_named:
+        return None
+    registered_dot_git = joined(real_git_dir, registered)
+    if registered_dot_git.name != ".git":
+        return None
+    checkout = canonical(registered_dot_git.parent)
+    if not checkout or checkout != canonical(candidate):
+        return None
+    if canonical(joined(real_git_dir, common_named)) != common:
+        return None
+    # The main checkout, as the worktree's `.git` names it, owns that repository.
+    main = git_dir.parent.parent.parent
+    if (found_main := metadata(main / ".git")) is None:
+        return None
+    main_git_dir = main / ".git" if S_ISDIR(found_main.st_mode) else gitdir_file(main / ".git")
+    if main_git_dir is None or canonical(main_git_dir) != common:
+        return None
+    return main
+
+
+def owner_trust(projects: Any) -> dict[str, str]:
+    """The trust the owner gave folders in Codex (`projects` in its config), by key."""
+    return {
+        key: entry["trust_level"]
+        for key, entry in mapping(projects).items()
+        if isinstance(entry, dict) and entry.get("trust_level") in {"trusted", "untrusted"}
+    }
+
+
+def trust_levels(
+    owners: Any, folders: list[str], markers: Any = None, answered: dict[str, str] | None = None
+) -> dict[str, dict]:
+    """The `projects` of a thread's config: each folder Codex would read a `.codex/` from for
+    these folders (each one, and those above it up to its project root) gets the trust Codex
+    itself gives it for the owner, or what Codex said of it (`answered`, from config/read);
+    untrusted otherwise, said explicitly: Codex records a folder without a decision as trusted
+    in the owner's config.toml when a writable thread starts there."""
+    levels = owner_trust(owners)
+    if not isinstance(markers, list) or not all(isinstance(m, str) for m in markers):
+        markers = [".git"]
+    projects: dict[str, dict] = {}
+    for folder in map(Path, folders):
+        root = project_root(folder, markers) or folder
+        repository = repository_root(folder)
+        looked_up = trust_keys(str(root)) + (trust_keys(str(repository)) if repository else [])
+        chain = [folder, *folder.parents]
+        for place in map(str, chain[: chain.index(root) + 1]):
+            level = (answered or {}).get(place) or next(
+                (levels[key] for key in trust_keys(place) + looked_up if key in levels),
+                "untrusted",
+            )
+            for key in trust_keys(place):
+                projects[key] = {"trust_level": level}
     return projects
+
+
+def trust_answered(layers: Any) -> dict[str, str]:
+    """What Codex said of each folder whose `.codex/` it found (config/read's layers): trusted
+    when that layer loads, else untrusted."""
+    answered = {}
+    for layer in layers if isinstance(layers, list) else []:
+        name = mapping(mapping(layer).get("name"))
+        if name.get("type") == "project" and isinstance(name.get("dotCodexFolder"), str):
+            folder = str(Path(name["dotCodexFolder"]).parent)
+            answered[folder] = "untrusted" if layer.get("disabledReason") else "trusted"
+    return answered
 
 
 def event(kind: str, /, **data: Any) -> SimpleNamespace:
     return SimpleNamespace(type=SimpleNamespace(value=kind), data=SimpleNamespace(**data))
 
 
+def release(version: str) -> tuple[int, ...] | None:
+    """A version, comparable: a pre-release ("0.168.0-alpha.2") comes before its release."""
+    found = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(-[\w.-]+)?", version or "")
+    if not found:
+        return None
+    return (*map(int, found.group(1, 2, 3)), 0 if found.group(4) else 1)
+
+
+def codex_refused(version: str) -> str:
+    """Why this Codex does not run at all ("" when it does)."""
+    if (found := release(version)) is None:
+        return (
+            f"Chief of Staff could not tell which version of Codex this is ({version or 'none'} "
+            f"said): update it to {OLDEST_CODEX} or later."
+        )
+    if found < (release(OLDEST_CODEX) or ()):
+        return f"Codex {version} is older than the versions tested ({OLDEST_CODEX}): update it."
+    return ""
+
+
 def ask_first_tested(version: str) -> bool:
-    return bool(version) and not older(version, OLDEST_CODEX) and older(version, ASK_FIRST_BEFORE)
+    found = release(version)
+    oldest, before = release(OLDEST_CODEX) or (), release(ASK_FIRST_BEFORE) or ()
+    # Not a pre-release of the next minor version either.
+    return found is not None and oldest <= found and found[:3] < before[:3]
 
 
 class CodexBackend:
@@ -193,6 +379,10 @@ class CodexBackend:
         # turn begins (Runtime.begins_turn). Without them every turn is admitted.
         self.admit: Callable[[CodexSession], Awaitable[str]] | None = None
         self.begins: Callable[[CodexSession], bool] | None = None
+        # What its check showed on this version (check): why workers may not run on it.
+        self.checked: dict | None = None
+        # Whether it needs the owner's sign-in (not for the check's model, on this machine).
+        self.needs_sign_in = True
 
     # The process
 
@@ -241,13 +431,10 @@ class CodexBackend:
             )
             self.notify("initialized")
             self.cli_version = version_of(answer.get("userAgent", ""))
-            if older(self.cli_version, OLDEST_CODEX):
-                raise RuntimeError(
-                    f"Codex {self.cli_version or '(unknown version)'} is older than the versions "
-                    f"tested ({OLDEST_CODEX}): update it."
-                )
+            if why := codex_refused(self.cli_version):
+                raise RuntimeError(why)
             await self.check_requirements()
-            if not (await self.get_auth_status()).isAuthenticated:
+            if self.needs_sign_in and not (await self.get_auth_status()).isAuthenticated:
                 raise RuntimeError("Codex is not signed in: run `codex login`.")
         except BaseException:
             await self.stop()
@@ -528,6 +715,7 @@ class CodexBackend:
         ]
         answer = await self.request("thread/start", params)
         try:
+            await self.apps_off(answer, options)
             session = self.opened(answer, options)
         except RuntimeError:
             if thread := (answer.get("thread") or {}).get("id"):
@@ -545,19 +733,146 @@ class CodexBackend:
         params = await self.thread_params(options)
         params.update(threadId=session_id, excludeTurns=True)
         answer = await self.request("thread/resume", params)
+        try:
+            await self.apps_off(answer, options)
+        except RuntimeError:
+            if thread := (answer.get("thread") or {}).get("id"):
+                with suppress(Exception):
+                    await self.request("thread/unsubscribe", {"threadId": thread})
+            raise
         return self.opened(answer, options)
+
+    async def apps_off(self, answer: dict, options: dict):
+        """With Ask first, the thread must read back with ChatGPT's apps off, as set."""
+        if not options.get("ask_first"):
+            return
+        thread = (answer.get("thread") or {}).get("id") or ""
+        try:
+            listed = await self.request("experimentalFeature/list", {"threadId": thread})
+        except CodexError as exc:
+            raise RuntimeError(
+                f"Codex could not say which features this worker has: {exc}"
+            ) from exc
+        apps = [f for f in listed.get("data") or [] if mapping(f).get("name") == "apps"]
+        if not apps or apps[0].get("enabled") is not False:
+            raise RuntimeError(
+                "Codex did not turn ChatGPT's apps off for this worker, which Ask first needs "
+                "(their actions are not checked by Chief of Staff): an administrator's Codex "
+                "settings may keep them on."
+            )
 
     @property
     def ask_first_refused(self) -> str:
-        """Why its workers cannot ask first ("" when they can): only a version whose every kind
-        of action was shown to ask Chief of Staff first runs them (Runtime.agent_block)."""
-        if ask_first_tested(self.cli_version):
-            return ""
-        return (
-            f"Codex {self.cli_version} has not passed Chief of Staff's checks for Ask first "
-            f"(tested from {OLDEST_CODEX}, before {ASK_FIRST_BEFORE}): let this worker act on its "
-            "own, or use a tested version."
+        """Why its workers cannot ask first ("" when they can): only a version tested for it,
+        whose check here showed every kind of action asking Chief of Staff first, runs them
+        (Runtime.agent_block)."""
+        if not ask_first_tested(self.cli_version):
+            return (
+                f"Codex {self.cli_version} has not passed Chief of Staff's checks for Ask first "
+                f"(tested from {OLDEST_CODEX}, before {ASK_FIRST_BEFORE}): let this worker act "
+                "on its own, or use a tested version."
+            )
+        return (self.checked or {}).get("ask_first") or ""
+
+    @property
+    def acting_refused(self) -> str:
+        """Why none of its workers runs, even acting on its own ("" when they do): its check
+        here showed edits not asking Chief of Staff first (the owner's checkouts are kept by
+        that ask, also for a worker acting on its own)."""
+        return (self.checked or {}).get("acting") or ""
+
+    async def check(self, folder: Path) -> dict:
+        """What Chief of Staff's checks rely on, on this Codex, without a model call: a thread
+        set up as a worker that asks first is (read back), whose one turn, from a stand-in
+        model on this machine (codex_check), calls one of Chief of Staff's tools, runs a
+        command, calls an MCP tool, adds two files and moves one. Each must reach Chief of
+        Staff, which refuses each (an edit at its last file, so every file of it is asked
+        about); nothing refused may happen. `ran`: False when the check itself could not run
+        (then it is not remembered)."""
+        work = folder / "work"
+        asked: list[str] = []
+        model = other = None
+        try:
+            await asyncio.to_thread(shutil.rmtree, folder, True)
+            await asyncio.to_thread(work.mkdir, parents=True)
+            (work / codex_check.MOVED_FROM).write_text("a\n")
+            model = await asyncio.to_thread(codex_check.Model, work)
+            other = CodexBackend(self.command)
+            other.arguments += model.arguments(folder)
+            other.needs_sign_in = False
+            await asyncio.wait_for(self.checking(other, work, asked), CHECK_TIMEOUT)
+            happened = [
+                name
+                for name in (
+                    codex_check.COMMAND_MARK,
+                    codex_check.SERVER_MARK,
+                    *codex_check.ADDED,
+                    codex_check.MOVED_TO,
+                )
+                if (work / name).exists()
+            ]
+        except Exception as exc:  # Whatever stops the check, it says why.
+            why = str(exc) or type(exc).__name__
+            return {
+                "ran": False,
+                "ask_first": f"Chief of Staff's check of Codex {self.cli_version} could not run "
+                f"({why[:200]}): workers that ask first do not run on it until it does.",
+                "acting": "",
+            }
+        finally:
+            if other:
+                await other.stop()
+            if model:
+                await asyncio.to_thread(model.close)
+            await asyncio.to_thread(shutil.rmtree, folder, True)
+        return check_verdict(self.cli_version, asked, happened)
+
+    async def checking(self, other: CodexBackend, work: Path, asked: list[str]):
+        await other.start()
+        ended = asyncio.Event()
+
+        def check(request: Any, invocation: dict) -> Any:
+            kind = getattr(request, "kind", "")
+            if kind != "write":
+                asked.append(kind)
+                return PermissionDecisionReject(feedback="Chief of Staff's check.")
+            name = Path(request.resolved_path).name
+            asked.append(f"write {name}")
+            # An edit's last file is refused, so each of its files is asked about first.
+            if name in {codex_check.ADDED[-1], codex_check.MOVED_TO}:
+                return PermissionDecisionReject(feedback="Chief of Staff's check.")
+            return PermissionDecisionApproveOnce()
+
+        def tool(invocation: Any) -> str:
+            asked.append("tool")
+            return "checked"
+
+        session = await other.create_session(
+            session_id="check",
+            name="",
+            working_directory=str(work),
+            folders=[str(work)],
+            ask_first=True,
+            ephemeral=True,
+            checking=str(work),
+            tools=[
+                SimpleNamespace(
+                    name=codex_check.TOOL,
+                    description="Chief of Staff's check.",
+                    parameters={"type": "object", "properties": {"text": {"type": "string"}}},
+                    handler=tool,
+                )
+            ],
+            on_permission_request=check,
         )
+
+        def on_event(event: Any):
+            if event.type.value in {"session.idle", "session.error"}:
+                ended.set()
+
+        session.on(on_event)
+        await session.send(codex_check.PROMPT.format(work=work))
+        await ended.wait()
 
     async def thread_params(self, options: dict) -> dict:
         if options.get("ask_first") and (why := self.ask_first_refused):
@@ -571,20 +886,30 @@ class CodexBackend:
             "approvalsReviewer": REVIEWER,
             **({"model": options["model"]} if options.get("model") else {}),
             **({"developerInstructions": prompt} if prompt else {}),
+            **({"ephemeral": True} if options.get("ephemeral") else {}),
             "config": await self.thread_config(options, cwd),
         }
 
     async def thread_config(self, options: dict, cwd: str) -> dict:
-        """The thread's own settings, over the owner's: whether its folders' repositories are
-        trusted (as the owner trusts them in Codex), and with Ask first, every MCP call asks."""
-        owner = (await self.request("config/read", {"cwd": cwd})).get("config") or {}
+        """The thread's own settings, over the owner's: whether its folders are trusted (as
+        Codex trusts them for the owner), and with Ask first, every MCP call asks and ChatGPT's
+        apps are off."""
+        read = await self.request("config/read", {"cwd": cwd, "includeLayers": True})
+        owner = mapping(read.get("config"))
         # Which of its MCP servers is GitHub's is told from their configuration (elicitation).
         options["mcp_configs"] = owner.get("mcp_servers") or {}
-        pairs = options.get("trust") or [(cwd, cwd)]
-        projects = await asyncio.to_thread(trust_levels, owner.get("projects") or {}, pairs)
+        folders = [cwd, *(f for f in options.get("folders") or [] if f != cwd)]
+        projects = await asyncio.to_thread(
+            trust_levels,
+            owner.get("projects"),
+            folders,
+            owner.get("project_root_markers"),
+            trust_answered(read.get("layers")),
+        )
         # Nested, this replaces the owner's table for the thread (only its folders matter there).
         config: dict[str, Any] = {"projects": projects}
         if options.get("ask_first"):
+            config["features.apps"] = False
             for server, entry in (owner.get("mcp_servers") or {}).items():
                 if "." in server or not isinstance(entry, dict):
                     continue  # Not addressable as a dotted key: left as configured.
@@ -593,6 +918,13 @@ class CodexBackend:
                 for tool in entry.get("tools") or {}:
                     if "." not in tool:
                         config[f"mcp_servers.{server}.tools.{tool}.approval_mode"] = "prompt"
+                if options.get("checking"):
+                    config[f"mcp_servers.{server}.enabled"] = False  # Not started for it.
+        if checking := options.get("checking"):
+            server = f"mcp_servers.{codex_check.SERVER}"
+            config[f"{server}.command"] = sys.executable
+            config[f"{server}.args"] = ["-m", "chiefofstaff.codex_check", "--mcp", checking]
+            config[f"{server}.default_tools_approval_mode"] = "prompt"
         return config
 
     def opened(self, answer: dict, options: dict) -> CodexSession:
@@ -865,25 +1197,56 @@ class CodexSession:
 
     async def stop_background(self) -> int:
         """Ends the commands its turns left running, and child agents still at work after its
-        turn ended. Codex keeps a turn's commands running when the turn is interrupted (0.167.2):
-        what its thread runs is asked of Codex, not only what its turns' ends have shown here."""
+        turn ended; how many it ended. Codex keeps a turn's commands running when the turn is
+        interrupted (0.167.2): what each of its threads runs is asked of Codex (its own thread
+        first), not only what its turns' ends have shown here. A thread that cannot be asked
+        does not keep the others' from being ended; one Codex no longer has (a child agent it
+        closed) is let go of."""
         stopping = 0
-        for thread in {self.session_id, *self.left_running.values(), *self.child_threads}:
-            listed = await self.backend.request(
-                "thread/backgroundTerminals/list", {"threadId": thread}
-            )
-            if found := listed.get("data"):
-                stopping += len(found)
-                await self.backend.request("thread/backgroundTerminals/clean", {"threadId": thread})
+        others = sorted({*self.left_running.values(), *self.child_threads} - {self.session_id})
+        for thread in [self.session_id, *others]:
+            try:
+                listed = await self.backend.request(
+                    "thread/backgroundTerminals/list", {"threadId": thread}
+                )
+                if found := listed.get("data"):
+                    await self.backend.request(
+                        "thread/backgroundTerminals/clean", {"threadId": thread}
+                    )
+                    stopping += len(found)
+            except CodexError as exc:
+                if thread != self.session_id and "not found" in str(exc):
+                    await self.let_go(thread)
+            except ConnectionError:
+                break  # Codex stopped: what it ran ended with it.
         if self.turn is None:
             for child, turn in list(self.child_turns.items()):
-                if turn:
-                    with suppress(Exception):
-                        await self.backend.request(
-                            "turn/interrupt", {"threadId": child, "turnId": turn}
-                        )
-                stopping += 1
+                if not turn:
+                    continue
+                with suppress(Exception):
+                    await self.backend.request(
+                        "turn/interrupt", {"threadId": child, "turnId": turn}
+                    )
+                    stopping += 1
         return stopping
+
+    async def let_go(self, thread: str):
+        """A child thread Codex no longer has (closed): nothing of it can be followed or ended
+        through Codex now. Its commands left running are settled without an exit code, and its
+        turn as cut short."""
+        self.child_threads.discard(thread)
+        settled = False
+        for item_id, owner in list(self.left_running.items()):
+            if owner == thread:
+                del self.left_running[item_id]
+                self.items.pop(item_id, None)
+                kind = SimpleNamespace(type="shell_completed", shell_id=item_id, exit_code=None)
+                self.emit("system.notification", kind=kind)
+                settled = True
+        if thread in self.child_turns:
+            await self.child_ended(thread, {"status": "interrupted"})
+        elif settled:
+            self.after_background()
 
     async def take_queued(self) -> int:
         taken, self.queue = len(self.queue), []
@@ -938,6 +1301,8 @@ class CodexSession:
             )
         elif method == "model/rerouted" and not child:
             self.current_model = params.get("toModel") or params.get("model") or self.current_model
+        elif method == "thread/closed" and child:
+            await self.let_go(thread)
 
     def shows_turn(self, method: str, params: dict) -> bool:
         """Whether this is the turn's first step that is not its message (Codex says other
@@ -1297,31 +1662,43 @@ class CodexSession:
         if not changes:
             return {"decision": "decline"}  # Which files it writes is not known: not written.
         for change in changes:
-            path = str(change.get("path") or "")
-            request = SimpleNamespace(
-                kind="write",
-                file_name=path,
-                resolved_path=path,
-                diff=change.get("diff") or "",
-                intention=params.get("reason") or "",
-                can_offer_session_approval=False,
-                tool_call_id=params.get("itemId"),
-            )
-            if await self.permitted(request, context):
-                return {"decision": "decline"}
+            # A move (apply_patch's `*** Move to:`) writes its destination too.
+            moved = mapping(change.get("kind")).get("move_path")
+            for path in [str(change.get("path") or ""), *([moved] if moved else [])]:
+                request = SimpleNamespace(
+                    kind="write",
+                    file_name=str(path),
+                    resolved_path=str(path),
+                    diff=change.get("diff") or "",
+                    intention=params.get("reason") or "",
+                    can_offer_session_approval=False,
+                    tool_call_id=params.get("itemId"),
+                )
+                if await self.permitted(request, context):
+                    return {"decision": "decline"}
         return {"decision": "accept"}
 
     async def elicitation(self, params: dict, context: dict) -> dict:
         meta = mapping(params.get("_meta"))
         server = params.get("serverName") or ""
         if meta.get("codex_approval_kind") == "mcp_tool_call":
-            annotations = meta.get("tool_annotations") or {}
+            read_only = bool(mapping(meta.get("tool_annotations")).get("readOnlyHint"))
+            github = self.github(server) or (server == CODEX_APPS and github_app(meta))
+            if (
+                server == CODEX_APPS
+                and not github
+                and not read_only
+                and self.options.get("ask_first")
+            ):
+                # Apps are off for it (apps_off): one that still asks is not let act.
+                await self.tell("ChatGPT's apps do not act for a worker that asks first.")
+                return {"action": "decline"}
             request = SimpleNamespace(
                 kind="mcp",
-                server_name=GITHUB_MCP if self.github(server) else server,
+                server_name=GITHUB_MCP if github else server,
                 tool_name=meta.get("tool_name") or "",
                 tool_title=meta.get("tool_name") or "",
-                read_only=bool(annotations.get("readOnlyHint")),
+                read_only=read_only,
                 args=meta.get("tool_params"),
             )
             refused = await self.permitted(request, context)
@@ -1394,6 +1771,42 @@ class CodexSession:
             if reply:
                 answers[question.get("id", "")] = {"answers": [str(reply)]}
         return {"answers": answers}
+
+
+def check_verdict(version: str, asked: list[str], happened: list[str]) -> dict:
+    """What a check showed (CodexBackend.check): why workers that ask first may not run on
+    this version, and why none may (an edit that did not ask, or happened though refused)."""
+    wanted = {
+        "tool": "a call of Chief of Staff's own tools",
+        "shell": "a command",
+        "mcp": "an MCP tool's call",
+        **{f"write {name}": "a new file" for name in codex_check.ADDED},
+        f"write {codex_check.MOVED_FROM}": "a file moved",
+        f"write {codex_check.MOVED_TO}": "a file moved (where to)",
+    }
+    missing = list(dict.fromkeys(what for key, what in wanted.items() if key not in asked))
+    edits = [key for key in wanted if key.startswith("write ")]
+    unsafe = any(key not in asked for key in edits) or any(
+        name in {*codex_check.ADDED, codex_check.MOVED_TO} for name in happened
+    )
+    said = f"Chief of Staff's check of Codex {version}"
+    ask_first = ""
+    if missing or happened:
+        found = []
+        if missing:
+            found.append("did not ask first for " + ", ".join(missing))
+        if happened:
+            found.append("did what was refused (" + ", ".join(happened) + ")")
+        ask_first = (
+            f"{said} found that it {' and '.join(found)}: workers that ask first do not run on it."
+        )
+    acting = (
+        f"{said} found that its edits do not all ask Chief of Staff first, which keeps your "
+        "checkouts unchanged: no worker runs on it. Use a tested version."
+        if unsafe
+        else ""
+    )
+    return {"ran": True, "ask_first": ask_first, "acting": acting}
 
 
 def codex_backend(command: str = "codex") -> CodexBackend:

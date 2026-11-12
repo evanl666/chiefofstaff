@@ -7,6 +7,7 @@ import asyncio
 import json
 import os
 import signal
+from pathlib import Path
 
 import pytest
 from conftest import Harness, call_tool, fake_codex
@@ -28,6 +29,7 @@ from chiefofstaff.backend_codex import (
 )
 from chiefofstaff.envelope import wrap
 from chiefofstaff.models import Settings
+from chiefofstaff.policy import GITHUB_MCP
 from chiefofstaff.roles import WORKER
 from chiefofstaff.runtime import AgentConnection
 
@@ -131,16 +133,100 @@ def test_what_is_read_from_its_answers():
     assert wrap("system", "refused", "x").split("\n")[0] == REFUSED_NOTE
 
 
-def test_each_folder_is_trusted_as_the_owner_trusts_its_repository(tmp_path):
+def git_repository(path, *more):
+    """A repository with one commit (and a `.codex/` folder), and its worktrees at `more`."""
+    import subprocess
+
+    (path / ".codex").mkdir(parents=True)
+    (path / "sub").mkdir()
+    (path / "sub" / "file").write_text("x")
+    git = ["git", "-C", str(path), "-c", "user.email=t@t", "-c", "user.name=t"]
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    (path / ".codex" / "config.toml").write_text("")
+    subprocess.run([*git, "add", "-A"], check=True)
+    subprocess.run([*git, "commit", "-qm", "start"], check=True)
+    for worktree in more:
+        subprocess.run([*git, "worktree", "add", "-q", str(worktree)], check=True)
+    return path
+
+
+def level(levels, path):
+    return levels[str(path)]["trust_level"]
+
+
+def test_a_folder_is_trusted_only_as_codex_itself_would_trust_it(tmp_path):
+    """Codex 0.167.2 trusts a folder by the entry for that folder, its project root or its
+    repository's root (a linked worktree's main checkout): never by an ancestor's."""
+    code = tmp_path / "code"
+    main = git_repository(code / "main", tmp_path / "scratch" / "wt")
+    clone = git_repository(code / ".chief" / "clone")  # CoS's clone, under a trusted folder.
+    elsewhere = git_repository(tmp_path / "elsewhere")
     owners = {
-        str(tmp_path / "trusted"): {"trust_level": "trusted"},
-        str(tmp_path / "other"): {"trust_level": "untrusted"},
+        str(code): {"trust_level": "trusted"},
+        str(main): {"trust_level": "trusted"},
+        str(main / "sub"): {"trust_level": "untrusted"},
         str(tmp_path / "odd"): "trusted",
+        str(tmp_path / "plain"): {"trust_level": "trusted"},
     }
-    worktree, repo = tmp_path / "work", tmp_path / "trusted" / "repo"
-    levels = trust_levels(owners, [(str(worktree), str(repo)), (str(tmp_path / "x"), "/x")])
-    assert levels[str(worktree)] == levels[str(repo)] == {"trust_level": "trusted"}
-    assert levels[str(tmp_path / "x")] == {"trust_level": "untrusted"}
+    worktree = tmp_path / "scratch" / "wt"
+    folders = [str(p) for p in (main, main / "sub", worktree, worktree / "sub", clone, elsewhere)]
+    levels = trust_levels(owners, [*folders, str(tmp_path / "plain"), str(tmp_path / "none")])
+    assert level(levels, main) == "trusted"  # Exactly the owner's.
+    assert level(levels, main / "sub") == "untrusted"  # Its own entry comes first.
+    assert level(levels, worktree) == "trusted"  # A worktree of a repository trusted.
+    assert level(levels, worktree / "sub") == "trusted"  # By its main checkout, as Codex does.
+    assert level(levels, clone) == "untrusted"  # Under a trusted folder: not trusted by it.
+    assert level(levels, elsewhere) == "untrusted"
+    assert level(levels, tmp_path / "plain") == "trusted"  # Not a repository: its own entry.
+    assert level(levels, tmp_path / "none") == "untrusted"
+    # Not even the folder a trusted one is in, nor any above the project root.
+    assert str(code) not in levels and str(tmp_path / "scratch") not in levels
+
+
+def test_trust_follows_links_and_the_project_root(tmp_path):
+    main = git_repository(tmp_path / "real" / "main", tmp_path / "wt")
+    (tmp_path / "link").symlink_to(main)
+    (tmp_path / "linkwt").symlink_to(tmp_path / "wt")
+    owners = {str(main): {"trust_level": "trusted"}}
+    levels = trust_levels(owners, [str(tmp_path / "link" / "sub"), str(tmp_path / "linkwt")])
+    # Each folder up to its project root, under its own spelling and its real one.
+    for folder in ("link", "link/sub", "linkwt"):
+        assert level(levels, tmp_path / folder) == "trusted"
+    assert level(levels, main / "sub") == "trusted"
+    assert str(tmp_path) not in levels
+    # Trusted only by a link's spelling: Codex looks up the real path first, then the link.
+    by_link = trust_levels({str(tmp_path / "link"): {"trust_level": "trusted"}}, [str(main)])
+    assert level(by_link, main) == "untrusted"
+    linked = trust_levels(
+        {str(tmp_path / "link"): {"trust_level": "trusted"}}, [str(tmp_path / "link")]
+    )
+    assert level(linked, tmp_path / "link") == level(linked, main) == "trusted"
+    # The owner's own project root markers (none here: each folder is its own project root, so
+    # no folder above it is read); and what Codex itself said of a folder wins.
+    marked = trust_levels({str(main): {"trust_level": "trusted"}}, [str(main / "sub")], [])
+    assert level(marked, main / "sub") == "trusted" and str(main) not in marked
+    said = {str(main): "untrusted"}
+    assert level(trust_levels(owners, [str(main)], None, said), main) == "untrusted"
+
+
+def test_a_worktree_is_trusted_by_its_main_checkout_only_when_git_says_they_belong(tmp_path):
+    main = git_repository(tmp_path / "main", tmp_path / "wt")
+    owners = {str(main): {"trust_level": "trusted"}}
+    assert level(trust_levels(owners, [str(tmp_path / "wt")]), tmp_path / "wt") == "trusted"
+    # A `.git` file pointing at another repository's worktree folder does not borrow its trust.
+    stranger = tmp_path / "stranger"
+    stranger.mkdir()
+    (stranger / ".git").write_text((tmp_path / "wt" / ".git").read_text())
+    assert level(trust_levels(owners, [str(stranger)]), stranger) == "untrusted"
+    # Nor one that is a link, nor one naming a folder that is not git's worktrees folder.
+    linked = tmp_path / "linked"
+    linked.mkdir()
+    (linked / ".git").symlink_to(tmp_path / "wt" / ".git")
+    assert level(trust_levels(owners, [str(linked)]), linked) == "untrusted"
+    odd = tmp_path / "odd"
+    odd.mkdir()
+    (odd / ".git").write_text(f"gitdir: {main / '.git'}\n")
+    assert level(trust_levels(owners, [str(odd)]), odd) == "untrusted"
 
 
 # The adapter on the stand-in
@@ -261,9 +347,89 @@ async def test_with_ask_first_every_server_it_can_name_asks(tmp_path, monkeypatc
     finally:
         await codex.stop()
     assert {key: value for key, value in config.items() if key != "projects"} == {
+        "features.apps": False,
         "mcp_servers.notes.default_tools_approval_mode": "prompt",
         "mcp_servers.notes.tools.write.approval_mode": "prompt",
     }
+
+
+async def test_chatgpts_apps_are_off_for_a_worker_that_asks_first_as_read_back(
+    tmp_path, monkeypatch
+):
+    """Review: an app's call (GitHub's, say) takes approval from Codex's own `apps` settings,
+    not Chief of Staff's: a worker that asks first has none; one acting on its own keeps the
+    owner's."""
+    log = tmp_path / "log.jsonl"
+    monkeypatch.setenv("FAKE_CODEX_LOG", str(log))
+    codex = CodexBackend(fake_codex(tmp_path / "fake", monkeypatch))
+    await codex.start()
+    try:
+        asking, _ = await opened(codex, tmp_path, ask_first=True)
+        acting, _ = await opened(codex, tmp_path)
+        features = {}
+        for session in (asking, acting):
+            listed = await codex.request(
+                "experimentalFeature/list", {"threadId": session.session_id}
+            )
+            features[session] = {f["name"]: f["enabled"] for f in listed["data"]}["apps"]
+        assert (features[asking], features[acting]) == (False, True)
+        resumed = await codex.resume_session(asking.session_id, ask_first=True)
+        assert resumed.session_id == asking.session_id
+    finally:
+        await codex.stop()
+    # Kept on by an administrator: such a thread is not used (nor kept), and says why.
+    monkeypatch.setenv("FAKE_CODEX_FEATURES", json.dumps({"apps": True}))
+    codex = CodexBackend(fake_codex(tmp_path / "fake", monkeypatch))
+    await codex.start()
+    try:
+        with pytest.raises(RuntimeError, match="did not turn ChatGPT's apps off"):
+            await opened(codex, tmp_path, ask_first=True)
+        with pytest.raises(RuntimeError, match="did not turn ChatGPT's apps off"):
+            await codex.resume_session(asking.session_id, ask_first=True)
+        assert (await opened(codex, tmp_path))[0].session_id, "acting on its own, it runs"
+    finally:
+        await codex.stop()
+    methods = [json.loads(line)["method"] for line in log.read_text().splitlines()]
+    assert methods.count("thread/archive") == 1 and "thread/unsubscribe" in methods
+
+
+@pytest.mark.parametrize("ask_first", [True, False])
+async def test_a_call_of_chatgpts_apps_is_checked_as_its_server_would_be(
+    codex, tmp_path, ask_first
+):
+    asked = []
+
+    def check(request, invocation):
+        asked.append((request.server_name, request.read_only))
+        return PermissionDecisionApproveOnce()
+
+    session, _ = await opened(codex, tmp_path, on_permission_request=check, ask_first=ask_first)
+
+    async def call(read_only=False, **meta):
+        params = {
+            "serverName": "codex_apps",
+            "mode": "form",
+            "_meta": {
+                "codex_approval_kind": "mcp_tool_call",
+                "tool_annotations": {"readOnlyHint": read_only},
+                **meta,
+            },
+        }
+        return (await session.elicitation(params, {"session_id": "x"}))["action"]
+
+    # GitHub's, by its connector or its tool: as GitHub's MCP server (its writes go through
+    # draft_github_review).
+    assert await call(connector_id="connector_github", tool_name="add_comment") == "accept"
+    assert await call(connector_name="GitHub", tool_name="add_comment") == "accept"
+    assert await call(tool_name="github_create_review") == "accept"
+    assert asked == [(GITHUB_MCP, False)] * 3
+    asked.clear()
+    # Another app: read-only, as any server's; a write, refused outright when asking first
+    # (apps are off for it, so one that still asks is not let act).
+    assert await call(True, connector_name="Calendar", tool_name="list_events") == "accept"
+    expected = "decline" if ask_first else "accept"
+    assert await call(connector_name="Calendar", tool_name="create_event") == expected
+    assert asked == [("codex_apps", True)] + ([] if ask_first else [("codex_apps", False)])
 
 
 async def test_a_refusal_reaches_the_model_and_is_no_message_of_chief_of_staff(codex, tmp_path):
@@ -448,6 +614,58 @@ async def test_stopping_a_child_left_at_work_ends_it(codex, tmp_path):
     assert task.success is False, "stopped, not finished"
 
 
+async def test_a_child_codex_closed_keeps_nothing_else_running_after_a_stop(codex, tmp_path):
+    """Review: a closed child's thread, asked first, made the stop end nothing (Codex has it no
+    more), leaving the worker's own dev server running in about half the runs."""
+    calls = []
+    session, turn = await opened(codex, tmp_path, tools=[echo_tool(calls)])
+    await session.send(
+        "Leave the command `sleep 37` running. Have a child agent call the echo tool with text "
+        "'x' then close it quietly. Then reply with just: started"
+    )
+    await until(lambda: "assistant.idle" in turn.kinds())
+    assert len(session.child_threads) == 1
+    assert await session.stop_background() == 1, "its own command, ended"
+    assert not session.child_threads, "let go of: Codex has it no more"
+    await turn.wait()
+    await until(lambda: not any("sleep 37" in line for _, line in process_table().values()))
+    assert await session.stop_background() == 0
+    # Said closed, it is let go of at once.
+    await session.send(
+        "Have a child agent call the echo tool with text 'y' then close it. "
+        "Then reply with just: done"
+    )
+    await turn.wait()
+    assert not session.child_threads
+    assert calls == [("x", session.session_id), ("y", session.session_id)]
+
+
+@pytest.mark.parametrize("closed", ["a-closed", "z-closed"])
+async def test_a_stop_ends_what_every_thread_it_can_ask_runs(tmp_path, closed):
+    """Whichever order its threads come in, one Codex no longer has is skipped and let go of;
+    the count is what was ended."""
+    session = backend_codex.CodexSession(CodexBackend("codex"), "own", {})
+    session.child_threads |= {closed, "m-live"}
+    session.left_running["cmd"] = closed
+    cleaned, notes = [], []
+    session.on(notes.append)
+
+    async def request(method, params):
+        thread = params["threadId"]
+        if thread == closed:
+            raise backend_codex.CodexError(f"thread not found: {thread}")
+        if method.endswith("list"):
+            return {"data": [{"itemId": f"{thread}-1"}]}
+        cleaned.append(thread)
+        return {}
+
+    session.backend.request = request  # type: ignore[method-assign]
+    assert await session.stop_background() == 2
+    assert cleaned == ["own", "m-live"]
+    assert session.child_threads == {"m-live"} and not session.left_running
+    assert [n.data.kind.shell_id for n in notes if n.type.value == "system.notification"] == ["cmd"]
+
+
 async def test_a_turns_start_read_after_its_end_leaves_no_turn_behind(codex, tmp_path):
     session, turn = await opened(codex, tmp_path)
     answer = codex.answer
@@ -542,6 +760,100 @@ async def test_an_edit_whose_files_are_not_known_is_refused(codex, tmp_path):
     assert answer == {"decision": "decline"}
 
 
+async def test_every_file_an_edit_writes_is_asked_about_a_moves_destination_too(codex, tmp_path):
+    """Review: apply_patch's `*** Move to:` writes a file Chief of Staff was never asked about;
+    refused, nothing of the edit is written."""
+    asked = []
+    theirs = tmp_path / "theirs"
+
+    def check(request, invocation):
+        asked.append(request.resolved_path)
+        if request.resolved_path.startswith(str(theirs)):
+            return PermissionDecisionReject(feedback="Not there.")
+        return PermissionDecisionApproveOnce()
+
+    work = tmp_path / "work"
+    work.mkdir()
+    for name in ("a.py", "b.py", "gone.py"):
+        (work / name).write_text(name)
+    session, turn = await opened(codex, work, on_permission_request=check)
+    await session.send(
+        f"Write the file `n1` and the file `n2`. Move the file `a.py` to `{theirs / 'a.py'}`. "
+        "Move the file `b.py` to `c.py`. Delete the file `gone.py`. Then reply with just: done"
+    )
+    await turn.wait()
+    assert asked == [
+        *(str(work / name) for name in ("n1", "n2", "a.py")),
+        str(theirs / "a.py"),
+        *(str(work / name) for name in ("b.py", "c.py", "gone.py")),
+    ]
+    assert (work / "a.py").exists() and not theirs.exists(), "refused: not moved"
+    assert (work / "c.py").read_text() == "b.py" and not (work / "b.py").exists()
+    assert not (work / "gone.py").exists() and (work / "n1").exists()
+
+
+@pytest.mark.parametrize("yolo", [True, False])
+async def test_a_codex_worker_moves_no_file_where_it_may_not_write(tmp_path, monkeypatch, yolo):
+    """Review: a move's destination escaped the owner's checkout (always kept, also when the
+    worker acts on its own) and, with Ask first, the worker's folders."""
+    from test_round7_split import published
+
+    app = published(tmp_path, "app")
+    loose = tmp_path / "loose"
+    loose.mkdir()
+    (loose / "a.py").write_text("a")
+    harness, runtime = await brief(
+        tmp_path, monkeypatch, Settings(projects=[str(app)], worker_yolo=yolo)
+    )
+    try:
+        if yolo:  # Its own checkout of the owner's project is the owner's: never written.
+            source, target = loose / "a.py", app / "a.py"
+            project, made = {"project": str(app)}, ""
+        else:  # Asking first, it writes only in its own folders (tests run in the temp folder).
+            monkeypatch.setattr("tempfile.gettempdir", lambda: "/no-temp-here")
+            source, target, project = "a.py", loose / "moved.py", {}
+            made = "Write the file `a.py` and the file `b.py`. "
+        result = await call_tool(
+            runtime,
+            "spawn_worker",
+            harness.router_id,
+            title="Move it",
+            instructions=f"{made}Move the file `{source}` to `{target}`. Report done: moved.",
+            why_new="t",
+            **project,
+        )
+        worker = json.loads(result.text_result_for_llm)["session_id"]
+        why = "own checkout" if yolo else "outside"
+
+        def refused():
+            return [m for m in harness.store.messages(worker) if why in m["text"]]
+
+        await until(lambda: refused() and harness.store.session(worker)["status"] == "done", 30)
+        assert refused()[0]["kind"] == "notice"
+        kept = Path(harness.store.session(worker)["cwd"]) / source
+        assert not target.exists() and kept.read_text() in {"a", "x\n"}, "not moved"
+        assert str(target) not in json.loads(harness.store.session(worker)["files"])
+    finally:
+        await runtime.stop()
+
+
+async def test_a_codex_worker_records_where_it_moved_a_file(tmp_path, monkeypatch):
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    try:
+        worker = await spawn(
+            runtime,
+            harness,
+            "Write the file `old.py` and the file `keep.py`. Move the file `old.py` to "
+            "`new/name.py`. Report done: moved.",
+        )
+        await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+        cwd = Path(harness.store.session(worker)["cwd"])
+        assert (cwd / "new" / "name.py").exists() and not (cwd / "old.py").exists()
+        assert {"old.py", "new/name.py"} <= set(json.loads(harness.store.session(worker)["files"]))
+    finally:
+        await runtime.stop()
+
+
 async def test_a_child_agent_known_only_by_the_turn_that_led_to_it_is_its_workers(codex, tmp_path):
     calls = []
     session, turn = await opened(codex, tmp_path, tools=[echo_tool(calls)])
@@ -613,9 +925,35 @@ async def test_ask_first_runs_only_on_a_tested_version(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize(
+    ("version", "runs", "asks_first"),
+    [
+        ("0.167.1", False, False),
+        ("0.167.2-alpha.1", False, False),  # Before the release tested.
+        ("0.167.2", True, True),
+        ("0.167.9", True, True),
+        ("0.168.0-alpha.1", True, False),
+        ("0.168.0", True, False),
+        ("1.0.0", True, False),
+        ("", False, False),
+        ("dev", False, False),
+    ],
+)
+def test_which_codex_runs_and_which_runs_workers_that_ask_first(version, runs, asks_first):
+    """The owner's decision: nothing older than tested; Ask first only before 0.168; newer
+    versions run workers that act on their own; one whose version cannot be told, none."""
+    assert (backend_codex.codex_refused(version) == "") is runs
+    assert backend_codex.ask_first_tested(version) is asks_first
+    if not runs:
+        assert ("older than" if version.startswith("0.") else "could not tell") in (
+            backend_codex.codex_refused(version)
+        )
+
+
+@pytest.mark.parametrize(
     ("env", "why"),
     [
         ({"FAKE_CODEX_VERSION": "0.167.1"}, "older than the versions tested"),
+        ({"FAKE_CODEX_VERSION": "unknown"}, "could not tell which version of Codex"),
         ({"FAKE_CODEX_SIGNED_OUT": "1"}, "not signed in: run `codex login`"),
     ],
 )
@@ -721,10 +1059,8 @@ async def test_a_codex_worker_works_reports_and_has_receipts(tmp_path, monkeypat
         assert options["ask_first"] is False and "model" not in options
         asking = {**harness.store.session(worker), "yolo": "off"}
         assert runtime.agent_options(asking)["ask_first"] is True
-        assert (worker_cwd := harness.store.session(worker)["cwd"]) in {
-            folder for folder, _ in options["trust"]
-        }
-        assert worker_cwd
+        worker_cwd = harness.store.session(worker)["cwd"]
+        assert worker_cwd and options["folders"][0] == worker_cwd
         assert not runtime.agent_block(harness.store.session(harness.router_id))
     finally:
         await runtime.stop()
@@ -882,6 +1218,115 @@ async def test_ask_first_on_an_untested_codex_is_refused_with_why(tmp_path, monk
         await runtime.set_session_yolo(worker, "on")
     finally:
         await runtime.stop()
+
+
+def logged(log) -> list[dict]:
+    return [json.loads(line) for line in log.read_text().splitlines()]
+
+
+async def test_each_codex_version_is_checked_once_before_its_workers_run(tmp_path, monkeypatch):
+    """The owner's decision: the first time a Codex version starts, Chief of Staff checks what
+    its checks rely on, offline (a stand-in model; Codex's own approvals), and remembers it."""
+    log = tmp_path / "log.jsonl"
+    servers = {"notes": {"command": "notes"}}
+    harness, runtime = await brief(
+        tmp_path,
+        monkeypatch,
+        FAKE_CODEX_LOG=str(log),
+        FAKE_CODEX_CONFIG=json.dumps({"mcp_servers": servers}),
+    )
+    try:
+        await runtime.connect_agent("codex")
+        found = json.loads(harness.store.get("agentcheck:codex:0.167.2") or "{}")
+        assert found == {"ran": True, "ask_first": "", "acting": ""}
+        await runtime.disconnect_agent("codex")
+        await runtime.connect_agent("codex")  # Remembered: not checked again.
+        worker = await spawn(runtime, harness, "Report done: Fixed it.")
+        await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+    finally:
+        await runtime.stop()
+    starts = [m["params"] for m in logged(log) if m["method"] == "thread/start"]
+    (check,) = [p for p in starts if p.get("ephemeral")]
+    assert len(starts) == 2, "the check's thread, then the worker's"
+    config = check["config"]
+    assert check["approvalPolicy"] == "untrusted" and config["features.apps"] is False
+    assert config["mcp_servers.notes.enabled"] is False, "the owner's servers do not start"
+    assert config["mcp_servers.chiefofstaff_check.default_tools_approval_mode"] == "prompt"
+    assert "mcp_servers.notes.enabled" not in starts[1]["config"]
+    assert not (tmp_path / "data" / "work" / "codex-check").exists(), "nothing of it is left"
+
+
+@pytest.mark.parametrize(
+    ("unasked", "missing", "acts"),
+    [
+        ("shell", "a command", True),
+        ("mcp", "an MCP tool's call", True),
+        ("patch", "a new file", False),
+    ],
+)
+async def test_what_a_codex_check_finds_keeps_its_workers_from_running(
+    tmp_path, monkeypatch, unasked, missing, acts
+):
+    harness, runtime = await brief(tmp_path, monkeypatch, FAKE_CODEX_UNASKED=unasked)
+    try:
+        await runtime.connect_agent("codex")
+        found = json.loads(harness.store.get("agentcheck:codex:0.167.2") or "{}")
+        assert f"did not ask first for {missing}" in found["ask_first"]
+        # What it did unasked (a command, an edit) happened; the stand-in's MCP call leaves none.
+        assert ("did what was refused" in found["ask_first"]) is (unasked != "mcp")
+        assert bool(found["acting"]) is not acts
+        row = harness.store.create_session("w1", WORKER, "Fix", "/tmp")
+        asking = runtime.agent_block({**row, "yolo": "off"})
+        assert "workers that ask first do not run on it" in asking or "no worker runs" in asking
+        assert (runtime.agent_block({**row, "yolo": "on"}) == "") is acts
+        if not acts:
+            assert "keeps your checkouts unchanged" in runtime.agent_block({**row, "yolo": "on"})
+    finally:
+        await runtime.stop()
+
+
+async def test_a_check_that_could_not_run_holds_only_ask_first_and_runs_again(
+    tmp_path, monkeypatch
+):
+    def broken(work):
+        raise OSError("no port free")
+
+    model = backend_codex.codex_check.Model
+    monkeypatch.setattr(backend_codex.codex_check, "Model", broken)
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    try:
+        await runtime.connect_agent("codex")
+        assert harness.store.get("agentcheck:codex:0.167.2") is None, "tried again next time"
+        assert not (tmp_path / "data" / "work" / "codex-check").exists()
+        row = harness.store.create_session("w1", WORKER, "Fix", "/tmp")
+        assert "could not run (no port free)" in runtime.agent_block({**row, "yolo": "off"})
+        assert runtime.agent_block({**row, "yolo": "on"}) == ""
+        monkeypatch.setattr(backend_codex.codex_check, "Model", model)
+        await runtime.disconnect_agent("codex")
+        await runtime.connect_agent("codex")
+        assert json.loads(harness.store.get("agentcheck:codex:0.167.2") or "{}")["ran"] is True
+        assert runtime.agent_block({**row, "yolo": "off"}) == ""
+    finally:
+        await runtime.stop()
+
+
+def test_what_a_check_found_is_said_plainly():
+    verdict = backend_codex.check_verdict
+    every = ["tool", "shell", "mcp", "write added-1.marker", "write added-2.marker"]
+    moves = ["write from.txt", "write moved.txt"]
+    assert verdict("0.167.2", every + moves, []) == {"ran": True, "ask_first": "", "acting": ""}
+    unmoved = verdict("0.167.2", every + moves[:1], ["moved.txt"])
+    assert unmoved["ask_first"] == (
+        "Chief of Staff's check of Codex 0.167.2 found that it did not ask first for a file "
+        "moved (where to) and did what was refused (moved.txt): workers that ask first do not "
+        "run on it."
+    )
+    assert "no worker runs on it" in unmoved["acting"]
+    quiet = verdict("0.167.2", ["shell", "mcp", *every[3:], *moves], [])
+    assert "did not ask first for a call of Chief of Staff's own tools" in quiet["ask_first"]
+    assert quiet["acting"] == ""
+    done = verdict("0.167.2", every + moves, ["server.marker"])
+    assert done["acting"] == "" and "did what was refused (server.marker)" in done["ask_first"]
 
 
 async def test_what_codex_left_after_an_abrupt_stop_is_ended_at_its_next_start(

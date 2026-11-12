@@ -4,8 +4,9 @@ JSON-RPC over stdio, with a tiny scripted model that understands the prompts the
 Run as `fake_codex.py app-server [-c key=value]...`. Its threads are kept in FAKE_CODEX_HOME
 (threads.json), so a new process resumes them. FAKE_CODEX_* variables shape it: VERSION,
 SIGNED_OUT, REQUIREMENTS (JSON), CONFIG (JSON: what config/read answers), ANSWER (JSON merged
-into thread/start and thread/resume answers: an administrator's override), LOG (a file each
-request's method and params are appended to, one JSON line each).
+into thread/start and thread/resume answers: an administrator's override), FEATURES (JSON: the
+features an administrator keeps on or off), UNASKED (actions taken without asking), LOG (a file
+each request's method and params are appended to, one JSON line each).
 """
 
 import asyncio
@@ -21,6 +22,9 @@ from pathlib import Path
 
 HOME = Path(os.environ.get("FAKE_CODEX_HOME") or ".")
 VERSION = os.environ.get("FAKE_CODEX_VERSION", "0.167.2")
+# Actions it takes without asking first, as a Codex that broke the contract would: shell, mcp,
+# patch.
+UNASKED = set(filter(None, os.environ.get("FAKE_CODEX_UNASKED", "").split(",")))
 
 
 class Server:
@@ -144,6 +148,24 @@ class Server:
     async def on_config_read(self, params):
         return {"config": json.loads(os.environ.get("FAKE_CODEX_CONFIG") or "{}")}
 
+    async def on_experimentalfeature_list(self, params):
+        """Each feature as the thread has it (its config's `features.<name>`, else on), or as
+        an administrator keeps it (FAKE_CODEX_FEATURES)."""
+        thread = self.threads.get(params.get("threadId") or "")
+        if params.get("threadId") and thread is None:
+            raise RuntimeError("thread not found")
+        config = (thread or {}).get("config") or {}
+        kept = json.loads(os.environ.get("FAKE_CODEX_FEATURES") or "{}")
+        data = [
+            {
+                "name": name,
+                "stage": "stable",
+                "enabled": kept.get(name, config.get(f"features.{name}", True)),
+            }
+            for name in ("apps", "multi_agent")
+        ]
+        return {"data": data, "nextCursor": None}
+
     def answer(self, thread_id: str, params: dict) -> dict:
         thread = self.threads[thread_id]
         answer = {
@@ -220,7 +242,12 @@ class Server:
             turns.reverse()
         return {"data": turns, "nextCursor": None}
 
+    def loaded_thread(self, thread_id):
+        if thread_id not in self.threads:
+            raise RuntimeError(f"thread not found: {thread_id}")
+
     async def on_thread_backgroundterminals_list(self, params):
+        self.loaded_thread(params["threadId"])
         found = [
             {"itemId": item, "processId": str(process.pid), "command": command}
             for item, (thread, process, _, command, _) in self.terminals.items()
@@ -229,6 +256,7 @@ class Server:
         return {"data": found, "nextCursor": None}
 
     async def on_thread_backgroundterminals_clean(self, params):
+        self.loaded_thread(params["threadId"])
         for thread, process, *_rest in list(self.terminals.values()):
             if thread == params["threadId"]:
                 with contextlib.suppress(ProcessLookupError):
@@ -396,7 +424,13 @@ class Server:
         if found := re.search(r"Leave the command `([^`]+)` running", prompt):
             await self.shell(thread_id, turn_id, found.group(1), background=True)
         for match in re.finditer(r"Write the file `([^`]+)` and the file `([^`]+)`", prompt):
-            await self.patch(thread_id, turn_id, [match.group(1), match.group(2)])
+            added = {"type": "add"}
+            await self.patch(thread_id, turn_id, [(match.group(1), added), (match.group(2), added)])
+        for match in re.finditer(r"Move the file `([^`]+)` to `([^`]+)`", prompt):
+            moved = {"type": "update", "move_path": self.at(thread_id, match.group(2))}
+            await self.patch(thread_id, turn_id, [(match.group(1), moved)])
+        for match in re.finditer(r"Delete the file `([^`]+)`", prompt):
+            await self.patch(thread_id, turn_id, [(match.group(1), {"type": "delete"})])
         for match in re.finditer(r"Call the MCP tool (\w+) of (\w+)(?: \((read-only)\))?", prompt):
             await self.mcp(thread_id, turn_id, match.group(2), match.group(1), bool(match.group(3)))
         if found := re.search(
@@ -548,16 +582,18 @@ class Server:
             "commandActions": [{"type": "unknown", "command": command}],
         }
         self.item("item/started", thread_id, turn_id, item)
-        decision = await self.ask(
-            "item/commandExecution/requestApproval",
-            {
-                "threadId": thread_id,
-                "turnId": turn_id,
-                "itemId": item["id"],
-                "command": item["command"],
-                "cwd": self.threads[thread_id]["cwd"],
-            },
-        )
+        decision = {"decision": "accept"}
+        if "shell" not in UNASKED:
+            decision = await self.ask(
+                "item/commandExecution/requestApproval",
+                {
+                    "threadId": thread_id,
+                    "turnId": turn_id,
+                    "itemId": item["id"],
+                    "command": item["command"],
+                    "cwd": self.threads[thread_id]["cwd"],
+                },
+            )
         if decision.get("decision") != "accept":
             item["status"] = "declined"
             self.item("item/completed", thread_id, turn_id, item)
@@ -598,24 +634,27 @@ class Server:
         )
         self.item("item/completed", thread_id, turn_id, item)
 
-    async def patch(self, thread_id, turn_id, paths):
-        cwd = Path(self.threads[thread_id]["cwd"])
-        targets = [str(cwd / path) for path in paths]
+    def at(self, thread_id, path):
+        return str(Path(self.threads[thread_id]["cwd"]) / path)
+
+    async def patch(self, thread_id, turn_id, changes):
+        """apply_patch's changes: (path, kind) with kind add, delete, or update (and a move)."""
+        changes = [(self.at(thread_id, path), kind) for path, kind in changes]
         item = {
             "type": "fileChange",
             "id": f"exec-{uuid.uuid4()}",
             "status": "inProgress",
-            "changes": [
-                {"path": target, "kind": {"type": "add"}, "diff": "+x"} for target in targets
-            ],
+            "changes": [{"path": path, "kind": kind, "diff": "+x"} for path, kind in changes],
         }
         self.item("item/started", thread_id, turn_id, item)
-        decision = await self.ask(
-            "item/fileChange/requestApproval",
-            {"threadId": thread_id, "turnId": turn_id, "itemId": item["id"]},
-        )
+        decision = {"decision": "accept"}
+        if "patch" not in UNASKED:
+            decision = await self.ask(
+                "item/fileChange/requestApproval",
+                {"threadId": thread_id, "turnId": turn_id, "itemId": item["id"]},
+            )
         if decision.get("decision") == "accept":
-            await asyncio.to_thread(write_files, targets)
+            await asyncio.to_thread(apply_changes, changes)
             item["status"] = "completed"
         else:
             item["status"] = "declined"
@@ -633,7 +672,7 @@ class Server:
         self.item("item/started", thread_id, turn_id, item)
         config = self.threads[thread_id]["config"]
         prompts = config.get(f"mcp_servers.{server}.default_tools_approval_mode") == "prompt"
-        if prompts:
+        if prompts and "mcp" not in UNASKED:
             answer = await self.ask(
                 "mcpServer/elicitation/request",
                 {
@@ -702,12 +741,24 @@ class Server:
         done = {**activity, "id": f"subagent-completed-{child_turn}", "kind": "completed"}
         self.item("item/started", thread_id, turn_id, done)
         self.item("item/completed", thread_id, turn_id, done)
+        if found := re.search(r"then close it( quietly)?", prompt):
+            # As close_agent: Codex no longer has the thread (said, or not).
+            self.threads.pop(child, None)
+            if not found.group(1):
+                self.notify("thread/closed", {"threadId": child})
 
 
-def write_files(targets: list[str]):
-    for target in targets:
-        Path(target).parent.mkdir(parents=True, exist_ok=True)
-        Path(target).write_text("x\n")
+def apply_changes(changes: list[tuple[str, dict]]):
+    for path, kind in changes:
+        target = Path(path)
+        if kind["type"] == "delete":
+            target.unlink()
+        elif kind.get("move_path"):
+            Path(kind["move_path"]).parent.mkdir(parents=True, exist_ok=True)
+            target.rename(kind["move_path"])
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("x\n")
 
 
 def logged(message: dict):
