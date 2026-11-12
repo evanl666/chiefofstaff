@@ -7,7 +7,10 @@ Each cache state is one command a worker runs, as given: `python3 bench.py cold|
 installs or builds five times and times each run inside (the receipt of the command, as the
 agent ran it, is kept as well: what it took beyond the runs is the agent's own per-command cost).
 The caches are this run's own (an empty one for each cold run, one warmed beforehand for the warm
-runs), so nothing of the owner's is cleared. Projects go one at a time, the two agents in turn
+runs), so nothing of the owner's is cleared. That the agent's commands would use the owner's own
+caches, as Copilot's do, is checked apart: before its runs, `bench.py cold` prints where the
+project's tool keeps its cache in the agent's environment (and HOME, TMPDIR and PATH), which must
+be the same for both agents. Projects go one at a time, the two agents in turn
 (their order alternating), so the network's mood is shared.
 
 Needs node with npm (pnpm and yarn run through npx), uv, python3, and a JDK and Gradle (PERF_TOOLS:
@@ -57,6 +60,23 @@ setup = json.loads((root / "bench.json").read_text())
 mode = sys.argv[1]
 runs = int(sys.argv[2]) if len(sys.argv) > 2 else setup["runs"]
 caches = Path(setup["caches"])
+results = Path(setup["results"])
+results.mkdir(parents=True, exist_ok=True)
+
+
+def say(line):
+    print(line)
+    sys.stdout.flush()
+    with open(str(results / (mode + ".txt")), "a") as out:
+        out.write(line + "\\n")
+
+
+if mode == "cold" and runs > 1:  # Where the owner's own cache would be, in this environment.
+    for name in ("HOME", "TMPDIR", "PATH"):
+        say("WHERE %s %s" % (name, os.environ.get(name, "")))
+    for step in setup.get("where", []):
+        done = subprocess.run(step, cwd=str(root), capture_output=True, text=True)
+        say("WHERE cache %s" % (done.stdout.strip().splitlines() or ["?"])[-1])
 for number in range(1, runs + 1):
     for name in setup["clean"]:
         path = root / name
@@ -77,8 +97,7 @@ for number in range(1, runs + 1):
         if done.returncode:
             sys.stderr.write(done.stdout[-2000:] + done.stderr[-2000:])
             sys.exit(done.returncode)
-    print("TIME %s %s %d %.2f" % (setup["tool"], mode, number, time.monotonic() - started))
-    sys.stdout.flush()
+    say("TIME %s %s %d %.2f" % (setup["tool"], mode, number, time.monotonic() - started))
     if mode == "cold":
         shutil.rmtree(str(cache), ignore_errors=True)
 '''
@@ -100,11 +119,13 @@ def projects(root: Path) -> dict[str, dict]:
         "npm": {
             "files": {"package.json": package},
             "steps": [["npm", "install", "--no-audit", "--no-fund", "--cache", "{cache}"]],
+            "where": [["npm", "config", "get", "cache"]],
             "clean": ["node_modules"],
         },
         "pnpm": {
             "files": {"package.json": package},
             "steps": [["npx", "--yes", "pnpm@9.15.0", "install", "--store-dir", "{cache}"]],
+            "where": [["npx", "--yes", "pnpm@9.15.0", "store", "path"]],
             "clean": ["node_modules"],
         },
         "yarn": {
@@ -121,6 +142,7 @@ def projects(root: Path) -> dict[str, dict]:
                     "--no-progress",
                 ]
             ],
+            "where": [["npx", "--yes", "yarn@1.22.22", "cache", "dir"]],
             "clean": ["node_modules"],
         },
         "uv": {
@@ -129,6 +151,7 @@ def projects(root: Path) -> dict[str, dict]:
                 'requires-python = ">=3.9"\ndependencies = ' + json.dumps(PYTHON_DEPS) + "\n"
             },
             "steps": [["uv", "sync", "--cache-dir", "{cache}", "--python", "3.12"]],
+            "where": [["uv", "cache", "dir"]],
             "clean": [".venv"],
         },
         "pip": {
@@ -146,6 +169,7 @@ def projects(root: Path) -> dict[str, dict]:
                 ],
             ],
             "clean": [".venv"],
+            "where": [["python3", "-m", "pip", "cache", "dir"]],
         },
     }
     if gradle and jdk and jdk.is_dir():
@@ -167,6 +191,7 @@ def projects(root: Path) -> dict[str, dict]:
             },
             "steps": [[str(gradle), "build", "--no-daemon", "-q", "-g", "{cache}"]],
             "env": {"JAVA_HOME": str(jdk)},
+            "where": [["sh", "-c", 'echo "${GRADLE_USER_HOME:-$HOME/.gradle}"']],
             "clean": ["build", ".gradle"],
         }
     for name, project in found.items():
@@ -174,7 +199,7 @@ def projects(root: Path) -> dict[str, dict]:
     return found
 
 
-def make(project: dict, name: str, caches: Path):
+def make(project: dict, name: str, caches: Path, results: Path):
     """The project as a repository, its lock file made by a first install (warming the warm
     cache), so both agents install the same thing."""
     path = project["path"]
@@ -182,7 +207,8 @@ def make(project: dict, name: str, caches: Path):
     for file, text in project["files"].items():
         write(path / file, text)
     settings = {"tool": name, "steps": project["steps"], "env": project.get("env", {}),
-                "clean": project["clean"], "caches": str(caches), "runs": RUNS}  # fmt: skip
+                "clean": project["clean"], "caches": str(caches), "runs": RUNS,
+                "where": project.get("where", []), "results": str(results / name)}  # fmt: skip
     write(path / "bench.json", json.dumps(settings, indent=1))
     write(path / "bench.py", BENCH)
     write(path / ".gitignore", "\n".join(project["clean"]) + "\n")
@@ -197,25 +223,38 @@ def make(project: dict, name: str, caches: Path):
     log(f"{name}: made, warm cache ready")
 
 
-def times(database: Path, worker: str, mode: str) -> tuple[list[float], float]:
-    """The run times its `bench.py <mode>` command printed, and how long the command took."""
+def times(results: Path, mode: str) -> list[float]:
+    """The run times `bench.py <mode>` wrote (once all its runs are done)."""
+    path = results / f"{mode}.txt"
+    text = path.read_text() if path.exists() else ""
+    found = [float(m) for m in re.findall(rf"^TIME \S+ {mode} \d+ ([\d.]+)$", text, re.MULTILINE)]
+    return found if len(found) == RUNS else []
+
+
+def where(results: Path) -> list[str]:
+    path = results / "cold.txt"
+    return [line for line in path.read_text().splitlines() if line.startswith("WHERE ")]
+
+
+def took(database: Path, worker: str, mode: str) -> float | None:
+    """How long the agent's `bench.py <mode>` command took, from its receipt (None: not known)."""
+    from datetime import datetime
+
     with contextlib.closing(sqlite3.connect(f"file:{database}?mode=ro", uri=True)) as db:
         rows = db.execute(
-            "SELECT output, started_at, ended_at FROM commands WHERE session_id=? AND command "
-            "LIKE ? AND exit_code=0 ORDER BY id DESC",
+            "SELECT started_at, ended_at FROM commands WHERE session_id=? AND command LIKE ? "
+            "AND ended_at IS NOT NULL ORDER BY id DESC LIMIT 1",
             (worker, f"%bench.py {mode}%"),
         ).fetchall()
-    for output, started, ended in rows:
-        found = [float(m) for m in re.findall(rf"TIME \S+ {mode} \d+ ([\d.]+)", output or "")]
-        if len(found) == RUNS and ended:
-            from datetime import datetime
-
-            took = (datetime.fromisoformat(ended) - datetime.fromisoformat(started)).total_seconds()
-            return found, took
-    return [], 0.0
+    for started, ended in rows:
+        return (datetime.fromisoformat(ended) - datetime.fromisoformat(started)).total_seconds()
+    return None
 
 
-async def bench(app: App, router: str, project: Path, agent: str, database: Path) -> dict:
+async def bench(
+    app: App, router: str, project: Path, agent: str, database: Path, results: Path
+) -> dict:
+    shutil.rmtree(results, ignore_errors=True)
     mark = max((m["id"] for m in await app.get(f"/api/sessions/{router}/messages")), default=0)
     await app.post(
         f"/api/sessions/{router}/messages",
@@ -241,19 +280,31 @@ async def bench(app: App, router: str, project: Path, agent: str, database: Path
     assert (view.get("agent") or "copilot") == agent, f"on {agent}: {view.get('agent')}"
 
     async def measured():
-        cold, warm = times(database, worker, "cold"), times(database, worker, "warm")
-        return (cold, warm) if cold[0] and warm[0] else None
+        cold, warm = times(results, "cold"), times(results, "warm")
+        return (cold, warm) if cold and warm else None
 
-    (cold, cold_took), (warm, warm_took) = await wait_for(
-        f"{agent}: both benches ran", measured, 3600, app
-    )
+    cold, warm = await wait_for(f"{agent}: both benches ran", measured, 3600, app)
+
+    async def receipts():  # The receipts end a moment after the commands.
+        found = {mode: took(database, worker, mode) for mode in ("cold", "warm")}
+        return found if all(value is not None for value in found.values()) else None
+
+    try:
+        spent = await wait_for(f"{agent}: the receipts", receipts, 120, app)
+    except Exception:
+        spent = {mode: took(database, worker, mode) for mode in ("cold", "warm")}
     with contextlib.suppress(Exception):
         await app.post(f"/api/sessions/{worker}/close")
+    timed = {"cold": cold, "warm": warm}
     return {
-        "cold": cold, "warm": warm,
+        **timed,
+        "where": where(results),
         # What the agent's command took beyond the runs it timed (its own cost per command).
-        "overhead": {"cold": cold_took - sum(cold), "warm": warm_took - sum(warm)},
-    }  # fmt: skip
+        "overhead": {
+            mode: (None if spent[mode] is None else spent[mode] - sum(timed[mode]))
+            for mode in timed
+        },
+    }
 
 
 def within(codex: float, copilot: float) -> bool:
@@ -264,15 +315,18 @@ async def main() -> int:
     live_e2e.PORT, live_e2e.SLACK_PORT = PORT, SLACK_PORT
     live_e2e.BASE = f"http://127.0.0.1:{PORT}"
     serve_in_thread(Workspace(), SLACK_TOKEN, SLACK_PORT)
-    root = Path(tempfile.mkdtemp(prefix="cos-perf-")).resolve()
+    # Not in the temporary folder when it says so (LIVE_AGENTS_ROOT): workers may write there.
+    parent = os.environ.get("LIVE_AGENTS_ROOT") or None
+    root = Path(tempfile.mkdtemp(prefix="cos-perf-", dir=parent)).resolve()
     home, _, _ = setup(root)
     caches = root / "caches"
     caches.mkdir()
+    results_root = root / "results"
     chosen = projects(root)
     if wanted := {name.lower() for name in sys.argv[1:]}:
         chosen = {name: project for name, project in chosen.items() if name in wanted}
     for name, project in chosen.items():
-        make(project, name, caches)
+        make(project, name, caches, results_root)
     app = App(root / "data", root / "log", {"COPILOT_HOME": str(home)})
     await app.start()
     database = root / "data" / "chiefofstaff.db"
@@ -291,7 +345,9 @@ async def main() -> int:
             results[name] = {}
             for agent in order:
                 log(f"=== {name} on {agent}")
-                results[name][agent] = await bench(app, router, project["path"], agent, database)
+                results[name][agent] = await bench(
+                    app, router, project["path"], agent, database, results_root / name
+                )
                 log(f"{name} {agent}: {results[name][agent]}")
     finally:
         await app.stop()
@@ -304,6 +360,10 @@ async def main() -> int:
     print(f"{'project':8} {'cache':5} {'Copilot':>8} {'Codex':>8} {'margin':>7}  verdict  "
           "(agent's own cost per command: Copilot / Codex)")  # fmt: skip
     failed = []
+
+    def cost(value):
+        return "?" if value is None else f"{value:.1f}"
+
     for name, by_agent in results.items():
         for mode in ("cold", "warm"):
             copilot = statistics.median(by_agent["copilot"][mode])
@@ -312,9 +372,34 @@ async def main() -> int:
             ok = within(codex, copilot)
             failed += [] if ok else [f"{name} {mode}"]
             print(f"{name:8} {mode:5} {copilot:8.1f} {codex:8.1f} {margin:7.1f}  "
-                  f"{'pass' if ok else 'FAIL':7}  ({by_agent['copilot']['overhead'][mode]:.1f} / "
-                  f"{by_agent['codex']['overhead'][mode]:.1f})")  # fmt: skip
+                  f"{'pass' if ok else 'FAIL':7}  ({cost(by_agent['copilot']['overhead'][mode])} / "
+                  f"{cost(by_agent['codex']['overhead'][mode])})")  # fmt: skip
     print("all within the margin" if not failed else f"OVER THE MARGIN: {', '.join(failed)}")
+    print("\n================ CACHES (where the owner's would be, per agent) ================")
+    for name, by_agent in results.items():
+        # PATH is shown, not compared: each agent may put its own helpers first.
+        found = {
+            agent: [line for line in by_agent[agent]["where"] if not line.startswith("WHERE PATH")]
+            for agent in ("copilot", "codex")
+        }
+        same = found["copilot"] == found["codex"] and bool(found["copilot"])
+        failed += [] if same else [f"{name} caches"]
+        print(f"{name:8} {'same for both' if same else 'DIFFERENT'}")
+        for agent in ("copilot", "codex") if not same else ("copilot",):
+            print(f"  {agent if not same else 'both'}:")
+            for line in found[agent]:
+                print(f"    {line[:300]}")
+        paths = {agent: by_agent[agent]["where"] for agent in ("copilot", "codex")}
+        for agent, lines in paths.items():
+            path = next((line[len("WHERE PATH ") :] for line in lines if "WHERE PATH" in line), "")
+            others = next(
+                (line[len("WHERE PATH ") :] for a, ls in paths.items() if a != agent
+                 for line in ls if "WHERE PATH" in line), "",
+            )  # fmt: skip
+            extra = [part for part in path.split(":") if part and part not in others.split(":")]
+            if extra:
+                print(f"  PATH only on {agent}: {':'.join(extra)[:300]}")
+    print("\nverdict: " + ("pass" if not failed else "FAIL: " + ", ".join(failed)))
     shutil.rmtree(root, ignore_errors=True)
     return 0 if results and not failed else 1
 

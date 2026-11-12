@@ -14,12 +14,14 @@ Codex configuration; the Router stays on Copilot. PARITY_PORT sets its port.
 
 import asyncio
 import base64
+import contextlib
 import csv
 import json
 import os
 import random
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -384,9 +386,13 @@ async def standalone_run(name: str, task: str, home: Path, project: Path, root: 
     started = time.monotonic()
     if AGENT == "codex":
         answer = root / "standalone" / f"{name}.answer"
+        # Codex trusts the repository of a writable thread's folder and writes that into the
+        # owner's config.toml when it has no word on it (0.167.2): it is said here instead, as
+        # an inline table (a dotted -c key would split the path at its dots).
+        trust = f'projects={{"{project}"={{trust_level="trusted"}}}}'
         process = await asyncio.create_subprocess_exec(
             CODEX, "exec", "--dangerously-bypass-approvals-and-sandbox", "--ephemeral",
-            "-C", str(checkout), "-o", str(answer), task,
+            "-c", trust, "-C", str(checkout), "-o", str(answer), task,
             stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )  # fmt: skip
@@ -525,6 +531,8 @@ async def run(number: int) -> list[str]:
         home, project, truth = setup(root)
         world = truths()
         app = App(root / "data", root / "chiefofstaff.log", {"COPILOT_HOME": str(home)})
+        codex_config = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "config.toml"
+        config_before = codex_config.read_bytes() if codex_config.exists() else None
         await app.start()
         summary = []
         try:
@@ -579,6 +587,18 @@ async def run(number: int) -> list[str]:
             untouched = not changed and commits == "1"
             summary.append(f"the owner's checkout untouched: {'yes' if untouched else 'NO'}")
             assert untouched, f"the owner's checkout changed: {changed or commits + ' commits'}"
+            if AGENT == "codex":
+                database = root / "data" / "chiefofstaff.db"
+                with contextlib.closing(
+                    sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+                ) as db:
+                    (tokens,) = db.execute(
+                        "SELECT COALESCE(SUM(tokens), 0) FROM agent_usage WHERE agent='codex'"
+                    ).fetchone()
+                summary.append(f"Codex workers' tokens: {tokens:,}")
+            kept = (codex_config.read_bytes() if codex_config.exists() else None) == config_before
+            summary.append(f"the owner's Codex config.toml untouched: {'yes' if kept else 'NO'}")
+            assert kept, f"{codex_config} changed during the run"
         except BaseException:
             try:  # What each session did, to tell the product from the run.
                 for session in (await app.get("/api/state"))["sessions"]:
