@@ -1260,8 +1260,10 @@ class CodexBackend:
                 owner.get("project_doc_max_bytes"),
                 owner.get("project_doc_fallback_filenames"),
             )
-        # Codex merges a table given here into the owner's, key by key (config/src/merge.rs);
-        # a dotted key would split a name with a dot in it (overrides.rs), so tables are nested.
+        # Codex merges a table given here into the owner's config files' tables, key by key
+        # (config/src/merge.rs); a dotted key would split a name with a dot in it (overrides.rs),
+        # so tables are nested. (With the process's own `-c` flags it makes one layer, where a
+        # table replaces what is at its key: none of those set what is set here.)
         config: dict[str, Any] = {"projects": projects}
         if options.get("ask_first"):
             config["features.apps"] = False

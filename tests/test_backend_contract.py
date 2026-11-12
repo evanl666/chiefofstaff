@@ -631,18 +631,20 @@ async def test_with_ask_first_every_mcp_call_asks_and_githubs_writes_stay_refuse
         "env": {"MARKER_DIR": str(marks)},
         "tools": {"create_pull_request_review": {"approval_mode": "approve"}},
     }
+    if real_codex(backend):
+        # In the owner's config.toml, as they set it (`-c` flags would share the thread's own
+        # layer of settings, where a table replaces what is at its key: Codex's overrides.rs).
+        home = Path(os.environ["CODEX_HOME"])
+        (home / "config.toml").write_text(
+            f"[mcp_servers.github]\ncommand = {json.dumps(sys.executable)}\n"
+            f"args = [{json.dumps(str(MARKERS))}]\n"
+            f"env = {{ MARKER_DIR = {json.dumps(str(marks))} }}\n"
+            '[mcp_servers.github.tools.create_pull_request_review]\napproval_mode = "approve"\n'
+        )
     owner = await another_codex(
         backend,
         tmp_path,
         monkeypatch,
-        "-c",
-        f'mcp_servers.github.command="{sys.executable}"',
-        "-c",
-        f'mcp_servers.github.args=["{MARKERS}"]',
-        "-c",
-        f'mcp_servers.github.env={{MARKER_DIR="{marks}"}}',
-        "-c",
-        'mcp_servers.github.tools.create_pull_request_review.approval_mode="approve"',
         FAKE_CODEX_CONFIG=json.dumps({"mcp_servers": {"github": server}}),
     )
     await owner.start()
