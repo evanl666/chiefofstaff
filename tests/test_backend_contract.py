@@ -804,6 +804,58 @@ async def test_a_codex_thread_open_in_another_app_server_is_said_to_be(tmp_path,
 
 
 @pytest.mark.codex
+async def test_a_codex_worker_has_the_mcp_servers_and_skill_folders_of_settings(
+    tmp_path, monkeypatch
+):
+    """What the owner added in Chief of Staff's Settings, given to the worker's thread: its
+    model calls the MCP server's tool, and Codex lists the skill from the skill folder."""
+    if not REAL_CODEX:
+        pytest.skip("Set CHIEFOFSTAFF_TEST_CODEX=1 to check it on real Codex.")
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    marks, skills = tmp_path / "marks", tmp_path / "skills"
+    marks.mkdir()
+    (skills / "probe-skill").mkdir(parents=True)
+    (skills / "probe-skill" / "SKILL.md").write_text(
+        "---\nname: probe-skill\ndescription: The probe skill.\n---\nSay hi.\n"
+    )
+    probe = {
+        "type": "local",
+        "command": sys.executable,
+        "args": [str(MARKERS)],
+        "env": {"MARKER_DIR": str(marks), "MARKER_NAME": "probe"},
+        "tools": ["*"],
+    }
+    model = scripted_model.Model()
+    codex = CodexBackend(shutil.which("codex") or "codex")
+    codex.arguments += model.arguments(tmp_path)
+    codex.needs_sign_in = False
+    codex.created = []
+    await codex.start()
+    try:
+        session, turn = await open_session(
+            codex, tmp_path, mcp_servers={"probe": probe}, skill_directories=[str(skills)]
+        )
+        await session.send("Call the MCP tool get_me of probe. Then reply with just: ok")
+        await turn.wait()
+        assert (marks / "started-probe").exists(), "Codex started the server"
+        assert "octocat" in json.dumps(model.bodies[-1].get("input")), "its tool answered"
+        listed = await codex.request("skills/list", {"cwds": [str(tmp_path)], "forceReload": True})
+        names = {
+            skill.get("name")
+            for entry in listed.get("data") or []
+            for skill in entry.get("skills") or []
+        }
+        assert "probe-skill" in names, names
+        said = [e.data.content for e in turn.events if e.type.value == "assistant.message"]
+        assert said[-1:] == ["ok"], said
+    finally:
+        await codex.stop()
+        model.close()
+
+
+@pytest.mark.codex
 async def test_codexs_check_of_a_tested_version_finds_nothing(tmp_path, monkeypatch):
     """Chief of Staff's check of the Codex on this computer, as it runs once per version: its
     protocol's schema has what Chief of Staff uses; its thread reads back untrusted with

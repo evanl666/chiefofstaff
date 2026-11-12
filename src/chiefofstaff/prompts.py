@@ -933,17 +933,19 @@ SEND_RULE = (
 
 # A worker on another coding agent gets WORKER with its few lines in Copilot's terms said in
 # that agent's (more-agents.md 5.4); Copilot's text is unchanged. Codex: a session of its own;
-# what keeps running goes on after the command returns (its background terminals: a message
-# still reaches the worker); no ask_user (the owner's questions go through report); an MCP
-# server's sign-in is Codex's own command.
+# what keeps running is a plain command, which Codex keeps running once the command returns
+# (its background terminals: seen and stopped by Chief of Staff; a message still reaches the
+# worker), never one backgrounded or daemonized by the shell, which nothing tracks; no ask_user
+# (the owner's questions go through report); an MCP server's sign-in is Codex's own command.
 AGENT_WORDS = {
     "codex": {
         "a Copilot session that the owner's Router": "a Codex session that the owner's Router",
         '(a dev server, a watcher, a tunnel) detached (bash with mode="async"\n  and detach: '
         "true), and stop it when you no longer need it. Left running attached, it holds\n  every "
-        "message to you until it ends.": "(a dev server, a watcher, a tunnel) so that it goes on "
-        "after your command\n  returns, and stop it when you no longer need it. Messages still "
-        "reach you while it\n  runs.",
+        "message to you until it ends.": "(a dev server, a watcher, a tunnel) as a plain "
+        "command, without `&`,\n  `nohup`, `setsid` or `disown`: Codex keeps it running once "
+        "your command returns,\n  where Chief of Staff sees it and can stop it. Stop it when "
+        "you no longer need it.\n  Messages still reach you while it runs.",
         "ask_user is for quick facts and access.": 'report(status="question") is for quick '
         "facts and access.",
         "- Ask the owner directly with ask_user when only they can answer or act": "- Ask the "

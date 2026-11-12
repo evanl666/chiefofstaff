@@ -100,6 +100,7 @@ CODEX_SENDS: dict[str, tuple[str, ...]] = {
     "config/read": ("cwd", "includeLayers"),
     "plugin/installed": ("cwds",),
     "plugin/read": ("marketplacePath", "pluginName"),
+    "skills/extraRoots/set": ("extraRoots",),
     "experimentalFeature/list": ("threadId",),
     "thread/start": (
         "cwd",
@@ -529,6 +530,8 @@ class CodexBackend:
         # Codex's experimental API: Chief of Staff's own tools (dynamicTools) and the commands a
         # turn left running (thread/backgroundTerminals/*) need it; Settings' look does not.
         self.experimental = True
+        # The skill folders from Chief of Staff's Settings this process reads (skill_roots).
+        self.extra_roots: list[str] = []
         self.process: asyncio.subprocess.Process | None = None
         # Chief of Staff's end of the supervisor's lifeline: closed with this process.
         self.lifeline: int | None = None
@@ -1247,8 +1250,15 @@ class CodexBackend:
         apps are off."""
         read = await self.request("config/read", {"cwd": cwd, "includeLayers": True})
         owner = mapping(read.get("config"))
+        # The MCP servers the owner added in Chief of Staff's Settings, as Codex has one.
+        provided = {
+            str(name): found
+            for name, entry in mapping(options.get("mcp_servers")).items()
+            if (found := codex_mcp(entry))
+        }
         # Which of its MCP servers is GitHub's is told from their configuration (elicitation).
-        options["mcp_configs"] = owner.get("mcp_servers") or {}
+        options["mcp_configs"] = {**mapping(owner.get("mcp_servers")), **provided}
+        await self.skill_roots(options.get("skill_directories") or [])
         folders = [cwd, *(f for f in options.get("folders") or [] if f != cwd)]
         projects = await asyncio.to_thread(
             trust_levels,
@@ -1282,6 +1292,12 @@ class CodexBackend:
         # owner's memories (memory_mode "disabled").
         config["features.memories"] = False
         config["memories"] = {"generate_memories": False}
+        if provided:
+            # Codex merges these into the owner's own servers, as Copilot does its session's.
+            config["mcp_servers"] = {
+                name: {**entry, **(asking(entry) if options.get("ask_first") else {})}
+                for name, entry in provided.items()
+            }
         if options.get("ask_first"):
             config["features.apps"] = False
             # Its subagents: a child's resume_agent opens any thread Codex can name (another
@@ -1293,9 +1309,10 @@ class CodexBackend:
             servers = {
                 str(server): asking(entry, checking=bool(options.get("checking")))
                 for server, entry in mapping(owner.get("mcp_servers")).items()
+                if str(server) not in provided
             }
             if servers:
-                config["mcp_servers"] = servers
+                config["mcp_servers"] = {**servers, **config.get("mcp_servers", {})}
             # A plugin's MCP servers have their policy in its own table: each asks too.
             plugins = {} if options.get("checking") else await self.plugin_servers(cwd)
             configured = mapping(owner.get("plugins"))
@@ -1317,6 +1334,15 @@ class CodexBackend:
                 "default_tools_approval_mode": "prompt",
             }
         return config
+
+    async def skill_roots(self, folders: list[str]):
+        """The skill folders the owner added in Settings, for this process (each worker has its
+        own): Codex reads each as it does its own `skills` folder."""
+        roots = [str(Path(folder)) for folder in folders]
+        if roots == self.extra_roots:
+            return
+        await self.request("skills/extraRoots/set", {"extraRoots": roots})
+        self.extra_roots = roots
 
     async def plugin_servers(self, cwd: str) -> dict[str, list[str]]:
         """The MCP servers each of Codex's plugins on for this folder adds (plugin id -> their
@@ -2583,6 +2609,31 @@ class CodexSession:
             if reply:
                 answers[question.get("id", "")] = {"answers": [str(reply)]}
         return {"answers": answers}
+
+
+def codex_mcp(entry: Any) -> dict | None:
+    """An MCP server as Chief of Staff's Settings have it (Copilot's form: a command, or a URL;
+    `tools` it may use, `*` for all), as Codex's config has one; None for one it cannot run."""
+    entry = mapping(entry)
+    found: dict[str, Any] = {}
+    if isinstance(url := entry.get("url"), str) and url:
+        found["url"] = url
+        if headers := mapping(entry.get("headers")):
+            found["http_headers"] = {str(k): str(v) for k, v in headers.items()}
+    elif isinstance(command := entry.get("command"), str) and command:
+        found["command"] = command
+        if args := entry.get("args"):
+            found["args"] = [str(arg) for arg in args]
+        if env := mapping(entry.get("env")):
+            found["env"] = {str(k): str(v) for k, v in env.items()}
+        if isinstance(cwd := entry.get("cwd"), str) and cwd:
+            found["cwd"] = cwd
+    else:
+        return None
+    tools = entry.get("tools") or ["*"]
+    if isinstance(tools, list) and "*" not in tools:
+        found["enabled_tools"] = [str(tool) for tool in tools]
+    return found
 
 
 def feature_on(config: dict, name: str) -> bool:

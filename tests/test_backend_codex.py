@@ -1720,6 +1720,52 @@ async def test_a_worker_open_in_the_owners_codex_app_says_so_and_waits_for_a_lat
         await runtime.stop()
 
 
+def test_an_mcp_server_from_settings_is_written_as_codex_reads_one():
+    """Settings keep MCP servers in Copilot's form; Codex's config has its own."""
+    mapped = backend_codex.codex_mcp
+    assert mapped(
+        {"type": "local", "command": "node", "args": ["s.js", 3], "env": {"K": 1}, "tools": ["*"]}
+    ) == {"command": "node", "args": ["s.js", "3"], "env": {"K": "1"}}
+    assert mapped(
+        {"type": "http", "url": "https://x/mcp", "headers": {"A": "b"}, "tools": ["read", "list"]}
+    ) == {"url": "https://x/mcp", "http_headers": {"A": "b"}, "enabled_tools": ["read", "list"]}
+    assert mapped({"type": "local", "command": ""}) is None
+    assert mapped("not a server") is None
+
+
+@pytest.mark.parametrize("yolo", [True, False])
+async def test_a_codex_worker_has_the_mcp_servers_and_skills_added_in_settings(
+    tmp_path, monkeypatch, yolo
+):
+    """As a Copilot worker has them (Runtime.options): the owner's MCP servers and skill
+    folders from Chief of Staff's Settings, the servers asking first where the worker does."""
+    log = tmp_path / "log.jsonl"
+    skills = tmp_path / "skills"
+    (skills / "probe-skill").mkdir(parents=True)
+    (skills / "probe-skill" / "SKILL.md").write_text("---\nname: probe-skill\n---\nHi.\n")
+    server = {"type": "local", "command": sys.executable, "args": ["probe.py"], "tools": ["*"]}
+    settings = Settings(
+        worker_yolo=yolo, mcp_servers={"probe": server}, skill_folders=[str(skills)]
+    )
+    harness, runtime = await brief(tmp_path, monkeypatch, settings, FAKE_CODEX_LOG=str(log))
+    try:
+        worker = await spawn(runtime, harness, "Report done: ok")
+        await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+        sent = [json.loads(line) for line in log.read_text().splitlines()]
+        cwd = harness.store.session(worker)["cwd"]
+        (start,) = [
+            e["params"] for e in sent if e["method"] == "thread/start" and e["params"]["cwd"] == cwd
+        ]
+        expected = {"command": sys.executable, "args": ["probe.py"]}
+        if not yolo:
+            expected["default_tools_approval_mode"] = "prompt"
+        assert start["config"]["mcp_servers"]["probe"] == expected
+        roots = [e["params"] for e in sent if e["method"] == "skills/extraRoots/set"]
+        assert roots == [{"extraRoots": [str(skills.resolve())]}], "once, for its process"
+    finally:
+        await runtime.stop()
+
+
 async def test_a_quiet_codex_worker_lets_go_of_its_codex_and_its_next_message_resumes_it(
     tmp_path, monkeypatch
 ):

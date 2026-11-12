@@ -2066,6 +2066,14 @@ class Runtime:
             "worker": row["id"],
             "children": self.agent_children(row["id"]),
         }
+        # What the owner added in Settings, as a Copilot worker has it: MCP servers and skills.
+        servers = dict(self.store.settings().mcp_servers)
+        if extra := os.environ.get("CHIEFOFSTAFF_WORKER_MCP"):
+            servers |= json.loads(extra)
+        if servers:
+            options["mcp_servers"] = servers
+        if skills := self.abilities.skill_directories():
+            options["skill_directories"] = skills
         if model := chosen.get("model"):
             options["model"] = model
         if effort := chosen.get("effort"):

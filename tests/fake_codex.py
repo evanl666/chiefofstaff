@@ -45,6 +45,7 @@ class Server:
         self.terminals: dict[str, tuple] = {}
         self.serving: set[asyncio.Task] = set()
         self.experimental = False
+        self.extra_roots: list[str] = []
         # Threads that start a turn of their own once their current one ends.
         self.on_its_own: set[str] = set()
         self.strangers: set[str] = set()
@@ -204,6 +205,12 @@ class Server:
                 detail |= {name: [] for name in ("apps", "appTemplates", "hooks", "skills")}
                 return {"plugin": {**detail, "mcpServers": entry.get("servers", [])}}
         raise RuntimeError("plugin not found")
+
+    async def on_skills_extraroots_set(self, params):
+        """Skill folders for the whole process, as Codex keeps them (and says skills changed)."""
+        self.extra_roots = list(params["extraRoots"])
+        self.notify("skills/changed", {})
+        return {}
 
     async def on_experimentalfeature_list(self, params):
         """Each feature as the thread has it (its config's `features.<name>`, else on), or as

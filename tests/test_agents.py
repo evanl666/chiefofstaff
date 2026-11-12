@@ -650,6 +650,8 @@ def test_a_codex_worker_is_told_in_codex_terms_what_copilot_is_told_in_its_own()
     for word in ("Copilot", "ask_user", 'mode="async"', "detach: true"):
         assert word not in said, word
     assert 'report(status="question")' in said and "codex mcp login" in said
+    # What keeps running is Codex's to keep (a background terminal), not the shell's.
+    assert "as a plain command, without `&`,\n  `nohup`, `setsid` or `disown`" in said
     assert prompts.worker_on("copilot", prompts.WORKER) == prompts.WORKER
 
 
