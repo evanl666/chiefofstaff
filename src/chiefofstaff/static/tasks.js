@@ -579,6 +579,9 @@ function taskCard(task, phase = phaseOf(task)) {
       main = el("button", { type: "button", text: "Accept", onclick: accept });
       shown = [viewing, following, changes];
       more = [copy, pr, named, splitOff, worker];
+    } else if (task.status === "waiting" && task.stopped && task.spend_stop && !task.go_on) {
+      // Its token limit used: nothing goes on until it is raised (Settings → Models).
+      more = [named, worker, cancel];
     } else if (task.status === "waiting" && task.stopped) {
       // Stopped mid-work: go on where it stopped, or with a word on what to do instead.
       main = el("button", { type: "button", text: "Go on", onclick: () => act(`/api/tasks/${task.id}/follow-up`, { text: "Go on where you stopped." }, "Sent to the worker.", true, true) });
@@ -1061,8 +1064,8 @@ export function rowLatest(task, worker, phase) {
   // Its runs are what it needs the owner for: its result (accepted) is not news.
   if (phase.marker === "runs-unknown") return { text: "" };
   if (phase.marker === "update") return { text: gist(task.news?.text || ""), help: task.news?.text };
-  // Its question is said in full on the row.
-  if (phase.section === "needs" && questionOf(task)) return { text: "" };
+  // Its question is said in full on the row; why its token limit stopped it, too.
+  if (phase.section === "needs" && (questionOf(task) || (phase.marker === "stopped" && task.spend_stop))) return { text: "" };
   // Failed after a retry, a result from before it is older than why it failed.
   const said = ["waiting", "failed"].includes(task.status) ? task.progress || task.result : ["review", "done"].includes(task.status) ? task.result || task.progress : task.progress;
   return { text: gist(said || ""), help: "" };

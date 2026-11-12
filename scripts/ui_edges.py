@@ -6025,6 +6025,7 @@ async def send_pins(runtime, browser):
 # task rows and Usage, a save that stops workers, and Go on for one whose spend is unknown.
 AGENT_SHOTS = SHOTS / "agents-m2"
 AGENT_WIDTHS = (800, 1024, 1440)
+SIGNED_OUT_CODEX = "Codex is not signed in: run codex login in a terminal."
 OLD_CODEX = "Codex 0.160.0 is older than the versions tested (0.167.2): update it."
 STOPPED_CODEX = "Stopped unexpectedly; starts again with its next worker's message."
 NO_ANSWER = "Codex did not answer in time: try again."
@@ -6085,6 +6086,7 @@ async def open_models(page):
 async def shoot(page, name: str, scheme: str, width: int, target: str = "#settings-dialog"):
     AGENT_SHOTS.mkdir(parents=True, exist_ok=True)
     await page.set_viewport_size({"width": width, "height": 900})
+    await page.mouse.move(1, 1)  # No hover where the last click left the pointer.
     await quiet_for(page)
     found = await page.locator(target).evaluate(OVERFLOWS)
     assert not found, (name, width, found)
@@ -6125,6 +6127,16 @@ async def agents_off(runtime, browser, scheme: str, runs: Path):
     assert last == "agents-line", last
     await expect(button).to_have_text("Use another coding agent for workers…")
     assert await button.evaluate("b => b.matches('button.link.quiet')")
+    # Its words start where the hint's above it do.
+    lefts = await tab.evaluate(
+        """t => {
+            const hint = [...t.querySelectorAll(':scope > small')].at(-1);
+            const words = document.createRange();
+            words.selectNodeContents(t.querySelector('#agents-open'));
+            return [hint.getBoundingClientRect().left, words.getBoundingClientRect().left];
+        }"""
+    )
+    assert abs(lefts[0] - lefts[1]) < 0.5, lefts
     await expect(group).to_be_hidden()
     # Its parts opened along with the tab's others: still nothing looked for.
     await tab.evaluate("t => t.querySelectorAll('details').forEach((d) => { d.open = true; })")
@@ -6141,6 +6153,8 @@ async def agents_off(runtime, browser, scheme: str, runs: Path):
     await expect(group).to_be_visible()
     await expect(button).to_be_hidden()
     await expect(group.locator("summary")).to_be_focused()
+    # By keyboard its ring shows (by mouse it does not: agents_states).
+    assert await group.locator("summary").evaluate("s => s.matches(':focus-visible')")
     rows = group.locator(".agent-row")
     state = rows.locator("small[role=status]")
     await expect(state).to_have_text("0.167.2 · signed in with ChatGPT", timeout=20000)
@@ -6155,8 +6169,18 @@ async def agents_off(runtime, browser, scheme: str, runs: Path):
     await expect(box).to_be_enabled()
     await expect(rows.locator(".agent-fields")).to_be_hidden()
     choose = group.locator("select[name=agent_new_workers]")
-    await expect(choose.locator("option")).to_have_text(["Copilot"])
+    await expect(choose).to_be_hidden()  # Nothing to choose from: not shown.
     await expect(group.locator("#agents-sandboxed")).to_be_hidden()
+    for width in AGENT_WIDTHS:
+        await shoot(page, "group-found-keyboard", scheme, width)
+    # As most open it: by mouse (its summary keeps focus, without the keyboard's ring).
+    await page.keyboard.press("Escape")
+    await expect(page.locator("#settings-dialog")).to_be_hidden()
+    tab = await open_models(page)
+    await tab.locator("#agents-open").click()
+    await expect(group.locator("summary")).to_be_focused()
+    assert not await group.locator("summary").evaluate("s => s.matches(':focus-visible')")
+    await expect(state).to_have_text("0.167.2 · signed in with ChatGPT", timeout=20000)
     for width in AGENT_WIDTHS:
         await shoot(page, "group-found", scheme, width)
     await page.set_viewport_size({"width": 1280, "height": 900})
@@ -6168,18 +6192,39 @@ async def agents_off(runtime, browser, scheme: str, runs: Path):
     await expect(model).to_have_attribute("placeholder", "Agent's default")
     options = fields.locator("datalist option")
     assert await options.evaluate_all("o => o.map((x) => x.value)") == ["gpt-test", "gpt-mini"]
-    await expect(fields.locator("label span")).to_have_text(["Model", "Limit per worker"])
+    await expect(fields.locator("label span")).to_have_text(["Model", "Limit per worker (tokens)"])
+    limit = fields.locator("input[name=agent_codex_limit]")
+    await expect(limit).to_have_attribute("placeholder", "No limit")
+    await expect(choose).to_be_visible()
     await expect(choose.locator("option")).to_have_text(["Copilot", "Codex"])
     for width in AGENT_WIDTHS:
         await shoot(page, "group-enabling", scheme, width)
     await page.set_viewport_size({"width": 1280, "height": 900})
     await choose.select_option("codex")
-    await fields.locator("input[name=agent_codex_limit]").fill("200000")
     saved = []
     page.on(
         "request",
         lambda r: saved.append(r.post_data_json) if r.url.endswith("/api/settings") else None,
     )
+    # Not a whole number of tokens: said beside it, and nothing is saved.
+    error = fields.locator("#agent-codex-limit-error")
+    await limit.fill("20k")
+    await page.locator("#settings-form footer button[type=submit]").click()
+    await expect(error).to_have_text(
+        "Enter a whole number of tokens, up to 1,000,000,000,000, or leave it empty for no limit."
+    )
+    await expect(limit).to_have_attribute("aria-invalid", "true")
+    await expect(limit).to_have_attribute("aria-describedby", "agent-codex-limit-error")
+    await expect(limit).to_be_focused()
+    await expect(page.locator("#settings-dialog")).to_be_visible()
+    assert not saved, saved
+    for width in AGENT_WIDTHS:
+        await shoot(page, "group-limit-wrong", scheme, width)
+    await page.set_viewport_size({"width": 1280, "height": 900})
+    await limit.fill("200000")
+    await expect(error).to_be_hidden()
+    await choose.focus()  # Left: the number shows grouped.
+    await expect(limit).to_have_value("200,000")
     await page.locator("#settings-form footer button[type=submit]").click()
     await expect(page.locator("#settings-dialog")).to_be_hidden()
     assert saved[-1]["agents"] == {
@@ -6201,7 +6246,7 @@ async def agents_off(runtime, browser, scheme: str, runs: Path):
     await group.locator("summary").click()
     await expect(state).to_have_text("0.167.2 · signed in with ChatGPT", timeout=20000)
     await expect(box).to_be_checked()
-    await expect(fields.locator("input[name=agent_codex_limit]")).to_have_value("200000")
+    await expect(fields.locator("input[name=agent_codex_limit]")).to_have_value("200,000")
     await expect(group.locator("#agents-downgrade")).to_be_visible()
     for width in AGENT_WIDTHS:
         await shoot(page, "on-open", scheme, width)
@@ -6241,7 +6286,7 @@ async def agents_states(browser, scheme: str):
     states = {
         "none-found": {"agents": [], "new_workers": "copilot", "sandboxed": False},
         "signed-out": {
-            "agents": [found | {"problem": "Codex is not signed in: run `codex login`."}],
+            "agents": [found | {"problem": SIGNED_OUT_CODEX}],
             "new_workers": "copilot", "sandboxed": False,
         },
         "too-old": {
@@ -6264,11 +6309,14 @@ async def agents_states(browser, scheme: str):
         await page.route("**/api/agents", answered)
         tab = await open_models(page)
         await tab.locator("#agents-open").click()
+        summary = tab.locator("#agents-group summary")
+        await expect(summary).to_be_focused()
+        assert not await summary.evaluate("s => s.matches(':focus-visible')"), "no ring by mouse"
         rows = tab.locator(".agent-row")
         if name == "checking":
             await expect(rows.locator("small[role=status]")).to_have_text("Checking…")
             await expect(rows.locator("input[type=checkbox]")).to_be_disabled()
-            await expect(tab.locator("select[name=agent_new_workers]")).to_be_disabled()
+            await expect(tab.locator("select[name=agent_new_workers]")).to_be_hidden()
         elif name == "error":
             await expect(rows.locator("small[role=status]")).to_have_text(
                 f"Could not check: {NO_ANSWER}"
@@ -6284,10 +6332,25 @@ async def agents_states(browser, scheme: str):
             line = rows.locator("small[role=status]")
             shown = answer["agents"][0]
             await expect(line).to_have_text(shown["problem"] or shown["state"])
+            assert "`" not in await rows.inner_text(), "no code marks shown as they are"
+            label = rows.locator("label.check")
+            muted = await page.evaluate(
+                "() => getComputedStyle(document.body).getPropertyValue('--muted').trim()"
+            )
+            colour = await label.evaluate("l => getComputedStyle(l).color")
             if name in ("signed-out", "too-old", "sandboxed"):
                 await expect(box).to_be_disabled()
+                await expect(rows).to_have_class("agent-row disabled")
+                assert colour == await page.evaluate(
+                    "c => { const p = document.createElement('p'); p.style.color = c; "
+                    "document.body.append(p); const s = getComputedStyle(p).color; p.remove(); "
+                    "return s; }",
+                    muted,
+                ), (name, colour, muted)
+                assert await box.evaluate("b => getComputedStyle(b).opacity") == "0.4"
             else:
                 await expect(box).to_be_enabled()  # On: it can always be turned off.
+                await expect(rows).to_have_class("agent-row")
             await expect(tab.locator("#agents-sandboxed")).to_be_visible(
                 visible=name == "sandboxed"
             )
@@ -6437,10 +6500,19 @@ async def agents_usage(runtime, browser, worker: str):
             dialog = page.locator("#usage-dialog")
             await expect(dialog).to_be_visible()
             part = dialog.locator("#usage-tables > div", has=page.locator("h3", has_text="Codex"))
-            await expect(part.locator("tr")).to_have_count(3)
+            today = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+            spent = store.agent_usage_in(today.timestamp(), time.time() + 1)
+            exact = sum(row["tokens"] for row in spent if row.get("model") == "gpt-test")
+            await expect(part.locator("h3")).to_have_text(
+                f"Codex{80_000 + exact:,}\u2013{120_000 + exact:,} tokens"
+            )
+            await expect(part.locator("tr td:first-child")).to_have_text(["gpt-mini", "gpt-test"])
             ranged = part.locator("tr", has_text="gpt-mini")
             await expect(ranged).to_contain_text("80,000\u2013120,000 tokens")
-            await expect(part.locator("tr").last).to_contain_text("unknown (agent crashed at ")
+            unknown = part.locator("small.unknown")
+            await expect(unknown).to_have_text(
+                re.compile(r"^Unknown: Fix the date parser — Codex crashed at \d{1,2}:\d\d [AP]M$")
+            )
             # Copilot's totals are Copilot's alone (today's, as the dialog opens on).
             local = datetime.now().astimezone()  # The page's midnight is the computer's.
             midnight = local.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -6475,7 +6547,7 @@ async def agents_unknown_spend(runtime, browser, spawned):
         f"agentepoch:{worker}",
         runtime.epoch_of(worker),
     )
-    await runtime.stop_for_spend(store.session(worker), runtime.agent_block(store.session(worker)))
+    await runtime.stop_for_spend(store.session(worker))
     await settle(runtime)
     for scheme in ("light", "dark"):
         context, page, errors, _ = await agents_page(browser, scheme)
@@ -6483,8 +6555,13 @@ async def agents_unknown_spend(runtime, browser, spawned):
             await page.locator("#home-tabs [data-tab=needs]").click()
         card = page.locator("#needs .card.task", has_text="Measure the build time")
         await expect(card).to_contain_text(
-            "Stopped by its token limit (Codex stopped mid-turn)", timeout=15000
+            re.compile(
+                r"Codex stopped mid-turn, so what this worker spent since \d{1,2}:\d\d [AP]M "
+                r"isn't known\. Go on accepts that and continues\."
+            ),
+            timeout=15000,
         )
+        assert "Stopped by" not in await card.inner_text(), "said once, not again after it"
         await expect(card.get_by_role("button", name="Go on", exact=True)).to_be_visible()
         for width in AGENT_WIDTHS:
             await page.set_viewport_size({"width": width, "height": 900})
@@ -6494,10 +6571,16 @@ async def agents_unknown_spend(runtime, browser, spawned):
             await shoot(page, "unknown-spend-go-on", scheme, width, "#main")
         await page.set_viewport_size({"width": 1280, "height": 900})
         await page.evaluate("id => import('/static/session.js').then((m) => m.select(id))", worker)
-        notice = page.locator("#timeline .notice", has_text="not known")
-        await expect(notice.first).to_be_visible()
+        notices = page.locator("#timeline .notice")
+        await expect(notices).to_have_text(
+            ["Stopped: Codex stopped mid-turn, so what it spent is unknown."]
+        )
         for width in AGENT_WIDTHS:
             await shoot(page, "unknown-spend-worker", scheme, width, "#main")
+            assert await notices.locator("span").evaluate("n => n.scrollWidth <= n.clientWidth"), (
+                "cut short",
+                width,
+            )
         assert not errors, errors
         await context.close()
     context, page, errors, _ = await agents_page(browser, "light")
@@ -6508,8 +6591,66 @@ async def agents_unknown_spend(runtime, browser, spawned):
     await until(lambda: not store.agent_unknown(worker), 10)
     await context.close()
     await runtime.workers.interrupt(worker, by="you")
+    await agents_limit_used(runtime, browser, spawned)
     await agents_saved(runtime, {"codex": {"enabled": True, "limit": 0}})
     log("agents: unknown spend with a limit waits under Needs you for Go on, which accepts it")
+
+
+async def agents_limit_used(runtime, browser, spawned):
+    """A Codex worker that used its token limit: its card says so, with no Go on until the
+    limit is raised; then Go on goes on."""
+    store = runtime.store
+    await agents_saved(runtime, {"codex": {"enabled": True, "limit": 1_000}})
+    made = await spawned("Profile the importer", "Wait 600 s")
+    worker = made["session_id"]
+    await until(lambda: store.session(worker)["status"] == "working", 30)
+    row = {"agent": "codex", "session_id": worker, "model": "gpt-test", "tokens": 1_200,
+           "kind": "exact", "at": time.time()}  # fmt: skip
+    store.record_agent_usage([row], f"agentepoch:{worker}", runtime.epoch_of(worker))
+    await runtime.stop_for_spend(store.session(worker))
+    await settle(runtime)
+    for scheme in ("light", "dark"):
+        context, page, errors, _ = await agents_page(browser, scheme)
+        if await page.locator("#home-tabs").is_visible():
+            await page.locator("#home-tabs [data-tab=needs]").click()
+        card = page.locator("#needs .card.task", has_text="Profile the importer")
+        await expect(card).to_contain_text(
+            "Used its 1,000-token limit. Raise it in Settings → Models, or cancel.", timeout=15000
+        )
+        assert "Stopped by" not in await card.inner_text()
+        await expect(card.get_by_role("button", name="Go on", exact=True)).to_have_count(0)
+        for width in AGENT_WIDTHS:
+            await page.set_viewport_size({"width": width, "height": 900})
+            if await page.locator("#home-tabs").is_visible():
+                await page.locator("#home-tabs [data-tab=needs]").click()
+            await expect(card).to_be_visible()
+            await shoot(page, "limit-used-card", scheme, width, "#main")
+        await page.set_viewport_size({"width": 1280, "height": 900})
+        await page.evaluate("id => import('/static/session.js').then((m) => m.select(id))", worker)
+        notices = page.locator("#timeline .notice")
+        await expect(notices).to_have_text(["Stopped: it used its 1,000-token limit."])
+        for width in AGENT_WIDTHS:
+            await shoot(page, "limit-used-worker", scheme, width, "#main")
+        assert not errors, errors
+        await context.close()
+    # Raised: Go on goes on.
+    await agents_saved(runtime, {"codex": {"enabled": True, "limit": 1_000_000}})
+    context, page, errors, _ = await agents_page(browser, "light")
+    if await page.locator("#home-tabs").is_visible():
+        await page.locator("#home-tabs [data-tab=needs]").click()
+    card = page.locator("#needs .card.task", has_text="Profile the importer")
+    await expect(card).to_contain_text("Its token limit is 1,000,000 now: Go on continues.")
+    for width in AGENT_WIDTHS:
+        await page.set_viewport_size({"width": width, "height": 900})
+        if await page.locator("#home-tabs").is_visible():
+            await page.locator("#home-tabs [data-tab=needs]").click()
+        await shoot(page, "limit-raised-card", "light", width, "#main")
+    await card.get_by_role("button", name="Go on", exact=True).click()
+    await until(lambda: store.session(worker)["status"] == "working", 15)
+    assert not errors, errors
+    await context.close()
+    await runtime.workers.interrupt(worker, by="you")
+    log("agents: a worker that used its limit waits with no Go on until it is raised")
 
 
 async def agents_stopped_by_settings(runtime, browser, spawned):
@@ -6542,8 +6683,8 @@ async def agents_stopped_by_settings(runtime, browser, spawned):
     held.set()  # From now on each goes through at once.
     toast = page.locator(".toast")
     await expect(toast).to_have_text(
-        "Stopped 1 worker: Codex is turned off in Settings → Models. Tell it to go on from Needs "
-        "you once that changes."
+        "Stopped 1 worker because Codex is off. Turn Codex on again, then press Go on under "
+        "Needs you."
     )
     await expect(toast).to_have_count(1)
     for width in AGENT_WIDTHS:

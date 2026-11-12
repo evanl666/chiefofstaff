@@ -1,7 +1,7 @@
 // The settings and usage dialogs.
 
 import { $, api, el, submits, toast } from "./dom.js";
-import { lines, plural, since } from "./text.js";
+import { codeHtml, lines, plural, since } from "./text.js";
 import { closedWorkers, followOthers, HOME, loadState, sessions, state } from "./state.js";
 import { renderSidebar } from "./sidebar.js";
 import { EFFORTS, renderHeader, select } from "./session.js";
@@ -232,23 +232,24 @@ function usageTable(title, rows, label, onclick) {
     ),
   );
 }
-// One other agent's usage in the range: its models' tokens (a range as a range), and each time
-// it stopped mid-turn, what it spent then being unknown.
+// One other agent's usage in the range: its total on its heading, its models' tokens (a range
+// as a range), and apart, muted, each time it stopped mid-turn, what it spent then unknown.
 function agentUsage(part) {
   const count = (tokens) => tokens.toLocaleString();
-  const clock = (at) => new Date(at * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  const amount = (least, most) => (least < most ? `${count(least)}–${count(most)} tokens` : `${count(most)} tokens`);
+  const clock = (at) => {
+    const when = new Date(at * 1000);
+    const today = when.toDateString() === new Date().toDateString();
+    return when.toLocaleString([], today ? { hour: "numeric", minute: "2-digit" } : { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  };
+  const least = part.models.reduce((sum, row) => sum + row.least, 0);
+  const most = part.models.reduce((sum, row) => sum + row.tokens, 0);
   return el(
     "div",
-    {},
-    el("h3", { text: part.name }),
-    el(
-      "table",
-      {},
-      ...part.models.map((row) =>
-        el("tr", {}, el("td", { text: row.model || "unknown model" }), el("td", { class: "num", text: row.least < row.tokens ? `${count(row.least)}–${count(row.tokens)} tokens` : `${count(row.tokens)} tokens` })),
-      ),
-      ...part.unknown.map((row) => el("tr", {}, el("td", { text: row.title || "Deleted session" }), el("td", { class: "num", text: `unknown (agent crashed at ${clock(row.at)})` }))),
-    ),
+    { class: "agent-usage" },
+    el("h3", {}, el("span", { text: part.name }), part.models.length ? el("span", { class: "num", text: amount(least, most) }) : ""),
+    part.models.length ? el("table", {}, ...part.models.map((row) => el("tr", {}, el("td", { text: row.model || "unknown model" }), el("td", { class: "num", text: amount(row.least, row.tokens) })))) : "",
+    ...part.unknown.map((row) => el("small", { class: "unknown", text: `Unknown: ${row.title || "a deleted worker"} — ${part.name} crashed at ${clock(row.at)}` })),
   );
 }
 // What a result the owner accepted cost, by the model that did most of a task's work.
@@ -893,9 +894,17 @@ async function saveSettings(event) {
     settingsError(error.message);
     return;
   }
+  let agents;
+  try {
+    agents = agentsBody();
+  } catch (error) {
+    showSettingsTab("models");
+    settingsError(error.message);
+    $(`#settings-form [aria-invalid="true"]`)?.focus();
+    return;
+  }
   try {
     if (form.slack_token.value.trim()) await saveToken();
-    const agents = agentsBody();
     if (agents) body.agents = agents;
     let snapshot = await api("/api/settings", { method: "POST", body });
     // The agents on are in the answer only while one is; a save that stopped workers says so.
@@ -990,6 +999,7 @@ function renderAgentsLine() {
   agentsLooked = null;
   $("#agents-rows").replaceChildren();
   $("#settings-form").agent_new_workers.replaceChildren(el("option", { value: "copilot", text: "Copilot" }));
+  $("#settings-form").agent_new_workers.closest("label").hidden = true;
   $("#agents-sandboxed").hidden = true;
   $("#agents-downgrade").hidden = !on;
 }
@@ -999,7 +1009,7 @@ async function lookForAgents() {
   agentsLooked = looking;
   // Loading: each row says so until the agents answer.
   $("#agents-rows").replaceChildren(...Object.entries(AGENTS).map(([name, label]) => agentRow({ name, label, found: true, state: "Checking…", problem: "", models: [] }, true)));
-  form.agent_new_workers.disabled = true;
+  form.agent_new_workers.closest("label").hidden = true;
   let found;
   try {
     found = await api("/api/agents");
@@ -1011,12 +1021,32 @@ async function lookForAgents() {
   }
   if (agentsLooked !== looking) return;
   agentsLooked = found;
-  form.agent_new_workers.disabled = false;
   $("#agents-sandboxed").hidden = !found.sandboxed;
   $("#agents-rows").replaceChildren(
     ...(found.agents.length ? found.agents.map((agent) => agentRow(agent, found.sandboxed)) : [el("small", { class: "agents-none", role: "status", text: "No supported agent found on this computer: the Codex CLI." })]),
   );
   newWorkersChoices(found.new_workers);
+}
+// A token count as the page shows it (200,000), and as the owner types it: grouped or not, as
+// their locale groups digits; null when it is not a whole number of tokens.
+const grouped = (count) => count.toLocaleString();
+const GROUP = new Intl.NumberFormat().formatToParts(10000).find((part) => part.type === "group")?.value || ",";
+const MOST_TOKENS = 1e12; // As agents.MOST_TOKENS: a typo's extra zeros are refused.
+function tokenCount(raw) {
+  const digits = raw.trim().split(GROUP).join("").replace(/[\s,]/g, "");
+  if (digits === "") return 0;
+  return /^\d+$/.test(digits) && Number(digits) <= MOST_TOKENS ? Number(digits) : null;
+}
+// Its limit field says what is wrong with what was typed, beside it (and only then).
+function checkLimit(input) {
+  const count = tokenCount(input.value);
+  const error = $(`#${input.getAttribute("aria-describedby")}`);
+  const wrong = count === null;
+  error.textContent = wrong ? `Enter a whole number of tokens, up to ${grouped(MOST_TOKENS)}, or leave it empty for no limit.` : "";
+  error.hidden = !wrong;
+  if (wrong) input.setAttribute("aria-invalid", "true");
+  else input.removeAttribute("aria-invalid");
+  return count;
 }
 // One agent's row: Use for workers, its state in a line, and once on, its model and limit.
 function agentRow(agent, disabled) {
@@ -1025,13 +1055,20 @@ function agentRow(agent, disabled) {
   box.checked = Boolean(agent.enabled);
   // Off, it is turned on only where it can run; on, it can always be turned off.
   box.disabled = disabled || (!agent.enabled && Boolean(agent.problem));
-  const line = el("small", { id, role: "status", class: agent.problem ? "agent-problem" : "", text: agent.problem || agent.state || "" });
+  const line = el("small", { id, role: "status", class: agent.problem ? "agent-problem" : "", html: codeHtml(agent.problem || agent.state || "") });
   const list = el("datalist", { id: `agent-${agent.name}-models` }, ...(agent.models || []).map((model) => el("option", { value: model.id, label: model.name })));
+  const errorId = `agent-${agent.name}-limit-error`;
+  const limit = el("input", { name: `agent_${agent.name}_limit`, type: "text", inputmode: "numeric", placeholder: "No limit", value: agent.limit ? grouped(agent.limit) : "", autocomplete: "off", "aria-describedby": errorId });
+  limit.addEventListener("blur", () => {
+    const count = checkLimit(limit);
+    if (count) limit.value = grouped(count);
+  });
+  limit.addEventListener("input", () => limit.hasAttribute("aria-invalid") && checkLimit(limit));
   const fields = el(
     "div",
     { class: "agent-fields" },
     el("label", {}, el("span", { text: "Model" }), el("input", { name: `agent_${agent.name}_model`, list: list.id, placeholder: "Agent's default", value: agent.model || "", autocomplete: "off" })),
-    el("label", {}, el("span", { text: "Limit per worker" }), el("input", { name: `agent_${agent.name}_limit`, type: "number", min: "0", step: "1000", placeholder: "Tokens; empty for none", value: agent.limit || "" })),
+    el("div", { class: "agent-limit" }, el("label", {}, el("span", { text: "Limit per worker (tokens)" }), limit), el("small", { id: errorId, class: "field-error", hidden: true })),
     list,
   );
   fields.hidden = !box.checked;
@@ -1039,14 +1076,17 @@ function agentRow(agent, disabled) {
     fields.hidden = !box.checked;
     newWorkersChoices($("#settings-form").agent_new_workers.value);
   });
-  return el("div", { class: "agent-row", "data-agent": agent.name }, el("label", { class: "check" }, box, ` Use ${agent.label} for workers`), line, fields);
+  // One that cannot be turned on looks it, its reason in its line.
+  return el("div", { class: `agent-row${box.disabled ? " disabled" : ""}`, "data-agent": agent.name }, el("label", { class: "check" }, box, ` Use ${agent.label} for workers`), line, fields);
 }
-// New workers use Copilot or an agent checked above (as the form has it, saved or not).
+// New workers use Copilot or an agent checked above (as the form has it, saved or not); with
+// none checked there is nothing to choose, and nothing shows.
 function newWorkersChoices(chosen) {
   const select = $("#settings-form").agent_new_workers;
   const on = (agentsLooked?.agents || []).filter((agent) => $("#settings-form")[`agent_${agent.name}_enabled`]?.checked);
   select.replaceChildren(el("option", { value: "copilot", text: "Copilot" }), ...on.map((agent) => el("option", { value: agent.name, text: agent.label })));
   select.value = on.some((agent) => agent.name === chosen) ? chosen : "copilot";
+  select.closest("label").hidden = !on.length;
 }
 // The group as the form has it, for Save: only once it was looked at, and only what changed.
 function agentsBody() {
@@ -1056,8 +1096,12 @@ function agentsBody() {
   for (const agent of agentsLooked.agents) {
     const enabled = form[`agent_${agent.name}_enabled`].checked;
     const model = form[`agent_${agent.name}_model`].value.trim();
-    const raw = form[`agent_${agent.name}_limit`].value.trim();
-    const limit = raw === "" ? 0 : Number(raw);
+    const input = form[`agent_${agent.name}_limit`];
+    const limit = checkLimit(input);
+    if (limit === null) {
+      $("#agents-group").open = true;  // Said beside the field; Save goes no further.
+      throw new Error("Limit per worker: enter a whole number of tokens.");
+    }
     if (enabled !== Boolean(agent.enabled) || model !== (agent.model || "") || limit !== (agent.limit || 0)) body[agent.name] = { enabled, model, limit };
   }
   if (form.agent_new_workers.value !== agentsLooked.new_workers) body.new_workers = form.agent_new_workers.value;

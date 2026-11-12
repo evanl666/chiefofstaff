@@ -864,6 +864,15 @@ async def runs_views(runtime, browser, quality: Quality):
         await context.close()
 
 
+async def signed_out(route):
+    codex = {
+        "name": "codex", "label": "Codex", "enabled": False, "model": "", "limit": 0,
+        "found": True, "state": "", "models": [],
+        "problem": "Codex is not signed in: run codex login in a terminal.",
+    }  # fmt: skip
+    await route.fulfill(json={"agents": [codex], "new_workers": "copilot", "sandboxed": False})
+
+
 async def agents_views(runtime, browser, quality: Quality):
     """Other coding agents (docs/design/more-agents.md 5.10): the last line of Settings →
     Models; the Coding agents group it unfolds, found and being turned on; on, folded and open;
@@ -883,10 +892,15 @@ async def agents_views(runtime, browser, quality: Quality):
             page = await context.new_page()
             await page.goto(f"{BASE}/#token={TOKEN}")
             await expect(page.locator("#application")).to_be_visible()
-            for state in ("off", "found", "enabling", "on-folded", "on-open"):
+            for state in ("off", "signed-out", "found", "enabling", "on-folded", "on-open"):
                 await page.locator("#settings-button").click()
                 await page.locator("#settings-tabs [data-tab=models]").click()
                 group = page.locator("#agents-group")
+                if state == "signed-out":
+                    # One that cannot be turned on: it looks it, in both themes.
+                    await page.route("**/api/agents", signed_out)
+                    await page.locator("#agents-open").click()
+                    await expect(group.locator(".agent-row.disabled")).to_be_visible()
                 if state in {"found", "enabling"}:
                     await page.locator("#agents-open").click()
                     await expect(group.locator(".agent-row small[role=status]")).to_have_text(
@@ -916,6 +930,8 @@ async def agents_views(runtime, browser, quality: Quality):
                     await until(lambda: bool(runtime.agents_on()), 10)
                 else:
                     await page.locator("#settings-cancel").click()
+                if state == "signed-out":
+                    await page.unroute("**/api/agents", signed_out)
             # A worker on Codex: its header and its ⋯.
             router = runtime.store.get("router_id")
             result = await runtime.toolset.spawn_on(["codex"]).handler(

@@ -850,6 +850,17 @@ class Store:
             )
         )
 
+    def agent_unknown_at(self, session_id: str) -> float:
+        """When the spend it has not accepted was found unknown (0 for never)."""
+        self.agent_usage_table()
+        return float(
+            self.value(
+                "SELECT coalesce(min(at), 0) FROM agent_usage WHERE session_id=? "
+                "AND kind='unknown' AND accepted=0",
+                (session_id,),
+            )
+        )
+
     def accept_agent_unknown(self, session_id: str):
         self.agent_usage_table()
         self.execute(

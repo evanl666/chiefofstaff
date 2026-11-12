@@ -209,7 +209,9 @@ function requestCard(draft) {
   } else {
     node.append(
       // Another agent's sign-in is run in a terminal: the card cannot tell when it is done.
-      el("div", { class: "note", text: target.command ? "Then press I signed in." : "This card closes by itself once you're signed in." }),
+      target.command
+        ? el("div", { class: "note", html: codeHtml(`Run \`${target.command}\` in a terminal, then press I signed in.`) })
+        : el("div", { class: "note", text: "This card closes by itself once you're signed in." }),
       actionRow(error, link(target.url, `Sign in to ${target.server}`), [{ text: "I signed in", onclick: () => decide({ action: "answer" }, "Done.") }, decline("Not now")]),
     );
   }

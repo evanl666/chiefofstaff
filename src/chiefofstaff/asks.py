@@ -642,11 +642,11 @@ class Asks:
             )
             try:
                 target = {"server": server, "url": url}
-                text = f"{server} needs you to sign in"
                 if command:
-                    target["command"] = command
-                    text += f": run `{command}` in a terminal."
-                result = await self.ask_owner(session_id, "signin", target, text, done=connected)
+                    target["command"] = command  # Its card says to run it.
+                result = await self.ask_owner(
+                    session_id, "signin", target, f"{server} needs you to sign in", done=connected
+                )
             finally:
                 self.signins.pop((session_id, server), None)
                 self.signin_pending.pop(key, None)

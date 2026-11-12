@@ -3973,10 +3973,15 @@ class TaskActions:
         if not (self.runtime.agents and row) or self.runtime.on_copilot(row["id"]):
             return {}
         agent = self.runtime.agent(row["id"])
+        spend = {}
+        stopped = self.store.get(f"stopped:{task['id']}")
+        if task["status"] == "waiting" and stopped == agents.SPEND_STOP:
+            spend = self.runtime.spend_stop(row)  # Why, and whether Go on can go on.
         return {
             "agent": agent,
             "agent_name": agents.display(agent),
             "tokens": self.store.task_tokens(task["id"]),
+            **spend,
         }
 
     def view(self, task: dict) -> dict:
@@ -4101,6 +4106,9 @@ class TaskActions:
             )
         if status == "waiting":
             if who := self.store.get(f"stopped:{task_id}"):
+                row = self.store.find_session(task["session_id"])
+                if who == agents.SPEND_STOP and row and not self.runtime.on_copilot(row["id"]):
+                    return "stopped", self.runtime.spend_stop(row)["spend_why"]
                 return "stopped", f"Stopped by {who}: tell it to go on, or cancel it"
             asked = self.open_question(task) or {}
             return "question", clip(" ".join((asked.get("text") or task["progress"]).split()), 300)

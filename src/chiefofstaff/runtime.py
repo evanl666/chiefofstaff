@@ -248,6 +248,11 @@ AGENT_CHECK_AGAIN = 60.0
 AGENT_LOST_AGAIN = 120.0
 
 
+def clock_time(at: float) -> str:
+    """A time of day as the page says it: "7:17 AM" (this computer's time)."""
+    return datetime.fromtimestamp(at, UTC).astimezone().strftime("%I:%M %p").lstrip("0")
+
+
 def counters(totals: Any) -> dict[str, int]:
     """An agent's cumulative token counts (Codex's `tokenUsage.total`), as the ledger keeps
     them; `tokens`: what counts toward a limit (input and output)."""
@@ -938,7 +943,7 @@ class Runtime:
         again = time.monotonic() - self.lost_at.get(worker, -AGENT_LOST_AGAIN) < AGENT_LOST_AGAIN
         self.lost_at[worker] = time.monotonic()
         if agents.limit(self.store, agent) and self.store.agent_unknown(worker):
-            await self.stop_for_spend(row, self.agent_block(row))
+            await self.stop_for_spend(row)
             return
         if not working:
             return
@@ -1181,10 +1186,9 @@ class Runtime:
 
     async def stop_blocked(self, session_id: str, why: str):
         """A turn of a worker that may not run now began anyway (its admission held as a change
-        came): stopped at its first event, as stop_ineligible stops one at work."""
-        self.add_message(session_id, "notice", why)
+        came): stopped at its first event, as stop_ineligible stops one at work, saying why."""
         with suppress(Exception):
-            await self.workers.interrupt(session_id, by="Settings")
+            await self.workers.interrupt(session_id, by="Settings", notice=f"Stopped: {why}")
 
     async def agents_saved(self, before: dict[str, dict]) -> list[str]:
         """The owner saved the Coding agents group (Settings → Models): an agent turned on
@@ -1216,6 +1220,15 @@ class Runtime:
         for row in self.store.open_sessions(WORKER):
             if self.agent(row["id"]) in retuned and not self.agent_choice(row["id"]).get("model"):
                 await self.refresh_session(row)
+        relimited = {
+            name for name in after if before.get(name, {}).get("limit") != after[name].get("limit")
+        }
+        for row in self.store.open_sessions(WORKER):
+            # Tasks its limit stopped say what Go on does now (it goes on once raised).
+            if self.agent(row["id"]) in relimited:
+                for task in self.tasks.for_session(row["id"]):
+                    if self.store.get(f"stopped:{task['id']}") == agents.SPEND_STOP:
+                        self.task_actions.publish(task)
         self.publish_state()
         return stopped
 
@@ -1237,6 +1250,8 @@ class Runtime:
         epoch, entries = self.epoch_of(session_id), []
         if process and (epoch.get("process") != process or epoch.get("ended")):
             epoch, entries = self.next_epoch(session_id, epoch, process)
+        if busy and not epoch.get("busy"):
+            epoch = epoch | {"since": time.time()}  # What it spends from now may be unknown.
         if bool(epoch.get("busy")) != busy or entries or process:
             self.store.record_agent_usage(
                 entries, f"agentepoch:{session_id}", epoch | {"busy": busy}
@@ -1302,18 +1317,43 @@ class Runtime:
             if self.end_epoch(session_id, epoch.get("process", "")):
                 row = self.store.find_session(session_id)
                 if row and agents.limit(self.store, agent) and not row["closed_at"]:
-                    await self.stop_for_spend(row, self.agent_block(row))
+                    await self.stop_for_spend(row)
 
-    async def stop_for_spend(self, row: dict, why: str):
-        """A worker past what its limit lets it spend stops, as after any stop (Go on, or
-        cancel); the owner hears why, and its stopped task says which: spent, or not known."""
+    async def stop_for_spend(self, row: dict):
+        """A worker past what its limit lets it spend stops, as after any stop; its timeline
+        says which in one line (spent, or not known), and its stopped task waits for Go on
+        (what is unknown accepted, or its limit raised: spend_stop) or cancel."""
         if row["status"] in {"working", "queued", "starting"} or self.held(row["id"]):
-            self.add_message(row["id"], "notice", why)
-            by = "its token limit"
+            name = agents.display(self.agent(row["id"]))
             if self.store.agent_unknown(row["id"]):
-                by += f" ({agents.display(self.agent(row['id']))} stopped mid-turn)"
+                notice = f"Stopped: {name} stopped mid-turn, so what it spent is unknown."
+            else:
+                limit = agents.limit(self.store, self.agent(row["id"]))
+                notice = f"Stopped: it used its {limit:,}-token limit."
             with suppress(Exception):
-                await self.workers.interrupt(row["id"], by=by)
+                await self.workers.interrupt(row["id"], by=agents.SPEND_STOP, notice=notice)
+
+    def spend_stop(self, row: dict) -> dict:
+        """A worker its token limit stopped, as its task under Needs you says it: what spent
+        is not known (Go on accepts that), or its limit used (Go on only once it is raised)."""
+        agent = self.agent(row["id"])
+        name, limit = agents.display(agent), agents.limit(self.store, agent)
+        if self.store.agent_unknown(row["id"]):
+            since = self.epoch_of(row["id"]).get("since") or self.store.agent_unknown_at(row["id"])
+            when = f" since {clock_time(since)}" if since else ""
+            return {
+                "spend_stop": "unknown",
+                "spend_why": f"{name} stopped mid-turn, so what this worker spent{when} isn't "
+                "known. Go on accepts that and continues.",
+                "go_on": True,
+            }
+        if not limit:
+            why = "Its token limit is off now: Go on continues."
+        elif self.store.agent_spent(row["id"]) < limit:
+            why = f"Its token limit is {limit:,} now: Go on continues."
+        else:
+            why = f"Used its {limit:,}-token limit. Raise it in Settings → Models, or cancel."
+        return {"spend_stop": "limit", "spend_why": why, "go_on": not self.agent_block(row)}
 
     def record_agent_usage(self, row: dict, data: Any):
         """One usage update of another agent's session: what it spent since the one before, in
@@ -1381,7 +1421,7 @@ class Runtime:
     async def stop_spending(self, session_id: str):
         try:
             if row := self.store.find_session(session_id):
-                await self.stop_for_spend(row, self.agent_block(row))
+                await self.stop_for_spend(row)
         finally:
             self.spend_stopping.discard(session_id)
 

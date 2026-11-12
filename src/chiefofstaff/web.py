@@ -139,13 +139,24 @@ async def check_models(runtime: Runtime, old: Settings, new: Settings):
 
 def stopped_text(reasons: list[str]) -> str:
     """What a Settings save that stopped workers on other agents says (their tasks wait under
-    Needs you, as after any stop)."""
+    Needs you, as after any stop): turned off, what brings them back."""
     many = len(reasons) > 1
-    why = " ".join(dict.fromkeys(reasons))
+    workers = f"{len(reasons)} worker{'s' if many else ''}"
+    whys = list(dict.fromkeys(reasons))
+    if len(whys) == 1 and (off := TURNED_OFF.match(whys[0])):
+        name = off["name"]
+        return (
+            f"Stopped {workers} because {name} is off. Turn {name} on again, then press Go on "
+            "under Needs you."
+        )
     return (
-        f"Stopped {len(reasons)} worker{'s' if many else ''}: {why} Tell "
-        f"{'them' if many else 'it'} to go on from Needs you once that changes."
+        f"Stopped {workers}: {' '.join(whys)} Tell {'them' if many else 'it'} to go on from "
+        "Needs you once that changes."
     )
+
+
+# Why a worker on another agent stopped when the owner turned that agent off (agent_block).
+TURNED_OFF = re.compile(r"^(?P<name>\w+) is turned off in Settings → Models\.$")
 
 
 def create_app(

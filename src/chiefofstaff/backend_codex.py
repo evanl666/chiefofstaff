@@ -545,7 +545,7 @@ class CodexBackend:
                 raise RuntimeError(why)
             await self.check_requirements()
             if self.needs_sign_in and not (await self.get_auth_status()).isAuthenticated:
-                raise RuntimeError("Codex is not signed in: run `codex login`.")
+                raise RuntimeError("Codex is not signed in: run codex login in a terminal.")
         except BaseException:
             await self.stop()
             raise

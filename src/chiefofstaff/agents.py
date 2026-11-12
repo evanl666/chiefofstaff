@@ -78,6 +78,8 @@ def configure(store: Store, name: str, **values: Any) -> dict[str, Any]:
 
 # The most a worker's token limit can be (a typo's extra zeros are refused, not kept).
 MOST_TOKENS = 10**12
+# Who stopped a worker past its token limit, or whose spend is not known (its task's `stopped:`).
+SPEND_STOP = "its token limit"
 
 
 def planned(store: Store, change: Any) -> dict[str, Any]:

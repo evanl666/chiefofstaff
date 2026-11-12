@@ -131,7 +131,7 @@ def test_agents_are_looked_for_only_once_the_group_is_opened(web, codex_on_path)
 @pytest.mark.parametrize(
     ("env", "problem"),
     [
-        ({"FAKE_CODEX_SIGNED_OUT": "1"}, "Codex is not signed in: run `codex login`."),
+        ({"FAKE_CODEX_SIGNED_OUT": "1"}, "Codex is not signed in: run codex login in a terminal."),
         ({"FAKE_CODEX_VERSION": "0.167.1"}, "Codex 0.167.1 is older than the versions tested"),
         (
             {"FAKE_CODEX_REQUIREMENTS": json.dumps({"allowedApprovalsReviewers": ["auto"]})},
@@ -415,7 +415,10 @@ async def test_a_named_agent_that_cannot_run_is_an_error_not_copilot(
             harness, runtime, title="Fix it", instructions="Do it.", agent="codex"
         )
         assert result.result_type == "failure"
-        assert result.error == "Codex could not start: Codex is not signed in: run `codex login`."
+        assert (
+            result.error
+            == "Codex could not start: Codex is not signed in: run codex login in a terminal."
+        )
         assert len(harness.store.open_sessions()) == before, "no worker made"
         slack = await spawn_on(
             harness, runtime, title="Answer", instructions="Do it.", agent="codex", slack=True
@@ -790,12 +793,16 @@ async def test_ask_first_on_a_codex_worker_asks_its_agent_first(
 
 def test_a_save_that_stops_workers_says_how_many_and_why():
     assert stopped_text(["Codex is turned off in Settings → Models."]) == (
-        "Stopped 1 worker: Codex is turned off in Settings → Models. Tell it to go on from Needs "
-        "you once that changes."
+        "Stopped 1 worker because Codex is off. Turn Codex on again, then press Go on under "
+        "Needs you."
     )
     assert stopped_text(["Codex is turned off in Settings → Models."] * 2) == (
-        "Stopped 2 workers: Codex is turned off in Settings → Models. Tell them to go on from "
-        "Needs you once that changes."
+        "Stopped 2 workers because Codex is off. Turn Codex on again, then press Go on under "
+        "Needs you."
+    )
+    sandboxed = "Codex can't run while workers are sandboxed."
+    assert stopped_text([sandboxed]) == (
+        f"Stopped 1 worker: {sandboxed} Tell it to go on from Needs you once that changes."
     )
 
 

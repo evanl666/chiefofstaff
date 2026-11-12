@@ -950,7 +950,8 @@ class Workers:
                 self.runtime.add_message(self.runtime.router_id(), "notice", display, meta)
         return self.runtime.view(row)
 
-    async def interrupt(self, session_id: str, by: str = "you"):
+    async def interrupt(self, session_id: str, by: str = "you", notice: str = ""):
+        """`notice`: what its timeline and its stopped task say instead of "Stopped by <by>."."""
         row = self.store.session(session_id)
         self.runtime.asks.cancel_requests(session_id, f"Stopped by {by}.")
         self.states[session_id].after_refresh = ""  # Not "go on" once it is stopped.
@@ -962,7 +963,8 @@ class Workers:
             # returns, and must find a deliberate stop, not a worker that ended without a report
             # (nor a silent stall for the Watchdog).
             self.runtime.update_session(session_id, status="idle", activity="")
-            self.runtime.add_message(session_id, "notice", f"Stopped by {by}.", {"stopped": True})
+            said = notice or f"Stopped by {by}."
+            self.runtime.add_message(session_id, "notice", said, {"stopped": True})
             # The task it was on (not one given last that it has not started), or, before it
             # started, those it was given: stopped, waiting for the owner to say go on or cancel.
             on = self.runtime.working_on(session_id) if row["role"] == WORKER else ""
@@ -975,7 +977,7 @@ class Workers:
                 if task["status"] in {"queued", "running"}:
                     self.store.set(f"stopped:{task['id']}", by)
                     self.store.delete(f"goingon:{task['id']}")
-                    self.tasks.move(task["id"], "waiting", progress=f"Stopped by {by}.")
+                    self.tasks.move(task["id"], "waiting", progress=said)
                     self.runtime.task_actions.publish(self.tasks.get(task["id"]))
         if session := self.states.handle(session_id):
             await session.abort()

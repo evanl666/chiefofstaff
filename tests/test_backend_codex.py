@@ -7,6 +7,7 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 import signal
 import sys
 from pathlib import Path
@@ -1179,7 +1180,7 @@ def test_which_codex_runs_and_which_runs_workers_that_ask_first(version, runs, a
     [
         ({"FAKE_CODEX_VERSION": "0.167.1"}, "older than the versions tested"),
         ({"FAKE_CODEX_VERSION": "unknown"}, "could not tell which version of Codex"),
-        ({"FAKE_CODEX_SIGNED_OUT": "1"}, "not signed in: run `codex login`"),
+        ({"FAKE_CODEX_SIGNED_OUT": "1"}, "not signed in: run codex login in a terminal"),
     ],
 )
 async def test_a_codex_it_cannot_run_on_says_why(tmp_path, monkeypatch, env, why):
@@ -1407,7 +1408,8 @@ async def test_a_change_as_a_turn_begins_stops_it_though_its_status_is_not_said_
         with contextlib.suppress(RuntimeError):
             await runtime.owner_send(worker, "Wait 3 s. Then reply with just: second")
         assert changed and changed[0] != "working", "its status did not say it yet"
-        await until(lambda: ("notice", "Stopped by Settings.") in harness.kinds(worker), 30)
+        stopped = {"Stopped by Settings.", "Stopped: Codex is turned off in Settings → Models."}
+        await until(lambda: stopped & {text for _, text in harness.kinds(worker)}, 30)
         await until(lambda: harness.store.session(worker)["status"] != "working", 30)
         await asyncio.sleep(4)
         assert "second" not in [text for kind, text in harness.kinds(worker) if kind == "assistant"]
@@ -1423,10 +1425,11 @@ async def test_a_turn_begun_is_stopped_by_a_change_before_and_at_its_first_event
     harness, runtime = await brief(tmp_path, monkeypatch)
     try:
         harness.store.create_session("w1", WORKER, "Fix", "idle", cwd=str(tmp_path))
-        stopped = []
+        stopped, notices = [], []
 
-        async def interrupt(session_id, by="you"):
+        async def interrupt(session_id, by="you", notice=""):
             stopped.append((session_id, by))
+            notices.append(notice)
 
         monkeypatch.setattr(runtime.workers, "interrupt", interrupt)
         runtime.admitted["w1"] = runtime.admission_generation
@@ -1440,7 +1443,7 @@ async def test_a_turn_begun_is_stopped_by_a_change_before_and_at_its_first_event
         assert stopped == [], "nothing of it runs any more"
         runtime.events.turn_start(harness.store.session("w1"), SimpleNamespace(data=None))
         await until(lambda: stopped == [("w1", "Settings")])
-        assert "turned off" in harness.kinds("w1")[-1][1]
+        assert "turned off" in notices[-1], "one line in its timeline says why"
     finally:
         await runtime.stop()
 
@@ -1835,7 +1838,7 @@ async def test_a_codex_worker_whose_mcp_server_needs_sign_in_has_the_owner_asked
             "url": "",
             "command": "codex mcp login notes",
         }
-        assert "run `codex mcp login notes` in a terminal" in card["text"]
+        assert card["text"] == "notes needs you to sign in", "as Copilot's says it"
         assert "the owner now has a sign-in card" in str(harness.kinds(worker))
         await runtime.drafts.resolve(card["id"], DraftDecision(action="answer"))
         await until(lambda: "its tools work from your next turn" in str(harness.kinds(worker)))
@@ -2051,16 +2054,27 @@ async def test_a_codex_worker_stops_at_its_token_limit(tmp_path, monkeypatch):
             "Run the shell command `echo 1`. Run the shell command `echo 2`. Wait 20 s. "
             "Then reply with just: done",
         )
-        await until(lambda: "Stopped by its token limit." in str(harness.kinds(worker)), 30)
+        stopped = "Stopped: it used its 150-token limit."
+        await until(lambda: stopped in str(harness.kinds(worker)), 30)
         notices = [text for kind, text in harness.kinds(worker) if kind == "notice"]
-        assert "This worker used its Codex token limit (220 of 150)." in notices
+        assert notices == [stopped], "one line says it"
         task = runtime.tasks.for_session(worker)[-1]
         assert task["status"] == "waiting" and harness.store.get(f"stopped:{task['id']}")
         assert harness.store.session(worker)["status"] == "idle"
+        view = runtime.task_actions.view(task)
+        assert (
+            view["attention_why"]
+            == view["spend_why"]
+            == ("Used its 150-token limit. Raise it in Settings → Models, or cancel.")
+        )
+        assert view["go_on"] is False, "no Go on until its limit is raised"
         with pytest.raises(RuntimeError, match="token limit"):
             await runtime.start_agent_of(worker)
         agents.configure(harness.store, "codex", limit=10_000)
         assert runtime.agent_block(harness.store.session(worker)) == ""
+        view = runtime.task_actions.view(runtime.tasks.get(task["id"]))
+        assert view["spend_why"] == "Its token limit is 10,000 now: Go on continues."
+        assert view["go_on"] is True
     finally:
         await runtime.stop()
 
@@ -2091,11 +2105,19 @@ async def test_a_crash_mid_turn_leaves_its_spend_unknown_until_the_owner_goes_on
             await until(lambda: harness.store.session(worker)["status"] == "working", 30)
             assert runtime.agent_block(harness.store.session(worker)) == ""
             return
-        stopped = "Stopped by its token limit (Codex stopped mid-turn)."
+        stopped = "Stopped: Codex stopped mid-turn, so what it spent is unknown."
         await until(lambda: stopped in str(harness.kinds(worker)), 30)
+        notices = [text for kind, text in harness.kinds(worker) if kind == "notice"]
+        assert notices.count(stopped) == 1 and not [n for n in notices if "limit" in n]
         why = runtime.agent_block(harness.store.session(worker))
         assert "what this worker spent then is not known" in why and "Go on" in why
-        assert any(why == text for _, text in harness.kinds(worker))
+        view = runtime.task_actions.view(runtime.tasks.get(task["id"]))
+        assert re.fullmatch(
+            r"Codex stopped mid-turn, so what this worker spent since \d{1,2}:\d\d [AP]M isn't "
+            r"known\. Go on accepts that and continues\.",
+            view["spend_why"],
+        ), view["spend_why"]
+        assert view["attention_why"] == view["spend_why"] and view["go_on"] is True
         await runtime.task_actions.follow_up(task["id"], "Go on where you stopped.")
         assert runtime.agent_block(harness.store.session(worker)) == ""
         await until(lambda: harness.store.session(worker)["status"] == "working", 30)

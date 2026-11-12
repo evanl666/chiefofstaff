@@ -819,7 +819,15 @@ label.hours input { width: 118px; }
 .agent-row { display: grid; gap: 6px; }
 .agent-row > :not(label) { margin-left: 28px; }
 .agent-row .agent-problem { color: var(--soft); }
-.agent-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 200px); gap: 8px 12px; max-width: 560px; }
+/* One that cannot be turned on looks it (its reason in the line under it). */
+.agent-row.disabled > label.check { color: var(--muted); cursor: default; }
+.agent-row.disabled > label.check input { opacity: 0.4; }
+.agents-line small code, .card.signin .note code { font: var(--small) var(--mono); background: var(--hover); padding: 1px 5px; border-radius: 5px; }
+.agent-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 220px); gap: 8px 12px; max-width: 580px; }
+.agent-limit { display: grid; gap: 4px; align-content: start; }
+.agent-limit .field-error { color: var(--red); }
+/* The line at the end of Models starts where the hint above it does. */
+#agents-open { padding-inline: 0; }
 .send-line { display: grid; gap: 6px; }
 .send-line > :not(label) { margin-left: 28px; }
 .send-consent { display: grid; gap: 8px; margin-bottom: 4px; }
@@ -921,6 +929,9 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
 .usage-tables table { width: 100%; border-collapse: collapse; font-size: var(--body); }
 .usage-tables td { padding: 6px 0; border-bottom: 1px solid var(--line); }
 .usage-tables td.num { text-align: right; color: var(--soft); font-variant-numeric: tabular-nums; }
+.usage-tables .agent-usage h3 { display: flex; justify-content: space-between; gap: 12px; }
+.usage-tables .agent-usage h3 .num { font-weight: 400; font-variant-numeric: tabular-nums; }
+.usage-tables .agent-usage small.unknown { display: block; margin-top: 6px; color: var(--muted); font-size: var(--small); }
 .usage-tables tr.link { cursor: pointer; }
 .usage-tables tr.link:hover td { color: var(--text); }
 .draft-banner { margin: 0; font-size: var(--small); color: var(--soft); background: var(--amber-soft); padding: 4px 12px; border-radius: var(--radius); }
