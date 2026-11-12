@@ -211,22 +211,34 @@ def low_priority() -> list[str]:
 
 
 def kill_process_tree(pid: int) -> None:
-    if sys.platform == "win32":
-        import psutil
-
-        try:
-            parent = psutil.Process(pid)
-            children = parent.children(recursive=True)
-            for process in reversed(children):
-                with suppress(psutil.Error):
-                    process.kill()
-            with suppress(psutil.Error):
-                parent.kill()
-        except psutil.NoSuchProcess:
-            pass
-    else:
+    """Stop a process and everything it started, at once."""
+    if sys.platform != "win32":
         with suppress(ProcessLookupError):
             os.killpg(pid, signal.SIGKILL)
+        return
+    import psutil
+
+    try:
+        tree = {psutil.Process(pid)}
+    except psutil.NoSuchProcess:
+        return
+    # Windows has no process groups: the tree is found by parent ids. Each process found is
+    # suspended before the tree is listed again, so none starts another unseen in between.
+    # psutil refuses to signal a pid that another process has taken since it was listed.
+    for _ in range(5):
+        for process in tree:
+            with suppress(psutil.Error):
+                process.suspend()
+        found = set(tree)
+        for process in tree:
+            with suppress(psutil.Error):
+                found.update(process.children(recursive=True))
+        if found == tree:
+            break
+        tree = found
+    for process in tree:
+        with suppress(psutil.Error):
+            process.kill()
 
 
 async def run_quietly(arguments: list[str], limit: float) -> tuple[int, str] | None:
@@ -295,23 +307,23 @@ async def process_cwds(limit: float = 30) -> set[str] | None:
 
 
 def windows_cwds() -> set[str] | None:
+    """The folders programs run in, on Windows, as far as this user can read them: programs
+    run as administrator, other users' and the system's cannot be read without administrator
+    rights and are left out, as Linux's /proc and lsof without root leave them out. None when
+    the processes cannot be listed at all."""
     if sys.platform != "win32":
         return None
     import psutil
 
     found = set()
-    for process in psutil.process_iter():
-        if process.pid in (0, 4):
-            continue
-        try:
-            cwd = process.cwd()
-            if not cwd:
-                return None
-            found.add(cwd)
-        except psutil.NoSuchProcess:
-            continue
-        except (psutil.Error, OSError):
-            return None
+    try:
+        processes = list(psutil.process_iter())
+    except (psutil.Error, OSError):
+        return None
+    for process in processes:
+        with suppress(psutil.NoSuchProcess, psutil.AccessDenied):
+            if cwd := process.cwd():
+                found.add(cwd)
     return found
 
 
@@ -327,10 +339,16 @@ def proc_cwds() -> set[str]:
 
 def in_use(folder: str, cwds: set[str]) -> bool:
     """Whether a program runs in this folder or in one inside it."""
-    root = os.path.normcase(os.path.realpath(folder))
-    for cwd in cwds:
-        path = os.path.normcase(os.path.realpath(cwd))
-        with suppress(ValueError):
-            if os.path.commonpath((root, path)) == root:
-                return True
-    return False
+    if sys.platform == "win32":
+        # Paths in any case, with either slash; the folder resolved once, not every cwd.
+        paths = {
+            os.path.normcase(os.path.normpath(path)) for path in (folder, os.path.realpath(folder))
+        }
+        for cwd in cwds:
+            cwd = os.path.normcase(os.path.normpath(cwd))
+            for path in paths:
+                if cwd == path or cwd.startswith(path.rstrip("\\") + "\\"):
+                    return True
+        return False
+    paths = {folder.rstrip("/"), os.path.realpath(folder)}
+    return any(cwd == path or cwd.startswith(path + "/") for cwd in cwds for path in paths)

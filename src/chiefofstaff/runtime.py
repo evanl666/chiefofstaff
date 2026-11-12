@@ -33,7 +33,7 @@ import time
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 from uuid import uuid4
 
@@ -275,6 +275,42 @@ def read_text_file(raw: str, cwd: str, roots: list[str]) -> dict:
 
 def default_backend(settings: Settings) -> AgentBackend:
     return copilot_backend(settings.copilot_command)
+
+
+# What cmd.exe reads as commands or variables, even in quotes: a .cmd launcher (VS Code's
+# code.cmd runs through cmd.exe) is never given a path with one.
+CMD_SPECIAL = re.compile(r'[%&^|<>"!\r\n]')
+
+
+def vscode_command(folder: str, found: str | None, platform: str = sys.platform) -> list[str]:
+    """What opens a folder in VS Code (`found`: the `code` command on PATH, if any)."""
+    if found and platform == "win32":
+        if Path(found).suffix.lower() in {".cmd", ".bat"} and CMD_SPECIAL.search(folder):
+            raise RuntimeError(
+                "This folder's path has a character VS Code's launcher would misread "
+                "(% & ^ !): open it in File Explorer instead."
+            )
+        return [found, folder]  # CreateProcess finds no .cmd by its bare name.
+    if found:
+        return ["code", folder]
+    if platform == "darwin":
+        return ["open", "-a", "Visual Studio Code", folder]
+    raise RuntimeError("No app to open the folder with was found.")
+
+
+def local_repository(repo: str, platform: str = sys.platform) -> Path | None:
+    """The folder add_repo was given, or None for a git URL or GitHub owner/name. On Windows
+    a path without its drive (`\\code\\app`, `C:app`) is refused: which folder it names
+    depends on where Chief of Staff happens to run."""
+    windows = platform == "win32"
+    if not repo.startswith(("/", "~", *(("\\",) if windows else ()))) and not (
+        windows and PureWindowsPath(repo).drive
+    ):
+        return None
+    path = Path(repo)
+    if windows and not (repo.startswith("~") or PureWindowsPath(repo).is_absolute()):
+        raise ValueError("Give the folder as a full path with its drive, e.g. C:\\code\\app.")
+    return path
 
 
 def default_effort(info: dict) -> str:
@@ -758,9 +794,8 @@ class Runtime:
         await asyncio.to_thread(workspace.mkdir, parents=True, exist_ok=True)
         slug = row["branch"].removeprefix(BRANCH_PREFIX) if row["branch"] else workspace.name
         checkouts = self.workspaces.checkouts(row)
-        if repo.startswith("~") or Path(repo).is_absolute():
-            local: Path | None = Path(repo)
-        else:
+        local = local_repository(repo)
+        if local is None:
             if row["slack"] and not self.yolo(row):
                 # A clone URL can carry data out; Slack content must not steer that.
                 raise ValueError("Workers that read Slack can only add configured projects.")
@@ -865,16 +900,15 @@ class Runtime:
                 if row["closed_at"]
                 else "This session's folder does not exist."
             )
-        if app != "vscode" and sys.platform == "win32":
+        if app == "vscode":
+            command = vscode_command(folder, shutil.which("code"))
+        elif sys.platform == "win32":
+            # The file manager ("finder" in the API): File Explorer, through the shell.
             await asyncio.to_thread(os.startfile, folder)
             return {"ok": True}
-        if app == "vscode":
-            command = ["code", folder] if shutil.which("code") else None
-            if not command and sys.platform == "darwin":
-                command = ["open", "-a", "Visual Studio Code", folder]
         else:
             command = ["open", folder] if sys.platform == "darwin" else ["xdg-open", folder]
-        if not command or not shutil.which(command[0]):
+        if not shutil.which(command[0]):
             raise RuntimeError("No app to open the folder with was found.")
         process = await asyncio.create_subprocess_exec(
             *command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
@@ -2912,7 +2946,7 @@ class Runtime:
                 self.store.set(f"goingon:{task_id}", "1")
         if fresh:
             # Where its checkouts are now: what comes after is this task's (see Scope).
-            self.background(self.task_actions.record_base(session_id, fresh, time.time()))
+            self.task_actions.begin_base(session_id, fresh, time.time())
         if not switch:
             on = self.tasks.find(self.turn_task(session_id))
             if on and on["session_id"] == session_id and on["status"] in OPEN_WORK:

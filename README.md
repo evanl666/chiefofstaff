@@ -84,12 +84,14 @@ the ones nothing uses. Never run `uv cache clean` while Chief of Staff is runnin
 the environment it runs from. Workers' folders, and how much disk they take, are under Storage
 (the disk icon at the bottom of the sidebar).
 
-On Windows, Send to Chief, the Copilot command sandbox, sandboxed checks, and some storage management features
-are unavailable. Workers can access files and networks available to your Windows account.
-Unix permission bits do not protect the data directory on Windows: check its Windows access
-control list restricts access to trusted users, especially when using `--data-dir`.
-Git can still hit path length limits in deeply nested folders; use a shorter project or data
-directory if that happens.
+On Windows (experimental), Send to Chief, the Copilot command sandbox, sandboxed checks and
+the folder sizes under Storage (measured with `du`) are unavailable. Workers can access files
+and networks available to your Windows account.
+A new data directory, and the private launch link in it, are made readable only by you (and
+SYSTEM and Administrators) with an access control list; a `--data-dir` that already exists
+keeps its own, so check it. Storage cleanup cannot see programs running as administrator in a
+worker's folder: close those before closing the worker. Git can still hit path length limits
+in deeply nested folders; use a shorter project or data directory if that happens.
 
 To start this checkout after `uv sync --extra dev`:
 

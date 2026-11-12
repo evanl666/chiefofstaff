@@ -552,7 +552,6 @@ async def test_closing_a_worker_removes_its_clean_worktrees_and_reopening_restor
     run("git", "clone", "-q", str(git_repo), str(code / "app"))
     harness = Harness(tmp_path / "data", Settings(code_folder=str(code)))
     runtime = await harness.connect()
-    runtime.workspaces.known_cwds = set()
     app = str((code / "app").resolve())
     clean, busy = [
         await spawn(
@@ -640,7 +639,6 @@ async def test_new_worktrees_get_the_gitignored_files_they_need(tmp_path, git_re
     (app / "notes.txt").write_text("untracked, not ignored")
     harness = Harness(tmp_path / "data", Settings(code_folder=str(code), slack_enabled=True))
     runtime = await harness.connect()
-    runtime.workspaces.known_cwds = set()
     project = str(app.resolve())
 
     first = await spawn(runtime, harness.router_id, title="A", instructions="a", project=project,
@@ -795,7 +793,6 @@ async def test_a_closed_workers_changes_are_still_shown(tmp_path):
     _, app = published(tmp_path, "app")
     harness = Harness(tmp_path / "data", Settings(projects=[str(app)]))
     runtime = await harness.connect()
-    runtime.workspaces.known_cwds = set()
     worker = await spawn(runtime, harness.router_id, title="Fix", instructions="x",
                          project=str(app), isolate=True)  # fmt: skip
     commit(Path(worker["cwd"]), "fix.py", "fixed = True\n")
@@ -933,21 +930,38 @@ async def receipts_of(runtime, task_id, ready=lambda found: bool(found["version"
     raise AssertionError(f"No receipts for {task_id}: {found}")
 
 
-async def test_a_result_recorded_before_its_base_keeps_its_snapshot(tmp_path, git_repo):
+async def test_a_result_reported_while_its_start_is_recorded_still_gets_its_end(
+    tmp_path, git_repo, monkeypatch
+):
+    """Its start (record_base) is recorded in the background; a report that comes before that
+    is done waits for it, or its result would have no share (slow git on Windows hit this)."""
     harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
     runtime = await harness.connect()
-    info = await spawn(
-        runtime, harness.router_id, title="Fix", instructions="fix", project=str(git_repo),
-        isolate=True,
-    )  # fmt: skip
-    await settle(runtime)
-    task = runtime.tasks.get(info["task_id"])
-    harness.store.delete(f"taskbase:{task['id']}")
+    actions = runtime.task_actions
+    adopt = actions.adopt_clones
+    calls = []
+
+    async def slow_first(row):
+        calls.append(row["id"])
+        if len(calls) == 1:  # record_base's: still at it when the report comes.
+            await asyncio.sleep(0.3)
+        return await adopt(row)
+
+    monkeypatch.setattr(actions, "adopt_clones", slow_first)
+    info = await spawn(runtime, harness.router_id, title="Fix", instructions="fix",
+                       project=str(git_repo), isolate=True)  # fmt: skip
+    for _ in range(100):
+        if info["task_id"] in actions.basing:
+            break
+        await asyncio.sleep(0.01)
+    assert info["task_id"] in actions.basing, "its start is being recorded"
     commit(Path(info["cwd"]), "fix.py", "fixed = True\n")
-    await runtime.task_actions.record_end(task)
-    ended = json.loads(harness.store.get(f"taskend:{task['id']}"))
-    assert ended[info["cwd"]]["commit"] == run("git", "rev-parse", "HEAD", cwd=info["cwd"]).strip()
-    assert ended[info["cwd"]]["tree"]
+    await call_tool(runtime, "report", info["session_id"], status="done", summary="Fixed.")
+    await settle(runtime)
+    ended = json.loads(harness.store.get(f"taskend:{info['task_id']}") or "{}")
+    head = run("git", "rev-parse", "HEAD", cwd=info["cwd"]).strip()
+    assert ended and ended[info["cwd"]]["commit"] == head
+    assert not actions.basing
 
 
 async def test_evidence_is_about_one_version_of_the_code(tmp_path, git_repo):

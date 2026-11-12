@@ -34,7 +34,16 @@ from pydantic import ValidationError
 from . import threads
 from .envelope import UNTRUSTED, wrap
 from .models import SentItem
-from .send import FOLDER, MAX_PATH, MAX_REQUEST, NAME, open_folder, peer_uid, remove_acl
+from .send import (
+    FOLDER,
+    MAX_PATH,
+    MAX_REQUEST,
+    NAME,
+    UNSUPPORTED,
+    open_folder,
+    peer_uid,
+    remove_acl,
+)
 
 if TYPE_CHECKING:
     from .runtime import Runtime
@@ -77,7 +86,7 @@ def prepare(directory: Path) -> tuple[socket.socket, tuple[int, int]]:
     directory's lock (service.lock), which no other Chief of Staff can hold. NotOpenedError when
     the folders on the way are not the owner's alone, or something else is where it goes."""
     if sys.platform == "win32":
-        raise NotOpenedError("Send to Chief is not supported on Windows")
+        raise NotOpenedError(UNSUPPORTED)
     me = os.geteuid()
     path = directory / FOLDER / NAME
     if len(os.fsencode(path)) > MAX_PATH:
@@ -183,7 +192,7 @@ class SendSocket:
         """A connection: its peer's user id is checked before a byte of it is read; another
         user's is closed at once."""
         if sys.platform == "win32":
-            raise RuntimeError("Send to Chief is not supported on Windows")
+            return  # Never registered there: prepare refuses.
         if not self.listener:
             return
         try:

@@ -508,6 +508,8 @@ class Facts:
 
 def read_chunk(fd: int, size: int, position: int) -> bytes:
     if sys.platform == "win32":
+        # No pread on Windows. Seeking then reading is safe: each descriptor is opened by
+        # one Log.read and read only by it, in the one reading thread.
         os.lseek(fd, position, os.SEEK_SET)
         return os.read(fd, size)
     return os.pread(fd, size, position)

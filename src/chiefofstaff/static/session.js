@@ -116,7 +116,7 @@ export function renderHeader() {
     const open = (app) => api(`/api/sessions/${session.id}/open`, { method: "POST", body: { app } }).catch((error) => toast(error.message, "error"));
     items.push(
       el("hr"),
-      menuButton("Open in Finder", () => open("finder")),
+      menuButton(/Windows/.test(navigator.userAgent) ? "Open in File Explorer" : "Open in Finder", () => open("finder")),
       menuButton("Open in VS Code", () => open("vscode")),
       menuButton("Copy folder path", () => navigator.clipboard.writeText(session.cwd).then(() => toast("Path copied."), (error) => toast(error.message, "error"))),
     );

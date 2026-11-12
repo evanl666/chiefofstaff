@@ -34,6 +34,8 @@ MAX_BODY = MAX_REQUEST - 1024
 TIMEOUT = 10.0
 RETRIES = (0.5, 1.0)
 SENT, USAGE, ABSENT, LIMITED, REFUSED, UNCONFIRMED = 0, 2, 3, 4, 5, 6
+# Windows has no peer credentials to check who connects (Unix sockets there have none).
+UNSUPPORTED = "Send to Chief is not supported on Windows"
 
 
 class NotServingError(Exception):
@@ -99,8 +101,8 @@ def acl_entries(path: Path) -> list[str]:
 def acl_opens(path: Path) -> bool:
     """Whether an entry of a file's access control list lets another user, or a group, change it
     or what is in it. Deny entries, and those only for what is made in it later, grant nothing."""
-    if sys.platform == "win32":
-        raise UnsafeError("Send to Chief is not supported on Windows")
+    if sys.platform != "darwin":
+        return False  # No access control lists (acl_entries).
     mine = {str(os.geteuid()), "0"}
     for entry in acl_entries(path):
         try:
@@ -143,7 +145,7 @@ def open_folder(directory: Path) -> str:
     access control list that lets others write. "" when there is none. `directory` is resolved:
     a link on the way is not a folder."""
     if sys.platform == "win32":
-        return "Send to Chief is not supported on Windows"
+        return UNSUPPORTED
     me = os.geteuid()
     for folder in (directory, *directory.parents):
         try:
@@ -204,7 +206,7 @@ def socket_path(directory: Path) -> Path:
     way only the owner can change, `send/` a folder of theirs and the socket theirs (not a link
     to one). Raises NotServingError when nothing is there, UnsafeError when something else is."""
     if sys.platform == "win32":
-        raise UnsafeError("Send to Chief is not supported on Windows")
+        raise UnsafeError(UNSUPPORTED)
     directory = directory.expanduser().resolve()
     if not directory.exists():
         raise NotServingError()
@@ -225,7 +227,7 @@ def connect(path: Path) -> socket.socket:
     """A connection to Chief of Staff's socket, once the process answering is known to run as
     this user: before anything is written."""
     if sys.platform == "win32":
-        raise UnsafeError("Send to Chief is not supported on Windows")
+        raise UnsafeError(UNSUPPORTED)
     connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     connection.settimeout(TIMEOUT)
     try:

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import shutil
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -682,7 +683,8 @@ async def test_scratch_folder_and_opening_a_workers_folder(tmp_path, monkeypatch
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
     monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
     await runtime.open_folder(worker["session_id"], "vscode")
-    assert calls == [("code", worker["cwd"])]
+    # On Windows CreateProcess finds no .cmd launcher by its bare name: it is given whole.
+    assert calls == [("/usr/bin/code" if sys.platform == "win32" else "code", worker["cwd"])]
 
 
 async def test_focus_holds_notifications_and_ends_with_one_summary(harness):

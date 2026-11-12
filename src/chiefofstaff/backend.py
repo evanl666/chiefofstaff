@@ -519,8 +519,9 @@ def end_processes(tree: dict[int, str], wait: float = 3.0):
     def same(table: dict[int, tuple[int, str]]) -> list[int]:
         return [pid for pid, command in tree.items() if pid in table and table[pid][1] == command]
 
-    signals = (signal.SIGTERM,) if sys.platform == "win32" else (signal.SIGTERM, signal.SIGKILL)
-    for signum in signals:
+    # On Windows any signal os.kill sends is TerminateProcess, which cannot be ignored: both
+    # passes force it, the second for any the first could not reach.
+    for signum in (signal.SIGTERM, getattr(signal, "SIGKILL", signal.SIGTERM)):
         left = same(process_table())
         for pid in left:
             with suppress(OSError):
