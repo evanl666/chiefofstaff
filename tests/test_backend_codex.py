@@ -919,10 +919,14 @@ async def test_a_codex_worker_records_where_it_moved_a_file(tmp_path, monkeypatc
             "Write the file `old.py` and the file `keep.py`. Move the file `old.py` to "
             "`new/name.py`. Report done: moved.",
         )
-        await until(lambda: harness.store.session(worker)["status"] == "done", 30)
         cwd = Path(harness.store.session(worker)["cwd"])
-        assert (cwd / "new" / "name.py").exists() and not (cwd / "old.py").exists()
-        assert {"old.py", "new/name.py"} <= set(json.loads(harness.store.session(worker)["files"]))
+
+        def files():
+            return set(json.loads(harness.store.session(worker)["files"]))
+
+        # (The stand-in reports before it edits.)
+        await until(lambda: (cwd / "new" / "name.py").exists() and "new/name.py" in files(), 30)
+        assert not (cwd / "old.py").exists() and "old.py" in files()
     finally:
         await runtime.stop()
 
@@ -1618,12 +1622,15 @@ async def test_codex_usage_counts_for_the_run_its_turn_is_on_also_after_its_repo
         await until(lambda: harness.store.session(worker)["status"] == "done", 30)
         (run,) = runtime.tasks.runs(runtime.tasks.for_session(worker)[-1]["id"])
         assert run["ended_at"], "its report ended the run"
-        rows = harness.store.all("SELECT * FROM agent_usage WHERE session_id=?", (worker,))
+
+        def rows():
+            return harness.store.all("SELECT * FROM agent_usage WHERE session_id=?", (worker,))
+
         # The report's own call spent after the report: still that run's.
-        assert len(rows) == 2 and {r["run_id"] for r in rows} == {run["id"]}
-        assert {r["agent"] for r in rows} == {"codex"} and {r["model"] for r in rows} == {
-            "gpt-test"
-        }
+        await until(lambda: len(rows()) == 2)
+        assert {r["run_id"] for r in rows()} == {run["id"]}
+        assert {r["agent"] for r in rows()} == {"codex"}
+        assert {r["model"] for r in rows()} == {"gpt-test"}
         assert not harness.store.all("SELECT * FROM usage WHERE session_id=?", (worker,))
         assert json.loads(harness.store.get(f"agentepoch:{worker}"))["busy"] is False
     finally:
