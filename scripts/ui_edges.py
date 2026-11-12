@@ -10,6 +10,7 @@ import itertools
 import json
 import os
 import re
+import shutil
 import struct
 import sys
 import tempfile
@@ -6031,7 +6032,7 @@ NO_ANSWER = "Codex did not answer in time: try again."
 
 def codex_on_path() -> tuple[Path, Path]:
     """The stand-in Codex CLI (tests/fake_codex.py) as `codex` on this process's PATH; each of
-    its runs is listed."""
+    its runs is listed. Taken away with codex_off_path."""
     folder = Path(tempfile.mkdtemp(prefix="cos-codex-"))
     stand_in = ROOT / "tests" / "fake_codex.py"
     (folder / "codex").write_text(f'#!/bin/sh\nexec "{sys.executable}" "{stand_in}" "$@"\n')
@@ -6040,6 +6041,14 @@ def codex_on_path() -> tuple[Path, Path]:
     os.environ["FAKE_CODEX_HOME"] = str(folder / "home")
     os.environ["FAKE_CODEX_RUNS"] = str(folder / "runs")
     return folder, folder / "runs"
+
+
+def codex_off_path(folder: Path):
+    path = os.environ["PATH"].split(os.pathsep)
+    os.environ["PATH"] = os.pathsep.join(entry for entry in path if entry != str(folder))
+    for name in ("FAKE_CODEX_HOME", "FAKE_CODEX_RUNS"):
+        os.environ.pop(name, None)
+    shutil.rmtree(folder, ignore_errors=True)
 
 
 async def agents_saved(runtime, part: dict) -> list[str]:
@@ -6091,7 +6100,7 @@ async def round_agents(runtime, browser, failures: list[str]):
     is anywhere (no request, no CLI run); the line unfolds the Coding agents group in place,
     which only then looks; each state of its rows; on, the group in place of the line, folded;
     a worker on Codex where it shows; a save that stops workers says so once."""
-    _, runs = codex_on_path()
+    folder, runs = codex_on_path()
     try:
         for scheme in ("light", "dark"):
             await agents_off(runtime, browser, scheme, runs)
@@ -6099,6 +6108,7 @@ async def round_agents(runtime, browser, failures: list[str]):
         await agents_on_and_worker(runtime, browser, runs)
     finally:
         await agents_saved(runtime, {"codex": {"enabled": False}})
+        codex_off_path(folder)
 
 
 async def agents_off(runtime, browser, scheme: str, runs: Path):
@@ -6529,8 +6539,7 @@ async def agents_stopped_by_settings(runtime, browser, spawned):
         "() => import('/static/state.js').then((m) => 'agents' in m.state.snapshot "
         "&& m.state.snapshot.agents !== undefined)"
     ), "none on: the page drops what it knew of them"
-    held.set()
-    await page.unroute("**/api/state", later)
+    held.set()  # From now on each goes through at once.
     toast = page.locator(".toast")
     await expect(toast).to_have_text(
         "Stopped 1 worker: Codex is turned off in Settings → Models. Tell it to go on from Needs "

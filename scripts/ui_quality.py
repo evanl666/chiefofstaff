@@ -870,11 +870,11 @@ async def agents_views(runtime, browser, quality: Quality):
     a worker on Codex, its header and ⋯; 800 to 1440 px, light and dark
     (browser-shots/agents-m2/quality-*)."""
     from copilot.tools import ToolInvocation
-    from ui_edges import agents_saved, codex_on_path, until
+    from ui_edges import agents_saved, codex_off_path, codex_on_path, until
 
     folder = SHOTS / "agents-m2"
     folder.mkdir(exist_ok=True)
-    codex_on_path()
+    codex, _ = codex_on_path()
     try:
         for scheme in ("light", "dark"):
             context = await browser.new_context(
@@ -947,6 +947,7 @@ async def agents_views(runtime, browser, quality: Quality):
             await context.close()
     finally:
         await agents_saved(runtime, {"codex": {"enabled": False}})
+        codex_off_path(codex)
     log(
         "Coding agents: the Models line, the group's states, a Codex worker; browser-shots/agents-m2/"
     )
