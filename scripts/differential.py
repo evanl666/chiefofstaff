@@ -9,11 +9,13 @@ run in its own `uv run` environment) against this working tree with every regist
 only --feature) at its off settings, allowing only those features' `allow_off`. The baseline runs
 with those of the settings it has: a feature it shipped with is off on both sides.
 --mode on: this working tree with --feature off against the same with it on, allowing only that
-feature's `allow_on` (and its own settings keys).
+feature's `allow_on` (and its own settings keys). A feature not behind a setting does its
+`on_action` instead (more_agents: Codex turned on, then off again).
 
 Each side runs the real web app in a process of its own tree's environment, on a scripted Copilot
-(chiefofstaff.scripted) with a fake Slack, a fake `gh` and a fixed clock (time-machine; time moves
-only between steps). The app's periodic rounds (an asyncio.sleep of PERIODIC seconds or more in
+(chiefofstaff.scripted) with a fake Slack, a fake `gh`, stand-in `codex` and `claude` CLIs on the
+PATH (each run of them is captured) and a fixed clock (time-machine; time moves only between
+steps). The app's periodic rounds (an asyncio.sleep of PERIODIC seconds or more in
 its code) wait for the script's tick, so they run at the same point on both sides. Sides run one
 after the other in the same folder on the same port (8810-8819, or ten from
 DIFFERENTIAL_PORT_BASE), so paths and ports match.
@@ -21,10 +23,12 @@ DIFFERENTIAL_PORT_BASE), so paths and ports match.
 Compared, after each step of the script (boot, ask, decide, slack, approve, blocked, accept,
 tick) and once more after the page was looked at:
 - the API: /api/state and the other GETs the page reads at boot, each session's messages;
-- the store: every table of the SQLite database (drafts, notices, usage rows, tasks, runs...);
+- the store: every table of the SQLite database (drafts, notices, usage rows, tasks, runs...)
+  and its schema;
 - what the scripted backend received: sessions created and resumed with their options (system
   message, tools with their schemas, model...), prompts sent, each session's turns; desktop
-  notifications, Slack calls and `gh` commands;
+  notifications, Slack calls and `gh` commands; any run of an agent CLI, and which agent
+  modules (AGENT_MODULES) the app imported;
 - the page: the API requests it makes, its errors, DOM snapshots and screenshots of Home (with
   its narrow tabs), the sidebar (and its other Copilot sessions) and each Settings tab (each
   scrolled page), at 800, 1024, 1280 and 1440 px, light and dark. Screenshots differ when more
@@ -149,12 +153,14 @@ class Allow:
 class Feature:
     """A feature behind a setting: the settings the working tree runs with when it is off and
     when it is on, and the differences each may show (against the baseline when off, against
-    off when on)."""
+    off when on). `on_action`: what the "on" side does once the app is ready, before the
+    script's steps, for a feature not turned on by a setting (a Scenario method's name)."""
 
     off: dict[str, Any]
     on: dict[str, Any]
     allow_off: list[Allow] = field(default_factory=list)
     allow_on: list[Allow] = field(default_factory=list)
+    on_action: str = ""
 
 
 FEATURES: dict[str, Feature] = {}
@@ -293,6 +299,53 @@ FEATURES["send_to_chief"] = Feature(
         ),
     ],
 )
+
+# More agents (docs/design/more-agents.md): workers on other coding agents (Codex), not a setting
+# but the owner's Coding agents group in Settings → Models. Off and never used, on a machine with
+# `codex` and `claude` on the PATH (every run has them): only the last line of Settings → Models
+# is new; no agent CLI runs and no agent module is imported (both captured, so either is a
+# difference). Its "on" mode is turned on and then off again, before the script (5.11): it may
+# leave its configuration (marked off) and its usage table, empty; the Router lets go of its
+# session (its tools and prompt are made again when the agents on change) and resumes it with
+# its next message, with the very options it was made with (captured): not live until then, and
+# one more session event.
+FEATURES["more_agents"] = Feature(
+    off={},
+    on={},
+    allow_off=[
+        Allow(
+            "its line at the end of Settings → Models (with its group, folded and hidden)",
+            element="#settings-dialog #agents-line",
+            views=r"^settings-models-",
+        ),
+    ],
+    allow_on=[
+        Allow("its configuration, kept and marked off", data=r"\.db\.kv\.agents$"),
+        Allow("its usage table, empty", data=r"\.db\.agent_usage$"),
+        Allow(
+            "its usage table and indexes in the schema",
+            data=r"\.db\._schema\.(agent_usage|agent_usage_by_session|agent_usage_by_time)$",
+        ),
+        Allow(
+            "the Router's session resumed once after the switch, as made",
+            data=r"^backend\.sessions\.router:[^.\[]*\[1\]$",
+        ),
+        Allow(
+            "the Router let go of its session after the switch, until its next message",
+            data=r"^steps\.boot\.api\./api/(state\.sessions\[0\]|sessions/<uuid-1>)\.live$",
+            value=False,
+        ),
+        Allow(
+            "one more session event: the Router's session opened again",
+            data=r"^steps\.\w+\.bus\.session$",
+        ),
+    ],
+    on_action="agents_drained",
+)
+
+# What another coding agent would leave if it were used while off: its CLI run, its modules.
+AGENT_MODULES = ("chiefofstaff.backend_codex", "chiefofstaff.agentrun", "chiefofstaff.codex_check")
+AGENT_CLIS = ("codex", "claude")
 
 # The side under test: the app in-process on a scripted Copilot, in its own tree's environment.
 
@@ -591,9 +644,16 @@ def decoded(value: Any) -> Any:
 
 
 def dump(store) -> dict:
-    """Every table: keyed by its primary key when that is text, else rows in order."""
+    """Every table: keyed by its primary key when that is text, else rows in order; and the
+    schema (`_schema`: each table's and index's SQL, by name)."""
     tables: dict[str, Any] = {}
     with store.lock:
+        tables["_schema"] = {
+            row[0]: row[1]
+            for row in store.db.execute(
+                "SELECT name, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name"
+            )
+        }
         names = [
             row[0]
             for row in store.db.execute(
@@ -880,6 +940,30 @@ class Scenario:
         self.record("backend", {"call": "owner", "path": path, "status": response.status_code,
                                 "answer": response.text[:400]})  # fmt: skip
 
+    async def agents_drained(self):
+        """More agents' on mode: Codex turned on, then off, as a Settings save of the Coding
+        agents group does it; the events it publishes are not the script's."""
+        from chiefofstaff import agents
+
+        store, published = self.runtime.store, Counter(self.published)
+        for enabled in (True, False):
+            before = agents.configured(store)
+            if agents.save(store, agents.planned(store, {"codex": {"enabled": enabled}})):
+                await self.runtime.agents_saved(before)
+        await self.settle()
+        self.published = published
+
+    def router_options_kept(self) -> bool:
+        """Whether every time the Router's session was opened, it had the same options."""
+        router = self.runtime.store.get("router_id")
+        opened = [
+            json.dumps(entry["options"], sort_keys=True, default=str)
+            for entry in self.records["backend"]
+            if entry["call"] in {"create", "resume"}
+            and self.runtime.row_id(entry["session"]) == router
+        ]
+        return len(set(opened)) <= 1
+
     def sessions(self) -> dict[str, str]:
         """Copilot session id -> a name that holds on both sides: role and title."""
         names: dict[str, str] = {}
@@ -945,6 +1029,8 @@ class Scenario:
                     if self.runtime.ready():
                         break
                     await self.periodic.real(0.05)
+                if action := self.spec.get("action"):
+                    await getattr(self, action)()
                 for index, name in enumerate(STEPS):
                     self.step = name
                     if index:
@@ -961,6 +1047,7 @@ class Scenario:
                 self.settled["page"] = await self.settle()
                 self.steps["page"] = await self.snapshot(client)
                 gh = Path(self.spec["gh_log"])
+                agents_run = Path(self.spec["agents_log"])
                 capture = {
                     "steps": self.steps,
                     "settled": self.settled,
@@ -968,6 +1055,12 @@ class Scenario:
                     "notices": self.by_step("notices"),
                     "slack": self.by_step("slack"),
                     "gh": sorted(gh.read_text().splitlines()) if gh.exists() else [],
+                    # Another coding agent's CLI run, and its modules imported: none, ever, off.
+                    "agent_clis": agents_run.read_text().splitlines()
+                    if agents_run.exists()
+                    else [],
+                    "agent_modules": sorted(set(AGENT_MODULES) & set(sys.modules)),
+                    "router_made_as_resumed": self.router_options_kept(),
                 }
         finally:
             server.should_exit = True
@@ -990,6 +1083,7 @@ class Side:
     name: str
     tree: Path
     settings: dict
+    action: str = ""  # Feature.on_action, on the "on" side.
 
 
 def claim_port() -> tuple[int, Any]:
@@ -1037,6 +1131,13 @@ def make_run(run: Path) -> dict:
         '#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$DIFFERENTIAL_GH_LOG"\necho "gh: not here" >&2\nexit 1\n'
     )
     gh.chmod(0o755)
+    # Other coding agents' CLIs, installed but never to be run while none is on: each run kept.
+    for name in AGENT_CLIS:
+        cli = run / "bin" / name
+        cli.write_text(
+            f'#!/bin/sh\nprintf \'{name} %s\\n\' "$*" >> "$DIFFERENTIAL_AGENTS_LOG"\nexit 1\n'
+        )
+        cli.chmod(0o755)
     stamp = CLOCK.isoformat()
     env = {
         key: value
@@ -1055,6 +1156,7 @@ def make_run(run: Path) -> dict:
         "CHIEFOFSTAFF_EVENT_DEBOUNCE": "0",
         "CHIEFOFSTAFF_RETRY_DELAY": "0.01",
         "DIFFERENTIAL_GH_LOG": str(run / "gh.log"),
+        "DIFFERENTIAL_AGENTS_LOG": str(run / "agents.log"),
     }  # fmt: skip
     project = run / "code" / "acme-api"
     (project / "app").mkdir(parents=True)
@@ -1072,8 +1174,9 @@ def make_run(run: Path) -> dict:
 async def start_side(side: Side, run: Path, port: int, folder: Path, env: dict):
     spec = {
         "tree": str(side.tree), "run": str(run), "port": port, "settings": side.settings,
-        "baseline": side.name == "baseline",
+        "baseline": side.name == "baseline", "action": side.action,
         "capture": str(folder / "capture.json"), "gh_log": env["DIFFERENTIAL_GH_LOG"],
+        "agents_log": env["DIFFERENTIAL_AGENTS_LOG"],
     }  # fmt: skip
     process = await asyncio.create_subprocess_exec(
         "uv", "run", "--quiet", "--with", "time-machine", "python", str(SCRIPT),
@@ -1654,6 +1757,9 @@ TITLES = {
     "notices": "Desktop notifications",
     "slack": "Slack calls",
     "gh": "gh commands",
+    "agent_clis": "Other coding agents' CLIs run",
+    "agent_modules": "Other coding agents' modules imported",
+    "router_made_as_resumed": "The Router's session opened with the same options each time",
     "settled": "Steps that settled",
     "page": "The page (API requests, errors)",
     "dom": "DOM snapshots",
@@ -1777,7 +1883,7 @@ def plan(args, parser, port: int) -> tuple[list[Side], dict[str, Allow], str]:
     allowances = fixes | {f"{args.feature}: {a.name}": a for a in feature.allow_on}
     for key in feature.on:
         allowances[f"{args.feature}: its setting {key}"] = Allow(key, setting=key)
-    sides = [Side("off", tree, off), Side("on", tree, {**off, **feature.on})]
+    sides = [Side("off", tree, off), Side("on", tree, {**off, **feature.on}, feature.on_action)]
     return sides, allowances, f"Differential test, on: {args.feature} off against on, in {tree}"
 
 

@@ -186,7 +186,7 @@ const tokenCount = (count) => (count >= 1e6 ? `${+(count / 1e6).toFixed(1)}M` : 
 export const EFFORTS = { none: "none", low: "low", medium: "medium", high: "high", xhigh: "extra high", max: "max" };
 // A worker's models: its agent's (listed once asked), or Copilot's.
 const modelsOf = (session) => (session?.agent ? state.agentModels?.[session.agent] || [] : state.models);
-let shownModels = state.models;
+let shownModels = [];
 const modelInfo = (id) => shownModels.find((model) => model.id === id);
 const tokens = (count) => (count >= 1e6 ? `${+(count / 1e6).toFixed(1)}M` : `${Math.round(count / 1000)}k`);
 // Model, thinking effort and context window of the selected session. Each applies from its next message.

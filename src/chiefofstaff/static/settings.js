@@ -170,7 +170,8 @@ export function bindSettings() {
     $("#agents-group").querySelector("summary").focus();
   });
   $("#agents-group").addEventListener("toggle", () => {
-    if ($("#agents-group").open && !agentsLooked) lookForAgents();
+    // Only the owner's opening looks (never a hidden group opened with the others).
+    if ($("#agents-group").open && !$("#agents-group").hidden && !agentsLooked) lookForAgents();
   });
   $("#send-cancel").addEventListener("click", () => {
     renderSendLine();

@@ -6021,3 +6021,312 @@ async def send_pins(runtime, browser):
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
+# Other coding agents (docs/design/more-agents.md 5.10): the last line of Settings → Models, the
+# Coding agents group it unfolds (each of its states), a worker on Codex in its header, menu,
+# task rows and Usage, a save that stops workers, and Go on for one whose spend is unknown.
+AGENT_SHOTS = SHOTS / "agents-m2"
+AGENT_WIDTHS = (800, 1024, 1440)
+OLD_CODEX = "Codex 0.160.0 is older than the versions tested (0.167.2): update it."
+STOPPED_CODEX = "Stopped unexpectedly; starts again with its next worker's message."
+NO_ANSWER = "Codex did not answer in time: try again."
+
+
+def codex_on_path() -> tuple[Path, Path]:
+    """The stand-in Codex CLI (tests/fake_codex.py) as `codex` on this process's PATH; each of
+    its runs is listed."""
+    folder = Path(tempfile.mkdtemp(prefix="cos-codex-"))
+    stand_in = ROOT / "tests" / "fake_codex.py"
+    (folder / "codex").write_text(f'#!/bin/sh\nexec "{sys.executable}" "{stand_in}" "$@"\n')
+    (folder / "codex").chmod(0o755)
+    os.environ["PATH"] = f"{folder}{os.pathsep}{os.environ['PATH']}"
+    os.environ["FAKE_CODEX_HOME"] = str(folder / "home")
+    os.environ["FAKE_CODEX_RUNS"] = str(folder / "runs")
+    return folder, folder / "runs"
+
+
+async def agents_saved(runtime, part: dict) -> list[str]:
+    from chiefofstaff import agents
+
+    before = agents.configured(runtime.store)
+    plan = agents.planned(runtime.store, part)
+    if not agents.save(runtime.store, plan):
+        return []
+    return await runtime.agents_saved(before)
+
+
+async def agents_page(browser, scheme: str, width: int = 1280):
+    context = await browser.new_context(
+        viewport={"width": width, "height": 900}, color_scheme=scheme
+    )
+    page = await context.new_page()
+    errors: list[str] = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.on("console", lambda note: errors.append(note.text) if note.type == "error" else None)
+    requests: list[str] = []
+    page.on("request", lambda r: requests.append(f"{r.method} {r.url.split(BASE)[-1]}"))
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    await expect(page.locator("#application")).to_be_visible()
+    return context, page, errors, requests
+
+
+async def open_models(page):
+    await page.locator("#settings-button").click()
+    await page.locator("#settings-tabs [data-tab=models]").click()
+    return page.locator("#settings-pane .tab[data-tab=models]")
+
+
+async def shoot(page, name: str, scheme: str, width: int, target: str = "#settings-dialog"):
+    AGENT_SHOTS.mkdir(parents=True, exist_ok=True)
+    await page.set_viewport_size({"width": width, "height": 900})
+    await quiet_for(page)
+    found = await page.locator(target).evaluate(OVERFLOWS)
+    assert not found, (name, width, found)
+    await page.screenshot(path=AGENT_SHOTS / f"{name}-{width}-{scheme}.png")
+
+
+async def quiet_for(page, ms: int = 200):
+    await page.wait_for_timeout(ms)
+
+
+async def round_agents(runtime, browser, failures: list[str]):
+    """With no agent on, Settings → Models ends with one quiet line and nothing else of agents
+    is anywhere (no request, no CLI run); the line unfolds the Coding agents group in place,
+    which only then looks; each state of its rows; on, the group in place of the line, folded;
+    a worker on Codex where it shows; a save that stops workers says so once."""
+    _, runs = codex_on_path()
+    try:
+        for scheme in ("light", "dark"):
+            await agents_off(runtime, browser, scheme, runs)
+            await agents_states(browser, scheme)
+        await agents_on_and_worker(runtime, browser, runs)
+    finally:
+        await agents_saved(runtime, {"codex": {"enabled": False}})
+
+
+async def agents_off(runtime, browser, scheme: str, runs: Path):
+    """Off: the line, the tab's last; unfolded, the group looks once; turned on and saved."""
+    context, page, errors, requests = await agents_page(browser, scheme)
+    tab = await open_models(page)
+    line = tab.locator("#agents-line")
+    button = line.locator("#agents-open")
+    group = line.locator("#agents-group")
+    last = await tab.evaluate(
+        "t => [...t.children].filter((n) => n.getBoundingClientRect().height > 0).at(-1).id"
+    )
+    assert last == "agents-line", last
+    await expect(button).to_have_text("Use another coding agent for workers…")
+    assert await button.evaluate("b => b.matches('button.link.quiet')")
+    await expect(group).to_be_hidden()
+    # Its parts opened along with the tab's others: still nothing looked for.
+    await tab.evaluate("t => t.querySelectorAll('details').forEach((d) => { d.open = true; })")
+    await quiet_for(page, 300)
+    assert not any("/api/agents" in r for r in requests), requests
+    assert not runs.exists(), "no agent CLI runs before the owner asks"
+    for width in AGENT_WIDTHS:
+        await shoot(page, "off-line", scheme, width)
+    await page.set_viewport_size({"width": 1280, "height": 900})
+    # By keyboard: the line takes focus and Enter unfolds the group in place.
+    await button.focus()
+    await page.keyboard.press("Enter")
+    await expect(group).to_be_visible()
+    await expect(button).to_be_hidden()
+    await expect(group.locator("summary")).to_be_focused()
+    rows = group.locator(".agent-row")
+    state = rows.locator("small[role=status]")
+    await expect(state).to_have_text("0.167.2 · signed in with ChatGPT", timeout=20000)
+    assert sum("/api/agents" in r for r in requests) == 1, requests
+    await expect(group.locator(".section-body > small").first).to_have_text(
+        "Workers can run on another coding agent you have installed and signed in to. The Router,"
+        " Slack and the Watchdog stay on Copilot. What differs"
+    )
+    box = rows.locator("input[type=checkbox]")
+    await expect(rows.locator("label.check")).to_have_text("Use Codex for workers")
+    await expect(box).to_have_attribute("aria-describedby", "agent-codex-state")
+    await expect(box).to_be_enabled()
+    await expect(rows.locator(".agent-fields")).to_be_hidden()
+    choose = group.locator("select[name=agent_new_workers]")
+    await expect(choose.locator("option")).to_have_text(["Copilot"])
+    await expect(group.locator("#agents-sandboxed")).to_be_hidden()
+    for width in AGENT_WIDTHS:
+        await shoot(page, "group-found", scheme, width)
+    await page.set_viewport_size({"width": 1280, "height": 900})
+    # Checked: Model and Limit per worker unfold; Codex can be chosen for new workers.
+    await box.check()
+    fields = rows.locator(".agent-fields")
+    await expect(fields).to_be_visible()
+    model = fields.locator("input[name=agent_codex_model]")
+    await expect(model).to_have_attribute("placeholder", "Agent's default")
+    options = fields.locator("datalist option")
+    assert await options.evaluate_all("o => o.map((x) => x.value)") == ["gpt-test", "gpt-mini"]
+    await expect(fields.locator("label span")).to_have_text(["Model", "Limit per worker"])
+    await expect(choose.locator("option")).to_have_text(["Copilot", "Codex"])
+    for width in AGENT_WIDTHS:
+        await shoot(page, "group-enabling", scheme, width)
+    await page.set_viewport_size({"width": 1280, "height": 900})
+    await choose.select_option("codex")
+    await fields.locator("input[name=agent_codex_limit]").fill("200000")
+    saved = []
+    page.on(
+        "request",
+        lambda r: saved.append(r.post_data_json) if r.url.endswith("/api/settings") else None,
+    )
+    await page.locator("#settings-form footer button[type=submit]").click()
+    await expect(page.locator("#settings-dialog")).to_be_hidden()
+    assert saved[-1]["agents"] == {
+        "codex": {"enabled": True, "model": "", "limit": 200000},
+        "new_workers": "codex",
+    }, saved[-1].get("agents")
+    from chiefofstaff import agents
+
+    assert agents.turned_on(runtime.store) == ["codex"]
+    # On: the group in place of the line, folded, saying who new workers use.
+    tab = await open_models(page)
+    await expect(button).to_be_hidden()
+    await expect(group).to_be_visible()
+    assert not await group.evaluate("g => g.open")
+    await expect(group.locator("#agents-summary")).to_have_text("New workers: Codex")
+    for width in AGENT_WIDTHS:
+        await shoot(page, "on-folded", scheme, width)
+    await page.set_viewport_size({"width": 1280, "height": 900})
+    await group.locator("summary").click()
+    await expect(state).to_have_text("0.167.2 · signed in with ChatGPT", timeout=20000)
+    await expect(box).to_be_checked()
+    await expect(fields.locator("input[name=agent_codex_limit]")).to_have_value("200000")
+    await expect(group.locator("#agents-downgrade")).to_be_visible()
+    for width in AGENT_WIDTHS:
+        await shoot(page, "on-open", scheme, width)
+    # Saving with nothing changed in the group sends nothing of it.
+    await page.locator("#settings-form footer button[type=submit]").click()
+    await expect(page.locator("#settings-dialog")).to_be_hidden()
+    assert "agents" not in saved[-1], saved[-1]
+    await agents_saved(runtime, {"codex": {"enabled": False}})
+    assert not errors, errors
+    await context.close()
+    log(f"agents ({scheme}): one line; unfolded it looks once; on, the group folded in its place")
+
+
+async def agents_states(browser, scheme: str):
+    """The group's other states, as /api/agents answers them: checking, none found, an error,
+    one that cannot run here, the sandbox on, stopped by itself."""
+    found = {
+        "name": "codex", "label": "Codex", "enabled": False, "model": "", "limit": 0,
+        "found": True, "state": "", "problem": "", "models": [],
+    }  # fmt: skip
+    states = {
+        "none-found": {"agents": [], "new_workers": "copilot", "sandboxed": False},
+        "signed-out": {
+            "agents": [found | {"problem": "Codex is not signed in: run `codex login`."}],
+            "new_workers": "copilot", "sandboxed": False,
+        },
+        "too-old": {
+            "agents": [found | {"problem": OLD_CODEX}],
+            "new_workers": "copilot", "sandboxed": False,
+        },
+        "sandboxed": {
+            "agents": [found | {"state": "0.167.2 · signed in with ChatGPT"}],
+            "new_workers": "copilot", "sandboxed": True,
+        },
+        "offline": {
+            "agents": [found | {"enabled": True, "problem": STOPPED_CODEX}],
+            "new_workers": "codex", "sandboxed": False,
+        },
+    }  # fmt: skip
+    for name, answer in [("checking", None), ("error", "error"), *states.items()]:
+        context, page, errors, _ = await agents_page(browser, scheme)
+        gate = asyncio.Event()
+
+        async def answered(route, answer=answer, gate=gate):
+            if answer is None:
+                await gate.wait()
+                await route.abort()
+            elif answer == "error":
+                await route.fulfill(status=500, json={"detail": NO_ANSWER})
+            else:
+                await route.fulfill(json=answer)
+
+        await page.route("**/api/agents", answered)
+        tab = await open_models(page)
+        await tab.locator("#agents-open").click()
+        rows = tab.locator(".agent-row")
+        if name == "checking":
+            await expect(rows.locator("small[role=status]")).to_have_text("Checking…")
+            await expect(rows.locator("input[type=checkbox]")).to_be_disabled()
+            await expect(tab.locator("select[name=agent_new_workers]")).to_be_disabled()
+        elif name == "error":
+            await expect(rows.locator("small[role=status]")).to_have_text(
+                f"Could not check: {NO_ANSWER}"
+            )
+        elif name == "none-found":
+            await expect(tab.locator(".agents-none")).to_have_text(
+                "No supported agent found on this computer: the Codex CLI."
+            )
+            await expect(rows).to_have_count(0)
+        else:
+            box = rows.locator("input[type=checkbox]")
+            await expect(box).to_have_attribute("aria-describedby", "agent-codex-state")
+            line = rows.locator("small[role=status]")
+            shown = answer["agents"][0]
+            await expect(line).to_have_text(shown["problem"] or shown["state"])
+            if name in ("signed-out", "too-old", "sandboxed"):
+                await expect(box).to_be_disabled()
+            else:
+                await expect(box).to_be_enabled()  # On: it can always be turned off.
+            await expect(tab.locator("#agents-sandboxed")).to_be_visible(
+                visible=name == "sandboxed"
+            )
+        for width in AGENT_WIDTHS:
+            await shoot(page, f"group-{name}", scheme, width)
+        gate.set()
+        await page.locator("#settings-cancel").click()
+        assert not [e for e in errors if "500" not in e and "Failed to load" not in e], errors
+        await context.close()
+    log(f"agents ({scheme}): checking, error, none found, signed out, too old, sandboxed, offline")
+
+
+async def agents_on_and_worker(runtime, browser, runs: Path):
+    """A worker on Codex: its header names Codex and its model, its tokens; its ⋯ lists Codex's
+    models (Ask first off with why, where it applies); its task's tip says "on Codex" and its
+    tokens; Usage has a Codex part; a worker whose spend is unknown waits under Needs you for Go
+    on; turning Codex off while it works says so once."""
+    from copilot.tools import ToolInvocation
+
+    store = runtime.store
+    await agents_saved(runtime, {"codex": {"enabled": True, "limit": 0}, "new_workers": "codex"})
+    router = store.get("router_id")
+    spawn = runtime.toolset.spawn_on(["codex"])
+
+    async def spawned(title, text):
+        result = await spawn.handler(
+            ToolInvocation(session_id=router, tool_call_id="t", tool_name="spawn_worker",
+                           arguments={"title": title, "instructions": text, "why_new": "t"})
+        )  # fmt: skip
+        return json.loads(result.text_result_for_llm)
+
+    done = await spawned("Fix the date parser", "Report done: Fixed the parser.")
+    await until(lambda: store.session(done["session_id"])["status"] == "done", 30)
+    worker = done["session_id"]
+    for scheme in ("light", "dark"):
+        context, page, errors, _ = await agents_page(browser, scheme)
+        await page.locator("#home-tabs [data-tab=tasks]").click()
+        row = page.locator(".card.task").filter(has_text="Fix the date parser").first
+        await expect(row).to_be_visible()
+        tip = await row.locator(".head .meta").get_attribute("data-tip") or ""
+        tokens = store.agent_spent(worker)
+        assert f"on Codex · {tokens:,} tokens" in tip, tip
+        await page.evaluate("id => import('/static/session.js').then((m) => m.select(id))", worker)
+        header = page.locator("#session-meta")
+        await expect(header).to_contain_text("Codex · gpt-test", timeout=10000)
+        meta = await header.inner_text()
+        shown = f"{int(tokens / 1000 + 0.5)}k" if tokens >= 1000 else str(tokens)
+        assert meta.endswith(f"{shown} tokens") and "credits" not in meta, meta
+        await page.locator("#session-more-button").click()
+        models = page.locator("#session-model option")
+        await expect(models).to_have_text(["Default · GPT-TEST", "GPT-TEST", "GPT-MINI"])
+        for width in AGENT_WIDTHS:
+            await shoot(page, "worker-header-menu", scheme, width, "#main")
+        await page.keyboard.press("Escape")
+        assert not errors, errors
+        await context.close()
+    log("agents: a Codex worker's header, ⋯ models, task tip and tokens")
