@@ -766,6 +766,7 @@ class TaskActions:
         self.basing: dict[str, asyncio.Future] = {}
         # An accepted task stays listed while something is followed up for it.
         self.tasks.monitored = lambda task: bool(self.monitoring(task))
+        self.tasks.runs_going = self.runs_going
         # The one task each follow tied to no task is for (legacy_follower), as worked out in
         # this pass: kept until the event loop runs anything else.
         self.legacy: dict[tuple[str, str], str] = {}
@@ -1634,21 +1635,34 @@ class TaskActions:
         evidence = json.loads(found["evidence"]) if found else {}
         return evidence.get("prs") or []
 
-    def set_check_back(self, task: dict, at: str, what: str, url: str):
-        """The worker is woken at `at` (ISO) to check `what`; one per task, the latest."""
+    def set_check_back(self, task: dict, at: str, what: str, url: str, run: bool = False):
+        """The worker is woken at `at` (ISO) to check `what`; one per task, the latest. `run`:
+        on a run of finished work that still goes on (kept while it does, see
+        TaskBook.checks_on_run)."""
         value = {"at": at, "what": what, "url": url, "session_id": task["session_id"]}
+        if run:
+            value["run"] = True
         self.store.set(f"checkback:{task['id']}", json.dumps(value))
         self.publish(self.tasks.get(task["id"]))
 
     def check_back(self, task: dict) -> dict | None:
         """Its check-back: on a task its worker is still on, or on a run of finished work that
-        still goes on (see Toolset.t_check_back)."""
+        still goes on (see Toolset.t_check_back); not one on finished work set aside, or whose
+        runs are over (ended on GitHub, said so by its worker or the owner)."""
         found = self.store.get(f"checkback:{task['id']}")
-        return (
-            json.loads(found)
-            if found and task["status"] in {"running", "waiting", "review", "done"}
-            else None
-        )
+        if not found or task["status"] not in {"running", "waiting", "review", "done"}:
+            return None
+        if task["status"] in {"review", "done"} and (
+            self.store.get(f"setaside:{task['id']}") or not self.runs_going(task["id"])
+        ):
+            return None
+        return json.loads(found)
+
+    def runs_over(self, task_id: str):
+        """Finished work whose runs are over: nothing for a check-back on them to check."""
+        task = self.tasks.find(task_id)
+        if task and task["status"] in {"review", "done"} and not self.runs_going(task_id):
+            self.store.delete(f"checkback:{task_id}")
 
     async def wake_check_backs(self, moment: datetime | None = None):
         """Workers whose check-back time came are woken with what they wanted to check. The
@@ -4123,6 +4137,7 @@ class TaskActions:
             else:
                 item["untracked"] = True
         self.store.set(f"artifacts:{task_id}", json.dumps(known))
+        self.runs_over(task_id)
         self.publish(self.tasks.get(task_id))
         return self.view(self.tasks.get(task_id))
 
@@ -4179,6 +4194,8 @@ class TaskActions:
                     item |= {"status": clip(status, 40), "changed_at": now()}
                     changed = True
             self.store.set(f"artifacts:{task_id}", json.dumps(known))
+            if changed:
+                self.runs_over(task_id)
             if changed or status:
                 self.publish(self.tasks.get(task_id))
 
@@ -4327,6 +4344,7 @@ class TaskActions:
                 if other["url"] != url and not (entry["name"] and other["name"] == entry["name"])
             ] + [entry]
         self.store.set(f"artifacts:{task_id}", json.dumps(known[-20:]))
+        self.runs_over(task_id)
         self.publish(self.tasks.get(task_id))
 
     def local_file(self, row: dict | None, given: str) -> str:

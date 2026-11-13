@@ -3937,7 +3937,7 @@ class Tools:
         if url and not re.match(r"^https?://\S+$", url):
             raise ValueError("url must be an http(s) link, or empty.")
         at = datetime.now(UTC) + timedelta(minutes=params.minutes)
-        self.runtime.task_actions.set_check_back(task, at.isoformat(), what, url)
+        self.runtime.task_actions.set_check_back(task, at.isoformat(), what, url, run=run_going)
         self.states[caller].turn_check_backs.add(task["id"])
         clock = at.astimezone().strftime("%H:%M")
         return (

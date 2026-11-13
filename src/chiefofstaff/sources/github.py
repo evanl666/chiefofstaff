@@ -151,7 +151,8 @@ def why_words(kind: str, detail: str, retry_at: str | None, moment: float) -> st
 # What Chief of Staff posted for the owner ended with before 0.1.43, unseen on GitHub but there
 # when it is edited or quoted: text that has it is still known as drafted, not the owner's own
 # words. What it posts now is known by its id (GitHubSource.posted), else by its words on that PR
-# (posted_key).
+# (posted_key): by this install only. What another install posts on the same account (the
+# owner's other computer) is taken for the owner's own writing: they approved it before it went.
 POSTED_MARK = "<!-- chief-of-staff -->"
 
 
