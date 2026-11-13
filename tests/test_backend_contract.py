@@ -210,7 +210,9 @@ async def test_a_session_resumes_with_its_conversation(backend, tmp_path):
 
 
 async def test_abort_ends_the_turn_and_its_command(backend, tmp_path):
-    marker = f"sleep {40 + os.getpid() % 17}"
+    # A marker no other process on the machine has (live runs and other checkouts' tests run
+    # `sleep` too): the fraction of a second makes it this run's alone.
+    marker = f"sleep {40 + os.getpid() % 17}.{uuid4().int % 10**6:06d}"
     session, turn = await open_session(backend, tmp_path)
     await session.send(f"Run the shell command `{marker}` and then reply with just: slept")
     for _ in range(600):
