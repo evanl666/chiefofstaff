@@ -226,6 +226,71 @@ def test_normal_worker_commands_are_allowed(command, tmp_path):
     assert permission_denial(row, request("shell", full_command_text=command)) is None
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git push origin HEAD:refs/heads/main",
+        "git push origin HEAD:refs/heads/master",
+        "git push origin refs/heads/main:refs/heads/main",
+        "git push origin main:main",
+        "git push -u origin main",
+        "git push --set-upstream origin master",
+        "git push origin 'HEAD:refs/heads/main'",
+        'git push origin "main"',
+        "git push origin :main",
+        "git push --delete origin main",
+        "git push --all origin",
+        "git push --mirror origin",
+        "git -C ../repo push origin HEAD:main",
+        "git -c push.default=current push origin main",
+        "sh -c 'git push origin HEAD:refs/heads/main'",
+        "cd repo && git push origin HEAD:main && echo done",
+        "git push -o ci.skip origin HEAD:main",
+    ],
+)
+def test_every_way_to_push_to_the_default_branch_is_denied(command, tmp_path):
+    """Review: the rule saw only `main` and `:main` as words; a refspec's other forms (a full
+    ref name, quoted, deleting it, every branch at once, git's own options first) got by."""
+    row = {"role": "worker", "slack": 0, "cwd": str(tmp_path)}
+    denied = permission_denial(row, request("shell", full_command_text=command))
+    assert denied and "push to the default branch" in denied, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git push origin +main",
+        "git push origin +refs/heads/main",
+        "git push --force-with-lease origin main",
+        "git push -fu origin wb/x",
+        "git -C ../repo push --force origin wb/x",
+    ],
+)
+def test_a_forced_push_is_denied_as_one_first(command, tmp_path):
+    row = {"role": "worker", "slack": 0, "cwd": str(tmp_path)}
+    denied = permission_denial(row, request("shell", full_command_text=command))
+    assert denied and "force push" in denied, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git push origin feature/main-tweak",
+        "git push origin mainline",
+        "git push origin HEAD:refs/heads/fix-main",
+        "git push origin main-fix:main-fix",
+        "git push -u origin HEAD",
+        "git push -o ci.skip origin wb/x",
+        "git stash push -m main",
+        "git commit -m 'push to main' && git push origin wb/x",
+        "git fetch origin main && git rebase origin/main",
+    ],
+)
+def test_pushing_a_branch_whose_name_has_main_in_it_is_allowed(command, tmp_path):
+    row = {"role": "worker", "slack": 0, "cwd": str(tmp_path)}
+    assert permission_denial(row, request("shell", full_command_text=command)) is None, command
+
+
 def test_permission_scopes_by_role(tmp_path):
     worker = {"role": "worker", "slack": 0, "cwd": str(tmp_path)}
     slack_worker = {**worker, "slack": 1}

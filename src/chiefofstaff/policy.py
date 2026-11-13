@@ -15,31 +15,86 @@ from .roles import SLACK, WORKER
 
 GITHUB_MCP = "github-mcp-server"
 
+# `git [its own options] push …`, also inside `sh -c "…"` or `$(…)`: what it pushes, up to the
+# end of that command.
+GIT_PUSH = re.compile(
+    r"\bgit\b(?:\s+(?:-[Cc]\s*\S+|--(?:git-dir|work-tree|namespace|config-env|exec-path|"
+    r"super-prefix)(?:[=\s]\S+)?|-[-\w]+(?:=\S+)?))*\s+push\b([^;&|\n]*)"
+)
+# The default branch's usual names (a rule of text: it does not ask the repository).
+DEFAULT_BRANCHES = frozenset({"main", "master"})
+# `git push` options whose value is the next word; and those that push every branch.
+PUSH_VALUED = frozenset({"-o", "--push-option", "--repo", "--receive-pack", "--exec"})
+PUSH_ALL = frozenset({"--all", "--mirror", "--branches"})
+
+
+def pushed_branch(refspec: str) -> str:
+    """The branch a refspec updates on the remote: `main`, `HEAD:main`, `+refs/heads/main`,
+    `:main` (deleting it) and `src:refs/heads/main` all update `main`."""
+    destination = refspec.lstrip("+").rsplit(":", 1)[-1]
+    for prefix in ("refs/heads/", "heads/"):
+        destination = destination.removeprefix(prefix)
+    return destination
+
+
+def pushes(command: str) -> list[tuple[bool, set[str] | None]]:
+    """Each `git push` in a command line: whether it forces, and the remote branches it may
+    update (None: every branch). Every word that is not an option counts as a refspec (the
+    remote's name too: it names no branch of its own), quoted or not."""
+    found: list[tuple[bool, set[str] | None]] = []
+    for match in GIT_PUSH.finditer(command):
+        forced, branches, valued = False, set(), False
+        for word in match.group(1).split():
+            word = word.strip("'\"`()\\")
+            if valued or not word:
+                valued = False
+                continue
+            if word.startswith("--"):
+                name = word.split("=", 1)[0]
+                forced = forced or name in {"--force", "--force-with-lease"}
+                if name in PUSH_ALL:
+                    branches = None
+                valued = name in PUSH_VALUED and "=" not in word
+                continue
+            if word.startswith("-") and len(word) > 1:
+                forced = forced or (word[1:].isalpha() and "f" in word[1:])
+                valued = word == "-o"
+                continue
+            forced = forced or word.startswith("+")
+            if branches is not None:
+                branches.add(pushed_branch(word))
+        found.append((forced, branches))
+    return found
+
+
 # Commands a worker may not run on its own; it must ask the owner through the Router.
 DANGEROUS = [
-    (re.compile(r"(^|[\s;&|(])sudo\s"), "sudo is not allowed"),
+    (re.compile(r"(^|[\s;&|(])sudo\s").search, "sudo is not allowed"),
     (
         re.compile(
             r"\brm\s+(-[a-zA-Z]+\s+)*-[a-zA-Z]*[rR][a-zA-Z]*\s+(-[a-zA-Z]+\s+)*(/|~|\$HOME)/?(\s|$)"
-        ),
+        ).search,
         "recursive delete of home or root",
     ),
-    (re.compile(r"\bgit\s+push\b[^;&|\n]*(\s--force(-with-lease)?\b|\s-f\b|\s\+\S)"), "force push"),
-    (re.compile(r"\bgit\s+push\b[^;&|\n]*[\s:](main|master)(\s|$)"), "push to the default branch"),
+    (lambda command: any(forced for forced, _ in pushes(command)), "force push"),
     (
-        re.compile(r"\bgh\s+pr\s+(merge|close|review|comment)\b"),
+        lambda command: any(to is None or to & DEFAULT_BRANCHES for _, to in pushes(command)),
+        "push to the default branch",
+    ),
+    (
+        re.compile(r"\bgh\s+pr\s+(merge|close|review|comment)\b").search,
         "merging, closing or commenting on PRs as the owner",
     ),
     (
-        re.compile(r"\bgh\s+issue\s+(close|comment|delete|edit)\b"),
+        re.compile(r"\bgh\s+issue\s+(close|comment|delete|edit)\b").search,
         "changing issues as the owner",
     ),
     (
-        re.compile(r"\b(curl|wget)\b[^|\n]*\|\s*(sudo\s+)?(sh|bash|zsh)\b"),
+        re.compile(r"\b(curl|wget)\b[^|\n]*\|\s*(sudo\s+)?(sh|bash|zsh)\b").search,
         "piping a download into a shell",
     ),
     (
-        re.compile(r"\b(mkfs|diskutil\s+erase|shutdown|reboot)\b"),
+        re.compile(r"\b(mkfs|diskutil\s+erase|shutdown|reboot)\b").search,
         "system-level destructive command",
     ),
 ]
@@ -150,7 +205,7 @@ def permission_denial(row: dict, request: Any, writable: list[str] | None = None
             )
     if kind == "shell":
         command = getattr(request, "full_command_text", "") or ""
-        reasons = [reason for pattern, reason in DANGEROUS if pattern.search(command)]
+        reasons = [reason for found, reason in DANGEROUS if found(command)]
         if gh_api_writes(command):
             reasons.append(
                 "writing to GitHub through gh api (with -f/-F fields gh sends a POST: to read, "

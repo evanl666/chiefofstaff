@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **A worker's push to the default branch is refused in every form**, as the rule meant: `main`
+  or `master` given as a full ref (`HEAD:refs/heads/main`), quoted, after git's own options
+  (`git -C … push`), inside `sh -c '…'`, or with every branch at once (`--all`, `--mirror`) got
+  past it, and so did a forced push after git's own options. A branch whose name only contains
+  "main" (`fix-main`, `mainline`) is pushed as before.
+
 ## 0.1.44 (2026-11-13)
 
 Your own sessions are hidden only on evidence a program made them; runs a task waits on are
