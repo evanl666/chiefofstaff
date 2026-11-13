@@ -869,13 +869,18 @@ class CodexBackend:
             return
         params = mapping(message.get("params"))
         if "id" in message:
-            task = asyncio.ensure_future(self.serve(message["id"], method, params))
+            # What its session had been told before this request, to be read before its tools
+            # answer (Codex's requests come at once, its news in order).
+            asked = self.session_of(params.get("threadId") or "", params)
+            told = (asked, asked.told) if asked else None
+            task = asyncio.ensure_future(self.serve(message["id"], method, params, told))
             self.tasks.add(task)
             task.add_done_callback(self.tasks.discard)
             return
         self.observe(method, params)
         thread = params.get("threadId") or (params.get("thread") or {}).get("id") or ""
         if session := self.session_of(thread, params):
+            session.told += 1
             session.inbox.put_nowait((method, params, thread))
         elif method == "thread/tokenUsage/updated" and thread:
             # What a thread resumed in this process restored, said before the resume's answer.
@@ -941,7 +946,9 @@ class CodexBackend:
                 return session
         return None
 
-    async def serve(self, request_id: Any, method: str, params: dict):
+    async def serve(
+        self, request_id: Any, method: str, params: dict, told: tuple[Any, int] | None = None
+    ):
         if method == "currentTime/read":
             # Asked when the owner's Codex takes its time from its client (an external clock).
             self.respond(request_id, {"currentTimeAt": int(time.time())})
@@ -951,7 +958,8 @@ class CodexBackend:
         try:
             if session is None:
                 raise CodexError("Unknown thread.")
-            result = await session.request(method, params, thread)
+            before = told[1] if told and told[0] is session else 0
+            result = await session.request(method, params, thread, before)
         except Exception as exc:
             if not isinstance(exc, CodexError):
                 logger.warning("Answering Codex's %s failed.", method, exc_info=True)
@@ -1770,6 +1778,9 @@ class CodexSession:
         self.current_model = ""
         self.handlers: list[Callable[[Any], None]] = []
         self.inbox: asyncio.Queue = asyncio.Queue()
+        # How much of what Codex said of it was put in its inbox, and read from there.
+        self.told = 0
+        self.read = 0
         self.pump: asyncio.Task | None = None
         self.closed = False
         # The turn in progress (its id once Codex answers), the turns it has had here, and
@@ -2150,6 +2161,8 @@ class CodexSession:
                 await self.handle(method, params, thread)
             except Exception:
                 logger.exception("Handling Codex's %s failed.", method)
+            finally:
+                self.read += 1
 
     async def handle(self, method: str, params: dict, thread: str):
         child = thread != self.session_id
@@ -2601,7 +2614,7 @@ class CodexSession:
 
     # Codex's requests
 
-    async def request(self, method: str, params: dict, thread: str) -> dict:
+    async def request(self, method: str, params: dict, thread: str, told: int = 0) -> dict:
         if not await self.known_turn(params.get("turnId") or "", thread):
             raise CodexError("Chief of Staff did not start this turn.")  # Declined, all of it.
         context = {"session_id": self.session_id, "sessionId": self.session_id}
@@ -2612,6 +2625,16 @@ class CodexSession:
         if method == "mcpServer/elicitation/request":
             return await self.elicitation(params, context)
         if method == "item/tool/call":
+            # Chief of Staff's tools act on what came before (a report on its commands' ends,
+            # say): answered once that is read, as Copilot's come in order.
+            for _ in range(1000):
+                if self.read >= told:
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                logger.warning("Codex: a tool answered before what came before it was read.")
+            # What that emitted reaches Chief of Staff on the loop (call_soon): handled first.
+            await asyncio.sleep(0)
             return await self.tool_call(params)
         if method == "item/tool/requestUserInput":
             return await self.user_input(params, context)

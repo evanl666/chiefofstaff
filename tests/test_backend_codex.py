@@ -1479,6 +1479,32 @@ async def spawn(runtime, harness, instructions: str) -> str:
     return json.loads(result.text_result_for_llm)["session_id"]
 
 
+async def test_a_tool_is_answered_once_what_was_said_before_it_is_handled(tmp_path, monkeypatch):
+    """Stress: what the adapter said reaches Chief of Staff on the loop (call_soon), its tools
+    at once: read in the same step as what came before it, a report was taken first. A tool
+    is answered once what was said before it is handled."""
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    try:
+        worker = await spawn(runtime, harness, "Wait 30 s. Then reply with just: on")
+        await until(lambda: (h := runtime.states.handle(worker)) is not None and h.turn, 30)
+        session = runtime.states.handle(worker)
+        tool, seen = session.tools["find_sessions"], []
+        handler = tool.handler
+
+        def seeing(invocation):
+            seen.append(("assistant", "said first") in harness.kinds(worker))
+            return handler(invocation)
+
+        monkeypatch.setattr(tool, "handler", seeing)
+        session.emit("assistant.message", content="said first", tool_requests=None)
+        call = {"threadId": session.session_id, "turnId": session.turn, "callId": "c1"}
+        call |= {"tool": "find_sessions", "arguments": {}}
+        await session.request("item/tool/call", call, session.session_id, session.told)
+        assert seen == [True]
+    finally:
+        await runtime.stop()
+
+
 def commands(harness, worker) -> list[tuple]:
     rows = harness.store.all(
         "SELECT command, exit_code, ended_at IS NOT NULL AS ended FROM commands "
@@ -1486,6 +1512,32 @@ def commands(harness, worker) -> list[tuple]:
         (worker,),
     )
     return [(row["command"], row["exit_code"], bool(row["ended"])) for row in rows]
+
+
+async def test_its_report_is_taken_once_what_codex_said_before_it_is_read(
+    tmp_path, monkeypatch, caplog
+):
+    """Stress: Codex's request (its report) is answered at once, its news in order: with
+    Chief of Staff busy as its command ended, its report was taken first (done, its command not
+    ended). Chief of Staff's tools are answered once what Codex said before them is read."""
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    handle = backend_codex.CodexSession.handle
+
+    async def busy(self, method, params, thread):
+        if (params.get("item") or {}).get("type") == "commandExecution":
+            await asyncio.sleep(1)  # Chief of Staff busy as its command starts and ends.
+        await handle(self, method, params, thread)
+
+    monkeypatch.setattr(backend_codex.CodexSession, "handle", busy)
+    try:
+        worker = await spawn(
+            runtime, harness, "Run the shell command `echo tested; exit 0`. Report done: Fixed it."
+        )
+        await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+        assert commands(harness, worker) == [("echo tested; exit 0", 0, True)]
+        assert "a tool answered before" not in caplog.text, "waited out, not read"
+    finally:
+        await runtime.stop()
 
 
 async def test_a_codex_worker_works_reports_and_has_receipts(tmp_path, monkeypatch):
