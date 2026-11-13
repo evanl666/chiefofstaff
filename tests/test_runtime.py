@@ -259,6 +259,83 @@ def test_every_way_to_push_to_the_default_branch_is_denied(command, tmp_path):
 @pytest.mark.parametrize(
     "command",
     [
+        "git push origin ma''in",
+        "git push origin m\\ain",
+        'git push origin HEAD:refs/heads/ma""in',
+        "git push origin \\\nmain",
+        "git -c remote.origin.push=HEAD:main push origin",
+        "git -c push.default=matching push origin",
+        "git --config-env=remote.origin.push=SPEC push origin",
+        "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.push GIT_CONFIG_VALUE_0=HEAD:main "
+        "git push origin",
+        "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.push "
+        "GIT_CONFIG_VALUE_0=HEAD:master; git push",
+        "GIT_CONFIG_PARAMETERS=\"'remote.origin.push'='HEAD:main'\" git push origin",
+        "env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.push GIT_CONFIG_VALUE_0=main "
+        "git push",
+        "bash -lc 'git push origin ma\"\"in'",
+        "eval git push origin main",
+    ],
+)
+def test_a_push_to_the_default_branch_is_read_as_the_shell_reads_it(command, tmp_path):
+    """Review: the rule read words as written: quotes and backslashes the shell takes away, a
+    line continued, and refspecs given as configuration got by."""
+    row = {"role": "worker", "slack": 0, "cwd": str(tmp_path)}
+    denied = permission_denial(row, request("shell", full_command_text=command))
+    assert denied and "push to the default branch" in denied, command
+
+
+def checkout_on(path, branch: str):
+    """A repository whose checkout is on `branch`, with an origin it pushes to."""
+    remote = path.parent / f"{path.name}-origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+    subprocess.run(["git", "init", "-q", "-b", branch, str(path)], check=True)
+    git = ["git", "-C", str(path), "-c", "user.email=t@t", "-c", "user.name=t"]
+    subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "start"], check=True)
+    subprocess.run([*git, "remote", "add", "origin", str(remote)], check=True)
+    return path
+
+
+@pytest.mark.parametrize(
+    ("branch", "command", "denied"),
+    [
+        ("main", "git push", True),
+        ("main", "git push origin", True),
+        ("master", "git push -u origin HEAD", True),
+        ("main", "git push origin @", True),
+        ("main", "cd sub && git push", True),
+        ("wb/fix", "git push", False),
+        ("wb/fix", "git push -u origin HEAD", False),
+        ("wb/fix", "git push origin", False),
+        ("wb/fix", "git -c push.autoSetupRemote=true push", False),
+    ],
+)
+def test_a_push_naming_no_branch_goes_where_its_checkout_is(tmp_path, branch, command, denied):
+    """A push that names no branch (or HEAD) updates the one its checkout is on: refused there
+    only when that is the default branch, asked of git."""
+    repo = checkout_on(tmp_path / "repo", branch)
+    (repo / "sub").mkdir()
+    row = {"role": "worker", "slack": 0, "cwd": str(repo)}
+    found = permission_denial(row, request("shell", full_command_text=command))
+    assert bool(found and "default branch" in found) is denied, (command, found)
+
+
+def test_a_push_naming_no_branch_goes_where_it_is_set_to_go(tmp_path):
+    """A feature branch whose pushes go to main (`@{push}`): refused too."""
+    repo = checkout_on(tmp_path / "repo", "main")
+    git = ["git", "-C", str(repo)]
+    subprocess.run([*git, "push", "-q", "origin", "main"], check=True, capture_output=True)
+    subprocess.run([*git, "switch", "-q", "-c", "feature", "--track", "origin/main"], check=True)
+    subprocess.run([*git, "config", "push.default", "upstream"], check=True)
+    row = {"role": "worker", "slack": 0, "cwd": str(repo)}
+    assert "default branch" in (
+        permission_denial(row, request("shell", full_command_text="git push")) or ""
+    )
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
         "git push origin +main",
         "git push origin +refs/heads/main",
         "git push --force-with-lease origin main",
@@ -284,6 +361,9 @@ def test_a_forced_push_is_denied_as_one_first(command, tmp_path):
         "git stash push -m main",
         "git commit -m 'push to main' && git push origin wb/x",
         "git fetch origin main && git rebase origin/main",
+        "git push origin 'fix-main'",
+        "git push origin $(git branch --show-current)",
+        "git log --oneline -1 && git push origin wb/x 2>&1",
     ],
 )
 def test_pushing_a_branch_whose_name_has_main_in_it_is_allowed(command, tmp_path):

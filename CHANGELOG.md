@@ -2,11 +2,15 @@
 
 ## Unreleased
 
-- **A worker's push to the default branch is refused in every form**, as the rule meant: `main`
-  or `master` given as a full ref (`HEAD:refs/heads/main`), quoted, after git's own options
-  (`git -C … push`), inside `sh -c '…'`, or with every branch at once (`--all`, `--mirror`) got
-  past it, and so did a forced push after git's own options. A branch whose name only contains
-  "main" (`fix-main`, `mainline`) is pushed as before.
+- **More pushes to the default branch are refused**, as the rule meant: `main` or `master` given
+  as a full ref (`HEAD:refs/heads/main`), quoted or with a backslash, on a continued line, after
+  git's own options (`git -C … push`), inside `sh -c '…'` or `eval`, with every branch at once
+  (`--all`, `--mirror`), or as configuration on the command line (`-c remote.origin.push=…`,
+  `GIT_CONFIG_*`) got past it, and so did a forced push after git's own options. A push that
+  names no branch is refused when its checkout's branch (or where it pushes) is `main` or
+  `master`. A branch whose name only contains "main" (`fix-main`, `mainline`) is pushed as
+  before. This reads commands as text, so it is a best effort: protect your default branch on
+  the server too.
 
 ## 0.1.44 (2026-11-13)
 
