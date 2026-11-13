@@ -1,5 +1,38 @@
 # Changelog
 
+## Unreleased
+
+QA round 12: runs that are not waited for for ever, Artifacts by task, nothing hidden in what is
+posted to GitHub, and watches that keep their place.
+
+- **A run is not waited for for ever.** A task stayed in *Monitoring* for days, "Waiting for the
+  run · No updates for 47h · checked 1d ago", on a run its worker declared running once and never
+  again; Chief of Staff had never checked it. A run nothing has told of for a day (its worker is
+  not at it and set no check-back) now says *Status unknown · reported running 2d ago*, and the
+  row's **⋯** has *Mark ended* and *Stop tracking*; the task leaves *Monitoring* once none of its
+  runs is followed. *checked … ago* only when Chief of Staff read it itself (else *reported
+  running … ago*), and its hover no longer promises a report nobody will send. GitHub Actions runs
+  are read on GitHub every few minutes until they end. A worker that reports done with a run still
+  going and nothing to wake it is told once to set a check-back for it (now possible on finished
+  work) or to give its end state.
+- **Artifacts, task by task**: a task's PRs and documents first, then its runs; three or more runs
+  are one line (*9 runs · 3 running · 1 failed*) with the latest and the failed ones under it, the
+  rest behind *+N*. Nine runs of one task no longer push every PR down.
+- **Nothing hidden in what Chief of Staff posts to GitHub**: reviews, line comments, replies and
+  PR descriptions no longer end with `<!-- chief-of-staff -->`. Learning how you write still
+  leaves out what it posted for you (it knows what it posted); text with the old mark still counts
+  as its own.
+- **Watches**: a watch an older version scanned but never covered in full goes on from where that
+  version left it after an upgrade (what is older than a week is a gap you are told of), instead of
+  starting a day back; a gap that keeps growing is told again once it doubles or passes an hour or
+  a day.
+- **Fixes**: an away notification's gist no longer ends inside a quote or brackets (…说“先做
+  A。); the Router keeps how to write a task (in English, human-sounding) out of its title (it is
+  told once when it does not); news on a PR that no task of its worker made or follows goes to the
+  Router, not to the newest task that merely names it; what each PR is to its task (created,
+  modified, reviewed, referenced) is read again once by today's rules where an older version read
+  it, merged and closed PRs too; a row's **⋯** menu in a list that scrolls opens in sight.
+
 ## 0.1.42 (2026-11-12)
 
 Windows support, experimental, from a contributor.
