@@ -384,7 +384,7 @@ async def main() -> int:
         (root.parent / f"cos-perf-{int(time.time())}.json").write_text(
             json.dumps(results, indent=1)
         )
-    print("\n================ PERFORMANCE GATE (median of 5, seconds) ================")
+    print(f"\n================ PERFORMANCE GATE (median of {RUNS}, seconds) ================")
     print(f"{'project':8} {'cache':5} {'Copilot':>8} {'Codex':>8} {'diff':>7} {'margin':>7}  "
           "verdict  (agent's own cost per command: Copilot / Codex)")  # fmt: skip
     failed = []
