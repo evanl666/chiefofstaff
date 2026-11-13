@@ -1798,6 +1798,13 @@ class CodexSession:
         # A turn Codex said started, shown once its message is (as Copilot shows a turn: the
         # message first, then its start).
         self.unshown: str = ""
+        # Stopped (abort) as its turn was starting or running: what Codex said of that turn
+        # before the stop and Chief of Staff reads after it (its message taken up, its start)
+        # is not news of a turn at work, which would undo the stop (its task running again).
+        # The messages sent until then are never taken up from here: Delivery sends what it
+        # did not see again, with its next message.
+        self.stopped_sends: set[str] = set()
+        self.hiding = False
         # The usage its thread restored when resumed in this process: its epoch's offset.
         self.restored: dict[str, dict] = {}
         # The ids of the messages Chief of Staff sent it (a message with another id, or none,
@@ -1956,6 +1963,8 @@ class CodexSession:
             if self.backend.begins and not self.backend.begins(self):
                 raise RuntimeError("Chief of Staff's settings changed; send it again.")
             self.sent.add(sent)
+            if self.hiding:
+                self.stopped_sends.add(sent)  # Stopped as it started.
             future = self.backend.send_request("turn/start", params)
             answer = await self.backend.answer("turn/start", future)
             turn = (answer.get("turn") or {}).get("id")
@@ -1964,6 +1973,8 @@ class CodexSession:
                 self.turns.add(turn)
         except BaseException:
             self.starting = False
+            if not self.turn:
+                self.hiding = False  # No turn of it began: none to stop.
             if admitted:
                 self.spent()  # Admitted, it began nothing.
             raise
@@ -1974,6 +1985,9 @@ class CodexSession:
         """Its turn ends, and its child agents' with it; what it left running goes on until
         stopped (stop_background). What waited for the turn's end is dropped."""
         self.queue.clear()
+        self.stopped_sends |= self.sent
+        if self.turn or self.starting:
+            self.hiding, self.unshown = True, ""
         for _ in range(500):
             if not self.starting:
                 break
@@ -2152,7 +2166,7 @@ class CodexSession:
                 return
             self.turn = turn
             self.turns.add(turn)
-            self.unshown = turn
+            self.unshown = "" if self.hiding else turn
             return
         if not child and (
             method == "thread/compacted"
@@ -2342,6 +2356,8 @@ class CodexSession:
                 if self.unshown:
                     self.show_turn()
                 return
+            if sent in self.stopped_sends:
+                return  # Taken up by a turn stopped meanwhile: never taken up from here.
             delivery = SimpleNamespace(value="steering") if sent in self.steered else None
             self.steered.discard(sent)
             self.emit("user.message", content=text_of(item.get("content")), delivery=delivery)
@@ -2515,6 +2531,7 @@ class CodexSession:
         status = turn.get("status")
         await self.settle_items(status == "interrupted")
         self.turn = None
+        self.hiding = False
         self.ended.add(turn.get("id", ""))
         self.spent()
         if self.closed:

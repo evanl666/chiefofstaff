@@ -640,6 +640,12 @@ async def codex_worker(tmp_path, instructions="Report done: Fixed it.", settings
     result = await spawn_on(harness, runtime, title="Fix it", instructions=instructions)
     worker = result["session_id"]
     await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+
+    def over() -> bool:  # Its report comes before its turn's end, and what that turn spent.
+        session = runtime.states.handle(worker)
+        return not (session and session.turn) and harness.store.agent_spent(worker) > 0
+
+    await until(over, 30)
     return harness, runtime, worker, result["task_id"]
 
 
@@ -933,6 +939,8 @@ async def test_prepare_downgrade_stops_codex_workers_at_work_and_leaves_copilots
     # Chief of Staff stops (the supervisor ends Codex), leaving the store as it was.
     harness.store.set("agentpids:codex", harness.store.get("agentpids:codex") or "{}")
     runtime.stopping = True
+    if watch := runtime.agents["codex"].watch:
+        watch.cancel()  # As Chief of Staff stops: its watch first.
     await runtime.agents["codex"].backend.stop()
     copilot_before = harness.store.session(copilot["session_id"])
     monkeypatch.setattr(

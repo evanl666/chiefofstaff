@@ -3137,11 +3137,14 @@ async def test_closing_a_codex_worker_mid_turn_leaves_its_spend_known(tmp_path, 
         process = backend.workers[worker]
         await runtime.workers.close(worker)
         await until(lambda: not process.alive(), 30)
-        await asyncio.sleep(0.5)
+
+        def epoch() -> dict:
+            return json.loads(harness.store.get(f"agentepoch:{worker}") or "{}")
+
+        await until(lambda: epoch().get("ended"), 30)  # Its end is recorded as it is handled.
         assert "unknown" not in [kind for kind, *_ in ledger(harness, worker)]
         assert not harness.store.agent_unknown(worker)
-        epoch = json.loads(harness.store.get(f"agentepoch:{worker}"))
-        assert epoch.get("ended") == "clean" and not epoch.get("busy"), epoch
+        assert epoch().get("ended") == "clean" and not epoch().get("busy"), epoch()
         assert worker not in runtime.begun
     finally:
         await runtime.stop()
@@ -3287,11 +3290,187 @@ async def test_a_codex_worker_switched_to_ask_first_at_work_stops_and_says_so(
         notices = [text for kind, text in harness.kinds(worker) if kind == "notice"]
         assert any(text.startswith("Stopped: it asks first from now on") for text in notices)
         task = runtime.tasks.for_session(worker)[-1]
+        task = runtime.tasks.for_session(worker)[-1]
         assert task["status"] == "waiting" and harness.store.get(f"stopped:{task['id']}")
         await runtime.task_actions.follow_up(task["id"], "Go on where you stopped. Report done: on")
         await until(lambda: harness.store.session(worker)["status"] == "done", 30)
         assert backend.workers[worker] is not before
         assert thread_configs(log)[-1]["features.apps"] is False
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.parametrize("read_from", ["turn/started", "item/started"])
+@pytest.mark.parametrize("stop", ["owner", "ask first"])
+async def test_a_stop_as_its_turn_begins_is_not_undone_by_what_codex_said_before_it(
+    tmp_path, monkeypatch, stop, read_from
+):
+    """Stress: stopped as its turn began, what Codex had said of that turn (its message taken
+    up, its first command) was read after the stop: as a turn at work on the task again, the
+    stopped task ran again, its worker idle, with no Go on. What Codex said of a turn stopped as
+    it began is not news of work (nor is the turn shown as starting): the task waits with Go on,
+    its message sent again then. `read_from`: what Codex said first that is read late."""
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    gate, started, late_from, statuses = asyncio.Event(), [], [], []
+    session_class = backend_codex.CodexSession
+    handle, abort, start_turn = session_class.handle, session_class.abort, session_class.start_turn
+    update = runtime.update_session
+
+    async def late(self, method, params, thread):
+        if self.session_id in started and (late_from or method == read_from):
+            late_from.append(method)
+            await gate.wait()  # Chief of Staff busy: what Codex says of the turn waits.
+        await handle(self, method, params, thread)
+
+    async def read_meanwhile(self):
+        gate.set()  # Read as the stop goes on (it awaits Codex).
+        await abort(self)
+
+    async def starts(self, items, sent):
+        if harness.store.find_session(runtime.row_id(self.session_id)):  # A worker's.
+            started.append(self.session_id)
+        await start_turn(self, items, sent)
+
+    def recorded(session_id, **values):
+        if gate.is_set() and "status" in values:
+            statuses.append(values["status"])
+        return update(session_id, **values)
+
+    monkeypatch.setattr(session_class, "handle", late)
+    monkeypatch.setattr(session_class, "abort", read_meanwhile)
+    monkeypatch.setattr(session_class, "start_turn", starts)
+    monkeypatch.setattr(runtime, "update_session", recorded)
+    try:
+        seconds = f"300.{uuid.uuid4().int % 10**6:06d}"
+        work = f"Run the shell command `sleep {seconds}`. Then reply with just: slept"
+        spawning = asyncio.ensure_future(spawn(runtime, harness, work))
+        await until(lambda: sleeping(seconds), 30)
+        worker = runtime.row_id(started[0])
+        assert harness.store.session(worker)["status"] == "working" and not gate.is_set()
+        assert late_from[0] == read_from
+        if stop == "owner":
+            await runtime.workers.interrupt(worker)
+        else:
+            assert (await runtime.set_session_yolo(worker, "off"))["switch_card"] is True
+        assert gate.is_set()
+        await spawning
+        await until(lambda: not sleeping(seconds), 15)
+        await asyncio.sleep(1)  # What Codex said of the turn is all read.
+        task = runtime.tasks.for_session(worker)[-1]
+        assert task["status"] == "waiting" and harness.store.get(f"stopped:{task['id']}")
+        assert "working" not in statuses, "shown at work again after its stop"
+        assert harness.store.session(worker)["status"] == "idle"
+        for name, was in (("handle", handle), ("abort", abort), ("start_turn", start_turn)):
+            monkeypatch.setattr(session_class, name, was)
+        await runtime.task_actions.follow_up(task["id"], "Go on where you stopped.")
+        await until(lambda: sleeping(seconds), 30)  # What it was told, sent again.
+        assert runtime.tasks.get(task["id"])["status"] == "running"
+        await runtime.workers.interrupt(worker)
+    finally:
+        gate.set()
+        await runtime.stop()
+
+
+async def test_a_stop_while_its_turn_is_starting_is_not_undone_by_that_turn(tmp_path, monkeypatch):
+    """The owner's stop came while its turn was being started (admitted, its start not sent):
+    the stop waits for that turn to start, then stops it; nothing that turn's start says
+    (its message taken up, its command) makes the stopped task run again."""
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    try:
+        await runtime.connect_agent("codex")
+        backend, _ = runtime.connection("codex")
+        admit, stopping = backend.admit, []
+
+        async def admitted_then_stopped(session):
+            why = await admit(session)
+            if (
+                not why
+                and not stopping
+                and harness.store.find_session(worker := runtime.row_id(session.session_id))
+            ):
+                stopping.append(runtime.background(runtime.workers.interrupt(worker)))
+                await asyncio.sleep(0.3)  # The stop is under way as the turn starts.
+            return why
+
+        monkeypatch.setattr(backend, "admit", admitted_then_stopped)
+        seconds = f"300.{uuid.uuid4().int % 10**6:06d}"
+        worker = await spawn(
+            runtime,
+            harness,
+            f"Run the shell command `sleep {seconds}`. Then reply with just: slept",
+        )
+        await until(lambda: stopping and stopping[0].done(), 30)
+        await stopping[0]
+        await asyncio.sleep(2)  # What the turn's start said is all read.
+        assert not sleeping(seconds)
+        task = runtime.tasks.for_session(worker)[-1]
+        assert task["status"] == "waiting" and harness.store.get(f"stopped:{task['id']}")
+        assert harness.store.session(worker)["status"] == "idle"
+    finally:
+        await runtime.stop()
+
+
+async def test_after_a_stop_its_next_turn_shows_as_at_work(tmp_path, monkeypatch):
+    """Stopped mid-turn (what Codex said of that turn all read), its conversation goes on in
+    the same process: its next turn shows as one at work, as before the stop."""
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    try:
+        worker = await spawn(runtime, harness, "Wait 30 s. Then reply with just: on")
+        await until(lambda: (h := runtime.states.handle(worker)) is not None and h.turn, 30)
+        session = runtime.states.handle(worker)
+        await until(lambda: runtime.states[worker].awaiting is None, 30)  # It took it up.
+        await runtime.workers.interrupt(worker)
+        await until(lambda: session.turn is None, 30)
+        assert runtime.states.handle(worker) is session
+        said, emit = [], session.emit
+
+        def recorded(kind, /, **data):
+            said.append(kind)
+            return emit(kind, **data)
+
+        monkeypatch.setattr(session, "emit", recorded)
+        await runtime.owner_send(worker, "Wait 2 s. Then reply with just: again")
+        await until(lambda: ("assistant", "again") in harness.kinds(worker), 30)
+        assert runtime.states.handle(worker) is session
+        assert said[:2] == ["user.message", "assistant.turn_start"], said
+    finally:
+        await runtime.stop()
+
+
+async def test_a_stop_as_a_start_is_refused_leaves_its_next_turn_shown(tmp_path, monkeypatch):
+    """Stopped while a turn was starting that then never began (refused): nothing of it is left
+    to stop, and its next turn shows as one at work."""
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    try:
+        worker = await spawn(runtime, harness, "Report done: first")
+        await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+        await turn_over(runtime, worker)
+        backend, _ = runtime.connection("codex")
+        session = runtime.states.handle(worker)
+        admit, stopped = backend.admit, []
+
+        async def stopped_then_refused(starting):
+            if stopped:
+                return await admit(starting)
+            stopped.append(runtime.background(session.abort()))
+            await asyncio.sleep(0.1)  # The stop is under way as the start goes on.
+            return "Refused here."
+
+        monkeypatch.setattr(backend, "admit", stopped_then_refused)
+        with contextlib.suppress(RuntimeError):
+            await runtime.owner_send(worker, "Reply with just: refused")
+        await stopped[0]
+        said, emit = [], session.emit
+
+        def recorded(kind, /, **data):
+            said.append(kind)
+            return emit(kind, **data)
+
+        monkeypatch.setattr(session, "emit", recorded)
+        await runtime.owner_send(worker, "Wait 1 s. Then reply with just: again")
+        await until(lambda: ("assistant", "again") in harness.kinds(worker), 30)
+        assert runtime.states.handle(worker) is session
+        assert said[:2] == ["user.message", "assistant.turn_start"], said
     finally:
         await runtime.stop()
 
