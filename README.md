@@ -4,9 +4,10 @@
 
 [![PyPI](https://img.shields.io/pypi/v/chiefofstaff)](https://pypi.org/project/chiefofstaff/) [![Python](https://img.shields.io/pypi/pyversions/chiefofstaff)](https://pypi.org/project/chiefofstaff/) [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-One home for all your GitHub Copilot sessions. Say what you need: each task gets its own
-Copilot session, follow-ups go to the session that already has the context, and you are asked
-only when a decision is yours or something is ready to review.
+A chief of staff for your engineering work, built on the GitHub Copilot you already have. It
+picks up what comes to you (a question in Slack, a PR to review, a comment on your doc), gets
+the work done, and drafts your reply in your voice. No reply or review goes out until you
+approve it: you make the calls, it does the rest.
 
 <p align="center"><img src="docs/images/captain.svg" width="600" alt="The captain, Chief of Staff's duck, in its five moods: idle, working, needs you, watching, done"></p>
 
@@ -18,25 +19,24 @@ uvx chiefofstaff --demo    # try it with scripted sessions, no sign-in needed
 
 ## Why
 
-I run several Copilot sessions at once: one fixing a test, one reviewing a PR, one reading
-logs. I kept switching terminals to see which was stuck, which had a question and which had
-finished, while Slack kept pinging me. Now I talk to one session, the Router, and Chief of
-Staff keeps track of the rest.
+Most of my day isn't writing code. It's answering a question in Slack, reviewing a PR,
+following up on a thread, checking whether a run finished. Copilot can do most of that, but I
+still had to notice each ask, start a session, keep an eye on it and write the reply myself.
+Chief of Staff does the noticing and the follow-through. I talk to one session, the Router: it
+hands each ask to its own Copilot session, keeps track of all of them, and comes back to me
+only with a decision to make or a draft to approve.
 
 ## What it does
 
-**All your work in one place**
-- Splits a request into tasks and runs each in its own Copilot session, in parallel or in order.
+**Picks up the work that comes to you**
+- Watches what you ask it to (Slack mentions, doc comments, mail) with any tool your Copilot
+  has, Glean or your company's search included, and turns what needs doing into tasks.
+- React 🤖 to any Slack message to hand it over, or just say what you need.
 - Sends a follow-up to the session that did the work, with its history and checkout.
-- Shows every task live on one board: what it is doing now, what waits and why, what is done.
-- The captain, the duck beside the name, shows how things stand at a glance: it salutes when
-  something needs you, takes the wheel while work runs, keeps watch while tasks wait, and
-  cheers when a task is done.
 
-**Results you can check**
-- Shows what was observed next to each report (test runs, commits, diff, PR checks), and flags
-  claims nothing backs.
-- Lets you comment on the diff, send it back, and open the PR in one click.
+**Speaks for you, once you approve**
+- Drafts Slack replies and PR reviews, approvals included, in your voice.
+- Sends them only when you approve; you can edit a draft first.
 
 **Asks only when it needs you**
 - One card per thing: a decision with options and a recommendation, a question, a draft.
@@ -44,20 +44,28 @@ Staff keeps track of the rest.
   takes your answers from there.
 - Focus mode: notifications wait, and you get one summary at the end.
 
-**Speaks for you, once you approve**
-- Drafts Slack replies and PR reviews, approvals included, in your voice.
-- Watches what you ask it to (Slack mentions, doc comments, mail) with any tool your Copilot
-  has, Glean or your company's search included.
-- React 🤖 to any Slack message to hand it over as a task.
+**Results you can check**
+- Shows what was observed next to each report (test runs, commits, diff, PR checks), and flags
+  claims nothing backs.
+- Lets you comment on the diff, send it back, and open the PR in one click.
 
 **Learns how you work**
 - Picks up how you write and what you keep asking for. Your style applies at once; habits wait
   for your OK.
 - Turns mistakes workers fixed into checks that catch them next time.
 
+**Keeps many things moving at once**
+- Splits a request into tasks and runs each in its own Copilot session, in parallel or in order.
+- Shows every task live on one board: what it is doing now, what waits and why, what is done.
+- The captain, the duck beside the name, shows how things stand at a glance: it salutes when
+  something needs you, takes the wheel while work runs, keeps watch while tasks wait, and
+  cheers when a task is done.
+
 **Your Copilot, your machine**
 - Uses the Copilot you already have: your plan, models, plugins, skills, MCP servers and your
   company's policies, plus anything you add in Settings. No other AI service or API key.
+- If you also use Codex, workers can run on it instead, with your own Codex sign-in: turn it
+  on in Settings ([how](docs/guide.md#workers-on-other-coding-agents)).
 - Every worker gets its own folder and git worktree, so your checkouts stay untouched. Workers
   run like your own Copilot sessions; turn on permission checks or an OS sandbox in Settings.
 
@@ -111,7 +119,8 @@ To start this checkout after `uv sync --extra dev`:
 ## How it works
 
 Each session is a regular Copilot CLI session, driven through the Copilot SDK; `copilot --resume`
-lists them as "Chief of Staff · …". Sessions never talk to each other directly: they call tools
+lists them as "Chief of Staff · …". A Codex worker is a thread of its own `codex app-server`.
+Sessions never talk to each other directly: they call tools
 such as `spawn_worker`, `report` and `tell_session`, and Chief of Staff delivers each message,
 labeled with who sent it, so a Slack message cannot pass itself off as you. Workers that work
 together pass what the other needs straight to it; the Router gets a copy.

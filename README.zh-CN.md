@@ -4,8 +4,9 @@
 
 [![PyPI](https://img.shields.io/pypi/v/chiefofstaff)](https://pypi.org/project/chiefofstaff/) [![Python](https://img.shields.io/pypi/pyversions/chiefofstaff)](https://pypi.org/project/chiefofstaff/) [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-在一个首页上管理你所有的 GitHub Copilot session。你说要做什么：每个任务交给一个单独的 Copilot
-session，追问发给已经了解情况的那个 session；只有需要你做决定、或者有结果要检查时才来找你。
+替你处理工作的幕僚长，跑在你已有的 GitHub Copilot 上。别人找你的事（Slack 里的问题、要 review
+的 PR、文档上的评论），它接下来、做完，再按你的语气起草回复。回复和 review 都要你同意才会发出：
+你拿主意，其余的交给它。
 
 <p align="center"><img src="docs/images/captain.svg" width="600" alt="船长：Chief of Staff 的小鸭子，五种状态：空闲、工作中、需要你、盯着、完成"></p>
 
@@ -17,38 +18,44 @@ uvx chiefofstaff --demo    # 用脚本模拟的 session 先体验，不需要登
 
 ## 为什么做这个
 
-我平时同时开好几个 Copilot session：一个修测试，一个看 PR，一个翻日志。总要在几个终端之间来回切，看哪个卡住了、哪个在等我回答、哪个已经做完了，中间 Slack 还不停地 @我。现在我只跟一个 session
-说话，也就是 Router，其余的交给 Chief of Staff。
+我一天里大部分时间不是在写代码，而是在回 Slack 上的问题、review PR、跟进讨论、看某个任务跑完没有。
+这些事 Copilot 大多能做，可我还是得自己发现每一件事、开 session、盯着它，再自己写回复。Chief of
+Staff 把“发现”和“跟到底”接了过去。我只跟一个 session 说话，也就是 Router：它把每件事交给单独的
+Copilot session，跟踪所有进展，只在需要我做决定、或者有草稿要我批准时才来找我。
 
 ## 能做什么
 
-**所有工作在一个地方**
-- 把一句话拆成几个任务，每个任务一个 Copilot session，可以并行，也可以按顺序。
+**接住找上你的事**
+- 按你说的帮你盯着（Slack 里 @ 你的、文档评论、邮件），用你的 Copilot 现有的任何工具，包括 Glean
+  或公司自己的搜索，需要做的事变成任务。
+- 在 Slack 任意消息上点 🤖 就交给它，或者直接告诉它要做什么。
 - 追问发给做过这件事的 session，它有之前的对话和代码。
-- 一个面板看所有任务的实时进度：正在做什么、谁在排队以及为什么、哪些做完了。
-- 名字旁边的小鸭子船长一眼告诉你现在的情况：有事需要你时它敬礼，任务在跑时它掌舵，任务在等别的东西时它举着望远镜盯着，任务完成时它欢呼。
 
-**结果可以核对**
-- 汇报旁边列出实际观察到的东西（跑了哪些测试、提交、diff、PR 检查），没有依据的说法会标出来。
-- 可以在 diff 上评论、发回去改，一键开 PR。
+**你同意后才替你说话**
+- 按你的语气起草 Slack 回复和 PR review，包括 approve。
+- 你批准后才发出，发之前可以先改。
 
 **只在需要你时找你**
 - 每件事一张卡片：带选项和建议的决定、一个问题、一份草稿。
 - 你离开电脑时，通过你指定的方式（比如公司的 Slack bot）找到你，你在那边回复就行。
 - 专注模式：通知先压着，结束后给你一份总结。
 
-**你同意后才替你说话**
-- 按你的语气起草 Slack 回复和 PR review，包括 approve。
-- 按你说的帮你盯着（Slack 里 @ 你的、文档评论、邮件），用你的 Copilot 现有的任何工具，包括 Glean
-  或公司自己的搜索。
-- 在 Slack 任意消息上点 🤖，它就变成一个任务。
+**结果可以核对**
+- 汇报旁边列出实际观察到的东西（跑了哪些测试、提交、diff、PR 检查），没有依据的说法会标出来。
+- 可以在 diff 上评论、发回去改，一键开 PR。
 
 **学习你的做事方式**
 - 学你的写法和你反复提的要求：写法立即生效，习惯经你确认后生效。
 - 把 worker 修过的错误变成检查，下次自动拦住。
 
+**很多事同时推进**
+- 把一句话拆成几个任务，每个任务一个 Copilot session，可以并行，也可以按顺序。
+- 一个面板看所有任务的实时进度：正在做什么、谁在排队以及为什么、哪些做完了。
+- 名字旁边的小鸭子船长一眼告诉你现在的情况：有事需要你时它敬礼，任务在跑时它掌舵，任务在等别的东西时它举着望远镜盯着，任务完成时它欢呼。
+
 **用你自己的 Copilot，跑在你自己的电脑上**
 - 用你现有的 Copilot：订阅、模型、插件、skill、MCP server 和公司策略，也可以在 Settings 里再加。不需要别的 AI 服务或 API key。
+- 如果你也用 Codex，可以在 Settings 里让 worker 改用 Codex，用你自己的 Codex 登录（[怎么设置](docs/guide.md#workers-on-other-coding-agents)，英文）。
 - 每个 worker 有自己的文件夹和 git worktree，不会动你的代码目录。worker 和你自己的 Copilot
   session 一样运行，可以在 Settings 里打开权限检查或系统沙箱。
 
@@ -90,7 +97,7 @@ Git 在很深的路径下仍可能遇到路径长度限制；遇到此问题时�
 ## 工作原理
 
 每个 session 都是普通的 Copilot CLI session，通过 Copilot SDK 驱动，在 `copilot --resume` 里叫
-"Chief of Staff · …"。session 之间从不直接对话：它们调用 `spawn_worker`、`report`、`tell_session`
+"Chief of Staff · …"（Codex worker 是它自己的 `codex app-server` 里的一个 thread）。session 之间从不直接对话：它们调用 `spawn_worker`、`report`、`tell_session`
 这类工具，由 Chief of Staff 传话，并标明是谁发的，所以一条 Slack 消息没法冒充成你。一起干活的 worker
 把对方需要的信息直接传给对方，Router 会收到一份副本。
 
