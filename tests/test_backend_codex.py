@@ -3525,6 +3525,68 @@ async def test_a_stop_while_its_turn_is_starting_is_not_undone_by_that_turn(tmp_
         await runtime.stop()
 
 
+async def test_a_command_started_as_its_turn_is_stopped_ends_with_that_turn(tmp_path, monkeypatch):
+    """Stress: stopped as a command was being started, Codex kept that command running (as
+    0.167.2 does) though the stop had looked for what its turn left running before Codex had
+    it: the stopped worker's command ran on. What shows running soon after a stop ends."""
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    request, unseen = backend_codex.CodexBackend.request, []
+    handle = backend_codex.CodexSession.handle
+
+    async def seen_late(self, method, params):
+        if unseen and method == "thread/backgroundTerminals/list":
+            return {"data": []}  # Codex has it as a terminal only later.
+        return await request(self, method, params)
+
+    async def ended_late(self, method, params, thread):
+        if method == "turn/completed" and unseen:
+            await asyncio.sleep(1)  # Its turn's end is read late too.
+        await handle(self, method, params, thread)
+
+    monkeypatch.setattr(backend_codex.CodexBackend, "request", seen_late)
+    monkeypatch.setattr(backend_codex.CodexSession, "handle", ended_late)
+    try:
+        seconds = f"300.{uuid.uuid4().int % 10**6:06d}"
+        worker = await spawn(
+            runtime,
+            harness,
+            f"Run the shell command `sleep {seconds}`. Then reply with just: slept",
+        )
+        await until(lambda: sleeping(seconds), 30)
+        session = runtime.states.handle(worker)
+        unseen.append(True)
+        await runtime.workers.interrupt(worker)
+        await until(lambda: session.turn is None, 15)  # Its end looked too, and saw none.
+        unseen.clear()
+        await until(lambda: not sleeping(seconds), 15)
+        task = runtime.tasks.for_session(worker)[-1]
+        assert task["status"] == "waiting" and not runtime.held(worker)
+    finally:
+        await runtime.stop()
+
+
+async def test_what_runs_after_a_stop_is_its_next_turns_own(tmp_path, monkeypatch):
+    """Right after a stop, Go on: what its next turn leaves running is not taken for what the
+    stopped turn was starting (the stop's sweep ends as a turn begins)."""
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    try:
+        first, second = (f"300.{uuid.uuid4().int % 10**6:06d}" for _ in range(2))
+        worker = await spawn(
+            runtime, harness, f"Run the shell command `sleep {first}`. Then reply with just: slept"
+        )
+        await until(lambda: sleeping(first), 30)
+        await runtime.workers.interrupt(worker)
+        task = runtime.tasks.for_session(worker)[-1]
+        await runtime.task_actions.follow_up(
+            task["id"], f"Leave the command `sleep {second}` running. Then reply with just: on"
+        )
+        await until(lambda: runtime.held(worker), 30)
+        await asyncio.sleep(backend_codex.LATE_TERMINALS + 0.5)
+        assert sleeping(second) and runtime.held(worker) and not sleeping(first)
+    finally:
+        await runtime.stop()
+
+
 async def test_after_a_stop_its_next_turn_shows_as_at_work(tmp_path, monkeypatch):
     """Stopped mid-turn (what Codex said of that turn all read), its conversation goes on in
     the same process: its next turn shows as one at work, as before the stop."""

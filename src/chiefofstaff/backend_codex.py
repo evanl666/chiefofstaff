@@ -89,6 +89,10 @@ CHECK_TIMEOUT = 90.0
 NOT_SIGNED_IN = re.compile(r"MCP server (?:is not logged in|requires OAuth reauthentication)")
 # How often a worker's process is looked at to see whether its supervisor still runs.
 WATCH_SECONDS = 0.5
+# How long after a turn was stopped a command it was starting may still show as running (Codex
+# keeps it as a terminal of its thread, 0.167.2), and how often that is looked for meanwhile.
+LATE_TERMINALS = 3.0
+LATE_TERMINALS_EVERY = 0.2
 # What Chief of Staff uses of Codex's app-server protocol: each request it sends with the fields
 # it may give, the requests of Codex it answers, the news it follows. A version's check finds
 # each in that version's own schema (`codex app-server generate-json-schema`, offline) before
@@ -1832,6 +1836,10 @@ class CodexSession:
         # is not shown as starting.
         self.stopped_sends: set[str] = set()
         self.hiding = False
+        # When a turn of it was last stopped, and what ends what that turn was still starting
+        # as it was stopped (stop_background, sweep).
+        self.stopped_at = 0.0
+        self.sweeper: asyncio.Task | None = None
         # The usage its thread restored when resumed in this process: its epoch's offset.
         self.restored: dict[str, dict] = {}
         # The ids of the messages Chief of Staff sent it (a message with another id, or none,
@@ -2015,6 +2023,7 @@ class CodexSession:
         self.stopped_sends |= self.sent
         if self.turn or self.starting:
             self.hiding, self.unshown = True, ""
+            self.stopped_at = time.monotonic()
         for _ in range(500):
             if not self.starting:
                 break
@@ -2141,7 +2150,31 @@ class CodexSession:
                         "turn/interrupt", {"threadId": child, "turnId": turn}
                     )
                     stopping += 1
+        if time.monotonic() - self.stopped_at < LATE_TERMINALS and self.sweeper is None:
+            self.sweeper = asyncio.ensure_future(self.sweep())
+            self.backend.tasks.add(self.sweeper)
+            self.sweeper.add_done_callback(self.backend.tasks.discard)
         return stopping
+
+    async def sweep(self):
+        """A turn stopped as it was starting a command: Codex keeps that command running as a
+        terminal of its thread (0.167.2), which may show only after stop_background looked. It
+        is ended as it shows, for a short while, unless a turn starts meanwhile (what runs then
+        is that turn's)."""
+        turns = len(self.turns)
+        try:
+            while time.monotonic() - self.stopped_at < LATE_TERMINALS:
+                await asyncio.sleep(LATE_TERMINALS_EVERY)
+                if self.starting or len(self.turns) != turns:
+                    return
+                thread = {"threadId": self.session_id}
+                listed = await self.backend.request("thread/backgroundTerminals/list", thread)
+                if listed.get("data"):
+                    await self.backend.request("thread/backgroundTerminals/clean", thread)
+        except (CodexError, ConnectionError):
+            return  # Its process ended (what it ran ended with it), or Codex cannot say.
+        finally:
+            self.sweeper = None
 
     async def let_go(self, thread: str):
         """A child thread Codex no longer has (closed): nothing of it can be followed or ended
