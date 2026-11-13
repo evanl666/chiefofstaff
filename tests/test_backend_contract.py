@@ -685,6 +685,20 @@ async def test_with_ask_first_every_mcp_call_asks_and_githubs_writes_stay_refuse
         assert not (marks / "review-published").exists(), "refused: never published"
         await owner.archive(session.session_id)
 
+        # Review: a server of Chief of Staff's Settings with the same name (Codex merges its
+        # table into the owner's, key by key): that tool still asks.
+        asked.clear()
+        settings = {"github": {**{k: v for k, v in server.items() if k != "tools"}, "tools": ["*"]}}
+        session, turn = await open_session(
+            owner, tmp_path, on_permission_request=check, ask_first=True, mcp_servers=settings
+        )
+        await session.send(prompt)
+        await turn.wait()
+        mcp = [(r.server_name, r.tool_name, r.read_only) for r in asked if r.kind == "mcp"]
+        assert ("github-mcp-server", "create_pull_request_review", False) in mcp, asked
+        assert not (marks / "review-published").exists(), "refused: never published"
+        await owner.archive(session.session_id)
+
         asked.clear()
         session, turn = await open_session(owner, tmp_path, on_permission_request=check)
         await session.send(prompt)

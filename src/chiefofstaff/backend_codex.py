@@ -1334,10 +1334,7 @@ class CodexBackend:
         config["allow_login_shell"] = False
         if provided:
             # Codex merges these into the owner's own servers, as Copilot does its session's.
-            config["mcp_servers"] = {
-                name: {**entry, **(asking(entry) if options.get("ask_first") else {})}
-                for name, entry in provided.items()
-            }
+            config["mcp_servers"] = dict(provided)
         if options.get("ask_first"):
             config["features.apps"] = False
             # Its subagents: a child's resume_agent opens any thread Codex can name (another
@@ -1346,13 +1343,19 @@ class CodexBackend:
             config["features.multi_agent"] = False
             config["features.multi_agent_v2"] = False
             config["agents"] = {"enabled": False}
-            servers = {
-                str(server): asking(entry, checking=bool(options.get("checking")))
-                for server, entry in mapping(owner.get("mcp_servers")).items()
-                if str(server) not in provided
-            }
+            # Every server it can name asks, each tool any table names too: Codex merges a
+            # server's table here into the owner's key by key, so a tool set to `approve` there
+            # (Codex's own "Always allow", or a trusted repository's .codex/) would outrank the
+            # server's default, also for a Settings server of the same name.
+            known = owner_servers(read)
+            servers = {}
+            for name in {*known, *provided}:
+                entry, given = mapping(known.get(name)), mapping(provided.get(name))
+                tools = {**mapping(entry.get("tools")), **mapping(given.get("tools"))}
+                checking = bool(options.get("checking")) and name not in provided
+                servers[name] = {**given, **asking({"tools": tools}, checking=checking)}
             if servers:
-                config["mcp_servers"] = {**servers, **config.get("mcp_servers", {})}
+                config["mcp_servers"] = servers
             # A plugin's MCP servers have their policy in its own table: each asks too.
             plugins = {} if options.get("checking") else await self.plugin_servers(cwd)
             configured = mapping(owner.get("plugins"))
@@ -1674,6 +1677,25 @@ class CodexAgent:
 
     def session_log(self, session_id: str) -> Path | None:
         return None
+
+
+def owner_servers(read: dict) -> dict[str, dict]:
+    """The MCP servers of the owner's configuration for a folder (config/read), each with the
+    tools any of its loaded layers names (user, a trusted project's): their policies are merged
+    key by key."""
+    servers = {
+        str(k): dict(mapping(v))
+        for k, v in mapping(mapping(read.get("config")).get("mcp_servers")).items()
+    }
+    for layer in read.get("layers") or []:
+        if not isinstance(layer, dict) or layer.get("disabledReason"):
+            continue
+        for name, entry in mapping(mapping(layer.get("config")).get("mcp_servers")).items():
+            found = servers.setdefault(str(name), {})
+            tools = {**mapping(found.get("tools")), **mapping(mapping(entry).get("tools"))}
+            if tools:
+                found["tools"] = tools
+    return servers
 
 
 def asking(entry: Any, name: str = "", checking: bool = False) -> dict:

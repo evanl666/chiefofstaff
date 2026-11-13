@@ -616,6 +616,58 @@ async def test_with_ask_first_every_server_it_can_name_asks(tmp_path, monkeypatc
     }
 
 
+async def test_with_ask_first_a_settings_server_named_as_one_of_codexs_asks_for_every_tool(
+    tmp_path, monkeypatch
+):
+    """Review: a Settings server with the name of one in the owner's Codex config (or in a
+    trusted repository's .codex/) got only a default policy, and Codex merges tables key by
+    key: the owner's `approve` for a tool ("Always allow") outranked it, unasked."""
+    owner = {
+        "github": {
+            "url": "https://api.githubcopilot.com/mcp/",
+            "tools": {"create_pull_request_review": {"approval_mode": "approve"}},
+        }
+    }
+    layers = [
+        {
+            "name": {"type": "user", "file": str(tmp_path / "config.toml")},
+            "version": "1",
+            "config": {"mcp_servers": owner},
+        },
+        {
+            "name": {"type": "project", "dotCodexFolder": str(tmp_path / ".codex")},
+            "version": "1",
+            "config": {"mcp_servers": {"github": {"tools": {"merge_pull_request": {}}}}},
+        },
+        {
+            "name": {"type": "project", "dotCodexFolder": "/elsewhere/.codex"},
+            "version": "1",
+            "disabledReason": "untrusted",
+            "config": {"mcp_servers": {"github": {"tools": {"not_loaded": {}}}}},
+        },
+    ]
+    monkeypatch.setenv("FAKE_CODEX_CONFIG", json.dumps({"mcp_servers": owner}))
+    monkeypatch.setenv("FAKE_CODEX_LAYERS", json.dumps(layers))
+    codex = CodexBackend(fake_codex(tmp_path / "fake", monkeypatch))
+    await codex.start()
+    try:
+        settings = {"github": {"url": "https://api.githubcopilot.com/mcp/", "tools": ["*"]}}
+        asking_first = await codex.thread_config(
+            {"ask_first": True, "mcp_servers": settings}, str(tmp_path)
+        )
+        acting = await codex.thread_config({"mcp_servers": settings}, str(tmp_path))
+    finally:
+        await codex.stop()
+    github = asking_first["mcp_servers"]["github"]
+    assert github["url"] == "https://api.githubcopilot.com/mcp/", "the Settings server's"
+    assert github["default_tools_approval_mode"] == "prompt"
+    assert github["tools"] == {
+        "create_pull_request_review": {"approval_mode": "prompt"},
+        "merge_pull_request": {"approval_mode": "prompt"},
+    }, "each tool any loaded table names asks"
+    assert acting["mcp_servers"] == {"github": {"url": "https://api.githubcopilot.com/mcp/"}}
+
+
 async def test_chatgpts_apps_are_off_for_a_worker_that_asks_first_as_read_back(
     tmp_path, monkeypatch
 ):
