@@ -921,7 +921,7 @@ async def test_a_steer_into_a_turn_that_just_ended_waits_for_that_end(codex, tmp
     release.set()
     await turn.wait()
     assert [d.content for d in turn.data("assistant.message")] == ["first", "second"]
-    assert not [d for d in turn.data("user.message") if d.delivery], "a turn of its own"
+    assert not [d for d in turn.data("user.message") if d.delivery.value], "a turn of its own"
 
 
 async def test_a_message_steered_into_its_turn_says_so(codex, tmp_path):
@@ -931,7 +931,7 @@ async def test_a_message_steered_into_its_turn_says_so(codex, tmp_path):
     await session.send("Reply with just: steered", mode="immediate")
     await turn.wait()
     first, steered = turn.data("user.message")
-    assert (first.delivery, steered.delivery.value) == (None, "steering")
+    assert (first.delivery.value, steered.delivery.value) == ("", "steering")
     assert turn.kinds().count("assistant.turn_start") == 1, "one turn"
 
 
@@ -3428,6 +3428,61 @@ async def test_a_stop_as_its_turn_begins_is_not_undone_by_what_codex_said_before
         assert runtime.tasks.get(task["id"])["status"] == "running"
     finally:
         gate.set()
+        await runtime.stop()
+
+
+@pytest.mark.parametrize("stop", ["owner", "ask first"])
+async def test_what_codex_said_before_a_stop_and_is_handled_after_it_does_not_undo_it(
+    tmp_path, monkeypatch, stop
+):
+    """Stress: what the adapter said of its turn (its message taken up, its first command)
+    reaches Chief of Staff on the loop; said before the stop, it was handled after it (the
+    stop moved its task, then Events took the message as one it went on with): the stopped
+    task ran again, its worker idle. How Codex took up its message is read when it is handled:
+    by then, by a stopped turn."""
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    held, holding = [], []
+    on_event, abort = runtime.events.on_event, backend_codex.CodexSession.abort
+
+    def later(session_id, event, source=None):
+        if holding and session_id == holding[0]:
+            held.append((session_id, event, source))  # Not handled yet (Chief of Staff busy).
+            return None
+        return on_event(session_id, event, source)
+
+    async def handled_meanwhile(self):
+        stopping = asyncio.ensure_future(abort(self))
+        await asyncio.sleep(0)  # The stop is under way (its first step done)...
+        holding.clear()
+        for args in held:  # ...as what was said before it is handled.
+            on_event(*args)
+        await stopping
+
+    monkeypatch.setattr(runtime.events, "on_event", later)
+    monkeypatch.setattr(backend_codex.CodexSession, "abort", handled_meanwhile)
+    try:
+        worker = await spawn(runtime, harness, "Report done: first")
+        await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+        await turn_over(runtime, worker)
+        task = runtime.tasks.for_session(worker)[-1]
+        seconds = f"300.{uuid.uuid4().int % 10**6:06d}"
+        holding.append(worker)
+        work = f"Run the shell command `sleep {seconds}`. Then reply with just: slept"
+        await runtime.task_actions.follow_up(task["id"], work)
+        await until(lambda: sleeping(seconds), 30)
+        await until(lambda: "tool.execution_start" in [e.type.value for _, e, _ in held], 30)
+        if stop == "owner":
+            await runtime.workers.interrupt(worker)
+        else:
+            assert (await runtime.set_session_yolo(worker, "off"))["switch_stopped"] is True
+        assert not holding
+        await until(lambda: not sleeping(seconds), 15)
+        await asyncio.sleep(1)
+        task = runtime.tasks.get(task["id"])
+        assert task["status"] == "waiting" and harness.store.get(f"stopped:{task['id']}")
+        assert harness.store.get(f"goingon:{task['id']}") is None, "as if told to go on"
+        assert harness.store.session(worker)["status"] == "idle"
+    finally:
         await runtime.stop()
 
 

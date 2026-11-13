@@ -209,6 +209,22 @@ def inner_command(command: str) -> str:
     return command
 
 
+class Taken:
+    """How Codex took up a message of Chief of Staff's (a user.message's `delivery`), as Events
+    reads it, when it handles the message (on the loop, maybe after a stop that came
+    meanwhile): "stopped" once the turn that took it up was stopped (CodexSession.abort), else
+    "steering" when it was steered into a turn, else ""."""
+
+    def __init__(self, session: CodexSession, sent: str, steered: bool):
+        self.session, self.sent, self.steered = session, sent, steered
+
+    @property
+    def value(self) -> str:
+        if self.sent in self.session.stopped_sends:
+            return "stopped"
+        return "steering" if self.steered else ""
+
+
 def mapping(value: Any) -> dict:
     return value if isinstance(value, dict) else {}
 
@@ -1810,10 +1826,10 @@ class CodexSession:
         # message first, then its start).
         self.unshown: str = ""
         # Stopped (abort) as its turn was starting or running: what Codex said of that turn
-        # before the stop and Chief of Staff reads after it (its message taken up, its start)
-        # is not news of a turn at work, which would undo the stop (its task running again):
-        # the messages sent until then are said as seen by a stopped turn ("stopped"), and
-        # that turn is not shown as starting.
+        # and Chief of Staff handles after the stop (its message taken up, its start) is not
+        # news of a turn at work, which would undo the stop (its task running again): the
+        # messages sent until then read as taken up by a stopped turn (Taken), and that turn
+        # is not shown as starting.
         self.stopped_sends: set[str] = set()
         self.hiding = False
         # The usage its thread restored when resumed in this process: its epoch's offset.
@@ -2369,9 +2385,7 @@ class CodexSession:
                 if self.unshown:
                     self.show_turn()
                 return
-            delivery = SimpleNamespace(value="steering") if sent in self.steered else None
-            if sent in self.stopped_sends:
-                delivery = SimpleNamespace(value="stopped")  # Seen by a turn stopped meanwhile.
+            delivery = Taken(self, sent, sent in self.steered)
             self.steered.discard(sent)
             self.emit("user.message", content=text_of(item.get("content")), delivery=delivery)
             if self.unshown:
