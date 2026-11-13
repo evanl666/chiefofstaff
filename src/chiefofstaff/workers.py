@@ -598,6 +598,12 @@ class Workers:
             self.requeue(session_id)
             raise
         except Exception as exc:
+            if self.store.agent_unknown(session_id) and self.runtime.spend_card(session_id):
+                # Refused for what it spent unknown: it waits under Needs you, its Go on there
+                # (Runtime.ensure_spend_card), not failed.
+                self.states[session_id].busy = False
+                self.runtime.background(self.pump())
+                return
             self.runtime.fail(row, f"Could not start: {describe(exc)}")
             return
         _, connection = self.runtime.connection(agent)

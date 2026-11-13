@@ -3727,6 +3727,9 @@ class TaskActions:
                 f"Task {task_id} is {task['status']}; only failed or cancelled tasks are retried."
             )
         row = self.store.session(task["session_id"])
+        # The owner asked it to go: what it spent unknown (another agent's) is accepted, before
+        # it is reopened (its agent refuses it otherwise).
+        self.runtime.accept_spend(row["id"])
         if row["closed_at"]:
             await self.runtime.workers.reopen(row["id"])
             task = self.tasks.get(task_id)
@@ -3741,8 +3744,6 @@ class TaskActions:
                 scope=self.runtime.learning.scope_of(task["session_id"]),
             )
         self.store.set(f"reopened:{task_id}", before["status"])
-        # The owner asked it to go: what it spent unknown (another agent's) is accepted.
-        self.runtime.accept_spend(row["id"])
         if before["status"] == "cancelled":
             self.drop_cancelled_note(row["id"], task_id)  # Moot: it is wanted after all.
             with suppress(RuntimeError):

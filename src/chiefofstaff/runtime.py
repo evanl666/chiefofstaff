@@ -1521,6 +1521,8 @@ class Runtime:
         of its stopped task, the Retry of its failed one, else its limit."""
         if self.spend_card(row["id"]):
             return "press Go on under Needs you to accept that and let it continue."
+        if row["closed_at"]:
+            return "Retry its task to accept that and let it continue."  # Reopened, accepted.
         tasks = [t for t in self.tasks.for_session(row["id"]) if t["status"] != "cancelled"]
         if tasks and tasks[-1]["status"] == "failed":
             return "Retry its task to accept that and let it continue."

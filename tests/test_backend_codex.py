@@ -3463,3 +3463,53 @@ async def test_a_failed_worker_with_unaccepted_spend_goes_on_with_retry(tmp_path
         await until(lambda: "retried" in str(harness.kinds(worker)), 30)
     finally:
         await runtime.stop()
+
+
+async def test_retry_of_a_closed_worker_whose_spend_is_unknown_goes(tmp_path, monkeypatch):
+    """Review: closed (its tasks cancelled, its Go on with them), a limited worker whose spend
+    is unknown was reopened before Retry accepted that: its agent refused it, and the refusal
+    said to Retry. Retry accepts first; the refusal of a closed one says Retry."""
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    try:
+        agents.configure(harness.store, "codex", limit=1_000_000)
+        worker = await spawn(runtime, harness, "Wait 30 s. Then reply with just: on")
+        backend, _ = runtime.connection("codex")
+        await until(lambda: worker in backend.workers and runtime.states.handle(worker).turn, 30)
+        os.kill(backend.workers[worker].process.pid, signal.SIGKILL)
+        await until(lambda: runtime.spend_card(worker), 30)
+        await runtime.workers.close(worker, by="you")
+        task = runtime.tasks.for_session(worker)[-1]
+        assert task["status"] == "cancelled" and runtime.spend_card(worker) is None
+        assert "Retry its task" in runtime.agent_block(harness.store.session(worker))
+        await runtime.task_actions.retry(task["id"], "Report done: back")
+        assert unknown_rows(harness, worker) == [("unknown", 1)]
+        await until(lambda: "back" in str(harness.kinds(worker)), 30)
+    finally:
+        await runtime.stop()
+
+
+async def test_a_queued_worker_refused_for_unknown_spend_waits_with_its_go_on(
+    tmp_path, monkeypatch
+):
+    """Review: queued with a limit and spend not known (its process stopped at the end of a
+    settings change, say), its start made its Go on card and then failed it, every open task
+    with it: a "Failed" alert pointing at a Go on gone. It waits, its card there."""
+    harness, runtime = await brief(tmp_path, monkeypatch, Settings(max_workers=1))
+    try:
+        agents.configure(harness.store, "codex", limit=1_000_000)
+        busy = await spawn(runtime, harness, "Wait 30 s. Then reply with just: busy")
+        backend, _ = runtime.connection("codex")
+        await until(lambda: busy in backend.workers and runtime.states.handle(busy).turn, 30)
+        queued = await spawn(runtime, harness, "Report done: queued")
+        assert harness.store.session(queued)["status"] == "queued"
+        unknown = runtime.unknown(queued)
+        harness.store.record_agent_usage([unknown], f"agentepoch:{queued}", {})
+        await runtime.workers.interrupt(busy)  # Its slot is free: the queued one starts.
+        await until(lambda: runtime.spend_card(queued), 30)
+        await asyncio.sleep(0.5)
+        assert harness.store.session(queued)["status"] != "failed"
+        assert [t["status"] for t in runtime.tasks.for_session(queued)] == ["waiting"]
+        assert not [text for kind, text in harness.kinds(queued) if kind == "error"]
+        assert runtime.task_actions.view(runtime.spend_card(queued))["go_on"] is True
+    finally:
+        await runtime.stop()
