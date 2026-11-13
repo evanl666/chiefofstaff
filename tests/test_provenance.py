@@ -938,6 +938,14 @@ async def test_what_was_queued_is_dropped_before_learning_and_once_at_start(
     store.save_settings(store.settings().model_copy(update={"learn_from_work": True}))
     await started()
     assert queued() == {talked, running}
+    # One kept as a script's, continued in a terminal since: looked at again once it ends.
+    continued = home.add(interactive(T0, "Label ticket 7", "And ticket 8", exit_=False), T0)
+    home.open[continued] = 4444
+    store.set(f"made:{continued}", json.dumps({"as": "batch", "group": "g", "at": T0, "size": 1}))
+    habits.add("copilot", "instruction", f"copilot:{continued}:e1", "Words continued")
+    await harness.runtime.workers.refresh_elsewhere()
+    await started()
+    assert queued() == {talked, running, continued}
     await harness.runtime.stop()
 
 
