@@ -2983,6 +2983,7 @@ class Runtime:
             jobs = (
                 self.watchdog.check,
                 self.task_actions.refresh_open_prs,
+                self.task_actions.reread_roles,
                 self.workers.tidy,
                 self.workers.release_idle,
                 self.drafts.check_posted_by_owner,

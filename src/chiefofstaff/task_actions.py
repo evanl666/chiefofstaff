@@ -91,6 +91,10 @@ PR_REFRESH = 180
 PR_HOURS = 72
 # Those closed (not merged) this many times less often: one may be reopened.
 CLOSED_PR_PACE = 5
+# The rules a task's PRs' roles were read by (classify_prs): raised when they change, so that
+# receipts read before are read again once (merged and closed PRs too), this many tasks a round.
+ROLE_RULES = 2
+ROLE_REREADS = 3
 
 
 # A report line that says its worker opened the PR it names (not that someone else did).
@@ -988,7 +992,13 @@ class TaskActions:
             )
         )
         if run:
-            evidence = {"checkouts": checkouts, "prs": prs, "at": now(), "prs_at": time.time()}
+            evidence = {
+                "checkouts": checkouts,
+                "prs": prs,
+                "at": now(),
+                "prs_at": time.time(),
+                "role_rules": ROLE_RULES,
+            }
             before = json.loads(run["evidence"]) if keep_stale and run["evidence"] else {}
             if reason := before.get("stale") or moved(before.get("checkouts", []), checkouts):
                 # The checks were about the code as it was then, not as it is now.
@@ -2078,7 +2088,7 @@ class TaskActions:
         await self.offer_merge(task, prs, since=read)
         shown = [{k: v for k, v in pr.items() if k != "at"} for pr in evidence["prs"]]
         changed = shown != [{k: v for k, v in pr.items() if k != "at"} for pr in prs]
-        evidence |= {"prs": prs, "prs_at": time.time()}
+        evidence |= {"prs": prs, "prs_at": time.time(), "role_rules": ROLE_RULES}
         # Saved first: whether its other PRs are still open is read from what is true now.
         self.store.execute(
             "UPDATE runs SET evidence=? WHERE id=?", (json.dumps(evidence), run["id"])
@@ -2118,6 +2128,49 @@ class TaskActions:
                 await self.refresh_prs(task["id"])
             except Exception:
                 logger.info("Could not refresh the PRs of %s.", task["id"], exc_info=True)
+
+    async def reread_roles(self, most: int = ROLE_REREADS):
+        """What each PR is to its task (created, modified, reviewed, referenced) as receipts read
+        by older rules have it (bug E45: kept for ever once its PR was merged or closed, or its
+        task was a few days old): read again once by today's rules, the newest tasks first, a
+        few a round. Only what they are and how they stand change: nothing is offered or
+        settled for it (a Merge card, a merged PR's news)."""
+        if self.store.get("role_rules") == str(ROLE_RULES):
+            return
+        # Each task's latest receipts (what its card shows), not read by these rules.
+        stale = [
+            run
+            for run in self.store.all(
+                """SELECT r.id, r.task_id, r.evidence FROM runs r WHERE r.evidence!=''
+                AND r.started_at=(SELECT max(started_at) FROM runs
+                    WHERE task_id=r.task_id AND evidence!='')
+                AND r.evidence NOT LIKE ? ORDER BY r.started_at DESC""",
+                (f'%"role_rules": {ROLE_RULES}%',),
+            )
+            if json.loads(run["evidence"]).get("prs")
+        ]
+        if not stale:
+            self.store.set("role_rules", str(ROLE_RULES))
+            return
+        for run in stale[:most]:
+            task = self.tasks.find(run["task_id"])
+            try:
+                prs = await self.read_prs(task) if task else []
+            except Exception:
+                logger.info("Could not read the PRs of %s again.", run["task_id"], exc_info=True)
+                prs = []
+            # Read once, whatever came of it: the next round goes on to others.
+            there = self.store.value("SELECT evidence FROM runs WHERE id=?", (run["id"],))
+            evidence = json.loads(there) if there else {}
+            changed = bool(prs) and prs != evidence.get("prs")
+            if prs:
+                evidence |= {"prs": prs, "prs_at": time.time()}
+            evidence["role_rules"] = ROLE_RULES
+            self.store.execute(
+                "UPDATE runs SET evidence=? WHERE id=?", (json.dumps(evidence), run["id"])
+            )
+            if changed and task:
+                self.publish(self.tasks.get(task["id"]))
 
     def record_opened(self, task_id: str, urls: list[str]):
         """PRs this task's worker opened (Create PR, or `gh pr create` in its shell): its own
