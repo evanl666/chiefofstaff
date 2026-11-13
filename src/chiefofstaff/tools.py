@@ -5,6 +5,7 @@ models the model sees.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -40,7 +41,7 @@ from .policy import within
 from .roles import ROUTER, SLACK, WATCHDOG, WORKER
 from .sources.github import NO_ACCESS, diff_lines, snippet
 from .store import ago_minutes, now
-from .task_actions import deliverable_title
+from .task_actions import deliverable_title, style_note
 from .tasks import ADOPTED, OPEN
 from .workspaces import resolve_project
 
@@ -1482,6 +1483,22 @@ class Tools:
 
         return OWNER_REF.sub(quoted, text)
 
+    def check_title_style(self, title: str, refused: str):
+        """A new task's title that ends with how to write the work (its language, tone) is
+        refused once, with why: that goes in the instructions. The same title again stands."""
+        note = style_note(title)
+        flag = "styletitle:" + hashlib.sha256(title.encode()).hexdigest()[:16]
+        if not note or self.store.get(flag):
+            return
+        self.store.set(flag, "1")
+        bare = title[: title.rindex(note)].rstrip(" -\u2013\u2014\u00b7,;:\uff0c\uff1b\uff1a")
+        raise ValueError(
+            f"{refused}: the title's \u201c{note}\u201d says how to write the work, not what it "
+            "delivers. Put how to write it in the instructions, and give the title without "
+            f"it (\u201c{bare}\u201d). If it is part of what the task delivers, call again with "
+            "the same title."
+        )
+
     async def t_spawn_worker(
         self, params: SpawnWorker, caller: str, special: str = "", untrusted: bool = False
     ):
@@ -1497,6 +1514,8 @@ class Tools:
             )
         # Checked as a rename or split is: it says what the task delivers.
         title = deliverable_title(params.title)
+        if not special:
+            self.check_title_style(title, "Not started")
         follow = [threads.normalize(key) for key in params.follow]
         after = [self.runtime.task_actions.task_for(reference) for reference in params.after]
         replaced = self.replaced_tasks(params.replaces)
@@ -1950,6 +1969,8 @@ class Tools:
             )
         # Checked before anything changes: a closed worker is not reopened for a refused title.
         title = deliverable_title(params.title) if params.task == "new" else ""
+        if title:
+            self.check_title_style(title, "Not sent")
         if target["closed_at"]:
             await self.runtime.workers.reopen(
                 target["id"]

@@ -40,9 +40,10 @@ from chiefofstaff.store import Store
 # The `chiefofstaff` command as installed (pyproject's console script), beside this Python.
 COMMAND = Path(sys.executable).parent / "chiefofstaff"
 
-# The Router's system message in a fresh store, as 0.1.38 sent it: while Send to Chief is off it
-# must not change by a byte. (Change it here only with a deliberate change to the Router's prompt.)
-ROUTER_PROMPT = (25029, "f7e9541b4fb02a27a5f9c79583f21b6e400cd31fea3facdd3ded055306bc6bec")
+# The Router's system message in a fresh store, as 0.1.38 sent it (and since, how to write a task
+# kept out of its title, E44): while Send to Chief is off it must not change by a byte. (Change it
+# here only with a deliberate change to the Router's prompt.)
+ROUTER_PROMPT = (25130, "8d7545cabd15585c6d7407a2b0d37bb12e592ebda00859469e30c743741eaf4e")
 
 HELP = """\
 usage: chiefofstaff [-h] [--version] [--port PORT] [--data-dir DATA_DIR] [--no-browser] [--demo]

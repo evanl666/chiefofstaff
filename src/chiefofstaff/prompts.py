@@ -156,7 +156,9 @@ How to route:
   "Answer Jingtao: why two parallel gets are slow"; in the language the owner wrote the
   request in (a Chinese request gets a Chinese title, as does why_new). Not "Handle the new
   Slack message" or a
-  thread timestamp; not the phase ("waiting for the reviewer" is a state, not a title). When a
+  thread timestamp; not the phase ("waiting for the reviewer" is a state, not a title). How to
+  write it (in English, human-sounding, concise) goes in the instructions, never the title.
+  When a
   task turned out to be about something else, rename_task it; when it now holds two
   deliverables, split_task the latest one off under its own title.
   When the new

@@ -323,6 +323,49 @@ def clip(text: str, limit: int) -> str:
 SPLIT_UNDO_MINUTES = 10
 
 
+# A title's last part when it only says how to write the work (its language, tone, length), not
+# what it delivers: "Review app#7 (in English, human-sounding comments)". That belongs in the
+# instructions. Bracketed at its end, or after its last separator.
+TITLE_NOTE = re.compile(
+    r"\s*(?:[(\uff08](?P<bracketed>[^()\uff08\uff09]+)[)\uff09]"
+    r"|(?:\s[-\u2013\u2014\u00b7]\s|[,;:]\s|[\uff0c\uff1b\uff1a])(?P<after>[^,;:\uff0c\uff1b\uff1a]+))"
+    r"\s*$"
+)
+WRITING_STYLE = re.compile(
+    r"\b(?:(?:in|into)\s+(?:plain\s+|simple\s+|natural\s+|good\s+)?)?"
+    r"(?:english|chinese|mandarin|japanese|korean|french|german|spanish)\b"
+    r"|\bhuman[- ]?(?:sounding|like|written|readable|tone)\b|\bnot\s+robotic\b|\bnatural(?:ly)?\b"
+    r"|\b(?:casual|formal|polite|friendly|concise|brief|terse|warm|professional)(?:ly)?\b"
+    r"|\b(?:plain\s+language|no\s+jargon|short\s+and\s+sweet)\b"
+    r"|用?(?:英文|中文|英语|汉语|日文|日语|韩文|韩语)|像人(?:写|说)?|口语化?|简洁|简短|自然|礼貌|正式|语气"
+    r"|人性化|不要?(?:太)?(?:机器|生硬)"
+)
+# What else such a note says that is no deliverable: what is written, and joining words.
+STYLE_FILLER = re.compile(
+    r"\b(?:comments?|replies|reply|review|text|words|messages?|written|writing|write|sounding|"
+    r"style|keep|it|be|make|use|with|and|or|the|a|an|in|please|very|more|less|bit)\b"
+    r"|评论|回复|消息|写|说|的|地|得|用|要|请|和|并且?|一点|一些|风格|方式",
+    re.IGNORECASE,
+)
+# A title of work that writes in a language: the language is what it delivers.
+TRANSLATES = re.compile(r"translat|locali[sz]|翻译|译成|本地化", re.IGNORECASE)
+
+
+def style_note(title: str) -> str:
+    """The end of a title that only says how to write the work ("(in English, human-sounding
+    comments)", "— 简洁一点"), or "": what to write goes in a title, how in the instructions.
+    Not a note that names anything else ("(comments only)", "(security)"), nor one of work
+    that translates."""
+    found = TITLE_NOTE.search(title)
+    if not found or TRANSLATES.search(title):
+        return ""
+    note = found.group("bracketed") or found.group("after") or ""
+    if not WRITING_STYLE.search(note.lower()):
+        return ""
+    rest = STYLE_FILLER.sub(" ", WRITING_STYLE.sub(" ", note.lower()))
+    return "" if re.search(r"\w", rest) else found.group(0).strip()
+
+
 def deliverable_title(title: str) -> str:
     """A task's title, checked alike when a task is made, renamed or split: it must say what
     the task delivers. Not "111", "A" or "Fix issue": a word of what or where ("Lint", "Fix
