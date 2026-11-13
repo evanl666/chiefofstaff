@@ -5,6 +5,7 @@ models the model sees.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -40,7 +41,7 @@ from .policy import within
 from .roles import ROUTER, SLACK, WATCHDOG, WORKER
 from .sources.github import NO_ACCESS, diff_lines, snippet
 from .store import ago_minutes, now
-from .task_actions import deliverable_title
+from .task_actions import GITHUB_RUN, deliverable_title, style_note
 from .tasks import ADOPTED, OPEN
 from .workspaces import resolve_project
 
@@ -1482,6 +1483,22 @@ class Tools:
 
         return OWNER_REF.sub(quoted, text)
 
+    def check_title_style(self, title: str, refused: str):
+        """A new task's title that ends with how to write the work (its language, tone) is
+        refused once, with why: that goes in the instructions. The same title again stands."""
+        note = style_note(title)
+        flag = "styletitle:" + hashlib.sha256(title.encode()).hexdigest()[:16]
+        if not note or self.store.get(flag):
+            return
+        self.store.set(flag, "1")
+        bare = title[: title.rindex(note)].rstrip(" -\u2013\u2014\u00b7,;:\uff0c\uff1b\uff1a")
+        raise ValueError(
+            f"{refused}: the title's \u201c{note}\u201d says how to write the work, not what it "
+            "delivers. Put how to write it in the instructions, and give the title without "
+            f"it (\u201c{bare}\u201d). If it is part of what the task delivers, call again with "
+            "the same title."
+        )
+
     async def t_spawn_worker(
         self, params: SpawnWorker, caller: str, special: str = "", untrusted: bool = False
     ):
@@ -1497,6 +1514,8 @@ class Tools:
             )
         # Checked as a rename or split is: it says what the task delivers.
         title = deliverable_title(params.title)
+        if not special:
+            self.check_title_style(title, "Not started")
         follow = [threads.normalize(key) for key in params.follow]
         after = [self.runtime.task_actions.task_for(reference) for reference in params.after]
         replaced = self.replaced_tasks(params.replaces)
@@ -1950,6 +1969,8 @@ class Tools:
             )
         # Checked before anything changes: a closed worker is not reopened for a refused title.
         title = deliverable_title(params.title) if params.task == "new" else ""
+        if title:
+            self.check_title_style(title, "Not sent")
         if target["closed_at"]:
             await self.runtime.workers.reopen(
                 target["id"]
@@ -2979,6 +3000,32 @@ class Tools:
             and (problem := await self.runtime.checks.before_done(row, task))
         ):
             raise ValueError(problem)
+        # Reported done with a run it says still goes on, and nothing will look at it again (one
+        # on GitHub Chief of Staff reads itself): told once how the owner hears its end.
+        run_note = ""
+        unwatched = [
+            item
+            for item in (self.runtime.task_actions.runs_going(task["id"]) if task else [])
+            if not GITHUB_RUN.match(item["url"])
+        ]
+        if (
+            task
+            and params.status == "done"
+            and row["role"] == WORKER
+            and unwatched
+            and task["status"] != "cancelled"
+            and not self.store.get(f"setaside:{task['id']}")
+            and task["id"] not in self.states[caller].turn_check_backs
+            and not self.store.get(f"runnudge:{task['id']}")
+        ):
+            self.store.set(f"runnudge:{task['id']}", "1")
+            names = ", ".join(f"\u201c{item['name'] or item['url']}\u201d" for item in unwatched)
+            run_note = (
+                f" By what you said, {names} still goes on, and nothing will look at it again: "
+                "for the owner to hear how it ends, call check_back for it now (task_id="
+                f"'{task['id']}') and end your turn; if it has ended, report again with its end "
+                "state in artifacts."
+            )
         meta = {"status": params.status, "task_id": task["id"] if task else None}
         drafts = {
             d["id"] for d in self.store.all("SELECT id FROM drafts WHERE session_id=?", (caller,))
@@ -3046,7 +3093,7 @@ class Tools:
                 self.runtime.update_session(caller, report=params.summary[:4000])
                 return (
                     f"Task {task['id']}'s report is updated. It was reported already: the "
-                    "Router is not told again."
+                    "Router is not told again." + run_note
                 )
             elif (
                 params.status == "done"
@@ -3187,11 +3234,11 @@ class Tools:
             if params.replaces_result:
                 return (
                     f"Task {task['id']}'s result is this report now (the owner asked in chat); "
-                    "the earlier one is kept with it."
+                    "the earlier one is kept with it." + run_note
                 )
             return (
                 f"Noted as an update on task {task['id']} (the owner asked in chat; its "
-                "result stays as it is)."
+                "result stays as it is)." + run_note
             )
         if settled and task and params.status in {"question", "blocked"}:
             # A cancelled task's worker still needs the owner: the question shows under Needs
@@ -3233,7 +3280,7 @@ class Tools:
                 needs_action=False,
                 title="PR update",
             )  # fmt: skip
-        return "Reported to the Router." + split_note
+        return "Reported to the Router." + split_note + run_note
 
     async def t_cancel_task(self, params: CancelTask, caller: str):
         self.caller(caller, ROUTER)
@@ -3871,8 +3918,18 @@ class Tools:
     async def t_check_back(self, params: CheckBack, caller: str):
         self.caller(caller, WORKER)
         task = self.runtime.task_actions.report_task(caller, params.task_id)
-        if not task or task["status"] not in {"running", "waiting"}:
-            raise ValueError("check_back is for a task you are still on.")
+        # Reported done with a run it said still goes on: checked on when it ends.
+        run_going = bool(
+            task
+            and task["status"] in {"review", "done"}
+            and not self.store.get(f"setaside:{task['id']}")
+            and self.runtime.task_actions.runs_going(task["id"])
+        )
+        if not task or (task["status"] not in {"running", "waiting"} and not run_going):
+            raise ValueError(
+                "check_back is for a task you are still on, or a run of a finished one that "
+                "still goes on."
+            )
         what = " ".join(params.what.split())[:300]
         if not what:
             raise ValueError("Say what you will check.")
@@ -3880,7 +3937,7 @@ class Tools:
         if url and not re.match(r"^https?://\S+$", url):
             raise ValueError("url must be an http(s) link, or empty.")
         at = datetime.now(UTC) + timedelta(minutes=params.minutes)
-        self.runtime.task_actions.set_check_back(task, at.isoformat(), what, url)
+        self.runtime.task_actions.set_check_back(task, at.isoformat(), what, url, run=run_going)
         self.states[caller].turn_check_backs.add(task["id"])
         clock = at.astimezone().strftime("%H:%M")
         return (

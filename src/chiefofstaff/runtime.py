@@ -2934,10 +2934,15 @@ class Runtime:
             # CI or a review came in: the PR's chips change now, not at the next round.
             self.background(self.task_actions.refresh_open_prs(thread.removeprefix("github:")))
         owners = self.thread_owners(followers, thread)
-        recipients = [
-            (session_id, self.thread_task(session_id, thread), text, display)
-            for session_id in owners
-        ]
+        recipients = []
+        for session_id in owners:
+            task = self.thread_task(session_id, thread)
+            row = self.store.find_session(session_id)
+            if not task and threads.GITHUB_PR.fullmatch(thread) and row and row["role"] == WORKER:
+                # Which of its tasks this PR is about is not known (none made it, none follows
+                # it): the Router decides, as for news nobody follows.
+                continue
+            recipients.append((session_id, task, text, display))
         bystanders = [s for s in followers if s not in owners] if replies else []
         for session_id in bystanders:
             # Not its PR, but someone answered its own comment there (a review it posted).
@@ -3023,6 +3028,8 @@ class Runtime:
             jobs = (
                 self.watchdog.check,
                 self.task_actions.refresh_open_prs,
+                self.task_actions.reread_roles,
+                self.task_actions.check_runs,
                 self.workers.tidy,
                 self.workers.release_idle,
                 self.drafts.check_posted_by_owner,
@@ -3331,19 +3338,17 @@ class Runtime:
         turn = self.tasks.find(self.turn_task(session_id))
         if not (turn and turn["session_id"] == session_id and turn["status"] != "cancelled"):
             turn = None
-        if thread and (task := self.thread_task(session_id, thread, turn)):
+        if thread and (task := self.thread_task(session_id, thread)):
             return task["id"]
         return turn["id"] if turn else ""
 
-    def thread_task(self, session_id: str, thread: str, turn: dict | None = None) -> dict | None:
+    def thread_task(self, session_id: str, thread: str) -> dict | None:
         """Which of a worker's tasks a followed thread is about: for a PR, the task that made
         it (its news is that work's, whichever later task of the worker follows or names it
         too), unless it no longer follows it (stopped for it, or followed for other tasks
-        only); else the newest one the follow was made for, else the newest whose PRs or
-        instructions name it: `turn` (the task its turn is on) first, when it does (another's
-        may only mention it: "not on PR #92's branch")."""
-        from .tools import names_pr
-
+        only); else the newest one the follow was made for. None when neither is known: a task
+        that only names it (its report, its instructions) does not make it its own (bug E46:
+        news and drafts went to the latest that did); the Router is told instead."""
         maker = self.pr_maker(session_id, thread)
         bound = self.store.follow_tasks(session_id, thread)
         if (
@@ -3356,17 +3361,6 @@ class Runtime:
         for task in reversed(self.tasks.for_session(session_id)):
             if task["id"] in bound:
                 return task
-        found = threads.GITHUB_PR.fullmatch(thread)
-        mine = list(self.tasks.for_session(session_id))
-        if turn and turn["id"] in {task["id"] for task in mine}:
-            mine = [*(task for task in mine if task["id"] != turn["id"]), turn]
-        for task in reversed(mine):
-            if found:
-                repo, number = found.groups()
-                if thread in threads.pull_requests(
-                    " ".join(self.task_actions.pr_urls(task))
-                ) or names_pr(f"{task['title']}\n{task['goal'] or ''}", repo, int(number)):
-                    return task
         return None
 
     def thread_owners(self, followers: list[str], thread: str) -> list[str]:

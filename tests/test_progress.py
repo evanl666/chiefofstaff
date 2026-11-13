@@ -14,7 +14,6 @@ import pytest
 from conftest import FakeSession, Harness, call_tool, env, settle, task_of
 
 from chiefofstaff.models import DraftDecision, Settings
-from chiefofstaff.sources.github import marked
 
 
 async def spawn(runtime, router, title, **extra):
@@ -414,7 +413,7 @@ async def test_replies_to_review_comments_on_the_workers_own_pr(harness):
     assert sent["outcome"] == "https://github.com/acme/model/pull/1043#discussion_r99"
     arguments, payload = harness.gh_calls[-1]
     assert arguments[1] == "repos/acme/model/pulls/1043/comments/21/replies"
-    assert payload == {"body": marked("Fixed in f61047fa: opted-out titles are removed first.")}
+    assert payload == {"body": "Fixed in f61047fa: opted-out titles are removed first."}
     assert "github:acme/model#1043" in harness.store.follows(worker)
 
 
@@ -956,14 +955,14 @@ async def test_reviews_a_company_pr_with_inline_comments(harness):
     )
     [(arguments, payload)] = [call for call in harness.gh_calls if call[1]]
     assert arguments[1] == f"repos/{repo}/pulls/1529/reviews"
-    assert payload["commit_id"] == "c0ffee" and payload["body"] == marked("Summary")
+    assert payload["commit_id"] == "c0ffee" and payload["body"] == "Summary"
     assert payload["comments"] == [
-        {"path": "model/train.py", "line": 11, "side": "RIGHT", "body": marked("Why 3?")},
+        {"path": "model/train.py", "line": 11, "side": "RIGHT", "body": "Why 3?"},
         {
             "path": "model/train.py",
             "line": 12,
             "side": "RIGHT",
-            "body": marked("Please add a test"),
+            "body": "Please add a test",
             "start_line": 10,
             "start_side": "RIGHT",
         },
@@ -1847,7 +1846,7 @@ async def test_an_answer_to_a_conversation_comment_names_its_author(harness):
     assert sent["outcome"] == "https://github.com/acme/model/pull/1043#issuecomment-501"
     arguments, payload = harness.gh_calls[-1]
     assert arguments[1] == "repos/acme/model/issues/1043/comments"
-    assert payload == {"body": marked("@ckrsek Documented it in README.md, see 3b6c1e0.")}
+    assert payload == {"body": "@ckrsek Documented it in README.md, see 3b6c1e0."}
     both = await call_tool(runtime, "draft_github_review", worker, repo="acme/model",
                            number=1043, body="x", in_reply_to=21, reply_to_comment=55)  # fmt: skip
     assert "not both" in both.text_result_for_llm

@@ -144,7 +144,7 @@ async def test_create_pr_text_and_the_result_it_leaves_on_the_card(tmp_path):
     assert "- ccddd63: `div(a, b)` in calc.py plus tests.\n" in body, body
     assert "- 57c5e01: `floordiv(a, b)` with the same zero check." in body, body
     assert "unchanged" not in body and "(new)" not in body, body
-    assert "- pytest passes: `pytest -q | tail -1`\n" in body, body
+    assert body.endswith("\n- pytest passes: `pytest -q | tail -1`"), body
     assert "EOF" not in body and "def floordiv" not in body, body
     assert hook in body, "not about pushing its branch: it stays"
     assert runtime.tasks.get(task)["result"] == summary, "the result stays as reported"

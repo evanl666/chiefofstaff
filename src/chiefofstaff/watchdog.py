@@ -198,6 +198,10 @@ class Watchdog:
             if row["status"] == "idle" and not running:
                 continue  # Between turns with nothing it owes: finished, waiting or cancelled.
             messages = recent_messages(self.store, row["id"])
+            if row["status"] == "idle" and self.runtime.workers.checking_finished(
+                since_last_instruction(messages)
+            ):
+                continue  # Its last turn checked on finished work: no report is owed for it.
             mark = messages[-1]["id"] if messages else 0
             state = self.state(row["id"])
             if state.get("escalated_mark") == mark:

@@ -377,6 +377,9 @@ async def test_a_new_watch_starts_a_day_back_whatever_other_watches_hold_back(tm
     assert started >= time.time() - 86400 - OVERLAP_SECONDS - 60, job
     for key in ("watchfrom:", "watchdone:"):
         harness.store.delete(key + watch_key("PR mentions"))
+    # Never scanned (in the last scan, with no place of its own, it is one an older version
+    # scanned: see test_round12_watches).
+    harness.store.set("watch_scan", "[]")
     harness.store.set("watch_done_at", str(time.time() - 9 * 86400))
     await scan(harness, runtime)
     assert not notices(harness) and runtime.connector.view()["gaps"] == []

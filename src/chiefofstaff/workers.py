@@ -243,6 +243,21 @@ class Workers:
                 unread=True,
             )
 
+    def checking_finished(self, recent: list[dict]) -> bool:
+        """Whether a turn (`recent`: from its instruction on) was about finished work, not
+        about a task it owes a report on: woken by a check-back on a task that is not running
+        (a run of finished work), or told about such a task while a check-back is set on it.
+        What it says then (or not) is no report of another of its tasks, nor a result of that
+        one. (A turn that reported on it owes nothing either way: see ask_what_it_waits_for.)"""
+        if not recent or not instruction(recent[0]):
+            return False
+        asked = recent[0]
+        about = asked["meta"].get("task_id") or ""
+        task = self.tasks.find(about) if about else None
+        if not task or task["status"] == "running":
+            return False
+        return bool(asked["meta"].get("check_back") or self.store.get(f"checkback:{about}"))
+
     async def ask_for_report(self, session_id: str):
         """A turn that ended on its task without report(): the owner sees only reports. Its
         final answer, when it wrote one, becomes the report as written (at once, and nothing is
@@ -276,6 +291,8 @@ class Workers:
         if not recent or not instruction(recent[0]):
             return
         asked = recent[0]
+        if self.checking_finished(recent):
+            return  # On finished work (its run): no report of another task, nor a result.
         named = next((t for t in running if t["id"] == asked["meta"].get("task_id")), None)
         if named:
             task = named

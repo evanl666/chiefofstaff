@@ -942,9 +942,9 @@ async def scenario_company_review(app: App):
         env=env, capture_output=True, text=True, check=True,
     ).stdout  # fmt: skip
     published = [json.loads(line) for line in listed.splitlines() if line.strip()]
-    # Each comment Chief of Staff posts ends with its mark (sources/github.py, POSTED_MARK).
+    # Each comment as it was written: nothing hidden added to it (E37).
     mine = {
-        (c["path"], c["line"], c["body"].removesuffix("\n\n<!-- chief-of-staff -->"))
+        (c["path"], c["line"], c["body"])
         for c in published
         if c["pull_request_review_id"] == review
     }

@@ -117,6 +117,8 @@ const TITLE_MAX = 80;
 // What cancelling came to, as the server has the task after it: one that had finished is set
 // aside (its result kept), not cancelled.
 export const cancelledWords = (view) => (view?.set_aside ? "It had finished: set aside, its result is kept." : "Task cancelled.");
+// Runs its worker said go on that nothing told of for a day (see showActions): their links.
+const unknownRuns = (task) => (Array.isArray(task.monitoring) ? task.monitoring : []).filter((item) => item.kind === "flow" && item.unknown).map((item) => item.url);
 // The key covers what changes a card's actions and layout; the version, what only its text.
 // `phase`: where it is on the board ({section, marker, why}: see board.js).
 export function taskItem(task, phase = phaseOf(task)) {
@@ -126,7 +128,7 @@ export function taskItem(task, phase = phaseOf(task)) {
   const made = [task.artifacts, task.links, task.files, task.made_links, task.link_names, task.watch_kind, task.watch_changed_at, task.deliverables, task.monitoring, state.snapshot?.artifacts_hidden];
   const asked = askedOf(task);
   return {
-    key: `task:${task.id}:${task.status}:${phase.section}:${phase.marker}:${task.stopped ? 1 : 0}:${task.blocked ? 1 : 0}:${createsPr(task) ? 1 : 0}:${task.news?.at || ""}:${task.splittable ? 1 : 0}:${undoUntil(task) ? 1 : 0}`,
+    key: `task:${task.id}:${task.status}:${phase.section}:${phase.marker}:${task.stopped ? 1 : 0}:${task.blocked ? 1 : 0}:${createsPr(task) ? 1 : 0}:${task.news?.at || ""}:${task.splittable ? 1 : 0}:${undoUntil(task) ? 1 : 0}${unknownRuns(task).map((url) => `:${url}`).join("")}`,
     id: task.id,
     // For live rows the minute too: "6m" and "3m ago" move on by themselves.
     version: `${task.updated_at}:${task.title}:${phase.why}:${meta.join("|")}:${help}:${task.read ? 1 : 0}:${worker?.status || ""}:${worker?.activity || ""}:${worker?.step || ""}:${worker?.step_since || ""}:${worker?.turn_task || ""}:${worker?.background ? 1 : 0}:${worker?.display_title || ""}:${task.credits}:${task.runs}:${JSON.stringify(task.receipts?.prs || null)}:${task.status === "review" ? JSON.stringify(task.receipts || null) : ""}:${live ? `${Math.floor(Date.now() / 60000)}:${queuedKey()}` : ""}:${waitsOnOwner(task, worker)}:${(task.watching || []).join(",")}:${(task.watch_failing || []).join(",")}:${(task.watch_unreadable || []).join(",")}:${JSON.stringify(task.watch_failing_why || null)}:${JSON.stringify(task.check_back || null)}:${task.nudged_at || ""}:${JSON.stringify(task.receipts?.changed || null)}:${JSON.stringify(made)}:${JSON.stringify(asked)}:${deliveryKey(task)}:${earlierResults(task).length}`,
@@ -591,6 +593,13 @@ function taskCard(task, phase = phaseOf(task)) {
     } else {
       more = [named, worker];
     }
+    // Runs its worker said go on that nothing told of for a day: the owner says what became of
+    // them (ended, or no longer to follow), in its menu.
+    const urls = unknownRuns(task);
+    if (urls.length && ["review", "done"].includes(task.status)) {
+      const what = urls.length > 1 ? "Runs marked ended." : "Marked ended.";
+      more = [{ text: "Mark ended", onclick: () => act(`/api/tasks/${task.id}/runs`, { how: "ended", urls }, what) }, { text: "Stop tracking", onclick: () => act(`/api/tasks/${task.id}/runs`, { how: "untracked", urls }, "No longer tracked.") }, ...more];
+    }
     const others = moreMenu(more, "More actions", "⋯", moreName(task)) || "";
     if (menu) menu.replaceChildren(others);
     actions.replaceChildren(error, menu ? "" : others, undo || "", ...shown, main || "");
@@ -913,8 +922,9 @@ function waitWords(task, worker, phase) {
     const unreadable = new Set(task.watch_unreadable || []);
     // On its card, in a line: for what, on what, how long quiet.
     const bits = monitorBits(task);
-    if (bits) text = [`${bits.what} ${bits.what === "Following" ? "" : "on "}${bits.label}`, bits.quiet].filter(Boolean).join(" · ");
-    help = [text, ...obligationsOf(task).map((item) => `${item.label || item.key}${item.waiting_for ? `: waiting for ${item.waiting_for}` : ""}${unreadable.has(item.key) ? " (can't read it now)" : ""}${item.trigger ? `\n  ${item.trigger}` : ""}`)].join("\n");
+    if (bits) text = [bits.first.unknown ? `${bits.label}: status unknown` : `${bits.what} ${bits.what === "Following" ? "" : "on "}${bits.label}`, bits.quiet].filter(Boolean).join(" · ");
+    const waits = (item) => (item.unknown ? ": status unknown" : item.waiting_for ? `: waiting for ${item.waiting_for}` : "");
+    help = [text, ...obligationsOf(task).map((item) => `${item.label || item.key}${waits(item)}${unreadable.has(item.key) ? " (can't read it now)" : ""}${item.trigger ? `\n  ${item.trigger}` : ""}`)].join("\n");
   } else if (marker === "queued") {
     const reason = queuedReason(task);
     text = reason.text;
@@ -932,7 +942,8 @@ function waitLine(task, worker, phase) {
 }
 // What a monitored task waits on, in a few words with a link to it: the first thing (a PR, a
 // thread, a flow), when it was last looked at and when it is next ("checked 5 min ago · next in
-// 10 min"); the trigger on hover.
+// 10 min"; a run Chief of Staff does not read itself, when its worker said where it stands:
+// "reported running 3h ago"); the trigger on hover.
 export function monitorBits(task) {
   const parts = monitorParts(task);
   if (!parts) return null;
@@ -940,7 +951,9 @@ export function monitorBits(task) {
   const label = first.kind === "pr" ? shortPr(first.label || first.key) : first.kind === "thread" ? threadWords(first.key) : first.label || first.key;
   const href = first.url || (first.kind === "thread" ? state.snapshot?.thread_links?.[first.key] || "" : "");
   const checked = first.last_check ? ago(first.last_check) : "";
-  const checks = [checked === "now" ? "checked just now" : checked ? `checked ${spelled(checked)} ago` : "", first.next_check ? nextWords(first.next_check) : ""].filter(Boolean).join(" · ");
+  const reported = !checked && !first.unknown && first.kind === "flow" && first.reported_at ? ago(first.reported_at) : "";
+  const said = reported === "now" ? `reported ${first.status} just now` : reported ? `reported ${first.status} ${spelled(reported)} ago` : "";
+  const checks = [checked === "now" ? "checked just now" : checked ? `checked ${spelled(checked)} ago` : said, first.next_check ? nextWords(first.next_check) : ""].filter(Boolean).join(" · ");
   return { ...parts, label, href, checks };
 }
 // "o/app#7" as "app#7" (the server's label is that already, with its title).

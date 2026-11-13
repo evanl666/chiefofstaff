@@ -1,6 +1,7 @@
 """GitHub review requests on explicitly connected repositories, through the gh CLI."""
 
 import asyncio
+import hashlib
 import json
 import logging
 import math
@@ -147,14 +148,30 @@ def why_words(kind: str, detail: str, retry_at: str | None, moment: float) -> st
     return f"{said}; retrying now" if minutes <= 0 else f"{said}; retrying in {minutes} min"
 
 
-# Under what Chief of Staff posts for the owner, unseen on GitHub: learning how the owner writes
-# leaves it out (it is drafted text), whichever install of Chief of Staff posted it.
+# What Chief of Staff posted for the owner ended with before 0.1.43, unseen on GitHub but there
+# when it is edited or quoted: text that has it is still known as drafted, not the owner's own
+# words. What it posts now is known by its id (GitHubSource.posted), else by its words on that PR
+# (posted_key): by this install only. What another install posts on the same account (the
+# owner's other computer) is taken for the owner's own writing: they approved it before it went.
 POSTED_MARK = "<!-- chief-of-staff -->"
 
 
-def marked(text: str) -> str:
-    """The text as posted: with the mark (none on an empty review summary: nothing to learn)."""
-    return f"{text.rstrip()}\n\n{POSTED_MARK}" if text.strip() else text
+def posted_key(label: str, text: str) -> str:
+    """A text Chief of Staff posts on a PR ("owner/repo#n"), by its words (spacing aside): known
+    as its own also when GitHub's answer, with the id, was lost (a send cut off, comments that
+    could not be listed). Not a text another PR got: "LGTM" posted once is no proof elsewhere."""
+    words = " ".join(unmarked(text).split())
+    found = hashlib.sha256(f"{label.lower()}\n{words}".encode()).hexdigest()[:32]
+    return f"github:text:{found}"
+
+
+def posted_text(store: Store, label: str, text: str) -> bool:
+    """Whether Chief of Staff posted this text on that PR (or tried to: a send whose answer was
+    lost may have gone out), or it carries the mark it once left."""
+    if POSTED_MARK in (text or ""):
+        return True
+    found = "SELECT id FROM triggers WHERE key=? AND source='github-sent-text'"
+    return bool(text.strip()) and bool(store.one(found, (posted_key(label, text),)))
 
 
 # `git commit` output: "[branch abc1234] message".
@@ -233,7 +250,7 @@ async def made_locally(folders: list[str], shas: list[str]) -> set[str]:
 
 
 def unmarked(text: str | None) -> str:
-    """What was posted, without the mark: to compare with the draft."""
+    """What was posted, without the mark it once carried: to compare with the draft."""
     return (text or "").replace(POSTED_MARK, "").strip()
 
 
@@ -614,6 +631,14 @@ class GitHubSource:
         """Chief of Staff posted it (as the owner). Not just read by a PR's follower."""
         found = "SELECT id FROM triggers WHERE key=? AND source='github-sent'"
         return bool(self.store.one(found, (key,)))
+
+    def posting(self, target: dict, *texts: str):
+        """Texts about to be posted on the target PR: known as Chief of Staff's by their words,
+        whatever comes back (see posted_key)."""
+        label = f"{target['repo']}#{int(target['number'])}"
+        for text in texts:
+            if text.strip():
+                self.store.add_trigger("github-sent-text", posted_key(label, text), "")
 
     def posted(self, key: str, text: str, target: dict):
         """What Chief of Staff posted for a draft: never news to the PR's followers, and a
@@ -1254,13 +1279,14 @@ class GitHubSource:
 
     async def publish_conversation_reply(self, target: dict, text: str) -> str:
         repo, number = target["repo"], int(target["number"])
+        self.posting(target, text)
         posted = json.loads(
             await self.gh(
                 "api",
                 f"repos/{repo}/issues/{number}/comments",
                 "--method=POST",
                 "--input=-",
-                payload={"body": marked(text)},
+                payload={"body": text},
             )
         )
         if posted.get("id"):
@@ -1389,13 +1415,14 @@ class GitHubSource:
 
     async def publish_reply(self, target: dict, text: str) -> str:
         repo, number = target["repo"], int(target["number"])
+        self.posting(target, text)
         reply = json.loads(
             await self.gh(
                 "api",
                 f"repos/{repo}/pulls/{number}/comments/{int(target['in_reply_to'])}/replies",
                 "--method=POST",
                 "--input=-",
-                payload={"body": marked(text)},
+                payload={"body": text},
             )
         )
         if reply.get("id"):
@@ -1419,14 +1446,14 @@ class GitHubSource:
         if await self.heads(repo, target["number"]) != {target["head_sha"]}:
             raise ValueError("The PR changed after the draft was written; nothing was published.")
         event = REVIEW_EVENTS.get(target.get("verdict", ""), "COMMENT")
-        payload = {"event": event, "commit_id": target["head_sha"], "body": marked(body)}
+        payload = {"event": event, "commit_id": target["head_sha"], "body": body}
         if comments := target.get("comments"):
             payload["comments"] = [
                 {
                     "path": comment["path"],
                     "line": comment["line"],
                     "side": comment.get("side", "RIGHT"),
-                    "body": marked(comment["body"]),
+                    "body": comment["body"],
                 }
                 | (
                     {
@@ -1439,6 +1466,7 @@ class GitHubSource:
                 for comment in comments
             ]
         path = f"repos/{repo}/pulls/{int(target['number'])}/reviews"
+        self.posting(target, body, *(comment["body"] for comment in comments or []))
         note = ""
         try:
             reply = await self.gh("api", path, "--method=POST", "--input=-", payload=payload)

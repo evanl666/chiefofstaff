@@ -745,7 +745,7 @@ async def test_create_pr_pushes_the_branch_and_the_worker_follows_the_pr(tmp_pat
     assert created[created.index("--head") + 1] == branch
     assert created[created.index("--title") + 1] == "add login.py", "what its commit says"
     body = created[created.index("--body") + 1]
-    assert "Fixed the login." in body and "<!-- chief-of-staff -->" in body
+    assert "Fixed the login." in body and "<!--" not in body, "nothing hidden in it (E37)"
     assert "credits" not in body and "**Goal**" not in body, "not the worker's instructions"
     assert harness.store.follows(worker_id) == ["github:acme/app#9"], "its PR comes to it"
     stale = runtime.task_actions.view(task)["receipts"]["stale"]

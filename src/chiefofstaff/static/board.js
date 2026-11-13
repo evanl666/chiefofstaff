@@ -160,17 +160,24 @@ export function obligationsOf(task) {
 // What a monitored task waits on, in parts: what its first obligation waits for ("Waiting for
 // approval"), how long nothing has changed there ("No updates for 26h"; it stays monitored
 // however long that is: news there brings it under Needs you), that obligation, and how many
-// more there are. Null when it waits on nothing (a check-back is said apart).
+// more there are. A run nothing told of for a day is no wait: where it stands is not known
+// ("Status unknown · reported running 2d ago"), said only when nothing else is waited for.
+// Null when it waits on nothing (a check-back is said apart).
 export function monitorParts(task, now = Date.now()) {
   const all = obligationsOf(task);
   // A check-back is said on its own (when it wakes it), unless it is all there is.
   const others = all.filter((item) => item.kind !== "check_back");
   const waits = others.length ? others : all;
-  const first = waits[0];
+  const first = waits.find((item) => !item.unknown) || waits[0];
   if (!first) return null;
-  const changed = waits.map((item) => item.changed_at).filter(Boolean).sort().pop() || task.watch_changed_at || "";
+  const more = waits.length - 1;
+  if (first.unknown) {
+    const said = first.reported_at ? hours(first.reported_at, now) : 0;
+    return { what: "Status unknown", quiet: said >= 1 ? `reported ${first.status || "running"} ${howLong(said)} ago` : "", first, more };
+  }
+  const changed = waits.filter((item) => !item.unknown).map((item) => item.changed_at).filter(Boolean).sort().pop() || task.watch_changed_at || "";
   const quiet = changed ? hours(changed, now) : 0;
-  return { what: first.waiting_for ? `Waiting for ${first.waiting_for}` : "Following", quiet: quiet >= 1 ? `No updates for ${howLong(quiet)}` : "", first, more: waits.length - 1 };
+  return { what: first.waiting_for ? `Waiting for ${first.waiting_for}` : "Following", quiet: quiet >= 1 ? `No updates for ${howLong(quiet)}` : "", first, more };
 }
 // Its reason in a line: "Waiting for approval · No updates for 26h".
 export function monitorWhy(task, now = Date.now()) {

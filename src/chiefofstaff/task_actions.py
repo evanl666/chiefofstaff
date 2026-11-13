@@ -23,7 +23,7 @@ from .backend import stop_background
 from .envelope import wrap
 from .policy import within
 from .roles import WORKER
-from .sources.github import MISSING_TRIES, NOT_FOUND, marked
+from .sources.github import MISSING_TRIES, NOT_FOUND
 from .sources.slack import describe
 from .store import hours_ago, now
 from .tasks import ADOPTED, ENDED, OPEN
@@ -91,6 +91,10 @@ PR_REFRESH = 180
 PR_HOURS = 72
 # Those closed (not merged) this many times less often: one may be reopened.
 CLOSED_PR_PACE = 5
+# The rules a task's PRs' roles were read by (classify_prs): raised when they change, so that
+# receipts read before are read again once (merged and closed PRs too), this many tasks a round.
+ROLE_RULES = 2
+ROLE_REREADS = 3
 
 
 # A report line that says its worker opened the PR it names (not that someone else did).
@@ -247,6 +251,17 @@ RUN_GOING = re.compile(
     r"executing|deploying|building)\b",
     re.IGNORECASE,
 )
+# A run reported going that nothing told of since for this long, on a task its worker is not at
+# and has no check-back on: where it stands is not known (bug E41: it showed "Waiting for the
+# run" for days); the owner can mark it ended or stop tracking it.
+RUN_UNKNOWN_HOURS = 24
+# A GitHub Actions run of a task's is read on GitHub this often (seconds) while it goes on, a few
+# a round: its status is then Chief of Staff's own reading, not only its worker's word.
+GITHUB_RUN = re.compile(r"^https://github\.com/([\w.-]+/[\w.-]+)/actions/runs/(\d+)/?$")
+RUN_CHECK_SECONDS = 300
+RUN_CHECKS = 10
+# What a run's status on GitHub says, in a worker's words (RUN_GOING's while it goes on).
+GITHUB_RUN_WORDS = {"requested": "queued"}
 # Kinds of files that are what a task worked with or on the way, never what it delivers:
 # screenshots, mockup images, data dumps, logs.
 NOT_DELIVERED = re.compile(
@@ -321,6 +336,49 @@ def clip(text: str, limit: int) -> str:
 
 
 SPLIT_UNDO_MINUTES = 10
+
+
+# A title's last part when it only says how to write the work (its language, tone, length), not
+# what it delivers: "Review app#7 (in English, human-sounding comments)". That belongs in the
+# instructions. Bracketed at its end, or after its last separator.
+TITLE_NOTE = re.compile(
+    r"\s*(?:[(\uff08](?P<bracketed>[^()\uff08\uff09]+)[)\uff09]"
+    r"|(?:\s[-\u2013\u2014\u00b7]\s|[,;:]\s|[\uff0c\uff1b\uff1a])(?P<after>[^,;:\uff0c\uff1b\uff1a]+))"
+    r"\s*$"
+)
+WRITING_STYLE = re.compile(
+    r"\b(?:(?:in|into)\s+(?:plain\s+|simple\s+|natural\s+|good\s+)?)?"
+    r"(?:english|chinese|mandarin|japanese|korean|french|german|spanish)\b"
+    r"|\bhuman[- ]?(?:sounding|like|written|readable|tone)\b|\bnot\s+robotic\b|\bnatural(?:ly)?\b"
+    r"|\b(?:casual|formal|polite|friendly|concise|brief|terse|warm|professional)(?:ly)?\b"
+    r"|\b(?:plain\s+language|no\s+jargon|short\s+and\s+sweet)\b"
+    r"|用?(?:英文|中文|英语|汉语|日文|日语|韩文|韩语)|像人(?:写|说)?|口语化?|简洁|简短|自然|礼貌|正式|语气"
+    r"|人性化|不要?(?:太)?(?:机器|生硬)"
+)
+# What else such a note says that is no deliverable: what is written, and joining words.
+STYLE_FILLER = re.compile(
+    r"\b(?:comments?|replies|reply|review|text|words|messages?|written|writing|write|sounding|"
+    r"style|keep|it|be|make|use|with|and|or|the|a|an|in|please|very|more|less|bit)\b"
+    r"|评论|回复|消息|写|说|的|地|得|用|要|请|和|并且?|一点|一些|风格|方式",
+    re.IGNORECASE,
+)
+# A title of work that writes in a language: the language is what it delivers.
+TRANSLATES = re.compile(r"translat|locali[sz]|翻译|译成|本地化", re.IGNORECASE)
+
+
+def style_note(title: str) -> str:
+    """The end of a title that only says how to write the work ("(in English, human-sounding
+    comments)", "— 简洁一点"), or "": what to write goes in a title, how in the instructions.
+    Not a note that names anything else ("(comments only)", "(security)"), nor one of work
+    that translates."""
+    found = TITLE_NOTE.search(title)
+    if not found or TRANSLATES.search(title):
+        return ""
+    note = found.group("bracketed") or found.group("after") or ""
+    if not WRITING_STYLE.search(note.lower()):
+        return ""
+    rest = STYLE_FILLER.sub(" ", WRITING_STYLE.sub(" ", note.lower()))
+    return "" if re.search(r"\w", rest) else found.group(0).strip()
 
 
 def deliverable_title(title: str) -> str:
@@ -708,6 +766,7 @@ class TaskActions:
         self.basing: dict[str, asyncio.Future] = {}
         # An accepted task stays listed while something is followed up for it.
         self.tasks.monitored = lambda task: bool(self.monitoring(task))
+        self.tasks.runs_going = self.runs_going
         # The one task each follow tied to no task is for (legacy_follower), as worked out in
         # this pass: kept until the event loop runs anything else.
         self.legacy: dict[tuple[str, str], str] = {}
@@ -945,7 +1004,13 @@ class TaskActions:
             )
         )
         if run:
-            evidence = {"checkouts": checkouts, "prs": prs, "at": now(), "prs_at": time.time()}
+            evidence = {
+                "checkouts": checkouts,
+                "prs": prs,
+                "at": now(),
+                "prs_at": time.time(),
+                "role_rules": ROLE_RULES,
+            }
             before = json.loads(run["evidence"]) if keep_stale and run["evidence"] else {}
             if reason := before.get("stale") or moved(before.get("checkouts", []), checkouts):
                 # The checks were about the code as it was then, not as it is now.
@@ -1570,15 +1635,34 @@ class TaskActions:
         evidence = json.loads(found["evidence"]) if found else {}
         return evidence.get("prs") or []
 
-    def set_check_back(self, task: dict, at: str, what: str, url: str):
-        """The worker is woken at `at` (ISO) to check `what`; one per task, the latest."""
+    def set_check_back(self, task: dict, at: str, what: str, url: str, run: bool = False):
+        """The worker is woken at `at` (ISO) to check `what`; one per task, the latest. `run`:
+        on a run of finished work that still goes on (kept while it does, see
+        TaskBook.checks_on_run)."""
         value = {"at": at, "what": what, "url": url, "session_id": task["session_id"]}
+        if run:
+            value["run"] = True
         self.store.set(f"checkback:{task['id']}", json.dumps(value))
         self.publish(self.tasks.get(task["id"]))
 
     def check_back(self, task: dict) -> dict | None:
+        """Its check-back: on a task its worker is still on, or on a run of finished work that
+        still goes on (see Toolset.t_check_back); not one on finished work set aside, or whose
+        runs are over (ended on GitHub, said so by its worker or the owner)."""
         found = self.store.get(f"checkback:{task['id']}")
-        return json.loads(found) if found and task["status"] in {"running", "waiting"} else None
+        if not found or task["status"] not in {"running", "waiting", "review", "done"}:
+            return None
+        if task["status"] in {"review", "done"} and (
+            self.store.get(f"setaside:{task['id']}") or not self.runs_going(task["id"])
+        ):
+            return None
+        return json.loads(found)
+
+    def runs_over(self, task_id: str):
+        """Finished work whose runs are over: nothing for a check-back on them to check."""
+        task = self.tasks.find(task_id)
+        if task and task["status"] in {"review", "done"} and not self.runs_going(task_id):
+            self.store.delete(f"checkback:{task_id}")
 
     async def wake_check_backs(self, moment: datetime | None = None):
         """Workers whose check-back time came are woken with what they wanted to check. The
@@ -1591,7 +1675,17 @@ class TaskActions:
             if datetime.fromisoformat(found["at"]) > moment or task_id in self.waking:
                 continue
             task = self.tasks.find(task_id)
-            if not task or task["status"] not in {"running", "waiting"}:
+            finished = bool(task) and task["status"] in {"review", "done"}
+            if (
+                not task
+                or task["status"] not in {"running", "waiting", "review", "done"}
+                or (
+                    finished
+                    and (self.store.get(f"setaside:{task_id}") or not self.runs_going(task_id))
+                )
+            ):
+                # Over, or finished work whose runs ended since (or the owner stopped tracking
+                # them): nothing to check now.
                 self.store.delete(f"checkback:{task_id}")
                 continue
             if self.store.get(f"stopped:{task_id}"):
@@ -1610,6 +1704,15 @@ class TaskActions:
                     "Check it now. Done: report. Not yet: check_back again, or report what "
                     "blocks it."
                 )
+                if finished:
+                    # Named in each call: its worker may be on another task now.
+                    text = (
+                        f"Time to check {found['what']}{link} for task {task_id} "
+                        f"“{task['title']}”, which you reported done. Check it now and report "
+                        f"where it stands with report(status=\"progress\", task_id='{task_id}') "
+                        "and the run in artifacts: its result stays. Not ended yet: check_back "
+                        f"again with task_id='{task_id}'."
+                    )
                 await self.delivery.deliver(
                     row["id"],
                     wrap("system", "check-back", text, task=task_id),
@@ -2035,7 +2138,7 @@ class TaskActions:
         await self.offer_merge(task, prs, since=read)
         shown = [{k: v for k, v in pr.items() if k != "at"} for pr in evidence["prs"]]
         changed = shown != [{k: v for k, v in pr.items() if k != "at"} for pr in prs]
-        evidence |= {"prs": prs, "prs_at": time.time()}
+        evidence |= {"prs": prs, "prs_at": time.time(), "role_rules": ROLE_RULES}
         # Saved first: whether its other PRs are still open is read from what is true now.
         self.store.execute(
             "UPDATE runs SET evidence=? WHERE id=?", (json.dumps(evidence), run["id"])
@@ -2075,6 +2178,49 @@ class TaskActions:
                 await self.refresh_prs(task["id"])
             except Exception:
                 logger.info("Could not refresh the PRs of %s.", task["id"], exc_info=True)
+
+    async def reread_roles(self, most: int = ROLE_REREADS):
+        """What each PR is to its task (created, modified, reviewed, referenced) as receipts read
+        by older rules have it (bug E45: kept for ever once its PR was merged or closed, or its
+        task was a few days old): read again once by today's rules, the newest tasks first, a
+        few a round. Only what they are and how they stand change: nothing is offered or
+        settled for it (a Merge card, a merged PR's news)."""
+        if self.store.get("role_rules") == str(ROLE_RULES):
+            return
+        # Each task's latest receipts (what its card shows), not read by these rules.
+        stale = [
+            run
+            for run in self.store.all(
+                """SELECT r.id, r.task_id, r.evidence FROM runs r WHERE r.evidence!=''
+                AND r.started_at=(SELECT max(started_at) FROM runs
+                    WHERE task_id=r.task_id AND evidence!='')
+                AND r.evidence NOT LIKE ? ORDER BY r.started_at DESC""",
+                (f'%"role_rules": {ROLE_RULES}%',),
+            )
+            if json.loads(run["evidence"]).get("prs")
+        ]
+        if not stale:
+            self.store.set("role_rules", str(ROLE_RULES))
+            return
+        for run in stale[:most]:
+            task = self.tasks.find(run["task_id"])
+            try:
+                prs = await self.read_prs(task) if task else []
+            except Exception:
+                logger.info("Could not read the PRs of %s again.", run["task_id"], exc_info=True)
+                prs = []
+            # Read once, whatever came of it: the next round goes on to others.
+            there = self.store.value("SELECT evidence FROM runs WHERE id=?", (run["id"],))
+            evidence = json.loads(there) if there else {}
+            changed = bool(prs) and prs != evidence.get("prs")
+            if prs:
+                evidence |= {"prs": prs, "prs_at": time.time()}
+            evidence["role_rules"] = ROLE_RULES
+            self.store.execute(
+                "UPDATE runs SET evidence=? WHERE id=?", (json.dumps(evidence), run["id"])
+            )
+            if changed and task:
+                self.publish(self.tasks.get(task["id"]))
 
     def record_opened(self, task_id: str, urls: list[str]):
         """PRs this task's worker opened (Create PR, or `gh pr create` in its shell): its own
@@ -2264,7 +2410,7 @@ class TaskActions:
                 )
         if checks:
             lines += ["**Checked**", "", *checks, ""]
-        return title[:250], marked("\n".join(lines).strip())
+        return title[:250], "\n".join(lines).strip()
 
     async def commit_subjects(self, plans: list[tuple[dict, str, str, str]]) -> list[str]:
         """The subjects of the commits the PRs bring, oldest first (no merges)."""
@@ -3813,8 +3959,9 @@ class TaskActions:
         it reviewed once its review is accepted (still followed, news there is an update),
         nor a PR merged, closed or only mentioned. Each with what it waits for, when it was
         last read and is read next (as the GitHub source keeps them), what brings it back,
-        and when it last changed. Nothing ends it for being quiet: Home says how long it is
-        ("No updates for 26h")."""
+        and when it last changed. A PR or a thread is followed however quiet it is (Home says
+        how long: "No updates for 26h"); a run nothing tells of for a day is said to be unknown
+        (see runs_monitored)."""
         if task["status"] in {"cancelled", "failed"} or self.store.get(f"setaside:{task['id']}"):
             return []
         row = self.store.find_session(task["session_id"])
@@ -3901,31 +4048,164 @@ class TaskActions:
                 }
             )
         if not row["closed_at"]:
-            for item in json.loads(self.store.get(f"artifacts:{task['id']}") or "[]"):
-                kind, called = deliverable_kind(item["url"], declared=True)
-                if kind != "flow" or not RUN_GOING.search(item.get("status") or ""):
-                    continue
-                found.append(
-                    {
-                        "key": item["url"],
-                        "kind": "flow",
-                        "label": item.get("name") or called,
-                        "url": item["url"],
-                        "waiting_for": "the run",
-                        "last_check": item.get("at") or None,
-                        "next_check": check.get("at") if check else None,
-                        "trigger": "Its worker's check-back on it"
-                        if check
-                        else "Its worker's next report on it",
-                        "changed_at": item.get("at") or None,
-                    }
-                )
+            found += self.runs_monitored(task, row, check)
         return found
+
+    def runs_going(self, task_id: str) -> list[dict]:
+        """The runs a task's worker declared that are still going by the last word on them
+        (its, or GitHub's as Chief of Staff read it), and that the owner did not stop tracking."""
+        return [
+            item
+            for item in json.loads(self.store.get(f"artifacts:{task_id}") or "[]")
+            if deliverable_kind(item["url"], declared=True)[0] == "flow"
+            and RUN_GOING.search(item.get("status") or "")
+            and not item.get("untracked")
+        ]
+
+    def runs_monitored(self, task: dict, row: dict, check: dict | None) -> list[dict]:
+        """Its runs still going, each as monitoring has it, with what will tell of it next:
+        Chief of Staff reading it on GitHub (a GitHub Actions run), its worker's check-back,
+        or its worker at work on the task. With none of those and nothing said of it for a
+        day, where it stands is not known (`unknown`): not waited for, it stays until the
+        owner marks it ended or stops tracking it. `last_check` only when Chief of Staff read
+        it itself; `reported_at` when its worker said where it stands."""
+        found = []
+        going = self.runs_going(task["id"])
+        working = (
+            bool(going)
+            and row["status"] in {"working", "starting"}
+            and task["id"]
+            in {self.runtime.working_on(row["id"]), self.runtime.turn_task(row["id"])}
+        )
+        for item in going:
+            readable = bool(GITHUB_RUN.match(item["url"]))
+            checked = item.get("checked_at") or None
+            said = max(item.get("at") or "", checked or "") or now()
+            quiet = (datetime.now(UTC) - datetime.fromisoformat(said)).total_seconds() / 3600
+            unknown = quiet >= RUN_UNKNOWN_HOURS and not working and not check
+            if unknown:
+                trigger = "Nothing tells where it stands now: mark it ended or stop tracking it (⋯)"
+            elif readable:
+                trigger = "Chief of Staff reads it on GitHub every few minutes"
+            elif check:
+                trigger = "Its worker's check-back on it"
+            elif working:
+                trigger = "Its worker's next report on it"
+            else:
+                trigger = "As its worker reported it: nothing checks it"
+            following = check.get("at") if check else None
+            if readable and checked:
+                following = (
+                    datetime.fromisoformat(checked) + timedelta(seconds=RUN_CHECK_SECONDS)
+                ).isoformat()
+            found.append(
+                {
+                    "key": item["url"],
+                    "kind": "flow",
+                    "label": item.get("name") or deliverable_kind(item["url"], declared=True)[1],
+                    "url": item["url"],
+                    "waiting_for": "" if unknown else "the run",
+                    "status": item.get("status") or "",
+                    "unknown": unknown,
+                    "reported_at": item.get("at") or None,
+                    "last_check": checked,
+                    "next_check": None if unknown else following,
+                    "trigger": trigger,
+                    "changed_at": item.get("changed_at") or item.get("at") or None,
+                }
+            )
+        return found
+
+    def end_runs(self, task_id: str, urls: list[str], how: str) -> dict:
+        """The owner's word on runs of a task its worker said go on: "ended" (they are over:
+        said so where they are listed) or "untracked" (no longer followed, as they were last
+        said to stand). The task leaves Monitoring once none is followed."""
+        if how not in {"ended", "untracked"}:
+            raise ValueError("Mark it ended, or stop tracking it.")
+        self.tasks.get(task_id)  # One that exists.
+        wanted = {threads.link_key(url) for url in urls}
+        known = json.loads(self.store.get(f"artifacts:{task_id}") or "[]")
+        going = {threads.link_key(item["url"]) for item in self.runs_going(task_id)}
+        if not wanted & going:
+            raise ValueError("It is not followed as going now.")
+        for item in known:
+            key = threads.link_key(item["url"])
+            if key not in wanted or key not in going:
+                continue
+            if how == "ended":
+                item |= {"status": "ended", "by": "you", "changed_at": now()}
+            else:
+                item["untracked"] = True
+        self.store.set(f"artifacts:{task_id}", json.dumps(known))
+        self.runs_over(task_id)
+        self.publish(self.tasks.get(task_id))
+        return self.view(self.tasks.get(task_id))
+
+    async def check_runs(self, most: int = RUN_CHECKS):
+        """The GitHub Actions runs tasks' workers said go on, read on GitHub every few minutes
+        (a few a round) while they do and their task is followed up: their status is what
+        GitHub says (ended: the task no longer waits on them). One that cannot be read is
+        tried again a few minutes later; a day without a reading or a word of its worker makes
+        it unknown (see runs_monitored)."""
+        moment = datetime.now(UTC)
+        due: list[tuple[str, str]] = []
+        for key, raw in self.store.items("artifacts:").items():
+            if "/actions/runs/" not in raw:
+                continue  # No GitHub Actions run among them.
+            task_id = key.removeprefix("artifacts:")
+            task = self.tasks.find(task_id)
+            if not task or task["status"] in {"cancelled", "failed"}:
+                continue
+            if self.store.get(f"setaside:{task_id}"):
+                continue
+            row = self.store.find_session(task["session_id"])
+            if not row or row["closed_at"]:
+                continue
+            for item in self.runs_going(task_id):
+                last = max(item.get("checked_at") or "", item.get("tried_at") or "")
+                if GITHUB_RUN.match(item["url"]) and (
+                    not last
+                    or (moment - datetime.fromisoformat(last)).total_seconds() >= RUN_CHECK_SECONDS
+                ):
+                    due.append((task_id, item["url"]))
+        for task_id, url in due[:most]:
+            repo, number = GITHUB_RUN.findall(url)[0]
+            try:
+                run = json.loads(
+                    await self.runtime.github.gh("api", f"repos/{repo}/actions/runs/{number}")
+                )
+                state = str(run.get("status") or "")
+                said = str(run.get("conclusion") or "") if state == "completed" else state
+                status = GITHUB_RUN_WORDS.get(said, said.replace("_", " ")) or "completed"
+            except Exception:
+                logger.info("Could not read %s on GitHub.", url, exc_info=True)
+                status = ""
+            known = json.loads(self.store.get(f"artifacts:{task_id}") or "[]")
+            changed = False
+            for item in known:
+                if item["url"] != url:
+                    continue
+                if not status:
+                    item["tried_at"] = now()
+                    continue
+                item["checked_at"] = now()
+                item.pop("tried_at", None)
+                if status != item.get("status"):
+                    item |= {"status": clip(status, 40), "changed_at": now()}
+                    changed = True
+            self.store.set(f"artifacts:{task_id}", json.dumps(known))
+            if changed:
+                self.runs_over(task_id)
+            if changed or status:
+                self.publish(self.tasks.get(task_id))
 
     def monitoring_words(self, task: dict) -> str:
         """What it is monitored for, in a few words for the Router ("" for nothing)."""
         return "; ".join(
-            f"{item['label']} (waiting for {item['waiting_for']})" for item in self.monitoring(task)
+            f"{item['label']} (status unknown)"
+            if item.get("unknown")
+            else f"{item['label']} (waiting for {item['waiting_for']})"
+            for item in self.monitoring(task)
         )[:300]
 
     def deliverables(self, task: dict, prs: list[dict], given: list[str]) -> list[dict]:
@@ -3986,6 +4266,13 @@ class TaskActions:
                     "title": item.get("name") or names.get(key) or called,
                     "role": "",
                     "status": item.get("status") or "",
+                    # Who said where it stands, when not its worker: the owner (Mark ended),
+                    # or GitHub as Chief of Staff read it.
+                    **(
+                        {"said_by": "you" if item.get("by") == "you" else "GitHub"}
+                        if item.get("by") == "you" or item.get("checked_at")
+                        else {}
+                    ),
                 }
             )
         given_keys = {threads.link_key(url) for url in given}
@@ -4057,6 +4344,7 @@ class TaskActions:
                 if other["url"] != url and not (entry["name"] and other["name"] == entry["name"])
             ] + [entry]
         self.store.set(f"artifacts:{task_id}", json.dumps(known[-20:]))
+        self.runs_over(task_id)
         self.publish(self.tasks.get(task_id))
 
     def local_file(self, row: dict | None, given: str) -> str:

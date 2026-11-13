@@ -56,6 +56,10 @@ RECOVER_DAYS = 7
 # A watch's window that this many scans in a row covered only in part is given up on: a coverage
 # gap, told; the next scans read on from its end.
 GAP_TRIES = 4
+# A gap told to the owner that goes on growing is told again once it is this many times as long
+# as when it was told, or once it passes one of these lengths (seconds: an hour, a day).
+GAP_GROWN = 2
+GAP_MARKS = (3600, 86400)
 # Coverage gaps kept for Settings, the newest.
 MAX_GAPS = 10
 # A fresh conversation once its context is this large: each scan carries what it needs.
@@ -428,12 +432,13 @@ def clock_of(moment: float) -> str:
     return f"{at.strftime('%b')} {at.day}, {hour}"
 
 
-def gap_text(gap: dict) -> str:
-    """A watch's coverage gap, for the owner: what could not be checked, when, and why."""
+def gap_text(gap: dict, still: bool = False) -> str:
+    """A watch's coverage gap, for the owner: what could not be checked, when, and why
+    (`still`: told before, it grew since)."""
     reason = str(gap.get("reason") or "").strip().rstrip(".")
     return (
-        f"Could not check \u201c{gap['watch']}\u201d between {clock_of(gap['from'])} and "
-        f"{clock_of(gap['to'])}" + (f" ({reason})" if reason else "")
+        f"{'Still could' if still else 'Could'} not check \u201c{gap['watch']}\u201d between "
+        f"{clock_of(gap['from'])} and {clock_of(gap['to'])}" + (f" ({reason})" if reason else "")
     )
 
 
@@ -711,21 +716,61 @@ def label_only(line: str) -> bool:
     return bool(bold) and size <= LABEL_WORDS and not line.endswith(tuple(".!?\u3002\uff01\uff1f"))
 
 
+# A quote or bracket that opens (ASCII, curly, CJK), and what closes it. Straight quotes close
+# themselves.
+PAIRS = {
+    "\u201c": "\u201d", "\u2018": "\u2019", "\u300c": "\u300d", "\u300e": "\u300f",
+    "(": ")", "\uff08": "\uff09", "[": "]", "\u3010": "\u3011",
+}  # fmt: skip
+CLOSERS = set(PAIRS.values())
+
+
+def unclosed(text: str) -> str:
+    """What would close the quotes and brackets `text` leaves open, innermost first ("" when
+    none is): a sentence that ends inside a quote is not where the quote ends. A straight
+    quote opens at a word's start and closes at its end; one inside a word ("don't", 5") or a
+    closing mark with nothing open (a list's "1)") is no quote."""
+    stack: list[str] = []
+    for index, char in enumerate(text):
+        before = text[index - 1] if index else " "
+        after = text[index + 1] if index + 1 < len(text) else " "
+        if char in PAIRS:
+            stack.append(PAIRS[char])
+        elif char in "\"'\u2019" and before.isalnum() and after.isalnum():
+            continue  # An apostrophe: "don't", "it\u2019s".
+        elif char in stack and (char in CLOSERS or not after.isalnum()):
+            del stack[len(stack) - 1 - stack[::-1].index(char) :]
+        elif char in "\"'" and not before.isalnum() and after.strip():
+            stack.append(char)
+    return "".join(reversed(stack))
+
+
 def shortened(said: str, ends: list[int], limit: int) -> str:
     """`said` in at most `limit` characters: up to the last sentence end (`ends`) that fits,
-    not on a colon; a first sentence longer than that is cut at a word, with an ellipsis."""
+    not on a colon nor inside a quote or brackets; a first sentence longer than that is cut at
+    a word, with an ellipsis (and the quotes and brackets it leaves open closed)."""
     if len(said) <= limit:
         return said
     fits = [
-        end for end in ends if end <= limit and not said[:end].rstrip().endswith((":", "\uff1a"))
+        end
+        for end in ends
+        if end <= limit
+        and not said[:end].rstrip().endswith((":", "\uff1a"))
+        and not unclosed(said[:end])
     ]
     # Not a few words when most of what fits is the next sentence: that one, cut.
     if fits and max(fits) >= limit // 2:
         return said[: max(fits)].rstrip(" ;")
-    cut = said[: limit - 1]
-    if " " in cut.strip():
-        cut = cut.rsplit(" ", 1)[0]
-    return cut.rstrip(" ;,:\uff1a\uff0c") + "\u2026"
+    room = limit - 1
+    while True:
+        cut = said[:room]
+        if " " in cut.strip():
+            cut = cut.rsplit(" ", 1)[0]
+        cut = cut.rstrip(" ;,:\uff1a\uff0c")
+        closing = unclosed(cut)
+        if len(cut) + 1 + len(closing) <= limit or room <= 1:
+            return cut + "\u2026" + closing
+        room -= len(cut) + 1 + len(closing) - limit
 
 
 def gist(text: str, limit: int = GIST_CHARS, ask: bool = False) -> str:
@@ -913,8 +958,10 @@ class Connector:
                 if not started:
                     # A watch never covered on its own (new, or its words edited): from a day
                     # before its first scan, or the last scan of all watches if later; not from
-                    # one long ago that other, partly covered watches hold back.
-                    since = max(
+                    # one long ago that other, partly covered watches hold back. One an earlier
+                    # version scanned goes on from where that version would have (what is
+                    # older than scans reach back is a gap, see reach_back).
+                    since = self.kept_before(key) or max(
                         float(self.store.get("watch_done_at") or 0),
                         time.time() - LOOKBACK_HOURS * 3600,
                     )
@@ -1003,6 +1050,17 @@ class Connector:
             or 0
         )
 
+    def kept_before(self, key: str) -> float:
+        """Where a version before 0.1.36 left a watch it scanned and never covered in full
+        (one in its last scan, or covered in part, with no place of its own; this version
+        gives each watch its place as a scan starts): its last scan that covered every watch
+        (watch_done_at), what that version read such a watch on from. 0 for one it never
+        scanned, or when it kept no such scan."""
+        known = key in json.loads(self.store.get("watch_scan") or "[]") or bool(
+            self.store.get(f"watchpartial:{key}")
+        )
+        return float(self.store.get("watch_done_at") or 0) if known else 0.0
+
     def watch_since(self, what: str) -> float:
         """Where a watch's next scan starts: a little before its watermark, however long ago
         that is (a window that scans kept covering only in part is searched again, not left
@@ -1024,23 +1082,36 @@ class Connector:
     def gap(self, what: str, start: float, end: float, reason: str):
         """A stretch of time a watch could not check, and no scan will: kept (Settings shows
         it) and told to the owner. One that goes on growing (a source that keeps covering only
-        part of it) is told once."""
+        part of it) is told again once it grew a lot since it was told (see GAP_GROWN), with
+        all of it, never for each scan that adds a little."""
         if end - start < 60:
             return
         key = watch_key(what)
         gaps = json.loads(self.store.get("watch_gaps") or "[]")
         last = next((gap for gap in reversed(gaps) if gap["key"] == key), None)
         if last and last["from"] <= start <= last["to"] + OVERLAP_SECONDS:
+            # Kept by an older version, which told it once: as long as it is now.
+            told = last.setdefault("told", last["to"] - last["from"])
             last.update({"to": max(last["to"], end), "reason": reason, "at": now()})
+            span = last["to"] - last["from"]
+            grown = span >= told * GAP_GROWN or any(told < mark <= span for mark in GAP_MARKS)
+            if grown:
+                last["told"] = span
             self.store.set("watch_gaps", json.dumps(gaps))
+            if grown:
+                self.tell_gap(last, still=True)
             return
         found = {"key": key, "watch": what, "from": start, "to": end, "reason": reason}
+        found["told"] = end - start
         self.store.set("watch_gaps", json.dumps([*gaps, {**found, "at": now()}][-MAX_GAPS:]))
+        self.tell_gap(found)
+
+    def tell_gap(self, gap: dict, still: bool = False):
         self.runtime.add_message(
             self.runtime.router_id(),
             "notice",
-            f"{gap_text(found)}: anything that came in then may have been missed, so look there "
-            "yourself. Settings → Connections → Watches lists what could not be checked.",
+            f"{gap_text(gap, still)}: anything that came in then may have been missed, so look "
+            "there yourself. Settings → Connections → Watches lists what could not be checked.",
             {"settings": "connections"},
         )
 
