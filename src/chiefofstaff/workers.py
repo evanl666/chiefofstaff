@@ -598,9 +598,22 @@ class Workers:
             self.requeue(session_id)
             raise
         except Exception as exc:
-            if self.store.agent_unknown(session_id) and self.runtime.spend_card(session_id):
+            if self.store.agent_unknown(session_id) and (
+                card := self.runtime.spend_card(session_id)
+            ):
                 # Refused for what it spent unknown: it waits under Needs you, its Go on there
-                # (Runtime.ensure_spend_card), not failed.
+                # (Runtime.ensure_spend_card), not failed. Its card made before (no stop put it
+                # at rest now): at rest, what it was sent waiting for Go on.
+                current = self.store.session(session_id)
+                if current["status"] in {"queued", "starting"}:
+                    # Nothing of it runs: what it was given (a task sent to it, or queued for
+                    # it) waits with Go on, as after a stop (its card's words; no second notice).
+                    self.runtime.update_session(session_id, status="idle", activity="")
+                    for task in self.tasks.for_session(session_id):
+                        if task["status"] in {"queued", "running"}:
+                            self.store.set(f"stopped:{task['id']}", agents.SPEND_STOP)
+                            self.tasks.move(task["id"], "waiting", progress=card["progress"])
+                            self.runtime.task_actions.publish(self.tasks.get(task["id"]))
                 self.states[session_id].busy = False
                 self.runtime.background(self.pump())
                 return

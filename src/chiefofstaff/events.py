@@ -852,13 +852,21 @@ class Events:
             f"A Copilot plugin hook failed; the session goes on. {message}{hint}",
         )
 
+    async def denial(self, row: dict, request: Any) -> str | None:
+        """Why a session may not do this (policy.permission_denial). A shell command's check
+        reads the whole line and may ask git: it runs aside, never holding up the rest (every
+        session's events, the page, Slack)."""
+        writable = self.workspaces.writes(row)
+        if getattr(request, "kind", "") == "shell":
+            return await asyncio.to_thread(permission_denial, row, request, writable)
+        return permission_denial(row, request, writable)
+
     async def on_permission(self, request: Any, invocation: dict):
         row = self.store.find_session(self.runtime.row_id(invocation.get("session_id", "")))
         if not row:
             return PermissionDecisionReject(feedback="Unknown session.")
         if (reason := owners_checkout(row, request, self.workspaces.checkouts(row))) or (
-            not self.runtime.yolo(row)
-            and (reason := permission_denial(row, request, self.workspaces.writes(row)))
+            not self.runtime.yolo(row) and (reason := await self.denial(row, request))
         ):
             self.runtime.add_message(row["id"], "notice", reason)
             return PermissionDecisionReject(feedback=reason)

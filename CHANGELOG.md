@@ -9,7 +9,11 @@
   `--mirror`), or as configuration on the command line (`-c remote.origin.push=…`,
   `GIT_CONFIG_*`) got past it, and so did a forced push after git's own options. A push that
   names no branch is refused when its checkout's branch (or where it pushes) is `main` or
-  `master`, unless it pushes only tags, is a dry run, or the same line made a new branch first.
+  `master`, unless it pushes only tags, is a dry run, or the same line made a new branch and
+  switched to it first (joined by `&&`). A push whose branch a variable, a glob or a brace
+  expansion names, one through an alias, and one naming no branch in another repository
+  (`GIT_DIR`, `--git-dir`) are refused too; one a command substitution names (`$(git branch --show-current)`) counts as the
+  checkout's branch. A command line too long or nested too deep to check is refused, saying so.
   Whatever the rule refused before, it still refuses. A branch whose name only contains "main"
   (`fix-main`, `mainline`) is pushed as before. This reads commands as text, so it is a best
   effort: protect your default branch on the server too.

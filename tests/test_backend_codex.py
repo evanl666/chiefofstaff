@@ -3871,6 +3871,68 @@ async def test_a_queued_worker_refused_for_unknown_spend_waits_with_its_go_on(
         await runtime.stop()
 
 
+@pytest.mark.parametrize("given", ["message", "task"])
+async def test_a_worker_with_its_go_on_card_queued_again_goes_on_with_go_on(
+    tmp_path, monkeypatch, given
+):
+    """Review: killed mid-turn with a limit (what it spent unknown: its Go on card), then sent
+    a message (or given a new task) while another worker had the only slot: queued, its start
+    refused for what it spent, it stayed "starting", not busy, which nothing starts again, and
+    Go on delivered nothing. Refused, it is at rest: a message waits for Go on, a new task
+    waits with its own Go on; Go on goes on."""
+    harness, runtime = await brief(tmp_path, monkeypatch, Settings(max_workers=1))
+    try:
+        agents.configure(harness.store, "codex", limit=1_000_000)
+        worker = await spawn(runtime, harness, "Wait 30 s. Then reply with just: on")
+        backend, _ = runtime.connection("codex")
+        await until(lambda: worker in backend.workers and runtime.states.handle(worker).turn, 30)
+        os.kill(backend.workers[worker].process.pid, signal.SIGKILL)
+        await until(lambda: runtime.spend_card(worker), 30)
+        await until(lambda: harness.store.session(worker)["status"] != "working", 30)
+        card = runtime.spend_card(worker)
+        other = await spawn(runtime, harness, "Wait 30 s. Then reply with just: other")
+        await until(lambda: other in backend.workers and runtime.states.handle(other).turn, 30)
+        if given == "message":
+            await runtime.owner_send(worker, "Also reply with just: noted")
+        else:
+            await call_tool(
+                runtime, "message_session", harness.router_id, session_id=worker,
+                text="Report done: second", task="new", title="Fix the second thing",
+                why_new="Another deliverable",
+            )  # fmt: skip
+        assert harness.store.session(worker)["status"] == "queued"
+        await runtime.workers.interrupt(other)  # The only slot is free.
+        await asyncio.sleep(1)
+        row = harness.store.session(worker)
+        assert row["status"] not in {"starting", "queued"} or runtime.states[worker].busy, (
+            f"{row['status']}, busy {runtime.states[worker].busy}: nothing starts it again"
+        )
+        assert not [text for kind, text in harness.kinds(worker) if kind == "error"]
+        if given == "message":
+            assert runtime.spend_card(worker)["id"] == card["id"]
+            await runtime.stop()
+            command = str(tmp_path / "fake" / "codex")
+            harness = Harness(tmp_path / "data", Settings(max_workers=1))
+            runtime = await harness.connect()
+            runtime.agents["codex"] = AgentConnection(
+                lambda: CodexAgent(command), enabled=lambda: agents.enabled(harness.store, "codex")
+            )
+            await runtime.recover_agents()
+            await asyncio.sleep(3)  # Restarted: it waits for Go on still, nothing started.
+            assert harness.store.session(worker)["status"] == "idle"
+            assert not [text for kind, text in harness.kinds(worker) if kind == "error"]
+            await runtime.task_actions.follow_up(card["id"], "Go on where you stopped.")
+            await until(lambda: ("assistant", "noted") in harness.kinds(worker), 30)
+        else:
+            new = runtime.tasks.for_session(worker)[-1]
+            assert new["id"] != card["id"] and new["status"] == "waiting"
+            assert runtime.task_actions.view(new)["go_on"] is True
+            await runtime.task_actions.follow_up(new["id"], "Go on where you stopped.")
+            await until(lambda: runtime.tasks.get(new["id"])["status"] == "review", 30)
+    finally:
+        await runtime.stop()
+
+
 @pytest.mark.parametrize("on_task", [False, True])
 async def test_a_switch_to_ask_first_as_a_turn_begins_stops_it_as_one_at_work(
     tmp_path, monkeypatch, on_task

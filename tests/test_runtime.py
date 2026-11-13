@@ -419,6 +419,41 @@ async def test_permission_handler_records_denials(tmp_path):
     assert allowed.kind == "approve-once"
 
 
+async def test_a_slow_permission_check_does_not_hold_up_the_rest(tmp_path, monkeypatch):
+    """Review of 00b1a30 (Q1): a shell command's check ran on the event loop, so a slow one (a
+    long line, git slow to answer) froze every session, the page and Slack. It runs aside."""
+    from chiefofstaff import events as events_module
+
+    harness = Harness(tmp_path / "data", Settings(worker_yolo=False))
+    runtime = await harness.connect()
+    result = await call_tool(
+        runtime, "spawn_worker", harness.router_id, title="A", instructions="a"
+    )
+    worker_id = json.loads(result.text_result_for_llm)["session_id"]
+
+    def slow(row, request, writable=None) -> str | None:
+        time.sleep(0.5)
+        return None
+
+    monkeypatch.setattr(events_module, "permission_denial", slow)
+    ticks = 0
+
+    async def tick():
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.01)
+            ticks += 1
+
+    ticking = asyncio.create_task(tick())
+    try:
+        decision = await runtime.events.on_permission(
+            request("shell", full_command_text="git push"), {"session_id": worker_id}
+        )
+    finally:
+        ticking.cancel()
+    assert decision.kind == "approve-once" and ticks > 20
+
+
 async def test_session_events_become_the_timeline(harness):
     runtime = await harness.connect()
     result = await call_tool(
