@@ -4,10 +4,12 @@
 
 [![PyPI](https://img.shields.io/pypi/v/chiefofstaff)](https://pypi.org/project/chiefofstaff/) [![Python](https://img.shields.io/pypi/pyversions/chiefofstaff)](https://pypi.org/project/chiefofstaff/) [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-A chief of staff for your engineering work, built on the GitHub Copilot you already have. It
-picks up what comes to you (a question in Slack, a PR to review, a comment on your doc), gets
-the work done, and drafts your reply in your voice. No reply or review goes out until you
-approve it: you make the calls, it does the rest.
+Your engineering chief of staff. It catches what comes to you (a question in Slack, a PR to
+review, a comment on your doc), gets it done with Copilot, and answers in your voice: with
+proof of what was done, and only once you say OK. The longer it works for you, the better it
+knows how you work.
+
+**It does the work. It drafts the words. You make the call.**
 
 <p align="center"><img src="docs/images/captain.svg" width="600" alt="The captain, Chief of Staff's duck, in its five moods: idle, working, needs you, watching, done"></p>
 
@@ -28,23 +30,17 @@ only with a decision to make or a draft to approve.
 
 ## What it does
 
-**Picks up the work that comes to you**
+**Catches what comes to you**
 - Watches what you ask it to (Slack mentions, doc comments, mail) with any tool your Copilot
   has, Glean or your company's search included, and turns what needs doing into tasks.
-- React 🤖 to any Slack message to hand it over, or just say what you need.
+- React 🤖 to any Slack message, press a hotkey from any app, or just say what you need.
 - Sends a follow-up to the session that did the work, with its history and checkout.
 
-**Speaks for you, once you approve**
-- Drafts Slack replies and PR reviews, approvals included, in your voice.
+**Answers in your voice, once you say OK**
+- Drafts Slack replies and PR reviews, approvals included, the way you write them.
 - Sends them only when you approve; you can edit a draft first.
 
-**Asks only when it needs you**
-- One card per thing: a decision with options and a recommendation, a question, a draft.
-- Reaches you when you are away from your desk (through your company's Slack bot, say) and
-  takes your answers from there.
-- Focus mode: notifications wait, and you get one summary at the end.
-
-**Results you can check**
+**Shows proof, not just claims**
 - Shows what was observed next to each report (test runs, commits, diff, PR checks), and flags
   claims nothing backs.
 - Lets you comment on the diff, send it back, and open the PR in one click.
@@ -53,6 +49,14 @@ only with a decision to make or a draft to approve.
 - Picks up how you write and what you keep asking for. Your style applies at once; habits wait
   for your OK.
 - Turns mistakes workers fixed into checks that catch them next time.
+
+**Guards your focus**
+- Asks only when it needs you: one card per thing, a decision with options and a
+  recommendation, a question, a draft.
+- Reaches you when you are away from your desk (through your company's Slack bot, say) and
+  takes your answers from there.
+- Focus mode holds notifications and gives you one summary at the end; a daily summary says what
+  finished, what waits for you and what was handled without you.
 
 **Keeps many things moving at once**
 - Splits a request into tasks and runs each in its own Copilot session, in parallel or in order.
@@ -67,7 +71,9 @@ only with a decision to make or a draft to approve.
 - If you also use Codex, workers can run on it instead, with your own Codex sign-in: turn it
   on in Settings ([how](docs/guide.md#workers-on-other-coding-agents)).
 - Every worker gets its own folder and git worktree, so your checkouts stay untouched. Workers
-  run like your own Copilot sessions; turn on permission checks or an OS sandbox in Settings.
+  run like your own Copilot sessions (those that read Slack keep permission checks by default); turn on
+  *Ask first* for all of them (no pushes to `main`, no force pushes, no writes outside their
+  folders) or an OS sandbox in Settings.
 
 ## Install
 

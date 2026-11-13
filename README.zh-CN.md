@@ -4,9 +4,11 @@
 
 [![PyPI](https://img.shields.io/pypi/v/chiefofstaff)](https://pypi.org/project/chiefofstaff/) [![Python](https://img.shields.io/pypi/pyversions/chiefofstaff)](https://pypi.org/project/chiefofstaff/) [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-替你处理工作的幕僚长，跑在你已有的 GitHub Copilot 上。别人找你的事（Slack 里的问题、要 review
-的 PR、文档上的评论），它接下来、做完，再按你的语气起草回复。回复和 review 都要你同意才会发出：
-你拿主意，其余的交给它。
+工程师的幕僚长。别人找你的事（Slack 里的问题、要 review 的 PR、文档上的评论），它接住，用
+Copilot 做完，再用你的口吻回话：做了什么都有证据，每句话都等你点头才发出。它替你干得越久，越懂你
+怎么做事。
+
+**活它干，话它拟，主意你拿。**
 
 <p align="center"><img src="docs/images/captain.svg" width="600" alt="船长：Chief of Staff 的小鸭子，五种状态：空闲、工作中、需要你、盯着、完成"></p>
 
@@ -28,25 +30,25 @@ Copilot session，跟踪所有进展，只在需要我做决定、或者有草�
 **接住找上你的事**
 - 按你说的帮你盯着（Slack 里 @ 你的、文档评论、邮件），用你的 Copilot 现有的任何工具，包括 Glean
   或公司自己的搜索，需要做的事变成任务。
-- 在 Slack 任意消息上点 🤖 就交给它，或者直接告诉它要做什么。
+- 在 Slack 任意消息上点 🤖、在任何 app 里按一下快捷键，或者直接告诉它要做什么。
 - 追问发给做过这件事的 session，它有之前的对话和代码。
 
-**你同意后才替你说话**
-- 按你的语气起草 Slack 回复和 PR review，包括 approve。
+**用你的口吻回话，你点头才发**
+- 按你的写法起草 Slack 回复和 PR review，包括 approve。
 - 你批准后才发出，发之前可以先改。
 
-**只在需要你时找你**
-- 每件事一张卡片：带选项和建议的决定、一个问题、一份草稿。
-- 你离开电脑时，通过你指定的方式（比如公司的 Slack bot）找到你，你在那边回复就行。
-- 专注模式：通知先压着，结束后给你一份总结。
-
-**结果可以核对**
+**拿证据说话**
 - 汇报旁边列出实际观察到的东西（跑了哪些测试、提交、diff、PR 检查），没有依据的说法会标出来。
 - 可以在 diff 上评论、发回去改，一键开 PR。
 
-**学习你的做事方式**
+**越用越懂你**
 - 学你的写法和你反复提的要求：写法立即生效，习惯经你确认后生效。
 - 把 worker 修过的错误变成检查，下次自动拦住。
+
+**护住你的专注**
+- 只在需要你时找你：每件事一张卡片，带选项和建议的决定、一个问题、一份草稿。
+- 你离开电脑时，通过你指定的方式（比如公司的 Slack bot）找到你，你在那边回复就行。
+- 专注模式先压着通知，结束后给你一份总结；每日汇总告诉你做完了什么、什么在等你、哪些没打扰你就处理了。
 
 **很多事同时推进**
 - 把一句话拆成几个任务，每个任务一个 Copilot session，可以并行，也可以按顺序。
@@ -57,7 +59,8 @@ Copilot session，跟踪所有进展，只在需要我做决定、或者有草�
 - 用你现有的 Copilot：订阅、模型、插件、skill、MCP server 和公司策略，也可以在 Settings 里再加。不需要别的 AI 服务或 API key。
 - 如果你也用 Codex，可以在 Settings 里让 worker 改用 Codex，用你自己的 Codex 登录（[怎么设置](docs/guide.md#workers-on-other-coding-agents)，英文）。
 - 每个 worker 有自己的文件夹和 git worktree，不会动你的代码目录。worker 和你自己的 Copilot
-  session 一样运行，可以在 Settings 里打开权限检查或系统沙箱。
+  session 一样运行（读 Slack 的 worker 默认带权限检查）；可以在 Settings 里给所有 worker 打开
+  *Ask first*（不推 `main`、不 force push、不写自己文件夹以外的地方）或系统沙箱。
 
 ## 安装
 
