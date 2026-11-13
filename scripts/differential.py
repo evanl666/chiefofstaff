@@ -4,7 +4,7 @@ differences the feature declares by name in FEATURES below.
 
     uv run --with playwright python scripts/differential.py [--feature NAME] [--mode off|on] [--out DIR]
 
---mode off (the default): the baseline (git tag v0.1.42, checked out with `git worktree add` and
+--mode off (the default): the baseline (git tag v0.1.43, checked out with `git worktree add` and
 run in its own `uv run` environment) against this working tree with every registered feature (or
 only --feature) at its off settings, allowing only those features' `allow_off`. The baseline runs
 with those of the settings it has: a feature it shipped with is off on both sides.
@@ -84,7 +84,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = Path(__file__).resolve()
-BASELINE = "v0.1.42"
+BASELINE = "v0.1.43"
 # DIFFERENTIAL_PORT_BASE moves the ten ports (another checkout's run on the same machine).
 PORT_BASE = int(os.environ.get("DIFFERENTIAL_PORT_BASE", "8810"))
 PORTS = range(PORT_BASE, PORT_BASE + 10)
@@ -188,45 +188,10 @@ EXAMPLE = Feature(
 )
 
 # Deliberate fixes of how the baseline looks, not any feature's: allowed in every run (the plain
-# one, and each feature's off and on), each with why.
-FIXES = [
-    # The heading of Other Copilot sessions wrapped into four short lines at 252 px ("Other Copilot /
-    # sessions", "· 12 · 9 / open"): now one line, its words never wrapping, how many are open
-    # (else how many there are) on the right as the rows' small words, in full in its tooltip
-    # and accessible name. Its markup and text changed with it, setting on or off.
-    Allow("heading-one-line", element="#external > summary"),
-    # 0.1.43: workers are told how to run a batch of `copilot -p` (named `batch: <task>`, in a
-    # Copilot home of their own), so its sessions stay out of the owner's.
-    Allow(
-        "workers-batch-cli",
-        data=r"\.system_message\.content$",
-        lines=r"copilot -p|--name \"batch: <your task>\"|to a new folder in your workspace|"
-        r"way first; if it cannot sign in there",
-    ),
-    # 0.1.43: learning reads only Copilot sessions the owner talked in (two messages or more):
-    # the scenario's two terminal sessions have one message each (one asks the owner, one
-    # finished), so their words are no longer read, and Settings → You counts two fewer.
-    Allow("learn-from-talked-sessions", data=r"\./api/state\.habits\.(observed\.instruction|new)$"),
-    Allow("learn-from-talked-sessions, read", data=r"\.db\.kv\.habits:copilot:<uuid-[34]>$"),
-    Allow("learn-from-talked-sessions, words", data=r"\.db\.observations\[[23]\]$"),
-    Allow("learn-from-talked-sessions, count", element="#learn-status", views=r"^settings-you"),
-    # 0.1.43: when Chief of Staff runs (its start and last alive, a run a row), so a worker's
-    # command never counts as running through the time it was stopped (provenance.window_end).
-    Allow("chief-of-staff-runs", data=r"\.db\.kv\.uptime$"),
-    # 0.1.43: what each PR is to its task is stamped with the rules it was read by, so one an
-    # older version read is read again once by today's (task_actions.reread_roles).
-    Allow("role-rules", data=r"\.db\.(runs\.<run-\d+>\.evidence|kv)\.role_rules$"),
-    # 0.1.43: the Router keeps how to write a task (its language, its tone) out of its title.
-    Allow(
-        "router-title-style",
-        data=r"\.system_message\.content$",
-        lines=r"not the phase \(\"waiting for the reviewer\" is a state, not a title\)\. "
-        r"(When a|How to)$|^\s*write it \(in English, human-sounding, concise\) goes in the "
-        r"instructions, never the title\.$|^\s*When a$",
-    ),
-    # Unreleased (QA round 13, E51): a worker's check-back names the runs it is for.
-    Allow("check-back-runs", data=r"\.options\.tools\[\d+\]\.parameters\.properties\.runs$"),
-]
+# one, and each feature's off and on), each with why. None against v0.1.43: those of 0.1.41 to
+# 0.1.43 (the one-line heading, workers' batch CLI line, learning from talked sessions, the runs
+# kept, role rules, the Router's title rule) are its own behaviour.
+FIXES: list[Allow] = []
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on
 # by default (the owner agreed), so it is compared switched off against the baseline. On, the

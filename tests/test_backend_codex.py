@@ -22,7 +22,7 @@ from copilot import Tool, define_tool
 from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
 from pydantic import BaseModel
 
-from chiefofstaff import agents, backend_codex, events
+from chiefofstaff import agents, backend_codex, events, provenance
 from chiefofstaff import runtime as runtime_module
 from chiefofstaff import workers as workers_module
 from chiefofstaff.backend import process_table, running
@@ -4023,3 +4023,45 @@ def test_a_save_that_switched_workers_to_ask_first_says_so():
         "Stopped 2 workers at work: Codex takes up Ask first only in a new process. To go on, "
         "asking first: Go on under Needs you, or send the message again."
     )
+
+
+async def test_a_codex_workers_commands_end_when_codex_or_chief_of_staff_said(
+    tmp_path, monkeypatch
+):
+    """0.1.43 keeps Chief of Staff's runs (kv uptime): a command whose end it never saw runs no
+    longer than the run it began in (provenance.window_end), a Codex worker's as a Copilot
+    worker's. Its Codex process starting afresh while Chief of Staff runs ends them then (seen);
+    ended only at a later start of Chief of Staff, they end with the run they began in."""
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    store = harness.store
+    try:
+        worker = await spawn(runtime, harness, "Report done: first")
+        await until(lambda: store.session(worker)["status"] == "done", 30)
+        before = time.time() - 7200
+        store.set("uptime", json.dumps([[before, before + 600]]))  # A run of before...
+        runtime.started_at = time.time() - 10  # ...and this one (as Runtime.start keeps it).
+        runtime.alive()
+
+        def ran(call: str, started: float):
+            store.execute(
+                "INSERT INTO commands(session_id, run_id, call_id, command, kind, started_at) "
+                "VALUES (?, '', ?, 'sleep 900', '', ?)",
+                (worker, call, provenance.iso(started)),
+            )
+
+        ran("then", before + 60)
+        ran("now", time.time() - 1)
+        runtime.end_commands("codex")
+        ended = time.time()
+        found = sorted(
+            (round(window.start - before), window.end)
+            for window in provenance.windows(
+                store, before, ended + 1, runtime.workspaces.own_folder, runtime.uptime()
+            )
+            if window.by == worker
+        )
+        (then, then_end), (_, now_end) = found
+        assert then == 60 and then_end == before + 600 + provenance.ALIVE_SLACK, "its run's end"
+        assert abs(now_end - ended) < 2, "seen ending as its process started afresh"
+    finally:
+        await runtime.stop()
