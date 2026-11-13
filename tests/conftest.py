@@ -519,3 +519,40 @@ def codex_wire_checked():
     checked = codex_schema.protocol()
     problems = [problem for wire in dict.fromkeys(wires) for problem in checked.problems(wire)]
     assert not problems, "Off Codex's protocol:\n" + "\n".join(problems[:20])
+
+
+# The repository's top folder: what a test run leaves there (and git does not ignore) fails it,
+# so no artefact of a test can be committed with the code (tests write under tmp_path).
+REPOSITORY = Path(__file__).resolve().parent.parent
+
+
+def left_at_the_top() -> set[str]:
+    """What is at the top of the repository and is neither tracked nor ignored by git."""
+    done = subprocess.run(
+        ["git", "-C", str(REPOSITORY), "ls-files", "--others", "--exclude-standard", "--directory"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if done.returncode:
+        return set()  # Not a git checkout (an unpacked release): nothing to check.
+    return {line.rstrip("/") for line in done.stdout.splitlines() if "/" not in line.rstrip("/")}
+
+
+def pytest_sessionstart(session):
+    session.config.stash[LEFT_BEFORE] = left_at_the_top()
+
+
+def pytest_sessionfinish(session, exitstatus):
+    if LEFT_BEFORE not in session.config.stash:
+        return
+    left = sorted(left_at_the_top() - session.config.stash[LEFT_BEFORE])
+    if left:
+        sys.stderr.write(
+            f"\nThe tests left {', '.join(left)} at the top of the repository: write under "
+            "tmp_path instead.\n"
+        )
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
+
+LEFT_BEFORE = pytest.StashKey[set]()
