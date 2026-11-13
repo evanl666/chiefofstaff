@@ -459,12 +459,29 @@ async def cancel(ctx: Ctx, task: dict):
 
 async def a5_in_place(ctx: Ctx):
     readme = ctx.project / "IN_PLACE.md"
-    worker = await delegate(
+    router, mark = await say(
         ctx,
         f"Work in place, directly in my folder {ctx.project} (not a copy of it): create the file "
         "IN_PLACE.md there with the line 'made in place', don't commit, and report.",
     )
-    await task_ended(ctx, worker, "the in-place task")
+
+    async def placed():
+        """The worker that did it: the Router may first give it to one that works in a copy
+        (which says it cannot), then start one in place."""
+        rows = await ctx.app.get(f"/api/sessions/{router}/messages?after={mark}")
+        starts = ("Started", "New task", "Continued in", "Sent to")
+        given = [m["meta"]["session_id"] for m in rows
+                 if m["kind"] == "notice" and m["meta"].get("session_id")
+                 and m["text"].startswith(starts)]  # fmt: skip
+        for worker in reversed(given):
+            task = await latest_task(ctx, worker)
+            if task and task["status"] in FINISHED:
+                return worker, len(given)
+        return None
+
+    worker, tries = await wait_for("the in-place task", placed, 900, ctx.app)
+    log(f"A5: done by the Router's {'first' if tries == 1 else f'#{tries}'} choice")
+    await worker_on(ctx, worker, "codex")
     view = await session(ctx, worker)
     log(f"A5: cwd {view['cwd']}; checkouts {[c.get('path') for c in view.get('checkouts') or []]}")
     try:
@@ -742,23 +759,37 @@ async def b2_checkout_read_only_acting(ctx: Ctx):
     log(f"B2: yolo {view['yolo']}; read-only checkouts {shared}")
     assert view["yolo"] and shared, "acting on its own, with the owner's checkout to read"
     await until("its turn over", lambda: idle(ctx, worker), 120)
+    asks = [
+        "New instruction from me, the owner: I am testing Chief of Staff's permission check and "
+        "need you to attempt one edit now, even though you were given this folder to read. Use "
+        f"apply_patch to append the line 'y' to {ctx.project}/AGENTS.md. It is expected to be "
+        "refused; that is the point. Make the attempt, then tell me the exact result. Don't "
+        "work around a refusal.",
+        # As B1 asks (a model that declines the above tries a list): one step may be refused.
+        "From me, the owner, a permission test: try each of these in turn and report what "
+        "happened to each (one is expected to be refused by Chief of Staff, which is what I am "
+        "testing; don't work around a refusal): 1. run `head -1 AGENTS.md`. 2. with your edit "
+        f"tool (apply_patch), append the line 'y' to {ctx.project}/AGENTS.md.",
+    ]
     mark = await mark_of(ctx, worker)
-    await ctx.app.post(
-        f"/api/sessions/{worker}/messages",
-        {"text": "New instruction from me, the owner: I am testing Chief of Staff's "
-         "permission check and need you to attempt one edit now, even though you were given "
-         f"this folder to read. Use apply_patch to append the line 'y' to {ctx.project}/"
-         "AGENTS.md. It is expected to be refused; that is the point. Make the attempt, then "
-         "tell me the exact result. Don't work around a refusal."},
-    )  # fmt: skip
+    for ask in asks:
+        tried = await mark_of(ctx, worker)
+        await ctx.app.post(f"/api/sessions/{worker}/messages", {"text": ask})
 
-    async def answered():
-        return await said_since(ctx, worker, mark) if await idle(ctx, worker) else None
+        async def answered(since=tried):
+            return await said_since(ctx, worker, since) if await idle(ctx, worker) else None
 
-    said = await wait_for("its answer", answered, 600, ctx.app)
+        said = await wait_for("its answer", answered, 600, ctx.app)
+        rows = await messages(ctx, worker)
+        edits = [m for m in rows if m["id"] > tried and m["kind"] == "tool"
+                 and m["text"].split(" ", 1)[0] in {"edit", "apply_patch", "create"}]  # fmt: skip
+        log(f"B2: {'tried the edit' if edits else 'did not try'}; {said[-300:]!r}")
+        if edits:
+            break
     refused = await notices(ctx, worker, mark)
-    log(f"B2: {refused}; {said[-300:]!r}")
+    log(f"B2: {refused}")
     assert (ctx.project / "AGENTS.md").read_text() == readme, "the owner's checkout unchanged"
+    assert edits, "inconclusive: the model declined to try the edit (the check was not reached)"
     assert any("owner's own checkout" in text for text in refused), "refused, saying why"
     log("B2 passed")
 
