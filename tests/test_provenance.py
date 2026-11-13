@@ -159,6 +159,10 @@ def test_the_clis_memories_are_no_message_of_the_owners():
     assert shape(log(*interactive(T0, "Fix it", "And test it"))) == TALKED
     one = prompt_mode(T0, LABEL)
     assert shape(log(*one[:3], memories(T0), *one[3:])).one_shot, "a script with memories"
+    told = event("user.message", T0 + 1, content="The owner works on acme", source="memory")
+    assert shape(log(*one[:4], told, *one[4:])).one_shot, "what the CLI tells, with words"
+    wordless = event("user.message", T0 + 1, content="  ")
+    assert shape(log(*one[:4], wordless, *one[4:])).one_shot, "a message with no words"
     from chiefofstaff.habits import talked_in
 
     assert not talked_in(said_in(interactive(T0, "Why does the build fail on CI?")))
@@ -296,16 +300,20 @@ async def test_chief_of_staff_keeps_its_runs(tmp_path, monkeypatch):
     await asyncio.sleep(0.2)
     (touched,) = runs_of(harness.store)
     assert touched[0] == first[0] and touched[1] > first[1], "touched while it runs"
+    monkeypatch.setattr(runtime_module, "ALIVE_EVERY", 3600)
+    await asyncio.sleep(0.1)  # Its last touch for a while.
+    stopping = time.time()
     await harness.runtime.stop()
     (stopped,) = runs_of(harness.store)
-    assert stopped[1] >= touched[1]
+    assert stopped[1] >= stopping, "and when it stops"
     assert harness.runtime.provenance.uptime()[-1] == stopped, "stopped: its run as kept"
     again = Harness(data)
     await again.runtime.start()
+    await asyncio.sleep(0.01)
     runs = runs_of(again.store)
     assert len(runs) == 2 and runs[0] == stopped and runs[1][0] >= stopped[1]
     ending = again.runtime.provenance.uptime()[-1][1]
-    assert ending >= runs[1][1], "the running one runs until now"
+    assert ending > runs[1][1], "the running one runs until now"
     await again.runtime.stop()
 
 
@@ -621,7 +629,7 @@ async def test_many_kept_decisions_cost_little_a_call(tmp_path, home):
         began = time.perf_counter()
         made = await deciding_.made(home.metas, {})
         took = time.perf_counter() - began
-        assert len(made) == 3 + count and took < 0.1, took
+        assert len(made) == 3 + count and took < 0.03, took  # About 4 ms here.
     assert set(mine).isdisjoint(made)
 
 
