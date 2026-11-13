@@ -123,7 +123,10 @@ async def test_a_worker_reporting_done_with_a_run_going_is_told_once_how_its_end
     await runtime.task_actions.wake_check_backs(datetime.now(UTC) + timedelta(hours=2))
     await settle(runtime)
     woken = harness.session(worker).sent[-1]
-    assert "which you reported done" in woken and 'report(status="progress")' in woken
+    # Each call names the task: its worker may be on another one by then.
+    assert "which you reported done" in woken
+    assert f"report(status=\"progress\", task_id='{task['id']}')" in woken
+    assert f"check_back again with task_id='{task['id']}'" in woken
     result = runtime.tasks.get(task["id"])["result"]
     await call_tool(runtime, "report", worker, status="progress", task_id=task["id"],
                     summary="The export finished.",
@@ -360,3 +363,22 @@ def test_a_tasks_runs_are_folded_under_its_prs_on_artifacts():
     ]
     assert unfolded[1]["runs"] == [f"Export {i}" for i in range(9)]
     assert unfolded[1]["folded"]["hidden"] == 0
+
+
+def test_a_rows_menu_is_built_again_when_a_run_turns_unknown():
+    """Review: Mark ended and Stop tracking are in a row's menu, built with its card: a run
+    that turned unknown while Home was open left them out until the page was loaded again."""
+    from test_ui_text import STATIC, run_js
+
+    keys = run_js(
+        f"const k = await import({json.dumps((STATIC / 'tasks.js').as_uri())});\n"
+        "const flow = (unknown) => ({ key: 'f', kind: 'flow', label: 'Export', url: 'https://x/f',"
+        " waiting_for: unknown ? '' : 'the run', status: 'running', unknown, reported_at: '',"
+        " last_check: null, next_check: null, trigger: '', changed_at: '' });\n"
+        "const task = (unknown) => ({ id: 't', status: 'done', title: 'Export', session_id: 'w',"
+        " updated_at: '', created_at: '', monitoring: [flow(unknown)] });\n"
+        "s.state.snapshot = { settings: { max_workers: 3 }, sessions: [], tasks: [] };\n"
+        "const phase = { section: 'monitoring', marker: 'delivered', why: '' };\n"
+        "return [k.taskItem(task(false), phase).key, k.taskItem(task(true), phase).key];"
+    )
+    assert keys[0] != keys[1]

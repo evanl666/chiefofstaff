@@ -1691,11 +1691,13 @@ class TaskActions:
                     "blocks it."
                 )
                 if finished:
+                    # Named in each call: its worker may be on another task now.
                     text = (
                         f"Time to check {found['what']}{link} for task {task_id} "
                         f"“{task['title']}”, which you reported done. Check it now and report "
-                        'where it stands with report(status="progress") and the run in '
-                        "artifacts: its result stays. Not ended yet: check_back again."
+                        f"where it stands with report(status=\"progress\", task_id='{task_id}') "
+                        "and the run in artifacts: its result stays. Not ended yet: check_back "
+                        f"again with task_id='{task_id}'."
                     )
                 await self.delivery.deliver(
                     row["id"],

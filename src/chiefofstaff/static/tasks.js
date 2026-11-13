@@ -117,6 +117,8 @@ const TITLE_MAX = 80;
 // What cancelling came to, as the server has the task after it: one that had finished is set
 // aside (its result kept), not cancelled.
 export const cancelledWords = (view) => (view?.set_aside ? "It had finished: set aside, its result is kept." : "Task cancelled.");
+// Runs its worker said go on that nothing told of for a day (see showActions): their links.
+const unknownRuns = (task) => (Array.isArray(task.monitoring) ? task.monitoring : []).filter((item) => item.kind === "flow" && item.unknown).map((item) => item.url);
 // The key covers what changes a card's actions and layout; the version, what only its text.
 // `phase`: where it is on the board ({section, marker, why}: see board.js).
 export function taskItem(task, phase = phaseOf(task)) {
@@ -126,7 +128,7 @@ export function taskItem(task, phase = phaseOf(task)) {
   const made = [task.artifacts, task.links, task.files, task.made_links, task.link_names, task.watch_kind, task.watch_changed_at, task.deliverables, task.monitoring, state.snapshot?.artifacts_hidden];
   const asked = askedOf(task);
   return {
-    key: `task:${task.id}:${task.status}:${phase.section}:${phase.marker}:${task.stopped ? 1 : 0}:${task.blocked ? 1 : 0}:${createsPr(task) ? 1 : 0}:${task.news?.at || ""}:${task.splittable ? 1 : 0}:${undoUntil(task) ? 1 : 0}`,
+    key: `task:${task.id}:${task.status}:${phase.section}:${phase.marker}:${task.stopped ? 1 : 0}:${task.blocked ? 1 : 0}:${createsPr(task) ? 1 : 0}:${task.news?.at || ""}:${task.splittable ? 1 : 0}:${undoUntil(task) ? 1 : 0}${unknownRuns(task).map((url) => `:${url}`).join("")}`,
     id: task.id,
     // For live rows the minute too: "6m" and "3m ago" move on by themselves.
     version: `${task.updated_at}:${task.title}:${phase.why}:${meta.join("|")}:${help}:${task.read ? 1 : 0}:${worker?.status || ""}:${worker?.activity || ""}:${worker?.step || ""}:${worker?.step_since || ""}:${worker?.turn_task || ""}:${worker?.background ? 1 : 0}:${worker?.display_title || ""}:${task.credits}:${task.runs}:${JSON.stringify(task.receipts?.prs || null)}:${task.status === "review" ? JSON.stringify(task.receipts || null) : ""}:${live ? `${Math.floor(Date.now() / 60000)}:${queuedKey()}` : ""}:${waitsOnOwner(task, worker)}:${(task.watching || []).join(",")}:${(task.watch_failing || []).join(",")}:${(task.watch_unreadable || []).join(",")}:${JSON.stringify(task.watch_failing_why || null)}:${JSON.stringify(task.check_back || null)}:${task.nudged_at || ""}:${JSON.stringify(task.receipts?.changed || null)}:${JSON.stringify(made)}:${JSON.stringify(asked)}:${deliveryKey(task)}:${earlierResults(task).length}`,
@@ -593,10 +595,9 @@ function taskCard(task, phase = phaseOf(task)) {
     }
     // Runs its worker said go on that nothing told of for a day: the owner says what became of
     // them (ended, or no longer to follow), in its menu.
-    const unknown = (Array.isArray(task.monitoring) ? task.monitoring : []).filter((item) => item.kind === "flow" && item.unknown);
-    if (unknown.length && ["review", "done"].includes(task.status)) {
-      const urls = unknown.map((item) => item.url);
-      const what = unknown.length > 1 ? "Runs marked ended." : "Marked ended.";
+    const urls = unknownRuns(task);
+    if (urls.length && ["review", "done"].includes(task.status)) {
+      const what = urls.length > 1 ? "Runs marked ended." : "Marked ended.";
       more = [{ text: "Mark ended", onclick: () => act(`/api/tasks/${task.id}/runs`, { how: "ended", urls }, what) }, { text: "Stop tracking", onclick: () => act(`/api/tasks/${task.id}/runs`, { how: "untracked", urls }, "No longer tracked.") }, ...more];
     }
     const others = moreMenu(more, "More actions", "⋯", moreName(task)) || "";
