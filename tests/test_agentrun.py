@@ -74,7 +74,9 @@ time.sleep(300)
 """
 
 # One whose command starts a daemon: it forks, the child makes a session of its own and forks
-# the daemon, then exits at once (the daemon is another parent's, in another group).
+# the daemon, then exits (the daemon is another parent's, in another group). The child lives a
+# moment, as the kernel's word of its fork is read: one that exits at once can be missed on
+# macOS, a known limit (SECURITY.md), so it is not what this checks.
 DAEMON = r"""
 import json, os, subprocess, sys, time
 script = (
@@ -84,6 +86,7 @@ script = (
     "    os.setsid()\n"
     "    if os.fork() == 0:\n"
     "        os.execvp('sleep', ['sleep', '3032'])\n"
+    "    time.sleep(0.5)\n"
     "    os._exit(0)\n"
     "os.wait()\n"
 )
@@ -241,7 +244,9 @@ def test_what_a_command_left_to_another_parent_ends_too(tmp_path, leftovers, cli
         assert time.monotonic() < deadline, "it never started"
         time.sleep(0.1)
     leftovers += found
-    assert all(process_table()[pid][0] == 1 for pid in found), "another parent's now"
+    while not all(process_table().get(pid, (1, ""))[0] == 1 for pid in found):
+        assert time.monotonic() < deadline, "another parent's now"
+        time.sleep(0.1)
     os.close(write)  # As when Chief of Staff's process ends, however it stopped.
     process.wait(15)
     assert gone(*found, seconds=10), "nothing of the agent is left"
