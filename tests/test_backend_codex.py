@@ -3308,9 +3308,11 @@ async def test_a_stop_as_its_turn_begins_is_not_undone_by_what_codex_said_before
     """Stress: stopped as its turn began, what Codex had said of that turn (its message taken
     up, its first command) was read after the stop: as a turn at work on the task again, the
     stopped task ran again, its worker idle, with no Go on. What Codex said of a turn stopped as
-    it began is not news of work (nor is the turn shown as starting): the task waits with Go on,
-    its message sent again then. `read_from`: what Codex said first that is read late."""
-    harness, runtime = await brief(tmp_path, monkeypatch)
+    it began is not news of work (nor is the turn shown as starting): the task waits with Go on;
+    its message was seen (not sent again with Go on). `read_from`: what Codex said first that is
+    read late."""
+    log = tmp_path / "log.jsonl"
+    harness, runtime = await brief(tmp_path, monkeypatch, FAKE_CODEX_LOG=str(log))
     gate, started, late_from, statuses = asyncio.Event(), [], [], []
     session_class = backend_codex.CodexSession
     handle, abort, start_turn = session_class.handle, session_class.abort, session_class.start_turn
@@ -3358,14 +3360,20 @@ async def test_a_stop_as_its_turn_begins_is_not_undone_by_what_codex_said_before
         await asyncio.sleep(1)  # What Codex said of the turn is all read.
         task = runtime.tasks.for_session(worker)[-1]
         assert task["status"] == "waiting" and harness.store.get(f"stopped:{task['id']}")
+        assert harness.store.get(f"goingon:{task['id']}") is None, "as if told to go on"
         assert "working" not in statuses, "shown at work again after its stop"
         assert harness.store.session(worker)["status"] == "idle"
         for name, was in (("handle", handle), ("abort", abort), ("start_turn", start_turn)):
             monkeypatch.setattr(session_class, name, was)
         await runtime.task_actions.follow_up(task["id"], "Go on where you stopped.")
-        await until(lambda: sleeping(seconds), 30)  # What it was told, sent again.
+
+        def went_on() -> str:
+            starts = [m["params"] for m in logged(log) if m["method"] == "turn/start"]
+            return json.dumps(starts[-1]["input"]) if len(starts) > 2 else ""
+
+        await until(went_on, 30)
+        assert "Go on where you stopped." in went_on() and "sleep" not in went_on()
         assert runtime.tasks.get(task["id"])["status"] == "running"
-        await runtime.workers.interrupt(worker)
     finally:
         gate.set()
         await runtime.stop()

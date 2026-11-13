@@ -399,10 +399,14 @@ class Events:
         state.echoes = True
         state.awaiting = None  # It took up what it was sent.
         self.delivery.echoed(row["id"], getattr(event.data, "content", "") or "")
+        # Another agent's adapter says "stopped" of a message its turn took up as Chief of Staff
+        # stopped that turn (said only after the stop): seen, yet no work goes on from it.
+        stopped = getattr(getattr(event.data, "delivery", None), "value", "") == "stopped"
         if row["role"] == WORKER and (named := tasks_named(getattr(event.data, "content", ""))):
             # What its turn is about now; steered into a turn on another task, it stays on that.
+            # (A task the owner stopped stays stopped, as for news, when its turn was stopped.)
             delivery = getattr(getattr(event.data, "delivery", None), "value", "")
-            self.runtime.took_up(row["id"], named, switch=delivery != "steering")
+            self.runtime.took_up(row["id"], named, switch=delivery != "steering", news=stopped)
         elif row["role"] == WORKER and (named := news_tasks(getattr(event.data, "content", ""))):
             # News on a thread it follows for a task: its turn is on that task.
             delivery = getattr(getattr(event.data, "delivery", None), "value", "")
@@ -413,7 +417,8 @@ class Events:
             state.unread.pop(seen if seen in state.unread else next(iter(state.unread)))
         if state.unseen:
             state.unseen.pop(seen if seen in state.unseen else next(iter(state.unseen)))
-        state.after_abort = False  # A turn on what it was sent now: its steps are work again.
+        if not stopped:
+            state.after_abort = False  # A turn on what it was sent now: its steps are work again.
         owner = from_owner(getattr(event.data, "content", "") or "") or state.owner_turn
         state.owner_turn = False
         state.event_turn = not owner

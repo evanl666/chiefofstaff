@@ -1800,9 +1800,9 @@ class CodexSession:
         self.unshown: str = ""
         # Stopped (abort) as its turn was starting or running: what Codex said of that turn
         # before the stop and Chief of Staff reads after it (its message taken up, its start)
-        # is not news of a turn at work, which would undo the stop (its task running again).
-        # The messages sent until then are never taken up from here: Delivery sends what it
-        # did not see again, with its next message.
+        # is not news of a turn at work, which would undo the stop (its task running again):
+        # the messages sent until then are said as seen by a stopped turn ("stopped"), and
+        # that turn is not shown as starting.
         self.stopped_sends: set[str] = set()
         self.hiding = False
         # The usage its thread restored when resumed in this process: its epoch's offset.
@@ -2356,9 +2356,9 @@ class CodexSession:
                 if self.unshown:
                     self.show_turn()
                 return
-            if sent in self.stopped_sends:
-                return  # Taken up by a turn stopped meanwhile: never taken up from here.
             delivery = SimpleNamespace(value="steering") if sent in self.steered else None
+            if sent in self.stopped_sends:
+                delivery = SimpleNamespace(value="stopped")  # Seen by a turn stopped meanwhile.
             self.steered.discard(sent)
             self.emit("user.message", content=text_of(item.get("content")), delivery=delivery)
             if self.unshown:
