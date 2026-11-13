@@ -204,6 +204,9 @@ FIXES = [
     Allow("learn-from-talked-sessions, read", data=r"\.db\.kv\.habits:copilot:<uuid-[34]>$"),
     Allow("learn-from-talked-sessions, words", data=r"\.db\.observations\[[23]\]$"),
     Allow("learn-from-talked-sessions, count", element="#learn-status", views=r"^settings-you"),
+    # 0.1.43: when Chief of Staff runs (its start and last alive, a run a row), so a worker's
+    # command never counts as running through the time it was stopped (provenance.window_end).
+    Allow("chief-of-staff-runs", data=r"\.db\.kv\.uptime$"),
 ]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on
