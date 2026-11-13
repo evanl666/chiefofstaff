@@ -736,7 +736,10 @@ class Runtime:
 
     async def agent_ready(self, agent: str, row: dict | None):
         """Its agent started for this worker, which may run on it: asked before and again once
-        it runs (what its version's check found is known only then)."""
+        it runs (what its version's check found is known only then). Refused for spend not
+        known, the card its refusal points at is there first."""
+        if row:
+            await self.ensure_spend_card(row)
         if row and (why := self.agent_block(row)):
             raise RuntimeError(why)
         await self.connect_agent(agent)
@@ -1057,8 +1060,7 @@ class Runtime:
             if self.store.agent_unknown(row["id"]):
                 return (
                     f"{name} stopped in the middle of a turn, so what this worker spent then is "
-                    "not known and its token limit can't be kept: say Go on to accept that and "
-                    "let it continue."
+                    f"not known and its token limit can't be kept: {self.spend_place(row)}"
                 )
             if (spent := self.store.agent_spent(row["id"])) >= limit:
                 return f"This worker used its {name} token limit ({spent:,} of {limit:,})."
@@ -1127,6 +1129,7 @@ class Runtime:
         if not row or row["closed_at"]:
             return "That session is closed."
         await self.usage_settled(row, session)
+        await self.ensure_spend_card(row)  # Refused for spend not known: its Go on is there.
         async with self.admission:
             if why := self.agent_block(row):
                 return why
@@ -1242,6 +1245,9 @@ class Runtime:
                 for task in self.tasks.for_session(row["id"]):
                     if self.store.get(f"stopped:{task['id']}") == agents.SPEND_STOP:
                         self.task_actions.publish(task)
+                # A limit set on a worker whose spend is partly unknown: its Go on card, also
+                # at rest, so what its next message is told to press is there.
+                await self.ensure_spend_card(row)
         self.publish_state()
         return stopped
 
@@ -1330,11 +1336,14 @@ class Runtime:
 
     def unknown(self, session_id: str) -> dict:
         """A row of the ledger for what a session spent that is not known: with a limit, it
-        runs no turn until the owner accepts that (Go on)."""
+        runs no turn until the owner accepts that (Go on); without one there is nothing to
+        keep, so it is recorded as accepted (Usage still shows it)."""
+        agent = self.agent(session_id)
         return {
-            "agent": self.agent(session_id),
+            "agent": agent,
             "session_id": session_id,
             "kind": "unknown",
+            "accepted": 0 if agents.limit(self.store, agent) else 1,
             "at": time.time(),
         }
 
@@ -1492,9 +1501,64 @@ class Runtime:
         return self.turn_runs[key]
 
     def accept_spend(self, session_id: str):
-        """The owner said Go on to a worker whose spend is not all known: they accept it."""
+        """The owner said Go on (or Retry) to a worker whose spend is not all known: they
+        accept it."""
         if not self.on_copilot(session_id):
             self.store.accept_agent_unknown(session_id)
+
+    def spend_card(self, session_id: str) -> dict | None:
+        """Its task under Needs you whose Go on accepts what it spent unknown (stopped for its
+        token limit), if it has one."""
+        for task in reversed(self.tasks.for_session(session_id)):
+            if task["status"] == "waiting" and (
+                self.store.get(f"stopped:{task['id']}") == agents.SPEND_STOP
+            ):
+                return task
+        return None
+
+    def spend_place(self, row: dict) -> str:
+        """Where the owner accepts a worker's unknown spend, as its refusals say it: the Go on
+        of its stopped task, the Retry of its failed one, else its limit."""
+        if self.spend_card(row["id"]):
+            return "press Go on under Needs you to accept that and let it continue."
+        tasks = [t for t in self.tasks.for_session(row["id"]) if t["status"] != "cancelled"]
+        if tasks and tasks[-1]["status"] == "failed":
+            return "Retry its task to accept that and let it continue."
+        name = agents.display(self.agent(row["id"]))
+        return f"turn its limit off in Settings → Models ({name}) to let it continue."
+
+    async def ensure_spend_card(self, row: dict) -> dict | None:
+        """A worker with a token limit whose spend is partly unknown, not accepted: the Go on
+        card the owner accepts that with, made if it has none, so what its refusals point at
+        exists (at work, it stops as its limit stops it; else its latest task waits, stopped).
+        A failed one is retried instead (Retry accepts)."""
+        if (
+            row["closed_at"]
+            or self.on_copilot(row["id"])
+            or not agents.limit(self.store, self.agent(row["id"]))
+            or not self.store.agent_unknown(row["id"])
+        ):
+            return None
+        if card := self.spend_card(row["id"]):
+            return card
+        if row["status"] in {"working", "queued", "starting"} or self.held(row["id"]):
+            await self.stop_for_spend(row)
+            return self.spend_card(row["id"])
+        tasks = [t for t in self.tasks.for_session(row["id"]) if t["status"] != "cancelled"]
+        if not tasks or tasks[-1]["status"] == "failed":
+            return None
+        task = tasks[-1]
+        notice = (
+            f"Stopped: {agents.display(self.agent(row['id']))} stopped mid-turn, so what it "
+            "spent is unknown."
+        )
+        self.store.set(f"stopped:{task['id']}", agents.SPEND_STOP)
+        self.store.delete(f"goingon:{task['id']}")
+        self.tasks.move(task["id"], "waiting", progress=notice)
+        full = self.spend_stop(row)["spend_why"]
+        self.add_message(row["id"], "notice", notice, {"stopped": True, "full": full})
+        self.task_actions.publish(self.tasks.get(task["id"]))
+        return self.spend_card(row["id"])
 
     def end_commands(self, agent: str):
         """An agent's process starts afresh: the commands its sessions' shells were running
@@ -4112,6 +4176,8 @@ class Runtime:
                 await self.refuse_if_open_elsewhere(self.store.session(session_id), False)
                 if self.agents and (why := self.agent_block(self.store.session(session_id))):
                     # Its agent may not run it now (turned off, say): it gets this once it may.
+                    if await self.ensure_spend_card(self.store.session(session_id)):
+                        why = self.agent_block(self.store.session(session_id))
                     raise IneligibleError(why)
                 await self.delivery.deliver(
                     session_id, held["prompt"], batch=True, kind="inbound",

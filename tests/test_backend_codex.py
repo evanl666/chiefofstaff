@@ -2528,7 +2528,8 @@ async def test_codex_usage_counts_each_update_once_per_epoch(tmp_path, monkeypat
             ("range", 100, 0, 100, 0),
         ]
         assert harness.store.agent_spent("w1") == 110 + 220 + 55 + 50 + 60 + 460 + 100
-        assert harness.store.agent_unknown("w1")
+        # With no limit there is nothing to keep: recorded as accepted (decision of the review).
+        assert not harness.store.agent_unknown("w1")
         assert not harness.store.all("SELECT * FROM usage"), "never Copilot's usage"
         assert not harness.store.get("copilot_default_model")
     finally:
@@ -3343,5 +3344,122 @@ async def test_a_worker_let_go_of_opens_again_only_once_its_old_process_has_ende
         await until(lambda: "second" in str(harness.kinds(worker)), 30)
         assert not before.alive() and backend.workers[worker] is not before
         assert "another Codex window" not in str(harness.kinds(worker))
+    finally:
+        await runtime.stop()
+
+
+# Review: unknown spend with no way on
+
+
+def unknown_rows(harness, worker) -> list[tuple]:
+    return [
+        (row["kind"], row["accepted"])
+        for row in harness.store.all(
+            "SELECT kind, accepted FROM agent_usage WHERE session_id=? AND kind='unknown'",
+            (worker,),
+        )
+    ]
+
+
+async def save_limit(runtime, limit: int):
+    before = agents.configured(runtime.store)
+    agents.configure(runtime.store, "codex", limit=limit)
+    return await runtime.agents_saved(before)
+
+
+async def test_spend_unknown_with_no_limit_is_accepted_and_a_limit_set_later_blocks_nothing(
+    tmp_path, monkeypatch
+):
+    """Review (a): recorded with no limit, then a limit saved: an idle worker refused every
+    message with "say Go on", and had no Go on anywhere. With no limit there is nothing to
+    keep: it is recorded as accepted (Usage still shows it)."""
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    try:
+        worker = await spawn(runtime, harness, "Wait 30 s. Then reply with just: on")
+        backend, _ = runtime.connection("codex")
+        await until(lambda: worker in backend.workers and runtime.states.handle(worker).turn, 30)
+        os.kill(backend.workers[worker].process.pid, signal.SIGKILL)
+        await until(lambda: unknown_rows(harness, worker), 30)
+        assert unknown_rows(harness, worker) == [("unknown", 1)]
+        await until(lambda: harness.store.session(worker)["status"] == "working", 30)
+        await runtime.workers.interrupt(worker)
+        await save_limit(runtime, 1_000_000)
+        assert runtime.agent_block(harness.store.session(worker)) == ""
+        unknown = [r for r in harness.store.agent_usage_in(0, time.time() + 1) if r.get("unknown")]
+        assert len(unknown) == 1, "Usage shows it"
+        await runtime.owner_send(worker, "Report done: after")
+        await until(lambda: "after" in str(harness.kinds(worker)), 30)
+    finally:
+        await runtime.stop()
+
+
+async def test_a_limit_saved_on_an_idle_worker_with_unaccepted_spend_gives_it_go_on(
+    tmp_path, monkeypatch
+):
+    """Decision 2: spend unknown and not accepted (recorded before, or under an earlier limit),
+    a limit saved: the worker gets its Go on card at once, though it is at rest, and its
+    refusals point at it; Go on accepts and it continues."""
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    try:
+        worker = await spawn(runtime, harness, "Report done: first")
+        await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+        await turn_over(runtime, worker)
+        unknown = runtime.unknown(worker) | {"accepted": 0}
+        harness.store.record_agent_usage([unknown], f"agentepoch:{worker}", {})
+        await save_limit(runtime, 1_000_000)
+        card = runtime.spend_card(worker)
+        assert card and card["status"] == "waiting"
+        why = runtime.agent_block(harness.store.session(worker))
+        assert "press Go on under Needs you" in why, why
+        assert runtime.task_actions.view(card)["go_on"] is True
+        await runtime.task_actions.follow_up(card["id"], "Go on where you stopped.")
+        assert unknown_rows(harness, worker) == [("unknown", 1)]
+        assert runtime.agent_block(harness.store.session(worker)) == ""
+    finally:
+        await runtime.stop()
+
+
+async def test_a_worker_refused_for_unaccepted_spend_gets_the_go_on_it_is_told_of(
+    tmp_path, monkeypatch
+):
+    """Decision 4: its card gone (cancelled) and a message for it: refused, the card made, and
+    the refusal names it."""
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    try:
+        worker = await spawn(runtime, harness, "Report done: first")
+        await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+        await turn_over(runtime, worker)
+        agents.configure(harness.store, "codex", limit=1_000_000)
+        unknown = runtime.unknown(worker)
+        assert unknown["accepted"] == 0, "under a limit: the owner accepts it"
+        harness.store.record_agent_usage([unknown], f"agentepoch:{worker}", {})
+        assert runtime.spend_card(worker) is None
+        with pytest.raises(RuntimeError, match="press Go on under Needs you"):
+            await runtime.start_agent_of(worker)
+        assert runtime.spend_card(worker), "what it says to press is there"
+    finally:
+        await runtime.stop()
+
+
+async def test_a_failed_worker_with_unaccepted_spend_goes_on_with_retry(tmp_path, monkeypatch):
+    """Review (b): with a limit, failed (stopped at once for what it did) mid-turn, its spend
+    unknown: Retry was refused with "say Go on", and Go on did nothing. Retry is the owner
+    asking it to go: it accepts, and the worker runs."""
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    try:
+        agents.configure(harness.store, "codex", limit=1_000_000)
+        worker = await spawn(runtime, harness, "Wait 30 s. Then reply with just: on")
+        backend, _ = runtime.connection("codex")
+        await until(lambda: worker in backend.workers and runtime.states.handle(worker).turn, 30)
+        runtime.states.handle(worker).stop_worker("Stopped: it did what it may not.")
+        await until(lambda: harness.store.session(worker)["status"] == "failed", 30)
+        assert unknown_rows(harness, worker) == [("unknown", 0)]
+        why = runtime.agent_block(harness.store.session(worker))
+        assert "Retry its task" in why, why
+        task = runtime.tasks.for_session(worker)[-1]
+        assert task["status"] == "failed"
+        await runtime.task_actions.retry(task["id"], "Report done: retried")
+        assert unknown_rows(harness, worker) == [("unknown", 1)]
+        await until(lambda: "retried" in str(harness.kinds(worker)), 30)
     finally:
         await runtime.stop()

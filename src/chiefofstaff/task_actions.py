@@ -3741,6 +3741,8 @@ class TaskActions:
                 scope=self.runtime.learning.scope_of(task["session_id"]),
             )
         self.store.set(f"reopened:{task_id}", before["status"])
+        # The owner asked it to go: what it spent unknown (another agent's) is accepted.
+        self.runtime.accept_spend(row["id"])
         if before["status"] == "cancelled":
             self.drop_cancelled_note(row["id"], task_id)  # Moot: it is wanted after all.
             with suppress(RuntimeError):

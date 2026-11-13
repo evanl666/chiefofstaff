@@ -981,7 +981,8 @@ new workers use cannot run, they start on Copilot and their chat says why.
   once it has spent it; it may pass it by the model call in flight and what its child agents
   spend before they stop. Tokens are counted as Codex counts them, cached input included. If
   Codex stops in the middle of a turn, what it spent then is not known: a worker with a limit
-  then waits under *Needs you* until you say *Go on*.
+  then waits under *Needs you* until you say *Go on* (or *Retry*, if it failed). Without a limit
+  that is recorded and shown in *Usage*, and nothing waits.
 - **Ask first** works on Codex versions before 0.168 (the ones tested): every command none of
   your Codex rules allows, every edit and every MCP call ask Chief of Staff, which answers as for
   a Copilot worker; ChatGPT's apps and Codex's subagents are off for such a worker. Your own
