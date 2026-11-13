@@ -9,6 +9,7 @@ worker with a shell can still reach anything its user account can unless OS sand
 import bisect
 import contextvars
 import functools
+import itertools
 import os
 import re
 import subprocess
@@ -90,32 +91,130 @@ MADE_UP_DEFAULT = re.compile(r"\$\([^()]*\b(?:main|master)\b|`[^`]*\b(?:main|mas
 UNSETTLED = re.compile(r"[$`\x00]")
 # `$NAME` and `${NAME}`: a variable a line may have set (NAME=value) before its push.
 VARIABLE = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
+# The folder a command runs in, as a word says it (`$PWD`, `${PWD}`), and the substitutions
+# that make it, or its repository's top (the same repository: its branch is asked of git).
+HERE = re.compile(r"\$(?:PWD|\{PWD\})(?=/|$)")
+HERE_MADE = frozenset({"pwd", "git rev-parse --show-toplevel"})
 # A heredoc's start: `<<WORD`, `<<-WORD`, `<<'WORD'`, `<<"WORD"` (not `<<<`, a here-string).
 HEREDOC = re.compile(r"<<(-?)[ \t]*(?:'([^'\n]*)'|\"([^\"\n]*)\"|\\?([^\s;&|()<>'\"`]+))")
 
 # A variable's name.
 NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# Where a line may set a variable (mentions): `${NAME=…}` and `${NAME:=…}`; `NAME=`, `NAME+=`
+# and `NAME[…]=` starting a word (also in quotes: eval, a shell or a trap may run them); and
+# the commands that set the variables they name (SETTERS), where a command may start.
+SETTERS = ("for", "select", "read", "mapfile", "readarray", "getopts", "export", "local",
+           "declare", "typeset", "readonly", "unset", "printf", "eval", "source", ".")  # fmt: skip
+SETTING = re.compile(
+    r"\$\{([A-Za-z_][A-Za-z0-9_]*):?="
+    r"|(?<![^\s;&|()`'\"{!])([A-Za-z_][A-Za-z0-9_]*)(\[[^\]\s;&|()`'\"{!]*\])?(\+?=)(\(?)"
+    r"|(?<![A-Za-z0-9_./-])(" + "|".join(map(re.escape, SETTERS)) + r")(?![A-Za-z0-9_./-])"
+)
+NAME_AFTER = re.compile(r"[ \t]+([A-Za-z_][A-Za-z0-9_]*)")
+WORD_NAME = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)(\[[^\]]*\])?(\+?=)?(\()?")
+ARGUMENTS_STOPS = re.compile(r"[;&|\n()`'\"\\]")
+LINE_STOPS = re.compile(r"[\n'\"\\]")
+# Words after which a word may be a command's name.
+COMMAND_WORDS = frozenset(
+    {"do", "then", "else", "elif", "if", "while", "until", "time", "builtin", "command", "exec",
+     "eval", "!", "{"}
+)  # fmt: skip
 
 
-def mentions(text: str) -> dict[str, int]:
-    """How often each name stands in a text where a command may set it: at a word's start
-    (`B=x`, `read B`, `for B in`, `export B`, `((B++))`, `${B:=x}`), not where it is only read
-    (`$B`, `${B}`) nor within a word (`wb/b`)."""
+def command_position(text: str, at: int) -> bool:
+    """Whether the word at `at` may be a command's name: first, or after a separator, a quote
+    (a string eval or a shell may run), a reserved word, `builtin`, `command`, `exec`, `eval`,
+    or an assignment (`IFS= read`); not a word in a sentence (`Add tests for branch names`)."""
+    if at and text[at - 1] == "\\":
+        at -= 1
+    end = at
+    while end and text[end - 1] in " \t":
+        end -= 1
+    if not end or text[end - 1] in ";&|(){}`'\"\n!":
+        return True
+    start = end
+    while start and text[start - 1] not in " \t;&|(){}`'\"\n!":
+        start -= 1
+    word = text[start:end]
+    return word in COMMAND_WORDS or bool(ASSIGNMENT.match(word))
+
+
+def arguments_end(text: str, index: int, stops: re.Pattern = ARGUMENTS_STOPS) -> int:
+    """Where the words of a command from `index` end: at a separator (`stops`), quotes read
+    whole."""
+    while stop := stops.search(text, index):
+        at = stop.start()
+        if text[at] in "'\"":
+            index = quoted_end(text, at)
+        elif text[at] == "\\":
+            index = at + 2
+        else:
+            return at
+    return len(text)
+
+
+def mentions(text: str) -> dict[str, int] | None:
+    """How often a line may set each variable (SETTING): an assignment that is plain (`B=x`)
+    counts once, any other (`B+=x`, `B[0]=x`, `B=(x)`) twice; a command's words (`git branch`)
+    and text (`-m "Fix branch handling"`) do not count. None when it may set any variable,
+    which it does not name (`eval "$N=x"`, `read "$N"`, `declare -n`, `source`)."""
     counted: dict[str, int] = {}
-    for found in NAME.finditer(text):
-        at, end = found.span()
-        before = text[at - 1] if at else " "
-        if before == "$" or before.isalnum() or before in "_/.-:@+%^~,":
+
+    def add(name: str, times: int = 1):
+        counted[name] = counted.get(name, 0) + times
+
+    index, settled = 0, 0  # (No `$` nor backquote in the text from an `eval` up to `settled`.)
+    while found := SETTING.search(text, index):
+        index = found.end()
+        if found.group(1):
+            add(found.group(1))
             continue
-        if before == "{" and text[at - 2 : at - 1] == "$" and text[end : end + 1] == "}":
+        if found.group(2):
+            plain = found.group(3) is None and found.group(4) == "=" and not found.group(5)
+            add(found.group(2), 1 if plain else 2)
             continue
-        counted[found.group()] = counted.get(found.group(), 0) + 1
+        setter = found.group(6)
+        if not command_position(text, found.start()):
+            continue
+        if setter in {"for", "select"}:
+            if name := NAME_AFTER.match(text, index):
+                add(name.group(1))
+                index = name.end()
+            continue
+        if setter in {"source", "."}:
+            return None
+        if setter == "eval":  # What it runs is the line's own text: read on.
+            if index >= settled:
+                settled = arguments_end(text, index, LINE_STOPS)
+                if UNSETTLED.search(text, index, settled):
+                    return None  # A line to run, made up as it runs (to its line's end).
+            continue
+        end = arguments_end(text, index)
+        words, index = text[index:end].split(), end
+        if setter == "printf":
+            targets = [after for before, after in itertools.pairwise(words) if before == "-v"]
+            words = targets + [word[2:] for word in words if word.startswith("-v") and word[2:]]
+        elif setter in {"declare", "local", "typeset"}:
+            if any(word.startswith("-") and "n" in word for word in words):
+                return None  # A name that stands for another (`declare -n`).
+        for word in words:
+            if word.startswith("-"):
+                continue
+            if UNSETTLED.search(word.partition("=")[0]):
+                return None  # A name made up as it runs (`read "$N"`, `export "$N=x"`).
+            if not (named := WORD_NAME.match(word.lstrip("'\"\\"))):
+                continue
+            assigning = bool(named.group(3))
+            if setter in {"export", "readonly"} and not assigning:
+                continue  # Its value as it was.
+            plain = not named.group(2) and named.group(3) in {None, "="} and not named.group(4)
+            add(named.group(1), 1 if plain else 2)
     return counted
 
 
 class TooComplexError(Exception):
     """A line that takes more to read than is read here (MOST_TOKENS, MOST_READ, MOST_MOVES,
-    MOST_PATH)."""
+    MOST_PATH, Tally.expands)."""
 
 
 @dataclass
@@ -130,6 +229,7 @@ class Push:
 
     forced: bool = False
     branches: set[str] | None = field(default_factory=set)  # None: every branch.
+    # (At most MOST_BRANCHES of them; past those, only main and master: what is judged.)
     bare_in: str | None = None  # The folder a bare push runs in.
     bare_new: str = ""
     bare_also: frozenset[str] = frozenset()
@@ -184,8 +284,12 @@ def pushed_branch(refspec: str) -> str:
 
 
 def expanded(folder: str, path: str) -> str:
-    """`path` from `folder`, `~` expanded; `folder` itself when it cannot be (an unknown user's
-    home: the shell's `cd` fails there, and the command goes on where it was)."""
+    """`path` from `folder`, `~` expanded, and `$PWD` (`${PWD}`, `$(pwd)`, the top of its
+    repository: see without_substitutions) as `folder` itself; `folder` itself when it cannot
+    be (an unknown user's home: the shell's `cd` fails there, and the command goes on where it
+    was)."""
+    if here := HERE.match(path):
+        path = "." + path[here.end() :]
     try:
         return str(Path(folder) / Path(path).expanduser())
     except (RuntimeError, ValueError):
@@ -203,16 +307,12 @@ PARENTHESES = re.compile(r"[()]")
 
 def quoted_end(text: str, index: int) -> int:
     """Where the quote opened at `index` ends, past its closing quote (the end of the text when
-    it never closes); in double quotes a backslash escapes the character after it."""
+    it never closes); in double quotes a backslash escapes the character after it, and a
+    command substitution is read whole (construct_end)."""
     if text[index] == "'":
         end = text.find("'", index + 1)
         return len(text) if end < 0 else end + 1
-    at = index + 1
-    while stop := QUOTED_STOPS.search(text, at):
-        if text[stop.start()] == '"':
-            return stop.end()
-        at = stop.start() + 2
-    return len(text)
+    return construct_end(text, index + 1, '"')[1]
 
 
 def plain_run(text: str, index: int, stops: re.Pattern) -> tuple[int, bool | None]:
@@ -257,9 +357,25 @@ def without_comments(text: str) -> str:
     return "".join(kept)
 
 
+# line_starts of the texts read last, by the text itself (not by its value: comparing two
+# long texts equal in value, at each heredoc, would take time growing with the line).
+LINES: dict[int, tuple[str, tuple[dict[str, list[int]], dict[str, list[int]]]]] = {}
+
+
 def line_starts(text: str) -> tuple[dict[str, list[int]], dict[str, list[int]]]:
     """Where each line of a text starts, by what it says, and by what it says once its leading
-    tabs are dropped."""
+    tabs are dropped (found once a text)."""
+    known = LINES.get(id(text))
+    if known is not None and known[0] is text:
+        return known[1]
+    if len(LINES) >= 8:
+        LINES.clear()
+    found = lines_of(text)
+    LINES[id(text)] = (text, found)
+    return found
+
+
+def lines_of(text: str) -> tuple[dict[str, list[int]], dict[str, list[int]]]:
     said: dict[str, list[int]] = {}
     untabbed: dict[str, list[int]] = {}
     at = 0
@@ -272,6 +388,41 @@ def line_starts(text: str) -> tuple[dict[str, list[int]], dict[str, list[int]]]:
     return said, untabbed
 
 
+def heredoc_at(text: str, index: int) -> tuple[str, bool, bool, int] | None:
+    """The heredoc a `<<WORD` at `index` opens (not `<<<`, a here-string): its word, whether
+    tabs are dropped from its lines (`<<-WORD`), whether the word is quoted (its body then
+    expands nothing), and where `<<WORD` ends; None when there is none."""
+    if not text.startswith("<<", index) or text.startswith("<<<", index):
+        return None
+    if (index and text[index - 1] == "<") or not (found := HEREDOC.match(text, index)):
+        return None
+    quoted = found.group(4) is None or found.group(0).find("\\") >= 0
+    word = next(group for group in found.groups()[1:] if group is not None)
+    return word, bool(found.group(1)), quoted, found.end()
+
+
+def bodies_end(
+    text: str, index: int, pending: list[tuple[str, bool, bool]]
+) -> tuple[int, list[str]]:
+    """Past the bodies of the heredocs `pending`, read from `index` (the line after the one
+    they were opened on): each up to the first line after it that is its word; and the bodies
+    whose word is not quoted (the shell runs their substitutions). A body with no line to end
+    it is no heredoc: what is left is read from there as it is."""
+    said, untabbed = line_starts(text)
+    bodies = []
+    for word, tabs, quoted in pending:
+        starting = (untabbed if tabs else said).get(word, [])
+        ending = bisect.bisect_left(starting, index)
+        if ending == len(starting):  # Never ended: not taken for a heredoc.
+            break
+        end = starting[ending]
+        stop = text.find("\n", end)
+        if not quoted:
+            bodies.append(text[index:end])
+        index = len(text) if stop < 0 else stop + 1
+    return index, bodies
+
+
 def without_heredocs(text: str) -> tuple[str, list[str]]:
     """A command line without its heredocs' bodies, as bash reads them: after the line a
     `<<WORD` (unquoted, outside a comment, not in `((…))`) stands on, each line up to one that
@@ -281,7 +432,6 @@ def without_heredocs(text: str) -> tuple[str, list[str]]:
     if "<<" not in text:
         return text, []
     kept, start, index, pending, bodies, arithmetic = [], True, 0, [], [], 0
-    lines = None  # Where each line starts (found once a heredoc is).
     while index < len(text):
         at, starts = plain_run(text, index, BODY_STOPS if pending else HEREDOC_STOPS)
         if starts is not None:
@@ -309,35 +459,16 @@ def without_heredocs(text: str) -> tuple[str, list[str]]:
             arithmetic += 1  # `$((1<<2))`, `((x<<=1))`: no heredoc in arithmetic.
         elif text.startswith("))", index) and arithmetic:
             arithmetic -= 1
-        elif (
-            char == "<"
-            and not arithmetic
-            and text.startswith("<<", index)
-            and not text.startswith("<<<", index)
-            and (index == 0 or text[index - 1] != "<")
-            and (found := HEREDOC.match(text, index))
-        ):
-            quoted = found.group(4) is None or found.group(0).find("\\") >= 0
-            word = next(group for group in found.groups()[1:] if group is not None)
-            pending.append((word, bool(found.group(1)), quoted))
-            kept.append(found.group(0))
-            index = found.end()
+        elif char == "<" and not arithmetic and (heredoc := heredoc_at(text, index)):
+            pending.append(heredoc[:3])
+            kept.append(text[index : heredoc[3]])
+            index = heredoc[3]
             start = False
             continue
         elif char == "\n" and pending:
             kept.append(char)
-            index += 1
-            lines = lines or line_starts(text)
-            for word, tabs, quoted in pending:
-                starting = lines[1 if tabs else 0].get(word, [])
-                ending = bisect.bisect_left(starting, index)
-                if ending == len(starting):  # Never ended: not taken for a heredoc.
-                    break
-                end = starting[ending]
-                stop = text.find("\n", end)
-                if not quoted:
-                    bodies.append(text[index:end])
-                index = len(text) if stop < 0 else stop + 1
+            index, found = bodies_end(text, index + 1, pending)
+            bodies += found
             pending = []
             start = True
             continue
@@ -347,28 +478,57 @@ def without_heredocs(text: str) -> tuple[str, list[str]]:
     return "".join(kept), bodies
 
 
-INNER_STOPS = re.compile(r"[\\'\"()]")
+INNER_STOPS = re.compile(r"[\\'\"()<\n]")
+DOUBLE_QUOTED_STOPS = re.compile(r'["\\$]')
 BACKQUOTE_STOPS = re.compile(r"[\\`]")
+
+
+def construct_end(text: str, index: int, opened: str) -> tuple[int, int]:
+    """Where a double-quoted string (`opened` '"') or a command substitution (`opened` "$(")
+    whose text starts at `index` ends: the end of its text, and past what closes it (the
+    text's end for both when nothing does). What is nested in it is read whole, as bash reads
+    it, in one pass: in double quotes, a backslash's character and a substitution; in a
+    substitution, quotes, parentheses (other substitutions), and heredocs' bodies (text: an
+    apostrophe in one is no quote; not in arithmetic, `$((…))`)."""
+    stack, pending = [opened], []
+    arithmetic = int(opened == "$(" and text.startswith("(", index))
+    while stop := (DOUBLE_QUOTED_STOPS if stack[-1] == '"' else INNER_STOPS).search(text, index):
+        at = stop.start()
+        char, index = text[at], at + 1
+        if char == "\\":
+            index = at + 2
+        elif stack[-1] == '"':
+            if char == '"':
+                stack.pop()
+            elif text.startswith("$(", at):
+                stack.append("$(")
+                arithmetic += text.startswith("((", at + 1)
+                index = at + 2
+        elif char == "'":
+            index = quoted_end(text, at)
+        elif char == '"':
+            stack.append('"')
+        elif char == "(":
+            arithmetic += text.startswith("((", at)
+            stack.append("(")
+        elif char == ")":
+            arithmetic -= bool(arithmetic and text.startswith("))", at))
+            stack.pop()
+        elif char == "<" and not arithmetic and (heredoc := heredoc_at(text, at)):
+            pending.append(heredoc[:3])
+            index = heredoc[3]
+        elif char == "\n" and pending:
+            index = bodies_end(text, index, pending)[0]
+            pending = []
+        if not stack:
+            return at, index
+    return len(text), len(text)
 
 
 def substitution_end(text: str, index: int) -> tuple[int, int]:
     """Where the `$(…)` whose text starts at `index` ends: the end of what it runs, and past its
-    `)` (the text's end for both when it never closes). Quotes in it are its own."""
-    depth = 1
-    while stop := INNER_STOPS.search(text, index):
-        at = stop.start()
-        char = text[at]
-        if char == "\\":
-            index = at + 2
-        elif char in "'\"":
-            index = quoted_end(text, at)
-        elif char == "(":
-            depth, index = depth + 1, at + 1
-        elif depth == 1:
-            return at, at + 1
-        else:
-            depth, index = depth - 1, at + 1
-    return len(text), len(text)
+    `)` (the text's end for both when it never closes); see construct_end."""
+    return construct_end(text, index, "$(")
 
 
 def backquote_end(text: str, index: int) -> tuple[int, int]:
@@ -384,8 +544,9 @@ def backquote_end(text: str, index: int) -> tuple[int, int]:
 def without_substitutions(text: str, quoted: bool = False) -> tuple[str, list[str]]:
     """A command line with each command substitution in it (`$(…)`, `` `…` ``, unquoted or in
     double quotes, not in single quotes: there text is only text) put as MADE_UP, in the word
-    it stood in, and what each runs: lines of their own. `quoted`: all of the text is in
-    double quotes (a heredoc's body)."""
+    it stood in (`$PWD` for one that says the folder it runs in: HERE_MADE), and what each
+    runs: lines of their own. `quoted`: all of the text is in double quotes (a heredoc's
+    body)."""
     if "$(" not in text and "`" not in text:
         return text, []
     kept, bodies, quote, index = [], [], '"' if quoted else "", 0
@@ -410,8 +571,10 @@ def without_substitutions(text: str, quoted: bool = False) -> tuple[str, list[st
             start = index + (2 if char == "$" else 1)
             ending = substitution_end if char == "$" else backquote_end
             end, index = ending(text, start)
-            bodies.append(text[start:end])
-            kept.append(MADE_UP)
+            body = text[start:end]
+            bodies.append(body)
+            here = len(body) < 64 and " ".join(body.split()) in HERE_MADE
+            kept.append("$PWD" if here else MADE_UP)
             continue
         if char in "'\"" and not quoted:
             quote = "" if quote == char else (quote or char)
@@ -572,19 +735,25 @@ def one_substitution(word: str) -> bool:
     return False
 
 
+DESTINATION_STOPS = re.compile(r"\$\(|[`):]")
+
+
 def destination(refspec: str) -> str:
     """The part of a refspec after its last `:` outside a substitution (all of it without
     one)."""
+    if "$(" not in refspec and "`" not in refspec:
+        return refspec.rpartition(":")[2]
     depth, quoted, last = 0, False, -1
-    for index, char in enumerate(refspec):
+    for found in DESTINATION_STOPS.finditer(refspec):
+        char = found.group()
         if char == "`":
             quoted = not quoted
-        elif refspec.startswith("$(", index):
+        elif char == "$(":
             depth += 1
         elif char == ")" and depth:
             depth -= 1
         elif char == ":" and not depth and not quoted:
-            last = index
+            last = found.start()
     return refspec[last + 1 :]
 
 
@@ -609,11 +778,14 @@ def resolved(word: str, value_of: Callable[[str], str | None]) -> str:
     return "".join(pieces) + word[at:]
 
 
-def expansions(words: list[str], values: dict[str, tuple[str, ...]]) -> list[list[str]]:
+def expansions(
+    words: list[str], values: dict[str, tuple[str, ...]], tally: "Tally"
+) -> list[list[str]]:
     """The words a simple command runs once the line's variables are put in: one list for each
     value a loop's variable takes (`for b in x y`), at most MOST_VALUES (past them, those
     stay unknown); a word a value went into split at its spaces, as the shell splits what it
-    puts in unquoted (an empty one is no word)."""
+    puts in unquoted (an empty one is no word). What they make is counted in `tally` as it is
+    made (TooComplexError past its budget)."""
     if not values or not any("$" in word for word in words):
         return [words]
     looped = {
@@ -639,7 +811,9 @@ def expansions(words: list[str], values: dict[str, tuple[str, ...]]) -> list[lis
         run = []
         for word in words:
             put = resolved(word, value_of)
-            run += [put] if put == word else put.split()
+            made = [put] if put == word else put.split()
+            tally.expands(len(put), len(made))
+            run += made
         found.append(run)
     return found
 
@@ -823,8 +997,10 @@ def push_of(git: Git) -> Push | None:
         branch = pushed_branch(target)
         if branch in {"HEAD", "@"}:
             heads = True
-        elif push.branches is not None:
-            push.branches.add(branch)
+        elif push.branches is not None and (
+            branch in DEFAULT_BRANCHES or len(push.branches) < MOST_BRANCHES
+        ):
+            push.branches.add(branch)  # (Past MOST_BRANCHES, only the default's are kept.)
     if dry:
         return push  # It updates nothing.
     if deleting or refspecs:
@@ -865,23 +1041,35 @@ def shell_script(words: list[str], position: int) -> str | None:
 @dataclass
 class Tally:
     """What reading a line and the lines in it found (their pushes), and how much it read: the
-    characters of each line, the moves to another folder."""
+    characters of each line, the moves to another folder, what its variables made."""
 
     text: str = ""
     pushes: list[Push] = field(default_factory=list)
     read: int = 0
     moves: int = 0
+    made: int = 0
+    made_words: int = 0
     names: dict[str, int] | None = None
+    namable: bool = True
 
     def mentioned(self, name: str) -> int:
-        """How often the line names `name` where a command may set it (mentions)."""
-        if self.names is None:
+        """How often the line may set `name` (mentions; twice when it may set any)."""
+        if self.namable and self.names is None:
             self.names = mentions(self.text)
-        return self.names.get(name, 0)
+            self.namable = self.names is not None
+        return self.names.get(name, 0) if self.names is not None else 2
 
     def reads(self, text: str):
         self.read += len(text)
         if self.read > 2 * len(self.text) + MOST_READ:
+            raise TooComplexError
+
+    def expands(self, characters: int, words: int):
+        """What putting the line's variables in a command's words made: in all, at most as
+        many characters as are read (Tally.reads), and MOST_WORDS words."""
+        self.made += characters
+        self.made_words += words
+        if self.made > 2 * len(self.text) + MOST_READ or self.made_words > MOST_WORDS:
             raise TooComplexError
 
     def moved(self, folder: str, path: str) -> str:
@@ -1003,7 +1191,7 @@ def read_command(words: list[str], index: int, line: Line) -> str:
         program = word.rsplit("/", 1)[-1]
         if program == "git":
             here = {**line.env, **local} if local else line.env
-            for run in expansions(words[position:], line.values):
+            for run in expansions(words[position:], line.values, line.tally):
                 read_git(run, here, index, line)
             return ""
         if program in SHELLS:  # Its words are its own: a script's (`-c`), or a file's.

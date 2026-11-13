@@ -169,6 +169,23 @@ BYPASSES = [
     "git $(echo push) origin main",
     "cd $D && git push",
     'cd "$(git rev-parse --show-toplevel)/../other" && git push',
+    # Review of b73e0a2 (2): every place a line may set a variable counts, a name made up or
+    # one that stands for another makes any variable not known.
+    "B=wb/x; IFS= read -r B <<< main; git push origin $B",
+    "B=wb/x; builtin read B <<< main; git push origin $B",
+    'B=wb/x; eval "B=main"; git push origin $B',
+    'B=wb/x; N=B; eval "x; $N=main"; git push origin $B',
+    "B=wb/x; declare -n R=B; R=main; git push origin $B",
+    "B=wb/x; printf -v B main; git push origin $B",
+    "B=(main); git push origin $B",
+    "B=wb/; B+=x; git push origin $B",
+    "B[0]=main; git push origin $B",
+    "B=wb/x; trap 'B=main' DEBUG; git push origin $B",
+    "B=wb/x; f() { B=main; }; f; git push origin $B",
+    "B=wb/x; : ${B:=main}; git push origin $B",
+    "B=wb/x; . ./env.sh; git push origin $B",
+    'B=wb/x; read "$N" <<< main; git push origin $B',
+    "B=wb/x; for B in main; do :; done; git push origin $B",
 ]
 # What a worker does every day, on its own branch: let through.
 EVERYDAY = [
@@ -213,6 +230,7 @@ EVERYDAY = [
     "cat <<'EOF'\n$(git push)\nEOF\ngit push origin wb/x",
     "git push -o ci.skip -u origin HEAD",
     'D=src; cd "$D" && git push',
+    'git push origin "$SOURCE:wb/x"',
 ]
 # On a checkout of main itself: pushes that update no branch, or one the line made.
 ON_MAIN_ALLOWED = [
@@ -503,6 +521,12 @@ def test_a_line_too_much_to_read_that_pushes_is_refused_saying_why(command, work
         '""' * 50_000 + " git push",
         ")[} " * 25_000 + " git push",
         "".join(f"git checkout a{i}; git push; " for i in range(5_000)),
+        # Review of b73e0a2: evals whose words run to the line's end, heredocs in substitutions.
+        "B=wb/x; " + "eval '" * 16_000 + " git push origin $B",
+        "B=wb/x; " + "eval '" * 16_000 + " git push origin wb/x",
+        "B=wb/x; " + "eval " * 20_000 + " git push origin $B",
+        "<<E $(\n" * 14_000 + " git push",
+        "\"$(cat <<'E'\nit's\n" * 7_000 + " git push",
     ],
 )
 def test_no_line_is_slow_to_check(command, feature):
@@ -1080,6 +1104,32 @@ NORMAL = [
     "mv old.txt new.txt",
     "touch .keep",
     "git log --format='%an pushed %s' | head",
+    # Review of b73e0a2 (2): a variable set once is read, whatever else the line says of its name.
+    'branch=$(git branch --show-current); git push -u origin "$branch"',
+    'tag=v1.2.3; git tag "$tag" && git push origin "$tag"',
+    'branch=wb/x; git commit -m "Fix branch handling" && git push origin "$branch"',
+    'branch=wb/x; git commit -m "Add tests for branch names" && git push origin "$branch"',
+    'B=wb/x; export PATH="$HOME/bin:$PATH"; git push origin "$B"',
+    'B=wb/x; printf "%s\\n" "$B"; git push origin "$B"',
+    # (3) The commit and PR messages agents write: a heredoc in a substitution, in double quotes.
+    "git commit -m \"$(cat <<'EOF'\nFix the parser's edge case\nEOF\n)\" && "
+    'git push -u origin "$(git branch --show-current)"',
+    'B=wb/x; git commit -m "$(cat <<\'EOF\'\nIt\'s done.\nEOF\n)" && git push origin "$B"',
+    'gh pr create --title "Make git push safer" --body "$(cat <<\'EOF\'\nIt\'s safer now.\nEOF\n)"',
+    "git commit -m \"$(cat <<'EOF'\nIt's the parser's fix\nEOF\n)\" && git push origin wb/x",
+    'git commit -m "$(cat <<\'EOF\'\nDon\'t say "main" here\nEOF\n)" && git push origin wb/x',
+    "git commit -m \"$(cat <<-'EOF'\n\tIt's tabbed.\n\tEOF\n)\" && git push origin wb/x",
+    'git commit -m "$(cat <<EOF\nIt\'s $(date +%F)\nEOF\n)" && git push origin wb/x',
+    'git commit -m "$(cat <<"EOF"\nIt\'s quoted\nEOF\n)" && git push origin wb/x',
+    "git commit -m \"$(cat <<'A'\nIt's one\nA\n)\" -m \"$(cat <<'B'\nIt's two\nB\n)\" && "
+    "git push origin wb/x",
+    "gh pr create --fill --body \"$(cat <<'EOF'\n## Summary\nIt's done; it's tested.\nEOF\n)\"",
+    # (4) The folder a command runs in, said as a variable or a substitution.
+    'cd "$(git rev-parse --show-toplevel)" && git push',
+    'git -C "$PWD" push',
+    'git -C "${PWD}" push',
+    'cd "$(pwd)" && git push',
+    'git -C "$(git rev-parse --show-toplevel)" push origin wb/x',
 ]
 
 # On a checkout of main, a push of the checkout's own branch (naming none, HEAD, or what
@@ -1098,6 +1148,11 @@ INTENDED_ON_MAIN = {
     "git -C src push", "git commit -F - <<'EOF'\nDon't push straight to main\nEOF\ngit push",
     "cat > notes.md <<'EOF'\nWe push to main only through PRs.\nEOF\n"
     "git add notes.md && git commit -m notes && git push",
+    'branch=$(git branch --show-current); git push -u origin "$branch"',
+    "git commit -m \"$(cat <<'EOF'\nFix the parser's edge case\nEOF\n)\" && "
+    'git push -u origin "$(git branch --show-current)"',
+    'cd "$(git rev-parse --show-toplevel)" && git push', 'git -C "$PWD" push',
+    'git -C "${PWD}" push', 'cd "$(pwd)" && git push',
 }  # fmt: skip
 
 
@@ -1160,3 +1215,82 @@ def test_a_heredocs_body_is_text_up_to_its_word(text, kept, bodies):
     """A body ends at the first line after it that is its word (the same word may end two);
     one with no such line is kept, read as commands (never less refused)."""
     assert policy.without_heredocs(text) == (kept, bodies)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "B=" + "x" * 1000 + "; git push origin " + "$B " * 39_000,
+        "for B in "
+        + " ".join(chr(97 + i) * 1000 for i in range(16))
+        + "; do git push origin "
+        + "$B " * 39_000
+        + "; done",
+        "for B in "
+        + " ".join("'" + " ".join([chr(97 + i)] * 500) + "'" for i in range(16))
+        + "; do git push origin "
+        + "$B " * 1_000
+        + "; done",
+        'B="' + "a " * 500 + '"; git push origin ' + "$B " * 90,
+    ],
+)
+def test_what_variables_make_counts_in_one_budget(command, monkeypatch, feature):
+    """Review of b73e0a2 (1): a value put in many words, a loop's values each in all of them,
+    values split into many words: what they make is counted, and past a budget the line is
+    refused as too complex, the work bounded by the line's own words."""
+    monkeypatch.setattr(policy, "current_branches", lambda folder: {"wb/x"})
+    resolving, resolve = [], policy.resolved
+    monkeypatch.setattr(policy, "resolved", lambda *a: resolving.append(1) or resolve(*a))
+    found, took = timed(command, feature)
+    assert found and "too complex" in found
+    assert len(resolving) <= len(command.split()) and took < 0.5
+
+
+def test_a_push_keeps_so_many_branches_at_most_but_the_default(feature):
+    """Review of b73e0a2 (1): what a cached reading keeps of a push is bounded."""
+    many = " ".join(f"wb/b{i}" for i in range(5_000))
+    (push,) = policy.pushes(f"git push origin {many}", str(feature))
+    assert push.branches is not None and len(push.branches) <= policy.MOST_BRANCHES
+    (push,) = policy.pushes(f"git push origin {many} main", str(feature))
+    assert push.branches is not None and "main" in push.branches
+    assert "default branch" in (denial(f"git push origin {many} main", feature) or "")
+
+
+@pytest.mark.parametrize(
+    ("text", "names"),
+    [
+        ('branch=$(git branch --show-current); git push -u origin "$branch"', {"branch": 1}),
+        ('branch=wb/x; git commit -m "Add tests for branch names"', {"branch": 1}),
+        ("for b in a b; do read c; done", {"b": 1, "c": 1}),
+        ("B=x; IFS= read -r B", {"B": 2, "IFS": 1}),
+        ("export B=x; export C", {"B": 1}),
+        ("B=(x); C+=y; D[0]=z", {"B": 2, "C": 2, "D": 2}),
+        ("printf -v B x; printf '%s' \"$C\"", {"B": 1}),
+        ("echo read B; git branch", {}),
+        ('eval "$N=x"', None),
+        ("declare -n R=B", None),
+        ("source env.sh", None),
+    ],
+)
+def test_a_variable_is_counted_where_a_line_may_set_it(text, names):
+    assert policy.mentions(text) == names
+
+
+@pytest.mark.parametrize(
+    ("text", "end"),
+    [
+        ("$(cat <<'EOF'\nit's\nEOF\n) && git push", "$(cat <<'EOF'\nit's\nEOF\n)"),
+        ("$(cat <<EOF\n)\nEOF\n) x", "$(cat <<EOF\n)\nEOF\n)"),
+        ("$(cat <<-E\n\tit's\n\tE\n)", "$(cat <<-E\n\tit's\n\tE\n)"),
+        ("$(a <<'A' <<'B'\n'\nA\n'\nB\n)", "$(a <<'A' <<'B'\n'\nA\n'\nB\n)"),
+        ("$(echo $((1<<2)))\n2\n)", "$(echo $((1<<2)))"),
+        ("$((1<<2\n+1))\n2\n) x", "$((1<<2\n+1))"),
+        ("$(echo \"$(echo ')')\")x", "$(echo \"$(echo ')')\")"),
+    ],
+)
+def test_a_substitution_ends_where_bash_ends_it(text, end):
+    """Review of b73e0a2 (3): a heredoc's body in a substitution is text (an apostrophe in it
+    is no quote, a `)` no end), as without_heredocs reads one outside."""
+    assert policy.substitution_end(text, 2)[1] == len(end)
+    quoted = f'"{end}"{text[len(end) :]}'
+    assert policy.quoted_end(quoted, 0) == len(end) + 2
