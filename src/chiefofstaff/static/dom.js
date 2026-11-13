@@ -171,6 +171,13 @@ export function moreMenu(items, label = "More actions", text = "⋯", name = lab
       const open = menu.hidden;
       closeMenus();
       menu.hidden = !open;
+      // In a list that scrolls (a row of Monitoring, say), all of it in sight: as it opens, and
+      // once it is at its full size.
+      if (open) {
+        const inSight = () => menu.scrollIntoView?.({ block: "nearest" });
+        inSight();
+        menu.addEventListener("animationend", inSight, { once: true });
+      }
     },
   });
   return el("span", { class: "menu-wrap" }, button, menu);

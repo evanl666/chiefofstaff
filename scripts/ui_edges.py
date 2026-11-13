@@ -2806,7 +2806,11 @@ async def round_eight(runtime, browser, failures: list[str]):
     await expect(page.locator(".toast.error", has_text="Too long: 20,512 characters, the limit "
                               "is 20,000")).to_be_visible()  # fmt: skip
     assert await composer.input_value() == "z" * 20512, "the text stays"
-    assert store.value("SELECT count(*) FROM messages WHERE session_id=?", (router,)) == sent
+    now_sent = store.value("SELECT count(*) FROM messages WHERE session_id=?", (router,))
+    assert now_sent == sent, store.all(
+        "SELECT kind, text FROM messages WHERE session_id=? ORDER BY id DESC LIMIT ?",
+        (router, max(1, now_sent - sent)),
+    )
     await composer.fill("")
     await expect(count).to_be_hidden()
     log("E6: the count near 20,000; over it, “Too long: N characters, the limit is 20,000”")
@@ -3769,6 +3773,176 @@ async def round_eleven(runtime, browser, failures: list[str]):
     await context.close()
 
 
+FLYTE = "https://flyte.acme.dev/console/projects/ml/domains/prod/executions/"
+SHARDS = ["running", "running", "succeeded", "failed", "running", "succeeded", "succeeded",
+          "succeeded", "succeeded"]  # fmt: skip
+
+
+async def runs_seeded(runtime) -> dict:
+    """QA E41/E43: two accepted tasks with a run their worker declared running two days ago and
+    nothing since; one that shipped a PR and nine runs (one failed, three running); another's
+    PR. By title."""
+    store = runtime.store
+    router = store.get("router_id")
+    store.save_settings(store.settings().model_copy(update={"max_workers": 90}))
+    ago = lambda **delta: (datetime.now(UTC) - timedelta(**delta)).isoformat()  # noqa: E731
+    found = {}
+
+    async def delivered(title, artifacts):
+        result = await call_tool(runtime, "spawn_worker", router, title=title, instructions=title,
+                                 why_new="test")  # fmt: skip
+        worker = json.loads(result.text_result_for_llm)["session_id"]
+        await settle(runtime)
+        task = runtime.tasks.current(worker)
+        await call_tool(runtime, "report", worker, status="done", summary=f"{title}: done.",
+                        artifacts=artifacts)  # fmt: skip
+        await settle(runtime)
+        runtime.task_actions.accept(task["id"])
+        found[title] = runtime.tasks.get(task["id"])
+        return task
+
+    def said(task, **times):
+        known = json.loads(store.get(f"artifacts:{task['id']}"))
+        for index, item in enumerate(known):
+            item["at"] = ago(**{key: value(index) for key, value in times.items()})
+        store.set(f"artifacts:{task['id']}", json.dumps(known))
+
+    for title, run in (("E41 backfill the ranking features", "f3a9c1"),
+                       ("E41 rebuild the search index", "a7b2d4")):  # fmt: skip
+        task = await delivered(title, [{"url": FLYTE + run, "name": f"Run {run}",
+                                        "status": "running"}])  # fmt: skip
+        said(task, hours=lambda _index: 47)
+    shards = [{"url": FLYTE + f"e{index:02d}", "name": f"Export shard {index + 1}",
+               "status": status} for index, status in enumerate(SHARDS)]  # fmt: skip
+    export = await delivered("E43 ship the sharded export", shards)
+    runtime.task_actions.record_opened(export["id"], ["https://github.com/acme/app/pull/42"])
+    runtime.remember_pr_title("acme/app#42", "Shard the nightly export")
+    said(export, minutes=lambda index: 10 + 20 * (len(shards) - index))
+    cache = await delivered("E43 tune the cache size", [])
+    runtime.task_actions.record_opened(cache["id"], ["https://github.com/acme/app/pull/43"])
+    runtime.remember_pr_title("acme/app#43", "Raise the cache to 96 MB")
+    for task in found.values():
+        runtime.task_actions.publish(runtime.tasks.get(task["id"]))
+    return found
+
+
+async def round_twelve(runtime, browser, failures: list[str]):
+    """The owner's QA E41: a run declared running two days ago and nothing since is "Status
+    unknown · reported running 47h ago", never "checked" when nobody checked; its row's menu
+    marks it ended or stops tracking it, and the task leaves Monitoring. E43: a task's nine
+    runs are one line under its PR, the latest and the failed one in sight, the rest behind
+    "+7"; unfolded and folded again by mouse or keyboard."""
+    store = runtime.store
+    tasks = await runs_seeded(runtime)
+    context = await browser.new_context(viewport={"width": 1440, "height": 1000})
+    page = await context.new_page()
+    errors: list[str] = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    monitoring = page.locator("#tasks-monitoring")
+
+    def row(title):
+        return page.locator("#panel .card.task").filter(
+            has=page.locator(".head .title", has_text=title)
+        )
+
+    backfill = row("E41 backfill the ranking features")
+    await expect(backfill).to_be_visible(timeout=15000)
+    assert await monitoring.locator(".card.task", has_text="E41 backfill").count() == 1
+    line = backfill.locator(".row-line")
+    await expect(line.locator(".why")).to_have_text("Status unknown")
+    await expect(line.locator(".quiet")).to_have_text("reported running 47h ago")
+    await expect(line.locator(".object")).to_have_attribute(
+        "data-tip",
+        "Run f3a9c1\nNothing tells where it stands now: mark it ended or stop tracking it (⋯)",
+    )
+    await expect(backfill.locator(".row-foot .checks")).to_have_count(0)
+    # A run declared an hour or two ago: waited for, said when its worker said it, not "checked".
+    export = row("E43 ship the sharded export")
+    await expect(export.locator(".row-line .why")).to_have_text("Waiting for the run")
+    await expect(export.locator(".row-foot .checks")).to_have_text(
+        re.compile(r"^reported running \dh ago$")
+    )
+    assert "checked" not in await monitoring.inner_text()
+    log('E41: a run nothing told of for a day is unknown; never "checked" unless it was')
+
+    # Its menu: Mark ended and Stop tracking first, all of it in sight in the list.
+    more = backfill.get_by_role("button", name=re.compile("More actions"))
+    await more.click()
+    menu = backfill.locator(".menu:not([hidden])")
+    items = await menu.get_by_role("menuitem").all_text_contents()
+    assert items[:2] == ["Mark ended", "Stop tracking"], items
+    await page.evaluate(
+        "() => Promise.all(document.getAnimations()"
+        ".filter((a) => a.effect?.getComputedTiming().iterations !== Infinity)"
+        ".map((a) => a.finished.catch(() => {})))"
+    )
+    box = await monitoring.locator(":scope > .items").bounding_box()
+    shown = await menu.bounding_box()
+    assert box and shown and shown["y"] + shown["height"] <= box["y"] + box["height"] + 1, (
+        "the menu is not cut by its list",
+        box,
+        shown,
+    )
+    await menu.get_by_role("menuitem", name="Stop tracking").click()
+    await expect(monitoring.locator(".card.task", has_text="E41 backfill")).to_have_count(
+        0, timeout=10000
+    )
+    await expect(page.locator("#tasks-recent .card.task", has_text="E41 backfill")).to_have_count(1)
+    [kept] = json.loads(store.get(f"artifacts:{tasks['E41 backfill the ranking features']['id']}"))
+    assert kept["untracked"] and kept["status"] == "running", kept
+    rebuild = row("E41 rebuild the search index")
+    await rebuild.get_by_role("button", name=re.compile("More actions")).click()
+    await rebuild.locator(".menu:not([hidden])").get_by_role("menuitem", name="Mark ended").click()
+    await expect(monitoring.locator(".card.task", has_text="E41 rebuild")).to_have_count(
+        0, timeout=10000
+    )
+    made = page.locator("#tasks-artifacts")
+    ended = made.locator(".artifact", has_text="Run a7b2d4")
+    await expect(ended.locator(".a-status")).to_have_text("ended")
+    await expect(ended.locator(".a-status")).to_have_attribute(
+        "data-tip", re.compile("^As you marked it")
+    )
+    log("E41: the row's menu marks a run ended or stops tracking it; the task leaves Monitoring")
+
+    # E43: the PR first, the runs in a line, the latest and the failed one under it.
+    await made.locator(":scope > .items").evaluate("n => { n.style.maxHeight = 'none'; }")
+    rows = made.locator(".artifact")
+    names = await rows.locator(".a-name").all_text_contents()
+    first = names.index("app#42 · Shard the nightly export")
+    assert names[first : first + 4] == [
+        "app#42 · Shard the nightly export", "9 runs", "Export shard 9", "Export shard 4"
+    ], names  # fmt: skip
+    assert not [name for name in names[first + 4 :] if name.startswith("Export shard")], names
+    fold = made.get_by_role("button", name="9 runs")
+    await expect(fold).to_have_attribute("aria-expanded", "false")
+    summary = made.locator(".artifact.runs")
+    await expect(summary.locator(".a-status")).to_have_text("3 running · 1 failed")
+    await expect(summary).to_have_class(re.compile(r"\btone-bad\b"))
+    await expect(made.locator(".artifact.in-runs")).to_have_count(2)
+    more_runs = "Show 7 more runs of E43 ship the sharded export"
+    await summary.get_by_role("button", name=more_runs).click()
+    await expect(made.locator(".artifact.in-runs")).to_have_count(9)
+    await expect(fold).to_have_attribute("aria-expanded", "true")
+    await expect(summary.locator(".a-more")).to_have_count(0)
+    await fold.focus()
+    await page.keyboard.press("Enter")
+    await expect(made.locator(".artifact.in-runs")).to_have_count(2)
+    await expect(fold).to_have_attribute("aria-expanded", "false")
+    await page.keyboard.press("Space")
+    await expect(made.locator(".artifact.in-runs")).to_have_count(9)
+    for width in (352, 400):
+        await page.evaluate("w => document.querySelector('#panel').style.width = `${w}px`", width)
+        await page.wait_for_timeout(100)
+        for part in (made, monitoring):
+            found = await part.evaluate(OVERFLOWS)
+            assert not found, (width, found)
+    await page.evaluate("document.querySelector('#panel').style.removeProperty('width')")
+    log("E43: a task's runs fold under its PR (latest and failed in sight); mouse and keyboard")
+    assert not errors, errors
+    await context.close()
+
+
 async def main():
     with tempfile.TemporaryDirectory(prefix="cos-ui-") as temporary:
         holder: dict = {}
@@ -4102,7 +4276,7 @@ async def main():
             only = set(sys.argv[1:])
             for check in (home, memory, this_round, round_two, round_three, round_four,
                           round_five, round_six, round_seven, round_eight, round_nine,
-                          round_ten, round_scale, round_qa, round_eleven,
+                          round_ten, round_scale, round_qa, round_eleven, round_twelve,
                           round_storage, round_mascot, round_others, round_send):  # fmt: skip
                 if not only or check.__name__ in only:
                     await check(runtime, browser, failures)

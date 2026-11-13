@@ -317,3 +317,46 @@ async def test_github_runs_are_read_in_the_background(harness, monkeypatch):
         await asyncio.wait_for(called.wait(), 10)
     finally:
         loop.cancel()
+
+
+def test_a_tasks_runs_are_folded_under_its_prs_on_artifacts():
+    """E43: 22 rows, 18 of them runs (one task 9, another 6): the PRs pushed down. A task's
+    deliverables together, its PRs and docs first; its runs in a line ("9 runs · 3 running ·
+    1 failed") with the latest and the failed ones under it, the rest behind "+N"."""
+    from test_ui_text import STATIC, run_js
+
+    found = run_js(
+        f"const a = await import({json.dumps((STATIC / 'artifacts.js').as_uri())});\n"
+        "const at = (h) => new Date(Date.now() - h * 3600000).toISOString();\n"
+        "const states = ['running', 'running', 'succeeded', 'failed', 'running', 'succeeded',"
+        " 'succeeded', 'succeeded', 'succeeded'];\n"
+        "const runs = states.map((status, i) => ({ kind: 'flow', url: `https://flyte.x/e/${i}`,"
+        " title: `Export ${i}`, status, at: at(i + 1) }));\n"
+        "const shipping = { id: 'a', title: 'Ship the export', status: 'done', updated_at: at(0),"
+        " deliverables: [{ kind: 'pr', url: 'https://github.com/o/app/pull/7', title: 'app#7 ·"
+        " Export', role: 'created', status: 'in review' }, ...runs, { kind: 'doc',"
+        " url: 'https://docs.google.com/document/d/abc123/edit', title: 'Plan',"
+        " status: 'final' }] };\n"
+        "const other = { id: 'b', title: 'Tune the cache', status: 'done', updated_at: at(0),"
+        " deliverables: [{ kind: 'pr', url: 'https://github.com/o/app/pull/8', title: 'app#8 ·"
+        " Cache', role: 'created', status: 'CI failing' }, ...runs.slice(0, 2).map((run, i) =>"
+        " ({ ...run, url: `https://flyte.x/c/${i}` }))] };\n"
+        "const items = a.collectArtifacts([shipping, other]);\n"
+        "const shape = (groups) => groups.map((g) => ({ task: g.task.id,"
+        " mains: g.mains.map((i) => i.kind), runs: g.runs.map((i) => i.name),"
+        " folded: g.folded && { count: g.folded.count, hidden: g.folded.hidden,"
+        " words: g.folded.words, tone: g.folded.tone } }));\n"
+        "return [shape(a.groupArtifacts(items)), shape(a.groupArtifacts(items, new Set(['a'])))];"
+    )
+    folded, unfolded = found
+    assert folded == [
+        {"task": "b", "mains": ["PR"], "runs": ["Export 0", "Export 1"], "folded": None},
+        {
+            "task": "a",
+            "mains": ["PR", "Doc"],
+            "runs": ["Export 0", "Export 3"],
+            "folded": {"count": 9, "hidden": 7, "words": "3 running · 1 failed", "tone": "bad"},
+        },
+    ]
+    assert unfolded[1]["runs"] == [f"Export {i}" for i in range(9)]
+    assert unfolded[1]["folded"]["hidden"] == 0

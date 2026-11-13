@@ -124,13 +124,53 @@ export function collectArtifacts(tasks, phases = new Map()) {
   return [...found.values()].sort((a, b) => RANK[a.tone] - RANK[b.tone] || String(b.at).localeCompare(String(a.at)));
 }
 
-// The list's rows: shown ones, then (on request) the hidden ones to bring back.
+// A task's runs from this many on are folded: one line says how many there are and how they
+// stand ("9 runs · 3 running · 1 failed"); under it only the latest and the failed ones, the
+// rest behind "+N" (bug E43: one task's nine runs pushed every PR down the list).
+const RUNS_FOLDED = 3;
+// Tasks whose runs the owner unfolded (this page's).
+const openRuns = new Set();
+// What runs come to in a few words, and the tone of the one that needs a look first.
+export function runsWords(runs) {
+  const running = runs.filter((item) => item.tone === "active").length;
+  const failed = runs.filter((item) => item.tone === "bad").length;
+  const words = [running ? `${running} running` : "", failed ? `${failed} failed` : ""].filter(Boolean).join(" · ");
+  const tone = failed ? "bad" : runs.some((item) => item.tone === "wait") ? "wait" : running ? "active" : runs.every((item) => item.tone === "good") ? "good" : "neutral";
+  return { words, tone };
+}
+// The list by task, the task with what needs a look first first: its PRs and docs, then its
+// runs, the newest first (from RUNS_FOLDED on: `folded`, as said above; `open`: the tasks whose
+// runs are all shown).
+export function groupArtifacts(items, open = new Set()) {
+  const groups = new Map();
+  for (const item of items) {
+    const group = groups.get(item.task.id) || { task: item.task, mains: [], runs: [] };
+    (item.kind === "Flow" ? group.runs : group.mains).push(item);
+    groups.set(item.task.id, group);
+  }
+  return [...groups.values()].map((group) => {
+    const runs = [...group.runs].sort((a, b) => String(b.at).localeCompare(String(a.at)));
+    if (runs.length < RUNS_FOLDED) return { ...group, runs, folded: null };
+    const unfolded = open.has(group.task.id);
+    const shown = unfolded ? runs : runs.filter((item, index) => !index || item.tone === "bad");
+    return { ...group, runs: shown, folded: { count: runs.length, hidden: runs.length - shown.length, open: unfolded, at: runs[0].at, ...runsWords(runs) } };
+  });
+}
+
+// The list's rows: shown ones, a task's together, then (on request) the hidden ones to bring
+// back.
 export function artifactItems(tasks, focusTask, phases) {
   const all = collectArtifacts(tasks, phases);
   const hidden = new Set(all.filter((item) => isHidden(item.key, item.tone)).map((item) => item.key));
   const shown = all.filter((item) => !hidden.has(item.key));
   const off = all.filter((item) => hidden.has(item.key));
-  const rows = [...shown, ...(state.showHiddenArtifacts ? off : [])].map((item) => artifactRow(item, hidden.has(item.key), focusTask));
+  const rows = [];
+  for (const group of groupArtifacts(shown, openRuns)) {
+    rows.push(...group.mains.map((item) => artifactRow(item, false, focusTask)));
+    if (group.folded) rows.push(runsRow(group, focusTask));
+    rows.push(...group.runs.map((item) => artifactRow(item, false, focusTask, Boolean(group.folded))));
+  }
+  if (state.showHiddenArtifacts) rows.push(...off.map((item) => artifactRow(item, true, focusTask)));
   if (off.length) {
     const words = state.showHiddenArtifacts ? "Hide the ones taken off" : `Show ${off.length} taken off`;
     rows.push({ key: `art-hidden:${off.length}:${Boolean(state.showHiddenArtifacts)}`, build: () => el("button", { type: "button", class: "link show-hidden", text: words, onclick: () => toggleHidden() }) });
@@ -170,23 +210,68 @@ export async function setHidden(key, hidden, tone = "") {
     toast(error.message, "error");
   }
 }
-function artifactRow(item, hidden, focusTask) {
+// `folded`: one of a task's folded runs, under the line that says them all (which names the
+// task).
+function artifactRow(item, hidden, focusTask, folded = false) {
   const when = item.at ? ago(item.at) : "";
   const help = item.said ? (item.kind === "PR" || item.by === "GitHub" ? "As GitHub has it" : item.by === "you" ? "As you marked it" : "As its worker last said") : "As its task stands: its worker has not said where this stands";
   return {
     key: `art:${item.key}:${hidden ? 1 : 0}`,
-    version: `${item.name}:${item.role}:${item.status}:${item.tone}:${when}:${item.task.id}:${item.task.title}`,
+    version: `${item.name}:${item.role}:${item.status}:${item.tone}:${when}:${item.task.id}:${item.task.title}:${folded}`,
     build: () => {
-      const node = el("div", { class: `artifact tone-${item.tone}${hidden ? " hidden-artifact" : ""}`, "data-key": item.key });
-      fill(node, item, hidden, focusTask, when, help);
+      const node = el("div", { class: "artifact", "data-key": item.key });
+      fill(node, item, hidden, focusTask, when, help, folded);
       return node;
     },
-    refresh: (node) => fill(node, item, hidden, focusTask, when, help),
+    refresh: (node) => fill(node, item, hidden, focusTask, when, help, folded),
   };
 }
+// A task's runs in a line: how many, how they stand, and "+N" for those not shown.
+function runsRow(group, focusTask) {
+  const { task, folded } = group;
+  const when = folded.at ? ago(folded.at) : "";
+  return {
+    key: `art-runs:${task.id}`,
+    version: `${folded.count}:${folded.words}:${folded.tone}:${folded.hidden}:${folded.open}:${when}:${task.title}`,
+    build: () => {
+      const node = el("div", { class: "artifact runs" });
+      fillRuns(node, group, focusTask, when);
+      return node;
+    },
+    refresh: (node) => fillRuns(node, group, focusTask, when),
+  };
+}
+// Its runs unfolded or folded again; a keyboard's focus stays on the line (redrawn).
+function toggleRuns(taskId, node) {
+  if (openRuns.has(taskId)) openRuns.delete(taskId);
+  else openRuns.add(taskId);
+  const focused = node.contains(document.activeElement);
+  import("./inbox.js").then((module) => {
+    module.renderHome();
+    if (focused) [...document.querySelectorAll("#tasks-artifacts .artifact.runs")].find((line) => line.dataset.task === taskId)?.querySelector(".a-fold")?.focus();
+  });
+}
+function fillRuns(node, group, focusTask, when) {
+  const { task, folded } = group;
+  node.className = `artifact runs tone-${folded.tone}`;
+  node.dataset.task = task.id;
+  const toggle = () => toggleRuns(task.id, node);
+  node.replaceChildren(
+    el("span", { class: "a-kind", text: "Flow" }),
+    el("button", { type: "button", class: "a-name a-fold", text: `${folded.count} runs`, "aria-expanded": String(folded.open), "data-tip": folded.open ? "Show only the latest run and the failed ones" : `Show all ${folded.count} runs`, onclick: toggle }),
+    folded.words ? el("span", { class: "a-status", text: folded.words, "data-tip": "As their worker last said, or GitHub" }) : el("span"),
+    folded.hidden ? el("button", { type: "button", class: "a-more link", text: `+${folded.hidden}`, "aria-label": `Show ${folded.hidden} more runs of ${task.title}`, "data-tip": `${folded.hidden} more, not failed`, onclick: toggle }) : el("span"),
+    el(
+      "div",
+      { class: "a-meta" },
+      el("button", { type: "button", class: "a-task link", text: task.title, "data-tip": "Show its task", onclick: () => focusTask(task.id, task.session_id) }),
+      when ? el("span", { class: "a-when", text: `· latest ${when === "now" ? "just now" : `${when} ago`}` }) : "",
+    ),
+  );
+}
 // Its tooltips are Home's own (data-tip): one that cannot be left pointing at another row.
-function fill(node, item, hidden, focusTask, when, help) {
-  node.className = `artifact tone-${item.tone}${hidden ? " hidden-artifact" : ""}`;
+function fill(node, item, hidden, focusTask, when, help, folded = false) {
+  node.className = `artifact tone-${item.tone}${hidden ? " hidden-artifact" : ""}${folded ? " in-runs" : ""}`;
   const role = PR_ROLES[item.role] || "";
   node.replaceChildren(
     el("span", { class: "a-kind", text: item.kind }),
@@ -200,8 +285,8 @@ function fill(node, item, hidden, focusTask, when, help) {
       { class: "a-meta" },
       role ? el("span", { class: `a-role role-${item.role}`, text: role, "data-tip": { created: "Its task opened this PR", modified: "Its task pushed to this PR", reviewed: "Its task reviewed this PR" }[item.role] }) : "",
       role ? el("span", { text: "·" }) : "",
-      el("button", { type: "button", class: "a-task link", text: item.task.title, "data-tip": "Show its task", onclick: () => focusTask(item.task.id, item.task.session_id) }),
-      when ? el("span", { class: "a-when", text: `· ${when === "now" ? "just now" : `${when} ago`}` }) : "",
+      folded ? "" : el("button", { type: "button", class: "a-task link", text: item.task.title, "data-tip": "Show its task", onclick: () => focusTask(item.task.id, item.task.session_id) }),
+      when ? el("span", { class: "a-when", text: `${folded ? "" : "· "}${when === "now" ? "just now" : `${when} ago`}` }) : "",
     ),
   );
 }

@@ -1128,6 +1128,12 @@ button.receipt.needs { background: var(--amber-soft); color: var(--amber); }
 #tasks-artifacts .artifact .a-role { color: var(--soft); font-weight: 500; }
 #tasks-artifacts .artifact.hidden-artifact { opacity: 0.6; }
 #tasks-artifacts .show-hidden { justify-self: start; margin: 2px 0 0 8px; font-size: var(--small); }
+/* A task's runs in a line (how many, how they stand); the latest and failed ones under it. */
+#tasks-artifacts .artifact .a-fold { font: inherit; font-weight: 500; background: none; margin: -4px 0; }
+#tasks-artifacts .artifact .a-fold::before { content: "▸ "; color: var(--muted); }
+#tasks-artifacts .artifact .a-fold[aria-expanded="true"]::before { content: "▾ "; }
+#tasks-artifacts .artifact .a-more { margin: -4px 0; padding: 0 4px; font-size: var(--small); }
+#tasks-artifacts .artifact.in-runs { margin-left: 16px; }
 :is(#session-list, #external-list) .idle-workers > summary { cursor: pointer; list-style: none; font-size: var(--small); color: var(--muted); padding: 6px 12px; }
 :is(#session-list, #external-list) .idle-workers > summary::-webkit-details-marker { display: none; }
 :is(#session-list, #external-list) .idle-workers > summary::before { content: "▸ "; }
