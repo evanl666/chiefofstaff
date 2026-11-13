@@ -84,7 +84,7 @@ from .notify import mac_notification
 from .others import Others
 from .peers import Peers
 from .policy import GITHUB_MCP, within
-from .provenance import Provenance, log_of
+from .provenance import ALIVE_EVERY, RUNS_KEPT, Provenance, log_of, runs_of
 from .roles import ROUTER, SLACK, WATCHDOG, WORKER
 from .sendsocket import LimitedError, SendSocket
 from .sendsocket import headline as sent_headline
@@ -341,6 +341,9 @@ class Runtime:
         # More event sources (see sources/__init__.py); Slack and GitHub are built in.
         self.sources: list[Source] = []
         self.watch_job: asyncio.Task | None = None
+        # Keeps when this run was last known running (see alive).
+        self.alive_job: asyncio.Task | None = None
+        self.started_at: float | None = None
         # Watches that Copilot's CLI still runs; reconnects after it stopped by itself, or once
         # the Router is no longer open in a terminal.
         self.process_job: asyncio.Task | None = None
@@ -395,7 +398,10 @@ class Runtime:
         self.storage = Storage(self)
         # Which Copilot sessions a worker or a script made, not the owner (provenance.py).
         self.provenance = Provenance(
-            store, lambda session_id: log_of(self.backend, session_id), self.workspaces.own_folder
+            store,
+            lambda session_id: log_of(self.backend, session_id),
+            self.workspaces.own_folder,
+            uptime=self.uptime,
         )
         # Where the owner's other Copilot sessions stand (the sidebar), while the setting is on.
         self.others = Others(self)
@@ -410,6 +416,9 @@ class Runtime:
         self.stopping = False
         self.loop = asyncio.get_running_loop()
         self.bus.bind(self.loop)
+        self.started_at = time.time()
+        self.alive()  # Before its commands of before are ended (end_commands, at connect).
+        self.alive_job = asyncio.create_task(self.keep_alive())
         self.store.execute(
             "UPDATE drafts SET status='uncertain', outcome=? WHERE status='sending'",
             ("Chief of Staff stopped while sending. Check whether it was delivered.",),
@@ -431,16 +440,47 @@ class Runtime:
         if self.store.drafts("uncertain"):
             self.background(self.drafts.check_uncertain())
 
+    def alive(self):
+        """This run is running now: kept with Chief of Staff's runs (kv "uptime", at most
+        RUNS_KEPT of them), so that a command it saw start and not end never counts as running
+        past it (provenance.window_end)."""
+        if self.started_at is None:
+            return
+        runs = [run for run in runs_of(self.store) if run[0] != self.started_at]
+        runs.append((self.started_at, time.time()))
+        self.store.set("uptime", json.dumps(runs[-RUNS_KEPT:]))
+
+    async def keep_alive(self):
+        while True:
+            await asyncio.sleep(ALIVE_EVERY)
+            self.alive()
+
+    def uptime(self) -> list[tuple[float, float]]:
+        """Chief of Staff's runs, this one's running until now."""
+        runs = [run for run in runs_of(self.store) if run[0] != self.started_at]
+        if self.started_at is not None:
+            runs.append((self.started_at, time.time()))
+        return runs
+
     def all_sources(self) -> list[Source]:
         return [self.slack, self.github, *self.sources]
 
     async def stop(self):
         self.stopping = True
         self.send.close()
-        for job in (self.recovery, self.process_job, self.watch_job, self.mirror_job):
+        for job in (
+            self.recovery,
+            self.process_job,
+            self.watch_job,
+            self.mirror_job,
+            self.alive_job,
+        ):
             if job:
                 job.cancel()
                 await asyncio.gather(job, return_exceptions=True)
+        if self.started_at is not None:
+            self.alive()  # Stopped: its run ends here.
+            self.started_at = None
         await self.others.stop()
         for source in self.all_sources():
             await source.stop()

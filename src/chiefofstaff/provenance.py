@@ -8,9 +8,11 @@ owner typed in it or a script ran `copilot -p` in a loop, so a session the CLI m
 owner's unless its own log shows a single shot (`one_shot`: one message of its own, never
 resumed, ended) and one of:
 
-- worker: it began while one of Chief of Staff's sessions ran a command (the commands table),
-  and something ties it to that command: it ran in that worker's own folder, the command names
-  the `copilot` command, or it is one of a batch (below) that began soon after the command did.
+- worker: it began while one of Chief of Staff's sessions ran a command (the commands table;
+  never past the end of the run of Chief of Staff it began in, nor for more than OPEN_MOST when
+  its end was not seen: see window_end), and something ties it to that command: it ran in that
+  worker's own folder, the command names the `copilot` command, or it is one of a batch (below)
+  that began soon after the command did.
   The time alone is not enough: a dev server a worker started runs for hours, and a
   `copilot -p` the owner runs meanwhile is theirs.
 - batch: at least BATCH_SIZE one-shot sessions whose first messages start alike (their first
@@ -29,7 +31,8 @@ go (tidied away) or as commands are read again; a session that changed since (co
 terminal) is looked at again.
 
 Learning takes the owner's words only from sessions they talked in (talks: a second message of
-their own, or resumed), never from a single shot, whoever made it.
+their own, or resumed), never from a single shot, whoever made it. A message the CLI writes
+itself (its memories) is no one's (see said_by_them).
 
 Logs are read in a thread, each once while it does not change: at most SHAPE_MOST bytes of it
 (a longer log is no single shot; for talks, only its start is read) and ROUND_BYTES a round, the
@@ -43,10 +46,10 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import stat
-import time
 from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -82,6 +85,14 @@ PREFIX = 64
 GAP = 30 * 60.0
 # A batch is a worker's when it began within LEAD seconds of the command it ran in.
 LEAD = 10 * 60.0
+# A command Chief of Staff did not see end (still running, its end not told, or it stopped):
+# running for at most this long, and never past the end of the run of Chief of Staff it began
+# in. Chief of Staff keeps its runs (kv "uptime": [start, last known running] each), the latter
+# touched every ALIVE_EVERY seconds: a command may have begun up to ALIVE_SLACK after it.
+OPEN_MOST = 2 * 3600.0
+ALIVE_EVERY = 60.0
+ALIVE_SLACK = ALIVE_EVERY + 30.0
+RUNS_KEPT = 500
 # A log longer than this is no single shot, and is not read.
 SHAPE_MOST = 4 << 20
 # What one round reads at most; the rest is read in the next one.
@@ -195,6 +206,18 @@ def own(event: dict, data: dict) -> bool:
     return not event.get("agentId") and not data.get("parentToolCallId")
 
 
+def said_by_them(event: dict, data: dict) -> bool:
+    """A user.message someone typed or sent (the owner, a script): not a sub-agent's, nor one
+    the CLI writes itself, with a source and no words (its memories, since 1.0.105)."""
+    content = data.get("content")
+    return (
+        own(event, data)
+        and not data.get("source")
+        and isinstance(content, str)
+        and bool(content.strip())
+    )
+
+
 def shape(log: bytes, whole: bool = True) -> Shape:
     """What a log says (see Shape): all of it, or only its start (`whole` False: only whether
     someone talked in it). A log in another format, or with a line it cannot read, is UNREAD; a
@@ -228,7 +251,7 @@ def shape(log: bytes, whole: bool = True) -> Shape:
             data = (event or {}).get("data")
             if not isinstance(data, dict):
                 return UNREAD
-            if not own(event or {}, data):
+            if not said_by_them(event or {}, data):
                 continue
             if said is not None:
                 return TALKED  # A second message: a conversation.
@@ -391,11 +414,41 @@ def iso(seconds: float) -> str:
     return datetime.fromtimestamp(seconds, UTC).isoformat()
 
 
+def runs_of(store: Store) -> list[tuple[float, float]]:
+    """Chief of Staff's runs, as kept: (start, when it was last known running), oldest first."""
+    try:
+        found = json.loads(store.get("uptime") or "[]")
+        return [(float(start), float(end)) for start, end in found]
+    except (ValueError, TypeError):
+        return []
+
+
+def window_end(start: float, ended: float | None, runs: list[tuple[float, float]]) -> float | None:
+    """Until when a command may have run: its end when Chief of Staff saw it end, in the run it
+    began in; else (still running, its end never told, or Chief of Staff stopped meanwhile: an
+    end its next start gave it, end_commands) that run's end, and OPEN_MOST after its start at
+    most. None for one that began while Chief of Staff was not running; one from before its runs
+    were kept (an older version's data) holds for OPEN_MOST at most."""
+    run = next((run for run in runs if run[0] - 5 <= start <= run[1] + ALIVE_SLACK), None)
+    if run is None:
+        if runs and start >= runs[0][0]:
+            return None
+        return min(ended or math.inf, start + OPEN_MOST)
+    stop = run[1] + ALIVE_SLACK
+    if ended is not None and ended <= stop:
+        return ended
+    return min(stop, start + OPEN_MOST)
+
+
 def windows(
-    store: Store, low: float, high: float, folder_of: Callable[[dict], Path | None]
+    store: Store,
+    low: float,
+    high: float,
+    folder_of: Callable[[dict], Path | None],
+    runs: list[tuple[float, float]],
 ) -> list[Window]:
     """The commands Chief of Staff's sessions ran that were running at some time from `low` to
-    `high`."""
+    `high` (see window_end), while Chief of Staff was (`runs`)."""
     rows = store.all(
         "SELECT session_id, command, started_at, ended_at FROM commands "
         "WHERE started_at <= ? AND (ended_at IS NULL OR ended_at >= ?)",
@@ -403,11 +456,12 @@ def windows(
     )
     folders: dict[str, str] = {}
     found = []
-    now = time.time()
     for row in rows:
         start = epoch(row["started_at"])
-        end = epoch(row["ended_at"]) if row["ended_at"] else now
-        if start is None or end is None:
+        if start is None:
+            continue
+        end = window_end(start, epoch(row["ended_at"]) if row["ended_at"] else None, runs)
+        if end is None or end < low or start > high:
             continue
         by = row["session_id"]
         if by not in folders:
@@ -454,15 +508,24 @@ class Provenance:
         log_of: Callable[[str], Path | None],
         folder_of: Callable[[dict], Path | None],
         keep: bool = True,
+        uptime: Callable[[], list[tuple[float, float]]] | None = None,
     ):
         self.store = store
         self.log_of = log_of
         self.folder_of = folder_of
         self.keep = keep  # Records what it decides (tidy-sessions' preview changes nothing).
+        # Chief of Staff's runs (see window_end): a running one's own ends now.
+        self.uptime = uptime or (lambda: runs_of(store))
         self.lock = asyncio.Lock()
         # Each log read: its identity then, and its shape.
         self.shapes: dict[str, tuple[tuple, Shape]] = {}
+        # What was decided (kept in the store, and what this one decided when not kept), read
+        # from the store again only when it holds another number of them; and by batch: group
+        # -> session id -> when it began.
+        self.cache: dict[str, dict] | None = None
+        self.counted = -1
         self.decided: dict[str, dict] = {}  # What it decided (when not kept).
+        self.groups: dict[str, dict[str, float]] = {}
         # One-shot sessions found the owner's, as they were then.
         self.settled: dict[str, OneShot] = {}
 
@@ -491,7 +554,7 @@ class Provenance:
         # The newest first: what is shown first is decided first.
         candidates.sort(key=lambda meta: stamp(getattr(meta, "modified_time", None)), reverse=True)
         async with self.lock:
-            records = known(self.store) | self.decided
+            records = await self.records()
             paths = {meta.session_id: self.log_of(meta.session_id) for meta in candidates}
             look = await asyncio.to_thread(self.look, paths, records)
             # Changed since (continued in a terminal, say): looked at again.
@@ -500,8 +563,7 @@ class Provenance:
                 for key, size in look.sizes.items()
                 if size is not None and size != records[key].get("size")
             ]
-            for key in gone:
-                records.pop(key)
+            self.drop(gone)
             shots = [
                 OneShot(
                     meta.session_id,
@@ -513,10 +575,12 @@ class Provenance:
                 for meta in candidates
                 if (found := look.shapes.get(meta.session_id)) and found.one_shot
             ]
-            # (A named one's group is its name's: a new one of it is named itself.)
+            # Those decided before, of the batches these may be of (a named one's group is its
+            # name's: a new one of it is named itself).
             earlier = [
-                OneShot(key, float(record.get("at") or 0), str(record.get("group") or ""))
-                for key, record in records.items()
+                OneShot(key, at, group)
+                for group in {shot.group for shot in shots}
+                for key, at in self.groups.get(group, {}).items()
             ]
             # One found the owner's stays theirs unless a batch it is one of comes along (the
             # commands it began during are known by the time it ended).
@@ -529,7 +593,8 @@ class Provenance:
             found = {}
             if due:
                 spans = [shot.at for shot in due]
-                commands = windows(self.store, min(spans), max(spans), self.folder_of)
+                runs = self.uptime()
+                commands = windows(self.store, min(spans), max(spans), self.folder_of, runs)
                 found = decide(due, earlier, commands)
             for shot in due:
                 if shot.session_id in found:
@@ -538,9 +603,41 @@ class Provenance:
                 else:
                     self.settled[shot.session_id] = shot
             self.record(found, gone)
-            records |= found
-        listed = {meta.session_id for meta in candidates}
-        return {key: record["as"] for key, record in records.items() if key in listed}
+        return {
+            meta.session_id: records[meta.session_id]["as"]
+            for meta in candidates
+            if meta.session_id in records
+        }
+
+    async def records(self) -> dict[str, dict]:
+        """What was decided, by session id (see cache): read in a thread when it changed."""
+        count = int(
+            self.store.value("SELECT count(*) FROM kv WHERE key >= ? AND key < ?", (KV, "made;"))
+        )
+        if self.cache is None or count != self.counted:
+            cache = await asyncio.to_thread(known, self.store)
+            if not self.keep:
+                cache |= self.decided
+            self.cache, self.counted = cache, count
+            self.groups = {}
+            for key, record in cache.items():
+                self.index(key, record)
+        return self.cache
+
+    async def kept(self) -> set[str]:
+        """Every session decided a worker's or a script's, listed or not (moved away)."""
+        async with self.lock:
+            return set(await self.records())
+
+    def index(self, key: str, record: dict):
+        group = str(record.get("group") or "")
+        self.groups.setdefault(group, {})[key] = float(record.get("at") or 0)
+
+    def drop(self, keys: Iterable[str]):
+        for key in keys:
+            record = (self.cache or {}).pop(key, None)
+            if record is not None:
+                self.groups.get(str(record.get("group") or ""), {}).pop(key, None)
 
     def look(self, paths: Mapping[str, Path | None], records: Mapping[str, dict]) -> Look:
         """In a thread: the size of each log decided before, and the shape of the others, read
@@ -602,6 +699,10 @@ class Provenance:
         return found
 
     def record(self, found: dict[str, dict], gone: list[str]):
+        if self.cache is not None:
+            self.cache |= found
+            for key, record in found.items():
+                self.index(key, record)
         if not self.keep:
             for key in gone:
                 self.decided.pop(key, None)
@@ -611,6 +712,12 @@ class Provenance:
             [(KV + key, json.dumps(record, sort_keys=True)) for key, record in found.items()],
             [KV + key for key in gone],
         )
+        if found or gone:
+            self.counted = int(
+                self.store.value(
+                    "SELECT count(*) FROM kv WHERE key >= ? AND key < ?", (KV, "made;")
+                )
+            )
         if found:
             logger.info(
                 "%d Copilot sessions a worker or a script made are left out of your sessions.",

@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import sqlite3
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,6 +27,7 @@ from chiefofstaff.habits import learned_from
 from chiefofstaff.provenance import (
     BATCH,
     MADE_BY_WORKER,
+    TALKED,
     UNREAD,
     OneShot,
     Provenance,
@@ -83,8 +85,19 @@ def prompt_mode(at: float, prompt: str, cwd: str = "/private/tmp") -> list[str]:
     ]  # fmt: skip
 
 
+def memories(at: float) -> str:
+    """What the CLI (1.0.105 on) puts first in a session of an account with memories: a
+    user.message of its own, with no words of the owner's."""
+    return event(
+        "user.message", at, content="", source="memory",
+        transformedContent="<memories>\nRecent memories from earlier sessions: …</memories>",
+        interactionId=str(uuid4()), agentTaskId=str(uuid4()),
+    )  # fmt: skip
+
+
 def interactive(at: float, *said: str, exit_: bool = True) -> list[str]:
-    """A session the owner typed in: its model resolved automatically, a turn per message."""
+    """A session the owner typed in: its model resolved automatically, the CLI's memories, a
+    turn per message."""
     lines = [
         event(
             "session.start", at, sessionId="s", version=1, producer="copilot-agent",
@@ -92,6 +105,7 @@ def interactive(at: float, *said: str, exit_: bool = True) -> list[str]:
             alreadyInUse=False,
         ),
         event("session.model_change", at, source="automatic", newModel="a-model"),
+        memories(at),
     ]  # fmt: skip
     for n, text in enumerate(said):
         moment = at + 60 * (n + 1)
@@ -136,6 +150,19 @@ def test_what_is_not_one_shot():
     assert not shape(log(*one[:2], "{not json", *one[2:])).one_shot, "a line it cannot read"
     assert not shape(log(*interactive(T0, exit_=True))).one_shot, "no message at all"
     assert shape(b"") == UNREAD
+
+
+def test_the_clis_memories_are_no_message_of_the_owners():
+    """Review: since CLI 1.0.105 a session of an account with memories starts with a
+    user.message the CLI writes (no words, source memory): one question asked is still one."""
+    assert shape(log(*interactive(T0, "Why does the build fail on CI?"))).one_shot
+    assert shape(log(*interactive(T0, "Fix it", "And test it"))) == TALKED
+    one = prompt_mode(T0, LABEL)
+    assert shape(log(*one[:3], memories(T0), *one[3:])).one_shot, "a script with memories"
+    from chiefofstaff.habits import talked_in
+
+    assert not talked_in(said_in(interactive(T0, "Why does the build fail on CI?")))
+    assert talked_in(said_in(interactive(T0, "Fix it", "And test it")))
 
 
 def test_a_sub_agents_message_is_not_its_own_and_another_order_is_read():
@@ -222,6 +249,101 @@ def test_a_worker_made_it_when_something_ties_it_to_the_worker(tmp_path):
     # Its own folder first, over a command of another worker's that names copilot.
     tied = [window(T0 - 5, T0 + 5, copilot=True, by="w2"), window(T0 - 9, T0 + 9, folder=real)]
     assert decide([shot(1, T0, cwd=str(folder))], [], tied)["s1"]["by"] == "w1"
+
+
+UP = [[T0 - 100, T0 + 60], [T0 + 3600, T0 + 3700]]  # Stopped from T0+60 to T0+3600.
+LOOP = 'for t in tickets/*.txt; do copilot -p "$(cat $t)" -s; done'
+
+
+def commanded(store: Store, started: float, ended: float | None, command: str = LOOP):
+    store.execute(
+        "INSERT INTO commands(session_id, call_id, command, started_at, ended_at) "
+        "VALUES (?,?,?,?,?)",
+        ("w1", f"c{started}", command, stored(started), stored(ended) if ended else None),
+    )
+
+
+@pytest.mark.parametrize("ended", [None, T0 + 3600], ids=["never seen to end", "ended at restart"])
+async def test_a_command_window_never_spans_time_chief_of_staff_was_not_running(
+    tmp_path, home, ended
+):
+    """Review: a command running when Chief of Staff stopped has no end, or the one its next
+    start gives it (end_commands). What the owner runs meanwhile is theirs; what the command ran
+    while Chief of Staff was running stays the worker's."""
+    store = Store(tmp_path / "data")
+    store.create_session("w1", "worker", "Label the tickets", "idle", cwd="/x")
+    store.set("uptime", json.dumps(UP))
+    commanded(store, T0 - 30, ended)
+    workers = home.add(prompt_mode(T0 + 20, "Label: refund my order"), T0 + 20)
+    owners = home.add(prompt_mode(T0 + 600, "Summarize the changelog"), T0 + 600)
+    asked = home.add(interactive(T0 + 900, "Why does the build fail on CI?"), T0 + 900)
+    made = await deciding(store, home).made(home.metas, {})
+    assert made == {workers: MADE_BY_WORKER}, "the owner's, during the downtime, stay theirs"
+    assert {owners, asked}.isdisjoint(store.items("made:"))
+
+
+async def test_chief_of_staff_keeps_its_runs(tmp_path, monkeypatch):
+    """Each run, from its start to when it was last known running: touched while it runs and
+    when it stops; a restart begins another (what provenance.window_end clips commands to)."""
+    from chiefofstaff import runtime as runtime_module
+    from chiefofstaff.provenance import runs_of
+
+    monkeypatch.setattr(runtime_module, "ALIVE_EVERY", 0.05)
+    data = tmp_path / "data"
+    harness = Harness(data)
+    await harness.runtime.start()
+    (first,) = runs_of(harness.store)
+    await asyncio.sleep(0.2)
+    (touched,) = runs_of(harness.store)
+    assert touched[0] == first[0] and touched[1] > first[1], "touched while it runs"
+    await harness.runtime.stop()
+    (stopped,) = runs_of(harness.store)
+    assert stopped[1] >= touched[1]
+    assert harness.runtime.provenance.uptime()[-1] == stopped, "stopped: its run as kept"
+    again = Harness(data)
+    await again.runtime.start()
+    runs = runs_of(again.store)
+    assert len(runs) == 2 and runs[0] == stopped and runs[1][0] >= stopped[1]
+    ending = again.runtime.provenance.uptime()[-1][1]
+    assert ending >= runs[1][1], "the running one runs until now"
+    await again.runtime.stop()
+
+
+async def test_a_command_never_seen_to_end_holds_for_two_hours_at_most(tmp_path, home):
+    """A detached command naming copilot whose end Copilot never told: running for at most
+    OPEN_MOST, also while Chief of Staff runs (its run ends now); before uptime was kept (data
+    of an older version), as long."""
+    store = Store(tmp_path / "data")
+    store.create_session("w1", "worker", "Label the tickets", "idle", cwd="/x")
+    commanded(store, T0, None)
+    early = home.add(prompt_mode(T0 + 60, "Label: refund my order"), T0 + 60)
+    late = home.add(prompt_mode(T0 + provenance.OPEN_MOST + 60, "Summarize it"), T0 + 9000)
+    running = Provenance(store, home.log_of, lambda row: None, uptime=lambda: [(T0 - 9, 2e10)])
+    assert await running.made(home.metas, {}) == {early: MADE_BY_WORKER}
+    store.execute("DELETE FROM kv WHERE key LIKE 'made:%'")
+    assert await deciding(store, home).made(home.metas, {}) == {early: MADE_BY_WORKER}, "no uptime"
+    assert late not in store.items("made:")
+    # One that began while Chief of Staff was not running is none of its commands.
+    store.execute("DELETE FROM kv WHERE key LIKE 'made:%'")
+    store.set("uptime", json.dumps([[T0 - 9000, T0 - 8000], [T0 + 9000, T0 + 9999]]))
+    assert await deciding(store, home).made(home.metas, {}) == {}
+
+
+async def test_tidy_sessions_with_chief_of_staff_stopped_leaves_the_owners_alone(
+    tmp_path, home, monkeypatch, capsys
+):
+    monkeypatch.setenv("COPILOT_HOME", str(home.root))
+    store = Store(tmp_path / "data")
+    store.create_session("w1", "worker", "Label the tickets", "idle", cwd="/x")
+    store.set("uptime", json.dumps(UP[:1]))  # Stopped since T0+60.
+    commanded(store, T0 - 30, None)
+    workers = home.add(prompt_mode(T0 + 20, "Label: refund my order"), T0 + 20)
+    owners = home.add(prompt_mode(T0 + 600, "Summarize the changelog"), T0 + 600)
+    store.close()
+    assert await tidy.run(tmp_path / "data", apply=False, backend=Listing(home)) == 0
+    said = capsys.readouterr().out
+    assert "1 session a Chief of Staff worker made" in said and "Summarize" not in said
+    assert {workers, owners} <= {m.session_id for m in home.metas}
 
 
 @pytest.mark.parametrize(
@@ -477,6 +599,32 @@ async def test_a_round_reads_within_its_bytes_newest_first(tmp_path, home, monke
     assert deciding_.shapes[big][1] == UNREAD, "not read"
 
 
+async def test_many_kept_decisions_cost_little_a_call(tmp_path, home):
+    """Review: every listing (each 2 s during a batch), Workers.external and forget parsed every
+    decision kept and grouped them all, on the event loop: 0.86 s a call at 50,000."""
+    store = Store(tmp_path / "data")
+    store.set_many(
+        [
+            (
+                f"made:{uuid4()}",
+                json.dumps({"as": "batch", "group": f"g{n % 500}", "at": T0 - n, "size": 1}),
+            )
+            for n in range(50_000)
+        ]
+    )
+    mine = [home.add(interactive(T0, f"Task {n}", "And test it"), T0) for n in range(37)]
+    batch = home.batch(3, start=T0 + 100)
+    deciding_ = deciding(store, home)
+    assert await deciding_.made(home.metas, {}) == dict.fromkeys(batch, BATCH)
+    for count in (1, 2):
+        home.batch(1, start=T0 + 160 + count)  # One more of the batch: decided as it comes.
+        began = time.perf_counter()
+        made = await deciding_.made(home.metas, {})
+        took = time.perf_counter() - began
+        assert len(made) == 3 + count and took < 0.1, took
+    assert set(mine).isdisjoint(made)
+
+
 async def test_when_it_cannot_tell_every_session_is_listed_as_before(tmp_path, home, caplog):
     store = Store(tmp_path / "data")
     home.batch(3)
@@ -652,6 +800,36 @@ async def test_without_a_log_of_its_own_what_is_read_says_whether_someone_talked
     await runtime.habits.collect_sessions()
     rows = harness.store.all("SELECT ref FROM observations ORDER BY id")
     assert [row["ref"].split(":")[1] for row in rows] == ["twice", "twice"]
+    await runtime.stop()
+
+
+@pytest.mark.parametrize("why", ["the listing failed", "the listing does not say whose"])
+async def test_a_learning_run_that_could_not_look_leaves_copilot_words_out(
+    tmp_path, monkeypatch, why
+):
+    """Review: when what was queued could not be looked at (a reconnect, a fallback listing),
+    a learning run still took it: 0.1.42's queued batch prompts could reach the first run
+    after the upgrade. They wait for a run that can look; the owner's other words go."""
+    harness = Harness(tmp_path / "data")
+    runtime = await harness.connect()
+    habits, store = runtime.habits, harness.store
+    habits.add("copilot", "instruction", "copilot:s1:e1", "You label support tickets for acme")
+    habits.add("chief", "instruction", "chief:1", "Answer me briefly, the conclusion first")
+    if why == "the listing failed":
+
+        async def failing():
+            raise RuntimeError("Copilot is reconnecting")
+
+        monkeypatch.setattr(harness.client, "list_sessions", failing)
+    else:
+        harness.client.metas = [listed("s1", T0, made="github/cli")]
+        harness.client.metas[0].clients_listed = False
+    await runtime.learning.learn()
+    given = json.loads(store.get("learning_observations") or "[]")
+    rows = store.all("SELECT id, ref FROM observations")
+    assert [row["ref"] for row in rows if row["id"] in given] == ["chief:1"]
+    habits.mark_learned(store.all("SELECT id, kind FROM observations WHERE ref='chief:1'"))
+    assert store.one("SELECT learned FROM observations WHERE ref='copilot:s1:e1'")["learned"] == 0
     await runtime.stop()
 
 

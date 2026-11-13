@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
-from .provenance import NOT_THEIRS, OWNER, known, managed, whose
+from .provenance import NOT_THEIRS, OWNER, managed, said_by_them, whose
 from .roles import ROUTER, SLACK, WATCHDOG, WORKER
 from .sources.github import POSTED_MARK, github_time, worker_commits
 from .sources.slack import SEARCH_TOOL
@@ -179,9 +179,7 @@ def talked_in(events: list[dict]) -> bool:
         data = data if isinstance(data, dict) else {}
         if event.get("type") in {"session.resume", "session.snapshot_rewind"}:
             return True
-        if event.get("type") == "user.message" and not (
-            event.get("agentId") or data.get("parentToolCallId")
-        ):
+        if event.get("type") == "user.message" and said_by_them(event, data):
             said += 1
     return said > 1
 
@@ -602,7 +600,7 @@ class Habits:
                 self.store.set(key, str(offset))
         return added
 
-    async def forget(self, backend: Any) -> int:
+    async def forget(self, backend: Any) -> int | None:
         """What was read as the owner's words and not learned from yet is dropped when its
         session is one learning takes no words from (see collect_sessions): a program's through
         Copilot's SDK (listed as the owner's before 0.1.40), a worker's or a script's (before
@@ -611,14 +609,14 @@ class Habits:
         queued before is never learned from. Only from a listing that says which app made each
         session (the fallback listing cannot tell them apart); a session open now, or whose log
         says neither, is looked at again next time. What was learned stays (see learned_from).
-        Returns how much was dropped."""
+        Returns how much was dropped; None when it could not be told (the fallback listing)."""
         listed = await backend.list_sessions()
         if not all(getattr(meta, "clients_listed", False) for meta in listed):
-            return 0
+            return None
         open_now = set(self.runtime.elsewhere)
         made = await self.runtime.provenance.made(listed, open_now)
         held = managed(self.store)
-        gone = set(known(self.store)) - open_now
+        gone = await self.runtime.provenance.kept() - open_now
         owners = []
         for meta in listed:
             is_open = meta.session_id in open_now
@@ -668,27 +666,35 @@ class Habits:
             return ""
         return self.store.value("SELECT min(created_at) FROM observations WHERE learned=0") or ""
 
-    def for_learning(self) -> list[dict]:
+    def for_learning(self, copilot: bool = True) -> list[dict]:
         """The newest observations of each kind not learned from yet (none while the owner
-        turned learning from their work off: what was read before stays unread)."""
+        turned learning from their work off: what was read before stays unread). `copilot`
+        False: not those read from Copilot sessions (what was queued from them could not be
+        looked at, see forget): they wait for a run that can, and mark_learned leaves them."""
         if not self.store.settings().learn_from_work:
             return []
+        source = "" if copilot else "AND source != 'copilot' "
         chosen = []
         for kind in KINDS:
             chosen += self.store.all(
-                "SELECT * FROM observations WHERE learned=0 AND kind=? ORDER BY id DESC LIMIT ?",
+                "SELECT * FROM observations WHERE learned=0 AND kind=? "  # noqa: S608
+                f"{source}ORDER BY id DESC LIMIT ?",  # (source: constant SQL)
                 (kind, PER_KIND),
             )
         return sorted(chosen, key=lambda row: row["id"])
 
     def mark_learned(self, given: list[dict]):
-        """Those given and, of each kind, the older ones: the owner's recent words matter."""
+        """Those given and, of each kind, the older ones: the owner's recent words matter (not
+        those read from Copilot sessions when the run was given none of them: see
+        for_learning; Learning.learn keeps which, as learning_without)."""
+        source = " AND source != 'copilot'" if self.store.get("learning_without") else ""
         newest: dict[str, int] = {}
         for row in given:
             newest[row["kind"]] = max(newest.get(row["kind"], 0), row["id"])
         for kind, last in newest.items():
             self.store.execute(
-                "UPDATE observations SET learned=1 WHERE kind=? AND id<=?", (kind, last)
+                f"UPDATE observations SET learned=1 WHERE kind=? AND id<=?{source}",  # noqa: S608
+                (kind, last),
             )
 
     def learning_lines(self, given: list[dict]) -> list[str]:

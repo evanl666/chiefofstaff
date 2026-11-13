@@ -225,14 +225,18 @@ class Learning:
         async with self.lock:
             if self.busy():
                 raise ValueError("Chief of Staff is learning from your work already.")
+            # What was queued from sessions learning takes no words from goes first; when that
+            # cannot be told (reconnecting, the fallback listing), none of what was read from
+            # Copilot sessions goes into this run.
+            looked = False
             if backend := self.runtime.backend:
-                # What was queued from sessions learning takes no words from goes first.
                 try:
-                    await self.runtime.habits.forget(backend)
+                    looked = await self.runtime.habits.forget(backend) is not None
                 except Exception:
                     logger.info("Could not look at what is queued for learning.", exc_info=True)
             items = self.unlearned()
-            observed = self.runtime.habits.for_learning()
+            observed = self.runtime.habits.for_learning(copilot=looked)
+            self.store.set("learning_without", "" if looked else "copilot")
             if not items and not observed:
                 raise ValueError("Nothing new to learn from yet.")
             for row in self.learners():  # One that stopped without proposing anything.
