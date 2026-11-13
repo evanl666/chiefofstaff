@@ -102,11 +102,27 @@ for number in range(1, runs + 1):
         shutil.rmtree(str(cache), ignore_errors=True)
 '''
 
+# Projects of a real size (an install of tens of seconds when cold), so that the 10% of the margin
+# is measured, not only its 15 seconds.
 NODE_DEPS = {
     "express": "4.21.2", "lodash": "4.17.21", "axios": "1.7.9", "dayjs": "1.11.13",
     "commander": "12.1.0", "zod": "3.24.1", "date-fns": "4.1.0", "uuid": "11.0.3",
+    "next": "15.1.3", "react": "19.0.0", "react-dom": "19.0.0", "typescript": "5.7.2",
+    "eslint": "9.17.0", "jest": "29.7.0", "webpack": "5.97.1", "@babel/core": "7.26.0",
+    "vite": "6.0.6", "@mui/material": "6.3.0", "@emotion/react": "11.14.0",
+    "@emotion/styled": "11.14.0", "aws-sdk": "2.1692.0",
 }  # fmt: skip
-PYTHON_DEPS = ["requests==2.32.3", "rich==13.9.4", "pydantic==2.10.4", "httpx==0.28.1"]
+PYTHON_DEPS = [
+    "requests==2.32.3", "rich==13.9.4", "pydantic==2.10.4", "httpx==0.28.1", "numpy==2.2.1",
+    "pandas==2.2.3", "scipy==1.14.1", "scikit-learn==1.6.0", "matplotlib==3.10.0",
+    "jupyterlab==4.3.4", "sqlalchemy==2.0.36", "fastapi==0.115.6", "boto3==1.35.90",
+]  # fmt: skip
+# One interpreter for both agents: which `python3` comes first differs between them (Codex runs
+# commands in a login shell, which puts the system's folders first on macOS).
+PYTHON = (
+    subprocess.run(["uv", "python", "find", "3.12"], capture_output=True, text=True).stdout.strip()
+    or "python3"
+)
 
 
 def projects(root: Path) -> dict[str, dict]:
@@ -148,7 +164,7 @@ def projects(root: Path) -> dict[str, dict]:
         "uv": {
             "files": {
                 "pyproject.toml": '[project]\nname = "perf"\nversion = "0.1.0"\n'
-                'requires-python = ">=3.9"\ndependencies = ' + json.dumps(PYTHON_DEPS) + "\n"
+                'requires-python = ">=3.12"\ndependencies = ' + json.dumps(PYTHON_DEPS) + "\n"
             },
             "steps": [["uv", "sync", "--cache-dir", "{cache}", "--python", "3.12"]],
             "where": [["uv", "cache", "dir"]],
@@ -157,7 +173,7 @@ def projects(root: Path) -> dict[str, dict]:
         "pip": {
             "files": {"requirements.txt": "\n".join(PYTHON_DEPS) + "\n"},
             "steps": [
-                ["python3", "-m", "venv", ".venv"],
+                [PYTHON, "-m", "venv", ".venv"],
                 [
                     ".venv/bin/pip",
                     "install",
@@ -169,7 +185,7 @@ def projects(root: Path) -> dict[str, dict]:
                 ],
             ],
             "clean": [".venv"],
-            "where": [["python3", "-m", "pip", "cache", "dir"]],
+            "where": [[PYTHON, "-m", "pip", "cache", "dir"]],
         },
     }
     if gradle and jdk and jdk.is_dir():
@@ -178,6 +194,10 @@ def projects(root: Path) -> dict[str, dict]:
                 "settings.gradle": "rootProject.name = 'perf'\n",
                 "build.gradle": "plugins { id 'java' }\nrepositories { mavenCentral() }\n"
                 "dependencies {\n  implementation 'com.google.guava:guava:33.3.1-jre'\n"
+                "  implementation 'org.springframework.boot:spring-boot-starter-web:3.4.1'\n"
+                "  implementation 'org.springframework.boot:spring-boot-starter-data-jpa:3.4.1'\n"
+                "  implementation 'com.fasterxml.jackson.core:jackson-databind:2.18.2'\n"
+                "  implementation 'org.apache.commons:commons-lang3:3.17.0'\n"
                 "  testImplementation 'org.junit.jupiter:junit-jupiter:5.11.3'\n"
                 "  testRuntimeOnly 'org.junit.platform:junit-platform-launcher'\n}\n"
                 "test { useJUnitPlatform() }\n",
@@ -349,6 +369,12 @@ async def main() -> int:
                     app, router, project["path"], agent, database, results_root / name
                 )
                 log(f"{name} {agent}: {results[name][agent]}")
+        with contextlib.closing(sqlite3.connect(f"file:{database}?mode=ro", uri=True)) as db:
+            (tokens,) = db.execute(
+                "SELECT COALESCE(SUM(tokens), 0) FROM agent_usage WHERE agent='codex'"
+            ).fetchone()
+            (spent,) = db.execute("SELECT COALESCE(SUM(credits), 0) FROM usage").fetchone()
+        log(f"Codex tokens: {tokens:,}; Copilot credits: {spent:.1f}")
     finally:
         await app.stop()
         with contextlib.suppress(Exception):
@@ -357,8 +383,8 @@ async def main() -> int:
             json.dumps(results, indent=1)
         )
     print("\n================ PERFORMANCE GATE (median of 5, seconds) ================")
-    print(f"{'project':8} {'cache':5} {'Copilot':>8} {'Codex':>8} {'margin':>7}  verdict  "
-          "(agent's own cost per command: Copilot / Codex)")  # fmt: skip
+    print(f"{'project':8} {'cache':5} {'Copilot':>8} {'Codex':>8} {'diff':>7} {'margin':>7}  "
+          "verdict  (agent's own cost per command: Copilot / Codex)")  # fmt: skip
     failed = []
 
     def cost(value):
@@ -371,7 +397,8 @@ async def main() -> int:
             margin = max(0.10 * copilot, 15.0)
             ok = within(codex, copilot)
             failed += [] if ok else [f"{name} {mode}"]
-            print(f"{name:8} {mode:5} {copilot:8.1f} {codex:8.1f} {margin:7.1f}  "
+            diff = f"{(codex - copilot) / copilot:+.0%}" if copilot else "-"
+            print(f"{name:8} {mode:5} {copilot:8.1f} {codex:8.1f} {diff:>7} {margin:7.1f}  "
                   f"{'pass' if ok else 'FAIL':7}  ({cost(by_agent['copilot']['overhead'][mode])} / "
                   f"{cost(by_agent['codex']['overhead'][mode])})")  # fmt: skip
     print("all within the margin" if not failed else f"OVER THE MARGIN: {', '.join(failed)}")
