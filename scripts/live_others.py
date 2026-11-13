@@ -23,12 +23,12 @@ O2 whose session it is (section 4.2), with a second Chief of Staff on the same h
 O4 a closed session continued here works and leaves the list (a); an open one is refused (b).
 O6 whose a `copilot -p` session is (provenance.py): five alike that a script runs one after
    the other are a batch, left out of the sidebar's rows and the Router's list (/api/external)
-   once they ended, and kept so in the store, as is a single one named `batch: …` (a); a single
-   one is the owner's, listed and finished (b); `chiefofstaff tidy-sessions` shows the batch,
-   what would be dropped and what was learned from it, changing nothing, and leaves them while
-   they are new (c); made two hours old, --apply moves them with a manifest, drops what was not
-   learned yet and keeps the one-off and the rest; one moved back is listed by Copilot again
-   and still left out (d).
+   once they ended (listed as the owner's while they run), and kept so in the store; a single
+   one named `batch: …` is never listed, also while it runs (a); a single one is the owner's,
+   listed and finished (b); `chiefofstaff tidy-sessions` shows the batch, what would be dropped
+   and what was learned from it, changing nothing, and leaves them while they are new (c); made
+   two hours old, --apply moves them with a manifest, drops what was not learned yet and keeps
+   the one-off and the rest; one moved back is listed by Copilot again and still left out (d).
 
 They run in the order O1, O5, O3, O2, O4, O6, five to eight minutes in all; each logs "O1a
 passed"… and the run ends with a report (each session's statuses as shown, Fresh and Found with
@@ -143,6 +143,9 @@ SLEEPY = (
     "DONE."
 )
 OK = "Reply with just the word OK."
+# O6b's single `copilot -p`: a prompt of its own (with the earlier sessions' OK, three one-shot
+# sessions alike within half an hour would be a batch, as a script's are).
+YES = "Reply with just the word YES."
 # O6: what a script labelling tickets of a made-up shop asks `copilot -p`, one ticket a call.
 LABEL = (
     "You label support tickets for acme, a made-up shop. Reply with one word, billing, outage, "
@@ -532,6 +535,7 @@ class Watch:
         self.expecting: dict[str, Expect] = {}
         self.opening: dict[str, int] = {}  # the next transition of a session's open to see
         self.timeline: dict[str, list[tuple[float, bool, str | None, str]]] = {}
+        self.seen: set[str] = set()  # Every session a row was read of.
         self.tasks: list[asyncio.Task] = []
         self.connected = asyncio.Event()
 
@@ -641,6 +645,7 @@ class Watch:
 
     def observe(self, session_id: str, row: dict, moment: float, age: float, source: str):
         self.observations += 1
+        self.seen.add(session_id)
         label = self.ctx.label(session_id)
         status = row["status"]
         key = status["key"] if status else None
@@ -1684,8 +1689,10 @@ async def o6_batch(ctx: Ctx):
     for ticket in TICKETS:
         batch.append(await prompt_mode(ctx, folder, LABEL + ticket))
         ctx.labels[batch[-1]] = f"batch {len(batch)}"
+    # Not decided on while they run (unnamed): the owner's rows until they end.
     shown_open = {key for key in batch if any(e[1] for e in watch.timeline.get(key, []))}
     log(f"the script's five sessions ended; shown open while they ran: {len(shown_open)}")
+    assert shown_open, "an unnamed one-shot session is listed while it runs"
     for session_id in batch:
         await watch.until("left out: one of a batch", session_id, lambda r: r is None, LISTING)
     ctx.banned |= set(batch)  # Never listed from now on.
@@ -1699,18 +1706,35 @@ async def o6_batch(ctx: Ctx):
     log(f"O6a passed: {len(batch)} `copilot -p` alike: left out of the rows and the Router's "
         f"list, kept as a batch ({made[batch[0]]['why']})")  # fmt: skip
 
-    # One named as a batch's, as workers name theirs: left out on its own.
-    named = await prompt_mode(ctx, folder, OK, "--name", "batch: Label the acme tickets")
+    # One named as a batch's, as workers name theirs: never listed, also while it runs (the
+    # sidebar's rows, and the Router's list asked again and again meanwhile).
+    routers: set[str] = set()
+
+    async def ask_routers_list():
+        while True:
+            with suppress(Exception):
+                listed = await app.get("/api/external?refresh=true")
+                routers.update(item["id"] for item in listed)
+            await asyncio.sleep(0.5)
+
+    asking = asyncio.create_task(ask_routers_list())
+    try:
+        named = await prompt_mode(ctx, folder, OK, "--name", "batch: Label the acme tickets")
+        await asyncio.sleep(FOUND_TARGET)  # Its closing brought a listing.
+    finally:
+        asking.cancel()
+        await asyncio.gather(asking, return_exceptions=True)
     ctx.labels[named] = "named"
-    await watch.until("left out: named a batch's", named, lambda r: r is None, LISTING)
     ctx.banned.add(named)
+    assert named not in watch.seen, f"named a batch's, yet listed: {watch.timeline.get(named)}"
+    assert routers and named not in routers, "named a batch's, yet in the Router's list"
     assert (await app.http.get(f"/api/others/{named}")).status_code == 404
-    assert named not in {item["id"] for item in await app.get("/api/external?refresh=true")}
     assert app.made()[named]["why"] == "named", app.made()[named]
-    log('O6a passed: one `copilot -p --name "batch: …"` alone: left out, kept as named')
+    log(f"O6a passed: one `copilot -p --name \"batch: …\"` alone: never listed, also while "
+        f"it ran (the Router's list read {len(routers)} ids meanwhile); kept as named")  # fmt: skip
 
     # b. A single one of the owner's: theirs.
-    one_off = await prompt_mode(ctx, ctx.folder("one-off"), OK)
+    one_off = await prompt_mode(ctx, ctx.folder("one-off"), YES)
     # Followed from when its row says it closed (it ended before this test knew its id).
     await watch.until("listed, closed", one_off, lambda r: r and not r["open"], LISTING)
     ctx.track(one_off, "P")
