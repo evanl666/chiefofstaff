@@ -936,7 +936,9 @@ refuses (the worker must ask you): writes outside its folders, `sudo`, force pus
 `gh pr merge|close|review|comment`, `gh issue` changes, `gh api` writes, GitHub MCP writes,
 piping downloads into a shell, and system-level destructive commands. Workers that read Slack
 cannot fetch URLs, and their network reaches only GitHub when sandboxed. These checks read
-commands as text, a best effort: protect your default branch on GitHub as well.
+commands as text, which can't be fully parsed: the push and delete checks are a best effort (a
+push whose branch a command doesn't say plainly, and a command line too long or complex to
+check, are refused, saying so). Protect your default branch on GitHub as well.
 
 **Yolo** is on by default, as in your own Copilot sessions: workers run without these checks.
 Turn it off in Settings → *Workers* (or per worker in its header's **⋯**: *Ask first*) to have

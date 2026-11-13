@@ -265,12 +265,10 @@ def test_every_way_to_push_to_the_default_branch_is_denied(command, tmp_path):
         "git push origin \\\nmain",
         "git -c remote.origin.push=HEAD:main push origin",
         "git -c push.default=matching push origin",
-        "git --config-env=remote.origin.push=SPEC push origin",
         "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.push GIT_CONFIG_VALUE_0=HEAD:main "
         "git push origin",
         "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.push "
         "GIT_CONFIG_VALUE_0=HEAD:master; git push",
-        "GIT_CONFIG_PARAMETERS=\"'remote.origin.push'='HEAD:main'\" git push origin",
         "env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.push GIT_CONFIG_VALUE_0=main "
         "git push",
         "bash -lc 'git push origin ma\"\"in'",
@@ -283,6 +281,21 @@ def test_a_push_to_the_default_branch_is_read_as_the_shell_reads_it(command, tmp
     row = {"role": "worker", "slack": 0, "cwd": str(tmp_path)}
     denied = permission_denial(row, request("shell", full_command_text=command))
     assert denied and "push to the default branch" in denied, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git --config-env=remote.origin.push=SPEC push origin",
+        "GIT_CONFIG_PARAMETERS=\"'remote.origin.push'='HEAD:main'\" git push origin",
+    ],
+)
+def test_a_push_whose_refspecs_are_in_configuration_not_read_is_denied_saying_so(command, tmp_path):
+    """Review of 9d8e631 (V5): refspecs given in a variable, or in configuration not read here,
+    are not known: denied as such, not as a push to the default branch."""
+    row = {"role": "worker", "slack": 0, "cwd": str(tmp_path)}
+    denied = permission_denial(row, request("shell", full_command_text=command))
+    assert denied and "can't tell which branch" in denied, command
 
 
 def checkout_on(path, branch: str):
@@ -378,7 +391,9 @@ def test_a_forced_push_is_denied_as_one_first(command, tmp_path):
     ],
 )
 def test_pushing_a_branch_whose_name_has_main_in_it_is_allowed(command, tmp_path):
-    row = {"role": "worker", "slack": 0, "cwd": str(tmp_path)}
+    """From a checkout of such a branch (one that names none pushes it: git says which)."""
+    folder = checkout_on(tmp_path / "repo", "feature/main-tweak")
+    row = {"role": "worker", "slack": 0, "cwd": str(folder)}
     assert permission_denial(row, request("shell", full_command_text=command)) is None, command
 
 

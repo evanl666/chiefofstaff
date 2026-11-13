@@ -10,13 +10,22 @@
   `GIT_CONFIG_*`) got past it, and so did a forced push after git's own options. A push that
   names no branch is refused when its checkout's branch (or where it pushes) is `main` or
   `master`, unless it pushes only tags, is a dry run, or the same line made a new branch and
-  switched to it first (joined by `&&`). A push whose branch a variable, a glob or a brace
-  expansion names, one through an alias, and one naming no branch in another repository
-  (`GIT_DIR`, `--git-dir`) are refused too; one a command substitution names (`$(git branch --show-current)`) counts as the
-  checkout's branch. A command line too long or nested too deep to check is refused, saying so.
-  Whatever the rule refused before, it still refuses. A branch whose name only contains "main"
-  (`fix-main`, `mainline`) is pushed as before. This reads commands as text, so it is a best
-  effort: protect your default branch on the server too.
+  switched to it first (joined by `&&`). What a command substitution runs (`$(…)`, backquotes,
+  also in double quotes and in heredocs) is checked too. A push whose branch the line does not
+  say is refused, saying it can't tell which branch (name the branch itself): one in a variable
+  the line did not set (`B=feat; git push origin $B` and `for b in …` are read), a glob, a brace
+  expansion, an alias, part of a substitution's output, or one naming no branch in another
+  repository (`GIT_DIR`, `--git-dir`) or in a folder git can't say the branch of. A whole
+  substitution (`$(git branch --show-current)`) counts as the checkout's branch. A command line
+  too complex to check is refused, saying so. Whatever the rule refused before, it still
+  refuses, and everyday commands get the same answer as before. A branch whose name only
+  contains "main" (`fix-main`, `mainline`) is pushed as before.
+- **A long command line no longer stalls Chief of Staff while it is checked** (with Ask first):
+  an `rm` followed by many flags such as `-rm` took seconds to check (10 s for 100 KB), and every
+  session, the page and Slack waited. Each check now reads a line in time linear in its length,
+  and a line over 500,000 characters is refused, saying it is too long to check.
+- The push and delete checks read commands as text, which can't be fully parsed: they are a
+  best effort. Protect your default branch on the server too.
 
 ## 0.1.44 (2026-11-13)
 

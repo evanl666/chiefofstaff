@@ -2,6 +2,7 @@
 (tests/policy_v0142.py, frozen), the default branch's pushes refused in every shape of command
 line here, and the pushes of ordinary work let through."""
 
+import itertools
 import subprocess
 import time
 from types import SimpleNamespace
@@ -130,6 +131,44 @@ BYPASSES = [
     "export GIT_DIR=/x/.git; git push",
     'git push origin "$(echo main)"',
     "git checkout - && git push",
+    # Review of 9d8e631 (V2): a switch to a new branch that may have failed (`;`, `||`, a new
+    # line) leaves where it was before, and the branch it named, counting.
+    "git checkout -B main origin/main; git push -u origin HEAD",
+    "git checkout -b master origin/master\ngit push",
+    "git checkout main; git switch -c fix || true; git push",
+    "git checkout main && git switch -c fix; git push",
+    "git checkout - && git switch -c fix; git push",
+    # (V3) What a substitution runs, in double quotes or a heredoc that expands; the part of a
+    # refspec after a substitution.
+    'git push origin "$(git branch --show-current):main"',
+    'git push origin "$(echo HEAD):refs/heads/main"',
+    'out="$(git push origin HEAD:main)"',
+    'echo "$(git push --all)"',
+    'echo "`git push origin main`"',
+    "cat <<EOF\n$(git push origin HEAD:main)\nEOF",
+    # (V4) Redirections of a checkout; an apostrophe in a heredoc's body.
+    "git checkout main 2>&1 && git push",
+    "git checkout main > /dev/null && git push",
+    "git checkout main 2>/dev/null && git push -u origin HEAD",
+    "git checkout main\ncat > notes.md <<'EOF'\nit's done\nEOF\ngit push",
+    # Found while fixing those: a substitution is a word's part; a variable's value is split
+    # at its spaces, set where the line may set it again, or holds options and commands.
+    "git push origin `echo main`",
+    "git push origin $(echo ma)in",
+    "git push origin `echo ma`in",
+    "B=`echo main`; git push origin $B",
+    'B="feat main"; git push origin $B',
+    'R="origin main"; git push $R',
+    "B=feat; read B <<< main; git push origin $B",
+    "B=feat; for i in 1 2; do git push origin $B; B=main; done",
+    'for b in wb/a main; do git push origin "$b"; done',
+    "OPTS=-f; git push $OPTS origin wb/x",
+    "X=push; git $X origin main",
+    "B=feat; f() { git push origin $B; }; B=main; f",
+    'git push -o ";" origin main',
+    "git $(echo push) origin main",
+    "cd $D && git push",
+    'cd "$(git rev-parse --show-toplevel)/../other" && git push',
 ]
 # What a worker does every day, on its own branch: let through.
 EVERYDAY = [
@@ -159,6 +198,21 @@ EVERYDAY = [
     "git push origin 'refs/tags/v1.2.3'",
     'git push origin wb/x > "$LOG" 2>&1',
     'git push "$REMOTE" wb/x',
+    # Review of 9d8e631 (V5): a branch the line put in a variable itself.
+    "B=feat; git push origin $B",
+    'BRANCH=feat && git push -u origin "$BRANCH"',
+    'export B=wb/x; git push origin "$B"',
+    'BRANCH=$(git branch --show-current); git push origin "$BRANCH"',
+    'BRANCH="$(git branch --show-current)" && git push -u origin "$BRANCH"',
+    'for b in wb/a wb/b; do git push origin "$b"; done',
+    # (V4) Redirections, heredocs.
+    "git push origin wb/x 2>&1 | tail -5",
+    "git commit -F - <<'EOF'\nDon't push origin main yet\nEOF\ngit push origin wb/x",
+    "cat > notes.md <<'EOF'\nit's done\nEOF\ngit push",
+    'git commit -m "$(cat msg.txt)" && git push origin wb/x',
+    "cat <<'EOF'\n$(git push)\nEOF\ngit push origin wb/x",
+    "git push -o ci.skip -u origin HEAD",
+    'D=src; cd "$D" && git push',
 ]
 # On a checkout of main itself: pushes that update no branch, or one the line made.
 ON_MAIN_ALLOWED = [
@@ -176,6 +230,12 @@ ON_MAIN_ALLOWED = [
     "git switch -c fix && git commit -am 'Fix it' && git push -u origin HEAD",
     "git checkout -b fix &&\n  git push -u origin HEAD",
     "git switch -c fix && git checkout README.md && git push -u origin HEAD",
+    # Review of 9d8e631 (V4): `2>&1` is one redirection, not a break in the `&&` chain; the last
+    # of `-n`/`--no-dry-run` wins. (V2) The branch made last counts, every join `&&`.
+    "git switch -c fix 2>&1 && git push -u origin HEAD",
+    "git checkout main && git switch -c fix && git push -u origin HEAD",
+    "git push --no-dry-run -n origin",
+    "git push origin --tags 2>&1 | tail -3",
 ]
 ON_MAIN_REFUSED = [
     "git push",
@@ -204,6 +264,16 @@ ON_MAIN_REFUSED = [
     "git push origin $(git branch --show-current)",
     'git push origin "$(git branch --show-current)"',
     "git push origin `git branch --show-current`",
+    # Review of 9d8e631 (V4): an apostrophe in a heredoc's body is no quote; `-on` is `-o n`
+    # (a push option), not a dry run; the last of `-n`/`--no-dry-run` wins.
+    "git commit -F - <<'EOF'\nDon't break the build\nEOF\ngit push",
+    "git push -on origin",
+    "git push -n --no-dry-run origin",
+    "git switch -c fix 2>&1; git push -u origin HEAD",
+    # An empty variable is no word: a bare push. A redirection's file descriptor is no refspec.
+    "B=; git push origin $B",
+    "git push origin 2>/dev/null",
+    "git push origin 2>&1",
 ]
 # v0.1.42 refused these as pushes to the default branch, wrongly; still refused (never less).
 OLD_FALSE_POSITIVES: set[str] = set()
@@ -216,6 +286,8 @@ def checkout(path, branch: str):
     git = ["git", "-C", str(path), "-c", "user.email=t@t", "-c", "user.name=t"]
     subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "start"], check=True)
     subprocess.run([*git, "remote", "add", "origin", str(remote)], check=True)
+    for folder in ("src", "docs"):
+        (path / folder).mkdir()
     return path
 
 
@@ -363,14 +435,15 @@ def test_the_same_push_many_times_asks_git_once(work, main_checkout, feature):
     assert found and "default branch" in found and work["git"] == 4
 
 
-def test_a_line_the_shell_would_not_parse_is_read_loosely_in_one_pass(work, feature):
-    assert denial("git push 'oops", feature) is None and work["git"] == 0
+def test_a_line_the_shell_would_not_parse_is_read_loosely_in_one_pass(work, feature, main_checkout):
+    assert denial("git push 'oops", feature) is None and work["git"] == 2
+    assert denial("git push 'oops", main_checkout), "a bare push: its folder's branch, asked"
     assert denial("git push origin HEAD:main 'oops", feature)
     found, took = timed("git x " * 30_000 + "push origin main 'oops", feature)
     assert found and took < 0.5
 
 
-@pytest.mark.parametrize("paths", [10_000, 30_000])
+@pytest.mark.parametrize("paths", [10_000, 19_000])
 def test_a_long_git_add_is_let_through_at_once(paths, work, feature):
     command = "git add " + " ".join(f"src/part_{i:05d}/module.py" for i in range(paths))
     found, took = timed(command, feature)
@@ -387,7 +460,10 @@ def test_a_long_line_that_pushes_is_read_in_one_pass(work, feature):
     "command",
     [
         "git push origin wb/x " + "x " * policy.MOST_WORDS,
-        "git push origin wb/x " + "x" * policy.MOST_CHARS,
+        "git push origin wb/x" + " ;" * policy.MOST_TOKENS,
+        "bash -c 'eval \"eval git push origin wb/x " + "y" * 100_000 + "\"'",
+        "cd d; " * (policy.MOST_MOVES + 1) + "git push",
+        "git -C " + "d/" * (policy.MOST_PATH // 2 + 1) + " push",
         "".join(f"export GIT_A{i}=1; " for i in range(policy.MOST_GIT_ENV + 1)) + "git push",
         "; ".join(f"git -C d{i} push" for i in range(policy.MOST_FOLDERS + 1)),
     ],
@@ -409,6 +485,24 @@ def test_a_line_too_much_to_read_that_pushes_is_refused_saying_why(command, work
         "sudo " * 40_000,
         "$(" * 40_000,
         "`" * 40_000,
+        # Review of 9d8e631 (V1): `\brm\s+` matched in each `-rm`: quadratic, under the GIL.
+        "rm " + "-rm " * 20_000,
+        "rm " + "-arm " * 20_000 + "/",
+        # Found while fixing it: a long word, many `-C`s, heredocs that never end, a variable
+        # put in itself, many variables, many switches, shells that run nothing.
+        "git push " + "-o=" * 30_000,
+        "B=" + "x" * 1000 + "; git push origin " + "$B" * 50_000,
+        "B0=x; " + "".join(f"B{i + 1}=$B{i}$B{i}; " for i in range(40)) + "git push origin $B40",
+        "git -C x" * 12_000 + " push",
+        "\n<<'EOF'\t" * 10_000 + "git push",
+        "".join(f"A{i}=x; " for i in range(12_000)) + "git push",
+        "".join(f"git checkout a{i}; git checkout -b b{i}; " for i in range(2_500)) + "git push",
+        "/\\bash -cmain" * 8_000 + "\ngit push origin main",
+        '"$(' * 30_000 + " git push",
+        "$((" * 30_000 + " git push",
+        '""' * 50_000 + " git push",
+        ")[} " * 25_000 + " git push",
+        "".join(f"git checkout a{i}; git push; " for i in range(5_000)),
     ],
 )
 def test_no_line_is_slow_to_check(command, feature):
@@ -419,7 +513,8 @@ def test_no_line_is_slow_to_check(command, feature):
 # The rules of v0.1.42 the check keeps, now read in one pass: what each says is what it said.
 ALPHABET = ["git", "push", "origin", "main", "master", "-f", "--force", "+x", ":main", "rm",
             "-r", "-rf", "-x", "/", "~", "$HOME", "curl", "wget", "|", "sh", "sudo", ";", "&",
-            "\n", " ", "  ", "x", "'", "--force-with-lease"]  # fmt: skip
+            "\n", " ", "  ", "x", "'", "--force-with-lease", "-rm", "-arm", "-R", "-Rf",
+            "-fr"]  # fmt: skip
 
 
 @pytest.mark.parametrize("seed", range(4))
@@ -443,3 +538,625 @@ def test_the_rules_kept_from_v0142_say_what_they_said(seed):
         assert bool(old["push to the default branch"].search(command)) == policy.floor_default(
             command
         ), command
+
+
+# Review of 9d8e631 (V1, G3): each rule reads a line in time linear in it, whatever words it is
+# made of: tried here on lines of its own words, repeated to about 100 KB.
+RULE_WORDS = {
+    "sudo is not allowed": ("", ["sudo", " ", "\t", ";", "(", "&", "x"]),
+    "recursive delete of home or root": (
+        "rm ",
+        ["rm", "-rm", "-r", "-arm", "-R", "/", "~", "$HOME", "-", " "],
+    ),
+    "push": (
+        "git push ",
+        ["git", "push", "origin", "main", "-f", "+", ":", "$(", "`", '"', "'", "\\", "\n", ";",
+         "&&", "|", "<<EOF", "EOF", "eval", "sh -c", "cd", "-C", "B=x", "$B", "for b in", "do",
+         "checkout -b", "#", "((", "))", " "],
+    ),
+    "merging, closing or commenting on PRs as the owner": ("", ["gh", "pr", "merge", " ", "\t"]),
+    "changing issues as the owner": ("", ["gh", "issue", "close", " "]),
+    "piping a download into a shell": (
+        "",
+        ["curl", "wget", "|", "sh", "bash", "sudo", "x", "\n", " "],
+    ),
+    "system-level destructive command": ("", ["mkfs", "diskutil", "erase", "shutdown", " "]),
+    "gh api": (
+        "gh api ",
+        ["gh", "api", "-X", "--method", "=", "-f", "graphql", "mutation", "GET", " ", "\t"],
+    ),
+}  # fmt: skip
+
+
+def adversarial_lines():
+    for name, (start, words) in RULE_WORDS.items():
+        repeated = [
+            *words,
+            " ".join(words),
+            "".join(words),
+            *map("".join, itertools.pairwise(words)),
+        ]
+        for word in repeated:
+            yield name, start + word * (100_000 // len(word))
+
+
+@pytest.mark.parametrize(("rule", "command"), list(adversarial_lines()))
+def test_each_rule_reads_a_line_of_its_own_words_in_linear_time(rule, command, feature):
+    rules = {reason: found for found, reason in policy.DANGEROUS}
+    chosen = {
+        "push": [policy.too_complex, policy.pushes_forced, policy.pushes_default],
+        "gh api": [lambda line, cwd: policy.gh_api_writes(line)],
+    }.get(rule, [rules.get(rule)])
+    for found in chosen:
+        assert found is not None
+        policy.reading.cache_clear()
+        started = time.perf_counter()
+        found(command, str(feature))
+        took = time.perf_counter() - started
+        assert took < 0.5, (rule, command[:40], took)
+
+
+def test_a_line_past_the_cap_is_refused_before_any_rule_reads_it(monkeypatch, feature):
+    """Review of 9d8e631 (V1): one cap, on every command line, before any rule."""
+    read = []
+    rules = [(lambda line, cwd, r=reason: read.append(r), reason) for _, reason in policy.DANGEROUS]
+    monkeypatch.setattr(policy, "DANGEROUS", rules)
+    monkeypatch.setattr(policy, "gh_api_writes", lambda line: read.append("gh api"))
+    for command in ("rm " + "-rm " * 200_000, "ls " + "x" * policy.MOST_LINE):
+        found = denial(command, feature)
+        assert found and "too long to check" in found and not read
+    assert denial("ls " + "x" * (policy.MOST_LINE - 3), feature) is None and len(read) > 1
+
+
+@pytest.mark.parametrize(
+    ("command", "reason"),
+    [
+        ('git push origin "$BRANCH"', "can't tell which branch"),
+        ("git push origin $(echo ma)in", "can't tell which branch"),
+        ("cd $D && git push", "can't tell which branch"),
+        ("git push origin 'refs/heads/*:refs/heads/*'", "can't tell which branch"),
+        ("B=main; git push origin $B", "push to the default branch"),
+        ("B=`echo main`; git push origin $B", "push to the default branch"),
+        ("OPTS=-f; git push $OPTS origin wb/x", "force push"),
+    ],
+)
+def test_a_refusal_says_why(command, reason, feature):
+    """Review of 9d8e631 (V5): a push whose branch the line does not say is refused for that,
+    never as a push to the default branch."""
+    found = denial(command, feature) or ""
+    assert reason in found
+    assert reason == "push to the default branch" or "default branch" not in found
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git -C a\x00b push",
+        "cd a\x00b && git push",
+        "git -C \udcff push",
+        "cd \ud800 && git push",
+        "git -C 'a\x00b' push origin main",
+    ],
+)
+def test_a_folder_git_cannot_be_asked_of_is_a_reason_not_an_error(command, feature):
+    """Review of 9d8e631 (V6): a NUL or an undecodable path escaped the check as an error."""
+    found = denial(command, feature)
+    assert found and found.startswith("Denied: ") and policy.NOT_CHECKED not in found
+
+
+def test_any_failure_to_check_refuses_saying_so(monkeypatch, feature):
+    def broken(folder):
+        raise RuntimeError(folder)
+
+    monkeypatch.setattr(policy, "current_branches", broken)
+    policy.reading.cache_clear()
+    found = denial("git push", feature)
+    assert found and f"{policy.NOT_CHECKED} (RuntimeError)" in found
+
+
+# G1 and G4: on any line, what v0.1.42 refused is refused still; and every line gets a decision
+# (a reason when refused), never an error, in time.
+FUZZ = ["git", "push", "origin", "main", "wb/x", "-f", "+x", ":main", " ", " ", "\n", "\t", "'",
+        '"', "`", "$(", ")", "(", "\\", "\x00", "\ud800", "\udcff", ";", "&&", "||", "|", "&",
+        "<<EOF", "<<'E'", "EOF", "E", "#", "eval", "sh -c", "cd", "-C", "$B", "B=", "for b in",
+        "do", "done", "{", "}", "$((", "))", "rm", "-rf", "/", "~", "curl", "gh api", "-X",
+        "-f", "sudo", "\r", "é", "${B}", "*", "checkout", "-b", "switch", "-c", "2>&1",
+        ">/dev/null", "HEAD", "--tags", "-n", "alias.p=push"]  # fmt: skip
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_every_line_gets_a_decision_never_less_than_v0142s(seed, monkeypatch, feature):
+    import random
+
+    monkeypatch.setattr(policy, "current_branches", lambda folder: {"wb/x"})
+    chance = random.Random(seed)  # noqa: S311  (a fixed sample, not a secret)
+    for _ in range(1500):
+        command = "".join(chance.choices(FUZZ, k=chance.randint(0, 40)))
+        policy.reading.cache_clear()
+        found = denial(command, feature)
+        assert found is None or (found.startswith("Denied: ") and policy.NOT_CHECKED not in found)
+        assert found or not old_denial(command), command
+
+
+@pytest.mark.parametrize("seed", range(3))
+def test_a_giant_line_gets_a_decision_in_time(seed, monkeypatch, feature):
+    import random
+
+    monkeypatch.setattr(policy, "current_branches", lambda folder: {"wb/x"})
+    chance = random.Random(seed)  # noqa: S311  (a fixed sample, not a secret)
+    words = chance.choices(FUZZ, k=40)
+    command = "".join(words) * (450_000 // len("".join(words)))
+    found, took = timed(command, feature)
+    assert (found is None or policy.NOT_CHECKED not in found) and took < 1.5, took
+
+
+@pytest.mark.parametrize("seed", range(2))
+def test_the_words_of_a_line_are_shlexs(seed):
+    """shell_words reads as shlex.shlex(…, posix=True, punctuation_chars=SEPARATORS) with only
+    " \t\r" for whitespace (what the check used before), in linear time."""
+    import random
+    import shlex
+
+    def shlexs(text):
+        lexer = shlex.shlex(text, posix=True, punctuation_chars=policy.SEPARATORS)
+        lexer.whitespace, lexer.whitespace_split, lexer.commenters = " \t\r", True, ""
+        try:
+            return list(lexer)
+        except ValueError as error:
+            return str(error)
+
+    def ours(text):
+        try:
+            return policy.shell_words(text)
+        except ValueError as error:
+            return str(error)
+
+    chance = random.Random(seed)  # noqa: S311  (a fixed sample, not a secret)
+    letters = [*"a b\t\r\n'\"\\;&|()`$#<>=-é\f\v\x00", "git", "  ", "\\\n", "\u2028", "\xa0"]
+    for _ in range(20_000):
+        text = "".join(chance.choices(letters, k=chance.randint(0, 20)))
+        assert ours(text) == shlexs(text), text
+
+
+def test_a_quoted_separator_is_a_word():
+    assert [type(word).__name__ for word in policy.shell_words("a ';' b; c")] == [
+        "str", "str", "str", "Separator", "str",
+    ]  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    ("text", "made", "runs"),
+    [
+        ("echo $(git push)", "echo \x00", ["git push"]),
+        ("echo `git push`", "echo \x00", ["git push"]),
+        ("echo '$(git push)'", "echo '$(git push)'", []),
+        ('echo "$(git push)"', 'echo "\x00"', ["git push"]),
+        ("echo \\$(git push)", "echo \\$(git push)", []),
+        ('echo $(echo ")")x', "echo \x00x", ['echo ")"']),
+        ("a$(b $(c))d", "a\x00d", ["b $(c)"]),
+        ("echo `a \\` b`", "echo \x00", ["a \\` b"]),
+        ("echo $(never closed", "echo \x00", ["never closed"]),
+        ('echo "it\'s $(x)"', 'echo "it\'s \x00"', ["x"]),
+    ],
+)
+def test_a_command_substitution_is_a_made_up_part_of_its_word(text, made, runs):
+    assert policy.without_substitutions(text) == (made, runs)
+
+
+# Review of 9d8e631 (G2): what workers run every day gets exactly v0.1.42's decision, from a
+# checkout of a feature branch and of main, but for the intended new refusals listed below.
+NORMAL = [
+    # git, no push
+    "git status",
+    "git status --short",
+    "git diff",
+    "git diff --stat origin/main...HEAD",
+    "git log --oneline -20",
+    "git log --oneline main..HEAD",
+    "git fetch origin",
+    "git fetch origin main",
+    "git pull --rebase origin main",
+    "git rebase origin/main",
+    "git merge origin/main",
+    "git merge --no-ff origin/main -m 'Merge main'",
+    "git add -A",
+    "git add .",
+    "git add src tests",
+    "git commit -m 'Fix the parser'",
+    "git commit -am 'Update docs'",
+    "git commit --amend --no-edit",
+    "git stash",
+    "git stash pop",
+    "git stash push -m 'wip on main'",
+    "git branch",
+    "git branch -a",
+    "git branch -d wb/old",
+    "git branch -D wb/old",
+    "git checkout -- README.md",
+    "git restore README.md",
+    "git restore --staged .",
+    "git reset --hard origin/wb/x",
+    "git reset HEAD~1",
+    "git cherry-pick abc123",
+    "git tag v1.2.3",
+    "git tag -a v1.2.3 -m 'Release 1.2.3'",
+    "git show HEAD",
+    "git show HEAD:src/app.py",
+    "git blame src/app.py",
+    "git grep -n 'push origin main'",
+    "git worktree list",
+    "git remote -v",
+    "git rev-parse HEAD",
+    "git describe --tags",
+    "git clean -fdx",
+    "git submodule update --init --recursive",
+    "git config user.email",
+    "git log -1 --format=%H",
+    "git diff main",
+    "git diff origin/main -- src",
+    "git merge-base HEAD origin/main",
+    "git switch wb/x",
+    "git checkout wb/x",
+    "git checkout -b wb/fix-typo",
+    "git switch -c wb/fix-typo",
+    "git log --grep='push'",
+    "git rebase --continue",
+    "git rebase --abort",
+    "git am < fix.patch",
+    "git format-patch -1",
+    "git apply fix.patch",
+    "git bisect start",
+    "git reflog -10",
+    "git shortlog -sn",
+    "git log --oneline | head -5",
+    "git diff | head -100",
+    "git ls-files | wc -l",
+    "git stash list",
+    "git fetch --all --prune",
+    "git pull",
+    "git pull origin main",
+    # git push, in the shapes workers write
+    "git push origin wb/x",
+    "git push -u origin wb/x",
+    "git push --set-upstream origin wb/x",
+    "git push -u origin HEAD",
+    "git push",
+    "git push origin HEAD",
+    "git push origin HEAD:wb/x",
+    "git push origin HEAD:refs/heads/wb/x",
+    "git push -o ci.skip origin wb/x",
+    "git push --push-option=ci.skip origin wb/x",
+    "git push origin wb/x 2>&1",
+    "git push origin wb/x 2>&1 | tail -20",
+    "git push origin wb/x > push.log 2>&1",
+    "git push origin wb/x --tags",
+    "git push --tags",
+    "git push origin v1.2.3",
+    "git push origin --tags",
+    "git push --follow-tags origin wb/x",
+    "git push origin --delete wb/old",
+    "git push origin :wb/old",
+    "git push -d origin wb/old",
+    "git push --dry-run origin wb/x",
+    "git push -n",
+    "git push -q origin wb/x",
+    "git push --verbose origin wb/x",
+    "git push --no-verify origin wb/x",
+    "git push origin wb/x && gh pr create --fill",
+    "git push -u origin HEAD && gh pr create --title 'Fix' --body 'Fixes it'",
+    "git add -A && git commit -m 'Fix' && git push",
+    "git add -A && git commit -m 'Fix' && git push origin wb/x",
+    "git commit -m 'push to main later' && git push origin wb/x",
+    "git commit -m 'Refuse pushes to main' && git push -u origin HEAD",
+    "for i in 1 2 3; do git push && break; sleep 5; done",
+    "for i in 1 2 3; do git push origin wb/x && break; sleep 5; done",
+    "until git push; do sleep 2; done",
+    "git push || (git pull --rebase && git push)",
+    "git pull --rebase origin wb/x && git push origin wb/x",
+    'BRANCH=wb/x; git push origin "$BRANCH"',
+    'B=$(git branch --show-current); git push -u origin "$B"',
+    'git push origin "$(git branch --show-current)"',
+    "git push origin `git rev-parse --abbrev-ref HEAD`",
+    'git push -u origin "$(git rev-parse --abbrev-ref HEAD)"',
+    "git push --force-with-lease origin wb/x",
+    "git push -f origin wb/x",
+    "git push origin +wb/x",
+    "git push --force",
+    "cd src && git push",
+    "cd src && git push origin wb/x",
+    "cd docs; git push origin wb/x",
+    "git -C src push",
+    "git -C docs push origin wb/x",
+    "REMOTE=origin; git push $REMOTE wb/x",
+    "export GIT_TERMINAL_PROMPT=0; git push origin wb/x",
+    "GIT_TRACE=1 git push origin wb/x",
+    "git -c http.postBuffer=524288000 push origin wb/x",
+    "git -c core.sshCommand='ssh -i key' push origin wb/x",
+    "git push origin wb/x 2>&1 | grep -v hint",
+    "git push origin wb/x || echo 'push failed'",
+    "timeout 120 git push origin wb/x",
+    "git push origin wb/x; echo done",
+    "git push origin wb/x && echo 'Pushed to wb/x'",
+    "(git fetch && git rebase origin/main && git push --force-with-lease)",
+    "git commit -F - <<'EOF'\nFix push to main checks\n\nDetails here.\nEOF\ngit push origin wb/x",
+    "git commit -F - <<'EOF'\nDon't push straight to main\nEOF\ngit push",
+    "cat > notes.md <<'EOF'\nWe push to main only through PRs.\nEOF\n"
+    "git add notes.md && git commit -m notes && git push",
+    "cat <<EOF > release.md\nRelease $(date +%F)\nEOF\ngit push origin wb/x",
+    "git push origin wb/x\ngh pr create --fill",
+    "git push origin HEAD:wb/x -o merge_request.create",
+    # gh
+    "gh pr create --fill",
+    "gh pr create --base main --title 'Push fix' --body 'Pushes to main are refused'",
+    "gh pr create --draft --title 'WIP'",
+    "gh pr view 12",
+    "gh pr view --web",
+    "gh pr list",
+    "gh pr checks",
+    "gh pr checks --watch",
+    "gh pr diff",
+    "gh pr merge --auto --squash",
+    "gh pr merge 12 --squash",
+    "gh pr comment 12 --body 'Done'",
+    "gh pr review --approve",
+    "gh pr edit 12 --add-label bug",
+    "gh pr ready",
+    "gh run list",
+    "gh run watch",
+    "gh run view 123 --log",
+    "gh issue view 7",
+    "gh issue list",
+    "gh issue create --title 'Bug' --body 'x'",
+    "gh issue comment 7 --body 'Fixed in #12'",
+    "gh api repos/o/r/pulls",
+    "gh api -X GET search/issues -f q=x",
+    "gh api graphql -f query='query { viewer { login } }'",
+    "gh api repos/o/r/issues/1/comments -f body=x",
+    "gh api -X POST repos/o/r/dispatches",
+    "gh repo view",
+    "gh auth status",
+    "gh release list",
+    # package managers, builds, tests
+    "npm install",
+    "npm ci",
+    "npm test",
+    "npm run build",
+    "npm run lint -- --fix",
+    "pnpm install --frozen-lockfile",
+    "pnpm -r build",
+    "yarn install",
+    "yarn test --watch=false",
+    "npx prettier --write .",
+    "npm install --save-dev typescript@5",
+    "npm publish --dry-run",
+    "npm run test -- --runInBand",
+    "npm audit fix",
+    "pip install -r requirements.txt",
+    "pip install -e '.[dev]'",
+    "uv sync",
+    "uv run pytest -q",
+    "uv run pytest tests/test_app.py -k 'push and not main'",
+    "python -m pytest -x",
+    "python3 -c 'print(1)'",
+    "uv pip install ruff",
+    "ruff check . --fix",
+    "mypy src",
+    "pyright",
+    "make",
+    "make test",
+    "make -j8 build",
+    "cargo build --release",
+    "cargo test",
+    "go test ./...",
+    "go build ./...",
+    "gradle build",
+    "./gradlew test",
+    "mvn -q test",
+    "dotnet test",
+    "bazel test //...",
+    "cmake -S . -B build && cmake --build build",
+    "docker build -t app .",
+    "docker compose up -d",
+    "docker run --rm app pytest",
+    "tox -e py311",
+    "pre-commit run --all-files",
+    "uv run ruff format --check .",
+    # deletes
+    "rm -rf node_modules",
+    "rm -rf build dist",
+    "rm -rf .venv",
+    "rm -rf ./build",
+    "rm -f *.log",
+    "rm -rf node_modules && npm ci",
+    "rm -r __pycache__",
+    "rm -rf target/",
+    "rm -rf ~/.cache/pip",
+    "rm -rf /tmp/build",
+    "rm -rf $HOME/.cache/x",
+    "rm -rf ./dist/*",
+    "rm -rf coverage .pytest_cache",
+    "rm notes.md",
+    "rm -i old.txt",
+    "rm -rf -- build",
+    "rm -fr out",
+    "rm -Rf out",
+    "rm -rf ../wb-old-worktree",
+    "find . -name '*.pyc' -delete",
+    "find build -type f -delete",
+    "find . -name node_modules -prune -exec rm -rf {} +",
+    "git clean -xdf && rm -rf node_modules",
+    'rm -rf "$TMPDIR/cos-test"',
+    "rm -rf ${BUILD_DIR:-build}",
+    # downloads
+    "curl -fsSL https://example.com/install.sh -o install.sh",
+    "curl -s https://api.github.com/repos/o/r | jq .",
+    "curl -sL https://example.com/x.tgz | tar xz",
+    "wget -q https://example.com/file.tar.gz",
+    "curl -fsSL https://bun.sh/install | bash",
+    "curl -s localhost:3000/health",
+    "curl -X POST -d '{}' localhost:3000/api",
+    "wget -qO- https://example.com | head",
+    # everything else
+    "ls -la",
+    "cat README.md",
+    "sed -i '' 's/main/master/' README.md",
+    "grep -rn 'git push origin main' docs",
+    "echo 'git push origin main' >> notes.md",
+    'echo "Run git push origin main to release"',
+    "printf '%s\\n' a b",
+    "jq '.version' package.json",
+    "tar czf dist.tgz dist",
+    "mkdir -p build && cd build && cmake ..",
+    "export PATH=$HOME/.local/bin:$PATH",
+    "source .venv/bin/activate",
+    "chmod +x scripts/run.sh",
+    "./scripts/run.sh",
+    "sleep 5",
+    "kill 1234",
+    "ps aux | grep node",
+    "lsof -i :3000",
+    "which python",
+    "env | sort",
+    "date",
+    "pwd",
+    "head -50 log.txt",
+    "tail -n 100 server.log",
+    "wc -l src/*.py",
+    "du -sh node_modules",
+    "df -h",
+    "xargs -n1 echo < list.txt",
+    "time npm test",
+    "timeout 60 npm test",
+    "nohup npm run dev > dev.log 2>&1 &",
+    "npm run dev &",
+    'cat > config.json <<\'EOF\'\n{"branch": "main"}\nEOF',
+    "cat <<EOF > notes.md\nPushed to $BRANCH\nEOF",
+    "python - <<'PY'\nprint('push origin main')\nPY",
+    'for f in src/*.py; do python -m py_compile "$f"; done',
+    'while read -r line; do echo "$line"; done < files.txt',
+    "for i in $(seq 1 3); do npm test && break; done",
+    "(cd src && npm test)",
+    "( git fetch && git rebase origin/main )",
+    "diff -u a.txt b.txt",
+    "patch -p1 < fix.patch",
+    "open http://localhost:3000",
+    "code .",
+    "sqlite3 db.sqlite '.tables'",
+    "redis-cli ping",
+    "brew install jq",
+    "apt-get install -y jq",
+    "node -e 'console.log(1)'",
+    "deno test",
+    "bun test",
+    "ruby -v",
+    "bundle exec rspec",
+    "php artisan test",
+    "swift test",
+    "xcodebuild test",
+    "kubectl get pods",
+    "terraform plan",
+    "aws s3 ls",
+    "ssh-keygen -t ed25519 -f key -N ''",
+    "openssl rand -hex 16",
+    "shasum -a 256 dist.tgz",
+    "zip -r out.zip dist",
+    "unzip out.zip",
+    "awk '{print $1}' log.txt",
+    "sort -u list.txt",
+    "cut -d, -f1 data.csv",
+    "tr a-z A-Z < x",
+    "echo $((1 + 2))",
+    "test -f x && echo yes",
+    "[ -d build ] || mkdir build",
+    "if [ -f package.json ]; then npm ci; fi",
+    "case $1 in a) echo a;; esac",
+    "set -euo pipefail",
+    "trap 'rm -f tmp' EXIT",
+    "alias ll='ls -la'",
+    "export NODE_ENV=test",
+    "unset NODE_ENV",
+    "ln -s ../shared shared",
+    "cp -r src dist",
+    "mv old.txt new.txt",
+    "touch .keep",
+    "git log --format='%an pushed %s' | head",
+]
+
+# On a checkout of main, a push of the checkout's own branch (naming none, HEAD, or what
+# `git branch --show-current` says) pushes main: v0.1.42 let these through, unread.
+INTENDED_ON_MAIN = {
+    "git push", "git push -u origin HEAD", "git push origin HEAD",
+    "git push -u origin HEAD && gh pr create --title 'Fix' --body 'Fixes it'",
+    "git add -A && git commit -m 'Fix' && git push",
+    "git commit -m 'Refuse pushes to main' && git push -u origin HEAD",
+    "for i in 1 2 3; do git push && break; sleep 5; done", "until git push; do sleep 2; done",
+    "git push || (git pull --rebase && git push)",
+    'B=$(git branch --show-current); git push -u origin "$B"',
+    'git push origin "$(git branch --show-current)"',
+    "git push origin `git rev-parse --abbrev-ref HEAD`",
+    'git push -u origin "$(git rev-parse --abbrev-ref HEAD)"', "cd src && git push",
+    "git -C src push", "git commit -F - <<'EOF'\nDon't push straight to main\nEOF\ngit push",
+    "cat > notes.md <<'EOF'\nWe push to main only through PRs.\nEOF\n"
+    "git add notes.md && git commit -m notes && git push",
+}  # fmt: skip
+
+
+def test_the_normal_corpus_is_large():
+    assert len(set(NORMAL)) >= 250 and set(NORMAL) >= INTENDED_ON_MAIN
+
+
+@pytest.mark.parametrize("command", NORMAL)
+def test_normal_work_gets_v0142s_decision(command, feature, main_checkout):
+    old = bool(old_denial(command))
+    assert bool(denial(command, feature)) == old, command
+    assert bool(denial(command, main_checkout)) == (old or command in INTENDED_ON_MAIN), command
+
+
+def test_a_value_too_long_for_a_branch_is_not_put_in():
+    """A variable put in itself doubles at each turn: past MOST_VALUE its word stays unread."""
+    assert policy.resolved("$B:$B", lambda name: "x" * 600) == "$B:$B"
+    assert policy.resolved("$B:$B", lambda name: "wb/x") == "wb/x:wb/x"
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_the_rm_rule_reads_as_v0142s(seed):
+    """Review of 9d8e631 (V1): the `rm` rule in one pass refuses exactly what v0.1.42's
+    regular expression did, flags glued or apart, an `rm` inside a flag (`-rm`) too."""
+    import random
+
+    from policy_v0142 import DANGEROUS as OLD
+
+    rule = {reason: found for found, reason in OLD}["recursive delete of home or root"]
+    words = ["rm", "-rm", "-r", "-R", "-f", "-arm", "-x", "/", "~", "$HOME", "/tmp", "~/x", "-",
+             "--", "x", "rm -rf", ";"]  # fmt: skip
+    gaps = [" ", "  ", "\t", "\n", ""]
+    chance = random.Random(seed)  # noqa: S311  (a fixed sample, not a secret)
+    for _ in range(5000):
+        command = "".join(
+            chance.choice(words) + chance.choice(gaps) for _ in range(chance.randint(1, 10))
+        )
+        assert bool(rule.search(command)) == policy.recursive_delete(command), command
+
+
+@pytest.mark.parametrize(
+    ("text", "kept", "bodies"),
+    [
+        ("cat <<EOF\nit's\nEOF\ngit push", "cat <<EOF\ngit push", ["it's\n"]),
+        ("cat <<'EOF'\n$(x)\nEOF\ngit push", "cat <<'EOF'\ngit push", []),
+        ("cat <<-EOF\n\tx\n\tEOF\ngit push", "cat <<-EOF\ngit push", ["\tx\n"]),
+        ("cat <<EOF\ngit push", "cat <<EOF\ngit push", []),
+        (
+            "cat <<EOF\na\nEOF\ncat <<EOF\nb\nEOF\ngit push",
+            "cat <<EOF\ncat <<EOF\ngit push",
+            ["a\n", "b\n"],
+        ),
+        ("cat <<A <<B\na\nA\nb\nB\ngit push", "cat <<A <<B\ngit push", ["a\n", "b\n"]),
+        ("echo $((1<<2))\ngit push", "echo $((1<<2))\ngit push", []),
+        ("cat <<<EOF\nEOF\n", "cat <<<EOF\nEOF\n", []),
+        ("echo '<<EOF'\nEOF\n", "echo '<<EOF'\nEOF\n", []),
+    ],
+)
+def test_a_heredocs_body_is_text_up_to_its_word(text, kept, bodies):
+    """A body ends at the first line after it that is its word (the same word may end two);
+    one with no such line is kept, read as commands (never less refused)."""
+    assert policy.without_heredocs(text) == (kept, bodies)
