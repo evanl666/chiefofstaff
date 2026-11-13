@@ -858,6 +858,7 @@ class Runtime:
         mine = self.on_agent(agent, self.states.ids())
         sessions = self.states.take_handles(mine)
         self.states.end_turns(mine)
+        self.turn_gone(*mine)
         await asyncio.gather(*(s.disconnect() for s in sessions), return_exceptions=True)
         if backend:
             with suppress(Exception):
@@ -914,6 +915,7 @@ class Runtime:
         (`why`), affects that worker alone (worker_lost)."""
         with suppress(Exception):
             self.end_epoch(worker, process)
+        self.turn_gone(worker)
         if why and not self.stopping:
             self.background(self.worker_lost(agent, worker, why))
 
@@ -926,6 +928,7 @@ class Runtime:
         working = [key for key in self.at_work_on(agent) if key == worker]
         sessions = self.states.take_handles([worker])
         self.states.end_turns([worker])
+        self.turn_gone(worker)
         await asyncio.gather(*(s.disconnect() for s in sessions), return_exceptions=True)
         self.store.execute(
             "UPDATE commands SET ended_at=? WHERE ended_at IS NULL AND session_id=?",
@@ -1299,9 +1302,31 @@ class Runtime:
         return crashed
 
     def agent_settled(self, row: dict):
-        self.begun.discard(row["id"])
-        self.halted.discard(row["id"])
+        self.turn_gone(row["id"])
         self.spending(row["id"], False)
+
+    def turn_gone(self, *session_ids: str):
+        """Their turns ended without their agent saying they settled (their process ended,
+        their handle let go of): none is begun or halted any more, so no later change stops
+        what does not run, nor is one that runs again kept from being stopped."""
+        for session_id in session_ids:
+            self.begun.discard(session_id)
+            self.halted.discard(session_id)
+
+    def agent_accounting(self, session_id: str, kind: str, data: Any):
+        """What another agent's worker spent (agent.usage), and that its turns spend no more
+        (agent.settled): recorded whatever became of its handle, its worker closed included
+        (Events drops a closed worker's events): what was spent is spent, and its epoch ends
+        as it was."""
+        try:
+            if not (row := self.store.find_session(session_id)):
+                return
+            if kind == "agent.usage":
+                self.record_agent_usage(row, data)
+            elif kind == "agent.settled":
+                self.agent_settled(row)
+        except Exception:
+            logger.exception("Recording %s of %s failed.", kind, session_id)
 
     def unknown(self, session_id: str) -> dict:
         """A row of the ledger for what a session spent that is not known: with a limit, it
@@ -1345,7 +1370,8 @@ class Runtime:
             else:
                 limit = agents.limit(self.store, self.agent(row["id"]))
                 notice = f"Stopped: it used its {limit:,}-token limit."
-            self.halted.add(row["id"])
+            if self.states.handle(row["id"]) is not None:
+                self.halted.add(row["id"])  # Until its turn settles (none runs without one).
             full = self.spend_stop(row)["spend_why"]  # As its card says it (cut there at 1440).
             with suppress(Exception):
                 await self.workers.interrupt(
@@ -1431,6 +1457,7 @@ class Runtime:
         limit = agents.limit(self.store, agent)
         if (
             limit
+            and not row["closed_at"]
             and row["id"] not in self.spend_stopping
             and (self.store.agent_unknown(row["id"]) or self.store.agent_spent(row["id"]) >= limit)
         ):
@@ -2069,6 +2096,11 @@ class Runtime:
             # other threads its turns may reach.
             "worker": row["id"],
             "children": self.agent_children(row["id"]),
+            # What tells the repository's instructions its thread was given (none: not yet).
+            "docs_given": self.store.get(f"agentdocs:{row['id']}") or "",
+            "on_repository_docs": lambda digest: self.store.set(f"agentdocs:{row['id']}", digest),
+            # What its turns spend, told whatever became of its handle (agent_accounting).
+            "on_accounting": lambda kind, data: self.agent_accounting(row["id"], kind, data),
         }
         # What the owner added in Settings, as a Copilot worker has it: MCP servers and skills.
         servers = dict(self.store.settings().mcp_servers)
@@ -2504,6 +2536,7 @@ class Runtime:
             # A disconnected session ends no turn: free its worker slot.
             state.busy = False
             self.background(self.workers.pump())
+        self.turn_gone(session_id)
         if session := self.states.take_handle(session_id):
             with suppress(Exception):
                 await session.disconnect()

@@ -76,7 +76,8 @@ Workers can also run on Codex (off by default; Settings → Models). For such a 
   do not ask).
 - **Repository settings** (`.codex/` settings, hooks, rules, MCP servers) load only where you
   trust the folder in Codex; a worktree is trusted as its repository is. Elsewhere none of them
-  loads, and the repository's `AGENTS.md` reaches the worker as text only.
+  loads, and the repository's `AGENTS.md` reaches the worker as text only: a message marked as
+  the repository's, never in Chief of Staff's instructions, with any tag in it escaped.
 - **Spend limit:** Chief of Staff's own ledger, in tokens. It may be passed by the model call in
   flight and by what child agents spend before they stop; spend lost when Codex stops mid-turn
   is recorded as unknown, and a worker with a limit then waits for your *Go on*.

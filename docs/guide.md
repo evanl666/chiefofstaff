@@ -994,7 +994,9 @@ new workers use cannot run, they start on Copilot and their chat says why.
   Every edit still asks Chief of Staff first, so your own checkouts stay read-only to them.
 - **Repositories:** a repository's `.codex/` settings, hooks and rules load only where you trust
   its folder in Codex (a worktree as its repository is trusted). Elsewhere Codex reads none of
-  them, and Chief of Staff gives the worker the repository's `AGENTS.md` files as text.
+  them, and Chief of Staff gives the worker the repository's `AGENTS.md` files as text: a
+  message marked as the repository's, with any tag in it escaped, so it can't pass as yours or
+  as Chief of Staff's.
 - **Questions:** a Codex worker asks you with a report's question (Codex has no `ask_user` here).
   An MCP server that needs a sign-in is signed in with `codex mcp login <name>`.
 

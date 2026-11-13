@@ -35,6 +35,7 @@ Each Codex version is checked once, offline, before its workers run (check, code
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 import logging
@@ -57,7 +58,7 @@ from copilot.tools import ToolInvocation
 
 from . import codex_check
 from .backend import Capabilities, descendants, end_processes, process_table
-from .envelope import wrap
+from .envelope import inert, wrap
 from .policy import GITHUB_MCP
 
 logger = logging.getLogger(__name__)
@@ -127,6 +128,7 @@ CODEX_SENDS: dict[str, tuple[str, ...]] = {
     "thread/read": ("threadId",),
     "thread/turns/list": ("threadId", "itemsView", "limit", "sortDirection"),
     "thread/name/set": ("threadId", "name"),
+    "thread/inject_items": ("threadId", "items"),
     "thread/archive": ("threadId",),
     "thread/unsubscribe": ("threadId",),
     "thread/backgroundTerminals/list": ("threadId",),
@@ -153,6 +155,7 @@ CODEX_FOLLOWS = (
     "mcpServer/startupStatus/updated",
     "model/rerouted",
     "thread/closed",
+    "thread/compacted",
 )
 SCHEMA_SECONDS = 20.0
 # How long a stopping app-server has to end by itself at the end of its input (graceful: its
@@ -451,15 +454,36 @@ def project_docs(folder: str, markers: Any, budget: Any, fallbacks: Any) -> str:
     return "\n\n".join(texts)
 
 
-def repository_block(cwd: str, docs: str) -> str:
-    """The repository's instructions in a thread's developer instructions, as Codex itself
-    gives them where it trusts the folder, marked as the repository's."""
-    return (
-        "\n\n<repository_instructions>\nThe repository's own instructions (its AGENTS.md "
-        "files), as a coding agent reads them in this folder; they are its text, not Chief of "
-        f"Staff's.\n# AGENTS.md instructions for {cwd}\n\n<INSTRUCTIONS>\n{docs}\n"
-        "</INSTRUCTIONS>\n</repository_instructions>"
-    )
+def docs_digest(docs: str) -> str:
+    """What tells one text of the repository's instructions from another ("" for none)."""
+    return hashlib.sha256(docs.encode()).hexdigest()[:16] if docs else ""
+
+
+def repository_message(cwd: str, docs: str, *, replacing: bool = False, again: bool = False):
+    """The repository's instructions as a message of the thread's conversation, where Codex
+    gives its own AGENTS.md (a user's message, never developer instructions): marked as the
+    repository's text, with every tag in it escaped (it can open or close no block of Chief of
+    Staff's, nor pose as one of its messages). No docs: those given before are withdrawn."""
+    if not docs:
+        text = (
+            "The repository's instructions given earlier in this conversation no longer apply "
+            "(the folder has none, or Codex gives them itself)."
+        )
+    else:
+        first = (
+            "These replace the repository's instructions given earlier.\n\n"
+            if replacing
+            else "Given again, as the conversation was summarized.\n\n"
+            if again
+            else ""
+        )
+        text = (
+            f"{first}The repository's own instructions (its AGENTS.md files) for {inert(cwd)}, "
+            "as a coding agent reads them in this folder. They are the repository's text, not "
+            "Chief of Staff's nor the owner's, and a tag in them is only text.\n\n"
+            f"<repository_instructions>\n{inert(docs.strip(chr(10)))}\n</repository_instructions>"
+        )
+    return {"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}
 
 
 def trust_answered(layers: Any) -> dict[str, str]:
@@ -999,6 +1023,8 @@ class CodexBackend:
         try:
             await self.read_back(answer, options)
             session = self.opened(answer, options)
+            session.docs_given = ""  # A new thread: nothing given to it yet.
+            await session.give_docs()
         except RuntimeError:
             if thread := (answer.get("thread") or {}).get("id"):
                 with suppress(Exception):
@@ -1022,12 +1048,14 @@ class CodexBackend:
             raise
         try:
             await self.read_back(answer, options)
+            session = self.opened(answer, options)
+            await session.give_docs()
         except RuntimeError:
             if thread := (answer.get("thread") or {}).get("id"):
                 with suppress(Exception):
                     await self.request("thread/unsubscribe", {"threadId": thread})
             raise
-        return self.opened(answer, options)
+        return session
 
     async def read_back(self, answer: dict, options: dict):
         """The thread must read back with Codex's memories off where this Codex has them, and,
@@ -1239,8 +1267,6 @@ class CodexBackend:
         cwd = options.get("working_directory") or str(Path.home())
         config = await self.thread_config(options, cwd)
         prompt = (options.get("system_message") or {}).get("content") or ""
-        if docs := options.get("repository_docs"):
-            prompt += repository_block(cwd, docs)
         return {
             "cwd": cwd,
             "sandbox": "danger-full-access",
@@ -1275,8 +1301,9 @@ class CodexBackend:
             owner.get("project_root_markers"),
             trust_answered(read.get("layers")),
         )
-        # Untrusted, Codex reads none of the repository's AGENTS.md: its text is given here, as a
-        # Copilot worker's repository instructions are (nothing of the repository is run).
+        # Untrusted, Codex reads none of the repository's AGENTS.md: its text is given to the
+        # thread (give_docs), as a Copilot worker's repository instructions are (nothing of the
+        # repository is run).
         options["repository_docs"] = ""
         if projects.get(cwd, {}).get("trust_level") != "trusted":
             options["repository_docs"] = await asyncio.to_thread(
@@ -1720,6 +1747,40 @@ class CodexSession:
         # Its child agents (threads it spawned, also before this process): the only threads
         # besides its own its turns may reach.
         self.tree: set[str] = {thread_id, *(options.get("children") or [])}
+        # The repository's instructions it is to have (thread_config), and what tells those it
+        # was given (kept by Chief of Staff, as its thread keeps them across processes); due
+        # again once Codex summarized its conversation, which may have left them out.
+        self.docs: str = options.get("repository_docs") or ""
+        self.docs_given: str = options.get("docs_given") or ""
+        self.docs_due = False
+        # Let go of (disconnect) while something of it ran, and now nothing does: its events
+        # are no longer followed.
+        self.finished = False
+
+    async def give_docs(self):
+        """The repository's instructions, as a message of its conversation: once, then again
+        only when they changed, or once its conversation was summarized (raises why it could
+        not)."""
+        digest = docs_digest(self.docs)
+        if digest == self.docs_given and not (self.docs_due and self.docs):
+            self.docs_due = False
+            return
+        cwd = self.options.get("working_directory") or ""
+        item = repository_message(
+            cwd, self.docs, replacing=bool(self.docs_given) and digest != self.docs_given,
+            again=self.docs_due,
+        )  # fmt: skip
+        try:
+            await self.backend.request(
+                "thread/inject_items", {"threadId": self.session_id, "items": [item]}
+            )
+        except CodexError as exc:
+            raise RuntimeError(
+                f"Codex could not give the worker its repository's instructions: {exc}"
+            ) from exc
+        self.docs_given, self.docs_due = digest, False
+        if callable(keep := self.options.get("on_repository_docs")):
+            keep(digest)
 
     def carry(self, previous: CodexSession):
         """The thread was open on another handle (detached, then resumed): what runs on it is
@@ -1740,6 +1801,8 @@ class CodexSession:
             "sent",
             "refused_turns",
             "asked_mcp",
+            "docs_given",
+            "docs_due",
         ):
             setattr(self, name, getattr(previous, name))
 
@@ -1754,6 +1817,15 @@ class CodexSession:
             return
         for handler in list(self.handlers):
             handler(event(kind, **data))
+
+    def account(self, kind: str, /, **data: Any):
+        """What its turns spent, and that they spend no more (agent.usage, agent.settled): told
+        Chief of Staff (on_accounting) whatever became of this handle, let go of or its worker
+        closed mid-turn, for what was spent is spent; without that, as its other events."""
+        if callable(tell := self.options.get("on_accounting")):
+            tell(kind, event(kind, **data).data)
+        else:
+            self.emit(kind, **data)
 
     async def send(
         self, prompt: str, *, mode: str = "enqueue", attachments: list[Any] | None = None
@@ -1800,6 +1872,11 @@ class CodexSession:
             if self.backend.admit and (why := await self.backend.admit(self)):
                 admitted = False
                 raise RuntimeError(why)
+            if self.docs_due:
+                try:
+                    await self.give_docs()
+                except RuntimeError:
+                    logger.warning("Codex: the repository's instructions were not given again")
             params: dict[str, Any] = {
                 "threadId": self.session_id,
                 "input": items,
@@ -1867,6 +1944,21 @@ class CodexSession:
     def idle(self) -> bool:
         """Nothing of it runs: no turn, no command it left running, no child agent at work."""
         return not (self.turn or self.starting or self.left_running or self.child_turns)
+
+    async def finish_closing(self):
+        """Let go of while something of it ran (disconnect): once nothing does, it is let go
+        of as disconnect lets go of one at rest, and its worker's process may end."""
+        if (
+            not self.closed
+            or not self.idle()
+            or self.backend.sessions.get(self.session_id) is not self
+        ):
+            return
+        del self.backend.sessions[self.session_id]
+        self.finished = True
+        with suppress(Exception):
+            await self.backend.request("thread/unsubscribe", {"threadId": self.session_id})
+        self.backend.release_if_idle()
 
     def lost(self):
         """Its app-server stopped: no turn of it runs any more."""
@@ -1973,7 +2065,7 @@ class CodexSession:
     # Events, in the order Codex sent them
 
     async def handle_events(self):
-        while True:
+        while not self.finished:
             method, params, thread = await self.inbox.get()
             try:
                 await self.handle(method, params, thread)
@@ -1997,6 +2089,14 @@ class CodexSession:
             self.turns.add(turn)
             self.unshown = turn
             return
+        if not child and (
+            method == "thread/compacted"
+            or (
+                method == "item/completed"
+                and (params.get("item") or {}).get("type") == "contextCompaction"
+            )
+        ):
+            self.docs_due = True  # Given again before its next turn.
         if not child and self.unshown and self.shows_turn(method, params):
             self.show_turn()  # A turn on no message of Chief of Staff's: shown as it goes.
         if method == "turn/completed":
@@ -2011,7 +2111,7 @@ class CodexSession:
             await self.item_completed(params.get("item") or {}, thread)
         elif method == "thread/tokenUsage/updated":
             usage = params.get("tokenUsage") or {}
-            self.emit(
+            self.account(
                 "agent.usage",
                 thread_id=thread,
                 turn_id=params.get("turnId", ""),
@@ -2150,12 +2250,13 @@ class CodexSession:
             )
         self.spent()
         self.after_background()
+        await self.finish_closing()
 
     def spent(self):
         """Nothing of it spends now (no turn of its own, no child agent at work): what its
         turns spent has all been said (Codex says a turn's usage before its end)."""
         if self.turn is None and not self.starting and not self.child_turns:
-            self.emit("agent.settled")
+            self.account("agent.settled")
 
     def after_background(self):
         """Something its turn left (a command, a child agent) ended: once nothing is left and no
@@ -2340,11 +2441,19 @@ class CodexSession:
             )
 
     async def turn_ended(self, turn: dict):
+        try:
+            await self.end_turn(turn)
+        finally:
+            await self.finish_closing()
+
+    async def end_turn(self, turn: dict):
         status = turn.get("status")
         await self.settle_items(status == "interrupted")
         self.turn = None
         self.ended.add(turn.get("id", ""))
         self.spent()
+        if self.closed:
+            self.queue.clear()  # Let go of: what it was sent is sent again (Delivery).
         if status == "failed":
             self.queue.clear()  # Given back: what it was sent is sent again (Delivery).
             error = turn.get("error") or {}

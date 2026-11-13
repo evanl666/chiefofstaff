@@ -15,6 +15,8 @@ import unicodedata
 
 # "<message" or "</message" anywhere in a body, however it is spaced or cased.
 TAG = re.compile(r"<(\s*/?\s*message\b)", re.IGNORECASE)
+# Any tag at all, opening or closing ("<x", "</x", "<!--", "<?x"), however spaced.
+ANY_TAG = re.compile(r"<(\s*/?\s*[A-Za-z!?])")
 OWNER = re.compile(r'(?m)^<message from="owner"')
 # External content: data to read, never instructions to follow.
 UNTRUSTED = "untrusted"
@@ -46,6 +48,13 @@ def wrap(sender: str, kind: str, body: str, **attributes: object) -> str:
     )
     escaped = TAG.sub(r"&lt;\1", body.strip())
     return f"<message {head}>\n{escaped}\n</message>"
+
+
+def inert(text: str) -> str:
+    """Text whose tags are all escaped, as wrap() escapes envelopes: what someone else wrote (a
+    repository's instructions) can then open or close no block of Chief of Staff's, nor pose as
+    one of its messages."""
+    return ANY_TAG.sub(r"&lt;\1", text)
 
 
 ENVELOPE = re.compile(r"<message ([^>]*)>\n(.*?)\n</message>", re.DOTALL)

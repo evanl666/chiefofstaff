@@ -385,6 +385,22 @@
    ],
    "type": "string"
   },
+  "ContextCompactedNotification": {
+   "description": "Deprecated: Use `ContextCompaction` item type instead.",
+   "properties": {
+    "threadId": {
+     "type": "string"
+    },
+    "turnId": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "threadId",
+    "turnId"
+   ],
+   "type": "object"
+  },
   "DynamicToolCallOutputContentItem": {
    "oneOf": [
     {
@@ -3402,6 +3418,27 @@
     "params"
    ],
    "title": "McpServer/startupStatus/updatedNotification",
+   "type": "object"
+  },
+  {
+   "description": "Deprecated: Use `ContextCompaction` item type instead.",
+   "properties": {
+    "method": {
+     "enum": [
+      "thread/compacted"
+     ],
+     "title": "Thread/compactedNotificationMethod",
+     "type": "string"
+    },
+    "params": {
+     "$ref": "#/definitions/ContextCompactedNotification"
+    }
+   },
+   "required": [
+    "method",
+    "params"
+   ],
+   "title": "Thread/compactedNotification",
    "type": "object"
   },
   {

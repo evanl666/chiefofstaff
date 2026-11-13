@@ -323,6 +323,21 @@ class Server:
         self.save()
         return {}
 
+    async def on_thread_inject_items(self, params):
+        """Raw items for the thread's history, no turn started (as Codex: a loaded thread, at
+        least one item, each a valid response item)."""
+        thread_id = params["threadId"]
+        if thread_id not in self.loaded:
+            raise RuntimeError("thread not loaded")
+        if not params.get("items"):
+            raise RuntimeError("items must not be empty")
+        for index, item in enumerate(params["items"]):
+            if item.get("type") != "message" or item.get("role") not in {"user", "developer"}:
+                raise RuntimeError(f"items[{index}] is not a valid response item")
+        self.threads[thread_id].setdefault("injected", []).extend(params["items"])
+        self.save()
+        return {}
+
     async def on_thread_archive(self, params):
         self.threads.pop(params["threadId"], None)
         self.save()
@@ -578,6 +593,11 @@ class Server:
             raise RuntimeError("The model is overloaded.")
         if found := re.search(r"Remember the word '(\w+)'", prompt):
             thread["memory"] = found.group(1)
+        if "Compact the conversation" in prompt:  # As Codex summarizes a long one.
+            item = {"type": "contextCompaction", "id": str(uuid.uuid4())}
+            self.item("item/started", thread_id, turn_id, item)
+            self.item("item/completed", thread_id, turn_id, item)
+            self.notify("thread/compacted", {"threadId": thread_id, "turnId": turn_id})
         if "What word did I ask you to remember" in prompt:
             await self.say(thread_id, turn_id, thread["memory"] or "none")
             return
