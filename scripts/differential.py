@@ -207,6 +207,17 @@ FIXES = [
     # 0.1.43: when Chief of Staff runs (its start and last alive, a run a row), so a worker's
     # command never counts as running through the time it was stopped (provenance.window_end).
     Allow("chief-of-staff-runs", data=r"\.db\.kv\.uptime$"),
+    # 0.1.43: what each PR is to its task is stamped with the rules it was read by, so one an
+    # older version read is read again once by today's (task_actions.reread_roles).
+    Allow("role-rules", data=r"\.db\.(runs\.<run-\d+>\.evidence|kv)\.role_rules$"),
+    # 0.1.43: the Router keeps how to write a task (its language, its tone) out of its title.
+    Allow(
+        "router-title-style",
+        data=r"\.system_message\.content$",
+        lines=r"not the phase \(\"waiting for the reviewer\" is a state, not a title\)\. "
+        r"(When a|How to)$|^\s*write it \(in English, human-sounding, concise\) goes in the "
+        r"instructions, never the title\.$|^\s*When a$",
+    ),
 ]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on
