@@ -1223,6 +1223,30 @@ async def test_a_thread_resumes_after_its_app_server_is_killed_mid_turn(
         await again.stop()
 
 
+async def test_its_commands_see_the_path_chief_of_staff_gives_it(backend, tmp_path):
+    """The owner's decision: a Codex worker's commands run in no login shell, so they see the
+    environment Chief of Staff gives it, as a Copilot worker's do (macOS's login shell puts the
+    system's folders first: another `python3`). Codex puts its own helpers' folders first."""
+    only_codex(backend)
+    if not real_codex(backend):
+        pytest.skip("How Codex runs a command is its own: the real one shows it.")
+    given = os.environ["PATH"]
+    session, turn = await open_session(backend, tmp_path)
+    await session.send(
+        "Run the shell command `printf '%s\\n' \"$PATH\"; command -v python3` and then reply "
+        "with just: shown"
+    )
+    await turn.wait()
+    done = next(e.data for e in turn.events if e.type.value == "tool.execution_complete")
+    path, python = done.result.content.strip().splitlines()[-2:]
+    assert path.endswith(given), path
+    helpers = [part for part in path[: -len(given)].split(":") if part]
+    assert all("codex" in part for part in helpers), helpers
+    assert python == shutil.which("python3", path=given)
+    started = [e.data for e in turn.events if e.type.value == "tool.execution_start"]
+    assert started and started[0].arguments["command"].startswith("printf"), started
+
+
 async def test_its_shell_sees_no_chief_of_staff_variable(backend, tmp_path, monkeypatch):
     only_codex(backend)
     monkeypatch.setenv("CHIEFOFSTAFF_CONTRACT_SECRET", "s3cret")

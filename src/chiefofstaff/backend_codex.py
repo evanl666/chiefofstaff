@@ -1327,6 +1327,11 @@ class CodexBackend:
         # owner's memories (memory_mode "disabled").
         config["features.memories"] = False
         config["memories"] = {"generate_memories": False}
+        # Its commands run in no login shell (`zsh -c`, not `-lc`, nor the snapshot of the
+        # owner's login shell Codex sources then): they see the environment Chief of Staff
+        # gives the worker, PATH as it is, as a Copilot worker's commands do (macOS's login
+        # shell puts the system's folders first: another `python3`). The owner's decision.
+        config["allow_login_shell"] = False
         if provided:
             # Codex merges these into the owner's own servers, as Copilot does its session's.
             config["mcp_servers"] = {

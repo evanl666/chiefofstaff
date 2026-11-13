@@ -136,6 +136,7 @@ def test_a_command_line_without_the_shell_codex_runs_it_in():
     assert inner_command("bash -c 'echo hi'") == "echo hi"
     assert inner_command("git status") == "git status", "no shell around it"
     assert inner_command("/bin/zsh -lc 'unclosed") == "/bin/zsh -lc 'unclosed"
+    assert inner_command("/bin/zsh -c 'npm test'") == "npm test", "no login shell"
     assert inner_command("python -c 'print(1)'") == "python -c 'print(1)'", "not a shell"
 
 
@@ -601,6 +602,7 @@ async def test_with_ask_first_every_server_it_can_name_asks(tmp_path, monkeypatc
         "features.apps": False,
         "features.memories": False,
         "memories": {"generate_memories": False},
+        "allow_login_shell": False,
         "features.multi_agent": False,
         "features.multi_agent_v2": False,
         "agents": {"enabled": False},
@@ -641,6 +643,8 @@ async def test_chatgpts_apps_are_off_for_a_worker_that_asks_first_as_read_back(
         configs = [p["config"] for p in starts if p and "config" in p and "threadId" not in p]
         for config in configs:
             assert config["memories"] == {"generate_memories": False}, "its own never kept"
+            # Every worker: its commands see the environment it is given (no login shell).
+            assert config["allow_login_shell"] is False
         assert configs[0]["agents"] == {"enabled": False} and "agents" not in configs[1]
         resumed = await codex.resume_session(asking.session_id, ask_first=True)
         assert resumed.session_id == asking.session_id

@@ -978,8 +978,9 @@ new workers use cannot run, they start on Copilot and their chat says why.
 - **Spend** is in tokens, never credits: the worker's header, its tasks' hover tips and a part of
   its own in *Usage*; the daily summary adds them on a day with some. A worker with a limit stops
   once it has spent it; it may pass it by the model call in flight and what its child agents
-  spend before they stop. If Codex stops in the middle of a turn, what it spent then is not
-  known: a worker with a limit then waits under *Needs you* until you say *Go on*.
+  spend before they stop. Tokens are counted as Codex counts them, cached input included. If
+  Codex stops in the middle of a turn, what it spent then is not known: a worker with a limit
+  then waits under *Needs you* until you say *Go on*.
 - **Ask first** works on Codex versions before 0.168 (the ones tested): every command none of
   your Codex rules allows, every edit and every MCP call ask Chief of Staff, which answers as for
   a Copilot worker; ChatGPT's apps and Codex's subagents are off for such a worker. Your own
@@ -992,11 +993,15 @@ new workers use cannot run, they start on Copilot and their chat says why.
 - **Sandbox:** Codex workers run as Copilot workers do with the sandbox off, with your caches,
   tools and network (`danger-full-access`); your own Codex `sandbox_mode` is not applied to them.
   Every edit still asks Chief of Staff first, so your own checkouts stay read-only to them.
+  Their commands run without a login shell, with the environment and `PATH` a Copilot worker's
+  commands get; Codex puts its own helpers first on `PATH` and sets a few variables of its own
+  (such as `LANG` and `LC_ALL` to `C.UTF-8`, `TERM=dumb`, `PAGER=cat`).
 - **Repositories:** a repository's `.codex/` settings, hooks and rules load only where you trust
   its folder in Codex (a worktree as its repository is trusted). Elsewhere Codex reads none of
   them, and Chief of Staff gives the worker the repository's `AGENTS.md` files as text: a
   message marked as the repository's, with any tag in it escaped, so it can't pass as yours or
-  as Chief of Staff's.
+  as Chief of Staff's. Trust the repository in Codex to load its `.codex/` settings and skills
+  in Codex workers.
 - **Questions:** a Codex worker asks you with a report's question (Codex has no `ask_user` here).
   An MCP server that needs a sign-in is signed in with `codex mcp login <name>`.
 

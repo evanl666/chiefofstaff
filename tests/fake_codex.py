@@ -817,7 +817,13 @@ class Server:
         item = {
             "type": "commandExecution",
             "id": f"exec-{uuid.uuid4()}",
-            "command": "/bin/zsh -lc " + shlex.quote(command),
+            # As Codex runs it: in a login shell unless its config says none (allow_login_shell).
+            "command": (
+                "/bin/zsh -c "
+                if (self.threads[thread_id].get("config") or {}).get("allow_login_shell") is False
+                else "/bin/zsh -lc "
+            )
+            + shlex.quote(command),
             "cwd": self.threads[thread_id]["cwd"],
             "status": "inProgress",
             "commandActions": [{"type": "unknown", "command": command}],
