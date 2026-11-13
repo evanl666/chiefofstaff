@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased (0.1.43)
+
+Other Copilot sessions lists yours only, also when a script or a worker runs `copilot -p`.
+
+- **One-shot `copilot -p` sessions a script or a worker made are no longer taken for yours.** The
+  Copilot CLI names itself the same whether you type in it or a script calls `copilot -p` in a
+  loop, so a worker's scripts left hundreds of sessions that filled Other Copilot sessions (38 of
+  its 40 rows), reached the Router as yours, and were read as your words when learning how you
+  write. A session with one prompt that has ended is now left out of all three when it is one
+  of a batch (three or more that start with the same words, each within half an hour of the one
+  before, or any named `batch: …` with `copilot -p --name`) or a worker made it while running a
+  command (in its own folder, with a command that runs `copilot`, or a batch it started). A
+  single `copilot -p` you run yourself, and every session you typed more than one message in or
+  have open, stays listed, and the list's 40 rows are counted after leaving the others out
+  (found by QA on 0.1.39 to 0.1.42).
+- **Learning how you write reads only Copilot sessions you talked in** (two messages of yours or
+  more): not a one-shot session, such as a `copilot -p` of your own or one question asked and
+  left, written for a script or a single answer. What was read before from sessions it no longer
+  reads, and not learned from yet, is dropped once after a start and before every learning run,
+  so a restart no longer lets a script's prompts in (QA on 0.1.42: 17 were waiting). Styles and
+  habits learned before stay; `chiefofstaff tidy-sessions` names those learned from a worker's
+  or a script's sessions.
+- **`chiefofstaff tidy-sessions`** shows the sessions a worker or a script left in your Copilot
+  home and what was learned from them, changing nothing. With `--apply`, run in your own
+  terminal, it moves them to a folder beside it with a manifest, to be moved back any time. It
+  deletes nothing and leaves sessions open or changed in the last hour where they are.
+- **Workers name each `copilot -p` call of a batch `batch: <their task>` and give the batch a
+  Copilot home of their own**, so its sessions never reach yours (their instructions say so, with
+  one call tried first, and to prefer a model's API where there is one).
+- Sessions a program made through Copilot's SDK are left out as in 0.1.40.
+
 ## 0.1.42 (2026-11-12)
 
 Windows support, experimental, from a contributor.

@@ -40,8 +40,8 @@ A status::
 
 ``GET /api/others/{id}``: one session from the latest listing, as a row (with a status only
 when it is tracked), for a selection kept across a reload; 404 for a session that is not the
-owner's to see (Chief of Staff's own, remote, or not listed); 409 while Copilot is not connected
-and nothing was listed yet.
+owner's to see (Chief of Staff's own, remote, made by a program, a worker or a script: see
+provenance.py; or not listed); 409 while Copilot is not connected and nothing was listed yet.
 
 The ``others`` event, after a pass with something to say (about every 2 s while a tab is open
 and a session has a status)::
@@ -79,8 +79,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .backend import OWN_CLIENTS, SESSION_ID, made_by_a_program, made_by_us
+from .backend import SESSION_ID
 from .events import PLUMBING_TOOLS, describe_tool
+from .provenance import LEFT_OUT, OWNER, managed, whose
 from .workers import own_event
 
 if TYPE_CHECKING:
@@ -936,39 +937,6 @@ class Row:
     meta: Any = field(compare=False)  # The listing's: kept while a listing has it unchanged.
 
 
-def whose(meta: Any, managed: set[str]) -> str:
-    """Section 4.2: whose a listed session is, the first rule that matches. ours, remote and
-    program (a script's through Copilot's SDK, see made_by_a_program) are left out (LEFT_OUT);
-    unlisted (the raw answer was not read), unknown (no maker named) and another (made by another
-    client and last run by a Chief of Staff) are listed without a status; owner: the owner's own,
-    with one."""
-    if meta.session_id in managed:
-        return "ours"
-    if getattr(meta, "is_remote", False):
-        return "remote"
-    if not getattr(meta, "clients_listed", False):
-        return "unlisted"
-    made = getattr(meta, "client_name", "") or ""
-    last = getattr(meta, "last_client_name", "") or ""
-    if not made:
-        return "unknown"
-    if getattr(meta, "made_by_us", False) or made_by_us(
-        {"clientName": made, "lastClientName": last}
-    ):
-        return "ours"
-    if getattr(meta, "made_by_program", False) or made_by_a_program(
-        {"clientName": made, "lastClientName": last}
-    ):
-        return "program"
-    if last in OWN_CLIENTS:
-        return "another"
-    return "owner"
-
-
-# Whose sessions are not listed at all (see whose).
-LEFT_OUT = frozenset({"ours", "remote", "program"})
-
-
 def item_of(meta: Any) -> dict:
     """A listed session as the sidebar's list has it (Workers.external), without "open"."""
     context = getattr(meta, "context", None)
@@ -1091,6 +1059,7 @@ class Others:
         # Open sessions the last listing did not have, with their log's size then (see grown).
         self.unlisted: dict[str, int] = {}
         self.managed: set[str] = set()
+        self.made: dict[str, str] = {}  # What a worker or a script made (provenance.py).
         self.tracked_for: tuple[int, frozenset[str]] | None = None
         self.listings = 0
         self.connection = -1
@@ -1242,16 +1211,9 @@ class Others:
         except Exception as exc:
             logger.warning("Could not list Copilot's sessions: %s", where_failed(exc))
             return
-        managed = {row["id"] for row in self.store.all("SELECT id FROM sessions")}
-        for row in self.store.all(
-            "SELECT key, value FROM kv WHERE key LIKE 'alias:%' OR key LIKE 'copilot:%'"
-        ):
-            managed.add(
-                row["key"].removeprefix("alias:")
-                if row["key"].startswith("alias:")
-                else row["value"]
-            )
-        self.listing, self.managed = listing, managed
+        # Which of them a worker or a script made (provenance.py), as the Router sees them.
+        made = await self.runtime.provenance.made(listing, self.listed_open)
+        self.listing, self.managed, self.made = listing, managed(self.store), made
         self.listings += 1
         listed = {meta.session_id for meta in listing}
         self.unlisted = {key: self.size_of(key) for key in self.listed_open - listed}
@@ -1294,12 +1256,14 @@ class Others:
         at = wall()
         found = []
         for meta in self.listing:
-            owner = whose(meta, self.managed)
+            is_open = meta.session_id in open_now
+            # Open again in a terminal, it is the owner's whoever made it: looked at again once
+            # it closes.
+            owner = whose(meta, self.managed, None if is_open else self.made)
             if owner in LEFT_OUT:
                 continue
             modified = getattr(meta, "modified_time", None)
             changed = modified.timestamp() if isinstance(modified, datetime) else 0.0
-            is_open = meta.session_id in open_now
             if is_open or at - changed <= CLOSED:
                 found.append((is_open, changed, meta, owner))
         found.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
@@ -1401,12 +1365,12 @@ class Others:
         if self.listing is None:
             await self.list_sessions()
         meta = next((m for m in self.listing or [] if m.session_id == session_id), None)
-        owner = whose(meta, self.managed) if meta else "ours"
+        is_open = session_id in self.runtime.elsewhere
+        owner = whose(meta, self.managed, None if is_open else self.made) if meta else "ours"
         if meta is None or owner in LEFT_OUT:
             raise LookupError("Session not found.")
-        found = "closed" if owner == "owner" else owner
-        is_open = session_id in self.runtime.elsewhere
-        if owner == "owner" and is_open:
+        found = "closed" if owner == OWNER else owner
+        if owner == OWNER and is_open:
             found = "reading"  # Followed from the next listing.
         return {
             **item_of(meta),

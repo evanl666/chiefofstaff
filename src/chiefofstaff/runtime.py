@@ -84,6 +84,7 @@ from .notify import mac_notification
 from .others import Others
 from .peers import Peers
 from .policy import GITHUB_MCP, within
+from .provenance import Provenance, log_of
 from .roles import ROUTER, SLACK, WATCHDOG, WORKER
 from .sendsocket import LimitedError, SendSocket
 from .sendsocket import headline as sent_headline
@@ -392,6 +393,10 @@ class Runtime:
         self.abilities = Abilities(self)
         self.connector = Connector(self)
         self.storage = Storage(self)
+        # Which Copilot sessions a worker or a script made, not the owner (provenance.py).
+        self.provenance = Provenance(
+            store, lambda session_id: log_of(self.backend, session_id), self.workspaces.own_folder
+        )
         # Where the owner's other Copilot sessions stand (the sidebar), while the setting is on.
         self.others = Others(self)
         # Send to Chief's socket, while the setting is on.

@@ -324,6 +324,10 @@ Work as fast as a skilled engineer at their own terminal:
 - Start what keeps running (a dev server, a watcher, a tunnel) detached (bash with mode="async"
   and detach: true), and stop it when you no longer need it. Left running attached, it holds
   every message to you until it ends.
+- A script that runs the `copilot` CLI many times (`copilot -p` in a loop; a model's API is
+  better where you have one): name each call `--name "batch: <your task>"`, and set COPILOT_HOME
+  to a new folder in your workspace so those sessions stay out of the owner's. Try one call that
+  way first; if it cannot sign in there, run them without COPILOT_HOME, still named.
 
 Communicating:
 {rules}

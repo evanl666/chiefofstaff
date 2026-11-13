@@ -114,9 +114,11 @@ ignore = ["SIM905", "PERF401"]
     "T201",  # Drivers print their progress.
     "PT017", "PT018",  # Not pytest: drivers assert on what an error says, several facts at once.
 ]
-# The command line prints where Chief of Staff runs, and what became of what was sent.
+# The command line prints where Chief of Staff runs, what became of what was sent, and what
+# tidy-sessions found and moved.
 "src/chiefofstaff/__main__.py" = ["T201"]
 "src/chiefofstaff/send.py" = ["T201"]
+"src/chiefofstaff/tidy.py" = ["T201"]
 
 [tool.pyright]
 include = ["src"]

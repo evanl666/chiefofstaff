@@ -38,7 +38,7 @@ from chiefofstaff.runtime import Runtime  # noqa: E402
 from chiefofstaff.sources.slack import SlackSource  # noqa: E402
 from chiefofstaff.web import create_app  # noqa: E402
 
-PORT = 8798
+PORT = int(os.environ.get("UI_EDGES_PORT", "8798"))
 TOKEN = "ui-edges-token"
 BASE = f"http://127.0.0.1:{PORT}"
 SHOTS = ROOT / "browser-shots"

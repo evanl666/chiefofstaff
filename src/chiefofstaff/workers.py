@@ -19,6 +19,7 @@ from . import catalog, machine
 from .backend import stop_background
 from .envelope import clean_title, owner_text, sendable, short, wrap
 from .events import PLUMBING_TOOLS, describe_tool
+from .provenance import LEFT_OUT, managed, whose
 from .roles import ROUTER, WORKER
 from .sources.slack import describe
 from .store import now
@@ -986,29 +987,23 @@ class Workers:
         cached_at, items = self.external_cache
         if not refresh and time.monotonic() - cached_at < 15:
             return items
-        managed = {row["id"] for row in self.store.all("SELECT id FROM sessions")}
-        managed |= {
-            row["key"].removeprefix("alias:")
-            for row in self.store.all("SELECT key FROM kv WHERE key LIKE 'alias:%'")
-        }
         items = []
         backend = self.runtime.require_ready()
         listed = await backend.list_sessions()
         await self.refresh_elsewhere()
         elsewhere = self.runtime.elsewhere
+        # Chief of Staff's own (here, or from another data directory: a test run's, an older
+        # install's), remote, or made by a program through Copilot's SDK, by a worker's
+        # `copilot -p` or by a script's: not the owner's to see, nor their words to learn from.
+        # Decided as the sidebar's index does (provenance.py); the most shown is counted after.
+        held = managed(self.store)
+        made = await self.runtime.provenance.made(listed, elsewhere)
         # Sessions open in a terminal right now first, then the most recent.
         for meta in sorted(
             listed, key=lambda m: (m.session_id in elsewhere, m.modified_time), reverse=True
         ):
-            # Chief of Staff's own, from another data directory (a test run's, an older
-            # install's), or a program's through Copilot's SDK (a script's batch): not the
-            # owner's to see, nor their words to learn from.
-            if (
-                meta.session_id in managed
-                or meta.is_remote
-                or getattr(meta, "made_by_us", False)
-                or getattr(meta, "made_by_program", False)
-            ):
+            is_open = meta.session_id in elsewhere
+            if whose(meta, held, None if is_open else made) in LEFT_OUT:
                 continue
             context = meta.context
             items.append(
@@ -1019,7 +1014,7 @@ class Workers:
                     "repository": sendable((context.repository if context else "") or ""),
                     "branch": sendable((context.branch if context else "") or ""),
                     "modified": meta.modified_time.isoformat(),
-                    "open": meta.session_id in elsewhere,
+                    "open": is_open,
                 }
             )
             if len(items) >= 40:

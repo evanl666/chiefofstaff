@@ -15,12 +15,14 @@ import json
 import logging
 import re
 import time
+from collections.abc import Collection
 from contextlib import suppress
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
+from .provenance import NOT_THEIRS, OWNER, known, managed, whose
 from .roles import ROUTER, SLACK, WATCHDOG, WORKER
 from .sources.github import POSTED_MARK, github_time, worker_commits
 from .sources.slack import SEARCH_TOOL
@@ -29,6 +31,7 @@ from .workspaces import git
 
 if TYPE_CHECKING:
     from .runtime import Runtime
+    from .store import Store
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +65,9 @@ LINE_COMMENTS = (
 )
 COLLECT_EVERY = 2 * 3600
 FIRST_COLLECT_DELAY = 120  # After a start: not while it is busy starting sessions.
+# After a start, what was queued from sessions learning takes no words from is dropped (once
+# Copilot is connected): before the first collect, as a learning run can come first.
+FIRST_FORGET_DELAY = 15
 LOOKBACK_DAYS = 30
 MAX_TEXT = 1500
 MAX_STYLE = 800
@@ -164,12 +170,91 @@ def own_words(row: dict) -> str:
     return text[found.end() :] if found else text
 
 
+def talked_in(events: list[dict]) -> bool:
+    """Whether these events of a session show someone talked in it: two messages of its own,
+    or it was resumed (see provenance.Shape)."""
+    said = 0
+    for event in events:
+        data = event.get("data")
+        data = data if isinstance(data, dict) else {}
+        if event.get("type") in {"session.resume", "session.snapshot_rewind"}:
+            return True
+        if event.get("type") == "user.message" and not (
+            event.get("agentId") or data.get("parentToolCallId")
+        ):
+            said += 1
+    return said > 1
+
+
+def current_styles(store: Store) -> dict[str, dict]:
+    """Each section's current version: its newest one not undone."""
+    found = {}
+    for row in store.all("SELECT * FROM style_versions WHERE status='active' ORDER BY id DESC"):
+        found.setdefault(row["section"], row)
+    return {section: found[section] for section in SECTIONS if section in found}
+
+
+def style_version(store: Store, section: str) -> int:
+    return int(
+        store.value(
+            "SELECT count(*) FROM style_versions WHERE section=? AND status!='undone'",
+            (section,),
+        )
+    )
+
+
+def learned_from(store: Store, session_ids: Collection[str]) -> list[dict]:
+    """What is in use and was learned partly from these Copilot sessions' words (before they
+    were known not to be the owner's, see provenance.py): each current style and each habit in
+    use or waiting for the owner, with how many of the examples it rests on came from them.
+    Nothing is changed here: the owner decides (Settings → You: Undo a style, remove a habit)."""
+    if not session_ids:
+        return []
+    theirs = set()
+    for row in store.all("SELECT id, ref FROM observations WHERE learned=1 AND source='copilot'"):
+        parts = row["ref"].split(":")
+        if len(parts) > 2 and parts[1] in session_ids:
+            theirs.add(row["id"])
+    if not theirs:
+        return []
+    found = []
+    for section, row in current_styles(store).items():
+        evidence = json.loads(row["evidence"] or "[]")
+        if used := sum(1 for item in evidence if item in theirs):
+            found.append(
+                {
+                    "kind": "style",
+                    "name": TITLES[section],
+                    "version": style_version(store, section),
+                    "from_them": used,
+                    "examples": len(evidence),
+                }
+            )
+    for lesson in store.all(
+        "SELECT text, observed, status FROM lessons WHERE status IN ('active', 'proposed') "
+        "ORDER BY created_at"
+    ):
+        observed = json.loads(lesson["observed"] or "[]")
+        if used := sum(1 for item in observed if item in theirs):
+            found.append(
+                {
+                    "kind": "habit",
+                    "name": lesson["text"],
+                    "status": lesson["status"],
+                    "from_them": used,
+                    "examples": len(observed),
+                }
+            )
+    return found
+
+
 class Habits:
     def __init__(self, runtime: Runtime):
         self.runtime = runtime
         self.store = runtime.store
         self.lock = asyncio.Lock()
         self.job: asyncio.Task | None = None
+        self.forgetting: asyncio.Task | None = None
         self.status: dict[str, str] = {}  # Source -> its last error ("" when it worked).
         self.running = False  # Learn now: reading the owner's work, then starting to learn.
 
@@ -177,11 +262,13 @@ class Habits:
 
     async def start(self):
         self.job = asyncio.create_task(self.loop())
+        self.forgetting = asyncio.create_task(self.forget_queued())
 
     async def stop(self):
-        if self.job:
-            self.job.cancel()
-            await asyncio.gather(self.job, return_exceptions=True)
+        for job in (self.job, self.forgetting):
+            if job:
+                job.cancel()
+                await asyncio.gather(job, return_exceptions=True)
 
     async def loop(self):
         await asyncio.sleep(FIRST_COLLECT_DELAY)
@@ -473,22 +560,33 @@ class Habits:
         return added
 
     async def collect_sessions(self) -> int:
-        """What the owner asked their own Copilot sessions (not Chief of Staff's, nor a
-        program's)."""
+        """What the owner asked their own Copilot sessions they talked in (two messages of
+        theirs or more, or one they came back to): not a one-shot session's prompt (a
+        `copilot -p`, or one question asked and left), written for a script or a single answer,
+        not as the owner writes to their sessions; nor Chief of Staff's, nor those a program, a
+        worker or a script made (see provenance.py)."""
         backend = self.runtime.backend
         if not backend:
             return 0
-        await self.forget_programs(backend)
-        added = 0
+        await self.forget(backend)
+        items = []
         for item in await self.runtime.workers.external(refresh=True):
             with suppress(ValueError):
-                stamp = datetime.fromisoformat(item["modified"]).timestamp()
-                if stamp < self.since():
+                if datetime.fromisoformat(item["modified"]).timestamp() < self.since():
                     continue
+            items.append(item)
+        talked = await self.runtime.provenance.talks([item["id"] for item in items])
+        added = 0
+        for item in items:
+            said = talked.get(item["id"])
+            if said is False:
+                continue  # One message so far: looked at again next time.
             key = f"habits:copilot:{item['id']}"
             offset = int(self.store.get(key) or 0)
             for _ in range(HISTORY_READS):
                 events, after, _ = await backend.read_history(item["id"], offset)
+                if said is None and not offset and not talked_in(events):
+                    break  # Its log not known otherwise: by what is read of it (read before: yes).
                 for event in events:
                     if event.get("type") != "user.message":
                         continue
@@ -504,21 +602,60 @@ class Habits:
                 self.store.set(key, str(offset))
         return added
 
-    async def forget_programs(self, backend: Any) -> None:
-        """What was read from a program's sessions (see backend.made_by_a_program) as the owner's
-        instructions, and not learned from yet, is dropped: before 0.1.40 they were listed as the
-        owner's, and the fallback listing cannot tell them apart. From a listing that can."""
+    async def forget(self, backend: Any) -> int:
+        """What was read as the owner's words and not learned from yet is dropped when its
+        session is one learning takes no words from (see collect_sessions): a program's through
+        Copilot's SDK (listed as the owner's before 0.1.40), a worker's or a script's (before
+        0.1.43; see provenance.py, also once moved away), or one of the owner's own they did not
+        talk in (one message). Before every learning run and once after a start, so what was
+        queued before is never learned from. Only from a listing that says which app made each
+        session (the fallback listing cannot tell them apart); a session open now, or whose log
+        says neither, is looked at again next time. What was learned stays (see learned_from).
+        Returns how much was dropped."""
         listed = await backend.list_sessions()
         if not all(getattr(meta, "clients_listed", False) for meta in listed):
-            return  # Not known whose they are: looked at again next time.
+            return 0
+        open_now = set(self.runtime.elsewhere)
+        made = await self.runtime.provenance.made(listed, open_now)
+        held = managed(self.store)
+        gone = set(known(self.store)) - open_now
+        owners = []
         for meta in listed:
-            if getattr(meta, "made_by_program", False):
-                prefix = f"copilot:{meta.session_id}:"
-                self.store.execute(
-                    "DELETE FROM observations WHERE learned=0 AND source='copilot' "
-                    "AND substr(ref, 1, ?)=?",
-                    (len(prefix), prefix),
-                )
+            if meta.session_id in open_now:
+                continue
+            found = whose(meta, held, made)
+            if found in NOT_THEIRS:
+                gone.add(meta.session_id)
+            elif found == OWNER:
+                owners.append(meta.session_id)
+        talked = await self.runtime.provenance.talks(owners)
+        gone |= {key for key, said in talked.items() if not said}
+        queued = [
+            row["id"]
+            for row in self.store.all(
+                "SELECT id, ref FROM observations WHERE learned=0 AND source='copilot'"
+            )
+            if (parts := row["ref"].split(":")) and len(parts) > 2 and parts[1] in gone
+        ]
+        if queued:
+            self.store.execute_many("DELETE FROM observations WHERE id=?", [(n,) for n in queued])
+            logger.info(
+                "Dropped %d words not learned from yet, of Copilot sessions learning takes no "
+                "words from (a script's, a worker's, a program's, or one-shot).",
+                len(queued),
+            )
+        return len(queued)
+
+    async def forget_queued(self):
+        """Once after a start, with Copilot connected and learning on: see forget."""
+        await asyncio.sleep(FIRST_FORGET_DELAY)
+        backend = self.runtime.backend
+        if not (backend and self.runtime.ready() and self.enabled()):
+            return  # Before every learning run anyway.
+        try:
+            await self.forget(backend)
+        except Exception:
+            logger.info("Could not look at what is queued for learning.", exc_info=True)
 
     # What the learning worker reads
 
@@ -591,12 +728,7 @@ class Habits:
 
     def styles(self) -> dict[str, dict]:
         """Each section's current version: its newest one not undone."""
-        found = {}
-        for row in self.store.all(
-            "SELECT * FROM style_versions WHERE status='active' ORDER BY id DESC"
-        ):
-            found.setdefault(row["section"], row)
-        return {section: found[section] for section in SECTIONS if section in found}
+        return current_styles(self.store)
 
     def sections_for(self, row: dict) -> list[str]:
         if row["role"] == WATCHDOG:
@@ -714,12 +846,7 @@ class Habits:
             self.runtime.learning.finish(caller, result)
 
     def version(self, section: str) -> int:
-        return int(
-            self.store.value(
-                "SELECT count(*) FROM style_versions WHERE section=? AND status!='undone'",
-                (section,),
-            )
-        )
+        return style_version(self.store, section)
 
     @staticmethod
     def roles_of(section: str) -> tuple[str, ...]:

@@ -15,7 +15,8 @@ Each side runs the real web app in a process of its own tree's environment, on a
 (chiefofstaff.scripted) with a fake Slack, a fake `gh` and a fixed clock (time-machine; time moves
 only between steps). The app's periodic rounds (an asyncio.sleep of PERIODIC seconds or more in
 its code) wait for the script's tick, so they run at the same point on both sides. Sides run one
-after the other in the same folder on the same port (8810-8819), so paths and ports match.
+after the other in the same folder on the same port (8810-8819, or ten from
+DIFFERENTIAL_PORT_BASE), so paths and ports match.
 
 Compared, after each step of the script (boot, ask, decide, slack, approve, blocked, accept,
 tick) and once more after the page was looked at:
@@ -80,7 +81,9 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = Path(__file__).resolve()
 BASELINE = "v0.1.40"
-PORTS = range(8810, 8820)
+# DIFFERENTIAL_PORT_BASE moves the ten ports (another checkout's run on the same machine).
+PORT_BASE = int(os.environ.get("DIFFERENTIAL_PORT_BASE", "8810"))
+PORTS = range(PORT_BASE, PORT_BASE + 10)
 TOKEN = "differential-token"
 WORK = ROOT / "browser-shots" / "differential-work"
 OUT = ROOT / "browser-shots" / "differential"
@@ -186,6 +189,21 @@ FIXES = [
     # (else how many there are) on the right as the rows' small words, in full in its tooltip
     # and accessible name. Its markup and text changed with it, setting on or off.
     Allow("heading-one-line", element="#external > summary"),
+    # 0.1.43: workers are told how to run a batch of `copilot -p` (named `batch: <task>`, in a
+    # Copilot home of their own), so its sessions stay out of the owner's.
+    Allow(
+        "workers-batch-cli",
+        data=r"\.system_message\.content$",
+        lines=r"copilot -p|--name \"batch: <your task>\"|to a new folder in your workspace|"
+        r"way first; if it cannot sign in there",
+    ),
+    # 0.1.43: learning reads only Copilot sessions the owner talked in (two messages or more):
+    # the scenario's two terminal sessions have one message each (one asks the owner, one
+    # finished), so their words are no longer read, and Settings → You counts two fewer.
+    Allow("learn-from-talked-sessions", data=r"\./api/state\.habits\.(observed\.instruction|new)$"),
+    Allow("learn-from-talked-sessions, read", data=r"\.db\.kv\.habits:copilot:<uuid-[34]>$"),
+    Allow("learn-from-talked-sessions, words", data=r"\.db\.observations\[[23]\]$"),
+    Allow("learn-from-talked-sessions, count", element="#learn-status", views=r"^settings-you"),
 ]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on

@@ -225,6 +225,12 @@ class Learning:
         async with self.lock:
             if self.busy():
                 raise ValueError("Chief of Staff is learning from your work already.")
+            if backend := self.runtime.backend:
+                # What was queued from sessions learning takes no words from goes first.
+                try:
+                    await self.runtime.habits.forget(backend)
+                except Exception:
+                    logger.info("Could not look at what is queued for learning.", exc_info=True)
             items = self.unlearned()
             observed = self.runtime.habits.for_learning()
             if not items and not observed:

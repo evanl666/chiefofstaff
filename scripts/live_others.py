@@ -21,10 +21,18 @@ O2 whose session it is (section 4.2), with a second Chief of Staff on the same h
    again (g, rule 4); a script's session (through the SDK, naming no app) is never listed, open
    or closed, until continued in a terminal (h).
 O4 a closed session continued here works and leaves the list (a); an open one is refused (b).
+O6 whose a `copilot -p` session is (provenance.py): five alike that a script runs one after
+   the other are a batch, left out of the sidebar's rows and the Router's list (/api/external)
+   once they ended, and kept so in the store, as is a single one named `batch: …` (a); a single
+   one is the owner's, listed and finished (b); `chiefofstaff tidy-sessions` shows the batch,
+   what would be dropped and what was learned from it, changing nothing, and leaves them while
+   they are new (c); made two hours old, --apply moves them with a manifest, drops what was not
+   learned yet and keeps the one-off and the rest; one moved back is listed by Copilot again
+   and still left out (d).
 
-They run in the order O1, O5, O3, O2, O4, four to six minutes in all; each logs "O1a
+They run in the order O1, O5, O3, O2, O4, O6, five to eight minutes in all; each logs "O1a
 passed"… and the run ends with a report (each session's statuses as shown, Fresh and Found with
-their p95) and "LIVE OTHERS PASSED".
+their p95, the CLI versions that ran) and "LIVE OTHERS PASSED".
 
 All along, a tab's event stream is held open (the index reads only while one is) and
 /api/others is read every second: every status given is checked against the session's log at
@@ -35,13 +43,16 @@ which the index reads when what is open changes, else once a minute. Fresh (an e
 its status shown) and Found (a terminal opening or closing a session to its row saying so) are
 measured against section 4.6's targets.
 
-The Chief of Staffs run on ports 18950 and 18951 (the refusing provider on 18952), with
-CHIEFOFSTAFF_OTHERS_STALL_SECONDS and CHIEFOFSTAFF_OTHERS_IDLE_SECONDS set; the CLIs in a
-Copilot home and folders of their own, deleted at the end with every process.
+The Chief of Staffs run on ports 18950 and 18951 (the refusing provider on 18952; another
+three from LIVE_OTHERS_PORT), with CHIEFOFSTAFF_OTHERS_STALL_SECONDS and
+CHIEFOFSTAFF_OTHERS_IDLE_SECONDS set; the CLIs in a Copilot home and folders of their own,
+deleted at the end with every process. The terminals and `copilot -p` run the CLI as the owner
+runs it (the version `copilot --version` shows; Chief of Staff's own CLI is the one the SDK
+starts, with auto-update off, which may be older).
 Uses your signed-in Copilot CLI and a few cheap model calls (LIVE_OTHERS_MODEL, by default
-claude-haiku-5.5). When the model does not do as told, twice (it does not ask, or does not run
-the command), or a terminal does not get where it was driven, the run ends with "NOT THE
-PRODUCT" (exit code 2), not as a product failure.
+claude-haiku-5.5; O6 makes seven). When the model does not do as told, twice (it does not ask, or
+does not run the command), or a terminal does not get where it was driven, the run ends with
+"NOT THE PRODUCT" (exit code 2), not as a product failure.
 
     uv run --with pexpect --with pyte python scripts/live_others.py
 
@@ -82,13 +93,17 @@ sys.path.insert(0, str(Path(__file__).parent))
 import live_e2e
 from live_e2e import App, log
 
+from chiefofstaff.backend import copilot_backend
 from chiefofstaff.others import FRESH as BEHIND
 from chiefofstaff.others import SHOWN
 
-PORT, OTHER_PORT = 18950, 18951
+BASE_PORT = int(os.environ.get("LIVE_OTHERS_PORT", "18950"))
+PORT, OTHER_PORT = BASE_PORT, BASE_PORT + 1
 MODEL = os.environ.get("LIVE_OTHERS_MODEL", "claude-haiku-5.5")
 COPILOT = shutil.which("copilot") or "copilot"
-CLI = ["--allow-all", "--no-auto-update", "--model", MODEL]
+# As the owner starts it in a terminal: the version they run (auto-update off would start the
+# one the CLI keeps for that, which may be older).
+CLI = ["--allow-all", "--model", MODEL]
 # No progress after this many seconds without the log growing (15 minutes in use), and a
 # command that runs well past it.
 STALL = 12
@@ -96,7 +111,7 @@ SLEEP = 32
 # Idle once a turn ended this long ago (an hour in use).
 IDLE = 30
 # A model provider of the test's own, that refuses every request: a session error, for free.
-PROVIDER_PORT = 18952
+PROVIDER_PORT = BASE_PORT + 2
 # The design's targets (section 4.6), and the most a single sample may take.
 FRESH_TARGET, FOUND_TARGET = 4.0, 13.0
 FOUND_MOST = 25.0
@@ -128,6 +143,18 @@ SLEEPY = (
     "DONE."
 )
 OK = "Reply with just the word OK."
+# O6: what a script labelling tickets of a made-up shop asks `copilot -p`, one ticket a call.
+LABEL = (
+    "You label support tickets for acme, a made-up shop. Reply with one word, billing, outage, "
+    "feature or other, for this ticket: "
+)
+TICKETS = [
+    "I was charged twice for one order.",
+    "The checkout page does not load.",
+    "Please add a dark mode.",
+    "Where is my parcel?",
+    "Refund the second charge, please.",
+]
 # How others.py words a turn the owner stopped.
 STOPPED = "Stopped by you"
 
@@ -975,6 +1002,12 @@ class Instance(App):
                 ids.add(key.removeprefix("alias:") if key.startswith("alias:") else value)
         return ids
 
+    def made(self) -> dict[str, dict]:
+        """Who made the sessions it found a worker's or a script's (provenance.py), as kept."""
+        with closing(sqlite3.connect(self.data / "chiefofstaff.db", timeout=5)) as db:
+            rows = db.execute("SELECT key, value FROM kv WHERE key LIKE 'made:%'").fetchall()
+        return {key.removeprefix("made:"): json.loads(value) for key, value in rows}
+
     async def router(self) -> str:
         """Its Router's Copilot session."""
         row = (await self.get("/api/state"))["router_id"]
@@ -1273,7 +1306,7 @@ async def o5_stopped_idle_failed(ctx: Ctx):
     truth = ctx.track(session_id, "X")
     term = Terminal(
         ctx, "X", ctx.folder("terminal-x"), session_id,
-        ["--session-id", session_id, "--allow-all", "--no-auto-update", "-i", OK],
+        ["--session-id", session_id, "--allow-all", "-i", OK],
         env=provider.env,
     )  # fmt: skip
     await term.started(ctx.home)
@@ -1551,6 +1584,223 @@ async def o4_continue(ctx: Ctx, closed: str, opened: str):
     log("O4 passed")
 
 
+# O6: a script's `copilot -p` sessions
+
+
+def sessions_in(home: Path) -> set[str]:
+    return {path.name for path in (home / "session-state").iterdir() if path.is_dir()}
+
+
+async def prompt_mode(ctx: Ctx, folder: Path, prompt: str, *extra: str) -> str:
+    """One `copilot -p`, as a script runs it (QA's: no tools, quiet): its session, once ended."""
+    before = sessions_in(ctx.home)
+    done = await asyncio.to_thread(
+        subprocess.run,
+        [
+            COPILOT,
+            "-p",
+            prompt,
+            "-s",
+            "--no-color",
+            "--available-tools",
+            "",
+            "--model",
+            MODEL,
+            *extra,
+        ],
+        cwd=str(folder),
+        env={**os.environ, "COPILOT_HOME": str(ctx.home)},
+        capture_output=True,
+        text=True,
+        timeout=240,
+    )
+    made = [
+        key
+        for key in sessions_in(ctx.home) - before
+        if workspace(ctx.home, key).get("client_name") == "github/cli"
+    ]
+    if done.returncode or len(made) != 1:
+        raise NotTheProductError(
+            f"`copilot -p` exited {done.returncode} with sessions {made}: "
+            f"{(done.stderr or done.stdout)[-400:]}"
+        )
+    return made[0]
+
+
+def tidy(ctx: Ctx, *arguments: str) -> subprocess.CompletedProcess:
+    """`chiefofstaff tidy-sessions` in the owner's terminal, for this Chief of Staff and home."""
+    done = subprocess.run(
+        [sys.executable, "-m", "chiefofstaff", "tidy-sessions", "--data-dir", str(ctx.app.data),
+         *arguments],
+        env={**os.environ, "COPILOT_HOME": str(ctx.home)},
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )  # fmt: skip
+    log(f"tidy-sessions {' '.join(arguments)} (exit {done.returncode}):\n{done.stdout}"
+        f"{done.stderr}")  # fmt: skip
+    return done
+
+
+async def listed_by_copilot(ctx: Ctx) -> set[str]:
+    """The sessions Copilot itself lists in the home (its own CLI, as Chief of Staff asks it)."""
+    os.environ["COPILOT_HOME"] = str(ctx.home)
+    try:
+        backend = copilot_backend("copilot")
+        await backend.start()
+        try:
+            return {meta.session_id for meta in await backend.list_sessions()}
+        finally:
+            await backend.stop()
+    finally:
+        os.environ.pop("COPILOT_HOME", None)
+
+
+def observe(ctx: Ctx, session_id: str, learned: bool = False) -> int:
+    """An observation read from a session as the owner's words (as habits.collect_sessions
+    adds one), in this Chief of Staff's store."""
+    with closing(sqlite3.connect(ctx.app.data / "chiefofstaff.db", timeout=5)) as db, db:
+        return (
+            db.execute(
+                "INSERT INTO observations(source, kind, ref, text, learned, created_at) VALUES "
+                "('copilot', 'instruction', ?, ?, ?, 'now')",
+                (f"copilot:{session_id}:e{int(learned)}", LABEL, int(learned)),
+            ).lastrowid
+            or 0
+        )
+
+
+def observed(ctx: Ctx) -> dict[str, int]:
+    with closing(sqlite3.connect(ctx.app.data / "chiefofstaff.db", timeout=5)) as db:
+        rows = db.execute("SELECT ref, learned FROM observations WHERE source='copilot'")
+        return dict(rows.fetchall())
+
+
+async def o6_batch(ctx: Ctx):
+    watch, app = ctx.watch, ctx.app
+    # a. Five alike, one after the other: a batch, left out once they ended.
+    folder = ctx.folder("batch")
+    batch = []
+    for ticket in TICKETS:
+        batch.append(await prompt_mode(ctx, folder, LABEL + ticket))
+        ctx.labels[batch[-1]] = f"batch {len(batch)}"
+    shown_open = {key for key in batch if any(e[1] for e in watch.timeline.get(key, []))}
+    log(f"the script's five sessions ended; shown open while they ran: {len(shown_open)}")
+    for session_id in batch:
+        await watch.until("left out: one of a batch", session_id, lambda r: r is None, LISTING)
+    ctx.banned |= set(batch)  # Never listed from now on.
+    for session_id in batch:
+        response = await app.http.get(f"/api/others/{session_id}")
+        assert response.status_code == 404, response.text
+    external = {item["id"] for item in await app.get("/api/external?refresh=true")}
+    assert external.isdisjoint(batch), "the Router's list has none of them"
+    made = app.made()
+    assert {key: made[key]["as"] for key in batch if key in made} == dict.fromkeys(batch, "batch")
+    log(f"O6a passed: {len(batch)} `copilot -p` alike: left out of the rows and the Router's "
+        f"list, kept as a batch ({made[batch[0]]['why']})")  # fmt: skip
+
+    # One named as a batch's, as workers name theirs: left out on its own.
+    named = await prompt_mode(ctx, folder, OK, "--name", "batch: Label the acme tickets")
+    ctx.labels[named] = "named"
+    await watch.until("left out: named a batch's", named, lambda r: r is None, LISTING)
+    ctx.banned.add(named)
+    assert (await app.http.get(f"/api/others/{named}")).status_code == 404
+    assert named not in {item["id"] for item in await app.get("/api/external?refresh=true")}
+    assert app.made()[named]["why"] == "named", app.made()[named]
+    log('O6a passed: one `copilot -p --name "batch: …"` alone: left out, kept as named')
+
+    # b. A single one of the owner's: theirs.
+    one_off = await prompt_mode(ctx, ctx.folder("one-off"), OK)
+    # Followed from when its row says it closed (it ended before this test knew its id).
+    await watch.until("listed, closed", one_off, lambda r: r and not r["open"], LISTING)
+    ctx.track(one_off, "P")
+    row = await watch.until(
+        "listed: closed, finished",
+        one_off,
+        lambda r: r and not r["open"] and key_of(r) == "finished",
+        LISTING,
+    )
+    assert one_off in {item["id"] for item in await app.get("/api/external?refresh=true")}
+    assert one_off not in app.made()
+    log(f"O6b passed: a single `copilot -p`: the owner's, finished {words_of(row)!r}")
+
+    # c. tidy-sessions: what it would move and drop, and what was learned; nothing changes,
+    # and nothing is moved while new.
+    observe(ctx, batch[0])
+    observe(ctx, one_off)
+    learned = observe(ctx, batch[1], learned=True)
+    with closing(sqlite3.connect(app.data / "chiefofstaff.db", timeout=5)) as db, db:
+        db.execute(
+            "INSERT INTO style_versions(section, text, evidence, status, created_at) VALUES "
+            "('chat', 'One word answers.', ?, 'active', 'now')",
+            (json.dumps([learned]),),
+        )
+    with closing(sqlite3.connect(app.data / "chiefofstaff.db", timeout=5)) as db:
+        # This Chief of Staff may have learned a style of its own meanwhile.
+        (version,) = db.execute(
+            "SELECT count(*) FROM style_versions WHERE section='chat' AND status!='undone'"
+        ).fetchone()
+    before, words = snapshot(ctx.home, [*batch, one_off]), observed(ctx)
+    shown = tidy(ctx)
+    assert shown.returncode == 0, shown.stderr
+    for said in (
+        "5 sessions of a script's batch (one-shot, alike)",
+        "1 session named as a batch's",
+        "Left where they are: 6 sessions changed in the last hour.",
+        "1 prompt of theirs, read as yours and not learned from yet, would be dropped.",
+        f"How you write, Answers and reports to you (version {version}): 1 of its 1 example",
+    ):
+        assert said in shown.stdout, said
+    assert snapshot(ctx.home, [*batch, one_off]) == before and observed(ctx) == words
+    log("O6c passed: tidy-sessions showed the batch, what it would drop and what was learned; "
+        "nothing changed, nothing new moved")  # fmt: skip
+
+    # d. Two hours old: moved, with a manifest; what was not learned from yet dropped; one
+    # moved back is Copilot's again, and still left out.
+    old = wall() - 2 * 3600
+    for session_id in batch:
+        for path in [ctx.home / "session-state" / session_id,
+                     *(ctx.home / "session-state" / session_id).rglob("*")]:  # fmt: skip
+            os.utime(path, (old, old), follow_symlinks=False)
+    moved = tidy(ctx, "--apply")
+    assert moved.returncode == 0 and "Moved 5 sessions" in moved.stdout, moved.stdout
+    (folder_moved,) = (ctx.home / "session-state-moved-by-chiefofstaff").iterdir()
+    manifest = json.loads((folder_moved / "manifest.json").read_text())
+    assert sorted(entry["id"] for entry in manifest["sessions"]) == sorted(batch)
+    assert sessions_in(ctx.home).isdisjoint(batch) and one_off in sessions_in(ctx.home)
+    assert observed(ctx) == {
+        key: value for key, value in words.items() if key != f"copilot:{batch[0]}:e0"
+    }, "only the batch's prompt not learned yet is dropped"
+    with closing(sqlite3.connect(app.data / "chiefofstaff.db", timeout=5)) as db:
+        kept = db.execute("SELECT status FROM style_versions WHERE evidence=?", (f"[{learned}]",))
+        assert kept.fetchall() == [("active",)], "what was learned stays"
+    listed = await listed_by_copilot(ctx)
+    assert listed.isdisjoint(batch) and one_off in listed
+    (folder_moved / batch[-1]).rename(ctx.home / "session-state" / batch[-1])
+    assert batch[-1] in await listed_by_copilot(ctx), "moved back: Copilot's again"
+    await asyncio.sleep(LISTING)  # A listing has it again.
+    response = await app.http.get(f"/api/others/{batch[-1]}")
+    assert response.status_code == 404, response.text
+    external = {item["id"] for item in await app.get("/api/external?refresh=true")}
+    assert batch[-1] not in external
+    watch.assert_right("O6")
+    log("O6d passed: moved 5 with a manifest, dropped what was not learned yet, kept the rest; "
+        "one moved back is listed by Copilot again and still left out")  # fmt: skip
+    log("O6 passed")
+
+
+def versions(home: Path) -> dict[str, int]:
+    """The Copilot CLI versions that ran in the home (from their process logs)."""
+    found: dict[str, int] = {}
+    for path in (home / "logs").glob("process-*.log"):
+        with suppress(OSError):
+            for line in path.read_text(errors="replace").splitlines():
+                if "Starting Copilot CLI: " in line:
+                    version = line.rsplit(": ", 1)[1].strip()
+                    found[version] = found.get(version, 0) + 1
+    return found
+
+
 def report(ctx: Ctx, began: float):
     watch = ctx.watch
     print("\n================ LIVE OTHERS REPORT ================")
@@ -1561,6 +1811,7 @@ def report(ctx: Ctx, began: float):
         )
         print(f"{ctx.label(session_id)}: {steps}")
     print(f"rows read {watch.observations}, statuses checked {watch.statuses}: {watch.keys}")
+    print(f"Copilot CLI versions run (processes): {versions(ctx.home)}")
     print(f"rows without a status, by reason: {watch.reasons}")
     fresh = [seconds for _, _, seconds in watch.fresh]
     found = [seconds for _, _, seconds in watch.found]
@@ -1595,6 +1846,8 @@ async def main():
         "fake-terminal",
         "script",
         "terminal-s",
+        "batch",
+        "one-off",
     ]
     for name in names:
         (root / name).mkdir()
@@ -1628,6 +1881,7 @@ async def main():
         await o3_untouched(ctx)
         fake = await o2_provenance(ctx, first)
         await o4_continue(ctx, second, fake)
+        await o6_batch(ctx)
         report(ctx, began)
         failed = False
         log("LIVE OTHERS PASSED")

@@ -205,7 +205,25 @@ more than four searches.
 ones you started in a terminal. Those open in a terminal right now come first, marked *open*.
 Opening one shows its latest conversation, and keeps it current while it works. Sessions a
 program made through Copilot's SDK (a script's, one per item of a batch, say) are not yours to
-continue and are not listed, unless you continued one in a terminal.
+continue and are not listed, unless you continued one in a terminal. Nor are one-shot
+`copilot -p` sessions (one prompt, then done) that a script made in a batch (three or more that
+start with the same words, each within half an hour of the one before, or any named
+`batch: …` with `copilot -p --name`) or that a worker made while it ran a command (in its own
+folder, with a command that runs `copilot`, or a batch it started). A single `copilot -p` you
+run yourself is listed, as is every session you typed more than one message in or have open.
+The Router does not see the others either. Workers name each call of a batch
+`batch: <their task>` and give it a Copilot home of their own (`COPILOT_HOME` in their folder),
+so its sessions do not reach yours at all.
+
+**Moving them out of the way.** Sessions left from before still take room in
+`~/.copilot/session-state` and in `copilot --resume`. `chiefofstaff tidy-sessions` shows those it
+would move: how many, how large, a few of each, who made them, and what was learned from them;
+it changes nothing. `chiefofstaff tidy-sessions --apply`, run in your own terminal, moves them to
+`~/.copilot/session-state-moved-by-chiefofstaff/<date>/` with a `manifest.json` saying what each
+was: move a folder back into `session-state` to have that session again. Nothing is deleted, and
+sessions open now or changed in the last hour stay where they are. What was read from them as
+your words and not learned from yet is dropped; a style or habit learned from them before stays
+until you undo or remove it in Settings → *You* (the command names them).
 
 **Where each stands.** Each row's dot says it, read from the log Copilot keeps on this computer
 (no model call; nothing stored or sent): amber when it asks you something or it is your turn, a
@@ -497,7 +515,12 @@ for you (the Slack session and workers that read Slack get your Slack style; wor
 commit and review style; the Router and workers answer you the way you talk to them), and the
 Router chat says what was learned, with a link to Settings. Settings → *You* → *How you work* shows each, with its version; *Undo* goes back to the
 previous one. Turn *Learn from my Slack messages, PR reviews, commits and Copilot sessions* off
-to stop reading them.
+to stop reading them. Of your Copilot sessions, only those you talked in are read (two messages
+of yours or more): not a one-shot one, such as a `copilot -p` you ran or one question you asked
+and left, which is written for a script or a single answer; nor sessions a program, a worker or a
+script made (see [Your other Copilot sessions](#your-other-copilot-sessions)). What was read from
+those and not learned from yet is dropped before learning; `chiefofstaff tidy-sessions` names
+what was learned from a worker's or a script's sessions before that.
 
 **How you want work done.** Your sessions also learn from what you do with their work:
 

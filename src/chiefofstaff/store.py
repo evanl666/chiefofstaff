@@ -91,6 +91,19 @@ def valid(values: dict) -> bool:
 
 
 class Store:
+    @classmethod
+    def reading(cls, directory: Path) -> "Store":
+        """An existing database, opened to read only: nothing is created, migrated or written
+        (`chiefofstaff tidy-sessions` previews with it, Chief of Staff may be running)."""
+        store = cls.__new__(cls)
+        store.directory = directory
+        store.lock = threading.RLock()
+        store.cached = None
+        uri = f"{(directory / DB_NAME).absolute().as_uri()}?mode=ro"
+        store.db = sqlite3.connect(uri, uri=True, check_same_thread=False)
+        store.db.row_factory = sqlite3.Row
+        return store
+
     def __init__(self, directory: Path):
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.directory = directory
@@ -404,6 +417,17 @@ class Store:
 
     def delete(self, key: str):
         self.execute("DELETE FROM kv WHERE key=?", (key,))
+
+    def execute_many(self, sql: str, rows: list[tuple]):
+        """One statement for each of these rows: one transaction."""
+        with self.lock, self.db:
+            self.db.executemany(sql, rows)
+
+    def set_many(self, values: list[tuple[str, str]], deleted: list[str] | None = None):
+        """Many keys set and deleted at once: one transaction."""
+        with self.lock, self.db:
+            self.db.executemany("INSERT OR REPLACE INTO kv VALUES (?, ?)", values)
+            self.db.executemany("DELETE FROM kv WHERE key=?", [(key,) for key in deleted or []])
 
     def keys(self, prefix: str) -> list[str]:
         rows = self.all(
