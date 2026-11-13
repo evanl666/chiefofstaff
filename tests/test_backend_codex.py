@@ -3058,7 +3058,7 @@ async def test_closing_a_codex_worker_mid_turn_lets_its_process_end(tmp_path, mo
         await runtime.workers.close(worker)
         await until(lambda: session.turn is None, 30)
         await until(lambda: not process.alive() and worker not in backend.workers, 15)
-        assert session.finished and session.session_id not in process.sessions
+        await until(lambda: session.pump is not None and session.pump.done(), 15)
         await until(lambda: not (pids & set(process_table())), 15)
     finally:
         await runtime.stop()
