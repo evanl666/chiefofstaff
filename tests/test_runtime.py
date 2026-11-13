@@ -23,7 +23,6 @@ from chiefofstaff.backend import (
 from chiefofstaff.models import DraftDecision, Settings
 from chiefofstaff.policy import permission_denial
 from chiefofstaff.runtime import ROUTER_TOOLS
-from chiefofstaff.sources.github import marked
 from chiefofstaff.tasks import settle_followups
 from chiefofstaff.workers import turn_open
 
@@ -519,7 +518,7 @@ async def test_github_review_draft_is_published_on_approval(tmp_path):
     assert published["outcome"] == "https://github.com/acme/app/pull/7#review-1"
     arguments, payload = harness.gh_calls[-1]
     assert arguments[1] == "repos/acme/app/pulls/7/reviews"
-    assert payload == {"event": "COMMENT", "commit_id": "abc123", "body": marked("Looks good")}
+    assert payload == {"event": "COMMENT", "commit_id": "abc123", "body": "Looks good"}
 
 
 async def test_an_approval_is_published_as_one_and_settles_the_review_task(tmp_path):
@@ -721,9 +720,7 @@ async def test_the_owner_can_post_the_line_comments_alone(tmp_path):
     )
     await runtime.drafts.resolve(draft["id"], DraftDecision(action="send", content={"body": ""}))
     [payload] = [payload for _, payload in harness.gh_calls if payload]
-    assert payload["body"] == "" and payload["comments"][0]["body"] == marked(
-        "Say why it is empty."
-    )
+    assert payload["body"] == "" and payload["comments"][0]["body"] == "Say why it is empty."
     assert "only the line comments were posted" in harness.session(worker).sent[-1]
     assert runtime.github.seen("github:reviewcomment:77"), "our own comments are not PR news"
 

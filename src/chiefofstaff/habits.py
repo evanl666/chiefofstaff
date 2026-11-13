@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, Field
 
 from .roles import ROUTER, SLACK, WATCHDOG, WORKER
-from .sources.github import POSTED_MARK, github_time, worker_commits
+from .sources.github import github_time, posted_text, worker_commits
 from .sources.slack import SEARCH_TOOL
 from .store import now
 from .workspaces import git
@@ -89,6 +89,7 @@ LANGUAGE_NAMES = re.compile(
 )
 QUOTES = re.compile(r"[\"“”「」『』]")
 HAN_OR_KANA = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]")
+PULL_URL = re.compile(r"github\.com/([^/\s]+/[^/\s]+)/pull/(\d+)")
 GITHUB_ID = re.compile(r"(?:pullrequestreview-|discussion_r)(\d+)$")
 COPILOT_TRAILER = re.compile(r"^Co-authored-by:.*\bcopilot\b", re.IGNORECASE | re.MULTILINE)
 # A file's path at the start of a line comment, as the collector once wrote it ("src/a.py: ").
@@ -136,6 +137,12 @@ def clean(text: str, limit: int = MAX_TEXT) -> str:
 
 def plain(text: str) -> str:
     return " ".join((text or "").split()).lower()
+
+
+def pull_label(url: str) -> str:
+    """The PR ("owner/repo#n") a review's or comment's URL is on; "" for another URL."""
+    found = PULL_URL.search(url or "")
+    return f"{found.group(1)}#{found.group(2)}" if found else ""
 
 
 def url_id(url: str) -> str:
@@ -421,7 +428,8 @@ class Habits:
                     # Reviews Chief of Staff published: drafts, learned from as feedback.
                     if url_id(review.get("url", "")) in sent:
                         continue
-                    if review.get("body") and POSTED_MARK not in review["body"]:
+                    label = pull_label(review.get("url", ""))
+                    if review.get("body") and not posted_text(self.store, label, review["body"]):
                         ref = f"github:{review['id']}"
                         meta = {**meta, "url": review.get("url", "")}
                         added += self.add("github", "pr_review", ref, review["body"], meta)
@@ -429,8 +437,11 @@ class Habits:
                         comment = comment or {}
                         if not comment.get("body") or url_id(comment.get("url", "")) in sent:
                             continue
-                        if POSTED_MARK in comment["body"]:
-                            continue  # Drafted for the owner by Chief of Staff (any install).
+                        on = label or pull_label(comment.get("url", ""))
+                        if posted_text(self.store, on, comment["body"]):
+                            # Drafted for the owner by Chief of Staff: its id was not kept (or
+                            # another install posted it, with the mark it once left).
+                            continue
                         # Their own words: GitHub shows the file beside a line comment.
                         added += self.add(
                             "github",

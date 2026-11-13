@@ -13,7 +13,7 @@ from conftest import FakeSession, Harness, call_tool, settle, task_of
 
 from chiefofstaff.delivery import digest
 from chiefofstaff.models import DraftDecision, Settings
-from chiefofstaff.sources.github import marked
+from chiefofstaff.sources.github import POSTED_MARK
 
 
 def interrupt_after_send(harness, session_id, status="idle"):
@@ -265,8 +265,9 @@ async def test_drafts_interrupted_while_sending_are_checked_before_anything_is_r
 
 
 async def test_an_interrupted_review_and_reply_posted_with_the_mark_are_found(harness):
-    """Code review: what Chief of Staff posts carries its mark; after a restart, the review and
-    the reply it posted must be found as posted, not offered to post again."""
+    """Code review: what Chief of Staff posted carried its mark (before 0.1.43); after a
+    restart, the review and the reply it posted must be found as posted, not offered to post
+    again."""
     runtime = await harness.connect()
     target = {"repo": "acme/app", "number": 7, "head_sha": "abc"}
     review = harness.store.create_draft(harness.router_id, "github", target, "Looks good.")
@@ -275,10 +276,15 @@ async def test_an_interrupted_review_and_reply_posted_with_the_mark_are_found(ha
     )
     harness.store.execute("UPDATE drafts SET status='uncertain'")
     harness.gh_replies["api repos/acme/app/pulls/7/reviews"] = json.dumps(
-        [{"body": marked("Looks good."), "html_url": "https://github.com/acme/app/pull/7#r1"}]
+        [
+            {
+                "body": f"Looks good.\n\n{POSTED_MARK}",
+                "html_url": "https://github.com/acme/app/pull/7#r1",
+            }
+        ]
     )
     harness.gh_replies["api repos/acme/app/pulls/7/comments"] = json.dumps(
-        [{"in_reply_to_id": 21, "body": marked("Fixed in f61047fa."),
+        [{"in_reply_to_id": 21, "body": f"Fixed in f61047fa.\n\n{POSTED_MARK}",
           "html_url": "https://github.com/acme/app/pull/7#discussion_r2"}]
     )  # fmt: skip
     await runtime.drafts.check_uncertain()

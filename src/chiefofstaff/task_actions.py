@@ -23,7 +23,7 @@ from .backend import stop_background
 from .envelope import wrap
 from .policy import within
 from .roles import WORKER
-from .sources.github import MISSING_TRIES, NOT_FOUND, marked
+from .sources.github import MISSING_TRIES, NOT_FOUND
 from .sources.slack import describe
 from .store import hours_ago, now
 from .tasks import ADOPTED, ENDED, OPEN
@@ -2264,7 +2264,7 @@ class TaskActions:
                 )
         if checks:
             lines += ["**Checked**", "", *checks, ""]
-        return title[:250], marked("\n".join(lines).strip())
+        return title[:250], "\n".join(lines).strip()
 
     async def commit_subjects(self, plans: list[tuple[dict, str, str, str]]) -> list[str]:
         """The subjects of the commits the PRs bring, oldest first (no merges)."""

@@ -124,8 +124,8 @@ async def scenario_a_chinese_company_review(app: App):
     assert sent["status"] == "sent", sent
     review = sent["outcome"].rsplit("pullrequestreview-", 1)[1]
     published = json.loads(gh_as_second("api", f"repos/{COMPANY_REPO}/pulls/1/reviews/{review}"))
-    # What Chief of Staff posts ends with its mark (sources/github.py, POSTED_MARK).
-    assert published["body"].removesuffix("\n\n<!-- chief-of-staff -->") == edited, published
+    # As the owner left it: nothing hidden added to it (E37).
+    assert published["body"] == edited, published
     mine = json.loads(
         gh_as_second("api", "--paginate", f"repos/{COMPANY_REPO}/pulls/1/reviews/{review}/comments")
     )
