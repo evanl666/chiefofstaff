@@ -1,8 +1,9 @@
-"""QA round 12, GitHub: nothing hidden in what Chief of Staff posts (E37)."""
+"""QA round 12, GitHub: nothing hidden in what Chief of Staff posts (E37); news on a PR whose
+task is not known goes to the Router (E46)."""
 
 import json
 
-from conftest import Harness
+from conftest import Harness, call_tool, settle
 
 from chiefofstaff.models import Settings
 from chiefofstaff.sources.github import POSTED_MARK
@@ -72,3 +73,39 @@ async def test_what_is_posted_carries_nothing_hidden_and_is_still_not_learned_as
         ("github:C80", "Why 3 retries?"),
         ("github:R44", "Nice. Ship it."),
     ]
+
+
+async def test_news_on_a_pr_no_task_made_or_follows_goes_to_the_router(harness):
+    """E46: a followed PR that no task of its worker made or follows: its news went to the
+    newest task that names it. Which task it is about is the Router's to say."""
+    runtime = await harness.connect()
+    started = await call_tool(
+        runtime, "spawn_worker", harness.router_id, title="Fix the login flow",
+        instructions="Fix the login. For context, see acme/app#9.", why_new="test",
+    )  # fmt: skip
+    worker = json.loads(started.text_result_for_llm)["session_id"]
+    await call_tool(
+        runtime, "message_session", harness.router_id, session_id=worker, task="new",
+        why_new="test", earlier="keep", title="Update the login docs",
+        text="Update the docs; acme/app#9 did the same for signup, for context.",
+    )  # fmt: skip
+    thread = "github:acme/app#9"
+    harness.store.follow(thread, worker)  # Followed for none of its tasks.
+    assert not harness.store.follow_tasks(worker, thread)
+    router = harness.session(harness.router_id)
+    before = (len(router.sent), len(harness.session(worker).sent))
+    news = "New review comment on acme/app#9 by bob: please split this."
+    assert await runtime.on_thread("github", thread, ["github:reviewcomment:5"], news)
+    await settle(runtime)
+    assert len(harness.session(worker).sent) == before[1], "not the newest task that names it"
+    assert len(router.sent) == before[0] + 1 and "please split this" in router.sent[-1]
+    assert 'type="event"' in router.sent[-1]
+    # Followed for one of them, it is that task's.
+    runtime.follow(worker, [thread], task_id=runtime.tasks.for_session(worker)[0]["id"])
+    news = "New review comment on acme/app#9 by bob: and rename it."
+    assert await runtime.on_thread("github", thread, ["github:reviewcomment:6"], news)
+    await settle(runtime)
+    first = runtime.tasks.for_session(worker)[0]["id"]
+    assert "and rename it" in harness.session(worker).sent[-1]
+    assert f'task="{first}"' in harness.session(worker).sent[-1]
+    assert len(router.sent) == before[0] + 1
