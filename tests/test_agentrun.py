@@ -97,6 +97,16 @@ time.sleep(300)
 """
 
 
+# One that forks many short commands one after another, as a build or a test run does.
+FORKING = r"""
+import json, os, subprocess, sys
+with open(sys.argv[1], "w") as f:
+    json.dump({"pid": os.getpid(), "child": 0}, f)
+for _ in range(400):
+    subprocess.run(["/usr/bin/true"])
+"""
+
+
 @pytest.fixture(autouse=True)
 def no_subreaper(monkeypatch):
     """In this process (pytest's), the supervisor does not take what others leave."""
@@ -109,6 +119,7 @@ def supervise(
     lifeline: int | None = None,
     look: str = "0.2",
     cli: str = CLI,
+    path_first: Path | None = None,
     **popen,
 ):
     out = tmp_path / "cli.json"
@@ -122,6 +133,8 @@ def supervise(
         "CHIEFOFSTAFF_SLACK_USER_TOKEN": "xoxp-secret",
         "OWNER_SETTING": "kept",
     }
+    if path_first is not None:
+        env["PATH"] = f"{path_first}{os.pathsep}{env.get('PATH', '')}"
     process = subprocess.Popen(
         command,
         env=env,
@@ -397,3 +410,31 @@ def test_in_process_an_agent_that_will_not_stop_is_killed(
     supervisor = agentrun.Supervisor([sys.executable, "-c", stubborn], None)
     threading.Timer(1, supervisor.on_signal, (signal.SIGTERM, None)).start()
     assert supervisor.run() == -signal.SIGKILL
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS: the kernel says each fork")
+def test_a_storm_of_forks_is_no_storm_of_looks(tmp_path, leftovers):
+    """Review (performance): each fork woke a look, which runs `ps`: a build used about a core
+    per worker. Looks on forks come at most once a second; each fork is followed in between."""
+    shim, calls = tmp_path / "bin", tmp_path / "ps-calls"
+    shim.mkdir()
+    (shim / "ps").write_text(f'#!/bin/sh\necho look >> "{calls}"\nexec /bin/ps "$@"\n')
+    (shim / "ps").chmod(0o755)
+    began = time.monotonic()
+    process, out = supervise(tmp_path, look="600", cli=FORKING, path_first=shim)
+    leftovers.append(process.pid)
+    started(out)
+    assert process.wait(120) == 0
+    took = time.monotonic() - began
+    looks = len(calls.read_text().splitlines()) if calls.exists() else 0
+    assert 1 <= looks <= 3 + int(took / agentrun.FORK_LOOK_EVERY), (looks, took)
+
+
+def test_a_group_followed_since_the_table_was_made_is_kept():
+    """A group the kernel's word of a fork added after `ps` ran is not in its table: it is
+    kept (it was let go of, and what ran in it outlived the agent); one known before that the
+    table does not show is let go of."""
+    supervisor = agentrun.Supervisor(["true"], None)
+    supervisor.groups = {990001, 990002}
+    supervisor.in_groups({1: (0, "launchd")}, {1: 1}, known={990001})
+    assert supervisor.groups == {990002}

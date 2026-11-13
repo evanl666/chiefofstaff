@@ -43,6 +43,10 @@ from .processes import descendants, end_processes, process_table
 # started in its last moments is seen too; on Linux what it leaves comes to the supervisor
 # (a subreaper); and when the supervisor ends the CLI, it looks first.
 LOOK_EVERY = float(os.environ.get("CHIEFOFSTAFF_AGENTRUN_LOOK", "2"))
+# At most this often for a fork (a build or a test run forks thousands of times, and a look runs
+# `ps`): in between, the kernel's word of each fork is followed (`follow`, proc_listpids), and a
+# look always comes first when the CLI ends.
+FORK_LOOK_EVERY = 1.0
 # prctl(2): the processes a dying descendant leaves come to this one, not to init.
 PR_SET_CHILD_SUBREAPER = 36
 
@@ -172,14 +176,16 @@ class Supervisor:
             self.watched.add(self.process.pid)
             self.watcher = threading.Thread(target=self.watching, daemon=True)
             self.watcher.start()
-        next_look = 0.0
+        next_look, looked = 0.0, float("-inf")
         while (code := self.process.poll()) is None:
             if self.ending or self.gone():
                 break
-            if self.forked or time.monotonic() >= next_look:
+            now = time.monotonic()
+            if now >= next_look or (self.forked and now - looked >= FORK_LOOK_EVERY):
                 self.forked = False
                 self.look()
-                next_look = time.monotonic() + LOOK_EVERY
+                looked = time.monotonic()
+                next_look = looked + LOOK_EVERY
             self.wait(0.2)
         self.end()
         return code if code is not None else (self.process.poll() or 0)
@@ -255,6 +261,8 @@ class Supervisor:
         is asked outside its lock: a fork is followed meanwhile.)"""
         if not self.process:
             return
+        with self.lock:
+            known = set(self.groups)  # What was followed since may not be in the table yet.
         table, groups = process_groups() if self.watch is not None else (process_table(), {})
         if not table:
             return
@@ -271,21 +279,25 @@ class Supervisor:
                     and not (table[pid][0] == own and table[pid][1].startswith("ps "))
                 }
             if groups:
-                self.in_groups(table, groups)
+                self.in_groups(table, groups, known)
         for pid in list(self.tree):
             self.add_watch(pid)
         self.reap()
 
-    def in_groups(self, table: dict[int, tuple[int, str]], groups: dict[int, int]):
+    def in_groups(self, table: dict[int, tuple[int, str]], groups: dict[int, int], known: set[int]):
         """macOS: the tree's process groups (and those its processes may have made) and what
-        runs in them, though no longer the tree's."""
+        runs in them, though no longer the tree's. A group let go of is one known before the
+        table was made (`known`) that it does not show: one followed since may be newer than
+        the table."""
         if sys.platform == "win32":
             return
         own = os.getpid()
         theirs = {os.getpgrp(), 0, 1}  # Chief of Staff's group (this one's), and the system's.
         self.groups |= {pid for pid in self.tree if pid != own}
         self.groups |= {groups[pid] for pid in self.tree if pid in groups and pid != own}
-        self.groups = {g for g in self.groups - theirs if g in table or g in groups.values()}
+        self.groups = {
+            g for g in self.groups - theirs if g not in known or g in table or g in groups.values()
+        }
         self.tree |= {
             pid: table[pid][1]
             for pid, group in groups.items()

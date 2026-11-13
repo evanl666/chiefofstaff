@@ -42,7 +42,7 @@ from live_parity import setup, write
 
 PORT, SLACK_PORT = 19110, 19160
 MODEL = os.environ.get("LIVE_AGENTS_MODEL", "claude-sonnet-5.5")
-RUNS = 5
+RUNS = int(os.environ.get("PERF_RUNS", "5"))
 TOOLS = Path(os.environ.get("PERF_TOOLS", "")).expanduser()
 
 BENCH = '''"""Installs or builds this project RUNS times (cold: an empty cache each time; warm: the
