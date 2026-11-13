@@ -82,6 +82,11 @@ MOST_TOKENS = 10**12
 SPEND_STOP = "its token limit"
 
 
+def switched_to_ask_first(name: str) -> str:
+    """Why a worker on another agent stopped as Ask first was turned on for it (Settings)."""
+    return f"{display(name)} takes up Ask first only in a new process."
+
+
 def planned(store: Store, change: Any) -> dict[str, Any]:
     """The Coding agents group of a Settings save, checked as the page names its fields: the
     configuration it leaves (each agent's entry, and who new workers use)."""

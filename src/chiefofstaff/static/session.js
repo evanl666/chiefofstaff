@@ -120,7 +120,7 @@ export function renderHeader() {
         toast(view.yolo
           ? "Yolo: this worker runs without permission checks."
           : view.switch_stopped
-            ? "Ask first: permission checks are on for this worker. It stopped to switch: Go on under Needs you continues."
+            ? `Ask first: permission checks are on for this worker. It stopped to switch: ${view.switch_card ? "Go on under Needs you continues." : "send it your message again."}`
             : "Ask first: permission checks are on for this worker.");
       } catch (error) {
         toast(error.message, "error");

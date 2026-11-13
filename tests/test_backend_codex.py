@@ -3513,3 +3513,157 @@ async def test_a_queued_worker_refused_for_unknown_spend_waits_with_its_go_on(
         assert runtime.task_actions.view(runtime.spend_card(queued))["go_on"] is True
     finally:
         await runtime.stop()
+
+
+@pytest.mark.parametrize("on_task", [False, True])
+async def test_a_switch_to_ask_first_as_a_turn_begins_stops_it_as_one_at_work(
+    tmp_path, monkeypatch, on_task
+):
+    """Review: busy (its turn on its way, its status not working yet), it was counted at work
+    and the toast said Go on, yet no stop was recorded. It is stopped as stop_ineligible stops
+    one: as one at work, with a notice; on a task, that task waits with Go on (the toast says
+    so); on a message alone, the toast says to send it again."""
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    try:
+        worker = await spawn(runtime, harness, "Report done: first")
+        await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+        await turn_over(runtime, worker)
+        backend, _ = runtime.connection("codex")
+        begins, switched = runtime.begins_turn, []
+
+        def begun_then_switched(session):
+            began = begins(session)
+            if began and not switched:
+                switched.append(harness.store.session(worker)["status"])
+                switched.append(runtime.background(runtime.set_session_yolo(worker, "off")))
+            return began
+
+        monkeypatch.setattr(backend, "begins", begun_then_switched)
+        second = "Wait 3 s. Then reply with just: second"
+        with contextlib.suppress(RuntimeError):
+            if on_task:
+                task = runtime.tasks.for_session(worker)[-1]
+                await runtime.task_actions.follow_up(task["id"], second)
+            else:
+                await runtime.owner_send(worker, second)
+        await until(lambda: len(switched) == 2, 30)
+        assert switched[0] != "working", "its status did not say it yet"
+        view = await switched[1]
+        assert view["switch_stopped"] is True and view["switch_card"] is on_task
+        then = "Go on continues" if on_task else "Send your message again to go on"
+        assert (
+            "Stopped: it asks first from now on, which Codex takes up in a new conversation "
+            f"process. {then}, asking first."
+        ) in [text for kind, text in harness.kinds(worker) if kind == "notice"]
+        waiting = [t for t in runtime.tasks.for_session(worker) if t["status"] == "waiting"]
+        assert bool(waiting) is on_task
+        await asyncio.sleep(4)
+        assert "second" not in [text for kind, text in harness.kinds(worker) if kind == "assistant"]
+    finally:
+        await runtime.stop()
+
+
+async def test_a_switch_to_ask_first_after_a_turn_is_admitted_keeps_it_from_beginning(
+    tmp_path, monkeypatch
+):
+    """Review: its message on its way (busy), its turn admitted and not begun, it was counted
+    at work yet nothing stopped it. The switch moves the admission's generation, as
+    stop_ineligible does: that turn never begins, on the process acting on its own."""
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    try:
+        worker = await spawn(runtime, harness, "Report done: first")
+        await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+        await turn_over(runtime, worker)
+        backend, _ = runtime.connection("codex")
+        admit, begins, switch, began = backend.admit, backend.begins, [], []
+
+        async def admitted_then_switched(session):
+            why = await admit(session)
+            if not why and not switch:
+                generation = runtime.admission_generation
+                switch.append(runtime.background(runtime.set_session_yolo(worker, "off")))
+                await until(lambda: runtime.admission_generation != generation or switch[0].done())
+            return why
+
+        def begins_seen(session):
+            began.append(begins(session))
+            return began[-1]
+
+        monkeypatch.setattr(backend, "admit", admitted_then_switched)
+        monkeypatch.setattr(backend, "begins", begins_seen)
+        with contextlib.suppress(RuntimeError):
+            await runtime.owner_send(worker, "Wait 3 s. Then reply with just: second")
+        await until(lambda: switch, 30)
+        view = await switch[0]
+        assert began[:1] == [False], "the turn admitted before the switch began after it"
+        assert view["switch_stopped"] is True
+        notices = [text for kind, text in harness.kinds(worker) if kind == "notice"]
+        assert any(text.startswith("Stopped: it asks first from now on") for text in notices)
+        await asyncio.sleep(4)
+        assert "second" not in [text for kind, text in harness.kinds(worker) if kind == "assistant"]
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.parametrize("at_work", [False, True])
+async def test_settings_turning_ask_first_on_reopens_codex_workers_that_follow_it(
+    tmp_path, monkeypatch, at_work
+):
+    """Review: Settings → Workers' default switched to Ask first refreshed workers only: a
+    Codex worker at work, or holding a command, kept its thread acting on its own (MCP calls
+    unasked, apps and subagents on). Those following the default switch as one switched by
+    hand: stopped first when at work, then a new process, asking first."""
+    log = tmp_path / "log.jsonl"
+    harness, runtime = await brief(tmp_path, monkeypatch, FAKE_CODEX_LOG=str(log))
+    try:
+        work = "Wait 30 s. Then reply with just: on" if at_work else "Report done: first"
+        worker = await spawn(runtime, harness, work)
+        backend, _ = runtime.connection("codex")
+        if at_work:
+            await until(
+                lambda: worker in backend.workers and runtime.states.handle(worker).turn, 30
+            )
+        else:
+            await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+            await turn_over(runtime, worker)
+        # One that acts on its own by its own choice, at work: Settings' default is not its.
+        chosen = await spawn(runtime, harness, "Report done: mine")
+        await until(lambda: harness.store.session(chosen)["status"] == "done", 30)
+        await turn_over(runtime, chosen)
+        await runtime.set_session_yolo(chosen, "on")
+        with contextlib.suppress(RuntimeError):
+            await runtime.owner_send(chosen, "Wait 30 s. Then reply with just: mine")
+        await until(lambda: chosen in backend.workers and runtime.states.handle(chosen).turn, 30)
+        before, kept = backend.workers[worker], backend.workers[chosen]
+        old = harness.store.settings()
+        new = old.model_copy(update={"worker_yolo": False})
+        harness.store.save_settings(new)
+        stopped = await runtime.settings_changed(old, new)
+        assert not before.alive() and worker not in backend.workers
+        assert kept.alive() and backend.workers[chosen] is kept
+        assert not [text for kind, text in harness.kinds(chosen) if kind == "notice"]
+        if at_work:
+            assert stopped == ["Codex takes up Ask first only in a new process."]
+            task = runtime.spend_card(worker) or runtime.tasks.for_session(worker)[-1]
+            assert task["status"] == "waiting" and harness.store.get(f"stopped:{task['id']}")
+            await runtime.task_actions.follow_up(
+                task["id"], "Go on where you stopped. Report done: on"
+            )
+        else:
+            assert stopped == []
+            await runtime.owner_send(worker, "Report done: second")
+        await until(lambda: worker in backend.workers and backend.workers[worker] is not before, 30)
+        await until(lambda: runtime.states.handle(worker) is not None, 30)
+        assert runtime.states.handle(worker).options["ask_first"] is True
+        assert thread_configs(log)[-1]["features.apps"] is False
+    finally:
+        await runtime.stop()
+
+
+def test_a_save_that_switched_workers_to_ask_first_says_so():
+    from chiefofstaff.web import stopped_text
+
+    assert stopped_text([agents.switched_to_ask_first("codex")] * 2) == (
+        "Stopped 2 workers at work: Codex takes up Ask first only in a new process. To go on, "
+        "asking first: Go on under Needs you, or send the message again."
+    )

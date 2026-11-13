@@ -1761,7 +1761,14 @@ class Runtime:
             stopped = await self.agent_mode_changed(row, asks_first=acted)
         else:
             await self.refresh_session(row)  # Its instructions mention the mode.
-        return self.view(row) | ({"switch_stopped": True} if stopped else {})
+        if not stopped:
+            return self.view(row)
+        # Stopped on a task, it has Go on under Needs you; on a message alone, it is sent again.
+        card = any(
+            t["status"] == "waiting" and self.store.get(f"stopped:{t['id']}") == "Settings"
+            for t in self.tasks.for_session(session_id)
+        )
+        return self.view(row) | {"switch_stopped": True, "switch_card": card}
 
     async def agent_mode_changed(self, row: dict, asks_first: bool) -> bool:
         """A worker on another agent switched between acting on its own and Ask first. Its
@@ -1783,12 +1790,27 @@ class Runtime:
             state.stale = True  # Opened again once its turn is over: in a new process.
             return False
         if at_work:
+            # As stop_ineligible stops one: no turn admitted before begins after this, and one
+            # that began with its status not said yet is stopped as one at work (its task waits
+            # under Needs you, with Go on). Not halted: interrupt marks its late first event as
+            # stopped (after_abort), and the detach below ends what was begun.
+            async with self.admission:
+                self.admission_generation += 1
+            # What interrupt stops and leaves waiting with Go on: its task, if it is on one.
+            on = self.tasks.find(self.working_on(session_id) or "")
+            on_task = bool(on and on["status"] in {"queued", "running"}) or (
+                row["status"] in {"queued", "starting"}
+                and any(t["status"] == "queued" for t in self.tasks.for_session(session_id))
+            )
+            if row["status"] not in {"working", "queued", "starting"} and not state.held:
+                self.update_session(session_id, status="working")
             name = agents.display(self.agent(session_id))
+            then = "Go on continues" if on_task else "Send your message again to go on"
             await self.workers.interrupt(
                 session_id,
                 by="Settings",
                 notice=f"Stopped: it asks first from now on, which {name} takes up in a new "
-                "conversation process. Go on continues, asking first.",
+                f"conversation process. {then}, asking first.",
             )
         await self.detach(session_id)
         backend, _ = self.connection(self.agent(session_id))
@@ -4756,6 +4778,14 @@ class Runtime:
             # Other agents' workers do not run sandboxed, and act on their own or ask first only
             # where their version's check allows it: stopped at once, with their commands.
             stopped = await self.stop_ineligible()
+        if self.agents and old.worker_yolo != new.worker_yolo:
+            # Those following the default switched between acting on their own and Ask first,
+            # which their agent takes up in a new process (agent_mode_changed).
+            for row in self.store.open_sessions(WORKER):
+                if self.on_copilot(row["id"]) or row.get("yolo") in {"on", "off"} or row["slack"]:
+                    continue
+                if await self.agent_mode_changed(row, asks_first=not new.worker_yolo):
+                    stopped.append(agents.switched_to_ask_first(self.agent(row["id"])))
         defaults = ("model", "role_models", "role_efforts")
         if any(getattr(old, key) != getattr(new, key) for key in defaults):
             # Models and efforts chosen now are tried, even where Copilot refused one before.

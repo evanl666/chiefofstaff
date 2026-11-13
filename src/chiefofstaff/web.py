@@ -149,6 +149,11 @@ def stopped_text(reasons: list[str]) -> str:
             f"Stopped {workers} because {name} is off. Turn {name} on again, then press Go on "
             "under Needs you."
         )
+    if len(whys) == 1 and (switched := SWITCHED.match(whys[0])):
+        return (
+            f"Stopped {workers} at work: {switched['name']} takes up Ask first only in a new "
+            "process. To go on, asking first: Go on under Needs you, or send the message again."
+        )
     return (
         f"Stopped {workers}: {' '.join(whys)} Tell {'them' if many else 'it'} to go on from "
         "Needs you once that changes."
@@ -157,6 +162,8 @@ def stopped_text(reasons: list[str]) -> str:
 
 # Why a worker on another agent stopped when the owner turned that agent off (agent_block).
 TURNED_OFF = re.compile(r"^(?P<name>\w+) is turned off in Settings → Models\.$")
+# Why one stopped when Ask first was turned on for it (agents.switched_to_ask_first).
+SWITCHED = re.compile(r"^(?P<name>\w+) takes up Ask first only in a new process\.$")
 
 
 def create_app(
