@@ -271,8 +271,12 @@ class TaskBook:
             self.store.delete(f"followup:{task_id}")
         if status in {"review", "done", "failed", "cancelled"}:
             self.store.delete(f"reopened:{task_id}")  # Its follow-up is over.
-        if status in {"review", "done", "failed", "cancelled"}:
-            self.store.delete(f"checkback:{task_id}")  # Nothing to check back on.
+        if status in {"failed", "cancelled"} or (
+            status in {"review", "done"} and task["status"] not in {"review", "done"}
+        ):
+            # Nothing to check back on. Not a run of finished work its worker checks on when it
+            # ends: accepted, it still does.
+            self.store.delete(f"checkback:{task_id}")
         if status != "waiting":
             self.store.delete(f"stopped:{task_id}")  # Going on (or over): not stopped now.
             self.store.delete(f"goingon:{task_id}")

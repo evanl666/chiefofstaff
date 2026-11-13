@@ -25,6 +25,7 @@ from .models import (
     OwnerMessage,
     ProfileText,
     ProjectPath,
+    RunsEnded,
     SessionModel,
     SessionYolo,
     Settings,
@@ -516,6 +517,11 @@ def create_app(
     @app.post("/api/tasks/{task_id}/merge-back")
     async def merge_back(task_id: str):
         return runtime.task_actions.merge_back(task_id)
+
+    @app.post("/api/tasks/{task_id}/runs")
+    async def task_runs(task_id: str, payload: RunsEnded):
+        """Runs its worker said go on: marked ended, or no longer followed."""
+        return runtime.task_actions.end_runs(task_id, payload.urls, payload.how)
 
     @app.post("/api/artifacts/hide")
     async def hide_artifact(payload: ArtifactHide):

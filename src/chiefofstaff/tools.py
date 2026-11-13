@@ -41,7 +41,7 @@ from .policy import within
 from .roles import ROUTER, SLACK, WATCHDOG, WORKER
 from .sources.github import NO_ACCESS, diff_lines, snippet
 from .store import ago_minutes, now
-from .task_actions import deliverable_title, style_note
+from .task_actions import GITHUB_RUN, deliverable_title, style_note
 from .tasks import ADOPTED, OPEN
 from .workspaces import resolve_project
 
@@ -3000,6 +3000,32 @@ class Tools:
             and (problem := await self.runtime.checks.before_done(row, task))
         ):
             raise ValueError(problem)
+        # Reported done with a run it says still goes on, and nothing will look at it again (one
+        # on GitHub Chief of Staff reads itself): told once how the owner hears its end.
+        run_note = ""
+        unwatched = [
+            item
+            for item in (self.runtime.task_actions.runs_going(task["id"]) if task else [])
+            if not GITHUB_RUN.match(item["url"])
+        ]
+        if (
+            task
+            and params.status == "done"
+            and row["role"] == WORKER
+            and unwatched
+            and task["status"] != "cancelled"
+            and not self.store.get(f"setaside:{task['id']}")
+            and task["id"] not in self.states[caller].turn_check_backs
+            and not self.store.get(f"runnudge:{task['id']}")
+        ):
+            self.store.set(f"runnudge:{task['id']}", "1")
+            names = ", ".join(f"\u201c{item['name'] or item['url']}\u201d" for item in unwatched)
+            run_note = (
+                f" By what you said, {names} still goes on, and nothing will look at it again: "
+                "for the owner to hear how it ends, call check_back for it now (task_id="
+                f"'{task['id']}') and end your turn; if it has ended, report again with its end "
+                "state in artifacts."
+            )
         meta = {"status": params.status, "task_id": task["id"] if task else None}
         drafts = {
             d["id"] for d in self.store.all("SELECT id FROM drafts WHERE session_id=?", (caller,))
@@ -3067,7 +3093,7 @@ class Tools:
                 self.runtime.update_session(caller, report=params.summary[:4000])
                 return (
                     f"Task {task['id']}'s report is updated. It was reported already: the "
-                    "Router is not told again."
+                    "Router is not told again." + run_note
                 )
             elif (
                 params.status == "done"
@@ -3208,11 +3234,11 @@ class Tools:
             if params.replaces_result:
                 return (
                     f"Task {task['id']}'s result is this report now (the owner asked in chat); "
-                    "the earlier one is kept with it."
+                    "the earlier one is kept with it." + run_note
                 )
             return (
                 f"Noted as an update on task {task['id']} (the owner asked in chat; its "
-                "result stays as it is)."
+                "result stays as it is)." + run_note
             )
         if settled and task and params.status in {"question", "blocked"}:
             # A cancelled task's worker still needs the owner: the question shows under Needs
@@ -3254,7 +3280,7 @@ class Tools:
                 needs_action=False,
                 title="PR update",
             )  # fmt: skip
-        return "Reported to the Router." + split_note
+        return "Reported to the Router." + split_note + run_note
 
     async def t_cancel_task(self, params: CancelTask, caller: str):
         self.caller(caller, ROUTER)
@@ -3892,8 +3918,18 @@ class Tools:
     async def t_check_back(self, params: CheckBack, caller: str):
         self.caller(caller, WORKER)
         task = self.runtime.task_actions.report_task(caller, params.task_id)
-        if not task or task["status"] not in {"running", "waiting"}:
-            raise ValueError("check_back is for a task you are still on.")
+        # Reported done with a run it said still goes on: checked on when it ends.
+        run_going = bool(
+            task
+            and task["status"] in {"review", "done"}
+            and not self.store.get(f"setaside:{task['id']}")
+            and self.runtime.task_actions.runs_going(task["id"])
+        )
+        if not task or (task["status"] not in {"running", "waiting"} and not run_going):
+            raise ValueError(
+                "check_back is for a task you are still on, or a run of a finished one that "
+                "still goes on."
+            )
         what = " ".join(params.what.split())[:300]
         if not what:
             raise ValueError("Say what you will check.")

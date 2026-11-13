@@ -90,7 +90,7 @@ export function deliverablesOf(task, phase) {
         const status = item.status || taskStatus;
         // When its worker last said where it stands (what needs a look first is the newest).
         const declared = (task.artifacts || []).find((said) => linkKey(said.url) === linkKey(item.url));
-        return { key: linkKey(item.url), kind: KIND_WORDS[item.kind], role: "", name: item.title || item.url, url: item.url, status, tone: item.status ? toneOf(item.status) : taskTone, at: item.at || declared?.at || task.updated_at, said: Boolean(item.status), pr: null, task };
+        return { key: linkKey(item.url), kind: KIND_WORDS[item.kind], role: "", name: item.title || item.url, url: item.url, status, tone: item.status ? toneOf(item.status) : taskTone, at: item.at || declared?.at || task.updated_at, said: Boolean(item.status), by: item.said_by || "", pr: null, task };
       });
   }
   const found = [];
@@ -172,7 +172,7 @@ export async function setHidden(key, hidden, tone = "") {
 }
 function artifactRow(item, hidden, focusTask) {
   const when = item.at ? ago(item.at) : "";
-  const help = item.said ? (item.kind === "PR" ? "As GitHub has it" : "As its worker last said") : "As its task stands: its worker has not said where this stands";
+  const help = item.said ? (item.kind === "PR" || item.by === "GitHub" ? "As GitHub has it" : item.by === "you" ? "As you marked it" : "As its worker last said") : "As its task stands: its worker has not said where this stands";
   return {
     key: `art:${item.key}:${hidden ? 1 : 0}`,
     version: `${item.name}:${item.role}:${item.status}:${item.tone}:${when}:${item.task.id}:${item.task.title}`,
