@@ -120,7 +120,9 @@ PYTHON_DEPS = [
 # One interpreter for both agents: which `python3` comes first differs between them (Codex runs
 # commands in a login shell, which puts the system's folders first on macOS).
 PYTHON = (
-    subprocess.run(["uv", "python", "find", "3.12"], capture_output=True, text=True).stdout.strip()
+    subprocess.run(
+        ["uv", "python", "find", "--system", "3.12"], capture_output=True, text=True
+    ).stdout.strip()
     or "python3"
 )
 
