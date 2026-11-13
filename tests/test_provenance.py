@@ -607,9 +607,25 @@ async def test_a_round_reads_within_its_bytes_newest_first(tmp_path, home, monke
     assert deciding_.shapes[big][1] == UNREAD, "not read"
 
 
-async def test_many_kept_decisions_cost_little_a_call(tmp_path, home):
+async def test_many_kept_decisions_cost_little_a_call(tmp_path, home, monkeypatch):
     """Review: every listing (each 2 s during a batch), Workers.external and forget parsed every
-    decision kept and grouped them all, on the event loop: 0.86 s a call at 50,000."""
+    decision kept and grouped them all, on the event loop: 0.86 s a call at 50,000. Counted, not
+    timed (a timing differs by machine): after the first call, a call reads no decision kept
+    again and groups only the batch its new sessions are of."""
+    reads, grouped = [], []
+    known, batches = provenance.known, provenance.batches
+
+    def counted_known(store):
+        reads.append(1)
+        return known(store)
+
+    def counted_batches(shots):
+        shots = list(shots)
+        grouped.append(len(shots))
+        return batches(shots)
+
+    monkeypatch.setattr(provenance, "known", counted_known)
+    monkeypatch.setattr(provenance, "batches", counted_batches)
     store = Store(tmp_path / "data")
     store.set_many(
         [
@@ -624,12 +640,15 @@ async def test_many_kept_decisions_cost_little_a_call(tmp_path, home):
     batch = home.batch(3, start=T0 + 100)
     deciding_ = deciding(store, home)
     assert await deciding_.made(home.metas, {}) == dict.fromkeys(batch, BATCH)
+    assert reads == [1], "read once, at the first call"
     for count in (1, 2):
         home.batch(1, start=T0 + 160 + count)  # One more of the batch: decided as it comes.
-        began = time.perf_counter()
+        reads.clear()
+        grouped.clear()
         made = await deciding_.made(home.metas, {})
-        took = time.perf_counter() - began
-        assert len(made) == 3 + count and took < 0.03, took  # About 4 ms here.
+        assert len(made) == 3 + count
+        assert not reads, "the decisions kept are not read again"
+        assert grouped and max(grouped) <= 3 + count, grouped  # This batch's, not 50,000.
     assert set(mine).isdisjoint(made)
 
 
