@@ -320,6 +320,17 @@ def test_a_push_naming_no_branch_goes_where_its_checkout_is(tmp_path, branch, co
     assert bool(found and "default branch" in found) is denied, (command, found)
 
 
+def test_a_push_naming_no_branch_goes_where_the_command_went_first(tmp_path):
+    """`cd` (or `git -C`) to another checkout first: its branch is the one that counts."""
+    mine = checkout_on(tmp_path / "mine", "wb/fix")
+    theirs = checkout_on(tmp_path / "theirs", "main")
+    row = {"role": "worker", "slack": 0, "cwd": str(mine)}
+    for command in (f"cd {theirs} && git push", "cd ../theirs; git push", f"git -C {theirs} push"):
+        denied = permission_denial(row, request("shell", full_command_text=command))
+        assert denied and "default branch" in denied, command
+    assert permission_denial(row, request("shell", full_command_text="git push")) is None
+
+
 def test_a_push_naming_no_branch_goes_where_it_is_set_to_go(tmp_path):
     """A feature branch whose pushes go to main (`@{push}`): refused too."""
     repo = checkout_on(tmp_path / "repo", "main")

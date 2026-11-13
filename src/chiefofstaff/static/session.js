@@ -117,7 +117,11 @@ export function renderHeader() {
       try {
         const view = await api(`/api/sessions/${session.id}/yolo`, { method: "POST", body: { mode: checks.value } });
         upsertSession(view);
-        toast(view.yolo ? "Yolo: this worker runs without permission checks." : "Ask first: permission checks are on for this worker.");
+        toast(view.yolo
+          ? "Yolo: this worker runs without permission checks."
+          : view.switch_stopped
+            ? "Ask first: permission checks are on for this worker. It stopped to switch: Go on under Needs you continues."
+            : "Ask first: permission checks are on for this worker.");
       } catch (error) {
         toast(error.message, "error");
       }

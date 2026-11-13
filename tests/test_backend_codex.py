@@ -11,6 +11,7 @@ import re
 import signal
 import sys
 import time
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -3209,5 +3210,138 @@ async def test_a_turn_let_go_of_with_its_handle_or_its_agent_is_begun_no_more(
         assert "w1" not in runtime.begun | runtime.halted and "w2" in runtime.begun
         await runtime.disconnect_agent("codex")
         assert not runtime.begun and not runtime.halted
+    finally:
+        await runtime.stop()
+
+
+# Review: switching a Codex worker between acting on its own and Ask first
+
+
+def sleeping(seconds: str) -> bool:
+    return any(line == f"sleep {seconds}" for _, line in process_table().values())
+
+
+def thread_configs(log) -> list[dict]:
+    """The `config` of each thread/start or thread/resume, in order."""
+    return [
+        m["params"]["config"]
+        for m in logged(log)
+        if m["method"] in {"thread/start", "thread/resume"} and "config" in (m["params"] or {})
+    ]
+
+
+async def test_a_codex_worker_switched_to_ask_first_at_rest_asks_first_in_a_new_process(
+    tmp_path, monkeypatch
+):
+    """Review: Codex reads a thread's settings (apps, subagents, which MCP calls ask) only
+    where it opens the thread: its process ends, and its next turn opens it in a new one."""
+    log = tmp_path / "log.jsonl"
+    harness, runtime = await brief(tmp_path, monkeypatch, FAKE_CODEX_LOG=str(log))
+    try:
+        worker = await spawn(runtime, harness, "Report done: first")
+        await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+        await turn_over(runtime, worker)
+        backend, _ = runtime.connection("codex")
+        before = backend.workers[worker]
+        view = await runtime.set_session_yolo(worker, "off")
+        assert not view.get("switch_stopped") and not before.alive()
+        assert worker not in backend.workers
+        assert "Stopped" not in str(harness.kinds(worker)), "at rest: nothing to stop"
+        await runtime.owner_send(worker, "Report done: second")
+        await until(lambda: "second" in str(harness.kinds(worker)), 30)
+        assert backend.workers[worker] is not before
+        last = thread_configs(log)[-1]
+        assert last["features.apps"] is False and last["agents"] == {"enabled": False}
+        assert runtime.states.handle(worker).options["ask_first"] is True
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.parametrize("held", [False, True])
+async def test_a_codex_worker_switched_to_ask_first_at_work_stops_and_says_so(
+    tmp_path, monkeypatch, held
+):
+    """Review: mid-turn (or holding a command it left running) it went on with the settings it
+    had, its toast saying checks were on: it is stopped, as a Settings change stops a worker,
+    its command with it; Go on continues in a new process, asking first."""
+    log = tmp_path / "log.jsonl"
+    harness, runtime = await brief(tmp_path, monkeypatch, FAKE_CODEX_LOG=str(log))
+    try:
+        seconds = f"300.{uuid.uuid4().int % 10**6:06d}"
+        work = (
+            f"Leave the command `sleep {seconds}` running. Then reply with just: started"
+            if held
+            else f"Run the shell command `sleep {seconds}`. Then reply with just: slept"
+        )
+        worker = await spawn(runtime, harness, work)
+        backend, _ = runtime.connection("codex")
+        await until(lambda: sleeping(seconds), 30)
+        if held:
+            await until(lambda: runtime.held(worker), 30)
+        before = backend.workers[worker]
+        view = await runtime.set_session_yolo(worker, "off")
+        assert view["switch_stopped"] is True
+        assert not before.alive() and worker not in backend.workers
+        await until(lambda: not sleeping(seconds), 15)
+        notices = [text for kind, text in harness.kinds(worker) if kind == "notice"]
+        assert any(text.startswith("Stopped: it asks first from now on") for text in notices)
+        task = runtime.tasks.for_session(worker)[-1]
+        assert task["status"] == "waiting" and harness.store.get(f"stopped:{task['id']}")
+        await runtime.task_actions.follow_up(task["id"], "Go on where you stopped. Report done: on")
+        await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+        assert backend.workers[worker] is not before
+        assert thread_configs(log)[-1]["features.apps"] is False
+    finally:
+        await runtime.stop()
+
+
+async def test_a_codex_worker_switched_to_act_on_its_own_finishes_its_turn_first(
+    tmp_path, monkeypatch
+):
+    """The other way, its settings were the stricter ones: it is not stopped; once its turn is
+    over its process ends, and its next turn opens its conversation acting on its own."""
+    log = tmp_path / "log.jsonl"
+    harness, runtime = await brief(
+        tmp_path, monkeypatch, Settings(worker_yolo=False), FAKE_CODEX_LOG=str(log)
+    )
+    try:
+        worker = await spawn(runtime, harness, "Wait 3 s. Then reply with just: first")
+        backend, _ = runtime.connection("codex")
+        await until(lambda: worker in backend.workers and runtime.states.handle(worker).turn, 30)
+        before = backend.workers[worker]
+        view = await runtime.set_session_yolo(worker, "on")
+        assert not view.get("switch_stopped") and before.alive()
+        await until(lambda: "first" in str(harness.kinds(worker)), 30)
+        assert "Stopped" not in str(harness.kinds(worker))
+        await until(lambda: not before.alive(), 30)
+        await runtime.owner_send(worker, "Report done: second")
+        await until(lambda: "second" in str(harness.kinds(worker)), 30)
+        assert backend.workers[worker] is not before
+        last = thread_configs(log)[-1]
+        assert "features.apps" not in last and "agents" not in last
+        assert runtime.states.handle(worker).options["ask_first"] is False
+    finally:
+        await runtime.stop()
+
+
+async def test_a_worker_let_go_of_opens_again_only_once_its_old_process_has_ended(
+    tmp_path, monkeypatch
+):
+    """Codex lets one process write a thread at a time: a worker's next turn, coming as its
+    process is still ending (let go of at rest, or as its settings changed), waits for that end
+    rather than finding its conversation "open in another Codex window"."""
+    harness, runtime = await brief(tmp_path, monkeypatch, FAKE_CODEX_HOLDS_ON="1")
+    try:
+        worker = await spawn(runtime, harness, "Report done: first")
+        await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+        await turn_over(runtime, worker)
+        backend, _ = runtime.connection("codex")
+        before = backend.workers[worker]
+        await runtime.detach(worker)  # Let go of: its process ends (slowly, here).
+        assert before.stopping and before.alive()
+        await runtime.owner_send(worker, "Report done: second")
+        await until(lambda: "second" in str(harness.kinds(worker)), 30)
+        assert not before.alive() and backend.workers[worker] is not before
+        assert "another Codex window" not in str(harness.kinds(worker))
     finally:
         await runtime.stop()

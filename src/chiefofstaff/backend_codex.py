@@ -161,6 +161,9 @@ SCHEMA_SECONDS = 20.0
 # How long a stopping app-server has to end by itself at the end of its input (graceful: its
 # threads written down) before its supervisor is told to end its tree.
 STOP_GRACE = 5.0
+# How long a worker's process whose settings changed has for its turn to end (it was just
+# stopped) before it ends anyway.
+RETIRE_SECONDS = 15.0
 # What a thread's settings must read back as (thread/start and thread/resume answers).
 APPROVAL_POLICY = "untrusted"
 REVIEWER = "user"
@@ -597,12 +600,19 @@ class CodexBackend:
         # and how many threads are being opened on it now.
         self.refusal = ""
         self.opening = 0
+        # Ending as its worker's settings changed (CodexAgent.retire): it opens no thread.
+        self.retiring: asyncio.Future | None = None
 
     # The process
 
     async def start(self) -> None:
         if not shutil.which(self.command):
             raise RuntimeError(f"Codex CLI '{self.command}' not found. Install it and sign in.")
+        if self.ending is not None and self.ending.done():
+            # Started again once its process ended (Chief of Staff starts a new one for each
+            # worker; tests start one again): a process of its own, ended by its own stop.
+            self.stopping = self.by_itself = self.told_end = False
+            self.ending, self.sessions = None, {}
         read, write = os.pipe()
         try:
             self.process = await asyncio.create_subprocess_exec(
@@ -1556,9 +1566,15 @@ class CodexAgent:
         """A worker's own process, started on first use (and after it ended)."""
         lock = self.locks.setdefault(worker, asyncio.Lock())
         async with lock:
-            if (process := self.workers.get(worker)) and process.alive() and not process.stopping:
+            process = self.workers.get(worker)
+            if process and process.alive() and not process.stopping and not process.retiring:
                 process.opening += 1  # Until its thread is open (opened): not let go of.
                 return process
+            if process is not None:
+                # Ending: its threads are let go of first (Codex lets one process write a
+                # thread at a time), so that they open again in the new one.
+                with suppress(Exception):
+                    await asyncio.shield(process.retiring or process.stop())
             if not self.running:
                 raise RuntimeError("Codex is not running for Chief of Staff.")
             process = self.process()
@@ -1576,6 +1592,28 @@ class CodexAgent:
             if self.on_start:
                 self.on_start()
             return process
+
+    async def retire(self, worker: str, seconds: float = RETIRE_SECONDS):
+        """A worker whose conversation's settings changed: its process opens no more thread
+        (its next one opens in a new process, with its new settings) and ends once nothing of
+        it runs (its turn just stopped), `seconds` at the latest."""
+        process = self.workers.get(worker)
+        if process is None:
+            return
+        if process.retiring is None:
+            process.retiring = asyncio.ensure_future(self.retiring(process, seconds))
+        await asyncio.shield(process.retiring)
+
+    async def retiring(self, process: CodexBackend, seconds: float):
+        deadline = time.monotonic() + seconds
+        while True:  # Polled: its sessions say nothing when they come to rest.
+            busy = any(not session.idle() for session in list(process.sessions.values()))
+            if not busy or not process.alive() or process.stopping:
+                break
+            if time.monotonic() >= deadline:
+                break
+            await asyncio.sleep(0.1)
+        await process.stop()
 
     def process_ended(self, worker: str, process: CodexBackend, by_itself: bool):
         if self.workers.get(worker) is process:

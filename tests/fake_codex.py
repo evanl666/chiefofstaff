@@ -62,6 +62,31 @@ class Server:
         HOME.mkdir(parents=True, exist_ok=True)
         (HOME / "threads.json").write_text(json.dumps(self.threads))
 
+    def write_lock(self, thread_id: str):
+        """As Codex: one process writes a thread at a time, from loading it until it ends (a
+        lock of another live process refuses the load)."""
+        lock = HOME / "writers" / thread_id
+        try:
+            holder = int(lock.read_text())
+        except (OSError, ValueError):
+            holder = 0
+        if holder and holder != os.getpid():
+            try:
+                os.kill(holder, 0)
+            except ProcessLookupError:
+                holder = 0
+            if holder:
+                raise RuntimeError(f"thread {thread_id} already has an active writer")
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        lock.write_text(str(os.getpid()))
+
+    def release_locks(self):
+        for thread_id in self.loaded:
+            lock = HOME / "writers" / thread_id
+            with contextlib.suppress(OSError, ValueError):
+                if int(lock.read_text()) == os.getpid():
+                    lock.unlink()
+
     # JSON-RPC
 
     def write(self, message: dict):
@@ -118,6 +143,7 @@ class Server:
         for _, process, *_rest in list(self.terminals.values()):
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(process.pid, signal.SIGKILL)
+        self.release_locks()
 
     async def serve(self, message: dict):
         method, params = message["method"], message.get("params") or {}
@@ -282,6 +308,7 @@ class Server:
             "memory": "",
         }
         self.save()
+        self.write_lock(thread_id)
         self.loaded[thread_id] = params
         self.notify("thread/started", {"thread": self.view(thread_id)})
         return self.answer(thread_id, params)
@@ -293,6 +320,8 @@ class Server:
         # Open in another app-server (the owner's Codex app): FAKE_CODEX_IN_USE lists them.
         if thread_id in in_use():
             raise RuntimeError(f"thread {thread_id} already has an active writer")
+        if thread_id not in self.loaded:
+            self.write_lock(thread_id)
         if (used := self.threads[thread_id].get("usage")) and thread_id not in self.loaded:
             # As Codex: the totals it restored, said before the answer (FAKE_CODEX_RESTORES_LESS:
             # less than was spent, by that many input tokens).

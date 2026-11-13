@@ -987,7 +987,8 @@ new workers use cannot run, they start on Copilot and their chat says why.
   a Copilot worker; ChatGPT's apps and Codex's subagents are off for such a worker. Your own
   Codex rules and `PermissionRequest` hooks can allow what those checks would refuse, as in your
   Codex sessions. Newer versions run workers that act on their own; their **⋯** says why *Ask
-  first* is off.
+  first* is off. Codex takes up a switch to *Ask first* only in a new process: a worker at work
+  then stops (with what it left running), and *Go on* continues, asking first.
 - **Codex's memories are off in Chief of Staff's workers:** their background agent would run
   commands nobody is asked about, which *Stop* does not end and no receipt shows. Your own Codex
   sessions keep them; a Codex worker's name says so in its tooltip when you have them on.

@@ -1688,9 +1688,47 @@ class Runtime:
             await self.connect_agent(self.agent(session_id))
             if why := self.agent_refused(self.agent(session_id)).get("ask_first"):
                 raise ValueError(why)
+        acted = self.yolo(row)
         row = self.update_session(session_id, yolo=mode)
-        await self.refresh_session(row)  # Its instructions mention the mode.
-        return self.view(row)
+        stopped = False
+        if not self.on_copilot(session_id) and self.yolo(row) != acted:
+            stopped = await self.agent_mode_changed(row, asks_first=acted)
+        else:
+            await self.refresh_session(row)  # Its instructions mention the mode.
+        return self.view(row) | ({"switch_stopped": True} if stopped else {})
+
+    async def agent_mode_changed(self, row: dict, asks_first: bool) -> bool:
+        """A worker on another agent switched between acting on its own and Ask first. Its
+        agent takes up what differs (Codex: its apps, subagents, and which MCP calls ask) only
+        in a conversation opened in a new process: its process ends, and its next message
+        opens its conversation again in a new one. Switched to Ask first, one at work (or
+        holding what it left running) stops first, its commands with it, as a Settings change
+        stops a worker that may not run as it is: nothing more of it runs as it was. Switched
+        the other way, it finishes its turn first (its settings were the stricter ones).
+        Returns whether it was stopped."""
+        session_id, state = row["id"], self.states[row["id"]]
+        at_work = (
+            row["status"] in {"working", "queued", "starting"}
+            or state.held
+            or state.busy
+            or session_id in self.begun
+        )
+        if at_work and not asks_first:
+            state.stale = True  # Opened again once its turn is over: in a new process.
+            return False
+        if at_work:
+            name = agents.display(self.agent(session_id))
+            await self.workers.interrupt(
+                session_id,
+                by="Settings",
+                notice=f"Stopped: it asks first from now on, which {name} takes up in a new "
+                "conversation process. Go on continues, asking first.",
+            )
+        await self.detach(session_id)
+        backend, _ = self.connection(self.agent(session_id))
+        if retire := getattr(backend, "retire", None):
+            await retire(session_id)  # Its next message opens it in a new process.
+        return at_work
 
     async def refresh_session(self, row: dict):
         """The session picks up new instructions from its next turn."""
