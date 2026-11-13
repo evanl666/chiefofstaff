@@ -1257,9 +1257,9 @@ class Others:
         found = []
         for meta in self.listing:
             is_open = meta.session_id in open_now
-            # Open again in a terminal, it is the owner's whoever made it: looked at again once
-            # it closes.
-            owner = whose(meta, self.managed, None if is_open else self.made)
+            # Open (again) in a terminal, it is the owner's whoever made it, unless it is named a
+            # batch's: looked at again once it closes.
+            owner = whose(meta, self.managed, self.made, is_open)
             if owner in LEFT_OUT:
                 continue
             modified = getattr(meta, "modified_time", None)
@@ -1366,7 +1366,7 @@ class Others:
             await self.list_sessions()
         meta = next((m for m in self.listing or [] if m.session_id == session_id), None)
         is_open = session_id in self.runtime.elsewhere
-        owner = whose(meta, self.managed, None if is_open else self.made) if meta else "ours"
+        owner = whose(meta, self.managed, self.made, is_open) if meta else "ours"
         if meta is None or owner in LEFT_OUT:
             raise LookupError("Session not found.")
         found = "closed" if owner == OWNER else owner

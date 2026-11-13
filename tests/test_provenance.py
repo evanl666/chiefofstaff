@@ -558,6 +558,10 @@ async def test_the_index_and_the_list_agree(tmp_path, home, monkeypatch):
     batch = home.batch(3)
     running = home.add(prompt_mode(T0 + 100, f"{LABEL} Ticket 9")[:5], T0 + 100)
     home.open[running] = 4242
+    # A worker's call named as its batch's, still running: no row for it meanwhile.
+    named_running = home.add(prompt_mode(T0 + 110, "Label this ticket")[:5], T0 + 110)
+    home.metas[-1].name = "batch: Label the support tickets"
+    home.open[named_running] = 4343
     asked = home.add(interactive(T0, "Why does the build fail on CI?"), T0)
     routers = home.add(interactive(T0, "Plan the week", "And the next"), T0 + 50)
     harness = await connected(tmp_path, home)
@@ -573,7 +577,7 @@ async def test_the_index_and_the_list_agree(tmp_path, home, monkeypatch):
     rows = [row["id"] for row in runtime.others.view()["rows"]]
     items = [item["id"] for item in await runtime.workers.external(refresh=True)]
     assert rows == items == [running, asked], "open (still running) first; never the batch"
-    for session_id in batch:
+    for session_id in [*batch, named_running]:
         with pytest.raises(LookupError):
             await runtime.others.find(session_id)
     # One of them continued in a terminal: the owner's while open, before the next listing.
@@ -604,9 +608,11 @@ async def test_learning_takes_words_only_from_sessions_the_owner_talked_in(tmp_p
         "running": interactive(T0 - 600, "Profile the slow orders page now", exit_=False),
         "named": prompt_mode(T0 - 500, "Label this ticket: refund my order"),
     }
+    logs["named, running"] = interactive(T0 - 400, "Label this ticket", "And this one", exit_=False)
     ids = {name: home.add(lines, T0) for name, lines in logs.items()}
-    home.metas[-1].name = "batch: Label the tickets"
+    home.metas[-2].name = home.metas[-1].name = "batch: Label the tickets"
     home.open[ids["running"]] = 4242
+    home.open[ids["named, running"]] = 4343
     batch = home.batch(3)
     harness = await connected(tmp_path, home)
     for name, session_id in ids.items():
@@ -663,6 +669,9 @@ async def test_what_was_queued_is_dropped_before_learning_and_once_at_start(
     talked = home.add(interactive(T0, "Fix the login test", "Now run all of them"), T0)
     running = home.add(interactive(T0, "Profile the orders page", exit_=False), T0)
     home.open[running] = 4242
+    named_running = home.add(prompt_mode(T0, "Label this ticket")[:5], T0)
+    home.metas[-1].name = "batch: Label the support tickets"
+    home.open[named_running] = 4343
     harness = await connected(tmp_path, home)
     habits, store = harness.runtime.habits, harness.store
 
@@ -671,7 +680,9 @@ async def test_what_was_queued_is_dropped_before_learning_and_once_at_start(
     store.set(f"made:{moved}", json.dumps({"as": "batch", "group": "g", "at": T0, "size": 1}))
 
     def queue():
-        for n, session_id in enumerate([*batch, asked, one_off, talked, running, moved]):
+        for n, session_id in enumerate(
+            [*batch, asked, one_off, talked, running, named_running, moved]
+        ):
             for e in ("e1", "e2"):
                 habits.add("copilot", "instruction", f"copilot:{session_id}:{e}", f"Words {n}{e}")
 
@@ -736,7 +747,8 @@ async def test_what_was_queued_is_dropped_before_learning_and_once_at_start(
 
     store.save_settings(store.settings().model_copy(update={"learn_from_work": False}))
     await started()
-    assert queued() == {batch[2], asked, one_off, talked, running, moved}, "learning off"
+    everyone = {batch[2], asked, one_off, talked, running, named_running, moved}
+    assert queued() == everyone, "learning off: not looked at"
     store.save_settings(store.settings().model_copy(update={"learn_from_work": True}))
     await started()
     assert queued() == {talked, running}

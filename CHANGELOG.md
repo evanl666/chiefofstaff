@@ -10,11 +10,11 @@ Other Copilot sessions lists yours only, also when a script or a worker runs `co
   its 40 rows), reached the Router as yours, and were read as your words when learning how you
   write. A session with one prompt that has ended is now left out of all three when it is one
   of a batch (three or more that start with the same words, each within half an hour of the one
-  before, or any named `batch: …` with `copilot -p --name`) or a worker made it while running a
-  command (in its own folder, with a command that runs `copilot`, or a batch it started). A
-  single `copilot -p` you run yourself, and every session you typed more than one message in or
-  have open, stays listed, and the list's 40 rows are counted after leaving the others out
-  (found by QA on 0.1.39 to 0.1.42).
+  before, or any named `batch: …` with `copilot -p --name`, even while it runs) or a worker made
+  it while running a command (in its own folder, with a command that runs `copilot`, or a batch
+  it started). A single `copilot -p` you run yourself, and every session you typed more than one
+  message in or have open (unless it is named `batch: …`), stays listed, and the list's 40 rows
+  are counted after leaving the others out (found by QA on 0.1.39 to 0.1.42).
 - **Learning how you write reads only Copilot sessions you talked in** (two messages of yours or
   more): not a one-shot session, such as a `copilot -p` of your own or one question asked and
   left, written for a script or a single answer. What was read before from sessions it no longer

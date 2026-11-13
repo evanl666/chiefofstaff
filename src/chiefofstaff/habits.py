@@ -621,12 +621,11 @@ class Habits:
         gone = set(known(self.store)) - open_now
         owners = []
         for meta in listed:
-            if meta.session_id in open_now:
-                continue
-            found = whose(meta, held, made)
+            is_open = meta.session_id in open_now
+            found = whose(meta, held, made, is_open)
             if found in NOT_THEIRS:
                 gone.add(meta.session_id)
-            elif found == OWNER:
+            elif found == OWNER and not is_open:
                 owners.append(meta.session_id)
         talked = await self.runtime.provenance.talks(owners)
         gone |= {key for key, said in talked.items() if not said}

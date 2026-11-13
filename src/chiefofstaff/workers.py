@@ -1003,7 +1003,7 @@ class Workers:
             listed, key=lambda m: (m.session_id in elsewhere, m.modified_time), reverse=True
         ):
             is_open = meta.session_id in elsewhere
-            if whose(meta, held, None if is_open else made) in LEFT_OUT:
+            if whose(meta, held, made, is_open) in LEFT_OUT:
                 continue
             context = meta.context
             items.append(

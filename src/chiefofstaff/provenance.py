@@ -19,9 +19,11 @@ resumed, ended) and one of:
   "batch: <task>"`, as workers are told to: see named). A single `copilot -p` the owner runs now
   and then stays theirs.
 
-A session open now is never decided on (it may be anything until it ends), nor one with more
-than one message of its own or resumed: an interactive session the owner asked one question in
-and exited looks like a single shot, and stays theirs unless a worker or a batch made it. What is
+A session open now is never decided on (it may be anything until it ends), except that one
+named a batch's is one while it runs too (no row for each call of a worker's batch); nor is one
+with more than one message of its own or resumed: an interactive session the owner asked one
+question in and exited looks like a single shot, and stays theirs unless a worker or a batch
+made it. What is
 decided is kept (kv `made:<session id>`), so it does not change when a batch's other sessions
 go (tidied away) or as commands are read again; a session that changed since (continued in a
 terminal) is looked at again.
@@ -104,12 +106,18 @@ def managed(store: Store) -> set[str]:
     return found
 
 
-def whose(meta: Any, held: Collection[str], made: Mapping[str, str] | None = None) -> str:
+def whose(
+    meta: Any,
+    held: Collection[str],
+    made: Mapping[str, str] | None = None,
+    is_open: bool = False,
+) -> str:
     """Section 4.2: whose a listed session is, the first rule that matches. ours, remote, program,
     worker and batch are left out (LEFT_OUT); unlisted (the raw answer was not read), unknown (no
     maker named) and another (made by another client and last run by a Chief of Staff) are listed
     without a status; owner: the owner's own, with one. `made`: what Provenance.made found of
-    the sessions that would otherwise be the owner's."""
+    the sessions that would otherwise be the owner's, closed. Open now (`is_open`), one may be
+    anything until it ends: only its name says it is a batch's (see named)."""
     if meta.session_id in held or getattr(meta, "made_by_us", False):
         return OURS
     if getattr(meta, "is_remote", False):
@@ -128,6 +136,8 @@ def whose(meta: Any, held: Collection[str], made: Mapping[str, str] | None = Non
         return PROGRAM
     if last in OWN_CLIENTS:
         return ANOTHER
+    if is_open:
+        return BATCH if named(meta) else OWNER
     return (made or {}).get(meta.session_id, OWNER)
 
 

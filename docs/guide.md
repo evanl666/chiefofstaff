@@ -208,9 +208,10 @@ program made through Copilot's SDK (a script's, one per item of a batch, say) ar
 continue and are not listed, unless you continued one in a terminal. Nor are one-shot
 `copilot -p` sessions (one prompt, then done) that a script made in a batch (three or more that
 start with the same words, each within half an hour of the one before, or any named
-`batch: …` with `copilot -p --name`) or that a worker made while it ran a command (in its own
-folder, with a command that runs `copilot`, or a batch it started). A single `copilot -p` you
-run yourself is listed, as is every session you typed more than one message in or have open.
+`batch: …` with `copilot -p --name`, even while it runs) or that a worker made while it ran a
+command (in its own folder, with a command that runs `copilot`, or a batch it started). A
+single `copilot -p` you run yourself is listed, as is every session you typed more than one
+message in or have open (unless it is named `batch: …`).
 The Router does not see the others either. Workers name each call of a batch
 `batch: <their task>` and give it a Copilot home of their own (`COPILOT_HOME` in their folder),
 so its sessions do not reach yours at all.
