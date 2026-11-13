@@ -481,7 +481,9 @@ you would.
 **How you write.** Every two hours (and when you press *Learn now*) it reads what you wrote
 since: the Slack messages you sent, your PR reviews and review comments (on the account active
 in `gh`; not what Chief of Staff posted for you, which it knows by what it posted; nothing is
-added to what it posts), your commit messages in your projects (not Copilot's, nor those a worker
+added to what it posts, so what Chief of Staff on another computer of yours posts on the same
+account is learned as your own writing: you approved it), your commit messages in your projects
+(not Copilot's, nor those a worker
 made), what you asked your own Copilot sessions, and what you told the Router. Only your own
 words; others' messages are never kept. A short-lived worker, which can do nothing but propose,
 then describes how you write in each place: answers and reports to you, Slack DMs, Slack

@@ -20,8 +20,9 @@ posted to GitHub, and watches that keep their place.
   rest behind *+N*. Nine runs of one task no longer push every PR down.
 - **Nothing hidden in what Chief of Staff posts to GitHub**: reviews, line comments, replies and
   PR descriptions no longer end with `<!-- chief-of-staff -->`. Learning how you write still
-  leaves out what it posted for you (it knows what it posted); text with the old mark still counts
-  as its own.
+  leaves out what this install posted for you (it knows what it posted), and text with the old
+  mark. What Chief of Staff on another computer of yours posts on the same GitHub account is no
+  longer told apart: it is learned as your own writing (you approved it before it was sent).
 - **Watches**: a watch an older version scanned but never covered in full goes on from where that
   version left it after an upgrade (what is older than a week is a gap you are told of), instead of
   starting a day back; a gap that keeps growing is told again once it doubles or passes an hour or
