@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (0.1.43)
+## 0.1.43 (2026-11-13)
 
 Other Copilot sessions lists yours only, also when a script or a worker runs `copilot -p`;
 runs that are not waited for for ever, Artifacts by task, nothing hidden in what is posted to
