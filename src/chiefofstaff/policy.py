@@ -30,13 +30,21 @@ PUSH_ALL = frozenset({"--all", "--mirror", "--branches"})
 GIT_VALUED = frozenset(
     {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--super-prefix"}
 )
-# Programs that run the command after them (their own options skipped), and shells whose `-c`
-# runs a command line of its own.
-WRAPPERS = frozenset({"command", "exec", "env", "nohup", "time", "nice", "builtin", "xargs"})
+# Shells whose `-c` runs a command line of its own.
 SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "fish"})
+ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# Words that open or join the shell's own constructs (`if …; then`, `while …; do`, `{ …; }`).
+KEYWORDS = frozenset(
+    {"if", "then", "elif", "else", "fi", "do", "done", "while", "until", "for", "!", "{", "}"}
+)
+# Where one simple command ends (a backquote opens or closes a command of its own).
+SEPARATORS = ";&|()`\n"
+# The rule v0.1.42 shipped, kept as a floor: a push it saw forcing, or naming main or master,
+# is refused whatever the reading below makes of the line (it never refuses less).
+FLOOR_FORCE = re.compile(r"\bgit\s+push\b[^;&|\n]*(\s--force(-with-lease)?\b|\s-f\b|\s\+\S)")
+FLOOR_DEFAULT = re.compile(r"\bgit\s+push\b[^;&|\n]*[\s:](main|master)(\s|$)")
 # A loose `git … push`, for text the shell would not parse (an unclosed quote).
 GIT_PUSH = re.compile(r"\bgit\b[^;&|\n]*?\bpush\b([^;&|\n]*)")
-ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 
 @dataclass
@@ -48,6 +56,7 @@ class Push:
     forced: bool = False
     branches: set[str] | None = field(default_factory=set)  # None: every branch.
     bare_in: str | None = None  # The folder a refspec-less push runs in.
+    bare_branch: str = ""  # The branch the line switched that folder to before (no need to ask).
     unknown: bool = False
 
 
@@ -60,20 +69,62 @@ def pushed_branch(refspec: str) -> str:
     return destination
 
 
+def expanded(folder: str, path: str) -> str:
+    """`path` from `folder`, `~` expanded; `folder` itself when it cannot be (an unknown user's
+    home: the shell's `cd` fails there, and the command goes on where it was)."""
+    try:
+        return str(Path(folder) / Path(path).expanduser())
+    except RuntimeError:
+        return folder
+
+
+def without_comments(text: str) -> str:
+    """A command line without its comments, as bash reads them: a word that starts with `#`,
+    unquoted, to the end of its line (`fix#12` is a word, `'#'` a quoted one)."""
+    kept, quote, start, index = [], "", True, 0
+    while index < len(text):
+        char = text[index]
+        if quote:
+            kept.append(char)
+            if char == "\\" and quote == '"' and index + 1 < len(text):
+                kept.append(text[index + 1])
+                index += 1
+            elif char == quote:
+                quote = ""
+        elif char == "\\" and index + 1 < len(text):
+            kept += [char, text[index + 1]]
+            index += 1
+            start = False
+        elif char in "'\"":
+            quote, start = char, False
+            kept.append(char)
+        elif char == "#" and start:
+            while index + 1 < len(text) and text[index + 1] != "\n":
+                index += 1
+        else:
+            kept.append(char)
+            start = char in " \t\r" or char in SEPARATORS
+        index += 1
+    return "".join(kept)
+
+
 def shell_words(text: str) -> list[list[str]] | None:
-    """A command line as the shell splits it (quotes and backslashes resolved, a
-    backslash-newline joined): its simple commands, each a list of words; None when it does
-    not parse (an unclosed quote)."""
-    lexer = shlex.shlex(text.replace("\\\n", ""), posix=True, punctuation_chars=";&|()\n")
+    """A command line as the shell splits it (comments dropped, quotes and backslashes
+    resolved, a backslash-newline joined): its simple commands, each a list of words; None
+    when it does not parse (an unclosed quote)."""
+    lexer = shlex.shlex(
+        without_comments(text).replace("\\\n", ""), posix=True, punctuation_chars=SEPARATORS
+    )
     lexer.whitespace = " \t\r"
     lexer.whitespace_split = True
+    lexer.commenters = ""
     try:
         words = list(lexer)
     except ValueError:
         return None
     commands, current = [], []
     for word in words:
-        if word and all(char in ";&|()\n" for char in word):
+        if word and all(char in SEPARATORS for char in word):
             if current:
                 commands.append(current)
             current = []
@@ -118,8 +169,11 @@ def environment_config(env: dict[str, str]) -> dict[str, str | None]:
     return found
 
 
-def push_of(words: list[str], env: dict[str, str], cwd: str) -> Push | None:
-    """The `git push` these words run (git's own options first), or None."""
+def git_command(
+    words: list[str], env: dict[str, str], cwd: str
+) -> tuple[str, dict[str, str | None], list[str]] | None:
+    """A `git …` invocation's folder (after `-C`), configuration (`-c`, `--config-env`, the
+    environment's) and its command with what follows; None without a command."""
     config: dict[str, str | None] = dict(environment_config(env))
     folder, index = cwd, 1
     while index < len(words) and words[index].startswith("-"):
@@ -129,17 +183,42 @@ def push_of(words: list[str], env: dict[str, str], cwd: str) -> Push | None:
             index += 1
             value = words[index]
         if name == "-C" and value:
-            folder = str(Path(folder) / Path(value).expanduser())
+            folder = expanded(folder, value)
         elif name == "-c" and value:
             key, has, setting = value.partition("=")
             config[key] = setting if has else "true"
         elif name == "--config-env" and value:
             config[value.partition("=")[0]] = None  # Its value is in a variable: not known.
         index += 1
-    if index >= len(words) or words[index] != "push":
+    return (folder, config, words[index:]) if index < len(words) else None
+
+
+def switched_to(arguments: list[str]) -> str | None:
+    """The branch `git checkout`/`git switch` with these arguments puts the checkout on (a new
+    one, or one it names); None when it does not say (files, `-`, nothing)."""
+    command, rest = arguments[0], arguments[1:]
+    creating = (
+        {"-b", "-B", "--orphan"} if command == "checkout" else {"-c", "-C", "--create", "--orphan"}
+    )
+    for index, word in enumerate(rest):
+        name, _, value = word.partition("=")
+        if name in creating:
+            return value or (rest[index + 1] if index + 1 < len(rest) else None)
+    named = [word for word in rest if not word.startswith("-")]
+    if "--" in rest or len(named) != 1 or named[0] == "-":
         return None
-    push, positional, valued, deleting = Push(), [], False, False
-    for word in words[index + 1 :]:
+    return named[0]
+
+
+def push_of(words: list[str], env: dict[str, str], cwd: str) -> Push | None:
+    """The `git push` these words run (git's own options first), or None."""
+    found = git_command(words, env, cwd)
+    if found is None or found[2][0] != "push":
+        return None
+    folder, config, arguments = found
+    push, positional, valued = Push(), [], False
+    deleting = dry = tags = False
+    for word in arguments[1:]:
         if valued:
             valued = False
             continue
@@ -147,13 +226,17 @@ def push_of(words: list[str], env: dict[str, str], cwd: str) -> Push | None:
             name = word.split("=", 1)[0]
             push.forced = push.forced or name in {"--force", "--force-with-lease"}
             deleting = deleting or name == "--delete"
+            dry = dry or name == "--dry-run"
+            tags = tags or name == "--tags"
             if name in PUSH_ALL:
                 push.branches = None
             valued = name in PUSH_VALUED and "=" not in word
             continue
         if word.startswith("-") and len(word) > 1:
-            push.forced = push.forced or (word[1:].isalpha() and "f" in word[1:])
-            deleting = deleting or (word[1:].isalpha() and "d" in word[1:])
+            letters = word[1:] if word[1:].isalpha() else ""
+            push.forced = push.forced or "f" in letters
+            deleting = deleting or "d" in letters
+            dry = dry or "n" in letters
             valued = word == "-o"
             continue
         positional.append(word)
@@ -167,7 +250,9 @@ def push_of(words: list[str], env: dict[str, str], cwd: str) -> Push | None:
         push.forced = push.forced or word.startswith("+")
         if push.branches is not None:
             push.branches.add(pushed_branch(word))
-    if not refspecs and len(positional) <= 1 and not deleting:
+    if dry or deleting or refspecs:
+        return push  # What it updates is all in its words (or it updates nothing).
+    if len(positional) <= 1 and not tags:
         push.bare_in = folder  # Where its folder's branch goes.
     elif any(pushed_branch(word) in {"HEAD", "@"} for word in positional[1:]):
         push.bare_in = folder  # `HEAD`: the branch its folder is on.
@@ -175,9 +260,11 @@ def push_of(words: list[str], env: dict[str, str], cwd: str) -> Push | None:
 
 
 def pushes(command: str, cwd: str = "") -> list[Push]:
-    """Each `git push` in a command line, as the shell would run it (also in `sh -c '…'` and
-    `eval`, after `cd`, with configuration given on the line). A rule of text, so best effort:
-    what a command makes up as it runs (`$(…)`) is not known here."""
+    """Each `git push` in a command line, as the shell would run it: wherever `git` stands in a
+    simple command (after `if`, `do`, `{`, `timeout 60`, `env A=b`…), in `sh -c '…'` and
+    `eval`, after `cd`, with configuration given on the line, and the branch an earlier
+    `git checkout -b`/`git switch -c` made. A rule of text, so best effort: what a command
+    makes up as it runs (`$(…)`) is not known here."""
     found: list[Push] = []
     commands = shell_words(command)
     if commands is None:  # Not a command line the shell runs: read loosely.
@@ -189,51 +276,56 @@ def pushes(command: str, cwd: str = "") -> list[Push]:
         return found
     env: dict[str, str] = {}
     folder = cwd
+    branch_of: dict[str, str] = {}  # Folder -> the branch the line switched it to.
     for words in commands:
-        local = dict(env)
-        while words and ASSIGNMENT.match(words[0]):
-            name, _, value = words[0].partition("=")
-            local[name] = value
-            words = words[1:]
-        if not words:
-            env = local  # `NAME=value` alone: for what follows.
+        first = next((i for i, word in enumerate(words) if word not in KEYWORDS), len(words))
+        if first < len(words) and all(ASSIGNMENT.match(w) for w in words[first:]):
+            env |= {word.partition("=")[0]: word.partition("=")[2] for word in words[first:]}
+            continue  # `NAME=value` alone: for what follows.
+        if first < len(words) and words[first] == "export":
+            env |= {
+                word.partition("=")[0]: word.partition("=")[2]
+                for word in words[first + 1 :]
+                if ASSIGNMENT.match(word)
+            }
             continue
-        if words[0] == "export":
-            for word in words[1:]:
-                if ASSIGNMENT.match(word):
-                    name, _, value = word.partition("=")
-                    env[name] = value
+        if first + 1 < len(words) and words[first] == "cd" and cwd:
+            folder = expanded(folder, words[first + 1])
             continue
-        if words[0] == "cd" and len(words) > 1 and cwd:
-            folder = str(Path(folder) / Path(words[1]).expanduser())
-            continue
-        while words and (Path(words[0]).name in WRAPPERS or ASSIGNMENT.match(words[0])):
-            if ASSIGNMENT.match(words[0]):
-                name, _, value = words[0].partition("=")
-                local[name] = value
-            words = words[1:]
-            while words and words[0].startswith("-"):
-                words = words[1:]
-        if not words:
-            continue
-        program = Path(words[0]).name
-        if program in SHELLS:
-            script = next(
-                (
-                    words[i + 1]
-                    for i, word in enumerate(words[:-1])
-                    if word.startswith("-") and not word.startswith("--") and "c" in word
-                ),
-                None,
-            )
-            if script is not None:
-                found += pushes(script, folder)
-            continue
-        if program == "eval":
-            found += pushes(" ".join(words[1:]), folder)
-            continue
-        if program == "git" and (push := push_of(words, local, folder)):
-            found.append(push)
+        for index, word in enumerate(words):
+            program = Path(word).name
+            local = env | {
+                w.partition("=")[0]: w.partition("=")[2]
+                for w in words[:index]
+                if ASSIGNMENT.match(w)
+            }
+            if program == "git":
+                if push := push_of(words[index:], local, folder):
+                    push.bare_branch = branch_of.get(push.bare_in or "", "")
+                    found.append(push)
+                elif (git := git_command(words[index:], local, folder)) and git[2][0] in {
+                    "checkout",
+                    "switch",
+                }:
+                    if branch := switched_to(git[2]):
+                        branch_of[git[0]] = branch
+                    else:
+                        branch_of.pop(git[0], None)
+            elif program in SHELLS:
+                script = next(
+                    (
+                        words[i + 1]
+                        for i in range(index + 1, len(words) - 1)
+                        if words[i].startswith("-")
+                        and not words[i].startswith("--")
+                        and "c" in words[i]
+                    ),
+                    None,
+                )
+                if script is not None:
+                    found += pushes(script, folder)
+            elif program == "eval":
+                found += pushes(" ".join(words[index + 1 :]), folder)
     return found
 
 
@@ -260,13 +352,22 @@ def current_branches(folder: str) -> set[str]:
 
 def pushes_default(command: str, cwd: str = "") -> bool:
     """Whether a command line may push to the default branch, as far as its words say (and,
-    for a push that names no branch, the branch its folder is on)."""
+    for a push that names no branch, the branch its folder is on); never less than v0.1.42's
+    rule said."""
+    if FLOOR_DEFAULT.search(command):
+        return True
     for push in pushes(command, cwd):
         if push.branches is None or push.unknown or push.branches & DEFAULT_BRANCHES:
             return True
-        if push.bare_in and current_branches(push.bare_in) & DEFAULT_BRANCHES:
-            return True
+        if push.bare_in is not None:
+            on = {push.bare_branch} if push.bare_branch else current_branches(push.bare_in)
+            if on & DEFAULT_BRANCHES:
+                return True
     return False
+
+
+def pushes_forced(command: str, cwd: str = "") -> bool:
+    return bool(FLOOR_FORCE.search(command)) or any(push.forced for push in pushes(command, cwd))
 
 
 def matches(pattern: str) -> Callable[[str, str], bool]:
@@ -284,7 +385,7 @@ DANGEROUS: list[tuple[Callable[[str, str], bool], str]] = [
         ),
         "recursive delete of home or root",
     ),
-    (lambda command, cwd: any(push.forced for push in pushes(command, cwd)), "force push"),
+    (pushes_forced, "force push"),
     (pushes_default, "push to the default branch"),
     (
         matches(r"\bgh\s+pr\s+(merge|close|review|comment)\b"),
