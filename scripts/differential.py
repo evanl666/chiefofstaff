@@ -4,7 +4,7 @@ differences the feature declares by name in FEATURES below.
 
     uv run --with playwright python scripts/differential.py [--feature NAME] [--mode off|on] [--out DIR]
 
---mode off (the default): the baseline (git tag v0.1.43, checked out with `git worktree add` and
+--mode off (the default): the baseline (git tag v0.1.44, checked out with `git worktree add` and
 run in its own `uv run` environment) against this working tree with every registered feature (or
 only --feature) at its off settings, allowing only those features' `allow_off`. The baseline runs
 with those of the settings it has: a feature it shipped with is off on both sides.
@@ -84,7 +84,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = Path(__file__).resolve()
-BASELINE = "v0.1.43"
+BASELINE = "v0.1.44"
 # DIFFERENTIAL_PORT_BASE moves the ten ports (another checkout's run on the same machine).
 PORT_BASE = int(os.environ.get("DIFFERENTIAL_PORT_BASE", "8810"))
 PORTS = range(PORT_BASE, PORT_BASE + 10)
@@ -188,9 +188,9 @@ EXAMPLE = Feature(
 )
 
 # Deliberate fixes of how the baseline looks, not any feature's: allowed in every run (the plain
-# one, and each feature's off and on), each with why. None against v0.1.43: those of 0.1.41 to
-# 0.1.43 (the one-line heading, workers' batch CLI line, learning from talked sessions, the runs
-# kept, role rules, the Router's title rule) are its own behaviour.
+# one, and each feature's off and on), each with why. None against v0.1.44: those of 0.1.41 to
+# 0.1.44 (the one-line heading, workers' batch CLI line, learning from talked sessions, the runs
+# kept, role rules, the Router's title rule, a check-back's runs) are its own behaviour.
 FIXES: list[Allow] = []
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on

@@ -4087,6 +4087,79 @@ def test_a_save_that_switched_workers_to_ask_first_says_so():
     )
 
 
+async def test_a_codex_workers_check_back_is_on_the_runs_it_declared_in_its_turn(
+    tmp_path, monkeypatch
+):
+    """0.1.44: a check-back naming no run is on those its worker declared in the same turn
+    (SessionState.turn_runs, cleared as a turn begins: its user.message). A Codex worker's
+    turns begin as a Copilot worker's do: a run declared in an earlier turn is not covered."""
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    try:
+        worker = await spawn(runtime, harness, "Reply with just: started")
+        await until(lambda: ("assistant", "started") in harness.kinds(worker), 30)
+        task = harness.store.one("SELECT id FROM tasks WHERE session_id=?", (worker,))
+        assert task
+        console = "https://flyte.acme.dev/console/projects/ml/domains/prod/executions/"
+        nightly = {"url": console + "a3f9", "name": "Nightly", "status": "running"}
+        backfill = {"url": console + "b7c1", "name": "Backfill", "status": "running"}
+        await call_tool(runtime, "report", worker, status="progress", summary="Nightly started.",
+                        artifacts=[nightly])  # fmt: skip
+        state = runtime.states[worker]
+        assert state.turn_runs.get(task["id"]), "declared in this turn"
+        await runtime.delivery.deliver(
+            worker, wrap("router", "message", "Reply with just: next"), kind="router"
+        )
+        await until(lambda: ("assistant", "next") in harness.kinds(worker), 30)
+        assert state.turn_runs == {}, "a new turn: none declared in it yet"
+        await call_tool(runtime, "report", worker, status="progress", summary="Backfill started.",
+                        artifacts=[backfill])  # fmt: skip
+        told = await call_tool(runtime, "check_back", worker, minutes=60, what="the backfill")
+        text = told.text_result_for_llm
+        assert "and \u201cBackfill\u201d" in text and "Not covered: \u201cNightly\u201d" in text
+    finally:
+        await runtime.stop()
+
+
+async def test_a_copilot_p_a_codex_worker_ran_makes_its_session_the_workers(tmp_path, monkeypatch):
+    """0.1.44 decides whose Copilot sessions a worker made from the commands it ran (off the
+    event loop): a Codex worker's `copilot -p` (its command as Codex ran it, without the shell
+    around it) ties the session it made to it, as a Copilot worker's does; the owner's own
+    session from before stays theirs."""
+    from test_provenance import Home, prompt_mode
+
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    (tools / "copilot").write_text("#!/bin/sh\nsleep 0.3\n")  # As long as it runs.
+    (tools / "copilot").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tools}{os.pathsep}{os.environ['PATH']}")
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    store = harness.store
+    try:
+        worker = await spawn(
+            runtime,
+            harness,
+            'Run the shell command `copilot -p "Summarize notes.md" -s`\nReport done: summarized',
+        )
+        await until(lambda: store.session(worker)["status"] == "done", 30)
+        assert runtime.agent(worker) == "codex"
+        assert commands(harness, worker) == [('copilot -p "Summarize notes.md" -s', 0, True)]
+        row = store.one("SELECT started_at FROM commands WHERE session_id=?", (worker,))
+        began = provenance.epoch(row["started_at"])
+        assert began is not None
+        home, cwd = Home(tmp_path / "copilot"), store.session(worker)["cwd"]
+        # As the CLI writes it: begun as the command ran, where it ran.
+        made = home.add(prompt_mode(began + 0.1, "Summarize notes.md", cwd), began + 0.1, cwd=cwd)
+        owners = home.add(prompt_mode(began - 7200, "Summarize notes.md", cwd), began - 7200)
+        deciding = provenance.Provenance(
+            store, home.log_of, runtime.workspaces.own_folder, uptime=runtime.uptime
+        )
+        assert await deciding.made(home.metas, {}) == {made: provenance.MADE_BY_WORKER}
+        assert json.loads(store.get(f"made:{made}") or "{}")["by"] == worker
+        assert store.get(f"made:{owners}") is None
+    finally:
+        await runtime.stop()
+
+
 async def test_a_codex_workers_commands_end_when_codex_or_chief_of_staff_said(
     tmp_path, monkeypatch
 ):
