@@ -287,6 +287,26 @@ def prepare_downgrade(store: Store) -> tuple[list[str], dict[int, str]]:
     return stopped, left
 
 
+def clear_private(folder: Path, *, keep_own: bool = False):
+    """An agent's private files (Claude's: a worker's MCP configuration and prompt, 0600) left
+    by processes that ended without removing them (Chief of Staff was killed); `keep_own`:
+    not those of this process's workers (they are removed as each ends)."""
+    import shutil
+
+    private = folder / "private"
+    mine = f"{os.getpid()}-"
+    for path in private.iterdir() if private.is_dir() else []:
+        if keep_own and path.name.startswith(mine):
+            continue
+        try:
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+        except OSError:
+            continue
+
+
 def backend(name: str, folder: Path | None = None) -> AgentBackend:
     """An agent's backend, its module imported now; `folder`: Chief of Staff's own folder for
     it (its processes start there; Claude's launcher is there)."""

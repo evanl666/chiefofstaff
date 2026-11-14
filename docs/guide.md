@@ -1274,8 +1274,10 @@ their chats, tasks and usage stay. *Go on* works again once it is back on.
 **Before installing an earlier version**, stop Chief of Staff and run
 `chiefofstaff --prepare-downgrade`: it stops the workers on Codex that were at work and checks
 that no Codex process is left. Earlier versions run every worker on Copilot and cannot resume
-Codex workers: close those you no longer need. With no worker ever on another agent, it says
-there is nothing to prepare.
+Codex workers: close those you no longer need. If Chief of Staff was killed, run it (or
+`--prepare-downgrade`) once with this version first: it keeps its record of those processes in a
+form 0.1.46 and earlier cannot read, so they would not end what they left running. With no worker
+ever on another agent, it says there is nothing to prepare.
 
 ## Daily summary and your profile
 

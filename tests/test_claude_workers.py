@@ -286,3 +286,20 @@ async def test_turning_claude_off_drains_its_workers_and_processes(tmp_path, cla
         assert ended["ended_at"], "its command ended with its process"
     finally:
         await runtime.stop()
+
+
+async def test_private_files_a_killed_chief_of_staff_left_go_at_start_and_at_turning_off(
+    tmp_path, claude_on_path
+):
+    private = tmp_path / "data" / "agents" / "claude" / "private"
+    private.mkdir(parents=True)
+    (private / "999999999-0a1b-mcp.json").write_text('{"mcpServers": {}}')
+    _, runtime = await started(tmp_path)
+    try:
+        assert list(private.iterdir()) == [], "gone at start, before any Claude worker runs"
+        await saved(runtime, {"claude": {"enabled": True}, "new_workers": "claude"})
+        (private / "999999999-2c3d-prompt.md").write_text("A worker.")
+        await saved(runtime, {"claude": {"enabled": False}})
+        assert list(private.iterdir()) == [], "and once it is turned off"
+    finally:
+        await runtime.stop()

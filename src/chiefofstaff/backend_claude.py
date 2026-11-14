@@ -123,6 +123,8 @@ TASK_ID = re.compile(r"<task-id>([^<]+)</task-id>")
 NOTIFICATION = "<task-notification>"
 # A server that is GitHub's (its name, command or URL): its writes are the owner's to approve.
 GITHUB = re.compile(r"github", re.IGNORECASE)
+# A variable of Chief of Staff's the launcher's shell can unset by name.
+OWN_NAME = re.compile(r"CHIEFOFSTAFF_[A-Za-z0-9_]+")
 TERMINAL = frozenset({"completed", "failed", "killed", "stopped"})
 
 # Claude's tools, as Chief of Staff's checks see them (more-agents.md 5.12.4).
@@ -666,9 +668,14 @@ def write_launcher(folder: Path, command: str, environment: Path | None = None) 
     launcher = folder / ("check-launcher" if environment else "launcher")
     chosen = ["--environment", str(environment)] if environment else []
     supervisor = shlex.join(isolated("chiefofstaff.agentrun", *chosen))
+    # Chief of Staff's own variables, named by it (OWN_UNSET), are unset before its supervisor
+    # starts: the SDK passes its whole environment, and can only add to it.
     launcher.write_text(
         "#!/bin/sh\n"
-        f'exec {supervisor} --cwd "${{CHIEFOFSTAFF_AGENT_CWD:?}}" -- {shlex.quote(command)} "$@"\n'
+        'cwd="${CHIEFOFSTAFF_AGENT_CWD:?}"\n'
+        'for name in ${CHIEFOFSTAFF_AGENT_UNSET-}; do unset "$name"; done\n'
+        "unset CHIEFOFSTAFF_AGENT_CWD CHIEFOFSTAFF_AGENT_UNSET\n"
+        f'exec {supervisor} --cwd "$cwd" -- {shlex.quote(command)} "$@"\n'
     )
     launcher.chmod(0o700)
     return launcher
@@ -692,12 +699,7 @@ def private_folder(launcher: Path) -> Path:
 
 def clear_private(launcher: Path):
     """What processes of an earlier Chief of Staff left there (it was killed)."""
-    folder = launcher.parent / "private"
-    mine = f"{os.getpid()}-"
-    for path in folder.glob("*") if folder.is_dir() else []:
-        if not path.name.startswith(mine):
-            with suppress(OSError):
-                path.unlink()
+    agents.clear_private(launcher.parent, keep_own=True)
 
 
 class Sent:
@@ -752,7 +754,7 @@ class ClaudeSession:
     async def send(
         self, prompt: str, *, mode: str = "enqueue", attachments: list[Any] | None = None
     ) -> str:
-        if self.closed or not self.worker.alive():
+        if self.closed or not (self.worker.alive() or self.worker.restarting()):
             raise ConnectionResetError("This Claude session is disconnected.")
         return await self.worker.send(prompt, mode=mode, attachments=attachments)
 
@@ -929,11 +931,15 @@ class ClaudeWorker:
         if self.ask_first:
             settings["disableAllHooks"] = True  # The owner's hooks and mods: off (5.7).
         files = self.private_files()
-        # What Chief of Staff's own variables were (the Slack token among them) is not passed
-        # on (the SDK passes its whole environment; agentrun drops them for the CLI), but for
-        # the folder the CLI starts in.
-        environment = {key: "" for key in os.environ if key.startswith("CHIEFOFSTAFF_")}
-        environment |= {"CHIEFOFSTAFF_AGENT_CWD": self.cwd}
+        # Chief of Staff's own variables (the Slack token among them) reach neither its
+        # supervisor nor the CLI: the launcher unsets those it names (a name the shell cannot
+        # unset is passed empty), and the folder the CLI starts in is said.
+        own = [key for key in os.environ if key.startswith("CHIEFOFSTAFF_")]
+        environment = {key: "" for key in own if not OWN_NAME.fullmatch(key)}
+        environment |= {
+            "CHIEFOFSTAFF_AGENT_CWD": self.cwd,
+            "CHIEFOFSTAFF_AGENT_UNSET": " ".join(key for key in own if OWN_NAME.fullmatch(key)),
+        }
         environment |= {"CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS": "1"}
         servers: dict[str, Any] = {"chief": self.chief_server()}
 
@@ -1122,6 +1128,11 @@ class ClaudeWorker:
                 self.stop_requested.set()
                 return
             await asyncio.sleep(WATCH_SECONDS)
+
+    def restarting(self) -> bool:
+        """Its process restarts for a turn (a new effort): what is sent meanwhile waits for it
+        (the turn's queue)."""
+        return self.starting and self.opening > 0 and not self.refusal
 
     def alive(self) -> bool:
         return (

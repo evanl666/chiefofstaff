@@ -959,6 +959,12 @@ class Runtime:
     @connection
     async def connect(self):
         async with self.connect_lock:
+            # What other agents' workers left in their private files when an earlier Chief of
+            # Staff was killed (this one's own workers' files are theirs until each ends).
+            for name in agents.NAMES:
+                await asyncio.to_thread(
+                    agents.clear_private, self.agent_folder(name), keep_own=True
+                )
             # Copilot starts afresh (at start, or reconnecting): the commands its shells were
             # running ended with the one before.
             self.end_commands(COPILOT_AGENT)
@@ -1105,9 +1111,13 @@ class Runtime:
             name: entry.backend for name, entry in self.agents.items() if entry.backend
         }
 
+    def agent_folder(self, name: str) -> Path:
+        """Chief of Staff's own folder for an agent (its processes start there)."""
+        return self.store.directory / "agents" / name
+
     def agent_connection(self, name: str) -> AgentConnection:
         return AgentConnection(
-            lambda: agents.backend(name, self.store.directory / "agents" / name),
+            lambda: agents.backend(name, self.agent_folder(name)),
             enabled=lambda: agents.enabled(self.store, name),
         )
 
@@ -1679,9 +1689,11 @@ class Runtime:
         for name in sorted(set(was_on) - set(now)):
             if self.agents[name].backend:
                 await self.disconnect_agent(name)
-            # Its process is gone, and what it ran with it: its records go, its commands end.
+            # Its process is gone, and what it ran with it: its records go, its commands end,
+            # and no private file of its workers is left.
             self.end_commands(name)
             self.store.delete(f"agentpids:{name}")
+            await asyncio.to_thread(agents.clear_private, self.agent_folder(name))
             self.agents[name].offline = False
         if was_on != now:
             await self.refresh(ROUTER)  # Its spawn_worker and prompt name the agents on.
