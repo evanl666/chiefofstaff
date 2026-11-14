@@ -1682,6 +1682,28 @@ def test_a_cd_to_no_folder_but_the_systems_leaves_the_folder_unknown(command, go
 
 
 @pytest.mark.parametrize(
+    ("command", "shell", "unknown"),
+    [
+        ('sh -c "git push origin $B:t"', "zsh", True),
+        ("eval \"bash -c 'git push origin $B:l'\"", "zsh", True),
+        ("sh -c 'sh -c \"git push origin $B[1]\"'", "zsh", True),
+        ('sh -c "git push origin $B:t"', "", False),
+        ("zsh -c 'git push origin $B:t'", "", True),
+    ],
+)
+def test_zshs_modifiers_stay_unknown_in_a_line_it_hands_to_another_shell(command, shell, unknown):
+    """A 200k run on 2ab43e1: from zsh (Codex), `sh -c "git push origin $B:t"` pushed main as
+    zsh put `$B:t` in (b391f06 read sh's line as sh does: `$B` then `:t`)."""
+    token = policy.SHELL.set(shell)
+    try:
+        policy.reading.cache_clear()
+        found = policy.pushes(command, "")
+    finally:
+        policy.SHELL.reset(token)
+    assert any(push.unknown for push in found) == unknown, found
+
+
+@pytest.mark.parametrize(
     ("option", "zsh", "read"),
     [("physical", False, (False, True)), ("PHYSICAL", False, (False, False)),
      ("nophysical", False, (False, False)), ("chase_links", False, (False, False)),

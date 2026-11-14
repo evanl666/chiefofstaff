@@ -799,6 +799,10 @@ FOUND_ZSH = [
     ("echo | eval 'cd ../main'; git push", 'feat'),
     ("source =(echo 'git push origin main')", 'feat'),
     ("=bash <<< 'git push origin main'", 'feat'),
+    # The owner's review of 2ab43e1 (a 200k run): zsh's modifiers in a line it hands to sh.
+    ('eval "find . -maxdepth 0 -exec sh -c \'git push origin $B:l\' \\;"', 'main/sub'),
+    ('( eval "bash -c \'git -C "$(cd ../main && pwd)" push origin $B:t; git push -o x origin\'; git -C -- ../feat push" ) || local IFS && time -p cd m/..', 'feat'),  # noqa: E501
+    ('sh -c "git push origin $B:t"', 'main'),
     ('git status\neval "env -i PATH="$PATH" git push -n" & emulate sh -c \'( : && bash < <(echo \'\\\'\'git -C ../main push origin HEAD; env -i PATH="$PATH" git push $B\'\\\'\') ) && false\' | for i in 1 2; do unset HOME || builtin popd; done', 'main'),  # noqa: E501
     ("emulate sh -c \"bash <<< 'git push origin main'\"", 'feat'),
     ('command pushd ../feat/sub || nice -n 5 git push -o x origin', 'main'),

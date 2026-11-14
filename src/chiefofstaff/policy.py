@@ -928,7 +928,7 @@ def expansions(
 
         run = []
         for word in words:
-            put = resolved(word, value_of, tally.zsh)
+            put = resolved(word, value_of, tally.modifiers)
             # Split where unquoted (`$B`), and gone when empty, unless part of it is quoted
             # (`""$B`); a quoted one (`"$B"`) is one word, even empty.
             made = [put] if put == word or not isinstance(word, Splitting) else put.split()
@@ -987,7 +987,7 @@ class Git:
     rest: list[str]
     elsewhere: bool
     moved: bool = False  # Its folder is another than the shell's (`-C`).
-    zsh: bool = False  # Run by zsh (Tally.zsh): a variable's modifier (`$B:t`) is its own.
+    zsh: bool = False  # zsh's modifiers may be in its words (`$B:t`: Tally.modifiers).
 
 
 def git_command(
@@ -1016,7 +1016,8 @@ def git_command(
         index += 1
     if index >= len(words):
         return None
-    return Git(folder, config, words[index:], elsewhere, folder != cwd, bool(tally and tally.zsh))
+    modifiers = bool(tally and tally.modifiers)
+    return Git(folder, config, words[index:], elsewhere, folder != cwd, modifiers)
 
 
 def switch_of(arguments: list[str]) -> tuple[str, str] | None:
@@ -1244,6 +1245,8 @@ class Tally:
     here: str | None = None  # Where code being read (read_code) started: `$PWD`, if there.
     # How cd reads `..` where the line being read starts (Line.physical, Line.physical_unsure).
     modes: tuple[bool, bool] = (False, False)
+    # Whether a line zsh runs handed this one to another shell (Tally.modifiers).
+    outer_zsh: bool = False
 
     def named(self) -> tuple[dict[str, int], dict[str, int]]:
         if self.names is None:
@@ -1298,6 +1301,13 @@ class Tally:
         otherwise (`$B:t`, `$B[2]`, `cdpath`, a pipe's last command in the shell itself) is
         taken as not known here."""
         return self.shell not in {"", "bash", "sh", "dash"}
+
+    @property
+    def modifiers(self) -> bool:
+        """Whether a word may carry zsh's modifiers or subscripts (`$B:t`, `$B[2]`: not known
+        here): read by zsh, or in a line zsh handed to another shell (`sh -c "… $B:t"`: zsh
+        put those in, in its double quotes)."""
+        return self.zsh or self.outer_zsh
 
     def moved(self, folder: str, path: str, physical: bool = False) -> str:
         """The folder `cd path` or `git -C path` moves to from `folder`, counted: `$(pwd)` is
@@ -1567,7 +1577,7 @@ class Line:
         self.put(self.values, name)
         if not certain or self.depth or not NAME.fullmatch(name):
             return
-        values = tuple(resolved(value, self.value_of, self.tally.zsh) for value in said)
+        values = tuple(resolved(value, self.value_of, self.tally.modifiers) for value in said)
         if 0 < len(values) <= MOST_VALUES and all(
             value == MADE_UP or not UNSETTLED.search(value) for value in values
         ):
@@ -1602,7 +1612,7 @@ class Line:
         elif (name == "cd" and len(rest) == 1 and rest[0] != "-") or (
             name == "pushd" and len(rest) == 1 and not rest[0].startswith(("-", "+"))
         ):
-            target = resolved(rest[0], self.value_of, self.tally.zsh)
+            target = resolved(rest[0], self.value_of, self.tally.modifiers)
             named = self.tally.named()[0]
             if (named.get("CDPATH") or (self.tally.zsh and named.get("cdpath"))) and (
                 not target.startswith(("/", ".", "~"))
@@ -1984,7 +1994,7 @@ def read_command(words: list[str], index: int, line: Line) -> str:
             if moved == LOST:
                 folder = LOST  # An option not read here.
             elif moved is not None:
-                target = resolved(moved, line.value_of, line.tally.zsh)
+                target = resolved(moved, line.value_of, line.tally.modifiers)
                 folder = LOST if LOST in folder else line.tally.moved(folder, target, True)
             if script is not None:
                 return read_code(script, line, folder)
@@ -2086,14 +2096,16 @@ def read_code(
     (in double quotes): it is the folder only where that is the folder it started in
     (Tally.here)."""
     folder = line.folder if folder is None else folder
-    tally, before = line.tally, (line.tally.here, line.tally.shell, line.tally.modes)
+    tally = line.tally
+    before = (tally.here, tally.shell, tally.modes, tally.outer_zsh)
     tally.here = folder if before[0] in (None, folder) and folder == line.folder else LOST
-    tally.shell = tally.shell if shell is None else shell
+    if shell is not None:
+        tally.outer_zsh, tally.shell = tally.modifiers, shell
     tally.modes = (line.physical, line.physical_unsure) if modes is None else modes
     try:
         return read_line(script, folder, line.depth + 1, tally)
     finally:
-        tally.here, tally.shell, tally.modes = before
+        tally.here, tally.shell, tally.modes, tally.outer_zsh = before
 
 
 def read_git(
