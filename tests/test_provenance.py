@@ -1037,15 +1037,19 @@ async def test_a_loop_still_running_after_two_hours_stays_its(tmp_path, home):
     ]
     owners = home.add(prompt_mode(T0 + 9000, "Summarize the changelog", "/w/app"), T0 + 9000,
                       cwd="/w/app")  # fmt: skip
-    late = home.add(prompt_mode(T0 + 270 * 40 + 1900, "Ticket: one more"), T0 + 13000)
+    # Where the worker's session runs its commands (/x), past two hours: the owner's still.
+    where_it_ran = home.add(prompt_mode(T0 + 9010, "And this?", "/x"), T0 + 9010, cwd="/x")
+    # A pause of 25 minutes, then of 31.
+    paused = home.add(prompt_mode(T0 + 269 * 40 + 1500, "Ticket: after a pause"), T0 + 12300)
+    late = home.add(prompt_mode(T0 + 269 * 40 + 1500 + 1860, "Ticket: one more"), T0 + 14200)
     deciding_ = deciding(store, home)
     made = await deciding_.made(home.metas, {})
-    assert made == dict.fromkeys(calls, MADE_BY_WORKER)
-    assert owners not in made and late not in made
+    assert made == dict.fromkeys([*calls, paused], MADE_BY_WORKER)
+    assert owners not in made and where_it_ran not in made and late not in made
     # Its next calls, decided as they come (those before kept): its too.
     more = []
-    for n in range(270, 273):
-        at = T0 + n * 40
+    for n in range(1, 4):
+        at = T0 + 269 * 40 + 1500 + n * 40
         more.append(home.add(prompt_mode(at, f"Ticket {n} {uuid4()}: label it"), at))
     made = await deciding_.made(home.metas, {})
     assert {key: made.get(key) for key in more} == dict.fromkeys(more, MADE_BY_WORKER)
@@ -1203,34 +1207,48 @@ async def test_a_command_whose_end_was_not_seen_is_not_kept_open_by_the_owners(t
     """Re-review: w1 works in the owner's checkout (/w) and runs one `copilot -p`, its end not
     seen; the owner asks a question there every 25 minutes for eight hours. Past two hours none
     is the worker's: only a session that is the worker's for a reason of its own (a temporary
-    folder, its own folder, alike, named) keeps such a command running."""
+    folder, its own folder, named) keeps such a command running, as it comes and as kept."""
     store = worker_store(tmp_path, cwd="/w")
     commanded(store, T0, None, 'copilot -p "Summarize the open issues" -s')
     its = home.add(prompt_mode(T0 + 5, "Summarize the open issues", "/w"), T0 + 5, cwd="/w")
-    asked = []
 
-    def ask(n: int, cwd: str = "/w") -> str:
-        at = T0 + n * 1500
-        asked.append(home.add(prompt_mode(at, f"Question {n}: {uuid4()}", cwd), at, cwd=cwd))
-        return asked[-1]
+    def ask(at: float, cwd: str = "/w") -> str:
+        return home.add(prompt_mode(at, f"Question {uuid4()}", cwd), at, cwd=cwd)
 
-    for n in range(1, 5):  # The first two hours: decided as they come.
-        ask(n)
+    # The first two hours, and a question from /private/tmp 30 minutes after the last of them.
+    first = [ask(T0 + n * 1500) for n in range(1, 5)]
+    from_tmp = ask(T0 + 7800, "/private/tmp")
     deciding_ = deciding(store, home)
-    await deciding_.made(home.metas, {})
-    late = [ask(n) for n in range(5, 20)]
-    from_tmp = ask(5.2, "/private/tmp")  # Ten minutes past two hours: no session of its since.
     made = await deciding_.made(home.metas, {})
-    assert len(late) == 15 and not {*late, from_tmp} & set(made)
+    assert set(made) == {its, *first}, "the owner's, then, by the time (no evidence against)"
+    # Decided later, with those kept.
+    late = [ask(T0 + n * 1500) for n in range(5, 20)]
+    from_tmp_later = ask(T0 + 7500, "/private/tmp")
+    made = await deciding_.made(home.metas, {})
+    assert len(late) == 15 and not {*late, from_tmp, from_tmp_later} & set(made)
     assert made[its] == MADE_BY_WORKER
-    # Its own, alike (a loop of one template in the checkout), keep it running.
-    loop = []
-    for n in range(300):
-        at = T0 + 30000 + n * 40
-        loop.append(home.add(prompt_mode(at, f"{LABEL} {n}", "/w"), at, cwd="/w"))
-    commanded(store, T0 + 29990, None, 'for t in t/*; do copilot -p "$(cat $t)"; done')
-    made = await deciding(store, home).made(home.metas, {})
-    assert set(loop) <= set(made)
+
+
+def test_a_command_whose_end_was_not_seen_runs_on_in_its_workers_own_folder():
+    """Its worker's sessions in the folder Chief of Staff made for it, or named a batch's, keep
+    it running; one where it ran (a checkout of the owner's) does not, nor does it go on after
+    a pause."""
+    folder = "/srv/workspaces/w1"  # Not a temporary folder: that would be a reason too.
+    command = Window("w1", T0, T0 + 7200, True, folder, ("/w",), T0 + 9e4)
+    named = OneShot("s5", T0 + 8050, "n", "/w", named=True)
+    shots = [
+        shot(1, T0 + 7000, cwd=f"{folder}/out"),
+        shot(2, T0 + 8000, cwd=f"{folder}/out"),
+        shot(3, T0 + 8100, cwd="/w"),
+        shot(4, T0 + 8050 + 1801, cwd=f"{folder}/out"),
+        named,
+    ]
+    found = decide(shots, [], [command])
+    assert {key: (r["as"], r["why"], r["keeps_open"]) for key, r in found.items()} == {
+        "s1": (MADE_BY_WORKER, "folder", True),
+        "s2": (MADE_BY_WORKER, "folder", True),
+        "s5": (MADE_BY_WORKER, "command", True),
+    }
 
 
 async def test_what_0143_decided_on_a_coincidence_is_decided_again(tmp_path, home):

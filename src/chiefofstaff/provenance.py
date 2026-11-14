@@ -103,7 +103,7 @@ LEAD = 10 * 60.0
 # A command runs from its start to its end, when Chief of Staff saw it end; one whose end it did
 # not see (still running, left running in the background, or Chief of Staff stopped meanwhile)
 # for COMMAND_MOST after it began, and past that only for sessions that are its worker's for a
-# reason of their own (in a temporary folder or the worker's own, alike, named), while they keep
+# reason of their own (in a temporary folder or the worker's own, named a batch's), while they keep
 # coming, each within WORKER_GAP of one before. Never past the end of the run of Chief of Staff
 # it began in: Chief of Staff keeps its runs (kv "uptime": [start, last known running] each),
 # the latter touched every ALIVE_EVERY seconds: a command may have begun up to ALIVE_SLACK after
@@ -535,7 +535,8 @@ def decide(
 ) -> dict[str, dict]:
     """Who made each fresh one-shot session (see the module's docstring): its record, as kept
     (`as`: worker or batch; `by`: the worker's session; `why`: folder, command, batch or named;
-    `named`: named as a batch's; `keeps_open`: the worker's for a reason of its own, see below;
+    `named`: named as a batch's; `keeps_open`: the worker's for a reason of its own (in a
+    temporary folder or its own, or named a batch's: see Window.covers);
     `rules`: RULES), or `as` alike (the owner's still: never kept). Those not in it are the
     owner's. `known`: those decided before, which batches may continue; `tied`: when each
     session that keeps its worker's commands open began, by worker (see Window.covers);
@@ -552,8 +553,8 @@ def decide(
         batch = bool(run) and (shot.named or len(run) >= HIDE_SIZE)
         kind = "named" if shot.named else "batch"
         # A worker's for a reason of its own, not only the time (with its own folder, below):
-        # in a temporary folder, alike with others, named a batch's.
-        reason = scratch or bool(run)
+        # in a temporary folder, or named a batch's.
+        reason = scratch or shot.named
         ties = []
         for w in windows:
             own = inside(cwd, w.folder)
