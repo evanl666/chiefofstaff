@@ -7,6 +7,7 @@ worker with a shell can still reach anything its user account can unless OS sand
 """
 
 import bisect
+import collections
 import contextvars
 import functools
 import itertools
@@ -2307,6 +2308,248 @@ def piped_download(command: str, cwd: str = "") -> bool:
     return once_a_stretch(DOWNLOAD_PIPED, command, DOWNLOAD, PIPE_ENDS)
 
 
+# A script fed to a shell: what it runs is text the line makes or holds, not read here (Ask
+# first). A line that feeds one, and says push (or may go to another branch: symbolic-ref,
+# update-ref, a branch renamed to main or master), is refused, saying so.
+FED_SCRIPT = "a script fed to a shell can't be checked; run its git commands directly"
+FED_SAYS = ("push", "symbolic-ref", "update-ref")
+FED_SHELLS = SHELLS | {"ash", "csh", "tcsh", "mksh", "yash", "posh", "rbash", "su"}
+# Commands that run the command after them, with the letters of their options that take a
+# value (`timeout` takes its duration too; `xargs`: the command may be given its script).
+FED_WRAPPERS = {"env": "CPSuLUa", "command": "", "exec": "a", "nice": "n", "nohup": "",
+                "time": "", "timeout": "sk", "stdbuf": "ioe", "busybox": "",
+                "sudo": "ugCDhprtTU", "doas": "uC", "xargs": "IJLnPsEdaRS"}  # fmt: skip
+FED_LONG_VALUED = frozenset({"--chdir", "--split-string", "--unset", "--argv0", "--signal",
+                             "--kill-after", "--adjustment", "--user", "--group", "--input",
+                             "--output", "--error", "--rcfile", "--init-file", "--emulate",
+                             "--max-args", "--max-lines", "--max-procs", "--delimiter",
+                             "--arg-file", "--eof", "--max-chars"})  # fmt: skip
+# A file a command may read what the line feeds it from (`/dev/stdin`, `/dev/fd/0`, `/proc/…`).
+FED_DEVICE = re.compile(r"/dev/(?!null$)|/proc/")
+FED_PROCESS = "\x01<("  # A process substitution's file (`<(…)`, zsh's `=(…)`), as a word.
+FED_WORD = re.compile(r"[^\s;&|()]+|[;&|()]+")
+FED_SEGMENTS = re.compile(r"[;&|\n()`]+")
+
+
+def fed_says(command: str) -> bool:
+    """Whether a line says push, symbolic-ref or update-ref (however quoted), or renames a
+    branch to main or master (`branch -M main`; the words after `branch`, a few)."""
+    text = squashed(command)
+    if any(word in text for word in FED_SAYS):
+        return True
+    words = FED_WORD.findall(text) if "branch" in text else []
+    for at, word in enumerate(words):
+        if word == "branch":
+            after = list(itertools.takewhile(lambda w: w[0] not in ";&|()", words[at + 1 : at + 8]))
+            moves = any(
+                w == "--move" or (w[:1] == "-" and w[1:2] != "-" and "m" in w) for w in after
+            )
+            if moves and any(w in {"main", "master"} for w in after):
+                return True
+    return False
+
+
+def unwrapped(words: list[str]) -> tuple[list[str], bool]:
+    """A simple command's words from the command it runs: past reserved words, assignments,
+    and the commands that run the one after them (`env`, `nice`, `timeout 60`, `command`,
+    `xargs`…) with their options; and whether xargs runs it (with words of its input). Past
+    MOST_NESTED of env's `-S` (each puts words of its own first): taken for a shell."""
+    rest, xargs, splits = collections.deque(words), False, 0
+    while rest and (rest[0] in KEYWORDS or isinstance(rest[0], Assignment)):
+        rest.popleft()
+    while rest and (name := rest[0].rsplit("/", 1)[-1]) in FED_WRAPPERS:
+        valued = FED_WRAPPERS[name]
+        rest.popleft()
+        while rest and rest[0][:1] == "-" and rest[0] != "-":
+            option, split = rest.popleft(), None
+            if option == "--":
+                break
+            if option.startswith("--"):
+                if option in FED_LONG_VALUED and rest:
+                    value = rest.popleft()
+                    split = value if option == "--split-string" else None
+                elif option.startswith("--split-string="):
+                    split = option.partition("=")[2]
+            else:
+                for index, letter in enumerate(option[1:], 1):
+                    if letter in valued:
+                        value = option[index + 1 :] or (rest.popleft() if rest else "")
+                        split = value if name == "env" and letter == "S" else None
+                        break
+            if split is not None:
+                splits += 1
+                if splits > MOST_NESTED:
+                    return ["sh"], xargs
+                rest.extendleft(reversed(split.split()))
+        while rest and (isinstance(rest[0], Assignment) or ASSIGNMENT.match(rest[0])):
+            rest.popleft()  # (`env A=b cmd`, `sudo A=b cmd`.)
+        if name == "timeout" and rest:
+            rest.popleft()  # Its duration.
+        xargs = xargs or name == "xargs"
+    return list(rest), xargs
+
+
+def code_of(words: list[str], fed: bool, xargs: bool) -> tuple[str, str | None]:
+    """Where a simple command (unwrapped) takes the code it runs: "fed" (a file the line
+    feeds: `bash <(…)`, `source /dev/stdin`), "stdin" (a shell given no script: its input;
+    any run by xargs, which may give it its script), or "" (none, or a file); and the code
+    eval or trap runs (a shell's `-c` script: inner_scripts). A command whose name the line
+    makes up (`$SHELL`) is taken for a shell where its own input is fed (`fed`: a pipe, a
+    heredoc)."""
+    if not words:
+        return "", None
+    name = words[0].rsplit("/", 1)[-1]
+    name = name[1:] if name.startswith("=") and len(name) > 1 else name  # (zsh's `=bash`.)
+    if name in {".", "source"}:
+        operand = next((word for word in words[1:] if word != "--"), "")
+        return ("fed" if operand == FED_PROCESS or FED_DEVICE.match(operand) else ""), None
+    if name == "eval":
+        return "", " ".join(words[1:])
+    if name == "trap":  # (`trap 'code' EXIT`: run by the shell, later.)
+        given = words[2:] if words[1:2] == ["--"] else words[1:]
+        return "", (given[0] if given and given[0][:1] != "-" else None)
+    if name not in FED_SHELLS and not (fed and UNSETTLED.search(words[0])):
+        return "", None
+    stdin, at = xargs, 1
+    while at < len(words):
+        word, at = words[at], at + 1
+        if word in {"--", "-"}:
+            break
+        if word.startswith("--"):
+            if word.startswith("--command"):
+                return ("stdin" if xargs else ""), None
+            at += word in FED_LONG_VALUED
+            continue
+        if word[:1] in {"-", "+"} and len(word) > 1:
+            letters = word[1:]
+            if word[0] == "-" and "c" in letters:
+                script = next((later for later in words[at:] if later[:1] not in {"-", "+"}), None)
+                return ("stdin" if xargs or (name == "su" and script is None) else ""), None
+            stdin = stdin or (word[0] == "-" and "s" in letters)
+            at += sum(letter in "oO" for letter in letters)  # (`-o pipefail`: its value.)
+            continue
+        at -= 1
+        break
+    operand = words[at] if at < len(words) else None
+    if operand is None or stdin or name == "su":  # (su's words: a user's name, not a file.)
+        return "stdin", None
+    if operand == FED_PROCESS or FED_DEVICE.match(operand):
+        return "fed", None
+    return "", None
+
+
+def inner_scripts(words: list[str]) -> list[str]:
+    """The scripts a simple command's words give a shell, wherever its name stands in them
+    (`sh -c '…'`, `find … -exec bash -c '…'`, zsh's `emulate sh -c '…'`, `su -c '…'`), and
+    what `env -S` is given: in one pass."""
+    scripts: list[str] = []
+    shell = env = script_next = skip = False
+    for word in words:
+        if skip:
+            skip = False
+        elif script_next:
+            if word[:1] not in {"-", "+"} or env:
+                scripts.append(word)
+                script_next = env = shell = False
+        elif env and word.startswith("--split-string"):
+            value = word.partition("=")[2]
+            scripts += [value] if value else []
+            script_next = not value
+        elif env and word[:1] == "-" and word[1:2] != "-" and "S" in word:
+            value = word[word.index("S") + 1 :]
+            scripts += [value] if value else []
+            script_next = not value
+        elif env and (word[:1] == "-" or ASSIGNMENT.match(word)):
+            pass  # (env's own options and assignments.)
+        elif shell and word[:1] in {"-", "+"} and not word.startswith(("--", "++")):
+            script_next = word[0] == "-" and "c" in word[1:]
+            skip = not script_next and ("o" in word[1:] or "O" in word[1:])  # (`-o pipefail`.)
+        elif shell and word.startswith("--"):
+            pass
+        else:
+            name = word.rsplit("/", 1)[-1].lstrip("=")
+            shell, env = name in FED_SHELLS or name == "emulate", name == "env"
+    return scripts
+
+
+def feeds_shell(command: str, depth: int = 0, given: bool = False) -> bool:
+    """Whether a line feeds a shell code it makes or holds: on its input (a pipe, a heredoc,
+    a here-string, a process substitution; `given`: the input of the line that runs this
+    one), or as a file (`bash <(…)`, `source /dev/stdin`); in the lines it runs too (`sh -c`,
+    `eval`, substitutions). Where it does not parse: a shell or `source` named at all."""
+    if depth > MOST_NESTED:
+        return True
+    unheredoc, bodies = heredocs(command)
+    plain, inside = without_substitutions(without_comments(unheredoc).replace("\\\n", ""))
+    for body, quoted in bodies:
+        if not quoted:
+            inside += without_substitutions(body, quoted=True)[1]
+    try:
+        tokens = shell_words(plain)
+    except ValueError:
+        return any(
+            (words := segment.split())
+            and (
+                words[0] in {".", "source"}
+                or any(w.rsplit("/", 1)[-1] in FED_SHELLS for w in words)
+            )
+            for segment in FED_SEGMENTS.split(plain)
+        )
+    except TooComplexError:
+        return True
+    given = given or any(
+        (isinstance(token, Separator) and "|" in token.replace("||", ""))
+        or (
+            isinstance(token, Redirecting)
+            and ("<<" in token[token.at :] or "<&" in token[token.at :])
+        )
+        for token in tokens
+    )
+    # Each simple command: its words, and whether its own input is fed (a pipe, a heredoc).
+    commands: list[tuple[list[str], bool]] = []
+    current: list[str] = []
+    piped = False
+    for token in [*tokens, Separator(";")]:
+        if not isinstance(token, Separator):
+            current.append(token)
+            continue
+        last = current[-1] if current else ""
+        operator = last[last.at :] if isinstance(last, Redirecting) else ""
+        inline = piped or any(
+            isinstance(word, Redirecting) and "<<" in word[word.at :] for word in current
+        )
+        if token.startswith("(") and (operator == "<" or last == "="):  # `<(…)`, zsh's `=(…)`
+            before = current[-2] if len(current) > 1 and last in {"<", "="} else ""
+            if isinstance(before, Redirecting) and not before.strip("<>&0123456789"):
+                given = given or "<" in before  # `< <(…)`: its input, what the line makes.
+                commands.append((redirection_free(current[:-2]), True))
+            else:
+                prefix = last[: last.at] if isinstance(last, Redirecting) else ""
+                words = [*redirection_free(current[:-1]), *([prefix] if prefix else [])]
+                commands.append(([*words, FED_PROCESS], inline))
+        elif current:
+            commands.append((redirection_free(current), inline))
+        current = []
+        piped = "|" in token.replace("||", "")
+    readers = False
+    for words, inline in commands:
+        rest, xargs = unwrapped(words)
+        kind, script = code_of(rest, inline, xargs)
+        if kind == "fed":
+            return True
+        readers = readers or kind == "stdin"
+        for text in [*([] if script is None else [script]), *inner_scripts(words)]:
+            if feeds_shell(text, depth + 1, given):
+                return True
+    return (readers and given) or any(feeds_shell(body, depth + 1, given) for body in inside)
+
+
+def fed_script(command: str, cwd: str = "") -> bool:
+    """A line that feeds a shell a script (feeds_shell) and says push or may go to another
+    branch (fed_says): what the script does is not known here."""
+    return fed_says(command) and feeds_shell(command)
+
+
 def current_branches(folder: str) -> set[str]:
     """The branch a folder's checkout is on and the remote branch a bare push there updates
     (`@{push}`), asked of git; none when it cannot say."""
@@ -2400,6 +2643,7 @@ DANGEROUS: list[tuple[Callable[[str, str], bool], str]] = [
     (pushes_forced, "force push"),
     (pushes_default, "push to the default branch"),
     (pushes_unknown, UNREADABLE_PUSH),
+    (fed_script, FED_SCRIPT),
     (
         matches(r"\bgh\s+pr\s+(merge|close|review|comment)\b"),
         "merging, closing or commenting on PRs as the owner",

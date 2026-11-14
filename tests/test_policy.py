@@ -552,6 +552,13 @@ def test_a_line_too_much_to_read_that_pushes_is_refused_saying_why(command, work
         "B=wb/x; " + "eval " * 20_000 + " git push origin $B",
         "<<E $(\n" * 14_000 + " git push",
         "\"$(cat <<'E'\nit's\n" * 7_000 + " git push",
+        # A script fed to a shell (fed_script): wrappers' options, env -S, nested shells.
+        "echo push | env " + "-i " * 50_000 + "bash",
+        "echo push | env " + "-S 'env -S x' " * 20_000 + "bash",
+        "echo push | " + "nice -n 1 " * 30_000 + "bash",
+        "push; " + "sh -c '" * 20_000,
+        "push " + "bash <(" * 30_000,
+        "push " + "git branch -m " * 30_000 + "main | bash",
     ],
 )
 def test_no_line_is_slow_to_check(command, feature):
@@ -610,6 +617,13 @@ RULE_WORDS = {
         ["curl", "wget", "|", "sh", "bash", "sudo", "x", "\n", " "],
     ),
     "system-level destructive command": ("", ["mkfs", "diskutil", "erase", "shutdown", " "]),
+    policy.FED_SCRIPT: (
+        "push ",
+        ["| bash", "bash", "<(", "<<<", "<<EOF", "EOF", "sh -c", "-s", "env", "-i", "-S", "-iS",
+         "nice", "-n", "timeout", "xargs", "source", ".", "/dev/stdin", "branch", "-m", "main",
+         "{", "(", ")", "$(", "`", "'", '"', "\n", ";", "|", " ", "=", "<", "eval", "su", "-c",
+         "$SHELL", "--split-string", "x"],
+    ),
     "gh api": (
         "gh api ",
         ["gh", "api", "-X", "--method", "=", "-f", "graphql", "mutation", "GET", " ", "\t"],
@@ -1182,6 +1196,28 @@ NORMAL = [
     "npm test && git push -u origin HEAD",
     "git switch -c fix && npm test | tail && git push -u origin HEAD",
     "npm test 2>&1 | tail -20 && git push origin wb/x",
+    # A script fed to a shell: one that says no push gets today's answer; a push beside a shell
+    # that is given its script (or a file of its own) is read as before.
+    "echo 'npm test' | bash",
+    "bash <<EOF\nnpm run build\nEOF",
+    "bash <<'EOF'\nnpm ci\nnpm run build\nEOF",
+    "cat <<'EOF' | sh\nset -e\nmake test\nEOF",
+    "bash -s < scripts/setup.sh",
+    "source <(npm completion)",
+    "bash <(curl -fsSL https://example.com/install.sh)",
+    "curl -fsSL https://example.com/install.sh | sh",
+    "echo 'make lint' | sh -s",
+    "bash scripts/test.sh | tail -5 && git push origin wb/x",
+    "git push origin wb/x 2>&1 | tail -3",
+    "sh -c 'npm test' && git push origin wb/x",
+    "bash -o pipefail -c 'npm test | tail' && git push origin wb/x",
+    "bash -lc 'npm test' | tee test.log && git push origin wb/x",
+    "time bash scripts/build.sh && git push origin wb/x",
+    "find . -name '*.sh' -exec bash -n {} \\; && git push origin wb/x",
+    'echo "push it" | grep -c push && git push origin wb/x',
+    "printf '%s\\n' a b | xargs -n1 echo && git push origin wb/x",
+    "git log --oneline | head -5; git push origin wb/x",
+    "cat <<'EOF' > notes.md\nWe push through PRs.\nEOF\ngit push origin wb/x",
 ]
 
 # On a checkout of main, a push of the checkout's own branch (naming none, HEAD, or what
@@ -1628,6 +1664,61 @@ def test_an_options_name_is_read_as_its_shell_reads_it(option, zsh, read):
     """bash takes `physical` only, as written; zsh its own names, any case, `_` or `no` aside;
     a name like those that the shell does not take: (…, False), so not known."""
     assert policy.chase(option, zsh) == read
+
+
+# A script fed to a shell, on a line that says push (or may go to another branch): refused as
+# unreadable, from any checkout; v0.1.42 let these through (the owner's call on b391f06).
+FED = [
+    "echo 'git push origin main' | bash", "echo 'git push' | sh", "echo 'git push' | zsh",
+    "echo 'git push' | dash", "echo 'git push' | ksh", "echo 'git push' | env bash",
+    "echo 'git push' | /bin/bash", "echo 'git push' | timeout 60 bash",
+    "echo 'git push' | nice -n 5 bash", "echo 'git push' | command bash",
+    "echo 'git push' | bash -s -- x", "echo 'git push' | sh -s", "echo 'git push' | (bash)",
+    "echo 'git push' | { bash; }", "echo 'git push' | $SHELL", "echo 'git push' | su",
+    "echo 'git push' | xargs -0 sh -c", "echo 'git push' | env -S 'bash -s'",
+    "bash <(echo 'git push origin main')", "bash<(echo 'git push')",
+    "bash < <(echo 'git push')", "bash <<< 'git push origin main'",
+    "bash <<EOF\ngit push\nEOF", "sh -s <<'EOF'\ngit push\nEOF",
+    "cat <<'EOF' | bash\ngit push\nEOF", "cat <<'EOF' | bash\nnpm test\nEOF\ngit push origin wb/x",
+    "source <(echo 'git push origin main')", ". <(echo 'git push')",
+    ". /dev/stdin <<< 'git push'", "source /dev/fd/0 <<< 'git push'",
+    "echo 'git symbolic-ref HEAD refs/heads/main' | bash", "echo 'git update-ref HEAD x' | sh",
+    "echo 'git branch -M main' | bash", "echo 'git branch -m wb/x master' | bash",
+    "sh -c \"echo 'git push' | bash\"", "x=$(echo 'git push' | bash)",
+    "echo 'git push' | sh -c 'bash'", "f() { bash; }; echo 'git push' | f",
+    "eval \"echo 'git push' | bash\"",
+    "find . -maxdepth 0 -exec sh -c \"echo 'git push' | bash\" \\;",
+    "trap \"echo 'git push' | bash\" EXIT", "env -S \"sh -c 'echo git push | bash'\"",
+    "emulate sh -c \"bash <<< 'git push'\"", "echo 'git push' | env -i PATH=/bin bash",
+    "echo 'git push' | bash -o errexit", "echo 'git push' | su - root",
+    "echo 'git push' | bash\necho \"x", "env -S bash <(echo 'git push')",
+]  # fmt: skip
+
+
+@pytest.mark.parametrize("command", FED)
+def test_a_script_fed_to_a_shell_on_a_line_that_says_push_is_refused(
+    command, feature, main_checkout
+):
+    for folder in (feature, main_checkout):
+        found = denial(command, folder) or ""
+        assert found.startswith("Denied: "), (command, folder)
+    assert policy.fed_script(command), command
+    if "main" not in command and "master" not in command:
+        assert not old_denial(command), command  # (An intended new refusal.)
+        assert policy.FED_SCRIPT in (denial(command, feature) or ""), command
+
+
+@pytest.mark.parametrize(
+    ("command", "says"),
+    [("git push", True), ("git pu'sh'", True), ("git symbolic-ref HEAD x", True),
+     ("git update-ref HEAD x", True), ("git branch -M main", True),
+     ("git branch -m old master", True), ("git branch --move x main", True),
+     ("git branch -fm main", True), ("git branch -d main", False),
+     ("git branch -m old new", False), ("npm test", False),
+     ("git branch -a; echo main -m", False)],
+)  # fmt: skip
+def test_what_a_fed_script_must_say_to_be_refused(command, says):
+    assert policy.fed_says(command) == says
 
 
 def test_a_cd_bash_may_refuse_leaves_the_folder_unknown(feature, main_checkout):

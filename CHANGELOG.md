@@ -23,7 +23,11 @@
   HEAD` counts; a push to a folder `find -exec` names (`{}`), or with words `xargs` adds (so
   `git remote | xargs -n1 git push`), is refused as unknown, and so is a line that defines an
   alias and says push; a Codex worker's command, and any `zsh -c` line, is read as zsh reads
-  it (`$B:t`, `=git`). A command line too complex to check is refused, saying so. Whatever
+  it (`$B:t`, `=git`). A script fed to a shell (`echo … | bash`, `bash <<EOF`, `bash <<< …`,
+  `bash <(…)`, `source <(…)`, `. /dev/stdin`, `sh -s`) on a line that says push (or
+  `symbolic-ref`, `update-ref`, a branch renamed to `main`/`master`) is refused: what it runs
+  can't be checked, so run its git commands directly; one that doesn't say push gets the same
+  answer as before. A command line too complex to check is refused, saying so. Whatever
   the rule refused before, it still refuses, and everyday commands get the same answer as
   before. A branch whose name only contains "main" (`fix-main`, `mainline`) is pushed as before.
 - **A long command line no longer stalls Chief of Staff while it is checked** (with Ask first):

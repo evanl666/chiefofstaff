@@ -38,7 +38,7 @@ ZSH = shutil.which("zsh")  # Codex runs commands in zsh (`zsh -lc`): the lines r
 # Commands that run another, put in the sandbox's PATH (by their full path; timeout as a script
 # that runs its command: GNU timeout puts it in a process group of its own, which a run would
 # not wait for, and a push it made late would be read as the next line's).
-WRAPPERS = ("env", "nice", "xargs", "find", "timeout")
+WRAPPERS = ("env", "nice", "xargs", "find", "timeout", "cat")  # (cat: what it feeds a shell.)
 TIMEOUT = r"""#!/bin/sh
 while [ $# -gt 0 ]; do
   case "$1" in -s|-k|--signal|--kill-after) shift 2 ;; -*) shift ;; *) break ;; esac
@@ -495,7 +495,7 @@ class Generator:
         inner = self.statements(depth + 1)
         kind = self.pick(["if", "else", "for", "case", "subshell", "group", "substitution",
                           "quoted", "eval", "eval1", "while", "case", "subshell", "process",
-                          "source", "shell"])  # fmt: skip
+                          "source", "shell", "fed"])  # fmt: skip
         if kind == "if":
             return f"if {self.pick(['true', 'false'])}; then {inner}; fi"
         if kind == "else":
@@ -528,9 +528,22 @@ class Generator:
             return f"eval {shell_quote(inner)}"
         if kind == "eval1":
             return f'eval "{inner}"'
+        if kind == "fed":  # A script fed to a shell: on its input, or as a file.
+            shell = self.pick(["bash", "sh", "zsh -f", "bash -s", "env bash", "xargs -0 sh -c"])
+            quoted = shell_quote(inner)
+            return self.pick([
+                f"echo {quoted} | {shell}", f"printf '%s\\n' {quoted} | {shell}",
+                f"{shell} <<< {quoted}", f"{shell} <<'END'\n{inner}\nEND",
+                f"cat <<'END' | {shell}\n{inner}\nEND", f"{shell} <(echo {quoted})",
+                f"{shell} < <(echo {quoted})", f"source <(echo {quoted})",
+                f". /dev/stdin <<< {quoted}",
+            ])  # fmt: skip
         if kind == "shell":  # Another shell's line (zsh's from bash too); with options of cd's.
             shell = self.pick(["sh -c", "bash -c", "bash -P -c", "bash -o physical -c",
-                               "zsh -f -c", "zsh -f -w -c", "emulate sh -c"])  # fmt: skip
+                               "zsh -f -c", "zsh -f -w -c", "emulate sh -c",
+                               "find"])  # fmt: skip
+            if shell == "find":
+                return f"find . -maxdepth 0 -exec sh -c {shell_quote(inner)} \\;"
             return f"{shell} {shell_quote(inner)}"
         return f"while false; do {inner}; done"
 
@@ -697,6 +710,23 @@ FOUND = [
     ('find ../main -maxdepth 0 -exec git -C {} push \\;', 'feat'),
     ('find ../main/sub -maxdepth 0 -exec git -C {}/.. push \\;', 'feat'),
     ('find ../main/sub -maxdepth 0 -exec git -C ../feat/{}/.. push \\;', 'feat'),
+    # The owner's call on b391f06: a script fed to a shell, on a line that says push.
+    ("echo 'git push origin main' | bash", 'feat'),
+    ("echo 'git push' | sh", 'main'),
+    ("bash <(echo 'git push origin main')", 'feat'),
+    ("bash <<< 'git push origin main'", 'feat'),
+    ("bash <<'END'\ngit push origin main\nEND", 'feat'),
+    ("cat <<'END' | bash\ngit push\nEND", 'main'),
+    ("source <(echo 'git push origin main')", 'feat'),
+    (". /dev/stdin <<< 'git push origin main'", 'feat'),
+    ("echo 'git push origin main' | xargs -0 sh -c", 'feat'),
+    ("echo 'git push origin main' | env bash -s", 'feat'),
+    ("echo 'git symbolic-ref HEAD refs/heads/main' | bash; git push", 'feat'),
+    ("echo 'git push origin main' | zsh -f", 'feat'),
+    ("env -S bash <(echo 'git push origin main')", 'feat'),
+    ('find . -maxdepth 0 -exec sh -c "echo \'git push origin main\' | bash" \\;', 'feat'),
+    ('trap "echo \'git push origin main\' | bash" EXIT', 'feat'),
+    ('env -S "sh -c \'echo git push origin main | bash\'"', 'feat'),
     # Their variants: `shopt -o`, the line's mode in substitutions, eval and shells' options,
     # an alias that says no push itself, zsh's lines from bash.
     ('shopt -so physical; cd n && cd .. && git push', 'feat'),
@@ -741,6 +771,10 @@ FOUND_ZSH = [
     ('setopt chase_dots; x=$(cd n && cd .. && git push)', 'feat'),
     ("setopt chase_dots; eval 'cd n && cd .. && git push'", 'feat'),
     ("echo | eval 'cd ../main'; git push", 'feat'),
+    ("source =(echo 'git push origin main')", 'feat'),
+    ("=bash <<< 'git push origin main'", 'feat'),
+    ('git status\neval "env -i PATH="$PATH" git push -n" & emulate sh -c \'( : && bash < <(echo \'\\\'\'git -C ../main push origin HEAD; env -i PATH="$PATH" git push $B\'\\\'\') ) && false\' | for i in 1 2; do unset HOME || builtin popd; done', 'main'),  # noqa: E501
+    ("emulate sh -c \"bash <<< 'git push origin main'\"", 'feat'),
     ('command pushd ../feat/sub || nice -n 5 git push -o x origin', 'main'),
     ('time -p cd -- ../feat; git push origin HEAD || while false; do env git push -o x origin; done\nwhile false; do command cd -P l/../..; done', 'main'),  # noqa: E501
 ]  # fmt: skip
