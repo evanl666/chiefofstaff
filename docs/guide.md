@@ -206,20 +206,25 @@ ones you started in a terminal. Those open in a terminal right now come first, m
 Opening one shows its latest conversation, and keeps it current while it works. Sessions a
 program made through Copilot's SDK (a script's, one per item of a batch, say) are not yours to
 continue and are not listed, unless you continued one in a terminal. Nor are one-shot
-`copilot -p` sessions (one prompt, then done) that a script made in a batch (three or more that
-start with the same words, each within half an hour of the one before, or any named
+`copilot -p` sessions (one prompt, then done) that a script made in a batch (ten or more that
+start with the same words, each within two minutes of the one before, or any named
 `batch: …` with `copilot -p --name`, even while it runs) or that a worker made while it ran a
-command (in its own folder, with a command that runs `copilot`, or a batch it started). A
-single `copilot -p` you run yourself is listed, as is every session you typed more than one
-message in or have open (unless it is named `batch: …`).
+command, for two hours at most: in its own folder, or where the command ran or in a temporary
+folder (`/tmp`, `$TMPDIR`) when the command runs `copilot -p` or the sessions are a batch it
+started (five or more alike). Nothing in a session's files tells `copilot -p` from a question
+you asked in a terminal and left, so a few alike (from five to nine) stay listed as yours:
+`chiefofstaff tidy-sessions` names them. A single `copilot -p` you run yourself is listed, as is
+every session you typed more than one message in, resumed, or have open (unless it is named
+`batch: …`).
 The Router does not see the others either. Workers name each call of a batch
 `batch: <their task>` and give it a Copilot home of their own (`COPILOT_HOME` in their folder),
 so its sessions do not reach yours at all.
 
 **Moving them out of the way.** Sessions left from before still take room in
 `~/.copilot/session-state` and in `copilot --resume`. `chiefofstaff tidy-sessions` shows those it
-would move: how many, how large, a few of each, who made them, and what was learned from them;
-it changes nothing. `chiefofstaff tidy-sessions --apply`, run in your own terminal, moves them to
+would move: how many, how large, a few of each, who made them, and what was learned from them,
+then the few alike it leaves listed and does not move; it reads every log first (a line on how
+many are left as it goes, and how many it could not read, if any) and changes nothing. `chiefofstaff tidy-sessions --apply`, run in your own terminal, moves them to
 `~/.copilot/session-state-moved-by-chiefofstaff/<date>/` with a `manifest.json` saying what each
 was: move a folder back into `session-state` to have that session again. Nothing is deleted, and
 sessions open now or changed in the last hour stay where they are. What was read from them as
