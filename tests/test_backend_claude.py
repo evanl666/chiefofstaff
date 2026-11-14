@@ -908,6 +908,31 @@ async def test_a_sandboxed_workers_commands_stay_in_its_folders_and_reach_only_i
     assert settings["network"] == {"allowLocalBinding": False, "allowedDomains": ["github.com"]}
 
 
+async def test_an_mcp_servers_form_is_the_owners_card_and_its_answer_goes_back(agent, tmp_path):
+    asked = []
+
+    async def form(context):
+        asked.append(context)
+        return {"action": "accept", "content": {"color": "red"}}
+
+    session = await agent.create_session(
+        session_id="d2" * 16, name="t", **options(tmp_path, on_elicitation_request=form)
+    )
+    turn = Turn(session)
+    await session.send("Fill the form of asker, then reply with just: ok")
+    await turn.ended()
+    (done,) = turn.of("tool.execution_complete")
+    assert json.loads(done.result.content.removeprefix("Form: ")) == {
+        "action": "accept",
+        "content": {"color": "red"},
+    }
+    (context,) = asked
+    assert context["elicitationSource"] == "asker" and context["mode"] == "form"
+    assert context["requestedSchema"]["required"] == ["color"]
+    assert context["session_id"] == session.session_id
+    assert await session.backend.elicitation({"mode": "elsewhere"}) == {"action": "cancel"}
+
+
 async def test_a_plan_limit_reached_keeps_workers_from_running_until_it_resets(
     agent, tmp_path, monkeypatch
 ):

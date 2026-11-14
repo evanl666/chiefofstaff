@@ -717,6 +717,8 @@ class Fake:
             call("Write", {"file_path": str(Path(self.cwd) / found.group(1)), "content": "x\n"})
         if found := re.search(r"Use Claude's (\w+) tool", text):
             call(found.group(1), {})
+        if found := re.search(r"Fill the form of (\w+)", text):
+            call(f"mcp__{found.group(1)}__form", {})
         if found := re.search(r"Call the MCP tool (\w+) of (\w+)", text):
             call(f"mcp__{found.group(2)}__{found.group(1)}", {})
         if re.search(r"Ask the owner which color", text):
@@ -821,6 +823,16 @@ class Fake:
             )
             text = "\n".join(str(part.get("text") or "") for part in found.get("content") or [])
             return self.tool_result(call, text, bool(found.get("isError")), found)
+        if name.startswith("mcp__") and name.endswith("__form"):
+            # The server asks for a form (elicitation): Claude asks the SDK's host (2.1.322).
+            reply = await self.ask(
+                {"subtype": "elicitation", "mcp_server_name": name[5:].partition("__")[0],
+                 "message": "Which color?", "mode": "form", "property_order": ["color"],
+                 "requested_schema": {"type": "object", "properties": {"color": {"type": "string"}},
+                                      "required": ["color"]}}
+            )  # fmt: skip
+            answered = reply.get("response") or {"action": "cancel"}
+            return self.tool_result(call, f"Form: {json.dumps(answered)}", False, answered)
         if name.startswith("mcp__"):
             server, _, tool = name[5:].partition("__")
             text = await self.stdio_call(server, tool, data)
