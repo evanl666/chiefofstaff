@@ -17,10 +17,13 @@
   expansion, an alias, part of a substitution's output, or one naming no branch in another
   repository (`GIT_DIR`, `--git-dir`) or in a folder git can't say the branch of. A whole
   substitution (`$(git branch --show-current)`) counts as the checkout's branch. The folder a
-  push runs in is followed through `cd` (as the shell reads a link's `..`), `pushd`/`popd`,
-  `cd -`, subshells, `env -C` and `git -C`; a branch switched to with `git symbolic-ref HEAD`
-  counts; words `xargs` adds make a push's branch unknown; a Codex worker's command is read as
-  zsh reads it (`$B:t`). A command line too complex to check is refused, saying so. Whatever
+  push runs in is followed through `cd` (as the shell reads a link's `..`, also after `set -P`,
+  `shopt -so physical` or zsh's `chase_links`), `pushd`/`popd`, `cd -`, subshells, `env -C`
+  (also in clusters: `env -iC DIR`) and `git -C`; a branch switched to with `git symbolic-ref
+  HEAD` counts; a push to a folder `find -exec` names (`{}`), or with words `xargs` adds (so
+  `git remote | xargs -n1 git push`), is refused as unknown, and so is a line that defines an
+  alias and says push; a Codex worker's command, and any `zsh -c` line, is read as zsh reads
+  it (`$B:t`, `=git`). A command line too complex to check is refused, saying so. Whatever
   the rule refused before, it still refuses, and everyday commands get the same answer as
   before. A branch whose name only contains "main" (`fix-main`, `mainline`) is pushed as before.
 - **A long command line no longer stalls Chief of Staff while it is checked** (with Ask first):

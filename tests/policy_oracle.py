@@ -175,10 +175,10 @@ class Sandbox:
         shim = bin_folder / "git"
         shim.write_text(SHIM_TEXT)
         shim.chmod(0o755)
-        for shell in ("sh", "bash"):
+        for shell, found in (("sh", SH), ("bash", BASH), ("zsh", ZSH)):
             link = bin_folder / shell
-            if not link.exists():
-                link.symlink_to(BASH if shell == "bash" else SH)
+            if found and not link.exists():
+                link.symlink_to(found)  # (zsh, where there is one: `zsh -c` from bash too.)
         for tool in WRAPPERS:
             link, found = bin_folder / tool, shutil.which(tool)
             if link.exists() or link.is_symlink():
@@ -435,7 +435,10 @@ class Generator:
         git = self.pick(["git", "git", "git", "command git", f"git -C {self.folder()}",
                          "\\git", "env git", f"env -C {self.folder()} git",
                          "env --chdir=../feat git", "timeout 5 git", "nice -n 5 git",
-                         "nice git"])  # fmt: skip
+                         "nice git", f"env -vC {self.folder()} git",
+                         f"env -iC {self.folder()} PATH=\"$PATH\" git",
+                         f"env -P ~/bin -C {self.folder()} git", "env -i PATH=\"$PATH\" git",
+                         "env -0 git", "=git"])  # fmt: skip
         arguments = self.pick(PUSH_ARGS + [f"origin {self.pick(REFS)}"] * 4)
         pushing = f"{git} push {arguments}".rstrip()
         roll = self.chance.random()
@@ -454,7 +457,13 @@ class Generator:
                 f"find {self.pick(['../main', '../feat', '.'])} -mindepth 1 -maxdepth 1 "
                 f"-name sub -execdir {pushing} \\;",
                 f"env -S {shell_quote(pushing)}",
+                f"find {self.pick(['../main', '../feat', '.', '../main/sub', '../feat/sub'])} "
+                f"-maxdepth 0 -exec git -C {self.pick(['{}', '{}/..', '../feat/{}/..'])} "
+                f"push {arguments} \\;",
             ])  # fmt: skip
+        if roll < 0.08:  # An alias for it (bash expands one only once told to; zsh always).
+            alias, rest = self.pick([(pushing, ""), (git, f" push {arguments}".rstrip())])
+            return f"shopt -s expand_aliases 2>/dev/null; alias g={shell_quote(alias)}\ng{rest}"
         return pushing
 
     def simple(self, depth: int = 0) -> str:
@@ -470,6 +479,14 @@ class Generator:
             return self.push()
         if roll < 0.88:
             return self.pick(SWITCHES)
+        if roll < 0.92:  # How cd reads `..`, for the rest of the line.
+            return self.pick(["set -P", "set +P", "set -o physical", "set +o physical",
+                              "setopt chase_links", "setopt chase_dots", "unsetopt chase_dots",
+                              "set -o chaselinks", "setopt CHASE_DOTS", "shopt -so physical",
+                              "shopt -s -o physical", "shopt -uo physical", "set -- -P",
+                              "set -w", "set +w", "set -eP", "set -o nophysical",
+                              "setopt NO_CHASE_LINKS", "options[chaselinks]=on",
+                              "emulate zsh -o chaselinks"])  # fmt: skip
         return self.pick(["true", "false", ":", "echo x", "echo read B", "git status"])
 
     def statement(self, depth: int = 0) -> str:
@@ -478,7 +495,7 @@ class Generator:
         inner = self.statements(depth + 1)
         kind = self.pick(["if", "else", "for", "case", "subshell", "group", "substitution",
                           "quoted", "eval", "eval1", "while", "case", "subshell", "process",
-                          "source"])  # fmt: skip
+                          "source", "shell"])  # fmt: skip
         if kind == "if":
             return f"if {self.pick(['true', 'false'])}; then {inner}; fi"
         if kind == "else":
@@ -511,6 +528,10 @@ class Generator:
             return f"eval {shell_quote(inner)}"
         if kind == "eval1":
             return f'eval "{inner}"'
+        if kind == "shell":  # Another shell's line (zsh's from bash too); with options of cd's.
+            shell = self.pick(["sh -c", "bash -c", "bash -P -c", "bash -o physical -c",
+                               "zsh -f -c", "zsh -f -w -c", "emulate sh -c"])  # fmt: skip
+            return f"{shell} {shell_quote(inner)}"
         return f"while false; do {inner}; done"
 
     def statements(self, depth: int = 0) -> str:
@@ -667,6 +688,29 @@ FOUND = [
     ('env -C m/sub git push origin "$(git branch --show-current)"', 'main'),
     ('echo "$(echo main | xargs -n1 git push origin v1.0)" | true\necho "x', 'main/sub'),
     ('CHIEFOFSTAFF_TOP=../feat; cd "$(git rev-parse --show-toplevel)"; git push', 'main'),
+    # The invariant review of a9aa9cc: cd as the system goes for the rest of the line (`set -P`),
+    # env's options in clusters and with values, find's `{}`, an alias that pushes.
+    ('set -P; cd n && cd .. && git push', 'feat'),
+    ('set -o physical; cd n && cd .. && git push', 'feat'),
+    ('env -vC ../main git push', 'feat'),
+    ('env -P ~/bin -C ../main git push', 'feat'),
+    ('find ../main -maxdepth 0 -exec git -C {} push \\;', 'feat'),
+    ('find ../main/sub -maxdepth 0 -exec git -C {}/.. push \\;', 'feat'),
+    ('find ../main/sub -maxdepth 0 -exec git -C ../feat/{}/.. push \\;', 'feat'),
+    # Their variants: `shopt -o`, the line's mode in substitutions, eval and shells' options,
+    # an alias that says no push itself, zsh's lines from bash.
+    ('shopt -so physical; cd n && cd .. && git push', 'feat'),
+    ('shopt -s expand_aliases\nalias g=git\ng push origin main', 'feat'),
+    ('set -P; x=$(cd n && cd .. && git push)', 'feat'),
+    ("set -P; eval 'cd n && cd .. && git push'", 'feat'),
+    ("bash -P -c 'cd n && cd .. && git push'", 'feat'),
+    ("bash -o physical -c 'cd n && cd .. && git push'", 'feat'),
+    ("zsh -f -c 'set -w; cd n && cd .. && git push'", 'feat'),
+    ("zsh -f --chase-links -c 'cd n && cd .. && git push'", 'feat'),
+    ("zsh -f -c 'B=x/main; git push origin $B:t'", 'feat'),
+    ("zsh -f -c '=git push origin HEAD'", 'main'),
+    ("zsh -f -c 'echo | cd ../main; git push'", 'feat'),
+    ("shopt -s expand_aliases\nalias g='git push origin main'\ng", 'feat'),
 ]  # fmt: skip
 
 
@@ -684,6 +728,19 @@ FOUND_ZSH = [
     # Found by the zsh 200k run on c3c270f: zsh's `command` runs no builtin (export).
     ('command -p export B=main.y; : <(timeout 5 git push origin $B $B)', 'main/sub'),
     ('command export B=feat; git push origin $B', 'main'),
+    # The invariant review of a9aa9cc: zsh's chase_links and chase_dots, its `=git`.
+    ('setopt chase_dots; cd n && cd .. && git push', 'feat'),
+    ('setopt chase_links; cd n/.. && git push', 'feat'),
+    ('set -o chaselinks; cd n && cd .. && git push', 'feat'),
+    ('=git push -u origin HEAD', 'main'),
+    ('B=main; =git push origin $B', 'feat'),
+    ('set -w; cd n && cd .. && git push', 'feat'),
+    ('options[chaselinks]=on; cd n && cd .. && git push', 'feat'),
+    ("emulate csh -c 'B=main; git push origin $B'", 'feat'),
+    ('emulate zsh -o chaselinks; cd n && cd .. && git push', 'feat'),
+    ('setopt chase_dots; x=$(cd n && cd .. && git push)', 'feat'),
+    ("setopt chase_dots; eval 'cd n && cd .. && git push'", 'feat'),
+    ("echo | eval 'cd ../main'; git push", 'feat'),
     ('command pushd ../feat/sub || nice -n 5 git push -o x origin', 'main'),
     ('time -p cd -- ../feat; git push origin HEAD || while false; do env git push -o x origin; done\nwhile false; do command cd -P l/../..; done', 'main'),  # noqa: E501
 ]  # fmt: skip

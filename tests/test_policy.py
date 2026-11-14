@@ -710,7 +710,9 @@ FUZZ = ["git", "push", "origin", "main", "wb/x", "-f", "+x", ":main", " ", " ", 
         "<<EOF", "<<'E'", "EOF", "E", "#", "eval", "sh -c", "cd", "-C", "$B", "B=", "for b in",
         "do", "done", "{", "}", "$((", "))", "rm", "-rf", "/", "~", "curl", "gh api", "-X",
         "-f", "sudo", "\r", "é", "${B}", "*", "checkout", "-b", "switch", "-c", "2>&1",
-        ">/dev/null", "HEAD", "--tags", "-n", "alias.p=push"]  # fmt: skip
+        ">/dev/null", "HEAD", "--tags", "-n", "alias.p=push", "-P", "env", "-iC", "pushd",
+        "popd", "set -P", "setopt chase_dots", "alias g=", "find", "-exec", "{}", "=git",
+        "shopt -s expand_aliases", ".."]  # fmt: skip
 
 
 @pytest.mark.parametrize("seed", range(4))
@@ -1502,6 +1504,130 @@ def test_a_group_in_a_pipe_runs_alongside_it(text, alongside):
     commands = commands_of(text)
     paired = policy.subshells(commands)
     assert policy.in_pipes(commands, paired and paired[2]) == alongside
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["git -C \ud800 push", "env -C \ud800 git push", "cd -P \ud800 && git push",
+     "cd \ud800 && git push"],
+)  # fmt: skip
+def test_a_folder_the_system_cannot_name_is_refused_saying_why(command, feature):
+    """The invariant review of a9aa9cc (G4): a name with a lone surrogate went to realpath, which
+    raised: refused as "could not be checked". Its folder is not known, and so said."""
+    found = denial(command, feature)
+    assert found and policy.NOT_CHECKED not in found and "can't tell which branch" in found
+
+
+@pytest.mark.parametrize(
+    ("words", "read"),
+    [
+        (["-C", "../main", "git"], ("../main", None)),
+        (["-iC", "../main", "git"], ("../main", None)),
+        (["-iC../main", "git"], ("../main", None)),
+        (["-vC", "x", "git"], ("x", None)),
+        (["-0C", "x", "git"], ("x", None)),
+        (["-P", "/usr/bin", "-C", "x", "git"], ("x", None)),
+        (["-u", "C", "git"], (None, None)),
+        (["--chdir", "x", "git"], ("x", None)),
+        (["--chdir=x", "-S", "git push", "origin"], ("x", "git push origin")),
+        (["-iS", "git push"], (None, "git push")),
+        (["-X", "git"], (policy.LOST, None)),
+        (["--frobnicate", "git"], (policy.LOST, None)),
+        (["A=b", "-C", "x", "git"], (None, None)),
+    ],
+)
+def test_envs_options_are_read_as_gnu_and_bsd_env_read_them(words, read):
+    """The invariant review of a9aa9cc: `env -iC ../main git push` (a cluster), `-P DIR -C …`
+    (an option that takes a value) pushed main. Every option is read; one not known: the
+    folder is not known."""
+    assert policy.env_options(words) == read
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["alias g='git push origin main'; g", "alias -g G='push origin main'; git G",
+     "BASH_ALIASES[g]='git push origin main'; g", 'alias g="$X"; X=push; g',
+     "alias g=git; g push origin main", "alias g='git '; alias p=push; g p origin main"],
+)  # fmt: skip
+def test_an_alias_that_may_push_is_refused(command, feature):
+    """The invariant review of a9aa9cc: bash (told so) and zsh run the aliases a line sets
+    (`shopt -s expand_aliases`): one whose text may push is refused, saying so."""
+    found = denial(command, feature)
+    assert found and "can't tell which branch" in found
+
+
+@pytest.mark.parametrize(
+    ("command", "shell", "goes"),
+    [
+        ("cd n && cd .. && git push", "", "logical"),
+        ("set -P; cd n && cd .. && git push", "", "physical"),
+        ("set -eP; cd n && cd .. && git push", "", "physical"),
+        ("set -P; set +P; cd n && cd .. && git push", "", "logical"),
+        ("set -o physical; cd n && cd .. && git push", "", "physical"),
+        ("set -- -P; cd n && cd .. && git push", "", "logical"),
+        ("set -o nophysical; cd n && cd .. && git push", "", "unknown"),
+        ("shopt -so physical; cd n && cd .. && git push", "", "physical"),
+        ("shopt -s -o physical; shopt -u -o physical; cd n && cd .. && git push", "", "logical"),
+        ("shopt -o physical; cd n && cd .. && git push", "", "logical"),
+        ("set -P; cd -L n && cd -L .. && git push", "", "logical"),
+        ("set -P; x=$(cd n && cd .. && git push)", "", "unknown"),
+        ("x=$(cd n && cd .. && git push)", "", "logical"),
+        ("set -P; eval 'cd n && cd .. && git push'", "", "physical"),
+        ("set -P; bash -c 'cd n && cd .. && git push'", "", "logical"),
+        ("bash -P -c 'cd n && cd .. && git push'", "", "unknown"),
+        ("bash -o physical -c 'cd n && cd .. && git push'", "", "unknown"),
+        ("zsh -w -c 'cd n && cd .. && git push'", "", "unknown"),
+        ("zsh -c 'set -w; cd n && cd .. && git push'", "", "physical"),
+        ('eval "$X"; cd n && cd .. && git push', "", "unknown"),
+        ('eval "$X"; cd {work} && git push', "", "logical"),
+        ('eval "$X"; cd {work}/n/.. && git push', "", "unknown"),
+        ('eval "$X"; cd -L {work}/n/.. && git push', "", "logical"),
+        ("set -w; cd n && cd .. && git push", "zsh", "physical"),
+        ("set -P; cd n && cd .. && git push", "zsh", "unknown"),
+        ("setopt chase_dots; cd n && cd .. && git push", "zsh", "physical"),
+        ("setopt NO_CHASE_LINKS; cd n && cd .. && git push", "zsh", "logical"),
+        ("setopt chase_dots; unsetopt chase_dots; cd n && cd .. && git push", "zsh", "logical"),
+        ("unsetopt nochaselinks; cd n && cd .. && git push", "zsh", "physical"),
+        ("setopt -m 'chase*'; cd n && cd .. && git push", "zsh", "unknown"),
+        ("options[chaselinks]=on; cd n && cd .. && git push", "zsh", "unknown"),
+        ("emulate zsh -o chaselinks; cd n && cd .. && git push", "zsh", "unknown"),
+        ("echo | setopt chase_dots; cd n && cd .. && git push", "zsh", "unknown"),
+        ("setopt chase_dots; cd n && cd .. && git push", "", "unknown"),
+        ("SHELLOPTS=physical bash -c 'cd n && cd .. && git push'", "zsh", "unknown"),
+    ],
+)
+def test_cd_reads_dot_dot_as_the_lines_mode_says(command, shell, goes, tmp_path):
+    """The invariant review of a9aa9cc: `set -P` (and `set -o physical`, `shopt -so physical`,
+    zsh's `chase_links`/`chase_dots`, a shell's own options) has every cd after it read `..` as
+    the system goes; `cd n && cd ..` through a link n into another checkout pushed from it."""
+    work, other = tmp_path / "work", tmp_path / "other"
+    (other / "sub").mkdir(parents=True)
+    work.mkdir()
+    (work / "n").symlink_to(other / "sub")
+    token = policy.SHELL.set(shell)
+    try:
+        policy.reading.cache_clear()
+        found = policy.pushes(command.format(work=work), str(work))
+    finally:
+        policy.SHELL.reset(token)
+    assert len(found) == 1, found
+    folder = found[0].bare_in
+    expected = {"logical": str(work), "physical": str(other), "unknown": policy.LOST}[goes]
+    assert (folder if folder is None or policy.LOST not in folder else policy.LOST) == expected
+
+
+@pytest.mark.parametrize(
+    ("option", "zsh", "read"),
+    [("physical", False, (False, True)), ("PHYSICAL", False, (False, False)),
+     ("nophysical", False, (False, False)), ("chase_links", False, (False, False)),
+     ("chase_links", True, (False, True)), ("CHASE_DOTS", True, (False, True)),
+     ("no_chase_links", True, (True, True)), ("physical", True, (False, False)),
+     ("pipefail", False, None), ("notify", True, None)],
+)  # fmt: skip
+def test_an_options_name_is_read_as_its_shell_reads_it(option, zsh, read):
+    """bash takes `physical` only, as written; zsh its own names, any case, `_` or `no` aside;
+    a name like those that the shell does not take: (…, False), so not known."""
+    assert policy.chase(option, zsh) == read
 
 
 def test_a_cd_bash_may_refuse_leaves_the_folder_unknown(feature, main_checkout):

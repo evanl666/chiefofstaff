@@ -120,10 +120,11 @@ SETTING_COMMANDS = frozenset(
      "read", "mapfile", "readarray", "printf", "getopts", "wait", "declare", "typeset",
      "local", "export", "readonly", "unset", "let", "set", "shift", "shopt", "cd", "pushd",
      "popd", "dirs", "select", "for", "case", "function", "in", "do", "done", "then", "else",
-     "elif", "fi", "if", "while", "until", "esac", "{", "}", "!", "[[", "]]", "caller", "hash"}
+     "elif", "fi", "if", "while", "until", "esac", "{", "}", "!", "[[", "]]", "caller", "hash",
+     "emulate"}
 )  # fmt: skip
 EVALUATORS = frozenset({".", "source", "eval", "trap", "alias", "fc", "bind", "complete",
-                        "compgen", "enable"})  # fmt: skip
+                        "compgen", "enable", "emulate"})  # fmt: skip
 WRAPPERS = frozenset({"command", "builtin", "time", "exec"})
 # A command's name that is plain text (no variable, substitution, glob or quote in it).
 PLAIN_NAME = re.compile(r"[A-Za-z0-9_./+:@%,~-]+|\[\[?")
@@ -315,8 +316,10 @@ def expanded(folder: str, path: str, physical: bool = False) -> str:
         return folder
     if UNSETTLED.search(joined):
         return joined
-    # (Each link resolved as it comes, its `..` then of its target: as the system goes.)
-    return os.path.realpath(joined) if physical else os.path.normpath(joined)
+    try:  # (Each link resolved as it comes, its `..` then of its target: as the system goes.)
+        return os.path.realpath(joined) if physical else os.path.normpath(joined)
+    except (OSError, ValueError):  # A name the system cannot take (`\ud800`): not known.
+        return LOST
 
 
 # The characters each scanner below stops at; what lies between is copied whole.
@@ -1238,6 +1241,8 @@ class Tally:
     top_unknown: bool = False
     background: bool = False  # A job runs in the background (`&`): in no order with the rest.
     here: str | None = None  # Where code being read (read_code) started: `$PWD`, if there.
+    # How cd reads `..` where the line being read starts (Line.physical, Line.physical_unsure).
+    modes: tuple[bool, bool] = (False, False)
 
     def named(self) -> tuple[dict[str, int], dict[str, int]]:
         if self.names is None:
@@ -1513,6 +1518,12 @@ class Line:
     # last): None when not known (before any move, the shell's own: not known).
     previous: str | None = None
     dirs: tuple[str, ...] | None = ()
+    # cd as the system goes, for the rest of the line (`set -P`, `set -o physical`, zsh's
+    # `setopt chase_links`); `physical_unsure`: whether may not be known (a cd through `..`:
+    # then not known); `moded`: whether the line changed either.
+    physical: bool = False
+    physical_unsure: bool = False
+    moded: bool = False
 
     def lose(self):
         """The folder, the one before it and pushd's: not known from here."""
@@ -1566,7 +1577,8 @@ class Line:
         folder pushd left; any other: not known), read as the shell reads it (`cd -P`: as the
         system does). When it may not have run (`certain` is false), only the commands of its
         `&&` chain after it surely run there."""
-        rest, target, physical = list(arguments), None, False
+        rest, target, physical = list(arguments), None, self.physical
+        unsure = self.physical_unsure
         while name == "cd" and rest and rest[0].startswith("-") and rest[0] != "-":
             option = rest.pop(0)
             if option == "--":
@@ -1576,6 +1588,7 @@ class Line:
                 break
             for letter in option[1:]:  # (The last of -L and -P counts.)
                 physical = {"P": True, "L": False}.get(letter, physical)
+                unsure = unsure and letter not in "LP"
         before, dirs = self.folder, self.dirs
         if name == "popd":
             if not rest and dirs:
@@ -1595,8 +1608,8 @@ class Line:
                 target = None  # Searched in CDPATH's folders first: which, not known.
             if name == "pushd":
                 dirs = None if dirs is None else (*dirs, before)
-        if target is None or LOST in target:
-            self.lose()
+        if target is None or LOST in target or (unsure and ".." in target.split("/")):
+            self.lose()  # (Through `..` when `set -P` may have run: as the system goes or not.)
             return
         self.folder = self.tally.moved(before, target, physical)
         self.previous, self.dirs = before, dirs
@@ -1607,6 +1620,109 @@ class Line:
     def end_loops(self, nest: int):
         while self.loops and self.loops[-1][1] > nest:
             self.put(self.values, self.loops.pop()[0])
+
+    def modes(self, name: str, arguments: list[str], certain: bool):
+        """How `set` (`-P`, `+P`, `-o physical`; zsh's `-w`, `-o chase_links`), `shopt -s -o
+        physical` or zsh's `setopt`/`unsetopt` (`chase_links`, `chase_dots`) has cd read `..`,
+        for the rest of the line: as the system goes or as the shell does. One that may not
+        have run, or that is not read here (a flag of setopt's, zsh's `set -P`, an option of
+        another shell's, a name the line makes up): how is not known."""
+        zsh, turned, unsure = self.tally.zsh, None, False
+
+        def take(value: str, on: bool, own: bool):
+            nonlocal turned, unsure
+            if (found := chase(value, zsh)) is not None and found[1] and own:
+                turned = on != found[0]
+            elif found is not None or not PLAIN_NAME.fullmatch(value):
+                unsure = True
+
+        if name == "set":
+            letter = "w" if zsh else "P"  # (zsh's CHASE_LINKS; bash's physical.)
+            at = 0
+            while at < len(arguments):
+                word, at = arguments[at], at + 1
+                if word in {"--", "-", "+"} or word[:1] not in {"-", "+"}:
+                    break  # (What follows: the positional parameters.)
+                on, letters = word[0] == "-", word[1:]
+                if not letters.isalpha():
+                    unsure = True  # (`--x`, `-$X`: not read here.)
+                    continue
+                if letter in letters:
+                    turned = on
+                unsure = unsure or (zsh and "P" in letters)
+                if "o" in letters and at < len(arguments):
+                    value, at = arguments[at], at + 1
+                    take(value, on, True)
+        elif name == "shopt":
+            flags, names = "", list(arguments)
+            while names and names[0].startswith("-") and len(names[0]) > 1 and names[0] != "--":
+                flags += names.pop(0)[1:]
+            names = names[1:] if names[:1] == ["--"] else names
+            setting = ("s" in flags) != ("u" in flags) and set(flags) <= set("psuqo")
+            if "o" in flags and (setting or set(flags) - set("pqo")):
+                for value in names:
+                    take(value, "s" in flags, setting and not zsh)
+        else:
+            for word in arguments:
+                if word[:1] in {"-", "+"}:
+                    unsure = True  # (Its own flags: not read here.)
+                else:
+                    take(word, name == "setopt", zsh)
+        if turned is None and not unsure:
+            return
+        self.moded = True
+        if unsure or not certain:
+            self.physical_unsure = True
+        elif turned is not None:
+            self.physical = turned
+
+
+def chase(option: str, zsh: bool) -> tuple[bool, bool] | None:
+    """Whether an option's name is one that has cd go as the system does (bash's `physical`;
+    zsh's `chase_links`, `CHASE_DOTS`, `nochaselinks`, case and `_` aside): (negated, whether
+    this shell takes it); or None."""
+    name = option.lower().replace("_", "")
+    negated = name.startswith("no") and name[2:] in {"chaselinks", "chasedots", "physical"}
+    base = name[2:] if negated else name
+    if base not in {"physical", "chaselinks", "chasedots"}:
+        return None
+    if zsh:
+        return negated, base != "physical"
+    return False, option == "physical"
+
+
+def shell_chases(words: list[str]) -> bool:
+    """Whether a shell's options (its words before its script) may have its cd read `..` as
+    the system goes: `bash -P`, `-o physical`, zsh's `-w`, `--chase-links`, or an option the
+    line makes up."""
+    for at, word in enumerate(words):
+        if word.startswith(("--", "++")):
+            if chase(word[2:].replace("-", ""), True) is not None or not PLAIN_NAME.fullmatch(word):
+                return True
+        elif word[:1] in {"-", "+"}:
+            letters = word[1:]
+            if not letters.isalpha() or "P" in letters or "w" in letters:
+                return True
+            if "o" in letters and at + 1 < len(words):
+                value = words[at + 1]
+                if chase(value, True) is not None or not PLAIN_NAME.fullmatch(value):
+                    return True
+    return False
+
+
+# Where the shells keep aliases as variables (bash's BASH_ALIASES, zsh's aliases).
+ALIAS_TABLES = ("BASH_ALIASES", "aliases", "galiases", "saliases")
+
+
+def aliases_may_push(values: list[str], tally: Tally) -> bool:
+    """Whether aliases with these texts may push: any, on a line that says push anywhere (an
+    alias's words join the words after it: `alias g=git; g push origin main`); one that holds
+    what the line makes up as it runs, or that says push itself."""
+    if not values:
+        return False
+    return "push" in squashed(tally.text) or any(
+        may_push(value) or UNSETTLED.search(value) for value in values
+    )
 
 
 def moves_folder(joiner: str, words: list[str], devices: bool = False) -> bool:
@@ -1653,9 +1769,10 @@ def read_line(command: str, cwd: str, depth: int, tally: Tally) -> str:
     if sum(len(words) for _, words in commands) > MOST_WORDS:
         return TOO_COMPLEX
     line = Line(cwd, depth, tally)
+    start_modes = line.physical, line.physical_unsure = tally.modes
     broken, nest, ordered = 0, 0, True
     # Where each open subshell started: its folder, chain, undo mark, nest, and cd's.
-    saved: list[tuple[str, int | None, int, int, str | None, tuple[str, ...] | None]] = []
+    saved: list[tuple[Any, ...]] = []
     devices = bool(DEVICES.search(command))
     moving = [bool(cwd) and moves_folder(*command, devices) for command in commands]
     ends = loop_ends(commands)
@@ -1694,13 +1811,15 @@ def read_line(command: str, cwd: str, depth: int, tally: Tally) -> str:
         for event in events[index]:  # A subshell's changes end with it.
             if event == "(":
                 saved.append(
-                    (line.folder, line.chain, len(line.undo), nest, line.previous, line.dirs)
-                )
+                    (line.folder, line.chain, len(line.undo), nest, line.previous, line.dirs,
+                     line.physical, line.physical_unsure)
+                )  # fmt: skip
             elif doubtful:
                 line.lose()
                 del saved[-1:]
             elif saved:
-                line.folder, line.chain, mark, _, line.previous, line.dirs = saved.pop()
+                (line.folder, line.chain, mark, _, line.previous, line.dirs, line.physical,
+                 line.physical_unsure) = saved.pop()  # fmt: skip
                 line.restore(mark)
         line.lost = line.lost or "()" in joiner.replace(" ", "")  # A function: called anywhere.
         if line.lost or (line.chain is not None and line.chain != broken):
@@ -1745,6 +1864,8 @@ def read_line(command: str, cwd: str, depth: int, tally: Tally) -> str:
         elif first and words[first - 1] in {"for", "select"} and len(rest) > 1 and rest[1] == "in":
             line.loops.append((rest[0], nest))
             line.assign(rest[0], rest[2:], certain=True)  # Each of those, in turn, in the loop.
+        elif name in {"set", "shopt", "setopt", "unsetopt"}:
+            line.modes(name, rest[start:], certain and not unrun)
         elif name in {"cd", "pushd", "popd"}:
             if cwd and unrun:
                 line.lose()
@@ -1755,15 +1876,23 @@ def read_line(command: str, cwd: str, depth: int, tally: Tally) -> str:
         else:
             if why := read_command(words, index, line):
                 return why
-            if cwd and not piped and (name == "function" or moving[index]):
-                line.lose()  # It may have gone elsewhere.
-                line.lost = line.lost or name == "function"
+            if name == "alias" and aliases_may_push(
+                [word.partition("=")[2] for word in rest[start:] if "=" in word], tally
+            ):
+                tally.pushes.append(Push(unknown=True))  # A name that may push from here on.
+            if (not piped or tally.zsh) and (name == "function" or moving[index]):
+                # (It may have run `set -P`; in zsh, a pipe's last command runs in the shell.)
+                line.physical_unsure = line.moded = True
+                if cwd:
+                    line.lose()  # It may have gone elsewhere.
+                    line.lost = line.lost or name == "function"
         if len(line.env) > MOST_GIT_ENV:
             return TOO_COMPLEX
     # What its command substitutions run: lines of their own, in the folder the line starts in
     # (not known when a command of it may go elsewhere first).
     inner = LOST if any(moving) else cwd
     for body in inside:
+        tally.modes = (start_modes[0], start_modes[1] or line.moded)  # (Where it stands: as there.)
         if may_push(body, switching=True) and (why := read_line(body, inner, depth + 1, tally)):
             return why
     return ""
@@ -1777,6 +1906,11 @@ def set_variables(line: Line, words: list[str], certain: bool):
         if not isinstance(word, Assignment):
             continue
         name, _, value = word.partition("=")
+        table = name.split("[", 1)[0].rstrip("+")
+        if table in ALIAS_TABLES and aliases_may_push([value], line.tally):
+            line.tally.pushes.append(Push(unknown=True))  # An alias that may push.
+        if table == "options" and line.tally.zsh:  # (zsh's options, by name: `chase_links`…)
+            line.physical_unsure = line.moded = True
         if name.startswith("GIT_"):
             if certain:
                 line.put(line.env, name, value)
@@ -1805,25 +1939,41 @@ def read_command(words: list[str], index: int, line: Line) -> str:
         if ASSIGNMENT.match(word):
             local.update(git_variables([word]))
             continue
+        if line.tally.zsh and word.startswith("=") and len(word) > 1:
+            word = word[1:]  # (zsh's `=git`: git's path.)
         program = word.rsplit("/", 1)[-1]
         if program == "git":
             here = {**line.env, **local} if local else line.env
             if line.env_unsure:  # git's own variables, maybe set: what it does, not known.
                 here = {**here, "GIT_CONFIG_PARAMETERS": "push alias.", "GIT_DIR": "?"}
-            given = words[position:]
+            given = [word, *words[position + 1 :]]
             if found:  # (`find … -exec git … ;`: its words end at find's `;` or `+`.)
                 given = list(itertools.takewhile(lambda word: word not in {";", "+"}, given))
+                if any("{}" in word for word in given):  # A found file's name: not known.
+                    folder, feeds = LOST, feeds or "{}"
             for run in expansions(given, line.said, line.tally):
                 read_git(run, here, index, line, folder, feeds)
             return ""
         if program in SHELLS:  # Its words are its own: a script's (`-c`), or a file's.
             script = shell_script(words, position)
-            return "" if script is None else read_code(script, line, folder)
+            if script is None:
+                return ""
+            # Read as that shell reads it; cd as the system goes if its options say so, or if
+            # the line may hand it bash's options (SHELLOPTS).
+            options = words[position + 1 :]
+            chases = shell_chases(options) or "shellopts" in squashed(line.tally.text)
+            return read_code(script, line, folder, program, (False, chases))
         if program == "eval":
             return read_code(" ".join(words[position + 1 :]), line, folder)
+        if program == "emulate":  # (zsh's: `emulate sh -c '…'` runs code, as eval does.)
+            after = words[position + 1 :]
+            script = after[after.index("-c") + 1] if "-c" in after[:-1] else None
+            return "" if script is None else read_code(script, line, folder)
         if program == "env":
             moved, script = env_options(words[position + 1 :])
-            if moved is not None:
+            if moved == LOST:
+                folder = LOST  # An option not read here.
+            elif moved is not None:
                 target = resolved(moved, line.value_of, line.tally.zsh)
                 folder = LOST if LOST in folder else line.tally.moved(folder, target, True)
             if script is not None:
@@ -1861,48 +2011,79 @@ def placeholder(program: str, words: list[str]) -> str:
     return "*"
 
 
+# env's options, GNU's and BSD's: those that take no value, and those that take one (`-C DIR`,
+# `-CDIR`, `-iC DIR`; `--chdir=DIR`, `--chdir DIR`); a long one with `=` only may take one.
+ENV_FLAGS = frozenset("i0v")
+ENV_VALUED = frozenset("CPSuLUa")
+ENV_LONG_FLAGS = frozenset({"--ignore-environment", "--null", "--debug", "--list-signal-handling"})
+ENV_LONG_VALUED = {"--chdir": "C", "--split-string": "S", "--unset": "u", "--argv0": "a"}
+ENV_LONG_OPTIONAL = frozenset({"--block-signal", "--default-signal", "--ignore-signal"})
+
+
 def env_options(words: list[str]) -> tuple[str | None, str | None]:
     """What `env` with these words does before the command it runs: the folder it goes to
-    (`-C DIR`, `--chdir=DIR`), and a command line it is given as one word (`-S '…'`)."""
+    (`-C DIR`, also in a cluster: `-iC DIR`, `-iCDIR`), and a command line it is given as one
+    word (`-S '…'`). An option not read here: the folder is not known (LOST)."""
     folder = script = None
     at = 0
     while at < len(words):
-        word = words[at]
-        name, has, value = word.partition("=")
-        if word in {"-C", "--chdir", "-S", "--split-string", "-u", "--unset"}:
-            given = words[at + 1] if at + 1 < len(words) else ""
-            at += 2
-        elif name in {"--chdir", "--split-string", "--unset"} and has:
-            word, given = name, value
-            at += 1
-        elif word.startswith(("-C", "-S", "-u")) and len(word) > 2:
-            word, given = word[:2], word[2:]
-            at += 1
-        elif word.startswith("-") and word != "-":
-            at += 1
+        word, at = words[at], at + 1
+        if word == "--":
+            break
+        if word == "-":  # (As -i.)
             continue
+        found: list[tuple[str, str]] = []  # (letter, value) of the options that take one.
+        if word.startswith("--"):
+            name, has, value = word.partition("=")
+            if name in ENV_LONG_VALUED:
+                if not has:
+                    value, at = (words[at] if at < len(words) else ""), at + 1
+                found.append((ENV_LONG_VALUED[name], value))
+            elif name not in ENV_LONG_FLAGS | ENV_LONG_OPTIONAL or (has and name in ENV_LONG_FLAGS):
+                return LOST, None
+        elif word.startswith("-"):
+            for index, letter in enumerate(word[1:], 1):
+                if letter in ENV_FLAGS:
+                    continue
+                if letter not in ENV_VALUED:
+                    return LOST, None
+                value = word[index + 1 :]
+                if not value:
+                    value, at = (words[at] if at < len(words) else ""), at + 1
+                found.append((letter, value))
+                break
         else:
             break
-        if word in {"-C", "--chdir"}:
-            folder = given
-        elif word in {"-S", "--split-string"}:
-            script = " ".join([given, *words[at:]])
-            break
+        for letter, value in found:
+            if letter == "C":
+                folder = value
+            elif letter == "S":
+                return folder, " ".join([value, *words[at:]])
     return folder, script
 
 
-def read_code(script: str, line: Line, folder: str | None = None) -> str:
+def read_code(
+    script: str,
+    line: Line,
+    folder: str | None = None,
+    shell: str | None = None,
+    modes: tuple[bool, bool] | None = None,
+) -> str:
     """A line a command runs as code (`eval …`, `sh -c …`), from the folder it runs in (the
-    line's, or `folder`: `env -C DIR sh -c …`). A `$PWD` in it may have been put in where it
-    was written (in double quotes): it is the folder only where that is the folder it started
-    in (Tally.here)."""
+    line's, or `folder`: `env -C DIR sh -c …`); by the shell running the line, or another
+    (`shell`: `zsh -c …` is read as zsh reads it), with cd reading `..` as in the line, or
+    as `modes` says (Tally.modes). A `$PWD` in it may have been put in where it was written
+    (in double quotes): it is the folder only where that is the folder it started in
+    (Tally.here)."""
     folder = line.folder if folder is None else folder
-    tally, before = line.tally, line.tally.here
-    tally.here = folder if before in (None, folder) and folder == line.folder else LOST
+    tally, before = line.tally, (line.tally.here, line.tally.shell, line.tally.modes)
+    tally.here = folder if before[0] in (None, folder) and folder == line.folder else LOST
+    tally.shell = tally.shell if shell is None else shell
+    tally.modes = (line.physical, line.physical_unsure) if modes is None else modes
     try:
         return read_line(script, folder, line.depth + 1, tally)
     finally:
-        tally.here = before
+        tally.here, tally.shell, tally.modes = before
 
 
 def read_git(
