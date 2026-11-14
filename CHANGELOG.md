@@ -1,7 +1,20 @@
 # Changelog
 
-## Unreleased
+## 0.1.45 (2026-11-14)
 
+Workers can run on Codex, with your own Codex sign-in (off by default); more pushes to the
+default branch are refused under *Ask first*.
+
+- **Workers on Codex.** If you also use [Codex](https://developers.openai.com/codex/cli),
+  Settings → *Models* → *Use another coding agent for workers…* lets new workers run on it, or
+  one task when you say so ("do this with Codex"). Each Codex worker runs in its own
+  `codex app-server`, in its own folder and worktree like any worker, and is followed the same
+  way: receipts, reviews, check-backs, *Stop*, *Go on*. Its spend is counted in tokens, with an
+  optional limit per worker; *Ask first* works on the Codex versions tested (0.167.2 to before
+  0.168); Codex's memories are off in its workers. The Router, the Slack session and the
+  Watchdog stay on Copilot. Nothing of it runs or is looked for until you turn it on, and
+  `chiefofstaff --prepare-downgrade` gets a data folder ready for an earlier version. See
+  [Workers on other coding agents](docs/guide.md#workers-on-other-coding-agents).
 - **More pushes to the default branch are refused**, as the rule meant: `main` or `master` given
   as a full ref (`HEAD:refs/heads/main`), quoted or with a backslash, on a continued line, after
   git's own options (`git -C … push`), inside `sh -c '…'` or `eval`, inside a loop, a condition,
