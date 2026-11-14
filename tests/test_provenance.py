@@ -209,8 +209,8 @@ def test_five_alike_each_within_two_minutes_of_the_one_before_are_alike():
     assert set(batches(alike(5))) == {f"s{n}" for n in range(5)}
     assert batches(alike(4)) == {}, "four are not"
     gap = provenance.GAP
-    assert len(batches(alike(5, every=gap))) == 5
-    assert batches(alike(5, every=gap + 1)) == {}
+    assert len(batches(alike(5, every=120))) == 5, "two minutes apart"
+    assert batches(alike(5, every=121)) == {}
     split = [*alike(3), *[shot(n, T0 + 40 + gap + 1 + n, "g") for n in range(3, 6)]]
     assert batches(split) == {}, "three, then three more after a pause: neither five"
     # Each within two minutes of the one before: one, however long it ran (three hours).
@@ -773,6 +773,17 @@ async def test_the_owners_questions_that_start_alike_stay_theirs(tmp_path, home)
         store.set(f"made:{session_id}", json.dumps(record))
     assert await deciding(store, home).made(home.metas, {}) == {}
     assert not store.items("made:"), "decided again: the owner's"
+    # Six, ninety seconds apart (a quick round of reviews): alike, the owner's still.
+    quick = []
+    for n in range(6):
+        at = T0 + 7200 + n * 90
+        quick.append(home.add(prompt_mode(at, f"{REVIEW}pull/{n}", "/w"), at, cwd="/w"))
+        size = home.log_of(quick[-1]).stat().st_size
+        record = {"as": "batch", "by": "", "why": "batch", "group": group_of(REVIEW), "at": at}
+        store.set(f"made:{quick[-1]}", json.dumps(record | {"size": size}))
+    deciding_ = deciding(store, home)
+    assert await deciding_.made(home.metas, {}) == {}
+    assert set(deciding_.alike) == set(quick) and not store.items("made:")
 
 
 async def test_a_batch_is_left_out_once_it_is_ten_as_its_calls_come(tmp_path, home):
@@ -899,16 +910,23 @@ async def test_a_workers_command_takes_only_what_ran_where_it_ran(tmp_path, home
     )
     assert made == {theirs: MADE_BY_WORKER}, "in a temporary folder: its; the owner's: theirs"
     assert {asked, one_off}.isdisjoint(store.items("made:"))
+    # Where its session runs commands (`/x`): its too.
+    store.execute("DELETE FROM kv WHERE key LIKE 'made:%'")
+    at_home = home.add(prompt_mode(T0 + 180, "Label: where is it", "/x"), T0 + 180, cwd="/x")
+    made = await Provenance(store, home.log_of, lambda row: None, uptime=lambda: up).made(
+        home.metas, {}
+    )
+    assert made == {theirs: MADE_BY_WORKER, at_home: MADE_BY_WORKER}
     # A loop seen to run for five hours: its first two only.
     store.execute("DELETE FROM commands")
     store.execute("DELETE FROM kv WHERE key LIKE 'made:%'")
-    commanded(store, T0 - 7300, T0 + 3 * 3600)
-    assert (
-        await Provenance(store, home.log_of, lambda row: None, uptime=lambda: up).made(
-            home.metas, {}
-        )
-        == {}
-    ), "two hours after it began"
+    commanded(store, T0 - 7000, T0 + 5 * 3600)
+    late = home.add(prompt_mode(T0 + 300, "Summarize the release"), T0 + 300)
+    made = await Provenance(store, home.log_of, lambda row: None, uptime=lambda: up).made(
+        home.metas, {}
+    )
+    assert made == {theirs: MADE_BY_WORKER, at_home: MADE_BY_WORKER}, "two hours after it began"
+    assert late not in made
 
 
 # The sidebar, the Router and learning, alike
