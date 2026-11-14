@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.44 (2026-11-13)
 
 Your own sessions are hidden only on evidence a program made them; runs a task waits on are
 followed up to the end; Artifacts by task in tidy columns (QA round on 0.1.43).
