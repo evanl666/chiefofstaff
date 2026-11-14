@@ -692,6 +692,27 @@ async def test_a_claude_never_set_up_is_said_so_and_none_of_its_files_is_made(
     assert (await backend_claude.look(command))["account"] == "claudePlan"
 
 
+async def test_looking_at_claude_runs_it_in_chief_of_staffs_folder_not_the_one_it_started_in(
+    tmp_path, monkeypatch
+):
+    # Started inside a repository, whose .claude/settings.json Claude would read there.
+    repository = tmp_path / "repository"
+    (repository / ".claude").mkdir(parents=True)
+    (repository / ".claude" / "settings.json").write_text('{"env": {"PLANTED": "1"}}')
+    monkeypatch.chdir(repository)
+    command = fake_claude(tmp_path / "fake", monkeypatch)
+    cwds = tmp_path / "cwds"
+    monkeypatch.setenv("FAKE_CLAUDE_CWDS", str(cwds))
+    folder = tmp_path / "data" / "agents" / "claude"
+    assert (await backend_claude.look(command, folder))["version"] == "2.1.322"
+    agent = claude_backend(command, folder=folder)
+    await agent.start()
+    await agent.stop()
+    ran = [json.loads(line) for line in cwds.read_text().splitlines()]
+    assert len(ran) == 4 and set(ran) == {str(folder.resolve())}
+    assert oct(folder.stat().st_mode & 0o777) == "0o700"
+
+
 async def test_a_session_claude_already_has_is_resumed_not_made_again(agent, tmp_path):
     session = await agent.create_session(session_id="a6" * 16, name="t", **options(tmp_path))
     turn = Turn(session)

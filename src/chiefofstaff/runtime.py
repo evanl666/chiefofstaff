@@ -3017,7 +3017,7 @@ class Runtime:
             if connection and connection.backend:
                 facts = await connection.backend.about()  # type: ignore[attr-defined]
             else:
-                facts = await agents.look(name)
+                facts = await agents.look(name, self.agent_folder(name))
         except Exception as exc:
             entry["problem"] = describe(exc)
             return entry
