@@ -706,6 +706,83 @@ async def test_a_round_reads_within_its_bytes_newest_first(tmp_path, home, monke
     assert deciding_.shapes[big][1] == UNREAD, "not read"
 
 
+def test_a_session_in_a_workers_folder_by_its_real_path(tmp_path):
+    """Folders are compared as real paths, each read from disk once: one reached through a
+    link is the folder it links to; a folder whose name only starts the same is another."""
+    own = tmp_path / "workspaces" / "w1"
+    (own / "out").mkdir(parents=True)
+    (tmp_path / "link").symlink_to(own)
+    command = window(T0 - 5, T0 + 5, folder=os.path.realpath(own))  # Not `copilot -p`.
+    found = decide([shot(1, T0, cwd=str(tmp_path / "link" / "out"))], [], [command])
+    assert found["s1"]["why"] == "folder"
+    assert provenance.within("/srv/w1/x", "/srv/w1") and provenance.within("/srv/x", "/")
+    assert not provenance.within("/srv/w10", "/srv/w1") and not provenance.within("", "/srv")
+
+
+async def test_many_sessions_among_many_commands_take_little_work(tmp_path, home, monkeypatch):
+    """Final re-check: each session was read against every command, its folder read from disk
+    each time (35 s at 1,000 sessions and 2,000 commands after a start, on the event loop).
+    Counted, not timed (a time differs by machine): at 2,000 sessions and 3,000 commands of
+    20 workers over 30 days, each session meets only the commands that may have been running
+    when it began, each folder is read from disk once, and the deciding is off the event loop."""
+    import threading
+
+    span = 30 * 86400
+    store = Store(tmp_path / "data")
+    store.set("uptime", json.dumps([[T0 - 100, T0 + span + 100]]))
+    for n in range(20):
+        store.create_session(f"w{n}", "worker", f"Worker {n}", "idle", cwd=f"/srv/w{n}")
+    rows = [
+        (f"w{n % 20}", f"c{n}", "npm test", stored(T0 + n * 864), stored(T0 + n * 864 + 360))
+        for n in range(3000)
+    ]
+    rows += [(f"w{n}", f"o{n}", "npm run dev", stored(T0 + n), None) for n in range(10)]
+    store.execute_many(
+        "INSERT INTO commands(session_id, call_id, command, started_at, ended_at) "
+        "VALUES (?,?,?,?,?)",
+        rows,
+    )
+    rng = random.Random(3)  # noqa: S311 (seeded: the same cases every run)
+    for n in range(2000):
+        at = T0 + rng.uniform(0, span)
+        cwd = f"/w/app{n % 50}"
+        home.add(prompt_mode(at, f"Question {n} {rng.random()}", cwd), at, cwd=cwd)
+    realpath, covers = os.path.realpath, Window.covers
+    counted = {"realpath": 0, "covers": 0}
+    off_the_loop: list[bool] = []
+
+    def counted_realpath(path, *arguments, **options):
+        counted["realpath"] += 1
+        return realpath(path, *arguments, **options)
+
+    def counted_covers(self, *arguments):
+        counted["covers"] += 1
+        return covers(self, *arguments)
+
+    def in_a_thread(work):
+        def run(*arguments):
+            off_the_loop.append(threading.current_thread() is not threading.main_thread())
+            return work(*arguments)
+
+        return run
+
+    provenance.read_command.cache_clear()
+    monkeypatch.setattr(os.path, "realpath", counted_realpath)
+    monkeypatch.setattr(Window, "covers", counted_covers)
+    monkeypatch.setattr(provenance, "decide", in_a_thread(provenance.decide))
+    monkeypatch.setattr(provenance, "windows", in_a_thread(provenance.windows))
+    deciding_ = Provenance(store, home.log_of, lambda row: Path(f"/srv/workspaces/{row['id']}"))
+    began = time.perf_counter()
+    assert await deciding_.made(home.metas, {}) == {}
+    took = time.perf_counter() - began
+    # A 6-minute command every 864 s: one at most when a session began, and the ten left open.
+    assert counted["covers"] <= 2000 * 11, counted  # Not 2,000 times 3,010.
+    # 50 session folders, 21 workers' own, 21 places where commands ran, temporary folders.
+    assert counted["realpath"] <= 150, counted
+    assert off_the_loop == [True, True]
+    assert took < 30, "a loose bound: about 0.2 s"
+
+
 async def test_many_kept_decisions_cost_little_a_call(tmp_path, home, monkeypatch):
     """Review: every listing (each 2 s during a batch), Workers.external and forget parsed every
     decision kept and grouped them all, on the event loop: 0.86 s a call at 50,000. Counted, not

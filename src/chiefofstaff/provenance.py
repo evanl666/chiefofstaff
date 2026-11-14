@@ -43,15 +43,20 @@ itself (its memories) is no one's (see said_by_them).
 
 Logs are read in a thread, each once while it does not change: at most SHAPE_MOST bytes of it
 (a longer log is no single shot; for talks, only its start is read) and ROUND_BYTES a round, the
-newest first (the rest in the next round: `pending`). Nothing a session said is kept: of its
-first message only a hash of its start (or of its name), to find its batch.
+newest first (the rest in the next round: `pending`). Who made them is decided in a thread too,
+each session against the commands that may have been running when it began (not every
+command), each folder read from disk once (see decide), each command read once (read_command).
+Nothing a session said is kept: of its first message only a hash of its start (or of its
+name), to find its batch.
 """
 
 from __future__ import annotations
 
 import asyncio
 import bisect
+import functools
 import hashlib
+import heapq
 import json
 import logging
 import math
@@ -383,13 +388,11 @@ class Window:
         return own_reason and bool(n) and at - came[n - 1] <= WORKER_GAP
 
 
-def inside(path: str, folder: str) -> bool:
+def within(path: str, folder: str) -> bool:
+    """Whether a path is a folder or in it, both real paths already (nothing read from disk)."""
     if not path or not folder:
         return False
-    try:
-        return Path(os.path.realpath(path)).is_relative_to(folder)
-    except (OSError, ValueError):
-        return False
+    return path == folder or path.startswith(folder.rstrip(os.sep) + os.sep)
 
 
 def temporary_folders() -> list[str]:
@@ -545,10 +548,25 @@ def decide(
     alike = batches([*fresh, *list(known)])
     temporary = temporary_folders()
     came = {by: sorted(ats) for by, ats in (tied or {}).items()}
+    real: dict[str, str] = {}  # Each session's folder, read from disk once.
+    # The commands in the order they began, and those that may have been running when each
+    # session began (to their end, or their limit), as the sessions come in order: each session
+    # meets those only, not every command.
+    order = sorted(windows, key=lambda w: w.start)
+    running: list[tuple[float, int, Window]] = []
+    begun = 0
     decided = {}
     for shot in fresh:
-        cwd = os.path.realpath(shot.cwd) if shot.cwd else ""
-        scratch = bool(cwd) and any(inside(cwd, folder) for folder in temporary)
+        while begun < len(order) and order[begun].start <= shot.at:
+            w = order[begun]
+            heapq.heappush(running, (max(w.end, w.limit), begun, w))
+            begun += 1
+        while running and running[0][0] < shot.at:
+            heapq.heappop(running)
+        if shot.cwd not in real:
+            real[shot.cwd] = os.path.realpath(shot.cwd) if shot.cwd else ""
+        cwd = real[shot.cwd]
+        scratch = any(within(cwd, folder) for folder in temporary)
         run = alike.get(shot.session_id)  # (Named ones are a run whatever their number.)
         batch = bool(run) and (shot.named or len(run) >= HIDE_SIZE)
         kind = "named" if shot.named else "batch"
@@ -556,8 +574,8 @@ def decide(
         # in a temporary folder, or named a batch's.
         reason = scratch or shot.named
         ties = []
-        for w in windows:
-            own = inside(cwd, w.folder)
+        for _, _, w in running:
+            own = within(cwd, w.folder)
             if not w.covers(shot.at, came.get(w.by, []), reason or own):
                 continue
             there = scratch or cwd in w.places
@@ -575,7 +593,7 @@ def decide(
             # command), in a temporary folder, while that worker ran a command: as it was.
             ties = [
                 (0, w.start, w, "batch")
-                for w in windows
+                for _, _, w in running
                 if w.by == old.get("by") and w.covers(shot.at, came.get(w.by, []), True)
             ]
         record = {"group": shot.group, "at": shot.at, "rules": RULES} | (
@@ -583,7 +601,7 @@ def decide(
         )
         if ties:
             _, _, window, why = max(ties, key=lambda tie: tie[:2])
-            keeps_open = reason or inside(cwd, window.folder)
+            keeps_open = reason or within(cwd, window.folder)
             decided[shot.session_id] = {
                 "as": MADE_BY_WORKER, "by": window.by, "why": why, "keeps_open": keeps_open,
                 **record,
@@ -634,6 +652,17 @@ def window_end(
     return min(stop, most), stop
 
 
+@functools.lru_cache(maxsize=4096)
+def read_command(command: str, cwd: str) -> tuple[bool, tuple[str, ...]]:
+    """Whether a command runs `copilot -p`, and where it ran (see runs_copilot and places),
+    read once while remembered. One it cannot read is no evidence: the rest stands."""
+    try:
+        return runs_copilot(command), places(command, cwd)
+    except Exception:
+        logger.debug("Could not read a command", exc_info=True)
+        return False, ()
+
+
 def windows(
     store: Store,
     low: float,
@@ -666,12 +695,7 @@ def windows(
                 str((session or {}).get("cwd") or ""),
             )
         folder, cwd = sessions[by]
-        command = row["command"] or ""
-        try:
-            copilot, where = runs_copilot(command), places(command, cwd)
-        except Exception:  # One it cannot read is no evidence; the rest stands.
-            logger.debug("Could not read a command of %s's", by, exc_info=True)
-            copilot, where = False, ()
+        copilot, where = read_command(row["command"] or "", cwd)
         found.append(Window(by, start, span[0], copilot, folder, where, span[1]))
     return found
 
@@ -803,30 +827,7 @@ class Provenance:
                 for key, at in self.groups.get(group, {}).items()
                 if key not in fresh
             ]
-            # One found the owner's stays theirs unless those it is alike with change (the
-            # commands it began during are known by the time it ended).
-            batched = batches([*shots, *earlier])
-
-            def alike(shot: OneShot) -> tuple[str, ...]:
-                return tuple(member.session_id for member in batched.get(shot.session_id, ()))
-
-            due = [
-                shot for shot in shots if self.settled.get(shot.session_id) != (shot, alike(shot))
-            ]
-            found = {}
-            if due:
-                spans = [shot.at for shot in due]
-                runs = self.uptime()
-                commands = windows(self.store, min(spans), max(spans), self.folder_of, runs)
-                tied = {w.by: self.workers.get(w.by, {}).values() for w in commands}
-                # What an earlier version found a worker made: kept unless these rules or the
-                # session's own log find otherwise (see decide).
-                kept = {
-                    shot.session_id: records[shot.session_id]
-                    for shot in due
-                    if shot.session_id in records and not current(records[shot.session_id])
-                }
-                found = decide(due, earlier, commands, tied, kept)
+            found, due, alike = await asyncio.to_thread(self.choose, shots, earlier, records)
             for shot in due:
                 record = found.get(shot.session_id)
                 if record and record["as"] != ALIKE:
@@ -834,7 +835,7 @@ class Provenance:
                     self.settled.pop(shot.session_id, None)
                     self.alike.pop(shot.session_id, None)
                     continue
-                self.settled[shot.session_id] = (shot, alike(shot))
+                self.settled[shot.session_id] = (shot, alike[shot.session_id])
                 if record:
                     self.alike[shot.session_id] = record
                 else:
@@ -857,6 +858,36 @@ class Provenance:
             for meta in candidates
             if meta.session_id in records
         }
+
+    def choose(
+        self, shots: list[OneShot], earlier: list[OneShot], records: Mapping[str, dict]
+    ) -> tuple[dict[str, dict], list[OneShot], dict[str, tuple[str, ...]]]:
+        """In a thread (the commands across the sessions' days, each against the sessions that
+        began while it ran): who made those due, the sessions due, and those each is alike
+        with. One found the owner's stays theirs unless those it is alike with change (the
+        commands it began during are known by the time it ended)."""
+        batched = batches([*shots, *earlier])
+        alike = {
+            shot.session_id: tuple(m.session_id for m in batched.get(shot.session_id, ()))
+            for shot in shots
+        }
+        due = [
+            shot
+            for shot in shots
+            if self.settled.get(shot.session_id) != (shot, alike[shot.session_id])
+        ]
+        if not due:
+            return {}, due, alike
+        spans = [shot.at for shot in due]
+        commands = windows(self.store, min(spans), max(spans), self.folder_of, self.uptime())
+        tied = {w.by: list(self.workers.get(w.by, {}).values()) for w in commands}
+        # What an earlier version found a worker made (see decide).
+        kept = {
+            shot.session_id: records[shot.session_id]
+            for shot in due
+            if shot.session_id in records and not current(records[shot.session_id])
+        }
+        return decide(due, earlier, commands, tied, kept), due, alike
 
     async def records(self) -> dict[str, dict]:
         """What was decided, by session id (see cache): read in a thread when it changed."""
