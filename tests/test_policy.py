@@ -3,8 +3,9 @@
 line here, and the pushes of ordinary work let through."""
 
 import itertools
+import os
 import subprocess
-import time
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -186,6 +187,17 @@ BYPASSES = [
     "B=wb/x; . ./env.sh; git push origin $B",
     'B=wb/x; read "$N" <<< main; git push origin $B',
     "B=wb/x; for B in main; do :; done; git push origin $B",
+    # Review of 767e08f (B): a setter however it is spelled or put; $PWD a line sets; the top
+    # of a repository after a `cd`.
+    "B=feat; <<<main read B; git push origin $B",
+    "B=feat; 0<<<main read B; git push origin $B",
+    "B=feat; r\\ead B <<< main; git push origin $B",
+    "B=feat; 're'ad B <<< main; git push origin $B",
+    "B=feat; command -p read B <<< main; git push origin $B",
+    "B=feat; time -p read B <<< main; git push origin $B",
+    'read PWD <<< ../other; git -C "$PWD" push',
+    'PWD=/x; PWD=/other; git -C "$PWD" push',
+    'cd src && git -C "$(git rev-parse --show-toplevel)/../other" push',
 ]
 # What a worker does every day, on its own branch: let through.
 EVERYDAY = [
@@ -292,6 +304,11 @@ ON_MAIN_REFUSED = [
     "B=; git push origin $B",
     "git push origin 2>/dev/null",
     "git push origin 2>&1",
+    # Review of 767e08f (B): `unset` escaped; and a quoted `>` (found by the oracle) is no
+    # redirection: what follows it in the script is read.
+    "B=feat; un\\set B; git push origin $B",
+    "sh -c 'echo x > log; git push'",
+    "eval 'echo x > log; git push'",
 ]
 # v0.1.42 refused these as pushes to the default branch, wrongly; still refused (never less).
 OLD_FALSE_POSITIVES: set[str] = set()
@@ -422,10 +439,18 @@ def work(monkeypatch):
     policy.reading.cache_clear()
 
 
+def spent() -> float:
+    """The CPU time of this process and of the commands it ran and waited for (git): what a
+    check costs, which a busy machine does not stretch as it does the time on the clock (30
+    suites at once, each running the bash oracle, stretched 0.1 s checks past 1 s)."""
+    times = os.times()
+    return times.user + times.system + times.children_user + times.children_system
+
+
 def timed(command: str, cwd) -> tuple[str | None, float]:
-    started = time.perf_counter()
+    started = spent()
     found = denial(command, cwd)
-    return found, time.perf_counter() - started
+    return found, spent() - started
 
 
 @pytest.mark.parametrize("evals", [16, 18, 20])
@@ -614,9 +639,9 @@ def test_each_rule_reads_a_line_of_its_own_words_in_linear_time(rule, command, f
     for found in chosen:
         assert found is not None
         policy.reading.cache_clear()
-        started = time.perf_counter()
+        started = spent()
         found(command, str(feature))
-        took = time.perf_counter() - started
+        took = spent() - started
         assert took < 0.5, (rule, command[:40], took)
 
 
@@ -1130,6 +1155,23 @@ NORMAL = [
     'git -C "${PWD}" push',
     'cd "$(pwd)" && git push',
     'git -C "$(git rev-parse --show-toplevel)" push origin wb/x',
+    # Final round: a subshell's folder (what is in one runs in order; it ends with it), a
+    # file a line sources (not read, as `sh FILE` is not), `pushd`, a quoted heredoc's `$B`.
+    "(cd src; git push)",
+    "(cd src && git push -u origin HEAD)",
+    "(cd src; npm test) && git push origin wb/x",
+    'for d in src; do (cd "$d" && git push); done',
+    'for d in src docs; do git -C "$d" push origin wb/x; done',
+    "pushd src && git push && popd",
+    "cd src || exit 1; git push",
+    "source .venv/bin/activate && git push -u origin HEAD",
+    ". .venv/bin/activate; git push",
+    "B=wb/x; cat <<'EOF'\n$B is pushed\nEOF\ngit push origin \"$B\"",
+    'case "$1" in (x) git push origin wb/x;; esac',
+    "if [ -d src ]; then (cd src; git push); fi",
+    "(export GIT_DIR=elsewhere; git status); git push -u origin HEAD",
+    "npm run dev > /dev/null & sleep 5 && git push -u origin HEAD",
+    "(cd src && git push -u origin HEAD) & wait",
 ]
 
 # On a checkout of main, a push of the checkout's own branch (naming none, HEAD, or what
@@ -1153,6 +1195,13 @@ INTENDED_ON_MAIN = {
     'git push -u origin "$(git branch --show-current)"',
     'cd "$(git rev-parse --show-toplevel)" && git push', 'git -C "$PWD" push',
     'git -C "${PWD}" push', 'cd "$(pwd)" && git push',
+    "(cd src; git push)", "(cd src && git push -u origin HEAD)",
+    'for d in src; do (cd "$d" && git push); done', "pushd src && git push && popd",
+    "cd src || exit 1; git push", "source .venv/bin/activate && git push -u origin HEAD",
+    ". .venv/bin/activate; git push", "if [ -d src ]; then (cd src; git push); fi",
+    "(export GIT_DIR=elsewhere; git status); git push -u origin HEAD",
+    "npm run dev > /dev/null & sleep 5 && git push -u origin HEAD",
+    "(cd src && git push -u origin HEAD) & wait",
 }  # fmt: skip
 
 
@@ -1257,23 +1306,32 @@ def test_a_push_keeps_so_many_branches_at_most_but_the_default(feature):
 
 
 @pytest.mark.parametrize(
-    ("text", "names"),
+    ("text", "name", "known"),
     [
-        ('branch=$(git branch --show-current); git push -u origin "$branch"', {"branch": 1}),
-        ('branch=wb/x; git commit -m "Add tests for branch names"', {"branch": 1}),
-        ("for b in a b; do read c; done", {"b": 1, "c": 1}),
-        ("B=x; IFS= read -r B", {"B": 2, "IFS": 1}),
-        ("export B=x; export C", {"B": 1}),
-        ("B=(x); C+=y; D[0]=z", {"B": 2, "C": 2, "D": 2}),
-        ("printf -v B x; printf '%s' \"$C\"", {"B": 1}),
-        ("echo read B; git branch", {}),
-        ('eval "$N=x"', None),
-        ("declare -n R=B", None),
-        ("source env.sh", None),
+        ('branch=$(git branch --show-current); git push -u origin "$branch"', "branch", True),
+        ('branch=wb/x; git commit -m "Add tests for branch names"', "branch", True),
+        ("B=x; echo read B; git branch", "B", True),
+        ("B=x; cat <<'EOF'\nB\nEOF", "B", True),
+        ("B=x; cat <<EOF\nB\nEOF", "B", False),
+        ("B=x; IFS= read -r B", "B", False),
+        ("B=x; <<<main read B", "B", False),
+        ("B=x; r\\ead B", "B", False),
+        ("B=x; 're'ad B", "B", False),
+        ("B=x; command -p read B", "B", False),
+        ("B=x; time -p read B", "B", False),
+        ("B=x; un\\set B", "B", False),
+        ('B=x; eval "$N=x"', "B", False),
+        ("B=x; declare -n R=B", "B", False),
+        ("B=x; source env.sh", "B", False),
+        ('B=x; read "$N"', "B", False),
+        ("B=x; IFS=/", "B", False),
+        ("B=x; $CMD B", "B", False),
     ],
 )
-def test_a_variable_is_counted_where_a_line_may_set_it(text, names):
-    assert policy.mentions(text) == names
+def test_a_variable_is_known_where_the_line_sets_it_once(text, name, known):
+    """Review of 767e08f (B): every other word naming it reads it (`$B`) or is given to a
+    command that cannot set it; anything else makes it not known."""
+    assert policy.Tally(text, "/").known(name) is known
 
 
 @pytest.mark.parametrize(
@@ -1286,11 +1344,198 @@ def test_a_variable_is_counted_where_a_line_may_set_it(text, names):
         ("$(echo $((1<<2)))\n2\n)", "$(echo $((1<<2)))"),
         ("$((1<<2\n+1))\n2\n) x", "$((1<<2\n+1))"),
         ("$(echo \"$(echo ')')\")x", "$(echo \"$(echo ')')\")"),
+        # Found running the oracle in bash 5.2: a case pattern's `)` ends no substitution.
+        ("$(case x in y) :;; x) git push;; esac) z", "$(case x in y) :;; x) git push;; esac)"),
+        ("$(case x in a) echo esac;; (b) (cd c);; esac) z",
+         "$(case x in a) echo esac;; (b) (cd c);; esac)"),
+        ("$(if true; then case x in a) :;; esac; fi) z",
+         "$(if true; then case x in a) :;; esac; fi)"),
+        ("$(echo case) z", "$(echo case)"),
+        ("$(x=esac) z", "$(x=esac)"),
     ],
-)
+)  # fmt: skip
 def test_a_substitution_ends_where_bash_ends_it(text, end):
     """Review of b73e0a2 (3): a heredoc's body in a substitution is text (an apostrophe in it
     is no quote, a `)` no end), as without_heredocs reads one outside."""
     assert policy.substitution_end(text, 2)[1] == len(end)
     quoted = f'"{end}"{text[len(end) :]}'
     assert policy.quoted_end(quoted, 0) == len(end) + 2
+
+
+@pytest.mark.parametrize("unit", [":.", ":read", "+source", ":eval", ",for", "=read", "%unset"])
+def test_a_line_naming_setters_is_read_in_one_pass(unit, work, feature):
+    """Review of 767e08f (A): words glued to setters' names made each of them read back over
+    the same growing word: quadratic. The names of a line are counted in one pass, over its
+    one parse."""
+    head = "B=x; git push origin $B; echo "
+    command = head + unit * ((480_000 - len(head)) // len(unit))
+    found, took = timed(command, feature)
+    assert found is None and work["parse"] == 1 and took < 0.5, (unit, took)
+
+
+@pytest.mark.parametrize(
+    ("text", "kinds"),
+    [
+        ("B=x \"B\"=y B\\=z B=(a) B+=c", ["Assignment", "str", "str", "str", "Separator",
+                                          "str", "Separator", "Assignment"]),
+        ("echo 'a > b' c>d \\>e", ["str", "str", "Redirecting", "str"]),
+        ('git push $R "$R" ${R}x \\$R', ["str", "str", "Splitting", "str", "Splitting", "str"]),
+    ],
+)  # fmt: skip
+def test_the_words_say_what_the_shell_takes_them_for(text, kinds):
+    """An assignment only with its name and `=` unquoted; a redirection only unquoted (a
+    quoted `>` in a script was taken for one, and what followed it was lost); a variable
+    unquoted is split into words."""
+    assert [type(word).__name__ for word in policy.shell_words(text)] == kinds
+
+
+def test_what_the_check_lets_through_pushes_nothing_to_main_in_real_bash(tmp_path, capsys):
+    """Review of 767e08f (C): command lines of a safe vocabulary (tests/policy_oracle.py),
+    generated with a fixed seed, and every line of this file, run in real bash with git a
+    shim that writes down what it pushes: none the check lets through pushed main or master.
+    The rates are printed (pytest -s)."""
+    import policy_oracle as oracle
+
+    generator = oracle.Generator(0)
+    cases = [generator.line() for _ in range(1000)]
+    cases += [(line, start) for line in oracle.seeds() for start in ("main", "feat")]
+    cases += oracle.FOUND
+    outcomes = oracle.run(policy, cases, tmp_path)
+    unsound = [(outcome.start, outcome.line, sorted(outcome.targets)) for outcome in outcomes
+               if outcome.unsound]  # fmt: skip
+    allowed = sum(outcome.allowed for outcome in outcomes)
+    with capsys.disabled():
+        refused = len(outcomes) - allowed
+        sys.stdout.write(f"\noracle: {len(outcomes)} lines, {allowed} allowed, {refused} "
+                         f"refused, {len(unsound)} unsound\n")  # fmt: skip
+    assert not unsound, unsound[:10]
+
+
+def commands_of(text: str) -> list[tuple[str, list[str]]]:
+    parsed = policy.shell_commands(text)
+    assert parsed is not None
+    return parsed[0]
+
+
+@pytest.mark.parametrize(
+    ("text", "events"),
+    [
+        ("(cd a; b) && c", ["(", "", ")"]),
+        ("( (cd a); b )", ["((", ")"]),
+        ("f() { cd a; }; f", ["", "()", "", ""]),
+        ("case x in (a) :;; (b) :;; esac; (c)", ["", "", "", "", "", "", "("]),
+        ("case x in a|b) (c);; esac", ["", "", "(", ")"]),
+        ("case x in\n a) :\n ;;\n *) (c)\nesac", ["", "", "", "", "(", ")"]),
+        ("case x in a) case y in (b) :;; esac;; esac", ["", "", "", "", "", ""]),
+        ("for case in a; do (b); done", ["", "", "(", ")"]),
+        ("a;; b", None),
+        ("case x in a) b", None),
+        ("esac", None),
+        ("a) b", None),
+        ("case x in a) (b;; esac)", None),
+        ("time case x in a) b;; esac", None),
+    ],
+)
+def test_a_case_patterns_parentheses_are_no_subshells(text, events):
+    """Found while checking the tests' mutants: a case pattern's `(` (`(a)`, `;; (b)`) was taken
+    for a subshell's, its `x|y)` for one's end; the folder a subshell had came back after the
+    case. Where the parentheses do not pair as bash's, None: the folder is then not known
+    after a `)`."""
+    found = policy.subshells(commands_of(text))
+    assert (found and found[0]) == events
+
+
+@pytest.mark.parametrize(
+    ("text", "jobs"),
+    [
+        ("a && b & c", [True, True, False]),
+        ("a; b & c", [False, True, False]),
+        ("(a; b) && c & d", [True, True, True, False]),
+        ("x && (a; b) & c", [True, True, True, False]),
+        ("(a && b) & c; d", [True, True, False, False]),
+        ("case x in (a) b & c;; esac; d", [False, False, True, False, False, False]),
+        ("a & b & c", [True, True, False]),
+        ("B=/ || if false; then a; fi & b", [True, True, True, True, False]),
+        ("for case in a; do b & done; c", [False, True, False, False]),
+        ("x && for case in a; do b; done & c", [True, True, True, True, False]),
+        ("{ a; b; } & c", [True, True, True, False]),
+    ],
+)
+def test_a_list_put_in_the_background_is_read_whole(text, jobs):
+    """Found by the fourth 200k run: in `cd ../main && git push & …` the `cd` was taken for a
+    piped command's (its own), and the push read where the line started; a list with a
+    subshell in it (`x && (a; b) &`) was not seen to be in the background at all."""
+    commands = commands_of(text)
+    paired = policy.subshells(commands)
+    assert policy.background(commands, paired and paired[2]) == jobs
+
+
+@pytest.mark.parametrize(
+    ("text", "alongside"),
+    [
+        ("case x in x) a;; esac | ( b )", [True, True, True, True]),
+        ("( a; b ) | c", [True, True, False]),
+        ("c | { a; b; }", [False, True, True, True]),
+        ("x | while read l; do a; done; b", [False, True, True, True, False]),
+        ("( a ) ; b | c", [False, False, False]),
+        ("{ a; } && b | c", [False, False, False, False]),
+    ],
+)
+def test_a_group_in_a_pipe_runs_alongside_it(text, alongside):
+    """Found by the fifth 200k run: `… | ( git checkout -B main )` switched while the pushes
+    piped into it ran; the switch was read as one after them."""
+    commands = commands_of(text)
+    paired = policy.subshells(commands)
+    assert policy.in_pipes(commands, paired and paired[2]) == alongside
+
+
+def test_a_cd_bash_may_refuse_leaves_the_folder_unknown(feature, main_checkout):
+    """`cd A B`: bash 5 refuses it (too many arguments), bash 3.2 goes to A."""
+    assert denial(f"cd {feature}; git push", main_checkout) is None
+    assert denial(f"cd {feature} extra; git push", main_checkout)
+
+
+@pytest.mark.parametrize(
+    ("value", "made"),
+    [("", ["", "", "x"]), ("a b", ["a b", "a", "b", "a", "b", "x"])],
+)
+def test_a_quoted_variable_is_one_word_even_empty(value, made):
+    """Found by the third 200k run: `git -C "$D" push` with D empty was read as `git -C push`
+    (the empty word dropped). Only what is put in unquoted is split; a word with a quoted
+    part (`""$D`) stays a word when empty."""
+    words = policy.shell_words('"$D" ""$D $D x')
+    assert policy.expansions(words, lambda name: (value,), policy.Tally("x", "/")) == [made]
+
+
+@pytest.mark.parametrize(
+    ("command", "allowed"),
+    [
+        # Intended, conservative: what the line runs as code, or reads from a file, may set
+        # any variable; a push of a variable the line set is then refused, saying why.
+        ('B=wb/x; source env.sh; git push origin "$B"', False),
+        ('B=wb/x; . ./env.sh; git push origin "$B"', False),
+        ('B=wb/x; eval "$(ssh-agent -s)"; git push origin "$B"', False),
+        ('B=wb/x; eval "$X"; git push origin "$B"', False),
+        # Text that names it, given to a command that cannot set it, is only text.
+        ("B=wb/x; git commit -m 'B=main later'; git push origin \"$B\"", True),
+        ('B=wb/x; echo "for B in main"; git push origin "$B"', True),
+        # Intended, conservative: a folder the line may or may not have gone to (code it runs,
+        # a `cd` in a group or a condition, a loop's several), a remote that may split into
+        # refspecs. A push naming its branch is let through (`git push origin wb/x`).
+        ('eval "$(ssh-agent -s)" && git push -u origin HEAD', False),
+        ('eval "$(ssh-agent -s)" && git push -u origin wb/x', True),
+        ("{ cd src; git push; }", False),
+        ("if [ -d src ]; then cd src; fi; git push", False),
+        ('for d in src docs; do (cd "$d" && git push); done', False),
+        ('for d in src docs; do git -C "$d" push; done', True),
+        ("git push $REMOTE HEAD", False),
+        ('git push "$REMOTE" HEAD', True),
+    ],
+)
+def test_code_a_line_runs_makes_its_variables_unknown_text_does_not(command, allowed, feature):
+    """Review of 767e08f: the intended conservative differences with v0.1.42 (which let these
+    through, unread): only where the line may run code it does not show, or go to a folder
+    that cannot be told from its text."""
+    found = denial(command, feature)
+    assert (found is None) is allowed, found
+    assert allowed or "can't tell which branch" in (found or "")

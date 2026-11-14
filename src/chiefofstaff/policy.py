@@ -91,124 +91,135 @@ MADE_UP_DEFAULT = re.compile(r"\$\([^()]*\b(?:main|master)\b|`[^`]*\b(?:main|mas
 UNSETTLED = re.compile(r"[$`\x00]")
 # `$NAME` and `${NAME}`: a variable a line may have set (NAME=value) before its push.
 VARIABLE = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
-# The folder a command runs in, as a word says it (`$PWD`, `${PWD}`), and the substitutions
-# that make it, or its repository's top (the same repository: its branch is asked of git).
+# The folder a command runs in, as a word says it (`$PWD`, `${PWD}`, `$(pwd)`), and the top of
+# its repository (`$(git rev-parse --show-toplevel)`, read as TOP): see Tally.moved.
 HERE = re.compile(r"\$(?:PWD|\{PWD\})(?=/|$)")
-HERE_MADE = frozenset({"pwd", "git rev-parse --show-toplevel"})
+TOP = re.compile(r"\$CHIEFOFSTAFF_TOP(?=/|$)")
+MADE_FOLDERS = {"pwd": "$PWD", "git rev-parse --show-toplevel": "$CHIEFOFSTAFF_TOP"}
+# A folder not known (a `cd` that may not have run, or where a line's text cannot say).
+LOST = "/" + MADE_UP
 # A heredoc's start: `<<WORD`, `<<-WORD`, `<<'WORD'`, `<<"WORD"` (not `<<<`, a here-string).
 HEREDOC = re.compile(r"<<(-?)[ \t]*(?:'([^'\n]*)'|\"([^\"\n]*)\"|\\?([^\s;&|()<>'\"`]+))")
 
 # A variable's name.
 NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-# Where a line may set a variable (mentions): `${NAME=…}` and `${NAME:=…}`; `NAME=`, `NAME+=`
-# and `NAME[…]=` starting a word (also in quotes: eval, a shell or a trap may run them); and
-# the commands that set the variables they name (SETTERS), where a command may start.
-SETTERS = ("for", "select", "read", "mapfile", "readarray", "getopts", "export", "local",
-           "declare", "typeset", "readonly", "unset", "printf", "eval", "source", ".")  # fmt: skip
-SETTING = re.compile(
-    r"\$\{([A-Za-z_][A-Za-z0-9_]*):?="
-    r"|(?<![^\s;&|()`'\"{!])([A-Za-z_][A-Za-z0-9_]*)(\[[^\]\s;&|()`'\"{!]*\])?(\+?=)(\(?)"
-    r"|(?<![A-Za-z0-9_./-])(" + "|".join(map(re.escape, SETTERS)) + r")(?![A-Za-z0-9_./-])"
-)
-NAME_AFTER = re.compile(r"[ \t]+([A-Za-z_][A-Za-z0-9_]*)")
-WORD_NAME = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)(\[[^\]]*\])?(\+?=)?(\()?")
-ARGUMENTS_STOPS = re.compile(r"[;&|\n()`'\"\\]")
-LINE_STOPS = re.compile(r"[\n'\"\\]")
-# Words after which a word may be a command's name.
-COMMAND_WORDS = frozenset(
-    {"do", "then", "else", "elif", "if", "while", "until", "time", "builtin", "command", "exec",
-     "eval", "!", "{"}
+# Commands that may set a variable of the shell they run in, or run code in it (builtins and
+# reserved words): a name in their words may be set there. Of those, the ones that run text
+# as code (EVALUATORS): any variable may be set, any folder gone to, by what they run.
+SETTING_COMMANDS = frozenset(
+    {".", "source", "eval", "exec", "command", "builtin", "time", "coproc", "alias",
+     "unalias", "bind", "complete", "compgen", "compopt", "enable", "fc", "history", "trap",
+     "read", "mapfile", "readarray", "printf", "getopts", "wait", "declare", "typeset",
+     "local", "export", "readonly", "unset", "let", "set", "shift", "shopt", "cd", "pushd",
+     "popd", "dirs", "select", "for", "case", "function", "in", "do", "done", "then", "else",
+     "elif", "fi", "if", "while", "until", "esac", "{", "}", "!", "[[", "]]", "caller", "hash"}
 )  # fmt: skip
+EVALUATORS = frozenset({".", "source", "eval", "trap", "alias", "fc", "bind", "complete",
+                        "compgen", "enable"})  # fmt: skip
+WRAPPERS = frozenset({"command", "builtin", "time", "exec"})
+# A command's name that is plain text (no variable, substitution, glob or quote in it).
+PLAIN_NAME = re.compile(r"[A-Za-z0-9_./+:@%,~-]+|\[\[?")
 
 
-def command_position(text: str, at: int) -> bool:
-    """Whether the word at `at` may be a command's name: first, or after a separator, a quote
-    (a string eval or a shell may run), a reserved word, `builtin`, `command`, `exec`, `eval`,
-    or an assignment (`IFS= read`); not a word in a sentence (`Add tests for branch names`)."""
-    if at and text[at - 1] == "\\":
-        at -= 1
-    end = at
-    while end and text[end - 1] in " \t":
-        end -= 1
-    if not end or text[end - 1] in ";&|(){}`'\"\n!":
-        return True
-    start = end
-    while start and text[start - 1] not in " \t;&|(){}`'\"\n!":
-        start -= 1
-    word = text[start:end]
-    return word in COMMAND_WORDS or bool(ASSIGNMENT.match(word))
+def command_name(words: list[str]) -> tuple[str, int]:
+    """The name a simple command runs (past reserved words and assignments before it; past
+    `command`, `builtin`, `exec`, and `time` first, and their options), and where its
+    arguments start."""
+    index = 0
+    while index < len(words) and words[index] in KEYWORDS:
+        index += 1
+    first = index
+    while index < len(words) and isinstance(words[index], Assignment):
+        index += 1
+    while index < len(words) and words[index] in WRAPPERS:
+        if words[index] == "time" and index != first:
+            break  # After an assignment, `time` is no reserved word: the program.
+        index += 1
+        while index < len(words) and words[index].startswith("-"):
+            index += 1
+    return (words[index], index + 1) if index < len(words) else ("", len(words))
 
 
-def arguments_end(text: str, index: int, stops: re.Pattern = ARGUMENTS_STOPS) -> int:
-    """Where the words of a command from `index` end: at a separator (`stops`), quotes read
-    whole."""
-    while stop := stops.search(text, index):
-        at = stop.start()
-        if text[at] in "'\"":
-            index = quoted_end(text, at)
-        elif text[at] == "\\":
-            index = at + 2
-        else:
-            return at
-    return len(text)
+def named(text: str) -> tuple[dict[str, int], dict[str, int]]:
+    """How often each name stands in a text as a whole word, anywhere (in quotes, comments,
+    heredocs too); and how often of those as a variable read (`$NAME`, `${NAME}`)."""
+    every: dict[str, int] = {}
+    read: dict[str, int] = {}
+    for found in NAME.finditer(text):
+        at, end = found.span()
+        before = text[at - 1] if at else ""
+        if before.isalnum() or before == "_":
+            continue  # Within a word (`9B`).
+        name = found.group()
+        every[name] = every.get(name, 0) + 1
+        if before == "$" or (
+            before == "{" and text[at - 2 : at - 1] == "$" and text[end : end + 1] == "}"
+        ):
+            read[name] = read.get(name, 0) + 1
+    return every, read
 
 
-def mentions(text: str) -> dict[str, int] | None:
-    """How often a line may set each variable (SETTING): an assignment that is plain (`B=x`)
-    counts once, any other (`B+=x`, `B[0]=x`, `B=(x)`) twice; a command's words (`git branch`)
-    and text (`-m "Fix branch handling"`) do not count. None when it may set any variable,
-    which it does not name (`eval "$N=x"`, `read "$N"`, `declare -n`, `source`)."""
+def names_made_up(name: str, words: list[str]) -> bool:
+    """Whether a command may set a variable whose name the line makes up as it runs (`read
+    "$N"`, `export "$N=x"`, `printf -v "$N"`), or one that stands for another (`declare -n`)."""
+    if name == "printf":
+        targets = [after for before, after in itertools.pairwise(words) if before == "-v"]
+        words = targets + [word[2:] for word in words if word.startswith("-v") and word[2:]]
+    elif name in {"export", "declare", "typeset", "local", "readonly"}:
+        if any(word.startswith("-") and "n" in word for word in words):
+            return True
+        words = [word.partition("=")[0] for word in words]
+    elif name not in {"read", "mapfile", "readarray", "getopts", "unset", "wait", "select"}:
+        return False
+    return any(UNSETTLED.search(word) for word in words)
+
+
+def placed(
+    text: str, parse: Callable[[str], Any] = lambda text: shell_commands(text)
+) -> dict[str, int] | None:
+    """How often each name stands, in a line, where it cannot be set: in the words given to a
+    command that cannot set a variable of the shell running it (any command but
+    SETTING_COMMANDS, by a plain name; `git branch`, `-m "Fix branch handling"`), in what its
+    command substitutions run, and in heredocs that expand nothing. None when the line may
+    set any variable without naming it (it runs EVALUATORS, or a command whose name it makes
+    up), or is past what is read here."""
     counted: dict[str, int] = {}
-
-    def add(name: str, times: int = 1):
-        counted[name] = counted.get(name, 0) + times
-
-    index, settled = 0, 0  # (No `$` nor backquote in the text from an `eval` up to `settled`.)
-    while found := SETTING.search(text, index):
-        index = found.end()
-        if found.group(1):
-            add(found.group(1))
-            continue
-        if found.group(2):
-            plain = found.group(3) is None and found.group(4) == "=" and not found.group(5)
-            add(found.group(2), 1 if plain else 2)
-            continue
-        setter = found.group(6)
-        if not command_position(text, found.start()):
-            continue
-        if setter in {"for", "select"}:
-            if name := NAME_AFTER.match(text, index):
-                add(name.group(1))
-                index = name.end()
-            continue
-        if setter in {"source", "."}:
+    budget, pending = 2 * len(text) + MOST_READ, [text]
+    while pending:
+        text = pending.pop()
+        budget -= len(text)
+        parsed = parse(text) if budget >= 0 else None
+        if parsed is None:
             return None
-        if setter == "eval":  # What it runs is the line's own text: read on.
-            if index >= settled:
-                settled = arguments_end(text, index, LINE_STOPS)
-                if UNSETTLED.search(text, index, settled):
-                    return None  # A line to run, made up as it runs (to its line's end).
-            continue
-        end = arguments_end(text, index)
-        words, index = text[index:end].split(), end
-        if setter == "printf":
-            targets = [after for before, after in itertools.pairwise(words) if before == "-v"]
-            words = targets + [word[2:] for word in words if word.startswith("-v") and word[2:]]
-        elif setter in {"declare", "local", "typeset"}:
-            if any(word.startswith("-") and "n" in word for word in words):
-                return None  # A name that stands for another (`declare -n`).
-        for word in words:
-            if word.startswith("-"):
+        commands, inside = parsed
+        pending += inside
+        for body, quoted in heredocs(text)[1]:
+            every, read = named(body) if quoted else ({}, {})
+            for name, times in every.items():  # (Not its `$NAME`s: counted as read, as text.)
+                counted[name] = counted.get(name, 0) + times - read.get(name, 0)
+        for _, words in commands:
+            name, start = command_name(words)
+            if not name:
                 continue
-            if UNSETTLED.search(word.partition("=")[0]):
-                return None  # A name made up as it runs (`read "$N"`, `export "$N=x"`).
-            if not (named := WORD_NAME.match(word.lstrip("'\"\\"))):
+            if (
+                name in EVALUATORS
+                or not PLAIN_NAME.fullmatch(name)
+                or names_made_up(name, words[start:])
+            ):
+                return None
+            if name in SETTING_COMMANDS and "/" not in name:
                 continue
-            assigning = bool(named.group(3))
-            if setter in {"export", "readonly"} and not assigning:
-                continue  # Its value as it was.
-            plain = not named.group(2) and named.group(3) in {None, "="} and not named.group(4)
-            add(named.group(1), 1 if plain else 2)
+            for word in words[start:]:
+                for found in NAME.finditer(word):
+                    at = found.start()
+                    before = word[at - 1] if at else ""
+                    if (
+                        before.isalnum()
+                        or before in {"_", "$"}
+                        or word[max(at - 2, 0) : at] == "${"
+                    ):
+                        continue
+                    counted[found.group()] = counted.get(found.group(), 0) + 1
     return counted
 
 
@@ -235,11 +246,12 @@ class Push:
     bare_also: frozenset[str] = frozenset()
     unknown: bool = False
     made_up: bool = False  # A refspec a substitution makes (taken as its folder's branch).
+    nested: bool = False  # In a line a command runs (`eval`, `sh -c`, a substitution).
 
     def key(self) -> tuple:
         branches = None if self.branches is None else frozenset(self.branches)
         return (self.forced, branches, self.bare_in, self.bare_new, self.bare_also,
-                self.unknown, self.made_up)  # fmt: skip
+                self.unknown, self.made_up, self.nested)  # fmt: skip
 
 
 @dataclass
@@ -284,12 +296,8 @@ def pushed_branch(refspec: str) -> str:
 
 
 def expanded(folder: str, path: str) -> str:
-    """`path` from `folder`, `~` expanded, and `$PWD` (`${PWD}`, `$(pwd)`, the top of its
-    repository: see without_substitutions) as `folder` itself; `folder` itself when it cannot
-    be (an unknown user's home: the shell's `cd` fails there, and the command goes on where it
-    was)."""
-    if here := HERE.match(path):
-        path = "." + path[here.end() :]
+    """`path` from `folder`, `~` expanded; `folder` itself when it cannot be (an unknown user's
+    home: the shell's `cd` fails there, and the command goes on where it was)."""
     try:
         return str(Path(folder) / Path(path).expanduser())
     except (RuntimeError, ValueError):
@@ -403,11 +411,11 @@ def heredoc_at(text: str, index: int) -> tuple[str, bool, bool, int] | None:
 
 def bodies_end(
     text: str, index: int, pending: list[tuple[str, bool, bool]]
-) -> tuple[int, list[str]]:
+) -> tuple[int, list[tuple[str, bool]]]:
     """Past the bodies of the heredocs `pending`, read from `index` (the line after the one
-    they were opened on): each up to the first line after it that is its word; and the bodies
-    whose word is not quoted (the shell runs their substitutions). A body with no line to end
-    it is no heredoc: what is left is read from there as it is."""
+    they were opened on): each up to the first line after it that is its word; and the
+    bodies, each with whether its word is quoted (if not, the shell runs its substitutions). A
+    body with no line to end it is no heredoc: what is left is read from there as it is."""
     said, untabbed = line_starts(text)
     bodies = []
     for word, tabs, quoted in pending:
@@ -417,18 +425,24 @@ def bodies_end(
             break
         end = starting[ending]
         stop = text.find("\n", end)
-        if not quoted:
-            bodies.append(text[index:end])
+        bodies.append((text[index:end], quoted))
         index = len(text) if stop < 0 else stop + 1
     return index, bodies
 
 
 def without_heredocs(text: str) -> tuple[str, list[str]]:
+    """A command line without its heredocs' bodies (heredocs), and those whose word is not
+    quoted, given apart: the shell runs their substitutions."""
+    kept, bodies = heredocs(text)
+    return kept, [body for body, quoted in bodies if not quoted]
+
+
+def heredocs(text: str) -> tuple[str, list[tuple[str, bool]]]:
     """A command line without its heredocs' bodies, as bash reads them: after the line a
     `<<WORD` (unquoted, outside a comment, not in `((…))`) stands on, each line up to one that
     is WORD (its tabs first dropped for `<<-WORD`). What a body says is text, not commands (an
-    apostrophe in it is no quote); but the shell runs the substitutions in one whose WORD is
-    not quoted: those bodies are given apart. A body with no line to end it is kept."""
+    apostrophe in it is no quote). The bodies, each with whether its word was quoted. A body
+    with no line to end it is kept."""
     if "<<" not in text:
         return text, []
     kept, start, index, pending, bodies, arithmetic = [], True, 0, [], [], 0
@@ -478,9 +492,28 @@ def without_heredocs(text: str) -> tuple[str, list[str]]:
     return "".join(kept), bodies
 
 
-INNER_STOPS = re.compile(r"[\\'\"()<\n]")
+INNER_STOPS = re.compile(r"[\\'\"()<\n]|(?<![\w$-])(?:case|esac)(?![\w-])")
 DOUBLE_QUOTED_STOPS = re.compile(r'["\\$]')
 BACKQUOTE_STOPS = re.compile(r"[\\`]")
+
+
+# The reserved words a command may follow (`then case …`): a command starts after them.
+LEADING = frozenset({"then", "do", "else", "elif", "if", "while", "until", "!", "time", "-p", "in"})
+ENDING = frozenset(" \t\n;&|(){}")
+
+
+def starts_command(text: str, at: int) -> bool:
+    """Whether the word at `at` stands where a command starts: after a separator, or a
+    reserved word a command follows (looked back over a few characters only)."""
+    index = at
+    while index and text[index - 1] in " \t":
+        index -= 1
+    if not index or text[index - 1] in ";\n&|(){":
+        return True
+    start = index
+    while start and index - start < 6 and text[start - 1] not in ENDING:
+        start -= 1
+    return (not start or text[start - 1] in ENDING) and text[start:index] in LEADING
 
 
 def construct_end(text: str, index: int, opened: str) -> tuple[int, int]:
@@ -488,8 +521,9 @@ def construct_end(text: str, index: int, opened: str) -> tuple[int, int]:
     whose text starts at `index` ends: the end of its text, and past what closes it (the
     text's end for both when nothing does). What is nested in it is read whole, as bash reads
     it, in one pass: in double quotes, a backslash's character and a substitution; in a
-    substitution, quotes, parentheses (other substitutions), and heredocs' bodies (text: an
-    apostrophe in one is no quote; not in arithmetic, `$((…))`)."""
+    substitution, quotes, parentheses (other substitutions), heredocs' bodies (text: an
+    apostrophe in one is no quote; not in arithmetic, `$((…))`), and a `case` up to its
+    `esac` (a pattern's `)` in it is no end, as bash 4 and later read it)."""
     stack, pending = [opened], []
     arithmetic = int(opened == "$(" and text.startswith("(", index))
     while stop := (DOUBLE_QUOTED_STOPS if stack[-1] == '"' else INNER_STOPS).search(text, index):
@@ -508,12 +542,19 @@ def construct_end(text: str, index: int, opened: str) -> tuple[int, int]:
             index = quoted_end(text, at)
         elif char == '"':
             stack.append('"')
+        elif char in "ce":  # `case`, `esac`: in a case, a `)` may end a pattern.
+            index = stop.end()
+            if char == "c" and starts_command(text, at):
+                stack.append("case")
+            elif char == "e" and stack[-1] == "case" and starts_command(text, at):
+                stack.pop()
         elif char == "(":
             arithmetic += text.startswith("((", at)
             stack.append("(")
-        elif char == ")":
+        elif char == ")":  # (In a case, a pattern's `)` without its `(` ends nothing.)
             arithmetic -= bool(arithmetic and text.startswith("))", at))
-            stack.pop()
+            if stack[-1] != "case":
+                stack.pop()
         elif char == "<" and not arithmetic and (heredoc := heredoc_at(text, at)):
             pending.append(heredoc[:3])
             index = heredoc[3]
@@ -544,8 +585,8 @@ def backquote_end(text: str, index: int) -> tuple[int, int]:
 def without_substitutions(text: str, quoted: bool = False) -> tuple[str, list[str]]:
     """A command line with each command substitution in it (`$(…)`, `` `…` ``, unquoted or in
     double quotes, not in single quotes: there text is only text) put as MADE_UP, in the word
-    it stood in (`$PWD` for one that says the folder it runs in: HERE_MADE), and what each
-    runs: lines of their own. `quoted`: all of the text is in double quotes (a heredoc's
+    it stood in (a variable for one that says a folder: MADE_FOLDERS), and what each runs:
+    lines of their own. `quoted`: all of the text is in double quotes (a heredoc's
     body)."""
     if "$(" not in text and "`" not in text:
         return text, []
@@ -573,8 +614,8 @@ def without_substitutions(text: str, quoted: bool = False) -> tuple[str, list[st
             end, index = ending(text, start)
             body = text[start:end]
             bodies.append(body)
-            here = len(body) < 64 and " ".join(body.split()) in HERE_MADE
-            kept.append("$PWD" if here else MADE_UP)
+            made = MADE_FOLDERS.get(" ".join(body.split())) if len(body) < 64 else None
+            kept.append(made or MADE_UP)
             continue
         if char in "'\"" and not quoted:
             quote = "" if quote == char else (quote or char)
@@ -585,16 +626,17 @@ def without_substitutions(text: str, quoted: bool = False) -> tuple[str, list[st
 
 def redirection_free(words: list[str]) -> list[str]:
     """A simple command's words without its redirections (`> log`, `2>/dev/null`, `<<EOF`,
-    `main>/dev/null`: the word before the operator stays): they name files, not branches."""
+    `main>/dev/null`: the word before the operator stays; a quoted `>` is text: Redirecting):
+    they name files, not branches."""
     kept, target = [], False
     for word in words:
         if target:
             target = False
             continue
-        if ">" not in word and "<" not in word:
+        if not isinstance(word, Redirecting):
             kept.append(word)
             continue
-        at = min(i for i in (word.find(">"), word.find("<")) if i >= 0)
+        at = word.at
         rest = word[at:]
         target = not rest.endswith("&-") and not rest.strip("<>&|-")  # Its file: the next word.
         if word[:at] and not word[:at].isdigit():  # Not a file descriptor's number (`2>`).
@@ -607,7 +649,47 @@ class Separator(str):
     is a word like any other."""
 
 
+class Assignment(str):
+    """A word the shell takes for an assignment (`NAME=…`, `NAME+=…`, `NAME[…]=…`: its name
+    and `=` unquoted); `"B"=x` and `B\\=x` are a command's name instead."""
+
+
+class Redirecting(str):
+    """A word with an unquoted `<` or `>` in it (a redirection), the first at `at`; a quoted
+    one is text (`'a > b'`)."""
+
+    at = 0
+
+
+class Splitting(str):
+    """A word with a variable or a substitution in it, unquoted: what it holds is split into
+    words (`$B`, not `"$B"`); with a quoted part (`quoted`), it is a word even when empty."""
+
+    quoted = False
+
+
+def made_word(
+    pieces: list[str], at: int, assignment: bool, splits: bool = False, quoted: bool = False
+) -> str:
+    text = "".join(pieces)
+    if at >= 0:
+        word = Redirecting(text)
+        word.at = at
+        return word
+    if assignment:
+        return Assignment(text)
+    if splits:
+        split = Splitting(text)
+        split.quoted = quoted
+        return split
+    return text
+
+
+ASSIGNING = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]\s'\"\\]*\])?\+?=")
+
+
 PLAIN_RUN = re.compile(r"[^\s'\"\\" + re.escape(SEPARATORS) + "]+")
+REDIRECTS = re.compile(r"[<>]")
 
 
 def shell_words(text: str) -> list[str]:
@@ -633,10 +715,13 @@ def shell_words(text: str) -> list[str]:
             index = end
             continue
         word: list[str] = []
+        at, assignment, splits = -1, bool(ASSIGNING.match(text, index)), False
+        quoted = False
         while index < size:
             char = text[index]
             if char in " \t\r" or char in SEPARATORS:
                 break
+            quoted = quoted or char in "\\'\""
             if char == "\\":
                 if index + 1 == size:
                     raise ValueError("No escaped character")
@@ -665,12 +750,18 @@ def shell_words(text: str) -> list[str]:
                     word.append(escaped if escaped in '"\\' else "\\" + escaped)
                     index = end + 2
             elif found := PLAIN_RUN.match(text, index):
-                word.append(found.group())
+                piece = found.group()
+                if at < 0 and (redirects := REDIRECTS.search(piece)):
+                    at = sum(map(len, word)) + redirects.start()
+                splits = splits or "$" in piece or MADE_UP in piece
+                word.append(piece)
                 index = found.end()
             else:  # Whitespace shlex does not split at (`\n` is a separator, `\f` a character).
                 word.append(char)
                 index += 1
-        words.append("".join(word))
+        # (`B=(x)`: an array, no assignment of a word.)
+        array = assignment and index < size and text[index] == "(" and text[index - 1] == "="
+        words.append(made_word(word, at, assignment and not array, splits, quoted))
     return words
 
 
@@ -701,12 +792,13 @@ def shell_commands(text: str) -> tuple[list[tuple[str, list[str]]], list[str]] |
             continue
         following = tokens[index] if index < len(tokens) else Separator()
         is_word = not isinstance(following, Separator)
-        if word == "&" and current and current[-1][-1:] in {">", "<"} and is_word:
-            current[-1] += "&" + following  # `2>&1`, `>&2`: one redirection, split by `&`.
+        last = current[-1] if current else ""
+        if word == "&" and isinstance(last, Redirecting) and last[-1:] in {">", "<"} and is_word:
+            current[-1] = made_word([last, "&", following], last.at, False)  # `2>&1`, `>&2`.
             index += 1
             continue
-        if word == "&" and following.startswith(">"):
-            current.append("&" + following)  # `&>log`: a redirection, not `&` and a command.
+        if word == "&" and isinstance(following, Redirecting) and following.startswith(">"):
+            current.append(made_word(["&", following], 0, False))  # `&>log`: a redirection.
             index += 1
             continue
         if current:
@@ -779,25 +871,25 @@ def resolved(word: str, value_of: Callable[[str], str | None]) -> str:
 
 
 def expansions(
-    words: list[str], values: dict[str, tuple[str, ...]], tally: "Tally"
+    words: list[str], values: Callable[[str], tuple[str, ...]], tally: "Tally"
 ) -> list[list[str]]:
     """The words a simple command runs once the line's variables are put in: one list for each
     value a loop's variable takes (`for b in x y`), at most MOST_VALUES (past them, those
     stay unknown); a word a value went into split at its spaces, as the shell splits what it
     puts in unquoted (an empty one is no word). What they make is counted in `tally` as it is
     made (TooComplexError past its budget)."""
-    if not values or not any("$" in word for word in words):
+    if not any("$" in word for word in words):
         return [words]
     looped = {
         name
         for word in words
         if "$" in word
         for found in VARIABLE.finditer(word)
-        if len(values.get(name := found.group(1) or found.group(2), ())) > 1
+        if len(values(name := found.group(1) or found.group(2))) > 1
     }
     combinations: list[dict[str, str]] = [{}]
     for name in sorted(looped):
-        combinations = [{**done, name: value} for done in combinations for value in values[name]]
+        combinations = [{**done, name: value} for done in combinations for value in values(name)]
         if len(combinations) > MOST_VALUES:
             combinations = [{}]
             break
@@ -805,13 +897,16 @@ def expansions(
     for combination in combinations:
 
         def value_of(name: str, chosen: dict[str, str] = combination) -> str | None:
-            said = values.get(name, ())
+            said = values(name)
             return chosen.get(name, said[0] if len(said) == 1 else None)
 
         run = []
         for word in words:
             put = resolved(word, value_of)
-            made = [put] if put == word else put.split()
+            # Split where unquoted (`$B`), and gone when empty, unless part of it is quoted
+            # (`""$B`); a quoted one (`"$B"`) is one word, even empty.
+            made = [put] if put == word or not isinstance(word, Splitting) else put.split()
+            made = made or ([""] if getattr(word, "quoted", False) else [])
             tally.expands(len(put), len(made))
             run += made
         found.append(run)
@@ -865,6 +960,7 @@ class Git:
     config: dict[str, str | None]
     rest: list[str]
     elsewhere: bool
+    moved: bool = False  # Its folder is another than the shell's (`-C`).
 
 
 def git_command(
@@ -893,7 +989,7 @@ def git_command(
         index += 1
     if index >= len(words):
         return None
-    return Git(folder, config, words[index:], elsewhere)
+    return Git(folder, config, words[index:], elsewhere, folder != cwd)
 
 
 def switch_of(arguments: list[str]) -> tuple[str, str] | None:
@@ -980,6 +1076,8 @@ def push_of(git: Git) -> Push | None:
         positional.append(word)
     refspecs, every, unknown = git_config_pushes(git.config)
     push.unknown = unknown
+    if positional and isinstance(positional[0], Splitting) and UNSETTLED.search(positional[0]):
+        push.unknown = True  # A remote in a variable, unquoted: it may hold refspecs too.
     if every:
         push.branches = None
     heads = False  # A refspec that pushes the folder's branch (`HEAD`, a substitution's whole).
@@ -1006,25 +1104,47 @@ def push_of(git: Git) -> Push | None:
     if deleting or refspecs:
         push.unknown = push.unknown or push.made_up  # Which one it deletes: not known.
         return push  # What it updates is all in its words.
+    if push.made_up and git.moved:
+        push.unknown = True  # A substitution runs where the shell is, not in `-C`'s folder.
     if (len(positional) <= 1 and not tags) or push.made_up or heads:
         push.bare_in = git.folder  # Where its folder's branch goes.
         push.unknown = push.unknown or git.elsewhere  # Another repository's: not known.
     return push
 
 
+# In text read loosely: what may take a command to another folder, git to another repository,
+# or the folder's checkout to another branch (bash runs the lines before one it cannot parse).
+ELSEWHERE = re.compile(
+    r"\b(?:cd|pushd|popd|eval|source|exec|function|checkout|switch|symbolic-ref)\b"
+    r"|(?:^|[\s;&|(`])\.\s|-C|GIT_DIR|GIT_WORK_TREE|--git-dir|--work-tree|\(\s*\)"
+)
+
+
 def loose_pushes(command: str, cwd: str) -> list[Push]:
     """The pushes of text the shell would not parse (an unclosed quote), read loosely: in each
-    stretch up to a separator, the words after the first `push` that follows its first `git`.
-    A bare one is judged by the line's folder (no `cd` or `-C` is read here)."""
-    found = []
+    stretch up to a separator, the words after the first `push` that follows its first `git`
+    (with nothing between them: git's options, an alias, are not read here). A bare one is
+    judged by the line's folder, unless the text may go elsewhere first (no `cd` or `-C` is
+    read here: ELSEWHERE). Not known where it pushes: one whose words name a variable or run
+    a command (no variable is read here), and a `push` after a `git` of an earlier stretch
+    (`git -C "$(cd x && pwd)" push`)."""
+    found, elsewhere, gits = [], bool(ELSEWHERE.search(command)), False
     for stretch in FLOOR_ENDS.split(command):
-        if (git := GIT_WORD.search(stretch)) and (push := PUSH_WORD.search(stretch, git.end())):
-            words = ["git", "push", *(w.strip("'\"`()\\") for w in stretch[push.end() :].split())]
-            git_push = git_command(words, {}, cwd)
-            if git_push and (found_push := push_of(git_push)):
-                if found_push.bare_in is not None and not cwd:
-                    found_push.bare_in, found_push.unknown = None, True
-                found.append(found_push)
+        git = GIT_WORD.search(stretch)
+        push = PUSH_WORD.search(stretch, git.end()) if git else PUSH_WORD.search(stretch)
+        if not push or not (git or gits):
+            gits = gits or bool(git)
+            continue
+        gits, rest = True, stretch[push.end() :].split()
+        if not git or stretch[git.end() : push.start()].strip() or UNSETTLED.search(" ".join(rest)):
+            found.append(Push(unknown=True))
+            continue
+        words = ["git", "push", *filter(None, (word.strip("'\"`()\\") for word in rest))]
+        git_push = git_command(words, {}, cwd)
+        if git_push and (found_push := push_of(git_push)):
+            if found_push.bare_in is not None and (not cwd or elsewhere):
+                found_push.bare_in, found_push.unknown = None, True
+            found.append(found_push)
     return found
 
 
@@ -1044,20 +1164,60 @@ class Tally:
     characters of each line, the moves to another folder, what its variables made."""
 
     text: str = ""
+    start: str = ""
     pushes: list[Push] = field(default_factory=list)
     read: int = 0
     moves: int = 0
     made: int = 0
     made_words: int = 0
-    names: dict[str, int] | None = None
-    namable: bool = True
+    names: tuple[dict[str, int], dict[str, int]] | None = None
+    places: dict[str, int] | None = None
+    placing: bool = True
+    # Branches checkouts and switches may have gone to: in lines a command runs, or in the
+    # background (`aside`, for every push of the line); at the line's top (`top`, for the
+    # pushes of the lines its commands run). Each with whether one went somewhere not named.
+    parsed: dict[int, tuple[str, Any]] = field(default_factory=dict)
+    knowing: dict[str, bool] = field(default_factory=dict)
+    aside: set[str] = field(default_factory=set)
+    aside_unknown: bool = False
+    top: set[str] = field(default_factory=set)
+    top_unknown: bool = False
+    background: bool = False  # A job runs in the background (`&`): in no order with the rest.
+    here: str | None = None  # Where code being read (read_code) started: `$PWD`, if there.
 
-    def mentioned(self, name: str) -> int:
-        """How often the line may set `name` (mentions; twice when it may set any)."""
-        if self.namable and self.names is None:
-            self.names = mentions(self.text)
-            self.namable = self.names is not None
-        return self.names.get(name, 0) if self.names is not None else 2
+    def named(self) -> tuple[dict[str, int], dict[str, int]]:
+        if self.names is None:
+            self.names = named(self.text)
+        return self.names
+
+    def parse(self, text: str) -> tuple[list[tuple[str, list[str]]], list[str]] | None:
+        """shell_commands of a text, once each (by the text itself)."""
+        known = self.parsed.get(id(text))
+        if known is None or known[0] is not text:
+            known = self.parsed[id(text)] = (text, shell_commands(text))
+        return known[1]
+
+    def known(self, name: str) -> bool:
+        """Whether the line sets `name` in one place only, the one being read: every other
+        word of the line that names it reads it (`$NAME`) or is given to a command that cannot
+        set it (placed); and IFS, which splits what a variable holds, is not named."""
+        if name in self.knowing:
+            return self.knowing[name]
+        every, read = self.named()
+        if self.placing and self.places is None:
+            self.places = placed(self.text, self.parse)
+            self.placing = self.places is not None
+        if self.places is None or every.get("IFS"):
+            known = False
+        else:
+            known = every.get(name, 0) == read.get(name, 0) + self.places.get(name, 0) + 1
+        self.knowing[name] = known
+        return known
+
+    def here_known(self) -> bool:
+        """Whether `$PWD` is the folder a command runs in: the line names PWD only to read it."""
+        every, read = self.named()
+        return not every.get("IFS") and every.get("PWD", 0) == read.get("PWD", 0)
 
     def reads(self, text: str):
         self.read += len(text)
@@ -1073,46 +1233,304 @@ class Tally:
             raise TooComplexError
 
     def moved(self, folder: str, path: str) -> str:
-        """The folder `cd path` or `git -C path` moves to from `folder`, counted."""
+        """The folder `cd path` or `git -C path` moves to from `folder`, counted: `$PWD` is
+        `folder` when the line does not set PWD (here_known), in code a command runs only
+        where it started (`here`); the repository's top (a substitution's: TOP) is `folder`
+        when that is the line's own and the top of one."""
         self.moves += 1
         if self.moves > MOST_MOVES or len(folder) + len(path) > MOST_PATH:
             raise TooComplexError
+        if path.startswith("~") and self.named()[0].get("HOME"):
+            return LOST  # A home the line may have set.
+        if (here := HERE.match(path)) and self.here_known() and self.here in (None, folder):
+            path = "." + path[here.end() :]
+        elif top := TOP.match(path):
+            if folder != self.start or not Path(folder, ".git").exists():
+                return LOST
+            path = "." + path[top.end() :]
         return expanded(folder, path)
+
+
+# Reserved words that open and close the shell's constructs: what is in one may not run (in a
+# loop, may run again).
+OPENERS = frozenset({"if", "while", "until", "for", "select", "{"})
+CLOSERS = frozenset({"fi", "done", "}"})
+LOOPS = frozenset({"while", "until", "for", "select"})
+
+
+# In a joiner: the operators that join or end lists, and parentheses.
+OPERATORS = re.compile(r"&&|\|\||;;&?|;&|[;&|\n()]")
+# A process substitution (`<(…)`, `>(…)`): what it runs, it runs alongside the line.
+PROCESS = re.compile(r"[<>]\(")
+
+
+def compounds(words: list[str]) -> str:
+    """The compound commands a simple command's words start ("o": `if`, `while`, `{`, `case`…)
+    and end ("c": `fi`, `done`, `}`, `esac`), in order."""
+    first = next((i for i, word in enumerate(words) if word not in KEYWORDS), len(words))
+    found = "".join("o" if w in OPENERS else "c" if w in CLOSERS else "" for w in words[:first])
+    if words[first : first + 1] == ["case"] and not (first and words[first - 1] in LOOPS):
+        found += "o"
+    elif words[first : first + 1] == ["esac"]:
+        found += "c"
+    return found
+
+
+def background(commands: list[tuple[str, list[str]]], joiners: list[str] | None) -> list[bool]:
+    """Whether each command is in a list put in the background (`a && b &`, `(a; b) && c &`):
+    run in a subshell of its own, in no order with what follows. `joiners`: the commands'
+    joiners without case patterns' parentheses (subshells); None when the line's are not
+    paired: then every command is, if the line puts any in the background."""
+    if joiners is None:
+        lone = any("&" in joiner.replace("&&", "") for joiner, _ in commands)
+        return [lone] * len(commands)
+    marks, starts = [0] * (len(commands) + 1), [0]  # Where the list read in each group started.
+    for index, (_, words) in enumerate(commands):
+        for part in [*OPERATORS.findall(joiners[index]), *compounds(words)]:
+            if part in {"(", "o"}:  # A subshell or a compound command: its lists, its own.
+                starts.append(index)
+            elif part in {")", "c"}:
+                if len(starts) > 1:
+                    starts.pop()
+            elif part == "&":
+                marks[starts[-1]] += 1
+                marks[index] -= 1
+                starts[-1] = index
+            elif part not in {"&&", "||", "|"}:
+                starts[-1] = index
+    return [running > 0 for running in itertools.accumulate(marks[:-1])]
+
+
+def in_pipes(commands: list[tuple[str, list[str]]], joiners: list[str] | None) -> list[bool]:
+    """Whether each command is in a subshell or a compound command that is part of a pipe
+    (`( a; b ) | c`, `case … esac | c`, `c | { a; }`): run alongside the pipe's other
+    commands, in no order with them. `joiners` as for background; None: every command is, if
+    the line has a pipe."""
+    if joiners is None:
+        piping = any("|" in joiner.replace("||", "") for joiner, _ in commands)
+        return [piping] * len(commands)
+    marks, opened = [0] * (len(commands) + 1), []  # Each group open: where, and if piped.
+    parts = [OPERATORS.findall(joiner) for joiner in joiners]
+
+    def operator(found: list[str], last: bool) -> str:
+        return next((part for part in (found[::-1] if last else found) if part not in "()"), "")
+
+    for index, (_, words) in enumerate(commands):
+        for at, part in enumerate(parts[index]):
+            if part == "(":
+                opened.append((index, operator(parts[index][:at], True) == "|"))
+            elif part == ")" and opened:
+                start, piped = opened.pop()
+                if piped or operator(parts[index][at + 1 :], False) == "|":
+                    marks[start] += 1
+                    marks[index] -= 1
+        for mark in compounds(words):
+            if mark == "o":
+                opened.append((index, operator(parts[index], True) == "|"))
+            elif opened:
+                start, piped = opened.pop()
+                after = parts[index + 1] if index + 1 < len(commands) else []
+                if piped or operator(after, False) == "|":
+                    marks[start] += 1
+                    marks[index + 1] -= 1
+    for start, piped in opened:  # (Open to the line's end: its last `)` is not kept.)
+        marks[start] += piped
+    return [running > 0 for running in itertools.accumulate(marks[:-1])]
+
+
+def loop_ends(commands: list[tuple[str, list[str]]]) -> dict[int, int]:
+    """Where each loop a line opens ends: the command that opens it, to the one with its
+    `done` (the line's last when there is none)."""
+    ends, opened = {}, []
+    for index, (_, words) in enumerate(commands):
+        for word in words:
+            if word in LOOPS:
+                opened.append(index)
+            elif word == "done" and opened:
+                ends[opened.pop()] = index
+            elif word not in KEYWORDS:
+                break
+    for index in opened:
+        ends[index] = len(commands) - 1
+    return ends
+
+
+# In a joiner: a case's clause ends (`;;`, `;&`, `;;&`), parentheses, and the rest.
+JOINER_PARTS = re.compile(r";;&?|;&|[()]|[^;()]+|;")
+
+
+def subshells(
+    commands: list[tuple[str, list[str]]],
+) -> tuple[list[str], list[int], list[str]] | None:
+    """What the parentheses before each command do, in order: a subshell starts (`(`) or ends
+    (`)`); a case pattern's (`(x)`, `x|y)`) do neither. How many subshells each command runs
+    in; and its joiner without a case pattern's parentheses. None when they do not pair as
+    the shell's do, or a `case` is not read here."""
+    events, depths, joiners, depth = [], [], [], 0
+    cases: list[int] = []  # The depth of each case being read.
+    expecting = worded = opened = False  # A pattern is next; its words, its `(`, seen.
+    for joiner, words in commands:
+        done, kept = "", ""
+        for part in JOINER_PARTS.findall(joiner):
+            if part.startswith(";;") or part == ";&":
+                if not cases or depth != cases[-1] or expecting:
+                    return None
+                expecting, worded, opened = True, False, False
+            elif part == "(" and expecting:
+                if worded or opened:
+                    return None
+                opened = True
+                continue
+            elif part == "(":
+                depth += 1
+                done += "("
+            elif part == ")" and expecting:
+                if not worded:
+                    return None
+                expecting = False
+                kept += ";"  # (What follows a pattern is a list of its own.)
+                continue
+            elif part == ")":
+                if depth <= (cases[-1] if cases else 0):
+                    return None
+                depth -= 1
+                done += ")"
+            kept += part
+        first = next((i for i, word in enumerate(words) if word not in KEYWORDS), len(words))
+        rest = words[first:]
+        if expecting and not worded and not opened and words[:1] == ["esac"]:
+            expecting = False
+            cases.pop()
+        elif expecting:
+            worded = worded or bool(words)
+        elif rest[:1] == ["case"] and not (first and words[first - 1] in {"for", "select"}):
+            if len(rest) < 3 or rest[2] != "in":
+                return None
+            cases.append(depth)
+            expecting, worded, opened = True, len(rest) > 3, False
+        elif rest[:1] == ["esac"]:
+            if not cases or cases.pop() != depth:
+                return None
+        events.append(done)
+        depths.append(depth)
+        joiners.append(kept)
+    if cases or expecting:  # (Subshells still open end the line: its last `)` is not kept.)
+        return None
+    return events, depths, joiners
 
 
 @dataclass
 class Line:
-    """What reading a line keeps as it goes: git's own variables it set (`env`), the values of
-    those it set in the one place it may set them (`values`: a loop's several), its folder,
-    what it did to each folder's branch, and how many joins were not `&&`, up to each simple
-    command (`marks`)."""
+    """What reading a line keeps as it goes: git's own variables it set (`env`; `env_unsure`
+    when one may not have been), the values of those it surely set in the one place it sets
+    them (`values`: a loop's several, while in it), its folder (LOST when not known; `chain`:
+    the mark of the `&&` chain a `cd` that may not have run moved in), what it did to each
+    folder's branch, and how many joins were not `&&`, up to each simple command (`marks`).
+    What a subshell sets ends with it: each change to `values` and `env` is noted (`undo`) to
+    be put back where one ends (restore)."""
 
     folder: str
     depth: int
     tally: Tally
     env: dict[str, str] = field(default_factory=dict)
+    env_unsure: bool = False
     values: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    loops: list[tuple[str, int]] = field(default_factory=list)
     switched: dict[str, Switched] = field(default_factory=dict)
     marks: list[int] = field(default_factory=list)
+    chained: list[bool] = field(default_factory=list)  # Only `&&` from its list's start to it.
+    chain: int | None = None
+    lost: bool = False
+    piped: bool = False
+    looping: int = 0  # Loops the command being read is in (run again: in no order).
+    alongside: bool = False  # In a group that is part of a pipe: in no order with its others.
+    undo: list[tuple[dict[str, Any], str, Any]] = field(default_factory=list)
+
+    def put(self, store: dict[str, Any], name: str, value: Any = None):
+        """Sets a value the line keeps (`values`, `env`), or drops it (None), noted in `undo`."""
+        self.undo.append((store, name, store.get(name)))
+        if value is None:
+            store.pop(name, None)
+        else:
+            store[name] = value
+
+    def restore(self, mark: int):
+        """Puts back the values and git variables the line had when `undo` was `mark` long."""
+        while len(self.undo) > mark:
+            store, name, value = self.undo.pop()
+            if value is None:
+                store.pop(name, None)
+            else:
+                store[name] = value
+
+    def said(self, name: str) -> tuple[str, ...]:
+        """The values a variable the line surely set holds (none when not known: Tally.known,
+        asked when one is read)."""
+        said = self.values.get(name, ())
+        return said if said and self.tally.known(name) else ()
 
     def value_of(self, name: str) -> str | None:
         """The value a variable holds, when one (a loop's holds several)."""
-        said = self.values.get(name, ())
+        said = self.said(name)
         return said[0] if len(said) == 1 else None
 
-    def assign(self, name: str, said: list[str]):
+    def assign(self, name: str, said: list[str], certain: bool):
         """`name` set to one of these words (`NAME=value`, `for NAME in …`), for the words after
-        it: known only when this is the one place the line may set it (a loop, `read`, a
-        second assignment would make it something else, maybe before a later word is read)
-        and each value is plain text or one substitution's whole."""
-        self.values.pop(name, None)
+        it: known only when the line surely set it here (`certain`: not in a condition, a
+        loop, a subshell or a pipe, nor after `&&` or `||`), at its top (not in a line a
+        command runs: `eval`, `sh -c`, a substitution), in no other place (Tally.known, asked
+        when it is read: said), and each value is plain text or one substitution's whole."""
+        self.put(self.values, name)
+        if not certain or self.depth or not NAME.fullmatch(name):
+            return
         values = tuple(resolved(value, self.value_of) for value in said)
-        if (
-            0 < len(values) <= MOST_VALUES
-            and self.tally.mentioned(name) == 1
-            and all(value == MADE_UP or not UNSETTLED.search(value) for value in values)
+        if 0 < len(values) <= MOST_VALUES and all(
+            value == MADE_UP or not UNSETTLED.search(value) for value in values
         ):
-            self.values[name] = values
+            self.put(self.values, name, values)
+
+    def cd(self, name: str, arguments: list[str], certain: bool, mark: int):
+        """Where `cd` (`pushd FOLDER` too; `popd`, `pushd` otherwise: not known) goes; when it
+        may not have run (`certain` is false), only the commands of its `&&` chain after it
+        surely run there."""
+        rest, target = list(arguments), None
+        while name == "cd" and rest and rest[0].startswith("-") and rest[0] != "-":
+            if rest.pop(0) == "--":
+                break
+        if name == "cd" and not rest:
+            target = "~"
+        elif (name == "cd" and len(rest) == 1 and rest[0] != "-") or (
+            name == "pushd" and len(rest) == 1 and not rest[0].startswith(("-", "+"))
+        ):
+            target = resolved(rest[0], self.value_of)
+            if self.tally.named()[0].get("CDPATH") and not target.startswith(("/", ".", "~")):
+                target = None  # Searched in CDPATH's folders first: which, not known.
+        self.folder = LOST if target is None else self.tally.moved(self.folder, target)
+        self.chain = None if certain else mark
+        if not certain and not self.chained[-1]:  # (`x || cd y && …`: it may not have run.)
+            self.folder, self.chain = LOST, None
+
+    def end_loops(self, nest: int):
+        while self.loops and self.loops[-1][1] > nest:
+            self.put(self.values, self.loops.pop()[0])
+
+
+def moves_folder(joiner: str, words: list[str]) -> bool:
+    """Whether a command may go to another folder (`cd`, an evaluator, a function's
+    definition, a command whose name the line makes up). Not `. FILE` or `source FILE`: what
+    a file runs is not read here (nor what `sh FILE` runs)."""
+    first = next((i for i, word in enumerate(words) if word not in KEYWORDS), len(words))
+    name, start = command_name(words[first:])
+    file = words[first + start] if first + start < len(words) else ""
+    sourced = name in {".", "source"} and bool(
+        PLAIN_NAME.fullmatch(file) and not file.startswith(("-", "/dev/", "/proc/"))
+    )
+    return bool(
+        "()" in joiner.replace(" ", "")
+        or name in {"cd", "pushd", "popd", "function"}
+        or (name in EVALUATORS and not sourced)
+        or (name and not PLAIN_NAME.fullmatch(name))
+    )
 
 
 def read_line(command: str, cwd: str, depth: int, tally: Tally) -> str:
@@ -1120,55 +1538,134 @@ def read_line(command: str, cwd: str, depth: int, tally: Tally) -> str:
     `git` stands in a simple command (after `if`, `do`, `{`, `timeout 60`, `env A=b`…), in
     `sh -c '…'`, `eval` and command substitutions, after `cd`, with configuration and variables
     set on the line, and the branch a line made and switched to. Read in one pass: a simple
-    command is read up to the first `git`, shell `-c` or `eval` in it. "" once read in full,
-    else why not (TOO_COMPLEX; or raises TooComplexError)."""
+    command is read up to the first `git`, shell `-c` or `eval` in it. What a command changes
+    counts for those after it only where it surely ran: a subshell's changes end with it, a
+    piped command's are its own, a conditional `cd` holds for its `&&` chain (after it, the
+    folder is not known), and after an evaluator or a function's definition, too. "" once read
+    in full, else why not (TOO_COMPLEX; or raises TooComplexError)."""
     if depth > MOST_NESTED:
         return TOO_COMPLEX
     tally.reads(command)
-    parsed = shell_commands(command)
+    parsed = tally.parse(command)
     if parsed is None:  # Not a command line the shell runs: read loosely.
         tally.pushes += loose_pushes(command, cwd)
         return ""
     commands, inside = parsed
     if sum(len(words) for _, words in commands) > MOST_WORDS:
         return TOO_COMPLEX
-    for body in inside:  # What its command substitutions run: lines of their own.
-        if may_push(body) and (why := read_line(body, cwd, depth + 1, tally)):
-            return why
     line = Line(cwd, depth, tally)
-    broken = 0
+    broken, nest, ordered = 0, 0, True
+    saved: list[tuple[str, int | None, int, int]] = []  # Where each open subshell started.
+    moving = [bool(cwd) and moves_folder(*command) for command in commands]
+    ends = loop_ends(commands)
+    # The subshells (when their parentheses are not read: after one ends, the folder is not
+    # known, and what is in one is not taken for sure).
+    paired = subshells(commands)
+    doubtful = paired is None
+    raw = [re.sub(r"[^()]", "", joiner) for joiner, _ in commands] if doubtful else []
+    events, depths, joiners = paired or (raw, [], None)
+    jobs = background(commands, joiners)
+    pipes = in_pipes(commands, joiners)
+    tally.background = tally.background or bool(PROCESS.search(command))
+    # Loops run again after a command in them went elsewhere (not in a subshell of their own).
+    loops_moving = list(itertools.accumulate(moving, initial=0))  # How many, before each.
+    lost_loops, budget = set(), 4 * len(commands) + 64
+    for start, end in ends.items():
+        if loops_moving[end + 1] == loops_moving[start]:
+            continue
+        budget -= end - start + 1
+        if (
+            doubtful
+            or budget < 0
+            or any(moving[at] and depths[at] <= depths[start] for at in range(start, end + 1))
+        ):
+            lost_loops.add(start)
     for index, (joiner, words) in enumerate(commands):
         broken += bool(index) and joiner.replace("\n", "") != "&&"
         line.marks.append(broken)
+        operators = joiner.replace("&&", "")
+        listed = not index or bool(set(operators) & set(";\n&("))  # A list starts here.
+        line.chained.append(listed or (joiner.replace("\n", "") == "&&" and line.chained[-1]))
+        after = commands[index + 1][0] if index + 1 < len(commands) else ""
+        for event in events[index]:  # A subshell's changes end with it.
+            if event == "(":
+                saved.append((line.folder, line.chain, len(line.undo), nest))
+            elif doubtful:
+                line.folder, line.chain = LOST, None
+                del saved[-1:]
+            elif saved:
+                line.folder, line.chain, mark, _ = saved.pop()
+                line.restore(mark)
+        line.lost = line.lost or "()" in joiner.replace(" ", "")  # A function: called anywhere.
+        if line.lost or (line.chain is not None and line.chain != broken):
+            line.folder, line.chain = (LOST if cwd else cwd), None
         first = next((i for i, word in enumerate(words) if word not in KEYWORDS), len(words))
+        for word in words[:first]:
+            nest += (word in OPENERS) - (word in CLOSERS)
+            line.looping += (word in LOOPS) - (word == "done")
+            if word == "done":
+                line.end_loops(nest)
+        if index in lost_loops:
+            line.folder, line.chain = LOST, None  # Run again after a `cd` in it: not known.
         rest = words[first:]
-        if rest and all(ASSIGNMENT.match(word) for word in rest):
-            set_variables(line, rest)  # `NAME=value` alone: for what follows.
-        elif rest and rest[0] == "export":
-            set_variables(line, rest[1:])
-        elif first and words[first - 1] == "for" and len(rest) > 1 and rest[1] == "in":
-            if NAME.fullmatch(rest[0]):
-                line.assign(rest[0], rest[2:])  # `for NAME in …`: each of those, in turn.
-        elif rest and rest[0] == "cd" and cwd:
-            to = resolved(rest[1], line.value_of) if len(rest) > 1 else "~"
-            line.folder = tally.moved(line.folder, to)
-        elif why := read_command(words, index, line):
-            return why
+        name, start = command_name(rest)
+        nest += (name == "case") - (name == "esac")
+        ordered = ordered and nest >= 0
+        before, following = joiner.rsplit("(", 1)[-1], after.split(")", 1)[0]
+        # In a pipe: a subshell of its own (what it changes is its own). In the background:
+        # in order with its list only (a `cd` there holds for its `&&` chain).
+        piped = "|" in before.replace("||", "") or "|" in following.replace("||", "")
+        tally.background = tally.background or "&" in joiner.replace("&&", "")
+        line.piped = piped or jobs[index]
+        line.alongside = pipes[index]
+        # Surely run, in order, where it stands: in its subshell (from its start), if in one.
+        opening = joiner.rsplit("(", 1)[-1] if "(" in events[index] else joiner
+        certain = ordered and not line.piped and not set(opening) - set(";\n)")
+        if doubtful:
+            certain = certain and nest == 0 and not saved
+        else:
+            certain = certain and nest == (saved[-1][3] if saved else 0)
+        if rest and all(isinstance(word, Assignment) for word in rest):
+            set_variables(line, rest, certain)  # `NAME=value` alone: for what follows.
+        elif name == "export":
+            set_variables(line, rest[start:], certain)
+        elif first and words[first - 1] in {"for", "select"} and len(rest) > 1 and rest[1] == "in":
+            line.loops.append((rest[0], nest))
+            line.assign(rest[0], rest[2:], certain=True)  # Each of those, in turn, in the loop.
+        elif name in {"cd", "pushd", "popd"}:
+            if cwd and not piped:
+                line.cd(name, rest[start:], certain, broken)
+        else:
+            if why := read_command(words, index, line):
+                return why
+            if cwd and not piped and (name == "function" or moving[index]):
+                line.folder, line.chain = LOST, None  # It may have gone elsewhere.
+                line.lost = line.lost or name == "function"
         if len(line.env) > MOST_GIT_ENV:
             return TOO_COMPLEX
+    # What its command substitutions run: lines of their own, in the folder the line starts in
+    # (not known when a command of it may go elsewhere first).
+    inner = LOST if any(moving) else cwd
+    for body in inside:
+        if may_push(body, switching=True) and (why := read_line(body, inner, depth + 1, tally)):
+            return why
     return ""
 
 
-def set_variables(line: Line, words: list[str]):
-    """The variables these `NAME=value` words set, for what follows on the line: git's own
-    (its configuration), and any whose value is plain text (put in a later refspec)."""
+def set_variables(line: Line, words: list[str], certain: bool):
+    """The variables these assignments set, for what follows on the line: git's own (its
+    configuration; when one may not have been set, git's configuration is not known), and any
+    whose value is plain text (put in a later refspec: Line.assign)."""
     for word in words:
-        if not ASSIGNMENT.match(word):
+        if not isinstance(word, Assignment):
             continue
         name, _, value = word.partition("=")
         if name.startswith("GIT_"):
-            line.env[name] = value
-        line.assign(name, [value])
+            if certain:
+                line.put(line.env, name, value)
+            else:
+                line.env_unsure = True
+        line.assign(name, [value], certain)
 
 
 def git_variables(words: list[str]) -> dict[str, str]:
@@ -1191,19 +1688,29 @@ def read_command(words: list[str], index: int, line: Line) -> str:
         program = word.rsplit("/", 1)[-1]
         if program == "git":
             here = {**line.env, **local} if local else line.env
-            for run in expansions(words[position:], line.values, line.tally):
+            if line.env_unsure:  # git's own variables, maybe set: what it does, not known.
+                here = {**here, "GIT_CONFIG_PARAMETERS": "push alias.", "GIT_DIR": "?"}
+            for run in expansions(words[position:], line.said, line.tally):
                 read_git(run, here, index, line)
             return ""
         if program in SHELLS:  # Its words are its own: a script's (`-c`), or a file's.
             script = shell_script(words, position)
-            return (
-                "" if script is None else read_line(script, line.folder, line.depth + 1, line.tally)
-            )
+            return "" if script is None else read_code(script, line)
         if program == "eval":
-            return read_line(
-                " ".join(words[position + 1 :]), line.folder, line.depth + 1, line.tally
-            )
+            return read_code(" ".join(words[position + 1 :]), line)
     return ""
+
+
+def read_code(script: str, line: Line) -> str:
+    """A line a command runs as code (`eval …`, `sh -c …`), from the folder it runs in. A `$PWD`
+    in it may have been put in where it was written (in double quotes): it is the folder
+    only where that is the folder it started in (Tally.here)."""
+    tally, before = line.tally, line.tally.here
+    tally.here = line.folder if before in (None, line.folder) else LOST
+    try:
+        return read_line(script, line.folder, line.depth + 1, tally)
+    finally:
+        tally.here = before
 
 
 def read_git(words: list[str], env: dict[str, str], index: int, line: Line):
@@ -1213,15 +1720,23 @@ def read_git(words: list[str], env: dict[str, str], index: int, line: Line):
     if git is None:
         return
     if push := push_of(git):
+        push.nested = bool(line.depth)
+        if push.bare_in is not None:  # A switch in another folder may be in the same repository.
+            for folder, other in line.switched.items():
+                if folder != push.bare_in:
+                    names = other.prior_also | other.also | ({other.new} if other.new else set())
+                    push.bare_also |= names
+                    push.unknown = push.unknown or other.unknown or other.prior_unknown
         if push.bare_in is not None and (made := line.switched.get(push.bare_in)):
             trusted = made.new and line.marks[index] == line.marks[made.new_at]
+            trusted = trusted and line.chained[made.new_at]
             if trusted:
                 push.bare_new = made.new
-                push.bare_also = frozenset(made.also)
+                push.bare_also |= made.also
                 push.unknown = push.unknown or made.unknown
             else:  # That switch may have failed: where it was before counts too.
                 also = made.prior_also | made.also | ({made.new} if made.new else set())
-                push.bare_also = frozenset(also)
+                push.bare_also |= also
                 push.unknown = push.unknown or made.unknown or made.prior_unknown
         line.tally.pushes.append(push)
     else:
@@ -1231,7 +1746,9 @@ def read_git(words: list[str], env: dict[str, str], index: int, line: Line):
 def record_switch(git: Git, index: int, line: Line):
     """What a `git checkout`, `git switch` or `git branch` does to its folder's branch, for a
     bare push later in the line: a branch made and switched to counts only when every join
-    from there is `&&` (it may have failed, and the line gone on: `;`, `||`, a new line)."""
+    from there is `&&` (it may have failed, and the line gone on: `;`, `||`, a new line). One
+    in a line a command runs, or in the background, may have gone anywhere before any push:
+    Tally.aside."""
     if git.rest[0] in {"checkout", "switch"}:
         what = switch_of(git.rest)
     elif git.rest[0] == "branch":
@@ -1243,6 +1760,17 @@ def record_switch(git: Git, index: int, line: Line):
     kind, name = what
     marks = line.marks
     made = line.switched.setdefault(git.folder, Switched())
+    tally = line.tally
+    if kind != "made":
+        aside = bool(line.depth or line.piped or line.looping or line.alongside)  # In no order.
+        names = tally.aside if aside else tally.top
+        if name and len(names) < MOST_BRANCHES:
+            names.add(name)
+        if kind == "unknown" or len(names) >= MOST_BRANCHES:
+            tally.aside_unknown = tally.aside_unknown or aside
+            tally.top_unknown = tally.top_unknown or not aside
+        if aside:
+            return
     if kind == "new":
         line.switched[git.folder] = made.switched_to(name, index)
     elif kind == "made":
@@ -1262,10 +1790,12 @@ def squashed(command: str) -> str:
     return command.replace("\\\n", "").translate(str.maketrans("", "", "'\"\\")).lower()
 
 
-def may_push(command: str) -> bool:
+def may_push(command: str, switching: bool = False) -> bool:
     """Whether a word of a line may say `push` or an alias, however it is quoted (a line that
-    says neither pushes nothing)."""
+    says neither pushes nothing); or, `switching`, go to another branch for a push after it."""
     words = squashed(command)
+    if switching and ("checkout" in words or "switch" in words or "branch" in words):
+        return True
     return "push" in words or "alias" in words
 
 
@@ -1277,11 +1807,19 @@ def reading(command: str, cwd: str) -> tuple[tuple[Push, ...], str]:
         return (), ""
     if len(command) > MOST_LINE:
         return (), TOO_LONG
-    tally = Tally(command)
+    tally = Tally(command, cwd)
     try:
         why = read_line(command, cwd, 0, tally)
     except TooComplexError:
         why = TOO_COMPLEX
+    for push in tally.pushes:
+        if push.bare_in is not None:
+            anywhere = push.nested or tally.background
+            push.bare_also |= tally.aside | (tally.top if anywhere else set())
+            push.unknown = push.unknown or tally.aside_unknown
+            push.unknown = push.unknown or (anywhere and tally.top_unknown)
+            if len(push.bare_also) > MOST_BRANCHES:  # Where it may go: too many to say.
+                push.bare_also, push.unknown = frozenset(), True
     unique = tuple({push.key(): push for push in tally.pushes}.values())
     asked = {push.bare_in for push in unique if push.bare_in is not None and not push.bare_new}
     if len(asked) > MOST_FOLDERS:
