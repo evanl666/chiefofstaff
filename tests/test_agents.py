@@ -1056,3 +1056,27 @@ async def test_a_queued_codex_worker_reads_as_made_to_earlier_versions_and_is_ma
         assert runtime.made(first["session_id"])
     finally:
         await runtime.stop()
+
+
+async def test_each_agent_continues_in_a_terminal_with_its_own_command_and_is_seen_there(tmp_path):
+    from chiefofstaff.backend import resumed_elsewhere
+
+    assert agents.resume_command("copilot", "abc", "/w") == "copilot --resume abc"
+    assert agents.resume_command("codex", "019a-thread", "/w") == "codex resume 019a-thread"
+    assert agents.resume_command("claude", "id-1", "/my w") == "cd '/my w' && claude --resume id-1"
+    fake = tmp_path / "codex"
+    fake.write_text("#!/bin/sh\nsleep 30\n")
+    fake.chmod(0o755)
+    thread = "019a2b3c-4d5e-7f60-8a9b-0c1d2e3f4a5b"
+    opened = await asyncio.create_subprocess_exec(str(fake), "resume", thread)
+    try:
+        for _ in range(100):
+            if found := resumed_elsewhere("codex", set()):
+                break
+            await asyncio.sleep(0.02)
+        assert found == {thread: opened.pid}
+        assert resumed_elsewhere("codex", {opened.pid}) == {}, "never one of its own"
+        assert resumed_elsewhere("claude", set()) == {}
+    finally:
+        opened.kill()
+        await opened.wait()

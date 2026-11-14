@@ -431,7 +431,7 @@ class Storage:
             "SELECT 1 FROM commands WHERE session_id=? AND ended_at IS NULL LIMIT 1", (row["id"],)
         ):
             return "a command it started still runs"
-        if self.runtime.copilot_id(row["id"]) in self.runtime.elsewhere:
+        if self.runtime.is_elsewhere(row):
             return "it is open in a terminal"
         return ""
 
@@ -441,7 +441,7 @@ class Storage:
         its commands; a program still running in a folder is checked there."""
         if self.store.get(KEEP + row["id"]):
             return "Keep its files is on"
-        if self.runtime.copilot_id(row["id"]) in self.runtime.elsewhere:
+        if self.runtime.is_elsewhere(row):
             return "it is open in a terminal"
         return ""
 

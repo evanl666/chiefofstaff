@@ -363,3 +363,40 @@ async def test_a_worker_that_reads_slack_runs_on_claude_only_with_its_guarantees
         assert "this computer can't sandbox workers" in runtime.blocked_on("claude", row)
     finally:
         await runtime.stop()
+
+
+async def test_a_claude_worker_continues_in_a_terminal_and_is_left_alone_there(
+    tmp_path, claude_on_path
+):
+    from chiefofstaff.runtime import OpenElsewhereError
+
+    harness, runtime, worker, _ = await claude_worker(tmp_path)
+    try:
+        row = harness.store.session(worker)
+        given = await runtime.terminal_command(worker)
+        assert given == {
+            "command": f"cd {row['cwd']} && claude --resume {worker}",
+            "agent": "claude",
+        }
+        assert not runtime.states.is_live(worker), "let go of first"
+        assert await runtime.agents["claude"].backend.open_elsewhere() == {}, "not its own"
+        # The owner runs it in a terminal: Chief of Staff writes nothing to it meanwhile.
+        fake = tmp_path / "bin" / "claude"
+        fake.parent.mkdir()
+        fake.write_text("#!/bin/sh\nsleep 30\n")
+        fake.chmod(0o755)
+        terminal = await asyncio.create_subprocess_exec(str(fake), "--resume", worker)
+        try:
+            await until(lambda: True)
+            with pytest.raises(OpenElsewhereError, match="open in another Claude window"):
+                await runtime.refuse_if_open_elsewhere(row)
+            assert runtime.view(harness.store.session(worker))["elsewhere"]
+        finally:
+            terminal.kill()
+            await terminal.wait()
+        await runtime.refuse_if_open_elsewhere(row)  # Closed there: its own again.
+        harness.store.update_session(worker, status="working")
+        with pytest.raises(ValueError, match="It is at work"):
+            await runtime.terminal_command(worker)
+    finally:
+        await runtime.stop()

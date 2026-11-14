@@ -685,6 +685,8 @@ class Runtime:
         # Sessions another program (a terminal) has open: session id -> pid. Refreshed by the
         # watch loop and before resuming a session.
         self.elsewhere: dict[str, int] = {}
+        # Other agents' conversations open in a terminal, by agent (agent_elsewhere).
+        self.elsewhere_on: dict[str, dict[str, int]] = {}
         # What workers open in a terminal are doing, read from their logs (Workers.mirror).
         self.terminal: dict[str, dict] = {}
         self.mirror_job: asyncio.Task | None = None
@@ -2093,10 +2095,44 @@ class Runtime:
 
     async def open_elsewhere(self) -> dict[str, int]:
         """Sessions another program (a terminal) has open now: session id -> its pid. Never
-        those a Copilot CLI this app started has open, even one its loader no longer runs."""
+        those a Copilot CLI this app started has open, even one its loader no longer runs;
+        other agents' too (a worker's conversation the owner resumed in a terminal)."""
         found = await self.connected().open_elsewhere()
         ours = copilot_ours(self.recorded_processes(), self.store.directory)
         return {session_id: pid for session_id, pid in found.items() if pid not in ours}
+
+    async def agent_elsewhere(self, agent: str) -> dict[str, int]:
+        """Another agent's conversations the owner resumed in a terminal: id -> its pid."""
+        entry = self.agents.get(agent)
+        found: dict[str, int] = {}
+        if entry and entry.backend and entry.backend.alive():
+            with suppress(Exception):
+                found = await entry.backend.open_elsewhere()
+        self.elsewhere_on[agent] = found
+        return found
+
+    def is_elsewhere(self, row: dict) -> int:
+        """The process that has this session open in a terminal, as last seen (0: none)."""
+        agent = self.agent(row["id"])
+        seen = self.elsewhere if agent == COPILOT_AGENT else self.elsewhere_on.get(agent, {})
+        return seen.get(self.copilot_id(row["id"]), 0)
+
+    async def terminal_command(self, session_id: str) -> dict:
+        """The command that continues a worker's conversation in a terminal (its agent's own),
+        once Chief of Staff let go of it: never two programs writing to one conversation. Not
+        while it works; it stays left alone while open there (refuse_if_open_elsewhere)."""
+        row = self.store.session(session_id)
+        if row["role"] != WORKER or row["closed_at"]:
+            raise ValueError("Only an open worker can continue in a terminal.")
+        if row["status"] in {"working", "starting", "queued"} or self.states[session_id].held:
+            raise ValueError("It is at work: stop it first, or wait until it is done.")
+        agent = self.agent(session_id)
+        if self.states.is_live(session_id):
+            await self.detach(session_id)
+        return {
+            "command": agents.resume_command(agent, self.copilot_id(session_id), row["cwd"]),
+            "agent": agent,
+        }
 
     async def watch_process(self, backend: AgentBackend, connection: int):
         """Copilot's CLI stopped by itself (crashed, killed): every request would fail, so the
@@ -6019,14 +6055,20 @@ class Runtime:
         open in a terminal is left alone until it is closed there. `tell`: once it is closed,
         the Router hears it can be reached again (what was refused came from it). Only Copilot's
         sessions: another agent's is never open in a Copilot terminal."""
-        if not self.on_copilot(row["id"]):
-            return
-        self.elsewhere = await self.open_elsewhere()
-        if pid := self.elsewhere.get(self.copilot_id(row["id"])):
+        if self.on_copilot(row["id"]):
+            self.elsewhere = await self.open_elsewhere()
+        else:
+            await self.agent_elsewhere(self.agent(row["id"]))
+        if pid := self.is_elsewhere(row):
             if tell:
                 self.store.set(f"refusedopen:{row['id']}", now())
+            name = (
+                agents.display(self.agent(row["id"]))
+                if not self.on_copilot(row["id"])
+                else ("Copilot")
+            )
             raise OpenElsewhereError(
-                f"“{row['title']}” is open in another Copilot window (process {pid}). Exit it "
+                f"“{row['title']}” is open in another {name} window (process {pid}). Exit it "
                 "there (/exit), then try again.",
                 pid,
             )
@@ -7614,7 +7656,7 @@ class Runtime:
             # Where the owner's next message in its chat goes, unless they look at a task there.
             "chat_task": self.chat_view(row),
             "display_title": self.display_title(row),
-            "elsewhere": self.copilot_id(row["id"]) in self.elsewhere and not row["closed_at"],
+            "elsewhere": bool(self.is_elsewhere(row)) and not row["closed_at"],
             "terminal": self.terminal.get(row["id"]),
             **(self.progress(row) if row["role"] == WORKER else {}),
             # Only for a worker on another agent (none without agents).

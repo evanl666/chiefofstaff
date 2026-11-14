@@ -68,6 +68,7 @@ from .backend import (
     image_type,
     isolated,
     process_table,
+    resumed_elsewhere,
 )
 from .envelope import inert, wrap
 from .policy import GITHUB_MCP
@@ -1923,7 +1924,9 @@ class CodexAgent:
         return None
 
     async def open_elsewhere(self) -> dict[str, int]:
-        return {}
+        """Its workers' threads the owner resumed in a terminal (`codex resume <id>`)."""
+        ours = set(await asyncio.to_thread(self.processes))
+        return await asyncio.to_thread(resumed_elsewhere, "codex", ours)
 
     async def read_history(self, session_id: str, offset: int) -> tuple[list[dict], int, float]:
         return [], offset, 0.0

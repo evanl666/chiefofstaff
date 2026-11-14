@@ -65,6 +65,7 @@ from .backend import (
     image_type,
     isolated,
     process_table,
+    resumed_elsewhere,
 )
 from .machine import kill_process_tree
 from .policy import GITHUB_MCP
@@ -2628,7 +2629,9 @@ class ClaudeAgent:
         return None
 
     async def open_elsewhere(self) -> dict[str, int]:
-        return {}
+        """Its workers' sessions the owner resumed in a terminal (`claude --resume <id>`)."""
+        ours = set(await asyncio.to_thread(self.processes))
+        return await asyncio.to_thread(resumed_elsewhere, "claude", ours)
 
     async def read_history(self, session_id: str, offset: int) -> tuple[list[dict], int, float]:
         return [], offset, 0.0

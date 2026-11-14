@@ -1590,7 +1590,7 @@ class Workers:
                 or state.held  # A command it left running would end with none to wake.
                 or row["status"] in {"working", "starting", "queued"}
                 or self.runtime.special(row)
-                or self.runtime.copilot_id(row["id"]) in self.runtime.elsewhere
+                or self.runtime.is_elsewhere(row)
                 or moment - timestamp(row["updated_at"]) < RELEASE_IDLE
                 or self.store.one(
                     "SELECT id FROM commands WHERE session_id=? AND ended_at IS NULL LIMIT 1",
