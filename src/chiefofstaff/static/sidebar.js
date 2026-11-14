@@ -313,12 +313,12 @@ function renderExternal() {
         {
           type: "button",
           class: `item${state.selected === item.id ? " selected" : ""}`,
-          title: item.open ? `Open in a terminal now · ${item.cwd}` : item.cwd,
+          title: [item.agent_name, item.open ? `Open in a terminal now · ${item.cwd}` : item.cwd].filter(Boolean).join(" · "),
           onclick: () => showExternal(item),
         },
         el("span", { class: `dot${item.open ? " open" : ""}`, title: item.open ? DOT_HELP.open : "Not open anywhere" }),
         el("span", { class: "label", text: item.summary }),
-        el("span", { class: "sub", text: item.open ? "open" : ago(item.modified) }),
+        el("span", { class: "sub", text: [item.agent_name, item.open ? "open" : ago(item.modified)].filter(Boolean).join(" · ") }),
       ),
     ),
   );
@@ -331,8 +331,12 @@ function headingCount(total, open) {
   if (count.textContent !== shown) count.textContent = shown;
   const words = total ? [plural(total, "session"), open ? `${open} open` : ""].filter(Boolean).join(", ") : "";
   const summary = $("#external > summary");
+  // Named for Copilot while only Copilot's are listed; for none once another agent's are too.
+  const name = state.external.some((item) => item.agent) ? "Other sessions" : "Other Copilot sessions";
+  const label = summary.querySelector(".group-name");
+  if (label && label.textContent !== name) label.textContent = name;
   put(summary, "title", words);
-  put(summary, "aria-label", words && `Other Copilot sessions, ${words}`);
+  put(summary, "aria-label", words && `${name}, ${words}`);
 }
 export async function loadExternal(refresh = false) {
   // Read while Copilot was not connected, the list is empty for no reason of its own: read again
@@ -382,7 +386,7 @@ export function showExternal(item) {
   $("#session-title").textContent = item.summary;
   $("#session-meta").textContent = externalMeta(item);
   $("#session-meta").title = item.cwd;
-  const command = `copilot --resume ${item.id}`;
+  const command = item.resume || `copilot --resume ${item.id}`;
   delete $("#session-actions").dataset.key;
   $("#session-actions").replaceChildren(
     el("button", { type: "button", class: "text", text: "Copy resume command", title: command, onclick: () => navigator.clipboard.writeText(command).then(() => toast("Copied")) }),
@@ -409,7 +413,7 @@ async function loadHistory(item, box, first = false) {
     const nodes = readOnlyTimeline(entries, item.cwd);
     if (!nodes.length) nodes.push(el("div", { class: "line note", text: "No conversation yet." }));
     if (working) nodes.push(el("div", { class: "working-line", text: "Working in a terminal…" }));
-    else if (!open) nodes.push(el("div", { class: "line notice" }, el("span", { text: `A message continues it here, still in ${shortPath(item.cwd) || "its folder"}` })));
+    else if (!open) nodes.push(el("div", { class: "line notice" }, el("span", { text: `A message continues it here${item.agent === "codex" ? ", in a new Codex thread" : ""}, still in ${shortPath(item.cwd) || "its folder"}` })));
     box.replaceChildren(...nodes);
     showQuestion(box, item);
     scrollToBottom(first);
@@ -467,8 +471,8 @@ export function otherLook(item, status) {
     return {
       dot: `dot${item.open ? " open" : ""}`,
       dotTitle: item.open ? DOT_HELP.open : "Not open anywhere",
-      sub: item.open ? "open" : item.modified ? ago(item.modified) : "",
-      title: [item.open ? `Open in a terminal now · ${item.cwd}` : item.cwd, item.why].filter(Boolean).join("\n"),
+      sub: [item.agent_name, item.open ? "open" : item.modified ? ago(item.modified) : ""].filter(Boolean).join(" · "),
+      title: [item.agent_name, item.open ? `Open in a terminal now · ${item.cwd}` : item.cwd, item.why].filter(Boolean).join("\n"),
       name: "",
     };
   }
@@ -492,7 +496,7 @@ function metaLead(status) {
 function externalMeta(item) {
   const status = otherStatus(item.id);
   const lead = status && STATUSES[status.key] ? metaLead(status) : item.open ? "Open in a terminal" : "Not managed yet";
-  return [lead, shortPath(item.cwd), item.branch, `updated ${since(item.modified)}`].filter(Boolean).join(" · ");
+  return [item.agent_name, lead, shortPath(item.cwd), item.branch, `updated ${since(item.modified)}`].filter(Boolean).join(" · ");
 }
 // The end of its timeline, by where it stands: while it asks, the question takes the place of
 // "Working in a terminal…" (its step shows only "ask_user"); once its turn ended (its turn,

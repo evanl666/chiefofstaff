@@ -13,6 +13,7 @@ import time
 from collections.abc import Collection
 from contextlib import suppress
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 from . import agents, caches, catalog, machine
@@ -62,9 +63,21 @@ MIRROR_SECONDS = 3
 ELSEWHERE_EVERY = 3  # mirror rounds
 # A log that changed this recently means the session is busy (its sub-agents, say).
 BUSY_SECONDS = 20
+# How long the owner's sessions of the other agents, as listed, are listed again from (the
+# sidebar reads the list each minute while it is open), and how long one agent may take.
+AGENT_LISTING_SECONDS = 55
+LISTING_TIMEOUT = 20
 # session.shutdown: its process ended the session, a turn it started included (a terminal closed
 # in the middle of one).
 TURN_ENDS = {"assistant.turn_end", "session.idle", "session.error", "abort", "session.shutdown"}
+
+
+def as_event(event: dict) -> SimpleNamespace:
+    """An event as read_history gives it (a dict), as a session's own events are."""
+    data = event.get("data") or {}
+    return SimpleNamespace(
+        type=SimpleNamespace(value=event.get("type")), data=SimpleNamespace(**data)
+    )
 
 
 def own_event(event: dict) -> bool:
@@ -146,6 +159,10 @@ class Workers:
         self.pump_lock = asyncio.Lock()
         # Never read yet (not 0: the monotonic clock starts at boot, so 0 can be "just now").
         self.external_cache: tuple[float, list[dict]] = (float("-inf"), [])
+        # The owner's sessions of the other agents on (agent_sessions), as last listed, and which
+        # agent each listed one is of.
+        self.agent_cache: tuple[float, list[dict]] = (float("-inf"), [])
+        self.listed_agent: dict[str, str] = {}
         # Reading logs of sessions open in a terminal; held while their timelines catch up.
         self.mirror_lock = asyncio.Lock()
         # Other sessions' logs as last read: session id -> (offset, entries, turn open).
@@ -1181,7 +1198,69 @@ class Workers:
             self.states[session_id].after_abort = False  # Nothing runs on a new connection.
         self.runtime.background(self.pump())
 
-    async def external(self, refresh: bool = False) -> list[dict]:
+    async def external(self, refresh: bool = False, agents_too: bool = False) -> list[dict]:
+        """The owner's own Copilot sessions Chief of Staff does not manage (open in a terminal
+        first, then the latest); `agents_too`: with those of the other agents on (each item
+        names its `agent`), as the sidebar lists them."""
+        items = await self.copilot_external(refresh)
+        if not agents_too or not self.runtime.agents_on():
+            return items
+        theirs = await self.agent_sessions(refresh)
+        if not theirs:
+            return items
+        merged = sorted(
+            items + theirs, key=lambda item: (item["open"], item["modified"]), reverse=True
+        )
+        return merged[:40]
+
+    async def agent_sessions(self, refresh: bool = False) -> list[dict]:
+        """The owner's own sessions of the other agents on, as `external` lists Copilot's: one
+        agent that cannot list them now (not started, signed out) leaves out only its own."""
+        cached_at, items = self.agent_cache
+        if not refresh and time.monotonic() - cached_at < AGENT_LISTING_SECONDS:
+            return items
+        held = managed(self.store)
+        items, listed = [], {}
+        for name in self.runtime.agents_on():
+            try:
+                backend = await self.runtime.connect_agent(name)
+                found = await asyncio.wait_for(backend.list_sessions(), LISTING_TIMEOUT)
+            except Exception as exc:
+                logger.info("Could not list %s's sessions: %s", name, describe(exc))
+                continue
+            for meta in found:
+                if meta.session_id in held:
+                    continue
+                context = meta.context
+                cwd = (context.working_directory if context else "") or ""
+                listed[meta.session_id] = name
+                items.append(
+                    {
+                        "id": sendable(meta.session_id),
+                        "summary": sendable((meta.summary or "Untitled session")[:200]),
+                        "cwd": sendable(cwd),
+                        "repository": sendable((context.repository if context else "") or ""),
+                        "branch": sendable((context.branch if context else "") or ""),
+                        "modified": meta.modified_time.isoformat(),
+                        "open": bool(getattr(meta, "open", False)),
+                        "agent": name,
+                        "agent_name": agents.display(name),
+                        "resume": sendable(agents.resume_command(name, meta.session_id, cwd)),
+                    }
+                )
+        self.agent_cache, self.listed_agent = (time.monotonic(), items), listed
+        return items
+
+    async def listed_as(self, session_id: str) -> str:
+        """The agent a session the owner chose from the list is of: Copilot's unless it is
+        another agent's (listed again once when not known)."""
+        if not self.runtime.agents_on():
+            return COPILOT_AGENT
+        if session_id not in self.listed_agent:
+            await self.agent_sessions(refresh=True)
+        return self.listed_agent.get(session_id, COPILOT_AGENT)
+
+    async def copilot_external(self, refresh: bool = False) -> list[dict]:
         if not self.runtime.ready():
             return []
         cached_at, items = self.external_cache
@@ -1223,9 +1302,11 @@ class Workers:
         return items
 
     async def adopt(self, session_id: str) -> dict:
-        backend = self.runtime.require_ready()
         if self.store.find_session(session_id):
             raise ValueError("Chief of Staff already manages that session.")
+        if (agent := await self.listed_as(session_id)) != COPILOT_AGENT:
+            return await self.adopt_agent(agent, session_id)
+        backend = self.runtime.require_ready()
         meta = await backend.get_session_metadata(session_id)
         if not meta:
             raise LookupError("Session not found.")
@@ -1254,21 +1335,82 @@ class Workers:
             self.bus.publish("state")
             raise RuntimeError(f"Could not adopt the session: {describe(exc)}") from exc
         self.store.set(f"created:{session_id}", "1")
+        return self.adopted(row, waits=waits)
+
+    def adopted(self, row: dict, agent: str = COPILOT_AGENT, waits: bool = False) -> dict:
         # Its work so far is not a task to review; the owner's next request starts one.
-        task = self.tasks.create(session_id, row["title"], "(an existing Copilot session)")
+        made = f"(an existing {agents.display(agent)} session)" if agent != COPILOT_AGENT else ""
+        task = self.tasks.create(row["id"], row["title"], made or "(an existing Copilot session)")
         self.tasks.move(task["id"], "done", result=ADOPTED)
         self.external_cache = (float("-inf"), [])
+        self.agent_cache = (float("-inf"), [])
         self.runtime.add_message(
             self.runtime.router_id(),
             "notice",
             f"Adopted “{row['title']}”"
             + (": it waits for you to look at its folder's settings" if waits else ""),
-            {"session_id": session_id},
+            {"session_id": row["id"]},
         )
-        return self.store.session(session_id)
+        return self.store.session(row["id"])
 
-    async def import_history(self, row: dict, session: Any):
-        """An adopted session's conversation so far, into its empty timeline.
+    async def adopt_agent(self, agent: str, session_id: str) -> dict:
+        """adopt, for another agent's session: a worker of the owner's on it, which that agent
+        must be able to run now (as a new worker named for it). Claude's session goes on as
+        itself (refused while a process of Claude's has it open: two would write it); a Codex
+        thread is read into a new thread of Chief of Staff's (Codex keeps a thread's tools from
+        its start), and the owner's own stays as it was."""
+        name = agents.display(agent)
+        await self.runtime.new_worker_agent(agent, slack=False)  # Raises why it cannot.
+        backend = await self.runtime.connect_agent(agent)
+        held = managed(self.store)
+        listed = {
+            m.session_id: m for m in await backend.list_sessions() if m.session_id not in held
+        }
+        if not (meta := listed.get(session_id)):
+            raise LookupError("Session not found.")
+        if agent == "claude" and (pid := (await backend.open_elsewhere()).get(session_id)):
+            raise ValueError(
+                f"That session is open in another {name} window (process {pid}). Exit it there "
+                "(/exit), then let the Router manage it."
+            )
+        cwd = meta.context.working_directory if meta.context else ""
+        row = self.store.create_session(
+            session_id,
+            WORKER,
+            clean_title(meta.summary or "Adopted session"),
+            "idle",
+            cwd=cwd or str(self.runtime.role_dir("scratch")),
+        )
+        self.store.set(f"agent:{session_id}", agent)
+        self.store.set(f"created:{session_id}", "1")
+        continued = agent == "codex"
+        if continued:
+            self.store.set(f"agentcontinues:{session_id}", session_id)
+        else:
+            self.store.set(f"copilot:{session_id}", session_id)  # Made: it is resumed.
+        waits = False
+        try:
+            await self.runtime.open_live(row, create=continued)
+            if continued:
+                events, _, _ = await backend.read_history(session_id, 0)
+                await self.import_history(row, None, events, agent)
+        except SettingsChangedError:
+            # As adopt: at rest with its line and Use these settings (Claude goes on as itself;
+            # a Codex thread made of it untrusts such a folder rather than waiting).
+            waits = True
+        except Exception as exc:
+            self.store.execute("DELETE FROM sessions WHERE id=?", (session_id,))
+            for key in ("agent", "created", "copilot", "agentcontinues"):
+                self.store.delete(f"{key}:{session_id}")
+            self.bus.publish("state")
+            raise RuntimeError(f"Could not adopt the session: {describe(exc)}") from exc
+        return self.adopted(row, agent, waits)
+
+    async def import_history(
+        self, row: dict, session: Any, events: list | None = None, agent: str = COPILOT_AGENT
+    ):
+        """An adopted session's conversation so far, into its empty timeline (`events`: as
+        read_history gives another agent's, else read from the session).
 
         Imported messages carry no prompt: they are never sent again, and the Watchdog does not
         take them for instructions.
@@ -1277,13 +1419,17 @@ class Workers:
             "SELECT id FROM messages WHERE session_id=? AND kind!='notice' LIMIT 1", (row["id"],)
         ):
             return  # (A notice may come first: why it waited to open.)
-        try:
-            events = await session.get_events()
-        except Exception:
-            logger.warning("Could not read the history of %s.", row["id"], exc_info=True)
-            return
+        if events is None:
+            try:
+                read = list(await session.get_events())
+            except Exception:
+                logger.warning("Could not read the history of %s.", row["id"], exc_info=True)
+                return
+            agent = self.runtime.agent(row["id"])
+        else:
+            read = [as_event(event) for event in events]
         said = []
-        for event in events:
+        for event in read:
             kind = {"user.message": "owner", "assistant.message": "assistant"}.get(
                 getattr(event.type, "value", str(event.type))
             )
@@ -1302,7 +1448,7 @@ class Workers:
         self.runtime.add_message(
             row["id"],
             "notice",
-            "Its conversation in Copilot before Chief of Staff managed it"
+            f"Its conversation in {agents.display(agent)} before Chief of Staff managed it"
             + (f" ({earlier})" if earlier else ""),
             {"imported": True},
         )
@@ -1354,7 +1500,8 @@ class Workers:
         if not backend or row["role"] != WORKER or copilot in self.runtime.elsewhere:
             return  # Open in a terminal: the mirror shows it.
         if not self.runtime.on_copilot(row["id"]):
-            return  # Another agent's: it has no Copilot log.
+            await self.catch_up_agent(row)
+            return
         async with self.mirror_lock:
             key = f"mirror:{row['id']}"
             mirrored = self.store.get(key)
@@ -1377,6 +1524,31 @@ class Workers:
             self.store.delete(key)
             self.read_to[row["id"]] = after
             await self.sync_usage(row)
+
+    async def catch_up_agent(self, row: dict):
+        """catch_up, for another agent's worker continued in a terminal (its conversation as
+        that agent keeps it): what it did there since its timeline last showed it."""
+        if self.runtime.is_elsewhere(row) or self.runtime.agent_block(row):
+            return  # Open there still, or it may not run (its send says why): nothing started.
+        try:
+            backend = await self.runtime.connect_agent(self.runtime.agent(row["id"]))
+        except Exception:
+            return  # Its send says why it cannot run.
+        async with self.mirror_lock:
+            if not self.store.one(
+                "SELECT id FROM messages WHERE session_id=? LIMIT 1", (row["id"],)
+            ):
+                return  # Adopted just now: import_history brings its conversation.
+            try:
+                events, after, _ = await backend.read_history(
+                    self.runtime.copilot_id(row["id"]), self.read_to.get(row["id"], 0)
+                )
+            except Exception:
+                logger.warning("Could not read the history of %s.", row["id"], exc_info=True)
+                return
+            entries = terminal_timeline(events, self.runtime.tools)
+            self.show(row, self.missed(row, entries), note="Meanwhile, in a terminal")
+            self.read_to[row["id"]] = after
 
     async def sync_all_usage(self):
         """Once a start: what workers used outside Chief of Staff while it did not look."""
@@ -1496,6 +1668,8 @@ class Workers:
     async def history(self, session_id: str) -> dict:
         """The latest of a session Chief of Staff does not manage, read-only from its log
         (read on from where the last look ended, while the owner watches it)."""
+        if (agent := await self.listed_as(session_id)) != COPILOT_AGENT:
+            return await self.agent_history(agent, session_id)
         backend = self.runtime.require_ready()
         offset, entries, turn = self.histories.pop(session_id, (0, [], False))
         events, after, changed = await backend.read_history(session_id, offset)
@@ -1513,6 +1687,20 @@ class Workers:
             "entries": [{"kind": kind, "text": text[:20000]} for kind, text, _ in entries],
             "open": open_now,
             "working": open_now and (turn or time.time() - changed < BUSY_SECONDS),
+        }
+
+    async def agent_history(self, agent: str, session_id: str) -> dict:
+        """history, for another agent's session: its conversation as that agent keeps it, and
+        whether a process of that agent has it open now."""
+        backend = await self.runtime.connect_agent(agent)
+        events, _, changed = await backend.read_history(session_id, 0)
+        entries = terminal_timeline(events, self.runtime.tools)[-HISTORY_SHOWN * 2 :]
+        is_open = getattr(backend, "open_now", None)  # Another agent's.
+        open_now = bool(is_open and await is_open(session_id))
+        return {
+            "entries": [{"kind": kind, "text": text[:20000]} for kind, text, _ in entries],
+            "open": open_now,
+            "working": open_now and time.time() - changed < BUSY_SECONDS,
         }
 
     async def refresh_elsewhere(self):

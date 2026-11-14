@@ -305,7 +305,10 @@ def resume_command(name: str, session_id: str, cwd: str) -> str:
     if name == "codex":
         return f"codex resume {session_id}"
     if name == "claude":
-        return f"cd {shlex.quote(cwd)} && claude --resume {session_id}"
+        from .backend_claude import dashed
+
+        # Claude takes a UUID only (a row's 32 hex digits are refused: "is not a UUID").
+        return f"cd {shlex.quote(cwd)} && claude --resume {dashed(session_id)}"
     return f"copilot --resume {session_id}"
 
 

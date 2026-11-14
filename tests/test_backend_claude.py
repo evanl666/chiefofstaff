@@ -7,6 +7,7 @@ import contextlib
 import json
 import os
 import sys
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1185,3 +1186,83 @@ async def test_what_claude_says_of_its_conversation_and_dropped_messages(agent, 
     await worker.handle_message({"type": "rate_limit_event", "rate_limit_info": info})
     assert limits == [{"status": "allowed_warning", "window": "seven_day", "resets_at": 5}]
     assert agent.acting_refused == "", "a warning keeps nothing from running"
+
+
+def owners_transcript(config: Path, cwd: Path, words: str, *, made="cli", title="", big=0) -> str:
+    """A session in Claude's transcripts, as Claude 2.1.322 writes one (made in the owner's
+    terminal: entrypoint cli; by a program: sdk-…), its first message `big` characters longer."""
+    from claude_agent_sdk._internal.sessions import _sanitize_path
+
+    session_id = str(uuid.uuid4())
+    folder = config / "projects" / _sanitize_path(str(cwd))
+    folder.mkdir(parents=True, exist_ok=True)
+    common = {"sessionId": session_id, "cwd": str(cwd), "gitBranch": "main", "version": "2.1.322"}
+    titled = {"type": "custom-title", "customTitle": title, "sessionId": session_id}
+    lines = [titled] if title else []
+    first = str(uuid.uuid4())
+    lines += [
+        {"type": "user", "uuid": first, "parentUuid": None, "timestamp": "2026-11-14T10:00:00Z",
+         "message": {"role": "user", "content": words + " " * big}, "entrypoint": made, **common},
+        {"type": "assistant", "uuid": str(uuid.uuid4()), "parentUuid": first,
+         "timestamp": "2026-11-14T10:00:01Z", "entrypoint": made,
+         "message": {"role": "assistant", "content": [{"type": "text", "text": "On it."},
+                     {"type": "tool_use", "id": "t1", "name": "Bash",
+                      "input": {"command": "ls"}}]}, **common},
+    ]  # fmt: skip
+    written = "\n".join(json.dumps(line, separators=(",", ":")) for line in lines)
+    (folder / f"{session_id}.jsonl").write_text(written + "\n")
+    return session_id
+
+
+async def test_the_owners_own_claude_sessions_are_listed_never_a_programs_or_a_managed_one(
+    tmp_path, monkeypatch
+):
+    config = tmp_path / "config"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+    project = tmp_path / "project"
+    theirs = owners_transcript(config, project, "Tidy the README")
+    long = owners_transcript(config, project, "Rename it", big=200_000)
+    owners_transcript(config, project, "From a script", made="sdk-cli")
+    owners_transcript(config, project, "A worker's", made="sdk-py", title="cos-1234abcd")
+    held = owners_transcript(config, project, "Managed already")
+    found = backend_claude.owner_sessions(held={held})
+    assert sorted((meta.session_id, meta.summary[:9]) for meta in found) == sorted(
+        [(theirs, "Tidy the "), (long, "")]
+    ), "what made each is read from its ends (a first prompt past them: untitled), no other"
+    assert {meta.context.working_directory for meta in found} == {str(project)}
+    assert {meta.context.branch for meta in found} == {"main"}
+    events, _ = backend_claude.history_events(theirs)
+    assert [(e["type"], e["data"]) for e in events] == [
+        ("user.message", {"content": "Tidy the README"}),
+        ("assistant.message", {"content": "On it."}),
+        ("tool.execution_start", {"toolName": "bash", "arguments": {"command": "ls"}}),
+    ]
+
+
+async def test_a_session_open_in_another_claude_process_is_found_by_its_live_file(
+    tmp_path, monkeypatch
+):
+    """Claude 2.1.x keeps `sessions/<pid>.json` while a process has a session open (also one
+    started without --resume, which no command line names): another process's is open there;
+    a file a killed one left, or one of Chief of Staff's own processes, is not."""
+    config = tmp_path / "config"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+    (config / "sessions").mkdir(parents=True)
+    program = tmp_path / "bin" / "claude"
+    program.parent.mkdir()
+    program.write_text("#!/bin/sh\nsleep 30\n")
+    program.chmod(0o755)
+    running = await asyncio.create_subprocess_exec(str(program))
+    try:
+        named = [(running.pid, "s-open"), (2**22 + 7, "s-gone"), (os.getpid(), "s-own")]
+        for pid, session in named:
+            (config / "sessions" / f"{pid}.json").write_text(
+                json.dumps({"pid": pid, "sessionId": session, "kind": "interactive"})
+            )
+        await until(lambda: running.pid in backend_claude.process_table())
+        table = backend_claude.process_table()
+        assert backend_claude.live_sessions({os.getpid()}, table) == {"s-open": running.pid}
+    finally:
+        running.kill()
+        await running.wait()
+    assert backend_claude.live_sessions(set(), backend_claude.process_table()) == {}

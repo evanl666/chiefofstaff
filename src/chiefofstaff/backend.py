@@ -1071,11 +1071,13 @@ def attached_text(files: list[tuple[str, str]], unreadable: bool = False) -> str
 RESUMED = re.compile(r"(?:^|\s)(?:--resume[= ]|-r |resume )([0-9a-f][0-9a-f-]{7,63})(?:\s|$)")
 
 
-def resumed_elsewhere(program: str, ours: set[int]) -> dict[str, int]:
+def resumed_elsewhere(
+    program: str, ours: set[int], table: dict[int, tuple[int, str]] | None = None
+) -> dict[str, int]:
     """Sessions of an agent's CLI the owner resumed in a terminal (`claude --resume <id>`,
     `codex resume <id>`): session id -> pid. Never one of Chief of Staff's own processes."""
     found: dict[str, int] = {}
-    for pid, (_, command) in process_table().items():
+    for pid, (_, command) in (process_table() if table is None else table).items():
         words = command.split()
         if pid in ours or not words:
             continue

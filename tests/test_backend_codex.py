@@ -4733,3 +4733,131 @@ async def test_a_codex_workers_commands_end_when_codex_or_chief_of_staff_said(
         assert abs(now_end - ended) < 2, "seen ending as its process started afresh"
     finally:
         await runtime.stop()
+
+
+def owners_thread(home: Path, cwd: Path, **fields) -> str:
+    """A thread of the owner's own Codex (its terminal's: codex-tui), kept where the stand-in
+    keeps its threads: their conversation, and when it last changed."""
+    threads_file = home / "threads.json"
+    threads = json.loads(threads_file.read_text()) if threads_file.exists() else {}
+    thread = str(uuid.uuid4())
+    said = [
+        {"type": "userMessage", "id": "u1",
+         "content": [{"type": "text", "text": "Remember the word 'teal'."}]},
+        {"type": "agentMessage", "id": "a1", "text": "Noted: teal."},
+    ]  # fmt: skip
+    threads[thread] = {
+        "created": int(time.time()) - 60,
+        "cwd": str(cwd),
+        "model": "gpt-test",
+        "tools": [],
+        "config": {},
+        "instructions": "",
+        "turns": [{"id": "t1", "status": "completed", "items": said, "completedAt": 1}],
+        "memory": "",
+        "originator": "codex-tui",
+        "preview": "Remember the word 'teal'.",
+        **fields,
+    }
+    home.mkdir(parents=True, exist_ok=True)
+    threads_file.write_text(json.dumps(threads))
+    return thread
+
+
+async def test_the_owners_codex_threads_are_listed_and_one_adopted_goes_on_in_a_thread_of_its_own(
+    tmp_path, monkeypatch
+):
+    """Parity with adopting a Copilot session: the owner's own Codex threads are listed with
+    theirs (never one of Chief of Staff's); one taken over goes on in a new thread of Chief of
+    Staff's, made with its tools, that has its conversation (Codex fixes a thread's tools at its
+    start); the owner's thread is read, never written, and is no longer listed."""
+    home = tmp_path / "fake" / "home"
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    project = tmp_path / "project"
+    project.mkdir()
+    thread = owners_thread(home, project, name="Teal things")
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    try:
+        listed = [i for i in await runtime.workers.external(True, True) if i.get("agent")]
+        assert [(i["id"], i["summary"], i["cwd"], i["open"], i["agent"]) for i in listed] == [
+            (thread, "Teal things", str(project), False, "codex")
+        ]
+        assert listed[0]["resume"] == f"codex resume {thread}"
+        assert all("agent" not in item for item in await runtime.workers.external(True)), (
+            "the Router's other uses of the list are Copilot's as before"
+        )
+        history = await runtime.workers.history(thread)
+        assert [(e["kind"], e["text"]) for e in history["entries"]] == [
+            ("owner", "Remember the word 'teal'."),
+            ("assistant", "Noted: teal."),
+        ]
+        assert not history["open"]
+        # Open in the owner's Codex now: its writer lock is there.
+        lock = home / "thread-writer-locks" / f"{thread}.lock"
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        lock.write_text("")
+        assert (await runtime.workers.history(thread))["open"]
+        lock.unlink()
+
+        row = await runtime.workers.adopt(thread)
+        assert row["id"] == thread and runtime.agent(thread) == "codex"
+        made = runtime.copilot_id(thread)
+        assert made != thread, "a thread of its own"
+        threads = json.loads((home / "threads.json").read_text())
+        assert threads[made]["originator"] == "chiefofstaff"
+        assert "report" in threads[made]["tools"], "made with Chief of Staff's tools"
+        injected = threads[made]["injected"]
+        assert injected[0]["role"] == "developer" and thread in injected[0]["content"][0]["text"]
+        assert [(i["role"], i["content"][0]["text"]) for i in injected[1:3]] == [
+            ("user", "Remember the word 'teal'."),
+            ("assistant", "Noted: teal."),
+        ]
+        assert "injected" not in threads[thread] and len(threads[thread]["turns"]) == 1, (
+            "the owner's own thread is not written"
+        )
+        assert ("notice", "Its conversation in Codex before Chief of Staff managed it") in (
+            harness.kinds(thread)
+        )
+        assert ("owner", "Remember the word 'teal'.") in harness.kinds(thread)
+        listed = await runtime.workers.external(True, agents_too=True)
+        assert not [item for item in listed if item.get("agent")], "neither is listed now"
+        await runtime.owner_send(thread, "What word did I ask you to remember?")
+        await until(lambda: ("assistant", "teal") in harness.kinds(thread), 30)
+    finally:
+        await runtime.stop()
+
+
+async def test_what_a_codex_worker_did_in_a_terminal_shows_before_its_next_message(
+    tmp_path, monkeypatch
+):
+    """Parity with a Copilot worker's catch-up: continued in a terminal (`codex resume`), then
+    messaged here again, what it said there comes first in its timeline (thread/turns/list)."""
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    try:
+        worker = await spawn(runtime, harness, "Report done: fixed")
+        await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+        await turn_over(runtime, worker)
+        await runtime.terminal_command(worker)
+        # The owner's turn in their Codex, as it keeps the thread.
+        threads_file = tmp_path / "fake" / "home" / "threads.json"
+        threads = json.loads(threads_file.read_text())
+        at = int(time.time()) + 2
+        threads[runtime.copilot_id(worker)]["turns"].append(
+            {"id": "t-terminal", "status": "completed", "startedAt": at, "completedAt": at,
+             "items": [
+                 {"type": "userMessage", "id": "u9",
+                  "content": [{"type": "text", "text": "Also tidy the README"}]},
+                 {"type": "agentMessage", "id": "a9", "text": "Tidied the README."}]}
+        )  # fmt: skip
+        threads_file.write_text(json.dumps(threads))
+        await runtime.owner_send(worker, "Reply with just: thanks")
+        await until(lambda: ("assistant", "thanks") in harness.kinds(worker), 30)
+        kinds = harness.kinds(worker)
+        meanwhile = kinds.index(("notice", "Meanwhile, in a terminal"))
+        assert kinds[meanwhile + 1 : meanwhile + 3] == [
+            ("owner", "Also tidy the README"),
+            ("assistant", "Tidied the README."),
+        ]
+        assert meanwhile < kinds.index(("owner", "Reply with just: thanks"))
+    finally:
+        await runtime.stop()

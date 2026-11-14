@@ -717,7 +717,7 @@ def create_app(
 
     @app.get("/api/external")
     async def external(refresh: bool = False):
-        return await runtime.workers.external(refresh)
+        return await runtime.workers.external(refresh, agents_too=True)
 
     @app.get("/api/others")
     async def others():

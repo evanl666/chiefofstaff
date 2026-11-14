@@ -45,8 +45,9 @@ import signal
 import sys
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from contextlib import suppress
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -2471,10 +2472,10 @@ class ClaudeAgent:
     def epochs(self) -> set[str]:
         return {worker.epoch for worker in self.workers.values() if worker.alive()}
 
-    def processes(self) -> dict[int, str]:
+    def processes(self, table: dict[int, tuple[int, str]] | None = None) -> dict[int, str]:
         found: dict[int, str] = {}
         if running := [worker for worker in list(self.workers.values()) if worker.alive()]:
-            table = process_table()
+            table = process_table() if table is None else table
             for worker in running:
                 found |= {
                     pid: command
@@ -2510,7 +2511,13 @@ class ClaudeAgent:
         return list(LISTED.get(self.cli_version) or alias_models())
 
     async def list_sessions(self) -> list[Any]:
-        return []
+        """The owner's own Claude sessions (owner_sessions), for Chief of Staff to adopt; each
+        `open` when a process of Claude's has it open now."""
+        listed = await asyncio.to_thread(owner_sessions)
+        live = await self.open_elsewhere()
+        for meta in listed:
+            meta.open = meta.session_id in live
+        return listed
 
     async def get_session_metadata(self, session_id: str) -> Any:
         from claude_agent_sdk import get_session_info
@@ -2682,18 +2689,206 @@ class ClaudeAgent:
         return None
 
     async def open_elsewhere(self) -> dict[str, int]:
-        """Its workers' sessions the owner resumed in a terminal (`claude --resume <id>`)."""
-        ours = set(await asyncio.to_thread(self.processes))
-        return await asyncio.to_thread(resumed_elsewhere, "claude", ours)
+        """Sessions open in another process of Claude's now: one the owner resumed in a
+        terminal (`claude --resume <id>`, or /resume there: live_sessions), never its workers'."""
+
+        def found() -> dict[str, int]:
+            table = process_table()
+            ours = set(self.processes(table))
+            opened = live_sessions(ours, table) | resumed_elsewhere("claude", ours, table)
+            # Also by a worker's own id (a row's 32 hex digits, which Claude has dashed).
+            return opened | {key.replace("-", ""): pid for key, pid in opened.items()}
+
+        return await asyncio.to_thread(found)
+
+    async def open_now(self, session_id: str) -> bool:
+        """Whether another process of Claude's has this session open now."""
+        return session_id in await self.open_elsewhere()
 
     async def read_history(self, session_id: str, offset: int) -> tuple[list[dict], int, float]:
-        return [], offset, 0.0
+        """A session's conversation after `offset` events (its transcript, read whole)."""
+        try:
+            events, changed = await asyncio.to_thread(history_events, dashed(session_id))
+        except Exception:
+            return [], offset, 0.0
+        return events[offset:], len(events), changed
 
     async def read_usage(self, session_id: str, offset: int) -> tuple[list[dict], int]:
         return [], offset
 
     def session_log(self, session_id: str) -> Path | None:
         return None
+
+
+# How much of each end of a transcript is read to tell what made it and where it ran.
+TRANSCRIPT_ENDS = 65536
+TRANSCRIPT_FIELD = {
+    key: re.compile(rb'"' + key.encode() + rb'"\s*:\s*"((?:[^"\\]|\\.){1,4096})"')
+    for key in ("entrypoint", "cwd", "gitBranch")
+}
+
+
+def transcript_ends(path: Path) -> dict[str, str]:
+    """What a transcript's ends say of it: what made it (its `entrypoint`: "cli" for the
+    owner's terminal, "claude-vscode"…, "sdk-…" for a program, as each of Chief of Staff's
+    workers), where it ran (`cwd`) and on which branch (`gitBranch`, its latest); "" for what
+    neither end says. Nothing else of them is kept."""
+    try:
+        with path.open("rb") as file:
+            head = file.read(TRANSCRIPT_ENDS)
+            size = file.seek(0, os.SEEK_END)
+            tail = b""
+            if size > TRANSCRIPT_ENDS:
+                file.seek(max(TRANSCRIPT_ENDS, size - TRANSCRIPT_ENDS))
+                tail = file.read()
+    except OSError:
+        return {}
+    found = {}
+    for key, pattern in TRANSCRIPT_FIELD.items():
+        matches = [*pattern.finditer(head), *pattern.finditer(tail)]
+        if matches:
+            chosen = matches[-1] if key == "gitBranch" else matches[0]
+            with suppress(ValueError):
+                found[key] = json.loads(b'"' + chosen.group(1) + b'"')
+    return found
+
+
+def owner_sessions(held: Collection[str] = (), limit: int = 40) -> list[SimpleNamespace]:
+    """The owner's own Claude sessions, the latest first (from Claude's transcripts, as others
+    are listed: what is read is their ends, never kept): those made in the owner's terminal or
+    editor, never by a program (`claude -p`, an SDK: Chief of Staff's workers and checks), nor
+    one Chief of Staff manages (`held`)."""
+    from claude_agent_sdk import get_session_info
+
+    files = []
+    for path in (config_folder() / "projects").glob("*/*.jsonl"):
+        with suppress(OSError):
+            files.append((path.stat().st_mtime, path))
+    files.sort(reverse=True)
+    found: list[SimpleNamespace] = []
+    for modified, path in files:
+        if len(found) >= limit:
+            break
+        session_id = path.stem
+        if session_id in held or not uuid_like(session_id):
+            continue
+        ends = transcript_ends(path)
+        maker = ends.get("entrypoint", "")
+        if not maker or maker.startswith("sdk-"):
+            continue
+        # Its title, else Claude's summary of it, else its first prompt (as Claude lists it);
+        # none for one whose first prompt is past what is read of it.
+        info = get_session_info(session_id)
+        if str(getattr(info, "custom_title", "") or "").startswith("cos-"):
+            continue
+        context = SimpleNamespace(
+            working_directory=str(getattr(info, "cwd", "") or ends.get("cwd") or ""),
+            repository="",
+            branch=str(getattr(info, "git_branch", "") or ends.get("gitBranch") or ""),
+        )
+        found.append(
+            SimpleNamespace(
+                session_id=session_id,
+                summary=str(getattr(info, "summary", "") or "")[:200],
+                modified_time=datetime.fromtimestamp(modified, tz=UTC),
+                context=context,
+            )
+        )
+    return found
+
+
+def uuid_like(text: str) -> bool:
+    try:
+        return str(uuid.UUID(text)) == text
+    except ValueError:
+        return False
+
+
+def claude_program(command: str) -> bool:
+    """Whether a command line is Claude Code's (a pid a `sessions/` file names is still that
+    process, not another that took its number): `claude` as typed or its path, run by itself or
+    by its interpreter (`node …/bin/claude`), a version of its native installer's
+    (…/claude/versions/2.1.322), or Node running its package's script (…/claude-code/cli.js)."""
+    words = [Path(word) for word in command.split()[:2]]
+    return any(
+        word.name.startswith("claude")
+        or word.parent.parts[-2:] == ("claude", "versions")
+        or "claude-code" in word.parts
+        for word in words
+    )
+
+
+def live_sessions(ours: Collection[int], table: dict[int, tuple[int, str]]) -> dict[str, int]:
+    """Claude sessions open in a process now, session id -> pid: each running `claude` keeps
+    `sessions/<pid>.json` in its configuration folder (2.1.x: its pid and session id, read and
+    dropped), never one of Chief of Staff's own processes; a file a process left when killed
+    names a pid that is gone, or no longer Claude's."""
+    found: dict[str, int] = {}
+    for path in (config_folder() / "sessions").glob("*.json"):
+        try:
+            data = json.loads(path.read_text()[:65536])
+            pid, session_id = int(data["pid"]), str(data["sessionId"])
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        if pid in ours or pid not in table:
+            continue
+        if claude_program(table[pid][1]):
+            found.setdefault(session_id, pid)
+    return found
+
+
+def transcript_of(session_id: str) -> Path | None:
+    """Where Claude keeps a session's transcript (in its project's folder)."""
+    return next((config_folder() / "projects").glob(f"*/{Path(session_id).name}.jsonl"), None)
+
+
+def stamps(path: Path) -> dict[str, str]:
+    """Each entry of a transcript: when it was written (its uuid -> its ISO time)."""
+    found: dict[str, str] = {}
+    with path.open(encoding="utf-8", errors="replace") as file:
+        for line in file:
+            with suppress(ValueError, AttributeError):
+                entry = json.loads(line)
+                if isinstance(entry.get("uuid"), str) and isinstance(entry.get("timestamp"), str):
+                    found[entry["uuid"]] = entry["timestamp"]
+    return found
+
+
+def history_events(session_id: str) -> tuple[list[dict], float]:
+    """A session's conversation from its transcript, as a session's log has it (user.message,
+    assistant.message; tool calls as tool.execution_start; each with when), and when it last
+    changed."""
+    from claude_agent_sdk import get_session_messages
+
+    if (path := transcript_of(session_id)) is None:
+        return [], 0.0
+    changed = path.stat().st_mtime
+    when = stamps(path)
+    events: list[dict] = []
+    for message in get_session_messages(session_id):
+        content = mapping(message.message).get("content")
+        blocks = content if isinstance(content, list) else []
+        at = {"timestamp": when[message.uuid]} if message.uuid in when else {}
+        if message.type == "user":
+            if any(mapping(b).get("type") == "tool_result" for b in blocks):
+                continue
+            text = owners_text(content)
+            if text and text != PROBE and not text.startswith(NOTIFICATION):
+                events.append({"type": "user.message", "data": {"content": text}, **at})
+        elif message.type == "assistant":
+            for block in blocks:
+                block = mapping(block)
+                if block.get("type") == "text" and block.get("text"):
+                    events.append(
+                        {"type": "assistant.message", "data": {"content": block["text"]}, **at}
+                    )
+                elif block.get("type") == "tool_use":
+                    shown, arguments = event_tool(str(block.get("name") or ""), block.get("input"))
+                    events.append(
+                        {"type": "tool.execution_start",
+                         "data": {"toolName": shown, "arguments": arguments}, **at}
+                    )  # fmt: skip
+    return events, changed
 
 
 def claude_backend(command: str = "claude", folder: Path | None = None) -> ClaudeAgent:

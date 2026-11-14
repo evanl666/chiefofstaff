@@ -6,8 +6,10 @@ itself)."""
 
 import asyncio
 import json
+import os
 import sys
 import time
+import uuid
 from pathlib import Path
 
 import pytest
@@ -375,7 +377,7 @@ async def test_a_claude_worker_continues_in_a_terminal_and_is_left_alone_there(
         row = harness.store.session(worker)
         given = await runtime.terminal_command(worker)
         assert given == {
-            "command": f"cd {row['cwd']} && claude --resume {worker}",
+            "command": f"cd {row['cwd']} && claude --resume {backend_claude.dashed(worker)}",
             "agent": "claude",
         }
         assert not runtime.states.is_live(worker), "let go of first"
@@ -385,7 +387,9 @@ async def test_a_claude_worker_continues_in_a_terminal_and_is_left_alone_there(
         fake.parent.mkdir()
         fake.write_text("#!/bin/sh\nsleep 30\n")
         fake.chmod(0o755)
-        terminal = await asyncio.create_subprocess_exec(str(fake), "--resume", worker)
+        terminal = await asyncio.create_subprocess_exec(
+            str(fake), "--resume", backend_claude.dashed(worker)
+        )
         try:
             await until(lambda: True)
             with pytest.raises(OpenElsewhereError, match="open in another Claude window"):
@@ -398,5 +402,160 @@ async def test_a_claude_worker_continues_in_a_terminal_and_is_left_alone_there(
         harness.store.update_session(worker, status="working")
         with pytest.raises(ValueError, match="It is at work"):
             await runtime.terminal_command(worker)
+    finally:
+        await runtime.stop()
+
+
+def owners_session(fake: Path, project: Path) -> str:
+    """A session of the owner's own Claude (made in their terminal), as Claude keeps it (its
+    transcript) and as the stand-in resumes it."""
+    from claude_agent_sdk._internal.sessions import _sanitize_path
+
+    session = str(uuid.uuid4())
+    first, second = str(uuid.uuid4()), str(uuid.uuid4())
+    said = [
+        {"type": "user", "uuid": first,
+         "message": {"role": "user", "content": "Remember the word 'teal'."}},
+        {"type": "assistant", "uuid": second,
+         "message": {"role": "assistant", "content": [{"type": "text", "text": "Noted: teal."}]}},
+    ]  # fmt: skip
+    (fake / "home" / "sessions").mkdir(parents=True, exist_ok=True)
+    (fake / "home" / "sessions" / f"{session}.json").write_text(
+        json.dumps({"memory": "teal", "totals": {}, "transcript": said, "cwd": str(project)})
+    )
+    folder = fake / "config" / "projects" / _sanitize_path(str(project))
+    folder.mkdir(parents=True)
+    lines, parent = [], None
+    for entry in said:
+        line = {**entry, "parentUuid": parent, "entrypoint": "cli", "sessionId": session,
+                "cwd": str(project), "timestamp": "2026-11-14T10:00:00Z"}  # fmt: skip
+        lines.append(json.dumps(line, separators=(",", ":")))
+        parent = entry["uuid"]
+    (folder / f"{session}.jsonl").write_text("\n".join(lines) + "\n")
+    return session
+
+
+async def test_the_owners_claude_sessions_are_listed_and_one_adopted_goes_on_as_itself(
+    tmp_path, claude_on_path
+):
+    """Parity with adopting a Copilot session: the owner's own Claude sessions are listed with
+    theirs (made in their terminal; never a worker's), each shown read-only; one taken over goes
+    on as itself, its conversation in its timeline, refused while a Claude process has it open
+    (two would write it)."""
+    fake = tmp_path / "fake-claude"
+    project = tmp_path / "project"
+    project.mkdir()
+    session = owners_session(fake, project)
+    harness, runtime = await started(tmp_path)
+    try:
+        await saved(runtime, {"claude": {"enabled": True}})
+        listed = [i for i in await runtime.workers.external(True, True) if i.get("agent")]
+        assert [(i["id"], i["agent"], i["agent_name"], i["cwd"], i["open"]) for i in listed] == [
+            (session, "claude", "Claude", str(project), False)
+        ]
+        assert listed[0]["resume"] == f"cd {project} && claude --resume {session}"
+        history = await runtime.workers.history(session)
+        assert [(e["kind"], e["text"]) for e in history["entries"]] == [
+            ("owner", "Remember the word 'teal'."),
+            ("assistant", "Noted: teal."),
+        ]
+        # The owner has it open in their terminal (begun there, so no command line names it).
+        program = tmp_path / "bin" / "claude"
+        program.parent.mkdir()
+        program.write_text("#!/bin/sh\nsleep 30\n")
+        program.chmod(0o755)
+        terminal = await asyncio.create_subprocess_exec(str(program))
+        live = fake / "config" / "sessions" / f"{terminal.pid}.json"
+        live.parent.mkdir(parents=True, exist_ok=True)
+        live.write_text(json.dumps({"pid": terminal.pid, "sessionId": session}))
+        try:
+            await until(lambda: terminal.pid in backend_claude.process_table())
+            assert (await runtime.workers.history(session))["open"]
+            with pytest.raises(ValueError, match="open in another Claude window"):
+                await runtime.workers.adopt(session)
+            assert not harness.store.find_session(session), "nothing of it made"
+        finally:
+            terminal.kill()
+            await terminal.wait()
+            live.unlink()
+
+        row = await runtime.workers.adopt(session)
+        assert row["id"] == session and runtime.agent(session) == "claude"
+        assert runtime.copilot_id(session) == session, "the same session"
+        kinds = harness.kinds(session)
+        assert ("notice", "Its conversation in Claude before Chief of Staff managed it") in kinds
+        assert ("owner", "Remember the word 'teal'.") in kinds
+        assert not [i for i in await runtime.workers.external(True, True) if i.get("agent")]
+        await runtime.owner_send(session, "What word did I ask you to remember?")
+        await until(lambda: ("assistant", "teal") in harness.kinds(session), 30)
+    finally:
+        await runtime.stop()
+
+
+async def test_what_a_claude_worker_did_in_a_terminal_shows_before_its_next_message(
+    tmp_path, claude_on_path
+):
+    """Parity with a Copilot worker's catch-up: continued in a terminal, then messaged here
+    again, what it said and did there comes first in its timeline (from Claude's transcript)."""
+    harness, runtime, worker, _ = await claude_worker(tmp_path)
+    try:
+        await runtime.terminal_command(worker)
+        # The owner's turn in the terminal, as Claude appends it to the transcript.
+        path = backend_claude.transcript_of(backend_claude.dashed(worker))
+        lines = path.read_text().splitlines()
+        parent = json.loads(lines[-1])["uuid"]
+        now = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(time.time() + 2))
+        common = {"sessionId": backend_claude.dashed(worker), "entrypoint": "cli", "timestamp": now}
+        asked, answered = str(uuid.uuid4()), str(uuid.uuid4())
+        lines += [
+            json.dumps({"type": "user", "uuid": asked, "parentUuid": parent, **common,
+                        "message": {"role": "user", "content": "Also tidy the README"}}),
+            json.dumps({"type": "assistant", "uuid": answered, "parentUuid": asked, **common,
+                        "message": {"role": "assistant", "content": [
+                            {"type": "tool_use", "id": "t9", "name": "Edit",
+                             "input": {"file_path": "README.md"}},
+                            {"type": "text", "text": "Tidied the README."}]}}),
+        ]  # fmt: skip
+        path.write_text("\n".join(lines) + "\n")
+        await runtime.owner_send(worker, "Reply with just: thanks")
+        await until(lambda: ("assistant", "thanks") in harness.kinds(worker), 30)
+        kinds = harness.kinds(worker)
+        meanwhile = kinds.index(("notice", "Meanwhile, in a terminal"))
+        assert kinds[meanwhile + 1 : meanwhile + 4] == [
+            ("owner", "Also tidy the README"),
+            ("tool", "edit README.md"),
+            ("assistant", "Tidied the README."),
+        ]
+        assert meanwhile < kinds.index(("owner", "Reply with just: thanks"))
+    finally:
+        await runtime.stop()
+
+
+async def test_a_copilot_session_a_claude_worker_made_is_its_not_the_owners(
+    tmp_path, claude_on_path, monkeypatch
+):
+    """The owner's Other sessions leave out a Copilot session a worker's `copilot -p` made: a
+    Claude worker's commands are kept as a Copilot worker's are, so its `copilot -p` is found."""
+    from chiefofstaff import provenance
+
+    stand_in = tmp_path / "copilot-bin" / "copilot"  # Never the owner's Copilot.
+    stand_in.parent.mkdir()
+    stand_in.write_text("#!/bin/sh\necho made\n")
+    stand_in.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{stand_in.parent}:{os.environ['PATH']}")
+    started_at = time.time()
+    harness, runtime, worker, _ = await claude_worker(
+        tmp_path, "Run the shell command `copilot -p 'label it' -s`. Report done: labelled"
+    )
+    try:
+        ran = harness.store.all("SELECT * FROM commands WHERE session_id=?", (worker,))
+        assert [(row["command"], bool(row["ended_at"])) for row in ran] == [
+            ("copilot -p 'label it' -s", True)
+        ]
+        found = provenance.windows(
+            harness.store, started_at, time.time(), runtime.provenance.folder_of,
+            [(started_at - 1, time.time() + 1)],
+        )  # fmt: skip
+        assert [(window.by, window.copilot) for window in found] == [(worker, True)]
     finally:
         await runtime.stop()

@@ -3151,6 +3151,8 @@ class Runtime:
             options["model"] = model
         if effort := chosen.get("effort"):
             options["reasoning_effort"] = effort
+        if (thread := self.store.get(f"agentcontinues:{row['id']}")) and not self.made(row["id"]):
+            options["continues"] = thread  # The owner's thread it takes over (Workers.adopt).
         return options
 
     def agent_children(self, session_id: str) -> list[str]:
