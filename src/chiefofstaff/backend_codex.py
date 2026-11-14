@@ -199,18 +199,24 @@ class OpenInCodexError(CodexError):
 
 def inner_command(command: str) -> str:
     """The command line a worker ran, without the shell Codex wraps it in."""
+    return wrapped(command)[1]
+
+
+def wrapped(command: str) -> tuple[str, str]:
+    """The shell Codex runs a worker's command line in (`zsh` for `/bin/zsh -lc '…'`; "" when
+    it runs none), and the command line."""
     try:
         words = shlex.split(command)
     except ValueError:
-        return command
+        return "", command
     if (
         len(words) == 3
         and Path(words[0]).name in SHELLS
         and words[1].startswith("-")
         and words[1].endswith("c")
     ):
-        return words[2]
-    return command
+        return Path(words[0]).name, words[2]
+    return "", command
 
 
 class Taken:
@@ -2730,7 +2736,7 @@ class CodexSession:
             )
 
     async def command_approval(self, params: dict, context: dict) -> dict:
-        text = inner_command(params.get("command") or "")
+        shell, text = wrapped(params.get("command") or "")
         network = params.get("networkApprovalContext") or {}
         if network.get("host"):
             request = SimpleNamespace(
@@ -2743,6 +2749,7 @@ class CodexSession:
             request = SimpleNamespace(
                 kind="shell",
                 full_command_text=text,
+                shell=shell,  # As the policy reads it (zsh: Tally.zsh).
                 intention=params.get("reason") or "",
                 commands=[],
                 possible_paths=[],

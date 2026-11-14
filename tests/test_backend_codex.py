@@ -36,10 +36,11 @@ from chiefofstaff.backend_codex import (
     text_of,
     trust_levels,
     version_of,
+    wrapped,
 )
 from chiefofstaff.envelope import wrap
 from chiefofstaff.models import DraftDecision, Settings
-from chiefofstaff.policy import GITHUB_MCP
+from chiefofstaff.policy import GITHUB_MCP, permission_denial
 from chiefofstaff.roles import WORKER
 from chiefofstaff.runtime import AgentConnection
 
@@ -139,6 +140,39 @@ def test_a_command_line_without_the_shell_codex_runs_it_in():
     assert inner_command("/bin/zsh -lc 'unclosed") == "/bin/zsh -lc 'unclosed"
     assert inner_command("/bin/zsh -c 'npm test'") == "npm test", "no login shell"
     assert inner_command("python -c 'print(1)'") == "python -c 'print(1)'", "not a shell"
+    # And the shell it runs in: the policy reads a line as zsh reads it (Tally.zsh).
+    assert wrapped("/bin/zsh -lc 'git push origin $B:t'") == ("zsh", "git push origin $B:t")
+    assert wrapped("bash -c 'git push'") == ("bash", "git push")
+    assert wrapped("git push") == ("", "git push")
+
+
+async def test_a_codex_workers_command_is_checked_as_zsh_runs_it(tmp_path, monkeypatch):
+    """The final review of 86c7d55: Codex runs a worker's commands in `zsh -lc`, where `$B:t`
+    is B's last part (`x/main`: main): pushed as zsh reads it, refused under Ask first."""
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    try:
+        worker = await spawn(runtime, harness, "Reply with just: ready")
+        await until(lambda: ("assistant", "ready") in harness.kinds(worker), 30)
+        session = runtime.states.handle(worker)
+        context = {"threadId": session.session_id}
+        seen = []
+        monkeypatch.setattr(
+            session, "permitted", lambda request, context: seen.append(request) or async_none()
+        )
+        await session.command_approval(
+            {"command": "/bin/zsh -lc 'B=x/main; git push origin $B:t'"}, context
+        )
+        assert seen[0].shell == "zsh"
+        row = {"role": "worker", "slack": 0, "cwd": str(tmp_path)}
+        assert permission_denial(row, seen[0]), "zsh pushes main"
+        bash = SimpleNamespace(kind="shell", full_command_text=seen[0].full_command_text)
+        assert permission_denial(row, bash) is None, "bash pushes x/main to t"
+    finally:
+        await runtime.stop()
+
+
+async def async_none():
+    return None
 
 
 def test_what_is_read_from_its_answers():

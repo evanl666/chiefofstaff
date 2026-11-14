@@ -91,11 +91,19 @@ MADE_UP_DEFAULT = re.compile(r"\$\([^()]*\b(?:main|master)\b|`[^`]*\b(?:main|mas
 UNSETTLED = re.compile(r"[$`\x00]")
 # `$NAME` and `${NAME}`: a variable a line may have set (NAME=value) before its push.
 VARIABLE = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
+# After a variable, in zsh: a modifier (`:t`, `:s/x/y/`, `:&`) or a subscript (`[2]`).
+ZSH_AFTER = re.compile(r":[A-Za-z&]|\[")
+ZSH_MODIFIED = re.compile(r"\$(?:\{[^}]*\}|[A-Za-z_][A-Za-z0-9_]*)(?::[A-Za-z&]|\[)")
 # The folder a command runs in, as a word says it (`$PWD`, `${PWD}`, `$(pwd)`), and the top of
 # its repository (`$(git rev-parse --show-toplevel)`, read as TOP): see Tally.moved.
 HERE = re.compile(r"\$(?:PWD|\{PWD\})(?=/|$)")
-TOP = re.compile(r"\$CHIEFOFSTAFF_TOP(?=/|$)")
-MADE_FOLDERS = {"pwd": "$PWD", "git rev-parse --show-toplevel": "$CHIEFOFSTAFF_TOP"}
+# What `$(pwd)` and `$(git rev-parse --show-toplevel)` say, put in their word as these marks (a
+# `$` and a character no variable's name has: never a variable's value): `pwd` says the folder
+# the shell is in, whatever the line set PWD to.
+PWD_MARK, TOP_MARK = "$\x01PWD", "$\x01TOP"
+HERE_MADE = re.compile(re.escape(PWD_MARK) + r"(?=/|$)")
+TOP = re.compile(re.escape(TOP_MARK) + r"(?=/|$)")
+MADE_FOLDERS = {"pwd": PWD_MARK, "git rev-parse --show-toplevel": TOP_MARK}
 # A folder not known (a `cd` that may not have run, or where a line's text cannot say).
 LOST = "/" + MADE_UP
 # A heredoc's start: `<<WORD`, `<<-WORD`, `<<'WORD'`, `<<"WORD"` (not `<<<`, a here-string).
@@ -295,13 +303,20 @@ def pushed_branch(refspec: str) -> str:
     return destination
 
 
-def expanded(folder: str, path: str) -> str:
+def expanded(folder: str, path: str, physical: bool = False) -> str:
     """`path` from `folder`, `~` expanded; `folder` itself when it cannot be (an unknown user's
-    home: the shell's `cd` fails there, and the command goes on where it was)."""
+    home: the shell's `cd` fails there, and the command goes on where it was). Read as the
+    shell's `cd` reads it (`..` takes off the name before it, a link's too); `physical`, as
+    `cd -P` and `git -C` do (`..` of a link is its target's parent). One not known (a variable
+    the line did not set, a substitution's, LOST) stays not known."""
     try:
-        return str(Path(folder) / Path(path).expanduser())
+        joined = str(Path(folder) / Path(path).expanduser())
     except (RuntimeError, ValueError):
         return folder
+    if UNSETTLED.search(joined):
+        return joined
+    # (Each link resolved as it comes, its `..` then of its target: as the system goes.)
+    return os.path.realpath(joined) if physical else os.path.normpath(joined)
 
 
 # The characters each scanner below stops at; what lies between is copied whole.
@@ -827,15 +842,15 @@ def one_substitution(word: str) -> bool:
     return False
 
 
-DESTINATION_STOPS = re.compile(r"\$\(|[`):]")
+DESTINATION_STOPS = re.compile(r"\$\(|\$\{|[`)}:]")
 
 
 def destination(refspec: str) -> str:
-    """The part of a refspec after its last `:` outside a substitution (all of it without
-    one)."""
-    if "$(" not in refspec and "`" not in refspec:
+    """The part of a refspec after its last `:` outside a substitution or a variable's braces
+    (`${B:-main}`: one word), all of it without one."""
+    if "$(" not in refspec and "`" not in refspec and "${" not in refspec:
         return refspec.rpartition(":")[2]
-    depth, quoted, last = 0, False, -1
+    depth, braces, quoted, last = 0, 0, False, -1
     for found in DESTINATION_STOPS.finditer(refspec):
         char = found.group()
         if char == "`":
@@ -844,19 +859,26 @@ def destination(refspec: str) -> str:
             depth += 1
         elif char == ")" and depth:
             depth -= 1
-        elif char == ":" and not depth and not quoted:
+        elif char == "${":
+            braces += 1
+        elif char == "}" and braces:
+            braces -= 1
+        elif char == ":" and not depth and not braces and not quoted:
             last = found.start()
     return refspec[last + 1 :]
 
 
-def resolved(word: str, value_of: Callable[[str], str | None]) -> str:
+def resolved(word: str, value_of: Callable[[str], str | None], zsh: bool = False) -> str:
     """A word with the variables the line set put in (`$NAME`, `${NAME}`); one it did not set
     stays (`$NAME`: not known), and so does the whole word when it would be longer than
-    MOST_VALUE (no branch's name is)."""
+    MOST_VALUE (no branch's name is). In zsh, one a modifier or a subscript follows (`$B:t`,
+    `$B[2]`) stays too: what that makes of it is not read here."""
     if "$" not in word:
         return word
     pieces, at, size = [], 0, 0
     for found in VARIABLE.finditer(word):
+        if zsh and ZSH_AFTER.match(word, found.end()):
+            continue
         value = value_of(found.group(1) or found.group(2))
         if value is None:
             continue
@@ -902,7 +924,7 @@ def expansions(
 
         run = []
         for word in words:
-            put = resolved(word, value_of)
+            put = resolved(word, value_of, tally.zsh)
             # Split where unquoted (`$B`), and gone when empty, unless part of it is quoted
             # (`""$B`); a quoted one (`"$B"`) is one word, even empty.
             made = [put] if put == word or not isinstance(word, Splitting) else put.split()
@@ -961,6 +983,7 @@ class Git:
     rest: list[str]
     elsewhere: bool
     moved: bool = False  # Its folder is another than the shell's (`-C`).
+    zsh: bool = False  # Run by zsh (Tally.zsh): a variable's modifier (`$B:t`) is its own.
 
 
 def git_command(
@@ -977,8 +1000,8 @@ def git_command(
         if name in GIT_VALUED and not value and index + 1 < len(words):
             index += 1
             value = words[index]
-        if name == "-C" and value:
-            folder = tally.moved(folder, value) if tally else expanded(folder, value)
+        if name == "-C" and value:  # (git goes there as the system does: a link's `..` too.)
+            folder = tally.moved(folder, value, True) if tally else expanded(folder, value, True)
         elif name == "-c" and value:
             key, has, setting = value.partition("=")
             config[key.lower()] = setting if has else "true"
@@ -989,7 +1012,7 @@ def git_command(
         index += 1
     if index >= len(words):
         return None
-    return Git(folder, config, words[index:], elsewhere, folder != cwd)
+    return Git(folder, config, words[index:], elsewhere, folder != cwd, bool(tally and tally.zsh))
 
 
 def switch_of(arguments: list[str]) -> tuple[str, str] | None:
@@ -1036,6 +1059,27 @@ def renamed_or_made(arguments: list[str]) -> tuple[str, str] | None:
     if listing & {word.partition("=")[0] for word in rest} or not named:
         return None
     return ("made", named[0])
+
+
+def pointed(arguments: list[str]) -> tuple[str, str] | None:
+    """What `git symbolic-ref` with these arguments does to the checkout's branch: ("to",
+    name) points HEAD at that branch; ("unknown", "") at a ref not a branch, or changes
+    another symbolic ref; None reads one (or deletes one: HEAD cannot be)."""
+    named, valued = [], False
+    for word in arguments[1:]:
+        if valued:
+            valued = False
+        elif word == "-m":
+            valued = True
+        elif not word.startswith("-") or word == "-":
+            named.append(word)
+        elif word in {"-d", "--delete"}:
+            return None
+    if len(named) < 2:
+        return None
+    if named[0] == "HEAD" and named[1].startswith("refs/heads/") and len(named[1]) > 11:
+        return ("to", named[1].removeprefix("refs/heads/"))
+    return ("unknown", "")
 
 
 def push_of(git: Git) -> Push | None:
@@ -1089,6 +1133,9 @@ def push_of(git: Git) -> Push | None:
             push.made_up = True  # As `HEAD`: its folder's branch (asked of git).
             continue
         target = destination(word.lstrip("+"))
+        if git.zsh and ZSH_MODIFIED.search(word):
+            push.unknown = True  # (`$B:t`, `$B[2]`: what zsh makes of B, not read here.)
+            continue
         if MADE_UP in target or "$(" in target or "`" in target or UNREADABLE.search(target):
             push.unknown = True  # A substitution, a variable, a glob: not known.
             continue
@@ -1136,7 +1183,13 @@ def loose_pushes(command: str, cwd: str) -> list[Push]:
             gits = gits or bool(git)
             continue
         gits, rest = True, stretch[push.end() :].split()
-        if not git or stretch[git.end() : push.start()].strip() or UNSETTLED.search(" ".join(rest)):
+        runs_it = set(re.split(r"[\s/]+", stretch[: git.start()] if git else ""))
+        if (
+            not git
+            or stretch[git.end() : push.start()].strip()
+            or UNSETTLED.search(" ".join(rest))
+            or runs_it & (FEEDERS | {"env", "find", "sudo"})  # Words or a folder of their own.
+        ):
             found.append(Push(unknown=True))
             continue
         words = ["git", "push", *filter(None, (word.strip("'\"`()\\") for word in rest))]
@@ -1165,6 +1218,7 @@ class Tally:
 
     text: str = ""
     start: str = ""
+    shell: str = ""  # The shell running the line, when not bash or sh (zsh: Codex's).
     pushes: list[Push] = field(default_factory=list)
     read: int = 0
     moves: int = 0
@@ -1232,23 +1286,31 @@ class Tally:
         if self.made > 2 * len(self.text) + MOST_READ or self.made_words > MOST_WORDS:
             raise TooComplexError
 
-    def moved(self, folder: str, path: str) -> str:
-        """The folder `cd path` or `git -C path` moves to from `folder`, counted: `$PWD` is
-        `folder` when the line does not set PWD (here_known), in code a command runs only
-        where it started (`here`); the repository's top (a substitution's: TOP) is `folder`
-        when that is the line's own and the top of one."""
+    @property
+    def zsh(self) -> bool:
+        """Run by another shell than bash or sh (zsh, as Codex runs commands): what it reads
+        otherwise (`$B:t`, `$B[2]`, `cdpath`, a pipe's last command in the shell itself) is
+        taken as not known here."""
+        return self.shell not in {"", "bash", "sh", "dash"}
+
+    def moved(self, folder: str, path: str, physical: bool = False) -> str:
+        """The folder `cd path` or `git -C path` moves to from `folder`, counted: `$(pwd)` is
+        `folder`, and `$PWD` when the line does not set PWD (here_known), in code a command
+        runs only where it started (`here`); the repository's top (a substitution's: TOP) is
+        `folder` when that is the line's own and the top of one."""
         self.moves += 1
         if self.moves > MOST_MOVES or len(folder) + len(path) > MOST_PATH:
             raise TooComplexError
         if path.startswith("~") and self.named()[0].get("HOME"):
             return LOST  # A home the line may have set.
-        if (here := HERE.match(path)) and self.here_known() and self.here in (None, folder):
+        here = HERE_MADE.match(path) or (HERE.match(path) if self.here_known() else None)
+        if here and self.here in (None, folder):
             path = "." + path[here.end() :]
         elif top := TOP.match(path):
             if folder != self.start or not Path(folder, ".git").exists():
                 return LOST
             path = "." + path[top.end() :]
-        return expanded(folder, path)
+        return expanded(folder, path, physical)
 
 
 # Reserved words that open and close the shell's constructs: what is in one may not run (in a
@@ -1260,6 +1322,8 @@ LOOPS = frozenset({"while", "until", "for", "select"})
 
 # In a joiner: the operators that join or end lists, and parentheses.
 OPERATORS = re.compile(r"&&|\|\||;;&?|;&|[;&|\n()]")
+# A device a line may name to feed a file it sources (`/dev/stdin`, `/dev/fd/0`, `/proc/…`).
+DEVICES = re.compile(r"/dev/(?!null\b)|/proc/")
 # A process substitution (`<(…)`, `>(…)`): what it runs, it runs alongside the line.
 PROCESS = re.compile(r"[<>]\(")
 
@@ -1445,6 +1509,14 @@ class Line:
     looping: int = 0  # Loops the command being read is in (run again: in no order).
     alongside: bool = False  # In a group that is part of a pipe: in no order with its others.
     undo: list[tuple[dict[str, Any], str, Any]] = field(default_factory=list)
+    # Where `cd -` goes (the folder before the last move) and pushd's folders (popd goes to the
+    # last): None when not known (before any move, the shell's own: not known).
+    previous: str | None = None
+    dirs: tuple[str, ...] | None = ()
+
+    def lose(self):
+        """The folder, the one before it and pushd's: not known from here."""
+        self.folder, self.chain, self.previous, self.dirs = LOST, None, None, None
 
     def put(self, store: dict[str, Any], name: str, value: Any = None):
         """Sets a value the line keeps (`values`, `env`), or drops it (None), noted in `undo`."""
@@ -1483,47 +1555,74 @@ class Line:
         self.put(self.values, name)
         if not certain or self.depth or not NAME.fullmatch(name):
             return
-        values = tuple(resolved(value, self.value_of) for value in said)
+        values = tuple(resolved(value, self.value_of, self.tally.zsh) for value in said)
         if 0 < len(values) <= MOST_VALUES and all(
             value == MADE_UP or not UNSETTLED.search(value) for value in values
         ):
             self.put(self.values, name, values)
 
     def cd(self, name: str, arguments: list[str], certain: bool, mark: int):
-        """Where `cd` (`pushd FOLDER` too; `popd`, `pushd` otherwise: not known) goes; when it
-        may not have run (`certain` is false), only the commands of its `&&` chain after it
-        surely run there."""
-        rest, target = list(arguments), None
+        """Where `cd` goes (`cd -`: to the folder before; `pushd FOLDER`, and `popd` back to the
+        folder pushd left; any other: not known), read as the shell reads it (`cd -P`: as the
+        system does). When it may not have run (`certain` is false), only the commands of its
+        `&&` chain after it surely run there."""
+        rest, target, physical = list(arguments), None, False
         while name == "cd" and rest and rest[0].startswith("-") and rest[0] != "-":
-            if rest.pop(0) == "--":
+            option = rest.pop(0)
+            if option == "--":
                 break
-        if name == "cd" and not rest:
+            if not set(option[1:]) <= set("LPe@"):
+                rest = ["-", "-"]  # (An option not read here, `cd -2` in zsh: not known.)
+                break
+            for letter in option[1:]:  # (The last of -L and -P counts.)
+                physical = {"P": True, "L": False}.get(letter, physical)
+        before, dirs = self.folder, self.dirs
+        if name == "popd":
+            if not rest and dirs:
+                target, dirs = dirs[-1], dirs[:-1]
+        elif name == "cd" and not rest:
             target = "~"
+        elif name == "cd" and rest == ["-"]:
+            target = self.previous
         elif (name == "cd" and len(rest) == 1 and rest[0] != "-") or (
             name == "pushd" and len(rest) == 1 and not rest[0].startswith(("-", "+"))
         ):
-            target = resolved(rest[0], self.value_of)
-            if self.tally.named()[0].get("CDPATH") and not target.startswith(("/", ".", "~")):
+            target = resolved(rest[0], self.value_of, self.tally.zsh)
+            named = self.tally.named()[0]
+            if (named.get("CDPATH") or (self.tally.zsh and named.get("cdpath"))) and (
+                not target.startswith(("/", ".", "~"))
+            ):
                 target = None  # Searched in CDPATH's folders first: which, not known.
-        self.folder = LOST if target is None else self.tally.moved(self.folder, target)
+            if name == "pushd":
+                dirs = None if dirs is None else (*dirs, before)
+        if target is None or LOST in target:
+            self.lose()
+            return
+        self.folder = self.tally.moved(before, target, physical)
+        self.previous, self.dirs = before, dirs
         self.chain = None if certain else mark
         if not certain and not self.chained[-1]:  # (`x || cd y && …`: it may not have run.)
-            self.folder, self.chain = LOST, None
+            self.lose()
 
     def end_loops(self, nest: int):
         while self.loops and self.loops[-1][1] > nest:
             self.put(self.values, self.loops.pop()[0])
 
 
-def moves_folder(joiner: str, words: list[str]) -> bool:
+def moves_folder(joiner: str, words: list[str], devices: bool = False) -> bool:
     """Whether a command may go to another folder (`cd`, an evaluator, a function's
     definition, a command whose name the line makes up). Not `. FILE` or `source FILE`: what
-    a file runs is not read here (nor what `sh FILE` runs)."""
+    a file runs is not read here (nor what `sh FILE` runs); unless what it reads may be what
+    the line feeds it (`/dev/stdin`; a path in a variable, in a line naming a device:
+    `devices`)."""
     first = next((i for i, word in enumerate(words) if word not in KEYWORDS), len(words))
     name, start = command_name(words[first:])
     file = words[first + start] if first + start < len(words) else ""
-    sourced = name in {".", "source"} and bool(
-        PLAIN_NAME.fullmatch(file) and not file.startswith(("-", "/dev/", "/proc/"))
+    sourced = (
+        name in {".", "source"}
+        and bool(file)
+        and not file.startswith(("-", "/dev/", "/proc/"))
+        and (bool(PLAIN_NAME.fullmatch(file)) or not devices)
     )
     return bool(
         "()" in joiner.replace(" ", "")
@@ -1555,8 +1654,10 @@ def read_line(command: str, cwd: str, depth: int, tally: Tally) -> str:
         return TOO_COMPLEX
     line = Line(cwd, depth, tally)
     broken, nest, ordered = 0, 0, True
-    saved: list[tuple[str, int | None, int, int]] = []  # Where each open subshell started.
-    moving = [bool(cwd) and moves_folder(*command) for command in commands]
+    # Where each open subshell started: its folder, chain, undo mark, nest, and cd's.
+    saved: list[tuple[str, int | None, int, int, str | None, tuple[str, ...] | None]] = []
+    devices = bool(DEVICES.search(command))
+    moving = [bool(cwd) and moves_folder(*command, devices) for command in commands]
     ends = loop_ends(commands)
     # The subshells (when their parentheses are not read: after one ends, the folder is not
     # known, and what is in one is not taken for sure).
@@ -1581,24 +1682,32 @@ def read_line(command: str, cwd: str, depth: int, tally: Tally) -> str:
         ):
             lost_loops.add(start)
     for index, (joiner, words) in enumerate(commands):
-        broken += bool(index) and joiner.replace("\n", "") != "&&"
+        # A pipe's commands are one item of its list (`a && b | c && d`: b | c runs if a did,
+        # and d if c did): `&&` and `|` go on with the chain.
+        going_on = joiner.replace("\n", "") in {"&&", "|"}
+        broken += bool(index) and not going_on
         line.marks.append(broken)
         operators = joiner.replace("&&", "")
         listed = not index or bool(set(operators) & set(";\n&("))  # A list starts here.
-        line.chained.append(listed or (joiner.replace("\n", "") == "&&" and line.chained[-1]))
+        line.chained.append(listed or (going_on and line.chained[-1]))
         after = commands[index + 1][0] if index + 1 < len(commands) else ""
         for event in events[index]:  # A subshell's changes end with it.
             if event == "(":
-                saved.append((line.folder, line.chain, len(line.undo), nest))
+                saved.append(
+                    (line.folder, line.chain, len(line.undo), nest, line.previous, line.dirs)
+                )
             elif doubtful:
-                line.folder, line.chain = LOST, None
+                line.lose()
                 del saved[-1:]
             elif saved:
-                line.folder, line.chain, mark, _ = saved.pop()
+                line.folder, line.chain, mark, _, line.previous, line.dirs = saved.pop()
                 line.restore(mark)
         line.lost = line.lost or "()" in joiner.replace(" ", "")  # A function: called anywhere.
         if line.lost or (line.chain is not None and line.chain != broken):
-            line.folder, line.chain = (LOST if cwd else cwd), None
+            if cwd:
+                line.lose()
+            else:
+                line.chain = None
         first = next((i for i, word in enumerate(words) if word not in KEYWORDS), len(words))
         for word in words[:first]:
             nest += (word in OPENERS) - (word in CLOSERS)
@@ -1606,7 +1715,7 @@ def read_line(command: str, cwd: str, depth: int, tally: Tally) -> str:
             if word == "done":
                 line.end_loops(nest)
         if index in lost_loops:
-            line.folder, line.chain = LOST, None  # Run again after a `cd` in it: not known.
+            line.lose()  # Run again after a `cd` in it: not known.
         rest = words[first:]
         name, start = command_name(rest)
         nest += (name == "case") - (name == "esac")
@@ -1625,21 +1734,29 @@ def read_line(command: str, cwd: str, depth: int, tally: Tally) -> str:
             certain = certain and nest == 0 and not saved
         else:
             certain = certain and nest == (saved[-1][3] if saved else 0)
+        # zsh's `command` runs no builtin (an external one, maybe none), and its `time` takes no
+        # options (`time -p cd x` runs `-p`): what such a builtin would change may not be.
+        wrapped = rest[: start - 1] if start else []
+        unrun = tally.zsh and any(w == "command" or w.startswith("-") for w in wrapped)
         if rest and all(isinstance(word, Assignment) for word in rest):
             set_variables(line, rest, certain)  # `NAME=value` alone: for what follows.
         elif name == "export":
-            set_variables(line, rest[start:], certain)
+            set_variables(line, rest[start:], certain and not unrun)
         elif first and words[first - 1] in {"for", "select"} and len(rest) > 1 and rest[1] == "in":
             line.loops.append((rest[0], nest))
             line.assign(rest[0], rest[2:], certain=True)  # Each of those, in turn, in the loop.
         elif name in {"cd", "pushd", "popd"}:
-            if cwd and not piped:
+            if cwd and unrun:
+                line.lose()
+            elif cwd and not piped:
                 line.cd(name, rest[start:], certain, broken)
+            elif cwd and tally.zsh:
+                line.lose()  # zsh runs a pipe's last command in the shell itself.
         else:
             if why := read_command(words, index, line):
                 return why
             if cwd and not piped and (name == "function" or moving[index]):
-                line.folder, line.chain = LOST, None  # It may have gone elsewhere.
+                line.lose()  # It may have gone elsewhere.
                 line.lost = line.lost or name == "function"
         if len(line.env) > MOST_GIT_ENV:
             return TOO_COMPLEX
@@ -1679,8 +1796,11 @@ def git_variables(words: list[str]) -> dict[str, str]:
 
 
 def read_command(words: list[str], index: int, line: Line) -> str:
-    """One simple command, read up to its first `git`, shell `-c` or `eval`."""
+    """One simple command, read up to its first `git`, shell `-c` or `eval`; through the
+    commands that run another (`env -C DIR`: there; `find … -execdir`: in folders not known;
+    `xargs`, `parallel`, `fd -x`: with words they add to it, not known here)."""
     local: dict[str, str] = {}
+    folder, feeds, found = line.folder, "", False
     for position, word in enumerate(words):
         if ASSIGNMENT.match(word):
             local.update(git_variables([word]))
@@ -1690,36 +1810,123 @@ def read_command(words: list[str], index: int, line: Line) -> str:
             here = {**line.env, **local} if local else line.env
             if line.env_unsure:  # git's own variables, maybe set: what it does, not known.
                 here = {**here, "GIT_CONFIG_PARAMETERS": "push alias.", "GIT_DIR": "?"}
-            for run in expansions(words[position:], line.said, line.tally):
-                read_git(run, here, index, line)
+            given = words[position:]
+            if found:  # (`find … -exec git … ;`: its words end at find's `;` or `+`.)
+                given = list(itertools.takewhile(lambda word: word not in {";", "+"}, given))
+            for run in expansions(given, line.said, line.tally):
+                read_git(run, here, index, line, folder, feeds)
             return ""
         if program in SHELLS:  # Its words are its own: a script's (`-c`), or a file's.
             script = shell_script(words, position)
-            return "" if script is None else read_code(script, line)
+            return "" if script is None else read_code(script, line, folder)
         if program == "eval":
-            return read_code(" ".join(words[position + 1 :]), line)
+            return read_code(" ".join(words[position + 1 :]), line, folder)
+        if program == "env":
+            moved, script = env_options(words[position + 1 :])
+            if moved is not None:
+                target = resolved(moved, line.value_of, line.tally.zsh)
+                folder = LOST if LOST in folder else line.tally.moved(folder, target, True)
+            if script is not None:
+                return read_code(script, line, folder)
+        elif program == "find":
+            found = True
+            if {"-execdir", "-okdir"} & set(words[position + 1 :]):
+                folder = LOST  # Each found file's folder.
+        elif program in FEEDERS:
+            feeds = feeds or placeholder(program, words[position + 1 :])
     return ""
 
 
-def read_code(script: str, line: Line) -> str:
-    """A line a command runs as code (`eval …`, `sh -c …`), from the folder it runs in. A `$PWD`
-    in it may have been put in where it was written (in double quotes): it is the folder
-    only where that is the folder it started in (Tally.here)."""
+# Commands that run another with words of their own added (each line of their input, a found
+# file's name), unless told where to put them (`xargs -I {}`).
+FEEDERS = frozenset({"xargs", "parallel", "fd", "fdfind"})
+
+
+def placeholder(program: str, words: list[str]) -> str:
+    """What a feeder puts its words in place of (`xargs -I R`, `-J R`, `--replace[=R]`, `-i`),
+    or "*" when it adds them at the end (or where cannot be told)."""
+    if program == "xargs":
+        for at, word in enumerate(words):
+            name, has, value = word.partition("=")
+            if name == "--replace":
+                return value if has and value else "{}"
+            if word in {"-I", "-J"} and at + 1 < len(words):
+                return words[at + 1] or "*"
+            if word.startswith(("-I", "-J")) and len(word) > 2:
+                return word[2:]
+            if word.startswith("-i"):
+                return word[2:] or "{}"
+            if not word.startswith("-"):
+                break
+    return "*"
+
+
+def env_options(words: list[str]) -> tuple[str | None, str | None]:
+    """What `env` with these words does before the command it runs: the folder it goes to
+    (`-C DIR`, `--chdir=DIR`), and a command line it is given as one word (`-S '…'`)."""
+    folder = script = None
+    at = 0
+    while at < len(words):
+        word = words[at]
+        name, has, value = word.partition("=")
+        if word in {"-C", "--chdir", "-S", "--split-string", "-u", "--unset"}:
+            given = words[at + 1] if at + 1 < len(words) else ""
+            at += 2
+        elif name in {"--chdir", "--split-string", "--unset"} and has:
+            word, given = name, value
+            at += 1
+        elif word.startswith(("-C", "-S", "-u")) and len(word) > 2:
+            word, given = word[:2], word[2:]
+            at += 1
+        elif word.startswith("-") and word != "-":
+            at += 1
+            continue
+        else:
+            break
+        if word in {"-C", "--chdir"}:
+            folder = given
+        elif word in {"-S", "--split-string"}:
+            script = " ".join([given, *words[at:]])
+            break
+    return folder, script
+
+
+def read_code(script: str, line: Line, folder: str | None = None) -> str:
+    """A line a command runs as code (`eval …`, `sh -c …`), from the folder it runs in (the
+    line's, or `folder`: `env -C DIR sh -c …`). A `$PWD` in it may have been put in where it
+    was written (in double quotes): it is the folder only where that is the folder it started
+    in (Tally.here)."""
+    folder = line.folder if folder is None else folder
     tally, before = line.tally, line.tally.here
-    tally.here = line.folder if before in (None, line.folder) else LOST
+    tally.here = folder if before in (None, folder) and folder == line.folder else LOST
     try:
-        return read_line(script, line.folder, line.depth + 1, tally)
+        return read_line(script, folder, line.depth + 1, tally)
     finally:
         tally.here = before
 
 
-def read_git(words: list[str], env: dict[str, str], index: int, line: Line):
-    """One `git …` run: a push, into the line's tally; a checkout, switch or branch, kept for
-    the pushes after it."""
-    git = git_command(words, env, line.folder, line.tally)
+def read_git(
+    words: list[str],
+    env: dict[str, str],
+    index: int,
+    line: Line,
+    folder: str | None = None,
+    feeds: str = "",
+):
+    """One `git …` run (in the line's folder, or `folder`): a push, into the line's tally; a
+    checkout, switch or branch, kept for the pushes after it. With words a command adds to it
+    (`feeds`: see placeholder), which and where are not known."""
+    git = git_command(words, env, line.folder if folder is None else folder, line.tally)
     if git is None:
         return
+    if folder is not None and folder != line.folder:
+        git.moved = True  # (`env -C DIR git push origin "$(…)"`: that runs in the shell's folder.)
+    fed = feeds == "*" or bool(feeds and any(feeds in word for word in words[1:]))
+    if fed and git.rest[0] in SWITCHING:
+        record_switch(git, index, line, ("unknown", ""))
+        return
     if push := push_of(git):
+        push.unknown = push.unknown or fed
         push.nested = bool(line.depth)
         if push.bare_in is not None:  # A switch in another folder may be in the same repository.
             for folder, other in line.switched.items():
@@ -1743,16 +1950,24 @@ def read_git(words: list[str], env: dict[str, str], index: int, line: Line):
         record_switch(git, index, line)
 
 
-def record_switch(git: Git, index: int, line: Line):
-    """What a `git checkout`, `git switch` or `git branch` does to its folder's branch, for a
-    bare push later in the line: a branch made and switched to counts only when every join
-    from there is `&&` (it may have failed, and the line gone on: `;`, `||`, a new line). One
-    in a line a command runs, or in the background, may have gone anywhere before any push:
-    Tally.aside."""
-    if git.rest[0] in {"checkout", "switch"}:
+# The git commands that may put a checkout on another branch.
+SWITCHING = frozenset({"checkout", "switch", "branch", "symbolic-ref"})
+
+
+def record_switch(git: Git, index: int, line: Line, what: tuple[str, str] | None = None) -> None:
+    """What a `git checkout`, `git switch`, `git branch` or `git symbolic-ref HEAD` does to its
+    folder's branch (`what`, when told), for a bare push later in the line: a branch made and
+    switched to counts only when every join from there is `&&` (it may have failed, and the
+    line gone on: `;`, `||`, a new line). One in a line a command runs, or in the background,
+    may have gone anywhere before any push: Tally.aside."""
+    if what is not None:
+        pass
+    elif git.rest[0] in {"checkout", "switch"}:
         what = switch_of(git.rest)
     elif git.rest[0] == "branch":
         what = renamed_or_made(git.rest)
+    elif git.rest[0] == "symbolic-ref":
+        what = pointed(git.rest)
     else:
         return
     if what is None:
@@ -1794,20 +2009,30 @@ def may_push(command: str, switching: bool = False) -> bool:
     """Whether a word of a line may say `push` or an alias, however it is quoted (a line that
     says neither pushes nothing); or, `switching`, go to another branch for a push after it."""
     words = squashed(command)
-    if switching and ("checkout" in words or "switch" in words or "branch" in words):
+    if switching and any(word in words for word in SWITCHING):
         return True
     return "push" in words or "alias" in words
 
 
-@functools.lru_cache(maxsize=32)
+# The shell a check's command line runs in, when not bash or sh (Codex's `zsh -lc`): see
+# Tally.zsh. Set for one check (shell_denial).
+SHELL: contextvars.ContextVar[str] = contextvars.ContextVar("SHELL", default="")
+
+
 def reading(command: str, cwd: str) -> tuple[tuple[Push, ...], str]:
     """Each push of a command line, once each (see read_line), and why it was not read in full
-    ("" when it was). A line no word of which says `push` or an alias pushes nothing."""
+    ("" when it was), as the shell of the check reads it (SHELL)."""
+    return read_pushes(command, cwd, SHELL.get())
+
+
+@functools.lru_cache(maxsize=32)
+def read_pushes(command: str, cwd: str, shell: str) -> tuple[tuple[Push, ...], str]:
+    """See reading. A line no word of which says `push` or an alias pushes nothing."""
     if not may_push(command):
         return (), ""
     if len(command) > MOST_LINE:
         return (), TOO_LONG
-    tally = Tally(command, cwd)
+    tally = Tally(command, cwd, shell)
     try:
         why = read_line(command, cwd, 0, tally)
     except TooComplexError:
@@ -1825,6 +2050,9 @@ def reading(command: str, cwd: str) -> tuple[tuple[Push, ...], str]:
     if len(asked) > MOST_FOLDERS:
         why = why or TOO_COMPLEX
     return unique, why
+
+
+reading.cache_clear = read_pushes.cache_clear  # type: ignore[attr-defined]
 
 
 def pushes(command: str, cwd: str = "") -> list[Push]:
@@ -2125,9 +2353,11 @@ def shell_denial(command: str, cwd: str, reads_slack: bool, request: Any) -> str
     if len(command) > MOST_LINE:
         return TOO_LONG
     answers = ANSWERS.set({})
+    shell = SHELL.set(str(getattr(request, "shell", "") or ""))
     try:
         first = next((reason for found, reason in DANGEROUS if found(command, cwd)), None)
     finally:
+        SHELL.reset(shell)
         ANSWERS.reset(answers)
     if first:
         return first

@@ -1172,6 +1172,14 @@ NORMAL = [
     "(export GIT_DIR=elsewhere; git status); git push -u origin HEAD",
     "npm run dev > /dev/null & sleep 5 && git push -u origin HEAD",
     "(cd src && git push -u origin HEAD) & wait",
+    # The final review of 86c7d55: back where pushd or `cd -` left; the nvm snippet (`\.` is
+    # `source`); a pipe in an `&&` chain (`a && b | c && d` is `a && (b | c) && d`).
+    "pushd frontend && npm test && popd && git push",
+    "cd frontend; npm test; cd -; git push",
+    'export NVM_DIR="$HOME/.nvm"; [ -s "$NVM_DIR/nvm.sh" ] && \\. "$NVM_DIR/nvm.sh"; '
+    "npm test && git push -u origin HEAD",
+    "git switch -c fix && npm test | tail && git push -u origin HEAD",
+    "npm test 2>&1 | tail -20 && git push origin wb/x",
 ]
 
 # On a checkout of main, a push of the checkout's own branch (naming none, HEAD, or what
@@ -1202,6 +1210,9 @@ INTENDED_ON_MAIN = {
     "(export GIT_DIR=elsewhere; git status); git push -u origin HEAD",
     "npm run dev > /dev/null & sleep 5 && git push -u origin HEAD",
     "(cd src && git push -u origin HEAD) & wait",
+    "pushd frontend && npm test && popd && git push", "cd frontend; npm test; cd -; git push",
+    'export NVM_DIR="$HOME/.nvm"; [ -s "$NVM_DIR/nvm.sh" ] && \\. "$NVM_DIR/nvm.sh"; '
+    "npm test && git push -u origin HEAD",
 }  # fmt: skip
 
 
@@ -1389,24 +1400,28 @@ def test_the_words_say_what_the_shell_takes_them_for(text, kinds):
     assert [type(word).__name__ for word in policy.shell_words(text)] == kinds
 
 
-def test_what_the_check_lets_through_pushes_nothing_to_main_in_real_bash(tmp_path, capsys):
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+def test_what_the_check_lets_through_pushes_nothing_to_main_in_real_bash(shell, tmp_path, capsys):
     """Review of 767e08f (C): command lines of a safe vocabulary (tests/policy_oracle.py),
     generated with a fixed seed, and every line of this file, run in real bash with git a
     shim that writes down what it pushes: none the check lets through pushed main or master.
-    The rates are printed (pytest -s)."""
+    And in zsh, as Codex runs a worker's commands (the check told so), where zsh is. The
+    rates are printed (pytest -s)."""
     import policy_oracle as oracle
 
+    if shell == "zsh" and not oracle.ZSH:
+        pytest.skip("no zsh here")
     generator = oracle.Generator(0)
     cases = [generator.line() for _ in range(1000)]
     cases += [(line, start) for line in oracle.seeds() for start in ("main", "feat")]
-    cases += oracle.FOUND
-    outcomes = oracle.run(policy, cases, tmp_path)
+    cases += oracle.FOUND + (oracle.FOUND_ZSH if shell == "zsh" else [])
+    outcomes = oracle.run(policy, cases, tmp_path, shell=shell)
     unsound = [(outcome.start, outcome.line, sorted(outcome.targets)) for outcome in outcomes
                if outcome.unsound]  # fmt: skip
     allowed = sum(outcome.allowed for outcome in outcomes)
     with capsys.disabled():
         refused = len(outcomes) - allowed
-        sys.stdout.write(f"\noracle: {len(outcomes)} lines, {allowed} allowed, {refused} "
+        sys.stdout.write(f"\noracle ({shell}): {len(outcomes)} lines, {allowed} allowed, {refused} "
                          f"refused, {len(unsound)} unsound\n")  # fmt: skip
     assert not unsound, unsound[:10]
 

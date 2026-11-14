@@ -27,15 +27,28 @@ import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
 DEFAULT = {"main", "master"}
 BASH = shutil.which("bash") or "/bin/bash"
 SH = shutil.which("sh") or "/bin/sh"  # (Each as found on PATH: another may be put first.)
+ZSH = shutil.which("zsh")  # Codex runs commands in zsh (`zsh -lc`): the lines run in it too.
+# Commands that run another, put in the sandbox's PATH (by their full path; timeout as a script
+# that runs its command: GNU timeout puts it in a process group of its own, which a run would
+# not wait for, and a push it made late would be read as the next line's).
+WRAPPERS = ("env", "nice", "xargs", "find", "timeout")
+TIMEOUT = r"""#!/bin/sh
+while [ $# -gt 0 ]; do
+  case "$1" in -s|-k|--signal|--kill-after) shift 2 ;; -*) shift ;; *) break ;; esac
+done
+shift
+exec "$@"
+"""
 
-# The git shim: global options (-C, -c, --git-dir, --work-tree), then a few commands answered
+# The git shim: global options (-C, as git goes there: a link's `..` is its target's parent; -c,
+# --git-dir, --work-tree), then a few commands answered
 # from `.git/HEAD` and `.git/branches` of the folder's fake repository; a push is written to
 # $PUSHES: its folder's top, its branch, `-c` settings, git's own variables, and its words,
 # separated by tabs (words by \x1f), each push ended by \x1e and a newline.
@@ -44,7 +57,7 @@ config=""
 other=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    -C) cd "$2" 2>/dev/null || exit 128; shift 2 ;;
+    -C) cd -P "$2" 2>/dev/null || exit 128; shift 2 ;;
     -c) config="$config$2;"; shift 2 ;;
     --git-dir|--work-tree) other=1; shift 2 ;;
     --git-dir=*|--work-tree=*) other=1; shift ;;
@@ -84,7 +97,20 @@ case "$command" in
       *--git-dir*) echo "$top/.git" ;;
       *) exit 128 ;;
     esac ;;
-  symbolic-ref) [ -n "$head" ] && echo "$head" || exit 128 ;;
+  symbolic-ref)
+    named=""; count=0
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -m) shift ;;
+        -*) ;;
+        *) count=$((count + 1)); [ "$count" = 2 ] && named="$1" ;;
+      esac
+      shift
+    done
+    case "$named" in
+      refs/heads/?*) echo "ref: $named" > "$top/.git/HEAD" ;;
+      "") [ -n "$head" ] && echo "$head" || exit 128 ;;
+    esac ;;
   branch)
     case "$1" in
       --show-current) echo "$head" ;;
@@ -128,6 +154,7 @@ for _tool in ("sed", "dirname", "grep", "cat"):
 
 def make_repository(folder: Path, branch: str):
     (folder / "sub").mkdir(parents=True, exist_ok=True)
+    (folder / "a" / "b").mkdir(parents=True, exist_ok=True)
     (folder / ".git").mkdir(exist_ok=True)
     (folder / ".git" / "HEAD").write_text(f"ref: refs/heads/{branch}\n")
     (folder / ".git" / "branches").write_text("main\nfeat\nmaster\nwb/x\n")
@@ -140,7 +167,7 @@ class Sandbox:
     no repository (`plain/`), and the shim."""
 
     root: Path
-    pushes: Path = field(init=False)
+    runs: int = 0
 
     def __post_init__(self):
         bin_folder = self.root / "bin"
@@ -152,30 +179,54 @@ class Sandbox:
             link = bin_folder / shell
             if not link.exists():
                 link.symlink_to(BASH if shell == "bash" else SH)
+        for tool in WRAPPERS:
+            link, found = bin_folder / tool, shutil.which(tool)
+            if link.exists() or link.is_symlink():
+                continue
+            if tool == "timeout":
+                link.write_text(TIMEOUT)
+                link.chmod(0o755)
+            elif found:
+                link.symlink_to(found)
         (self.root / "plain").mkdir(exist_ok=True)
-        self.pushes = self.root / "pushes"
         self.reset()
+        # Links: in each checkout, `l` to its own a/b (`cd l/..` reads as the checkout, `git -C
+        # l/..` goes to a); `m` to the other checkout, `n` into it (`cd n/..`: this checkout,
+        # `git -C n/..` and `cd -P n/..`: the other).
+        for name, other in (("main", "feat"), ("feat", "main")):
+            for link, target in (("l", "a/b"), ("m", f"../{other}"), ("n", f"../{other}/sub")):
+                path = self.root / name / link
+                if not path.is_symlink():
+                    path.symlink_to(target)
 
     def reset(self):
         make_repository(self.root / "main", "main")
         make_repository(self.root / "feat", "feat")
-        self.pushes.write_text("")
 
     def folder(self, name: str) -> Path:
         return (self.root / name).resolve()
 
-    def run(self, line: str, start: str) -> list[str]:
-        """Run a line in bash from the folder `start`: what the shim was asked to push."""
+    def run(self, line: str, start: str, shell: str = "bash") -> list[str]:
+        """Run a line in bash (or zsh, without its startup files: as Codex's `zsh -lc` but for
+        the owner's profile) from the folder `start`: what the shim was asked to push."""
         self.reset()
+        self.runs += 1  # Each run's own record (one a process left behind wrote is not read).
+        pushes = self.root / f"pushes-{self.runs}"
+        pushes.write_text("")
         tools = self.root / "bin"
         environment = {
             "PATH": str(tools),
             "HOME": str(self.root),
-            "PUSHES": str(self.pushes),
+            "PUSHES": str(pushes),
             "LANG": "C",
         }
+        run = (
+            [ZSH, "-f", "-c", line]
+            if shell == "zsh"
+            else [BASH, "--norc", "--noprofile", "-c", line]
+        )
         process = subprocess.Popen(  # In a group of its own: its jobs (`&`) are waited for.
-            [BASH, "--norc", "--noprofile", "-c", line],
+            run,
             cwd=self.folder(start),
             env=environment,
             stdin=subprocess.DEVNULL,
@@ -194,7 +245,9 @@ class Sandbox:
             except (ProcessLookupError, PermissionError):
                 break
             time.sleep(0.005)
-        return [record for record in self.pushes.read_text().split("\x1e\n") if record]
+        records = [record for record in pushes.read_text().split("\x1e\n") if record]
+        pushes.unlink()
+        return records
 
     def branches(self, folder: str) -> set[str]:
         """What current_branches says of a folder here: its fake repository's branch."""
@@ -292,7 +345,7 @@ NAMES = ["B", "B", "B", "B", "PWD", "D", "D", "IFS", "CDPATH", "HOME"]
 VALUES = ["main", "feat", "wb/x", "master", "", "'feat main'", "HEAD", "../main", "../feat",
           "sub", "'a b'", '"$PWD"', "x:main", "$(echo main)", '"$(git branch --show-current)"',
           "$(git rev-parse --abbrev-ref HEAD)", "/", "..", "'$(echo main)'", "$B",
-          '"$PWD/../main"', "wb/main"]  # fmt: skip
+          '"$PWD/../main"', "wb/main", "x/main", "xmain", "main.y", "MAIN"]  # fmt: skip
 SPELLINGS = {
     "read": ["read", "r\\ead", "'re'ad", '"read"', "\\read"],
     "export": ["export", "ex\\port", "'export'"],
@@ -307,11 +360,14 @@ FOLDERS = ["../main", "../feat", "sub", "..", "../main/sub", "../feat/sub", "$PW
            '"$(git rev-parse --show-toplevel)/.."', '"$(git rev-parse --show-toplevel)/../main"',
            "$D", '"$D"', "../plain", "nowhere", "-", "../main ../feat", "main", "feat", "~",
            "~/main", "-P ../main", "-- ../feat", "", '"$PWD/../main"', "`pwd`/../main",
-           '"$(cd ../main && pwd)"', "$(echo ../main)"]  # fmt: skip
+           '"$(cd ../main && pwd)"', "$(echo ../main)", "l", "l/..", "l/../..", "l/../../main",
+           "m", "m/..", "m/sub", "n/..", "-P n/..", "-P l/..", "-P l/../..", "-L l/..", "$PWD:h",
+           "${PWD:h}", "+1", "-1", "../main sub"]  # fmt: skip
 REFS = ["main", "feat", "wb/x", "master", "HEAD", "$B", '"$B"', "${B}", "HEAD:main",
         "HEAD:$B", "+feat", "refs/heads/main", "HEAD:feat", "$D", "@", "$B:feat", "$(echo main)",
         '"$(git branch --show-current)"', "feat:$B", "${B}x", "'$B'", "v1.0", "--tags",
-        "HEAD:refs/heads/$B"]  # fmt: skip
+        "HEAD:refs/heads/$B", "$B:t", "${B:t}", "$B[2,-1]", "$B:r", "$B:s/x//", "$B:l",
+        "${B[1]}", "HEAD:$B:t"]  # fmt: skip
 PUSH_ARGS = ["", "origin", "-u origin HEAD", "origin HEAD", "--dry-run origin main",
              "-f origin feat", "--set-upstream origin", "-n", "--all origin", "-o x origin",
              "origin -n main", "--no-dry-run -n origin", "-n --no-dry-run origin", "$B",
@@ -319,7 +375,9 @@ PUSH_ARGS = ["", "origin", "-u origin HEAD", "origin HEAD", "--dry-run origin ma
 SWITCHES = ["git checkout -b wb/new", "git switch -c fix", "git checkout main",
             "git checkout feat", "git checkout -", "git switch feat", "git branch wb/y",
             "git checkout wb/y", "git checkout -B main", "git switch -C feat", "git checkout -- x",
-            "git checkout ."]  # fmt: skip
+            "git checkout .", "git symbolic-ref HEAD refs/heads/main",
+            "git symbolic-ref HEAD refs/heads/feat", "git symbolic-ref -q HEAD",
+            "echo main | xargs git checkout"]  # fmt: skip
 SEPARATORS = ["; ", "; ", " && ", " || ", " | ", "\n", " & "]
 
 
@@ -375,9 +433,29 @@ class Generator:
 
     def push(self) -> str:
         git = self.pick(["git", "git", "git", "command git", f"git -C {self.folder()}",
-                         "\\git"])  # fmt: skip
+                         "\\git", "env git", f"env -C {self.folder()} git",
+                         "env --chdir=../feat git", "timeout 5 git", "nice -n 5 git",
+                         "nice git"])  # fmt: skip
         arguments = self.pick(PUSH_ARGS + [f"origin {self.pick(REFS)}"] * 4)
-        return f"{git} push {arguments}".rstrip()
+        pushing = f"{git} push {arguments}".rstrip()
+        roll = self.chance.random()
+        if roll < 0.04:  # Its words, or more of them, from a command that adds them.
+            value = self.value() or "main"
+            return self.pick([
+                f"echo {value} | xargs {pushing}",
+                f"echo {value} | xargs -I{{}} git push origin {{}}",
+                f"echo {value} | xargs -n1 {pushing}",
+                f"echo | xargs {pushing}",
+            ])  # fmt: skip
+        if roll < 0.06:
+            return self.pick([
+                f"find {self.pick(['../main/sub', '../feat/sub', 'sub'])} -maxdepth 0 "
+                f"-execdir {pushing} \\;",
+                f"find {self.pick(['../main', '../feat', '.'])} -mindepth 1 -maxdepth 1 "
+                f"-name sub -execdir {pushing} \\;",
+                f"env -S {shell_quote(pushing)}",
+            ])  # fmt: skip
+        return pushing
 
     def simple(self, depth: int = 0) -> str:
         roll = self.chance.random()
@@ -557,6 +635,57 @@ FOUND = [
     ('source ./nothing; : <(git push -n --no-dry-run origin && case x in (x) git push origin HEAD;; esac) && case x in (y) :;; (x) popd;; esac; git checkout -B main', 'feat/sub'),  # noqa: E501
     ('command pushd ../feat/sub || for B in feat wb/main; do :; done & declare HOME=$B & git push --set-upstream origin', 'main'),  # noqa: E501
     (': <(git push) ; git checkout -B main', 'feat'),
+    # The final review of 86c7d55: commands that run git (env -C, xargs, find -execdir), a
+    # link's `..` as cd reads it, HEAD pointed at a branch (symbolic-ref).
+    ('env -C ../main git push', 'feat'),
+    ('echo main | xargs git push origin', 'feat'),
+    ('echo main | xargs git push origin feat', 'feat'),
+    ('echo main | xargs git checkout; git push', 'feat'),
+    ('cd l && cd ../../main && git push', 'feat'),
+    ('git symbolic-ref HEAD refs/heads/main && git push', 'feat'),
+    ('find ../main/sub -maxdepth 0 -execdir git push \\;', 'feat'),
+    ("env -C ../main -S 'git push'", 'feat'),
+    ('find sub -maxdepth 0 -execdir nice git push origin \\; && PWD=sub; popd', 'main'),
+    ('cd ../feat; true || cd ../main/sub && true; cd -; git push', 'main'),
+    ('cd ../feat; (cd ../main); cd -; git push', 'main'),
+    ('echo main | xargs -I R git push origin R', 'feat'),
+    ('git -C n/.. push', 'feat'),
+    ('cd -P n/.. && git push', 'feat'),
+    ("X=/dev/stdin; . \"$X\" <<< 'cd ../main'; git push", 'feat'),
+    ('git push origin ${B:t}', 'main'),
+    ('env -C ../feat sh -c "git -C $PWD push"', 'main'),
+    # Found while checking the tests' mutants (round 23).
+    ('cd n/.. && git push', 'main'),
+    ('cd n && cd .. && git push', 'main'),
+    ('cd -q ../feat; git push', 'main'),
+    ('find ../main -mindepth 1 -maxdepth 1 -name sub -execdir git push \\;', 'feat'),
+    # Found by the 200k runs on 195971b (bash 5.2 in Debian, zsh): `pwd` says the folder
+    # whatever PWD is set to; a substitution runs in the shell's folder, not env -C's;
+    # xargs before git in a line read loosely.
+    ("PWD='a b' && git -C `pwd`/../main push origin HEAD", 'main'),
+    ('env -C ../feat/sub git push origin "$(git branch --show-current)"', 'main'),
+    ('env -C m/sub git push origin "$(git branch --show-current)"', 'main'),
+    ('echo "$(echo main | xargs -n1 git push origin v1.0)" | true\necho "x', 'main/sub'),
+    ('CHIEFOFSTAFF_TOP=../feat; cd "$(git rev-parse --show-toplevel)"; git push', 'main'),
+]  # fmt: skip
+
+
+# Lines found in zsh (as Codex runs commands), run in zsh: a modifier or a subscript on a
+# variable (`$B:t`, `$B[2,-1]`), a pipe's last command run in the shell itself.
+FOUND_ZSH = [
+    ('B=x/main; git push origin $B:t', 'feat'),
+    ('B=x/main; git push origin ${B:t}', 'feat'),
+    ('B=xmain; git push origin $B[2,-1]', 'feat'),
+    ('B=main.y; git push origin $B:r', 'feat'),
+    ('B=MAIN; git push origin $B:l', 'feat'),
+    ('B=xmain; git push origin $B:s/x//', 'feat'),
+    ('true | cd ../main; git push', 'feat'),
+    ('git push origin $B:t', 'main'),
+    # Found by the zsh 200k run on c3c270f: zsh's `command` runs no builtin (export).
+    ('command -p export B=main.y; : <(timeout 5 git push origin $B $B)', 'main/sub'),
+    ('command export B=feat; git push origin $B', 'main'),
+    ('command pushd ../feat/sub || nice -n 5 git push -o x origin', 'main'),
+    ('time -p cd -- ../feat; git push origin HEAD || while false; do env git push -o x origin; done\nwhile false; do command cd -P l/../..; done', 'main'),  # noqa: E501
 ]  # fmt: skip
 
 
@@ -574,8 +703,11 @@ def seeds() -> list[str]:
     return sorted({line for line in lines if not UNSAFE_SEEDS.search(line)})
 
 
-def run(policy, cases: list[tuple[str, str]], root: Path, workers: int = 8) -> list[Outcome]:
-    """Check each (line, start) in its own sandbox, `workers` at a time; with the check's
+def run(
+    policy, cases: list[tuple[str, str]], root: Path, workers: int = 8, shell: str = "bash"
+) -> list[Outcome]:
+    """Check each (line, start) in its own sandbox, `workers` at a time, run in `shell` (bash,
+    or zsh: as Codex runs a worker's commands, and as the check is told); with the check's
     current_branches answered from the sandbox."""
     local = threading.local()
     lock = threading.Lock()
@@ -593,7 +725,9 @@ def run(policy, cases: list[tuple[str, str]], root: Path, workers: int = 8) -> l
     def one(case: tuple[str, str]) -> Outcome:
         box = sandbox()
         row = {"role": "worker", "slack": 0, "cwd": str(box.folder(case[1]))}
-        request = SimpleNamespace(kind="shell", full_command_text=case[0])
+        request = SimpleNamespace(
+            kind="shell", full_command_text=case[0], shell="" if shell == "bash" else shell
+        )
         box.reset()
         with lock:  # The check (pure Python) one at a time; bash runs in parallel.
             policy.reading.cache_clear()
@@ -608,7 +742,7 @@ def run(policy, cases: list[tuple[str, str]], root: Path, workers: int = 8) -> l
                 else:
                     os.environ["HOME"] = home
         targets: set[str] = set()
-        for record in box.run(case[0], case[1]):
+        for record in box.run(case[0], case[1], shell):
             targets |= pushed(record)
         return Outcome(case[0], case[1], allowed, targets)
 
@@ -626,12 +760,14 @@ def main():
     parser.add_argument("--cases", type=int, default=3000)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument("--shell", choices=["bash", "zsh"], default="bash")
     arguments = parser.parse_args()
     generator = Generator(arguments.seed)
     cases = [generator.line() for _ in range(arguments.cases)]
     cases += [(line, start) for line in seeds() for start in ("main", "feat")] + FOUND
+    cases += FOUND_ZSH if arguments.shell == "zsh" else []
     with tempfile.TemporaryDirectory(prefix="oracle-") as folder:
-        outcomes = run(policy, cases, Path(folder), arguments.workers)
+        outcomes = run(policy, cases, Path(folder), arguments.workers, arguments.shell)
     unsound = [outcome for outcome in outcomes if outcome.unsound]
     allowed = sum(outcome.allowed for outcome in outcomes)
     pushing = sum(bool(outcome.targets) for outcome in outcomes)
