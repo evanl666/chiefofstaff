@@ -300,3 +300,70 @@ def test_a_tasks_runs_are_taken_off_artifacts_together(tmp_path):
             headers=ORIGIN,
         ).json()["hidden"]
         assert undone == []
+
+
+def test_a_local_runs_chip_says_what_monitoring_says_of_it():
+    """Re-review: a run on this computer (not on Artifacts) stayed "running" in blue on its
+    card's chip while its row said "Status unknown"; so too after Stop tracking."""
+    found = run_js(
+        DOM
+        + TASKS
+        + AGO
+        + "s.state.snapshot = { settings: { max_workers: 3 }, sessions: [], tasks: [],"
+        " artifacts_hidden: [], pr_titles: {} };\n"
+        "const url = 'http://localhost:8080/dags/local/grid?dag_run_id=manual__1';\n"
+        "const other = 'http://localhost:8081/dags/other/grid';\n"
+        "const task = { id: 't', title: 'Local DAG', status: 'done', session_id: 'w',"
+        " deliverables: [], artifacts: [{ url, name: 'Local DAG', status: 'running', at: at(47) },"
+        " { url: other, name: 'Other DAG', status: 'running', at: at(47), untracked: true }],"
+        " monitoring: [{ key: url, kind: 'flow', label: 'Local DAG', url, unknown: true,"
+        " status: 'running', reported_at: at(47) }] };\n"
+        "const node = k.artifacts(task, null, { active: false, phase: { section: 'needs',"
+        " marker: 'runs-unknown' } });\n"
+        "return walk(node).filter((n) => String(n.className).includes('link-chip'))"
+        ".map((n) => { const a = walk(n).find((p) => p.className === 'chip-link');"
+        " return [n.className.split(' ').find((c) => c.startsWith('tone-')), a.textContent,"
+        " a.attrs['data-tip'].split('\\n')[1]]; });"
+    )
+    assert found == [
+        [
+            "tone-wait",
+            "Local DAG · status unknown",
+            "Status unknown: reported running 47h ago, not checked since",
+        ],
+        [
+            "tone-neutral",
+            "Other DAG · not tracked",
+            "Not tracked · last reported running: you stopped tracking it",
+        ],
+    ]
+
+
+def test_a_runs_short_status_is_its_tones_word_never_a_piece_of_it():
+    """Re-review: cut to its first word, "not started yet" read "not", "no errors, finished" a
+    green "no", "still running (step 3/5)" "still", "failed: OOM in shard 3" "failed:"."""
+    found = run_js(
+        ARTIFACTS
+        + AGO
+        + "const said = ['not started yet', 'no errors, finished', 'still running (step 3/5)',"
+        " 'failed: OOM in shard 3', 'waiting for approval', 'cancelled by the owner',"
+        " 'succeeded', 'queued'];\n"
+        "const task = { id: 'a', title: 'Runs', status: 'done', updated_at: at(0),"
+        " deliverables: said.map((status, i) => ({ kind: 'flow', url: `https://flyte.x/e/${i}`,"
+        " title: `Run ${i}`, status, at: at(i + 1) })) };\n"
+        "const items = a.deliverablesOf(task);\n"
+        "return [...items.map((i) => a.shortStatus(i)), a.shortStatus({ untracked: true }),"
+        " a.shortStatus({ unknown: true, tone: 'wait' })];"
+    )
+    assert found == [
+        "pending",
+        "done",
+        "running",
+        "failed",
+        "waiting",
+        "ended",
+        "done",
+        "pending",
+        "not tracked",
+        "unknown",
+    ]

@@ -91,13 +91,8 @@ export function deliverablesOf(task, phase) {
         // When its worker last said where it stands (what needs a look first is the newest).
         const declared = (task.artifacts || []).find((said) => linkKey(said.url) === linkKey(item.url));
         const found = { key: linkKey(item.url), kind: KIND_WORDS[item.kind], role: "", name: item.title || item.url, url: item.url, status, tone: item.status ? toneOf(item.status) : taskTone, at: item.at || declared?.at || task.updated_at, said: Boolean(item.status), by: item.said_by || "", pr: null, task };
-        // The owner stopped tracking it (bug E53): what it last was, not where it stands now;
-        // neither running nor needing a look.
-        if (item.untracked) return { ...found, status: "not tracked", tone: "neutral", untracked: true, help: `Not tracked · last reported ${item.status || "running"}: you stopped tracking it` };
-        // Nothing has told of it for a day: not "running" as it was last said; the owner says
-        // what became of it (amber, as under Needs you).
-        if (item.unknown) return { ...found, status: "status unknown", tone: "wait", unknown: true, help: unknownWords(item.status, declared) };
-        return found;
+        const standing = runStanding(item.status, declared, item.untracked, item.unknown);
+        return standing ? { ...found, ...standing } : found;
       });
   }
   const found = [];
@@ -113,6 +108,16 @@ export function deliverablesOf(task, phase) {
     found.push({ key: link.key, kind, role: "", name: nameOf(link), url: link.url, status, tone: link.said ? toneOf(link.said.status) : taskTone, at: link.said?.at || task.updated_at, said: Boolean(link.said), pr: null, task });
   }
   return found;
+}
+// Where a run its worker declared stands when not as it last said: the owner stopped tracking
+// it (bug E53: what it last was, neither running nor needing a look), or nothing has told of it
+// for a day (not "running" as it was last said: the owner says what became of it, amber as
+// under Needs you). { status, tone, help, untracked | unknown }, or null. `declared`: what its
+// worker declared of it (when it said so; GitHub's reading).
+export function runStanding(status, declared, untracked, unknown) {
+  if (untracked) return { status: "not tracked", tone: "neutral", untracked: true, help: `Not tracked · last reported ${status || "running"}: you stopped tracking it` };
+  if (unknown) return { status: "status unknown", tone: "wait", unknown: true, help: unknownWords(status, declared) };
+  return null;
 }
 // Why a run's status is unknown, in a line: "Status unknown: reported running 47h ago, not
 // checked since" (its worker's word), or GitHub's as Chief of Staff last read it.
@@ -161,14 +166,16 @@ export function runsWords(runs) {
   const tone = failed ? "bad" : waiting || unknown ? "wait" : running ? "active" : runs.every((item) => item.tone === "good") ? "good" : "neutral";
   return { words, tone };
 }
-// A run's status in a word or two under its task's runs line ("waiting", "unknown", "not
-// tracked"): its name comes first there; the whole of it on hover.
+// A run's status in a word under its task's runs line, its name coming first there: the word of
+// its tone, never a piece of what its worker wrote ("not started yet" is not "not"); the whole
+// of it on hover. One running that has not started is "pending".
+const TONE_WORDS = { bad: "failed", wait: "waiting", good: "done", muted: "ended" };
+const NOT_YET = /\b(not|pending|queued|scheduled|paused|on[ -]hold|yet|waiting)\b/i;
 export function shortStatus(item) {
   if (item.untracked) return "not tracked";
   if (item.unknown) return "unknown";
-  const status = String(item.status || "");
-  if (status.length <= 12) return status;
-  return item.tone === "wait" ? "waiting" : status.split(/\s+/)[0];
+  if (item.tone === "active") return NOT_YET.test(item.status || "") ? "pending" : "running";
+  return TONE_WORDS[item.tone] || item.status || "";
 }
 // Statuses by how many have each, the most first: "4 succeeded, 2 running".
 function statusCounts(items) {

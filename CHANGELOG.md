@@ -21,10 +21,11 @@ Runs a task waits on, followed up to the end; Artifacts by task in tidy columns 
   summary; away notifications still tell only of questions, failures and cards), and says so
   when its worker's later report no longer lists the run. **⋯** offers *Mark ended* and *Stop
   tracking* whenever a task has a run of unknown status, a running task too.
-- **A run whose status is unknown says so everywhere.** Artifacts and its task's chip still
-  said *running* in blue beside *Status unknown*. It is now *status unknown* in amber on both,
+- **A run whose status is unknown says so everywhere.** Artifacts and its task's chips still
+  said *running* in blue beside *Status unknown*. It is now *status unknown* in amber there,
   counted apart (*1 unknown*), never folded away, and its tooltip says how old the last word is
-  (*reported running 47h ago, not checked since*).
+  (*reported running 47h ago, not checked since*); one you stopped tracking is *not tracked*. So
+  too for a run on your computer, which is among its task's links rather than on Artifacts.
 - **A run you stopped tracking is no longer shown as running.** Artifacts said *running* in
   blue, counted in *N running*. It is now *not tracked* in gray (its last reported status on
   hover) and counted nowhere.
@@ -40,7 +41,9 @@ Runs a task waits on, followed up to the end; Artifacts by task in tidy columns 
   indented whole (their kind column too, *FLOW* again), two lines high with only the time on
   the second, and apart from their line. They are now one card with it, one line each with
   their names first (under its own, *└*) and their status in a word with since when
-  (*waiting · 2h ago*; the whole of it on hover), in the list's columns at every width.
+  (*waiting · 2h ago*): the word of what it comes to (*failed*, *waiting*, *unknown*, *running*,
+  *pending*, *done*, *ended*, *not tracked*), never a piece of what its worker wrote (*not
+  started yet* is *pending*, not *not*), which is on hover, in the list's columns at every width.
 - **Artifacts: what needs a look comes first, and waiting runs stay in sight.** A task's merged
   PR could sit above another task's PR with failing CI; a run waiting for approval was folded
   behind *+N* (*N more, not failed*) while its line turned amber with no word why. Tasks are now
@@ -59,7 +62,9 @@ Runs a task waits on, followed up to the end; Artifacts by task in tidy columns 
   its length then (a gap told at 15 minutes was 100 hours "told"), and said nothing more. The
   first scan after updating tells, in one notice and with its whole range, each gap still open
   (the newest of its watch) and each that grew since it was told, whichever version kept it;
-  each is then told again only as it doubles or passes an hour or a day.
+  each is then told again only as it doubles or passes an hour or a day. Every gap notice now
+  says how long the gap is and gives its end's day when that is not its start's (*for 4 days 14
+  hours, between Nov 9, 8:49 PM and Nov 13, 10:49 AM*), so a gap of days never reads as hours.
 - **A language in a task's title is what is written, not how.** "Add a Chinese README (中文)" and
   "Update the locale strings: French" were refused once as writing-style notes. Only words that
   say how to write (*in English*, *用中文*, *英文写*, *像人写*, *human-sounding*, a tone) are; the

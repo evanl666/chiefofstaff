@@ -432,13 +432,40 @@ def clock_of(moment: float) -> str:
     return f"{at.strftime('%b')} {at.day}, {hour}"
 
 
+def counted(count: int, word: str) -> str:
+    return f"{count} {word}{'' if count == 1 else 's'}"
+
+
+def length_words(seconds: float) -> str:
+    """How long, in words: "40 minutes", "6 hours", "about 7 hours", "4 days 14 hours"."""
+    if seconds < 3600:
+        return counted(max(1, round(seconds / 60)), "minute")
+    if seconds < 48 * 3600:
+        hours = round(seconds / 3600)
+        return ("" if abs(seconds - hours * 3600) < 300 else "about ") + counted(hours, "hour")
+    days, rest = divmod(round(seconds / 3600), 24)
+    return counted(days, "day") + (f" {counted(rest, 'hour')}" if rest else "")
+
+
+def between(start: float, end: float) -> str:
+    """When a stretch of time was, as the owner reads it: "between 3:00 PM and 9:00 PM",
+    "between Nov 9, 6:34 AM and Nov 13, 10:49 AM" (its end's day whenever it is not its
+    start's: a gap of days never reads as hours)."""
+    first, last = (datetime.fromtimestamp(moment).astimezone() for moment in (start, end))
+    ending = clock_of(end)
+    if first.date() != last.date() and ending[:1].isdigit():
+        ending = f"{last.strftime('%b')} {last.day}, {ending}"
+    return f"between {clock_of(start)} and {ending}"
+
+
 def gap_text(gap: dict, still: bool = False) -> str:
-    """A watch's coverage gap, for the owner: what could not be checked, when, and why
-    (`still`: told before, it grew since)."""
+    """A watch's coverage gap, for the owner: what could not be checked, for how long, when, and
+    why (`still`: told before, it grew since)."""
     reason = str(gap.get("reason") or "").strip().rstrip(".")
     return (
-        f"{'Still could' if still else 'Could'} not check \u201c{gap['watch']}\u201d between "
-        f"{clock_of(gap['from'])} and {clock_of(gap['to'])}" + (f" ({reason})" if reason else "")
+        f"{'Still could' if still else 'Could'} not check \u201c{gap['watch']}\u201d for "
+        f"{length_words(gap['to'] - gap['from'])}, {between(gap['from'], gap['to'])}"
+        + (f" ({reason})" if reason else "")
     )
 
 
