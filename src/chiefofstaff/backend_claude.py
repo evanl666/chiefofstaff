@@ -1106,6 +1106,7 @@ class ClaudeWorker:
                     "tested with: reinstall its Claude extra."
                 )
             self.pid = process.pid
+            self.answer_forms(self.query)
             self.read_back(mapping(getattr(self.query, "_initialization_result", None)))
             self.reader = asyncio.ensure_future(self.read())
             self.tasks.add(asyncio.ensure_future(self.watch(process)))
@@ -1139,6 +1140,58 @@ class ClaudeWorker:
                     path.unlink()
             self.lost()
             self.ended()
+
+    def answer_forms(self, query: Any):
+        """An MCP server's form (elicitation): Claude asks the SDK's host (2.1.322: a control
+        request the Agent SDK 0.2.182 does not answer, so Claude cancels it). Answered by the
+        owner's card, as a Copilot worker's form is (Asks.on_elicitation)."""
+        handled = getattr(query, "_handle_control_request", None)
+        transport = getattr(query, "transport", None)
+        if handled is None or transport is None:
+            return
+
+        async def handle(request: Any):
+            data = mapping(mapping(request).get("request"))
+            if data.get("subtype") != "elicitation":
+                return await handled(request)
+            answer = await self.elicitation(data)
+            reply = {"subtype": "success", "request_id": mapping(request).get("request_id"),
+                     "response": answer}  # fmt: skip
+            with suppress(Exception):
+                await transport.write(
+                    json.dumps({"type": "control_response", "response": reply}) + "\n"
+                )
+            return None
+
+        query._handle_control_request = handle
+
+    async def elicitation(self, data: dict) -> dict:
+        """The owner's answer to an MCP server's form or link, as the server takes it."""
+        ask = self.options.get("on_elicitation_request")
+        if not ask or data.get("mode") not in {"form", "url"}:
+            return {"action": "cancel"}
+        context = {
+            "session_id": self.session_id,
+            "sessionId": self.session_id,
+            "elicitationSource": str(data.get("mcp_server_name") or ""),
+            "message": str(data.get("message") or ""),
+            "mode": data.get("mode"),
+            "url": str(data.get("url") or ""),
+            "requestedSchema": mapping(data.get("requested_schema")),
+        }
+        try:
+            answer = ask(context)
+            if inspect.isawaitable(answer):
+                answer = await answer
+        except Exception:
+            logger.warning("An MCP form for %s could not be asked.", self.worker, exc_info=True)
+            return {"action": "cancel"}
+        answer = mapping(answer)
+        action = answer.get("action") if answer.get("action") in {"accept", "decline"} else "cancel"
+        found: dict[str, Any] = {"action": action}
+        if action == "accept" and isinstance(answer.get("content"), dict):
+            found["content"] = answer["content"]
+        return found
 
     def start_error(self, exc: BaseException) -> BaseException:
         """Why its process could not start, in words the owner can act on."""

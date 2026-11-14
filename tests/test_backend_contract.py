@@ -2140,3 +2140,24 @@ def red_png() -> bytes:
         + chunk(b"IDAT", zlib.compress(rows))
         + chunk(b"IEND", b"")
     )
+
+
+async def test_an_mcp_servers_form_reaches_the_owner_and_back(backend, tmp_path):
+    """An MCP server asks for a form mid-call: the owner's card, and the answer reaches it."""
+    if not isinstance(backend, ClaudeAgent):
+        pytest.skip("Claude's (Copilot and Codex have their own tests of forms).")
+    asked = []
+
+    async def form(context):
+        asked.append(context)
+        return {"action": "accept", "content": {"color": "red"}}
+
+    server = {"command": sys.executable, "args": [str(Path(__file__).parent / "elicit_server.py")]}
+    session, turn = await open_session(
+        backend, tmp_path, on_elicitation_request=form, mcp_servers={"asker": server}
+    )
+    await session.send("Fill the form of asker, then reply with just: ok")
+    await turn.wait()
+    (done,) = [e.data for e in turn.events if e.type.value == "tool.execution_complete"]
+    assert "accept" in done.result.content and "red" in done.result.content
+    assert [c["elicitationSource"] for c in asked] == ["asker"]

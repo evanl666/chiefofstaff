@@ -64,6 +64,8 @@ def answer(body: dict) -> tuple[list[dict], str]:
                 {"command": command, "description": "left running", "run_in_background": True},
             )
         )
+    if found := re.search(r"Fill the form of (\w+)", prompt):
+        plan.append(call(f"mcp__{found.group(1)}__form", {}))
     if answered < len(plan):
         return [plan[answered]], "tool_use"
     if found := re.search(r"reply with just: (\w+)", after, re.IGNORECASE):
