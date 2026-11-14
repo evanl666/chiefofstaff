@@ -3132,11 +3132,12 @@ def codex_backend(command: str = "codex", folder: Path | None = None) -> CodexAg
     return CodexAgent(shutil.which(command) or command, folder)
 
 
-async def look(command: str = "codex") -> dict:
+async def look(command: str = "codex", folder: Path | None = None) -> dict:
     """What Settings shows of the Codex on this computer, from an app-server started for this
     and stopped: its version, how it is signed in and its models; raises with why its workers
     cannot run (not found, too old, signed out, an administrator's requirements)."""
     backend = CodexBackend(shutil.which(command) or command)
+    backend.folder = folder
     backend.experimental = False
     try:
         await asyncio.wait_for(backend.start(), LOOK_SECONDS)

@@ -528,12 +528,27 @@ def owner_trusts(folder: str) -> bool:
     return False
 
 
-async def run_claude(command: str, *arguments: str, env: dict | None = None) -> tuple[int, str]:
+def quiet_folder(folder: Path | None) -> Path:
+    """Where a short-lived `claude` command runs: Chief of Staff's own folder for Claude (made
+    if missing), else the owner's home; never the folder Chief of Staff was started in (a
+    repository, whose .claude/settings.json Claude would read)."""
+    if folder is None:
+        return Path.home()
+    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return folder
+
+
+async def run_claude(
+    command: str, *arguments: str, env: dict | None = None, folder: Path | None = None
+) -> tuple[int, str]:
     """A short-lived `claude` command (its version, how it is signed in): its exit code and
-    what it printed (never logged). Its process group ends if it does not answer in time."""
+    what it printed (never logged), run in `folder` (quiet_folder). Its process group ends if
+    it does not answer in time."""
+    cwd = await asyncio.to_thread(quiet_folder, folder)
     process = await asyncio.create_subprocess_exec(
         command,
         *arguments,
+        cwd=cwd,
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
@@ -550,8 +565,8 @@ async def run_claude(command: str, *arguments: str, env: dict | None = None) -> 
     return process.returncode or 0, output.decode(errors="replace")
 
 
-async def claude_version(command: str) -> str:
-    code, said = await run_claude(command, "--version")
+async def claude_version(command: str, folder: Path | None = None) -> str:
+    code, said = await run_claude(command, "--version", folder=folder)
     return version_of(said) if code == 0 else ""
 
 
@@ -561,13 +576,13 @@ def set_up() -> bool:
     return state_file().is_file()
 
 
-async def auth_status(command: str) -> dict:
+async def auth_status(command: str, folder: Path | None = None) -> dict:
     """How Claude is signed in: the four fields Chief of Staff reads of `claude auth status`
     (AUTH_FIELDS), and its exit code. Nothing else of it is kept. Raises NOT_SET_UP, running
     nothing, when Claude was never set up (set_up)."""
     if not await asyncio.to_thread(set_up):
         raise RuntimeError(NOT_SET_UP)
-    code, said = await run_claude(command, "auth", "status", "--json")
+    code, said = await run_claude(command, "auth", "status", "--json", folder=folder)
     try:
         parsed = json.loads(said)
     except ValueError:
@@ -596,7 +611,7 @@ def model_entry(model: dict) -> SimpleNamespace:
     )
 
 
-async def look(command: str = "claude") -> dict:
+async def look(command: str = "claude", folder: Path | None = None) -> dict:
     """What Settings shows of the Claude Code on this computer, without starting a session (its
     version and how it is signed in, from two short-lived commands; its models as its workers
     last listed them, else Claude's aliases); raises with why its workers cannot run (not found,
@@ -606,10 +621,10 @@ async def look(command: str = "claude") -> dict:
         raise RuntimeError(NOT_FOUND)
     if why := sdk_refused():
         raise RuntimeError(why)
-    version = await claude_version(path)
+    version = await claude_version(path, folder)
     if why := claude_refused(version):
         raise RuntimeError(why)
-    auth = await auth_status(path)
+    auth = await auth_status(path, folder)
     if not auth.get("loggedIn"):
         raise RuntimeError(NOT_SIGNED_IN)
     return {
@@ -2287,10 +2302,10 @@ class ClaudeAgent:
         if not path:
             raise RuntimeError(f"Claude Code '{self.command}' not found. Install it and sign in.")
         self.command = path
-        self.cli_version = await claude_version(path)
+        self.cli_version = await claude_version(path, self.folder)
         if why := claude_refused(self.cli_version):
             raise RuntimeError(why)
-        self.auth = await auth_status(path)
+        self.auth = await auth_status(path, self.folder)
         if not self.auth.get("loggedIn"):
             raise RuntimeError(NOT_SIGNED_IN)
         self.key = await asyncio.to_thread(check_key, path, self.cli_version)

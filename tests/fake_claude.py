@@ -1019,6 +1019,7 @@ async def serve(flags: dict):
 def main():
     argv = sys.argv[1:]
     note("FAKE_CLAUDE_RUNS", argv)
+    note("FAKE_CLAUDE_CWDS", str(Path.cwd()))
     if argv[:1] == ["--version"]:
         sys.stdout.write(f"{VERSION} (Claude Code)\n")
         return

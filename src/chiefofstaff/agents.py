@@ -226,17 +226,18 @@ def command(name: str) -> str:
     return COMMANDS[name]
 
 
-async def look(name: str) -> dict[str, Any]:
+async def look(name: str, folder: Path | None = None) -> dict[str, Any]:
     """An agent's version, sign-in and models, from a process of its own started for this and
-    stopped (its module imported now): raises with why it cannot run here."""
+    stopped (its module imported now), in `folder` (Chief of Staff's own for it): raises with
+    why it cannot run here."""
     if name == "codex":
         from .backend_codex import look as look_at_codex
 
-        return await look_at_codex(command(name))
+        return await look_at_codex(command(name), folder)
     if name == "claude":
         from .backend_claude import look as look_at_claude
 
-        return await look_at_claude(command(name))
+        return await look_at_claude(command(name), folder)
     raise RuntimeError(f"This Chief of Staff does not run {name}.")
 
 
