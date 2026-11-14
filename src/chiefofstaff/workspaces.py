@@ -858,6 +858,36 @@ def linked_worktree(path: Path) -> bool:
     return False
 
 
+def nested_first(checkouts: list[dict]) -> list[dict]:
+    """Checkouts, those inside another's folder first (a worktree another agent made in the
+    worker's own: Claude's .claude/worktrees/…), the rest in their order: one is removed before
+    the worktree that holds it."""
+
+    def inside(checkout: dict) -> bool:
+        tree = str(checkout.get("worktree") or checkout.get("path") or "")
+        return any(
+            other is not checkout
+            and (around := str(other.get("worktree") or other.get("path") or ""))
+            and tree.startswith(around.rstrip(os.sep) + os.sep)
+            for other in checkouts
+        )
+
+    return sorted(checkouts, key=lambda checkout: not inside(checkout))
+
+
+def tidy_claude_folder(tree: str):
+    """A worktree removed from Claude's folder (<folder>/.claude/worktrees/<name>): the folders
+    it leaves empty go too, so the worktree that held it is clean again."""
+    path = Path(tree)
+    if path.parent.name != "worktrees" or path.parent.parent.name != ".claude":
+        return
+    for folder in (path.parent, path.parent.parent):
+        try:
+            folder.rmdir()  # Only when empty.
+        except OSError:
+            return
+
+
 def find_repositories(folder: Path, skip: set[Path], worktrees: bool = False) -> list[str]:
     """Git repositories in a code folder, and in its folders up to CODE_FOLDER_DEPTH deep
     (`worktrees`: linked worktrees too, such as one a worker made in its folder).
@@ -3548,7 +3578,7 @@ class Workspaces:
         ours = {tree for _, tree in await asyncio.to_thread(own_trees, folder, self.checkouts(row))}
         trash = trash_of(folder, roots)
         others = self.others(row)
-        for checkout in self.checkouts(row):
+        for checkout in nested_first(self.checkouts(row)):
             tree = checkout.get("worktree")
             if not tree or not await asyncio.to_thread(os.path.isdir, tree):
                 continue
@@ -3583,6 +3613,7 @@ class Workspaces:
                     cleanable = []
                 if await self.remove_tree(checkout, tree, trash):
                     removed.append(tree)
+                    await asyncio.to_thread(tidy_claude_folder, tree)
                     continue
                 changes = await uncommitted(checkout, tree)
             elif found is not None and not unknown and changes == []:
@@ -3596,6 +3627,7 @@ class Workspaces:
                     removed.append(tree)
                 self.store.delete(REMOVING + tree)
                 if tree in removed:
+                    await asyncio.to_thread(tidy_claude_folder, tree)
                     continue
             stays |= {
                 "items": unknown[:MAX_KEPT_LISTED],
@@ -3808,34 +3840,70 @@ class Workspaces:
         made = []
         found = await asyncio.to_thread(unknown)
         for repo in found:
-            if await asyncio.to_thread(linked_worktree, Path(repo)):
-                if not (checkout := await self.own_worktree(row, repo, found)):
-                    continue
-            else:
-                checkout = {"project": "", "repo": repo, "path": repo, "branch": "",
-                            "base_ref": "", "base": "a clone it made itself",
-                            "remote": repo}  # fmt: skip
-                try:  # Its .git as taken now: the one Chief of Staff's git reads (clone_place).
-                    checkout |= await asyncio.to_thread(clone_identity, Path(repo) / ".git")
-                except OSError:
-                    continue
-            if checkout.get("remote"):
-                # Where it is pushed to from now on: as its config says now, recorded.
-                origin = await asyncio.to_thread(recorded_origin, Path(checkout["clone_git"]))
-                checkout |= {"origin": origin, "remote": origin or checkout["remote"]}
-            with suppress(ValueError):
-                branch = await checkout_git(checkout, repo, "rev-parse", "--abbrev-ref", "HEAD")
-                checkout["branch"] = branch.strip().removesuffix("HEAD")
-            for ref in ("origin/HEAD", "origin/main", "origin/master"):
-                with suppress(ValueError):
-                    await checkout_git(checkout, repo, "rev-parse", "--verify", "--quiet", ref)
-                    checkout["base_ref"] = ref
-                    break
-            if not checkout["base_ref"] and checkout["repo"] != repo:
-                # A worktree of a repository without an origin: from the owner's own branch.
-                checkout["base_ref"] = await local_default(checkout, repo)
-            made.append(checkout)
+            if checkout := await self.as_checkout(row, repo, found):
+                made.append(checkout)
         return made
+
+    async def claimed_worktree(self, row: dict, tree: str) -> dict | None:
+        """A worktree another agent made for a worker (Claude's EnterWorktree, a subagent's
+        isolation: <folder>/.claude/worktrees/<name>, `folder` one it may write), as one of
+        its checkouts: as own_clones takes one it made with `git worktree add`."""
+        parts = Path(tree).parts
+        folder = (
+            str(Path(*parts[:-3]))
+            if len(parts) > 3 and parts[-3:-1] == (".claude", "worktrees")
+            else ""
+        )
+        writes = self.writes(row)
+
+        def its_own() -> bool:
+            real = os.path.realpath(folder)
+            mine = any(within(real, os.path.realpath(path)) for path in writes)
+            return mine and linked_worktree(Path(tree))
+
+        if not folder or not await asyncio.to_thread(its_own):
+            return None
+        checkout = await self.as_checkout(row, tree, [folder])
+        if checkout is not None:
+            # Released (and restored) with the worktrees Chief of Staff made for it: removed as
+            # it closes when nothing in it is uncommitted, else kept, as theirs are. Its folder
+            # in the repository, as found now (git_pins: read there, even once moved to trash).
+            checkout["worktree"] = tree
+            common = checkout.get("git_dir") or str(Path(checkout["repo"]) / ".git")
+            if admin := await asyncio.to_thread(admin_dir, common, tree):
+                checkout["admin"] = admin
+        return checkout
+
+    async def as_checkout(self, row: dict, repo: str, found: list[str]) -> dict | None:
+        """A repository a worker made in its folder (a clone, or a linked worktree of one it
+        works in: own_worktree), as a checkout: its remote, branch and base."""
+        if await asyncio.to_thread(linked_worktree, Path(repo)):
+            if not (checkout := await self.own_worktree(row, repo, found)):
+                return None
+        else:
+            checkout = {"project": "", "repo": repo, "path": repo, "branch": "",
+                        "base_ref": "", "base": "a clone it made itself",
+                        "remote": repo}  # fmt: skip
+            try:  # Its .git as taken now: the one Chief of Staff's git reads (clone_place).
+                checkout |= await asyncio.to_thread(clone_identity, Path(repo) / ".git")
+            except OSError:
+                return None
+        if checkout.get("remote"):
+            # Where it is pushed to from now on: as its config says now, recorded.
+            origin = await asyncio.to_thread(recorded_origin, Path(checkout["clone_git"]))
+            checkout |= {"origin": origin, "remote": origin or checkout["remote"]}
+        with suppress(ValueError):
+            branch = await checkout_git(checkout, repo, "rev-parse", "--abbrev-ref", "HEAD")
+            checkout["branch"] = branch.strip().removesuffix("HEAD")
+        for ref in ("origin/HEAD", "origin/main", "origin/master"):
+            with suppress(ValueError):
+                await checkout_git(checkout, repo, "rev-parse", "--verify", "--quiet", ref)
+                checkout["base_ref"] = ref
+                break
+        if not checkout["base_ref"] and checkout["repo"] != repo:
+            # A worktree of a repository without an origin: from the owner's own branch.
+            checkout["base_ref"] = await local_default(checkout, repo)
+        return checkout
 
     async def own_worktree(self, row: dict, tree: str, found: list[str]) -> dict | None:
         """A linked worktree a worker made itself in its folder, as a checkout: only of a

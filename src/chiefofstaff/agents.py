@@ -312,6 +312,16 @@ def resume_command(name: str, session_id: str, cwd: str) -> str:
     return f"copilot --resume {session_id}"
 
 
+def history_reader(name: str) -> Any:
+    """How an agent's session's conversation is read with no process of it running (Claude's,
+    from its transcript), or None when it needs one (Codex's)."""
+    if name == "claude":
+        from .backend_claude import read_history
+
+        return read_history
+    return None
+
+
 def clear_private(folder: Path, *, keep_own: bool = False):
     """An agent's private files (Claude's: a worker's MCP configuration and prompt, 0600) left
     by processes that ended without removing them (Chief of Staff was killed); `keep_own`:

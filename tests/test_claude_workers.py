@@ -7,6 +7,7 @@ itself)."""
 import asyncio
 import json
 import os
+import subprocess
 import sys
 import time
 import uuid
@@ -17,6 +18,7 @@ from conftest import Harness, call_tool, settle
 from copilot.tools import ToolInvocation
 
 from chiefofstaff import agents, backend_claude, prompts
+from chiefofstaff.models import Settings
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="Claude workers need macOS/Linux")
 
@@ -128,7 +130,7 @@ async def test_a_task_runs_on_claude_when_the_owner_names_it(tmp_path, claude_on
         view = runtime.view(harness.store.session(worker))
         assert view["agent"] == "claude" and view["agent_name"] == "Claude"
         assert view["tokens"] == harness.store.agent_spent(worker) > 0
-        assert view["agent_notes"] == ["Its subagents, worktrees and schedules are off for now"]
+        assert view["agent_notes"] == ["Its Claude memory is off"]
         listed = json.loads(
             (await call_tool(runtime, "list_sessions", harness.router_id)).text_result_for_llm
         )
@@ -557,5 +559,144 @@ async def test_a_copilot_session_a_claude_worker_made_is_its_not_the_owners(
             [(started_at - 1, time.time() + 1)],
         )  # fmt: skip
         assert [(window.by, window.copilot) for window in found] == [(worker, True)]
+    finally:
+        await runtime.stop()
+
+
+# Claude's own capabilities, tied into Chief of Staff (more-agents.md 5.12.4)
+
+
+async def test_a_worktree_a_claude_worker_makes_is_one_of_its_checkouts(tmp_path, claude_on_path):
+    """Its receipts, Storage and folders count it as they do a checkout Chief of Staff made;
+    removed by Claude, it is no longer one."""
+    from test_round7_split import published
+
+    app = published(tmp_path, "app")
+    harness, runtime = await started(tmp_path, Settings(projects=[str(app)]))
+    try:
+        await saved(runtime, {"claude": {"enabled": True}})
+        result = await spawn_on(
+            harness, runtime, title="Feature", agent="claude", project=str(app), isolate=True,
+            instructions="Enter a worktree named feat. Report done: made",
+        )  # fmt: skip
+        worker = result["session_id"]
+        await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+        tree = str(Path(harness.store.session(worker)["cwd"]) / ".claude" / "worktrees" / "feat")
+        made = f"Made the worktree {tree} on worktree-feat: one of its checkouts now."
+        await until(lambda: ("notice", made) in harness.kinds(worker))
+        row = harness.store.session(worker)
+        found = [c for c in json.loads(row["repos"]) if c["path"] == tree]
+        assert [(c["branch"], c["base"]) for c in found] == [
+            ("worktree-feat", "a worktree it made itself")
+        ]
+        assert tree in runtime.workspaces.writes(row), "a folder of its own to write"
+        await runtime.owner_send(worker, "Leave the worktree and remove it. Report done: gone")
+        await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+        await until(
+            lambda: (
+                tree not in [c["path"] for c in json.loads(harness.store.session(worker)["repos"])]
+            )
+        )
+    finally:
+        await runtime.stop()
+
+
+async def test_a_claude_workers_schedule_is_kept_holds_its_process_and_fires_as_its_task_run(
+    tmp_path, claude_on_path, monkeypatch
+):
+    from chiefofstaff import workers as workers_module
+
+    monkeypatch.setenv("FAKE_CLAUDE_FIRE_SECONDS", "1.5")
+    harness, runtime, worker, _ = await claude_worker(
+        tmp_path, "Report done: set. Schedule 'Run the shell command `echo tick`' every minute."
+    )
+    try:
+        kept = json.loads(harness.store.get(f"agentschedules:{worker}") or "[]")
+        assert [(e["prompt"], e["recurring"]) for e in kept] == [
+            ("Run the shell command `echo tick`", True)
+        ]
+        assert any(t.startswith("Scheduled (Every minute)") for k, t in harness.kinds(worker))
+        later = time.time() + workers_module.RELEASE_IDLE + 1
+        assert await runtime.workers.release_idle(later) == [], "a schedule needs its process"
+        fired = ("notice", "Its schedule fired (Every minute).")
+        await until(lambda: fired in harness.kinds(worker), 30)
+        await until(lambda: harness.kinds(worker)[-2:] == [("tool", "bash echo tick"),
+                                                          ("assistant", "done")])  # fmt: skip
+    finally:
+        await runtime.stop()
+
+
+async def test_a_claude_workers_message_to_another_worker_is_its_tell_session(
+    tmp_path, claude_on_path
+):
+    harness, runtime, first, _ = await claude_worker(tmp_path, "Report done: first")
+    try:
+        result = await spawn_on(
+            harness, runtime, title="Second", agent="claude",
+            instructions=f"Message cos-{first[:8]}: 'the API moved'. Report done: told",
+        )  # fmt: skip
+        second = result["session_id"]
+        await until(lambda: harness.store.session(second)["status"] == "done", 30)
+        told = [m for m in harness.store.messages(second) if m["kind"] == "tell"]
+        assert [(m["text"], m["meta"]["target"]) for m in told] == [("the API moved", first)]
+        router = [m["text"] for m in harness.store.messages(harness.router_id)]
+        assert not any("the API moved" in text and "Claude session" in text for text in router)
+    finally:
+        await runtime.stop()
+
+
+async def test_another_claude_sessions_message_to_a_worker_is_shown_as_its_and_admitted(
+    tmp_path, claude_on_path, monkeypatch
+):
+    inbox = tmp_path / "inbox.jsonl"
+    monkeypatch.setenv("FAKE_CLAUDE_INBOX", str(inbox))
+    harness, runtime, worker, _ = await claude_worker(tmp_path, "Report done: ready")
+    try:
+        inbox.write_text(json.dumps({"name": "alice", "pid": 4242, "text": "Reply with just: hi"}))
+        await until(lambda: ("assistant", "hi") in harness.kinds(worker), 30)
+        (inbound,) = [m for m in harness.store.messages(worker) if m["kind"] == "inbound"]
+        assert (inbound["text"], inbound["meta"]) == (
+            "Reply with just: hi",
+            {"claude_session": "alice"},
+        )
+    finally:
+        await runtime.stop()
+
+
+async def test_a_claude_workers_notification_is_its_own_in_chief_of_staff(tmp_path, claude_on_path):
+    harness, runtime, worker, _ = await claude_worker(
+        tmp_path, "Notify me: 'Build is green'. Report done: notified"
+    )
+    try:
+        assert ("notice", "Notified you: Build is green") in harness.kinds(worker)
+    finally:
+        await runtime.stop()
+
+
+async def test_a_claude_workers_worktrees_go_with_its_checkouts_when_it_closes(
+    tmp_path, claude_on_path
+):
+    from test_round7_split import published
+
+    app = published(tmp_path, "app")
+    harness, runtime = await started(tmp_path, Settings(projects=[str(app)]))
+    try:
+        await saved(runtime, {"claude": {"enabled": True}})
+        result = await spawn_on(
+            harness, runtime, title="Feature", agent="claude", project=str(app), isolate=True,
+            instructions="Enter a worktree named feat. Report done: made",
+        )  # fmt: skip
+        worker = result["session_id"]
+        cwd = Path(harness.store.session(worker)["cwd"])
+        tree = cwd / ".claude" / "worktrees" / "feat"
+        await until(lambda: str(tree) in harness.store.session(worker)["repos"], 30)
+        await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+        await call_tool(runtime, "close_worker", harness.router_id, session_id=worker)
+        await until(lambda: not tree.exists() and not cwd.exists(), 30)
+        listed = (await asyncio.to_thread(
+            subprocess.run, ["git", "worktree", "list"], cwd=app, capture_output=True, text=True,
+            check=True,
+        )).stdout  # fmt: skip
+        assert "feat" not in listed and str(cwd) not in listed
     finally:
         await runtime.stop()

@@ -3153,6 +3153,20 @@ class Runtime:
             options["reasoning_effort"] = effort
         if (thread := self.store.get(f"agentcontinues:{row['id']}")) and not self.made(row["id"]):
             options["continues"] = thread  # The owner's thread it takes over (Workers.adopt).
+        if self.agent(row["id"]) == "claude":
+            # Claude's own capabilities, tied into Chief of Staff (more-agents.md 5.12.4).
+            sid = row["id"]
+            options |= {
+                "token_limit": agents.limit(self.store, "claude"),
+                "schedules": json.loads(self.store.get(f"agentschedules:{sid}") or "[]"),
+                "on_schedules": lambda found: self.agent_schedules(sid, found),
+                # Kept apart from the hook (Claude waits for it), as the checkouts' lock allows.
+                "on_worktree": lambda path, removed: self.background(
+                    self.agent_worktree(sid, path, removed)
+                ),
+                "on_peer": lambda kind, data: self.agent_peer(sid, kind, data),
+                "on_notify": lambda text: self.agent_notified(sid, text),
+            }
         return options
 
     def agent_children(self, session_id: str) -> list[str]:
@@ -3164,6 +3178,108 @@ class Runtime:
 
     def agent_notice(self, row: dict, text: str):
         self.add_message(row["id"], "notice", text)
+
+    async def agent_worktree(self, session_id: str, path: str, removed: bool) -> None:
+        """A worktree another agent made for a worker (Claude's EnterWorktree, a subagent's
+        isolation): one of its checkouts from then on, as one it made with `git worktree add`
+        (receipts, Storage, its folders, removed with the others as it closes); one it
+        removed, no longer."""
+        row = self.store.find_session(session_id)
+        if not row or row["closed_at"]:
+            return
+        real = await asyncio.to_thread(os.path.realpath, path)
+        async with self.states[session_id].checkouts:
+            row = self.store.session(session_id)
+            checkouts = self.workspaces.checkouts(row)
+            paths = await asyncio.to_thread(
+                lambda: [os.path.realpath(c.get("path") or "") for c in checkouts]
+            )
+            if removed:
+                kept = [c for c, at in zip(checkouts, paths, strict=True) if at != real]
+                if len(kept) != len(checkouts):
+                    self.update_session(session_id, repos=json.dumps(kept))
+                return
+            if real in paths:
+                return
+            checkout = await self.workspaces.claimed_worktree(row, path)
+            if checkout is None:
+                self.agent_notice(
+                    row,
+                    f"Its worktree {path} is not one Chief of Staff can keep as its checkout "
+                    "(not of a repository it works in).",
+                )
+                return
+            self.update_session(session_id, repos=json.dumps([*checkouts, checkout]))
+        branch = f" on {checkout['branch']}" if checkout.get("branch") else ""
+        self.agent_notice(row, f"Made the worktree {path}{branch}: one of its checkouts now.")
+
+    def agent_schedules(self, session_id: str, schedules: list[dict]):
+        """What another agent's worker scheduled (Claude's CronCreate, ScheduleWakeup): kept
+        for its next process (Claude restores them), which admits each firing (its gate)."""
+        if schedules:
+            self.store.set(f"agentschedules:{session_id}", json.dumps(schedules[:50]))
+        else:
+            self.store.delete(f"agentschedules:{session_id}")
+        if row := self.store.find_session(session_id):
+            self.publish_session(row)
+
+    async def agent_peer(self, session_id: str, kind: str, data: dict) -> str | None:
+        """Claude's messages between sessions, through Chief of Staff (more-agents.md 5.12.5).
+        `send`: the worker's SendMessage; to one of Chief of Staff's workers (`cos-…`), its
+        tell_session (what it was told: Claude does not send it), else None (Claude sends it
+        to that session of the owner's). `inbound`: another session's message to it, shown in
+        its timeline and to the Router as that session's, within the hourly limit of what a
+        worker is told: "" to deliver it, else why not."""
+        from .peers import MAX_TELLS_PER_HOUR, ROUTER_COPY_CHARS, TellSession, clip
+
+        row = self.store.session(session_id)
+        if kind == "send":
+            to = str(data.get("to") or "")
+            found = re.fullmatch(r"cos-([0-9a-f]{8})", to)
+            targets = [
+                other
+                for other in self.store.open_sessions(WORKER)
+                if found and other["id"].replace("-", "").startswith(found.group(1))
+            ]
+            if not found:
+                return None
+            if len(targets) != 1:
+                return f"No worker of Chief of Staff's is named {to} now: find_sessions lists them."
+            try:
+                told = await self.peers.t_tell_session(
+                    TellSession(session_id=targets[0]["id"], text=str(data.get("text") or "")),
+                    session_id,
+                )
+            except ValueError as exc:
+                return f"Chief of Staff did not deliver it: {exc}"
+            return f"Delivered through Chief of Staff: {told}"
+        name = str(data.get("name") or "unnamed")
+        key = f"told:session:{name}:{session_id}"
+        hour = time.time() - 3600
+        told = [t for t in json.loads(self.store.get(key) or "[]") if t > hour]
+        if len(told) >= MAX_TELLS_PER_HOUR:
+            return (
+                f"Claude session “{name}” sent this worker {MAX_TELLS_PER_HOUR} messages this "
+                "hour: no more are delivered."
+            )
+        self.store.set(key, json.dumps([*told, time.time()]))
+        text = str(data.get("text") or "").strip()[:6000]
+        self.add_message(session_id, "inbound", text, {"claude_session": name})
+        self.peers.copy_to_router(
+            f"Claude session “{name}” told “{self.display_title(row)}”: "
+            f"{clip(text, ROUTER_COPY_CHARS)}",
+            {"peer_to": session_id},
+        )
+        return ""
+
+    def agent_notified(self, session_id: str, text: str):
+        """A worker's own notification (Claude's PushNotification): in its timeline, and to
+        the owner as its other news is (held while they focus)."""
+        row = self.store.session(session_id)
+        self.add_message(session_id, "notice", f"Notified you: {text[:500]}")
+        self.alert(
+            text[:300], session_id=session_id, needs_action=False, title=self.display_title(row)
+        )
 
     def agent_child(self, row: dict, thread: str):
         """A child agent a worker on another agent spawned: its turns may reach it, also from

@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from .backend_claude import ClaudeAgent, ClaudeWorker
 
 # Raised whenever what the check does changes: every version is checked again then.
-REVISION = 3
+REVISION = 4
 # The check's own tool of Chief of Staff's, and the stand-in MCP server's.
 TOOL = "chiefofstaff_check"
 SERVER = "chiefofstaff_check"
@@ -416,6 +416,7 @@ class Facts:
         self.tasks_seen = False
         self.offered: list[str] = []
         self.sandbox = "not checked"
+        self.agents: list[str] = []
 
     def saw(self, kind: str, message: dict, *paths: str):
         """Which of the fields Chief of Staff reads this message had."""
@@ -433,6 +434,8 @@ def observe(facts: Facts, message: dict):
     kind, subtype = message.get("type"), message.get("subtype")
     if kind == "system" and subtype == "init":
         facts.saw("system/init", message, *CLAUDE_USES["system/init"])
+        # Its own agents (no user's nor project's in the check's folder): defined by no file.
+        facts.agents = sorted({str(name) for name in message.get("agents") or []})
     elif kind == "system" and subtype == "task_started":
         facts.tasks_seen = True
         facts.saw("system/task_started", message, *CLAUDE_USES["system/task_started"])
@@ -851,4 +854,6 @@ def check_verdict(version: str, facts: Facts, happened: list[str], reached: list
         "sandbox": facts.sandbox,
         # Chief of Staff's tools given to the model upfront (alwaysLoad), not behind its search.
         "tools_upfront": f"mcp__chief__{TOOL}" in facts.offered,
+        # Claude's own agents in this version (any other is defined in a file it reads).
+        "agents": facts.agents,
     }

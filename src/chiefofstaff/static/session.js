@@ -838,6 +838,8 @@ function renderMessage(original) {
         return card({ label: `Review · ${meta.title}`, body: message.text, className: "inbound", time, open: () => select(meta.review) });
       }
       if (meta.thread) return card({ label: threadLabel(meta.thread), body: readable(meta, message.text), className: "inbound", time });
+      // Another Claude session's message to a Claude worker: its sender's, never the owner's.
+      if (meta.claude_session) return card({ label: `From Claude session “${meta.claude_session}”`, body: message.text, className: "inbound", time });
       if (meta.from) {
         return card({ label: meta.title, body: message.text, className: `report ${meta.status}`, status: meta.status, task: meta.task_id, time, open: () => select(meta.from) });
       }
