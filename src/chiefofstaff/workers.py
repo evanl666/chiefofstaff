@@ -69,6 +69,13 @@ LISTING_TIMEOUT = 20
 TURN_ENDS = {"assistant.turn_end", "session.idle", "session.error", "abort", "session.shutdown"}
 
 
+def keeps_process(handle: Any) -> bool:
+    """Whether a session's process must stay for what it was asked to do later (another
+    agent's: Claude's schedules fire only in its running process)."""
+    keeps = getattr(handle, "keeps_process", None)
+    return bool(keeps and keeps())
+
+
 def as_event(event: dict) -> SimpleNamespace:
     """An event as read_history gives it (a dict), as a session's own events are."""
     data = event.get("data") or {}
@@ -1517,19 +1524,22 @@ class Workers:
     async def catch_up_agent(self, row: dict):
         """catch_up, for another agent's worker continued in a terminal (its conversation as
         that agent keeps it): what it did there since its timeline last showed it."""
-        if self.runtime.is_elsewhere(row) or self.runtime.agent_block(row):
-            return  # Open there still, or it may not run (its send says why): nothing started.
-        try:
-            backend = await self.runtime.connect_agent(self.runtime.agent(row["id"]))
-        except Exception:
-            return  # Its send says why it cannot run.
+        if self.runtime.is_elsewhere(row):
+            return  # Open there still.
+        # Read by its agent's running backend, else without starting anything (Claude's
+        # transcript); none of those, nothing is read (its send starts it, or says why not).
+        agent = self.runtime.agent(row["id"])
+        backend, _ = self.runtime.connection(agent)
+        read = backend.read_history if backend else agents.history_reader(agent)
+        if read is None:
+            return
         async with self.mirror_lock:
             if not self.store.one(
                 "SELECT id FROM messages WHERE session_id=? LIMIT 1", (row["id"],)
             ):
                 return  # Adopted just now: import_history brings its conversation.
             try:
-                events, after, _ = await backend.read_history(
+                events, after, _ = await read(
                     self.runtime.copilot_id(row["id"]), self.read_to.get(row["id"], 0)
                 )
             except Exception:
@@ -1773,6 +1783,7 @@ class Workers:
                     "SELECT id FROM commands WHERE session_id=? AND ended_at IS NULL LIMIT 1",
                     (row["id"],),
                 )
+                or keeps_process(self.states.handle(row["id"]))
             ):
                 continue
             await self.runtime.detach(row["id"])

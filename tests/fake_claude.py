@@ -102,6 +102,12 @@ class Fake:
         self.ids = 0
         self.pending: dict[str, asyncio.Future] = {}
         self.hooks: dict[str, list[str]] = {}
+        self.matchers: dict[str, str] = {}  # A hook callback's matcher (none: every tool).
+        self.mode = "default"
+        self.schedules: dict[str, dict] = {}
+        self.entered: list[str] = []
+        self.plan_file = ""
+        self.agents: dict[str, asyncio.Future] = {}
         self.session_id = str(flags.get("resume") or flags.get("session-id") or uuid.uuid4())
         self.cwd = str(Path.cwd())
         self.model = str(flags.get("model") or "claude-fake-1")
@@ -127,6 +133,7 @@ class Fake:
                 "own": sorted(k for k in os.environ if k.startswith("CHIEFOFSTAFF_")),
                 "servers": sorted(self.servers),
                 "appended": self.appended,
+                "plugins": flags.get("plugin-dir"),
             },
         )
         self.state = self.load() if flags.get("resume") else self.fresh()
@@ -230,6 +237,9 @@ class Fake:
         """Each callback of a hook event; None when one failed (it blocks: on_failure)."""
         answer: dict = {}
         for callback in self.hooks.get(event, []):
+            pattern = self.matchers.get(callback)
+            if pattern and not re.fullmatch(pattern, str(data.get("tool_name") or "")):
+                continue
             reply = await self.ask(
                 {
                     "subtype": "hook_callback",
@@ -284,7 +294,11 @@ class Fake:
         if subtype == "initialize":
             for event, matchers in (request.get("hooks") or {}).items():
                 for matcher in matchers or []:
-                    self.hooks.setdefault(event, []).extend(matcher.get("hookCallbackIds") or [])
+                    ids = matcher.get("hookCallbackIds") or []
+                    self.hooks.setdefault(event, []).extend(ids)
+                    for callback in ids:
+                        if matcher.get("matcher"):
+                            self.matchers[callback] = matcher["matcher"]
             answer = {
                 "commands": [],
                 "models": MODELS,
@@ -303,6 +317,8 @@ class Fake:
                     os.killpg(self.running.pid, signal.SIGKILL)
         elif subtype == "set_model":
             self.model = request.get("model") or "claude-fake-1"
+        elif subtype == "stop_task" and request.get("task_id") in self.agents:
+            self.agents.pop(request["task_id"]).cancel()
         elif subtype == "stop_task":
             task = self.background.get(request.get("task_id") or "")
             if not task:
@@ -453,6 +469,9 @@ class Fake:
             answer = await self.hook(
                 "UserPromptSubmit", {"prompt": text, "prompt_id": str(uuid.uuid4())}
             )
+            added = ((answer or {}).get("hookSpecificOutput") or {}).get("additionalContext")
+            if added:
+                note("FAKE_CLAUDE_CONTEXT", {"prompt": text, "context": added})
             if answer is None or answer.get("decision") == "block":
                 why = (answer or {}).get("reason") or "hook failed"
                 self.system(
@@ -467,9 +486,11 @@ class Fake:
             "cwd": self.cwd,
             "session_id": self.session_id,
             "model": self.model,
-            "permissionMode": "default",
+            "permissionMode": self.mode,
             "claude_code_version": VERSION,
             "mcp_servers": [{"name": name, "status": "connected"} for name in names],
+            "agents": ["claude", "Explore", "general-purpose", "Plan", "statusline-setup"],
+            "plugins": [],
             "tools": ["Bash", "Write", "Edit", "Read"],
         }
         self.system("init", **(init | json.loads(os.environ.get("FAKE_CLAUDE_SYSTEM") or "{}")))
@@ -559,7 +580,7 @@ class Fake:
             conversation.append({"role": "user", "content": answered})
             if os.environ.get("FAKE_CLAUDE_NO_STEER"):
                 continue  # A version that takes notes up only after the turn.
-            for note in await self.steered():
+            for steered in await self.steered():
                 # As Claude gives a note sent mid-turn: a message of its own, with the result.
                 conversation.append(
                     {
@@ -567,7 +588,7 @@ class Fake:
                         "content": [
                             {
                                 "type": "text",
-                                "text": f"{STEERED}\n{note}",
+                                "text": f"{STEERED}\n{steered}",
                             }
                         ],
                     }
@@ -753,6 +774,44 @@ class Fake:
                     ]
                 },
             )
+        if found := re.search(r"Enter a worktree named (\w+)", text):
+            call("EnterWorktree", {"name": found.group(1)})
+        if "Leave the worktree and remove it" in text:
+            call("ExitWorktree", {"action": "remove", "discard_changes": True})
+        if found := re.search(r"Schedule '([^']+)' every minute", text):
+            call("CronCreate", {"cron": "* * * * *", "prompt": found.group(1), "recurring": True})
+        if found := re.search(r"Wake up later to '([^']+)'", text):
+            wake = {"delaySeconds": 60, "reason": "later", "prompt": found.group(1)}
+            call("ScheduleWakeup", wake)
+        if found := re.search(r"Message (\S+): '([^']+)'", text):
+            message = {"to": found.group(1), "summary": "a note", "message": found.group(2)}
+            call("SendMessage", message)
+        if found := re.search(r"Plan it: '([^']+)'", text):
+            plans = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "plans"
+            plans.mkdir(parents=True, exist_ok=True)
+            call("EnterPlanMode", {})
+            call("Write", {"file_path": str(plans / "a-plan.md"), "content": found.group(1)})
+            call("ExitPlanMode", {})
+        if found := re.search(
+            r"Have a (background )?subagent( in a worktree| in the cloud)?(?: of type (\S+))? "
+            r"run `([^`]+)`",
+            text,
+        ):
+            isolation = {" in a worktree": "worktree", " in the cloud": "remote"}.get(
+                found.group(2) or ""
+            )
+            call(
+                "Agent",
+                {
+                    "description": "a subagent",
+                    "prompt": f"Run the shell command `{found.group(4)}`",
+                    "subagent_type": found.group(3) or "general-purpose",
+                    "run_in_background": bool(found.group(1)),
+                    **({"isolation": isolation} if isolation else {}),
+                },
+            )
+        if found := re.search(r"Notify me: '([^']+)'", text):
+            call("PushNotification", {"message": found.group(1)})
         if found := re.search(r"Remember the word '(\w+)'", text):
             self.state["memory"] = found.group(1)
         if "What word did I ask you to remember" in text:
@@ -765,17 +824,18 @@ class Fake:
             plan.append({"type": "text", "text": found.group(1)})
         return plan
 
-    async def run(self, block: dict) -> dict:
+    async def run(self, block: dict, agent: dict | None = None) -> dict:
         """One tool call: asked about first (PreToolUse, then can_use_tool when it asks), then
-        run; its result as Claude gives it."""
+        run; its result as Claude gives it. `agent`: the subagent that makes it (its id, its
+        folder, the call that started it)."""
         name, data, call = block["name"], block["input"], block["id"]
         decision, reason = "allow", ""
         if name not in UNASKED:
-            answer = await self.hook(
-                "PreToolUse",
-                {"tool_name": name, "tool_input": data, "tool_use_id": call, "agent_id": None},
-                call,
-            )
+            asked = {"tool_name": name, "tool_input": data, "tool_use_id": call,
+                     "agent_id": None, "permission_mode": self.mode}  # fmt: skip
+            if agent:
+                asked |= {k: agent[k] for k in ("agent_id", "agent_type", "cwd")}
+            answer = await self.hook("PreToolUse", asked, call)
             if answer is None:
                 self.system(
                     "informational",
@@ -806,6 +866,7 @@ class Fake:
                 decision, data = "allow", answer.get("updatedInput") or data
             else:
                 decision, reason = "deny", answer.get("message") or "denied"
+        parent = (agent or {}).get("parent")
         if decision != "allow":
             return self.tool_result(
                 call,
@@ -813,9 +874,14 @@ class Fake:
                 True,
                 f"Error: PreToolUse:{name} hook error: {reason}",
                 {"non_execution_kind": "permission-rule"},
+                parent=parent,
             )
+        if (done := await self.capability(name, call, data, agent)) is not None:
+            return done
         if name == "Bash":
-            return await self.bash(call, data)
+            return await self.bash(call, data, (agent or {}).get("cwd"), parent)
+        if name == "Write" and self.mode == "plan":
+            self.plan_file = data["file_path"]
         if name == "Write":
             await asyncio.to_thread(Path(data["file_path"]).write_text, data.get("content") or "")
             return self.tool_result(
@@ -860,6 +926,205 @@ class Fake:
             )
         return self.tool_result(call, "ok", False, {"ok": True})
 
+    # Claude's own capabilities (2.1.322's, as Chief of Staff ties them in: more-agents.md 5.12.4)
+
+    async def capability(self, name: str, call: str, data: dict, agent: dict | None) -> dict | None:
+        """A capability tool's run, as 2.1.322 answers it (PostToolUse after it, for those that
+        report what they made); None for any other tool."""
+        structured: dict | None = None
+        text = "ok"
+        if name == "EnterWorktree":
+            top = await self.git("rev-parse", "--show-toplevel")
+            label = data.get("name") or f"w{uuid.uuid4().hex[:6]}"
+            path = str(Path(top) / ".claude" / "worktrees" / label)
+            await self.git("worktree", "add", "-q", "-b", f"worktree-{label}", path)
+            self.entered.append(self.cwd)
+            self.cwd = path
+            structured = {"worktreePath": path, "worktreeBranch": f"worktree-{label}",
+                          "message": f"Created worktree at {path}"}  # fmt: skip
+            text = structured["message"]
+        elif name == "ExitWorktree":
+            path, self.cwd = self.cwd, self.entered.pop() if self.entered else self.cwd
+            if data.get("action") == "remove":
+                await self.git("worktree", "remove", "--force", path)
+            structured = {"action": data.get("action"), "originalCwd": self.cwd,
+                          "worktreePath": path, "restoredCwd": self.cwd}  # fmt: skip
+        elif name in {"CronCreate", "ScheduleWakeup"}:
+            key = uuid.uuid4().hex[:8]
+            recurring = name == "CronCreate" and bool(data.get("recurring", True))
+            self.schedules[key] = {"prompt": data["prompt"], "recurring": recurring}
+            task = asyncio.ensure_future(self.fire(key))
+            self.tasks.add(task)
+            if name == "CronCreate":
+                structured = {
+                    "id": key,
+                    "humanSchedule": "Every minute",
+                    "recurring": recurring,
+                    "durable": False,
+                    "nextFireAt": int(time.time() * 1000) + 60000,
+                }
+            else:
+                structured = {"scheduledFor": int(time.time() * 1000) + 60000,
+                              "clampedDelaySeconds": 60, "wasClamped": False}  # fmt: skip
+        elif name == "CronDelete":
+            self.schedules.pop(str(data.get("id") or ""), None)
+            structured = {"id": data.get("id")}
+        elif name == "SendMessage":
+            text = f"Message sent to {data.get('to')}."
+            note("FAKE_CLAUDE_SENT", {"to": data.get("to"), "message": data.get("message")})
+        elif name == "EnterPlanMode":
+            self.mode = "plan"
+            text = "Entered plan mode."
+        elif name == "ExitPlanMode":
+            self.mode = "default"
+            structured = {"plan": None, "isAgent": False, "filePath": self.plan_file}
+            text = "User has approved exiting plan mode."
+        elif name in {"Agent", "Task"}:
+            return await self.subagent(call, data)
+        elif name == "PushNotification":
+            text = "Notification sent."
+        else:
+            return None
+        result = self.tool_result(call, text, False, structured or {"ok": True},
+                                  parent=(agent or {}).get("parent"))  # fmt: skip
+        await self.hook(
+            "PostToolUse",
+            {"tool_name": name, "tool_input": data, "tool_response": structured or {},
+             "tool_use_id": call},
+            call,
+        )  # fmt: skip
+        return result
+
+    async def git(self, *arguments: str) -> str:
+        process = await asyncio.create_subprocess_exec(
+            "git", *arguments, cwd=self.cwd, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )  # fmt: skip
+        output, _ = await process.communicate()
+        return output.decode().strip()
+
+    async def fire(self, key: str):
+        """A schedule fires (FAKE_CLAUDE_FIRE_SECONDS apart, for a test; Claude's are a minute
+        at least): its prompt, as it is, through the gate; a recurring one up to 3 times."""
+        for _ in range(3):
+            await asyncio.sleep(float(os.environ.get("FAKE_CLAUDE_FIRE_SECONDS") or 1))
+            entry = self.schedules.get(key)
+            if entry is None:
+                return
+            # As Claude: a firing waits for its session to be idle (taken after the turn).
+            self.system("command_lifecycle", state="started", wakeup_source="schedule_wakeup")
+            self.prompts.put_nowait({"content": entry["prompt"], "origin": None, "uuid": None})
+            if not entry["recurring"]:
+                self.schedules.pop(key, None)
+                return
+
+    async def inbox(self):
+        """Other sessions' messages (FAKE_CLAUDE_INBOX: a file, one JSON line each, {name, pid,
+        text}), as Claude gives them to the gate."""
+        path = Path(os.environ.get("FAKE_CLAUDE_INBOX") or "")
+        read = 0
+        while path.name:
+            await asyncio.sleep(0.1)
+            lines = await asyncio.to_thread(
+                lambda: path.read_text().splitlines() if path.is_file() else []
+            )
+            for line in lines[read:]:
+                said = json.loads(line)
+                prompt = (
+                    f'<cross-session-message from="uds:/tmp/cc-socks/{said["pid"]}.sock" '
+                    f'from-name="{said["name"]}" from-mode="prompting">\n{said["text"]}\n'
+                    "</cross-session-message>"
+                )
+                entry = {"content": prompt, "origin": None, "uuid": None}
+                if self.turning:
+                    self.steering.append(entry)
+                else:
+                    self.prompts.put_nowait(entry)
+            read = len(lines)
+
+    async def subagent(self, call: str, data: dict) -> dict:
+        """A subagent (Agent): in Anthropic's cloud (isolation remote), else here, in a worktree
+        of its own (isolation worktree) or the worker's folder; told what SubagentStart
+        answers; its calls asked about (PreToolUse, with its id and folder) and run; in the
+        background when asked (its end then wakes the worker)."""
+        kind = str(data.get("subagent_type") or "general-purpose")
+        if data.get("isolation") == "remote":
+            note("FAKE_CLAUDE_SUBAGENTS", {"kind": kind, "remote": True})
+            structured = {"status": "remote_launched", "taskId": "r1"}
+            return self.tool_result(call, "Remote agent launched.", False, structured)
+        agent_id = f"a{uuid.uuid4().hex[:16]}"
+        cwd = self.cwd
+        if data.get("isolation") == "worktree":
+            top = await self.git("rev-parse", "--show-toplevel")
+            cwd = str(Path(top) / ".claude" / "worktrees" / f"agent-{agent_id[:8]}")
+            await self.git("worktree", "add", "-q", "-b", f"worktree-agent-{agent_id[:8]}", cwd)
+        background = bool(data.get("run_in_background"))
+        self.system(
+            "task_started", task_id=agent_id, tool_use_id=call, description=data.get("description"),
+            subagent_type=kind, is_backgrounded=background, task_type="local_agent",
+            prompt=data.get("prompt"),
+        )  # fmt: skip
+        answer = await self.hook(
+            "SubagentStart", {"agent_id": agent_id, "agent_type": kind, "cwd": cwd}
+        )
+        told = ((answer or {}).get("hookSpecificOutput") or {}).get("additionalContext") or ""
+        note("FAKE_CLAUDE_SUBAGENTS", {"kind": kind, "cwd": cwd, "told": told})
+        context = {"agent_id": agent_id, "agent_type": kind, "cwd": cwd, "parent": call}
+
+        async def work() -> str:
+            said = "done"
+            for block in self.brain(str(data.get("prompt") or "")):
+                if block.get("type") != "tool_use":
+                    said = block.get("text") or said
+                    continue
+                self.send(
+                    {"type": "assistant", "parent_tool_use_id": call,
+                     "session_id": self.session_id, "uuid": str(uuid.uuid4()),
+                     "message": {"id": f"msg_sub_{uuid.uuid4().hex[:8]}", "role": "assistant",
+                                 "model": self.model, "content": [block],
+                                 "usage": {"input_tokens": 30, "output_tokens": 1}}}
+                )  # fmt: skip
+                await self.run(block, context)
+                self.system(
+                    "task_progress", task_id=agent_id, tool_use_id=call,
+                    usage={"total_tokens": 120, "tool_uses": 1, "duration_ms": 5},
+                )  # fmt: skip
+            return said
+
+        async def ending(said: str, status: str = "completed"):
+            self.system(
+                "task_notification", task_id=agent_id, tool_use_id=call, status=status,
+                output_file="", summary=said, usage={"total_tokens": 150},
+            )  # fmt: skip
+
+        if not background:
+            said = await work()
+            await ending(said)
+            structured = {"status": "completed", "agentId": agent_id, "content": said}
+            return self.tool_result(call, said, False, structured)
+
+        async def behind():
+            try:
+                said = await work()
+            except asyncio.CancelledError:
+                self.system("task_updated", task_id=agent_id, patch={"status": "killed"})
+                return
+            await ending(said)
+            prompt = (
+                f"<task-notification>\n<task-id>{agent_id}</task-id>\n<tool-use-id>{call}"
+                f"</tool-use-id>\n<status>completed</status>\n<summary>{said}</summary>\n"
+                "</task-notification>"
+            )
+            entry = {"content": prompt, "origin": {"kind": "task-notification"}, "uuid": None}
+            if self.turning:
+                self.steering.append(entry)
+            else:
+                self.prompts.put_nowait(entry)
+
+        self.agents[agent_id] = asyncio.ensure_future(behind())
+        structured = {"status": "async_launched", "agentId": agent_id}
+        return self.tool_result(call, f"Async agent launched: {agent_id}", False, structured)
+
     async def stdio_call(self, server: str, tool: str, data: dict) -> str:
         """A tool of a stdio MCP server it was given (started on first use)."""
         config = self.servers.get(server) or {}
@@ -893,8 +1158,9 @@ class Fake:
         return (json.loads(line) if line else {}).get("result") or {}
 
     def tool_result(
-        self, call: str, text: str, error: bool, structured, meta: dict | None = None
-    ) -> dict:
+        self, call: str, text: str, error: bool, structured, meta: dict | None = None,
+        parent: str | None = None,
+    ) -> dict:  # fmt: skip
         block = {"type": "tool_result", "tool_use_id": call, "content": text, "is_error": error}
         self.send(
             {
@@ -902,7 +1168,7 @@ class Fake:
                 "message": {"role": "user", "content": [block]},
                 "tool_use_result": structured,
                 "tool_result_meta": [{"id": call, **(meta or {})}],
-                "parent_tool_use_id": None,
+                "parent_tool_use_id": parent,
                 "session_id": self.session_id,
                 "uuid": str(uuid.uuid4()),
             }
@@ -956,15 +1222,25 @@ class Fake:
         failed = f"Exit code 1\n{refused}"
         return self.tool_result(call, failed, True, f"Error: {failed}")
 
-    async def bash(self, call: str, data: dict) -> dict:
+    async def bash(
+        self, call: str, data: dict, cwd: str | None = None, parent: str | None = None
+    ) -> dict:
         command = data.get("command") or ""
         if (refused := await self.sandboxed(call, command)) is not None:
             return refused
+        if parent:  # A subagent's: run where it works, its result its own.
+            process = await asyncio.create_subprocess_exec(
+                "/bin/sh", "-c", command, cwd=cwd or self.cwd,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            )  # fmt: skip
+            output, _ = await process.communicate()
+            return self.tool_result(call, output.decode().strip() or "(no output)", False,
+                                    {"stdout": output.decode()}, parent=parent)  # fmt: skip
         process = await asyncio.create_subprocess_exec(
             "/bin/sh",
             "-c",
             command,
-            cwd=self.cwd,
+            cwd=cwd or self.cwd,
             start_new_session=True,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
@@ -1092,6 +1368,8 @@ async def serve(flags: dict):
     fake = Fake(flags)
     fake.save()
     turns = asyncio.ensure_future(fake.turns())
+    inbox = asyncio.ensure_future(fake.inbox())
+    fake.tasks.add(inbox)
     await fake.read()
     turns.cancel()
 
