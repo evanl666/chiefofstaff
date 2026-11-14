@@ -12,17 +12,22 @@
   `chiefofstaff tidy-sessions` names them. What 0.1.43 decided is decided again by these rules,
   a round of logs at a time: your sessions come back; a script's batch stays out meanwhile (QA
   on 0.1.43, E49).
-- **A worker's command takes only the sessions where it ran.** While a worker ran
+- **A worker's command takes only the sessions it clearly made.** While a worker ran
   `cd ~/src/copilot && npm run dev`, a question you asked in your own project was taken for the
-  worker's: the word copilot in the command was enough. A command now ties a one-shot session
-  to its worker only when it runs `copilot -p` (or `--prompt`, however it is started: `npx`,
-  a path, `$(which copilot)`, `bash -c`; not a folder or file of that name) or the sessions are
-  a batch it started (ten or more alike; minutes apart too in a temporary folder or its own),
-  and only those in its own folder, where it ran (a folder it went to with `cd`) or in a
-  temporary folder; for as long as it ran (one whose end was not seen: two hours, and on while
-  its sessions keep coming). A worker's batch slow or of varied prompts stays its, as 0.1.43
-  found it, and what 0.1.43 found a worker made stays so unless the session shows it is yours
-  (QA on 0.1.43, E54, and its review).
+  worker's: the word copilot in the command was enough. Now a one-shot session is a worker's
+  only on evidence: it ran in the folder Chief of Staff made for the worker, or the command
+  runs `copilot -p` (or `--prompt`, however it is started: `npx`, a path, `$(which copilot)`,
+  `bash -c`; not a folder or file of that name) and the session ran where the command did or in
+  a temporary folder; while the command ran (one whose end was not seen: two hours, and longer
+  only for sessions clearly its). The time and a folder alone never are: your questions in a
+  project a worker shares, or in `/tmp`, stay yours unless it was running `copilot -p` there
+  then. What 0.1.43 found a worker made is decided
+  again by these rules, but for a batch of a worker's it found in a temporary folder (QA on
+  0.1.43, E54, and two reviews).
+- **A command Chief of Staff cannot read no longer lists every hidden session again.** A
+  command with an escaped space (`Google\ Chrome.app`) or a `cd ~-` made the reading fail, and
+  with it the whole decision, at every listing; such a command is now no evidence, and the
+  rest stands (a review of the above).
 - **`chiefofstaff tidy-sessions` reads every log before it says** (it read one round, 128 MB,
   and listed what it found there), with a line on how many are left as it goes and how many it
   could not read; and `--apply` run twice in the same second no longer fails (its folder is

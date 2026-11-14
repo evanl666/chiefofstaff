@@ -7,29 +7,26 @@ backend.made_by_us and backend.made_by_a_program). Its CLI calls itself github/c
 owner typed in it or a script ran `copilot -p` in a loop, and nothing in a session's files tells
 the two apart for sure (CLI 1.0.110 to 1.0.112: the same events and fields; what differs, a
 title the CLI makes up, its memories, how its model was settled, comes and goes with the
-version and the account). So a session the CLI made is the owner's unless its own log shows a
-single shot (`one_shot`: one message of its own, never resumed, ended) and one of:
+version and the account). So a session the CLI made is the owner's unless something shows a
+program made it: when in doubt, it is listed. What does, of a single shot only (`one_shot`:
+one message of its own, never resumed, ended):
 
-- worker: it began while one of Chief of Staff's sessions ran a command (the commands table: to
-  its end, when seen; else COMMAND_MOST, and on while that worker's sessions keep coming;
-  never past the end of the run of Chief of Staff it began in: see window_end), and it ran in
-  that worker's own folder; or, where the command ran (its folder, one it went to with `cd`)
-  or in a temporary folder, the command runs `copilot -p` (see runs_copilot), or it is one of
-  a batch that began soon after the command did (named a batch's, or ten or more alike close
-  together; in a temporary folder or the worker's own, ten or more alike each within
-  WORKER_GAP of the one before: a worker's calls may take minutes). The time and the folder
-  alone are not enough: a worker may run a dev server for hours, in the owner's own project (a
-  shared checkout, a session adopted from a terminal), and what the owner asks there meanwhile
-  is theirs. What an earlier version found a worker made stays so unless the session's own
-  log says it is the owner's (see below) or its folder rules the worker's commands out (see
-  ruled_out): never for want of evidence.
-- batch: at least HIDE_SIZE one-shot sessions whose first messages start alike (their first
-  PREFIX characters, whitespace collapsed, case folded), each begun within GAP of the one
-  before: a script's, whoever ran it; or any number named as a batch's (`copilot -p --name
-  "batch: <task>"`, as workers are told to: see named). From BATCH_SIZE alike (a batch for a
-  worker's command above) to fewer than HIDE_SIZE, tied to no worker, they are `alike`: the
-  owner's still, listed; only tidy-sessions names them. The owner asks alike questions too
-  (a review of each pull request, say), a few a day: never a batch.
+- batch: named as a batch's (`copilot -p --name "batch: <task>"`, as workers are told to: see
+  named), whatever their number; or at least HIDE_SIZE whose first messages start alike (their
+  first PREFIX characters, whitespace collapsed, case folded), each begun within GAP of the one
+  before: a script's, whoever ran it. The owner asks alike questions too (a review of each
+  pull request, say), minutes apart, a few at a time: from BATCH_SIZE to fewer than HIDE_SIZE
+  close together they are `alike`, still the owner's (only tidy-sessions names them).
+- worker: it began while one of Chief of Staff's workers ran a command (the commands table: see
+  Window.covers and window_end), and it ran in that worker's own folder (one Chief of Staff
+  made for it); or the command runs `copilot -p` (see runs_copilot) and it ran where the
+  command did (its folder, one it went to with `cd`) or in a temporary folder. A batch (above)
+  that began soon after a command did, where it ran or in a temporary folder, is that
+  worker's too. The time and a folder alone are no evidence: a worker runs dev servers and
+  tests for hours, at times in the owner's own project (a shared checkout, a session adopted
+  from a terminal). What 0.1.43 found a worker made is decided again by these rules, but for
+  a batch of a worker's it found in a temporary folder while that worker ran a command
+  (alike, begun soon after the command, by 0.1.43's measure): as it was.
 
 A session open now is never decided on (it may be anything until it ends), except that one
 named a batch's is one while it runs too (no row for each call of a worker's batch); nor is one
@@ -101,18 +98,18 @@ BATCH_SIZE = 5
 HIDE_SIZE = 10
 PREFIX = 64
 GAP = 120.0
-# A batch is a worker's when it began within LEAD seconds of the command it ran in: alike, ten
-# or more, each within WORKER_GAP of the one before (a worker's calls may take minutes each:
-# agentic prompts, a backoff), in a temporary folder or the worker's own.
+# A batch is a worker's when it began within LEAD seconds of the command it ran in.
 LEAD = 10 * 60.0
-WORKER_GAP = 30 * 60.0
 # A command runs from its start to its end, when Chief of Staff saw it end; one whose end it did
 # not see (still running, left running in the background, or Chief of Staff stopped meanwhile)
-# for COMMAND_MOST after it began, and past that only while its worker's sessions keep coming
-# (each within WORKER_GAP of one before). Never past the end of the run of Chief of Staff it
-# began in: Chief of Staff keeps its runs (kv "uptime": [start, last known running] each), the
-# latter touched every ALIVE_EVERY seconds: a command may have begun up to ALIVE_SLACK after it.
+# for COMMAND_MOST after it began, and past that only for sessions that are its worker's for a
+# reason of their own (in a temporary folder or the worker's own, alike, named), while they keep
+# coming, each within WORKER_GAP of one before. Never past the end of the run of Chief of Staff
+# it began in: Chief of Staff keeps its runs (kv "uptime": [start, last known running] each),
+# the latter touched every ALIVE_EVERY seconds: a command may have begun up to ALIVE_SLACK after
+# it.
 COMMAND_MOST = 2 * 3600.0
+WORKER_GAP = 30 * 60.0
 ALIVE_EVERY = 60.0
 ALIVE_SLACK = ALIVE_EVERY + 30.0
 RUNS_KEPT = 500
@@ -373,16 +370,17 @@ class Window:
     places: tuple[str, ...] = ()  # where it ran (real paths): that session's folder, a cd's
     limit: float = 0.0  # its end not seen: how long it may have run at most (see window_end)
 
-    def covers(self, at: float, came: Sequence[float]) -> bool:
+    def covers(self, at: float, came: Sequence[float], own_reason: bool) -> bool:
         """Whether it may have been running when a session began: up to its end; past an end
-        it was not seen to reach (up to its limit) while its worker's sessions keep coming,
-        each within WORKER_GAP of one before (`came`: when each began, in order)."""
+        it was not seen to reach (up to its limit), for a session that is the worker's for a
+        reason of its own (`own_reason`: see decide), while such sessions of the worker's keep
+        coming, each within WORKER_GAP of one before (`came`: when each began, in order)."""
         if not self.start <= at <= max(self.end, self.limit):
             return False
         if at <= self.end:
             return True
         n = bisect.bisect_left(came, at)
-        return bool(n) and at - came[n - 1] <= WORKER_GAP  # (One before it began: hours before.)
+        return own_reason and bool(n) and at - came[n - 1] <= WORKER_GAP
 
 
 def inside(path: str, folder: str) -> bool:
@@ -432,31 +430,31 @@ def program(word: str) -> str:
     return name[:-4] if name.lower().endswith((".exe", ".cmd")) else name
 
 
-def words_of(part: str) -> list[str]:
-    """A command part's words (see COMMAND_WORDS)."""
+def words_of(part: str) -> list[tuple[str, bool]]:
+    """A command part's words (see COMMAND_WORDS), each with whether it was quoted."""
     found = []
     for match in COMMAND_WORDS.finditer(part):
         double, single, bare = match.groups()
-        found.append(next(word for word in (double, single, bare) if word is not None))
+        found.append((bare, False) if bare is not None else (double or single or "", True))
     return found
 
 
-def runs_copilot(command: str) -> bool:
+def runs_copilot(command: str, nested: bool = False) -> bool:
     """Whether a command runs `copilot -p` (or --prompt): the Copilot CLI as the command of one
     of its parts (`copilot`, a path to it, `npx @github/copilot`, `$(which copilot)`, what
-    `bash -c` runs), a prompt given to it. Not the word in a path (`cd ~/src/copilot`,
-    `git -C copilot log -p`) or as a plain word (`echo copilot -p`), nor the CLI without a
-    prompt (an interactive one, the owner's way)."""
+    `bash -c "..."` runs, one level deep), a prompt given to it. Not the word in a path
+    (`cd ~/src/copilot`, `git -C copilot log -p`) or as a plain word (`echo copilot -p`), nor the
+    CLI without a prompt (an interactive one, the owner's way)."""
     for part in COMMAND_PARTS.split(WHICH_COPILOT.sub(" copilot ", command)):
         words = words_of(part)
         value = False  # The word before was an option of a program before the command.
-        for n, word in enumerate(words):
+        for n, (word, quoted) in enumerate(words):
             if program(word) == "copilot":
-                rest = words[n + 1 :]
+                rest = [w for w, _ in words[n + 1 :]]
                 if any(w in PROMPT or w.startswith("--prompt=") for w in rest):
                     return True
                 break
-            if " " in word.strip() and runs_copilot(word):
+            if quoted and not nested and " " in word.strip() and runs_copilot(word, nested=True):
                 return True  # What `bash -c "..."` runs.
             if word in BEFORE_COMMAND or SETTING_OR_DURATION.match(word):
                 value = False
@@ -478,7 +476,8 @@ CHANGES_FOLDER = re.compile(
 
 def places(command: str, cwd: str) -> tuple[str, ...]:
     """Where a command ran (real paths): the folder its session runs commands in (`cwd`), and
-    each it went to with `cd` or pushd (~ and $HOME read; one it cannot tell, left out)."""
+    each it went to with `cd` or pushd (~ and $HOME read as the owner's home; one it cannot
+    tell, such as another's home or the shell's ~- or ~1, left out)."""
     found = [os.path.realpath(cwd)] if cwd else []
     here = cwd
     home = str(Path.home())
@@ -490,8 +489,10 @@ def places(command: str, cwd: str) -> tuple[str, ...]:
             if target == name or target.startswith(name + "/"):
                 target = home + target[len(name) :]
         if target.startswith("~"):
-            target = str(Path(target).expanduser())
-        if not target or target == "-" or "$" in target or "`" in target:
+            if target != "~" and not target.startswith("~/"):
+                continue
+            target = home + target[1:]
+        if not target or target == "-" or any(c in target for c in "$`\0"):
             continue
         if not Path(target).is_absolute():
             if not here:
@@ -525,16 +526,6 @@ def batches(
     return found
 
 
-def ruled_out(cwd: str, at: float, by: str, windows: list[Window], temporary: list[str]) -> bool:
-    """Whether a session's folder (`cwd`, a real path) rules out that a worker's command made
-    it: that worker ran commands then, none where it ran (nor in a temporary folder or its
-    own). Without a command of the worker's then, nothing does."""
-    if not cwd or any(inside(cwd, folder) for folder in temporary):
-        return False
-    mine = [w for w in windows if w.by == by and w.start <= at <= max(w.end, w.limit)]
-    return bool(mine) and not any(cwd in w.places or inside(cwd, w.folder) for w in mine)
-
-
 def decide(
     fresh: Iterable[OneShot],
     known: Iterable[OneShot],
@@ -544,59 +535,62 @@ def decide(
 ) -> dict[str, dict]:
     """Who made each fresh one-shot session (see the module's docstring): its record, as kept
     (`as`: worker or batch; `by`: the worker's session; `why`: folder, command, batch or named;
-    `named`: named as a batch's; `rules`: RULES), or `as` alike (the owner's still: never kept).
-    Those not in it are the owner's. `known`: those decided before, which batches may
-    continue; `tied`: when each session decided a worker's began, by worker (see
-    Window.covers); `kept`: what an earlier version decided a worker made, kept unless these
-    rules find it is not (see ruled_out) or the owner's own log says so (not a single shot)."""
+    `named`: named as a batch's; `keeps_open`: the worker's for a reason of its own, see below;
+    `rules`: RULES), or `as` alike (the owner's still: never kept). Those not in it are the
+    owner's. `known`: those decided before, which batches may continue; `tied`: when each
+    session that keeps its worker's commands open began, by worker (see Window.covers);
+    `kept`: what an earlier version decided."""
     fresh = sorted(fresh, key=lambda shot: (shot.at, shot.session_id))
-    known = list(known)
-    close = batches([*fresh, *known])
-    loose = batches([*fresh, *known], WORKER_GAP, HIDE_SIZE)
+    alike = batches([*fresh, *list(known)])
     temporary = temporary_folders()
     came = {by: sorted(ats) for by, ats in (tied or {}).items()}
     decided = {}
     for shot in fresh:
         cwd = os.path.realpath(shot.cwd) if shot.cwd else ""
         scratch = bool(cwd) and any(inside(cwd, folder) for folder in temporary)
-        during = [w for w in windows if w.covers(shot.at, came.get(w.by, []))]
-        own = [w for w in during if inside(cwd, w.folder)]
-        # Where the command ran, or a temporary folder: not the owner's own project.
-        there = [w for w in during if w in own or (cwd and (cwd in w.places or scratch))]
-        tied_to = [(w, "folder") for w in own]
-        tied_to += [(w, "command") for w in there if w.copilot]
-        run = close.get(shot.session_id)
+        run = alike.get(shot.session_id)  # (Named ones are a run whatever their number.)
+        batch = bool(run) and (shot.named or len(run) >= HIDE_SIZE)
         kind = "named" if shot.named else "batch"
-        if not tied_to:
-            # A batch that began soon after a command it runs in did: named a batch's, or a
-            # script's (ten or more alike, close together); or, in a temporary folder or the
-            # worker's own (where the owner's alike questions are not), ten or more alike each
-            # within WORKER_GAP of the one before. Never by the folder and the time alone.
-            for w in there:
-                runs = [run] if shot.named or (run and len(run) >= HIDE_SIZE) else []
-                if not shot.named and (scratch or w in own):
-                    runs.append(loose.get(shot.session_id))
-                for members in filter(None, runs):
-                    began = min(m.at for m in members if m.at >= w.start)
-                    if began - w.start <= LEAD:
-                        tied_to.append((w, kind))
-                        break
+        # A worker's for a reason of its own, not only the time (with its own folder, below):
+        # in a temporary folder, alike with others, named a batch's.
+        reason = scratch or bool(run)
+        ties = []
+        for w in windows:
+            own = inside(cwd, w.folder)
+            if not w.covers(shot.at, came.get(w.by, []), reason or own):
+                continue
+            there = scratch or cwd in w.places
+            if own:
+                ties.append((2, w.start, w, "folder"))
+            elif w.copilot and there:
+                ties.append((1, w.start, w, "command"))
+            elif batch and there:  # Its batch, if it began soon after the command did.
+                began = min(m.at for m in run or () if m.at >= w.start)
+                if began - w.start <= LEAD:
+                    ties.append((0, w.start, w, kind))
+        old = (kept or {}).get(shot.session_id) or {}
+        if not ties and scratch and old.get("as") == MADE_BY_WORKER and old.get("why") == "batch":
+            # A batch of a worker's an earlier version found (alike, begun soon after its
+            # command), in a temporary folder, while that worker ran a command: as it was.
+            ties = [
+                (0, w.start, w, "batch")
+                for w in windows
+                if w.by == old.get("by") and w.covers(shot.at, came.get(w.by, []), True)
+            ]
         record = {"group": shot.group, "at": shot.at, "rules": RULES} | (
             {"named": True} if shot.named else {}
         )
-        old = (kept or {}).get(shot.session_id) or {}
-        if tied_to:
-            order = {"folder": 2, "command": 1, "batch": 0, "named": 0}
-            window, why = max(tied_to, key=lambda pair: (order[pair[1]], pair[0].start))
-            decided[shot.session_id] = {"as": MADE_BY_WORKER, "by": window.by, "why": why, **record}
-            bisect.insort(came.setdefault(window.by, []), shot.at)
-        elif run and (shot.named or len(run) >= HIDE_SIZE):
+        if ties:
+            _, _, window, why = max(ties, key=lambda tie: tie[:2])
+            keeps_open = reason or inside(cwd, window.folder)
+            decided[shot.session_id] = {
+                "as": MADE_BY_WORKER, "by": window.by, "why": why, "keeps_open": keeps_open,
+                **record,
+            }  # fmt: skip
+            if keeps_open:
+                bisect.insort(came.setdefault(window.by, []), shot.at)
+        elif batch:
             decided[shot.session_id] = {"as": BATCH, "by": "", "why": kind, **record}
-        elif old.get("as") == MADE_BY_WORKER and not ruled_out(
-            cwd, shot.at, str(old.get("by") or ""), windows, temporary
-        ):
-            decided[shot.session_id] = old | {"rules": RULES}
-            bisect.insort(came.setdefault(str(old.get("by") or ""), []), shot.at)
         elif run:
             decided[shot.session_id] = {"as": ALIKE, "by": "", "why": kind, **record}
     return decided
@@ -672,9 +666,12 @@ def windows(
             )
         folder, cwd = sessions[by]
         command = row["command"] or ""
-        found.append(
-            Window(by, start, span[0], runs_copilot(command), folder, places(command, cwd), span[1])
-        )
+        try:
+            copilot, where = runs_copilot(command), places(command, cwd)
+        except Exception:  # One it cannot read is no evidence; the rest stands.
+            logger.debug("Could not read a command of %s's", by, exc_info=True)
+            copilot, where = False, ()
+        found.append(Window(by, start, span[0], copilot, folder, where, span[1]))
     return found
 
 
@@ -883,7 +880,7 @@ class Provenance:
     def index(self, key: str, record: dict):
         group = str(record.get("group") or "")
         self.groups.setdefault(group, {})[key] = float(record.get("at") or 0)
-        if record.get("as") == MADE_BY_WORKER and (by := record.get("by")):
+        if record.get("keeps_open") and (by := record.get("by")):
             self.workers.setdefault(str(by), {})[key] = float(record.get("at") or 0)
 
     def drop(self, keys: Iterable[str]):
