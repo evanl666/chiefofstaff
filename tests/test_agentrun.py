@@ -257,7 +257,10 @@ def test_what_a_command_left_to_another_parent_ends_too(tmp_path, leftovers, cli
         assert time.monotonic() < deadline, "it never started"
         time.sleep(0.1)
     leftovers += found
-    while not all(process_table().get(pid, (1, ""))[0] == 1 for pid in found):
+    # Its own parent gone, it is another's: init's (macOS) or the supervisor's (Linux, where
+    # the supervisor is a subreaper).
+    others = {1, process.pid}
+    while not all(process_table().get(pid, (1, ""))[0] in others for pid in found):
         assert time.monotonic() < deadline, "another parent's now"
         time.sleep(0.1)
     os.close(write)  # As when Chief of Staff's process ends, however it stopped.
