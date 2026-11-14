@@ -686,12 +686,19 @@ class RunsEnded(StrictModel):
     urls: list[Annotated[str, Field(max_length=2000)]] = Field(min_length=1, max_length=20)
 
 
+class HiddenArtifact(StrictModel):
+    key: str = Field(max_length=2100)
+    tone: str = Field(default="", max_length=20)
+
+
 class ArtifactHide(StrictModel):
     key: str = Field(max_length=2100)
     hidden: bool = True
     tone: str = Field(default="", max_length=20)
     # The same one under the key an earlier version gave it (its address): replaced.
     also: list[Annotated[str, Field(max_length=2100)]] = Field(default_factory=list, max_length=20)
+    # Taken off (or back) with it: a task's runs, from their line's ✕.
+    together: list[HiddenArtifact] = Field(default_factory=list, max_length=40)
 
 
 # Under GitHub's 65536 characters for a review and Slack's 40000 for a message.

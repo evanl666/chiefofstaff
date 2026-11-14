@@ -92,6 +92,20 @@ export const shorten = (text, max) => (text.length > max ? `${text.slice(0, max 
 export function prTitle(key) {
   return state.snapshot?.pr_titles?.[String(key).toLowerCase()] || "";
 }
+// A server on this computer or its network, not a page others read (bug E55): a loopback,
+// private or link-local address, a .local or .localhost name, or a port that is not its
+// scheme's own (a dev server's). The server also reads the hosts file for names it maps here.
+export function servedHere(parsed) {
+  if (parsed.port) return true;
+  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+  if (host === "localhost" || /\.(local|localhost)$/.test(host)) return true;
+  const ip = /^(\d+)\.(\d+)\.\d+\.\d+$/.exec(host);
+  if (ip) {
+    const [a, b] = [Number(ip[1]), Number(ip[2])];
+    return [0, 10, 127].includes(a) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254);
+  }
+  return ["::", "::1"].includes(host) || /^(f[cd]|fe[89ab])[0-9a-f]*:/.test(host);
+}
 // What a link is, for a chip or a link's text: { kind, label, key (PRs), title (PRs) }.
 export function linkKind(url) {
   let match;
@@ -101,6 +115,8 @@ export function linkKind(url) {
   } catch {
     return null;
   }
+  // A dev server's page: none of these (a document, a run), whatever its path says.
+  if (/^https?:$/.test(parsed.protocol) && servedHere(parsed)) return null;
   const host = parsed.hostname.replace(/^www\./, "");
   const path = decodePath(parsed.pathname);
   const last = path.split("/").filter(Boolean).pop() || "";
@@ -202,11 +218,12 @@ export function taskLinks(task) {
   const seen = new Set();
   const links = [];
   for (const url of urls) {
-    const found = linkKind(url);
     const key = linkKey(url);
+    const said = declared.get(key);
+    // A plain page its worker declared (a dev server's, say): its own link, as it called it.
+    const found = linkKind(url) || (said && /^https?:\/\//.test(url) ? { kind: "link", label: linkLabel(url), role: "output" } : null);
     if (!found || seen.has(key)) continue;
     seen.add(key);
-    const said = declared.get(key);
     const file = files.get(key);
     let role = found.role;
     if (role === "diagnostic" && found.id && asked.includes(found.id)) role = "run";

@@ -40,6 +40,7 @@ export const MARKERS = {
   "pr-failing": "CI failing",
   "pr-changes": "Changes requested",
   "pr-conflicts": "Merge conflicts",
+  "runs-unknown": "Status unknown",
   mergeable: "Ready to merge",
   reviewed: "Reviewed",
   "still-following": "Still following",
@@ -172,12 +173,24 @@ export function monitorParts(task, now = Date.now()) {
   if (!first) return null;
   const more = waits.length - 1;
   if (first.unknown) {
-    const said = first.reported_at ? hours(first.reported_at, now) : 0;
+    // Since the last word on it: its worker's, or GitHub's as Chief of Staff last read it (bug
+    // E59).
+    const last = [first.reported_at, first.last_check].filter(Boolean).sort().pop();
+    const said = last ? hours(last, now) : 0;
     return { what: "Status unknown", quiet: said >= 1 ? `reported ${first.status || "running"} ${howLong(said)} ago` : "", first, more };
   }
   const changed = waits.filter((item) => !item.unknown).map((item) => item.changed_at).filter(Boolean).sort().pop() || task.watch_changed_at || "";
   const quiet = changed ? hours(changed, now) : 0;
   return { what: first.waiting_for ? `Waiting for ${first.waiting_for}` : "Following", quiet: quiet >= 1 ? `No updates for ${howLong(quiet)}` : "", first, more };
+}
+// Why runs whose status is unknown need the owner, in a line: "Nightly export: reported
+// running 2d ago · its later report no longer lists it".
+export function unknownWhy(task, now = Date.now()) {
+  const parts = monitorParts(task, now);
+  if (!parts) return "";
+  const { first, more, quiet } = parts;
+  const what = `${first.label || first.key}${more ? ` and ${more} more` : ""}`;
+  return [quiet ? `${what}: ${quiet}` : what, first.unlisted ? "its later report no longer lists it" : ""].filter(Boolean).join(" · ");
 }
 // Its reason in a line: "Waiting for approval · No updates for 26h".
 export function monitorWhy(task, now = Date.now()) {
@@ -247,6 +260,9 @@ export function taskPhase(task, worker, { active = "", activeTitle = "", stopped
     // Needs you when there is one), else it waits here.
     if (obligationsOf(task).length) {
       if (standing && standing.marker !== "mergeable") return at("needs", standing.marker, standing.why);
+      // All it is monitored for is runs nothing tells of now (bug E56): nothing will come of
+      // waiting, the owner says what became of them.
+      if (obligationsOf(task).every((item) => item.unknown)) return at("needs", "runs-unknown", unknownWhy(task, now));
       if (standing) return at("monitoring", standing.marker, standing.why);
       return at("monitoring", "delivered", monitorWhy(task, now));
     }

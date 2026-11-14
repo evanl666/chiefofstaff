@@ -3812,6 +3812,13 @@ async def runs_seeded(runtime) -> dict:
         task = await delivered(title, [{"url": FLYTE + run, "name": f"Run {run}",
                                         "status": "running"}])  # fmt: skip
         said(task, hours=lambda _index: 47)
+    # Round 13 (E56): the rebuild still waits on a run of its own declared since, so it stays in
+    # Monitoring (its unknown run ended or untracked from its menu); the backfill waits on
+    # nothing else, so it needs the owner.
+    rebuild = found["E41 rebuild the search index"]
+    known = json.loads(store.get(f"artifacts:{rebuild['id']}"))
+    fresh = {"url": FLYTE + "c5d6e7", "name": "Run c5d6e7", "status": "running", "at": ago(hours=1)}
+    store.set(f"artifacts:{rebuild['id']}", json.dumps([*known, fresh]))
     shards = [{"url": FLYTE + f"e{index:02d}", "name": f"Export shard {index + 1}",
                "status": status} for index, status in enumerate(SHARDS)]  # fmt: skip
     export = await delivered("E43 ship the sharded export", shards)
@@ -3848,15 +3855,25 @@ async def round_twelve(runtime, browser, failures: list[str]):
 
     backfill = row("E41 backfill the ranking features")
     await expect(backfill).to_be_visible(timeout=15000)
-    assert await monitoring.locator(".card.task", has_text="E41 backfill").count() == 1
-    line = backfill.locator(".row-line")
-    await expect(line.locator(".why")).to_have_text("Status unknown")
-    await expect(line.locator(".quiet")).to_have_text("reported running 47h ago")
-    await expect(line.locator(".object")).to_have_attribute(
-        "data-tip",
-        "Run f3a9c1\nNothing tells where it stands now: mark it ended or stop tracking it (⋯)",
+    # Round 13 (E56): nothing else to wait on, so it needs the owner, its two answers on its row.
+    needs = page.locator("#needs")
+    await expect(needs.locator(".card.task", has_text="E41 backfill")).to_have_count(1)
+    assert await monitoring.locator(".card.task", has_text="E41 backfill").count() == 0
+    await expect(backfill.locator(".head .marker")).to_have_text("Status unknown")
+    await expect(backfill.locator(".row-line .why")).to_have_text(
+        "Run f3a9c1: reported running 47h ago"
     )
-    await expect(backfill.locator(".row-foot .checks")).to_have_count(0)
+    await expect(backfill.get_by_role("button", name="Ended", exact=True)).to_be_visible()
+    await expect(backfill.get_by_role("button", name="Stop tracking")).to_be_visible()
+    rebuild = row("E41 rebuild the search index")
+    await expect(monitoring.locator(".card.task", has_text="E41 rebuild")).to_have_count(1)
+    line = rebuild.locator(".row-line")
+    # Its run declared since is what it waits for; the unknown one on hover, its state once.
+    await expect(line.locator(".why")).to_have_text("Waiting for the run")
+    await expect(line.locator(".also")).to_have_text("+1")
+    tip = await line.locator(".why").get_attribute("data-tip") or ""
+    assert "Run a7b2d4: status unknown\n  Nothing tells where it stands now" in tip, tip
+    assert tip.count("status unknown") == 1, tip
     # A run declared an hour or two ago: waited for, said when its worker said it, not "checked".
     export = row("E43 ship the sharded export")
     await expect(export.locator(".row-line .why")).to_have_text("Waiting for the run")
@@ -3867,9 +3884,9 @@ async def round_twelve(runtime, browser, failures: list[str]):
     log('E41: a run nothing told of for a day is unknown; never "checked" unless it was')
 
     # Its menu: Mark ended and Stop tracking first, all of it in sight in the list.
-    more = backfill.get_by_role("button", name=re.compile("More actions"))
+    more = rebuild.get_by_role("button", name=re.compile("More actions"))
     await more.click()
-    menu = backfill.locator(".menu:not([hidden])")
+    menu = rebuild.locator(".menu:not([hidden])")
     items = await menu.get_by_role("menuitem").all_text_contents()
     assert items[:2] == ["Mark ended", "Stop tracking"], items
     await page.evaluate(
@@ -3884,39 +3901,46 @@ async def round_twelve(runtime, browser, failures: list[str]):
         box,
         shown,
     )
-    await menu.get_by_role("menuitem", name="Stop tracking").click()
-    await expect(monitoring.locator(".card.task", has_text="E41 backfill")).to_have_count(
+    await menu.get_by_role("menuitem", name="Mark ended").click()
+    # Its other run is still waited for: it stays, its unknown one ended.
+    await expect(line.locator(".also")).to_have_count(0, timeout=10000)
+    await expect(line.locator(".why")).to_have_text("Waiting for the run")
+    await backfill.get_by_role("button", name="Stop tracking").click()
+    await expect(page.locator("#panel .card.task", has_text="E41 backfill")).to_have_count(1)
+    await expect(needs.locator(".card.task", has_text="E41 backfill")).to_have_count(
         0, timeout=10000
     )
     await expect(page.locator("#tasks-recent .card.task", has_text="E41 backfill")).to_have_count(1)
     [kept] = json.loads(store.get(f"artifacts:{tasks['E41 backfill the ranking features']['id']}"))
     assert kept["untracked"] and kept["status"] == "running", kept
-    rebuild = row("E41 rebuild the search index")
-    await rebuild.get_by_role("button", name=re.compile("More actions")).click()
-    await rebuild.locator(".menu:not([hidden])").get_by_role("menuitem", name="Mark ended").click()
-    await expect(monitoring.locator(".card.task", has_text="E41 rebuild")).to_have_count(
-        0, timeout=10000
-    )
     made = page.locator("#tasks-artifacts")
     ended = made.locator(".artifact", has_text="Run a7b2d4")
     await expect(ended.locator(".a-status")).to_have_text("ended")
     await expect(ended.locator(".a-status")).to_have_attribute(
         "data-tip", re.compile("^As you marked it")
     )
-    log("E41: the row's menu marks a run ended or stops tracking it; the task leaves Monitoring")
+    # Round 13 (E53): no longer tracked, it is not said to run.
+    untracked = made.locator(".artifact", has_text="Run f3a9c1")
+    await expect(untracked.locator(".a-status")).to_have_text("not tracked")
+    await expect(untracked).to_have_class(re.compile(r"\btone-neutral\b"))
+    await expect(untracked.locator(".a-status")).to_have_attribute(
+        "data-tip", re.compile("^Not tracked · last reported running: you stopped tracking it")
+    )
+    log("E41/E56: a run's end or untracking from the row (Needs you) or its menu (Monitoring)")
 
     # E43: the PR first, the runs in a line, the latest and the failed one under it.
     await made.locator(":scope > .items").evaluate("n => { n.style.maxHeight = 'none'; }")
     rows = made.locator(".artifact")
     names = await rows.locator(".a-name").all_text_contents()
-    first = names.index("app#42 · Shard the nightly export")
+    first = names.index("9 runs")
+    # Round 13 (E58): its failed run first, its PR after.
     assert names[first : first + 4] == [
-        "app#42 · Shard the nightly export", "9 runs", "Export shard 9", "Export shard 4"
+        "9 runs", "Export shard 9", "Export shard 4", "app#42 · Shard the nightly export"
     ], names  # fmt: skip
-    assert not [name for name in names[first + 4 :] if name.startswith("Export shard")], names
-    fold = made.get_by_role("button", name="9 runs")
+    assert not [name for name in names[first + 3 :] if name.startswith("Export shard")], names
+    summary = made.locator(".artifact.runs").filter(has=page.locator(".a-meta", has_text="E43"))
+    fold = summary.locator(".a-fold")
     await expect(fold).to_have_attribute("aria-expanded", "false")
-    summary = made.locator(".artifact.runs")
     await expect(summary.locator(".a-status")).to_have_text("3 running · 1 failed")
     await expect(summary).to_have_class(re.compile(r"\btone-bad\b"))
     await expect(made.locator(".artifact.in-runs")).to_have_count(2)
@@ -3939,6 +3963,157 @@ async def round_twelve(runtime, browser, failures: list[str]):
             assert not found, (width, found)
     await page.evaluate("document.querySelector('#panel').style.removeProperty('width')")
     log("E43: a task's runs fold under its PR (latest and failed in sight); mouse and keyboard")
+    assert not errors, errors
+    await context.close()
+
+
+APPROVALS = ["running", "succeeded", "failed", "succeeded", "waiting for approval", "succeeded",
+             "succeeded", "running", "succeeded"]  # fmt: skip
+# A row's columns where its kind and its name start (E48: a run under its line's was 16px off).
+COLUMNS = """root => [...root.querySelectorAll(".artifact")].map((row) => {
+  const kind = row.querySelector(".a-kind").getBoundingClientRect();
+  const name = row.children[1].getBoundingClientRect();
+  const box = row.getBoundingClientRect();
+  return { cls: row.className, task: row.dataset.task || "", kind: Math.round(kind.left),
+    name: Math.round(name.left),
+    top: Math.round(box.top), bottom: Math.round(box.bottom), height: Math.round(box.height),
+    hidden: getComputedStyle(row.querySelector(".a-kind")).visibility === "hidden" };
+})"""
+
+
+async def thirteen_seeded(runtime) -> dict:
+    """QA round 13: a running task whose only run nothing told of for 30 hours (its worker
+    between turns); an accepted task with its PR and nine runs, an older one waiting for
+    approval and one the owner marked ended."""
+    store = runtime.store
+    router = store.get("router_id")
+    ago = lambda **delta: (datetime.now(UTC) - timedelta(**delta)).isoformat()  # noqa: E731
+    found = {}
+
+    async def started(title, status, artifacts):
+        result = await call_tool(runtime, "spawn_worker", router, title=title, instructions=title,
+                                 why_new="test")  # fmt: skip
+        worker = json.loads(result.text_result_for_llm)["session_id"]
+        await settle(runtime)
+        task = runtime.tasks.current(worker)
+        await call_tool(runtime, "report", worker, status=status, summary=f"{title}: on it.",
+                        artifacts=artifacts)  # fmt: skip
+        await settle(runtime)
+        runtime.update_session(worker, status="idle", activity="")
+        found[title] = task
+        return task
+
+    swept = [{"url": FLYTE + "s1", "name": "Ranker sweep", "status": "running"}]
+    sweep = await started("E57 tune the ranker", "progress", swept)
+    known = json.loads(store.get(f"artifacts:{sweep['id']}"))
+    known[0]["at"] = ago(hours=30)
+    store.set(f"artifacts:{sweep['id']}", json.dumps(known))
+    runs = [{"url": FLYTE + f"ap{index:02d}", "name": f"Approval run {index + 1}",
+             "status": status} for index, status in enumerate(APPROVALS)]  # fmt: skip
+    ship = await started("E58 ship the approvals", "done", runs)
+    runtime.task_actions.accept(ship["id"])
+    runtime.task_actions.record_opened(ship["id"], ["https://github.com/acme/app/pull/58"])
+    runtime.remember_pr_title("acme/app#58", "Gate the export on approval")
+    known = json.loads(store.get(f"artifacts:{ship['id']}"))
+    for index, item in enumerate(known):
+        item["at"] = ago(minutes=5 + 30 * (len(known) - index))
+    known[1] |= {"status": "ended", "by": "you"}
+    store.set(f"artifacts:{ship['id']}", json.dumps(known))
+    for task in found.values():
+        runtime.task_actions.publish(runtime.tasks.get(task["id"]))
+    return found
+
+
+async def round_thirteen(runtime, browser, failures: list[str]):
+    """The owner's QA round 13. E57: a running task's run of unknown status is ended or
+    untracked from its menu. E48: a task's runs under their line are one card with it, each a
+    line, in the list's columns at 1500, 760, 400 and 352 px. E58: a run waiting for approval is
+    never folded away and is counted; "+N" says what it shows; the line's ✕ takes all its runs
+    off, each back from the list of those taken off; the line's tooltip names the owner."""
+    tasks = await thirteen_seeded(runtime)
+    context = await browser.new_context(viewport={"width": 1500, "height": 1000})
+    page = await context.new_page()
+    errors: list[str] = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    monitoring = page.locator("#tasks-monitoring")
+    sweep = page.locator("#panel .card.task").filter(
+        has=page.locator(".head .title", has_text="E57 tune the ranker")
+    )
+    await expect(monitoring.locator(".card.task", has_text="E57 tune")).to_have_count(
+        1, timeout=15000
+    )
+    line = sweep.locator(".row-line")
+    await expect(line.locator(".why")).to_have_text("Status unknown")
+    await expect(line.locator(".quiet")).to_have_text("reported running 30h ago")
+    await sweep.get_by_role("button", name=re.compile("More actions")).click()
+    menu = sweep.locator(".menu:not([hidden])")
+    items = await menu.get_by_role("menuitem").all_text_contents()
+    assert items[:2] == ["Mark ended", "Stop tracking"], items
+    await menu.get_by_role("menuitem", name="Stop tracking").click()
+    await expect(line.locator(".why")).not_to_have_text("Status unknown", timeout=10000)
+    [kept] = json.loads(runtime.store.get(f"artifacts:{tasks['E57 tune the ranker']['id']}"))
+    assert kept["untracked"], kept
+    log("E57: a running task's run of unknown status is untracked from its menu")
+
+    made = page.locator("#tasks-artifacts")
+    await made.locator(":scope > .items").evaluate("n => { n.style.maxHeight = 'none'; }")
+    line = made.locator(".artifact.runs").filter(has=page.locator(".a-meta", has_text="E58 ship"))
+    await expect(line.locator(".a-status")).to_have_text("2 running · 1 waiting · 1 failed")
+    await expect(line).to_have_class(re.compile(r"\btone-bad\b"))
+    await expect(line.locator(".a-status")).to_have_attribute(
+        "data-tip",
+        "2 running · 1 waiting · 1 failed\nAs their worker last said, or as you marked them",
+    )
+    more = line.locator(".a-more")
+    await expect(more).to_have_text("+6")
+    await expect(more).to_have_attribute("data-tip", "Show 6 more: 3 succeeded, 2 running, 1 ended")
+    group = made.locator(".artifact.in-runs", has_text="Approval run")
+    names = await group.locator(".a-name").all_text_contents()
+    assert names == ["Approval run 9", "Approval run 5", "Approval run 3"], names
+    await expect(group.nth(1).locator(".a-status")).to_have_text(
+        re.compile(r"^waiting for approval · \dh ago$")
+    )
+    for width in (1500, 760, 400, 352):
+        await page.set_viewport_size({"width": width, "height": 1000})
+        if width < 1100:
+            await page.locator("#home-tabs [data-tab=tasks]").click()
+        await made.locator(":scope > .items").evaluate("n => { n.style.maxHeight = 'none'; }")
+        await page.wait_for_timeout(150)
+        rows = await made.evaluate(COLUMNS)
+        assert len({row["kind"] for row in rows}) == 1, (width, rows)
+        assert len({row["name"] for row in rows}) == 1, (width, rows)
+        ship = tasks["E58 ship the approvals"]["id"]
+        header = next(index for index, row in enumerate(rows) if row["task"] == ship)
+        under = list(
+            itertools.takewhile(lambda row: "in-runs" in row["cls"].split(), rows[header + 1 :])
+        )
+        assert under and all(row["hidden"] for row in under), (width, rows)
+        # One card: each right under the one before; one line each.
+        chain = [rows[header], *under]
+        assert all(b["top"] == a["bottom"] for a, b in itertools.pairwise(chain)), (width, chain)
+        assert all(row["height"] < rows[header]["height"] for row in under), (width, chain)
+        found = await made.evaluate(OVERFLOWS)
+        assert not found, (width, found)
+    await page.set_viewport_size({"width": 1500, "height": 1000})
+    log("E48: a task's runs are one card with their line, in its columns, at four widths")
+
+    take = line.get_by_role(
+        "button", name="Take the 9 runs of E58 ship the approvals off this list"
+    )
+    await take.click()
+    await expect(made.locator(".artifact", has_text="Approval run")).to_have_count(0, timeout=5000)
+    await expect(made.locator(".artifact.runs", has_text="E58 ship")).to_have_count(0)
+    await expect(made.locator(".artifact", has_text="app#58")).to_have_count(1)
+    hidden = [item["key"] for item in runtime.hidden_artifacts()]
+    assert sum("ap0" in key for key in hidden) == 9, hidden
+    await made.get_by_role("button", name=re.compile(r"^Show \d+ taken off$")).click()
+    back = made.locator(".artifact.hidden-artifact", has_text="Approval run 5")
+    await back.get_by_role("button", name="Bring back").click()
+    await expect(
+        made.locator(".artifact:not(.hidden-artifact)", has_text="Approval run 5")
+    ).to_have_count(1)
+    log("E58: a task's runs taken off at once from their line, each brought back")
     assert not errors, errors
     await context.close()
 
@@ -4277,7 +4452,8 @@ async def main():
             for check in (home, memory, this_round, round_two, round_three, round_four,
                           round_five, round_six, round_seven, round_eight, round_nine,
                           round_ten, round_scale, round_qa, round_eleven, round_twelve,
-                          round_storage, round_mascot, round_others, round_send):  # fmt: skip
+                          round_thirteen, round_storage, round_mascot, round_others,
+                          round_send):  # fmt: skip
                 if not only or check.__name__ in only:
                     await check(runtime, browser, failures)
             await browser.close()

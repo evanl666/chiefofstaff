@@ -138,9 +138,10 @@ async def test_a_gap_that_grows_a_lot_is_told_again_with_all_of_it(tmp_path):
     assert abs(datetime.fromisoformat(gap["to"]).timestamp() - (start + 3.6 * 86400)) < 1
 
 
-async def test_a_gap_an_older_version_kept_is_not_told_again_at_once(tmp_path):
-    """E42: one kept before this version (told when it began, its length then unknown) counts
-    as told as it is: not told again for growing a little."""
+async def test_a_gap_an_older_version_kept_is_told_once_then_as_it_grows(tmp_path):
+    """E42, as round 13 (E50) has it: one kept before this version was told when it began,
+    however long it is now: told once, all of it, as it grows again; not again for growing a
+    little."""
     harness = Harness(tmp_path / "data", Settings(watches=[Watch(what="#deploys")]))
     await harness.connect()
     connector = harness.runtime.connector
@@ -148,7 +149,7 @@ async def test_a_gap_an_older_version_kept_is_not_told_again_at_once(tmp_path):
     kept = {"key": watch_key("#deploys"), "watch": "#deploys", "from": start, "to": start + 3600}
     harness.store.set("watch_gaps", json.dumps([kept | {"reason": "x", "at": "2026-11-12"}]))
     connector.gap("#deploys", start + 3000, start + 5400, "x")
-    assert not told(harness)
+    assert len(told(harness)) == 1
     connector.gap("#deploys", start + 5000, start + 7200, "x")
     assert len(told(harness)) == 1
 

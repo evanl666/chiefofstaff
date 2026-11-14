@@ -1104,7 +1104,7 @@ button.receipt.needs { background: var(--amber-soft); color: var(--amber); }
 #tasks-artifacts > .items { display: grid; gap: 2px; }
 /* Artifacts, Monitoring and Recently finished: lists that scroll on their own, a few rows high. */
 :is(#tasks-artifacts, #tasks-monitoring, #tasks-recent) > .items { max-height: min(40vh, 300px); overflow-y: auto; padding-right: 2px; }
-#tasks-artifacts .artifact { display: grid; grid-template-columns: 6.5ch minmax(0, 1fr) auto auto; align-items: center; column-gap: 8px; padding: 5px 8px; border-radius: 6px; background: var(--card, var(--hover)); font-size: var(--small); min-width: 0; }
+#tasks-artifacts .artifact { display: grid; grid-template-columns: 6.5ch minmax(min(8em, 35%), 1fr) auto auto; align-items: center; column-gap: 8px; padding: 5px 8px; border-radius: 6px; background: var(--card, var(--hover)); font-size: var(--small); min-width: 0; }
 #tasks-artifacts .artifact .a-kind { font: 600 10px var(--mono); color: var(--muted); text-transform: uppercase; letter-spacing: 0.02em; min-width: 5.5ch; }
 #tasks-artifacts .artifact .a-name { min-width: 0; padding: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); text-align: left; text-decoration: none; font-weight: 500; }
 /* A file's name opens it here (a button): a 28px target on the line of a link's. */
@@ -1128,12 +1128,21 @@ button.receipt.needs { background: var(--amber-soft); color: var(--amber); }
 #tasks-artifacts .artifact .a-role { color: var(--soft); font-weight: 500; }
 #tasks-artifacts .artifact.hidden-artifact { opacity: 0.6; }
 #tasks-artifacts .show-hidden { justify-self: start; margin: 2px 0 0 8px; font-size: var(--small); }
-/* A task's runs in a line (how many, how they stand); the latest and failed ones under it. */
+/* A task's runs in a line (how many, how they stand); the latest, failed and waiting ones under
+   it, one card with it: the same columns, each a line, its name under theirs (└). */
 #tasks-artifacts .artifact .a-fold { font: inherit; font-weight: 500; background: none; margin: -4px 0; }
 #tasks-artifacts .artifact .a-fold::before { content: "▸ "; color: var(--muted); }
 #tasks-artifacts .artifact .a-fold[aria-expanded="true"]::before { content: "▾ "; }
-#tasks-artifacts .artifact .a-more { margin: -4px 0; padding: 0 4px; font-size: var(--small); }
-#tasks-artifacts .artifact.in-runs { margin-left: 16px; }
+#tasks-artifacts .artifact .a-more { flex: none; margin: -4px 0; padding: 0 4px; font-size: var(--small); }
+#tasks-artifacts .artifact .a-name-cell { display: flex; align-items: center; gap: 4px; min-width: 0; }
+#tasks-artifacts .artifact .a-name-cell > .a-name { flex: 0 1 auto; }
+#tasks-artifacts .artifact .a-branch { flex: none; color: var(--muted); }
+#tasks-artifacts .artifact.runs.has-children { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+#tasks-artifacts .artifact.in-runs { margin-top: -2px; border-radius: 0; }
+#tasks-artifacts .artifact.in-runs.last-in-runs { border-radius: 0 0 6px 6px; }
+#tasks-artifacts .artifact.in-runs .a-kind { visibility: hidden; }
+/* Their words, and each one's status with since when: as long as the row has room for. */
+#tasks-artifacts .artifact:is(.runs, .in-runs) .a-status { max-width: 20em; }
 :is(#session-list, #external-list) .idle-workers > summary { cursor: pointer; list-style: none; font-size: var(--small); color: var(--muted); padding: 6px 12px; }
 :is(#session-list, #external-list) .idle-workers > summary::-webkit-details-marker { display: none; }
 :is(#session-list, #external-list) .idle-workers > summary::before { content: "▸ "; }

@@ -415,6 +415,7 @@ class Events:
         state.owner_reply = bool(owner)
         state.turn_decisions, state.turn_tasks = [], []
         state.turn_check_backs = set()
+        state.turn_runs = {}
         state.turn_reported = set()
         state.turn_tools = 0
 

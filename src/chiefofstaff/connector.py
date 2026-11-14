@@ -946,6 +946,7 @@ class Connector:
                 raise ValueError("Add a watch first.")
             if self.busy():
                 raise ValueError("A scan is running already.")
+            self.retell_gaps()
             self.store.set("watch_scanned_at", str(time.time()))  # When the next one is due.
             self.store.set("watch_started_at", str(time.time()))
             # Each watch from where it was last covered in full (a little before: what came in
@@ -1090,8 +1091,9 @@ class Connector:
         gaps = json.loads(self.store.get("watch_gaps") or "[]")
         last = next((gap for gap in reversed(gaps) if gap["key"] == key), None)
         if last and last["from"] <= start <= last["to"] + OVERLAP_SECONDS:
-            # Kept by an older version, which told it once: as long as it is now.
-            told = last.setdefault("told", last["to"] - last["from"])
+            # Kept by an older version, which told it once when it began, however long it grew
+            # since (bug E50): told none of it as far as anyone knows (see retell_gaps).
+            told = last.setdefault("told", 0)
             last.update({"to": max(last["to"], end), "reason": reason, "at": now()})
             span = last["to"] - last["from"]
             grown = span >= told * GAP_GROWN or any(told < mark <= span for mark in GAP_MARKS)
@@ -1106,14 +1108,29 @@ class Connector:
         self.store.set("watch_gaps", json.dumps([*gaps, {**found, "at": now()}][-MAX_GAPS:]))
         self.tell_gap(found)
 
-    def tell_gap(self, gap: dict, still: bool = False):
+    def tell_gap(self, gap: dict, still: bool = False, *more: dict):
+        said = "; ".join(gap_text(each) for each in more)
         self.runtime.add_message(
             self.runtime.router_id(),
             "notice",
-            f"{gap_text(gap, still)}: anything that came in then may have been missed, so look "
-            "there yourself. Settings → Connections → Watches lists what could not be checked.",
+            f"{gap_text(gap, still)}{f'; {said}' if said else ''}: anything that came in then "
+            "may have been missed, so look there yourself. Settings → Connections → Watches lists "
+            "what could not be checked.",
             {"settings": "connections"},
         )
+
+    def retell_gaps(self):
+        """Gaps an older version kept (bug E50): it told each once, when it began, and not as
+        it grew (one told as 15 minutes was days long by the update). Told again once, all of
+        each, in one notice; from then on as GAP_GROWN has it."""
+        gaps = json.loads(self.store.get("watch_gaps") or "[]")
+        older = [gap for gap in gaps if "told" not in gap]
+        if not older:
+            return
+        for gap in older:
+            gap["told"] = gap["to"] - gap["from"]
+        self.store.set("watch_gaps", json.dumps(gaps))
+        self.tell_gap(older[0], False, *older[1:])
 
     async def t_report_found(self, params: ReportFound, caller: str):
         self.check(caller)

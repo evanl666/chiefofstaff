@@ -1,5 +1,60 @@
 # Changelog
 
+## Unreleased
+
+Runs a task waits on, followed up to the end; Artifacts by task in tidy columns (QA round on
+0.1.43).
+
+- **A check-back covers the runs it names, not every run of its task.** A worker renewing its
+  check-back on its newest run kept three older ones "running" for days. `check_back` now takes
+  the runs it is for (by link or name); naming none, it covers the runs its worker declared or
+  updated in that turn. A run no check-back covers and no word comes of for a day is *Status
+  unknown* as before, and a check-back wake asks its worker for the status of every run still
+  said to be running (found by QA on 0.1.43).
+- **A check-back set before a done report in the same turn is kept.** Moving to review dropped
+  it, and the reminder to set one was skipped because one was set that turn: nothing looked at
+  the run again. It now stays while a run it covers still goes on, and the one-time reminder
+  goes by whether each run still running is covered once the report moved the task.
+- **A finished task waiting only on runs of unknown status needs you.** It sat in Monitoring for
+  days with its way out behind **⋯**. It is now under *Needs you* as *Status unknown*, with
+  *Ended* and *Stop tracking* on its row, counted like the rest of *Needs you* (Home, the daily
+  summary; away notifications still tell only of questions, failures and cards), and says so
+  when its worker's later report no longer lists the run. **⋯** offers *Mark ended* and *Stop
+  tracking* whenever a task has a run of unknown status, a running task too.
+- **A run you stopped tracking is no longer shown as running.** Artifacts said *running* in
+  blue, counted in *N running*. It is now *not tracked* in gray (its last reported status on
+  hover) and counted nowhere.
+- **A dev server's page is not something a task delivered.** A page on your computer or network
+  (*localhost*, a private or link-local address, a *.local* name or one your hosts file maps
+  there, a port of its own) or one its worker said is running was listed as a *Doc*, still
+  *running* after its task ended. It now stays among its task's links.
+- **Artifacts: a task's runs line up with the rest.** Runs under their task's *N runs* line were
+  indented whole (their kind column too, *FLOW* again), two lines high with only the time on
+  the second, and apart from their line. They are now one card with it, one line each (the time
+  with the status: *running · 1h ago*), their names under its own (*└*), in the list's columns
+  at every width.
+- **Artifacts: what needs a look comes first, and waiting runs stay in sight.** A task's merged
+  PR could sit above another task's PR with failing CI; a run waiting for approval was folded
+  behind *+N* (*N more, not failed*) while its line turned amber with no word why. Tasks are now
+  ordered by their most urgent deliverable and each task's deliverables by urgency; waiting runs
+  are always shown and counted (*1 running · 1 waiting · 1 failed*), *+N* says what it hides,
+  **✕** on the line takes all of a task's runs off the list (each comes back from *Show … taken
+  off*), and the line's tooltip says when you marked one.
+- **GitHub Actions runs with a query are read, and failing reads are said.** A link such as
+  `…/actions/runs/123?pr=7` was never read on GitHub; one whose reads kept failing still said it
+  was read every few minutes, and *reported … ago* went by its worker's word, not the last read.
+  Now the link's path decides, a failing read says why and when it last worked, and *reported …
+  ago* counts from the last word on the run, its worker's or GitHub's.
+- **A watch gap kept by an earlier version is told once more, all of it.** The update took a
+  gap told when it was 15 minutes long for told at its length then (100 hours), and said nothing
+  more. The first scan after updating now tells each such gap once, with its whole range; it is
+  then told again only as it doubles or passes an hour or a day.
+- **A language in a task's title is what is written, not how.** "Add a Chinese README (中文)" and
+  "Update the locale strings: French" were refused once as writing-style notes. Only words that
+  say how to write (*in English*, *用中文*, *英文写*, *像人写*, *human-sounding*, a tone) are; the
+  Router's renames and splits are held to the same rule.
+- Monitoring's tooltip says *status unknown* once.
+
 ## 0.1.43 (2026-11-13)
 
 Other Copilot sessions lists yours only, also when a script or a worker runs `copilot -p`;

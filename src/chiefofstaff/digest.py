@@ -29,6 +29,7 @@ NEEDS_WORDS = {
     "pr-failing": "CI failing on its PR",
     "pr-changes": "changes requested on its PR",
     "pr-conflicts": "merge conflicts on its PR",
+    "runs-unknown": "a run's status unknown: Ended or Stop tracking",
 }
 # A delivered task's own PR to fix (board.js PR_TO_FIX): it goes under Needs you.
 PR_TO_FIX = {"pr-changes", "pr-conflicts", "pr-failing"}
@@ -251,6 +252,7 @@ def waiting_parts(found: Needs) -> list[str]:
     review, update = found.tasks("review"), found.tasks("update")
     stopped, blocked = found.tasks("stopped"), found.tasks("blocked")
     stalled_, unchecked = found.tasks("stalled"), found.tasks("check-failed")
+    unknown = found.tasks("runs-unknown")
     sends, notes = found.of("send"), found.of("note")
     parts = [
         (review, plural(len(review), "result") + " to review"),
@@ -260,6 +262,7 @@ def waiting_parts(found: Needs) -> list[str]:
         (blocked, f"{names(blocked)} blocked (a task it needs did not finish)"),
         (stalled_, f"{names(stalled_)} made no progress"),
         (unchecked, f"{names(unchecked)} could not check back"),
+        (unknown, f"{names(unknown)}: run status unknown (ended, or stop tracking?)"),
         (approvals, plural(approvals, "draft") + " to approve"),
         (others, plural(others.total(), "card") + f" to answer ({', '.join(sorted(others))})"),
         (sends, plural(len(sends), "send") + " to check"),

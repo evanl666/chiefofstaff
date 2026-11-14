@@ -563,6 +563,13 @@ function taskCard(task, phase = phaseOf(task)) {
       const about = { "pr-failing": "the failing checks", "pr-conflicts": "the merge conflicts", "pr-changes": "the changes asked for" }[phase.marker];
       main = el("button", { type: "button", text: "Ask it to fix…", onclick: () => reply(`What should it do about ${about}?`, "Sent to the worker.") });
       more = [followUp, copy, named, worker];
+    } else if (task.status === "done" && phase.marker === "runs-unknown") {
+      // Runs its worker said go on that nothing told of for a day, and nothing else to wait
+      // on: the owner says what became of them, here.
+      const urls = unknownRuns(task);
+      main = el("button", { type: "button", text: "Ended", "data-tip": urls.length > 1 ? "They have ended: mark them so" : "It has ended: mark it so", onclick: () => act(`/api/tasks/${task.id}/runs`, { how: "ended", urls }, urls.length > 1 ? "Runs marked ended." : "Marked ended.") });
+      shown = [quiet("Stop tracking", () => act(`/api/tasks/${task.id}/runs`, { how: "untracked", urls }, "No longer tracked."), "Stop following it, as it was last said to stand")];
+      more = [followUp, copy, pr, named, splitOff, worker];
     } else if (task.status === "review") {
       // Every result waits for the owner's Accept, a report that only informs too.
       main = el("button", { type: "button", text: "Accept", onclick: accept });
@@ -594,9 +601,10 @@ function taskCard(task, phase = phaseOf(task)) {
       more = [named, worker];
     }
     // Runs its worker said go on that nothing told of for a day: the owner says what became of
-    // them (ended, or no longer to follow), in its menu.
+    // them (ended, or no longer to follow), in its menu, whatever the task's state (bug E57);
+    // on its row when that is all it waits on.
     const urls = unknownRuns(task);
-    if (urls.length && ["review", "done"].includes(task.status)) {
+    if (urls.length && phase.marker !== "runs-unknown") {
       const what = urls.length > 1 ? "Runs marked ended." : "Marked ended.";
       more = [{ text: "Mark ended", onclick: () => act(`/api/tasks/${task.id}/runs`, { how: "ended", urls }, what) }, { text: "Stop tracking", onclick: () => act(`/api/tasks/${task.id}/runs`, { how: "untracked", urls }, "No longer tracked.") }, ...more];
     }
@@ -624,7 +632,7 @@ function taskBody(task, phase = {}) {
     // it made, the threads it still follows); on a row, what it reported before, folded.
     const first = isRow(phase) ? gist(task.result || "") : "";
     // Monitoring: what it waits on; under Needs you for its PR: what is wrong there.
-    const waits = phase.section === "monitoring" || PR_TO_FIX.includes(phase.marker) ? waitLine(task, worker, phase) : null;
+    const waits = phase.section === "monitoring" || [...PR_TO_FIX, "runs-unknown"].includes(phase.marker) ? waitLine(task, worker, phase) : null;
     const found = artifacts(task, worker, { active: phase.section === "monitoring" || phase.marker === "still-following" });
     const nodes = [first ? el("div", { class: "outcome", text: first }) : null, waits, found, isRow(phase) ? earlierBlock(task) : null].filter(Boolean);
     return nodes.length ? el("div", { class: "task-body" }, ...nodes) : null;
@@ -907,7 +915,7 @@ function runningBody(task, worker, phase = {}) {
 // What a task that is not being worked on waits for, and what wakes it: the PR or thread it
 // follows for this task (and where the PR stands), the time it checks back, a slot, its turn,
 // or nothing (then it says so): { text, help, warn }.
-function waitWords(task, worker, phase) {
+export function waitWords(task, worker, phase) {
   const marker = phase.marker;
   let text = phase.why;
   let help = "";
@@ -916,15 +924,18 @@ function waitWords(task, worker, phase) {
     text = `Checks back at ${clockTime(back.at)}: ${back.what}`;
     if (back.error) text += ` · could not wake it last time (${back.error}); trying again`;
     help = "It said when to look again; it is woken then";
-  } else if (["watching", "delivered", "mergeable"].includes(marker) && obligationsOf(task).length) {
+  } else if (["watching", "delivered", "mergeable", "runs-unknown"].includes(marker) && obligationsOf(task).length) {
     // What it waits for and what wakes it, each thing it waits on (one it cannot read now is
     // said so: its card says why).
     const unreadable = new Set(task.watch_unreadable || []);
     // On its card, in a line: for what, on what, how long quiet.
     const bits = monitorBits(task);
     if (bits) text = [bits.first.unknown ? `${bits.label}: status unknown` : `${bits.what} ${bits.what === "Following" ? "" : "on "}${bits.label}`, bits.quiet].filter(Boolean).join(" · ");
-    const waits = (item) => (item.unknown ? ": status unknown" : item.waiting_for ? `: waiting for ${item.waiting_for}` : "");
-    help = [text, ...obligationsOf(task).map((item) => `${item.label || item.key}${waits(item)}${unreadable.has(item.key) ? " (can't read it now)" : ""}${item.trigger ? `\n  ${item.trigger}` : ""}`)].join("\n");
+    // The first line says the first one's state: not said again under it (bug E62).
+    const waits = (item) => (item === bits?.first ? "" : item.unknown ? ": status unknown" : item.waiting_for ? `: waiting for ${item.waiting_for}` : "");
+    // When GitHub was last read, of a run it cannot be read now (bug E59).
+    const read = (item) => (item.read_error && item.last_check ? ` (last read ${spelled(ago(item.last_check))} ago)` : "");
+    help = [text, ...obligationsOf(task).map((item) => `${item.label || item.key}${waits(item)}${unreadable.has(item.key) ? " (can't read it now)" : ""}${item.trigger ? `\n  ${item.trigger}${read(item)}` : ""}`)].join("\n");
   } else if (marker === "queued") {
     const reason = queuedReason(task);
     text = reason.text;
