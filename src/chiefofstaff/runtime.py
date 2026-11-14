@@ -2910,6 +2910,9 @@ class Runtime:
             # What tells the repository's instructions its thread was given (none: not yet).
             "docs_given": self.store.get(f"agentdocs:{row['id']}") or "",
             "on_repository_docs": lambda digest: self.store.set(f"agentdocs:{row['id']}", digest),
+            # Whether its thread was made with Chief of Staff's ask_user (Codex's, since 0.1.47).
+            "asks_owner": bool(self.store.get(f"agentasks:{row['id']}")),
+            "on_asks_owner": lambda: self.store.set(f"agentasks:{row['id']}", "1"),
             # The folders whose Codex settings changed since Chief of Staff last saw them: its
             # threads do not trust them (codex_settings, which says so in its timeline).
             "settings_changed": lambda: self.codex_settings(self.store.session(row["id"])),

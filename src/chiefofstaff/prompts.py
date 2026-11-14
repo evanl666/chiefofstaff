@@ -969,8 +969,9 @@ SEND_RULE = (
 # that agent's (more-agents.md 5.4); Copilot's text is unchanged. Codex: a session of its own;
 # what keeps running is a plain command, which Codex keeps running once the command returns
 # (its background terminals: seen and stopped by Chief of Staff; a message still reaches the
-# worker), never one backgrounded or daemonized by the shell, which nothing tracks; no ask_user
-# (the owner's questions go through report); an MCP server's sign-in is Codex's own command.
+# worker), never one backgrounded or daemonized by the shell, which nothing tracks; ask_user is
+# Chief of Staff's own tool (backend_codex.ASK_USER: the same card); an MCP server's sign-in is
+# Codex's own command.
 AGENT_WORDS = {
     "codex": {
         "a Copilot session that the owner's Router": "a Codex session that the owner's Router",
@@ -980,10 +981,6 @@ AGENT_WORDS = {
         "command, without `&`,\n  `nohup`, `setsid` or `disown`: Codex keeps it running once "
         "your command returns,\n  where Chief of Staff sees it and can stop it. Stop it when "
         "you no longer need it.\n  Messages still reach you while it runs.",
-        "ask_user is for quick facts and access.": 'report(status="question") is for quick '
-        "facts and access.",
-        "- Ask the owner directly with ask_user when only they can answer or act": "- Ask the "
-        'owner with report(status="question") when only they can answer or act',
         "An\n  MCP server that needs sign-in shows the owner a sign-in card by itself and you get "
         'a\n  from="system" note; do not ask the owner to sign in to it yourself, but go on or '
         "wait\n  until the note says it works, then retry.": "An\n  MCP server that needs "

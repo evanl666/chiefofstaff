@@ -630,6 +630,9 @@ class Server:
         if "What word did I ask you to remember" in prompt:
             await self.say(thread_id, turn_id, thread["memory"] or "none")
             return
+        if found := re.search(r"Ask the owner (.+?\?)", prompt):
+            question = {"question": found.group(1), "choices": ["Red", "Blue"]}
+            await self.dynamic(thread_id, turn_id, "ask_user", question)
         for match in re.finditer(r"Call the (\w+) tool with text '([^']*)'", prompt):
             await self.say(thread_id, turn_id, "Calling it.", "commentary")
             await self.dynamic(thread_id, turn_id, match.group(1), {"text": match.group(2)})

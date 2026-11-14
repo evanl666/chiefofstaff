@@ -655,9 +655,13 @@ def test_a_codex_worker_is_told_in_codex_terms_what_copilot_is_told_in_its_own()
     for copilot in prompts.AGENT_WORDS["codex"]:
         assert prompts.WORKER.count(copilot) == 1, copilot
     said = prompts.worker_on("codex", prompts.WORKER)
-    for word in ("Copilot", "ask_user", 'mode="async"', "detach: true"):
+    for word in ("Copilot", 'mode="async"', "detach: true"):
         assert word not in said, word
-    assert 'report(status="question")' in said and "codex mcp login" in said
+    # ask_user is Chief of Staff's own tool for Codex workers (backend_codex.ASK_USER).
+    assert "ask_user is for quick facts" in said and "codex mcp login" in said
+    assert said.count('report(status="question")') == prompts.WORKER.count(
+        'report(status="question")'
+    )
     # What keeps running is Codex's to keep (a background terminal), not the shell's.
     assert "as a plain command, without `&`,\n  `nohup`, `setsid` or `disown`" in said
     assert prompts.worker_on("copilot", prompts.WORKER) == prompts.WORKER

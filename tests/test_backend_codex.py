@@ -121,6 +121,53 @@ async def test_a_repositorys_python_files_never_run_as_its_supervisor(tmp_path, 
     assert sorted(path.name for path in marks.iterdir()) == [], "none of them ran"
 
 
+async def test_a_codex_worker_asks_the_owner_with_the_same_card_and_gets_the_answer(
+    codex, tmp_path
+):
+    asked = []
+
+    async def answer(request, context):
+        asked.append((request, context["session_id"]))
+        return {"answer": "Blue", "wasFreeform": False}
+
+    made = []
+    session, turn = await opened(
+        codex, tmp_path, on_user_input_request=answer, on_asks_owner=lambda: made.append(1)
+    )
+    await session.send("Ask the owner which colour?")
+    await turn.wait()
+    assert asked == [
+        ({"question": "which colour?", "choices": ["Red", "Blue"], "allowFreeform": True},
+         session.session_id)
+    ]  # fmt: skip
+    (done,) = turn.data("tool.execution_complete")
+    assert done.result.content == "The owner answered: Blue" and made == [1]
+
+
+async def test_a_thread_made_before_ask_user_keeps_the_words_it_was_made_with(codex, tmp_path):
+    prompt = "ask_user is for quick facts and access."
+    session, _ = await opened(codex, tmp_path, system_message={"content": prompt})
+    for asks_owner, expected in [(False, 'report(status="question") is for'), (True, prompt)]:
+        await session.disconnect()
+        again = await codex.resume_session(
+            session.session_id,
+            working_directory=str(tmp_path),
+            on_permission_request=approve,
+            system_message={"content": prompt},
+            asks_owner=asks_owner,
+        )
+        wire = [
+            json.loads(line) for line in (tmp_path / "fake" / "wire.jsonl").read_text().splitlines()
+        ]
+        resumed = [
+            e["message"]["params"]["developerInstructions"]
+            for e in wire
+            if e["from"] == "client" and e["message"].get("method") == "thread/resume"
+        ]
+        assert resumed[-1].startswith(expected)
+        session = again
+
+
 async def test_every_file_attached_reaches_codex(codex, tmp_path):
     image, notes = tmp_path / "red.png", tmp_path / "notes.txt"
     image.write_bytes(b"\x89PNG\r\n\x1a\nfake")
