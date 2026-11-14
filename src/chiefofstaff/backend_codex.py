@@ -250,6 +250,42 @@ def mapping(value: Any) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+# Chief of Staff's ask_user for Codex workers, as Copilot's worker has it: the owner's question
+# card (Asks.on_user_input), whose answer comes back into the turn.
+ASK_USER = {
+    "type": "function",
+    "name": "ask_user",
+    "description": (
+        "Ask the owner a question and wait for the answer, in this turn: a choice that is theirs, "
+        "a fact only they know, access only they can give. Offer choices when there are a few."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "question": {"type": "string", "description": "The question, on its own."},
+            "choices": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Answers to offer, if any (the owner may also write one).",
+            },
+            "allow_freeform": {
+                "type": "boolean",
+                "description": "Whether the owner may write their own answer (default true).",
+            },
+        },
+        "required": ["question"],
+    },
+}
+# A thread made before Codex workers had ask_user keeps the words it was made with: its tools
+# are those it was started with.
+WITHOUT_ASK_USER = {
+    "ask_user is for quick facts and access.": 'report(status="question") is for quick facts '
+    "and access.",
+    "- Ask the owner directly with ask_user when only they can answer or act": "- Ask the owner "
+    'with report(status="question") when only they can answer or act',
+}
+
+
 def text_of(content: Any) -> str:
     """The text of a message's input items (images, mentions and the lines naming files
     attached to it left out)."""
@@ -1182,10 +1218,14 @@ class CodexBackend:
             }
             for tool in options.get("tools") or []
         ]
+        if not options.get("checking"):
+            params["dynamicTools"].append(ASK_USER)
         answer = await self.request("thread/start", params)
         try:
             await self.read_back(answer, options)
             session = self.opened(answer, options)
+            if callable(made := options.get("on_asks_owner")):
+                made()  # Its thread has ask_user: so has its next resume's prompt.
             session.docs_given = ""  # A new thread: nothing given to it yet.
             await session.give_docs()
         except RuntimeError:
@@ -1203,6 +1243,11 @@ class CodexBackend:
     async def resume_session(self, session_id: str, **options: Any) -> CodexSession:
         params = await self.thread_params(options)
         params.update(threadId=session_id, excludeTurns=True)
+        if not options.get("asks_owner") and isinstance(params.get("developerInstructions"), str):
+            for copilot, without in WITHOUT_ASK_USER.items():
+                params["developerInstructions"] = params["developerInstructions"].replace(
+                    copilot, without
+                )
         try:
             answer = await self.request("thread/resume", params)
         except CodexError as exc:
@@ -2996,7 +3041,9 @@ class CodexSession:
     async def tool_call(self, params: dict) -> dict:
         name = params.get("tool") or ""
         tool = self.tools.get(name)
-        if not tool or not tool.handler:
+        if name == ASK_USER["name"] and not tool:
+            text, ok = await self.ask_user(params.get("arguments")), True
+        elif not tool or not tool.handler:
             text, ok = f"Tool {name} is not available.", False
         else:
             invocation = ToolInvocation(
@@ -3015,6 +3062,26 @@ class CodexSession:
                 logger.warning("Tool %s failed.", name, exc_info=True)
                 text, ok = f"The tool failed: {exc}", False
         return {"contentItems": [{"type": "inputText", "text": text}], "success": ok}
+
+    async def ask_user(self, arguments: Any) -> str:
+        """Chief of Staff's ask_user (ASK_USER): the owner's card; their answer, said."""
+        arguments = mapping(arguments)
+        question = str(arguments.get("question") or "").strip()
+        ask = self.options.get("on_user_input_request")
+        if not question or not ask:
+            return "No question was asked: say it in `question`."
+        choices = [str(c) for c in arguments.get("choices") or [] if isinstance(c, str) and c]
+        context = {"session_id": self.session_id, "sessionId": self.session_id}
+        request = {
+            "question": question,
+            "choices": choices,
+            "allowFreeform": arguments.get("allow_freeform") is not False,
+        }
+        answer = ask(request, context)
+        if inspect.isawaitable(answer):
+            answer = await answer
+        reply = str(mapping(answer).get("answer") or "").strip()
+        return f"The owner answered: {reply}" if reply else "The owner did not answer."
 
     async def user_input(self, params: dict, context: dict) -> dict:
         ask = self.options.get("on_user_input_request")
