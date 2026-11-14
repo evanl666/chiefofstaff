@@ -246,7 +246,9 @@ async def test_a_worker_on_another_agent_goes_through_the_same_paths(harness, na
         assert harness.store.get(f"copilot:{worker}") == session.session_id
         assert harness.store.get(f"alias:{session.session_id}") == worker
     else:
-        assert session.session_id == worker and not harness.store.get(f"copilot:{worker}")
+        # The row's own id: made (its own, no alias), so a restart resumes it.
+        assert session.session_id == worker and harness.store.get(f"copilot:{worker}") == worker
+        assert not harness.store.get(f"alias:{worker}") and runtime.made(worker)
     assert harness.store.get(f"created:{worker}") == "1"
     # The child agent's command is a receipt too; exit codes only where the agent gives them.
     code = 0 if PROFILES[name].exit_codes else None

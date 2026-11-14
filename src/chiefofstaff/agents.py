@@ -1,4 +1,4 @@
-"""Other coding agents that can run the owner's workers beside Copilot (Codex).
+"""Other coding agents that can run the owner's workers beside Copilot (Codex, Claude).
 
 Nothing of them is stored, looked for or started until the owner turns one on: their
 configuration is one key-value entry (`agents`), not a Settings field, so the settings stay as
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -18,7 +19,7 @@ if TYPE_CHECKING:
 
 CONFIG = "agents"
 # The agents this release runs workers on, by the name rows keep (`agent:<row>`).
-NAMES = {"codex": "Codex"}
+NAMES = {"codex": "Codex", "claude": "Claude"}
 COPILOT = "copilot"
 # In the configuration, beside each agent's settings: the agent new workers use.
 NEW_WORKERS = "new_workers"
@@ -157,17 +158,68 @@ def display(name: str) -> str:
     return "Copilot" if name == COPILOT else NAMES.get(name, name)
 
 
-# How the group in Settings says an agent is signed in (Codex's account types).
+# How the group in Settings says an agent is signed in (Codex's account types; Claude's, as
+# backend_claude.signed_in reads `claude auth status`).
 SIGNED_IN = {
     "chatgpt": "signed in with ChatGPT",
     "apiKey": "signed in with an API key",
     "amazonBedrock": "signed in with Amazon Bedrock",
     "gcp": "signed in with Google Cloud",
+    "claudePlan": "signed in with your Claude plan",
+    "foundry": "signed in with Foundry",
 }
+# The one line Settings and the guide add under an agent signed in a way that has terms of its
+# own (more-agents.md 5.12.1).
+PLAN_NOTES = {
+    "claudePlan": "On a Claude plan, Claude workers count against your plan's usage limits, "
+    "under Anthropic's terms."
+}
+# A plan's limits, as Claude's stream names their windows.
+WINDOWS = {
+    "five_hour": "5-hour limit",
+    "seven_day": "weekly limit",
+    "seven_day_opus": "weekly Opus limit",
+    "seven_day_sonnet": "weekly Sonnet limit",
+}
+
+
+def clock(at: float) -> str:
+    """A time of day as Settings says it ("3:40 pm")."""
+    stamp = time.localtime(at)
+    return f"{(stamp.tm_hour % 12) or 12}:{stamp.tm_min:02d} {'am' if stamp.tm_hour < 12 else 'pm'}"
+
+
+def limit_line(limit: Any, now: float | None = None) -> str:
+    """What a plan's limit, as a worker's stream last said it, means now ("" once it reset, or
+    while nothing is near)."""
+    limit = limit if isinstance(limit, dict) else {}
+    resets = limit.get("resets_at") if isinstance(limit.get("resets_at"), int | float) else 0
+    if resets and resets <= (time.time() if now is None else now):
+        return ""
+    window = WINDOWS.get(str(limit.get("window") or ""), "usage limit")
+    when = f"; it resets at {clock(resets)}" if resets else ""
+    if limit.get("status") == "rejected":
+        return f"Your Claude plan's {window} is reached{when}."
+    if limit.get("status") == "allowed_warning":
+        return f"Your Claude plan's {window} is close{when}."
+    return ""
+
+
+def plan_limit(store: Store, name: str, live: Any = None) -> str:
+    """An agent's plan limit line for Settings: as its running backend has it, else as last
+    kept (kv `agentlimit:<agent>`)."""
+    if not live:
+        try:
+            live = json.loads(store.get(f"agentlimit:{name}") or "{}")
+        except ValueError:
+            live = {}
+    return limit_line(live)
+
+
 # Each agent's command, and what to install when it is not found.
-COMMANDS = {"codex": "codex"}
-FOLDERS = {"codex": (".codex", "CODEX_HOME")}
-INSTALL = {"codex": "the Codex CLI"}
+COMMANDS = {"codex": "codex", "claude": "claude"}
+FOLDERS = {"codex": (".codex", "CODEX_HOME"), "claude": (".claude", "CLAUDE_CONFIG_DIR")}
+INSTALL = {"codex": "the Codex CLI", "claude": "Claude Code"}
 
 
 def command(name: str) -> str:
@@ -181,6 +233,10 @@ async def look(name: str) -> dict[str, Any]:
         from .backend_codex import look as look_at_codex
 
         return await look_at_codex(command(name))
+    if name == "claude":
+        from .backend_claude import look as look_at_claude
+
+        return await look_at_claude(command(name))
     raise RuntimeError(f"This Chief of Staff does not run {name}.")
 
 
@@ -231,10 +287,15 @@ def prepare_downgrade(store: Store) -> tuple[list[str], dict[int, str]]:
     return stopped, left
 
 
-def backend(name: str) -> AgentBackend:
-    """An agent's backend, its module imported now."""
+def backend(name: str, folder: Path | None = None) -> AgentBackend:
+    """An agent's backend, its module imported now; `folder`: Chief of Staff's own folder for
+    it (Claude's launcher)."""
     if name == "codex":
         from .backend_codex import codex_backend
 
         return codex_backend()
+    if name == "claude":
+        from .backend_claude import claude_backend
+
+        return claude_backend(folder=folder)
     raise RuntimeError(f"This Chief of Staff does not run {name}.")

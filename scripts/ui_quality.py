@@ -919,13 +919,18 @@ async def signed_out(route):
         "found": True, "state": "", "models": [],
         "problem": "Codex is not signed in: run codex login in a terminal.",
     }  # fmt: skip
-    await route.fulfill(json={"agents": [codex], "new_workers": "copilot", "sandboxed": False})
+    claude = codex | {
+        "name": "claude", "label": "Claude",
+        "problem": "Not signed in: run `claude` in a terminal and sign in.",
+    }  # fmt: skip
+    answer = {"agents": [codex, claude], "new_workers": "copilot", "sandboxed": False}
+    await route.fulfill(json=answer)
 
 
 async def agents_views(runtime, browser, quality: Quality):
     """Other coding agents (docs/design/more-agents.md 5.10): the last line of Settings →
-    Models; the Coding agents group it unfolds, found and being turned on; on, folded and open;
-    a worker on Codex, its header and ⋯; 800 to 1440 px, light and dark
+    Models; the Coding agents group it unfolds (Codex's and Claude's rows), found and being turned
+    on; on, folded and open; a worker on Codex, its header and ⋯; 800 to 1440 px, light and dark
     (browser-shots/agents-m2/quality-*)."""
     from copilot.tools import ToolInvocation
     from ui_edges import agents_saved, codex_off_path, codex_on_path, until
@@ -949,11 +954,17 @@ async def agents_views(runtime, browser, quality: Quality):
                     # One that cannot be turned on: it looks it, in both themes.
                     await page.route("**/api/agents", signed_out)
                     await page.locator("#agents-open").click()
-                    await expect(group.locator(".agent-row.disabled")).to_be_visible()
+                    await expect(group.locator(".agent-row.disabled .agent-problem")).to_have_count(
+                        2
+                    )
                 if state in {"found", "enabling"}:
                     await page.locator("#agents-open").click()
                     await expect(group.locator(".agent-row small[role=status]")).to_have_text(
-                        "0.167.2 · signed in with ChatGPT", timeout=20000
+                        [
+                            "0.167.2 · signed in with ChatGPT",
+                            "2.1.322 · signed in with your Claude plan",
+                        ],
+                        timeout=20000,
                     )
                 if state == "enabling":
                     await group.locator("input[name=agent_codex_enabled]").check()

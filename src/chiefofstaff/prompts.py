@@ -989,7 +989,29 @@ AGENT_WORDS = {
         "wait\n  until the note says it works, then retry.": "An\n  MCP server that needs "
         "sign-in: ask the owner to run `codex mcp login <its name>` in a\n  terminal, then retry "
         "once they say it is done.",
-    }
+    },
+    # Claude Code: a session of its own; what keeps running is a command run with Bash's
+    # run_in_background (Chief of Staff sees it, and can stop it), never one backgrounded by
+    # the shell; the owner's questions through AskUserQuestion (the same card as ask_user); an
+    # MCP server's sign-in is Claude's own command.
+    "claude": {
+        "a Copilot session that the owner's Router": "a Claude Code session that the owner's "
+        "Router",
+        '(a dev server, a watcher, a tunnel) detached (bash with mode="async"\n  and detach: '
+        "true), and stop it when you no longer need it. Left running attached, it holds\n  every "
+        "message to you until it ends.": "(a dev server, a watcher, a tunnel) with Bash's "
+        "run_in_background,\n  never with `&`, `nohup`, `setsid` or `disown`: Chief of Staff "
+        "sees it and can stop it.\n  Stop it (TaskStop) when you no longer need it. Messages "
+        "still reach you while it runs.",
+        "ask_user is for quick facts and access.": "AskUserQuestion is for quick facts and access.",
+        "- Ask the owner directly with ask_user when only they can answer or act": "- Ask the "
+        "owner directly with AskUserQuestion when only they can answer or act",
+        "An\n  MCP server that needs sign-in shows the owner a sign-in card by itself and you get "
+        'a\n  from="system" note; do not ask the owner to sign in to it yourself, but go on or '
+        "wait\n  until the note says it works, then retry.": "An\n  MCP server that needs "
+        "sign-in: ask the owner to run `claude mcp login <its name>` in a\n  terminal, then "
+        "retry once they say it is done.",
+    },
 }
 
 

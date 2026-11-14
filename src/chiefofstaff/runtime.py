@@ -1034,7 +1034,8 @@ class Runtime:
 
     def agent_connection(self, name: str) -> AgentConnection:
         return AgentConnection(
-            lambda: agents.backend(name), enabled=lambda: agents.enabled(self.store, name)
+            lambda: agents.backend(name, self.store.directory / "agents" / name),
+            enabled=lambda: agents.enabled(self.store, name),
         )
 
     def agent(self, session_id: str) -> str:
@@ -1147,6 +1148,13 @@ class Runtime:
                 )
             if hasattr(backend, "on_start"):
                 backend.on_start = lambda: self.agent_process_started(agent, backend)  # type: ignore[attr-defined]
+            if hasattr(backend, "on_limit"):
+                # A plan's limit as a worker's stream said it (nothing about the account).
+                backend.on_limit = lambda limit: self.store.set(  # type: ignore[attr-defined]
+                    f"agentlimit:{agent}", json.dumps(limit)
+                )
+            if hasattr(backend, "on_refused"):
+                backend.on_refused = lambda why: self.agent_gate_failed(agent, backend, why)  # type: ignore[attr-defined]
             entry.backend = backend
             entry.offline = False
             entry.watch = asyncio.ensure_future(self.watch_agent(agent, backend, entry.connections))
@@ -1166,7 +1174,9 @@ class Runtime:
         if not hasattr(backend, "check"):
             return
         version = await backend.version()
-        key = f"agentcheck:{agent}:{version}"
+        # A version, or (Claude's) what tells one build of it from another (check_key).
+        checked = await backend.check_key() if hasattr(backend, "check_key") else version
+        key = f"agentcheck:{agent}:{checked}"
         try:
             found = json.loads(self.store.get(key) or "null")
         except ValueError:
@@ -1184,6 +1194,25 @@ class Runtime:
         }
         if self.store.get(f"agentrefused:{agent}") != json.dumps(refused):
             self.store.set(f"agentrefused:{agent}", json.dumps(refused))
+
+    def agent_gate_failed(self, agent: str, backend: Any, why: str):
+        """Another agent began a turn its gate did not admit (more-agents.md 5.12.5): no worker
+        runs on that version again, also after a restart (its check's record says why)."""
+
+        async def record():
+            checked = await backend.check_key() if hasattr(backend, "check_key") else ""
+            key = f"agentcheck:{agent}:{checked or await backend.version()}"
+            try:
+                found = json.loads(self.store.get(key) or "{}")
+            except ValueError:
+                found = {}
+            found = (found if isinstance(found, dict) else {}) | {"ran": True, "acting": why}
+            self.store.set(key, json.dumps(found))
+            backend.checked = found
+            refused = {"version": await backend.version(), "acting": why, "ask_first": why}
+            self.store.set(f"agentrefused:{agent}", json.dumps(refused))
+
+        self.background(record())
 
     async def recheck_agent(self, agent: str):
         """A check that could not run (its version's workers wait meanwhile) is tried again
@@ -1471,14 +1500,18 @@ class Runtime:
                 f"{', '.join(offered) or 'none listed'}"
             )
 
-    async def admit_turn(self, session: Any) -> str:
-        """The one door for a turn of another agent's worker (what CoS sends, and the next
-        message in the agent's own queue): "" when it may begin now, else why not. Under the
-        admission lock, so a change that makes it ineligible (stop_ineligible) is either seen
-        here or comes after, and then stops it."""
+    async def admit_turn(self, session: Any, woken: bool = False) -> str:
+        """The one door for a turn of another agent's worker (what CoS sends, the next message
+        in the agent's own queue, and, `woken`, one it starts by itself as a command it left
+        running ended): "" when it may begin now, else why not. Under the admission lock, so a
+        change that makes it ineligible (stop_ineligible) is either seen here or comes after,
+        and then stops it."""
         row = self.store.find_session(self.row_id(session.session_id))
         if not row or row["closed_at"]:
             return "That session is closed."
+        if woken and row["role"] == WORKER and self.events.stopped_work(row):
+            # What it was on is stopped or cancelled: it does not start again by itself.
+            return "What it was on is stopped or cancelled."
         await self.usage_settled(row, session)
         await self.ensure_spend_card(row)  # Refused for spend not known: its Go on is there.
         async with self.admission:
@@ -2978,8 +3011,9 @@ class Runtime:
             return entry
         models = [described(model) for model in facts["models"]]
         self.agent_models_cache[name] = (time.monotonic(), models)
+        key = facts.get("check_key") or facts["version"]
         try:
-            checked = json.loads(self.store.get(f"agentcheck:{name}:{facts['version']}") or "{}")
+            checked = json.loads(self.store.get(f"agentcheck:{name}:{key}") or "{}")
         except ValueError:
             checked = {}
         signed = agents.SIGNED_IN.get(facts["account"], "signed in")
@@ -2990,6 +3024,10 @@ class Runtime:
             entry["problem"] = "Stopped unexpectedly; starts again with its next worker's message."
         else:
             entry["state"] = f"{facts['version']} · {signed}"
+        if note := agents.PLAN_NOTES.get(facts["account"]):
+            entry["note"] = note
+        if limit := agents.plan_limit(self.store, name, facts.get("limit")):
+            entry["limit_line"] = limit
         return entry
 
     def check_agents(self, plan: dict | None, settings: Settings):
@@ -3629,6 +3667,9 @@ class Runtime:
                 # successive Copilot sessions are.
                 copilot_id = session.session_id
                 self.store.set(f"alias:{copilot_id}", row["id"])
+                self.store.set(f"copilot:{row['id']}", copilot_id)
+            elif agent != COPILOT_AGENT:
+                # It took the row's own id (Claude's): made, as made() reads an agent's row.
                 self.store.set(f"copilot:{row['id']}", copilot_id)
             if agent == COPILOT_AGENT:
                 # Copilot keeps a session only once it has had a message: until then it cannot

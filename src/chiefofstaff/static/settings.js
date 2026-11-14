@@ -997,7 +997,7 @@ async function saveAway() {
 // Other coding agents (more-agents.md 5.10). With none on, the last line of Models is a quiet
 // button, the same whatever is installed; once one is on, their group takes its place, folded.
 // The group looks for agents (GET /api/agents) only once opened, and each time it is.
-const AGENTS = { codex: "Codex" };
+const AGENTS = { codex: "Codex", claude: "Claude" };
 let agentsLooked = null; // What the group showed when it looked: the agents found, as saved.
 function renderAgentsLine() {
   const on = state.snapshot.agents;
@@ -1065,6 +1065,8 @@ function agentRow(agent, disabled) {
   // Off, it is turned on only where it can run; on, it can always be turned off.
   box.disabled = disabled || (!agent.enabled && Boolean(agent.problem));
   const line = el("small", { id, role: "status", class: agent.problem ? "agent-problem" : "", html: codeHtml(agent.problem || agent.state || "") });
+  // A plan's limit as its workers last heard it, and the one line its sign-in calls for.
+  const notes = [agent.limit_line, agent.problem ? "" : agent.note].filter(Boolean).map((text) => el("small", { class: "agent-note", text }));
   const list = el("datalist", { id: `agent-${agent.name}-models` }, ...(agent.models || []).map((model) => el("option", { value: model.id, label: model.name })));
   const errorId = `agent-${agent.name}-limit-error`;
   const limit = el("input", { name: `agent_${agent.name}_limit`, type: "text", inputmode: "numeric", placeholder: "No limit", value: agent.limit ? grouped(agent.limit) : "", autocomplete: "off", "aria-describedby": errorId });
@@ -1086,7 +1088,7 @@ function agentRow(agent, disabled) {
     newWorkersChoices($("#settings-form").agent_new_workers.value);
   });
   // One that cannot be turned on looks it, its reason in its line.
-  return el("div", { class: `agent-row${box.disabled ? " disabled" : ""}`, "data-agent": agent.name }, el("label", { class: "check" }, box, ` Use ${agent.label} for workers`), line, fields);
+  return el("div", { class: `agent-row${box.disabled ? " disabled" : ""}`, "data-agent": agent.name }, el("label", { class: "check" }, box, ` Use ${agent.label} for workers`), line, ...notes, fields);
 }
 // New workers use Copilot or an agent checked above (as the form has it, saved or not); with
 // none checked there is nothing to choose, and nothing shows.
