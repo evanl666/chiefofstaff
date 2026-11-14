@@ -14,11 +14,15 @@
   on 0.1.43, E49).
 - **A worker's command takes only the sessions where it ran.** While a worker ran
   `cd ~/src/copilot && npm run dev`, a question you asked in your own project was taken for the
-  worker's: the word copilot in the command was enough, for as long as the command ran. A
-  command now ties a one-shot session to its worker only when it runs `copilot -p` (or
-  `--prompt`; not a folder or file of that name) or the sessions are a batch it started, and
-  only those in its own folder, where it ran (a folder it went to with `cd`) or in a temporary
-  folder, for two hours after it began at most (QA on 0.1.43, E54).
+  worker's: the word copilot in the command was enough. A command now ties a one-shot session
+  to its worker only when it runs `copilot -p` (or `--prompt`, however it is started: `npx`,
+  a path, `$(which copilot)`, `bash -c`; not a folder or file of that name) or the sessions are
+  a batch it started (ten or more alike; minutes apart too in a temporary folder or its own),
+  and only those in its own folder, where it ran (a folder it went to with `cd`) or in a
+  temporary folder; for as long as it ran (one whose end was not seen: two hours, and on while
+  its sessions keep coming). A worker's batch slow or of varied prompts stays its, as 0.1.43
+  found it, and what 0.1.43 found a worker made stays so unless the session shows it is yours
+  (QA on 0.1.43, E54, and its review).
 - **`chiefofstaff tidy-sessions` reads every log before it says** (it read one round, 128 MB,
   and listed what it found there), with a line on how many are left as it goes and how many it
   could not read; and `--apply` run twice in the same second no longer fails (its folder is

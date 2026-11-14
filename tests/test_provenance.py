@@ -391,6 +391,21 @@ async def test_tidy_sessions_with_chief_of_staff_stopped_leaves_the_owners_alone
         ("COPILOT_HOME=$PWD/.copilot-home npx @github/copilot -p hi", True),
         ("cat tickets.txt | xargs -P 4 -I {} copilot --model m -p {}", True),
         ("timeout 60 copilot --prompt=hi", True),
+        ("npx -y @github/copilot@latest -p hi", True),  # Review of E54
+        ("timeout 60s copilot -p hi", True),
+        ("sudo -u me copilot -p hi", True),
+        ('"/Users/me/My Tools/copilot" -p hi', True),
+        ("/Users/me/My\\ Tools/copilot -p hi", True),
+        ("C:\\tools\\copilot.exe -p hi", True),
+        ("copilot.cmd -p hi", True),
+        ("$(which copilot) -p hi", True),
+        ("`command -v copilot` -p hi", True),
+        ("find . -name '*.txt' -exec copilot -p {} \\;", True),
+        ("npm exec @github/copilot -- -p hi", True),
+        ("cd ~/src/copilot.exe && make -p", False),
+        ("ls C:\\src\\copilot -p", False),
+        ("npm install @github/copilot -p", False),
+        ("find copilot -p", False),
         (
             "python3 -c \"import subprocess; subprocess.run(['copilot', '-p', p], cwd='/tmp')\"",
             True,
@@ -425,28 +440,47 @@ def test_where_a_command_ran(tmp_path):
         ]
     )  # fmt: skip
     assert provenance.places("cd labels", "") == (), "relative to a folder it does not know"
+    # Review of E54: after a quote, a space in a name, pushd.
+    assert provenance.places('bash -c "cd /srv/x && copilot -p hi"', "") == ("/srv/x",)
+    assert provenance.places("cd My\\ Project && pushd 'the out'", "/srv") == (
+        "/srv", "/srv/My Project", "/srv/My Project/the out",
+    )  # fmt: skip
 
 
 def test_a_batch_is_a_workers_when_it_began_soon_after_the_workers_command():
-    runs = [shot(n, T0 + 30 + n * 3) for n in range(5)]
+    runs = [shot(n, T0 + 30 + n * 3) for n in range(10)]
     script = window(T0, T0 + 600)  # `python3 label.py`, started 30 seconds before
     found = decide(runs, [], [script])
     assert {(r["as"], r["by"], r["why"]) for r in found.values()} == {
         (MADE_BY_WORKER, "w1", "batch")
     }
-    # A dev server a worker started hours before: the owner's few alike, not the worker's.
+    # A dev server a worker started hours before: a script's batch, not the worker's.
     server = window(T0 - 3600, T0 + 3600)
-    assert {r["as"] for r in decide(runs, [], [server]).values()} == {ALIKE}
-    # E54: not where it ran (the owner's own project).
-    mine = [shot(n, T0 + 30 + n * 3, cwd="/w/app") for n in range(5)]
-    assert {r["as"] for r in decide(mine, [], [script]).values()} == {ALIKE}
+    assert {r["as"] for r in decide(runs, [], [server]).values()} == {BATCH}
     lead = provenance.LEAD
     assert {r["as"] for r in decide(runs, [], [window(T0 + 30 - lead, T0 + 999)]).values()} == {
         MADE_BY_WORKER
     }
     assert {r["as"] for r in decide(runs, [], [window(T0 + 29 - lead, T0 + 999)]).values()} == {
-        ALIKE
+        BATCH
     }
+    # Review: a few alike, by a command that does not run copilot -p: not the worker's by the
+    # time and the folder alone, in a temporary folder or where it ran (the owner's project).
+    few = runs[:9]
+    assert {r["as"] for r in decide(few, [], [script]).values()} == {ALIKE}
+    mine = [shot(n, T0 + 30 + n * 3, cwd="/w/app") for n in range(9)]
+    there = window(T0, T0 + 600, places=("/w/app",))
+    assert {r["as"] for r in decide(mine, [], [there]).values()} == {ALIKE}
+    # Ten or more where it ran: close together, a script's it ran; minutes apart, the owner's.
+    mine = [shot(n, T0 + 30 + n * 3, cwd="/w/app") for n in range(10)]
+    assert {r["as"] for r in decide(mine, [], [there]).values()} == {MADE_BY_WORKER}
+    slow = [shot(n, T0 + 30 + n * 300, cwd="/w/app") for n in range(10)]
+    assert decide(slow, [], [window(T0, T0 + 9999, places=("/w/app",))]) == {}
+    # In a temporary folder, each within half an hour of the one before: the worker's.
+    slow = [shot(n, T0 + 30 + n * 1800) for n in range(10)]
+    assert {r["as"] for r in decide(slow, [], [window(T0, T0 + 9e4)]).values()} == {MADE_BY_WORKER}
+    slower = [shot(n, T0 + 30 + n * 1801) for n in range(10)]
+    assert decide(slower, [], [window(T0, T0 + 9e4)]) == {}
 
 
 # What a Chief of Staff decides, kept
@@ -554,7 +588,7 @@ async def test_what_a_worker_ran_is_the_workers(tmp_path, home):
         "VALUES (?,?,?,?,?)",
         ("w1", "c2", 'copilot -p "Summarize notes.md" -s', stored(T0 + 7000), None),
     )
-    batch = home.batch(5)
+    batch = home.batch(10)
     alone = home.add(prompt_mode(T0 + 7200, "Summarize notes.md"), T0 + 7200)
     inside = home.add(
         prompt_mode(T0 + 300, "Write the release notes"), T0 + 300, cwd=str(folder / "out")
@@ -681,10 +715,10 @@ async def test_many_kept_decisions_cost_little_a_call(tmp_path, home, monkeypatc
         reads.append(1)
         return known(store)
 
-    def counted_batches(shots):
+    def counted_batches(shots, *arguments):
         shots = list(shots)
         grouped.append(len(shots))
-        return batches(shots)
+        return batches(shots, *arguments)
 
     monkeypatch.setattr(provenance, "known", counted_known)
     monkeypatch.setattr(provenance, "batches", counted_batches)
@@ -917,16 +951,154 @@ async def test_a_workers_command_takes_only_what_ran_where_it_ran(tmp_path, home
         home.metas, {}
     )
     assert made == {theirs: MADE_BY_WORKER, at_home: MADE_BY_WORKER}
-    # A loop seen to run for five hours: its first two only.
+    # A loop whose end was not seen (left running, say), begun more than two hours before and
+    # none of its calls since: not its.
     store.execute("DELETE FROM commands")
     store.execute("DELETE FROM kv WHERE key LIKE 'made:%'")
-    commanded(store, T0 - 7000, T0 + 5 * 3600)
-    late = home.add(prompt_mode(T0 + 300, "Summarize the release"), T0 + 300)
+    commanded(store, T0 - 7300, None)
     made = await Provenance(store, home.log_of, lambda row: None, uptime=lambda: up).made(
         home.metas, {}
     )
-    assert made == {theirs: MADE_BY_WORKER, at_home: MADE_BY_WORKER}, "two hours after it began"
-    assert late not in made
+    assert made == {}, "two hours after it began"
+
+
+# Review of the QA round: a worker's batches, slow or varied, stay its, also after the upgrade
+
+
+def worker_store(tmp_path, cwd: str = "/x", up: tuple[float, float] = (T0 - 900, T0 + 9e5)):
+    store = Store(tmp_path / "data")
+    store.create_session("w1", "worker", "Label the tickets", "idle", cwd=cwd)
+    store.set("uptime", json.dumps([list(up)]))
+    return store
+
+
+def as_0143(store: Store, home: Home, session_id: str, at: float, why: str = "command"):
+    """A decision as 0.1.43 kept it: no rules."""
+    record = {"as": "worker", "by": "w1", "why": why, "group": "g0143", "at": at,
+              "size": home.log_of(session_id).stat().st_size}  # fmt: skip
+    store.set(f"made:{session_id}", json.dumps(record))
+
+
+async def test_a_workers_long_loop_kept_by_0143_stays_left_out(tmp_path, home):
+    """Review: w1 ran LOOP, seen to end after three hours; its 260 calls, 40 seconds apart,
+    each its own prompt, kept by 0.1.43 as w1's, all stay left out after the upgrade (the two
+    hours are for a command whose end was not seen). As fresh, all 530 of a longer one."""
+    store = worker_store(tmp_path)
+    commanded(store, T0 - 30, T0 + 3 * 3600)
+    calls = []
+    for n in range(260):
+        calls.append(home.add(prompt_mode(T0 + n * 40, f"Ticket {n} {uuid4()}: label it"), T0))
+        as_0143(store, home, calls[-1], T0 + n * 40)
+    made = await deciding(store, home).made(home.metas, {})
+    assert made == dict.fromkeys(calls, MADE_BY_WORKER)
+    kept = [json.loads(value) for value in store.items("made:").values()]
+    assert {(r["by"], r["rules"]) for r in kept} == {("w1", provenance.RULES)}
+    store.execute("DELETE FROM kv WHERE key LIKE 'made:%'")
+    store.execute("DELETE FROM commands")
+    commanded(store, T0 - 30, T0 + 6 * 3600)
+    calls += [
+        home.add(prompt_mode(T0 + n * 40, f"Ticket {n} {uuid4()}: label it"), T0)
+        for n in range(260, 530)
+    ]
+    assert await deciding(store, home).made(home.metas, {}) == dict.fromkeys(calls, MADE_BY_WORKER)
+
+
+async def test_a_workers_slow_batch_is_its(tmp_path, home):
+    """Review: one template, 100 calls 150 seconds apart (agentic prompts, a backoff) under
+    `python3 label.py`, in a temporary folder: the worker's (0.1.43 hid all 100; two minutes
+    apart at most, none were)."""
+    store = worker_store(tmp_path)
+    commanded(store, T0 - 30, T0 + 100 * 150, "python3 label.py")
+    ids = home.batch(100, every=150)
+    assert await deciding(store, home).made(home.metas, {}) == dict.fromkeys(ids, MADE_BY_WORKER)
+
+
+async def test_a_loop_still_running_after_two_hours_stays_its(tmp_path, home):
+    """A loop still running past two hours (its end not seen yet: it may have been left
+    running): its calls are its while they keep coming where it runs, each within half an hour
+    of the one before; not the owner's in their project meanwhile, nor one after a pause."""
+    store = worker_store(tmp_path)
+    commanded(store, T0 - 30, None)
+    calls = [
+        home.add(prompt_mode(T0 + n * 40, f"Ticket {n} {uuid4()}: label it"), T0 + n * 40)
+        for n in range(270)
+    ]
+    owners = home.add(prompt_mode(T0 + 9000, "Summarize the changelog", "/w/app"), T0 + 9000,
+                      cwd="/w/app")  # fmt: skip
+    late = home.add(prompt_mode(T0 + 270 * 40 + 1900, "Ticket: one more"), T0 + 13000)
+    made = await deciding(store, home).made(home.metas, {})
+    assert made == dict.fromkeys(calls, MADE_BY_WORKER)
+    assert owners not in made and late not in made
+
+
+async def test_what_0143_found_a_workers_is_kept_unless_it_is_the_owners(tmp_path, home):
+    """Review: a decision 0.1.43 kept that a worker made a session is undone only when the
+    session shows it is the owner's: talked in or resumed since, or in a folder the worker's
+    command did not run in (E54's); not for want of evidence (no command of the worker's then,
+    or one these rules do not tie it to)."""
+    store = worker_store(tmp_path)
+    commanded(store, T0 - 600, T0 + 3600, "cd ~/src/copilot && npm run dev")
+    project = home.add(prompt_mode(T0, "Why does the build fail?", "/w/app"), T0, cwd="/w/app")
+    in_tmp = home.add(prompt_mode(T0 + 60, "Label: refund my order"), T0 + 60)
+    no_command = home.add(prompt_mode(T0 + 9e4, "Label: where is it"), T0 + 9e4)
+    resumed = home.add(prompt_mode(T0 + 120, "Label: an outage"), T0 + 120)
+    for session_id, at in [(project, T0), (in_tmp, T0 + 60), (no_command, T0 + 9e4),
+                           (resumed, T0 + 120)]:  # fmt: skip
+        as_0143(store, home, session_id, at)
+    with home.log_of(resumed).open("a") as file:
+        file.write(event("session.resume", T0 + 999) + "\n")
+        file.write(event("user.message", T0 + 1000, content="And the next one?") + "\n")
+        file.write(event("session.shutdown", T0 + 1100) + "\n")
+    made = await deciding(store, home).made(home.metas, {})
+    assert made == {in_tmp: MADE_BY_WORKER, no_command: MADE_BY_WORKER}
+    kept = {key: json.loads(value) for key, value in store.items("made:").items()}
+    assert set(kept) == {in_tmp, no_command}
+    assert {r["rules"] for r in kept.values()} == {provenance.RULES}
+
+
+@pytest.mark.parametrize("seed", range(12))
+async def test_a_workers_batch_stays_its_whatever_its_pace_also_after_the_upgrade(
+    seed, tmp_path, home
+):
+    """E38 stays fixed: a worker's `copilot -p` calls (a loop of them, or a script's of one
+    template), seconds to ten minutes apart, its command seen to end or not, are the worker's,
+    as 0.1.43 kept them and as decided afresh."""
+    rng = random.Random(seed)  # noqa: S311 (seeded: the same cases every run)
+    loop = rng.random() < 0.5
+    same = not loop or rng.random() < 0.5
+    at, calls = T0, []
+    for n in range(rng.randint(10, 60)):
+        at += rng.uniform(1, 600)
+        prompt = f"{LABEL} {n}" if same else f"Ticket {n} {uuid4()}: label it"
+        calls.append(home.add(prompt_mode(at, prompt), at))
+    store = worker_store(tmp_path, up=(T0 - 900, at + 7200))
+    first = home.metas[0].modified_time.timestamp() - 2
+    started = first - rng.uniform(0, provenance.LEAD - 60)
+    ended = at + rng.uniform(1, 600) if rng.random() < 0.5 else None
+    commanded(store, started, ended, LOOP if loop else "python3 label.py")
+    for session_id, meta in zip(calls, home.metas, strict=True):
+        as_0143(store, home, session_id, meta.modified_time.timestamp() - 2, "command")
+    expected = dict.fromkeys(calls, MADE_BY_WORKER)
+    assert await deciding(store, home).made(home.metas, {}) == expected, "kept by 0.1.43"
+    store.execute("DELETE FROM kv WHERE key LIKE 'made:%'")
+    assert await deciding(store, home).made(home.metas, {}) == expected, "decided afresh"
+
+
+async def test_a_workers_command_in_the_owners_folder_takes_none_of_their_few_alike(tmp_path, home):
+    """Review: w1 works in the owner's project (/w: a shared checkout, or a session adopted
+    from a terminal) and runs `npm test` for six minutes; the owner asks six alike questions
+    there, 90 seconds apart: theirs, not the worker's by the time and the folder alone. Nor
+    twelve, minutes apart, while it runs a dev server there."""
+    store = worker_store(tmp_path, cwd="/w")
+    commanded(store, T0 - 30, T0 + 360, "npm test")
+    for n in range(6):
+        home.add(prompt_mode(T0 + n * 90, f"{REVIEW}pull/{n}", "/w"), T0 + n * 90, cwd="/w")
+    assert await deciding(store, home).made(home.metas, {}) == {}
+    commanded(store, T0 + 3600, None, "npm run dev")
+    for n in range(12):
+        at = T0 + 3700 + n * 300
+        home.add(prompt_mode(at, f"{REVIEW}pull/{n + 6}", "/w"), at, cwd="/w")
+    assert await deciding(store, home).made(home.metas, {}) == {}
 
 
 # The sidebar, the Router and learning, alike
@@ -1254,7 +1426,7 @@ def tidying(tmp_path, home, monkeypatch):
         "VALUES (?,?,?,?,?)",
         ("w1", "c1", "python3 label.py", stored(T0 - 30), stored(T0 + 600)),
     )
-    worker = home.batch(5)
+    worker = home.batch(10)
     translate = "Translate the text below into French. Keep its tone and its length. Text"
     script = [
         home.add(
@@ -1325,21 +1497,21 @@ async def test_tidy_sessions_shows_what_it_would_move_and_changes_nothing(tidyin
         database.chmod(0o600)
     said = capsys.readouterr().out
     assert snapshot(home.root) == before and snapshot(tidying.data) == data, "nothing changed"
-    assert unlearned_refs(tidying.data) == unlearned and len(unlearned) == 16
+    assert unlearned_refs(tidying.data) == unlearned and len(unlearned) == 21
     with sqlite3.connect(tidying.data / "chiefofstaff.db") as db:
         assert db.execute("SELECT count(*) FROM kv WHERE key LIKE 'made:%'").fetchone() == (0,)
-    assert "5 sessions a Chief of Staff worker made (“Label the support tickets”)" in said
+    assert "10 sessions a Chief of Staff worker made (“Label the support tickets”)" in said
     assert "10 sessions of a script's batch (one-shot, alike)" in said
     assert "e.g. “Translate into French 0”" in said and ", in /private/tmp\n" in said
     assert said.count(f"e.g. “{LABEL[:71]}…”") == 1, "a batch's start the same: shown once"
-    assert "15 prompts of theirs, read as yours and not learned from yet, would be dropped" in said
+    assert "20 prompts of theirs, read as yours and not learned from yet, would be dropped" in said
     assert "How you write, Answers and reports to you (version 1): 1 of its 1 example" in said
     # E49: a few alike, the owner's maybe: named, never moved.
     alike = said[said.index("Alike, fewer than 10") :].split("\n\n")[0].splitlines()
     assert alike[0].startswith("Alike, fewer than 10 (a script's maybe, maybe yours: still listed")
     assert alike[1].startswith("  6 sessions one-shot, alike, ")
     assert alike[2].endswith(", in /w/app") and alike[3] == "    e.g. “Review pull request 0”"
-    assert "Nothing was changed. To move 15 sessions" in said
+    assert "Nothing was changed. To move 20 sessions" in said
     assert "chiefofstaff tidy-sessions --apply" in said
     assert tidying.mine not in said and LABEL[:30] in said
 
@@ -1356,7 +1528,7 @@ async def test_tidy_sessions_moves_them_where_they_can_be_had_again(tidying, cap
     said = capsys.readouterr().out
     state = home.root / "session-state"
     moved = list((home.root / tidy.MOVED).iterdir())
-    assert len(moved) == 1 and "Moved 13 sessions" in said and str(moved[0]) in said
+    assert len(moved) == 1 and "Moved 18 sessions" in said and str(moved[0]) in said
     manifest = json.loads((moved[0] / "manifest.json").read_text())
     entries = {entry["id"]: entry for entry in manifest["sessions"]}
     assert set(entries) == {*tidying.worker, *tidying.script[2:]}
@@ -1373,7 +1545,7 @@ async def test_tidy_sessions_moves_them_where_they_can_be_had_again(tidying, cap
     assert "Left where they are: 1 session open now, 1 session changed in the last hour." in said
     # Their prompts not learned from yet are dropped; the owner's and what was learned stay.
     assert unlearned_refs(tidying.data) == {f"copilot:{tidying.mine}:e1"}
-    assert "Dropped 15 prompts of theirs not learned from yet." in said
+    assert "Dropped 20 prompts of theirs not learned from yet." in said
     with sqlite3.connect(tidying.data / "chiefofstaff.db") as db:
         assert db.execute("SELECT count(*) FROM observations WHERE learned=1").fetchone() == (1,)
         assert db.execute("SELECT status FROM style_versions").fetchone() == ("active",)
@@ -1435,7 +1607,7 @@ async def test_tidy_sessions_works_with_the_data_of_an_older_chief_of_staff(tidy
     said = capsys.readouterr().out
     assert "10 sessions of a script's batch" in said and "prompt" not in said
     assert await tidy.run(tidying.data, apply=True, backend=Listing(tidying.home)) == 0
-    assert "Moved 15 sessions" in capsys.readouterr().out
+    assert "Moved 20 sessions" in capsys.readouterr().out
 
 
 def test_tidy_sessions_moves_nothing_from_a_copilot_sessions_shell(tidying, monkeypatch, capsys):

@@ -209,9 +209,12 @@ continue and are not listed, unless you continued one in a terminal. Nor are one
 `copilot -p` sessions (one prompt, then done) that a script made in a batch (ten or more that
 start with the same words, each within two minutes of the one before, or any named
 `batch: …` with `copilot -p --name`, even while it runs) or that a worker made while it ran a
-command, for two hours at most: in its own folder, or where the command ran or in a temporary
-folder (`/tmp`, `$TMPDIR`) when the command runs `copilot -p` or the sessions are a batch it
-started (five or more alike). Nothing in a session's files tells `copilot -p` from a question
+command (as long as it ran; one whose end was not seen, two hours and on while its sessions
+keep coming): in its own folder, or where the command ran or in a temporary folder (`/tmp`,
+`$TMPDIR`) when the command runs `copilot -p` or the sessions are a batch it started (ten or
+more alike; in a temporary folder or its own, minutes apart too). A command that does not run
+`copilot -p` never makes your few alike questions a worker's, even in your own project folder
+the worker works in. Nothing in a session's files tells `copilot -p` from a question
 you asked in a terminal and left, so a few alike (from five to nine) stay listed as yours:
 `chiefofstaff tidy-sessions` names them. A single `copilot -p` you run yourself is listed, as is
 every session you typed more than one message in, resumed, or have open (unless it is named
