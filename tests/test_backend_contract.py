@@ -2161,3 +2161,68 @@ async def test_an_mcp_servers_form_reaches_the_owner_and_back(backend, tmp_path)
     (done,) = [e.data for e in turn.events if e.type.value == "tool.execution_complete"]
     assert "accept" in done.result.content and "red" in done.result.content
     assert [c["elicitationSource"] for c in asked] == ["asker"]
+
+
+async def test_an_owners_codex_thread_is_listed_and_continued_in_a_thread_of_chief_of_staffs(
+    tmp_path, monkeypatch
+):
+    """Adopting the owner's own Codex thread (Workers.adopt): thread/list gives the owner's
+    threads (made by their Codex, not Chief of Staff's), open while their Codex writes it (its
+    writer lock); thread/turns/list reads its conversation without opening it; a thread of Chief
+    of Staff's given it (thread/inject_items, a developer note first) answers from it."""
+    if not REAL_CODEX:
+        pytest.skip("Set CHIEFOFSTAFF_TEST_CODEX=1 to check it on real Codex.")
+    from chiefofstaff import backend_codex
+
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    model = scripted_model.Model()
+    codex = shutil.which("codex") or "codex"
+    owners = CodexBackend(codex)
+    owners.arguments += model.arguments(tmp_path)
+    owners.needs_sign_in = False
+    owners.created = []
+    agent = CodexAgent(codex, tmp_path / "agents" / "codex")
+    agent.arguments = model.arguments(tmp_path)
+    agent.needs_sign_in = False
+    try:
+        with monkeypatch.context() as named:
+            named.setattr(backend_codex, "CLIENT_NAME", "codex_vscode")  # The owner's editor.
+            await owners.start()
+        thread, turn = await open_session(owners, tmp_path)
+        await thread.send("Remember the word 'teal'. Then reply with just: ok")
+        await turn.wait()
+        await agent.start()
+        listed = await agent.list_sessions()
+        assert [(m.session_id, m.open) for m in listed] == [(thread.session_id, True)]
+        assert listed[0].context.working_directory == str(tmp_path)
+        events, _, _ = await agent.read_history(thread.session_id, 0)
+        assert [(e["type"], e["data"]["content"]) for e in events] == [
+            ("user.message", "Remember the word 'teal'. Then reply with just: ok"),
+            ("assistant.message", "ok"),
+        ]
+        await owners.stop()  # Closed in their editor.
+        assert [(m.session_id, m.open) for m in await agent.list_sessions()] == [
+            (thread.session_id, False)
+        ]
+        ours = await agent.create_session(
+            session_id=str(uuid4()),
+            name="",
+            working_directory=str(tmp_path),
+            worker="w1",
+            continues=thread.session_id,
+            on_permission_request=lambda request, inv: PermissionDecisionApproveOnce(),
+        )
+        answered = Turn(ours)
+        await ours.send("What word did I ask you to remember?")
+        await answered.wait()
+        assert answered.said() == "teal"
+        assert [m.session_id for m in await agent.list_sessions()] == [thread.session_id], (
+            "never one of Chief of Staff's"
+        )
+        await agent.archive(ours.session_id)
+    finally:
+        await agent.stop()
+        await owners.stop()
+        model.close()

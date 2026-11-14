@@ -1050,7 +1050,11 @@ async def test_each_agent_continues_in_a_terminal_with_its_own_command_and_is_se
 
     assert agents.resume_command("copilot", "abc", "/w") == "copilot --resume abc"
     assert agents.resume_command("codex", "019a-thread", "/w") == "codex resume 019a-thread"
-    assert agents.resume_command("claude", "id-1", "/my w") == "cd '/my w' && claude --resume id-1"
+    # Claude refuses a worker's own id (32 hex digits, "not a UUID"): it is given as Claude has it.
+    assert (
+        agents.resume_command("claude", "0123456789abcdef0123456789abcdef", "/my w")
+        == "cd '/my w' && claude --resume 01234567-89ab-cdef-0123-456789abcdef"
+    )
     fake = tmp_path / "codex"
     fake.write_text("#!/bin/sh\nsleep 30\n")
     fake.chmod(0o755)

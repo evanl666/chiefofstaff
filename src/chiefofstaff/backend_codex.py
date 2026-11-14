@@ -48,6 +48,7 @@ import time
 import unicodedata
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from datetime import UTC, datetime
 from pathlib import Path
 from stat import S_ISDIR, S_ISREG
 from types import SimpleNamespace
@@ -142,7 +143,8 @@ CODEX_SENDS: dict[str, tuple[str, ...]] = {
         "excludeTurns",
     ),
     "thread/read": ("threadId",),
-    "thread/turns/list": ("threadId", "itemsView", "limit", "sortDirection"),
+    "thread/list": ("limit",),
+    "thread/turns/list": ("threadId", "itemsView", "limit", "sortDirection", "cursor"),
     "thread/name/set": ("threadId", "name"),
     "thread/inject_items": ("threadId", "items"),
     "thread/archive": ("threadId",),
@@ -191,6 +193,10 @@ QUIET_ITEMS = frozenset({"reasoning", "plan", "hookPrompt", "contextCompaction",
 # How the adapter's own notes (why Chief of Staff refused an action) begin: not messages it was
 # sent.
 REFUSED_NOTE = '<message from="system" type="refused">'
+# How Chief of Staff names itself to Codex: each thread it makes says so (its `originator`).
+CLIENT_NAME = "chiefofstaff"
+# How long a process kept for reading the owner's own threads stays after its last use.
+READER_SECONDS = 60.0
 # A server that is GitHub's (its name, command or URL): its writes are the owner's to approve.
 GITHUB = re.compile(r"github", re.IGNORECASE)
 # Codex's own server for ChatGPT's apps (connectors): their calls take approval from Codex's
@@ -285,6 +291,62 @@ WITHOUT_ASK_USER = {
     "- Ask the owner directly with ask_user when only they can answer or act": "- Ask the owner "
     'with report(status="question") when only they can answer or act',
 }
+
+
+def iso(seconds: Any) -> dict:
+    """A turn's time (Unix seconds) as an event's timestamp, when it has one."""
+    if not isinstance(seconds, int | float) or seconds <= 0:
+        return {}
+    return {"timestamp": datetime.fromtimestamp(seconds, tz=UTC).isoformat()}
+
+
+def codex_home() -> Path:
+    """Codex's own folder for the owner (its CODEX_HOME, else ~/.codex)."""
+    given = os.environ.get("CODEX_HOME")
+    return Path(given).expanduser() if given else Path.home() / ".codex"
+
+
+def writer_lock(thread: str) -> Path:
+    """The file Codex locks while a process writes a thread (0.167.2: one writer at a time;
+    removed as that process lets go of it)."""
+    return codex_home() / "thread-writer-locks" / f"{Path(thread).name}.lock"
+
+
+# What of an earlier conversation a thread that continues it is given (thread/inject_items),
+# the latest first: its messages, up to this many characters.
+CONTINUED_CHARACTERS = 200_000
+
+
+def continued_items(thread: str, turns: list[dict]) -> list[dict]:
+    """A thread's conversation as Responses items for the thread that continues it: a line
+    saying what it is, then what the owner said and what Codex answered (its commands and edits
+    are not repeated: the folder shows what they did)."""
+    said: list[dict] = []
+    room = CONTINUED_CHARACTERS
+    for turn in reversed(turns):
+        for item in reversed(mapping(turn).get("items") or []):
+            item = mapping(item)
+            if item.get("type") == "userMessage":
+                text, role, kind = text_of(item.get("content")), "user", "input_text"
+            elif item.get("type") == "agentMessage":
+                text, role, kind = str(item.get("text") or ""), "assistant", "output_text"
+            else:
+                continue
+            if not text or text.startswith(REFUSED_NOTE) or len(text) > room:
+                continue
+            room -= len(text)
+            said.append(
+                {"type": "message", "role": role, "content": [{"type": kind, "text": text}]}
+            )
+    note = (
+        f"What follows is the owner's conversation in their own Codex thread {thread}, which "
+        "Chief of Staff now continues here: your commands and edits then are not repeated; the "
+        "folder shows what they did."
+    )
+    return [
+        {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": note}]},
+        *said[::-1],
+    ]
 
 
 def text_of(content: Any) -> str:
@@ -830,7 +892,7 @@ class CodexBackend:
                 "initialize",
                 {
                     "clientInfo": {
-                        "name": "chiefofstaff",
+                        "name": CLIENT_NAME,
                         "title": "Chief of Staff",
                         "version": client_version(),
                     },
@@ -1208,6 +1270,27 @@ class CodexBackend:
         thread = answer.get("thread") or {}
         return SimpleNamespace(session_id=thread.get("id", session_id), cwd=thread.get("cwd"))
 
+    async def latest_turns(self, thread: str, pages: int = 5) -> list[dict]:
+        """A thread's latest turns (up to `pages` of 20), the earliest first, each with its
+        items: read, whichever process writes it."""
+        turns: list[dict] = []
+        cursor = None
+        for _ in range(pages):
+            answer = await self.request(
+                "thread/turns/list",
+                {
+                    "threadId": thread,
+                    "itemsView": "full",
+                    "sortDirection": "desc",
+                    "limit": 20,
+                    **({"cursor": cursor} if cursor else {}),
+                },
+            )
+            turns += [mapping(turn) for turn in answer.get("data") or []]
+            if not (cursor := answer.get("nextCursor")):
+                break
+        return turns[::-1]
+
     async def create_session(self, *, session_id: str, name: str, **options: Any) -> CodexSession:
         params = await self.thread_params(options)
         params["dynamicTools"] = [
@@ -1228,6 +1311,8 @@ class CodexBackend:
             if callable(made := options.get("on_asks_owner")):
                 made()  # Its thread has ask_user: so has its next resume's prompt.
             session.docs_given = ""  # A new thread: nothing given to it yet.
+            if continues := options.get("continues"):
+                await self.continue_from(session, continues)
             await session.give_docs()
         except RuntimeError:
             if thread := (answer.get("thread") or {}).get("id"):
@@ -1240,6 +1325,18 @@ class CodexBackend:
                     "thread/name/set", {"threadId": session.session_id, "name": name}
                 )
         return session
+
+    async def continue_from(self, session: CodexSession, thread: str):
+        """A thread of the owner's that Chief of Staff took over (Workers.adopt): its
+        conversation, into the new thread made for it (Codex keeps a thread's tools, Chief of
+        Staff's among them, from its start; the owner's own thread is read, never written)."""
+        try:
+            items = continued_items(thread, await self.latest_turns(thread))
+            await self.request(
+                "thread/inject_items", {"threadId": session.session_id, "items": items}
+            )
+        except CodexError as exc:
+            raise RuntimeError(f"Codex could not read the thread to continue: {exc}") from exc
 
     async def resume_session(self, session_id: str, **options: Any) -> CodexSession:
         params = await self.thread_params(options)
@@ -1724,6 +1821,10 @@ class CodexAgent:
         # Whether the owner's own Codex has its memories on (as its last thread read it): then
         # a worker's header says they are off for it (thread_config).
         self.owner_memories = False
+        # A process for reading the owner's own threads while no worker's runs (reading).
+        self.reader: CodexBackend | None = None
+        self.reader_lock = asyncio.Lock()
+        self.reader_timer: asyncio.TimerHandle | None = None
 
     def notes_for(self, ask_first: bool) -> list[str]:
         """What a worker of it does differently from a Copilot worker, a short line each."""
@@ -1757,6 +1858,11 @@ class CodexAgent:
 
     async def stop(self) -> None:
         self.running = False
+        if self.reader_timer:
+            self.reader_timer.cancel()
+        if self.reader is not None:
+            self.retired.add(self.reader)
+            self.reader = self.reader_timer = None
         workers, self.workers = [*self.workers.values(), *self.retired], {}
         self.retired = set()
         await asyncio.gather(*(process.stop() for process in workers), return_exceptions=True)
@@ -1886,7 +1992,88 @@ class CodexAgent:
         return await self.any_process(lambda process: process.list_models())
 
     async def list_sessions(self) -> list[Any]:
-        return []
+        """The owner's own Codex threads, the latest first, for Chief of Staff to adopt: those
+        made in Codex's terminal or editor (thread/list's default: its interactive ones), never
+        a thread of Chief of Staff's (any instance's: made by it, `chiefofstaff`); each `open`
+        while a Codex process writes it (its writer lock)."""
+        answer = await self.reading(lambda process: process.request("thread/list", {"limit": 80}))
+        found = []
+        for thread in mapping(answer).get("data") or []:
+            thread = mapping(thread)
+            thread_id = str(thread.get("id") or "")
+            if not thread_id or thread.get("originator") == CLIENT_NAME:
+                continue
+            git = mapping(thread.get("gitInfo"))
+            context = SimpleNamespace(
+                working_directory=str(thread.get("cwd") or ""), repository="",
+                branch=str(git.get("branch") or ""),
+            )  # fmt: skip
+            found.append(
+                SimpleNamespace(
+                    session_id=thread_id,
+                    summary=str(thread.get("name") or thread.get("preview") or "")[:200],
+                    modified_time=datetime.fromtimestamp(thread.get("updatedAt") or 0, tz=UTC),
+                    context=context,
+                    open=writer_lock(thread_id).exists(),
+                )
+            )
+        return found[:40]
+
+    async def read_history(self, session_id: str, offset: int) -> tuple[list[dict], int, float]:
+        """A thread's conversation after `offset` events (its latest turns, as thread/turns/list
+        gives them: read, never resumed, so a process of the owner's may write it meanwhile)."""
+        try:
+            turns = await self.reading(lambda process: process.latest_turns(session_id))
+        except Exception:
+            return [], offset, 0.0
+        events: list[dict] = []
+        for turn in turns:
+            turn = mapping(turn)
+            began, ended = turn.get("startedAt"), turn.get("completedAt") or turn.get("startedAt")
+            for item in turn.get("items") or []:
+                item = mapping(item)
+                text = text_of(item.get("content"))
+                if item.get("type") == "userMessage" and text and not text.startswith(REFUSED_NOTE):
+                    events.append({"type": "user.message", "data": {"content": text}, **iso(began)})
+                elif item.get("type") == "agentMessage" and item.get("text"):
+                    events.append(
+                        {"type": "assistant.message", "data": {"content": item["text"]},
+                         **iso(ended)}
+                    )  # fmt: skip
+        changed = max((mapping(turn).get("completedAt") or 0 for turn in turns), default=0)
+        return events[offset:], len(events), float(changed or 0)
+
+    async def open_now(self, session_id: str) -> bool:
+        """Whether a process of Codex's writes this thread now (its writer lock is there)."""
+        return writer_lock(session_id).exists()
+
+    async def reading(self, call: Callable[[CodexBackend], Awaitable[Any]]) -> Any:
+        """What any process can read (the owner's threads): a worker's running one, else one
+        kept for this, ended READER_SECONDS after its last use (the list and a thread shown are
+        read again while the owner looks)."""
+        for process in list(self.workers.values()):
+            if process.alive() and not process.stopping:
+                return await call(process)
+        async with self.reader_lock:
+            if self.reader is None or not self.reader.alive():
+                if not self.running:
+                    raise RuntimeError("Codex is not running for Chief of Staff.")
+                self.reader = self.process()
+                await self.reader.start()
+            reader = self.reader
+            if self.reader_timer:
+                self.reader_timer.cancel()
+            self.reader_timer = asyncio.get_running_loop().call_later(
+                READER_SECONDS, self.end_reader
+            )
+        return await call(reader)
+
+    def end_reader(self):
+        reader, self.reader, self.reader_timer = self.reader, None, None
+        if reader is not None:
+            self.retired.add(reader)
+            task = asyncio.ensure_future(reader.stop())
+            task.add_done_callback(lambda _: self.retired.discard(reader))
 
     async def get_session_metadata(self, session_id: str) -> Any:
         return await self.any_process(lambda process: process.get_session_metadata(session_id))
@@ -1927,9 +2114,6 @@ class CodexAgent:
         """Its workers' threads the owner resumed in a terminal (`codex resume <id>`)."""
         ours = set(await asyncio.to_thread(self.processes))
         return await asyncio.to_thread(resumed_elsewhere, "codex", ours)
-
-    async def read_history(self, session_id: str, offset: int) -> tuple[list[dict], int, float]:
-        return [], offset, 0.0
 
     async def read_usage(self, session_id: str, offset: int) -> tuple[list[dict], int]:
         return [], offset
@@ -2287,23 +2471,8 @@ class CodexSession:
 
     async def get_events(self) -> list[Any]:
         """Its conversation (the latest turns): what it received and what it said."""
-        turns, cursor = [], None
-        for _ in range(5):
-            answer = await self.backend.request(
-                "thread/turns/list",
-                {
-                    "threadId": self.session_id,
-                    "itemsView": "full",
-                    "sortDirection": "desc",
-                    "limit": 20,
-                    **({"cursor": cursor} if cursor else {}),
-                },
-            )
-            turns += answer.get("data") or []
-            if not (cursor := answer.get("nextCursor")):
-                break
         found = []
-        for turn in reversed(turns):
+        for turn in await self.backend.latest_turns(self.session_id):
             for item in turn.get("items") or []:
                 text = text_of(item.get("content"))
                 ours = str(item.get("clientId") or "").startswith("cos-")

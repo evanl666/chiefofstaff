@@ -17,6 +17,7 @@ turns come from that stand-in Messages API, as Claude Code's would.
 """
 
 import asyncio
+import atexit
 import contextlib
 import json
 import os
@@ -129,6 +130,7 @@ class Fake:
             },
         )
         self.state = self.load() if flags.get("resume") else self.fresh()
+        self.announce()
         self.prompts: asyncio.Queue = asyncio.Queue()
         self.steering: list[dict] = []
         self.turning = False
@@ -152,6 +154,18 @@ class Fake:
             sys.exit(1)
         return {"memory": "", "totals": {}, "transcript": [], "cwd": self.cwd}
 
+    def announce(self):
+        """As Claude 2.1.x: `sessions/<pid>.json` in its configuration folder while it runs (an
+        SDK's process says so: entrypoint sdk-py), gone as it ends."""
+        given = os.environ.get("CLAUDE_CONFIG_DIR")
+        folder = (Path(given) if given else Path.home() / ".claude") / "sessions"
+        folder.mkdir(parents=True, exist_ok=True)
+        live = folder / f"{os.getpid()}.json"
+        said = {"pid": os.getpid(), "sessionId": self.session_id, "cwd": self.cwd}
+        said |= {"kind": "interactive", "entrypoint": "sdk-py", "status": "idle"}
+        live.write_text(json.dumps(said))
+        atexit.register(lambda: live.unlink(missing_ok=True))
+
     def load(self) -> dict:
         try:
             return json.loads((HOME / "sessions" / f"{self.session_id}.json").read_text())
@@ -173,6 +187,7 @@ class Fake:
                 line = {
                     **entry,
                     "parentUuid": parent,
+                    "entrypoint": "sdk-py",
                     "sessionId": self.session_id,
                     "cwd": self.cwd,
                 }

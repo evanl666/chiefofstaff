@@ -65,7 +65,7 @@ class Server:
     def write_lock(self, thread_id: str):
         """As Codex: one process writes a thread at a time, from loading it until it ends (a
         lock of another live process refuses the load)."""
-        lock = HOME / "writers" / thread_id
+        lock = writer_lock(thread_id)
         try:
             holder = int(lock.read_text())
         except (OSError, ValueError):
@@ -82,7 +82,7 @@ class Server:
 
     def release_locks(self):
         for thread_id in self.loaded:
-            lock = HOME / "writers" / thread_id
+            lock = writer_lock(thread_id)
             with contextlib.suppress(OSError, ValueError):
                 if int(lock.read_text()) == os.getpid():
                     lock.unlink()
@@ -171,6 +171,7 @@ class Server:
 
     async def on_initialize(self, params):
         name = params.get("clientInfo", {}).get("name", "client")
+        self.originator = name
         self.experimental = bool((params.get("capabilities") or {}).get("experimentalApi"))
         return {
             "userAgent": f"{name}/{VERSION} (fake)",
@@ -306,6 +307,7 @@ class Server:
             "instructions": params.get("developerInstructions") or "",
             "turns": [],
             "memory": "",
+            "originator": getattr(self, "originator", "client"),
         }
         self.save()
         self.write_lock(thread_id)
@@ -361,9 +363,17 @@ class Server:
         if not params.get("items"):
             raise RuntimeError("items must not be empty")
         for index, item in enumerate(params["items"]):
-            if item.get("type") != "message" or item.get("role") not in {"user", "developer"}:
+            if item.get("type") != "message" or item.get("role") not in {
+                "user",
+                "developer",
+                "assistant",
+            }:
                 raise RuntimeError(f"items[{index}] is not a valid response item")
         self.threads[thread_id].setdefault("injected", []).extend(params["items"])
+        for item in params["items"]:  # What the model is given: as said in the conversation.
+            for part in item.get("content") or []:
+                if found := re.search(r"Remember the word '(\w+)'", part.get("text") or ""):
+                    self.threads[thread_id]["memory"] = found.group(1)
         self.save()
         return {}
 
@@ -376,7 +386,32 @@ class Server:
         self.loaded.pop(params["threadId"], None)
         return {"status": "unsubscribed"}
 
+    async def on_thread_list(self, params):
+        """Its threads, the latest first (as Codex: the interactive ones, which here are all)."""
+        found = sorted(
+            self.threads.items(), key=lambda pair: pair[1].get("updated") or pair[1]["created"]
+        )[::-1][: params.get("limit") or 25]
+        return {
+            "data": [
+                self.view(thread_id)
+                | {
+                    "originator": thread.get("originator", "codex-tui"),
+                    "name": thread.get("name"),
+                    "preview": thread.get("preview", ""),
+                    "updatedAt": thread.get("updated") or thread["created"],
+                    "gitInfo": {"branch": thread.get("branch"), "sha": None, "originUrl": None},
+                }
+                for thread_id, thread in found
+            ],
+            "nextCursor": None,
+        }
+
     async def on_thread_turns_list(self, params):
+        # One this process does not have open: as written by whichever wrote it last.
+        if params["threadId"] not in self.loaded and (
+            stored := self.load().get(params["threadId"])
+        ):
+            self.threads[params["threadId"]] = stored
         thread = self.threads.get(params["threadId"])
         if thread is None:
             raise RuntimeError("no rollout found")
@@ -1122,6 +1157,11 @@ def subagents_off(config: dict) -> bool:
     `features.multi_agent` false (and v2 off)."""
     agents = config.get("agents") if isinstance(config.get("agents"), dict) else {}
     return agents.get("enabled") is False or config.get("features.multi_agent") is False
+
+
+def writer_lock(thread_id: str) -> Path:
+    """Where Codex 0.167.2 keeps a thread's writer lock: CODEX_HOME's thread-writer-locks."""
+    return HOME / "thread-writer-locks" / f"{thread_id}.lock"
 
 
 def in_use() -> list[str]:

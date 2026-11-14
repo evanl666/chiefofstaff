@@ -2368,7 +2368,7 @@ class Tools:
         reference = params.session_id
         found = [
             item
-            for item in await self.runtime.workers.external(refresh=True)
+            for item in await self.runtime.workers.external(refresh=True, agents_too=True)
             if item["id"] == reference or (len(reference) >= 6 and item["id"].startswith(reference))
         ]
         if len(found) != 1:
@@ -2543,7 +2543,7 @@ class Tools:
     async def read_terminal_session(self, params: ReadSession) -> dict:
         found = [
             item
-            for item in await self.runtime.workers.external()
+            for item in await self.runtime.workers.external(agents_too=True)
             if item["id"] == params.session_id
             or (len(params.session_id) >= 6 and item["id"].startswith(params.session_id))
         ]
@@ -2555,6 +2555,7 @@ class Tools:
             "session_id": found[0]["id"],
             "title": found[0]["summary"],
             "cwd": found[0]["cwd"],
+            **({"agent": found[0]["agent"]} if found[0].get("agent") else {}),
             "open_in_terminal": history["open"],
             "working": history["working"],
             "latest": entries[-params.items :],
@@ -2563,7 +2564,7 @@ class Tools:
     async def terminal_sessions(self) -> list[dict]:
         """The owner's own Copilot sessions open in a terminal now."""
         try:
-            listed = await self.runtime.workers.external()
+            listed = await self.runtime.workers.external(agents_too=True)
         except Exception:
             return []
         return [
@@ -2572,6 +2573,7 @@ class Tools:
                 "title": item["summary"],
                 "cwd": item["cwd"],
                 "last_active": item["modified"],
+                **({"agent": item["agent"]} if item.get("agent") else {}),
             }
             for item in listed
             if item["open"]
