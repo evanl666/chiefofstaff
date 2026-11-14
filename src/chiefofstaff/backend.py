@@ -863,6 +863,49 @@ def data_identity(directory: Path) -> dict:
     return {"path": str(real), "device": info.st_dev, "inode": info.st_ino}
 
 
+# What an agent's model takes as an image (the owner's attachments are these: Runtime
+# .save_attachments); any other file attached reaches it as a marked line with its path.
+IMAGE_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
+# The first line of what Chief of Staff adds to a message for the files attached to it (another
+# agent's adapter leaves it out of the message as shown: it is not the message's text).
+ATTACHED = "Attached to this message (files to read, by path):"
+
+
+def attachment_paths(attachments: list[Any] | None) -> list[tuple[str, str]]:
+    """Each attachment's path and name (a session's send: {"type": "file", "path", ...})."""
+    found = []
+    for attachment in attachments or []:
+        if isinstance(attachment, dict) and isinstance(attachment.get("path"), str):
+            path = attachment["path"]
+            found.append((path, str(attachment.get("displayName") or Path(path).name)))
+    return found
+
+
+def image_type(path: str) -> str:
+    """The image type an agent's model takes this file as ("" for another file)."""
+    return IMAGE_TYPES.get(Path(path).suffix.lower(), "")
+
+
+def attached_text(files: list[tuple[str, str]], unreadable: bool = False) -> str:
+    """The marked lines for files attached to a message, each by path (and its name when that
+    differs), every tag escaped."""
+    from .envelope import inert
+
+    lines = [ATTACHED]
+    for path, name in files:
+        named = f" ({inert(name)})" if name and name != Path(path).name else ""
+        lines.append(f"- {inert(path)}{named}")
+    if unreadable:
+        lines.append("(Some could not be read as images: open them by path.)")
+    return "\n".join(lines)
+
+
 def isolated(module: str, *arguments: str) -> list[str]:
     """How Chief of Staff runs a module of its own as a program (another agent's supervisor,
     agentrun; a check's MCP server): this Python, isolated (-I), so that the folder it starts in

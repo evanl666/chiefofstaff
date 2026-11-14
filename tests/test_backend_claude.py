@@ -1083,9 +1083,19 @@ async def test_an_image_goes_with_the_message(agent, tmp_path):
     await turn.ended()
     (shown,) = turn.of("user.message")
     assert shown.content == "Reply with just: seen" and turn.said() == ["seen"]
-    sent = session.backend.content("x", attachments)
-    assert [block["type"] for block in sent] == ["text", "image"]
-    assert sent[1]["source"]["media_type"] == "image/png"
+    # Every file reaches it: the image as an image, the others (one not readable as an image)
+    # as a marked line each, which its gate reads too and its echo leaves out.
+    sent, text = session.backend.content("x", attachments)
+    assert [block["type"] for block in sent] == ["text", "text", "image"]
+    assert sent[2]["source"]["media_type"] == "image/png"
+    lines = sent[1]["text"].splitlines()
+    assert lines[0] == backend_claude.ATTACHED
+    assert lines[1:3] == [f"- {tmp_path / 'missing.png'}", f"- {tmp_path / 'notes.txt'}"]
+    assert (
+        lines[3].startswith("(Some could not be read as images") and text == f"x\n{sent[1]['text']}"
+    )
+    assert [e.data.content for e in await session.get_events()][:1] == ["Reply with just: seen"]
+    assert session.backend.content("plain", []) == ("plain", "plain")
 
 
 async def test_a_worker_whose_settings_changed_ends_once_at_rest(agent, tmp_path):
