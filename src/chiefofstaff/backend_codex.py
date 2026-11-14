@@ -58,7 +58,17 @@ from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecis
 from copilot.tools import ToolInvocation
 
 from . import codex_check
-from .backend import Capabilities, descendants, end_processes, isolated, process_table
+from .backend import (
+    ATTACHED,
+    Capabilities,
+    attached_text,
+    attachment_paths,
+    descendants,
+    end_processes,
+    image_type,
+    isolated,
+    process_table,
+)
 from .envelope import inert, wrap
 from .policy import GITHUB_MCP
 
@@ -241,13 +251,16 @@ def mapping(value: Any) -> dict:
 
 
 def text_of(content: Any) -> str:
-    """The text of a message's input items (images and mentions left out)."""
+    """The text of a message's input items (images, mentions and the lines naming files
+    attached to it left out)."""
     if not isinstance(content, list):
         return ""
     return "\n".join(
         str(part.get("text") or "")
         for part in content
-        if isinstance(part, dict) and part.get("type") == "text"
+        if isinstance(part, dict)
+        and part.get("type") == "text"
+        and not str(part.get("text") or "").startswith(ATTACHED)
     )
 
 
@@ -2071,11 +2084,17 @@ class CodexSession:
     ) -> str:
         if self.closed or not self.backend.alive():
             raise ConnectionResetError("This Codex session is disconnected.")
-        items = [{"type": "text", "text": prompt}]
-        for attachment in attachments or []:
-            path = attachment.get("path") if isinstance(attachment, dict) else None
-            if path:
+        # Images as Codex takes them; any other file as a marked line with its path (text_of
+        # leaves it out of the message as shown).
+        items: list[dict] = [{"type": "text", "text": prompt}]
+        others = []
+        for path, name in attachment_paths(attachments):
+            if image_type(path):
                 items.append({"type": "localImage", "path": path})
+            else:
+                others.append((path, name))
+        if others:
+            items.append({"type": "text", "text": attached_text(others)})
         sent = f"cos-{uuid4().hex[:12]}"
         if self.turn or self.starting:
             if mode == "immediate" and self.turn and await self.steer(items, sent):

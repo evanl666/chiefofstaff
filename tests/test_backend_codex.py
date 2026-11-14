@@ -121,6 +121,35 @@ async def test_a_repositorys_python_files_never_run_as_its_supervisor(tmp_path, 
     assert sorted(path.name for path in marks.iterdir()) == [], "none of them ran"
 
 
+async def test_every_file_attached_reaches_codex(codex, tmp_path):
+    image, notes = tmp_path / "red.png", tmp_path / "notes.txt"
+    image.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+    notes.write_text("kiwi\n")
+    session, turn = await opened(codex, tmp_path)
+    attachments = [
+        {"type": "file", "path": str(image), "displayName": "red.png"},
+        {"type": "file", "path": str(notes), "displayName": "My notes"},
+    ]
+    await session.send("Reply with just: seen", attachments=attachments)
+    await turn.wait()
+    (shown,) = turn.data("user.message")
+    assert shown.content == "Reply with just: seen", "the lines it added are not the message"
+    wire = [
+        json.loads(line) for line in (tmp_path / "fake" / "wire.jsonl").read_text().splitlines()
+    ]
+    (started,) = [
+        e["message"]["params"]["input"]
+        for e in wire
+        if e["from"] == "client" and e["message"].get("method") == "turn/start"
+    ]
+    assert started[:2] == [
+        {"type": "text", "text": "Reply with just: seen"},
+        {"type": "localImage", "path": str(image)},
+    ]
+    assert started[2]["text"] == f"{backend_codex.ATTACHED}\n- {notes} (My notes)"
+    assert [e.data.content for e in await session.get_events()][:1] == ["Reply with just: seen"]
+
+
 async def opened(backend, tmp_path, **options):
     options.setdefault("on_permission_request", approve)
     session = await backend.create_session(

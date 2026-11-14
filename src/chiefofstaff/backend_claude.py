@@ -36,7 +36,6 @@ import hashlib
 import inspect
 import json
 import logging
-import mimetypes
 import os
 import platform
 import re
@@ -56,7 +55,17 @@ from copilot.generated.rpc import PermissionDecisionReject
 from copilot.tools import ToolInvocation
 
 from . import agents
-from .backend import Capabilities, descendants, end_processes, isolated, process_table
+from .backend import (
+    ATTACHED,
+    Capabilities,
+    attached_text,
+    attachment_paths,
+    descendants,
+    end_processes,
+    image_type,
+    isolated,
+    process_table,
+)
 from .machine import kill_process_tree
 from .policy import GITHUB_MCP
 
@@ -417,6 +426,16 @@ def text_of(content: Any) -> str:
     )
 
 
+def owners_text(content: Any) -> str:
+    """A message's text as Chief of Staff wrote it: without the blocks it added (the lines
+    naming files attached to it)."""
+    if isinstance(content, str):
+        return content
+    return text_of(
+        [b for b in content or [] if not str(mapping(b).get("text") or "").startswith(ATTACHED)]
+    )
+
+
 def result_text(content: Any) -> str:
     if isinstance(content, str):
         return content
@@ -721,9 +740,13 @@ class Sent:
     """A message Chief of Staff wrote to a worker's CLI: its text as the gate sees it, the id it
     carries (the echo carries it back), and what became of it."""
 
-    def __init__(self, content: Any, text: str, *, kind: str, probe: bool = False):
+    def __init__(
+        self, content: Any, text: str, *, kind: str, probe: bool = False, shown: str | None = None
+    ):
         self.content = content
         self.text = text
+        # The message as Chief of Staff wrote it (its echo): without the lines it added.
+        self.shown = text if shown is None else shown
         self.uuid = str(uuid.uuid4())
         # "turn": the first of a turn admitted; "steer": into the turn in progress.
         self.kind = kind
@@ -865,7 +888,7 @@ class ClaudeWorker:
         self.wakeups = 0
         # Messages for after the turn (content, the text the gate sees), Chief of Staff's own
         # written and not yet echoed (by id), and those not yet seen at the gate, in order.
-        self.queue: list[tuple[Any, str]] = []
+        self.queue: list[tuple[Any, str, str]] = []
         self.written: dict[str, Sent] = {}
         self.at_gate: list[Sent] = []
         # Tool calls started and not ended: id -> (Claude's name, the subagent call it is in);
@@ -1264,45 +1287,45 @@ class ClaudeWorker:
     # What Chief of Staff sends
 
     async def send(self, prompt: str, *, mode: str, attachments: list[Any] | None) -> str:
-        content = self.content(prompt, attachments)
+        content, text = self.content(prompt, attachments)
         if self.turn or self.starting:
             # Into the turn while one of its tools runs (Claude reads it with that tool's
             # result), where its version's check showed that it does.
             steerable = self.turn and self.running_calls and not self.aborting
             if mode == "immediate" and steerable and self.agent.steers:
-                sent = Sent(content, prompt, kind="steer")
+                sent = Sent(content, text, kind="steer", shown=prompt)
                 sent.steered = True
                 await self.write(sent)
                 return sent.uuid
-            self.queue.append((content, prompt))  # Taken up once its turn ends.
+            self.queue.append((content, text, prompt))  # Taken up once its turn ends.
             return ""
-        sent = await self.start_turn(content, prompt)
+        sent = await self.start_turn(content, text, prompt)
         return sent.uuid
 
-    def content(self, prompt: str, attachments: list[Any] | None) -> Any:
-        images = []
-        for attachment in attachments or []:
-            path = attachment.get("path") if isinstance(attachment, dict) else None
-            kind = mimetypes.guess_type(path or "")[0] or ""
-            if not path or not kind.startswith("image/"):
+    def content(self, prompt: str, attachments: list[Any] | None) -> tuple[Any, str]:
+        """A message as Claude takes it, and its text as Claude's gate reads it (text blocks
+        joined by line). Each file attached reaches it: an image as an image; any other (or an
+        image that cannot be read) as a marked line with its path."""
+        images, others, unreadable = [], [], False
+        for path, name in attachment_paths(attachments):
+            kind = image_type(path)
+            data = b""
+            if kind:
+                try:
+                    data = Path(path).read_bytes()
+                except OSError:
+                    unreadable = True
+            if not data:
+                others.append((path, name))
                 continue
-            try:
-                data = Path(path).read_bytes()
-            except OSError:
-                continue
-            images.append(
-                {
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": kind,
-                        "data": base64.b64encode(data).decode(),
-                    },
-                }
-            )
-        return [{"type": "text", "text": prompt}, *images] if images else prompt
+            source = {"type": "base64", "media_type": kind, "data": base64.b64encode(data).decode()}
+            images.append({"type": "image", "source": source})
+        texts = [prompt, *([attached_text(others, unreadable)] if others else [])]
+        if not images and not others:
+            return prompt, prompt
+        return [*({"type": "text", "text": text} for text in texts), *images], "\n".join(texts)
 
-    async def start_turn(self, content: Any, prompt: str) -> Sent:
+    async def start_turn(self, content: Any, text: str, prompt: str) -> Sent:
         """A turn on this message, once Chief of Staff admits it; refused, it raises why.
         Admitted but not begun, nothing of it spends. Stopped meanwhile (abort: while its
         process restarted, or while it waited to be admitted), it ends at Claude's gate before
@@ -1317,7 +1340,7 @@ class ClaudeWorker:
                 if why := await self.agent.admit_turn(self.handle_for_admission()):
                     admitted = False
                     raise RuntimeError(why)
-            sent = Sent(content, prompt, kind="turn")
+            sent = Sent(content, text, kind="turn", shown=prompt)
             # Written now, nothing awaited since these checks: a Stop after them marks it as
             # written (abort), and a turn admitted before a change that makes this worker
             # ineligible never begins after it.
@@ -1438,7 +1461,7 @@ class ClaudeWorker:
                     mapping(block).get("type") == "tool_result" for block in content
                 ):
                     continue
-                text = text_of(content)
+                text = owners_text(content)
                 if text and text != PROBE and not text.startswith(NOTIFICATION):
                     found.append(event("user.message", content=text))
             elif message.type == "assistant" and (text := text_of(content)):
@@ -1689,7 +1712,7 @@ class ClaudeWorker:
             return  # Not Chief of Staff's (an interrupt's mark, a wakeup's notice): never shown.
         if sent in self.at_gate:
             self.at_gate.remove(sent)
-        self.emit("user.message", content=sent.text, delivery=Taken(sent))
+        self.emit("user.message", content=sent.shown, delivery=Taken(sent))
         if self.unshown:
             self.show_turn()
 
@@ -1868,9 +1891,9 @@ class ClaudeWorker:
         queued is given back (Chief of Staff sends it again)."""
         if not self.queue:
             return False  # Stopped meanwhile.
-        content, prompt = self.queue.pop(0)
+        content, text, prompt = self.queue.pop(0)
         try:
-            await self.start_turn(content, prompt)
+            await self.start_turn(content, text, prompt)
         except Exception as exc:
             logger.info("%s's next turn did not start: %s", self.worker, exc)
             self.queue.clear()
