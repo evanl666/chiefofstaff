@@ -889,6 +889,8 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
 .toast.error::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 8px; border-radius: 50%; background: var(--red); vertical-align: 1px; }
 /* What needs the owner (a question, a card to approve, the Router's urgent note). */
 .toast.attention::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 8px; border-radius: 50%; background: var(--badge); vertical-align: 1px; }
+/* Its one action (Undo): a link in the toast's own colors. */
+.toast .toast-action { margin-left: 12px; min-height: 0; padding: 0; background: none; color: inherit; font: inherit; font-weight: 600; text-decoration: underline; }
 @keyframes rise { from { transform: translateY(8px); opacity: 0; } }
 
 /* Model picker, usage */
@@ -1138,7 +1140,8 @@ button.receipt.needs { background: var(--amber-soft); color: var(--amber); }
 #tasks-artifacts .artifact .a-name-cell > .a-name { flex: 0 1 auto; }
 #tasks-artifacts .artifact .a-branch { flex: none; color: var(--muted); }
 #tasks-artifacts .artifact.runs.has-children { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
-#tasks-artifacts .artifact.in-runs { margin-top: -2px; border-radius: 0; }
+/* Under its line, a run's name is read first: its status (a word and since when) gives way. */
+#tasks-artifacts .artifact.in-runs { margin-top: -2px; border-radius: 0; grid-template-columns: 6.5ch minmax(min(10em, 45%), 1fr) auto auto; }
 #tasks-artifacts .artifact.in-runs.last-in-runs { border-radius: 0 0 6px 6px; }
 #tasks-artifacts .artifact.in-runs .a-kind { visibility: hidden; }
 /* Their words, and each one's status with since when: as long as the row has room for. */

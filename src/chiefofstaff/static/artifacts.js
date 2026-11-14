@@ -7,7 +7,7 @@
 import { api, el, toast } from "./dom.js";
 import { ago, linkKey, linkName, prTitle, taskLinks } from "./text.js";
 import { state } from "./state.js";
-import { prStatus } from "./board.js";
+import { howLong, prStatus } from "./board.js";
 
 // What a PR's state comes to: one rule with where its task is placed (board.js).
 export { prStatus };
@@ -93,7 +93,11 @@ export function deliverablesOf(task, phase) {
         const found = { key: linkKey(item.url), kind: KIND_WORDS[item.kind], role: "", name: item.title || item.url, url: item.url, status, tone: item.status ? toneOf(item.status) : taskTone, at: item.at || declared?.at || task.updated_at, said: Boolean(item.status), by: item.said_by || "", pr: null, task };
         // The owner stopped tracking it (bug E53): what it last was, not where it stands now;
         // neither running nor needing a look.
-        return item.untracked ? { ...found, status: "not tracked", tone: "neutral", untracked: true, last: item.status || "" } : found;
+        if (item.untracked) return { ...found, status: "not tracked", tone: "neutral", untracked: true, help: `Not tracked · last reported ${item.status || "running"}: you stopped tracking it` };
+        // Nothing has told of it for a day: not "running" as it was last said; the owner says
+        // what became of it (amber, as under Needs you).
+        if (item.unknown) return { ...found, status: "status unknown", tone: "wait", unknown: true, help: unknownWords(item.status, declared) };
+        return found;
       });
   }
   const found = [];
@@ -109,6 +113,14 @@ export function deliverablesOf(task, phase) {
     found.push({ key: link.key, kind, role: "", name: nameOf(link), url: link.url, status, tone: link.said ? toneOf(link.said.status) : taskTone, at: link.said?.at || task.updated_at, said: Boolean(link.said), pr: null, task });
   }
   return found;
+}
+// Why a run's status is unknown, in a line: "Status unknown: reported running 47h ago, not
+// checked since" (its worker's word), or GitHub's as Chief of Staff last read it.
+function unknownWords(status, declared) {
+  const read = Boolean(declared?.checked_at) && declared.checked_at >= (declared.at || "");
+  const last = read ? declared.checked_at : declared?.at || "";
+  const since = last ? ` ${howLong((Date.now() - Date.parse(last)) / 3600000)} ago` : "";
+  return read ? `Status unknown: GitHub said ${status || "running"}${since}, not read since` : `Status unknown: reported ${status || "running"}${since}, not checked since`;
 }
 // Every task's deliverables, once each (a PR two tasks share: the one that made it, else the
 // newer word; a document linked in two ways: one row), the ones that need a look first.
@@ -139,11 +151,24 @@ const newest = (a, b) => String(b.at).localeCompare(String(a.at));
 const byUrgency = (a, b) => RANK[a.tone] - RANK[b.tone] || newest(a, b);
 // What runs come to in a few words, and the tone of the one that needs a look first.
 export function runsWords(runs) {
-  const count = (tone) => runs.filter((item) => item.tone === tone).length;
-  const [running, waiting, failed] = [count("active"), count("wait"), count("bad")];
-  const words = [running ? `${running} running` : "", waiting ? `${waiting} waiting` : "", failed ? `${failed} failed` : ""].filter(Boolean).join(" · ");
-  const tone = failed ? "bad" : waiting ? "wait" : running ? "active" : runs.every((item) => item.tone === "good") ? "good" : "neutral";
+  const count = (test) => runs.filter(test).length;
+  const failed = count((item) => item.tone === "bad");
+  const waiting = count((item) => item.tone === "wait" && !item.unknown);
+  const unknown = count((item) => item.unknown);
+  const running = count((item) => item.tone === "active");
+  // What needs a look first first (bug E58 review): cut short on a narrow list, the rest goes.
+  const words = [failed ? `${failed} failed` : "", waiting ? `${waiting} waiting` : "", unknown ? `${unknown} unknown` : "", running ? `${running} running` : ""].filter(Boolean).join(" · ");
+  const tone = failed ? "bad" : waiting || unknown ? "wait" : running ? "active" : runs.every((item) => item.tone === "good") ? "good" : "neutral";
   return { words, tone };
+}
+// A run's status in a word or two under its task's runs line ("waiting", "unknown", "not
+// tracked"): its name comes first there; the whole of it on hover.
+export function shortStatus(item) {
+  if (item.untracked) return "not tracked";
+  if (item.unknown) return "unknown";
+  const status = String(item.status || "");
+  if (status.length <= 12) return status;
+  return item.tone === "wait" ? "waiting" : status.split(/\s+/)[0];
 }
 // Statuses by how many have each, the most first: "4 succeeded, 2 running".
 function statusCounts(items) {
@@ -153,9 +178,10 @@ function statusCounts(items) {
 }
 // Who says where runs stand: their worker, GitHub (as Chief of Staff read them), the owner.
 export function runsSources(runs) {
-  const said = (item) => (item.by === "GitHub" ? "as GitHub has them" : item.by === "you" ? "as you marked them" : item.said ? "as their worker last said" : "as their task stands");
-  const found = [...new Set(runs.map(said))];
-  return `${found.join(", or ").replace(/^as/, "As")}`;
+  const said = (item) => (item.unknown ? "" : item.by === "GitHub" ? "as GitHub has them" : item.by === "you" ? "as you marked them" : item.said ? "as their worker last said" : "as their task stands");
+  const found = [...new Set(runs.map(said))].filter(Boolean);
+  const unknown = runs.some((item) => item.unknown) ? "Unknown: nothing has told of it for a day" : "";
+  return [found.join(", or ").replace(/^as/, "As"), unknown].filter(Boolean).join("\n");
 }
 // The list by task, the task with what needs a look first first (bug E58: by its most urgent
 // deliverable), its deliverables so too: its PRs and docs, its runs (from RUNS_FOLDED on, in
@@ -223,8 +249,9 @@ export function isHidden(key, tone = "") {
 }
 // What taking one off said: gone once it is back (said so instead), not left on screen.
 let offNote = null;
-// `together`: more taken off with it ({ key, tone }: a task's runs, from their line's ✕).
-export async function setHidden(key, hidden, tone = "", together = []) {
+// `together`: more taken off with it ({ key, tone }: a task's runs, from their line's ✕), said
+// so in `said`, with Undo.
+export async function setHidden(key, hidden, tone = "", together = [], said = "") {
   const before = state.snapshot.artifacts_hidden || [];
   const keys = new Set([key, ...together.map((item) => item.key)]);
   const same = hiddenList().filter((item) => hiddenKey(item) === key).map((item) => item.key);
@@ -236,7 +263,8 @@ export async function setHidden(key, hidden, tone = "", together = []) {
     const also = same.filter((old) => old !== key);
     await api("/api/artifacts/hide", { method: "POST", body: { key, hidden, tone, ...(also.length ? { also } : {}), ...(together.length ? { together } : {}) } });
     offNote?.remove();
-    offNote = toast(hidden ? `Taken off Artifacts; its task keeps ${together.length ? "them" : "it"}.` : "Back on Artifacts.");
+    const undo = hidden && together.length ? { text: "Undo", onclick: () => setHidden(key, false, tone, together) } : null;
+    offNote = toast(hidden ? said || "Taken off Artifacts; its task keeps it." : "Back on Artifacts.", "", null, undo);
   } catch (error) {
     state.snapshot.artifacts_hidden = before;
     import("./inbox.js").then((module) => module.renderHome());
@@ -247,8 +275,8 @@ export async function setHidden(key, hidden, tone = "", together = []) {
 // task): "child", or "last" (the card's foot).
 function artifactRow(item, hidden, focusTask, folded = "") {
   const when = item.at ? ago(item.at) : "";
-  const help = item.untracked
-    ? `Not tracked · last reported ${item.last || "running"}: you stopped tracking it`
+  const help = item.help
+    ? item.help
     : item.said
       ? item.kind === "PR" || item.by === "GitHub"
         ? "As GitHub has it"
@@ -258,7 +286,7 @@ function artifactRow(item, hidden, focusTask, folded = "") {
       : "As its task stands: its worker has not said where this stands";
   return {
     key: `art:${item.key}:${hidden ? 1 : 0}`,
-    version: `${item.name}:${item.role}:${item.status}:${item.tone}:${item.by || ""}:${item.untracked ? 1 : 0}:${when}:${item.task.id}:${item.task.title}:${folded}`,
+    version: `${item.name}:${item.role}:${item.status}:${item.tone}:${item.by || ""}:${item.help || ""}:${when}:${item.task.id}:${item.task.title}:${folded}`,
     build: () => {
       const node = el("div", { class: "artifact", "data-key": item.key });
       fill(node, item, hidden, focusTask, when, help, folded);
@@ -308,7 +336,7 @@ function fillRuns(node, group, focusTask, when) {
       folded.hidden ? el("button", { type: "button", class: "a-more link", text: `+${folded.hidden}`, "aria-label": `Show ${folded.hidden} more runs of ${task.title}`, "data-tip": `Show ${folded.hidden} more: ${folded.hiddenWords}`, onclick: toggle }) : "",
     ),
     folded.words ? el("span", { class: "a-status", text: folded.words, "data-tip": `${folded.words}\n${folded.by}` }) : el("span"),
-    el("button", { type: "button", class: "a-hide", text: "✕", "aria-label": `Take the ${folded.count} runs of ${task.title} off this list`, "data-tip": "Take them all off this list (their task keeps them; one comes back if it fails)", onclick: () => setHidden(first.key, true, first.tone, rest) }),
+    el("button", { type: "button", class: "a-hide", text: "✕", "aria-label": `Take the ${folded.count} runs of ${task.title} off this list`, "data-tip": "Take them all off this list (their task keeps them; one comes back if it fails)", onclick: () => setHidden(first.key, true, first.tone, rest, `${folded.count} runs taken off Artifacts; their task keeps them.`) }),
     el(
       "div",
       { class: "a-meta" },
@@ -329,8 +357,8 @@ function fill(node, item, hidden, focusTask, when, help, folded = "") {
     // Under its line, a run's kind is that line's: kept for the columns, not said again.
     el("span", { class: "a-kind", text: item.kind, "aria-hidden": folded ? "true" : undefined }),
     folded ? el("span", { class: "a-name-cell" }, el("span", { class: "a-branch", "aria-hidden": "true", text: "└" }), name) : name,
-    // Under its line, with since when (cut short on a narrow list): whole on hover.
-    el("span", { class: `a-status${item.said ? "" : " derived"}`, text: folded && since ? `${item.status} · ${since}` : item.status, "data-tip": `${folded ? `${item.status}\n` : ""}${help}${item.at ? ` · ${new Date(item.at).toLocaleString()}` : ""}` }),
+    // Under its line: in a word or two, with since when (its name first there); whole on hover.
+    el("span", { class: `a-status${item.said ? "" : " derived"}`, text: folded ? [shortStatus(item), since].filter(Boolean).join(" · ") : item.status, "data-tip": `${folded && !item.help ? `${item.status}${since ? ` · ${since}` : ""}\n` : ""}${help}${item.at ? ` · ${new Date(item.at).toLocaleString()}` : ""}` }),
     hidden
       ? el("button", { type: "button", class: "a-hide link", text: "Bring back", "data-tip": "Back on this list", onclick: () => setHidden(item.key, false) })
       : el("button", { type: "button", class: "a-hide", text: "✕", "aria-label": `Take ${item.name} off this list`, "data-tip": "Take it off this list (its task keeps it; it comes back if it fails)", onclick: () => setHidden(item.key, true, item.tone) }),

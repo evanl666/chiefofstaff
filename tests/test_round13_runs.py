@@ -16,7 +16,7 @@ from test_round12_runs import ACTIONS, FLYTE, NIGHTLY, ago, delivered, said_at
 
 from chiefofstaff import task_actions
 from chiefofstaff.digest import needs, waiting_parts
-from chiefofstaff.task_actions import RUN_UNKNOWN_HOURS, deliverable_kind
+from chiefofstaff.task_actions import RUN_UNKNOWN_HOURS
 
 SHARDS = "https://flyte.acme.dev/console/projects/ml/domains/prod/executions/b7c1"
 BACKFILL = {"url": SHARDS, "name": "Backfill", "status": "running"}
@@ -193,9 +193,27 @@ async def test_a_run_no_longer_tracked_is_not_said_to_run(harness):
     assert (run["untracked"], run["said_by"], run["status"]) == (True, "you", "running")
 
 
-def test_a_dev_servers_page_is_no_document(tmp_path, monkeypatch):
-    """E55: a page on this computer (a name the hosts file maps here, a port of its own) was
-    listed as a Doc, "running" after its task ended."""
+async def test_a_page_said_to_be_running_is_no_document_a_document_in_progress_is(harness):
+    """E55: a page its worker said is "running" is a server's, not a document; the task keeps
+    it among its links. Review: a Google Sheet "in progress" or "submitted for review", a page
+    "in progress", are documents still."""
+    runtime = await harness.connect()
+    page = {"url": "https://preview.acme.dev/app", "name": "Preview", "status": "running"}
+    docs = [
+        {"url": "https://wiki.acme.dev/plan", "name": "Plan", "status": "in progress"},
+        {"url": "https://docs.google.com/spreadsheets/d/1ZyXwVuT/edit", "name": "Budget",
+         "status": "submitted for review"},
+        {"url": "https://docs.google.com/document/d/1AbCdEfGh/edit", "name": "Spec",
+         "status": "running notes"},
+    ]  # fmt: skip
+    _worker, task, _told = await delivered(harness, runtime, page, *docs)
+    shown = view(runtime, task["id"])
+    assert sorted(item["title"] for item in shown["deliverables"]) == ["Budget", "Plan", "Spec"]
+    assert page["url"] in {item["url"] for item in shown["artifacts"]}
+
+
+def hosts_here(tmp_path, monkeypatch):
+    """This computer's hosts file, as the test has it."""
     hosts = tmp_path / "hosts"
     hosts.write_text(
         "127.0.0.1 localhost\n# A comment\n10.1.2.3   devbox devbox.acme.test  # mine\n"
@@ -206,36 +224,62 @@ def test_a_dev_servers_page_is_no_document(tmp_path, monkeypatch):
     monkeypatch.setattr(
         task_actions, "Path", lambda *parts: hosts if parts == ("/etc/hosts",) else real(*parts)
     )
-    local = [
-        "https://devbox.acme.test/report",
-        "https://devbox/report",
-        "http://localhost/report",
-        "http://127.0.0.1/report",
-        "http://[::1]/report",
-        "http://192.168.1.20/report",
-        "http://169.254.1.1/report",
-        "https://preview.local/report",
-        "https://app.localhost/report",
-        "https://docs.acme.test:8443/report",
-        "http://docs.acme.test:3000/dags/nightly/grid",
-    ]
-    assert {url: deliverable_kind(url, declared=True) for url in local} == dict.fromkeys(
-        local, ("", "")
-    )
-    assert deliverable_kind("https://wiki.acme.test/page", declared=True)[0] == "doc"
-    assert deliverable_kind("https://docs.acme.test:443/page", declared=True)[0] == "doc"
 
 
-async def test_a_link_said_to_be_running_is_no_document(harness):
-    """E55: a page its worker said is "running" is a server or a job, not a document; the
-    task keeps it among its links."""
+LOCAL = [
+    "https://devbox.acme.test/report",
+    "https://devbox/report",
+    "http://localhost/report",
+    "http://127.0.0.1/report",
+    "http://[::1]/report",
+    "http://192.168.1.20/report",
+    "http://169.254.1.1/report",
+    "https://preview.local/report",
+    "https://app.localhost/report",
+    "https://docs.acme.test:8443/report",
+    "http://localhost:8080/dags/nightly/grid",
+]
+
+
+async def test_a_dev_servers_page_is_not_on_artifacts(harness, tmp_path, monkeypatch):
+    """E55: a page on this computer (a name the hosts file maps here, a port of its own) was
+    listed as a Doc, "running" after its task ended. It stays among its task's links."""
+    hosts_here(tmp_path, monkeypatch)
     runtime = await harness.connect()
-    page = {"url": "https://preview.acme.dev/app", "name": "Preview", "status": "running"}
-    doc = {"url": "https://wiki.acme.dev/plan", "name": "Plan", "status": "waiting for review"}
-    _worker, task, _told = await delivered(harness, runtime, page, doc)
+    pages = [{"url": url, "name": f"Page {n}", "status": "done"} for n, url in enumerate(LOCAL)]
+    kept = [
+        {"url": "https://wiki.acme.test/page", "name": "Wiki", "status": "done"},
+        {"url": "https://docs.acme.test:443/page", "name": "Docs", "status": "done"},
+    ]
+    worker, task = await spawn(runtime, harness.router_id, "Build the report pages")
+    await call_tool(runtime, "report", worker, status="progress", summary="Drafted.",
+                    artifacts=kept)  # fmt: skip
+    await call_tool(runtime, "report", worker, status="done", summary="Built.", artifacts=pages)
     shown = view(runtime, task["id"])
-    assert [item["title"] for item in shown["deliverables"]] == ["Plan"]
-    assert {item["url"] for item in shown["artifacts"]} == {page["url"], doc["url"]}
+    assert sorted(item["title"] for item in shown["deliverables"]) == ["Docs", "Wiki"]
+    assert len(shown["artifacts"]) == len(LOCAL) + 2  # Its own links, all of them.
+
+
+async def test_a_run_on_a_port_of_its_own_is_still_a_run(harness):
+    """Review of E55: Airflow on :8080 "running" was no longer monitored, a check-back on it was
+    refused, and one set was dropped at wake time without waking."""
+    runtime = await harness.connect()
+    dag = "https://airflow.acme.dev:8080/dags/nightly/grid?dag_run_id=manual__1"
+    run = {"url": dag, "name": "Nightly DAG", "status": "running"}
+    worker, task, _told = await delivered(harness, runtime, run)
+    shown = view(runtime, task["id"])
+    assert [item["title"] for item in shown["deliverables"]] == ["Nightly DAG"]
+    [watch] = shown["monitoring"]
+    assert (watch["kind"], watch["waiting_for"]) == ("flow", "the run")
+    session = harness.session(worker)
+    await turn(runtime, session, "Is it finished?")
+    told = await call_tool(runtime, "check_back", worker, task_id=task["id"], minutes=60,
+                           what="whether the DAG finished", runs=["Nightly DAG"])  # fmt: skip
+    assert "You are woken at" in told.text_result_for_llm, told.text_result_for_llm
+    sent = len(session.sent)
+    await runtime.task_actions.wake_check_backs(datetime.now(UTC) + timedelta(hours=2))
+    await settle(runtime)
+    assert len(session.sent) == sent + 1 and "Nightly DAG" in session.sent[-1]
 
 
 async def test_a_task_waiting_only_on_runs_of_unknown_status_needs_the_owner(harness):
@@ -263,6 +307,18 @@ async def test_a_task_waiting_only_on_runs_of_unknown_status_needs_the_owner(har
     runtime.task_actions.end_runs(task["id"], [FLYTE], "ended")
     assert view(runtime, task["id"])["attention"] == ""
     assert task["id"] not in needs(runtime).markers
+
+
+async def test_a_run_of_unknown_status_is_not_delivered_as_running(harness):
+    """Screenshot review: under its task in Needs you ("Status unknown"), Artifacts and its chip
+    still said "running" in blue."""
+    runtime = await harness.connect()
+    fresh = {"url": SHARDS, "name": "Backfill", "status": "running"}
+    _worker, task, _told = await delivered(harness, runtime, NIGHTLY, fresh)
+    said_at(harness, task["id"], FLYTE, at=ago(hours=47))
+    runs = {item["title"]: item for item in view(runtime, task["id"])["deliverables"]}
+    assert runs["Nightly export"]["unknown"] is True
+    assert "unknown" not in runs["Backfill"]
 
 
 async def test_a_run_still_listed_is_not_said_to_be_left_out(harness):

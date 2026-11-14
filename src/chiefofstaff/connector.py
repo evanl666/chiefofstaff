@@ -1098,13 +1098,13 @@ class Connector:
             span = last["to"] - last["from"]
             grown = span >= told * GAP_GROWN or any(told < mark <= span for mark in GAP_MARKS)
             if grown:
-                last["told"] = span
+                last.update({"told": span, "told_at": now()})
             self.store.set("watch_gaps", json.dumps(gaps))
             if grown:
                 self.tell_gap(last, still=True)
             return
         found = {"key": key, "watch": what, "from": start, "to": end, "reason": reason}
-        found["told"] = end - start
+        found |= {"told": end - start, "told_at": now()}
         self.store.set("watch_gaps", json.dumps([*gaps, {**found, "at": now()}][-MAX_GAPS:]))
         self.tell_gap(found)
 
@@ -1120,17 +1120,30 @@ class Connector:
         )
 
     def retell_gaps(self):
-        """Gaps an older version kept (bug E50): it told each once, when it began, and not as
-        it grew (one told as 15 minutes was days long by the update). Told again once, all of
-        each, in one notice; from then on as GAP_GROWN has it."""
+        """At the first scan after this version came (bug E50): the gaps earlier versions kept,
+        told again with all of each, in one notice. 0.1.42 and before told a gap when it began
+        and never as it grew (no `told`); 0.1.43 took such a gap, at its first growth, for told
+        as long as it was then (one told as 15 minutes was 100 hours "told"). Each gap still
+        open (the newest of its watch) and each that grew since it was told is told, once: this
+        version stamps every gap it tells (`told_at`), so it is never told again here; from
+        then on as GAP_GROWN has it."""
         gaps = json.loads(self.store.get("watch_gaps") or "[]")
-        older = [gap for gap in gaps if "told" not in gap]
-        if not older:
-            return
-        for gap in older:
-            gap["told"] = gap["to"] - gap["from"]
-        self.store.set("watch_gaps", json.dumps(gaps))
-        self.tell_gap(older[0], False, *older[1:])
+        newest = {gap["key"]: index for index, gap in enumerate(gaps)}
+        again = [
+            gap
+            for index, gap in enumerate(gaps)
+            if not gap.get("told_at")
+            and (
+                newest[gap["key"]] == index
+                or "told" not in gap
+                or gap["told"] < gap["to"] - gap["from"]
+            )
+        ]
+        for gap in again:
+            gap.update({"told": gap["to"] - gap["from"], "told_at": now()})
+        if again:
+            self.store.set("watch_gaps", json.dumps(gaps))
+            self.tell_gap(again[0], False, *again[1:])
 
     async def t_report_found(self, params: ReportFound, caller: str):
         self.check(caller)

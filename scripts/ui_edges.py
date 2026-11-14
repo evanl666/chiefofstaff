@@ -3863,8 +3863,20 @@ async def round_twelve(runtime, browser, failures: list[str]):
     await expect(backfill.locator(".row-line .why")).to_have_text(
         "Run f3a9c1: reported running 47h ago"
     )
+    # Its accepted result is not said again beside it (here, its title again).
+    await expect(backfill.locator(".row-line .latest")).to_have_count(0)
     await expect(backfill.get_by_role("button", name="Ended", exact=True)).to_be_visible()
     await expect(backfill.get_by_role("button", name="Stop tracking")).to_be_visible()
+    # Its run is "status unknown" everywhere: on its chip and on Artifacts, not "running".
+    await expect(backfill.locator(".row-foot .link-chip .chip-link")).to_have_text(
+        "Flow · Run f3a9c1 · status unknown"
+    )
+    lost = page.locator("#tasks-artifacts .artifact", has_text="Run f3a9c1")
+    await expect(lost.locator(".a-status")).to_have_text("status unknown")
+    await expect(lost).to_have_class(re.compile(r"\btone-wait\b"))
+    await expect(lost.locator(".a-status")).to_have_attribute(
+        "data-tip", re.compile("^Status unknown: reported running 47h ago, not checked since")
+    )
     rebuild = row("E41 rebuild the search index")
     await expect(monitoring.locator(".card.task", has_text="E41 rebuild")).to_have_count(1)
     line = rebuild.locator(".row-line")
@@ -3941,7 +3953,7 @@ async def round_twelve(runtime, browser, failures: list[str]):
     summary = made.locator(".artifact.runs").filter(has=page.locator(".a-meta", has_text="E43"))
     fold = summary.locator(".a-fold")
     await expect(fold).to_have_attribute("aria-expanded", "false")
-    await expect(summary.locator(".a-status")).to_have_text("3 running · 1 failed")
+    await expect(summary.locator(".a-status")).to_have_text("1 failed · 3 running")
     await expect(summary).to_have_class(re.compile(r"\btone-bad\b"))
     await expect(made.locator(".artifact.in-runs")).to_have_count(2)
     more_runs = "Show 7 more runs of E43 ship the sharded export"
@@ -4059,11 +4071,11 @@ async def round_thirteen(runtime, browser, failures: list[str]):
     made = page.locator("#tasks-artifacts")
     await made.locator(":scope > .items").evaluate("n => { n.style.maxHeight = 'none'; }")
     line = made.locator(".artifact.runs").filter(has=page.locator(".a-meta", has_text="E58 ship"))
-    await expect(line.locator(".a-status")).to_have_text("2 running · 1 waiting · 1 failed")
+    await expect(line.locator(".a-status")).to_have_text("1 failed · 1 waiting · 2 running")
     await expect(line).to_have_class(re.compile(r"\btone-bad\b"))
     await expect(line.locator(".a-status")).to_have_attribute(
         "data-tip",
-        "2 running · 1 waiting · 1 failed\nAs their worker last said, or as you marked them",
+        "1 failed · 1 waiting · 2 running\nAs their worker last said, or as you marked them",
     )
     more = line.locator(".a-more")
     await expect(more).to_have_text("+6")
@@ -4071,9 +4083,7 @@ async def round_thirteen(runtime, browser, failures: list[str]):
     group = made.locator(".artifact.in-runs", has_text="Approval run")
     names = await group.locator(".a-name").all_text_contents()
     assert names == ["Approval run 9", "Approval run 5", "Approval run 3"], names
-    await expect(group.nth(1).locator(".a-status")).to_have_text(
-        re.compile(r"^waiting for approval · \dh ago$")
-    )
+    await expect(group.nth(1).locator(".a-status")).to_have_text(re.compile(r"^waiting · \dh ago$"))
     for width in (1500, 760, 400, 352):
         await page.set_viewport_size({"width": width, "height": 1000})
         if width < 1100:
@@ -4105,6 +4115,18 @@ async def round_thirteen(runtime, browser, failures: list[str]):
     await expect(made.locator(".artifact", has_text="Approval run")).to_have_count(0, timeout=5000)
     await expect(made.locator(".artifact.runs", has_text="E58 ship")).to_have_count(0)
     await expect(made.locator(".artifact", has_text="app#58")).to_have_count(1)
+    # Undo, from what it said: all back at once.
+    note = page.locator(".toast", has_text="9 runs taken off Artifacts")
+    await note.get_by_role("button", name="Undo").click()
+    await expect(made.locator(".artifact.runs", has_text="E58 ship")).to_have_count(1, timeout=5000)
+    for _ in range(50):
+        if not [item for item in runtime.hidden_artifacts() if "ap0" in item["key"]]:
+            break
+        await page.wait_for_timeout(100)
+    else:
+        raise AssertionError(runtime.hidden_artifacts())
+    await take.click()
+    await expect(made.locator(".artifact", has_text="Approval run")).to_have_count(0, timeout=5000)
     hidden = [item["key"] for item in runtime.hidden_artifacts()]
     assert sum("ap0" in key for key in hidden) == 9, hidden
     await made.get_by_role("button", name=re.compile(r"^Show \d+ taken off$")).click()

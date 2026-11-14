@@ -21,34 +21,45 @@ Runs a task waits on, followed up to the end; Artifacts by task in tidy columns 
   summary; away notifications still tell only of questions, failures and cards), and says so
   when its worker's later report no longer lists the run. **⋯** offers *Mark ended* and *Stop
   tracking* whenever a task has a run of unknown status, a running task too.
+- **A run whose status is unknown says so everywhere.** Artifacts and its task's chip still
+  said *running* in blue beside *Status unknown*. It is now *status unknown* in amber on both,
+  counted apart (*1 unknown*), never folded away, and its tooltip says how old the last word is
+  (*reported running 47h ago, not checked since*).
 - **A run you stopped tracking is no longer shown as running.** Artifacts said *running* in
   blue, counted in *N running*. It is now *not tracked* in gray (its last reported status on
   hover) and counted nowhere.
 - **A dev server's page is not something a task delivered.** A page on your computer or network
   (*localhost*, a private or link-local address, a *.local* name or one your hosts file maps
-  there, a port of its own) or one its worker said is running was listed as a *Doc*, still
-  *running* after its task ended. It now stays among its task's links.
+  there), a page on a port of its own, or a page its worker said is running (a server's) was
+  listed as a *Doc*, still *running* after its task ended. Such pages are now left off
+  Artifacts and stay among their task's links, whether it declared them or its reports only
+  mention them. A run on a port of its own (Airflow on *:8080*) is still a run, monitored and
+  listed, and a document is still a document whatever its status (*in progress*, *submitted for
+  review*).
 - **Artifacts: a task's runs line up with the rest.** Runs under their task's *N runs* line were
   indented whole (their kind column too, *FLOW* again), two lines high with only the time on
-  the second, and apart from their line. They are now one card with it, one line each (the time
-  with the status: *running · 1h ago*), their names under its own (*└*), in the list's columns
-  at every width.
+  the second, and apart from their line. They are now one card with it, one line each with
+  their names first (under its own, *└*) and their status in a word with since when
+  (*waiting · 2h ago*; the whole of it on hover), in the list's columns at every width.
 - **Artifacts: what needs a look comes first, and waiting runs stay in sight.** A task's merged
   PR could sit above another task's PR with failing CI; a run waiting for approval was folded
   behind *+N* (*N more, not failed*) while its line turned amber with no word why. Tasks are now
   ordered by their most urgent deliverable and each task's deliverables by urgency; waiting runs
-  are always shown and counted (*1 running · 1 waiting · 1 failed*), *+N* says what it hides,
-  **✕** on the line takes all of a task's runs off the list (each comes back from *Show … taken
-  off*), and the line's tooltip says when you marked one.
+  are always shown and counted, the line's words go from what needs a look most (*1 failed · 1
+  waiting · 1 unknown · 3 running*, so a narrow list cuts the least of it), *+N* says what it
+  hides, **✕** on the line takes all of a task's runs off the list (*Undo* in what it says, or
+  each back from *Show … taken off*), and the line's tooltip says when you marked one.
 - **GitHub Actions runs with a query are read, and failing reads are said.** A link such as
   `…/actions/runs/123?pr=7` was never read on GitHub; one whose reads kept failing still said it
   was read every few minutes, and *reported … ago* went by its worker's word, not the last read.
   Now the link's path decides, a failing read says why and when it last worked, and *reported …
   ago* counts from the last word on the run, its worker's or GitHub's.
-- **A watch gap kept by an earlier version is told once more, all of it.** The update took a
-  gap told when it was 15 minutes long for told at its length then (100 hours), and said nothing
-  more. The first scan after updating now tells each such gap once, with its whole range; it is
-  then told again only as it doubles or passes an hour or a day.
+- **A watch gap kept by an earlier version is told once more, all of it.** 0.1.42 told a gap
+  when it began and never as it grew; 0.1.43 took such a gap, once it grew again, for told at
+  its length then (a gap told at 15 minutes was 100 hours "told"), and said nothing more. The
+  first scan after updating tells, in one notice and with its whole range, each gap still open
+  (the newest of its watch) and each that grew since it was told, whichever version kept it;
+  each is then told again only as it doubles or passes an hour or a day.
 - **A language in a task's title is what is written, not how.** "Add a Chinese README (中文)" and
   "Update the locale strings: French" were refused once as writing-style notes. Only words that
   say how to write (*in English*, *用中文*, *英文写*, *像人写*, *human-sounding*, a tone) are; the

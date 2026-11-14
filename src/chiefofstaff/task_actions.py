@@ -297,12 +297,11 @@ def github_run(url: str) -> tuple[str, str] | None:
 # looked at again after HOSTS_SECONDS and read again when it changed.
 HOSTS_FILE: tuple[float, float, dict[str, set[str]]] = (0.0, 0.0, {})
 HOSTS_SECONDS = 30
-# A declared link with a run's word for where it stands is no document (a dev server's page
-# said to be "running"): it stays in its task's links. Not "waiting" or "pending": a document
-# can wait for its review.
-RUN_WORDS = re.compile(
-    r"\b(running|queued|in[ -]progress|started|starting|scheduled|submitted|executing|"
-    r"deploying|building|succeeded|failed|crashed|timed[ -]out)\b",
+# A page its worker declared (of no documents site) said to be a process at work is a server's
+# (a dev server "running"), no document: it stays in its task's links. Only words that say a
+# process runs: a document is "in progress", "submitted for review", "failed review" too.
+SERVING_WORDS = re.compile(
+    r"\b(running|starting|restarting|serving|listening|deploying|booting|launching)\b",
     re.IGNORECASE,
 )
 
@@ -343,16 +342,18 @@ def local_address(address: str) -> bool:
     return found.is_loopback or found.is_private or found.is_link_local or found.is_unspecified
 
 
-def served_here(parts) -> bool:
+def served_here(url: str, ports: bool = True) -> bool:
     """Whether a link is to a server on this computer or its network, not a page others read:
     a loopback, private or link-local address, a .local or .localhost name (or one the hosts
-    file gives such an address), or a port that is not its scheme's own (a dev server's)."""
-    host = (parts.hostname or "").lower().rstrip(".")
+    file gives such an address), or (`ports`) a port that is not its scheme's own (a dev
+    server's)."""
     try:
+        parts = urlsplit(url)
         port = parts.port
     except ValueError:
         return True
-    if port is not None and port != {"http": 80, "https": 443}.get(parts.scheme):
+    host = (parts.hostname or "").lower().rstrip(".")
+    if ports and port is not None and port != {"http": 80, "https": 443}.get(parts.scheme):
         return True
     if host == "localhost" or host.endswith((".local", ".localhost")) or local_address(host):
         return True
@@ -399,8 +400,6 @@ def deliverable_kind(url: str, declared: bool = False) -> tuple[str, str]:
         return "", ""
     if parts.scheme not in {"http", "https"} or not parts.hostname:
         return "", ""  # A file on this computer (a mockup, a CSV): its task's files.
-    if served_here(parts):
-        return "", ""  # A dev server's page (bug E55): its task's links, not what it delivers.
     host = parts.hostname.removeprefix("www.").lower()
     path = parts.path.rstrip("/")
     last = path.rsplit("/", 1)[-1]
@@ -3973,7 +3972,9 @@ class TaskActions:
         for pr in prs:
             pr["role"] = pr_role(pr)
         given = self.given_links(task, row)
-        attention, why = self.attention(task, prs)
+        monitoring = self.monitoring(task, prs, follows)
+        attention, why = self.attention(task, prs, monitoring)
+        unknown = frozenset(item["url"] for item in monitoring if item.get("unknown"))
         return {
             **task,
             # Its state, apart: where its run is (queued, running, waiting, finished,
@@ -3982,9 +3983,9 @@ class TaskActions:
             "execution": self.execution(task),
             "attention": attention,
             "attention_why": why,
-            "monitoring": self.monitoring(task, prs, follows),
+            "monitoring": monitoring,
             # What it delivered (its PRs, documents and runs): Artifacts and its card's chips.
-            "deliverables": self.deliverables(task, prs, given),
+            "deliverables": self.deliverables(task, prs, given, unknown),
             # Its question to the owner while it is open: why it asks, the choices, what next.
             "question": self.open_question(task),
             # As its card shows it: what it said of its PR before it was opened or merged
@@ -4063,7 +4064,9 @@ class TaskActions:
             return "cancelled" if self.store.get(f"setaside:{task['id']}") else "finished"
         return task["status"]
 
-    def attention(self, task: dict, prs: list[dict] | None = None) -> tuple[str, str]:
+    def attention(
+        self, task: dict, prs: list[dict] | None = None, watched: list[dict] | None = None
+    ) -> tuple[str, str]:
         """What the owner has to do about a task now, and why in their words: "blocked",
         "stopped", "question", "failed", "check-failed", "acceptance" (a result to accept),
         "update" (news on finished work), "pr-changes" / "pr-conflicts" / "pr-failing" (its own
@@ -4071,7 +4074,7 @@ class TaskActions:
         runs whose status is unknown), "merge" (its own PR ready to merge, on its Merge card);
         "" for nothing. As Home's Needs you (board.js taskPhase) and the owner's count
         (digest.needs) have it; not "No progress", which Home works out as time passes.
-        `prs`: its receipts' PRs, when read already."""
+        `prs`: its receipts' PRs, `watched`: what it is monitored for, when read already."""
         status, task_id = task["status"], task["id"]
         if status == "queued":
             broken = self.tasks.broken(task)
@@ -4119,7 +4122,7 @@ class TaskActions:
             return "update", clip(" ".join((news.get("text") or "").split()), 300)
         if marker in PR_TO_FIX:
             return marker, why
-        watched = self.monitoring(task, prs)
+        watched = self.monitoring(task, prs) if watched is None else watched
         if watched and all(item.get("unknown") for item in watched):
             # All it is monitored for is runs nothing tells of now (bug E56): the owner says
             # what became of them.
@@ -4428,14 +4431,17 @@ class TaskActions:
             for item in self.monitoring(task)
         )[:300]
 
-    def deliverables(self, task: dict, prs: list[dict], given: list[str]) -> list[dict]:
+    def deliverables(
+        self, task: dict, prs: list[dict], given: list[str], unknown: frozenset[str] = frozenset()
+    ) -> list[dict]:
         """What the task delivered, the one list Home's Artifacts and its card's chips show:
         the PRs it created, modified or reviewed (as GitHub has them), the documents and the
         runs it declared or its reports say it made, each by its name (the one its worker or
         its report gave it), else by what it is. Not a PR it only mentions, a link it was
         given or only mentions, a file on this computer (a mockup, a screenshot, a CSV, a
-        log), a site's home page, a run's logs, a Slack message: those stay in its report,
-        files and links."""
+        log), a site's home page, a run's logs, a Slack message, a page served from this
+        computer or its network: those stay in its report, files and links. `unknown`: the
+        links of its runs whose status is unknown now (see runs_monitored), said so."""
         found: list[dict] = []
         labels = set()
         for pr in prs:
@@ -4479,8 +4485,15 @@ class TaskActions:
             if not kind or key in seen:
                 continue
             seen.add(key)
-            if kind == "doc" and RUN_WORDS.search(item.get("status") or ""):
-                continue  # Said to run (a server, a job): no document; in its links.
+            # Served from this computer or its network (bug E55): its task's links, not what
+            # it delivers; a run is known by its address, not by a port of its own (Airflow on
+            # :8080 is still a run). A page of no documents site said to be running: a server's.
+            if served_here(item["url"], ports=kind != "flow") or (
+                kind == "doc"
+                and not deliverable_kind(item["url"])[0]
+                and SERVING_WORDS.search(item.get("status") or "")
+            ):
+                continue
             found.append(
                 {
                     "kind": kind,
@@ -4499,13 +4512,15 @@ class TaskActions:
                     ),
                     # The owner stopped tracking it: what it last said, not followed (bug E53).
                     **({"untracked": True} if item.get("untracked") else {}),
+                    # Nothing tells where it stands now: not "running" as it was last said.
+                    **({"unknown": True} if item["url"] in unknown else {}),
                 }
             )
         given_keys = {threads.link_key(url) for url in given}
         for url in json.loads(self.store.get(f"madelinks:{task['id']}") or "[]"):
             kind, called = deliverable_kind(url)
             key = threads.link_key(url)
-            if not kind or key in seen or key in given_keys:
+            if not kind or key in seen or key in given_keys or served_here(url, kind != "flow"):
                 continue
             seen.add(key)
             found.append(

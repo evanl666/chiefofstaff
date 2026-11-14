@@ -93,10 +93,10 @@ export function prTitle(key) {
   return state.snapshot?.pr_titles?.[String(key).toLowerCase()] || "";
 }
 // A server on this computer or its network, not a page others read (bug E55): a loopback,
-// private or link-local address, a .local or .localhost name, or a port that is not its
-// scheme's own (a dev server's). The server also reads the hosts file for names it maps here.
+// private or link-local address, a .local or .localhost name. The server also reads the hosts
+// file for names it maps there, and leaves a page on a port of its own out of Artifacts
+// (task_actions.served_here); a run there (Airflow on :8080) is still a run.
 export function servedHere(parsed) {
-  if (parsed.port) return true;
   const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
   if (host === "localhost" || /\.(local|localhost)$/.test(host)) return true;
   const ip = /^(\d+)\.(\d+)\.\d+\.\d+$/.exec(host);
@@ -115,8 +115,6 @@ export function linkKind(url) {
   } catch {
     return null;
   }
-  // A dev server's page: none of these (a document, a run), whatever its path says.
-  if (/^https?:$/.test(parsed.protocol) && servedHere(parsed)) return null;
   const host = parsed.hostname.replace(/^www\./, "");
   const path = decodePath(parsed.pathname);
   const last = path.split("/").filter(Boolean).pop() || "";
@@ -125,6 +123,10 @@ export function linkKind(url) {
   // what is under one (a Spark application, logs, a debug page, a CI run); "reference",
   // something it points to.
   const is = (kind, label, role, extra = {}) => ({ kind, label, role, ...extra });
+  const plain = () => is("link", last && !/^[\w-]{32,}$/.test(last) ? `${shorten(host, 28)} · ${shorten(last, 24)}` : shorten(host, 40), "reference");
+  // A page of this computer or its network (a dev server's, a local Airflow): a link of its
+  // task's, never a document or a run it delivered, whatever its path says.
+  if (/^https?:$/.test(parsed.protocol) && servedHere(parsed)) return plain();
   // A file its worker made (declared by its path): opened here, not by the browser.
   if (parsed.protocol === "file:") return is("file", last || "File", "output", { path });
   if ((match = /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/.exec(url))) {
@@ -159,7 +161,7 @@ export function linkKind(url) {
   if (/spark|shs-/i.test(host)) return is("run", `Spark history${last ? ` · ${shorten(last, 28)}` : ""}`, "diagnostic");
   if (/(^|[.-])rdev([.-]|$)/i.test(host)) return is("run", `rdev · ${shorten(host.split(".")[0], 28)}`, "diagnostic", { id: host.split(".")[0] });
   if (/darwin/i.test(host)) return is("doc", `Darwin${last ? ` · ${shorten(last, 28)}` : ""}`, "output");
-  return is("link", last && !/^[\w-]{32,}$/.test(last) ? `${shorten(host, 28)} · ${shorten(last, 24)}` : shorten(host, 40), "reference");
+  return plain();
 }
 // One key for one thing linked in different ways: a Google document by its id; else the
 // address without what only says how it was shared ("?usp=sharing", "utm_…") or a place in the
@@ -218,12 +220,11 @@ export function taskLinks(task) {
   const seen = new Set();
   const links = [];
   for (const url of urls) {
+    const found = linkKind(url);
     const key = linkKey(url);
-    const said = declared.get(key);
-    // A plain page its worker declared (a dev server's, say): its own link, as it called it.
-    const found = linkKind(url) || (said && /^https?:\/\//.test(url) ? { kind: "link", label: linkLabel(url), role: "output" } : null);
     if (!found || seen.has(key)) continue;
     seen.add(key);
+    const said = declared.get(key);
     const file = files.get(key);
     let role = found.role;
     if (role === "diagnostic" && found.id && asked.includes(found.id)) role = "run";

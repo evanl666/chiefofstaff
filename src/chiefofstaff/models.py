@@ -697,8 +697,9 @@ class ArtifactHide(StrictModel):
     tone: str = Field(default="", max_length=20)
     # The same one under the key an earlier version gave it (its address): replaced.
     also: list[Annotated[str, Field(max_length=2100)]] = Field(default_factory=list, max_length=20)
-    # Taken off (or back) with it: a task's runs, from their line's ✕.
-    together: list[HiddenArtifact] = Field(default_factory=list, max_length=40)
+    # Taken off (or back) with it: a task's runs, from their line's ✕ (a task lists at most 20
+    # it declared and 60 its reports link).
+    together: list[HiddenArtifact] = Field(default_factory=list, max_length=100)
 
 
 # Under GitHub's 65536 characters for a review and Slack's 40000 for a message.

@@ -745,7 +745,7 @@ function deliverableChips(task, phase) {
 // where it stands as its worker said (its task's state is on its row already).
 function deliveredChip(item, removable) {
   const role = PR_ROLES[item.role] ? ` · ${PR_ROLES[item.role].toLowerCase()}` : "";
-  const help = [`${item.kind}${role}: ${item.name}`, item.status ? `${item.status} (${item.said ? "as its worker said" : "as its task stands"})` : "", item.url].filter(Boolean).join("\n");
+  const help = [`${item.kind}${role}: ${item.name}`, item.help || (item.status ? `${item.status} (${item.said ? "as its worker said" : "as its task stands"})` : ""), item.url].filter(Boolean).join("\n");
   const chip = el("span", { class: `receipt link-chip kind-${item.kind.toLowerCase()} output tone-${item.tone}` }, el("a", { class: "chip-link", href: item.url, target: "_blank", rel: "noreferrer", "data-tip": help, text: `${item.kind === "PR" ? "" : `${item.kind} · `}${item.name}${item.status && item.said ? ` · ${item.status}` : ""}` }));
   if (removable) chip.append(offButton(item.key, item.name, item.tone));
   return chip;
@@ -1043,6 +1043,8 @@ export function rowLatest(task, worker, phase) {
     return { text: line.textContent, help: line.dataset.tip };
   }
   if (phase.section === "finished") return { text: "" };
+  // Its runs are what it needs the owner for: its result (accepted) is not news.
+  if (phase.marker === "runs-unknown") return { text: "" };
   if (phase.marker === "update") return { text: gist(task.news?.text || ""), help: task.news?.text };
   // Its question is said in full on the row.
   if (phase.section === "needs" && questionOf(task)) return { text: "" };

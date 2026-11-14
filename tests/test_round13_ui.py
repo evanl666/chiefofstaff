@@ -43,7 +43,8 @@ def test_a_tasks_runs_are_one_card_with_their_line():
         " && String(p.className).split(' ').includes(name));\n"
         "  return { cls: node.className, kind: of('a-kind')?.attrs['aria-hidden'] || '',"
         " branch: of('a-branch')?.textContent || '', name: of('a-name')?.textContent,"
-        " status: of('a-status')?.textContent, meta: Boolean(of('a-meta')) }; });"
+        " status: of('a-status')?.textContent, tip: of('a-status')?.attrs['data-tip'],"
+        " meta: Boolean(of('a-meta')) }; });"
     )
     header = next(row for row in found if "runs" in row["cls"].split())
     assert "has-children" in header["cls"].split() and header["meta"], header
@@ -52,11 +53,14 @@ def test_a_tasks_runs_are_one_card_with_their_line():
     for row in children:
         # One line: its time with its status, its kind kept for the columns but not said.
         assert not row["meta"] and row["branch"] == "\u2514" and row["kind"] == "true", row
+    # Review: a status in a word or two, so its name is read first ("waiting for approval"
+    # squeezed it); the whole of it on hover.
     assert [row["status"] for row in children] == [
         "running · 1h ago",
         "failed · 4h ago",
-        "waiting for approval · 7h ago",
+        "waiting · 7h ago",
     ]
+    assert children[2]["tip"].startswith("waiting for approval · 7h ago\n"), children[2]
     assert ["last-in-runs" in row["cls"].split() for row in children] == [False, False, True]
     others = [row for row in found if "in-runs" not in row["cls"].split()]
     assert all(row["meta"] and not row["branch"] and not row["kind"] for row in others)
@@ -70,10 +74,15 @@ def test_a_run_no_longer_tracked_is_neither_running_nor_needing_a_look():
         "const shipping = task('a', 'Ship the export', off, ...runs.slice(1, 3));\n"
         "const [item] = a.deliverablesOf(shipping).filter((i) => i.untracked);\n"
         "const [group] = a.groupArtifacts(a.collectArtifacts([shipping]));\n"
-        "return { item: [item.status, item.tone, item.by, item.last],"
+        "return { item: [item.status, item.tone, item.by, item.help],"
         " words: group.folded.words, tone: group.folded.tone };"
     )
-    assert found["item"] == ["not tracked", "neutral", "you", "running"]
+    assert found["item"] == [
+        "not tracked",
+        "neutral",
+        "you",
+        "Not tracked · last reported running: you stopped tracking it",
+    ]
     assert (found["words"], found["tone"]) == ("1 running", "active"), found
 
 
@@ -107,7 +116,8 @@ def test_runs_waiting_are_never_folded_away_and_needing_a_look_comes_first():
     assert quiet["members"] == ["PR", "runs"]
     assert shipping["shown"] == ["running", "failed", "waiting for approval"]
     assert shipping["folded"] == [
-        "3 running · 1 waiting · 1 failed",
+        # Review: what needs a look first first (a narrow list cuts the end off).
+        "1 failed · 1 waiting · 3 running",
         "bad",
         6,
         "3 succeeded, 2 running, 1 ended",
@@ -129,21 +139,69 @@ def test_a_rows_version_changes_with_who_said_where_it_stands():
 
 
 def test_a_dev_servers_page_is_a_link_of_its_task():
-    """E55: a page on this computer (or its network, or on a port of its own) is neither a
-    document nor a run; declared, it stays among its task's links."""
+    """E55: a page on this computer or its network is neither a document nor a run: a link of
+    its task's, declared (made) or only mentioned in a report (referenced). Review: those its
+    reports only mention (localhost:3000, Grafana on :3000, Jenkins on :8443) had vanished
+    from its card; a run on a port of its own elsewhere (Airflow on :8080) is a run."""
     found = run_js(
         "const urls = ['http://localhost:3000/app', 'https://devbox.local/report',"
         " 'http://127.0.0.1/x', 'http://192.168.1.4/x', 'http://[::1]:8080/x',"
-        " 'https://docs.acme.dev:8443/page', 'https://airflow.acme.dev:8080/dags/x/grid',"
+        " 'http://127.0.0.1:8080/dags/nightly/grid', 'https://grafana.acme.dev:3000/d/abc',"
+        " 'https://ci.acme.dev:8443/job/deploy/42/', 'https://airflow.acme.dev:8080/dags/x/grid',"
         " 'https://docs.google.com/document/d/abc123/edit'];\n"
-        "const kinds = urls.map((u) => t.linkKind(u)?.kind || null);\n"
+        "const kinds = urls.map((u) => [t.linkKind(u)?.kind, t.linkKind(u)?.role]);\n"
         "s.state.snapshot = { pr_titles: {} };\n"
         "const links = t.taskLinks({ title: 'Preview', artifacts: [{ url: urls[0],"
-        " name: 'Preview', status: 'running' }] });\n"
+        " name: 'Preview', status: 'running' }], result: `Opened ${urls[5]}; dashboards at"
+        " ${urls[6]} and ${urls[7]}.` });\n"
         "return { kinds, links: links.map((l) => [l.found.kind, l.role, l.name]) };"
     )
-    assert found["kinds"] == [None] * 7 + ["doc"]
-    assert found["links"] == [["link", "output", "Preview"]]
+    assert found["kinds"] == [["link", "reference"]] * 8 + [["run", "run"], ["doc", "output"]]
+    assert found["links"] == [
+        ["link", "output", "Preview"],
+        ["link", "reference", ""],
+        ["link", "reference", ""],
+        ["link", "reference", ""],
+    ]
+
+
+def test_a_run_of_unknown_status_says_so_on_artifacts_and_its_chip():
+    """Screenshot review: "Run f3a9c1 · running" in blue on Artifacts and on its chip under
+    Needs you, beside "Status unknown"; counted as running on its task's runs line."""
+    found = run_js(
+        ARTIFACTS + NINE + "const said = [{ url: runs[0].url, at: at(47) },"
+        " { url: runs[1].url, at: at(60), checked_at: at(30) }];\n"
+        "const lost = [{ ...runs[0], unknown: true }, { ...runs[1], status: 'in progress',"
+        " said_by: 'GitHub', unknown: true }, ...runs.slice(2, 4)];\n"
+        "const shipping = { ...task('a', 'Ship the export', ...lost), artifacts: said };\n"
+        "const items = a.deliverablesOf(shipping).filter((i) => i.unknown);\n"
+        "const [group] = a.groupArtifacts(a.collectArtifacts([shipping]));\n"
+        "return { items: items.map((i) => [i.status, i.tone, i.help]),"
+        " words: group.folded.words, shown: group.runs.map((r) => r.name) };"
+    )
+    assert found["items"] == [
+        ["status unknown", "wait", "Status unknown: reported running 47h ago, not checked since"],
+        [
+            "status unknown",
+            "wait",
+            "Status unknown: GitHub said in progress 30h ago, not read since",
+        ],
+    ]
+    assert found["words"] == "1 failed · 2 unknown"
+    # Never folded away: they wait for the owner's word.
+    assert found["shown"] == ["Export 0", "Export 1", "Export 3"]
+
+
+def test_a_needs_you_row_for_unknown_runs_does_not_repeat_its_result():
+    """Screenshot review: its second line was the run's state, then its accepted result (here,
+    as often, its own title again)."""
+    found = run_js(
+        TASKS + "s.state.snapshot = { settings: { max_workers: 3 }, sessions: [], tasks: [] };\n"
+        "const task = { id: 't', title: 'Backfill', status: 'done', result: 'Backfill: done.' };\n"
+        "return [k.rowLatest(task, null, { section: 'needs', marker: 'runs-unknown' }).text,"
+        " k.rowLatest(task, null, { section: 'needs', marker: 'pr-failing' }).text];"
+    )
+    assert found == ["", "Backfill: done."]
 
 
 def test_a_finished_task_waiting_only_on_runs_of_unknown_status_needs_the_owner():
@@ -222,7 +280,8 @@ def test_a_tasks_runs_are_taken_off_artifacts_together(tmp_path):
     app = create_app(tmp_path / "data", TOKEN, 8765, runtime_factory=factory)
     with TestClient(app, base_url="http://127.0.0.1:8765") as http:
         sign_in(http)
-        runs = [{"key": f"flyte.x/e/{index}", "tone": "good"} for index in range(9)]
+        # Review: as many as a task can list (20 declared, 60 its reports link); 40 was the cap.
+        runs = [{"key": f"flyte.x/e/{index}", "tone": "good"} for index in range(80)]
         first, *rest = runs
         hidden = http.post(
             "/api/artifacts/hide",
@@ -234,3 +293,10 @@ def test_a_tasks_runs_are_taken_off_artifacts_together(tmp_path):
             "/api/artifacts/hide", json={"key": rest[0]["key"], "hidden": False}, headers=ORIGIN
         ).json()["hidden"]
         assert [item["key"] for item in back] == [first["key"]] + [r["key"] for r in rest[1:]]
+        # Undo: all of them back at once.
+        undone = http.post(
+            "/api/artifacts/hide",
+            json={"key": first["key"], "hidden": False, "tone": "good", "together": rest},
+            headers=ORIGIN,
+        ).json()["hidden"]
+        assert undone == []
