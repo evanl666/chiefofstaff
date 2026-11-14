@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from chiefofstaff import agentrun
-from chiefofstaff.backend import process_table, running
+from chiefofstaff.backend import isolated, process_table, running
 
 # A stand-in agent CLI: it says who it is, starts a command in a session of its own (as Codex
 # runs a command left running, in a terminal of its own), prints a line on its stdout and waits;
@@ -381,6 +381,32 @@ def test_a_chosen_environment_keeps_only_what_it_names(tmp_path, monkeypatch, ow
     given = json.loads(out.read_text())
     assert not any(k.startswith("CHIEFOFSTAFF_") or k == "OWNER_TOKEN" for k in given)
     assert given["OWNER_SETTING"] == "kept"
+
+
+def test_the_cli_alone_starts_in_the_folder_it_is_given(tmp_path, own_signals, capsys):
+    folder = tmp_path / "worker folder"
+    folder.mkdir()
+    out = tmp_path / "cli.json"
+    script = (
+        "import json, os, sys; json.dump([os.getcwd(), os.environ['PWD']], open(sys.argv[1], 'w'))"
+    )
+    before = Path.cwd()
+    code = agentrun.main(["--cwd", str(folder), "--", sys.executable, "-c", script, str(out)])
+    assert code == 0 and Path.cwd() == before, "the supervisor stays where it is"
+    assert json.loads(out.read_text()) == [str(folder.resolve()), str(folder)]
+    assert agentrun.main(["--cwd", str(tmp_path / "gone"), "--", "true"]) == 127
+    assert "no folder" in capsys.readouterr().err
+
+
+def test_chief_of_staff_runs_its_own_modules_isolated(tmp_path):
+    marks = tmp_path / "marks"
+    marks.mkdir()
+    (tmp_path / "typing.py").write_text(f"open({str(marks / 'typing')!r}, 'w').close()\n")
+    listed = subprocess.run(
+        [*isolated("chiefofstaff.agentrun"), "--", "true"], cwd=tmp_path, check=False
+    )
+    assert listed.returncode == 0 and not list(marks.iterdir())
+    assert isolated("x", "a")[1:] == ["-I", "-m", "x", "a"]
 
 
 # The same, run in this process (what the subprocesses above do is not measured).

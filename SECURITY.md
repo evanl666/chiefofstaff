@@ -98,7 +98,10 @@ Workers can also run on Codex (off by default; Settings → Models). For such a 
   approval reaches, outside any receipt.
 - **Its processes** run under a small supervisor of Chief of Staff's, without Chief of Staff's
   `CHIEFOFSTAFF_*` variables (your Slack token among them), and end when Chief of Staff's process
-  goes away, however it stops.
+  goes away, however it stops. The supervisor runs isolated from the folder it starts in
+  (`python -I`, in a folder of Chief of Staff's own), so no Python file of a repository runs as
+  it; what Chief of Staff records of these processes keeps a hash of each command line, not the
+  command line.
 - **Its settings folder** (`~/.codex`, and `$CODEX_HOME`) cannot be added to *Also writable in
   the sandbox* while Codex is on: its hooks run outside any sandbox.
 - **Sign-in** is Codex's own; Chief of Staff never reads or stores it. What a Codex worker reads

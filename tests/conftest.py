@@ -587,7 +587,36 @@ def fake_claude(directory: Path, monkeypatch) -> str:
     command.chmod(0o755)
     monkeypatch.setenv("FAKE_CLAUDE_HOME", str(directory / "home"))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(directory / "config"))
+    # Claude set up (its state file there), as on a computer where the owner signed in.
+    (directory / "config").mkdir(exist_ok=True)
+    (directory / "config" / ".claude.json").write_text("{}\n")
     return str(command)
+
+
+# Modules a program of Chief of Staff's imports as it starts (and its own package): a repository
+# with files of these names runs them as Chief of Staff if its folder is on the import path.
+SHADOWED = ("typing", "argparse", "logging", "subprocess", "token", "copy", "inspect", "json")
+
+
+def shadowing_repository(folder: Path, marks: Path) -> Path:
+    """A repository whose `typing.py` (and others: SHADOWED) and `chiefofstaff/` would each leave
+    a mark in `marks` if Python imported them."""
+    (folder / "chiefofstaff").mkdir(parents=True)
+    marks.mkdir()
+    for name in [*SHADOWED, "chiefofstaff/__init__", "chiefofstaff/agentrun"]:
+        mark = marks / name.replace("/", ".")
+        (folder / f"{name}.py").write_text(f"open({str(mark)!r}, 'w').close()\n")
+    return folder
+
+
+def cwd_of(pid: int) -> str:
+    """The folder a process runs in."""
+    if sys.platform.startswith("linux"):
+        return str(Path(f"/proc/{pid}/cwd").readlink())
+    listed = subprocess.run(
+        ["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"], capture_output=True, text=True
+    ).stdout
+    return next((line[1:] for line in listed.splitlines() if line.startswith("n")), "")
 
 
 # The owner's own Claude Code, when this machine has one: the contract tests on the real CLI run

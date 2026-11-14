@@ -1133,7 +1133,7 @@ class Runtime:
                     await backend.stop()
                 raise
             pids = await asyncio.to_thread(backend.processes)
-            records = await asyncio.to_thread(copilot_records, pids, directory)
+            records = await asyncio.to_thread(copilot_records, pids, directory, hashed=True)
             self.store.set(key, json.dumps(records))
             self.agent_pids[agent] = pids
             # Its turns begin only once admitted (the next message in its own queue too).
@@ -1281,7 +1281,7 @@ class Runtime:
         if not entry or entry.backend is not backend or self.agent_pids.get(agent) == pids:
             return
         self.agent_pids[agent] = pids
-        records = await asyncio.to_thread(copilot_records, pids, self.store.directory)
+        records = await asyncio.to_thread(copilot_records, pids, self.store.directory, hashed=True)
         if entry.backend is backend:
             self.store.set(f"agentpids:{agent}", json.dumps(records))
 
