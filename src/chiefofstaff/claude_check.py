@@ -35,13 +35,20 @@ if TYPE_CHECKING:
     from .backend_claude import ClaudeAgent, ClaudeWorker
 
 # Raised whenever what the check does changes: every version is checked again then.
-REVISION = 2
+REVISION = 3
 # The check's own tool of Chief of Staff's, and the stand-in MCP server's.
 TOOL = "chiefofstaff_check"
 SERVER = "chiefofstaff_check"
 SERVER_TOOL = "write_marker"
 # What each action would leave in the check's folder, had it run.
 COMMAND_MARK = "command.marker"
+# The sandbox step's: a file outside the worker's folder, one kept unreadable (its copy, if read),
+# a host off its list and one on it.
+SANDBOX_MARK = "sandbox.marker"
+SANDBOX_READ = "sandbox-read.copy"
+UNREADABLE_TEXT = "chiefofstaff-check-unreadable"
+BLOCKED_HOST = "example.com"
+ALLOWED_HOST = "api.github.com"
 SERVER_MARK = "server.marker"
 RAISING_MARK = "raising.marker"
 ALLOWED_FILE, REFUSED_FILE = "allowed.txt", "refused.txt"
@@ -191,6 +198,12 @@ def script(work: Path, step: str, answered: int, after: str) -> tuple[list[dict]
         "background": [bash("sleep 1; echo done", run_in_background=True)],
         "interrupt": [bash(f"echo $$ > {work / INTERRUPT_PID}; exec sleep 40")],
         "resumed": [],
+        "sandbox": [
+            bash(f"touch {work.parent / 'sandbox-outside' / SANDBOX_MARK}"),
+            bash(f"cat {work.parent / 'sandbox-secret'} > {work / SANDBOX_READ}"),
+            bash(f"curl -sS -m 5 -o /dev/null http://{BLOCKED_HOST}/"),
+            bash(f"curl -sS -m 5 -o /dev/null https://{ALLOWED_HOST}/"),
+        ],
     }
     planned = steps.get(step, [])
     if answered < len(planned):
@@ -402,6 +415,7 @@ class Facts:
         self.background_code: int | None = None
         self.tasks_seen = False
         self.offered: list[str] = []
+        self.sandbox = "not checked"
 
     def saw(self, kind: str, message: dict, *paths: str):
         """Which of the fields Chief of Staff reads this message had."""
@@ -517,6 +531,7 @@ async def check(agent: ClaudeAgent, folder: Path) -> dict:
         offered = messages.requests[0]["tools"] if messages.requests else []
         facts.offered = sorted({*offered})
         reached = list(catcher.seen)
+        facts.sandbox = await sandboxed(checker, launcher, work, facts, catcher)
     except Exception as exc:  # Whatever stops the check, it says why.
         why = (
             f"Chief of Staff's check of Claude Code {agent.cli_version} could not run ("
@@ -539,6 +554,56 @@ async def check(agent: ClaudeAgent, folder: Path) -> dict:
             await asyncio.to_thread(catcher.close)
         await asyncio.to_thread(shutil.rmtree, folder, True)
     return check_verdict(agent.cli_version, facts, happened, reached)
+
+
+async def sandboxed(
+    checker: ClaudeAgent, launcher: Path, work: Path, facts: Facts, catcher: Catcher
+) -> str:
+    """Claude's sandbox as Chief of Staff gives a worker's commands its own (sandbox_settings),
+    on a worker of its own: a write outside its folder, a read of a file kept unreadable and a
+    host off its list must all fail, a host on its list must be reached (the catcher answers,
+    nothing goes further). "" when they did, else why its workers may not run sandboxed."""
+    from .backend import SandboxPolicy
+    from .backend_claude import ClaudeWorker
+
+    said = f"Chief of Staff's check of Claude Code {checker.cli_version}"
+    outside, secret = work.parent / "sandbox-outside", work.parent / "sandbox-secret"
+    seen = len(catcher.seen)
+    try:
+        await asyncio.to_thread(outside.mkdir, exist_ok=True)
+        await asyncio.to_thread(secret.write_text, UNREADABLE_TEXT)
+        policy = SandboxPolicy(
+            readwrite=(str(work),), denied=(str(secret),), allowed_hosts=("github.com",)
+        )
+        options = check_options(work, facts) | {"sandbox": policy}
+        worker = ClaudeWorker(
+            checker, "check-sandbox", str(uuid.uuid4()), options, resume=False,
+            launcher=launcher, checking=True,
+        )  # fmt: skip
+        checker.workers["check-sandbox"] = worker
+        try:
+            await worker.open()
+            session = worker.attach(worker.options)
+            turn = Turn(session, facts)
+            await turn.send(f"{STEP}sandbox")
+            await asyncio.wait_for(turn.ended(), CHECK_SECONDS / 2)
+            await session.disconnect()
+        finally:
+            await worker.stop()
+    except Exception as exc:
+        return f"{said} could not check its sandbox ({(str(exc) or type(exc).__name__)[:200]})"
+    caught = list(catcher.seen[seen:])
+    copy = work / SANDBOX_READ
+    problems = []
+    if (outside / SANDBOX_MARK).exists():
+        problems.append("let a command write outside the worker's folders")
+    if copy.exists() and UNREADABLE_TEXT in copy.read_text(errors="replace"):
+        problems.append("let a command read a file it keeps unreadable")
+    if any(BLOCKED_HOST in line for line in caught):
+        problems.append("let a command reach a host off its list")
+    if not any(ALLOWED_HOST in line for line in caught):
+        problems.append("kept a command from reaching a host on its list")
+    return f"{said} found that its sandbox {' and '.join(problems)}" if problems else ""
 
 
 def check_options(work: Path, facts: Facts) -> dict:
@@ -782,6 +847,8 @@ def check_verdict(version: str, facts: Facts, happened: list[str], reached: list
         "steering": "steered" in facts.said,
         "usage": usage_ok,
         "background_code": facts.background_code,
+        # Whether its sandbox holds as Chief of Staff's does ("": it does; else why not).
+        "sandbox": facts.sandbox,
         # Chief of Staff's tools given to the model upfront (alwaysLoad), not behind its search.
         "tools_upfront": f"mcp__chief__{TOOL}" in facts.offered,
     }

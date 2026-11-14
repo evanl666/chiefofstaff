@@ -288,6 +288,15 @@ def prepare_downgrade(store: Store) -> tuple[list[str], dict[int, str]]:
     return stopped, left
 
 
+# The agents whose own sandbox Chief of Staff can give a worker as its own sandbox, once the
+# check of their version shows it holding (Claude's: backend_claude.sandbox_settings).
+SANDBOXED = frozenset({"claude"})
+
+
+def can_sandbox(name: str) -> bool:
+    return name in SANDBOXED
+
+
 def clear_private(folder: Path, *, keep_own: bool = False):
     """An agent's private files (Claude's: a worker's MCP configuration and prompt, 0600) left
     by processes that ended without removing them (Chief of Staff was killed); `keep_own`:

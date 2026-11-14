@@ -21,6 +21,7 @@ import contextlib
 import json
 import os
 import re
+import shlex
 import signal
 import sys
 import time
@@ -111,6 +112,9 @@ class Fake:
         for config in configs if isinstance(configs, list) else [configs]:
             text = config if config.lstrip().startswith("{") else Path(config).read_text()
             self.servers |= json.loads(text).get("mcpServers") or {}
+        # Claude's sandbox for its commands, as --settings says (emulated: sandboxed).
+        settings = json.loads(flags["settings"]) if isinstance(flags.get("settings"), str) else {}
+        self.sandbox = (settings.get("sandbox") or {}) if isinstance(settings, dict) else {}
         appended = flags.get("append-system-prompt-file")
         self.appended = Path(appended).read_text() if appended else ""
         self.appended = self.appended or str(flags.get("append-system-prompt") or "")
@@ -878,8 +882,57 @@ class Fake:
         )
         return block
 
+    async def sandboxed(self, call: str, command: str) -> dict | None:
+        """Claude's sandbox, as 2.1.322's behaves for the commands Chief of Staff's check runs
+        (a write outside its folders, a read of a file kept unreadable, a host asked about):
+        the result where it refuses one, else None (the command runs)."""
+        if not self.sandbox.get("enabled"):
+            return None
+        files = self.sandbox.get("filesystem") or {}
+        network = self.sandbox.get("network") or {}
+        words = shlex.split(command) if command else []
+
+        def under(path: str, roots: list) -> bool:
+            path = os.path.normpath(Path(self.cwd) / path)
+            return any(path == r or path.startswith(r.rstrip("/") + "/") for r in roots)
+
+        refused = None
+        if words[:1] == ["touch"] and not under(words[1], [self.cwd, *files.get("allowWrite", [])]):
+            refused = f"touch: {words[1]}: Operation not permitted"
+        if words[:1] == ["cat"] and under(words[1], files.get("denyRead", [])):
+            refused = f"cat: {words[1]}: Operation not permitted"
+        if words[:1] == ["curl"]:
+            url = next(w for w in words if "://" in w)
+            host = url.split("://", 1)[1].split("/", 1)[0].split(":", 1)[0]
+            allowed = network.get("allowedDomains")
+            listed = allowed is None or any(host == d or host.endswith("." + d) for d in allowed)
+            if not listed:
+                reply = await self.ask(
+                    {"subtype": "can_use_tool", "tool_name": "SandboxNetworkAccess",
+                     "input": {"host": host}, "tool_use_id": call, "permission_suggestions": []}
+                )  # fmt: skip
+                listed = (reply.get("response") or {}).get("behavior") == "allow"
+            if not listed:
+                refused = f"curl: (56) CONNECT tunnel failed, response 403 ({host} blocked)"
+            elif proxy := os.environ.get("HTTPS_PROXY"):
+                # Through its proxy, to the one it was given: the check's catcher hears of it.
+                address = proxy.split("://", 1)[1].rstrip("/")
+                with contextlib.suppress(OSError):
+                    reader, writer = await asyncio.open_connection(*address.rsplit(":", 1))
+                    writer.write(f"CONNECT {host}:443 HTTP/1.1\r\nHost: {host}\r\n\r\n".encode())
+                    await writer.drain()
+                    await asyncio.wait_for(reader.read(100), 5)
+                    writer.close()
+                refused = "curl: (56) CONNECT tunnel failed, response 502"
+        if refused is None:
+            return None
+        failed = f"Exit code 1\n{refused}"
+        return self.tool_result(call, failed, True, f"Error: {failed}")
+
     async def bash(self, call: str, data: dict) -> dict:
         command = data.get("command") or ""
+        if (refused := await self.sandboxed(call, command)) is not None:
+            return refused
         process = await asyncio.create_subprocess_exec(
             "/bin/sh",
             "-c",

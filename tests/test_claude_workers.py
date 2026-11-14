@@ -303,3 +303,63 @@ async def test_private_files_a_killed_chief_of_staff_left_go_at_start_and_at_tur
         assert list(private.iterdir()) == [], "and once it is turned off"
     finally:
         await runtime.stop()
+
+
+@pytest.mark.parametrize("proven", [True, False])
+async def test_claude_workers_run_sandboxed_only_on_a_version_whose_sandbox_held(
+    tmp_path, claude_on_path, monkeypatch, proven
+):
+    monkeypatch.setitem(PASSED, "sandbox", "" if proven else "its sandbox let a command out")
+    harness, runtime = await started(tmp_path)
+    try:
+        harness.store.save_settings(
+            harness.store.settings().model_copy(update={"worker_sandbox": True})
+        )
+        await saved(runtime, {"claude": {"enabled": True}})
+        await runtime.connect_agent("claude")
+        row = {"id": "", "role": "worker", "slack": 0, "yolo": "", "closed_at": None}
+        why = runtime.blocked_on("claude", row)
+        if not proven:
+            assert why == (
+                "Claude can't run while workers are sandboxed: its sandbox let a command out. "
+                "Turn the sandbox off in Settings → Workers to go on."
+            )
+            return
+        assert why == ""
+        result = await spawn_on(harness, runtime, title="Fix it", instructions="Report done: Ok.",
+                                agent="claude")  # fmt: skip
+        worker = harness.store.session(result["session_id"])
+        policy = runtime.agent_options(worker)["sandbox"]
+        assert worker["cwd"] in policy.readwrite and policy.allowed_hosts == ()
+        await until(lambda: harness.store.session(worker["id"])["status"] == "done", 30)
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.parametrize(
+    ("sandbox", "ask_first", "yolo", "expected"),
+    [
+        ("", "", "", ""),
+        ("its sandbox let a command out", "", "", "its sandbox let a command out"),
+        ("", "it did not ask first for a command", "", "it did not ask first for a command"),
+        ("", "", "on", "it acts on its own"),
+    ],
+)
+async def test_a_worker_that_reads_slack_runs_on_claude_only_with_its_guarantees(
+    tmp_path, claude_on_path, monkeypatch, sandbox, ask_first, yolo, expected
+):
+    monkeypatch.setitem(PASSED, "sandbox", sandbox)
+    monkeypatch.setitem(PASSED, "ask_first", ask_first)
+    _, runtime = await started(tmp_path)
+    try:
+        await saved(runtime, {"claude": {"enabled": True}})
+        await runtime.connect_agent("claude")
+        row = {"id": "", "role": "worker", "slack": 1, "yolo": yolo, "closed_at": None}
+        why = runtime.blocked_on("claude", row)
+        assert why == (
+            f"Workers that read Slack run on Copilot, not Claude: {expected}." if expected else ""
+        )
+        runtime.sandbox_host = False
+        assert "this computer can't sandbox workers" in runtime.blocked_on("claude", row)
+    finally:
+        await runtime.stop()
