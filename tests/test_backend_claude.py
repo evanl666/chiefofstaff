@@ -294,6 +294,24 @@ async def test_a_new_effort_with_a_message_queued_starts_its_turn_in_a_new_proce
     assert turn.kinds().count("assistant.turn_start") == 2 and not worker.queue
 
 
+async def test_a_message_sent_while_its_process_restarts_waits_for_it(agent, tmp_path):
+    session = await agent.create_session(session_id="c4" * 16, name="t", **options(tmp_path))
+    turn = Turn(session)
+    await session.send("Run the shell command `sleep 1`, then reply with just: first")
+    await until(lambda: "tool.execution_start" in turn.kinds())
+    worker = session.backend
+    await session.set_model("", reasoning_effort="high")
+    await session.send("Then reply with just: second")
+    await until(lambda: worker.opening > 0, 30)
+    assert await session.send("And then reply with just: third") == "", "queued, not refused"
+    for _ in range(3):
+        if turn.said() == ["first", "second", "third"]:
+            break
+        await turn.ended(30)
+    assert turn.said() == ["first", "second", "third"]
+    assert worker.process_effort == "high" and worker.alive()
+
+
 @pytest.mark.parametrize("during", ["restart", "admission"])
 async def test_a_stop_while_its_turn_starts_stops_it_before_it_begins(agent, tmp_path, during):
     raw, admitting = Raw(), asyncio.Event()
@@ -704,8 +722,8 @@ async def test_its_cli_runs_under_the_supervisor_with_none_of_chief_of_staffs_va
 ):
     monkeypatch.setenv("CHIEFOFSTAFF_SECRET", "x")
     launcher = agent.launcher.read_text()
-    assert launcher.startswith("#!/bin/sh\nexec ")
-    assert ' -I -m chiefofstaff.agentrun --cwd "${CHIEFOFSTAFF_AGENT_CWD:?}" -- ' in launcher
+    assert launcher.startswith("#!/bin/sh\n") and "\nexec " in launcher
+    assert ' -I -m chiefofstaff.agentrun --cwd "$cwd" -- ' in launcher
     assert agent.command in launcher and "_bundled" not in launcher
     assert oct(agent.launcher.stat().st_mode & 0o777) == "0o700"
     session = await agent.create_session(session_id="a8" * 16, name="t", **options(tmp_path))
@@ -718,6 +736,40 @@ async def test_its_cli_runs_under_the_supervisor_with_none_of_chief_of_staffs_va
     processes = agent.processes()
     assert any("chiefofstaff.agentrun" in line for line in processes.values())
     assert not any("_bundled" in line for line in processes.values())
+
+
+# Chief of Staff's variables the guide documents (docs/guide.md), each set as an owner might.
+DOCUMENTED = {
+    "CHIEFOFSTAFF_DISK_CRITICAL_GB": "5",
+    "CHIEFOFSTAFF_DISK_WARNING_GB": "20",
+    "CHIEFOFSTAFF_EVENT_DEBOUNCE": "0.5",
+    "CHIEFOFSTAFF_MIN_FREE_MEMORY": "5",
+    "CHIEFOFSTAFF_QUESTION_TTL": "600",
+    "CHIEFOFSTAFF_RELEASE_IDLE_MINUTES": "10",
+    "CHIEFOFSTAFF_REQUEST_TIMEOUT": "60",
+    "CHIEFOFSTAFF_ROUTER_CONTEXT": "Owner works in Lisbon.",
+    "CHIEFOFSTAFF_SLACK_MCP_URL": "https://slack.example.com/mcp",
+    "CHIEFOFSTAFF_SLACK_USER_TOKEN": "xoxp-secret",
+    "CHIEFOFSTAFF_WATCHDOG_INTERVAL": "120",
+}
+
+
+async def test_its_workers_and_check_run_whichever_of_chief_of_staffs_variables_are_set(
+    agent, tmp_path, monkeypatch
+):
+    for name, value in DOCUMENTED.items():
+        monkeypatch.setenv(name, value)
+    starts = tmp_path / "starts.jsonl"
+    monkeypatch.setenv("FAKE_CLAUDE_STARTS", str(starts))
+    session = await agent.create_session(session_id="c3" * 16, name="t", **options(tmp_path))
+    turn = Turn(session)
+    await session.send("Reply with just: ok")
+    await turn.ended()
+    assert turn.said() == ["ok"]
+    (started,) = [json.loads(line) for line in starts.read_text().splitlines()]
+    assert started["own"] == [], "none of them reaches the CLI"
+    found = await agent.check(tmp_path / "check")
+    assert found["ran"] is True and found["acting"] == "" and found["ask_first"] == ""
 
 
 async def test_a_repositorys_python_files_never_run_as_chief_of_staff(agent, tmp_path, monkeypatch):

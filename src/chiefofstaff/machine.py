@@ -26,7 +26,7 @@ from dataclasses import dataclass, fields
 from pathlib import Path
 
 # New worker turns wait while less than this share of memory (percent) is available.
-MIN_FREE_PERCENT = float(os.environ.get("CHIEFOFSTAFF_MIN_FREE_MEMORY", "10"))
+MIN_FREE_PERCENT = float(os.environ.get("CHIEFOFSTAFF_MIN_FREE_MEMORY") or "10")
 CACHE_SECONDS = 5.0
 _cached: tuple[float, float | None] = (0.0, None)
 
