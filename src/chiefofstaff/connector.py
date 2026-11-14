@@ -432,13 +432,40 @@ def clock_of(moment: float) -> str:
     return f"{at.strftime('%b')} {at.day}, {hour}"
 
 
+def counted(count: int, word: str) -> str:
+    return f"{count} {word}{'' if count == 1 else 's'}"
+
+
+def length_words(seconds: float) -> str:
+    """How long, in words: "40 minutes", "6 hours", "about 7 hours", "4 days 14 hours"."""
+    if seconds < 3600:
+        return counted(max(1, round(seconds / 60)), "minute")
+    if seconds < 48 * 3600:
+        hours = round(seconds / 3600)
+        return ("" if abs(seconds - hours * 3600) < 300 else "about ") + counted(hours, "hour")
+    days, rest = divmod(round(seconds / 3600), 24)
+    return counted(days, "day") + (f" {counted(rest, 'hour')}" if rest else "")
+
+
+def between(start: float, end: float) -> str:
+    """When a stretch of time was, as the owner reads it: "between 3:00 PM and 9:00 PM",
+    "between Nov 9, 6:34 AM and Nov 13, 10:49 AM" (its end's day whenever it is not its
+    start's: a gap of days never reads as hours)."""
+    first, last = (datetime.fromtimestamp(moment).astimezone() for moment in (start, end))
+    ending = clock_of(end)
+    if first.date() != last.date() and ending[:1].isdigit():
+        ending = f"{last.strftime('%b')} {last.day}, {ending}"
+    return f"between {clock_of(start)} and {ending}"
+
+
 def gap_text(gap: dict, still: bool = False) -> str:
-    """A watch's coverage gap, for the owner: what could not be checked, when, and why
-    (`still`: told before, it grew since)."""
+    """A watch's coverage gap, for the owner: what could not be checked, for how long, when, and
+    why (`still`: told before, it grew since)."""
     reason = str(gap.get("reason") or "").strip().rstrip(".")
     return (
-        f"{'Still could' if still else 'Could'} not check \u201c{gap['watch']}\u201d between "
-        f"{clock_of(gap['from'])} and {clock_of(gap['to'])}" + (f" ({reason})" if reason else "")
+        f"{'Still could' if still else 'Could'} not check \u201c{gap['watch']}\u201d for "
+        f"{length_words(gap['to'] - gap['from'])}, {between(gap['from'], gap['to'])}"
+        + (f" ({reason})" if reason else "")
     )
 
 
@@ -946,6 +973,7 @@ class Connector:
                 raise ValueError("Add a watch first.")
             if self.busy():
                 raise ValueError("A scan is running already.")
+            self.retell_gaps()
             self.store.set("watch_scanned_at", str(time.time()))  # When the next one is due.
             self.store.set("watch_started_at", str(time.time()))
             # Each watch from where it was last covered in full (a little before: what came in
@@ -1090,30 +1118,59 @@ class Connector:
         gaps = json.loads(self.store.get("watch_gaps") or "[]")
         last = next((gap for gap in reversed(gaps) if gap["key"] == key), None)
         if last and last["from"] <= start <= last["to"] + OVERLAP_SECONDS:
-            # Kept by an older version, which told it once: as long as it is now.
-            told = last.setdefault("told", last["to"] - last["from"])
+            # Kept by an older version, which told it once when it began, however long it grew
+            # since (bug E50): told none of it as far as anyone knows (see retell_gaps).
+            told = last.setdefault("told", 0)
             last.update({"to": max(last["to"], end), "reason": reason, "at": now()})
             span = last["to"] - last["from"]
             grown = span >= told * GAP_GROWN or any(told < mark <= span for mark in GAP_MARKS)
             if grown:
-                last["told"] = span
+                last.update({"told": span, "told_at": now()})
             self.store.set("watch_gaps", json.dumps(gaps))
             if grown:
                 self.tell_gap(last, still=True)
             return
         found = {"key": key, "watch": what, "from": start, "to": end, "reason": reason}
-        found["told"] = end - start
+        found |= {"told": end - start, "told_at": now()}
         self.store.set("watch_gaps", json.dumps([*gaps, {**found, "at": now()}][-MAX_GAPS:]))
         self.tell_gap(found)
 
-    def tell_gap(self, gap: dict, still: bool = False):
+    def tell_gap(self, gap: dict, still: bool = False, *more: dict):
+        said = "; ".join(gap_text(each) for each in more)
         self.runtime.add_message(
             self.runtime.router_id(),
             "notice",
-            f"{gap_text(gap, still)}: anything that came in then may have been missed, so look "
-            "there yourself. Settings → Connections → Watches lists what could not be checked.",
+            f"{gap_text(gap, still)}{f'; {said}' if said else ''}: anything that came in then "
+            "may have been missed, so look there yourself. Settings → Connections → Watches lists "
+            "what could not be checked.",
             {"settings": "connections"},
         )
+
+    def retell_gaps(self):
+        """At the first scan after this version came (bug E50): the gaps earlier versions kept,
+        told again with all of each, in one notice. 0.1.42 and before told a gap when it began
+        and never as it grew (no `told`); 0.1.43 took such a gap, at its first growth, for told
+        as long as it was then (one told as 15 minutes was 100 hours "told"). Each gap still
+        open (the newest of its watch) and each that grew since it was told is told, once: this
+        version stamps every gap it tells (`told_at`), so it is never told again here; from
+        then on as GAP_GROWN has it."""
+        gaps = json.loads(self.store.get("watch_gaps") or "[]")
+        newest = {gap["key"]: index for index, gap in enumerate(gaps)}
+        again = [
+            gap
+            for index, gap in enumerate(gaps)
+            if not gap.get("told_at")
+            and (
+                newest[gap["key"]] == index
+                or "told" not in gap
+                or gap["told"] < gap["to"] - gap["from"]
+            )
+        ]
+        for gap in again:
+            gap.update({"told": gap["to"] - gap["from"], "told_at": now()})
+        if again:
+            self.store.set("watch_gaps", json.dumps(gaps))
+            self.tell_gap(again[0], False, *again[1:])
 
     async def t_report_found(self, params: ReportFound, caller: str):
         self.check(caller)

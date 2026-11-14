@@ -348,7 +348,7 @@ TOOL_SCHEMAS: dict[str, tuple[int, str]] = {
     "ask_workspace": (1176, "5d00bb6fc095b66a8be34246c09de112066d435e7ea8e40de8e042672c462f2e"),
     "assess_worker": (1283, "2f97c542176a6aadd04812f43e9e54e2a6a0b667b818149693018c844c87be36"),
     "cancel_task": (720, "2011f9c18cbbe0da27a39489620ef13c7381f1acb64cdfe8ca3b86b7b62595ef"),
-    "check_back": (1212, "93e0b1687efc478d9624e8f40c0032c0a8e048c190b23c2da2a705fe526d3c80"),
+    "check_back": (1527, "50fdc2e5bb3f9b101114de4a6f7f6187cf7f6b1f38a672245313bc9ae512de51"),
     "check_prs": (767, "3dac38ab006814eb88e1b7324e0f9f36a8dfa761bbae0f5f18e6341702884ed0"),
     "close_worker": (505, "c4103af68548be57f389ba91d1d9c1b3370d3eb1ed9c6d9c0a4b8485e6a789cd"),
     "distill_profile": (544, "2904b62209db0faa88cdb3cca631b120b47223876dee91465c1f8158ad64cafd"),

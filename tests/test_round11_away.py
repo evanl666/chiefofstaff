@@ -313,7 +313,7 @@ async def test_what_no_scan_can_cover_is_a_gap_the_owner_is_told_of(tmp_path):
     for _scan in range(GAP_TRIES):
         await scan(harness, runtime, **CAPPED)
     [told] = notices(harness)
-    assert told.startswith("Could not check \u201cDMs to me\u201d between "), told
+    assert told.startswith("Could not check \u201cDMs to me\u201d for 5 hours, between "), told
     assert "only the newest 3 DMs" in told and "look there yourself" in told
     [gap] = runtime.connector.view()["gaps"]
     assert gap["text"] in told and abs(datetime.fromisoformat(gap["from"]).timestamp() - done) < 1
@@ -350,7 +350,9 @@ async def test_what_is_older_than_the_source_or_scans_reach_is_a_gap(tmp_path):
 def test_a_gap_says_when_in_the_owners_clock():
     today = datetime.now().astimezone().replace(hour=15, minute=0, second=0, microsecond=0)
     gap = {"watch": "#deploys", "from": today.timestamp(), "to": today.timestamp() + 6 * 3600}
-    assert gap_text(gap) == "Could not check \u201c#deploys\u201d between 3:00 PM and 9:00 PM"
+    assert gap_text(gap) == (
+        "Could not check \u201c#deploys\u201d for 6 hours, between 3:00 PM and 9:00 PM"
+    )
 
 
 async def test_a_scan_that_reports_in_several_calls_counts_once_toward_a_gap(tmp_path):

@@ -14,7 +14,7 @@ from chiefofstaff.connector import (
     LOOKBACK_HOURS,
     OVERLAP_SECONDS,
     RECOVER_DAYS,
-    clock_of,
+    between,
     gist,
     unclosed,
 )
@@ -70,7 +70,7 @@ async def test_what_an_older_version_left_beyond_scans_reach_is_a_gap_told(tmp_p
     horizon = time.time() - RECOVER_DAYS * 86400
     assert abs(starts(job)["#deploys"] - horizon) < 120, job
     [told] = notices(harness)
-    assert told.startswith("Could not check \u201c#deploys\u201d between "), told
+    assert told.startswith("Could not check \u201c#deploys\u201d for 2 days, between "), told
     [gap] = runtime.connector.view()["gaps"]
     assert gap["watch"] == "#deploys" and gap["text"] in told
     assert abs(datetime.fromisoformat(gap["from"]).timestamp() - done) < 1, gap
@@ -112,7 +112,9 @@ async def test_a_gap_that_grows_a_lot_is_told_again_with_all_of_it(tmp_path):
     assert len(told(harness)) == 1, "a little longer: not told again"
     grow(31)  # Twice as long.
     assert len(told(harness)) == 2
-    assert told(harness)[-1].startswith("Still could not check \u201c#deploys\u201d between ")
+    assert told(harness)[-1].startswith(
+        "Still could not check \u201c#deploys\u201d for 31 minutes, between "
+    )
     grow(50)
     assert len(told(harness)) == 2
     grow(61)  # Past an hour (not twice 31 minutes).
@@ -131,16 +133,17 @@ async def test_a_gap_that_grows_a_lot_is_told_again_with_all_of_it(tmp_path):
     grow(3.5 * 24 * 60)
     assert len(told(harness)) == 7
     latest = told(harness)[-1]
-    assert f"between {clock_of(start)} and {clock_of(start + 3.5 * 86400)}" in latest, latest
+    assert between(start, start + 3.5 * 86400) in latest, latest
     grow(3.6 * 24 * 60)
     assert len(told(harness)) == 7, "once per crossing"
     [gap] = connector.view()["gaps"]
     assert abs(datetime.fromisoformat(gap["to"]).timestamp() - (start + 3.6 * 86400)) < 1
 
 
-async def test_a_gap_an_older_version_kept_is_not_told_again_at_once(tmp_path):
-    """E42: one kept before this version (told when it began, its length then unknown) counts
-    as told as it is: not told again for growing a little."""
+async def test_a_gap_an_older_version_kept_is_told_once_then_as_it_grows(tmp_path):
+    """E42, as round 13 (E50) has it: one kept before this version was told when it began,
+    however long it is now: told once, all of it, as it grows again; not again for growing a
+    little."""
     harness = Harness(tmp_path / "data", Settings(watches=[Watch(what="#deploys")]))
     await harness.connect()
     connector = harness.runtime.connector
@@ -148,7 +151,7 @@ async def test_a_gap_an_older_version_kept_is_not_told_again_at_once(tmp_path):
     kept = {"key": watch_key("#deploys"), "watch": "#deploys", "from": start, "to": start + 3600}
     harness.store.set("watch_gaps", json.dumps([kept | {"reason": "x", "at": "2026-11-12"}]))
     connector.gap("#deploys", start + 3000, start + 5400, "x")
-    assert not told(harness)
+    assert len(told(harness)) == 1
     connector.gap("#deploys", start + 5000, start + 7200, "x")
     assert len(told(harness)) == 1
 

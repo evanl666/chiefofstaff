@@ -92,6 +92,20 @@ export const shorten = (text, max) => (text.length > max ? `${text.slice(0, max 
 export function prTitle(key) {
   return state.snapshot?.pr_titles?.[String(key).toLowerCase()] || "";
 }
+// A server on this computer or its network, not a page others read (bug E55): a loopback,
+// private or link-local address, a .local or .localhost name. The server also reads the hosts
+// file for names it maps there, and leaves a page on a port of its own out of Artifacts
+// (task_actions.served_here); a run there (Airflow on :8080) is still a run.
+export function servedHere(parsed) {
+  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+  if (host === "localhost" || /\.(local|localhost)$/.test(host)) return true;
+  const ip = /^(\d+)\.(\d+)\.\d+\.\d+$/.exec(host);
+  if (ip) {
+    const [a, b] = [Number(ip[1]), Number(ip[2])];
+    return [0, 10, 127].includes(a) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254);
+  }
+  return ["::", "::1"].includes(host) || /^(f[cd]|fe[89ab])[0-9a-f]*:/.test(host);
+}
 // What a link is, for a chip or a link's text: { kind, label, key (PRs), title (PRs) }.
 export function linkKind(url) {
   let match;
@@ -109,6 +123,10 @@ export function linkKind(url) {
   // what is under one (a Spark application, logs, a debug page, a CI run); "reference",
   // something it points to.
   const is = (kind, label, role, extra = {}) => ({ kind, label, role, ...extra });
+  const plain = () => is("link", last && !/^[\w-]{32,}$/.test(last) ? `${shorten(host, 28)} · ${shorten(last, 24)}` : shorten(host, 40), "reference");
+  // A page of this computer or its network (a dev server's, a local Airflow): a link of its
+  // task's, never a document or a run it delivered, whatever its path says.
+  if (/^https?:$/.test(parsed.protocol) && servedHere(parsed)) return plain();
   // A file its worker made (declared by its path): opened here, not by the browser.
   if (parsed.protocol === "file:") return is("file", last || "File", "output", { path });
   if ((match = /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/.exec(url))) {
@@ -143,7 +161,7 @@ export function linkKind(url) {
   if (/spark|shs-/i.test(host)) return is("run", `Spark history${last ? ` · ${shorten(last, 28)}` : ""}`, "diagnostic");
   if (/(^|[.-])rdev([.-]|$)/i.test(host)) return is("run", `rdev · ${shorten(host.split(".")[0], 28)}`, "diagnostic", { id: host.split(".")[0] });
   if (/darwin/i.test(host)) return is("doc", `Darwin${last ? ` · ${shorten(last, 28)}` : ""}`, "output");
-  return is("link", last && !/^[\w-]{32,}$/.test(last) ? `${shorten(host, 28)} · ${shorten(last, 24)}` : shorten(host, 40), "reference");
+  return plain();
 }
 // One key for one thing linked in different ways: a Google document by its id; else the
 // address without what only says how it was shared ("?usp=sharing", "utm_…") or a place in the

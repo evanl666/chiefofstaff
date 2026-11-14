@@ -41,7 +41,15 @@ from .policy import within
 from .roles import ROUTER, SLACK, WATCHDOG, WORKER
 from .sources.github import NO_ACCESS, diff_lines, snippet
 from .store import ago_minutes, now
-from .task_actions import GITHUB_RUN, deliverable_title, style_note
+from .task_actions import (
+    covers,
+    deliverable_kind,
+    deliverable_title,
+    github_run,
+    run_mark,
+    run_marks,
+    style_note,
+)
 from .tasks import ADOPTED, OPEN
 from .workspaces import resolve_project
 
@@ -589,6 +597,12 @@ class CheckBack(BaseModel):
     )
     url: str = Field(default="", description="A link to what you will check (a run, a page)")
     task_id: str = Field(default="", description="The task it is for; empty for your current task")
+    runs: list[str] = Field(
+        default_factory=list,
+        description="The runs you declared that it checks, each by its link or name; empty: "
+        "those you declared or updated in this turn. A run nothing checks and nobody updates "
+        "for a day shows as status unknown",
+    )
 
 
 class AssessWorker(BaseModel):
@@ -854,6 +868,11 @@ def shortened(listed: dict) -> dict:
             card.pop("text", None)  # What it is, to whom and what it answers stay.
     listed["note"] = "Shortened to fit: read_session and find_sessions give any session's details."
     return listed
+
+
+def run_names(items: list[dict]) -> str:
+    """Declared runs, each by its name (else its link): “Nightly export”, “…”."""
+    return ", ".join(f"\u201c{item.get('name') or item['url']}\u201d" for item in items)
 
 
 def clip_report(text: str) -> str:
@@ -2833,9 +2852,21 @@ class Tools:
                 task = made
         if task and params.artifacts:
             # What they are and where they stand is a fact, whatever becomes of the report.
-            self.runtime.task_actions.declare_artifacts(
+            declared = self.runtime.task_actions.declare_artifacts(
                 task["id"], [item.model_dump() for item in params.artifacts]
             )
+            # The runs it declared in this turn: a check-back it sets in it naming none is on
+            # them (one it set already too).
+            marks = self.states[caller].turn_runs.setdefault(task["id"], set())
+            marks |= {
+                mark
+                for item in declared
+                if deliverable_kind(item["url"], declared=True)[0] == "flow"
+                for mark in run_marks(item)
+            }
+            if task["id"] in self.states[caller].turn_check_backs:
+                self.runtime.task_actions.cover_runs(task["id"], marks)
+
         if task:
             self.runtime.task_actions.reported_links(task["id"], params.summary)
         if (
@@ -3000,31 +3031,9 @@ class Tools:
             and (problem := await self.runtime.checks.before_done(row, task))
         ):
             raise ValueError(problem)
-        # Reported done with a run it says still goes on, and nothing will look at it again (one
-        # on GitHub Chief of Staff reads itself): told once how the owner hears its end.
-        run_note = ""
-        unwatched = [
-            item
-            for item in (self.runtime.task_actions.runs_going(task["id"]) if task else [])
-            if not GITHUB_RUN.match(item["url"])
-        ]
-        if (
-            task
-            and params.status == "done"
-            and row["role"] == WORKER
-            and unwatched
-            and task["status"] != "cancelled"
-            and not self.store.get(f"setaside:{task['id']}")
-            and task["id"] not in self.states[caller].turn_check_backs
-            and not self.store.get(f"runnudge:{task['id']}")
-        ):
-            self.store.set(f"runnudge:{task['id']}", "1")
-            names = ", ".join(f"\u201c{item['name'] or item['url']}\u201d" for item in unwatched)
-            run_note = (
-                f" By what you said, {names} still goes on, and nothing will look at it again: "
-                "for the owner to hear how it ends, call check_back for it now (task_id="
-                f"'{task['id']}') and end your turn; if it has ended, report again with its end "
-                "state in artifacts."
+        if task and params.status == "done":
+            self.runtime.task_actions.unlisted_runs(
+                task["id"], self.states[caller].turn_runs.get(task["id"], set()), params.summary
             )
         meta = {"status": params.status, "task_id": task["id"] if task else None}
         drafts = {
@@ -3093,7 +3102,7 @@ class Tools:
                 self.runtime.update_session(caller, report=params.summary[:4000])
                 return (
                     f"Task {task['id']}'s report is updated. It was reported already: the "
-                    "Router is not told again." + run_note
+                    "Router is not told again." + self.run_note(row, task, params.status)
                 )
             elif (
                 params.status == "done"
@@ -3234,11 +3243,11 @@ class Tools:
             if params.replaces_result:
                 return (
                     f"Task {task['id']}'s result is this report now (the owner asked in chat); "
-                    "the earlier one is kept with it." + run_note
+                    "the earlier one is kept with it." + self.run_note(row, task, params.status)
                 )
             return (
                 f"Noted as an update on task {task['id']} (the owner asked in chat; its "
-                "result stays as it is)." + run_note
+                "result stays as it is)." + self.run_note(row, task, params.status)
             )
         if settled and task and params.status in {"question", "blocked"}:
             # A cancelled task's worker still needs the owner: the question shows under Needs
@@ -3280,7 +3289,37 @@ class Tools:
                 needs_action=False,
                 title="PR update",
             )  # fmt: skip
-        return "Reported to the Router." + split_note + run_note
+        return "Reported to the Router." + split_note + self.run_note(row, task, params.status)
+
+    def run_note(self, row: dict, task: dict | None, status: str) -> str:
+        """Reported done with a run it says still goes on that nothing will look at again (not
+        one on GitHub Chief of Staff reads itself, nor one its check-back is on as the report
+        left the task: bug E52): told once how the owner hears its end."""
+        task = self.tasks.find(task["id"]) if task else None
+        if (
+            not task
+            or status != "done"
+            or row["role"] != WORKER
+            or task["status"] == "cancelled"
+            or self.store.get(f"setaside:{task['id']}")
+            or self.store.get(f"runnudge:{task['id']}")
+        ):
+            return ""
+        check = self.runtime.task_actions.check_back(task)
+        unwatched = [
+            item
+            for item in self.runtime.task_actions.runs_going(task["id"])
+            if not github_run(item["url"]) and not (check and covers(check, item))
+        ]
+        if not unwatched:
+            return ""
+        self.store.set(f"runnudge:{task['id']}", "1")
+        return (
+            f" By what you said, {run_names(unwatched)} still goes on, and nothing will look at "
+            "it again: for the owner to hear how it ends, call check_back for it now (task_id="
+            f"'{task['id']}', runs: its link or name) and end your turn; if it has ended, report "
+            "again with its end state in artifacts."
+        )
 
     async def t_cancel_task(self, params: CancelTask, caller: str):
         self.caller(caller, ROUTER)
@@ -3507,12 +3546,15 @@ class Tools:
     async def t_rename_task(self, params: RenameTask, caller: str):
         self.caller(caller, ROUTER)
         task = self.runtime.task_actions.task_for(params.task_id)
+        # As a new task's title (bug E61: one rule for all three).
+        self.check_title_style(deliverable_title(params.title), "Not renamed")
         renamed = self.runtime.task_actions.rename(task["id"], params.title, "the Router")
         return f"Renamed task {renamed['id']} to “{renamed['title']}”."
 
     async def t_split_task(self, params: SplitTask, caller: str):
         self.caller(caller, ROUTER)
         task = self.runtime.task_actions.task_for(params.task_id)
+        self.check_title_style(deliverable_title(params.title), "Not split")
         made = self.runtime.task_actions.split(task["id"], params.title, "the Router")
         return f"Split off task {made['id']} “{made['title']}” ({made['status']})."
 
@@ -3936,13 +3978,46 @@ class Tools:
         url = params.url.strip()
         if url and not re.match(r"^https?://\S+$", url):
             raise ValueError("url must be an http(s) link, or empty.")
+        # The runs it is on (bug E51): those it names (its link among them), else those it
+        # declared in this turn; others are not waited for on its word.
+        named = [given for given in params.runs if given.strip()][:20]
+        runs = {run_mark(given) for given in named} | ({run_mark(url)} if url else set())
+        if not named:
+            runs |= self.states[caller].turn_runs.get(task["id"], set())
+        going = self.runtime.task_actions.runs_going(task["id"])
+        on = [item for item in going if run_marks(item) & runs]
+        if run_going and not on:
+            raise ValueError(
+                f"Not set: task {task['id']} is finished, and a check-back on it is for its runs "
+                f"still going ({run_names(going)}). Name those it checks in runs, or give "
+                "their status in a report first."
+            )
         at = datetime.now(UTC) + timedelta(minutes=params.minutes)
-        self.runtime.task_actions.set_check_back(task, at.isoformat(), what, url, run=run_going)
+        self.runtime.task_actions.set_check_back(
+            task, at.isoformat(), what, url, sorted(runs), bool(named)
+        )
         self.states[caller].turn_check_backs.add(task["id"])
         clock = at.astimezone().strftime("%H:%M")
+        known = set().union(*(run_marks(item) for item in going))
+        missing = [given for given in named if run_mark(given) not in known]
+        # Not one on GitHub: Chief of Staff reads that itself.
+        others = [item for item in going if item not in on and not github_run(item["url"])]
         return (
-            f"You are woken at {clock} ({params.minutes} minutes) to check {what}. End your turn "
-            "now; do not wait in a shell."
+            f"You are woken at {clock} ({params.minutes} minutes) to check {what}"
+            + (f", and {run_names(on)}" if on else "")
+            + ". End your turn now; do not wait in a shell."
+            + (
+                f" No run of this task said to go on is called {', '.join(missing)} yet: "
+                "declare it in a report's artifacts for this check-back to cover it."
+                if missing
+                else ""
+            )
+            + (
+                f" Not covered: {run_names(others)}. Name them in runs (or give their status "
+                "in a report) for the owner to hear how they end."
+                if others
+                else ""
+            )
         )
 
     async def t_unfollow_thread(self, params: FollowThread, caller: str):

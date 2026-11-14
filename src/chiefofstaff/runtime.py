@@ -3142,17 +3142,27 @@ class Runtime:
         return [item if isinstance(item, dict) else {"key": item, "tone": ""} for item in found]
 
     def hide_artifact(
-        self, key: str, hidden: bool = True, tone: str = "", also: Sequence[str] = ()
+        self,
+        key: str,
+        hidden: bool = True,
+        tone: str = "",
+        also: Sequence[str] = (),
+        together: Sequence[tuple[str, str]] = (),
     ) -> list[dict]:
         """The owner's Artifacts list without (or again with) this one: a PR's key or a link.
-        `also`: the keys an earlier version gave the same one, replaced by this."""
+        `also`: the keys an earlier version gave the same one, replaced by this. `together`:
+        more (key, tone) with it (a task's runs, taken off from their line)."""
         key = key.strip()
         if not key:
             raise ValueError("Which artifact?")
-        gone = {key, *(old.strip() for old in also)}
+        more = [(other.strip(), shade) for other, shade in together if other.strip()]
+        gone = {key, *(old.strip() for old in also), *(other for other, _shade in more)}
         found = [item for item in self.hidden_artifacts() if item["key"] not in gone]
         if hidden:
-            found = [*found, {"key": key, "tone": tone[:20]}][-500:]
+            found = [
+                *found,
+                *({"key": other, "tone": shade[:20]} for other, shade in [(key, tone), *more]),
+            ][-500:]
         self.store.set("artifacts_hidden", json.dumps(found))
         self.publish_state()
         return found

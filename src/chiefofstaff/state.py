@@ -51,6 +51,9 @@ class SessionState:
     turn_tasks: list[str] = field(default_factory=list)
     # Tasks a worker set a check-back on in its current turn: it waits for it, not in this turn.
     turn_check_backs: set[str] = field(default_factory=set)
+    # The runs it declared in its current turn, by task (run_marks): a check-back it sets in
+    # the turn naming none is on them.
+    turn_runs: dict[str, set[str]] = field(default_factory=dict)
     # Tasks it reported done in its current turn: another done report on one is an amendment.
     turn_reported: set[str] = field(default_factory=set)
     # Open cards for the owner: draft id -> text.

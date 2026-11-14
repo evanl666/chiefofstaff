@@ -528,7 +528,11 @@ def create_app(
         """Off the owner's Artifacts list (or back on it): the task keeps it."""
         return {
             "hidden": runtime.hide_artifact(
-                payload.key, payload.hidden, payload.tone, also=payload.also
+                payload.key,
+                payload.hidden,
+                payload.tone,
+                also=payload.also,
+                together=[(item.key, item.tone) for item in payload.together],
             )
         }
 

@@ -2,8 +2,8 @@
 
 import { api, el, foldable, moreMenu, once, submits, toast } from "./dom.js";
 import { monitorParts, obligationsOf, PR_TO_FIX, SECTION_DOT, statusWord, taskPhase, workerContext } from "./board.js";
-import { ago, changesText, compactPaths, displayPath, gist, linkName, markdown, notCountedText, plural, prTitle, shorten, since, taskLinks, threadLabel } from "./text.js";
-import { deliverablesOf, isHidden, PR_ROLES, prStatus, setHidden, toneOf } from "./artifacts.js";
+import { ago, changesText, compactPaths, displayPath, gist, linkKey, linkName, markdown, notCountedText, plural, prTitle, shorten, since, taskLinks, threadLabel } from "./text.js";
+import { deliverablesOf, isHidden, PR_ROLES, prStatus, runStanding, setHidden, toneOf } from "./artifacts.js";
 import { openFile } from "./files.js";
 import { byId, closedWorkers, DELIVERY_WORDS, latestDelivery, loadState, ownerQuestions, pendingDrafts, sessions, state, tasks } from "./state.js";
 import { renderSidebar } from "./sidebar.js";
@@ -563,6 +563,13 @@ function taskCard(task, phase = phaseOf(task)) {
       const about = { "pr-failing": "the failing checks", "pr-conflicts": "the merge conflicts", "pr-changes": "the changes asked for" }[phase.marker];
       main = el("button", { type: "button", text: "Ask it to fix…", onclick: () => reply(`What should it do about ${about}?`, "Sent to the worker.") });
       more = [followUp, copy, named, worker];
+    } else if (task.status === "done" && phase.marker === "runs-unknown") {
+      // Runs its worker said go on that nothing told of for a day, and nothing else to wait
+      // on: the owner says what became of them, here.
+      const urls = unknownRuns(task);
+      main = el("button", { type: "button", text: "Ended", "data-tip": urls.length > 1 ? "They have ended: mark them so" : "It has ended: mark it so", onclick: () => act(`/api/tasks/${task.id}/runs`, { how: "ended", urls }, urls.length > 1 ? "Runs marked ended." : "Marked ended.") });
+      shown = [quiet("Stop tracking", () => act(`/api/tasks/${task.id}/runs`, { how: "untracked", urls }, "No longer tracked."), "Stop following it, as it was last said to stand")];
+      more = [followUp, copy, pr, named, splitOff, worker];
     } else if (task.status === "review") {
       // Every result waits for the owner's Accept, a report that only informs too.
       main = el("button", { type: "button", text: "Accept", onclick: accept });
@@ -594,9 +601,10 @@ function taskCard(task, phase = phaseOf(task)) {
       more = [named, worker];
     }
     // Runs its worker said go on that nothing told of for a day: the owner says what became of
-    // them (ended, or no longer to follow), in its menu.
+    // them (ended, or no longer to follow), in its menu, whatever the task's state (bug E57);
+    // on its row when that is all it waits on.
     const urls = unknownRuns(task);
-    if (urls.length && ["review", "done"].includes(task.status)) {
+    if (urls.length && phase.marker !== "runs-unknown") {
       const what = urls.length > 1 ? "Runs marked ended." : "Marked ended.";
       more = [{ text: "Mark ended", onclick: () => act(`/api/tasks/${task.id}/runs`, { how: "ended", urls }, what) }, { text: "Stop tracking", onclick: () => act(`/api/tasks/${task.id}/runs`, { how: "untracked", urls }, "No longer tracked.") }, ...more];
     }
@@ -624,7 +632,7 @@ function taskBody(task, phase = {}) {
     // it made, the threads it still follows); on a row, what it reported before, folded.
     const first = isRow(phase) ? gist(task.result || "") : "";
     // Monitoring: what it waits on; under Needs you for its PR: what is wrong there.
-    const waits = phase.section === "monitoring" || PR_TO_FIX.includes(phase.marker) ? waitLine(task, worker, phase) : null;
+    const waits = phase.section === "monitoring" || [...PR_TO_FIX, "runs-unknown"].includes(phase.marker) ? waitLine(task, worker, phase) : null;
     const found = artifacts(task, worker, { active: phase.section === "monitoring" || phase.marker === "still-following" });
     const nodes = [first ? el("div", { class: "outcome", text: first }) : null, waits, found, isRow(phase) ? earlierBlock(task) : null].filter(Boolean);
     return nodes.length ? el("div", { class: "task-body" }, ...nodes) : null;
@@ -674,13 +682,13 @@ function progressLine(text, at, taskId = "", stale = false) {
 function linkGroups(task, shown, mentioned = [], off = []) {
   const more = { made: [], diagnostic: [], reference: [...mentioned], off: [...off] };
   for (const link of taskLinks(task)) {
-    const { found, said } = link;
+    const { found } = link;
     if (shown.has(link.key) || (found.key && shown.has(found.key))) continue;
     shown.add(link.key);
     if (found.key) shown.add(found.key);
     const role = link.role === "pr" ? "reference" : link.role;
     const made = ["output", "run"].includes(role);
-    const taken = made && isHidden(link.key, toneOf(said?.status));
+    const taken = made && isHidden(link.key, linkStanding(task, link).tone);
     const chip = linkChip(task, link, role, made && !taken);
     if (taken) more.off.push(chip);
     else if (made) more.made.push(chip);
@@ -692,19 +700,30 @@ function linkGroups(task, shown, mentioned = [], off = []) {
   return el("details", { class: "more-links" }, el("summary", { text: `More links: ${words}` }), el("div", { class: "receipts" }, ...folded));
 }
 // A link as a chip: its name (and where it stands, as its worker said); a file opens here.
+// Where a link its worker declared stands: as it said; a run of its (one on this computer,
+// say, which is not on Artifacts) as monitoring has it: not "running" once nothing has told of
+// it for a day, nor once the owner stopped tracking it. { status, tone, help }.
+function linkStanding(task, link) {
+  const { said } = link;
+  if (!said) return { status: "", tone: "", help: "" };
+  const lost = (task.monitoring || []).some((item) => item.kind === "flow" && item.unknown && linkKey(item.url) === link.key);
+  const standing = runStanding(said.status, said, said.untracked, lost);
+  return standing || { status: said.status || "", tone: toneOf(said.status), help: "" };
+}
 function linkChip(task, link, role, removable) {
   const { found, said } = link;
   const name = linkName(link);
   const file = link.path && found.kind === "file";
-  const label = `${file ? "file · " : ""}${name}${said?.status ? ` · ${said.status}` : ""}`;
+  const { status, tone, help: why } = linkStanding(task, link);
+  const label = `${file ? "file · " : ""}${name}${status ? ` · ${status}` : ""}`;
   const size = link.file?.size ? `${Math.max(1, Math.round(link.file.size / 1024))} KB` : "";
   // What it is and its id (a document's) on hover, never as its name.
-  const help = [said?.status ? `${name} · ${said.status}` : name, found.id ? `${found.label} ${found.id}` : link.name && found.title ? found.title : "", size, link.path || link.url].filter(Boolean).join("\n");
+  const help = [status ? `${name} · ${status}` : name, why, found.id ? `${found.label} ${found.id}` : link.name && found.title ? found.title : "", size, link.path || link.url].filter(Boolean).join("\n");
   const open = file
     ? el("button", { type: "button", class: "chip-link", text: label, "data-tip": `${help}\nClick to open it`, onclick: () => openFile(link.path, task.session_id) })
     : el("a", { class: "chip-link", href: link.url, target: "_blank", rel: "noreferrer", "data-tip": help, text: label });
-  const chip = el("span", { class: `receipt link-chip kind-${found.kind} ${role}${said ? ` tone-${toneOf(said.status)}` : ""}` }, open);
-  if (removable) chip.append(offButton(link.key, name, toneOf(said?.status)));
+  const chip = el("span", { class: `receipt link-chip kind-${found.kind} ${role}${said ? ` tone-${tone}` : ""}` }, open);
+  if (removable) chip.append(offButton(link.key, name, tone));
   return chip;
 }
 const offButton = (key, name, tone) => el("button", { type: "button", class: "chip-off", text: "✕", "data-tip": "Take it off this card and Artifacts (it comes back if it fails)", "aria-label": `Take ${name} off`, onclick: () => setHidden(key, true, tone) });
@@ -737,7 +756,7 @@ function deliverableChips(task, phase) {
 // where it stands as its worker said (its task's state is on its row already).
 function deliveredChip(item, removable) {
   const role = PR_ROLES[item.role] ? ` · ${PR_ROLES[item.role].toLowerCase()}` : "";
-  const help = [`${item.kind}${role}: ${item.name}`, item.status ? `${item.status} (${item.said ? "as its worker said" : "as its task stands"})` : "", item.url].filter(Boolean).join("\n");
+  const help = [`${item.kind}${role}: ${item.name}`, item.help || (item.status ? `${item.status} (${item.said ? "as its worker said" : "as its task stands"})` : ""), item.url].filter(Boolean).join("\n");
   const chip = el("span", { class: `receipt link-chip kind-${item.kind.toLowerCase()} output tone-${item.tone}` }, el("a", { class: "chip-link", href: item.url, target: "_blank", rel: "noreferrer", "data-tip": help, text: `${item.kind === "PR" ? "" : `${item.kind} · `}${item.name}${item.status && item.said ? ` · ${item.status}` : ""}` }));
   if (removable) chip.append(offButton(item.key, item.name, item.tone));
   return chip;
@@ -907,7 +926,7 @@ function runningBody(task, worker, phase = {}) {
 // What a task that is not being worked on waits for, and what wakes it: the PR or thread it
 // follows for this task (and where the PR stands), the time it checks back, a slot, its turn,
 // or nothing (then it says so): { text, help, warn }.
-function waitWords(task, worker, phase) {
+export function waitWords(task, worker, phase) {
   const marker = phase.marker;
   let text = phase.why;
   let help = "";
@@ -916,15 +935,18 @@ function waitWords(task, worker, phase) {
     text = `Checks back at ${clockTime(back.at)}: ${back.what}`;
     if (back.error) text += ` · could not wake it last time (${back.error}); trying again`;
     help = "It said when to look again; it is woken then";
-  } else if (["watching", "delivered", "mergeable"].includes(marker) && obligationsOf(task).length) {
+  } else if (["watching", "delivered", "mergeable", "runs-unknown"].includes(marker) && obligationsOf(task).length) {
     // What it waits for and what wakes it, each thing it waits on (one it cannot read now is
     // said so: its card says why).
     const unreadable = new Set(task.watch_unreadable || []);
     // On its card, in a line: for what, on what, how long quiet.
     const bits = monitorBits(task);
     if (bits) text = [bits.first.unknown ? `${bits.label}: status unknown` : `${bits.what} ${bits.what === "Following" ? "" : "on "}${bits.label}`, bits.quiet].filter(Boolean).join(" · ");
-    const waits = (item) => (item.unknown ? ": status unknown" : item.waiting_for ? `: waiting for ${item.waiting_for}` : "");
-    help = [text, ...obligationsOf(task).map((item) => `${item.label || item.key}${waits(item)}${unreadable.has(item.key) ? " (can't read it now)" : ""}${item.trigger ? `\n  ${item.trigger}` : ""}`)].join("\n");
+    // The first line says the first one's state: not said again under it (bug E62).
+    const waits = (item) => (item === bits?.first ? "" : item.unknown ? ": status unknown" : item.waiting_for ? `: waiting for ${item.waiting_for}` : "");
+    // When GitHub was last read, of a run it cannot be read now (bug E59).
+    const read = (item) => (item.read_error && item.last_check ? ` (last read ${spelled(ago(item.last_check))} ago)` : "");
+    help = [text, ...obligationsOf(task).map((item) => `${item.label || item.key}${waits(item)}${unreadable.has(item.key) ? " (can't read it now)" : ""}${item.trigger ? `\n  ${item.trigger}${read(item)}` : ""}`)].join("\n");
   } else if (marker === "queued") {
     const reason = queuedReason(task);
     text = reason.text;
@@ -1032,6 +1054,8 @@ export function rowLatest(task, worker, phase) {
     return { text: line.textContent, help: line.dataset.tip };
   }
   if (phase.section === "finished") return { text: "" };
+  // Its runs are what it needs the owner for: its result (accepted) is not news.
+  if (phase.marker === "runs-unknown") return { text: "" };
   if (phase.marker === "update") return { text: gist(task.news?.text || ""), help: task.news?.text };
   // Its question is said in full on the row.
   if (phase.section === "needs" && questionOf(task)) return { text: "" };

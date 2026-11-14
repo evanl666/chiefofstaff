@@ -65,9 +65,9 @@ class TaskBook:
         # Whether an accepted task still has something followed up for it (a PR waiting for
         # its review, a run under way): set by TaskActions, see its `monitoring`.
         self.monitored: Callable[[dict], bool] = lambda task: False
-        # The runs its worker said still go on (TaskActions.runs_going): a check-back on one of
-        # finished work stays while they do.
-        self.runs_going: Callable[[str], list[dict]] = lambda task_id: []
+        # Its check-back as it stays once the work is finished (TaskActions.run_check): on the
+        # runs it covers that still go on; None when it covers none.
+        self.run_check: Callable[[str], dict | None] = lambda task_id: None
 
     # Reading
 
@@ -257,12 +257,6 @@ class TaskBook:
             (status, now(), task_id),
         )
 
-    def checks_on_run(self, task_id: str) -> bool:
-        """Its check-back is on a run of finished work (see TaskActions.set_check_back) that is
-        still going."""
-        found = json.loads(self.store.get(f"checkback:{task_id}") or "{}")
-        return bool(found.get("run")) and bool(self.runs_going(task_id))
-
     def move(self, task_id: str, status: str, *, reason: str = "", **values: Any) -> dict:
         """Change a task's status, keeping its runs in step."""
         if status not in STATUSES:
@@ -280,12 +274,16 @@ class TaskBook:
             self.store.delete(f"followup:{task_id}")
         if status in {"review", "done", "failed", "cancelled"}:
             self.store.delete(f"reopened:{task_id}")  # Its follow-up is over.
-        if status in {"failed", "cancelled"} or (
-            status in {"review", "done"} and not self.checks_on_run(task_id)
-        ):
-            # Nothing to check back on. Not a run of finished work its worker checks on when it
-            # ends: accepted, answered, its result told again, it still does.
-            self.store.delete(f"checkback:{task_id}")
+        if status in {"failed", "cancelled"}:
+            self.store.delete(f"checkback:{task_id}")  # Nothing to check back on.
+        elif status in {"review", "done"}:
+            # Finished: its check-back stays on the runs it covers that still go on (set while
+            # it worked, or on finished work: accepted, answered, its result told again), for
+            # its worker to tell how they end; otherwise there is nothing to check back on.
+            if kept := self.run_check(task_id):
+                self.store.set(f"checkback:{task_id}", json.dumps(kept))
+            else:
+                self.store.delete(f"checkback:{task_id}")
         if status != "waiting":
             self.store.delete(f"stopped:{task_id}")  # Going on (or over): not stopped now.
             self.store.delete(f"goingon:{task_id}")

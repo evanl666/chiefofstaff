@@ -358,7 +358,8 @@ def test_a_tasks_runs_are_folded_under_its_prs_on_artifacts():
             "task": "a",
             "mains": ["PR", "Doc"],
             "runs": ["Export 0", "Export 3"],
-            "folded": {"count": 9, "hidden": 7, "words": "3 running · 1 failed", "tone": "bad"},
+            # Round 13 review: what needs a look most first.
+            "folded": {"count": 9, "hidden": 7, "words": "1 failed · 3 running", "tone": "bad"},
         },
     ]
     assert unfolded[1]["runs"] == [f"Export {i}" for i in range(9)]

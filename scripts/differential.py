@@ -218,6 +218,8 @@ FIXES = [
         r"(When a|How to)$|^\s*write it \(in English, human-sounding, concise\) goes in the "
         r"instructions, never the title\.$|^\s*When a$",
     ),
+    # Unreleased (QA round 13, E51): a worker's check-back names the runs it is for.
+    Allow("check-back-runs", data=r"\.options\.tools\[\d+\]\.parameters\.properties\.runs$"),
 ]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on

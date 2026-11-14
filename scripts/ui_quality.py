@@ -793,14 +793,18 @@ KNOWN_ROW_FINDINGS = re.compile(
 
 
 async def runs_views(runtime, browser, quality: Quality):
-    """QA E41/E43: Monitoring with runs nothing told of for two days (its row, its menu open)
-    and Artifacts with a task's nine runs under its PR, folded and unfolded; 800 to 1440 px,
-    light and dark (browser-shots/qa-e41/)."""
-    from ui_edges import runs_seeded
+    """QA E41/E43, round 13: a finished task with only a run of unknown status (under Needs
+    you, its two answers on its row), one in Monitoring with another run still waited for (its
+    menu open), a running task's unknown run, and Artifacts with tasks' runs under their line
+    (a waiting run in sight, one marked ended, one no longer tracked), folded and unfolded; 800
+    to 1440 px, light and dark (browser-shots/qa-e41/)."""
+    from ui_edges import FLYTE, runs_seeded, thirteen_seeded
 
     folder = SHOTS / "qa-e41"
     folder.mkdir(exist_ok=True)
     await runs_seeded(runtime)
+    ship = (await thirteen_seeded(runtime))["E58 ship the approvals"]["id"]
+    runtime.task_actions.end_runs(ship, [FLYTE + "ap07"], "untracked")  # E53: not tracked.
     for scheme in ("light", "dark"):
         context = await browser.new_context(
             viewport={"width": 1440, "height": 1000}, color_scheme=scheme, bypass_csp=True
@@ -810,14 +814,25 @@ async def runs_views(runtime, browser, quality: Quality):
         page.on("pageerror", lambda error: errors.append(str(error)))  # noqa: B023
         await page.goto(f"{BASE}/#token={TOKEN}")
         monitoring, made = page.locator("#tasks-monitoring"), page.locator("#tasks-artifacts")
-        row = monitoring.locator(".card.task", has_text="E41 backfill the ranking features")
+        needs = page.locator("#needs")
+        await expect(needs.locator(".card.task", has_text="E41 backfill")).to_be_visible(
+            timeout=15000
+        )
+        row = monitoring.locator(".card.task", has_text="E41 rebuild the search index")
         await expect(row).to_be_visible(timeout=15000)
         for width in WIDTHS:
             await page.set_viewport_size({"width": width, "height": 1000})
             if width < 1100:
-                await page.locator("#home-tabs [data-tab=tasks]").click()
+                await page.locator("#home-tabs [data-tab=needs]").click()
             await page.wait_for_timeout(150)
             name = f"quality-{width}-{scheme}"
+            await needs.screenshot(path=folder / f"{name}-needs.png")
+            await quality.check(
+                page, f"needs unknown runs {width} {scheme}", "#needs", KNOWN_ROW_FINDINGS
+            )
+            if width < 1100:
+                await page.locator("#home-tabs [data-tab=tasks]").click()
+                await page.wait_for_timeout(150)
             await monitoring.screenshot(path=folder / f"{name}-monitoring.png")
             await quality.check(
                 page, f"monitoring {width} {scheme}", "#tasks-monitoring", KNOWN_ROW_FINDINGS
@@ -829,18 +844,19 @@ async def runs_views(runtime, browser, quality: Quality):
             )
             await monitoring.screenshot(path=folder / f"{name}-menu.png")
             await page.keyboard.press("Escape")
-            fold = made.locator(".a-fold")
-            for state in ("false", "true"):
-                await expect(fold).to_have_attribute("aria-expanded", state)
-                await made.locator(":scope > .items").evaluate("n => n.scrollTop = 0")
-                await made.screenshot(
-                    path=folder / f"{name}-artifacts-{'open' if state == 'true' else 'folded'}.png"
-                )
-                await quality.check(
-                    page, f"artifacts {width} {scheme} {state}", "#tasks-artifacts",
-                    KNOWN_ROW_FINDINGS,
-                )  # fmt: skip
-                await fold.click()
+            for fold in await made.locator(".a-fold").all():
+                for state in ("false", "true"):
+                    await expect(fold).to_have_attribute("aria-expanded", state)
+                    await made.locator(":scope > .items").evaluate("n => n.scrollTop = 0")
+                    task = await fold.evaluate("n => n.closest('.artifact').dataset.task")
+                    shown = "open" if state == "true" else "folded"
+                    await made.screenshot(path=folder / f"{name}-artifacts-{task}-{shown}.png")
+                    await quality.check(
+                        page, f"artifacts {width} {scheme} {task} {state}", "#tasks-artifacts",
+                        KNOWN_ROW_FINDINGS,
+                    )  # fmt: skip
+                    await fold.click()
+        await quality.contrast(page, f"needs {scheme}", "#needs")
         await quality.contrast(page, f"monitoring {scheme}", "#tasks-monitoring")
         await quality.contrast(page, f"artifacts {scheme}", "#tasks-artifacts")
         quality.failures += [f"page error {scheme}: {error}" for error in errors]

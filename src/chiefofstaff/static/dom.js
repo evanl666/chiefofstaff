@@ -342,7 +342,8 @@ export const submits = (event) => event.key === "Enter" && !event.isComposing &&
 export function escapeHtml(text) {
   return text.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 }
-export function toast(text, kind = "", sessionId = null) {
+// `action`: { text, onclick }, a button in it (Undo), and a little longer to reach it.
+export function toast(text, kind = "", sessionId = null, action = null) {
   const node = el("div", {
     class: `toast ${kind}`,
     text,
@@ -351,8 +352,22 @@ export function toast(text, kind = "", sessionId = null) {
       node.remove();
     },
   });
+  if (action) {
+    node.append(
+      el("button", {
+        type: "button",
+        class: "toast-action",
+        text: action.text,
+        onclick: (event) => {
+          event.stopPropagation();
+          node.remove();
+          action.onclick();
+        },
+      }),
+    );
+  }
   $("#toasts").append(node);
-  setTimeout(() => node.remove(), kind === "attention" ? 12000 : 6000);
+  setTimeout(() => node.remove(), kind === "attention" || action ? 12000 : 6000);
   return node;
 }
 // A click on the dim area around an open dialog closes it as Esc does: through its "cancel"
