@@ -1576,8 +1576,9 @@ class Line:
     def cd(self, name: str, arguments: list[str], certain: bool, mark: int):
         """Where `cd` goes (`cd -`: to the folder before; `pushd FOLDER`, and `popd` back to the
         folder pushd left; any other: not known), read as the shell reads it (`cd -P`: as the
-        system does). When it may not have run (`certain` is false), only the commands of its
-        `&&` chain after it surely run there."""
+        system does; a name that is no folder so, but is one as the system reads it: not
+        known, bash goes there). When it may not have run (`certain` is false), only the
+        commands of its `&&` chain after it surely run there."""
         rest, target, physical = list(arguments), None, self.physical
         unsure = self.physical_unsure
         while name == "cd" and rest and rest[0].startswith("-") and rest[0] != "-":
@@ -1612,7 +1613,15 @@ class Line:
         if target is None or LOST in target or (unsure and ".." in target.split("/")):
             self.lose()  # (Through `..` when `set -P` may have run: as the system goes or not.)
             return
-        self.folder = self.tally.moved(before, target, physical)
+        folder = self.tally.moved(before, target, physical)
+        if not physical and LOST not in folder and not Path(folder).is_dir():
+            # Not there as the shell reads the name: bash then goes where the system resolves
+            # it (a link's `..`: its target's parent). There, if that is a folder: not known.
+            system = self.tally.moved(before, target, True)
+            if LOST not in system and Path(system).is_dir():
+                self.lose()
+                return
+        self.folder = folder
         self.previous, self.dirs = before, dirs
         self.chain = None if certain else mark
         if not certain and not self.chained[-1]:  # (`x || cd y && …`: it may not have run.)

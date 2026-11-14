@@ -178,6 +178,12 @@ the checks you approved run.
 
 - Pattern checks on shell commands are guardrails, not isolation. Unless you turn the sandbox on,
   workers that do not read Slack run as your own Copilot sessions do: with your access.
+- The push check reads a command line as text; code the line only makes or keeps elsewhere is
+  not read: a `-c` script built by a substitution or from input (`bash -c "$(…)"`,
+  `while read l; do bash -c "$l"; done`), code in `trap '…'`, a script the line writes to a file
+  and then runs (`… > s.sh && bash s.sh`), other interpreters (`python3 -c`, `perl -e`,
+  `node -e`), and a script fed to a shell on a line that does not say push (`base64 -d | bash`,
+  GNU `parallel` with no command). Protect your default branch on the server too.
 - Unsandboxed commands run as you: they can reach whatever your account can, including
   keychain items that do not ask for a password.
 - The sandbox does not confine Copilot's built-in file edits as strictly as shell commands

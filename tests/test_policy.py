@@ -1653,6 +1653,35 @@ def test_cd_reads_dot_dot_as_the_lines_mode_says(command, shell, goes, tmp_path)
 
 
 @pytest.mark.parametrize(
+    ("command", "goes"),
+    [
+        ("cd m; cd ../main && git push", "unknown"),
+        ("pushd m; cd ../main && git push", "unknown"),
+        ("cd m && cd .. && git push", "work"),
+        ("cd -P m && cd ../main && git push", "a/main"),
+        ("cd build && cd .. && git push", "work"),
+        ("cd sub && git push", "work/sub"),
+    ],
+)
+def test_a_cd_to_no_folder_but_the_systems_leaves_the_folder_unknown(command, goes, tmp_path):
+    """The owner's review of 2ab43e1: where a name is no folder as the shell reads it (`m/../main`
+    with m a link: work/main) but is one as the system does (a/main), bash goes there; a name
+    that is no folder either way (made later, or a typo) is read as before."""
+    work = tmp_path / "work"
+    (work / "sub").mkdir(parents=True)
+    (tmp_path / "a" / "inner").mkdir(parents=True)
+    (tmp_path / "a" / "main").mkdir()
+    (work / "m").symlink_to(tmp_path / "a" / "inner")
+    policy.reading.cache_clear()
+    found = policy.pushes(command, str(work))
+    assert len(found) == 1, found
+    folder = found[0].bare_in or ""
+    assert (policy.LOST if policy.LOST in folder else folder) == (
+        policy.LOST if goes == "unknown" else str(tmp_path / goes)
+    )
+
+
+@pytest.mark.parametrize(
     ("option", "zsh", "read"),
     [("physical", False, (False, True)), ("PHYSICAL", False, (False, False)),
      ("nophysical", False, (False, False)), ("chase_links", False, (False, False)),

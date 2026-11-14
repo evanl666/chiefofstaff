@@ -18,9 +18,10 @@
   repository (`GIT_DIR`, `--git-dir`) or in a folder git can't say the branch of. A whole
   substitution (`$(git branch --show-current)`) counts as the checkout's branch. The folder a
   push runs in is followed through `cd` (as the shell reads a link's `..`, also after `set -P`,
-  `shopt -so physical` or zsh's `chase_links`), `pushd`/`popd`, `cd -`, subshells, `env -C`
-  (also in clusters: `env -iC DIR`) and `git -C`; a branch switched to with `git symbolic-ref
-  HEAD` counts; a push to a folder `find -exec` names (`{}`), or with words `xargs` adds (so
+  `shopt -so physical` or zsh's `chase_links`; unknown where bash falls back to the system's
+  reading), `pushd`/`popd`, `cd -`, subshells, `env -C` (also in clusters: `env -iC DIR`) and
+  `git -C`; a branch switched to with `git symbolic-ref HEAD` counts; a push to a folder
+  `find -exec` names (`{}`), or with words `xargs` adds (so
   `git remote | xargs -n1 git push`), is refused as unknown, and so is a line that defines an
   alias and says push; a Codex worker's command, and any `zsh -c` line, is read as zsh reads
   it (`$B:t`, `=git`). A script fed to a shell (`echo … | bash`, `bash <<EOF`, `bash <<< …`,

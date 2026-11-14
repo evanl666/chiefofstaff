@@ -51,7 +51,9 @@ exec "$@"
 # --git-dir, --work-tree), then a few commands answered
 # from `.git/HEAD` and `.git/branches` of the folder's fake repository; a push is written to
 # $PUSHES: its folder's top, its branch, `-c` settings, git's own variables, and its words,
-# separated by tabs (words by \x1f), each push ended by \x1e and a newline.
+# separated by tabs (words by \x1f), each push ended by \x1e and a newline. A push to a remote
+# that is not there (not origin, one `-c` names, a URL, or a repository's folder) fails, as
+# git's does (zsh's unsplit `$B`: `git push 'a b'`).
 SHIM = r"""#!/bin/sh
 config=""
 other=""
@@ -86,6 +88,26 @@ case "$config" in
 esac
 case "$command" in
   push|alias)
+    remote=""; skip=""; repo=""
+    [ "$command" = push ] && for word in "$@"; do
+      if [ -n "$skip" ]; then skip=""; [ -n "$repo" ] && { remote="$word"; break; }; continue; fi
+      case "$word" in
+        --repo=*) remote="${word#--repo=}"; break ;;
+        --repo) skip=1; repo=1 ;;
+        --push-option|--receive-pack|--exec) skip=1 ;;
+        --*) ;;
+        -*o) skip=1 ;;
+        -*) ;;
+        *) remote="$word"; break ;;
+      esac
+    done
+    case "$remote" in
+      ""|origin|*:*) ;;
+      *) case "$config" in
+           *"remote.$remote."*) ;;
+           *) [ -d "$remote/.git" ] || [ -f "$remote/HEAD" ] || exit 128 ;;
+         esac ;;
+    esac
     record=$(printf 'PUSH\t%s\t%s\t%s\t%s\t%s' "$top" "$head" "$config" "$other" "$command")
     separator=$(printf '\037')
     for word in "$@"; do record="$record$separator$word"; done
@@ -724,6 +746,10 @@ FOUND = [
     ("echo 'git symbolic-ref HEAD refs/heads/main' | bash; git push", 'feat'),
     ("echo 'git push origin main' | zsh -f", 'feat'),
     ("env -S bash <(echo 'git push origin main')", 'feat'),
+    # The owner's review of 2ab43e1: a cd to no folder as the shell reads it, but one as the
+    # system does (bash goes there).
+    ('builtin pushd m; cd "$PWD/../main"\ngit -C l/../.. push; cd sub', 'feat'),
+    ('cd m; cd ../main && git push', 'feat'),
     ('find . -maxdepth 0 -exec sh -c "echo \'git push origin main\' | bash" \\;', 'feat'),
     ('trap "echo \'git push origin main\' | bash" EXIT', 'feat'),
     ('env -S "sh -c \'echo git push origin main | bash\'"', 'feat'),
