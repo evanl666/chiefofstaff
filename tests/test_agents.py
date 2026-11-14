@@ -240,8 +240,9 @@ def test_codex_is_not_turned_on_while_workers_are_sandboxed(web, codex_on_path):
     assert web.get("/api/agents").json()["sandboxed"] is True
     refused = save(web, {"codex": {"enabled": True}})
     assert refused.status_code == 400
-    assert refused.json()["detail"].startswith(
-        "Use Codex for workers: other agents can't run while workers are sandboxed"
+    assert refused.json()["detail"] == (
+        "Use Codex for workers: Codex can't run while workers are sandboxed: its sandbox has not "
+        "passed Chief of Staff's checks yet."
     )
     assert codex["found"]
 

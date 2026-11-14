@@ -255,6 +255,8 @@ TASKS_SHOWN_HOURS = 72
 OPEN_WORK = frozenset({"running", "waiting"})
 # The same message again within this long is not shown twice.
 REPEAT_SECONDS = 60
+# Another agent's sandbox, until its version's check showed it holding (agent_refused).
+SANDBOX_UNPROVEN = "its sandbox has not passed Chief of Staff's checks yet"
 GITHUB_HOSTS = (
     "github.com",
     "api.github.com",
@@ -1201,6 +1203,7 @@ class Runtime:
             "version": version,
             "acting": getattr(backend, "acting_refused", ""),
             "ask_first": getattr(backend, "ask_first_refused", ""),
+            "sandbox": getattr(backend, "sandbox_refused", SANDBOX_UNPROVEN),
         }
         if self.store.get(f"agentrefused:{agent}") != json.dumps(refused):
             self.store.set(f"agentrefused:{agent}", json.dumps(refused))
@@ -1219,7 +1222,10 @@ class Runtime:
             found = (found if isinstance(found, dict) else {}) | {"ran": True, "acting": why}
             self.store.set(key, json.dumps(found))
             backend.checked = found
-            refused = {"version": await backend.version(), "acting": why, "ask_first": why}
+            refused = {
+                "version": await backend.version(), "acting": why, "ask_first": why,
+                "sandbox": why,
+            }  # fmt: skip
             self.store.set(f"agentrefused:{agent}", json.dumps(refused))
 
         self.background(record())
@@ -1434,14 +1440,24 @@ class Runtime:
             return self.turned_off(agent)
         if row["role"] != WORKER or self.special(row):
             return f"Only your own workers run on {name}."
-        if row["slack"]:
-            return f"Workers that read Slack run on Copilot only, not {name}."
-        if self.store.settings().worker_sandbox and self.sandbox_host:
-            return (
-                f"{name} can't run while workers are sandboxed: its sandbox has not passed Chief "
-                "of Staff's checks yet. Turn the sandbox off in Settings → Workers to go on."
-            )
         refused = self.agent_refused(agent)
+        sandbox = refused.get("sandbox", SANDBOX_UNPROVEN)
+        if row["slack"]:
+            # The same guarantees as a Copilot worker that reads Slack: its commands sandboxed
+            # (GitHub only), and asking first, on a version shown to do both.
+            why = (
+                "this computer can't sandbox workers" if not self.sandbox_host
+                else sandbox or refused.get("ask_first") or (
+                    "it acts on its own" if self.yolo(row) else ""
+                )
+            )  # fmt: skip
+            if why:
+                return f"Workers that read Slack run on Copilot, not {name}: {why}."
+        if self.store.settings().worker_sandbox and self.sandbox_host and sandbox:
+            return (
+                f"{name} can't run while workers are sandboxed: {sandbox}. Turn the sandbox off "
+                "in Settings → Workers to go on."
+            )
         if why := refused.get("acting"):
             return why
         if not self.yolo(row) and (why := refused.get("ask_first")):
@@ -1465,6 +1481,7 @@ class Runtime:
             return {
                 "acting": getattr(entry.backend, "acting_refused", ""),
                 "ask_first": getattr(entry.backend, "ask_first_refused", ""),
+                "sandbox": getattr(entry.backend, "sandbox_refused", SANDBOX_UNPROVEN),
             }
         try:
             found = json.loads(self.store.get(f"agentrefused:{agent}") or "{}")
@@ -1480,11 +1497,11 @@ class Runtime:
         chosen = named or (agents.new_workers(self.store) if self.agents else COPILOT_AGENT)
         if chosen == COPILOT_AGENT:
             return chosen, ""
-        if slack and not named:
-            return COPILOT_AGENT, ""  # Not this agent's to run: nothing to say.
         if chosen not in agents.NAMES:
             raise ValueError(f"Chief of Staff does not run {chosen!r}.")
         row = {"id": "", "role": WORKER, "slack": slack, "yolo": "", "closed_at": None}
+        if slack and not named and self.blocked_on(chosen, row):
+            return COPILOT_AGENT, ""  # Not this agent's to run (it reads Slack): nothing to say.
         if not (why := self.blocked_on(chosen, row)):
             try:
                 await self.connect_agent(chosen)
@@ -2099,8 +2116,7 @@ class Runtime:
             # Workers that read Slack always: what they read must not leave through a command.
             and (self.store.settings().worker_sandbox or row["slack"])
             and self.sandbox_host
-            and self.backend
-            and self.backend.capabilities.sandbox
+            and self.sandboxes(row)
         )
 
     def sandbox_policy(self, row: dict) -> SandboxPolicy | None:
@@ -2236,6 +2252,13 @@ class Runtime:
             server.startswith("lsp/") or "@" in server
             for server in self.servers_off.get(row["id"], {})
         )
+
+    def sandboxes(self, row: dict) -> bool:
+        """Whether its agent sandboxes its commands as Chief of Staff's sandbox says: Copilot's,
+        and another's whose version's check showed its sandbox holding (agent_refused)."""
+        if self.on_copilot(row["id"]) if row.get("id") else True:
+            return bool(self.backend and self.backend.capabilities.sandbox)
+        return self.agent_refused(self.agent(row["id"])).get("sandbox", SANDBOX_UNPROVEN) == ""
 
     def cache_plan(self, row: dict) -> caches.Plan:
         """A sandboxed worker's caches (caches.plan): what they add to its sandbox, and its
@@ -2927,6 +2950,12 @@ class Runtime:
             options["mcp_servers"] = servers
         if skills := self.abilities.skill_directories():
             options["skill_directories"] = skills
+        if sandbox := self.sandbox_policy(row):
+            options["sandbox"] = sandbox  # Its agent's own, as Chief of Staff's (agent_block).
+        if row["slack"] and (slack := self.slack.session_mcp_config()):
+            # Slack's read tools, as a Copilot worker that reads Slack has them (only those).
+            options["mcp_servers"] = {**options.get("mcp_servers", {}), "slack": slack}
+            options["slack_tools"] = list(slack.get("tools") or [])
         if model := chosen.get("model"):
             options["model"] = model
         if effort := chosen.get("effort"):
@@ -3061,10 +3090,15 @@ class Runtime:
             label, fresh = agents.display(name), name not in before
             if fresh and sys.platform == "win32":
                 raise ValueError(f"Use {label} for workers: {self.not_on_windows(name)}")
-            if fresh and settings.worker_sandbox and self.sandbox_host:
+            if (
+                fresh
+                and settings.worker_sandbox
+                and self.sandbox_host
+                and not agents.can_sandbox(name)
+            ):
                 raise ValueError(
-                    f"Use {label} for workers: other agents can't run while workers are "
-                    "sandboxed: their sandboxes have not passed Chief of Staff's checks yet."
+                    f"Use {label} for workers: {label} can't run while workers are sandboxed: "
+                    f"{SANDBOX_UNPROVEN}."
                 )
             for own in agents.folders(name, home):
                 for folder in map(Path, settings.sandbox_writable):

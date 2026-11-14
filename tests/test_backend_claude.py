@@ -879,6 +879,35 @@ async def test_what_a_killed_chief_of_staffs_workers_left_in_its_files_goes_at_s
         await agent.stop()
 
 
+async def test_a_sandboxed_workers_commands_stay_in_its_folders_and_reach_only_its_hosts(
+    agent, tmp_path
+):
+    from chiefofstaff.backend import SandboxPolicy
+
+    policy = SandboxPolicy(readwrite=(str(tmp_path),), allowed_hosts=("github.com",))
+    session = await agent.create_session(
+        session_id="d1" * 16, name="t", **options(tmp_path, sandbox=policy, slack_tools=["read"])
+    )
+    turn = Turn(session)
+    outside = tmp_path.parent / f"{tmp_path.name}-outside"
+    for command in (f"touch {outside}", "curl -sS http://example.com/"):
+        await session.send(f"Run the shell command `{command}`, then reply with just: ok")
+        await turn.ended()
+    results = [done.result.content for done in turn.of("tool.execution_complete")]
+    assert "Operation not permitted" in results[0] and not outside.exists()
+    assert "example.com blocked" in results[1]
+    worker = session.backend
+    assert worker.network_refused("api.github.com") == "" and worker.network_refused("x.io")
+    assert await worker.decide("Bash", {"command": "ls", "dangerouslyDisableSandbox": True}, "c")
+    assert await worker.decide("mcp__slack__send", {}, "c") == (
+        "Only Slack's read tools are a worker's to use."
+    )
+    settings = backend_claude.sandbox_settings(policy)
+    assert settings["allowUnsandboxedCommands"] is False and settings["failIfUnavailable"]
+    assert settings["filesystem"]["allowWrite"] == [str(tmp_path)]
+    assert settings["network"] == {"allowLocalBinding": False, "allowedDomains": ["github.com"]}
+
+
 async def test_a_plan_limit_reached_keeps_workers_from_running_until_it_resets(
     agent, tmp_path, monkeypatch
 ):
@@ -966,6 +995,7 @@ async def test_the_check_of_a_claude_that_keeps_the_contract_finds_nothing(
         "steering": True,
         "usage": True,
         "background_code": 0,
+        "sandbox": "",
         "tools_upfront": True,
     }
     assert not (tmp_path / "check").exists(), "its folder goes"

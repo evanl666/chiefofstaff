@@ -132,6 +132,7 @@ TASK_ID = re.compile(r"<task-id>([^<]+)</task-id>")
 NOTIFICATION = "<task-notification>"
 # A server that is GitHub's (its name, command or URL): its writes are the owner's to approve.
 GITHUB = re.compile(r"github", re.IGNORECASE)
+SANDBOX_UNCHECKED = "its sandbox has not passed Chief of Staff's checks yet"
 # A variable of Chief of Staff's the launcher's shell can unset by name.
 OWN_NAME = re.compile(r"CHIEFOFSTAFF_[A-Za-z0-9_]+")
 TERMINAL = frozenset({"completed", "failed", "killed", "stopped"})
@@ -715,6 +716,37 @@ def write_launcher(folder: Path, command: str, environment: Path | None = None) 
     return launcher
 
 
+def sandbox_settings(policy: Any) -> dict:
+    """Chief of Staff's sandbox for a worker's commands (Runtime.sandbox_policy) as Claude's own
+    (2.1.322: Seatbelt on macOS, bubblewrap on Linux): writes only where the policy says, its
+    protected paths read-only, the owner's service secrets unreadable, no command run outside it,
+    and no start without it. A host off the policy's list asks (SandboxNetworkAccess), and
+    Chief of Staff answers (ClaudeWorker.network_refused); loopback as the policy says."""
+    sockets = [path for path in policy.readwrite if path == os.environ.get("SSH_AUTH_SOCK")]
+    network: dict[str, Any] = {"allowLocalBinding": bool(policy.local_network)}
+    if policy.allowed_hosts:
+        network["allowedDomains"] = list(policy.allowed_hosts)
+    if sockets:
+        network["allowUnixSockets"] = sockets
+    return {
+        "enabled": True,
+        "failIfUnavailable": True,
+        "allowUnsandboxedCommands": False,
+        "filesystem": {
+            "allowWrite": [path for path in policy.readwrite if path not in sockets],
+            "denyWrite": list(policy.readonly),
+            "denyRead": list(policy.denied),
+        },
+        "network": network,
+    }
+
+
+def host_allowed(host: str, hosts: Any) -> bool:
+    """Whether a host is one of these, or under one (api.github.com under github.com)."""
+    host = host.lower().rstrip(".").partition(":")[0]
+    return any(host == h or host.endswith("." + h) for h in (str(h).lower() for h in hosts))
+
+
 def write_private(path: Path, text: str):
     """A file only the owner can read (0600), made new (never one that was there)."""
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -966,6 +998,8 @@ class ClaudeWorker:
         sources: list[Any] = ["user", "project"] if trusted else ["user"]
         effort: Any = self.process_effort or None
         settings: dict[str, Any] = {"autoMemoryEnabled": False, "sandbox": {"enabled": False}}
+        if policy := self.options.get("sandbox"):
+            settings["sandbox"] = sandbox_settings(policy)
         if self.ask_first:
             settings["disableAllHooks"] = True  # The owner's hooks and mods: off (5.7).
         files = self.private_files()
@@ -2049,6 +2083,10 @@ class ClaudeWorker:
         the owner): the same answer. No rule is ever saved."""
         from claude_agent_sdk.types import PermissionResultAllow, PermissionResultDeny
 
+        if name == "SandboxNetworkAccess":
+            # A command in its sandbox reaching a host not on its list (asked before it does).
+            why = self.network_refused(str(mapping(data).get("host") or ""))
+            return PermissionResultDeny(message=why) if why else PermissionResultAllow()
         call = str(getattr(context, "tool_use_id", "") or "")
         if call in self.allowed:
             why = self.allowed[call]
@@ -2065,8 +2103,29 @@ class ClaudeWorker:
             return PermissionResultAllow(updated_input={**mapping(data), "answers": answers})
         return PermissionResultAllow()
 
+    def network_refused(self, host: str) -> str:
+        """Why a sandboxed command may not reach this host ("" when it may): only the hosts its
+        sandbox lists (GitHub's, for a worker that reads Slack), any other otherwise."""
+        policy = self.options.get("sandbox")
+        hosts = getattr(policy, "allowed_hosts", ()) if policy else ()
+        if not hosts or host_allowed(host, hosts):
+            return ""
+        return (
+            f"Chief of Staff's sandbox lets this worker's commands reach only {', '.join(hosts)}, "
+            f"not {host}."
+        )
+
     async def decide(self, name: str, arguments: dict, call: str) -> str:
         """ "" when Chief of Staff allows this call, else why not."""
+        if (
+            name in SHELL_TOOLS
+            and arguments.get("dangerouslyDisableSandbox")
+            and (self.options.get("sandbox"))
+        ):
+            return "This worker's commands run in Chief of Staff's sandbox: run it without that."
+        slack = self.options.get("slack_tools")
+        if name.startswith("mcp__slack__") and slack is not None and name[12:] not in slack:
+            return "Only Slack's read tools are a worker's to use."
         if why := WITHHELD.get(name):
             self.emit("agent.notice", text=f"Refused Claude's {name}: {why}")
             return why
@@ -2416,6 +2475,13 @@ class ClaudeAgent:
     @property
     def ask_first_refused(self) -> str:
         return ask_first_refusal(self.cli_version, self.checked)
+
+    @property
+    def sandbox_refused(self) -> str:
+        """Why its workers may not run sandboxed ("" when its version's check showed Claude's
+        sandbox keeping writes in, a file unreadable and a host off the list unreached)."""
+        found = (self.checked or {}).get("sandbox")
+        return found if isinstance(found, str) else SANDBOX_UNCHECKED
 
     @property
     def acting_refused(self) -> str:
