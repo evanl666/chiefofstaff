@@ -1,5 +1,38 @@
 # Changelog
 
+## Unreleased
+
+- **Your own questions are no longer hidden as a script's batch.** Three terminal sessions with
+  one question each, ten minutes apart, that began with the same 64 characters (a review of
+  each pull request, say) were left out of Other Copilot sessions and the Router's list as a
+  script's batch, and stayed out. Nothing in a session's files tells `copilot -p` from a
+  question asked in a terminal and left (checked with the Copilot CLI 1.0.110 to 1.0.112), so a
+  batch is now ten or more alike, each within two minutes of the one before (a script runs its
+  calls seconds apart), or any named `batch: …`; five to nine alike stay listed, and
+  `chiefofstaff tidy-sessions` names them. What 0.1.43 decided is decided again by these rules,
+  a round of logs at a time: your sessions come back; a script's batch stays out meanwhile (QA
+  on 0.1.43, E49).
+- **A worker's command takes only the sessions it clearly made.** While a worker ran
+  `cd ~/src/copilot && npm run dev`, a question you asked in your own project was taken for the
+  worker's: the word copilot in the command was enough. Now a one-shot session is a worker's
+  only on evidence: it ran in the folder Chief of Staff made for the worker, or the command
+  runs `copilot -p` (or `--prompt`, however it is started: `npx`, a path, `$(which copilot)`,
+  `bash -c`; not a folder or file of that name) and the session ran where the command did or in
+  a temporary folder; while the command ran (one whose end was not seen: two hours, and longer
+  only for sessions clearly its). The time and a folder alone never are: your questions in a
+  project a worker shares, or in `/tmp`, stay yours unless it was running `copilot -p` there
+  then. What 0.1.43 found a worker made is decided
+  again by these rules, but for a batch of a worker's it found in a temporary folder (QA on
+  0.1.43, E54, and two reviews).
+- **A command Chief of Staff cannot read no longer lists every hidden session again.** A
+  command with an escaped space (`Google\ Chrome.app`) or a `cd ~-` made the reading fail, and
+  with it the whole decision, at every listing; such a command is now no evidence, and the
+  rest stands (a review of the above).
+- **`chiefofstaff tidy-sessions` reads every log before it says** (it read one round, 128 MB,
+  and listed what it found there), with a line on how many are left as it goes and how many it
+  could not read; and `--apply` run twice in the same second no longer fails (its folder is
+  named to the microsecond and by its process) (QA on 0.1.43, E60).
+
 ## 0.1.43 (2026-11-13)
 
 Other Copilot sessions lists yours only, also when a script or a worker runs `copilot -p`;

@@ -2,7 +2,9 @@
 moved out of the owner's Copilot home when the owner says so.
 
 Without --apply it only says what it would do: how many, how large, a few of each, grouped by
-who made them, and what was learned from them; nothing is changed. With --apply, run by the owner
+who made them, and what was learned from them, then the few alike it leaves (provenance.ALIKE:
+the owner's maybe); nothing is changed. It reads every log first, round after round (each
+provenance.ROUND_BYTES), and says how many it could not. With --apply, run by the owner
 in their own terminal (refused in a Copilot session's shell, where a worker's commands run), it
 moves each such session's folder whole into <Copilot home>/session-state-moved-by-chiefofstaff/
 <when>/ with a manifest.json saying what each was: moving a folder back into session-state
@@ -37,7 +39,16 @@ from typing import Any
 
 from .backend import SESSION_ID, copilot_backend, copilot_home, running
 from .habits import learned_from
-from .provenance import BATCH, KV, MADE_BY_WORKER, Provenance, identity, known
+from .provenance import (
+    ALIKE,
+    HIDE_SIZE,
+    KV,
+    MADE_BY_WORKER,
+    Provenance,
+    current,
+    identity,
+    known,
+)
 from .send import default_data_dir
 from .store import DB_NAME, Store
 from .workspaces import Workspaces
@@ -79,6 +90,9 @@ class Survey:
     unlearned: int = 0
     learned: list[dict] = field(default_factory=list)
     workers: dict[str, str] = field(default_factory=dict)  # session id -> its title
+    # A few one-shot sessions alike, tied to no worker (provenance.ALIKE): named, never moved.
+    alike: list[Found] = field(default_factory=list)
+    not_read: int = 0  # sessions whose logs could not be read (changed as they were, say)
 
     @property
     def moving(self) -> list[Found]:
@@ -179,24 +193,41 @@ async def survey(store: Store, backend: Any, home: Path, now: float) -> Survey:
     workspaces = Workspaces(store, store.directory / "work")
     provenance = Provenance(store, log_of, workspaces.own_folder, keep=False)
     made = await provenance.made(listing, in_use)
+    # A round reads so much (provenance.ROUND_BYTES): the next ones the rest, while some are
+    # read; those that cannot be (changing as they are read) are said.
+    while provenance.pending:
+        left = provenance.pending
+        print(f"Reading Copilot sessions' logs: {left} left…", file=sys.stderr, flush=True)
+        made = await provenance.made(listing, in_use)
+        if provenance.pending >= left:
+            break
     records = known(store) | provenance.decided
-    result = Survey(home)
-    for meta in listing:
-        if meta.session_id not in made:
-            continue
+    result = Survey(home, not_read=provenance.pending)
+
+    def item_of(meta: Any, made: str, record: dict) -> Found:
         context = getattr(meta, "context", None)
-        item = Found(
+        return Found(
             meta.session_id,
-            made[meta.session_id],
-            records.get(meta.session_id, {}),
+            made,
+            record,
             getattr(meta, "summary", "") or "",
             (getattr(context, "working_directory", "") or "") if context else "",
             state / meta.session_id,
         )
+
+    for meta in listing:
+        if record := provenance.alike.get(meta.session_id):
+            item = item_of(meta, ALIKE, record)
+            item.size = (folder_facts(item.folder) or (0, 0.0))[0]
+            result.alike.append(item)
+        if meta.session_id not in made:
+            continue
+        item = item_of(meta, made[meta.session_id], records.get(meta.session_id, {}))
         log = log_of(item.session_id)
         item.log = identity(log) if log else None
         item.stays = stays(item, now)
         result.found.append(item)
+    result.alike.sort(key=lambda item: float(item.record.get("at") or 0))
     result.found.sort(key=lambda item: float(item.record.get("at") or 0))
     ids = [item.session_id for item in result.found]
     if learns(store):
@@ -236,14 +267,36 @@ def report(result: Survey) -> list[str]:
     state = result.home / "session-state"
     if not result.found:
         lines = [f"No Copilot sessions a worker or a script made in {state}."]
+    else:
+        lines = [f"Copilot sessions a worker or a script made, in {state}:", ""]
+        lines += grouped(result, result.found)
+    if result.alike:
+        lines += [
+            "",
+            f"Alike, fewer than {HIDE_SIZE} (a script's maybe, maybe yours: still listed in "
+            "Chief of Staff, not moved):",
+            *grouped(result, result.alike),
+        ]
+    if result.not_read:
+        lines += [
+            "",
+            f"{plural(result.not_read, 'session')} not read (it changed as it was read, or could "
+            "not be): run it again to look at " + ("it." if result.not_read == 1 else "them."),
+        ]
+    if not result.found:
         return lines + learned_lines(result.learned)
-    lines = [f"Copilot sessions a worker or a script made, in {state}:", ""]
+    return lines + staying_lines(result)
+
+
+def grouped(result: Survey, found: list[Found]) -> list[str]:
+    """Sessions grouped by who made them: how many, how large, when, where, a few of each."""
+    lines = []
     groups: dict[tuple[str, str], list[Found]] = {}
-    for item in result.found:
+    for item in found:
         key = (
             (MADE_BY_WORKER, item.record.get("by", ""))
             if item.made == MADE_BY_WORKER
-            else (BATCH, item.record.get("group", ""))
+            else (item.made, item.record.get("group", ""))
         )
         groups.setdefault(key, []).append(item)
     for (made, key), items in groups.items():
@@ -254,6 +307,8 @@ def report(result: Survey) -> list[str]:
             lines.append(f"  {count} a Chief of Staff worker made (“{title}”), {size_text(size)}")
         elif items[0].record.get("named"):
             lines.append(f"  {count} named as a batch's, {size_text(size)}")
+        elif made == ALIKE:
+            lines.append(f"  {count} one-shot, alike, {size_text(size)}")
         else:
             lines.append(f"  {count} of a script's batch (one-shot, alike), {size_text(size)}")
         span = when(float(items[0].record.get("at") or 0))
@@ -266,6 +321,11 @@ def report(result: Survey) -> list[str]:
         # Alike, a batch's start the same: each different one once.
         for summary in list(dict.fromkeys(shown(item.summary) for item in items))[:EXAMPLES]:
             lines.append(f"    e.g. “{summary}”")
+    return lines
+
+
+def staying_lines(result: Survey) -> list[str]:
+    lines = []
     staying: dict[str, int] = {}
     for item in result.found:
         if item.stays:
@@ -306,13 +366,26 @@ def agent_shell() -> str:
     return next((name for name in AGENT_SHELL if os.environ.get(name)), "")
 
 
+def new_folder(root: Path, now: float) -> Path:
+    """A folder of its own for this run's sessions, named by when (to the microsecond) and by
+    whom (its process): another run in the same second, or at once, has another."""
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    stamp = datetime.fromtimestamp(now, UTC).strftime("%Y%m%d-%H%M%S-%f")
+    for n in range(100):
+        target = root / (f"{stamp}-{os.getpid()}" + (f"-{n}" if n else ""))
+        try:
+            target.mkdir(mode=0o700)
+        except FileExistsError:
+            continue
+        return target
+    raise FileExistsError(f"No new folder could be made in {root}")
+
+
 def move(result: Survey, now: float) -> tuple[Path, list[Found], list[str]]:
     """Moves what can be moved, each checked again just before; a manifest says what each was
     and where it came from (written whatever happens). Returns the folder, those moved, and what
     failed."""
-    stamp = datetime.fromtimestamp(now, UTC).strftime("%Y%m%d-%H%M%S")
-    target = result.home / MOVED / stamp
-    target.mkdir(parents=True, mode=0o700)
+    target = new_folder(result.home / MOVED, now)
     moved: list[Found] = []
     failed: list[str] = []
     try:
@@ -362,6 +435,15 @@ def move(result: Survey, now: float) -> tuple[Path, list[Found], list[str]]:
     return target, moved, failed
 
 
+def still(value: str) -> bool:
+    """Whether a decision kept is one by these rules (see provenance.current)."""
+    try:
+        record = json.loads(value)
+    except ValueError:
+        return False
+    return isinstance(record, dict) and current(record)
+
+
 def settle(directory: Path, found: list[Found]) -> int:
     """In Chief of Staff's store, in one transaction (it may be running): what was read from
     these sessions as the owner's words and not learned from yet, dropped; and who made each,
@@ -383,8 +465,12 @@ def settle(directory: Path, found: list[Found]) -> int:
                     (len(prefix), prefix),
                 ).rowcount
             if item.record.get("as"):
+                # Not over one Chief of Staff decided meanwhile, by these rules.
+                kept = db.execute("SELECT value FROM kv WHERE key=?", (KV + item.session_id,))
+                if (row := kept.fetchone()) and still(row[0]):
+                    continue
                 db.execute(
-                    "INSERT OR IGNORE INTO kv VALUES (?, ?)",
+                    "INSERT OR REPLACE INTO kv VALUES (?, ?)",
                     (KV + item.session_id, json.dumps(item.record, sort_keys=True)),
                 )
         return dropped

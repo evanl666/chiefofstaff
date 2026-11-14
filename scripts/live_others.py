@@ -21,9 +21,10 @@ O2 whose session it is (section 4.2), with a second Chief of Staff on the same h
    again (g, rule 4); a script's session (through the SDK, naming no app) is never listed, open
    or closed, until continued in a terminal (h).
 O4 a closed session continued here works and leaves the list (a); an open one is refused (b).
-O6 whose a `copilot -p` session is (provenance.py): five alike that a script runs one after
+O6 whose a `copilot -p` session is (provenance.py): ten alike that a script runs one after
    the other are a batch, left out of the sidebar's rows and the Router's list (/api/external)
-   once they ended (listed as the owner's while they run), and kept so in the store; a single
+   once they ended (listed as the owner's while they run, and the first five, a few alike, the
+   owner's still), and kept so in the store; a single
    one named `batch: …` is never listed, also while it runs (a); a single one is the owner's,
    listed and finished (b); `chiefofstaff tidy-sessions` shows the batch, what would be dropped
    and what was learned from it, changing nothing, and leaves them while they are new (c); made
@@ -143,8 +144,7 @@ SLEEPY = (
     "DONE."
 )
 OK = "Reply with just the word OK."
-# O6b's single `copilot -p`: a prompt of its own (with the earlier sessions' OK, three one-shot
-# sessions alike within half an hour would be a batch, as a script's are).
+# O6b's single `copilot -p`: a prompt of its own, alike with no other session's.
 YES = "Reply with just the word YES."
 # O6: what a script labelling tickets of a made-up shop asks `copilot -p`, one ticket a call.
 LABEL = (
@@ -157,6 +157,11 @@ TICKETS = [
     "Please add a dark mode.",
     "Where is my parcel?",
     "Refund the second charge, please.",
+    "The app crashes when I open my basket.",
+    "Can I pay with a gift card?",
+    "Your site has been down for an hour.",
+    "Please let me export my orders.",
+    "My discount code was not applied.",
 ]
 # How others.py words a turn the owner stopped.
 STOPPED = "Stopped by you"
@@ -1683,15 +1688,25 @@ def observed(ctx: Ctx) -> dict[str, int]:
 
 async def o6_batch(ctx: Ctx):
     watch, app = ctx.watch, ctx.app
-    # a. Five alike, one after the other: a batch, left out once they ended.
+    # a. Ten alike, one after the other: a batch, left out once they ended. The first five, a
+    # few alike (the owner asks alike questions too, QA's E49), are the owner's until then.
     folder = ctx.folder("batch")
     batch = []
     for ticket in TICKETS:
         batch.append(await prompt_mode(ctx, folder, LABEL + ticket))
         ctx.labels[batch[-1]] = f"batch {len(batch)}"
+        if len(batch) == 5:
+            for session_id in batch:
+                await watch.until(
+                    "five alike: listed, closed", session_id, lambda r: r and not r["open"], LISTING
+                )
+            external = {item["id"] for item in await app.get("/api/external?refresh=true")}
+            assert set(batch) <= external, "five alike: the owner's, in the Router's list"
+            assert set(batch).isdisjoint(app.made()), "five alike: none kept"
+            log("O6a: five alike, ended: listed as the owner's (a few alike)")
     # Not decided on while they run (unnamed): the owner's rows until they end.
     shown_open = {key for key in batch if any(e[1] for e in watch.timeline.get(key, []))}
-    log(f"the script's five sessions ended; shown open while they ran: {len(shown_open)}")
+    log(f"the script's ten sessions ended; shown open while they ran: {len(shown_open)}")
     assert shown_open, "an unnamed one-shot session is listed while it runs"
     for session_id in batch:
         await watch.until("left out: one of a batch", session_id, lambda r: r is None, LISTING)
@@ -1768,9 +1783,9 @@ async def o6_batch(ctx: Ctx):
     shown = tidy(ctx)
     assert shown.returncode == 0, shown.stderr
     for said in (
-        "5 sessions of a script's batch (one-shot, alike)",
+        "10 sessions of a script's batch (one-shot, alike)",
         "1 session named as a batch's",
-        "Left where they are: 6 sessions changed in the last hour.",
+        "Left where they are: 11 sessions changed in the last hour.",
         "1 prompt of theirs, read as yours and not learned from yet, would be dropped.",
         f"How you write, Answers and reports to you (version {version}): 1 of its 1 example",
     ):
@@ -1787,7 +1802,7 @@ async def o6_batch(ctx: Ctx):
                      *(ctx.home / "session-state" / session_id).rglob("*")]:  # fmt: skip
             os.utime(path, (old, old), follow_symlinks=False)
     moved = tidy(ctx, "--apply")
-    assert moved.returncode == 0 and "Moved 5 sessions" in moved.stdout, moved.stdout
+    assert moved.returncode == 0 and "Moved 10 sessions" in moved.stdout, moved.stdout
     (folder_moved,) = (ctx.home / "session-state-moved-by-chiefofstaff").iterdir()
     manifest = json.loads((folder_moved / "manifest.json").read_text())
     assert sorted(entry["id"] for entry in manifest["sessions"]) == sorted(batch)
@@ -1808,7 +1823,7 @@ async def o6_batch(ctx: Ctx):
     external = {item["id"] for item in await app.get("/api/external?refresh=true")}
     assert batch[-1] not in external
     watch.assert_right("O6")
-    log("O6d passed: moved 5 with a manifest, dropped what was not learned yet, kept the rest; "
+    log("O6d passed: moved 10 with a manifest, dropped what was not learned yet, kept the rest; "
         "one moved back is listed by Copilot again and still left out")  # fmt: skip
     log("O6 passed")
 
