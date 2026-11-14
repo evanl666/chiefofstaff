@@ -496,8 +496,9 @@ def agent_capabilities(name: str, steering: bool) -> Capabilities:
 CODEX_LIKE = Profile(
     agent_capabilities("Codex-like", steering=True), exit_codes=True, assigns_ids=True
 )
-# Claude Code through its SDK: a message waits for the turn's end, no exit codes, and its
-# sessions take Chief of Staff's ids.
+# An agent that cannot steer and gives no exit codes, whose sessions take Chief of Staff's ids:
+# the runtime's paths for such an agent (Claude Code as first researched; its adapter,
+# backend_claude, steers at a tool call and gives the exit codes Claude says).
 CLAUDE_LIKE = Profile(
     agent_capabilities("Claude-like", steering=False), exit_codes=False, assigns_ids=False
 )

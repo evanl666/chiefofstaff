@@ -3,6 +3,7 @@ import inspect
 import json
 import os
 import re
+import shutil
 import sys
 
 # Events are batched in the app; tests deliver them at once.
@@ -647,6 +648,55 @@ def fake_codex(directory: Path, monkeypatch) -> str:
 
 
 WIRES: list[Path] = []
+
+
+def fake_claude(directory: Path, monkeypatch) -> str:
+    """A stand-in Claude Code (tests/fake_claude.py) as `claude` in `directory`, its sessions
+    kept there too, and a Claude configuration folder of the test's own: the command a Claude
+    backend runs."""
+    directory.mkdir(parents=True, exist_ok=True)
+    command = directory / "claude"
+    script = Path(__file__).parent / "fake_claude.py"
+    command.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n')
+    command.chmod(0o755)
+    monkeypatch.setenv("FAKE_CLAUDE_HOME", str(directory / "home"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(directory / "config"))
+    return str(command)
+
+
+# The owner's own Claude Code, when this machine has one: the contract tests on the real CLI run
+# it by this path. Every other test sees no `claude` on the PATH, unless it puts a stand-in there.
+REAL_CLAUDE = shutil.which("claude")
+
+
+@pytest.fixture(scope="session")
+def path_without_claude(tmp_path_factory) -> str:
+    """The PATH, each of its folders that has a `claude` mirrored without it."""
+    folders = []
+    for folder in os.environ.get("PATH", "").split(os.pathsep):
+        if folder and (Path(folder) / "claude").exists():
+            mirror = tmp_path_factory.mktemp("path-without-claude")
+            for entry in Path(folder).iterdir():
+                if entry.name != "claude":
+                    (mirror / entry.name).symlink_to(entry)
+            folder = str(mirror)
+        folders.append(folder)
+    return os.pathsep.join(folders)
+
+
+@pytest.fixture(autouse=True)
+def owners_claude_hidden(monkeypatch, path_without_claude):
+    monkeypatch.setenv("PATH", path_without_claude)
+
+
+@pytest.fixture
+def claude_on_path(tmp_path, monkeypatch, owners_claude_hidden):
+    """The stand-in Claude Code as `claude` on the PATH; each of its runs is listed."""
+    command = fake_claude(tmp_path / "fake-claude", monkeypatch)
+    monkeypatch.setenv("PATH", f"{tmp_path / 'fake-claude'}:{os.environ['PATH']}")
+    runs = tmp_path / "claude-runs"
+    monkeypatch.setenv("FAKE_CLAUDE_RUNS", str(runs))
+    return command, runs
 
 
 @pytest.fixture(autouse=True)

@@ -6,8 +6,13 @@ agents (scripted.CODEX_LIKE, CLAUDE_LIKE), and so does the Codex adapter on a st
 uses a few small model calls; CHIEFOFSTAFF_TEST_MODEL picks the model), and the Codex adapter on
 the real Codex CLI when CHIEFOFSTAFF_TEST_CODEX=1: its app-server, approvals, commands, child
 agents and resumes, with a CODEX_HOME of the test's own and a stand-in model on this machine
-(tests/scripted_model.py): no sign-in, no model call, the owner's ~/.codex untouched. Run them
-before upgrading the Copilot SDK or CLI, or Codex.
+(tests/scripted_model.py): no sign-in, no model call, the owner's ~/.codex untouched. Claude's
+adapter runs on a stand-in Claude Code always (tests/fake_claude.py), and on the owner's real
+`claude` when CHIEFOFSTAFF_TEST_CLAUDE=1: with a Claude configuration folder of the test's own, a
+made-up key and a stand-in Messages API on this machine (tests/claude_standin.py), every proxy
+pointing at a listener that must stay unused: no sign-in, no model call, the owner's ~/.claude
+untouched. Run them before upgrading the Copilot SDK or CLI, Codex, Claude Code or the Agent
+SDK.
 """
 
 import asyncio
@@ -28,9 +33,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
+import claude_standin
 import pytest
 import scripted_model
-from conftest import fake_codex
+from conftest import REAL_CLAUDE, fake_claude, fake_codex
 from copilot import define_tool
 from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
 from pydantic import BaseModel
@@ -46,7 +52,9 @@ from chiefofstaff.backend import (
     stop_background,
     take_queued,
 )
+from chiefofstaff.backend_claude import ClaudeAgent, claude_backend
 from chiefofstaff.backend_codex import CodexAgent, CodexBackend
+from chiefofstaff.claude_check import Catcher
 from chiefofstaff.codex_check import subagent_tools
 from chiefofstaff.delivery import queue_holds
 from chiefofstaff.policy import OWN_COPY
@@ -70,6 +78,19 @@ MODEL = os.environ.get("CHIEFOFSTAFF_TEST_MODEL", "claude-haiku-5.5")
 # cache), so that the contract runs on both protocols.
 COPILOT_CLI = os.environ.get("CHIEFOFSTAFF_TEST_COPILOT_CLI") or "copilot"
 REAL_CODEX = os.environ.get("CHIEFOFSTAFF_TEST_CODEX") == "1"
+REAL_CLAUDE_RUN = os.environ.get("CHIEFOFSTAFF_TEST_CLAUDE") == "1"
+# What could choose a provider or a credential for the real Claude Code: none reaches it here.
+CLAUDE_PROVIDERS = (
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_PROFILE",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+    "CLAUDE_CODE_SHELL",
+)
 
 
 # Files of a repository the installed Copilot CLI's help names that load nothing that runs: its
@@ -160,8 +181,10 @@ PROFILES = {"codex-like": CODEX_LIKE, "claude-like": CLAUDE_LIKE}
         "scripted",
         *PROFILES,
         "fake-codex",
+        "fake-claude",
         pytest.param("copilot", marks=pytest.mark.copilot),
         pytest.param("codex", marks=pytest.mark.codex),
+        pytest.param("claude", marks=pytest.mark.claude),
     ]
 )
 async def backend(request, tmp_path, monkeypatch):
@@ -183,6 +206,28 @@ async def backend(request, tmp_path, monkeypatch):
         backend.needs_sign_in = False
     elif request.param == "fake-codex":
         backend = CodexBackend(fake_codex(tmp_path / "fake", monkeypatch))
+    elif request.param == "fake-claude":
+        backend = claude_backend(fake_claude(tmp_path / "fake", monkeypatch), tmp_path / "agent")
+    elif request.param == "claude":
+        if not REAL_CLAUDE_RUN or not REAL_CLAUDE:
+            pytest.skip("Set CHIEFOFSTAFF_TEST_CLAUDE=1 (with claude installed) to check it.")
+        model, catcher = claude_standin.Model(), Catcher()
+        for name in [
+            *CLAUDE_PROVIDERS,
+            *(k for k in os.environ if k.startswith(("AWS_", "GOOGLE_"))),
+        ]:
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-contract-not-a-key")
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", model.url)
+        monkeypatch.setenv("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
+        for name in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY"):
+            monkeypatch.setenv(name, catcher.url)
+            monkeypatch.setenv(name.lower(), catcher.url)
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+        monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+        backend = claude_backend(REAL_CLAUDE, tmp_path / "agent")
+        backend.model, backend.catcher = model, catcher
     elif request.param in PROFILES:
         backend = AgentLikeBackend(contract_brain, PROFILES[request.param])
     else:
@@ -198,6 +243,9 @@ async def backend(request, tmp_path, monkeypatch):
     await backend.stop()
     if model := getattr(backend, "model", None):
         model.close()
+    if catcher := getattr(backend, "catcher", None):
+        catcher.close()
+        assert catcher.seen == [], "nothing left this machine"
 
 
 class Echo(BaseModel):
@@ -211,7 +259,7 @@ def unique_seconds(about: int) -> str:
 
 def agent_like(backend) -> bool:
     """Another coding agent's backend, as its adapter shows it (not Copilot's)."""
-    return isinstance(backend, AgentLikeBackend | CodexBackend)
+    return isinstance(backend, AgentLikeBackend | CodexBackend | ClaudeAgent)
 
 
 def only_agent_like(backend):
@@ -266,8 +314,8 @@ async def open_session(backend, tmp_path, **options):
     options.setdefault(
         "on_permission_request", lambda request, inv: PermissionDecisionApproveOnce()
     )
-    if not isinstance(backend, CodexBackend):
-        options.setdefault("model", MODEL)  # Codex: its default model.
+    if not isinstance(backend, CodexBackend | ClaudeAgent):
+        options.setdefault("model", MODEL)  # Codex's and Claude's: their default model.
     session = await backend.create_session(
         session_id=session_id, name="contract test", working_directory=str(tmp_path), **options
     )
@@ -339,7 +387,9 @@ async def test_abort_ends_the_turn_and_its_command(backend, tmp_path):
     # `sleep` too): the fraction of a second makes it this run's alone.
     marker = f"sleep {40 + os.getpid() % 17}.{uuid4().int % 10**6:06d}"
     session, turn = await open_session(backend, tmp_path)
-    await session.send(f"Run the shell command `{marker}` and then reply with just: slept")
+    # Claude Code refuses a long sleep standing alone ("Blocked: standalone sleep", 2.1.322).
+    command = f"true && {marker}" if isinstance(backend, ClaudeAgent) else marker
+    await session.send(f"Run the shell command `{command}` and then reply with just: slept")
     for _ in range(600):
         if "tool.execution_start" in turn.kinds():
             break

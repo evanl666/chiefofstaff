@@ -1,10 +1,12 @@
 """The supervisor every process of another coding agent runs under (`python -m
 chiefofstaff.agentrun`).
 
-    python -m chiefofstaff.agentrun [--lifeline FD] -- codex app-server ...
+    python -m chiefofstaff.agentrun [--lifeline FD] [--environment FILE] -- codex app-server ...
 
 It starts the agent's CLI in a process group of its own, with the owner's environment without
-Chief of Staff's variables (CHIEFOFSTAFF_*, the Slack token among them), and the CLI talks to
+Chief of Staff's variables (CHIEFOFSTAFF_*, the Slack token among them), or, with
+`--environment`, only the variables that file keeps and sets (an agent's check, which must not
+see the owner's sign-in or provider: claude_check.py), and the CLI talks to
 Chief of Staff over the stdin and stdout it inherits. When the CLI exits, or when Chief of Staff
 goes away however it stopped (its end of the lifeline pipe closes, or this process is orphaned),
 it ends the CLI's whole process tree, commands left running in the background included, as
@@ -24,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import json
 import os
 import select
 import signal
@@ -32,6 +35,7 @@ import sys
 import threading
 import time
 from contextlib import suppress
+from pathlib import Path
 
 # Not the backend module: the supervisor of each worker's process stays light (no Copilot SDK).
 from .machine import kill_process_tree
@@ -136,10 +140,24 @@ def own_environment() -> dict[str, str]:
     return {key: value for key, value in os.environ.items() if not key.startswith("CHIEFOFSTAFF_")}
 
 
+def chosen_environment(path: str) -> dict[str, str]:
+    """Only what a file of Chief of Staff's keeps of this environment (`keep`: names) and sets
+    (`set`: name -> value), never one of its own settings; raises when it cannot be read."""
+    with Path(path).open(encoding="utf-8") as file:
+        chosen = json.load(file)
+    kept = [name for name in chosen.get("keep") or [] if isinstance(name, str)]
+    given = {str(k): str(v) for k, v in (chosen.get("set") or {}).items()}
+    found = {name: os.environ[name] for name in kept if name in os.environ} | given
+    return {key: value for key, value in found.items() if not key.startswith("CHIEFOFSTAFF_")}
+
+
 class Supervisor:
-    def __init__(self, command: list[str], lifeline: int | None):
+    def __init__(
+        self, command: list[str], lifeline: int | None, environment: dict[str, str] | None = None
+    ):
         self.command = command
         self.lifeline = lifeline
+        self.environment = environment
         self.parent = os.getppid()
         self.process: subprocess.Popen | None = None
         # What the CLI ran, as last seen: pid -> command line (a pid can be reused).
@@ -168,8 +186,9 @@ class Supervisor:
         for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
             signal.signal(signum, self.on_signal)
         self.adopting = adopt_orphans()
+        environment = own_environment() if self.environment is None else self.environment
         self.process = subprocess.Popen(  # noqa: S603  (the agent's CLI, as configured)
-            self.command, env=own_environment(), start_new_session=True
+            self.command, env=environment, start_new_session=True
         )
         self.watch = fork_watch(self.process.pid, self.lifeline)
         if self.watch is not None:
@@ -343,12 +362,14 @@ class Supervisor:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m chiefofstaff.agentrun")
     parser.add_argument("--lifeline", type=int, default=None)
+    parser.add_argument("--environment", default=None)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not command:
         parser.error("no command to run")
-    return Supervisor(command, args.lifeline).run()
+    environment = chosen_environment(args.environment) if args.environment else None
+    return Supervisor(command, args.lifeline, environment).run()
 
 
 if __name__ == "__main__":

@@ -41,7 +41,13 @@ Homepage = "https://github.com/evanl666/chiefofstaff"
 Issues = "https://github.com/evanl666/chiefofstaff/issues"
 
 [project.optional-dependencies]
+# Claude workers (more-agents.md 5.12): the SDK drives the owner's installed `claude`, never the
+# CLI its wheel bundles; imported only once Claude is turned on.
+claude = [
+    "claude-agent-sdk>=0.2.182,<0.3",
+]
 dev = [
+    "claude-agent-sdk>=0.2.182,<0.3",
     "pytest>=8,<10",
     "pytest-asyncio>=0.25,<2",
     "pytest-cov>=6,<8",
@@ -78,6 +84,7 @@ asyncio_mode = "auto"
 markers = [
     "copilot: runs against the real GitHub Copilot CLI (set CHIEFOFSTAFF_TEST_COPILOT=1)",
     "codex: runs against the owner's real Codex CLI (set CHIEFOFSTAFF_TEST_CODEX=1)",
+    "claude: runs against the owner's real Claude Code, offline (set CHIEFOFSTAFF_TEST_CLAUDE=1)",
     "titles: new tasks' titles are checked as in use (other tests name tasks tersely)",
     "own_code: Chief of Staff's own code is looked up as in use (others skip the uv cache scan)",
 ]

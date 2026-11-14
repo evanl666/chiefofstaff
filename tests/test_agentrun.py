@@ -353,6 +353,36 @@ def test_its_own_environment_leaves_out_chief_of_staffs_settings(monkeypatch):
     assert "CHIEFOFSTAFF_SLACK_USER_TOKEN" not in env and env["OWNER_SETTING"] == "kept"
 
 
+def test_a_chosen_environment_keeps_only_what_it_names(tmp_path, monkeypatch, own_signals):
+    """An agent's check (claude_check.py): only the variables its file keeps, and those it
+    sets; never one of Chief of Staff's, even named."""
+    monkeypatch.setenv("CHIEFOFSTAFF_SLACK_USER_TOKEN", "xoxp-secret")
+    monkeypatch.setenv("OWNER_SETTING", "kept")
+    monkeypatch.setenv("OWNER_TOKEN", "dropped")
+    chosen = tmp_path / "environment.json"
+    chosen.write_text(
+        json.dumps(
+            {
+                "keep": ["OWNER_SETTING", "CHIEFOFSTAFF_SLACK_USER_TOKEN", "NOT_SET"],
+                "set": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:9", "CHIEFOFSTAFF_X": "1"},
+            }
+        )
+    )
+    assert agentrun.chosen_environment(str(chosen)) == {
+        "OWNER_SETTING": "kept",
+        "ANTHROPIC_BASE_URL": "http://127.0.0.1:9",
+    }
+    out = tmp_path / "cli.json"
+    script = "import json, os, sys; json.dump(dict(os.environ), open(sys.argv[1], 'w'))"
+    code = agentrun.main(
+        ["--environment", str(chosen), "--", sys.executable, "-c", script, str(out)]
+    )
+    assert code == 0
+    given = json.loads(out.read_text())
+    assert not any(k.startswith("CHIEFOFSTAFF_") or k == "OWNER_TOKEN" for k in given)
+    assert given["OWNER_SETTING"] == "kept"
+
+
 # The same, run in this process (what the subprocesses above do is not measured).
 
 

@@ -4,13 +4,16 @@ differences the feature declares by name in FEATURES below.
 
     uv run --with playwright python scripts/differential.py [--feature NAME] [--mode off|on] [--out DIR]
 
---mode off (the default): the baseline (git tag v0.1.44, checked out with `git worktree add` and
+--mode off (the default): the baseline (git tag v0.1.46, checked out with `git worktree add` and
 run in its own `uv run` environment) against this working tree with every registered feature (or
 only --feature) at its off settings, allowing only those features' `allow_off`. The baseline runs
 with those of the settings it has: a feature it shipped with is off on both sides.
 --mode on: this working tree with --feature off against the same with it on, allowing only that
 feature's `allow_on` (and its own settings keys). A feature not behind a setting does its
-`on_action` instead (more_agents: Codex turned on, then off again).
+`on_action` instead (more_agents: Codex turned on, then off again; claude_agents: Claude). A
+feature with a `setup` runs it on both sides, the baseline's too, before the script, when it is
+the one chosen (--feature), allowing its `allow_setup` too (then only): codex_on_claude_never
+compares the baseline with Codex on to this tree with Codex on and Claude never turned on.
 
 Each side runs the real web app in a process of its own tree's environment, on a scripted Copilot
 (chiefofstaff.scripted) with a fake Slack, a fake `gh`, stand-in `codex` and `claude` CLIs on the
@@ -84,7 +87,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = Path(__file__).resolve()
-BASELINE = "v0.1.44"
+BASELINE = "v0.1.46"
 # DIFFERENTIAL_PORT_BASE moves the ten ports (another checkout's run on the same machine).
 PORT_BASE = int(os.environ.get("DIFFERENTIAL_PORT_BASE", "8810"))
 PORTS = range(PORT_BASE, PORT_BASE + 10)
@@ -161,6 +164,11 @@ class Feature:
     allow_off: list[Allow] = field(default_factory=list)
     allow_on: list[Allow] = field(default_factory=list)
     on_action: str = ""
+    # What both sides do once the app is ready, before the script, when this feature is the one
+    # chosen in off mode (a Scenario method's name, which the baseline's app runs too), and the
+    # differences allowed then only (never in a run of every feature).
+    setup: str = ""
+    allow_setup: list[Allow] = field(default_factory=list)
 
 
 FEATURES: dict[str, Feature] = {}
@@ -188,82 +196,15 @@ EXAMPLE = Feature(
 )
 
 # Deliberate fixes of how the baseline looks, not any feature's: allowed in every run (the plain
-# one, and each feature's off and on), each with why. Those of 0.1.41 to 0.1.44 (the one-line
+# one, and each feature's off and on), each with why. Those of 0.1.41 to 0.1.48 (the one-line
 # heading, workers' batch CLI line, learning from talked sessions, the runs kept, role rules, the
-# Router's title rule, a check-back's runs) are the baseline's own behaviour.
+# Router's title rule, a check-back's runs, workers' own caches, agent settings snapshots, .git
+# identities, held messages, a chat's task, tool search, the Router's rule for a crossed report,
+# ask_decision's task, Watch scans that failed, drafts' has_final, tasks' settings and aged,
+# follow_thread's description) are the baseline's own behaviour.
 FIXES: list[Allow] = [
-    # 0.1.46: sandboxed workers' package caches are their own, started from the owner's, which
-    # are read-only to them (caches.py); the switch says so instead of "share your stores".
-    Allow(
-        "the switch line for workers' caches in Settings → Workers, reworded",
-        element="#settings-dialog label:has(> input[name=shared_caches])",
-        views=r"^settings-workers-",
-    ),
-    # 0.1.46: Storage reports sandboxed workers' own caches (measured and cleared when asked).
-    Allow("Storage's report of workers' caches", data=r"/api/storage\.caches"),
-    # 0.1.46: and its place in order (an action's answer that comes late no longer wins).
-    Allow("Storage's report's order", data=r"/api/storage\.order"),
-    # 0.1.46 (security): what the agent settings in each folder handed to a worker held then,
-    # kept in Chief of Staff's own data (settings_guard), empty ones too. Nothing is shown.
     # Since qa8 (the owner's decision), only for workers that run sandboxed: this run's, without
     # the sandbox, keep none where 0.1.46-0.1.48 kept them.
-    Allow("agent settings snapshots", data=r"\.db\.kv\.settingssnap:"),
-    # 0.1.46 (security): the identity of each .git folder a worker's commands could replace, as
-    # first seen (a folder moved into its place is another), and (Linux) the git files that
-    # appeared in one a worker writes. Nothing is shown. Since qa8, as for the snapshots: only
-    # for sandboxed workers.
-    Allow(".git identities", data=r"\.db\.kv\.git(id|appeared):"),
-    # 0.1.46 (QA6-1): a message held for its session's next message (it was stopped, it failed,
-    # a note that rides along) says so: held, not "Waiting to be sent".
-    Allow("a held message's delivery", data=r"/messages\[\d+\]\.delivery$", value="held"),
-    # 0.1.46 (QA6-3): where the owner's next message in a worker's chat goes (null with one task
-    # or none: nothing to choose from).
-    Allow("a session's chat_task", data=r"\.chat_task$"),
-    # 0.1.47: every Copilot session asks for tool search (Copilot 1.0.112, which runs when the
-    # owner's CLI is newer than the SDK, leaves it off), and Chief of Staff's own tools are never
-    # deferred behind it.
-    Allow("Copilot's tool search, asked for", data=r"\.options\.tool_search(\.enabled)?$"),
-    Allow(
-        "Chief of Staff's own tools, never deferred",
-        data=r"\.options\.tools\[\d+\]\.defer$",
-        value="never",
-    ),
-    # 0.1.48 (QA7, E95): the Router waits for the next report on a task when one lacks what it
-    # just asked (written before the worker read it), never moving that work into another task.
-    Allow(
-        "the Router's rule for a report that crossed its message",
-        data=r"\.system_message\.content$",
-        lines=r"^  (can make, a conflict with other work, a step the owner must take\.|you just "
-        r"asked of that task was written before its worker read your message: wait for its$"
-        r"|next report on it, or send the message again with that task_id; never move that "
-        r"work into$|another task\. Never give a worker work on$)",
-    ),
-    # 0.1.48 (QA7, E101): ask_decision names the task it is for (by default the one at work).
-    Allow(
-        "ask_decision's task_id",
-        data=r"^backend\.sessions\.worker:.*\.options\.tools\[\d+\]\.parameters\.properties\."
-        r"task_id$",
-        value={
-            "default": "",
-            "description": "The task (t…) the decision is for, when you have several; by "
-            "default the one you are working on",
-            "title": "Task Id",
-            "type": "string",
-        },
-    ),
-    # 0.1.48 (QA round 7, E102): Watch for you's scans that failed since the last one that worked
-    # (null while none did).
-    Allow("Watch scans that failed", data=r"/api/state\.connector\.failed$"),
-    # 0.1.48 (E105): whether a draft's final text is the owner's (an empty one too).
-    Allow("drafts' has_final", data=r"(\.drafts\[\d+\]|\.db\.drafts\.[^.]+)\.has_final$"),
-    Allow(
-        "drafts' has_final column",
-        data=r"\.db\._schema\.drafts$",
-        lines=r"^\s*(\)|, has_final INTEGER NOT NULL DEFAULT 0\))$",
-    ),
-    # 0.1.48 (E98, E89): what a task's Use these settings sends (null unless its worker waits for
-    # that word), and whether a failed one is out of Needs you.
-    Allow("tasks' settings and aged", data=r"\.tasks\[\d+\]\.(settings|aged)$"),
     # 0.1.50: a command the task itself asks a worker to run, a sleep included, runs as asked (a
     # Codex worker skipped the owner's `sleep 240`, live C5, citing "Never sit and wait").
     Allow(
@@ -279,13 +220,6 @@ FIXES: list[Allow] = [
     Allow("Handled for you", data=r"/api/state\.handled$"),
     Allow("the handled table", data=r"\.db\.(_schema\.)?handled$"),
     Allow("tasks' report_only", data=r"\.tasks\[\d+\]\.report_only$"),
-    # 0.1.48 (E111): follow_thread says what a PR merged or closed already brings.
-    Allow(
-        "follow_thread's description",
-        data=r"\.options\.tools\[\d+\]\.description$",
-        value="Follow a Slack thread, DM or PR: its new messages come straight to you (a PR "
-        "merged or closed already: for 14 days, and a closed one's reopening).",
-    ),
     # 0.1.49: a worker given the owner's checkout to read gets a copy of its own for a command
     # refused there (Runtime.own_copy): its prompt's line for that checkout says so, and the
     # refusal (a notice in its chat) says where the copy is.
@@ -506,8 +440,78 @@ FEATURES["update_notice"] = Feature(
     ],
 )
 
+# Claude workers (more-agents.md 5.12): the same group, one more row. Off and never used, as
+# more_agents: no `claude` run, none of its modules (nor the Agent SDK) imported. Its "on" mode
+# turns Claude on and then off again before the script (5.11), leaving what Codex's does.
+FEATURES["claude_agents"] = Feature(
+    off={},
+    on={},
+    allow_on=[
+        Allow("its configuration, kept and marked off", data=r"\.db\.kv\.agents$"),
+        Allow("its usage table, empty", data=r"\.db\.agent_usage$"),
+        Allow(
+            "its usage table and indexes in the schema",
+            data=r"\.db\._schema\.(agent_usage|agent_usage_by_session|agent_usage_by_time)$",
+        ),
+        Allow(
+            "the Router's session resumed once after the switch, as made",
+            data=r"^backend\.sessions\.router:[^.\[]*\[1\]$",
+        ),
+        Allow(
+            "the Router let go of its session after the switch, until its next message",
+            data=r"^steps\.boot\.api\./api/(state\.sessions\[0\]|sessions/<uuid-1>)\.live$",
+            value=False,
+        ),
+        Allow(
+            "one more session event: the Router's session opened again",
+            data=r"^steps\.\w+\.bus\.session$",
+        ),
+    ],
+    on_action="claude_drained",
+)
+
+# Codex on and Claude never turned on (more-agents.md 5.12.8, 5.12.10): both sides turn Codex on
+# before the script. The group Codex's row is in has Claude's beside it (with the stand-in
+# `claude`, which says no version, one that cannot be turned on): to show it, Settings looks at
+# it as it does at Codex (its version; its sign-in's state once the version is one it runs),
+# from the module that looks. No Claude session, no check, no Agent SDK.
+FEATURES["codex_on_claude_never"] = Feature(
+    off={},
+    on={},
+    setup="codex_on",
+    allow_setup=[
+        Allow(
+            "Claude's row in the Coding agents group",
+            element="#settings-dialog .agent-row[data-agent=claude]",
+            views=r"^settings-models-",
+        ),
+        Allow(
+            "Settings looks at Claude for its row: its version",
+            data=r"^agent_clis\[\d+\]$",
+            value="claude --version",
+        ),
+        Allow(
+            "Settings looks at Claude for its row: how it is signed in",
+            data=r"^agent_clis\[\d+\]$",
+            value="claude auth status --json",
+        ),
+        Allow(
+            "the module that looks at Claude",
+            data=r"^agent_modules\[\d+\]$",
+            value="chiefofstaff.backend_claude",
+        ),
+    ],
+)
+
 # What another coding agent would leave if it were used while off: its CLI run, its modules.
-AGENT_MODULES = ("chiefofstaff.backend_codex", "chiefofstaff.agentrun", "chiefofstaff.codex_check")
+AGENT_MODULES = (
+    "chiefofstaff.backend_codex",
+    "chiefofstaff.agentrun",
+    "chiefofstaff.codex_check",
+    "chiefofstaff.backend_claude",
+    "chiefofstaff.claude_check",
+    "claude_agent_sdk",
+)
 AGENT_CLIS = ("codex", "claude")
 
 # The side under test: the app in-process on a scripted Copilot, in its own tree's environment.
@@ -1103,7 +1107,7 @@ class Scenario:
         self.record("backend", {"call": "owner", "path": path, "status": response.status_code,
                                 "answer": response.text[:400]})  # fmt: skip
 
-    async def agents_drained(self):
+    async def agents_drained(self, name: str = "codex"):
         """More agents' on mode: Codex turned on, then off, as a Settings save of the Coding
         agents group does it; the events it publishes are not the script's."""
         from chiefofstaff import agents
@@ -1111,8 +1115,23 @@ class Scenario:
         store, published = self.runtime.store, Counter(self.published)
         for enabled in (True, False):
             before = agents.configured(store)
-            if agents.save(store, agents.planned(store, {"codex": {"enabled": enabled}})):
+            if agents.save(store, agents.planned(store, {name: {"enabled": enabled}})):
                 await self.runtime.agents_saved(before)
+        await self.settle()
+        self.published = published
+
+    async def claude_drained(self):
+        """Claude workers' on mode: Claude turned on, then off, as Codex's is."""
+        await self.agents_drained("claude")
+
+    async def codex_on(self):
+        """Codex turned on (and left on), as a Settings save does it, on either side."""
+        from chiefofstaff import agents
+
+        store, published = self.runtime.store, Counter(self.published)
+        before = agents.configured(store)
+        if agents.save(store, agents.planned(store, {"codex": {"enabled": True}})):
+            await self.runtime.agents_saved(before)
         await self.settle()
         self.published = published
 
@@ -1192,8 +1211,9 @@ class Scenario:
                     if self.runtime.ready():
                         break
                     await self.periodic.real(0.05)
-                if action := self.spec.get("action"):
-                    await getattr(self, action)()
+                for action in (self.spec.get("setup"), self.spec.get("action")):
+                    if action:
+                        await getattr(self, action)()
                 for index, name in enumerate(STEPS):
                     self.step = name
                     if index:
@@ -1247,6 +1267,7 @@ class Side:
     tree: Path
     settings: dict
     action: str = ""  # Feature.on_action, on the "on" side.
+    setup: str = ""  # Feature.setup, on both sides.
 
 
 def claim_port() -> tuple[int, Any]:
@@ -1338,7 +1359,7 @@ def make_run(run: Path) -> dict:
 async def start_side(side: Side, run: Path, port: int, folder: Path, env: dict):
     spec = {
         "tree": str(side.tree), "run": str(run), "port": port, "settings": side.settings,
-        "baseline": side.name == "baseline", "action": side.action,
+        "baseline": side.name == "baseline", "action": side.action, "setup": side.setup,
         "capture": str(folder / "capture.json"), "gh_log": env["DIFFERENTIAL_GH_LOG"],
         "agents_log": env["DIFFERENTIAL_AGENTS_LOG"],
     }  # fmt: skip
@@ -2041,6 +2062,12 @@ def plan(args, parser, port: int) -> tuple[list[Side], dict[str, Allow], str]:
             f"{name}: {a.name}": a for name in chosen for a in FEATURES[name].allow_off
         }
         sides = [Side("baseline", WORK / f"baseline-{port}", off), Side("current", tree, off)]
+        if args.feature:
+            for side in sides:
+                side.setup = FEATURES[args.feature].setup
+            allowances |= {
+                f"{args.feature}: {a.name}": a for a in FEATURES[args.feature].allow_setup
+            }
         title = f"Differential test, off: {args.baseline} against {tree}"
         return sides, allowances, title + (f", {', '.join(chosen)} off" if chosen else "")
     feature = FEATURES[args.feature]
@@ -2048,6 +2075,8 @@ def plan(args, parser, port: int) -> tuple[list[Side], dict[str, Allow], str]:
     for key in feature.on:
         allowances[f"{args.feature}: its setting {key}"] = Allow(key, setting=key)
     sides = [Side("off", tree, off), Side("on", tree, {**off, **feature.on}, feature.on_action)]
+    for side in sides:
+        side.setup = feature.setup
     return sides, allowances, f"Differential test, on: {args.feature} off against on, in {tree}"
 
 

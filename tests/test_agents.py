@@ -159,8 +159,10 @@ def test_with_no_agent_found_the_group_lists_none(web, monkeypatch, tmp_path):
 def test_on_windows_codex_is_found_but_not_offered_and_never_run(web, codex_on_path, monkeypatch):
     _, runs = codex_on_path
     monkeypatch.setattr(sys, "platform", "win32")
-    (codex,) = web.get("/api/agents").json()["agents"]
+    # Said of each agent Chief of Staff runs, without looking for it.
+    codex, claude = web.get("/api/agents").json()["agents"]
     assert codex["problem"] == "Codex workers need macOS or Linux for now."
+    assert claude["problem"] == "Claude workers need macOS or Linux for now."
     assert ran(runs) == []
     refused = save(web, {"codex": {"enabled": True}})
     assert refused.status_code == 400
@@ -211,7 +213,7 @@ def test_saving_the_group_with_nothing_turned_on_stores_nothing(web, codex_on_pa
         ({"codex": {"enabled": "yes"}}, "Use Codex for workers: on or off."),
         ({"codex": {"enabled": True, "model": 5}}, "Model: a model's name"),
         ({"codex": {"enabled": True, "effort": "high"}}, "Coding agents: unknown setting"),
-        ({"claude": {"enabled": True}}, "Coding agents: Chief of Staff does not run 'claude'."),
+        ({"gemini": {"enabled": True}}, "Coding agents: Chief of Staff does not run 'gemini'."),
         ({"new_workers": "codex"}, "New workers use: Copilot, or an agent turned on below."),
         ([], "Coding agents: expected each agent's settings."),
     ],

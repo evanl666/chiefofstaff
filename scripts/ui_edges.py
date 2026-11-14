@@ -7403,25 +7403,39 @@ SIGNED_OUT_CODEX = "Codex is not signed in: run codex login in a terminal."
 OLD_CODEX = "Codex 0.160.0 is older than the versions tested (0.167.2): update it."
 STOPPED_CODEX = "Stopped unexpectedly; starts again with its next worker's message."
 NO_ANSWER = "Codex did not answer in time: try again."
+PLAN_NOTE = (
+    "On a Claude plan, Claude workers count against your plan's usage limits, under Anthropic's "
+    "terms."
+)
+NO_EXTRA = "Needs Chief of Staff's Claude extra: `uv tool install 'chiefofstaff[claude]'`"
+LIMIT_LINE = "Your Claude plan's 5-hour limit is reached; it resets at 3:40 pm."
 
 
 def codex_on_path() -> tuple[Path, Path]:
-    """The stand-in Codex CLI (tests/fake_codex.py) as `codex` on this process's PATH; each of
-    its runs is listed. Taken away with codex_off_path."""
+    """The stand-in Codex CLI (tests/fake_codex.py) as `codex` on this process's PATH, and the
+    stand-in Claude Code (tests/fake_claude.py) as `claude` (never the owner's); each of their
+    runs is listed (codex's in `runs`, claude's in `claude-runs` beside it). Taken away with
+    codex_off_path."""
     folder = Path(tempfile.mkdtemp(prefix="cos-codex-"))
-    stand_in = ROOT / "tests" / "fake_codex.py"
-    (folder / "codex").write_text(f'#!/bin/sh\nexec "{sys.executable}" "{stand_in}" "$@"\n')
-    (folder / "codex").chmod(0o755)
+    for name in ("codex", "claude"):
+        stand_in = ROOT / "tests" / f"fake_{name}.py"
+        (folder / name).write_text(f'#!/bin/sh\nexec "{sys.executable}" "{stand_in}" "$@"\n')
+        (folder / name).chmod(0o755)
     os.environ["PATH"] = f"{folder}{os.pathsep}{os.environ['PATH']}"
     os.environ["FAKE_CODEX_HOME"] = str(folder / "home")
     os.environ["FAKE_CODEX_RUNS"] = str(folder / "runs")
+    os.environ["FAKE_CLAUDE_HOME"] = str(folder / "claude-home")
+    os.environ["FAKE_CLAUDE_RUNS"] = str(folder / "claude-runs")
     return folder, folder / "runs"
+
+
+CLAUDE_HIDDEN = ("FAKE_CODEX_HOME", "FAKE_CODEX_RUNS", "FAKE_CLAUDE_HOME", "FAKE_CLAUDE_RUNS")
 
 
 def codex_off_path(folder: Path):
     path = os.environ["PATH"].split(os.pathsep)
     os.environ["PATH"] = os.pathsep.join(entry for entry in path if entry != str(folder))
-    for name in ("FAKE_CODEX_HOME", "FAKE_CODEX_RUNS"):
+    for name in CLAUDE_HIDDEN:
         os.environ.pop(name, None)
     shutil.rmtree(folder, ignore_errors=True)
 
@@ -7522,12 +7536,16 @@ async def agents_off(runtime, browser, scheme: str, runs: Path):
     )
     assert abs(lefts[0] - lefts[1]) < 0.5, lefts
     await expect(group).to_be_hidden()
+    claude_runs = runs.parent / "claude-runs"
+    claude_ran = claude_runs.read_text().count("\n") if claude_runs.exists() else 0
     # Its parts opened along with the tab's others: still nothing looked for.
     await tab.evaluate("t => t.querySelectorAll('details').forEach((d) => { d.open = true; })")
     await quiet_for(page, 300)
     assert not any("/api/agents" in r for r in requests), requests
     now = runs.read_text().count("\n") if runs.exists() else 0
     assert now == ran, "no agent CLI runs before the owner asks"
+    claude_now = claude_runs.read_text().count("\n") if claude_runs.exists() else 0
+    assert claude_now == claude_ran, "no agent CLI runs before the owner asks"
     for width in AGENT_WIDTHS:
         await shoot(page, "off-line", scheme, width)
     await page.set_viewport_size({"width": 1280, "height": 900})
@@ -7539,10 +7557,21 @@ async def agents_off(runtime, browser, scheme: str, runs: Path):
     await expect(group.locator("summary")).to_be_focused()
     # By keyboard its ring shows (by mouse it does not: agents_states).
     assert await group.locator("summary").evaluate("s => s.matches(':focus-visible')")
-    rows = group.locator(".agent-row")
+    rows = group.locator(".agent-row[data-agent=codex]")
     state = rows.locator("small[role=status]")
     await expect(state).to_have_text("0.167.2 · signed in with ChatGPT", timeout=20000)
     assert sum("/api/agents" in r for r in requests) == 1, requests
+    # Claude's row, beside Codex's: how it is signed in, and the one line a plan calls for. Its
+    # look ran its version and its sign-in's state, and started no session.
+    claude = group.locator(".agent-row[data-agent=claude]")
+    await expect(claude.locator("label.check")).to_have_text("Use Claude for workers")
+    await expect(claude.locator("small[role=status]")).to_have_text(
+        "2.1.322 · signed in with your Claude plan"
+    )
+    await expect(claude.locator(".agent-note")).to_have_text(PLAN_NOTE)
+    await expect(claude.locator("input[type=checkbox]")).to_be_enabled()
+    looked = [json.loads(line) for line in claude_runs.read_text().splitlines()[claude_ran:]]
+    assert looked == [["--version"], ["auth", "status", "--json"]], looked
     await expect(group.locator(".section-body > small").first).to_have_text(
         "Workers can run on another coding agent you have installed and signed in to. The Router,"
         " Slack and the Watchdog stay on Copilot. What differs"
@@ -7665,6 +7694,7 @@ async def agents_states(browser, scheme: str):
         "name": "codex", "label": "Codex", "enabled": False, "model": "", "limit": 0,
         "found": True, "state": "", "problem": "", "models": [],
     }  # fmt: skip
+    claude = found | {"name": "claude", "label": "Claude"}
     states = {
         "none-found": {"agents": [], "new_workers": "copilot", "sandboxed": False},
         "signed-out": {
@@ -7683,6 +7713,16 @@ async def agents_states(browser, scheme: str):
             "agents": [found | {"enabled": True, "problem": STOPPED_CODEX}],
             "new_workers": "codex", "sandboxed": False,
         },
+        # Claude on a plan whose limit its workers reached, and without Chief of Staff's extra.
+        "claude-plan-limit": {
+            "agents": [claude | {"state": "2.1.322 · signed in with your Claude plan",
+                                 "note": PLAN_NOTE, "limit_line": LIMIT_LINE}],
+            "new_workers": "copilot", "sandboxed": False,
+        },
+        "claude-no-extra": {
+            "agents": [claude | {"problem": NO_EXTRA, "note": PLAN_NOTE}],
+            "new_workers": "copilot", "sandboxed": False,
+        },
     }  # fmt: skip
     for name, answer in [("checking", None), ("error", "error"), *states.items()]:
         context, page, errors, _ = await agents_page(browser, scheme)
@@ -7696,32 +7736,41 @@ async def agents_states(browser, scheme: str):
         assert not await summary.evaluate("s => s.matches(':focus-visible')"), "no ring by mouse"
         rows = tab.locator(".agent-row")
         if name == "checking":
-            await expect(rows.locator("small[role=status]")).to_have_text("Checking…")
-            await expect(rows.locator("input[type=checkbox]")).to_be_disabled()
+            # A row for each agent Chief of Staff runs, until they answer.
+            await expect(rows.locator("small[role=status]")).to_have_text(["Checking…"] * 2)
+            await expect(rows.locator("label.check")).to_have_text(
+                ["Use Codex for workers", "Use Claude for workers"]
+            )
+            for box in await rows.locator("input[type=checkbox]").all():
+                await expect(box).to_be_disabled()
             await expect(tab.locator("select[name=agent_new_workers]")).to_be_hidden()
         elif name == "error":
             await expect(rows.locator("small[role=status]")).to_have_text(
-                f"Could not check: {NO_ANSWER}"
+                [f"Could not check: {NO_ANSWER}"] * 2
             )
         elif name == "none-found":
             await expect(tab.locator(".agents-none")).to_have_text(
-                "No supported coding agent found. Supported: the Codex CLI \u2014 install it, then "
-                "open this again."
+                "No supported coding agent found. Supported: the Codex CLI or Claude Code \u2014 "
+                "install one, then open this again."
             )
             await expect(rows).to_have_count(0)
         else:
-            box = rows.locator("input[type=checkbox]")
-            await expect(box).to_have_attribute("aria-describedby", "agent-codex-state")
-            line = rows.locator("small[role=status]")
             shown = answer["agents"][0]
-            await expect(line).to_have_text(shown["problem"] or shown["state"])
+            await expect(rows).to_have_count(1)  # Answered: each agent it found.
+            box = rows.locator("input[type=checkbox]")
+            await expect(box).to_have_attribute("aria-describedby", f"agent-{shown['name']}-state")
+            line = rows.locator("small[role=status]")
+            # A command in it shows as code, its marks not as they are.
+            await expect(line).to_have_text((shown["problem"] or shown["state"]).replace("`", ""))
+            notes = [shown.get("limit_line"), "" if shown["problem"] else shown.get("note")]
+            await expect(rows.locator(".agent-note")).to_have_text([n for n in notes if n])
             assert "`" not in await rows.inner_text(), "no code marks shown as they are"
             label = rows.locator("label.check")
             muted = await page.evaluate(
                 "() => getComputedStyle(document.body).getPropertyValue('--muted').trim()"
             )
             colour = await label.evaluate("l => getComputedStyle(l).color")
-            if name in ("signed-out", "too-old", "sandboxed"):
+            if name in ("signed-out", "too-old", "sandboxed", "claude-no-extra"):
                 await expect(box).to_be_disabled()
                 await expect(rows).to_have_class("agent-row disabled")
                 assert colour == await page.evaluate(
@@ -7743,7 +7792,10 @@ async def agents_states(browser, scheme: str):
         await page.locator("#settings-cancel").click()
         assert not [e for e in errors if "500" not in e and "Failed to load" not in e], errors
         await context.close()
-    log(f"agents ({scheme}): checking, error, none found, signed out, too old, sandboxed, offline")
+    log(
+        f"agents ({scheme}): checking, error, none found, signed out, too old, sandboxed, "
+        "offline, Claude's plan limit, Claude without its extra"
+    )
 
 
 async def agents_on_and_worker(runtime, browser, runs: Path):
