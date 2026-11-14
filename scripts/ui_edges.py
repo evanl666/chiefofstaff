@@ -7426,7 +7426,15 @@ def codex_on_path() -> tuple[Path, Path]:
     os.environ["FAKE_CODEX_RUNS"] = str(folder / "runs")
     os.environ["FAKE_CLAUDE_HOME"] = str(folder / "claude-home")
     os.environ["FAKE_CLAUDE_RUNS"] = str(folder / "claude-runs")
+    # A Claude configuration of its own, set up (its state file there): never the owner's.
+    (folder / "claude-config").mkdir()
+    (folder / "claude-config" / ".claude.json").write_text("{}\n")
+    OWNERS_CLAUDE_CONFIG.append(os.environ.get("CLAUDE_CONFIG_DIR"))
+    os.environ["CLAUDE_CONFIG_DIR"] = str(folder / "claude-config")
     return folder, folder / "runs"
+
+
+OWNERS_CLAUDE_CONFIG: list[str | None] = []
 
 
 CLAUDE_HIDDEN = ("FAKE_CODEX_HOME", "FAKE_CODEX_RUNS", "FAKE_CLAUDE_HOME", "FAKE_CLAUDE_RUNS")
@@ -7437,6 +7445,11 @@ def codex_off_path(folder: Path):
     os.environ["PATH"] = os.pathsep.join(entry for entry in path if entry != str(folder))
     for name in CLAUDE_HIDDEN:
         os.environ.pop(name, None)
+    if OWNERS_CLAUDE_CONFIG:
+        if (owners := OWNERS_CLAUDE_CONFIG.pop()) is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = owners
     shutil.rmtree(folder, ignore_errors=True)
 
 

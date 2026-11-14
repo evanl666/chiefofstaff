@@ -56,7 +56,7 @@ from copilot.generated.rpc import PermissionDecisionReject
 from copilot.tools import ToolInvocation
 
 from . import agents
-from .backend import Capabilities, descendants, end_processes, process_table
+from .backend import Capabilities, descendants, end_processes, isolated, process_table
 from .machine import kill_process_tree
 from .policy import GITHUB_MCP
 
@@ -83,6 +83,8 @@ SDK_BEFORE = (0, 3, 0)
 EXTRA = "Needs Chief of Staff's Claude extra: `uv tool install 'chiefofstaff[claude]'`"
 NOT_FOUND = "Not found on this computer: install Claude Code."
 NOT_SIGNED_IN = "Not signed in: run `claude` in a terminal and sign in."
+# Claude never set up for the owner (no state file): `claude auth status` would make its files.
+NOT_SET_UP = "Not set up: run `claude` in a terminal and sign in."
 # How long Settings waits for `claude --version` and `claude auth status`.
 LOOK_SECONDS = 30.0
 # How long a hook of Chief of Staff's may take before Claude blocks what it was asked about.
@@ -551,9 +553,18 @@ async def claude_version(command: str) -> str:
     return version_of(said) if code == 0 else ""
 
 
+def set_up() -> bool:
+    """Whether Claude was set up for the owner: its state file is there. Without it, `claude auth
+    status` makes the owner's Claude files (that file, a backups folder): it is not run then."""
+    return state_file().is_file()
+
+
 async def auth_status(command: str) -> dict:
     """How Claude is signed in: the four fields Chief of Staff reads of `claude auth status`
-    (AUTH_FIELDS), and its exit code. Nothing else of it is kept."""
+    (AUTH_FIELDS), and its exit code. Nothing else of it is kept. Raises NOT_SET_UP, running
+    nothing, when Claude was never set up (set_up)."""
+    if not await asyncio.to_thread(set_up):
+        raise RuntimeError(NOT_SET_UP)
     code, said = await run_claude(command, "auth", "status", "--json")
     try:
         parsed = json.loads(said)
@@ -647,18 +658,46 @@ def check_key(path: str, version: str) -> str:
 
 
 def write_launcher(folder: Path, command: str, environment: Path | None = None) -> Path:
-    """The program the Agent SDK starts as Claude Code (its `cli_path`): Chief of Staff's
-    supervisor, then the owner's own `claude`; mode 0700, written again at each start."""
-    folder.mkdir(parents=True, exist_ok=True)
+    """The program the Agent SDK starts as Claude Code (its `cli_path`), in this folder of Chief
+    of Staff's own: its supervisor, isolated (agentrun.isolated: no file of the worker's folder
+    runs as it), which starts the owner's own `claude` in the worker's folder (the SDK's
+    CHIEFOFSTAFF_AGENT_CWD; none, it does not start); mode 0700, written again at each start."""
+    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
     launcher = folder / ("check-launcher" if environment else "launcher")
-    chosen = f" --environment {shlex.quote(str(environment))}" if environment else ""
+    chosen = ["--environment", str(environment)] if environment else []
+    supervisor = shlex.join(isolated("chiefofstaff.agentrun", *chosen))
     launcher.write_text(
         "#!/bin/sh\n"
-        f"exec {shlex.quote(sys.executable)} -m chiefofstaff.agentrun{chosen} -- "
-        f'{shlex.quote(command)} "$@"\n'
+        f'exec {supervisor} --cwd "${{CHIEFOFSTAFF_AGENT_CWD:?}}" -- {shlex.quote(command)} "$@"\n'
     )
     launcher.chmod(0o700)
     return launcher
+
+
+def write_private(path: Path, text: str):
+    """A file only the owner can read (0600), made new (never one that was there)."""
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as file:
+        file.write(text)
+
+
+def private_folder(launcher: Path) -> Path:
+    """Where a worker's process's MCP configuration and system prompt are, as files of their own
+    (not its command line, which other users of the computer can read): beside its launcher."""
+    folder = launcher.parent / "private"
+    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+    folder.chmod(0o700)
+    return folder
+
+
+def clear_private(launcher: Path):
+    """What processes of an earlier Chief of Staff left there (it was killed)."""
+    folder = launcher.parent / "private"
+    mine = f"{os.getpid()}-"
+    for path in folder.glob("*") if folder.is_dir() else []:
+        if not path.name.startswith(mine):
+            with suppress(OSError):
+                path.unlink()
 
 
 class Sent:
@@ -803,6 +842,8 @@ class ClaudeWorker:
         self.turns: set[str] = set()
         self.starting = False
         self.aborting = False
+        # Each Stop (abort): a turn starting when one comes is stopped before it begins.
+        self.aborts = 0
         self.unshown = ""
         self.wakeups = 0
         # Messages for after the turn (content, the text the gate sees), Chief of Staff's own
@@ -842,13 +883,42 @@ class ClaudeWorker:
         self.retiring: asyncio.Future | None = None
         self.on_end: Callable[[bool], None] | None = None
         self.handling = False
+        # The current process's MCP configuration and system prompt, as files (private_files):
+        # each process's go with it (run).
+        self.private: list[Path] = []
 
     # The process
+
+    def private_files(self) -> dict[str, str]:
+        """Its MCP servers (the owner's, with their headers and variables, and the check's) and
+        Chief of Staff's system prompt, in files only the owner can read, for this process: the
+        CLI's arguments that name them (on its command line, only their paths)."""
+        servers = {
+            str(name): found
+            for name, entry in mapping(self.options.get("mcp_servers")).items()
+            if str(name) != "chief" and (found := claude_mcp(entry))
+        }
+        servers.update(mapping(self.options.get("checking_servers")))
+        prompt = (self.options.get("system_message") or {}).get("content") or ""
+        folder = private_folder(self.launcher)
+        stem = f"{os.getpid()}-{self.epoch}"
+        given: dict[str, str] = {}
+        self.private = []
+        if servers:
+            path = folder / f"{stem}-mcp.json"
+            self.private.append(path)
+            write_private(path, json.dumps({"mcpServers": servers}))
+            given["mcp-config"] = str(path)
+        if prompt:
+            path = folder / f"{stem}-prompt.md"
+            self.private.append(path)
+            write_private(path, prompt)
+            given["append-system-prompt-file"] = str(path)
+        return given
 
     def client_options(self) -> Any:
         from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
 
-        prompt = (self.options.get("system_message") or {}).get("content") or ""
         folders = [f for f in self.options.get("folders") or [] if f and f != self.cwd]
         # The repository's own settings (its hooks, MCP servers, CLAUDE.md) only where the owner
         # trusts it in Claude.
@@ -858,13 +928,14 @@ class ClaudeWorker:
         settings: dict[str, Any] = {"autoMemoryEnabled": False, "sandbox": {"enabled": False}}
         if self.ask_first:
             settings["disableAllHooks"] = True  # The owner's hooks and mods: off (5.7).
-        servers: dict[str, Any] = {
-            str(name): found
-            for name, entry in mapping(self.options.get("mcp_servers")).items()
-            if (found := claude_mcp(entry))
-        }
-        servers["chief"] = self.chief_server()
-        servers.update(mapping(self.options.get("checking_servers")))
+        files = self.private_files()
+        # What Chief of Staff's own variables were (the Slack token among them) is not passed
+        # on (the SDK passes its whole environment; agentrun drops them for the CLI), but for
+        # the folder the CLI starts in.
+        environment = {key: "" for key in os.environ if key.startswith("CHIEFOFSTAFF_")}
+        environment |= {"CHIEFOFSTAFF_AGENT_CWD": self.cwd}
+        environment |= {"CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS": "1"}
+        servers: dict[str, Any] = {"chief": self.chief_server()}
 
         def every(hook: Any) -> Any:
             # Every tool and prompt; a hook that fails or takes too long blocks.
@@ -874,11 +945,13 @@ class ClaudeWorker:
 
         return ClaudeAgentOptions(
             cli_path=str(self.launcher),
-            cwd=self.cwd,
+            # The launcher's own folder, Chief of Staff's: the CLI starts in the worker's.
+            cwd=str(self.launcher.parent),
             add_dirs=folders,
             permission_mode="default",
             setting_sources=sources,
-            system_prompt={"type": "preset", "preset": "claude_code", "append": prompt},
+            system_prompt={"type": "preset", "preset": "claude_code"},
+            # Chief of Staff's tools, in this process; the other servers are in a file.
             mcp_servers=servers,
             hooks={
                 "PreToolUse": every(self.pre_tool_use),
@@ -887,9 +960,13 @@ class ClaudeWorker:
             can_use_tool=self.can_use_tool,
             include_partial_messages=True,
             verbatim_prompts=True,
-            extra_args={"replay-user-messages": None, "name": f"cos-{self.worker[:8]}"},
+            extra_args={
+                "replay-user-messages": None,
+                "name": f"cos-{self.worker[:8]}",
+                **files,
+            },
             settings=json.dumps(settings),
-            env={"CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS": "1"},
+            env=environment,
             model=self.model or None,
             effort=effort,
             stderr=self.on_stderr,
@@ -933,8 +1010,13 @@ class ClaudeWorker:
         ready = self.ready or asyncio.get_running_loop().create_future()
         client = None
         stopped: asyncio.Task | None = None
+        files: list[Path] = []
         try:
-            client = ClaudeSDKClient(self.client_options())
+            try:
+                options = self.client_options()
+            finally:
+                files = list(self.private)  # This process's, whatever comes after it.
+            client = ClaudeSDKClient(options)
             await client.connect()
             self.client, self.query = client, getattr(client, "_query", None)
             transport = getattr(client, "_transport", None)
@@ -973,6 +1055,9 @@ class ClaudeWorker:
             for task in list(self.tasks):
                 task.cancel()
             await asyncio.to_thread(self.end_leftovers)
+            for path in files:
+                with suppress(OSError):
+                    path.unlink()
             self.lost()
             self.ended()
 
@@ -1193,25 +1278,35 @@ class ClaudeWorker:
 
     async def start_turn(self, content: Any, prompt: str) -> Sent:
         """A turn on this message, once Chief of Staff admits it; refused, it raises why.
-        Admitted but not begun, nothing of it spends."""
-        if self.process_effort != self.effort and not self.background:
-            await self.restart()  # Claude takes a thinking effort as its process starts.
-        self.starting = admitted = True
+        Admitted but not begun, nothing of it spends. Stopped meanwhile (abort: while its
+        process restarted, or while it waited to be admitted), it ends at Claude's gate before
+        it begins, as a message stopped once written does (gate_sent), never admitted then."""
+        aborts = self.aborts
+        self.starting, admitted = True, False
         try:
-            if why := await self.agent.admit_turn(self.handle_for_admission()):
-                admitted = False
-                raise RuntimeError(why)
-            # Written now, nothing awaited since the check: a turn admitted before a change
-            # that makes this worker ineligible never begins after it.
-            if not self.agent.begins_turn(self.handle_for_admission()):
-                raise RuntimeError("Chief of Staff's settings changed; send it again.")
+            if self.process_effort != self.effort and not self.background:
+                await self.restart()  # Claude takes a thinking effort as its process starts.
+            if self.aborts == aborts:
+                admitted = True
+                if why := await self.agent.admit_turn(self.handle_for_admission()):
+                    admitted = False
+                    raise RuntimeError(why)
             sent = Sent(content, prompt, kind="turn")
+            # Written now, nothing awaited since these checks: a Stop after them marks it as
+            # written (abort), and a turn admitted before a change that makes this worker
+            # ineligible never begins after it.
+            if self.aborts != aborts:
+                sent.stopped = True
+            elif not self.agent.begins_turn(self.handle_for_admission()):
+                raise RuntimeError("Chief of Staff's settings changed; send it again.")
             await self.write(sent)
             return sent
         except BaseException:
             self.starting = False
             if admitted:
                 self.spent()
+            if self.turn is None:
+                self.queue.clear()  # Given back: Delivery sends what it holds again.
             raise
 
     def handle_for_admission(self) -> ClaudeSession:
@@ -1252,6 +1347,7 @@ class ClaudeWorker:
             self.process_effort = self.effort
             self.resume = True
             self.reset_turn_state()
+            self.starting = True  # The turn it restarts for.
             await self.open()
             self.on_end = self.agent.ending(self.worker, self)
             if self.agent.on_start:
@@ -1276,6 +1372,7 @@ class ClaudeWorker:
         waited for the turn's end, or was written and not yet taken up, is dropped (Delivery
         sends it again with its next message)."""
         self.queue.clear()
+        self.aborts += 1  # A turn starting now (start_turn) is stopped before it begins.
         for sent in self.written.values():
             sent.stopped = True
         if self.turn and self.query is not None:
@@ -1696,8 +1793,18 @@ class ClaudeWorker:
             self.emit("session.error", message=self.failure(message))
             self.agent.turn_failed(message)
             return
+        elif self.queue and self.process_effort != self.effort and not self.background:
+            # Its next turn starts in a new process (a new effort), which ends this task, the
+            # one that reads its messages: started from a task of its own.
+            self.starting = True
+            self.agent.apart(self.next_turn_apart())
+            return
         elif self.queue and await self.next_turn():
             return
+        self.rest()
+
+    def rest(self):
+        """No turn: what it left running holds the session; else it is idle."""
         if self.background:
             self.emit("assistant.idle")  # What it left running holds session.idle.
         else:
@@ -1733,6 +1840,8 @@ class ClaudeWorker:
     async def next_turn(self) -> bool:
         """The next message it queued, as a turn of its own once admitted; refused, what it
         queued is given back (Chief of Staff sends it again)."""
+        if not self.queue:
+            return False  # Stopped meanwhile.
         content, prompt = self.queue.pop(0)
         try:
             await self.start_turn(content, prompt)
@@ -1741,6 +1850,12 @@ class ClaudeWorker:
             self.queue.clear()
             return False
         return True
+
+    async def next_turn_apart(self):
+        if not await self.next_turn():
+            self.starting = False
+            self.spent()
+            self.rest()
 
     def unadmitted(self):
         """A model response with no turn of Chief of Staff's admitted: something passed its gate
@@ -1792,6 +1907,10 @@ class ClaudeWorker:
                 self.emit("session.idle")
             return self.block("Stopped by Chief of Staff.")
         if self.turn:
+            if sent.kind == "turn":
+                # Admitted while a turn the worker started by itself (gate_wakeup) began: it
+                # is part of that turn.
+                self.starting = False
             sent.steered = sent.kind == "steer"
             return {}  # Into the turn in progress.
         if self.starting and sent.kind == "turn":
@@ -1820,8 +1939,10 @@ class ClaudeWorker:
         (counted to its task's run before it spends)."""
         if self.turn:
             return {}
-        if self.starting:
-            # Its admitted turn's message waits behind this notice: the turn begins with it.
+        if self.starting and any(s.kind == "turn" and not s.stopped for s in self.at_gate):
+            # Its admitted turn's message, written, waits behind this notice: the turn begins
+            # with it. (One still waiting to be admitted, or restarting, is not: this one is
+            # admitted on its own.)
             self.starting = False
             self.begin_turn(f"t-{uuid.uuid4().hex[:12]}", show=True)
             return {}
@@ -2120,6 +2241,8 @@ class ClaudeAgent:
         self.workers: dict[str, ClaudeWorker] = {}
         self.locks: dict[str, asyncio.Lock] = {}
         self.retired: set[ClaudeWorker] = set()
+        # Workers' work started apart from their process's own tasks (ClaudeWorker.end_turn).
+        self.started_apart: set[asyncio.Task] = set()
         self.running = False
         self.launcher: Path | None = None
         # The plan's limit as the stream last said it (status, window, reset), and a failure
@@ -2163,11 +2286,19 @@ class ClaudeAgent:
         if self.folder is None:
             raise RuntimeError("Chief of Staff has no folder for Claude's launcher.")
         self.launcher = await asyncio.to_thread(write_launcher, self.folder, path)
+        await asyncio.to_thread(clear_private, self.launcher)
         self.trouble = ""
         self.running = True
 
+    def apart(self, coroutine: Awaitable[Any]):
+        task = asyncio.ensure_future(coroutine)
+        self.started_apart.add(task)
+        task.add_done_callback(self.started_apart.discard)
+
     async def stop(self) -> None:
         self.running = False
+        for task in list(self.started_apart):
+            task.cancel()
         workers, self.workers = [*self.workers.values(), *self.retired], {}
         self.retired = set()
         await asyncio.gather(*(worker.stop() for worker in workers), return_exceptions=True)

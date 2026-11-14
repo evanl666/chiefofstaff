@@ -29,11 +29,13 @@ from typing import TYPE_CHECKING, Any
 
 from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
 
+from .backend import isolated
+
 if TYPE_CHECKING:
     from .backend_claude import ClaudeAgent, ClaudeWorker
 
 # Raised whenever what the check does changes: every version is checked again then.
-REVISION = 1
+REVISION = 2
 # The check's own tool of Chief of Staff's, and the stand-in MCP server's.
 TOOL = "chiefofstaff_check"
 SERVER = "chiefofstaff_check"
@@ -591,7 +593,7 @@ def check_options(work: Path, facts: Facts) -> dict:
             SERVER: {
                 "type": "stdio",
                 "command": sys.executable,
-                "args": ["-m", "chiefofstaff.codex_check", "--mcp", str(work)],
+                "args": isolated("chiefofstaff.codex_check", "--mcp", str(work))[1:],
             }
         },
     }

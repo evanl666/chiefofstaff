@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import functools
+import hashlib
 import importlib.metadata
 import json
 import logging
@@ -1024,10 +1025,31 @@ def data_identity(directory: Path) -> dict:
     return {"path": str(real), "device": info.st_dev, "inode": info.st_ino}
 
 
-def copilot_records(processes: dict[int, str], directory: Path) -> dict[str, dict]:
+def isolated(module: str, *arguments: str) -> list[str]:
+    """How Chief of Staff runs a module of its own as a program (another agent's supervisor,
+    agentrun; a check's MCP server): this Python, isolated (-I), so that the folder it starts in
+    (a repository) is not on its import path, nor PYTHONPATH, nor the user's site folder."""
+    return [sys.executable, "-I", "-m", module, *arguments]
+
+
+def hashed_command(command: str) -> str:
+    """A command line as another agent's process records keep it: its SHA-256, never its words
+    (what a worker's commands were given, an MCP server's)."""
+    return "sha256:" + hashlib.sha256(command.encode(errors="replace")).hexdigest()
+
+
+def same_command(command: str, recorded: Any) -> bool:
+    """Whether a process's command line is the one recorded (as is, or as hashed_command)."""
+    return isinstance(recorded, str) and recorded in {command, hashed_command(command)}
+
+
+def copilot_records(
+    processes: dict[int, str], directory: Path, *, hashed: bool = False
+) -> dict[str, dict]:
     """What is kept of the processes this instance's Copilot CLI runs (pid -> command line), so
     that a later start can tell they are still those, and its own to stop (copilot_orphans):
-    this instance, its data directory, when each started, its command and its parents."""
+    this instance, its data directory, when each started, its command and its parents.
+    `hashed`: each command kept as its hash (another agent's records)."""
     if not processes:
         return {}
     starts, table = start_times(), process_table()
@@ -1043,7 +1065,7 @@ def copilot_records(processes: dict[int, str], directory: Path) -> dict[str, dic
                 break
             at = table.get(at, (0, ""))[0]
         records[str(pid)] = {
-            "command": command,
+            "command": hashed_command(command) if hashed else command,
             "started": starts.get(pid, ""),
             "parents": parents,
             "instance": INSTANCE,
@@ -1104,7 +1126,7 @@ def copilot_orphans(records: Any, directory: Path) -> dict[int, str]:
             and record.get("started")
             and starts.get(pid) == record["started"]
             and pid in table
-            and table[pid][1] == record.get("command")
+            and same_command(table[pid][1], record.get("command"))
             and not started_elsewhere(pid, record, starts, table)
         ):
             found[pid] = table[pid][1]

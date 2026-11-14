@@ -58,7 +58,7 @@ from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecis
 from copilot.tools import ToolInvocation
 
 from . import codex_check
-from .backend import Capabilities, descendants, end_processes, process_table
+from .backend import Capabilities, descendants, end_processes, isolated, process_table
 from .envelope import inert, wrap
 from .policy import GITHUB_MCP
 
@@ -688,6 +688,10 @@ class CodexBackend:
         self.experimental = True
         # The skill folders from Chief of Staff's Settings this process reads (skill_roots).
         self.extra_roots: list[str] = []
+        # The folder its process starts in: Chief of Staff's own for it (a worker's: the data
+        # directory's agents/codex; the check's: its folder), never the one Chief of Staff was
+        # started in (a repository); the owner's home when it has none (Settings' look).
+        self.folder: Path | None = getattr(owner, "folder", None)
         self.process: asyncio.subprocess.Process | None = None
         # Chief of Staff's end of the supervisor's lifeline: closed with this process.
         self.lifeline: int | None = None
@@ -742,17 +746,16 @@ class CodexBackend:
             # worker; tests start one again): a process of its own, ended by its own stop.
             self.stopping = self.by_itself = self.told_end = False
             self.ending, self.sessions = None, {}
+        folder = self.folder or Path.home()
+        await asyncio.to_thread(folder.mkdir, mode=0o700, parents=True, exist_ok=True)
         read, write = os.pipe()
         try:
             self.process = await asyncio.create_subprocess_exec(
-                sys.executable,
-                "-m",
-                "chiefofstaff.agentrun",
-                "--lifeline",
-                str(read),
+                *isolated("chiefofstaff.agentrun", "--lifeline", str(read)),
                 "--",
                 self.command,
                 *self.arguments,
+                cwd=folder,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -1280,6 +1283,7 @@ class CodexBackend:
             (work / codex_check.MOVED_FROM).write_text("a\n")
             model = await asyncio.to_thread(codex_check.Model, work)
             other = CodexBackend(self.command)
+            other.folder = folder
             other.arguments += model.arguments(folder)
             other.needs_sign_in = False
             await asyncio.wait_for(self.checking(other, work, asked), CHECK_TIMEOUT)
@@ -1537,7 +1541,7 @@ class CodexBackend:
             # In the same table as the owner's servers' policies (one key per table here).
             config.setdefault("mcp_servers", {})[codex_check.SERVER] = {
                 "command": sys.executable,
-                "args": ["-m", "chiefofstaff.codex_check", "--mcp", checking],
+                "args": isolated("chiefofstaff.codex_check", "--mcp", checking)[1:],
                 "default_tools_approval_mode": "prompt",
             }
         return config
@@ -1638,8 +1642,10 @@ class CodexAgent:
 
     capabilities = CODEX
 
-    def __init__(self, command: str):
+    def __init__(self, command: str, folder: Path | None = None):
         self.command = command
+        # Chief of Staff's own folder for its processes to start in (backend.folder).
+        self.folder = folder
         self.arguments: list[str] = []  # More `-c` settings for each process (the check's).
         self.needs_sign_in = True
         self.cli_version = ""
@@ -3122,8 +3128,8 @@ def check_verdict(
     return {"ran": True, "ask_first": ask_first, "acting": acting}
 
 
-def codex_backend(command: str = "codex") -> CodexAgent:
-    return CodexAgent(shutil.which(command) or command)
+def codex_backend(command: str = "codex", folder: Path | None = None) -> CodexAgent:
+    return CodexAgent(shutil.which(command) or command, folder)
 
 
 async def look(command: str = "codex") -> dict:

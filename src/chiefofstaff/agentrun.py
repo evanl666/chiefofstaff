@@ -1,7 +1,13 @@
 """The supervisor every process of another coding agent runs under (`python -m
 chiefofstaff.agentrun`).
 
-    python -m chiefofstaff.agentrun [--lifeline FD] [--environment FILE] -- codex app-server ...
+    python -I -m chiefofstaff.agentrun [--lifeline FD] [--environment FILE] [--cwd DIR] -- codex ...
+
+Chief of Staff starts it isolated (`python -I`, backend.isolated): neither the folder it starts
+in nor PYTHON* variables nor the user's site folder are on its import path, so no file of a
+repository (a `typing.py`, a `chiefofstaff/` folder) runs as it. It starts in a folder of Chief of
+Staff's own; `--cwd` is the folder the CLI starts in (a worker's), entered by the CLI's process
+only.
 
 It starts the agent's CLI in a process group of its own, with the owner's environment without
 Chief of Staff's variables (CHIEFOFSTAFF_*, the Slack token among them), or, with
@@ -46,7 +52,7 @@ from .processes import descendants, end_processes, process_table
 # moment the CLI starts a process (macOS: the kernel says so), so what a CLI that crashes
 # started in its last moments is seen too; on Linux what it leaves comes to the supervisor
 # (a subreaper); and when the supervisor ends the CLI, it looks first.
-LOOK_EVERY = float(os.environ.get("CHIEFOFSTAFF_AGENTRUN_LOOK", "2"))
+LOOK_EVERY = float(os.environ.get("CHIEFOFSTAFF_AGENTRUN_LOOK") or "2")
 # At most this often for a fork (a build or a test run forks thousands of times, and a look runs
 # `ps`): in between, the kernel's word of each fork is followed (`follow`, proc_listpids), and a
 # look always comes first when the CLI ends.
@@ -153,11 +159,17 @@ def chosen_environment(path: str) -> dict[str, str]:
 
 class Supervisor:
     def __init__(
-        self, command: list[str], lifeline: int | None, environment: dict[str, str] | None = None
+        self,
+        command: list[str],
+        lifeline: int | None,
+        environment: dict[str, str] | None = None,
+        cwd: str | None = None,
     ):
         self.command = command
         self.lifeline = lifeline
         self.environment = environment
+        # The folder the CLI starts in (this process stays in its own).
+        self.cwd = cwd
         self.parent = os.getppid()
         self.process: subprocess.Popen | None = None
         # What the CLI ran, as last seen: pid -> command line (a pid can be reused).
@@ -187,8 +199,10 @@ class Supervisor:
             signal.signal(signum, self.on_signal)
         self.adopting = adopt_orphans()
         environment = own_environment() if self.environment is None else self.environment
+        if self.cwd:
+            environment = {**environment, "PWD": self.cwd}
         self.process = subprocess.Popen(  # noqa: S603  (the agent's CLI, as configured)
-            self.command, env=environment, start_new_session=True
+            self.command, env=environment, cwd=self.cwd, start_new_session=True
         )
         self.watch = fork_watch(self.process.pid, self.lifeline)
         if self.watch is not None:
@@ -363,13 +377,17 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m chiefofstaff.agentrun")
     parser.add_argument("--lifeline", type=int, default=None)
     parser.add_argument("--environment", default=None)
+    parser.add_argument("--cwd", default=None)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not command:
         parser.error("no command to run")
+    if args.cwd is not None and not Path(args.cwd).is_dir():
+        sys.stderr.write(f"chiefofstaff.agentrun: no folder {args.cwd!r} to start in\n")
+        return 127
     environment = chosen_environment(args.environment) if args.environment else None
-    return Supervisor(command, args.lifeline, environment).run()
+    return Supervisor(command, args.lifeline, environment, args.cwd).run()
 
 
 if __name__ == "__main__":

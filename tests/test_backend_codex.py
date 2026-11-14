@@ -17,7 +17,7 @@ from types import SimpleNamespace
 
 import codex_schema
 import pytest
-from conftest import Harness, call_tool, fake_codex
+from conftest import Harness, call_tool, cwd_of, fake_codex, shadowing_repository
 from copilot import Tool, define_tool
 from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
 from pydantic import BaseModel
@@ -96,6 +96,29 @@ async def codex(tmp_path, monkeypatch):
     await backend.start()
     yield backend
     await backend.stop()
+
+
+@pytest.mark.parametrize("owned", [True, False], ids=["a-workers", "settings-look"])
+async def test_a_repositorys_python_files_never_run_as_its_supervisor(tmp_path, monkeypatch, owned):
+    # Chief of Staff started in a repository: its supervisor, isolated, starts in a folder of its
+    # own (a worker's: Chief of Staff's agents/codex; else the owner's home), not there.
+    marks = tmp_path / "marks"
+    monkeypatch.chdir(shadowing_repository(tmp_path / "repository", marks))
+    command = fake_codex(tmp_path / "fake", monkeypatch)
+    folder = tmp_path / "agents" / "codex"
+    backend = CodexAgent(command, folder).process() if owned else CodexBackend(command)
+    await backend.start()
+    try:
+        session, turn = await opened(backend, tmp_path)
+        await session.send("Reply with just: ok")
+        await turn.wait()
+        assert [data.content for data in turn.data("assistant.message")][-1:] == ["ok"]
+        expected = folder if owned else Path.home()
+        assert cwd_of(backend.process.pid) == str(expected.resolve())
+        assert oct(folder.stat().st_mode & 0o777) == "0o700" if owned else not folder.exists()
+    finally:
+        await backend.stop()
+    assert sorted(path.name for path in marks.iterdir()) == [], "none of them ran"
 
 
 async def opened(backend, tmp_path, **options):
@@ -1974,6 +1997,8 @@ async def test_a_codex_worker_works_reports_and_has_receipts(tmp_path, monkeypat
         await until(lambda: json.loads(harness.store.get("agentpids:codex") or "{}"))
         records = json.loads(harness.store.get("agentpids:codex"))
         assert all(record["data_dir"] for record in records.values())
+        # Their command lines as hashes: never what a worker's commands were given.
+        assert all(record["command"].startswith("sha256:") for record in records.values())
         options = runtime.agent_options(harness.store.session(worker))
         copilot = runtime.options(harness.store.session(worker))
         assert options["system_message"]["content"] == copilot["system_message"]["content"]

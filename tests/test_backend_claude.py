@@ -3,6 +3,7 @@ relies on of the CLI and the Agent SDK, and what it shows the runtime. The contr
 (test_backend_contract.py) run the parts every backend shares; these, Claude's own."""
 
 import asyncio
+import contextlib
 import json
 import os
 import sys
@@ -10,10 +11,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from conftest import fake_claude
+from conftest import SHADOWED, cwd_of, fake_claude, shadowing_repository
 from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
 
 from chiefofstaff import backend_claude
+from chiefofstaff.backend import copilot_orphans, copilot_records
 from chiefofstaff.backend_claude import claude_backend
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="Claude workers need macOS/Linux")
@@ -46,6 +48,28 @@ class Turn:
     async def ended(self, seconds=20):
         await asyncio.wait_for(self.done.wait(), seconds)
         self.done.clear()
+
+
+async def until(check, seconds: float = 20):
+    for _ in range(int(seconds * 100)):
+        if check():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("never came")
+
+
+class Raw:
+    """What Claude says, message by message (the options' on_message)."""
+
+    def __init__(self):
+        self.messages = []
+
+    def __call__(self, message):
+        self.messages.append(message)
+
+    def blocked(self) -> int:
+        """Results of no model request: prompts its gate blocked."""
+        return sum(m.get("type") == "result" and m.get("num_turns") == 0 for m in self.messages)
 
 
 @pytest.fixture
@@ -208,15 +232,103 @@ async def test_a_wakeup_not_admitted_is_blocked_before_the_model(agent, tmp_path
         return "Stopped by you." if woken else ""
 
     agent.admit = admit
-    session = await agent.create_session(session_id="f" * 32, name="t", **options(tmp_path))
+    raw = Raw()
+    session = await agent.create_session(
+        session_id="f" * 32, name="t", **options(tmp_path, on_message=raw)
+    )
     turn = Turn(session)
     await session.send("Leave the command `echo up` running for 0.3 s, then reply with just: up")
     await turn.ended()
     await turn.ended()
     shown = len(turn.kinds())
-    await asyncio.sleep(1)
+    await until(lambda: raw.blocked() == 1)  # Its end's notice, at the gate: blocked.
+    await asyncio.sleep(0.05)
     assert len(turn.kinds()) == shown, "blocked: no turn, nothing shown"
-    assert turn.said() == ["up"]
+    assert turn.said() == ["up"] and not session.backend.turn
+
+
+async def test_a_wakeup_while_a_message_waits_to_be_admitted_is_admitted_on_its_own(
+    agent, tmp_path
+):
+    # The message's admission is under way (not yet written) as a command it left running ends:
+    # the turn that end starts is admitted itself, never begun on the message's admission.
+    asked, wakeup = [], asyncio.Event()
+
+    async def admit(session, woken=False):
+        asked.append(woken)
+        if len(asked) == 1:
+            return ""
+        if woken:
+            wakeup.set()
+            return "Stopped by you."
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(wakeup.wait(), 5)
+        return "Stopped by you."
+
+    agent.admit = admit
+    session = await agent.create_session(session_id="f1" * 16, name="t", **options(tmp_path))
+    turn = Turn(session)
+    await session.send("Leave the command `echo up` running for 0.5 s, then reply with just: up")
+    await turn.ended()
+    with pytest.raises(RuntimeError, match="Stopped by you"):
+        await session.send("Reply with just: later")
+    assert asked == [False, False, True], "the wakeup asked for itself"
+    await until(lambda: not session.backend.background)
+    assert turn.said() == ["up"], "nothing ran that was not admitted"
+    assert not session.backend.turn and not session.backend.starting
+
+
+async def test_a_new_effort_with_a_message_queued_starts_its_turn_in_a_new_process(agent, tmp_path):
+    session = await agent.create_session(session_id="c1" * 16, name="t", **options(tmp_path))
+    turn = Turn(session)
+    await session.send("Run the shell command `sleep 2`, then reply with just: first")
+    await until(lambda: "tool.execution_start" in turn.kinds())
+    worker, first = session.backend, session.backend.epoch
+    await session.set_model("", reasoning_effort="high")
+    await session.send("Then reply with just: second")
+    assert worker.queue, "it waits for the turn's end"
+    await turn.ended(30)
+    assert turn.said() == ["first", "second"]
+    assert worker.epoch != first and worker.process_effort == "high" and worker.alive()
+    assert turn.kinds().count("session.idle") == 1 and agent.workers[worker.worker] is worker
+    assert turn.kinds().count("assistant.turn_start") == 2 and not worker.queue
+
+
+@pytest.mark.parametrize("during", ["restart", "admission"])
+async def test_a_stop_while_its_turn_starts_stops_it_before_it_begins(agent, tmp_path, during):
+    raw, admitting = Raw(), asyncio.Event()
+    session = await agent.create_session(
+        session_id="c2" * 16, name="t", **options(tmp_path, on_message=raw)
+    )
+    turn = Turn(session)
+    await session.send("Reply with just: ok")
+    await turn.ended()
+    worker = session.backend
+    if during == "restart":
+        await session.set_model("", reasoning_effort="high")
+    else:
+        release = asyncio.Event()
+
+        async def admit(session, woken=False):
+            admitting.set()
+            await release.wait()
+            return ""
+
+        agent.admit = admit
+    sending = asyncio.ensure_future(session.send("Reply with just: stopped"))
+    if during == "restart":
+        await until(lambda: worker.opening > 0)
+    else:
+        await admitting.wait()
+    await session.abort()
+    if during == "admission":
+        release.set()
+    await sending
+    await turn.ended()
+    assert turn.kinds()[-2:] == ["abort", "session.idle"]
+    await until(lambda: raw.blocked() >= 1)  # Its message, at the gate: blocked.
+    assert turn.said() == ["ok"], "the turn stopped never began"
+    assert not worker.turn and not worker.starting and worker.alive()
 
 
 async def test_stopping_what_it_left_running_settles_it_without_a_code(agent, tmp_path):
@@ -245,9 +357,15 @@ async def test_abort_ends_the_turn_and_its_command(agent, tmp_path):
     await turn.ended()
     assert "abort" in turn.kinds()
     pid = int(marker.read_text())
-    await asyncio.sleep(0.3)
-    with pytest.raises(ProcessLookupError):
-        os.kill(pid, 0)
+
+    def gone():
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        return False
+
+    await until(gone, 5)
     (done,) = turn.of("tool.execution_complete")
     assert done.success is False and done.shell_execution is None
 
@@ -526,6 +644,36 @@ async def test_the_look_keeps_how_it_is_signed_in_and_never_who(tmp_path, monkey
                           "apiKeySource": None, "exit": 0}  # fmt: skip
 
 
+@pytest.mark.parametrize("configured", [True, False], ids=["CLAUDE_CONFIG_DIR", "home"])
+async def test_a_claude_never_set_up_is_said_so_and_none_of_its_files_is_made(
+    tmp_path, monkeypatch, configured
+):
+    # `claude auth status` makes the owner's .claude.json and a backups folder where Claude was
+    # never set up (2.1.322): it does not run then, and nothing of Claude's is made.
+    command = fake_claude(tmp_path / "fake", monkeypatch)
+    home, config = tmp_path / "home", tmp_path / "fake" / "config"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    (config / ".claude.json").unlink()
+    if not configured:
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR")
+        config.rmdir()
+    runs = tmp_path / "runs"
+    monkeypatch.setenv("FAKE_CLAUDE_RUNS", str(runs))
+    with pytest.raises(RuntimeError, match=r"^Not set up: run `claude` in a terminal and sign in"):
+        await backend_claude.look(command)
+    with pytest.raises(RuntimeError, match=r"^Not set up: run `claude`"):
+        await claude_backend(command, folder=tmp_path / "agent").start()
+    ran = [json.loads(line) for line in runs.read_text().splitlines()]
+    assert ran == [["--version"], ["--version"]], "only its version, which makes nothing"
+    assert sorted(path.name for path in home.iterdir()) == []
+    assert not config.exists() or sorted(path.name for path in config.iterdir()) == []
+    # Set up (where it keeps its state): looked at as before.
+    (config if configured else home).mkdir(exist_ok=True)
+    (config if configured else home).joinpath(".claude.json").write_text("{}\n")
+    assert (await backend_claude.look(command))["account"] == "claudePlan"
+
+
 async def test_a_session_claude_already_has_is_resumed_not_made_again(agent, tmp_path):
     session = await agent.create_session(session_id="a6" * 16, name="t", **options(tmp_path))
     turn = Turn(session)
@@ -556,7 +704,8 @@ async def test_its_cli_runs_under_the_supervisor_with_none_of_chief_of_staffs_va
 ):
     monkeypatch.setenv("CHIEFOFSTAFF_SECRET", "x")
     launcher = agent.launcher.read_text()
-    assert launcher.startswith("#!/bin/sh\nexec ") and "-m chiefofstaff.agentrun -- " in launcher
+    assert launcher.startswith("#!/bin/sh\nexec ")
+    assert ' -I -m chiefofstaff.agentrun --cwd "${CHIEFOFSTAFF_AGENT_CWD:?}" -- ' in launcher
     assert agent.command in launcher and "_bundled" not in launcher
     assert oct(agent.launcher.stat().st_mode & 0o777) == "0o700"
     session = await agent.create_session(session_id="a8" * 16, name="t", **options(tmp_path))
@@ -569,6 +718,92 @@ async def test_its_cli_runs_under_the_supervisor_with_none_of_chief_of_staffs_va
     processes = agent.processes()
     assert any("chiefofstaff.agentrun" in line for line in processes.values())
     assert not any("_bundled" in line for line in processes.values())
+
+
+async def test_a_repositorys_python_files_never_run_as_chief_of_staff(agent, tmp_path, monkeypatch):
+    # Its supervisor starts in Chief of Staff's own folder, isolated; only Claude enters the
+    # worker's folder, where a repository's typing.py or chiefofstaff/ would have run as it.
+    marks = tmp_path / "marks"
+    repository = shadowing_repository(tmp_path / "repository", marks)
+    starts = tmp_path / "starts.jsonl"
+    monkeypatch.setenv("FAKE_CLAUDE_STARTS", str(starts))
+    monkeypatch.setenv("CHIEFOFSTAFF_SECRET", "x")
+    session = await agent.create_session(
+        session_id="a7" * 16, name="t", **options(repository, folders=[str(repository)])
+    )
+    turn = Turn(session)
+    await session.send("Run the shell command `pwd`, then reply with just: ok")
+    await turn.ended()
+    assert turn.said() == ["ok"]
+    assert sorted(path.name for path in marks.iterdir()) == [], "none of them ran"
+    (started,) = [json.loads(line) for line in starts.read_text().splitlines()]
+    assert started["cwd"] == started["pwd"] == str(repository.resolve())
+    assert started["own"] == [], "none of Chief of Staff's variables"
+    assert cwd_of(session.backend.pid) == str(agent.launcher.parent.resolve())
+    assert len(SHADOWED) >= 8
+
+
+async def test_its_mcp_servers_and_prompt_are_in_files_only_the_owner_reads(
+    agent, tmp_path, monkeypatch
+):
+    starts = tmp_path / "starts.jsonl"
+    monkeypatch.setenv("FAKE_CLAUDE_STARTS", str(starts))
+    servers = {
+        "remote": {
+            "type": "http",
+            "url": "https://mcp.example.com/mcp",
+            "headers": {"Authorization": "Bearer s3cret-header"},
+        },
+        "local": {"command": "a-server", "args": ["--x"], "env": {"API_TOKEN": "s3cret-env"}},
+    }
+    session = await agent.create_session(
+        session_id="a6" * 16,
+        name="t",
+        **options(tmp_path, mcp_servers=servers, system_message={"content": "Rules s3cret-rule"}),
+    )
+    turn = Turn(session)
+    await session.send("Reply with just: ok")
+    await turn.ended()
+    worker = session.backend
+    files = list(worker.private)
+    assert sorted(path.suffix for path in files) == [".json", ".md"]
+    assert {oct(path.stat().st_mode & 0o777) for path in files} == {"0o600"}
+    assert oct(files[0].parent.stat().st_mode & 0o777) == "0o700"
+    (started,) = [json.loads(line) for line in starts.read_text().splitlines()]
+    assert started["servers"] == ["chief", "local", "remote"]
+    assert started["appended"] == "Rules s3cret-rule"
+    status = {entry["name"]: entry for entry in (await worker.query.get_mcp_status())["mcpServers"]}
+    assert status["local"]["config"]["env"] == {"API_TOKEN": "s3cret-env"}, "as configured"
+    processes = agent.processes()
+    assert len(processes) >= 2 and not any("s3cret" in line for line in processes.values())
+    # What Chief of Staff records of them (Runtime: agentpids) names no command, and still finds
+    # them.
+    records = copilot_records(processes, tmp_path, hashed=True)
+    assert "s3cret" not in json.dumps(records) and "chiefofstaff.agentrun" not in json.dumps(
+        records
+    )
+    assert all(record["command"].startswith("sha256:") for record in records.values())
+    assert set(copilot_orphans(records, tmp_path)) <= set(processes)
+    await agent.stop()
+    assert not any(path.exists() for path in files), "gone with its process"
+
+
+async def test_what_a_killed_chief_of_staffs_workers_left_in_its_files_goes_at_start(
+    tmp_path, monkeypatch
+):
+    command = fake_claude(tmp_path / "fake", monkeypatch)
+    private = tmp_path / "agent" / "private"
+    private.mkdir(parents=True)
+    left = private / "999999999-0123-mcp.json"
+    left.write_text("{}")
+    mine = private / f"{os.getpid()}-4567-prompt.md"
+    mine.write_text("A worker.")
+    agent = claude_backend(command, folder=tmp_path / "agent")
+    await agent.start()
+    try:
+        assert not left.exists() and mine.exists(), "another process's, not this one's"
+    finally:
+        await agent.stop()
 
 
 async def test_a_plan_limit_reached_keeps_workers_from_running_until_it_resets(
@@ -603,6 +838,8 @@ async def test_a_new_effort_starts_its_next_turn_in_a_new_process(agent, tmp_pat
     await turn.ended()
     first = session.backend.epoch
     before = [data for kind, data in told if kind == "agent.usage"][-1].total
+    files = list(session.backend.private)
+    assert files and all(path.exists() for path in files)
     told.clear()
     await session.set_model("sonnet", reasoning_effort="high")
     assert session.backend.model == "sonnet" and session.backend.epoch == first
@@ -614,6 +851,8 @@ async def test_a_new_effort_starts_its_next_turn_in_a_new_process(agent, tmp_pat
     assert usage[0].epoch == session.backend.epoch and usage[0].restored == before, (
         "the new process counts from what it restored"
     )
+    assert not any(path.exists() for path in files), "the first process's files went with it"
+    assert session.backend.private != files and all(p.exists() for p in session.backend.private)
 
 
 async def test_a_process_that_stops_by_itself_affects_its_worker_alone(agent, tmp_path):
@@ -679,8 +918,10 @@ async def test_the_check_finds_actions_that_do_not_ask(
 
 
 async def test_a_note_steered_into_a_stopped_turn_starts_no_turn_after_it(agent, tmp_path):
-    marker = tmp_path / "pid"
-    session = await agent.create_session(session_id="b3" * 16, name="t", **options(tmp_path))
+    marker, raw = tmp_path / "pid", Raw()
+    session = await agent.create_session(
+        session_id="b3" * 16, name="t", **options(tmp_path, on_message=raw)
+    )
     turn = Turn(session)
     await session.send(f"Run the shell command `echo $$ > {marker}; exec sleep 30`")
     for _ in range(200):
@@ -690,7 +931,9 @@ async def test_a_note_steered_into_a_stopped_turn_starts_no_turn_after_it(agent,
     await session.send("Change of plan. Reply with just: steered", mode="immediate")
     await session.abort()
     await turn.ended()
-    await asyncio.sleep(1)
+    # Claude takes the note up as a turn of its own after the stop (2.1.322): its gate blocks it.
+    await until(lambda: raw.blocked() >= 1)
+    await asyncio.sleep(0.05)
     assert [m.content for m in turn.of("user.message")] == [
         f"Run the shell command `echo $$ > {marker}; exec sleep 30`"
     ], "the note never shows: Chief of Staff sends it again with the next message"

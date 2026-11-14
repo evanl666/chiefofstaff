@@ -289,11 +289,11 @@ def prepare_downgrade(store: Store) -> tuple[list[str], dict[int, str]]:
 
 def backend(name: str, folder: Path | None = None) -> AgentBackend:
     """An agent's backend, its module imported now; `folder`: Chief of Staff's own folder for
-    it (Claude's launcher)."""
+    it (its processes start there; Claude's launcher is there)."""
     if name == "codex":
         from .backend_codex import codex_backend
 
-        return codex_backend()
+        return codex_backend(folder=folder)
     if name == "claude":
         from .backend_claude import claude_backend
 

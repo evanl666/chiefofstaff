@@ -471,10 +471,10 @@ FEATURES["claude_agents"] = Feature(
 )
 
 # Codex on and Claude never turned on (more-agents.md 5.12.8, 5.12.10): both sides turn Codex on
-# before the script. The group Codex's row is in has Claude's beside it (with the stand-in
-# `claude`, which says no version, one that cannot be turned on): to show it, Settings looks at
-# it as it does at Codex (its version; its sign-in's state once the version is one it runs),
-# from the module that looks. No Claude session, no check, no Agent SDK.
+# before the script. The group Codex's row is in has Claude's beside it (the stand-in `claude`
+# says 2.1.322, signed in with a plan): to show it, Settings looks at it as it does at Codex (its
+# version, then its sign-in's state), from the module that looks, which keys its check by the
+# check's revision. No Claude session, no check run, no Agent SDK imported.
 FEATURES["codex_on_claude_never"] = Feature(
     off={},
     on={},
@@ -500,6 +500,11 @@ FEATURES["codex_on_claude_never"] = Feature(
             data=r"^agent_modules\[\d+\]$",
             value="chiefofstaff.backend_claude",
         ),
+        Allow(
+            "the module that keys Claude's check (its revision; the check does not run)",
+            data=r"^agent_modules\[\d+\]$",
+            value="chiefofstaff.claude_check",
+        ),
     ],
 )
 
@@ -513,6 +518,13 @@ AGENT_MODULES = (
     "claude_agent_sdk",
 )
 AGENT_CLIS = ("codex", "claude")
+CLAUDE_ANSWERS = (
+    'case "$*" in\n'
+    '  --version) echo "2.1.322 (Claude Code)"; exit 0 ;;\n'
+    '  \'auth status --json\') echo \'{"loggedIn": true, "authMethod": "claude.ai", '
+    '"apiProvider": "firstParty"}\'; exit 0 ;;\n'
+    "esac\n"
+)
 
 # The side under test: the app in-process on a scripted Copilot, in its own tree's environment.
 
@@ -1316,12 +1328,18 @@ def make_run(run: Path) -> dict:
     )
     gh.chmod(0o755)
     # Other coding agents' CLIs, installed but never to be run while none is on: each run kept.
+    # `claude` says its version and that it is signed in (in a Claude configuration of its own,
+    # set up), so that a look at it goes all the way (codex_on_claude_never).
     for name in AGENT_CLIS:
         cli = run / "bin" / name
         cli.write_text(
-            f'#!/bin/sh\nprintf \'{name} %s\\n\' "$*" >> "$DIFFERENTIAL_AGENTS_LOG"\nexit 1\n'
+            f'#!/bin/sh\nprintf \'{name} %s\\n\' "$*" >> "$DIFFERENTIAL_AGENTS_LOG"\n'
+            + (CLAUDE_ANSWERS if name == "claude" else "")
+            + "exit 1\n"
         )
         cli.chmod(0o755)
+    (run / "claude-config").mkdir()
+    (run / "claude-config" / ".claude.json").write_text("{}\n")
     stamp = CLOCK.isoformat()
     env = {
         key: value
@@ -1342,6 +1360,7 @@ def make_run(run: Path) -> dict:
         "CHIEFOFSTAFF_UPDATE_CHECK": "0",
         "DIFFERENTIAL_GH_LOG": str(run / "gh.log"),
         "DIFFERENTIAL_AGENTS_LOG": str(run / "agents.log"),
+        "CLAUDE_CONFIG_DIR": str(run / "claude-config"),
     }  # fmt: skip
     project = run / "code" / "acme-api"
     (project / "app").mkdir(parents=True)
@@ -1556,6 +1575,10 @@ async def photograph(
             "hidden": camera.hidden}  # fmt: skip
 
 
+AGENTS_LOOKED = """() => ![...document.querySelectorAll("#agents-rows [role=status]")].some(
+  (line) => line.textContent === "Checking…")"""
+
+
 async def settings(page, camera: Camera, scheme: str, width: int):
     """Each tab of Settings, its folded sections open, page by page as it scrolls."""
     await page.locator("#settings-button").click()
@@ -1571,6 +1594,10 @@ async def settings(page, camera: Camera, scheme: str, width: int):
             "t => document.querySelectorAll(`#settings-pane .tab[data-tab='${t}'] details`).forEach((d) => { d.open = true; })",
             name,
         )
+        await quiet(page)
+        # The Coding agents group, opened, looks for agents: what it found, not its loading
+        # rows (their height decides how many pages there are).
+        await page.wait_for_function(AGENTS_LOOKED, timeout=20000)
         await quiet(page)
         pane = page.locator("#settings-pane")
         height, shown = await pane.evaluate("p => [p.scrollHeight, p.clientHeight]")

@@ -104,7 +104,26 @@ class Fake:
         self.cwd = str(Path.cwd())
         self.model = str(flags.get("model") or "claude-fake-1")
         self.name = str(flags.get("name") or "")
-        self.servers = json.loads(flags.get("mcp-config") or "{}").get("mcpServers") or {}
+        # Each --mcp-config (JSON, or a file's path, as Claude reads them), and the system prompt
+        # appended (as text, or from a file).
+        self.servers: dict = {}
+        configs = flags.get("mcp-config") or []
+        for config in configs if isinstance(configs, list) else [configs]:
+            text = config if config.lstrip().startswith("{") else Path(config).read_text()
+            self.servers |= json.loads(text).get("mcpServers") or {}
+        appended = flags.get("append-system-prompt-file")
+        self.appended = Path(appended).read_text() if appended else ""
+        self.appended = self.appended or str(flags.get("append-system-prompt") or "")
+        note(
+            "FAKE_CLAUDE_STARTS",
+            {
+                "cwd": self.cwd,
+                "pwd": os.environ.get("PWD"),
+                "own": sorted(k for k in os.environ if k.startswith("CHIEFOFSTAFF_")),
+                "servers": sorted(self.servers),
+                "appended": self.appended,
+            },
+        )
         self.state = self.load() if flags.get("resume") else self.fresh()
         self.prompts: asyncio.Queue = asyncio.Queue()
         self.steering: list[dict] = []
@@ -1004,6 +1023,13 @@ def main():
         sys.stdout.write(f"{VERSION} (Claude Code)\n")
         return
     if argv[:2] == ["auth", "status"]:
+        # As 2.1.322 does where Claude was never set up: its state file and a backups folder.
+        given = os.environ.get("CLAUDE_CONFIG_DIR")
+        config = Path(given) if given else Path.home() / ".claude"
+        state = config / ".claude.json" if given else Path.home() / ".claude.json"
+        if not state.exists():
+            (config / "backups").mkdir(parents=True, exist_ok=True)
+            state.write_text("{}\n")
         if os.environ.get("FAKE_CLAUDE_SIGNED_OUT"):
             out = {"loggedIn": False, "authMethod": "none", "apiProvider": "firstParty"}
             sys.stdout.write(json.dumps(out) + "\n")

@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **Codex workers' supervisor starts isolated.** It ran with the folder Chief of Staff was
+  started in first on Python's import path: started inside a repository, a `typing.py` or a
+  `chiefofstaff/` folder there would have run as it. It now runs with `python -I`, in a folder
+  of Chief of Staff's own, and Chief of Staff records a hash of its processes' command lines
+  rather than the command lines.
+
 ## 0.1.52 (2026-11-20)
 
 - **Connections you made for Copilot (Glean, Atlassian…) work in Chief of Staff's workers too

@@ -218,6 +218,8 @@ async def backend(request, tmp_path, monkeypatch):
         ]:
             monkeypatch.delenv(name, raising=False)
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
+        (tmp_path / "claude-config").mkdir()
+        (tmp_path / "claude-config" / ".claude.json").write_text("{}\n")  # Set up.
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-contract-not-a-key")
         monkeypatch.setenv("ANTHROPIC_BASE_URL", model.url)
         monkeypatch.setenv("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")

@@ -982,14 +982,17 @@ async def test_prepare_downgrade_stops_codex_workers_at_work_and_leaves_copilots
     await runtime.stop()
 
 
-async def test_prepare_downgrade_says_what_is_left_running_and_fails(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("hashed", [True, False], ids=["hashed", "as-0.1.45-kept-them"])
+async def test_prepare_downgrade_says_what_is_left_running_and_fails(
+    tmp_path, monkeypatch, capsys, hashed
+):
     store = Store(tmp_path / "data")
     left = await asyncio.create_subprocess_exec("sleep", "30")
     try:
         command = process_table()[left.pid][1]
-        store.set(
-            "agentpids:codex", json.dumps(copilot_records({left.pid: command}, store.directory))
-        )
+        records = copilot_records({left.pid: command}, store.directory, hashed=hashed)
+        assert (command in json.dumps(records)) is not hashed
+        store.set("agentpids:codex", json.dumps(records))
         monkeypatch.setattr(backend, "end_processes", lambda tree, wait=3.0: None)
         monkeypatch.setattr(
             sys, "argv", ["chiefofstaff", "--prepare-downgrade", "--data-dir", str(store.directory)]
