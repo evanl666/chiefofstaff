@@ -402,6 +402,9 @@ async def test_tidy_sessions_with_chief_of_staff_stopped_leaves_the_owners_alone
         ("`command -v copilot` -p hi", True),
         ("find . -name '*.txt' -exec copilot -p {} \\;", True),
         ("npm exec @github/copilot -- -p hi", True),
+        ('bash -c "copilot -p hi"', True),
+        ("python3 -c 'subprocess.run(\"copilot -p hi\", shell=True)'", True),
+        ('bash -c "npm test" -p', False),
         ("cd ~/src/copilot.exe && make -p", False),
         ("ls C:\\src\\copilot -p", False),
         ("npm install @github/copilot -p", False),
@@ -1026,9 +1029,17 @@ async def test_a_loop_still_running_after_two_hours_stays_its(tmp_path, home):
     owners = home.add(prompt_mode(T0 + 9000, "Summarize the changelog", "/w/app"), T0 + 9000,
                       cwd="/w/app")  # fmt: skip
     late = home.add(prompt_mode(T0 + 270 * 40 + 1900, "Ticket: one more"), T0 + 13000)
-    made = await deciding(store, home).made(home.metas, {})
+    deciding_ = deciding(store, home)
+    made = await deciding_.made(home.metas, {})
     assert made == dict.fromkeys(calls, MADE_BY_WORKER)
     assert owners not in made and late not in made
+    # Its next calls, decided as they come (those before kept): its too.
+    more = []
+    for n in range(270, 273):
+        at = T0 + n * 40
+        more.append(home.add(prompt_mode(at, f"Ticket {n} {uuid4()}: label it"), at))
+    made = await deciding_.made(home.metas, {})
+    assert {key: made.get(key) for key in more} == dict.fromkeys(more, MADE_BY_WORKER)
 
 
 async def test_what_0143_found_a_workers_is_kept_unless_it_is_the_owners(tmp_path, home):
@@ -1040,20 +1051,22 @@ async def test_what_0143_found_a_workers_is_kept_unless_it_is_the_owners(tmp_pat
     commanded(store, T0 - 600, T0 + 3600, "cd ~/src/copilot && npm run dev")
     project = home.add(prompt_mode(T0, "Why does the build fail?", "/w/app"), T0, cwd="/w/app")
     in_tmp = home.add(prompt_mode(T0 + 60, "Label: refund my order"), T0 + 60)
-    no_command = home.add(prompt_mode(T0 + 9e4, "Label: where is it"), T0 + 9e4)
+    no_command = home.add(prompt_mode(T0 + 9e4, "Label: where is it", "/w/app"), T0 + 9e4,
+                          cwd="/w/app")  # fmt: skip
     resumed = home.add(prompt_mode(T0 + 120, "Label: an outage"), T0 + 120)
+    unreadable = home.add(prompt_mode(T0 + 180, "Label: a refund")[1:], T0 + 180)
     for session_id, at in [(project, T0), (in_tmp, T0 + 60), (no_command, T0 + 9e4),
-                           (resumed, T0 + 120)]:  # fmt: skip
+                           (resumed, T0 + 120), (unreadable, T0 + 180)]:  # fmt: skip
         as_0143(store, home, session_id, at)
     with home.log_of(resumed).open("a") as file:
         file.write(event("session.resume", T0 + 999) + "\n")
         file.write(event("user.message", T0 + 1000, content="And the next one?") + "\n")
         file.write(event("session.shutdown", T0 + 1100) + "\n")
     made = await deciding(store, home).made(home.metas, {})
-    assert made == {in_tmp: MADE_BY_WORKER, no_command: MADE_BY_WORKER}
+    assert made == dict.fromkeys([in_tmp, no_command, unreadable], MADE_BY_WORKER)
     kept = {key: json.loads(value) for key, value in store.items("made:").items()}
-    assert set(kept) == {in_tmp, no_command}
-    assert {r["rules"] for r in kept.values()} == {provenance.RULES}
+    assert set(kept) == {in_tmp, no_command, unreadable}, "one it cannot read, as it was"
+    assert {r.get("rules") for r in kept.values()} == {provenance.RULES, None}
 
 
 @pytest.mark.parametrize("seed", range(12))

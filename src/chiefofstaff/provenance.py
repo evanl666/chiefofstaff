@@ -382,7 +382,7 @@ class Window:
         if at <= self.end:
             return True
         n = bisect.bisect_left(came, at)
-        return bool(n) and self.start <= came[n - 1] and at - came[n - 1] <= WORKER_GAP
+        return bool(n) and at - came[n - 1] <= WORKER_GAP  # (One before it began: hours before.)
 
 
 def inside(path: str, folder: str) -> bool:
@@ -409,8 +409,8 @@ WHICH_COPILOT = re.compile(
 # A command's parts that run one after the other or apart (a loop's body, a pipe's end, $(..),
 # what `find -exec` runs). Commands are kept to their first 2000 characters (events.py).
 COMMAND_PARTS = re.compile(r"&&|\|\||\$\(|[;&|(){}`\n]|\s-(?:exec|execdir|ok)\s")
-# Its words: one quoted is one (spaces and all), `\ ` kept in one; a list's brackets and commas
-# aside (`["copilot", "-p", prompt]`).
+# Its words: one quoted is one (spaces and all), as is one with `\ `; a list's brackets and
+# commas aside (`["copilot", "-p", prompt]`).
 COMMAND_WORDS = re.compile(r""""([^"]*)"|'([^']*)'|((?:\\.|[^\s'"\[\],])+)""")
 # What may come before the command a part runs: a loop's keyword, a variable set for it, a
 # program that runs it, and their options and an option's value (`sudo -u me`, `xargs -I {}`,
@@ -437,10 +437,7 @@ def words_of(part: str) -> list[str]:
     found = []
     for match in COMMAND_WORDS.finditer(part):
         double, single, bare = match.groups()
-        if bare is not None:
-            found.append(bare.replace("\\ ", " "))
-        else:
-            found.append(double if double is not None else single)
+        found.append(next(word for word in (double, single, bare) if word is not None))
     return found
 
 
