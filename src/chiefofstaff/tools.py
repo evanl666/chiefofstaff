@@ -2494,7 +2494,7 @@ class Tools:
             "status": row["status"],
             "task": brief,
             "now": self.runtime.progress_line(row) or row["status"],
-            "open_in_terminal": self.runtime.copilot_id(row["id"]) in self.runtime.elsewhere,
+            "open_in_terminal": bool(self.runtime.is_elsewhere(row)),
             "latest": entries[-params.items :],
             **(
                 {"agent": agent}

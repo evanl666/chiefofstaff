@@ -906,6 +906,25 @@ def attached_text(files: list[tuple[str, str]], unreadable: bool = False) -> str
     return "\n".join(lines)
 
 
+RESUMED = re.compile(r"(?:^|\s)(?:--resume[= ]|-r |resume )([0-9a-f][0-9a-f-]{7,63})(?:\s|$)")
+
+
+def resumed_elsewhere(program: str, ours: set[int]) -> dict[str, int]:
+    """Sessions of an agent's CLI the owner resumed in a terminal (`claude --resume <id>`,
+    `codex resume <id>`): session id -> pid. Never one of Chief of Staff's own processes."""
+    found: dict[str, int] = {}
+    for pid, (_, command) in process_table().items():
+        words = command.split()
+        if pid in ours or not words:
+            continue
+        named = [Path(word).name for word in words[:3]]
+        if program not in named and f"{program}.js" not in named:
+            continue
+        if match := RESUMED.search(command):
+            found.setdefault(match.group(1), pid)
+    return found
+
+
 def isolated(module: str, *arguments: str) -> list[str]:
     """How Chief of Staff runs a module of its own as a program (another agent's supervisor,
     agentrun; a check's MCP server): this Python, isolated (-I), so that the folder it starts in

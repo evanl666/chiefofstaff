@@ -197,7 +197,7 @@ class Watchdog:
         for row in self.store.open_sessions(WORKER):
             if row["status"] not in {"working", "idle"} or self.states[row["id"]].asking:
                 continue
-            if self.runtime.copilot_id(row["id"]) in self.runtime.elsewhere:
+            if self.runtime.is_elsewhere(row):
                 continue  # Its owner is working with it in a terminal.
             if self.runtime.special(row) in {"connector", "messenger"}:
                 continue  # Chief of Staff's own: a run ends without a report.

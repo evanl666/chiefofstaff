@@ -678,6 +678,13 @@ def create_app(
     async def open_folder(session_id: str, payload: OpenFolder):
         return await runtime.open_folder(session_id, payload.app)
 
+    @app.post("/api/sessions/{session_id}/terminal")
+    async def terminal(session_id: str):
+        try:
+            return await runtime.terminal_command(session_id)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+
     @app.post("/api/sessions/{session_id}/close")
     async def close(session_id: str):
         await runtime.workers.close(session_id, by="you")

@@ -139,6 +139,20 @@ export function renderHeader() {
       menuButton("Copy folder path", () => navigator.clipboard.writeText(session.cwd).then(() => toast("Path copied."), (error) => toast(error.message, "error"))),
     );
   }
+  if (session.role === "worker" && session.agent && !session.closed_at && session.status !== "working") {
+    // Another agent's worker: its agent's own command (a Copilot worker's is `copilot --resume`,
+    // as the guide says); Chief of Staff lets go of it first, and leaves it alone there.
+    const terminal = async () => {
+      try {
+        const { command } = await api(`/api/sessions/${session.id}/terminal`, { method: "POST" });
+        await navigator.clipboard.writeText(command);
+        toast("Command copied: run it in a terminal. Chief of Staff leaves this worker alone while it is open there.");
+      } catch (error) {
+        toast(error.message, "error");
+      }
+    };
+    items.push(menuButton("Continue in a terminal", terminal));
+  }
   if (session.role === "worker" && !session.closed_at) {
     items.push(
       el("hr"),

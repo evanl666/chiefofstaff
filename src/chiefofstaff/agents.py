@@ -297,6 +297,18 @@ def can_sandbox(name: str) -> bool:
     return name in SANDBOXED
 
 
+def resume_command(name: str, session_id: str, cwd: str) -> str:
+    """How the owner continues a worker's conversation in a terminal, by hand: its agent's own
+    command (Claude's from the worker's folder, where it keeps its transcript)."""
+    import shlex
+
+    if name == "codex":
+        return f"codex resume {session_id}"
+    if name == "claude":
+        return f"cd {shlex.quote(cwd)} && claude --resume {session_id}"
+    return f"copilot --resume {session_id}"
+
+
 def clear_private(folder: Path, *, keep_own: bool = False):
     """An agent's private files (Claude's: a worker's MCP configuration and prompt, 0600) left
     by processes that ended without removing them (Chief of Staff was killed); `keep_own`:
