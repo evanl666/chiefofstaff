@@ -13,7 +13,6 @@ storage.py): the owner hears when it runs low, and new worker turns wait while i
 
 from __future__ import annotations
 
-import asyncio
 import ctypes
 import ctypes.util
 import os
@@ -24,6 +23,9 @@ import time
 from contextlib import suppress
 from dataclasses import dataclass, fields
 from pathlib import Path
+
+# (asyncio is imported where it is used: each worker's supervisor, agentrun, imports this module
+# as it starts, which costs it that much less.)
 
 # New worker turns wait while less than this share of memory (percent) is available.
 MIN_FREE_PERCENT = float(os.environ.get("CHIEFOFSTAFF_MIN_FREE_MEMORY") or "10")
@@ -155,6 +157,8 @@ async def disk_status(
 ) -> dict | None:
     """Free space on the disk of these folders and its level (previous: the level it was at),
     read in a thread at most every DISK_CACHE_SECONDS. None when it cannot be read."""
+    import asyncio
+
     global _disk
     at, status = _disk
     if status is None or time.monotonic() - at >= DISK_CACHE_SECONDS:
@@ -236,6 +240,8 @@ def kill_process_tree(pid: int) -> None:
 async def run_quietly(arguments: list[str], limit: float) -> tuple[int, str] | None:
     """A command's exit code and output, or None when it cannot run or takes longer than
     `limit` seconds (it is stopped then, with its children)."""
+    import asyncio
+
     try:
         process = await asyncio.create_subprocess_exec(
             *arguments,
@@ -283,6 +289,8 @@ async def process_cwds(limit: float = 30) -> set[str] | None:
     """The folders this computer's programs run in (their working directory), as one
     `lsof -d cwd -Fn` lists them (on Linux without lsof: /proc). None when they cannot be read:
     then every folder may be in use."""
+    import asyncio
+
     if sys.platform == "win32":
         return await asyncio.to_thread(windows_cwds)
     if shutil.which("lsof"):

@@ -280,7 +280,10 @@ async def test_a_wakeup_while_a_message_waits_to_be_admitted_is_admitted_on_its_
     assert not session.backend.turn and not session.backend.starting
 
 
-async def test_a_new_effort_with_a_message_queued_starts_its_turn_in_a_new_process(agent, tmp_path):
+async def test_a_new_effort_with_a_message_queued_starts_its_turn_in_a_new_process(
+    agent, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("FAKE_CLAUDE_FIXED_EFFORT", "1")  # A new process, as before 2.1.322's.
     session = await agent.create_session(session_id="c1" * 16, name="t", **options(tmp_path))
     turn = Turn(session)
     await session.send("Run the shell command `sleep 2`, then reply with just: first")
@@ -296,7 +299,8 @@ async def test_a_new_effort_with_a_message_queued_starts_its_turn_in_a_new_proce
     assert turn.kinds().count("assistant.turn_start") == 2 and not worker.queue
 
 
-async def test_a_message_sent_while_its_process_restarts_waits_for_it(agent, tmp_path):
+async def test_a_message_sent_while_its_process_restarts_waits_for_it(agent, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_FIXED_EFFORT", "1")  # A new process, as before 2.1.322's.
     session = await agent.create_session(session_id="c4" * 16, name="t", **options(tmp_path))
     turn = Turn(session)
     await session.send("Run the shell command `sleep 1`, then reply with just: first")
@@ -315,7 +319,10 @@ async def test_a_message_sent_while_its_process_restarts_waits_for_it(agent, tmp
 
 
 @pytest.mark.parametrize("during", ["restart", "admission"])
-async def test_a_stop_while_its_turn_starts_stops_it_before_it_begins(agent, tmp_path, during):
+async def test_a_stop_while_its_turn_starts_stops_it_before_it_begins(
+    agent, tmp_path, during, monkeypatch
+):
+    monkeypatch.setenv("FAKE_CLAUDE_FIXED_EFFORT", "1")  # (A restart: its effort in a new process.)
     raw, admitting = Raw(), asyncio.Event()
     session = await agent.create_session(
         session_id="c2" * 16, name="t", **options(tmp_path, on_message=raw)
@@ -943,7 +950,35 @@ async def test_a_plan_limit_reached_keeps_workers_from_running_until_it_resets(
     assert agent.acting_refused == "", "past its reset: it runs again"
 
 
-async def test_a_new_effort_starts_its_next_turn_in_a_new_process(agent, tmp_path):
+async def test_a_new_effort_is_taken_in_its_process_for_its_next_turn(agent, tmp_path, monkeypatch):
+    efforts = tmp_path / "efforts.jsonl"
+    monkeypatch.setenv("FAKE_CLAUDE_EFFORTS", str(efforts))
+    session = await agent.create_session(session_id="b2" * 16, name="t", **options(tmp_path))
+    turn = Turn(session)
+    await session.send("Reply with just: ok")
+    await turn.ended()
+    first, pid = session.backend.epoch, session.backend.pid
+    await session.set_model("sonnet", reasoning_effort="high")
+    await session.send("Reply with just: again")
+    await turn.ended()
+    assert turn.said() == ["ok", "again"]
+    worker = session.backend
+    assert (worker.epoch, worker.pid, worker.process_effort) == (first, pid, "high"), (
+        "the same process: no start, its conversation's prompt cache kept"
+    )
+    seen = [json.loads(line) for line in efforts.read_text().splitlines()]
+    turns = [entry for entry in seen if "turn" in entry]
+    assert [(t["turn"], t["effort"]) for t in turns] == [
+        ("Reply with just: ok", ""),
+        ("Reply with just: again", "high"),
+    ]
+    assert len({t["pid"] for t in turns}) == 1
+
+
+async def test_a_new_effort_a_claude_cannot_take_in_place_starts_a_new_process(
+    agent, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("FAKE_CLAUDE_FIXED_EFFORT", "1")
     told = []
     session = await agent.create_session(
         session_id="b1" * 16,
