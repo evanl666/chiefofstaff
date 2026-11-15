@@ -909,6 +909,121 @@ def shell_commands(text: str) -> tuple[list[tuple[str, list[str]]], list[str]] |
     return commands, inside
 
 
+# What a worker that is only planning (Claude's plan mode) may run: programs that read and
+# write nothing, called without an option of theirs that writes or runs another program.
+READING_PROGRAMS = frozenset({
+    "cd", "ls", "cat", "head", "tail", "grep", "egrep", "fgrep", "rg", "wc", "pwd", "echo", "which",
+    "stat", "sort", "uniq", "cut", "diff", "basename", "dirname", "realpath", "readlink", "true",
+    "false", "find", "git",
+})  # fmt: skip
+WRITING_OPTIONS = {
+    "sort": ("--output", "--compress-program"),
+    "find": ("-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf",
+             "-fls"),
+    "rg": ("--pre", "--hostname-bin"),
+}  # fmt: skip
+GIT_READING = frozenset({
+    "log", "status", "diff", "show", "rev-parse", "ls-files", "blame", "grep", "describe",
+    "shortlog", "ls-tree", "cat-file", "merge-base", "rev-list",
+})  # fmt: skip
+GIT_READING_LISTS = {"branch": ("-a", "-r", "-v", "-vv", "--all", "--remotes", "--list",
+                                "--show-current"), "remote": ("-v",)}  # fmt: skip
+# git options that write or run another program: an output file, a pager command (git grep).
+GIT_WRITING = ("--output", "-O", "--open-files-in-pager")
+
+
+def reads_only(command: str) -> bool:
+    """Whether a command line only reads: each of its commands one of READING_PROGRAMS (git's
+    reading subcommands), with no option that writes (WRITING_OPTIONS; sort's -o however
+    written; uniq's output file), nothing assigned or wrapped before it, no output redirected,
+    no substitution and no heredoc. Anything else, or what does not parse: False."""
+    unheredoc, heredocs = without_heredocs(command)
+    if heredocs or ">(" in command or len(command) > MOST_LINE:
+        return False
+    parsed = shell_commands(command)
+    if parsed is None or parsed[1]:
+        return False
+    try:
+        words = shell_words(without_comments(unheredoc))
+    except ValueError:
+        return False
+    if not discarded_output(words):
+        return False
+    for _, command_words in parsed[0]:
+        name, start = command_name(command_words)
+        arguments = command_words[start:]
+        if start != 1 or name not in READING_PROGRAMS:
+            return False
+        if any(names_option(word, WRITING_OPTIONS.get(name, ())) for word in arguments):
+            return False
+        if name == "sort" and any("o" in word for word in short_options(arguments)):
+            return False
+        if name == "uniq" and len([word for word in arguments if not word.startswith("-")]) > 1:
+            return False  # (Its second file is written; a number for -f, -s, -w is taken so too.)
+        if name == "git" and not git_reads(arguments):
+            return False
+    return True
+
+
+def git_reads(arguments: list[str]) -> bool:
+    """git's arguments that only read: a reading subcommand without GIT_WRITING, or a listing
+    of branches or remotes (none made, changed or removed); no option before it (-c, -C)."""
+    if not arguments or arguments[0].startswith("-"):
+        return False
+    sub, rest = arguments[0], arguments[1:]
+    if sub in GIT_READING:
+        return not any(names_option(word, GIT_WRITING) for word in rest) and not any(
+            "O" in word for word in short_options(rest)
+        )
+    if sub in GIT_READING_LISTS:
+        return all(word in GIT_READING_LISTS[sub] for word in rest)
+    return False
+
+
+def discarded_output(words: list[str]) -> bool:
+    """Whether every output redirected among these words goes to /dev/null or to another of the
+    command's outputs (2>&1): nothing written."""
+    for at, word in enumerate(words):
+        if not isinstance(word, Redirecting) or ">" not in word:
+            continue
+        target = word.lstrip("0123456789").lstrip(">")
+        after = words[at + 1 : at + 3]
+        if target:
+            if target != "/dev/null":
+                return False
+        elif after[:1] == ["/dev/null"] and not isinstance(after[0], Separator):
+            continue
+        elif not (
+            len(after) == 2
+            and isinstance(after[0], Separator)
+            and after[0] == "&"
+            and not isinstance(after[1], Separator | Redirecting)
+            and after[1].isdigit()
+        ):
+            return False
+    return True
+
+
+def names_option(word: str, options: tuple[str, ...]) -> bool:
+    """Whether a word is one of these options: a long one however shortened (getopt's and
+    git's abbreviations: --outp=x for --output), a short one with its value attached or not
+    (-Ox), one of find's whole (-exec, not -executable)."""
+    name = word.split("=", 1)[0]
+    return any(
+        name.startswith("--") and len(name) > 2 and option.startswith(name)
+        if option.startswith("--")
+        else word.startswith(option)
+        if len(option) == 2
+        else word == option
+        for option in options
+    )
+
+
+def short_options(words: list[str]) -> list[str]:
+    """The words that are short options, together or not (-uo: -u -o)."""
+    return [word for word in words if word.startswith("-") and not word.startswith("--")]
+
+
 def one_substitution(word: str) -> str:
     """What a word is when it is one command substitution, whole: "current" when it asks git
     for the checkout's branch (CURRENT; see current_query), "other" for any other (MADE_UP);

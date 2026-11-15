@@ -833,7 +833,21 @@ class Fake:
         if found := re.search(r"Message (\S+): '([^']+)'", text):
             message = {"to": found.group(1), "summary": "a note", "message": found.group(2)}
             call("SendMessage", message)
-        if found := re.search(r"Plan it: '([^']+)'", text):
+        if found := re.search(r"Plan it, trying things: '([^']+)'", text):
+            # What a model may try while it plans: a command that reads, one that writes, an
+            # edit; then its plan.
+            plans = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "plans"
+            plans.mkdir(parents=True, exist_ok=True)
+            call("EnterPlanMode", {})
+            call("Bash", {"command": "ls", "description": "a look"})
+            call("Bash", {"command": "touch tried-command", "description": "a change"})
+            call("Write", {"file_path": str(Path(self.cwd) / "tried-edit.txt"), "content": "x"})
+            for server in [name for name in self.servers if name != "chief"]:
+                call(f"mcp__{server}__read_marker", {})
+                call(f"mcp__{server}__write_marker", {})
+            call("Write", {"file_path": str(plans / "a-plan.md"), "content": found.group(1)})
+            call("ExitPlanMode", {})
+        elif found := re.search(r"Plan it: '([^']+)'", text):
             plans = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "plans"
             plans.mkdir(parents=True, exist_ok=True)
             call("EnterPlanMode", {})

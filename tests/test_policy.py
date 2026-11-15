@@ -2210,6 +2210,37 @@ def test_code_a_line_runs_makes_its_variables_unknown_text_does_not(command, all
     assert allowed or "can't tell which branch" in (found or "")
 
 
+# What a planning worker (Claude's plan mode) may run: only what reads.
+READS = [
+    "ls -la", "cat README.md | head -20", "grep -rn 'def main' src", "rg -n --hidden foo",
+    "find . -name '*.py' -executable", "git log --oneline -5", "git status --short",
+    "git diff HEAD~1 -- src", "git branch --show-current", "git remote -v", "wc -l a b",
+    "sort -k2,2 names | uniq -c", "git grep -n -o foo", "cd src && ls", "echo hi 2>/dev/null",
+    "ls x >/dev/null 2>&1", "find / -name y 2> /dev/null", "ls 1>&2",
+]  # fmt: skip
+WRITES = [
+    "touch x", "echo hi > x", "cat a >> b", "ls; rm -rf build", "git commit -m x",
+    "git checkout main", "git branch new", "git -C other log", "git log --output=x",
+    "git log --outp=x", "git grep -Otouch foo", "git grep -iOtouch foo",
+    "git grep --open-files-in-pager=sh foo", "find . -delete", "find . -exec rm {} +",
+    "find . -fprint x", "sort -o x y", "sort -uo x y", "sort --out=x y",
+    "sort --compress-program=sh y", "uniq a b", "rg --pre ./run foo", "rg --hostname-bin=sh x",
+    "X=1 ls", "env ls", "ls $(touch x)", "cat <<EOF > x\nhi\nEOF", "tee x", "python -c 1",
+    "ls >(cat)", "npm install", "ls >| x", "ls >&x", "ls 2>x", "ls >> /dev/null.x",
+    "ls > /dev/null x > y",
+]  # fmt: skip
+
+
+@pytest.mark.parametrize("command", READS)
+def test_a_command_that_only_reads_is_one_a_planning_worker_may_run(command):
+    assert policy.reads_only(command)
+
+
+@pytest.mark.parametrize("command", WRITES)
+def test_a_command_that_writes_or_runs_another_program_is_not(command):
+    assert not policy.reads_only(command)
+
+
 # QA on 0.1.45 (E64 to E68).
 
 

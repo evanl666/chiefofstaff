@@ -88,7 +88,7 @@ from .claude_tools import (
     under,
 )
 from .machine import kill_process_tree
-from .policy import GITHUB_MCP, private_denial
+from .policy import GITHUB_MCP, private_denial, reads_only
 
 logger = logging.getLogger(__name__)
 
@@ -209,6 +209,11 @@ REPORTING_TOOLS = (
 CLOUD = (
     "Run this in Anthropic's cloud? Chief of Staff can't check, receipt, count or stop what runs "
     "there."
+)
+# Why a worker in plan mode may not do this until its plan is approved (planning_refusal).
+PLANNING = (
+    "It is planning (plan mode): until its plan is approved it writes only its plan and runs "
+    "only commands that read. Finish the plan with ExitPlanMode."
 )
 # Why a worker that reads Slack neither messages nor hears from other sessions (what it read
 # must not leave it that way, nor another session steer it).
@@ -2566,15 +2571,16 @@ class ClaudeWorker:
         slack = self.options.get("slack_tools")
         if name.startswith("mcp__slack__") and slack is not None and name[12:] not in slack:
             return "Only Slack's read tools are a worker's to use."
+        planning = self.mode == "plan" or hook.get("permission_mode") == "plan"
+        if (
+            planning
+            and (why := await self.planning_refusal(name, arguments, call, cwd)) is not None
+        ):
+            return why  # Refused, or its plan written in Claude's plans folder ("").
         if (why := await self.capability(name, arguments, call, cwd)) is not None:
             return why
         if name in FREE_TOOLS:
             return ""
-        if name in WRITE_TOOLS and (self.mode == "plan" or hook.get("permission_mode") == "plan"):
-            path = joined(cwd, str(arguments.get(WRITE_TOOLS[name]) or ""))
-            if under(path, [str(config_folder() / "plans")]):
-                self.plan_path = path  # Its plan, as plan mode writes it (Claude's own folder).
-                return ""
         request = await self.permission_request(name, arguments, call, cwd)
         if request is None:
             if self.ask_first:
@@ -2584,6 +2590,26 @@ class ClaudeWorker:
                 )
             return ""
         return await self.permitted(request)
+
+    async def planning_refusal(self, name: str, arguments: dict, call: str, cwd: str) -> str | None:
+        """In plan mode, until its plan is approved (ExitPlanMode), whether it asks first or
+        not: it writes only its plan (in Claude's plans folder: "" for that), runs only
+        commands that read (policy.reads_only), and calls no MCP tool that is not read-only;
+        why not, else None (the usual checks then)."""
+        if name in WRITE_TOOLS:
+            path = joined(cwd, str(arguments.get(WRITE_TOOLS[name]) or ""))
+            if under(path, [str(config_folder() / "plans")]):
+                self.plan_path = path  # Its plan, as plan mode writes it (Claude's own folder).
+                return ""
+            return PLANNING
+        if name in SHELL_TOOLS:
+            return None if reads_only(str(arguments.get(SHELL_TOOLS[name]) or "")) else PLANNING
+        if name == "EnterWorktree":
+            return PLANNING
+        if name.startswith("mcp__") and not name.startswith("mcp__chief__"):
+            request = await self.permission_request(name, arguments, call, cwd)
+            return None if getattr(request, "read_only", False) else PLANNING
+        return None
 
     def private_refusal(self, name: str, arguments: dict, cwd: str) -> str:
         """Chief of Staff's private files (workers' MCP configurations and prompts): never read

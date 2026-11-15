@@ -1666,6 +1666,46 @@ async def test_a_message_from_one_of_chief_of_staffs_workers_processes_is_said_t
 
 
 @pytest.mark.parametrize("ask_first", [False, True])
+async def test_while_it_plans_it_writes_only_its_plan_and_runs_only_what_reads(
+    agent, tmp_path, ask_first
+):
+    """Plan mode until its plan is approved, asking first or not: a command that reads and a
+    read-only MCP tool run; a command that writes, an edit and an MCP tool that writes are
+    refused; its plan is written in Claude's plans folder."""
+
+    def on_user_input(request, context):
+        return {"answer": "Go ahead", "wasFreeform": False}
+
+    servers = {"notes": {"command": "true", "tools": ["*"]}}
+    session = await agent.create_session(
+        session_id="b4" * 16, name="t",
+        **options(tmp_path, ask_first=ask_first, on_user_input_request=on_user_input,
+                  mcp_servers=servers),
+    )  # fmt: skip
+    turn = Turn(session)
+    await session.send("Plan it, trying things: 'Step one'. Reply with just: planned")
+    await turn.ended()
+    started = [(e.tool_name, e.arguments or {}) for e in turn.of("tool.execution_start")]
+    ended = [e.success for e in turn.of("tool.execution_complete")]
+    outcome = [
+        (name, str(arguments.get("command") or arguments.get("path")), ok)
+        for (name, arguments), ok in zip(started, ended, strict=True)
+        if name in {"bash", "create", "notes-read_marker", "notes-write_marker"}
+    ]
+    plan = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "plans" / "a-plan.md"
+    assert outcome == [
+        ("bash", "ls", True),
+        ("bash", "touch tried-command", False),
+        ("create", str(tmp_path / "tried-edit.txt"), False),
+        ("notes-read_marker", "None", True),
+        ("notes-write_marker", "None", False),
+        ("create", str(plan), True),
+    ], outcome
+    assert not (tmp_path / "tried-command").exists() and not (tmp_path / "tried-edit.txt").exists()
+    assert plan.read_text() == "Step one" and turn.said() == ["planned"]
+
+
+@pytest.mark.parametrize("ask_first", [False, True])
 async def test_plan_mode_is_approved_acting_alone_and_by_the_owners_card_otherwise(
     agent, tmp_path, ask_first
 ):
