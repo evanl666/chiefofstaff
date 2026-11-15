@@ -6,6 +6,18 @@
    "description": "A path that is guaranteed to be absolute and normalized (though it is not guaranteed to be canonicalized or exist on the filesystem).\n\nIMPORTANT: When deserializing an `AbsolutePathBuf`, a base path must be set using [AbsolutePathBufGuard::new]. If no base path is set, the deserialization will fail unless the path being deserialized is already absolute.",
    "type": "string"
   },
+  "AccountRateLimitsUpdatedNotification": {
+   "description": "Sparse rolling rate-limit update.\n\nClients should merge available values into the most recent `account/rateLimits/read` response or refetch that snapshot. Nullable account metadata may be unavailable in a rolling update and does not clear a previously observed value.",
+   "properties": {
+    "rateLimits": {
+     "$ref": "#/definitions/RateLimitSnapshot"
+    }
+   },
+   "required": [
+    "rateLimits"
+   ],
+   "type": "object"
+  },
   "AgentMessageDelivery": {
    "enum": [
     "async"
@@ -401,6 +413,27 @@
    ],
    "type": "object"
   },
+  "CreditsSnapshot": {
+   "properties": {
+    "balance": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "hasCredits": {
+     "type": "boolean"
+    },
+    "unlimited": {
+     "type": "boolean"
+    }
+   },
+   "required": [
+    "hasCredits",
+    "unlimited"
+   ],
+   "type": "object"
+  },
   "DynamicToolCallOutputContentItem": {
    "oneOf": [
     {
@@ -472,6 +505,29 @@
     "failed"
    ],
    "type": "string"
+  },
+  "ErrorNotification": {
+   "properties": {
+    "error": {
+     "$ref": "#/definitions/TurnError"
+    },
+    "threadId": {
+     "type": "string"
+    },
+    "turnId": {
+     "type": "string"
+    },
+    "willRetry": {
+     "type": "boolean"
+    }
+   },
+   "required": [
+    "error",
+    "threadId",
+    "turnId",
+    "willRetry"
+   ],
+   "type": "object"
   },
   "FileUpdateChange": {
    "properties": {
@@ -1142,6 +1198,158 @@
     }
    ]
   },
+  "PlanType": {
+   "enum": [
+    "free",
+    "go",
+    "plus",
+    "pro",
+    "prolite",
+    "promax",
+    "team",
+    "self_serve_business_prolite",
+    "self_serve_business_usage_based",
+    "business",
+    "ent26",
+    "enterprise_cbp_automation",
+    "enterprise_cbp_usage_based",
+    "enterprise",
+    "edu",
+    "edu_plus",
+    "edu_pro",
+    "sci",
+    "sci_plus",
+    "unknown"
+   ],
+   "type": "string"
+  },
+  "RateLimitReachedType": {
+   "enum": [
+    "rate_limit_reached",
+    "workspace_owner_credits_depleted",
+    "workspace_member_credits_depleted",
+    "workspace_owner_usage_limit_reached",
+    "workspace_member_usage_limit_reached"
+   ],
+   "type": "string"
+  },
+  "RateLimitSnapshot": {
+   "properties": {
+    "credits": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/CreditsSnapshot"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
+    "individualLimit": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/SpendControlLimitSnapshot"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
+    "limitId": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "limitName": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "normalModelSlug": {
+     "description": "Normal model whose display name and reasoning options describe this quota alias.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "planType": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/PlanType"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
+    "primary": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/RateLimitWindow"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
+    "rateLimitReachedType": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/RateLimitReachedType"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
+    "secondary": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/RateLimitWindow"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
+    "spendControlReached": {
+     "description": "Backend-reported spend-control state. `None` is unavailable, not a sparse-update recovery.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    }
+   },
+   "type": "object"
+  },
+  "RateLimitWindow": {
+   "properties": {
+    "resetsAt": {
+     "format": "int64",
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "usedPercent": {
+     "format": "int32",
+     "type": "integer"
+    },
+    "windowDurationMins": {
+     "format": "int64",
+     "type": [
+      "integer",
+      "null"
+     ]
+    }
+   },
+   "required": [
+    "usedPercent"
+   ],
+   "type": "object"
+  },
   "ReasoningEffort": {
    "description": "A non-empty reasoning effort value advertised by the model.",
    "minLength": 1,
@@ -1189,6 +1397,31 @@
   },
   "SkillsChangedNotification": {
    "description": "Notification emitted when watched local skill files change.\n\nTreat this as an invalidation signal and re-run `skills/list` with the client's current parameters when refreshed skill metadata is needed.",
+   "type": "object"
+  },
+  "SpendControlLimitSnapshot": {
+   "properties": {
+    "limit": {
+     "type": "string"
+    },
+    "remainingPercent": {
+     "format": "int32",
+     "type": "integer"
+    },
+    "resetsAt": {
+     "format": "int64",
+     "type": "integer"
+    },
+    "used": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "limit",
+    "remainingPercent",
+    "resetsAt",
+    "used"
+   ],
    "type": "object"
   },
   "SubAgentActivityKind": {
@@ -3221,6 +3454,27 @@
  "description": "Notification sent from the server to the client.",
  "oneOf": [
   {
+   "description": "NEW NOTIFICATIONS",
+   "properties": {
+    "method": {
+     "enum": [
+      "error"
+     ],
+     "title": "ErrorNotificationMethod",
+     "type": "string"
+    },
+    "params": {
+     "$ref": "#/definitions/ErrorNotification"
+    }
+   },
+   "required": [
+    "method",
+    "params"
+   ],
+   "title": "ErrorNotification",
+   "type": "object"
+  },
+  {
    "properties": {
     "method": {
      "enum": [
@@ -3418,6 +3672,26 @@
     "params"
    ],
    "title": "McpServer/startupStatus/updatedNotification",
+   "type": "object"
+  },
+  {
+   "properties": {
+    "method": {
+     "enum": [
+      "account/rateLimits/updated"
+     ],
+     "title": "Account/rateLimits/updatedNotificationMethod",
+     "type": "string"
+    },
+    "params": {
+     "$ref": "#/definitions/AccountRateLimitsUpdatedNotification"
+    }
+   },
+   "required": [
+    "method",
+    "params"
+   ],
+   "title": "Account/rateLimits/updatedNotification",
    "type": "object"
   },
   {

@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
 
-from . import prompts, receipts, settings_guard, threads
+from . import agents, prompts, receipts, settings_guard, threads
 from .backend import COPILOT_AGENT, running_background, stop_background
 from .delivery import digest
 from .envelope import from_owner, news_tasks, tasks_named, wrap
@@ -838,6 +838,9 @@ class Events:
         self.states[session_id].retuned = False
         self.states[session_id].awaiting = None  # Copilot said what went wrong.
         self.states[session_id].steps.clear()
+        if getattr(event.data, "error_type", "") == "plan_limit" and row["role"] == WORKER:
+            self.plan_limited(row, message, getattr(event.data, "limit", None))
+            return
         # Copilot's model and effort fallbacks: another agent's models are not Copilot's.
         copilot = self.runtime.on_copilot(session_id)
         if copilot and EFFORT_REFUSED.search(message) and self.runtime.effort_clearable(row):
@@ -866,7 +869,8 @@ class Events:
         if TRANSIENT.search(message):
             if self.retry_turn(row, message):
                 return
-            message = f"Copilot failed on this turn {RETRIES + 1} times: {message}"
+            agent = agents.display(self.runtime.agent(session_id))
+            message = f"{agent} failed on this turn {RETRIES + 1} times: {message}"
         self.runtime.add_message(session_id, "error", message)
         if row["role"] == WORKER:
             self.runtime.worker_failed(row, message)
@@ -874,6 +878,20 @@ class Events:
             self.runtime.update_session(session_id, status="idle", activity="")
             if row["role"] in {ROUTER, SLACK} and self.delivery.has_unsent(session_id):
                 self.delivery.schedule_flush(session_id)
+
+    def plan_limited(self, row: dict, message: str, limit: Any):
+        """Another agent's worker whose turn its plan's limit (or a rate limit) ended: paused
+        under Needs you with when it resets, if its agent said (Go on then, or Continue with
+        another agent), not failed nor tried again; never moved elsewhere by itself. Its plan's
+        limit, Settings says too."""
+        agent = self.runtime.agent(row["id"])
+        limit = dict(limit) if isinstance(limit, dict) else {}
+        line = agents.limit_line(limit, name=agent) or (
+            f"{agents.display(agent)} refused it for a limit of its plan or account."
+        )
+        self.runtime.workers.paused(row["id"], agents.PLAN_STOP, f"Paused: {line}", message)
+        if agents.blocked(limit):
+            self.runtime.plan_limit_seen(agent, limit)
 
     def retry_turn(self, row: dict, message: str) -> bool:
         """Copilot failed on its side (no answer, overloaded, a dropped connection): the turn is

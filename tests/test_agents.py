@@ -1,5 +1,5 @@
 """Other coding agents as the owner sees and sets them (more-agents.md 5.9-5.11, section 8): the
-Coding agents group in Settings → Models and what it saves, the Router's choice of an agent,
+Coding agents tab in Settings and what it saves, the Router's choice of an agent,
 workers on one in the page, and an agent turned off. Codex is the stand-in CLI
 (tests/fake_codex.py) on the PATH, under the real supervisor."""
 
@@ -107,7 +107,7 @@ def stored(data) -> dict:
     return json.loads(row[0]) if row else {}
 
 
-# The Coding agents group in Settings → Models
+# Settings' Coding agents tab
 
 
 def test_agents_are_looked_for_only_once_the_group_is_opened(web, codex_on_path):
@@ -181,6 +181,7 @@ def test_turning_codex_on_stores_its_configuration_and_nothing_of_the_settings(w
         "on": ["codex"],
         "names": {"codex": "Codex"},
         "new_workers": "codex",
+        "router_chooses": False,
     }
     assert "stopped" not in snapshot
     assert stored(web.data) == {
@@ -343,7 +344,13 @@ async def test_without_an_agent_on_the_routers_tools_and_prompt_are_as_before(
         assert properties["agent"]["enum"] == ["", "copilot", "codex"]
         assert "only when the owner named one" in properties["agent"]["description"]
         assert {k: v for k, v in properties.items() if k != "agent"} == schema(before)["properties"]
-        assert [t.name for t in on["tools"]] == [name for name, _, _ in tools_before]
+        # And one more, to move a worker's work to another agent when the owner asks.
+        assert [t.name for t in on["tools"]] == [
+            *(name for name, _, _ in tools_before),
+            ("continue_worker"),
+        ]
+        (moving,) = [t for t in on["tools"] if t.name == "continue_worker"]
+        assert moving.parameters["properties"]["agent"]["enum"] == ["copilot", "codex"]
         added = on["system_message"]["content"].replace(
             prompt_before.rpartition("\n</chiefofstaff_role>")[0], ""
         )
@@ -559,12 +566,12 @@ async def test_turning_codex_off_drains_it_to_as_without_agents(tmp_path, codex_
         stopped = await saved(runtime, {"codex": {"enabled": False}})
         await settle(runtime)
 
-        assert stopped == ["Codex is turned off in Settings → Models."]
+        assert stopped == ["Codex is turned off in Settings → Coding agents."]
         assert runtime.admission_generation > generation, "nothing admitted before begins"
         assert runtime.connection("codex") == (None, 1) and not backend.alive()
         await until(lambda: not any(alive(pid) for pid in processes), 10)
         row = harness.store.session(worker)
-        assert runtime.agent_block(row) == "Codex is turned off in Settings → Models."
+        assert runtime.agent_block(row) == "Codex is turned off in Settings → Coding agents."
         with pytest.raises(RuntimeError, match="turned off"):
             await runtime.session_for(worker)
         off = router_options(harness, runtime)
@@ -810,11 +817,11 @@ async def test_ask_first_on_a_codex_worker_asks_its_agent_first(
 
 
 def test_a_save_that_stops_workers_says_how_many_and_why():
-    assert stopped_text(["Codex is turned off in Settings → Models."]) == (
+    assert stopped_text(["Codex is turned off in Settings → Coding agents."]) == (
         "Stopped 1 worker because Codex is off. Turn Codex on again, then press Go on under "
         "Needs you."
     )
-    assert stopped_text(["Codex is turned off in Settings → Models."] * 2) == (
+    assert stopped_text(["Codex is turned off in Settings → Coding agents."] * 2) == (
         "Stopped 2 workers because Codex is off. Turn Codex on again, then press Go on under "
         "Needs you."
     )
@@ -889,7 +896,7 @@ async def test_an_agent_never_turned_on_is_said_to_be_off(tmp_path, codex_on_pat
                 arguments={"title": "Fix it", "instructions": "Do it.", "agent": "codex"},
             )
         )
-        assert refused.error == "Codex is turned off in Settings → Models."
+        assert refused.error == "Codex is turned off in Settings → Coding agents."
     finally:
         await runtime.stop()
 

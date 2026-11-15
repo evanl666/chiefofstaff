@@ -155,6 +155,8 @@ SANDBOX_UNCHECKED = "its sandbox has not passed Chief of Staff's checks yet"
 # A variable of Chief of Staff's the launcher's shell can unset by name.
 OWN_NAME = re.compile(r"CHIEFOFSTAFF_[A-Za-z0-9_]+")
 TERMINAL = frozenset({"completed", "failed", "killed", "stopped"})
+# A rate_limit_event's overageStatus while extra usage carries requests past the plan's limit.
+OVERAGE_ON = frozenset({"allowed", "allowed_warning"})
 
 # Claude's tools, as Chief of Staff's checks see them (more-agents.md 5.12.4).
 SHELL_TOOLS = {"Bash": "command", "Monitor": "command"}
@@ -719,6 +721,8 @@ async def look(command: str = "claude", folder: Path | None = None) -> dict:
         "version": version,
         "account": signed_in(auth),
         "models": list(LISTED.get(version) or alias_models()),
+        # Its own list once a worker's process said it; until then, its aliases (not kept).
+        "models_known": version in LISTED,
         "check_key": await asyncio.to_thread(check_key, path, version),
     }
 
@@ -985,6 +989,9 @@ class ClaudeWorker:
         self.turns: set[str] = set()
         self.starting = False
         self.aborting = False
+        # Its turn's request was refused for a rate limit (its plan's, or the account's): its
+        # failure pauses it rather than failing it (Events.plan_limited).
+        self.rate_limited = False
         # Each Stop (abort): a turn starting when one comes is stopped before it begins.
         self.aborts = 0
         self.unshown = ""
@@ -1898,6 +1905,8 @@ class ClaudeWorker:
         key = str(response.get("id") or "")
         parent = str(message.get("parent_tool_use_id") or "")
         if message.get("error"):
+            if message["error"] == "rate_limit" and not parent:
+                self.rate_limited = True
             return  # Claude's words for a failed request: its turn's error says them.
         if self.turn is None and not parent and not self.checking:
             # A response no turn of Chief of Staff's admitted: what passed its gate unseen.
@@ -2073,6 +2082,7 @@ class ClaudeWorker:
 
     async def end_turn(self, message: dict):
         aborted = self.aborting
+        limited, self.rate_limited = self.rate_limited, False
         self.settle_calls()
         self.turn = None
         self.aborting = False
@@ -2085,7 +2095,15 @@ class ClaudeWorker:
             self.emit("abort", reason="user initiated")
         elif message.get("is_error"):
             self.queue.clear()  # Given back: what it was sent is sent again (Delivery).
-            self.emit("session.error", message=self.failure(message))
+            if limited or message.get("api_error_status") == 429:
+                self.emit(
+                    "session.error",
+                    message=self.failure(message),
+                    error_type="plan_limit",
+                    limit=self.limit_now(),
+                )
+            else:
+                self.emit("session.error", message=self.failure(message))
             self.agent.turn_failed(message)
             return
         elif self.queue and self.process_effort != self.effort and not self.background:
@@ -2097,6 +2115,15 @@ class ClaudeWorker:
         elif self.queue and await self.next_turn():
             return
         self.rest()
+
+    def limit_now(self) -> dict:
+        """The limit that refused its turn's request: its plan's, as its stream last said it
+        (rejected, until it resets), else a rate limit with no reset known."""
+        limit = dict(self.agent.limit or {})
+        resets = limit.get("resets_at") or 0
+        if agents.blocked(limit) and (not resets or resets > time.time()):
+            return limit
+        return {"status": "limited", "resets_at": 0}
 
     def rest(self):
         """No turn: what it left running (a command, a subagent) holds the session; else it is
@@ -2324,6 +2351,7 @@ class ClaudeWorker:
         self.turn = turn
         self.turns.add(turn)
         self.aborting = False
+        self.rate_limited = False
         if show:
             self.unshown = turn
             self.show_turn()
@@ -2964,12 +2992,19 @@ class ClaudeAgent:
             "version": self.cli_version,
             "account": signed_in(self.auth),
             "models": await self.list_models(),
+            "models_known": self.models_known,
             "check_key": self.key,
             "limit": dict(self.limit),
         }
 
     async def list_models(self) -> list[Any]:
         return list(LISTED.get(self.cli_version) or alias_models())
+
+    @property
+    def models_known(self) -> bool:
+        """Whether list_models is Claude's own list (a worker's process said it), not only its
+        aliases: those are not kept as its list."""
+        return self.cli_version in LISTED
 
     async def list_sessions(self) -> list[Any]:
         """The owner's own Claude sessions (owner_sessions), for Chief of Staff to adopt; each
@@ -3016,7 +3051,7 @@ class ClaudeAgent:
     def limit_refusal(self) -> str:
         """While the plan's limit is reached (until its reset): why no worker runs. Nothing
         tries again by itself."""
-        if self.limit.get("status") != "rejected":
+        if not agents.blocked(self.limit):
             return ""
         line = agents.limit_line(self.limit)
         return f"{line} Tell the worker to go on after that." if line else ""
@@ -3027,10 +3062,15 @@ class ClaudeAgent:
         if not status:
             return
         resets = info.get("resetsAt")
+        used = info.get("utilization")
+        # Past its plan's limit, extra usage (pay as you go) may carry its requests on.
+        extra = info.get("isUsingOverage") is True or info.get("overageStatus") in OVERAGE_ON
         found = {
             "status": status,
             "window": str(info.get("rateLimitType") or ""),
             "resets_at": int(resets) if isinstance(resets, int | float) else 0,
+            **({"used": round(used * 100)} if isinstance(used, int | float) else {}),
+            **({"extra": True} if extra else {}),
         }
         if found != self.limit:
             self.limit = found

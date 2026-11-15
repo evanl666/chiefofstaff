@@ -14,8 +14,12 @@ export function showSettingsTab(tab) {
   for (const section of tabs) section.hidden = section !== shown;
   for (const button of document.querySelectorAll("#settings-tabs button")) {
     button.setAttribute("aria-selected", String(button.dataset.tab === shown.dataset.tab));
+    // On a phone the tabs scroll sideways: the one shown is in view.
+    if (button.dataset.tab === shown.dataset.tab) button.scrollIntoView({ block: "nearest", inline: "nearest" });
   }
   $("#settings-pane").scrollTop = 0;
+  // Coding agents looks for them each time it is shown (only then).
+  if (shown.dataset.tab === "agents" && !agentsLooked) lookForAgents();
 }
 export function openSettings(tab = "") {
   const dialog = $("#settings-dialog");
@@ -50,9 +54,11 @@ export function bindSettings() {
     event.preventDefault();  // Not the settings form's submit.
     addLesson();
   });
-  for (const button of document.querySelectorAll("#settings-tabs button")) {
-    button.addEventListener("click", () => showSettingsTab(button.dataset.tab));
-  }
+  // (Coding agents' button, made only when it is offered, is listened to as it is made.)
+  $("#settings-tabs").addEventListener("click", (event) => {
+    const button = event.target.closest("#settings-tabs button");
+    if (button) showSettingsTab(button.dataset.tab);
+  });
   // A field the browser finds invalid on Save may be on another tab: show that tab.
   $("#settings-form").addEventListener("invalid", (event) => showSettingsTab(event.target.closest(".tab")?.dataset.tab), true);
   $("#settings-form").addEventListener("submit", saveSettings);
@@ -162,18 +168,6 @@ export function bindSettings() {
     }
   });
   $("#send-on").addEventListener("click", () => saveSend(true));
-  // Other coding agents: the last line of Models unfolds their group, which only then looks.
-  $("#agents-open").addEventListener("click", () => {
-    $("#agents-open").parentElement.hidden = true;
-    $("#agents-group").hidden = false;
-    $("#agents-group").open = true;
-    $("#agents-group").querySelector("summary").focus();
-    if (!agentsLooked) lookForAgents();
-  });
-  $("#agents-group").addEventListener("toggle", () => {
-    // Only the owner's opening looks (never a hidden group opened with the others).
-    if ($("#agents-group").open && !$("#agents-group").hidden && !agentsLooked) lookForAgents();
-  });
   $("#send-cancel").addEventListener("click", () => {
     renderSendLine();
     sendSwitch.focus();
@@ -907,7 +901,7 @@ async function saveSettings(event) {
   try {
     agents = agentsBody();
   } catch (error) {
-    showSettingsTab("models");
+    showSettingsTab("agents");
     settingsError(error.message);
     $(`#settings-form [aria-invalid="true"]`)?.focus();
     return;
@@ -994,37 +988,61 @@ async function saveAway() {
     return false;
   }
 }
-// Other coding agents (more-agents.md 5.10). With none on, the last line of Models is a quiet
-// button, the same whatever is installed; once one is on, their group takes its place, folded.
-// The group looks for agents (GET /api/agents) only once opened, and each time it is.
+// Other coding agents (more-agents.md 5.10; the agent picker's Settings): their own tab, after
+// Models, made only where one is installed or on (with Copilot alone, Settings is as it always
+// was, with nothing of them). The tab looks for them (GET /api/agents) each time it is shown,
+// never before.
 const AGENTS = { codex: "Codex", claude: "Claude" };
-let agentsLooked = null; // What the group showed when it looked: the agents found, as saved.
+let agentsLooked = null; // What the tab showed when it looked: the agents found, as saved.
+function agentsTab() {
+  const help = "https://github.com/evanl666/chiefofstaff/blob/main/docs/guide.md#workers-on-other-coding-agents";
+  const button = el("button", { type: "button", role: "tab", "data-tab": "agents", id: "agents-tab", text: "Coding agents" });
+  $("#settings-tabs [data-tab=models]").after(button);
+  const section = el(
+    "section",
+    { class: "tab agents-tab", "data-tab": "agents", hidden: true },
+    el("small", { class: "agents-intro" }, "Workers can also run on another coding agent you have installed and signed in to. The Router, Slack and the Watchdog stay on Copilot. ", el("a", { class: "link", href: help, target: "_blank", rel: "noreferrer", text: "What differs" })),
+    el("div", { id: "agents-rows", class: "agents-rows" }),
+    el(
+      "div",
+      { id: "agents-choice", class: "agents-choice", hidden: true },
+      el("label", { class: "short" }, el("span", { text: "New workers use" }), el("select", { name: "agent_new_workers" })),
+      el("label", { class: "check" }, el("input", { name: "agent_router_chooses", type: "checkbox" }), " Let the Router choose the agent for each task"),
+      el("small", { text: "It says which it chose and why. Ask for one with @codex or @claude, or in your own words." }),
+    ),
+    el("small", { id: "agents-sandboxed", hidden: true, text: "Other agents can't run while workers are sandboxed: their sandboxes have not passed Chief of Staff's checks yet." }),
+    el("small", { id: "agents-downgrade", hidden: true }, "Before you install an older Chief of Staff, run ", el("code", { text: "chiefofstaff --prepare-downgrade" }), " and close the workers on other agents."),
+  );
+  $("#settings-form .tab[data-tab=models]").after(section);
+}
 function renderAgentsLine() {
-  const on = state.snapshot.agents;
-  $("#agents-open").parentElement.hidden = Boolean(on);
-  $("#agents-group").hidden = !on;
-  $("#agents-group").open = false;
-  $("#agents-summary").textContent = on ? `New workers: ${on.names[on.new_workers] || "Copilot"}` : "";
+  const shown = Boolean(state.snapshot.agents || state.snapshot.agents_found?.length);
   agentsLooked = null;
+  if (!shown) {
+    $("#agents-tab")?.remove();
+    $("#settings-form .tab[data-tab=agents]")?.remove();
+    return;
+  }
+  if (!$("#agents-tab")) agentsTab();
   $("#agents-rows").replaceChildren();
   $("#settings-form").agent_new_workers.replaceChildren(el("option", { value: "copilot", text: "Copilot" }));
-  $("#settings-form").agent_new_workers.closest("label").hidden = true;
+  $("#agents-choice").hidden = true;
   $("#agents-sandboxed").hidden = true;
-  $("#agents-downgrade").hidden = !on;
+  $("#agents-downgrade").hidden = !state.snapshot.agents;
 }
 async function lookForAgents() {
-  const form = $("#settings-form");
   const looking = Symbol("looking");
   agentsLooked = looking;
   // Loading: each row says so until the agents answer.
-  $("#agents-rows").replaceChildren(...Object.entries(AGENTS).map(([name, label]) => agentRow({ name, label, found: true, state: "Checking…", problem: "", models: [] }, true)));
-  form.agent_new_workers.closest("label").hidden = true;
+  const loading = (state.snapshot.agents_found || Object.keys(AGENTS)).map((name) => agentRow({ name, label: AGENTS[name] || name, found: true, state: "Checking…", problem: "", models: [] }, true));
+  $("#agents-rows").replaceChildren(...loading);
+  $("#agents-choice").hidden = true;
   let found;
   try {
     found = await api("/api/agents");
   } catch (error) {
     if (agentsLooked !== looking) return;
-    agentsLooked = null;  // Looked for again when opened next.
+    agentsLooked = null;  // Looked for again when shown next.
     $("#agents-rows").replaceChildren(...Object.entries(AGENTS).map(([name, label]) => agentRow({ name, label, found: true, state: "", problem: `Could not check: ${error.message}`, models: [] }, true)));
     return;
   }
@@ -1034,6 +1052,7 @@ async function lookForAgents() {
   $("#agents-rows").replaceChildren(
     ...(found.agents.length ? found.agents.map((agent) => agentRow(agent, found.sandboxed)) : [el("small", { class: "agents-none", role: "status", text: noAgentWords(found.supported) })]),
   );
+  $("#settings-form").agent_router_chooses.checked = Boolean(found.router_chooses);
   newWorkersChoices(found.new_workers);
 }
 // A token count as the page shows it (200,000), and as the owner types it: grouped or not, as
@@ -1057,14 +1076,29 @@ function checkLimit(input) {
   else input.removeAttribute("aria-invalid");
   return count;
 }
-// One agent's row: Use for workers, its state in a line, and once on, its model and limit.
+// How much of its plan's limits it used, where the agent says it: "42% of your 5-hour limit,
+// resets 3:40 pm". At 80% and over, a chip beside its name says so.
+const USED_CHIP = 80;
+function usageLine(usage) {
+  return (usage || []).map((entry) => `${entry.used}% of your ${entry.label}${entry.resets_at ? `, resets ${resetTime(entry.resets_at)}` : ""}`).join(" · ");
+}
+function resetTime(seconds) {
+  const at = new Date(seconds * 1000);
+  const today = at.toDateString() === new Date().toDateString();
+  return today ? at.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : at.toLocaleDateString([], { weekday: "short", hour: "numeric", minute: "2-digit" });
+}
+// One agent's row: its name and state, Available for workers, how much of its plan it used,
+// and its model and limit per worker under Advanced.
 function agentRow(agent, disabled) {
   const id = `agent-${agent.name}-state`;
   const box = el("input", { type: "checkbox", name: `agent_${agent.name}_enabled`, "aria-describedby": id });
   box.checked = Boolean(agent.enabled);
   // Off, it is turned on only where it can run; on, it can always be turned off.
   box.disabled = disabled || (!agent.enabled && Boolean(agent.problem));
-  const line = el("small", { id, role: "status", class: agent.problem ? "agent-problem" : "", html: codeHtml(agent.problem || agent.state || "") });
+  const line = el("small", { id, role: "status", class: agent.problem ? "agent-problem" : "agent-state", html: codeHtml(agent.problem || agent.state || "") });
+  const most = Math.max(0, ...(agent.usage || []).map((entry) => entry.used));
+  const chip = most >= USED_CHIP ? el("span", { class: `chip ${most >= 100 ? "blocked" : "waiting"}`, text: `${most}% used`, title: usageLine(agent.usage) }) : null;
+  const usage = agent.usage?.length ? el("small", { class: "agent-usage", text: usageLine(agent.usage) }) : null;
   // A plan's limit as its workers last heard it, and the one line its sign-in calls for.
   const notes = [agent.limit_line, agent.problem ? "" : agent.note].filter(Boolean).map((text) => el("small", { class: "agent-note", text }));
   const list = el("datalist", { id: `agent-${agent.name}-models` }, ...(agent.models || []).map((model) => el("option", { value: model.id, label: model.name })));
@@ -1082,24 +1116,27 @@ function agentRow(agent, disabled) {
     el("div", { class: "agent-limit" }, el("label", {}, el("span", { text: "Limit per worker (tokens)" }), limit), el("small", { id: errorId, class: "field-error", hidden: true })),
     list,
   );
-  fields.hidden = !box.checked;
+  // A limit typed wrong opens Advanced (Save says so beside it).
+  const advanced = el("details", { class: "agent-advanced", open: Boolean(agent.limit_error) }, el("summary", { text: "Advanced" }), fields);
+  advanced.hidden = !box.checked;
   box.addEventListener("change", () => {
-    fields.hidden = !box.checked;
+    advanced.hidden = !box.checked;
     newWorkersChoices($("#settings-form").agent_new_workers.value);
   });
+  const head = el("div", { class: "agent-head" }, el("strong", { text: agent.label }), chip, el("label", { class: "check agent-switch" }, box, " Available for workers"));
   // One that cannot be turned on looks it, its reason in its line.
-  return el("div", { class: `agent-row${box.disabled ? " disabled" : ""}`, "data-agent": agent.name }, el("label", { class: "check" }, box, ` Use ${agent.label} for workers`), line, ...notes, fields);
+  return el("div", { class: `agent-row${box.disabled ? " disabled" : ""}`, "data-agent": agent.name }, head, line, usage, ...notes, advanced);
 }
-// New workers use Copilot or an agent checked above (as the form has it, saved or not); with
-// none checked there is nothing to choose, and nothing shows.
+// New workers use Copilot or an agent available above (as the form has it, saved or not), and
+// the Router may choose among them: shown only once there are two to choose from.
 function newWorkersChoices(chosen) {
   const select = $("#settings-form").agent_new_workers;
   const on = (agentsLooked?.agents || []).filter((agent) => $("#settings-form")[`agent_${agent.name}_enabled`]?.checked);
   select.replaceChildren(el("option", { value: "copilot", text: "Copilot" }), ...on.map((agent) => el("option", { value: agent.name, text: agent.label })));
   select.value = on.some((agent) => agent.name === chosen) ? chosen : "copilot";
-  select.closest("label").hidden = !on.length;
+  $("#agents-choice").hidden = !on.length;
 }
-// The group as the form has it, for Save: only once it was looked at, and only what changed.
+// The tab as the form has it, for Save: only once it was looked at, and only what changed.
 function agentsBody() {
   if (!agentsLooked?.agents) return null;
   const form = $("#settings-form");
@@ -1110,12 +1147,14 @@ function agentsBody() {
     const input = form[`agent_${agent.name}_limit`];
     const limit = checkLimit(input);
     if (limit === null) {
-      $("#agents-group").open = true;  // Said beside the field; Save goes no further.
+      input.closest("details").open = true;  // Said beside the field; Save goes no further.
+      showSettingsTab("agents");
       throw new Error("Limit per worker: enter a whole number of tokens.");
     }
     if (enabled !== Boolean(agent.enabled) || model !== (agent.model || "") || limit !== (agent.limit || 0)) body[agent.name] = { enabled, model, limit };
   }
   if (form.agent_new_workers.value !== agentsLooked.new_workers) body.new_workers = form.agent_new_workers.value;
+  if (form.agent_router_chooses.checked !== Boolean(agentsLooked.router_chooses)) body.router_chooses = form.agent_router_chooses.checked;
   return Object.keys(body).length ? body : null;
 }
 // None of the coding agents it supports is on this computer (bug E80): which they are, and

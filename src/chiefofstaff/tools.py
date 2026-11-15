@@ -86,6 +86,12 @@ logger = logging.getLogger(__name__)
 
 
 SPAWN_WORKER = "Start a new worker session for one task. Returns its session id."
+CONTINUE_WORKER = (
+    "Only when the owner asks to move a worker's work to another coding agent (\"hand this to "
+    'Claude", "continue it on Codex"): a new worker on that agent goes on with it from a '
+    "summary, in the same folders, and the old worker closes. Only for an idle worker: if it "
+    "is at work, tell the owner to stop it or wait. Never on your own initiative."
+)
 
 
 class SpawnWorker(BaseModel):
@@ -1453,6 +1459,35 @@ class Tools:
             )
         return self.spawn_tools[key]
 
+    def continue_on(self, names: Sequence[str]) -> Any:
+        """continue_worker, the Router's while other coding agents are on: the owner's "hand
+        this to Claude" (as Continue with… in a worker's ⋯)."""
+        key = ("continue", *names)
+        if key not in self.spawn_tools:
+            choices: Any = Literal.__getitem__((agents.COPILOT, *names))  # type: ignore[attr-defined]
+            params = create_model(
+                "ContinueWorker",
+                session_id=(str, Field(description="The worker whose work goes on (its id)")),
+                agent=(choices, Field(description="The coding agent the new worker runs on")),
+            )
+            self.spawn_tools[key] = define_tool(
+                "continue_worker",
+                description=CONTINUE_WORKER,
+                params_type=leak_proof(params),
+                handler=self.handler(self.t_continue_worker),
+                skip_permission=True,
+            )
+        return self.spawn_tools[key]
+
+    async def t_continue_worker(self, params: Any, caller: str):
+        self.caller(caller, ROUTER)
+        row = self.store.session(params.session_id.removeprefix("worker:"))
+        made = await self.runtime.continue_on(row["id"], params.agent)
+        return (
+            f"“{row['title']}” goes on with a new worker on {agents.display(params.agent)} "
+            f"(session {made['session_id']}, task {made['task_id']}); the old one is closed."
+        )
+
     def handler(self, handler):
         async def run(params, invocation):
             try:
@@ -1554,10 +1589,16 @@ class Tools:
         )
 
     async def t_spawn_worker(
-        self, params: SpawnWorker, caller: str, special: str = "", untrusted: bool = False
+        self,
+        params: SpawnWorker,
+        caller: str,
+        special: str = "",
+        untrusted: bool = False,
+        agent: str = "",
     ):
         """`untrusted`: a helper that reads untrusted content (the connector) runs as a worker
-        that reads Slack does, whether or not Slack is connected."""
+        that reads Slack does, whether or not Slack is connected. `agent`: the one the owner
+        chose for it on a card (else its params' or Settings')."""
         self.caller(caller, ROUTER)
         params = params.model_copy(update={"instructions": self.owner_words(params.instructions)})
         if not special and (asked := risky(params.instructions)):
@@ -1588,12 +1629,18 @@ class Tools:
                 if row["id"] not in known
             ]
         decisions = self.with_turn_decisions(caller, params.decisions)
+        named = agent or getattr(params, "agent", "")
         agent, agent_notice = agents.COPILOT, ""
-        if not special and (self.runtime.agents or getattr(params, "agent", "")):
-            agent, agent_notice = await self.runtime.new_worker_agent(
-                getattr(params, "agent", ""),
-                bool((params.slack and self.runtime.slack.configured()) or untrusted),
-            )
+        if not special and (self.runtime.agents or named):
+            try:
+                agent, agent_notice = await self.runtime.new_worker_agent(
+                    named, bool((params.slack and self.runtime.slack.configured()) or untrusted)
+                )
+            except ValueError as exc:
+                if named and named != agents.COPILOT:
+                    # Never started on another: the owner chooses (their card's actions).
+                    self.runtime.agent_refused_card(named, str(exc), params.model_dump())
+                raise
         if agent == agents.COPILOT:
             await self.runtime.check_model(params.model)
         else:
@@ -1756,6 +1803,7 @@ class Tools:
         self.runtime.add_message(session_id, "router", params.instructions, meta)
         if agent_notice:  # The agent Settings chose could not run it.
             self.runtime.add_message(session_id, "notice", agent_notice)
+            self.store.set(f"agentfallback:{session_id}", agent_notice)
         if not special:  # Chief of Staff's own helpers come and go quietly.
             # Not "Started" for work that waits: for the tasks it comes after, or for a slot.
             waits = [dep["title"] for dep in self.tasks.unmet(task)]

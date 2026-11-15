@@ -50,7 +50,7 @@ export const MARKERS = {
   cancelled: "Cancelled",
 };
 const PLACE_WORDS = { needs: "Needs you", running: "Running", monitoring: "Monitoring", finished: "Done" };
-export const statusWord = (phase) => MARKERS[phase.marker] || PLACE_WORDS[phase.section] || "";
+export const statusWord = (phase) => phase.word || MARKERS[phase.marker] || PLACE_WORDS[phase.section] || "";
 
 // What a PR's state comes to, in a word or two, worst first: one rule for Artifacts, a card's
 // PR chip, what Monitoring says it waits on and where its task is placed (changes requested
@@ -223,7 +223,9 @@ export function workerContext(worker, list) {
     stoppedTitle: list.find((task) => task.status === "waiting" && task.stopped)?.title || "",
   };
 }
-// One task's place: { section, marker, why }. `active`, `activeTitle`, `stoppedTitle`: see
+// What another agent's worker paused for its plan's limit is stopped by (agents.PLAN_STOP).
+export const PLAN_STOP = "its plan's limit";
+// One task's place: { section, marker, why } (and `word`, its status word where not its marker's). `active`, `activeTitle`, `stoppedTitle`: see
 // workerContext; `onCard`: shown on a card under Needs you already (a draft for it), so not
 // again: in no section, its marker says what that card shows of it (news on it, a result to
 // accept).
@@ -236,6 +238,8 @@ export function taskPhase(task, worker, { active = "", activeTitle = "", stopped
   // runs, news for it waits too, until they say to use them.
   if (task.attention === "settings") return at("needs", "settings", task.attention_why || "Its folder's settings changed: it waits for your word");
   // Its token limit stopped it (another agent's worker): what it spent is unknown, or its limit used.
+  // Its plan's limit paused it: when it resets, if its agent said; Go on then, or another agent.
+  if (task.status === "waiting" && task.stopped === PLAN_STOP) return { ...at("needs", "stopped", `${task.progress} Go on once it resets, or continue with another agent.`), word: "Paused" };
   if (task.status === "waiting" && task.stopped) return at("needs", "stopped", task.spend_why || `Stopped by ${task.stopped}: tell it to go on, or cancel it`);
   // Its question is about its own draft: decided on that draft's card, which holds it.
   if (task.status === "waiting" && onCard && task.question_draft) return at("", "", "On its draft's card under Needs you");

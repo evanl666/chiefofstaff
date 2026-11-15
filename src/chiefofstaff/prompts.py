@@ -939,7 +939,18 @@ AGENTS_RULE = (
     "- Workers can run on {agents} as well as Copilot: set spawn_worker's agent only when the "
     "owner names one for the task, else leave it empty (Settings chooses). If the agent they "
     "named cannot run it, tell them why; never start it on another. A model for such a worker "
-    "is one from list_sessions().agents.models of its agent."
+    "is one from list_sessions().agents.models of its agent. When they ask to move a worker's "
+    "work to another agent, use continue_worker."
+)
+
+CHOOSES_RULE = (
+    "- Workers can run on {agents} as well as Copilot, and the owner lets you choose: set "
+    "spawn_worker's agent for each new worker, the one they name for the task, else the one "
+    "that suits it best among those (empty: Copilot). Say which you chose and why in one line "
+    'of your reply ("On Codex: a long refactor it handles well."). If the agent they named, '
+    "or the one you chose, cannot run it, tell them why; never start it on another unless "
+    "they say so. A model for such a worker is one from list_sessions().agents.models of its "
+    "agent. When they ask to move a worker's work to another agent, use continue_worker."
 )
 
 AWAY_DEFAULT = (
@@ -1019,10 +1030,10 @@ def worker_on(agent: str, prompt: str) -> str:
     return prompt
 
 
-def with_agents_rule(prompt: str, names: list[str]) -> str:
+def with_agents_rule(prompt: str, names: list[str], chooses: bool = False) -> str:
     """The Router's role while other coding agents are on (more-agents.md 5.9): one rule,
-    after its others."""
-    rule = AGENTS_RULE.format(agents=" or ".join(names))
+    after its others (`chooses`: the owner lets it choose each new worker's agent)."""
+    rule = (CHOOSES_RULE if chooses else AGENTS_RULE).format(agents=" or ".join(names))
     head, end, tail = prompt.rpartition("\n</chiefofstaff_role>")
     return f"{head}\n{rule}{end}{tail}"
 

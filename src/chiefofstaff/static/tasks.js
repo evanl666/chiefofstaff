@@ -1,7 +1,7 @@
 // Task cards on Home: what runs and what it does now, what waits, what is finished.
 
 import { api, el, foldable, moreMenu, once, submits, toast } from "./dom.js";
-import { monitorParts, obligationsOf, PR_TO_FIX, SECTION_DOT, statusWord, taskPhase, workerContext } from "./board.js";
+import { monitorParts, obligationsOf, PLAN_STOP, PR_TO_FIX, SECTION_DOT, statusWord, taskPhase, workerContext } from "./board.js";
 import { ago, changesText, compactPaths, displayPath, gist, linkKey, linkName, markdown, notCountedText, plural, prTitle, shorten, since, taskLinks, threadLabel, uncheckedText } from "./text.js";
 import { deliverablesOf, isHidden, PR_ROLES, prStatus, runStanding, setHidden, toneOf } from "./artifacts.js";
 import { openFile } from "./files.js";
@@ -14,6 +14,29 @@ import { showChanges } from "./diff.js";
 // results come as cards to approve; the work itself is not the owner's.
 const HELPER_TITLES = new Set(["Learn how you work", "Learn checks from mistakes", "Distill owner profile"]);
 const sessionById = (id) => byId(id) || closedWorkers().find((session) => session.id === id);
+// A task its plan's limit paused: Continue with each other agent on (Copilot too), as the
+// worker's ⋯ does.
+function elsewhereItems(task) {
+  const on = state.snapshot.agents;
+  const session = byId(task.session_id);
+  if (task.stopped !== PLAN_STOP || !on || !session) return [];
+  const names = { copilot: "Copilot", ...on.names };
+  return ["copilot", ...on.on]
+    .filter((name) => name !== (session.agent || "copilot"))
+    .map((name) => ({
+      text: `Continue with ${names[name]}…`,
+      onclick: async () => {
+        if (!confirm(`Continue it with ${names[name]}? A new worker there goes on from a summary of this one's work, in the same folders; this one closes.`)) return;
+        try {
+          const made = await api(`/api/sessions/${session.id}/continue`, { method: "POST", body: { agent: name } });
+          toast(`Continuing on ${names[name]}.`);
+          select(made.session_id);
+        } catch (error) {
+          toast(error.message, "error");
+        }
+      },
+    }));
+}
 export function isHelperTask(task) {
   if (task.helper) return true;
   const session = sessionById(task.session_id);
@@ -661,12 +684,13 @@ function taskCard(task, phase = phaseOf(task)) {
       shown = [viewing, following, changes];
       more = [copy, pr, named, splitOff, worker];
     } else if (task.status === "waiting" && task.stopped && task.spend_stop && !task.go_on) {
-      // Its token limit used: nothing goes on until it is raised (Settings → Models).
+      // Its token limit used: nothing goes on until it is raised (Settings → Coding agents).
       more = [named, worker, cancel];
     } else if (task.status === "waiting" && task.stopped) {
-      // Stopped mid-work: go on where it stopped, or with a word on what to do instead.
+      // Stopped mid-work: go on where it stopped, or with a word on what to do instead. Paused
+      // by its plan's limit: go on once it resets, or on another agent (never by itself).
       main = el("button", { type: "button", text: "Go on", onclick: () => act(`/api/tasks/${task.id}/follow-up`, { text: "Go on where you stopped." }, "Sent to the worker.", true, true) });
-      more = [{ text: "Go on with a note…", onclick: () => reply("What should it do now?", "Sent to the worker.") }, named, worker, cancel];
+      more = [{ text: "Go on with a note…", onclick: () => reply("What should it do now?", "Sent to the worker.") }, ...elsewhereItems(task), named, worker, cancel];
     } else if (task.status === "waiting") {
       main = el("button", { type: "button", text: "Reply", onclick: () => reply("Your answer", "Sent to the worker.") });
       more = [named, worker, cancel];

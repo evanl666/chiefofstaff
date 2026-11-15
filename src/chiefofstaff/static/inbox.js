@@ -570,7 +570,7 @@ function bringIntoView(node) {
 // Above the conversation: what must be fixed first, and the summary after focus.
 function renderNotices() {
   const box = $("#notices");
-  const nodes = [setupCard(), focusSummaryCard()].filter(Boolean);
+  const nodes = [setupCard(), agentOfferCard(), focusSummaryCard()].filter(Boolean);
   if (nodes.length !== box.children.length || nodes.some((node, index) => box.children[index] !== node)) box.replaceChildren(...nodes);
   box.hidden = !nodes.length;
 }
@@ -649,6 +649,38 @@ function setupCard() {
     return null;
   }
   node.dataset.key = key;
+  return node;
+}
+// Another coding agent installed and signed in, never asked about: may workers use it? Once
+// per agent, either way; new workers stay on Copilot unless the owner chooses otherwise.
+function agentOfferCard() {
+  const offer = (state.snapshot.agent_offers || [])[0];
+  if (!offer) return null;
+  let node = document.getElementById("agent-offer");
+  if (node?.dataset.name === offer.name) return node;
+  const answer = async (allow, button) => {
+    button.disabled = true;
+    try {
+      await api(`/api/agents/${offer.name}/offer`, { method: "POST", body: { allow } });
+      await loadState();
+      toast(allow ? `${offer.label} is available for workers. Ask for it with @${offer.name}, or choose it in Settings → Coding agents.` : `Not now. ${offer.label} stays off; turn it on any time in Settings → Coding agents.`);
+    } catch (error) {
+      button.disabled = false;
+      toast(error.message, "error");
+    }
+  };
+  const later = el("button", { type: "button", class: "text", text: "Not now" });
+  const allow = el("button", { type: "button", text: "Allow" });
+  later.onclick = () => answer(false, later);
+  allow.onclick = () => answer(true, allow);
+  node = el(
+    "div",
+    { id: "agent-offer", class: "card setup agent-offer", "data-name": offer.name },
+    el("div", { class: "head" }, el("span", { class: "label", text: `${offer.label} is ready` })),
+    el("p", { text: `Allow workers to use ${offer.label}${offer.state ? ` (${offer.state})` : ""}? New workers stay on Copilot unless you ask for ${offer.label}.` }),
+    offer.note ? el("p", { class: "muted", text: offer.note }) : null,
+    el("div", { class: "actions" }, later, allow),
+  );
   return node;
 }
 function focusSummaryCard() {

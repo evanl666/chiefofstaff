@@ -26,6 +26,7 @@ from types import SimpleNamespace
 
 import codex_schema
 import pytest
+from agent_paths import without_agents
 from copilot.tools import ToolInvocation
 from policy_oracle import owners_git_configuration
 
@@ -619,29 +620,37 @@ def cwd_of(pid: int) -> str:
     return next((line[1:] for line in listed.splitlines() if line.startswith("n")), "")
 
 
-# The owner's own Claude Code, when this machine has one: the contract tests on the real CLI run
-# it by this path. Every other test sees no `claude` on the PATH, unless it puts a stand-in there.
+# The owner's own Claude Code and Codex, when this machine has them: the contract tests on the
+# real CLIs run them by these paths. Every other test sees neither on the PATH, unless it puts a
+# stand-in there (Chief of Staff looks for the agents installed: never the owner's in a test).
 REAL_CLAUDE = shutil.which("claude")
+CODEX_COMMAND = shutil.which("codex") or "codex"
 
 
 @pytest.fixture(scope="session")
 def path_without_claude(tmp_path_factory) -> str:
-    """The PATH, each of its folders that has a `claude` mirrored without it."""
-    folders = []
-    for folder in os.environ.get("PATH", "").split(os.pathsep):
-        if folder and (Path(folder) / "claude").exists():
-            mirror = tmp_path_factory.mktemp("path-without-claude")
-            for entry in Path(folder).iterdir():
-                if entry.name != "claude":
-                    (mirror / entry.name).symlink_to(entry)
-            folder = str(mirror)
-        folders.append(folder)
-    return os.pathsep.join(folders)
+    """The PATH, each of its folders that has a `claude` or a `codex` mirrored without them."""
+    return without_agents(os.environ.get("PATH", ""), tmp_path_factory.mktemp("path"))
 
 
 @pytest.fixture(autouse=True)
 def owners_claude_hidden(monkeypatch, path_without_claude):
     monkeypatch.setenv("PATH", path_without_claude)
+
+
+@pytest.fixture
+def codex_installed(tmp_path, monkeypatch, owners_claude_hidden):
+    """The stand-in Codex CLI as `codex` on the PATH, a home of the test's own (where ~/.codex
+    would be); each of its runs is listed (FAKE_CODEX_RUNS)."""
+    home = tmp_path / "home"
+    (home / ".codex").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    command = fake_codex(tmp_path / "fake", monkeypatch)
+    monkeypatch.setenv("PATH", f"{tmp_path / 'fake'}:{os.environ['PATH']}")
+    runs = tmp_path / "codex-runs"
+    monkeypatch.setenv("FAKE_CODEX_RUNS", str(runs))
+    return command, runs
 
 
 @pytest.fixture

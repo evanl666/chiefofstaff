@@ -1137,6 +1137,46 @@ class Workers:
                 self.runtime.add_message(self.runtime.router_id(), "notice", display, meta)
         return self.runtime.view(row)
 
+    def mark_stopped(self, row: dict, by: str, notice: str, full: str):
+        """Its timeline and its task say it stopped (`by`, or `notice`): idle, the task it was
+        on (not one given last that it has not started), or, before it started, those it was
+        given, waiting for the owner to say go on or cancel."""
+        session_id = row["id"]
+        self.runtime.update_session(session_id, status="idle", activity="")
+        said = notice or f"Stopped by {by}."
+        meta = {"stopped": True, **({"full": full} if full else {})}
+        self.runtime.add_message(session_id, "notice", said, meta)
+        on = self.runtime.working_on(session_id) if row["role"] == WORKER else ""
+        stopped = [self.tasks.find(on)] if on else []
+        if row["status"] in {"queued", "starting"} and row["role"] == WORKER:
+            stopped += [t for t in self.tasks.for_session(session_id) if t["status"] == "queued"]
+        for task in {t["id"]: t for t in stopped if t}.values():
+            if task["status"] in {"queued", "running"}:
+                self.store.set(f"stopped:{task['id']}", by)
+                self.store.delete(f"goingon:{task['id']}")
+                self.tasks.move(task["id"], "waiting", progress=said)
+                self.runtime.task_actions.publish(self.tasks.get(task["id"]))
+
+    def paused(self, session_id: str, by: str, notice: str, full: str = ""):
+        """Its agent ended its turn on a limit (its plan's, or a rate limit): left as the owner's
+        Stop leaves it, under Needs you saying why, for the owner to go on once it resets or to
+        continue on another agent; never switched by itself. What it was sent goes with its next
+        message; what it left running stops, as with Stop."""
+        row = self.store.session(session_id)
+        self.runtime.asks.cancel_requests(session_id, f"Stopped by {by}.")
+        self.states[session_id].after_refresh = ""
+        if row["status"] in {"working", "queued", "starting"} or self.states[session_id].held:
+            self.mark_stopped(row, by, notice, full)
+        else:
+            self.runtime.update_session(session_id, status="idle", activity="")
+        self.states[session_id].busy = False
+        self.states[session_id].steps.clear()
+        self.delivery.unsee(session_id)
+        self.delivery.defer_pending(session_id)
+        if session := self.states.handle(session_id):
+            self.runtime.background(stop_background(session))
+        self.runtime.background(self.pump())
+
     async def interrupt(self, session_id: str, by: str = "you", notice: str = "", full: str = ""):
         """`notice`: what its timeline and its stopped task say instead of "Stopped by <by>.";
         `full`: what its task's card says of it, in full (the notice's tooltip)."""
@@ -1150,24 +1190,7 @@ class Workers:
             # Recorded before the abort: the turn's end (idle) can arrive before the abort
             # returns, and must find a deliberate stop, not a worker that ended without a report
             # (nor a silent stall for the Watchdog).
-            self.runtime.update_session(session_id, status="idle", activity="")
-            said = notice or f"Stopped by {by}."
-            meta = {"stopped": True, **({"full": full} if full else {})}
-            self.runtime.add_message(session_id, "notice", said, meta)
-            # The task it was on (not one given last that it has not started), or, before it
-            # started, those it was given: stopped, waiting for the owner to say go on or cancel.
-            on = self.runtime.working_on(session_id) if row["role"] == WORKER else ""
-            stopped = [self.tasks.find(on)] if on else []
-            if row["status"] in {"queued", "starting"} and row["role"] == WORKER:
-                stopped += [
-                    t for t in self.tasks.for_session(session_id) if t["status"] == "queued"
-                ]
-            for task in {t["id"]: t for t in stopped if t}.values():
-                if task["status"] in {"queued", "running"}:
-                    self.store.set(f"stopped:{task['id']}", by)
-                    self.store.delete(f"goingon:{task['id']}")
-                    self.tasks.move(task["id"], "waiting", progress=said)
-                    self.runtime.task_actions.publish(self.tasks.get(task["id"]))
+            self.mark_stopped(row, by, notice, full)
         if session := self.states.handle(session_id):
             await session.abort()
             # A command its turn left running would go on (and end in a turn of its own).

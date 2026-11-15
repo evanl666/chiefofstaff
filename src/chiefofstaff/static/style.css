@@ -648,6 +648,7 @@ a.button:hover { text-decoration: none; opacity: 0.88; }
   color: var(--muted);
   font-size: var(--title);
 }
+#mention-list li.agent .at { flex: none; color: var(--muted); font-weight: 600; }
 #mention-list {
   position: absolute;
   left: 8px;
@@ -675,6 +676,9 @@ a.button:hover { text-decoration: none; opacity: 0.88; }
 #mention-list .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #mention-list .status { color: var(--muted); font-size: var(--small); max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .msg.owner .to { display: flex; align-items: center; min-height: 28px; margin: -6px 0 -2px; font-size: var(--small); font-weight: 400; color: var(--muted); background: none; border: 0; padding: 0; cursor: pointer; }
+.msg.owner span.to { cursor: default; }
+/* A worker's agent where it is not the default (its name; why it fell back to Copilot). */
+.item .agent-badge { flex: none; font-size: var(--small); color: var(--muted); }
 #file-dialog { width: min(900px, calc(100vw - 32px)); }
 #file-dialog .file-head {
   display: flex;
@@ -813,25 +817,38 @@ label.hours input { width: 118px; }
 #learn-state { font-size: var(--small); color: var(--soft); }
 #learn-state.error { color: var(--red); }
 #learn-state:empty { display: none; }
-/* Send to Chief: one line at the end of Connections; its consent, and what it says once on,
-   unfold under its words. */
-.agents-line { display: grid; gap: 12px; }
-/* A link inside its sentence, told apart in both themes by more than its colour. */
-.agents-line small a { text-decoration: underline; }
-.agents-rows { display: grid; gap: 14px; }
-.agent-row { display: grid; gap: 6px; }
-.agent-row > :not(label) { margin-left: 28px; }
+/* Coding agents: a row per agent (its name, Available for workers, its state and plan usage,
+   Advanced folded), then who new workers use once there are two to choose from. */
+.agents-tab { display: grid; gap: 18px; align-content: start; }
+.agents-tab small a { text-decoration: underline; }
+.agents-tab small code, .card.signin .note code { font: var(--small) var(--mono); background: var(--hover); padding: 1px 5px; border-radius: 5px; }
+.agents-intro { max-width: 64ch; line-height: 1.5; }
+.agents-rows { display: grid; gap: 10px; }
+.agent-row { display: grid; gap: 4px; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius); }
+.agent-head { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.agent-head strong { font-weight: 600; }
+.agent-head .agent-switch { margin-left: auto; white-space: nowrap; }
+.agent-row .agent-state, .agent-row .agent-usage { color: var(--soft); }
 .agent-row .agent-problem { color: var(--soft); }
 .agent-row .agent-note { color: var(--muted); }
+.agent-advanced { margin-top: 4px; }
+.agent-advanced > summary { font-size: var(--small); color: var(--muted); cursor: pointer; width: max-content; }
+.agent-advanced[open] > summary { margin-bottom: 8px; }
 /* One that cannot be turned on looks it (its reason in the line under it). */
-.agent-row.disabled > label.check { color: var(--muted); cursor: default; }
-.agent-row.disabled > label.check input { opacity: 0.4; }
-.agents-line small code, .card.signin .note code { font: var(--small) var(--mono); background: var(--hover); padding: 1px 5px; border-radius: 5px; }
+.agent-row.disabled .agent-switch { color: var(--muted); cursor: default; }
+.agent-row.disabled .agent-switch input { opacity: 0.4; }
 .agent-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 220px); align-items: start; gap: 8px 12px; max-width: 580px; }
 .agent-limit { display: grid; gap: 4px; align-content: start; }
 .agent-limit .field-error { color: var(--red); }
-/* The line at the end of Models starts where the hint above it does. */
-#agents-open { padding-inline: 0; }
+.agents-choice { display: grid; gap: 8px; }
+.agents-choice small { color: var(--muted); }
+@media (max-width: 560px) {
+  .agent-head { flex-wrap: wrap; }
+  .agent-head .agent-switch { margin-left: 0; flex-basis: 100%; }
+  .agent-fields { grid-template-columns: minmax(0, 1fr); }
+}
+/* Send to Chief: one line at the end of Connections; its consent, and what it says once on,
+   unfold under its words. */
 .send-line { display: grid; gap: 6px; }
 .send-line > :not(label) { margin-left: 28px; }
 .send-consent { display: grid; gap: 8px; margin-bottom: 4px; }

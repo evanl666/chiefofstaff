@@ -276,7 +276,7 @@ async def test_turning_claude_off_drains_its_workers_and_processes(tmp_path, cla
         assert any("sleep 300" in command for command in processes.values())
         stopped = await saved(runtime, {"claude": {"enabled": False}})
         await settle(runtime)
-        assert stopped == ["Claude is turned off in Settings → Models."]
+        assert stopped == ["Claude is turned off in Settings → Coding agents."]
         assert runtime.connection("claude") == (None, 1) and not backend.alive()
 
         def gone():
@@ -611,6 +611,8 @@ async def test_a_claude_workers_schedule_is_kept_holds_its_process_and_fires_as_
         tmp_path, "Report done: set. Schedule 'Run the shell command `echo tick`' every minute."
     )
     try:
+        # (It reports first, then schedules: its report alone does not say the schedule is made.)
+        await until(lambda: harness.store.get(f"agentschedules:{worker}"), 10)
         kept = json.loads(harness.store.get(f"agentschedules:{worker}") or "[]")
         assert [(e["prompt"], e["recurring"]) for e in kept] == [
             ("Run the shell command `echo tick`", True)

@@ -134,6 +134,7 @@ from .workspaces import (
     ABSENT_HELD_CLI,
     BRANCH_PREFIX,
     Workspaces,
+    checkout_git,
     common_git_dir,
     git_dirs,
     holds_alternates,
@@ -286,6 +287,8 @@ SENT_AGAIN_SECONDS = 600
 
 # How long a turn of another agent waits for what the last one spent (seconds).
 USAGE_SETTLES = 60.0
+# How long which other agents are installed here is taken as known (agents_found).
+FOUND_SECONDS = 60.0
 # How soon an agent's check that could not run is tried again, at the earliest (seconds); and
 # how soon after its last a worker's process stopping by itself again fails it instead of
 # starting another (never a loop of starts).
@@ -331,7 +334,7 @@ class AgentConnection:
     connections: int = 0
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     watch: asyncio.Task | None = None
-    # Whether the owner has it turned on (Settings → Models): off, none of its workers runs.
+    # Whether the owner has it turned on (Settings → Coding agents): off, none of its workers runs.
     enabled: Callable[[], bool] = lambda: True
     # It stopped by itself and could not start again: it is tried again with its next worker's
     # message (Settings says so).
@@ -557,6 +560,11 @@ class Runtime:
         }
         # Each agent's models, as last listed (Copilot's are in models_cache).
         self.agent_models_cache: dict[str, tuple[float, list[dict]]] = {}
+        # Other agents installed here (agents_found), and the first-run cards for those
+        # installed and signed in that the owner was never asked about (offer_agents).
+        self.found_cache: tuple[float, list[str]] = (float("-inf"), [])
+        self.offers: dict[str, dict] = {}
+        self.offering: asyncio.Task | None = None
         # Every turn of another agent's worker begins only once admitted (admit_turn), one at a
         # time; what can make a worker ineligible bumps the generation under this lock first.
         self.admission = asyncio.Lock()
@@ -985,6 +993,8 @@ class Runtime:
             self.background(self.workers.pump())
             self.background(self.workers.refresh_elsewhere())
             self.background(self.github.signed_in())  # Which GitHub accounts workers can use.
+            # Installed, signed in, never asked: a card (`offering`: until it has looked).
+            self.offering = self.background(self.offer_agents())
 
     def backend_note(self, text: str) -> None:
         """What Copilot's start is doing when it takes a while: said as it connects."""
@@ -1164,9 +1174,7 @@ class Runtime:
                 backend.on_start = lambda: self.agent_process_started(agent, backend)  # type: ignore[attr-defined]
             if hasattr(backend, "on_limit"):
                 # A plan's limit as a worker's stream said it (nothing about the account).
-                backend.on_limit = lambda limit: self.store.set(  # type: ignore[attr-defined]
-                    f"agentlimit:{agent}", json.dumps(limit)
-                )
+                backend.on_limit = lambda limit: self.plan_limit_seen(agent, limit)  # type: ignore[attr-defined]
             if hasattr(backend, "on_refused"):
                 backend.on_refused = lambda why: self.agent_gate_failed(agent, backend, why)  # type: ignore[attr-defined]
             entry.backend = backend
@@ -1412,7 +1420,7 @@ class Runtime:
     # Admission: whether another agent's worker may run now. Copilot's sessions always may.
 
     def turned_off(self, agent: str) -> str:
-        return f"{agents.display(agent)} is turned off in Settings → Models."
+        return f"{agents.display(agent)} is turned off in Settings → Coding agents."
 
     @staticmethod
     def not_on_windows(agent: str) -> str:
@@ -1608,19 +1616,37 @@ class Runtime:
                     self.update_session(row["id"], status="working")
                 self.halted.add(row["id"])
                 with suppress(Exception):
-                    await self.workers.interrupt(row["id"], by="Settings")
+                    if paused := self.plan_paused(named[row["id"]], why):
+                        await self.workers.interrupt(row["id"], by=agents.PLAN_STOP, notice=paused)
+                    else:
+                        await self.workers.interrupt(row["id"], by="Settings")
                 stopped[row["id"]] = why
         return list(stopped.values())
 
     async def stop_blocked(self, session_id: str, why: str):
         """A turn of a worker that may not run now began anyway (its admission held as a change
-        came): stopped at its first event, as stop_ineligible stops one at work, saying why."""
+        came): stopped at its first event, as stop_ineligible stops one at work, saying why (its
+        plan's limit: paused, as when its request is refused)."""
         self.halted.add(session_id)
         with suppress(Exception):
-            await self.workers.interrupt(session_id, by="Settings", notice=f"Stopped: {why}")
+            if paused := self.plan_paused(self.agent(session_id), why):
+                await self.workers.interrupt(session_id, by=agents.PLAN_STOP, notice=paused)
+            else:
+                await self.workers.interrupt(session_id, by="Settings", notice=f"Stopped: {why}")
 
-    async def agents_saved(self, before: dict[str, dict]) -> list[str]:
-        """The owner saved the Coding agents group (Settings → Models): an agent turned on
+    def plan_paused(self, agent: str, why: str) -> str:
+        """What a worker's timeline says when `why` it may not run is its agent's plan's limit
+        reached ("" for any other reason): paused, not stopped by Settings."""
+        entry = self.agents.get(agent)
+        backend = entry.backend if entry else None
+        refusal = getattr(backend, "limit_refusal", None)
+        if not why or not callable(refusal) or refusal() != why:
+            return ""
+        line = agents.limit_line(getattr(backend, "limit", {}), name=agent)
+        return f"Paused: {line}" if line else ""
+
+    async def agents_saved(self, before: dict[str, dict], chose: bool | None = None) -> list[str]:
+        """The owner saved the Coding agents tab (or answered a first-run card): an agent turned on
         starts with its first worker; one turned off drains (more-agents.md 5.11): its workers
         stop at once with their commands, its process ends, and with none on the Router's tools
         and prompt are as without agents. Workers whose model came from the group take the new
@@ -1631,6 +1657,11 @@ class Runtime:
         for name in now:
             if name not in self.agents:
                 self.agents[name] = self.agent_connection(name)
+            # Decided on in Settings: its first-run card is not shown again (nor once off).
+            if not self.store.get(f"{agents.OFFERED}{name}"):
+                self.store.set(f"{agents.OFFERED}{name}", "settings")
+            if self.offers.pop(name, None):
+                self.publish_state()
         stopped = await self.stop_ineligible()
         for name in sorted(set(was_on) - set(now)):
             if self.agents[name].backend:
@@ -1641,7 +1672,7 @@ class Runtime:
             self.store.delete(f"agentpids:{name}")
             await asyncio.to_thread(agents.clear_private, self.agent_folder(name))
             self.agents[name].offline = False
-        if was_on != now:
+        if was_on != now or (chose is not None and chose != agents.router_chooses(self.store)):
             await self.refresh(ROUTER)  # Its spawn_worker and prompt name the agents on.
         retuned = {
             name
@@ -1821,7 +1852,9 @@ class Runtime:
         elif self.store.agent_spent(row["id"]) < limit:
             why = f"Its token limit is {limit:,} now: Go on continues."
         else:
-            why = f"Used its {limit:,}-token limit. Raise it in Settings → Models, or cancel."
+            why = (
+                f"Used its {limit:,}-token limit. Raise it in Settings → Coding agents, or cancel."
+            )
         return {"spend_stop": "limit", "spend_why": why, "go_on": not self.agent_block(row)}
 
     def record_agent_usage(self, row: dict, data: Any):
@@ -1942,7 +1975,7 @@ class Runtime:
         if tasks and tasks[-1]["status"] == "failed":
             return "Retry its task to accept that and let it continue."
         name = agents.display(self.agent(row["id"]))
-        return f"turn its limit off in Settings → Models ({name}) to let it continue."
+        return f"turn its limit off in Settings → Coding agents ({name}) to let it continue."
 
     async def ensure_spend_card(self, row: dict) -> dict | None:
         """A worker with a token limit whose spend is partly unknown, not accepted: the Go on
@@ -2814,7 +2847,11 @@ class Runtime:
         if row["role"] == ROUTER and settings.send_to_chief:
             prompt = prompts.with_send_rule(prompt)
         if row["role"] == ROUTER and (on := self.agents_on()):
-            prompt = prompts.with_agents_rule(prompt, [agents.display(name) for name in on])
+            prompt = prompts.with_agents_rule(
+                prompt,
+                [agents.display(name) for name in on],
+                chooses=agents.router_chooses(self.store),
+            )
         if (profile := self.store.get("profile", "")) and row["role"] != WATCHDOG:
             prompt += f"\n<owner_profile>\n{profile}\n</owner_profile>"
         prompt += self.learning.block(row)
@@ -2833,9 +2870,11 @@ class Runtime:
         prompt = self.session_prompt(row, sandbox)
         tools = [self.tools[name] for name in self.tool_names(row)]
         if row["role"] == ROUTER and (on := self.agents_on()):
-            # Its spawn_worker names the agents on (as without them otherwise).
+            # Its spawn_worker names the agents on (as without them otherwise), and it can move a
+            # worker's work to another (continue_worker).
             spawn = self.toolset.spawn_on(on)
             tools = [spawn if tool.name == "spawn_worker" else tool for tool in tools]
+            tools.append(self.toolset.continue_on(on))
         options: dict[str, Any] = {
             # Copilot's record of past sessions, which the owner's own sessions can search: for
             # workers that do not read Slack. Sessions that read Slack are not recorded in it,
@@ -3024,6 +3063,162 @@ class Runtime:
     def agent_notice(self, row: dict, text: str):
         self.add_message(row["id"], "notice", text)
 
+    def agent_refused_card(self, agent: str, why: str, params: dict):
+        """A worker the owner named an agent for could not start on it (more-agents.md 5.12.8,
+        recovery): the Router says why, and the owner's card in its chat offers what to do
+        (sign-in help, run it on Copilot instead, or wait); nothing starts elsewhere unasked."""
+        key = uuid4().hex[:10]
+        self.store.set(f"agentrefusal:{key}", json.dumps({"agent": agent, "params": params}))
+        self.add_message(
+            self.router_id(),
+            "notice",
+            f"“{params.get('title') or 'The task'}” did not start on {agents.display(agent)}: "
+            f"{why}",
+            {"agent_refused": key, "agent": agent},
+        )
+
+    async def answer_refusal(self, key: str, action: str) -> dict:
+        """The owner's answer on an agent refusal's card: start it on Copilot instead, or wait
+        (nothing starts; they ask again once the agent can run it)."""
+        raw = self.store.get(f"agentrefusal:{key}")
+        if not raw:
+            raise ValueError("That card was answered already.")
+        found = json.loads(raw)
+        self.store.delete(f"agentrefusal:{key}")
+        if action != "copilot":
+            self.add_message(
+                self.router_id(),
+                "notice",
+                f"Waiting for {agents.display(found['agent'])}: ask again once it can run it.",
+            )
+            return {}
+        from .tools import SpawnWorker
+
+        params = {k: v for k, v in found["params"].items() if k != "agent"} | {"model": ""}
+        await self.toolset.t_spawn_worker(
+            SpawnWorker.model_validate(params), self.router_id(), agent=COPILOT_AGENT
+        )
+        self.add_message(
+            self.router_id(), "notice", f"Started “{params.get('title')}” on Copilot instead."
+        )
+        return {}
+
+    def plan_limit_seen(self, agent: str, limit: dict):
+        """An agent's plan limit as its worker last said it: Settings says it. A worker pauses
+        only when its own request is refused (Events.plan_limited): a plan's limit reached with
+        extra usage on refuses nothing, and each other worker meets it on its next request."""
+        self.store.set(f"agentlimit:{agent}", json.dumps(limit))
+
+    async def continue_on(self, session_id: str, agent: str) -> dict:
+        """Continue with <agent>… (the owner's, from a worker's ⋯ or by asking the Router): a
+        new worker on that agent goes on with this one's work, in its folders (its checkouts
+        handed over: never two writing them), from a summary of where it stands; this one
+        closes, linked to it. Only an idle worker of the owner's; the agent must be able to
+        run it now (else why not, nothing changed)."""
+        row = self.store.session(session_id)
+        if row["role"] != WORKER or row["closed_at"] or self.special(row):
+            raise ValueError("Only an open worker of yours can continue on another agent.")
+        if row["status"] in {"working", "starting", "queued"} or self.states[session_id].held:
+            raise ValueError("It is at work: stop it first, or wait until it is done.")
+        if self.is_elsewhere(row):
+            raise ValueError("It is open in a terminal: exit it there first.")
+        current = self.agent(session_id)
+        if agent == current:
+            raise ValueError(f"It already runs on {agents.display(agent)}.")
+        if agent != COPILOT_AGENT:
+            await self.new_worker_agent(agent, bool(row["slack"]))  # Raises why it cannot.
+        summary = await self.handoff_summary(row, current)
+        new_id = str(uuid4())
+        title = row["title"]
+        if self.states.is_live(session_id):
+            await self.detach(session_id)
+        self.store.create_session(
+            new_id, WORKER, title, "queued", cwd=row["cwd"], branch=row["branch"],
+            slack=row["slack"],
+        )  # fmt: skip
+        if agent != COPILOT_AGENT:
+            self.store.set(f"agent:{new_id}", agent)
+            self.store.set(f"created:{new_id}", "1")
+        self.store.set(f"workspace:{new_id}", str(self.workspaces.workspace(row)))
+        # Its task, folders and permission checks as this one's (Ask first, if chosen for it).
+        self.store.update_session(
+            new_id,
+            task=row["task"] or "",
+            project=row["project"] or "",
+            repos=row["repos"] or "[]",
+            yolo=row["yolo"] or "",
+        )
+        # Its checkouts are the new worker's now: closing this one removes none of them.
+        self.store.update_session(session_id, repos="[]", project="")
+        self.store.set(f"continued:{session_id}", new_id)
+        self.store.set(f"continues:{new_id}", session_id)
+        task = self.tasks.create(new_id, title, summary[:4000])
+        self.add_message(
+            session_id,
+            "notice",
+            f"Continued on {agents.display(agent)} by a new worker, “{title}”, in its folders.",
+            {"continued": new_id},
+        )
+        self.add_message(
+            new_id,
+            "notice",
+            f"Continues “{title}” from a summary of the worker that ran on "
+            f"{agents.display(current)} (not its whole conversation).",
+            {"continues": session_id},
+        )
+        # Its first message, as a new worker's task is given (spawn_worker).
+        prompt = wrap("router", "task", summary, title=title, task=task["id"])
+        self.add_message(new_id, "router", summary, {"prompt": prompt, "task_id": task["id"]})
+        await self.workers.close(session_id, by="you")
+        self.publish_session(self.store.session(new_id))
+        self.background(self.workers.pump())
+        return {"session_id": new_id, "task_id": task["id"]}
+
+    async def handoff_summary(self, row: dict, agent: str) -> str:
+        """What the worker that continues another's work is told (its first message): the
+        task, where it stands (its last results and words), and its folders' state (branch,
+        what changed and is not committed); its earlier conversation is not given."""
+        lines = [
+            f"You continue the work of another worker, “{row['title']}”, which ran on "
+            f"{agents.display(agent)}: the owner moved it to you. You get a summary, not its "
+            "conversation: say so in your first reply, in one line.",
+            "",
+            f"Its task:\n{(row['task'] or row['title']).strip()[:3000]}",
+        ]
+        tasks = self.tasks.for_session(row["id"])
+        if results := [t["result"] for t in tasks if t.get("result")][-2:]:
+            lines += ["", "What it reported:", *[f"- {clip_words(r, 1500)}" for r in results]]
+        said = [
+            m["text"]
+            for m in self.store.messages(row["id"])
+            if m["kind"] in {"assistant", "owner"} and m["text"]
+        ][-4:]
+        if said:
+            lines += ["", "Its last messages (the owner's and its own):"]
+            lines += [f"- {clip_words(text, 800)}" for text in said]
+        for checkout in self.workspaces.checkouts(row)[:5]:
+            path = checkout.get("path") or ""
+            if not path or not await asyncio.to_thread(os.path.isdir, path):
+                continue
+            state = ""
+            with suppress(Exception):
+                branch = await checkout_git(checkout, path, "rev-parse", "--abbrev-ref", "HEAD")
+                status = await checkout_git(checkout, path, "status", "--short")
+                changed = status.strip().splitlines()
+                state = f"on {branch.strip()}; " + (
+                    f"{len(changed)} uncommitted change(s): "
+                    + ", ".join(line[3:] for line in changed[:20])
+                    if changed
+                    else "nothing uncommitted"
+                )
+            lines += ["", f"Folder {path}: {state or 'as it was'}."]
+        lines += [
+            "",
+            "Look at the folder (git log, git diff) for what it did before you go on, then go "
+            "on with the task and report as any worker does.",
+        ]
+        return "\n".join(lines)
+
     async def agent_worktree(self, session_id: str, path: str, removed: bool) -> None:
         """A worktree another agent made for a worker (Claude's EnterWorktree, a subagent's
         isolation): one of its checkouts from then on, as one it made with `git worktree add`
@@ -3155,7 +3350,8 @@ class Runtime:
         if backend is None:
             return models
         models = [described(model) for model in await backend.list_models()]
-        self.agent_models_cache[name] = (time.monotonic(), models)
+        if getattr(backend, "models_known", True):
+            self.agent_models_cache[name] = (time.monotonic(), models)
         return models
 
     def agent_model_info(self, agent: str, model: str) -> dict | None:
@@ -3165,7 +3361,7 @@ class Runtime:
         return wanted[0] if wanted else None
 
     async def look_for_agents(self) -> dict:
-        """What the Coding agents group in Settings → Models shows, looked for only once the
+        """What Settings' Coding agents tab shows, looked for only once the
         owner opens it: each supported agent found on this computer (or on), with its version
         and sign-in or why its workers cannot run here, and its models."""
         settings = self.store.settings()
@@ -3175,6 +3371,7 @@ class Runtime:
             # What it supports, for when none is found ("the Codex CLI").
             "supported": [agents.INSTALL[name] for name in agents.NAMES],
             "new_workers": agents.new_workers(self.store),
+            "router_chooses": bool(agents.stored(self.store).get(agents.ROUTER_CHOOSES)),
             "sandboxed": bool(settings.worker_sandbox and self.sandbox_host),
         }
 
@@ -3208,7 +3405,8 @@ class Runtime:
             entry["problem"] = describe(exc)
             return entry
         models = [described(model) for model in facts["models"]]
-        self.agent_models_cache[name] = (time.monotonic(), models)
+        if facts.get("models_known", True):
+            self.agent_models_cache[name] = (time.monotonic(), models)
         key = facts.get("check_key") or facts["version"]
         try:
             checked = json.loads(self.store.get(f"agentcheck:{name}:{key}") or "{}")
@@ -3224,8 +3422,14 @@ class Runtime:
             entry["state"] = f"{facts['version']} · {signed}"
         if note := agents.PLAN_NOTES.get(facts["account"]):
             entry["note"] = note
-        if limit := agents.plan_limit(self.store, name, facts.get("limit")):
-            entry["limit_line"] = limit
+        usage = agents.plan_usage(self.store, name, facts)
+        if usage:
+            entry["usage"] = usage
+        # Its plan's limit in words where its usage line does not say it already: reached with
+        # no percent known, or reached with extra usage carrying its workers on.
+        live = agents.live_limit(self.store, name, facts.get("limit"))
+        if (not usage or live.get("extra")) and (line := agents.limit_line(live, name=name)):
+            entry["limit_line"] = line
         return entry
 
     def check_agents(self, plan: dict | None, settings: Settings):
@@ -3296,7 +3500,63 @@ class Runtime:
             "on": on,
             "names": {name: agents.display(name) for name in on},
             "new_workers": agents.new_workers(self.store),
+            "router_chooses": agents.router_chooses(self.store),
         }
+
+    def agents_found(self) -> list[str]:
+        """The other agents installed here (their CLI on the PATH: nothing runs), looked at a
+        minute apart at most; none on Windows, nor in the demo (its own world)."""
+        if getattr(self, "demo", False):
+            return []
+        at, found = self.found_cache
+        if time.monotonic() - at > FOUND_SECONDS:
+            found = agents.found()
+            self.found_cache = (time.monotonic(), found)
+        return found
+
+    async def offer_agents(self):
+        """Each agent installed and signed in that the owner was never asked about: a first-run
+        card on Home (agent_offers), once its look (as Settings looks, in Chief of Staff's own
+        folder: its version and sign-in, nothing written of the owner's) finds it can run."""
+        on = agents.turned_on(self.store)
+        for name in self.agents_found():
+            if name in on or self.store.get(f"{agents.OFFERED}{name}") or name in self.offers:
+                continue
+            try:
+                entry = await self.look_for_agent(name)
+            except Exception:
+                logger.info("Could not look at %s for its first-run card.", name, exc_info=True)
+                continue
+            decided = self.store.get(f"{agents.OFFERED}{name}")
+            if entry.get("version") and not entry.get("problem") and not decided:
+                self.offers[name] = {
+                    "name": name,
+                    "label": entry["label"],
+                    "state": entry.get("state") or "",
+                    **({"note": entry["note"]} if entry.get("note") else {}),
+                }
+                self.publish_state()
+
+    def agent_offers(self) -> list[dict]:
+        on = agents.turned_on(self.store)
+        return [offer for name, offer in self.offers.items() if name not in on]
+
+    async def answer_offer(self, name: str, allow: bool) -> dict:
+        """The owner's answer on an agent's first-run card: Allow turns it on (as Settings
+        would; new workers stay on Copilot), Not now leaves it off. Asked once either way."""
+        if name not in agents.NAMES:
+            raise ValueError(f"Chief of Staff does not run {name!r}.")
+        stopped: list[str] = []
+        if allow:
+            plan = agents.planned(self.store, {name: {"enabled": True}})
+            self.check_agents(plan, self.store.settings())
+            before = agents.configured(self.store)
+            if agents.save(self.store, plan):
+                stopped = await self.agents_saved(before)
+        self.store.set(f"{agents.OFFERED}{name}", "allowed" if allow else "not now")
+        self.offers.pop(name, None)
+        self.publish_state()
+        return {"stopped": stopped}
 
     def agent_view(self, row: dict, agent: str) -> dict:
         """What a worker's view says of the agent it runs on, when that is not Copilot: its
@@ -3316,6 +3576,7 @@ class Runtime:
             "context": "",
             "credits": 0,
             "tokens": self.store.agent_spent(row["id"]),
+            "token_limit": agents.limit(self.store, agent),
             "agent_notes": notes(not self.yolo(row))
             if (notes := getattr(backend, "notes_for", None))
             else [],
@@ -5630,12 +5891,15 @@ class Runtime:
         attachments: Sequence[Attachment] = (),
         clear_questions: bool = True,
         from_home: bool = False,
+        agent: str = "",
         task_id: str = "",
     ) -> dict:
         """`learn`: the owner typed it (not a message the app sends for them). A message to a
         worker is also noted for the Router (`tell_router`), which must know what the owner
         asked for. `from_home`: written on Home (@ a worker), where its answer is shown too.
-        `task_id`: the task of the worker's they look at in its chat (see chat_task)."""
+        `agent`: the coding agent the owner chose for it in the composer (@codex: the Router's
+        new workers for it run there). `task_id`: the task of the worker's they look at in its
+        chat (see chat_task)."""
         row = self.store.session(session_id)
         if row["closed_at"] and row["role"] == WORKER:
             await self.workers.reopen(session_id, restore=True)
@@ -5713,6 +5977,13 @@ class Runtime:
             meta["ref"] = "o" + uuid4().hex[:6]
             prompt = wrap("owner", "message", text, ref=meta["ref"], reply_in=spoken)
             notes += [self.projects_note(), self.toolset.related_hint(text)]
+            if agent in {COPILOT_AGENT, *self.agents_on()}:
+                # Chosen in the composer: as if they had named it.
+                meta["agent"] = agent
+                notes.append(
+                    f"The owner chose {agents.display(agent)} for this: spawn_worker's agent "
+                    f'is "{agent}" for the workers it needs.'
+                )
         was = self.store.value("SELECT task_id FROM sessions WHERE id=?", (session_id,))
         if apart:
             about = made = self.new_chat_task(session_id, text)
@@ -6582,6 +6853,18 @@ class Runtime:
                 if self.agents and (agent := self.agent(row["id"])) != COPILOT_AGENT
                 else {}
             ),
+            # One the agent Settings chose could not run: why it runs on Copilot (its badge).
+            **(
+                {"agent_fallback": why}
+                if self.agents and (why := self.store.get(f"agentfallback:{row['id']}"))
+                else {}
+            ),
+            # Continued on another agent: the worker that goes on with its work.
+            **(
+                {"continued": new}
+                if self.agents and (new := self.store.get(f"continued:{row['id']}"))
+                else {}
+            ),
         }
 
     async def read_file(self, raw: str, session_id: str = "") -> dict:
@@ -7089,8 +7372,17 @@ class Runtime:
                 for task in self.tasks.listed(include_ended_since=hours_ago(TASKS_SHOWN_HOURS))
             ],
             "settings": self.store.settings().model_dump(),
-            # Only while another coding agent is on: Settings → Models shows its group.
+            # Only while another coding agent is on: Settings' Coding agents tab shows it.
             **({"agents": self.agents_view()} if self.agents_on() else {}),
+            # Only where another agent is installed: its Settings tab, and first-run cards.
+            **({"agents_found": found} if (found := self.agents_found()) else {}),
+            **({"agent_offers": offers} if (offers := self.agent_offers()) else {}),
+            # Cards for workers their named agent could not start, not answered yet.
+            **(
+                {"agent_refusals": sorted(refusals)}
+                if (refusals := self.store.items("agentrefusal:"))
+                else {}
+            ),
             # Configured projects and the code folder's repositories (where a habit applies).
             "projects": self.workspaces.projects(),
             # Configured projects whose folder is gone: Settings says so.

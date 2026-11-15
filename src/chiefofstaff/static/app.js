@@ -4,7 +4,7 @@ import { $, api, closeMenus, closeOnBackdrop, rememberKey, submits, toast } from
 import { byId, connectEvents, current, HOME, loadModels, loadState, markRead, othersOn, routerId, state, viewedId } from "./state.js";
 import { externalItem, bindSidebarToggle, loadExternal } from "./sidebar.js";
 import { appendMessages, chatAnchor, followAnchor, renderHeader, scrolledByOwner, scrollToBottom, select } from "./session.js";
-import { closeMentions, mention, onComposerInput, onMentionKey, routerSide, setRecipient } from "./mention.js";
+import { closeMentions, mention, onComposerInput, onMentionKey, routerSide, setAgent, setRecipient } from "./mention.js";
 import { openFile } from "./files.js";
 import { scheduleHome, showHomeTab } from "./inbox.js";
 import { attachmentBody, bindAttachments, hasAttachments, restoreAttachments, showLength, takeAttachments, tooLong } from "./composer.js";
@@ -53,6 +53,8 @@ function bindUi() {
     input.value = "";
     autosize();
     const to = routerSide() ? mention.to : null;
+    // The agent chosen with @ for what this asks (only from Home, only while agents are on).
+    const agent = routerSide() && !to && mention.agent ? mention.agent.name : "";
     // Images go along only when there are any: a server without them takes the message as before.
     const body = (extra = {}) => ({ text, ...extra, ...(files.length ? { attachments: attachmentBody(files) } : {}) });
     try {
@@ -78,7 +80,8 @@ function bindUi() {
       }
       // About the task of the worker's the owner looks at in its chat (several to choose from).
       const task = chatAnchor();
-      appendMessages([await api(`/api/sessions/${viewedId()}/messages`, { method: "POST", body: body(task ? { task_id: task } : {}) })]);
+      appendMessages([await api(`/api/sessions/${viewedId()}/messages`, { method: "POST", body: body({ ...(agent ? { agent } : {}), ...(task ? { task_id: task } : {}) }) })]);
+      if (agent) setAgent(null);
     } catch (error) {
       if (other) input.disabled = false;
       input.value = text;
