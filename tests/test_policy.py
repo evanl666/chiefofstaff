@@ -250,6 +250,14 @@ BYPASSES = [
     # (A zsh 200k run.) A switch and a push in folders not known are not the same folder.
     "eval :; git switch -c fix && cd ../main && git push",
     "eval :; git switch main && env -C ../main git push",
+    # (A bash 3.2 200k run.) The checkout's branch put in a line a command runs is the branch
+    # where it was put in, before that line goes elsewhere.
+    'eval "cd ../other && git push origin "$(git branch --show-current)""',
+    'sh -c "cd ../other; git push origin $(git branch --show-current)"',
+    'env -C ../other sh -c "git push origin $(git branch --show-current)"',
+    # (A zsh 200k run.) The user's git configuration is where HOME says.
+    'HOME="$PWD" git push',
+    "export XDG_CONFIG_HOME=.config; git push origin",
 ]
 # What a worker does every day, on its own branch: let through.
 EVERYDAY = [
@@ -311,6 +319,8 @@ EVERYDAY = [
     'cp "$SRC" push.txt && git push origin wb/x',
     "git push origin $(git branch --show-current):wb/y",
     'git push origin "$B:wb/x"',
+    'eval "git push origin $(git branch --show-current)"',
+    'sh -c "git push -u origin $(git branch --show-current)"',
 ]
 # On a checkout of main itself: pushes that update no branch, or one the line made.
 ON_MAIN_ALLOWED = [

@@ -916,7 +916,7 @@ def captured(epoch: int) -> str:
 
 
 CAPTURED = re.compile(re.escape(CURRENT) + r"\x00[0-9]+")
-CURRENTS = re.compile(re.escape(CURRENT) + r"(?:\x00[0-9]+)?")
+CURRENTS = re.compile(re.escape(CURRENT) + r"(?:\x00([0-9]+))?")
 
 
 DESTINATION_STOPS = re.compile(r"\$\(|\$\{|[`)}:]")
@@ -1509,6 +1509,12 @@ class Tally:
         """Whether `$PWD` is the folder a command runs in: the line names PWD only to read it."""
         every, read = self.named()
         return not every.get("IFS") and every.get("PWD", 0) == read.get("PWD", 0)
+
+    def homed(self) -> bool:
+        """Whether the user's git configuration may be another file than the one asked of git
+        (config_entries): the line names HOME or XDG_CONFIG_HOME but to read them."""
+        every, read = self.named()
+        return any(every.get(name, 0) > read.get(name, 0) for name in ("HOME", "XDG_CONFIG_HOME"))
 
     def reads(self, text: str):
         self.read += len(text)
@@ -2372,9 +2378,24 @@ def read_code(
         tally.outer_zsh, tally.shell = tally.modifiers, shell
     tally.modes = (line.physical, line.physical_unsure) if modes is None else modes
     try:
-        return read_line(script, folder, line.depth + 1, tally)
+        return read_line(handed(script, line, folder), folder, line.depth + 1, tally)
     finally:
         tally.here, tally.shell, tally.modes, tally.outer_zsh = before
+
+
+def handed(script: str, line: Line, folder: str) -> str:
+    """A line's text handed to a command that runs it (`eval`, `sh -c`), the checkout's branch
+    as its substitutions made it in (CURRENT, or a variable that still holds it: captured) put
+    in as what the line run holds from its start (captured(0)): its branch only until a `cd`
+    or a switch there (Line.epoch); not known when it runs elsewhere (`env -C DIR sh -c`)."""
+    if CURRENT not in script:
+        return script
+
+    def put(found: re.Match) -> str:
+        now = found.group(1) is None or int(found.group(1)) == line.epoch
+        return captured(0) if now and folder == line.folder else MADE_UP
+
+    return CURRENTS.sub(put, script)
 
 
 def read_git(
@@ -2636,6 +2657,8 @@ def read_pushes(command: str, cwd: str, shell: str) -> tuple[tuple[Push, ...], s
                 push.unknown = push.unknown or push.alt_unknown
                 push.bare_check, push.alt_new, push.alt_also = False, "", frozenset()
             push.upstreams_set = tally.upstreams_set
+            if (push.configured or push.mapped) and tally.homed():
+                push.unknown = True  # Where its configuration sends it: in a file not asked.
             anywhere = push.nested or tally.background
             push.bare_also |= tally.aside | (tally.top if anywhere else set())
             push.unknown = push.unknown or tally.aside_unknown

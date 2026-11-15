@@ -283,7 +283,11 @@ class Sandbox:
     def reset(self, preset: str = ""):
         make_repository(self.root / "main", "main", PRESETS[preset])
         make_repository(self.root / "feat", "feat", PRESETS[preset])
-        (self.root / ".shimconfig").unlink(missing_ok=True)
+        # (The user's settings `git config --global` wrote, wherever HOME was: a zsh run read
+        # one a line before had left in a checkout, with `HOME="$PWD"`.)
+        for folder in (self.root, *(self.root / name for name in ("main", "feat", "plain"))):
+            for found in (folder, *(path for path in folder.glob("*") if path.is_dir())):
+                (found / ".shimconfig").unlink(missing_ok=True)
 
     def folder(self, name: str) -> Path:
         return (self.root / name).resolve()
@@ -965,6 +969,15 @@ FOUND = [
     ("{ eval 'builtin declare CDPATH=/ || while false; do command git push -u origin HEAD; done'; }; (git switch feat && env -P ~/bin -C ~/main git push)", 'feat/sub'),  # noqa: E501
     ('pushd "$(git rev-parse --show-toplevel)/../main"; { git switch feat && git push -o x origin; }', 'feat/sub', 'upstream'),  # noqa: E501
     ('eval :; git switch -c fix && cd ../main && git push', 'feat'),
+    # Found by the bash 3.2 200k run on 9b2859f: the checkout's branch a substitution put in a
+    # line `eval` runs is the branch where it ran, before the `cd` that line makes.
+    ('eval "cd ../feat && env git subtree -P sub push origin "$(git symbolic-ref -q --short HEAD)"" && eval \'if true; then :; else set -o chaselinks; true; fi\'', 'main'),  # noqa: E501
+    ('eval "cd ../feat && git push origin "$(git branch --show-current)""', 'main'),
+    ('sh -c "cd ../feat; git push origin $(git branch --show-current)"', 'main'),
+    ('env -C ../feat sh -c "git push origin $(git branch --show-current)"', 'main'),
+    # Found by the zsh 200k run on 9b2859f (a file a line before had left): the user's settings
+    # are where HOME says; a line that sets it can't tell where its pushes go.
+    ("echo push.default=matching > .shimconfig; { HOME=\"$PWD\" && PWD=\"$PWD\" \\git push origin; }", 'feat'),  # noqa: E501
 ]  # fmt: skip
 
 
