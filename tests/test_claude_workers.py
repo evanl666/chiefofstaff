@@ -92,7 +92,12 @@ async def claude_worker(tmp_path, instructions="Report done: Fixed it.", named=T
     )
     worker = result["session_id"]
     await until(lambda: harness.store.session(worker)["status"] == "done", 30)
-    await until(lambda: harness.store.agent_spent(worker) > 0, 30)
+
+    def over() -> bool:  # Its report comes before its turn's end, and what that turn spent.
+        session = runtime.states.handle(worker)
+        return not (session and session.worker.turn) and harness.store.agent_spent(worker) > 0
+
+    await until(over, 30)
     return harness, runtime, worker, result["task_id"]
 
 
