@@ -2,6 +2,42 @@
 
 ## Unreleased
 
+Workers can run on Claude Code too, with your own sign-in; choosing an agent is simpler (a card
+when one is ready, `@codex` and `@claude` in the message box, a *Coding agents* tab); workers on
+Codex and Claude can do what Copilot workers can.
+
+- **Workers on Claude Code.** If you also use
+  [Claude Code](https://docs.claude.com/en/docs/claude-code), workers can run on it, with whatever your `claude` is signed in with (a Claude plan, an API
+  key, a cloud): Chief of Staff has no sign-in of its own for it and never reads yours. Each
+  Claude worker runs your installed `claude` in its own process, through Chief of Staff's
+  optional extra (`uv tool install 'chiefofstaff[claude]'`), and is followed as any worker:
+  receipts, reviews, check-backs, *Stop*, *Go on*. *Ask first* and the worker sandbox work on
+  the versions Chief of Staff's check proves (2.1.322 and later, each checked on this machine
+  without a model); Claude's worktrees, scheduled turns, plan mode, subagents and messages from
+  other Claude sessions are tied into Chief of Staff's checks, receipts and timeline; its auto
+  memory is off in workers; its spend is counted in tokens as it goes. On a Claude plan, Claude
+  workers count against your plan's usage limits, under Anthropic's terms. See
+  [Workers on other coding agents](docs/guide.md#workers-on-other-coding-agents).
+- **Choosing the agent.** With only Copilot installed, nothing changes. Once Codex or Claude
+  Code is installed and signed in, Home asks once whether workers may use it; Settings has a
+  *Coding agents* tab (each agent's version, sign-in and plan usage, with a chip from 80%, and
+  its model and token limit under *Advanced*) instead of a line under *Models*. Type `@codex`,
+  `@claude` or `@copilot` to run a task there; optionally let the Router choose (it says which
+  and why). Worker rows and headers name the agent and model.
+- **When an agent can't run:** a task you put on it is not moved elsewhere: the Router's card
+  offers sign-in help, waiting, or running it on Copilot. A worker whose plan's usage limit (or
+  a rate limit) is reached mid-task pauses under *Needs you* with when it resets, instead of
+  failing or retrying. *Continue with* another agent (a worker's **⋯**, a paused task's, or "hand
+  this to Claude") goes on from a summary in the same folders.
+- **Codex and Claude workers do what Copilot workers do:** ask you with the same question card,
+  get every file you attach (images as images, other files by path), fill MCP servers' forms
+  with you, continue in a terminal (`codex resume`, `claude --resume`), and adopt your own
+  Codex and Claude sessions from *Other Copilot sessions*.
+- **Quicker on other agents:** a Claude worker takes a new thinking effort in the process it
+  runs in (no new process, its conversation's prompt cache kept), and each Codex and Claude
+  worker's supervisor has less to load as it starts.
+- **Fixes:** a *Go on* refused (an agent off, its limit reached) leaves the task stopped as it
+  was, with its *Go on*; "Copilot failed on this turn" names the worker's own agent.
 - **Codex workers' supervisor starts isolated.** It ran with the folder Chief of Staff was
   started in first on Python's import path: started inside a repository, a `typing.py` or a
   `chiefofstaff/` folder there would have run as it. It now runs with `python -I`, in a folder
