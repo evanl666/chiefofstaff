@@ -1184,7 +1184,7 @@ async def run_shard(shard: str, wanted: set[str]) -> list[tuple[str, bool, float
                   "env": {"MARKER_DIR": str(root / "marks"), "MARKER_NAME": "github"},
                   "tools": ["*"]}  # fmt: skip
         env["CHIEFOFSTAFF_WORKER_MCP"] = json.dumps({"github": github})
-    app = App(root / "data", root / "log", env)
+    app = App(root / "data", root / "log", env, agents=True)
     await app.start()
     ctx = Ctx(shard, app, root, home, project, truth)
     results = []

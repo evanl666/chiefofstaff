@@ -3,11 +3,14 @@ its setting off, a new feature leaves Chief of Staff as the baseline release was
 differences the feature declares by name in FEATURES below.
 
     uv run --with playwright python scripts/differential.py [--feature NAME] [--mode off|on] [--out DIR]
+    uv run --with playwright python scripts/differential.py --copilot-alone [--out DIR]
 
 --mode off (the default): the baseline (git tag v0.1.46, checked out with `git worktree add` and
 run in its own `uv run` environment) against this working tree with every registered feature (or
 only --feature) at its off settings, allowing only those features' `allow_off`. The baseline runs
 with those of the settings it has: a feature it shipped with is off on both sides.
+--copilot-alone: as off mode, every feature off, with no other coding agent on the PATH (no
+stand-ins; the owner's own hidden): only COPILOT_ALONE is allowed (and FIXES).
 --mode on: this working tree with --feature off against the same with it on, allowing only that
 feature's `allow_on` (and its own settings keys). A feature not behind a setting does its
 `on_action` instead (more_agents: Codex turned on, then off again; claude_agents: Claude). A
@@ -135,8 +138,12 @@ class Allow:
     lines: str = ""
     element: str = ""
     views: str = ""
+    # A count only this many more on the side tested (one more event, say), nothing else.
+    more: int = 0
 
-    def matches(self, path: str, after: Any, text_lines: list[str] | None) -> bool:
+    def matches(
+        self, path: str, after: Any, text_lines: list[str] | None, before: Any = None
+    ) -> bool:
         if self.element and not (self.setting or self.data):
             return False
         if self.setting:
@@ -146,6 +153,8 @@ class Allow:
         if self.data and not re.search(self.data, path):
             return False
         if self.value is not ANY and after != self.value:
+            return False
+        if self.more and not (isinstance(before, int) and after == before + self.more):
             return False
         if self.lines:
             return text_lines is not None and all(re.search(self.lines, x) for x in text_lines)
@@ -277,26 +286,24 @@ FEATURES["send_to_chief"] = Feature(
 )
 
 # More agents (docs/design/more-agents.md): workers on other coding agents (Codex), not a setting
-# but the owner's Coding agents group in Settings → Models. Off and never used, on a machine with
-# `codex` and `claude` on the PATH (every run has them): only the last line of Settings → Models
-# is new; no agent CLI runs and no agent module is imported (both captured, so either is a
-# difference). Its "on" mode is turned on and then off again, before the script (5.11): it may
-# leave its configuration (marked off) and its usage table, empty; the Router lets go of its
-# session (its tools and prompt are made again when the agents on change) and resumes it with
-# its next message, with the very options it was made with (captured): not live until then, and
-# one more session event.
+# but the owner's Coding agents tab in Settings. Off and never used, on a machine with `codex` and
+# `claude` on the PATH (every run has them): v0.1.45's last line of Settings → Models is gone,
+# and the picker shows what INSTALLED says; nothing else of agents runs or is imported (both
+# captured, so either is a difference). Its "on" mode is turned on and then off again, before
+# the script (5.11): it may leave its configuration (marked off) and its usage table, empty; the
+# Router lets go of its session (its tools and prompt are made again when the agents on change)
+# and resumes it with its next message, with the very options it was made with (captured): not
+# live until then, and one more session event.
 FEATURES["more_agents"] = Feature(
     off={},
     on={},
-    allow_off=[
-        Allow(
-            "its line at the end of Settings → Models (with its group, folded and hidden)",
-            element="#settings-dialog #agents-line",
-            views=r"^settings-models-",
-        ),
-    ],
     allow_on=[
         Allow("its configuration, kept and marked off", data=r"\.db\.kv\.agents$"),
+        Allow(
+            "decided on in Settings: its first-run card is not shown again",
+            data=r"\.db\.kv\.agentoffer:(codex|claude)$",
+            value={"value": "settings"},
+        ),
         Allow("its usage table, empty", data=r"\.db\.agent_usage$"),
         Allow(
             "its usage table and indexes in the schema",
@@ -342,14 +349,19 @@ FEATURES["update_notice"] = Feature(
     ],
 )
 
-# Claude workers (more-agents.md 5.12): the same group, one more row. Off and never used, as
-# more_agents: no `claude` run, none of its modules (nor the Agent SDK) imported. Its "on" mode
+# Claude workers (more-agents.md 5.12): the same tab, one more row. Off and never used, as
+# more_agents: only INSTALLED's look at `claude` (never the Agent SDK). Its "on" mode
 # turns Claude on and then off again before the script (5.11), leaving what Codex's does.
 FEATURES["claude_agents"] = Feature(
     off={},
     on={},
     allow_on=[
         Allow("its configuration, kept and marked off", data=r"\.db\.kv\.agents$"),
+        Allow(
+            "decided on in Settings: its first-run card is not shown again",
+            data=r"\.db\.kv\.agentoffer:(codex|claude)$",
+            value={"value": "settings"},
+        ),
         Allow("its usage table, empty", data=r"\.db\.agent_usage$"),
         Allow(
             "its usage table and indexes in the schema",
@@ -383,6 +395,30 @@ FEATURES["codex_on_claude_never"] = Feature(
     setup="codex_on",
     allow_setup=[
         Allow(
+            "the agents' view says the Router does not choose the agent (the picker's option)",
+            data=r"\./api/state\.agents\.router_chooses$",
+            value=False,
+        ),
+        Allow(
+            "the Router can move a worker's work to another agent when asked (continue_worker)",
+            data=r"^backend\.sessions\.router:Router\[\d+\]\.options\.(available_)?tools\[\d+\]$",
+        ),
+        Allow(
+            "the Router's rule for agents says when to use continue_worker",
+            data=r"\.system_message\.content$",
+            lines=r"^- Workers can run on Codex as well as Copilot: ",
+        ),
+        Allow(
+            "the Coding agents tab is not photographed (INSTALLED), so it does not look",
+            data=r"^page\.requests\[\d+\]$",
+            value="GET /api/agents",
+        ),
+        Allow(
+            "Codex decided on in Settings: its first-run card is not shown",
+            data=r"\.db\.kv\.agentoffer:codex$",
+            value={"value": "settings"},
+        ),
+        Allow(
             "Claude's row in the Coding agents group",
             element="#settings-dialog .agent-row[data-agent=claude]",
             views=r"^settings-models-",
@@ -409,6 +445,59 @@ FEATURES["codex_on_claude_never"] = Feature(
         ),
     ],
 )
+
+# The agent picker with other coding agents installed and never decided on (the stand-ins are on
+# the PATH in every run but --copilot-alone): v0.1.45's last line of Settings → Models is gone;
+# Settings has a Coding agents tab after Models, which looks at them only when shown (left out
+# here, so the page never shows it); at its start the app looks at each once (as that tab does:
+# its version and sign-in, in its own folder) for a first-run card on Home: the stand-in `claude`
+# is signed in, so Claude's card shows (published once: one more state event); the stand-in
+# `codex` fails its look, so none for it. Allowed in every run but --copilot-alone, whatever the
+# features.
+INSTALLED = [
+    Allow(
+        "v0.1.45's line at the end of Settings → Models, gone (the Coding agents tab instead)",
+        element="#settings-dialog #agents-line",
+        views=r"^settings-models-",
+    ),
+    Allow(
+        "the Coding agents tab, after Models (left out: never shown here)",
+        element="#settings-tabs #agents-tab",
+        views=r"^settings",
+    ),
+    Allow("the agents found on the PATH, in the page's state", data=r"\./api/state\.agents_found$",
+          value=["codex", "claude"]),
+    Allow("Claude's first-run card, in the page's state", data=r"\./api/state\.agent_offers$"),
+    Allow(
+        "Claude's first-run card on Home (the notices it alone is in)",
+        element="#notices:has(> #agent-offer:only-child), #notices[hidden]:empty",
+        views=r"^home",
+    ),
+    Allow("the first-run card published: one more state event", data=r"^steps\.\w+\.bus\.state$",
+          more=1),
+    *(
+        Allow(f"the look at startup: {run}", data=r"^agent_clis\[\d+\]$", value=run)
+        for run in ('codex app-server -c approvals_reviewer="user"', "claude --version",
+                    "claude auth status --json")
+    ),
+    *(
+        Allow(f"the look at startup: {module}", data=r"^agent_modules\[\d+\]$", value=module)
+        for module in ("chiefofstaff.backend_codex", "chiefofstaff.codex_check",
+                       "chiefofstaff.backend_claude", "chiefofstaff.claude_check")
+    ),
+]  # fmt: skip
+
+# Copilot alone (--copilot-alone: no other coding agent on the PATH, the owner's hidden too): the
+# agent picker shows nothing of other agents anywhere, so this tree is v0.1.45 itself but for the
+# one line v0.1.45 ended Settings → Models with, which is gone. Nothing looked for or run, no
+# agent module imported, no request about them, no snapshot key: each would be a difference.
+COPILOT_ALONE = [
+    Allow(
+        "v0.1.45's line at the end of Settings → Models, gone (nothing of other agents shows)",
+        element="#settings-dialog #agents-line",
+        views=r"^settings-models-",
+    ),
+]
 
 # What another coding agent would leave if it were used while off: its CLI run, its modules.
 AGENT_MODULES = (
@@ -1125,6 +1214,13 @@ class Scenario:
                     if self.runtime.ready():
                         break
                     await self.periodic.real(0.05)
+                # Its first look for other agents (their first-run cards) over first, on either
+                # side, whatever an action then does (a version without it has none).
+                for _ in range(200):
+                    offering = getattr(self.runtime, "offering", None)
+                    if offering is None or offering.done():
+                        break
+                    await self.periodic.real(0.05)
                 for action in (self.spec.get("setup"), self.spec.get("action")):
                     if action:
                         await getattr(self, action)()
@@ -1217,9 +1313,10 @@ def drop_worktree(path: Path):
         git("worktree", "prune")
 
 
-def make_run(run: Path) -> dict:
+def make_run(run: Path, alone: bool = False) -> dict:
     """A fresh run folder, the same for both sides: a git project, a fake `gh` that keeps what
-    it was asked, an empty Copilot home and git config; the environment to run in."""
+    it was asked, an empty Copilot home and git config; the environment to run in. `alone`:
+    Copilot alone, no other coding agent on the PATH (the owner's hidden too)."""
     shutil.rmtree(run, ignore_errors=True)
     (run / "bin").mkdir(parents=True)
     (run / "copilot-home").mkdir()
@@ -1232,7 +1329,7 @@ def make_run(run: Path) -> dict:
     # Other coding agents' CLIs, installed but never to be run while none is on: each run kept.
     # `claude` says its version and that it is signed in (in a Claude configuration of its own,
     # set up), so that a look at it goes all the way (codex_on_claude_never).
-    for name in AGENT_CLIS:
+    for name in () if alone else AGENT_CLIS:
         cli = run / "bin" / name
         cli.write_text(
             f'#!/bin/sh\nprintf \'{name} %s\\n\' "$*" >> "$DIFFERENTIAL_AGENTS_LOG"\n'
@@ -1248,8 +1345,14 @@ def make_run(run: Path) -> dict:
         for key, value in os.environ.items()
         if not key.startswith(("VIRTUAL_ENV", "CHIEFOFSTAFF_", "GIT_"))
     }
+    path = env.get("PATH", "")
+    if alone:
+        sys.path.insert(0, str(ROOT / "tests"))
+        from agent_paths import without_agents
+
+        path = without_agents(path, run / "path")
     env |= {
-        "PATH": f"{run / 'bin'}{os.pathsep}{env.get('PATH', '')}",
+        "PATH": f"{run / 'bin'}{os.pathsep}{path}",
         "TZ": "UTC",
         "COPILOT_HOME": str(run / "copilot-home"),
         "GIT_CONFIG_GLOBAL": str(run / "gitconfig"),
@@ -1342,7 +1445,9 @@ DOM = """([selector, skip]) => {
       else attrs.push(`:value=${JSON.stringify(node.value)}`);
     }
     if (tag === "details") attrs.push(node.open ? ":open" : ":closed");
-    const classes = typeof node.className === "string" && node.className.trim() ? "." + node.className.trim().split(/\\s+/).join(".") : "";
+    // (A duck moves for 8 s once drawn: whether it still does depends on the machine's pace.)
+    const names = typeof node.className === "string" ? node.className.trim().split(/\\s+/).filter((c) => c && !(c === "moving" && node.classList.contains("duck"))) : [];
+    const classes = names.length ? "." + names.join(".") : "";
     const text = [...node.childNodes].filter((n) => n.nodeType === 3).map((n) => n.textContent).join(" ").replace(/\\s+/g, " ").trim();
     lines.push("  ".repeat(depth) + tag + (node.id ? `#${node.id}` : "") + classes + (attrs.length ? ` [${attrs.join(" ")}]` : "") + (text ? ` ${JSON.stringify(text)}` : ""));
     if (tag !== "svg") for (const child of node.children) walk(child, depth + 1);
@@ -1354,20 +1459,26 @@ DOM = """([selector, skip]) => {
 
 # Allowed elements hidden for a screenshot, then shown again. Through each one's own style (the
 # page's CSP refuses an added <style> element), its style attribute as it was afterwards.
+# Hiding an element keeps what scrolls to its end (the chat, pinned to its latest) at its end, as
+# if the element had never been there.
 HIDE = """(selector) => {
   const hidden = (window.__differentialHidden ||= new Map());
+  const nodes = selector ? [...document.querySelectorAll(selector)] : [...hidden.keys()];
+  const pinned = nodes.length ? [...document.querySelectorAll("*")].filter((s) => s.scrollHeight > s.clientHeight
+    && ["auto", "scroll"].includes(getComputedStyle(s).overflowY) && s.scrollTop + s.clientHeight >= s.scrollHeight - 2) : [];
   if (selector) {
-    for (const node of document.querySelectorAll(selector)) {
+    for (const node of nodes) {
       if (!hidden.has(node)) hidden.set(node, node.getAttribute("style"));
       node.style.setProperty("display", "none", "important");
     }
-    return;
+  } else {
+    for (const [node, style] of hidden) {
+      if (style === null) node.removeAttribute("style");
+      else node.style.cssText = style;
+    }
+    hidden.clear();
   }
-  for (const [node, style] of hidden) {
-    if (style === null) node.removeAttribute("style");
-    else node.style.cssText = style;
-  }
-  hidden.clear();
+  for (const scroller of pinned) scroller.scrollTop = scroller.scrollHeight;
 }"""
 
 
@@ -1394,7 +1505,9 @@ class Camera:
         skip = ", ".join(filter(None, [self.skipped(view), skip]))
         self.dom[view] = await page.evaluate(DOM, [selector, skip])
 
-    async def shoot(self, page, view: str, scheme: str, selector: str = "", dom: str = ""):
+    async def shoot(
+        self, page, view: str, scheme: str, selector: str = "", dom: str = "", restore=True
+    ):
         skip = self.skipped(view)
         for name, element in self.applying(view).items():
             if await page.evaluate("s => document.querySelectorAll(s).length", element):
@@ -1406,7 +1519,7 @@ class Camera:
         path = self.folder / f"{view}-{scheme}.png"
         target = page.locator(selector) if selector else page
         await target.screenshot(path=path, animations="disabled", caret="hide")
-        if skip:
+        if skip and restore:
             await page.evaluate(HIDE, "")
 
 
@@ -1452,6 +1565,9 @@ async def photograph(
             for width in WIDTHS:
                 await page.set_viewport_size({"width": width, "height": HEIGHT})
                 await quiet(page)
+                # Home's chat at its latest, where the app keeps it (a resize may leave it a few
+                # pixels short, depending on what was drawn before).
+                await page.evaluate(PINNED)
                 await camera.shoot(page, f"home-{width}", scheme, dom="#application")
                 tabs = page.locator("#home-tabs")
                 if await tabs.is_visible():
@@ -1477,6 +1593,7 @@ async def photograph(
             "hidden": camera.hidden}  # fmt: skip
 
 
+PINNED = """() => { const chat = document.querySelector("#scroller"); if (chat) chat.scrollTop = chat.scrollHeight; }"""
 AGENTS_LOOKED = """() => ![...document.querySelectorAll("#agents-rows [role=status]")].some(
   (line) => line.textContent === "Checking…")"""
 
@@ -1491,7 +1608,11 @@ async def settings(page, camera: Camera, scheme: str, width: int):
         await camera.snapshot(page, f"settings-{width}", "#settings-dialog", sections)
     for tab in await page.locator("#settings-tabs [role=tab]").all():
         name = await tab.get_attribute("data-tab")
-        await tab.click()
+        skip = camera.skipped(f"settings-{name}-p1-{width}")
+        if skip and await tab.evaluate("(b, s) => b.matches(s)", skip):
+            continue  # A tab an allowance leaves out (its button): nothing of it is compared.
+        # Clicked without the pointer: no hover is left where a button left out moved the others.
+        await tab.evaluate("b => b.click()")
         await page.evaluate(
             "t => document.querySelectorAll(`#settings-pane .tab[data-tab='${t}'] details`).forEach((d) => { d.open = true; })",
             name,
@@ -1501,6 +1622,9 @@ async def settings(page, camera: Camera, scheme: str, width: int):
         # rows (their height decides how many pages there are).
         await page.wait_for_function(AGENTS_LOOKED, timeout=20000)
         await quiet(page)
+        # What an allowance leaves out is out of the count of pages too, until the tab is done.
+        if left := camera.skipped(f"settings-{name}-p1-{width}"):
+            await page.evaluate(HIDE, left)
         pane = page.locator("#settings-pane")
         height, shown = await pane.evaluate("p => [p.scrollHeight, p.clientHeight]")
         pages = max(1, min(6, -(-height // max(shown, 1))))
@@ -1509,7 +1633,8 @@ async def settings(page, camera: Camera, scheme: str, width: int):
             await quiet(page, 150)
             view = f"settings-{name}-p{index + 1}-{width}"
             dom = f"{sections}[data-tab='{name}']" if index == 0 else ""
-            await camera.shoot(page, view, scheme, "#settings-dialog", dom=dom)
+            await camera.shoot(page, view, scheme, "#settings-dialog", dom=dom, restore=False)
+        await page.evaluate(HIDE, "")
         await pane.evaluate("p => { p.scrollTop = 0; }")
     await page.locator("#settings-cancel").click()
     await dialog.wait_for(state="hidden")
@@ -1707,7 +1832,7 @@ def allow(differences: list[Difference], allowances: dict[str, Allow]):
         changed = [line[1:] for line in difference.lines] if difference.lines is not None else None
         for name, allowance in allowances.items():
             value = difference.after if difference.kind != "removed" else difference.before
-            if allowance.matches(difference.path, value, changed):
+            if allowance.matches(difference.path, value, changed, difference.before):
                 difference.allowed = name
                 break
 
@@ -1908,7 +2033,7 @@ def report(
 
 
 async def run_sides(
-    sides: list[Side], out: Path, allowances: dict[str, Allow], port: int
+    sides: list[Side], out: Path, allowances: dict[str, Allow], port: int, alone: bool = False
 ) -> tuple[list[dict], list[dict], list[Path], Path]:
     run = WORK / f"run-{port}"
     captures, pages, folders = [], [], []
@@ -1918,7 +2043,7 @@ async def run_sides(
             folder = out / side.name
             shutil.rmtree(folder, ignore_errors=True)
             folder.mkdir(parents=True)
-            env = make_run(run)
+            env = make_run(run, alone)
             process, clock, drain = await start_side(side, run, port, folder, env)
             try:
                 page = await photograph(port, folder, clock, allowances)
@@ -1983,13 +2108,28 @@ def plan(args, parser, port: int) -> tuple[list[Side], dict[str, Allow], str]:
     if args.mode == "on" and not args.feature:
         parser.error("--mode on needs --feature")
     tree = args.tree.resolve()
+    if args.copilot_alone:
+        if args.feature or args.mode != "off":
+            parser.error("--copilot-alone compares the baseline with every feature off")
+        allowances = {f"fix: {a.name}": a for a in FIXES} | {
+            f"Copilot alone: {a.name}": a for a in COPILOT_ALONE
+        }
+        sides = [Side("baseline", WORK / f"baseline-{port}", {}), Side("current", tree, {})]
+        return (
+            sides,
+            allowances,
+            f"Differential test, Copilot alone: {args.baseline} against {tree}",
+        )
     chosen = [args.feature] if args.feature and args.mode == "off" else list(FEATURES)
     off = {key: value for name in chosen for key, value in FEATURES[name].off.items()}
     fixes = {f"fix: {a.name}": a for a in FIXES}
+    installed = {f"installed: {a.name}": a for a in INSTALLED}
     if args.mode == "off":
-        allowances = fixes | {
-            f"{name}: {a.name}": a for name in chosen for a in FEATURES[name].allow_off
-        }
+        allowances = (
+            fixes
+            | installed
+            | {f"{name}: {a.name}": a for name in chosen for a in FEATURES[name].allow_off}
+        )
         sides = [Side("baseline", WORK / f"baseline-{port}", off), Side("current", tree, off)]
         if args.feature:
             for side in sides:
@@ -2000,7 +2140,7 @@ def plan(args, parser, port: int) -> tuple[list[Side], dict[str, Allow], str]:
         title = f"Differential test, off: {args.baseline} against {tree}"
         return sides, allowances, title + (f", {', '.join(chosen)} off" if chosen else "")
     feature = FEATURES[args.feature]
-    allowances = fixes | {f"{args.feature}: {a.name}": a for a in feature.allow_on}
+    allowances = fixes | installed | {f"{args.feature}: {a.name}": a for a in feature.allow_on}
     for key in feature.on:
         allowances[f"{args.feature}: its setting {key}"] = Allow(key, setting=key)
     sides = [Side("off", tree, off), Side("on", tree, {**off, **feature.on}, feature.on_action)]
@@ -2024,7 +2164,9 @@ async def differential(
             drop_worktree(baseline)
             git("worktree", "add", "--detach", "--quiet", str(baseline), args.baseline)
             log(f"baseline: {args.baseline} checked out in {baseline.relative_to(ROOT)}")
-        captures, pages, folders, run = await run_sides(sides, out, allowances, port)
+        captures, pages, folders, run = await run_sides(
+            sides, out, allowances, port, args.copilot_alone
+        )
     finally:
         if baseline:
             drop_worktree(baseline)
@@ -2061,6 +2203,11 @@ def main():
     parser.add_argument("--out", type=Path, default=OUT, help=f"default {OUT.relative_to(ROOT)}")
     parser.add_argument("--baseline", default=BASELINE, help=f"git ref (default {BASELINE})")
     parser.add_argument("--tree", type=Path, default=ROOT, help="the tree to test (default: this)")
+    parser.add_argument(
+        "--copilot-alone",
+        action="store_true",
+        help="no other coding agent on the PATH: only COPILOT_ALONE allowed (off mode)",
+    )
     parser.add_argument("--serve", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.serve:

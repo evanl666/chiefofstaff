@@ -530,7 +530,12 @@ async def run(number: int) -> list[str]:
         root = Path(temporary).resolve()
         home, project, truth = setup(root)
         world = truths()
-        app = App(root / "data", root / "chiefofstaff.log", {"COPILOT_HOME": str(home)})
+        app = App(
+            root / "data",
+            root / "chiefofstaff.log",
+            {"COPILOT_HOME": str(home)},
+            agents=AGENT != "copilot",
+        )
         codex_config = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "config.toml"
         config_before = codex_config.read_bytes() if codex_config.exists() else None
         await app.start()
