@@ -1428,26 +1428,41 @@ class Tools:
             for name, description, params, handler in definitions
         }
 
-    def spawn_on(self, names: Sequence[str]) -> Any:
+    def spawn_on(self, names: Sequence[str], chooses: bool = False) -> Any:
         """spawn_worker as the Router has it while other coding agents are on: with `agent`,
-        set only when the owner named one (more-agents.md 5.9). Without them, the tool is as
-        it always was (definitions)."""
-        key = tuple(names)
+        set only when the owner named one (more-agents.md 5.9); `chooses` (the owner lets the
+        Router choose): for every worker, saying whether the owner named it (owner_named).
+        Without them, the tool is as it always was (definitions)."""
+        key = (*names, "chooses") if chooses else tuple(names)
         if key not in self.spawn_tools:
-            choices: Any = Literal.__getitem__(("", agents.COPILOT, *key))  # type: ignore[attr-defined]
-            named = ", ".join(agents.display(name) for name in (agents.COPILOT, *key))
-            params = create_model(
-                "SpawnWorker",
-                __base__=SpawnWorker,
-                agent=(
+            choices: Any = Literal.__getitem__(("", agents.COPILOT, *names))  # type: ignore[attr-defined]
+            named = ", ".join(agents.display(name) for name in (agents.COPILOT, *names))
+            fields: dict[str, Any] = {
+                "agent": (
                     choices,
                     Field(
                         default="",
-                        description=f"The coding agent it runs on ({named}): only when the "
-                        "owner named one for this task; empty for the one Settings chose",
+                        description=(
+                            f"The coding agent it runs on ({named}): the one the owner named, "
+                            "else the one you choose among those list_sessions().agents."
+                            "available says can run now"
+                            if chooses
+                            else f"The coding agent it runs on ({named}): only when the "
+                            "owner named one for this task; empty for the one Settings chose"
+                        ),
                     ),
-                ),
-            )
+                )
+            }
+            if chooses:
+                fields["owner_named"] = (
+                    bool,
+                    Field(
+                        default=False,
+                        description="True when the owner named this agent for the task (one "
+                        "they named that can't run is never replaced; one you chose is)",
+                    ),
+                )
+            params = create_model("SpawnWorker", __base__=SpawnWorker, **fields)
             params.__doc__ = SpawnWorker.__doc__
             self.spawn_tools[key] = define_tool(
                 "spawn_worker",
@@ -1632,11 +1647,24 @@ class Tools:
             ]
         decisions = self.with_turn_decisions(caller, params.decisions)
         named = agent or getattr(params, "agent", "")
+        picked = ""
+        if not agent and named and getattr(params, "owner_named", None) is False:
+            picked, named = named, ""  # The Router's own pick: replaced if it can't run it.
+        if (
+            self.runtime.agents
+            and not special
+            and not named
+            and not picked
+            and caller == self.runtime.router_id()
+        ):
+            named = self.runtime.chosen_agent()  # The owner's @agent in this turn's message.
         agent, agent_notice = agents.COPILOT, ""
-        if not special and (self.runtime.agents or named):
+        if not special and (self.runtime.agents or named or picked):
             try:
                 agent, agent_notice = await self.runtime.new_worker_agent(
-                    named, bool((params.slack and self.runtime.slack.configured()) or untrusted)
+                    named,
+                    bool((params.slack and self.runtime.slack.configured()) or untrusted),
+                    picked=picked,
                 )
             except ValueError as exc:
                 if named and named != agents.COPILOT:
@@ -2705,7 +2733,15 @@ class Tools:
                 models[name] = [item["id"] for item in await self.runtime.agent_models(name)]
             except Exception:
                 models[name] = []
-        return {"new_workers": agents.new_workers(self.store), "models": models}
+        # Which can run a new worker of the owner's now, and why not (the Router chooses only
+        # among those that can).
+        not_now = {name: why for name in on if (why := self.runtime.agent_unavailable(name))}
+        return {
+            "new_workers": agents.new_workers(self.store),
+            "models": models,
+            "available": [name for name in on if name not in not_now],
+            **({"not_now": not_now} if not_now else {}),
+        }
 
     def needs_owner(self, found: Needs | None = None) -> dict:
         """What waits for the owner, item by item as Home's Needs you lists it (digest.needs),
