@@ -899,10 +899,13 @@ def sandbox_settings(policy: Any) -> dict:
     }
 
 
-def sandbox_widened(cwd: str, trusted: bool | None = None, local: bool = True) -> str:
+def sandbox_widened(
+    cwd: str, trusted: bool | None = None, local: bool = True, restricted: bool = False
+) -> str:
     """Why a sandboxed worker in this folder may not run on Claude: settings Claude loads for it
     (the owner's; the project's, where the owner trusts it; managed settings) that would widen
-    its sandbox past Chief of Staff's (claude_tools.sandbox_widening). "" when none do."""
+    its sandbox past Chief of Staff's (claude_tools.sandbox_widening; `restricted`: it reaches
+    only the hosts its sandbox lists). "" when none do."""
     home = str(Path.home())
     user = config_folder()
     sources = [
@@ -914,7 +917,7 @@ def sandbox_widened(cwd: str, trusted: bool | None = None, local: bool = True) -
             (Path(cwd) / ".claude" / name, f"this project's .claude/{name}")
             for name in ("settings.json", "settings.local.json")
         ]
-    found = sandbox_widening(sources, managed_settings(sys.platform), local)
+    found = sandbox_widening(sources, managed_settings(sys.platform), local, restricted)
     if not found:
         return ""
     return (
@@ -1282,7 +1285,8 @@ class ClaudeWorker:
         effort: Any = self.process_effort or None
         settings: dict[str, Any] = {"autoMemoryEnabled": False, "sandbox": {"enabled": False}}
         if policy := self.options.get("sandbox"):
-            if why := sandbox_widened(self.cwd, trusted, bool(policy.local_network)):
+            local, restricted = bool(policy.local_network), bool(policy.allowed_hosts)
+            if why := sandbox_widened(self.cwd, trusted, local, restricted):
                 raise RuntimeError(why)
             settings["sandbox"] = sandbox_settings(policy)
         if self.ask_first:

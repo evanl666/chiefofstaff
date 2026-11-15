@@ -972,6 +972,28 @@ def test_settings_that_would_widen_a_workers_sandbox_are_found_where_they_take_e
     assert sandbox_widening([(commented, "c")], []) == ""
     monkeypatch.setattr(claude_tools, "MOST_SETTINGS", 1000)
     assert sandbox_widening([(big, "g")], []) == "g: too large for Chief of Staff to check"
+
+    # Permissions it merges into the sandbox (2.1.322): an Edit rule's path not plainly under the
+    # worker's folder, an additional directory; a WebFetch domain where it lists the hosts.
+    def allowing(name: str, permissions: dict) -> Path:
+        path = tmp_path / name
+        path.write_text(json.dumps({"permissions": permissions}))
+        return path
+
+    for rule in ("Edit(//srv/**)", "Edit(~/code/**)", "Edit(/notes/**)", "Edit(../other/**)"):
+        found = sandbox_widening([(allowing("e.json", {"allow": [rule]}), "e")], [])
+        assert found == f"permissions.allow {rule} in e", rule
+    harmless = allowing("h.json", {"allow": ["Edit", "Edit(src/**)", "Write(//srv/**)", "Bash"]})
+    assert sandbox_widening([(harmless, "h")], []) == ""
+    directories = allowing("d.json", {"additionalDirectories": ["/srv"]})
+    assert (
+        sandbox_widening([], [directories]) == f"permissions.additionalDirectories in {directories}"
+    )
+    fetch = allowing("f.json", {"allow": ["WebFetch(domain:example.com)"]})
+    assert sandbox_widening([(fetch, "f")], []) == ""
+    assert sandbox_widening([(fetch, "f")], [], restricted=True) == (
+        "permissions.allow WebFetch(domain:example.com) in f"
+    )
     # Each switch that would widen it, Chief of Staff sets (to its narrow side).
     policy = SimpleNamespace(readwrite=("/w",), readonly=(), denied=(), allowed_hosts=(),
                              local_network=False)  # fmt: skip
