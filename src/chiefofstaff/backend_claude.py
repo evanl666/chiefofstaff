@@ -742,6 +742,25 @@ async def look(command: str = "claude", folder: Path | None = None) -> dict:
     }
 
 
+async def glance(command: str = "claude", folder: Path | None = None) -> dict:
+    """What a first-run card needs of Claude Code, looked at as lightly as it can be (at
+    startup, before the owner opened Settings): its version (`claude --version`) and how it is
+    signed in (`claude auth status`, only where Claude was set up: set_up); raises with why its
+    workers cannot run. Nothing else: its models and its check's key are Settings' look's."""
+    path = shutil.which(command)
+    if not path:
+        raise RuntimeError(NOT_FOUND)
+    if why := sdk_refused():
+        raise RuntimeError(why)
+    version = await claude_version(path, folder)
+    if why := claude_refused(version):
+        raise RuntimeError(why)
+    auth = await auth_status(path, folder)
+    if not auth.get("loggedIn"):
+        raise RuntimeError(NOT_SIGNED_IN)
+    return {"version": version, "account": signed_in(auth)}
+
+
 # Each version's models as the last worker's process listed them (initialize), for Settings.
 LISTED: dict[str, list[SimpleNamespace]] = {}
 # What tells one CLI binary from another (path, size, time) -> its SHA-256: hashed once.

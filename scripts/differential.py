@@ -573,10 +573,10 @@ FEATURES["codex_on_claude_never"] = Feature(
 # The agent picker with other coding agents installed and never decided on (the stand-ins are on
 # the PATH in every run but --copilot-alone): v0.1.45's last line of Settings → Models is gone;
 # Settings has a Coding agents tab after Models, which looks at them only when shown (left out
-# here, so the page never shows it); at its start the app looks at each once (as that tab does:
-# its version and sign-in, in its own folder) for a first-run card on Home: the stand-in `claude`
-# is signed in, so Claude's card shows (published once: one more state event); the stand-in
-# `codex` fails its look, so none for it. Allowed in every run but --copilot-alone, whatever the
+# here, so the page never shows it); at its start the app glances at each once (its CLI's version,
+# then its sign-in, in its own folder) for a first-run card on Home: the stand-in `claude` is
+# signed in, so Claude's card shows (published once: one more state event); the stand-in `codex`
+# fails `codex --version`, so none for it. Allowed in every run but --copilot-alone, whatever the
 # features.
 INSTALLED = [
     Allow(
@@ -600,15 +600,13 @@ INSTALLED = [
     Allow("the first-run card published: one more state event", data=r"^steps\.\w+\.bus\.state$",
           more=1),
     *(
-        Allow(f"the look at startup: {run}", data=r"^agent_clis\[\d+\]$", value=run)
-        for run in ('codex app-server -c approvals_reviewer="user" -c features.plugins=false -c '
-                    'features.remote_plugin=false -c features.plugin_discovery_prefetch=false',
-                    "claude --version", "claude auth status --json")
+        Allow(f"the glance at startup: {run}", data=r"^agent_clis\[\d+\]$", value=run)
+        for run in ("codex --version", "claude --version", "claude auth status --json")
     ),
     *(
-        Allow(f"the look at startup: {module}", data=r"^agent_modules\[\d+\]$", value=module)
+        Allow(f"the glance at startup: {module}", data=r"^agent_modules\[\d+\]$", value=module)
         for module in ("chiefofstaff.backend_codex", "chiefofstaff.codex_check",
-                       "chiefofstaff.backend_claude", "chiefofstaff.claude_check")
+                       "chiefofstaff.backend_claude")
     ),
 ]  # fmt: skip
 

@@ -14,7 +14,7 @@ import pytest
 from conftest import Harness
 from test_agents import ran, router_options, saved, schema, spawn_on
 
-from chiefofstaff import agents, backend_codex, prompts, task_actions
+from chiefofstaff import agents, backend_claude, backend_codex, prompts, task_actions
 from chiefofstaff.backend_codex import CodexAgent
 from chiefofstaff.roles import WORKER
 
@@ -54,7 +54,7 @@ async def test_an_agent_installed_and_signed_in_is_offered_once_and_allowed(
         (offer,) = state["agent_offers"]
         assert (offer["name"], offer["label"]) == ("codex", "Codex")
         assert offer["state"] == "0.167.2 · signed in with ChatGPT"
-        assert len(ran(runs)) == 1, "looked at once, as Settings looks"
+        assert ran(runs) == ["--version", "login status"], "a glance: its version, its sign-in"
         await runtime.answer_offer("codex", True)
         assert agents.turned_on(harness.store) == ["codex"]
         assert agents.new_workers(harness.store) == "copilot", "new workers stay on Copilot"
@@ -91,7 +91,7 @@ async def test_not_now_leaves_it_off_and_it_is_not_offered_again(tmp_path, codex
         await runtime.stop()
         runtime = await harness.connect()
         await asyncio.sleep(0.3)
-        assert "agent_offers" not in runtime.snapshot() and len(ran(runs)) == 1, (
+        assert "agent_offers" not in runtime.snapshot() and len(ran(runs)) == 2, (
             "never looked at again for its card"
         )
     finally:
@@ -123,15 +123,42 @@ async def test_a_codex_never_set_up_is_not_offered_and_nothing_of_it_runs_or_is_
         await runtime.stop()
 
 
-async def test_a_look_runs_codex_without_its_plugin_sync(tmp_path, codex_installed):
-    # Each app-server syncs plugins as it starts, rewriting Codex's plugin cache (0.167.2): a
-    # look (Settings, a first-run card) turns that off for its own process; workers keep it.
+async def test_settings_look_runs_codex_without_its_plugin_sync(tmp_path, codex_installed):
+    # Each app-server syncs plugins as it starts, rewriting Codex's plugin cache (0.167.2): the
+    # look Settings → Coding agents takes (its models, limits) turns that off for its own
+    # process; workers keep it. Startup's first-run card runs no app-server at all.
     _, runs = codex_installed
     _, runtime = await started(tmp_path)
     try:
         await until(lambda: runtime.snapshot().get("agent_offers"))
-        (looked,) = ran(runs)
-        assert looked.endswith(" ".join(backend_codex.LOOK_SETTINGS)), looked
+        assert not [run for run in ran(runs) if run.startswith("app-server")]
+        await runtime.look_for_agents()
+        looked = [run for run in ran(runs) if run.startswith("app-server")]
+        assert looked == [" ".join(['app-server -c approvals_reviewer="user"',
+                                    *backend_codex.LOOK_SETTINGS])]  # fmt: skip
+    finally:
+        await runtime.stop()
+
+
+async def test_claudes_first_run_card_runs_only_its_version_and_sign_in(
+    tmp_path, claude_on_path, monkeypatch
+):
+    # Nothing else at startup: no check's key (a hash of the CLI), no models, no session.
+    _, runs = claude_on_path
+
+    def hashed(*_):
+        raise AssertionError("its check's key is Settings' look's")
+
+    monkeypatch.setattr(backend_claude, "check_key", hashed)
+    _, runtime = await started(tmp_path)
+    try:
+        await until(lambda: runtime.snapshot().get("agent_offers"))
+        (offer,) = runtime.snapshot()["agent_offers"]
+        assert offer["name"] == "claude" and offer["state"].startswith("2.1.322 · signed in")
+        assert [json.loads(line) for line in runs.read_text().splitlines()] == [
+            ["--version"],
+            ["auth", "status", "--json"],
+        ]
     finally:
         await runtime.stop()
 
