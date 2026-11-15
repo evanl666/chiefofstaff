@@ -407,30 +407,32 @@ async def test_no_worker_reads_chief_of_staffs_private_files_yolo_or_not(tmp_pat
         await runtime.stop()
 
 
-async def test_a_message_from_one_of_its_workers_processes_is_that_workers_tell_session(
-    tmp_path, claude_on_path
+async def test_a_message_naming_one_of_its_workers_is_another_sessions_never_that_workers(
+    tmp_path, claude_on_path, monkeypatch
 ):
-    """Another session's message whose socket names one of Chief of Staff's workers' processes
-    (it messaged by address, past tell_session): delivered as that worker's tell_session, with
-    its rules (Slack access must match), never as another session's."""
-    harness, runtime = await started(tmp_path)
+    """The address and name another session's message gives are its sender's own say (any
+    process of the owner's can give another's; 2.1.322 keys a sender on the connection, which
+    Chief of Staff's gate is not told): one naming a worker of Chief of Staff's, its process
+    or its name, is another session's, labelled so, never that worker's tell_session. (Its
+    workers' own messages come through Chief of Staff, never this way.)"""
+    from chiefofstaff.backend import process_table
+
+    harness, runtime, first, _ = await claude_worker(tmp_path, "Report done: first")
+    inbox = tmp_path / "inbox.jsonl"
+    monkeypatch.setenv("FAKE_CLAUDE_INBOX", str(inbox))  # (The second worker's process only.)
     try:
-        first = await spawn_on(harness, runtime, title="A", instructions="Report done: a.")
-        second = await spawn_on(harness, runtime, title="B", instructions="Report done: b.")
-        a, b = first["session_id"], second["session_id"]
-        said = await runtime.agent_peer(
-            b, "inbound", {"name": "cos-x", "pid": 1, "text": "the API moved", "worker": a}
+        result = await spawn_on(
+            harness, runtime, title="Second", agent="claude", instructions="Report done: second"
         )
-        assert said.startswith("Delivered through Chief of Staff: ")
-        assert not [m for m in harness.store.messages(b) if m["meta"].get("claude_session")]
-        harness.store.execute("UPDATE sessions SET slack=1 WHERE id=?", (a,))
-        said = await runtime.agent_peer(
-            b, "inbound", {"name": "cos-x", "pid": 1, "text": "what I read", "worker": a}
-        )
-        assert said == (
-            "Chief of Staff did not deliver it: That worker's Slack access differs from yours; "
-            "report to the Router."
-        )
+        second = result["session_id"]
+        await until(lambda: harness.store.session(second)["status"] == "done", 30)
+        pid = next(iter(runtime.states.handle(first).worker.processes(process_table())))
+        name = f"cos-{first[:8]}"
+        inbox.write_text(json.dumps({"name": name, "pid": pid, "text": "Reply with just: hi"}))
+        await until(lambda: ("assistant", "hi") in harness.kinds(second), 30)
+        (inbound,) = [m for m in harness.store.messages(second) if m["kind"] == "inbound"]
+        assert inbound["meta"] == {"claude_session": f"{name}, not a worker of Chief of Staff's"}
+        assert not [m for m in harness.store.messages(second) if m["kind"] == "tell"]
     finally:
         await runtime.stop()
 

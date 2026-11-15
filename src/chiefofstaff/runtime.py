@@ -3552,9 +3552,9 @@ class Runtime:
         `send`: the worker's SendMessage; to one of Chief of Staff's workers (`cos-…`), its
         tell_session (what it was told: Claude does not send it), else None (another session:
         the owner says whether Claude sends it, each time). `inbound`: another session's message
-        to it, shown in its timeline and to the Router as that session's, within the hourly
-        limit of what a worker is told: "" to deliver it, else why not; from one of Chief of
-        Staff's workers' processes (`worker`), its tell_session instead."""
+        to it, shown in its timeline and to the Router as that session's (by the name it gives
+        itself, never one of Chief of Staff's workers: theirs come as tell_session), within the
+        hourly limit of what a worker is told: "" to deliver it, else why not."""
         from .peers import MAX_TELLS_PER_HOUR, ROUTER_COPY_CHARS, TellSession, clip
 
         row = self.store.session(session_id)
@@ -3578,17 +3578,9 @@ class Runtime:
             except ValueError as exc:
                 return f"Chief of Staff did not deliver it: {exc}"
             return f"Delivered through Chief of Staff: {told}"
-        if sender := str(data.get("worker") or ""):
-            # One of Chief of Staff's own workers (by its process): as its tell_session, with
-            # its rules, never straight to this worker.
-            try:
-                told = await self.peers.t_tell_session(
-                    TellSession(session_id=session_id, text=str(data.get("text") or "")), sender
-                )
-            except ValueError as exc:
-                return f"Chief of Staff did not deliver it: {exc}"
-            return f"Delivered through Chief of Staff: {told}"
         name = str(data.get("name") or "unnamed")
+        if re.fullmatch(r"cos-[0-9a-f]{8}", name):
+            name = f"{name}, not a worker of Chief of Staff's"  # A worker's name, given by another.
         key = f"told:session:{name}:{session_id}"
         hour = time.time() - 3600
         told = [t for t in json.loads(self.store.get(key) or "[]") if t > hour]
