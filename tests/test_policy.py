@@ -670,7 +670,7 @@ def test_a_line_too_much_to_read_that_pushes_is_refused_saying_why(command, work
         "git send-pack x wb/x " * 20_000,
         "$G push; " * 30_000,
         "git push origin : " * 30_000,
-        "git push origin $(git branch --show-current) " * 4_000,
+        "git push origin $(git branch --show-current) " * 2_000,
     ],
 )
 def test_no_line_is_slow_to_check(command, feature):

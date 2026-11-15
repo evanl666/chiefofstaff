@@ -284,13 +284,16 @@ class Push:
     alt_also: frozenset[str] = frozenset()
     alt_unknown: bool = False
     upstreams_set: bool = False  # The line may set a branch's upstream (`branch -u`, `-t`…).
+    # A command whose name a variable or a substitution holds, on a line that says push: maybe
+    # a push (or a shell fed a script: refused for that, fed_script, when it is one).
+    anonymous: bool = False
 
     def key(self) -> tuple:
         branches = None if self.branches is None else frozenset(self.branches)
         return (self.forced, branches, self.bare_in, self.bare_new, self.bare_also,
                 self.unknown, self.made_up, self.nested, self.current, self.configured,
                 self.mapped, self.mode, self.bare_check, self.alt_new, self.alt_also,
-                self.alt_unknown, self.upstreams_set)  # fmt: skip
+                self.alt_unknown, self.upstreams_set, self.anonymous)  # fmt: skip
 
 
 @dataclass
@@ -1458,7 +1461,6 @@ class Tally:
     # Whether a line zsh runs handed this one to another shell (Tally.modifiers).
     outer_zsh: bool = False
     saying: dict[str, bool] = field(default_factory=dict)
-    feeding: bool | None = None
     currents: bool = False  # Whether CURRENT's second character is in no word of the line.
     # What the line may do to where pushes go, besides what it says of each: set git's push
     # configuration (`git config`), a branch's upstream (`git branch -u`, a branch made: Push.
@@ -1471,13 +1473,6 @@ class Tally:
         if self.names is None:
             self.names = named(self.text)
         return self.names
-
-    def fed(self) -> bool:
-        """Whether the line feeds a shell a script, on a line that says push (fed_script: refused
-        for that), found once a line."""
-        if self.feeding is None:
-            self.feeding = fed_script(self.text)
-        return self.feeding
 
     def says(self, word: str) -> bool:
         """Whether a word of the line says `word` (in lower case), however it is quoted
@@ -2213,8 +2208,8 @@ def read_command(words: list[str], index: int, line: Line) -> str:
     first = words[0] if words else ""
     plain = PLAIN_NAME.fullmatch(first) and first not in FED_WRAPPERS and first not in KEYWORDS
     named = [] if plain else unwrapped(words)[0][:1]  # (The command, past `env`, `if`… only.)
-    if named and UNSETTLED.search(named[0]) and line.says_push() and not line.tally.fed():
-        line.tally.pushes.append(Push(unknown=True))  # A command a variable or substitution names.
+    if named and UNSETTLED.search(named[0]) and line.says_push():
+        line.tally.pushes.append(Push(unknown=True, anonymous=True))  # (Its name: not known.)
     for position, word in enumerate(words):
         if ASSIGNMENT.match(word):
             local.update(git_variables([word]))
@@ -2264,8 +2259,8 @@ def read_command(words: list[str], index: int, line: Line) -> str:
                 folder = LOST  # Each found file's folder.
         elif program in FEEDERS:
             feeds = feeds or placeholder(program, words[position + 1 :])
-    if pushed_by_a_name(words) and line.says_push() and not line.tally.fed():
-        line.tally.pushes.append(Push(unknown=True))  # (`find … -exec $G push`, `watch $G push`.)
+    if pushed_by_a_name(words) and line.says_push():
+        line.tally.pushes.append(Push(unknown=True, anonymous=True))  # (`find … -exec $G push`.)
     return ""
 
 
@@ -2967,6 +2962,12 @@ def feeds_shell(command: str, depth: int = 0, given: bool = False) -> bool:
 def fed_script(command: str, cwd: str = "") -> bool:
     """A line that feeds a shell a script (feeds_shell) and says push or may go to another
     branch (fed_says): what the script does is not known here."""
+    return fed_line(command)
+
+
+@functools.lru_cache(maxsize=32)
+def fed_line(command: str) -> bool:
+    """fed_script, once a line (pushes_unknown may ask it first)."""
     return fed_says(command) and feeds_shell(command)
 
 
@@ -3274,16 +3275,19 @@ def pushes_default(command: str, cwd: str = "") -> bool:
 def pushes_unknown(command: str, cwd: str = "") -> bool:
     """Whether a push's branch cannot be read from the line (see Push.unknown), or a bare
     one's from git (see bare_reading), or may be the default branch only because of a switch
-    before it."""
+    before it; or the line runs a command whose name it makes up (Push.anonymous), unless it
+    feeds that a script (fed_script says so then)."""
     found = pushes(command, cwd)
     checked = checked_branches(found)
+    anonymous = False
     for push in found:
-        if push.unknown:
+        anonymous = anonymous or push.anonymous
+        if push.unknown and not push.anonymous:
             return True
         branches, unknown, several = bare_reading(push, checked)
         if unknown or (several and branches is not None and branches & DEFAULT_BRANCHES):
             return True
-    return False
+    return anonymous and not fed_script(command, cwd)
 
 
 def pushes_forced(command: str, cwd: str = "") -> bool:
