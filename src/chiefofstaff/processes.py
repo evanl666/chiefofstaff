@@ -23,7 +23,8 @@ def process_table() -> dict[int, tuple[int, str]]:
         }
     try:
         table = subprocess.run(
-            ["ps", "-axo", "pid=,ppid=,command="],  # noqa: S607  (a fixed command, found on PATH)
+            # -ww: whole command lines (procps cuts them to 80 columns in some runs).
+            ["ps", "-axwwo", "pid=,ppid=,command="],  # noqa: S607  (a fixed command, found on PATH)
             capture_output=True,
             text=True,
             # Any program's command line, which need not be UTF-8.

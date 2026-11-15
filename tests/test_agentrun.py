@@ -326,6 +326,21 @@ def test_it_stays_light_without_the_copilot_sdk():
     assert "'copilot'" not in loaded and "'chiefofstaff.backend'" not in loaded
 
 
+def test_processes_are_seen_by_their_whole_command_lines(monkeypatch):
+    """Processes are known by their command lines (a terminal's `claude`, another Chief of
+    Staff's): Linux's ps cuts them to the width COLUMNS gives, even into a pipe; never here."""
+    monkeypatch.setenv("COLUMNS", "40")
+    script = f"sleep 30; : {'x' * 120}"
+    running = subprocess.Popen(["/bin/sh", "-c", script], start_new_session=True)
+    try:
+        assert process_table()[running.pid][1] == f"/bin/sh -c {script}"
+        table, groups = agentrun.process_groups()
+        assert table[running.pid][1] == f"/bin/sh -c {script}" and running.pid in groups
+    finally:
+        os.killpg(running.pid, signal.SIGKILL)
+        running.wait()
+
+
 def test_a_command_is_needed():
     with pytest.raises(SystemExit):
         agentrun.main([])

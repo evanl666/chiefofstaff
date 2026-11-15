@@ -112,7 +112,7 @@ def process_groups() -> tuple[dict[int, tuple[int, str]], dict[int, int]]:
     `ps` for both."""
     try:
         listed = subprocess.run(
-            ["ps", "-axo", "pid=,ppid=,pgid=,command="],  # noqa: S607  (a fixed command)
+            ["ps", "-axwwo", "pid=,ppid=,pgid=,command="],  # noqa: S607  (whole lines, as above)
             capture_output=True,
             text=True,
             errors="replace",
