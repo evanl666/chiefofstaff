@@ -1164,7 +1164,10 @@ hover tips and a part of its own in *Usage*; the daily summary adds them on a da
 
 **What each needs:** macOS or Linux.
 
-- **Codex:** the Codex CLI 0.167.2 or later, signed in (`codex login`).
+- **Codex:** the Codex CLI 0.167.2 or later, signed in (`codex login`). Chief of Staff runs
+  nothing of Codex where it was never set up (no `~/.codex`, or `CODEX_HOME`): any run would
+  make that folder. Settings looks at it as Codex starts, without its plugin sync; Codex still
+  refreshes its own model cache then.
 - **Claude:** Claude Code 2.1.322 or later, signed in by running `claude` in a terminal, and
   Chief of Staff's Claude extra (`uv tool install 'chiefofstaff[claude]'`). Claude workers use
   whatever your `claude` is signed in with: a Claude plan, an API key, Amazon Bedrock, Google
@@ -1225,14 +1228,19 @@ hover tips and a part of its own in *Usage*; the daily summary adds them on a da
   `codex mcp login <name>` or `claude mcp login <name>`.
 - **Claude's own tools** are tied into Chief of Staff: a worktree it makes is one of the
   worker's checkouts (receipts, *Storage*, removed with the others); what it schedules (`/loop`,
-  a reminder) runs as a turn of its own, admitted, shown and stopped as any; another Claude
-  session's message is shown labelled with its sender, never as yours, and can approve nothing;
-  plan mode is approved when the worker acts on its own and asks you under *Ask first*; its
-  subagents get Chief of Staff's rules; a cloud agent or a routine needs your OK each time.
-  Receipts show no exit code where Claude gives none (a `grep` that found nothing, say).
+  a reminder) runs as a turn of its own, admitted, shown and stopped as any: *Stop* holds it
+  until you say *Go on*; *Cancel*, *Set aside* and closing the worker end it; one meant to
+  outlive the worker (`durable`) is refused. Another Claude session's message is shown labelled
+  with its sender, never as yours, and can approve nothing; a message to a session that isn't
+  one of your workers asks you each time. In plan mode the worker reads and writes only its
+  plan until the plan is approved (when the worker acts on its own, at once; under *Ask first*,
+  by you); its subagents get Chief of Staff's rules; a cloud agent or a routine needs your OK
+  each time. Receipts show no exit code where Claude gives none (a `grep` that found nothing,
+  say).
 - **Continue in a terminal** (**⋯**) copies the agent's own command (`codex resume <thread>`, or
   `cd <folder> && claude --resume <id>`); while it is open there, Chief of Staff writes nothing
-  to it, and it shows what you did there before its next message.
+  to it, and it shows what you did there before its next message. A Claude worker with turns
+  scheduled is not handed over until they are deleted: they would go on in your terminal.
 - **Your own sessions:** *Other Copilot sessions* lists your own Codex and Claude sessions too.
   Adopting a Claude session goes on in that session (not while it is open elsewhere); a Codex
   thread goes on in a new thread of Chief of Staff's with its conversation, and yours stays as it

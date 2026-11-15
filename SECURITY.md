@@ -98,7 +98,7 @@ Settings → *Coding agents*). For such a worker:
   Chief of Staff's instructions, with any tag in it escaped. A message from another Claude
   session is shown as that session's, never as yours, can approve nothing, and starts a turn only
   if Chief of Staff admits it; messages between Chief of Staff's own workers go through it, with
-  the limits of `tell_session`.
+  the limits of `tell_session`, and one to a session that isn't one of them asks you each time.
 - **A Codex worker's own changes to `.codex/` never load.** Codex reads a folder's `.codex/`
   when a thread starts or resumes there: a rule in it lets commands run without asking Chief of Staff, an MCP
   server runs its command, and its settings reach every command's environment. So each time a
@@ -121,11 +121,13 @@ Settings → *Coding agents*). For such a worker:
   goes away, however it stops. The supervisor runs isolated from the folder it starts in
   (`python -I`, in a folder of Chief of Staff's own), so no Python file of a repository runs as
   it. A Claude worker's MCP servers (their headers and variables) and instructions are in files
-  only you can read, named by path on its command line and removed with it; what Chief of Staff
-  records of these processes keeps a hash of each command line, not the command line.
+  only you can read, named by path on its command line and removed with it, in a folder no
+  worker may read (its checks and its sandbox refuse it); Chief of Staff's own secrets (your
+  Slack token) never reach a file or a command line. What Chief of Staff records of these
+  processes keeps a hash of each command line, not the command line.
 - **Your agent settings stay yours.** Chief of Staff never edits a Codex or Claude settings file
-  and runs nothing that does (`claude auth status` only where Claude was set up, so none of its
-  files is made). Each Claude worker runs your installed `claude` itself, unmodified. Codex's
+  and runs nothing that does (Codex, and `claude auth status`, only where that agent was set up,
+  so none of its files is made; Codex refreshes its own model cache as it starts). Each Claude worker runs your installed `claude` itself, unmodified. Codex's
   settings folder (`~/.codex`, and `$CODEX_HOME`) and Claude's (`~/.claude`, and
   `$CLAUDE_CONFIG_DIR`) cannot be added to *Also writable in the sandbox* while that agent is on:
   their hooks run outside any sandbox.
