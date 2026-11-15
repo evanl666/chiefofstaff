@@ -12,15 +12,25 @@ export function showSettingsTab(tab) {
   const shown = tabs.find((section) => section.dataset.tab === tab) || tabs[0];
   localStorage.setItem(TAB, shown.dataset.tab);
   for (const section of tabs) section.hidden = section !== shown;
-  for (const button of document.querySelectorAll("#settings-tabs button")) {
-    button.setAttribute("aria-selected", String(button.dataset.tab === shown.dataset.tab));
-    // On a phone the tabs scroll sideways: the one shown is in view.
-    if (button.dataset.tab === shown.dataset.tab) button.scrollIntoView({ block: "nearest", inline: "nearest" });
-  }
+  for (const button of document.querySelectorAll("#settings-tabs button")) button.setAttribute("aria-selected", String(button.dataset.tab === shown.dataset.tab));
+  tabInView();
   $("#settings-pane").scrollTop = 0;
   // Coding agents looks for them each time it is shown (only then).
   if (shown.dataset.tab === "agents" && !agentsLooked) lookForAgents();
 }
+// On a phone the tabs scroll sideways: the one shown is in view, whole, also as the width
+// changes (a phone turned, a window narrowed while Settings is open). Only the strip scrolls.
+function tabInView() {
+  const strip = $("#settings-tabs");
+  const button = strip?.querySelector('[aria-selected="true"]');
+  if (!button || strip.scrollWidth <= strip.clientWidth) return;
+  const box = strip.getBoundingClientRect();
+  const at = button.getBoundingClientRect();
+  const edge = 10;
+  if (at.left < box.left + edge) strip.scrollLeft -= box.left + edge - at.left;
+  else if (at.right > box.right - edge) strip.scrollLeft += at.right - box.right + edge;
+}
+window.addEventListener("resize", tabInView);
 export function openSettings(tab = "") {
   const dialog = $("#settings-dialog");
   // Opened first: a part that fails to render must not keep Settings shut.
@@ -1011,7 +1021,6 @@ function agentsTab() {
       el("small", { text: "It says which it chose and why. Ask for one with @codex or @claude, or in your own words." }),
     ),
     el("small", { id: "agents-sandboxed", hidden: true, text: "Other agents can't run while workers are sandboxed: their sandboxes have not passed Chief of Staff's checks yet." }),
-    el("small", { id: "agents-downgrade", hidden: true }, "Before you install an older Chief of Staff, run ", el("code", { text: "chiefofstaff --prepare-downgrade" }), " and close the workers on other agents."),
   );
   $("#settings-form .tab[data-tab=models]").after(section);
 }
@@ -1028,7 +1037,6 @@ function renderAgentsLine() {
   $("#settings-form").agent_new_workers.replaceChildren(el("option", { value: "copilot", text: "Copilot" }));
   $("#agents-choice").hidden = true;
   $("#agents-sandboxed").hidden = true;
-  $("#agents-downgrade").hidden = !state.snapshot.agents;
 }
 async function lookForAgents() {
   const looking = Symbol("looking");
