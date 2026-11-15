@@ -1398,8 +1398,12 @@ class ClaudeWorker:
                 if self.pid:
                     os.kill(self.pid, signal.SIGTERM)
 
+    def ending_or_alive(self) -> bool:
+        """Its process may still run: alive, or ending (its task waits for it to be gone)."""
+        return self.task is not None and not self.task.done()
+
     def processes(self, table: dict | None = None) -> dict[int, str]:
-        if self.pid and self.alive():
+        if self.pid and self.ending_or_alive():
             table = process_table() if table is None else table
             self.started |= {
                 pid: table[pid][1]
@@ -2985,8 +2989,11 @@ class ClaudeAgent:
         return {worker.epoch for worker in self.workers.values() if worker.alive()}
 
     def processes(self, table: dict[int, tuple[int, str]] | None = None) -> dict[int, str]:
+        """Its workers' processes, also those still ending (let go of, retired): theirs until
+        gone, never another window's (their live files, their `--resume`)."""
         found: dict[int, str] = {}
-        if running := [worker for worker in list(self.workers.values()) if worker.alive()]:
+        workers = {*self.workers.values(), *self.retired}
+        if running := [worker for worker in workers if worker.ending_or_alive()]:
             table = process_table() if table is None else table
             for worker in running:
                 found |= {
