@@ -22,6 +22,7 @@ from urllib.parse import parse_qsl, urlsplit
 from . import agents, prompts, receipts, threads
 from .backend import stop_background
 from .envelope import wrap
+from .models import this_computer as loopback
 from .policy import within
 from .roles import WORKER
 from .sources.github import MISSING_TRIES, NOT_FOUND
@@ -297,9 +298,10 @@ def github_run(url: str) -> tuple[str, str] | None:
 # looked at again after HOSTS_SECONDS and read again when it changed.
 HOSTS_FILE: tuple[float, float, dict[str, set[str]]] = (0.0, 0.0, {})
 HOSTS_SECONDS = 30
-# A page its worker declared (of no documents site) said to be a process at work is a server's
-# (a dev server "running"), no document: it stays in its task's links. Only words that say a
-# process runs: a document is "in progress", "submitted for review", "failed review" too.
+# A page its worker declared on its network or a port of its own (neither a documents site's
+# nor a run) said to be a process at work is a server's (a dev server "running"), no document:
+# it stays in its task's links (local_page). Only words that say a process runs: a document is
+# "in progress", "submitted for review", "failed review" too.
 SERVING_WORDS = re.compile(
     r"\b(running|starting|restarting|serving|listening|deploying|booting|launching)\b",
     re.IGNORECASE,
@@ -334,30 +336,46 @@ def hosts_file() -> dict[str, set[str]]:
     return names
 
 
-def local_address(address: str) -> bool:
+def address_of(host: str):
     try:
-        found = ipaddress.ip_address(address.split("%", 1)[0])
+        return ipaddress.ip_address(host.split("%", 1)[0])
     except ValueError:
-        return False
-    return found.is_loopback or found.is_private or found.is_link_local or found.is_unspecified
+        return None
 
 
-def served_here(url: str, ports: bool = True) -> bool:
-    """Whether a link is to a server on this computer or its network, not a page others read:
-    a loopback, private or link-local address, a .local or .localhost name (or one the hosts
-    file gives such an address), or (`ports`) a port that is not its scheme's own (a dev
-    server's)."""
+def this_computer(host: str) -> bool:
+    """A name of this computer: localhost (or a .localhost name), a loopback address or the
+    unspecified one (0.0.0.0, [::]: where a dev server says it serves), however written, or a
+    name the hosts file maps to one (no DNS lookup)."""
+    return any(loopback(name) for name in [host, *hosts_file().get(host, ())])
+
+
+def on_its_network(host: str) -> bool:
+    """A name of a computer on its network: a private or link-local address, a .local name, or
+    a name the hosts file maps to such an address."""
+    if host.endswith(".local"):
+        return True
+    names = [host, *hosts_file().get(host, ())]
+    return any(
+        (found := address_of(name)) and (found.is_private or found.is_link_local) for name in names
+    )
+
+
+def local_page(url: str, status: str) -> bool:
+    """Whether a page its worker declared (one of no documents site, and no run: those are
+    listed wherever they are served, bug E71) is served here rather than delivered (bug E55): on
+    this computer; or on its network or a port of its own, said to be serving (a dev server
+    "running"). Such a page stays in its task's links."""
     try:
         parts = urlsplit(url)
         port = parts.port
     except ValueError:
         return True
     host = (parts.hostname or "").lower().rstrip(".")
-    if ports and port is not None and port != {"http": 80, "https": 443}.get(parts.scheme):
+    if this_computer(host):
         return True
-    if host == "localhost" or host.endswith((".local", ".localhost")) or local_address(host):
-        return True
-    return any(local_address(address) for address in hosts_file().get(host, ()))
+    elsewhere = port is not None and port != {"http": 80, "https": 443}.get(parts.scheme)
+    return (elsewhere or on_its_network(host)) and bool(SERVING_WORDS.search(status or ""))
 
 
 def run_marks(item: dict) -> set[str]:
@@ -385,15 +403,35 @@ def covers(check: dict, item: dict) -> bool:
     return bool(run_marks(item) & set(check["runs"]))
 
 
+def ci_build(host: str, path: str, query: dict[str, str], here: bool = False) -> str:
+    """A CI build its worker declared (bug E73: one "running" was taken for a server's page), by
+    a default name: a Jenkins build (/job/<name>/<n>), a Buildkite one (or any /builds/<n>), a
+    GitLab pipeline or job (/-/pipelines/<n>, /-/jobs/<n>), an Azure DevOps build
+    (_build/results?buildId=<n>); "" for none. CircleCI's workflows are runs by their path.
+    `here`: served on this computer, where a dev server's routes look like anything: only what
+    says which CI it is (GitLab's /-/, Azure's _build, a Jenkins named so)."""
+    if (found := re.search(r"/job/([^/]+)/(\d+)(?:/|$)", path)) and (
+        not here or "jenkins" in f"{host}{path}".lower()
+    ):
+        return f"Jenkins · {clip(found.group(1), 24)} #{found.group(2)}"
+    if found := re.search(r"/([^/]+)/-/(pipeline|job)s/(\d+)(?:/|$)", path):
+        return f"GitLab · {clip(found.group(1), 20)} {found.group(2)} {found.group(3)}"
+    if "/_build/results" in path and (number := query.get("buildId", "")).isdigit():
+        return f"Azure DevOps · build {number}"
+    if not here and (found := re.search(r"/builds?/(\d+)(?:/|$)", path)):
+        return f"{clip(host.split('.')[0], 20)} · build {found.group(1)}"
+    return ""
+
+
 def deliverable_kind(url: str, declared: bool = False) -> tuple[str, str]:
     """Whether a link is a deliverable, and what it is called by default: ("doc", "Google
     Doc"), ("flow", "Airflow · nightly"), or ("", "") for what is not one. A document is one
     page of a documents site (a Google Doc with its id, a Notion or Confluence page, a Quip
     doc), never the site's home page; a flow is one workflow run (an Airflow DAG run, a Flyte
-    execution; a GitHub Actions run only when its worker `declared` it: one in a report is a
-    PR's CI), never its logs or pods. Any other page its worker declared counts as a document
-    when it is a page of its own, not a site's root nor a screenshot, a CSV or a log. Mirrors
-    static/text.js linkKind."""
+    execution; a GitHub Actions run or another CI build only when its worker `declared` it: one
+    in a report is a PR's CI), never its logs or pods. Any other page its worker declared
+    counts as a document when it is a page of its own, not a site's root nor a screenshot, a
+    CSV or a log. Mirrors static/text.js linkKind."""
     try:
         parts = urlsplit(url)
     except ValueError:
@@ -435,7 +473,15 @@ def deliverable_kind(url: str, declared: bool = False) -> tuple[str, str]:
         return ("flow", f"Flyte · {clip(execution.group(1), 24)}") if execution else ("", "")
     if not declared or not path:
         return "", ""  # Only mentioned, or a site's root: no deliverable.
-    if re.search(r"/(?:runs?|flow-runs?|dagruns?|executions?|workflows?|pipelines?)/[^/]+", path):
+    # A dev server on this computer has routes of any name ("/pipelines/new"): there only what
+    # says which runner it is makes a run (a Prefect flow run, an Airflow DAG run), never a
+    # route's common word alone.
+    here = this_computer(host)
+    if called := ci_build(host, path, query, here):
+        return "flow", called
+    if re.search(r"/(?:flow-runs?|dagruns?)/[^/]+", path) or (
+        not here and re.search(r"/(?:runs?|executions?|workflows?|pipelines?)/[^/]+", path)
+    ):
         return "flow", f"{host.split('.')[0]} · {clip(last, 28)}"
     return "doc", f"{clip(host, 28)} · {clip(last, 24)}"
 
@@ -4342,22 +4388,27 @@ class TaskActions:
             )
         return found
 
-    def unlisted_runs(self, task_id: str, declared: set[str], summary: str):
-        """A done report that names neither in its artifacts nor in its words a run its worker
-        said goes on: noted on the run (if nothing tells of it, the owner hears it may have
-        ended). Said again, it is listed again (declare_artifacts)."""
+    def listed_runs(self, task_id: str, declared: set[str], summary: str, done: bool):
+        """What a report of its worker says of the runs it said go on: a done report that names
+        one neither in its artifacts nor in its words notes it as no longer listed (if nothing
+        tells of it, the owner hears it may have ended); a later report that names it, in its
+        words or its artifacts, any report, lists it again (bug E75)."""
         text = summary.casefold()
         known = json.loads(self.store.get(f"artifacts:{task_id}") or "[]")
         going = {threads.link_key(item["url"]) for item in self.runs_going(task_id)}
         changed = False
         for item in known:
-            if (
-                threads.link_key(item["url"]) in going
-                and not run_marks(item) & declared
-                and item["url"].casefold() not in text
-                and not ((item.get("name") or "").casefold() in text and item.get("name"))
-                and not item.get("unlisted")
-            ):
+            if threads.link_key(item["url"]) not in going:
+                continue
+            name = (item.get("name") or "").casefold()
+            named = bool(
+                run_marks(item) & declared
+                or item["url"].casefold() in text
+                or (name and name in text)
+            )
+            if named and item.pop("unlisted", None):
+                changed = True
+            elif done and not named and not item.get("unlisted"):
                 item["unlisted"] = True
                 changed = True
         if changed:
@@ -4382,7 +4433,7 @@ class TaskActions:
             if how == "ended":
                 item |= {"status": "ended", "by": "you", "changed_at": now()}
             else:
-                item["untracked"] = True
+                item |= {"untracked": True, "changed_at": now()}
         self.store.set(f"artifacts:{task_id}", json.dumps(known))
         self.runs_over(task_id)
         self.publish(self.tasks.get(task_id))
@@ -4512,13 +4563,13 @@ class TaskActions:
             if not kind or key in seen:
                 continue
             seen.add(key)
-            # Served from this computer or its network (bug E55): its task's links, not what
-            # it delivers; a run is known by its address, not by a port of its own (Airflow on
-            # :8080 is still a run). A page of no documents site said to be running: a server's.
-            if served_here(item["url"], ports=kind != "flow") or (
+            # A page served here (local_page): its task's links, not what it delivers. Never a
+            # documents site's page nor a run, wherever it is (bug E71): a run that can bring
+            # its task under Needs you is listed here too.
+            if (
                 kind == "doc"
                 and not deliverable_kind(item["url"])[0]
-                and SERVING_WORDS.search(item.get("status") or "")
+                and local_page(item["url"], item.get("status") or "")
             ):
                 continue
             found.append(
@@ -4541,13 +4592,17 @@ class TaskActions:
                     **({"untracked": True} if item.get("untracked") else {}),
                     # Nothing tells where it stands now: not "running" as it was last said.
                     **({"unknown": True} if item["url"] in unknown else {}),
+                    # Since when it stands so (bug E77): when that changed (GitHub read a new
+                    # status, the owner marked it), else when it was said (a read that found it
+                    # as it was is no change).
+                    "changed_at": item.get("changed_at") or item.get("at") or None,
                 }
             )
         given_keys = {threads.link_key(url) for url in given}
         for url in json.loads(self.store.get(f"madelinks:{task['id']}") or "[]"):
             kind, called = deliverable_kind(url)
             key = threads.link_key(url)
-            if not kind or key in seen or key in given_keys or served_here(url, kind != "flow"):
+            if not kind or key in seen or key in given_keys:
                 continue
             seen.add(key)
             found.append(
@@ -4607,6 +4662,13 @@ class TaskActions:
                 "status": clip(" ".join(str(item.get("status") or "").split()), 40),
                 "at": stamp,
             }
+            # Said again as it stood: it stands so since then, not since now (bug E77).
+            before = next(
+                (other for other in known if other["url"] == url and not other.get("untracked")),
+                {},
+            )
+            if entry["status"] and entry["status"] == before.get("status"):
+                entry["changed_at"] = before.get("changed_at") or before.get("at") or stamp
             known = [
                 other
                 for other in known

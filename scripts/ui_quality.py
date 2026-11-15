@@ -970,6 +970,11 @@ async def agents_views(runtime, browser, quality: Quality):
 
 
 async def main():
+    from chiefofstaff import machine
+
+    # A disk as roomy as the pages expect, whatever this machine's is (a low one adds the
+    # Router's note under Needs you); a round about storage sets its own.
+    machine.read_disk = lambda paths: {"free": 200 * 10**9, "total": 500 * 10**9, "path": "/"}
     phase = sys.argv[1] if len(sys.argv) > 1 else "check"
     SHOTS.mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="cos-quality-") as temporary:

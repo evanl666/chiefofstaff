@@ -123,7 +123,12 @@ def prepare_downgrade(parser: argparse.ArgumentParser, data_dir: Path) -> int:
             "terminal), then run this again."
         )
     try:
-        stopped, left = agents.prepare_downgrade(Store(directory))
+        store = Store(directory)
+        if not agents.ever_used(store):
+            # Bug E80: no "close the workers on other agents" when there never were any.
+            print("Nothing to prepare: no workers ran on another agent.", flush=True)
+            return 0
+        stopped, left = agents.prepare_downgrade(store)
     finally:
         data_lock.close()
     if stopped:

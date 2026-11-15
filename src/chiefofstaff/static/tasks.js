@@ -118,7 +118,8 @@ const TITLE_MAX = 80;
 // aside (its result kept), not cancelled.
 export const cancelledWords = (view) => (view?.set_aside ? "It had finished: set aside, its result is kept." : "Task cancelled.");
 // Runs its worker said go on that nothing told of for a day (see showActions): their links.
-const unknownRuns = (task) => (Array.isArray(task.monitoring) ? task.monitoring : []).filter((item) => item.kind === "flow" && item.unknown).map((item) => item.url);
+const unknownItems = (task) => (Array.isArray(task.monitoring) ? task.monitoring : []).filter((item) => item.kind === "flow" && item.unknown);
+const unknownRuns = (task) => unknownItems(task).map((item) => item.url);
 // The key covers what changes a card's actions and layout; the version, what only its text.
 // `phase`: where it is on the board ({section, marker, why}: see board.js).
 export function taskItem(task, phase = phaseOf(task)) {
@@ -518,6 +519,32 @@ function taskCard(task, phase = phaseOf(task)) {
     actions.replaceChildren(box, input, error, cancel, el("button", { type: "button", text: "Move it", onclick: go }));
     input.focus();
   }
+  // Mark ended and Stop tracking for its runs of unknown status: of one, at once; of several,
+  // the owner picks which (bug E78: one may have ended, another not).
+  function runActions() {
+    // In the order of their chips above.
+    const chips = deliverablesOf(task).map((item) => item.key);
+    const rank = (run) => (chips.includes(linkKey(run.url)) ? chips.indexOf(linkKey(run.url)) : chips.length);
+    const runs = unknownItems(task).sort((a, b) => rank(a) - rank(b));
+    const one = runs.length === 1;
+    const done = (how, count) => (how === "ended" ? (count > 1 ? "Runs marked ended." : "Marked ended.") : "No longer tracked.");
+    const go = (how, urls) => act(`/api/tasks/${task.id}/runs`, { how, urls }, done(how, urls.length));
+    return [
+      { text: one ? "Mark ended" : "Mark ended…", tip: one ? "It has ended: mark it so" : "Choose the runs that have ended", onclick: () => (one ? go("ended", [runs[0].url]) : pickRuns("ended", runs, go)) },
+      { text: one ? "Stop tracking" : "Stop tracking…", tip: one ? "Stop following it, as it was last said to stand" : "Choose the runs to stop following", onclick: () => (one ? go("untracked", [runs[0].url]) : pickRuns("untracked", runs, go)) },
+    ];
+  }
+  function pickRuns(how, runs, go) {
+    const boxes = runs.map((run) => el("input", { type: "checkbox", value: run.url }));
+    const reported = (run) => (run.reported_at ? ` · reported ${run.status || "running"} ${since(run.reported_at)}` : "");
+    const list = el("div", { class: "run-picker", role: "group", "aria-label": how === "ended" ? "Runs that have ended" : "Runs to stop tracking" }, ...runs.map((run, index) => el("label", { class: "check" }, boxes[index], el("span", { text: run.label || run.url }), el("span", { class: "muted", text: reported(run) }))));
+    const confirm = el("button", { type: "button", text: how === "ended" ? "Mark ended" : "Stop tracking", disabled: true, onclick: () => go(how, boxes.filter((box) => box.checked).map((box) => box.value)) });
+    for (const box of boxes) box.addEventListener("change", () => (confirm.disabled = !boxes.some((item) => item.checked)));
+    actions.replaceChildren(list, error, el("button", { type: "button", class: "text", text: "Cancel", onclick: showActions }), confirm);
+    actions.dataset.editing = "1";
+    place();
+    boxes[0].focus();
+  }
   function retryWithNote() {
     const input = el("textarea", { rows: 2, placeholder: "What should it do differently?" });
     form(input, "Retry", () => act(`/api/tasks/${task.id}/retry`, { text: input.value.trim() }, "Retrying."));
@@ -569,10 +596,10 @@ function taskCard(task, phase = phaseOf(task)) {
       more = [followUp, copy, named, worker];
     } else if (task.status === "done" && phase.marker === "runs-unknown") {
       // Runs its worker said go on that nothing told of for a day, and nothing else to wait
-      // on: the owner says what became of them, here.
-      const urls = unknownRuns(task);
-      main = el("button", { type: "button", text: "Ended", "data-tip": urls.length > 1 ? "They have ended: mark them so" : "It has ended: mark it so", onclick: () => act(`/api/tasks/${task.id}/runs`, { how: "ended", urls }, urls.length > 1 ? "Runs marked ended." : "Marked ended.") });
-      shown = [quiet("Stop tracking", () => act(`/api/tasks/${task.id}/runs`, { how: "untracked", urls }, "No longer tracked."), "Stop following it, as it was last said to stand")];
+      // on: the owner says what became of them, here; of several, which (bug E78).
+      const [ended, untracked] = runActions();
+      main = el("button", { type: "button", text: ended.text, "data-tip": ended.tip, onclick: ended.onclick });
+      shown = [quiet(untracked.text, untracked.onclick, untracked.tip)];
       more = [followUp, copy, pr, named, splitOff, worker];
     } else if (task.status === "review") {
       // Every result waits for the owner's Accept, a report that only informs too.
@@ -610,11 +637,7 @@ function taskCard(task, phase = phaseOf(task)) {
     // Runs its worker said go on that nothing told of for a day: the owner says what became of
     // them (ended, or no longer to follow), in its menu, whatever the task's state (bug E57);
     // on its row when that is all it waits on.
-    const urls = unknownRuns(task);
-    if (urls.length && phase.marker !== "runs-unknown") {
-      const what = urls.length > 1 ? "Runs marked ended." : "Marked ended.";
-      more = [{ text: "Mark ended", onclick: () => act(`/api/tasks/${task.id}/runs`, { how: "ended", urls }, what) }, { text: "Stop tracking", onclick: () => act(`/api/tasks/${task.id}/runs`, { how: "untracked", urls }, "No longer tracked.") }, ...more];
-    }
+    if (unknownRuns(task).length && phase.marker !== "runs-unknown") more = [...runActions().map(({ text, onclick }) => ({ text, onclick })), ...more];
     const others = moreMenu(more, "More actions", "⋯", moreName(task)) || "";
     if (menu) menu.replaceChildren(others);
     actions.replaceChildren(error, menu ? "" : others, undo || "", ...shown, main || "");

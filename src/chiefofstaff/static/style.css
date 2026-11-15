@@ -791,6 +791,7 @@ details.section > summary::-webkit-details-marker { display: none; }
 details.section > summary::before { content: "▸"; color: var(--muted); font-weight: 400; width: 8px; }
 details.section[open] > summary::before { content: "▾"; }
 details.section > summary small { margin-left: auto; font-weight: 400; color: var(--muted); font-size: var(--small); }
+details.section > summary small.error { color: var(--red); }
 details.section > .section-body { display: grid; gap: 12px; padding: 4px 16px 16px; }
 .inline-actions { display: flex; gap: 8px; align-items: center; }
 .paste-box { display: grid; gap: 8px; }
@@ -1574,6 +1575,12 @@ dialog .row label.hours:not(.grow) { width: auto; flex: none; }
 /* A report not read yet. */
 .dot.unread { background: var(--accent); opacity: 1; }
 /* Moving a task's latest result to a task of its own: what stays, what moves. */
+/* Which of its runs of unknown status: one line each, its name and since when it is quiet. */
+.card .actions .run-picker { flex: 1 1 100%; display: grid; gap: 2px; min-width: 0; font-size: var(--small); }
+.card .actions .run-picker label.check { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.card .actions .run-picker label.check > span:first-of-type { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.card .actions .run-picker .muted { color: var(--muted); white-space: nowrap; }
+.card .actions .run-picker input { flex: none; min-height: 0; padding: 0; border: 0; }
 .card .actions .split-preview { flex: 1 1 100%; display: grid; gap: 4px; min-width: 0; font-size: var(--small); color: var(--soft); }
 .split-preview .hint { color: var(--muted); }
 .split-preview .doubt { color: var(--amber); }

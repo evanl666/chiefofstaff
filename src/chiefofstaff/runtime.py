@@ -86,6 +86,7 @@ from .peers import Peers
 from .policy import GITHUB_MCP, within
 from .provenance import ALIVE_EVERY, RUNS_KEPT, Provenance, log_of, runs_of
 from .roles import ROUTER, SLACK, WATCHDOG, WORKER
+from .send import shell_command
 from .sendsocket import LimitedError, SendSocket
 from .sendsocket import headline as sent_headline
 from .sendsocket import parts as sent_parts
@@ -482,8 +483,9 @@ class Runtime:
         )
         # Where the owner's other Copilot sessions stand (the sidebar), while the setting is on.
         self.others = Others(self)
-        # Send to Chief's socket, while the setting is on.
+        # Send to Chief's socket, while the setting is on, and its command in the owner's shell.
         self.send = SendSocket(self)
+        self.send_command = shell_command()
         self.toolset = Tools(self)
         self.tools = self.toolset.definitions()
 
@@ -2298,6 +2300,8 @@ class Runtime:
         found = [await self.look_for_agent(name) for name in agents.NAMES]
         return {
             "agents": [entry for entry in found if entry["found"] or entry["enabled"]],
+            # What it supports, for when none is found ("the Codex CLI").
+            "supported": [agents.INSTALL[name] for name in agents.NAMES],
             "new_workers": agents.new_workers(self.store),
             "sandboxed": bool(settings.worker_sandbox and self.sandbox_host),
         }
@@ -4692,6 +4696,13 @@ class Runtime:
             "runtime": self.status,
             # Why Send to Chief's socket is not open, while the setting is on.
             **({"send_problem": self.send.problem} if self.send.problem else {}),
+            # Its command, when it is not `chiefofstaff` in the owner's shell (bug E63: started
+            # with uvx, there is no such command there).
+            **(
+                {"send_command": {"command": self.send_command[0], "install": self.send_command[1]}}
+                if self.send_command[0] != "chiefofstaff"
+                else {}
+            ),
             "demo": getattr(self, "demo", False),
             "focus": self.focus.state(),
             "router_id": self.store.get("router_id"),

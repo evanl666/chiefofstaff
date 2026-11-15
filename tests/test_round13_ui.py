@@ -120,7 +120,7 @@ def test_runs_waiting_are_never_folded_away_and_needing_a_look_comes_first():
         "1 failed · 1 waiting · 3 running",
         "bad",
         6,
-        "3 succeeded, 2 running, 1 ended",
+        "2 running, 3 done, 1 ended",  # Round 14 (E76): the rows' words.
         "As their worker last said, or as you marked them",
     ]
 
@@ -156,12 +156,19 @@ def test_a_dev_servers_page_is_a_link_of_its_task():
         " ${urls[6]} and ${urls[7]}.` });\n"
         "return { kinds, links: links.map((l) => [l.found.kind, l.role, l.name]) };"
     )
-    assert found["kinds"] == [["link", "reference"]] * 8 + [["run", "run"], ["doc", "output"]]
+    # Round 14: a run is one wherever it runs (E71), a Jenkins build is a run (E73).
+    assert found["kinds"] == [["link", "reference"]] * 5 + [
+        ["run", "run"],
+        ["link", "reference"],
+        ["run", "diagnostic"],
+        ["run", "run"],
+        ["doc", "output"],
+    ]
     assert found["links"] == [
         ["link", "output", "Preview"],
+        ["run", "run", ""],
         ["link", "reference", ""],
-        ["link", "reference", ""],
-        ["link", "reference", ""],
+        ["run", "diagnostic", ""],
     ]
 
 

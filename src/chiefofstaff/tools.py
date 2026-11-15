@@ -3110,9 +3110,12 @@ class Tools:
             and (problem := await self.runtime.checks.before_done(row, task))
         ):
             raise ValueError(problem)
-        if task and params.status == "done":
-            self.runtime.task_actions.unlisted_runs(
-                task["id"], self.states[caller].turn_runs.get(task["id"], set()), params.summary
+        if task:
+            self.runtime.task_actions.listed_runs(
+                task["id"],
+                self.states[caller].turn_runs.get(task["id"], set()),
+                params.summary,
+                done=params.status == "done",
             )
         meta = {"status": params.status, "task_id": task["id"] if task else None}
         drafts = {

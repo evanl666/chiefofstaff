@@ -218,6 +218,18 @@ export function renderStatusLine() {
       ),
     );
   }
+  // An away notice that did not reach the owner (bug E72): said until one does.
+  const away = snap.connector?.away?.last || {};
+  if (snap.settings.away_notify && away.at && !away.ok) {
+    nodes.push(
+      el(
+        "div",
+        { class: "bad", title: `Could not reach you${away.where ? ` via ${away.where}` : ""}: ${away.error || "unknown error"}` },
+        `Away notice not delivered · ${since(away.at)} `,
+        el("button", { type: "button", class: "link", text: "Settings", onclick: () => openSettings("connections") }),
+      ),
+    );
+  }
   if (snap.settings.paused) nodes.push(el("div", { text: "Watchers paused" }));
   line.replaceChildren(...nodes);
 }

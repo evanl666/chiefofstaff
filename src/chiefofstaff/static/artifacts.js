@@ -24,7 +24,7 @@ export function toneOf(status) {
   if (has("cancelled|canceled|aborted|abandoned|skipped|superseded|obsolete")) return "muted";
   if (has("not|incomplete|unfinished|unpublished|partial|partially|pending|waiting|paused|on-hold|yet")) return /review|approval/.test(words) ? "wait" : "active";
   if (has("review|reviewing|approval|for-review")) return "wait";
-  if (has("succeeded|success|successful|done|final|live|complete|completed|merged|published|passed|passing|ready|updated|shipped|deployed|green")) return "good";
+  if (has("succeeded|success|successful|done|finished|delivered|final|live|complete|completed|merged|published|passed|passing|ready|updated|shipped|deployed|green")) return "good";
   if (has("running|in-progress|progress|draft|queued|started|starting|writing|building|drafting")) return "active";
   if (words !== said && !has("but|except")) return "good";  // "no errors", "error-free".
   return "neutral";
@@ -85,12 +85,13 @@ export function deliverablesOf(task, phase) {
       .map((item) => {
         if (item.kind === "pr") {
           const found = prItem(task, receipt(item.url), item.role || "created", item.url, item.title);
-          return found.pr || !item.status ? found : { ...found, status: item.status, tone: PR_TONES[item.status] || toneOf(item.status), said: true };
+          return found.pr || !item.status ? found : { ...found, status: item.status, tone: PR_TONES[item.status] || toneOf(item.status), said: true, at: item.changed_at || item.at || found.at };
         }
         const status = item.status || taskStatus;
         // When its worker last said where it stands (what needs a look first is the newest).
         const declared = (task.artifacts || []).find((said) => linkKey(said.url) === linkKey(item.url));
-        const found = { key: linkKey(item.url), kind: KIND_WORDS[item.kind], role: "", name: item.title || item.url, url: item.url, status, tone: item.status ? toneOf(item.status) : taskTone, at: item.at || declared?.at || task.updated_at, said: Boolean(item.status), by: item.said_by || "", pr: null, task };
+        // Since when it stands so (bug E77): when that changed, else was last read, else said.
+        const found = { key: linkKey(item.url), kind: KIND_WORDS[item.kind], role: "", name: item.title || item.url, url: item.url, status, tone: item.status ? toneOf(item.status) : taskTone, at: item.changed_at || item.at || declared?.at || task.updated_at, said: Boolean(item.status), by: item.said_by || "", pr: null, task };
         const standing = runStanding(item.status, declared, item.untracked, item.unknown);
         return standing ? { ...found, ...standing } : found;
       });
@@ -154,34 +155,43 @@ const openRuns = new Set();
 const newest = (a, b) => String(b.at).localeCompare(String(a.at));
 // What needs a look first first; of two alike, the newer.
 const byUrgency = (a, b) => RANK[a.tone] - RANK[b.tone] || newest(a, b);
-// What runs come to in a few words, and the tone of the one that needs a look first.
-export function runsWords(runs) {
-  const count = (test) => runs.filter(test).length;
-  const failed = count((item) => item.tone === "bad");
-  const waiting = count((item) => item.tone === "wait" && !item.unknown);
-  const unknown = count((item) => item.unknown);
-  const running = count((item) => item.tone === "active");
-  // What needs a look first first (bug E58 review): cut short on a narrow list, the rest goes.
-  const words = [failed ? `${failed} failed` : "", waiting ? `${waiting} waiting` : "", unknown ? `${unknown} unknown` : "", running ? `${running} running` : ""].filter(Boolean).join(" · ");
-  const tone = failed ? "bad" : waiting || unknown ? "wait" : running ? "active" : runs.every((item) => item.tone === "good") ? "good" : "neutral";
-  return { words, tone };
-}
-// A run's status in a word under its task's runs line, its name coming first there: the word of
-// its tone, never a piece of what its worker wrote ("not started yet" is not "not"); the whole
-// of it on hover. One running that has not started is "pending".
+// A run's status in a word (bug E76: one word for it on its row, in its runs line's count and in
+// "+N"): the word of its tone, never a piece of what its worker wrote ("not started yet" is
+// not "not"); the whole of it on hover. One running that has not started is "pending".
 const TONE_WORDS = { bad: "failed", wait: "waiting", good: "done", muted: "ended" };
 const NOT_YET = /\b(not|pending|queued|scheduled|paused|on[ -]hold|yet|waiting)\b/i;
 export function shortStatus(item) {
   if (item.untracked) return "not tracked";
   if (item.unknown) return "unknown";
   if (item.tone === "active") return NOT_YET.test(item.status || "") ? "pending" : "running";
-  return TONE_WORDS[item.tone] || item.status || "";
+  const word = TONE_WORDS[item.tone] || String(item.status || "").trim();
+  return word.length <= 14 ? word || "no status" : "other";
 }
-// Statuses by how many have each, the most first: "4 succeeded, 2 running".
-function statusCounts(items) {
+// Those words, what needs a look first first; then what is over.
+const WORD_ORDER = ["failed", "waiting", "unknown", "running", "pending", "done", "ended", "not tracked"];
+const URGENT = new Set(["failed", "waiting", "unknown", "running", "pending"]);
+// Runs counted by their words, in that order: [[word, count], …].
+function counted(runs) {
   const counts = new Map();
-  for (const item of items) counts.set(item.status || "no status", (counts.get(item.status || "no status") || 0) + 1);
-  return [...counts].sort((a, b) => b[1] - a[1]).map(([status, n]) => `${n} ${status}`).join(", ");
+  for (const item of runs) counts.set(shortStatus(item), (counts.get(shortStatus(item)) || 0) + 1);
+  const rank = (word) => (WORD_ORDER.includes(word) ? WORD_ORDER.indexOf(word) : WORD_ORDER.length);
+  return [...counts].sort((a, b) => rank(a[0]) - rank(b[0]) || b[1] - a[1]);
+}
+// What runs come to in a few words (what needs a look, "1 failed · 1 waiting · 2 running · 1
+// pending"; else what they came to, "9 done"), and the tone of the one that needs a look first.
+export function runsWords(runs) {
+  const all = counted(runs);
+  const urgent = all.filter(([word]) => URGENT.has(word));
+  const words = (urgent.length ? urgent : all).map(([word, count]) => `${count} ${word}`).join(" · ");
+  const has = (word) => all.some(([found]) => found === word);
+  const tone = has("failed") ? "bad" : has("waiting") || has("unknown") ? "wait" : has("running") || has("pending") ? "active" : all.every(([word]) => word === "done") ? "good" : "neutral";
+  return { words, tone };
+}
+// Runs counted by their words, for "+N": "3 done, 2 running, 1 ended".
+function statusCounts(items) {
+  return counted(items)
+    .map(([word, count]) => `${count} ${word}`)
+    .join(", ");
 }
 // Who says where runs stand: their worker, GitHub (as Chief of Staff read them), the owner.
 export function runsSources(runs) {
@@ -215,6 +225,19 @@ export function groupArtifacts(items, open = new Set()) {
     .sort((a, b) => byUrgency(a.members[0], b.members[0]));
 }
 
+// The groups in the order the list shows them (bug E58): what needs a look (failed, CI failing,
+// changes asked for, waiting, unknown) of every task first, each task's together, the task with
+// the most urgent first; then the rest, so too. One task's merged PRs never push another's
+// failing one down the list. [{ group, members }], a task's group in each at most once.
+export function arranged(groups) {
+  const urgent = (member) => ["bad", "wait"].includes(member.tone);
+  const order = (a, b) => byUrgency(a.members[0], b.members[0]);
+  const first = groups.map((group) => ({ group, members: group.members.filter(urgent) }));
+  const then = groups.map((group) => ({ group, members: group.members.filter((member) => !urgent(member)) }));
+  // What needs a look ranks first (byUrgency): those parts come before the rest.
+  return [...first, ...then].filter((part) => part.members.length).sort(order);
+}
+
 // The list's rows: shown ones, a task's together, then (on request) the hidden ones to bring
 // back.
 export function artifactItems(tasks, focusTask, phases) {
@@ -223,8 +246,8 @@ export function artifactItems(tasks, focusTask, phases) {
   const shown = all.filter((item) => !hidden.has(item.key));
   const off = all.filter((item) => hidden.has(item.key));
   const rows = [];
-  for (const group of groupArtifacts(shown, openRuns)) {
-    for (const { item, block } of group.members) {
+  for (const { group, members } of arranged(groupArtifacts(shown, openRuns))) {
+    for (const { item, block } of members) {
       if (!block) {
         rows.push(artifactRow(item, false, focusTask));
         continue;
