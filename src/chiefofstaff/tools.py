@@ -1653,11 +1653,13 @@ class Tools:
         if (
             self.runtime.agents
             and not special
-            and not named
-            and not picked
+            and not agent
             and caller == self.runtime.router_id()
+            and (chip := self.runtime.chosen_agent())
         ):
-            named = self.runtime.chosen_agent()  # The owner's @agent in this turn's message.
+            # The owner's @agent in this turn's message: always theirs, over the Router's pick
+            # and any agent it names.
+            named, picked = chip, ""
         agent, agent_notice = agents.COPILOT, ""
         if not special and (self.runtime.agents or named or picked):
             try:
