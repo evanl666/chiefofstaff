@@ -500,6 +500,44 @@ async def test_a_paused_task_says_its_reset_first_and_goes_on_by_itself_then_onc
         await runtime.stop()
 
 
+@pytest.mark.parametrize("said_by", ["owner", "worker"])
+async def test_a_task_set_to_go_on_at_its_reset_does_not_once_told_something_else(
+    tmp_path, claude_on_path, monkeypatch, said_by
+):
+    """What the owner (in its chat) or another worker (tell_session) says to its worker, once
+    taken, takes the place of going on by itself at its reset."""
+    from chiefofstaff.peers import TellSession
+
+    resets = int(time.time()) + 3600
+    info = {"status": "rejected", "rateLimitType": "five_hour", "resetsAt": resets}
+    monkeypatch.setenv("FAKE_CLAUDE_LIMIT", json.dumps(info))
+    monkeypatch.setattr(task_actions, "GO_ON_MARGIN", 0)
+    harness, runtime = await started(tmp_path)
+    try:
+        await saved(runtime, {"claude": {"enabled": True}})
+        worker, task, _ = await limited(harness, runtime, "claude", "Hit the usage limit")
+        await runtime.task_actions.go_on_at(task)
+        assert harness.store.get(f"goonat:{task}") == str(resets)
+        # Its limit reset early (as its stream would say it): what it is told now is taken.
+        runtime.agents["claude"].backend.limit = {"status": "allowed", "resets_at": 0}
+        harness.store.delete("agentlimit:claude")
+        if said_by == "owner":
+            await runtime.owner_send(worker, "Do the other part instead.")
+        else:
+            other = await spawn_on(harness, runtime, title="Other", instructions="Report done: o.")
+            await runtime.peers.t_tell_session(
+                TellSession(session_id=worker, text="Do the other part instead."),
+                other["session_id"],
+            )
+        assert harness.store.get(f"goonat:{task}") is None
+        assert runtime.task_actions.view(runtime.tasks.get(task))["paused"]["go_on_at"] == 0
+        await runtime.task_actions.going_on_at(task, resets - 7200)  # Its time come: nothing.
+        said = [m["text"] for m in harness.store.messages(worker)]
+        assert "Go on where you stopped." not in said
+    finally:
+        await runtime.stop()
+
+
 async def test_a_task_asked_to_go_on_at_its_reset_still_does_after_a_restart(
     tmp_path, claude_on_path, monkeypatch
 ):
