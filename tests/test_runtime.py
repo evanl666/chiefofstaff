@@ -5,7 +5,6 @@ import re
 import subprocess
 import time
 from datetime import UTC, datetime
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -403,7 +402,8 @@ def test_permission_scopes_by_role(tmp_path):
     slack = {"role": "slack", "slack": 0, "cwd": str(tmp_path)}
     router = {"role": "router", "slack": 0, "cwd": str(tmp_path)}
     inside = request("write", file_name="src/a.py", resolved_path=None)
-    outside = request("write", file_name=str(Path.home() / "wb-other.py"), resolved_path=None)
+    # (Not the home: the tests' own is a temporary folder, where a worker may write.)
+    outside = request("write", file_name="/wb-other.py", resolved_path=None)
     assert permission_denial(worker, inside) is None
     assert "outside your working directory" in permission_denial(worker, outside)
     assert permission_denial(worker, request("url", url="https://docs")) is None

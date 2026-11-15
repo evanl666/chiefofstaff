@@ -2,10 +2,74 @@
 
 ## Unreleased
 
-Runs and documents are listed wherever they are served; an away notice that failed stays in
-sight; Artifacts words and times match what its rows say; a slow script's `copilot -p` calls
-are a batch again, and your own questions stay listed (QA round on 0.1.45).
+Pushes to the default branch that got past *Ask first* in 0.1.45 are refused, and a switch back
+to a branch of its own before a push is let through again; runs and documents are listed
+wherever they are served; an away notice that failed stays in sight; Artifacts words and times
+match what its rows say; a slow script's `copilot -p` calls are a batch again, and your own
+questions stay listed (QA round on 0.1.45).
 
+- **A push to a branch a command makes up is refused**, saying it can't tell which branch (name
+  the branch itself). Only `$(git branch --show-current)`, `$(git rev-parse --abbrev-ref HEAD)`
+  and `$(git symbolic-ref --short HEAD)` (with `-q`, in backquotes, after `HEAD:`, or in a
+  variable the line sets) count as the checkout's branch; `git push origin $(cat branch.txt)`,
+  `$(printf HEAD:ma; printf in)` or the default branch's name read from `origin/HEAD` pushed to
+  `main`. A variable holds the branch it was set to: after a `cd` or a switch, which one that
+  was is not known (E64).
+- **`git push origin :`** pushes every branch that has the same name on both sides, as `--all`
+  does: refused (E65).
+- **Where git's configuration sends a push naming no branch is read**: `push.default=matching`,
+  a remote's push refspecs (`remote.origin.push=HEAD:main`) or mirror, and a branch's upstream
+  with `push.default=upstream`, in the repository's configuration or your own. A push that goes
+  to `main` or `master` that way is refused, and one where git can't read its configuration
+  can't tell which branch. So can a line that sets them (`git config remote.origin.push …`,
+  `--unset`, `--global`; also `-c remote.origin.mirror=…`, `-c include.path=…`,
+  `GIT_CONFIG_GLOBAL=…`, and `HOME=…` for a push naming no branch). A remote's push refspecs
+  given with `-c` add to the repository's, as git adds them (E66).
+- **Back on a branch of its own after updating main, a push is let through again**, as in
+  0.1.43: `git checkout main && git pull && git checkout feature/x && git push`, the same with
+  `git switch`, and `git switch feature/x && git push` on `main`. A `git switch` to a branch,
+  or a `git checkout` of a branch the repository has (asked of git; not a file of that name),
+  joined to the push by `&&`, is where it pushes from. A push that may be on several branches
+  only because of a switch before it is refused as "can't tell which branch", not as a push to
+  the default branch (E67).
+- **Other ways to push are read**: `git subtree push` and `git send-pack` (with no branch named,
+  every branch of the same name on both sides), an alias that `git config` sets on a line that
+  says push, and a command whose name a variable or a substitution holds on such a line
+  (`g=git; $g push origin main`, also one another command runs: `find … -exec $G push`) (E68).
+- **Git configuration written to its files on the line** (not with `git config`) before a push
+  can't tell which branch it updates either: `printf … >> .git/config`, `tee -a`, `cp`, `mv` or
+  `install` onto it, `sed -i`, `perl -pi`, in `~/.gitconfig`, `~/.config/git/config`,
+  `$GIT_DIR/config` or `config.worktree`, and a file your configuration includes.
+- **Aliases in your configuration are read**, the repository's and your own, in the same call to
+  git that reads where pushes go, and followed to what they run: with `alias.p=push`,
+  `git p origin main` is refused as a push to the default branch, and `alias.pf="push --force"`
+  as a force push; a shell alias (`!…`) that says push, send-pack or subtree, or is given words
+  that do, can't tell which branch. An alias given with `-c` that runs `send-pack` or
+  `subtree` is refused as one that runs `push` is. A line that only sets a harmless alias
+  (`git config alias.st status`) is let through.
+- **An alias that switches branches is read as that switch**: with `alias.co=checkout` or
+  `alias.sw=switch` in git's configuration, or `-c alias.co=checkout` on the line,
+  `git co main && git push` is refused as a push to the default branch, and
+  `git co main && git pull && git co feature/x && git push` is let through, as the same lines
+  with `git checkout` are. One a shell alias may run (`!…`), or that the line sets itself
+  before a push naming no branch, can't tell which branch; so can `git co -`. An alias `-c`
+  gives that runs another of git's configuration is followed to it. A command whose name the
+  line doesn't set (`$G p origin main`), on a line that names an alias that pushes, is read as
+  `$G push origin main` is: which branch, not known.
+- **An unquoted variable the line doesn't set, or a substitution, before a refspec's `:`** may
+  hold several refspecs (`$B:feat` with `B='HEAD:main HEAD'`): which branch the push updates is
+  not known, and it is refused, saying so (found checking these fixes; quoted, `"$B:feat"`, it
+  is one refspec, as before).
+- A push in a folder the line leaves unknown (after `eval`, a `cd` it can't follow) is refused,
+  saying it can't tell which branch, also after a switch there: that switch may have been in
+  another folder (found checking these fixes; 0.1.45 let `eval …; git switch -c fix && cd
+  ../main && git push` through). And the checkout's branch a substitution puts in a line
+  `eval` or `sh -c` runs is the branch where it ran: after a `cd` in that line, not known. Text
+  the shell can't parse (read loosely) that sets git's configuration or defines an alias can't
+  tell where its pushes go either, and the file of a process substitution `eval` hands a shell
+  (`eval zsh <(…)`) is a script fed to it.
+- A long line of aliases (or of shells given `-c`) on a line that says push took time growing
+  with its square to check; it is read in one pass.
 - **A run or a document is listed wherever it is served.** A run on another computer of your
   network (`http://10.0.4.12:8080/dags/…`, *running*) or a published wiki page on a port of its
   own (`:8090`) was left off Artifacts, the run while it could put its task under *Needs you*.

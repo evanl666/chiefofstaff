@@ -1,5 +1,6 @@
 """Which actions a session may take on its own. Pure functions, easy to test and to audit (but
-for the branch a `git push` naming none goes to, which is asked of git).
+for where a `git push` naming no branch goes, its folder's branch and configuration, what an
+alias of git's runs, and whether a name a checkout goes to is a branch: asked of git).
 
 These rules are guardrails checked in Chief of Staff's permission callback, not a sandbox: a
 worker with a shell can still reach anything its user account can unless OS sandboxing is on
@@ -9,12 +10,15 @@ worker with a shell can still reach anything its user account can unless OS sand
 import bisect
 import collections
 import contextvars
+import fnmatch
 import functools
 import itertools
 import os
 import re
+import shlex
 import subprocess
 import tempfile
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,6 +34,38 @@ DEFAULT_BRANCHES = frozenset({"main", "master"})
 # `git push` options whose value is the next word; and those that push every branch.
 PUSH_VALUED = frozenset({"-o", "--push-option", "--repo", "--receive-pack", "--exec"})
 PUSH_ALL = frozenset({"--all", "--mirror", "--branches"})
+# The commands that push: an alias whose text names one may push.
+PUSHING = ("push", "send-pack", "subtree")
+# git's own commands (its builtins but the newest): git runs no alias of one of their names; a
+# line's `git <name>` of another name may run an alias git's configuration has (Push.alias).
+GIT_COMMANDS = frozenset(
+    {"add", "am", "annotate", "apply", "archive", "bisect", "blame", "branch", "bugreport",
+     "bundle", "cat-file", "check-attr", "check-ignore", "check-mailmap", "check-ref-format",
+     "checkout", "checkout--worker", "checkout-index", "cherry", "cherry-pick", "clean", "clone",
+     "column", "commit", "commit-graph", "commit-tree", "config", "count-objects", "credential",
+     "credential-cache", "credential-cache--daemon", "credential-store", "describe", "diagnose",
+     "diff", "diff-files", "diff-index", "diff-tree", "difftool", "fast-export", "fast-import",
+     "fetch", "fetch-pack", "fmt-merge-msg", "for-each-ref", "for-each-repo", "format-patch",
+     "fsck", "fsck-objects", "fsmonitor--daemon", "gc", "get-tar-commit-id", "grep",
+     "hash-object", "help", "hook", "index-pack", "init", "init-db", "interpret-trailers", "log",
+     "ls-files", "ls-remote", "ls-tree", "mailinfo", "mailsplit", "maintenance", "merge",
+     "merge-base", "merge-file", "merge-index", "merge-ours", "merge-recursive",
+     "merge-recursive-ours", "merge-recursive-theirs", "merge-subtree", "merge-tree", "mktag",
+     "mktree", "multi-pack-index", "mv", "name-rev", "notes", "pack-objects", "pack-redundant",
+     "pack-refs", "patch-id", "pickaxe", "prune", "prune-packed", "pull", "push", "range-diff",
+     "read-tree", "rebase", "receive-pack", "reflog", "refs", "remote", "remote-ext", "remote-fd",
+     "repack", "replace", "rerere", "reset", "restore", "rev-list", "rev-parse", "revert", "rm",
+     "send-pack", "shortlog", "show", "show-branch", "show-index", "show-ref", "sparse-checkout",
+     "stage", "stash", "status", "stripspace", "submodule--helper", "switch", "symbolic-ref",
+     "tag", "unpack-file", "unpack-objects", "update-index", "update-ref", "update-server-info",
+     "upload-archive", "upload-archive--writer", "upload-pack", "var", "verify-commit",
+     "verify-pack", "verify-tag", "version", "whatchanged", "worktree", "write-tree"}
+)  # fmt: skip
+# A name an alias may have (a configuration variable's); one in an alias's text (lower case).
+ALIAS_NAME = re.compile(r"[A-Za-z][A-Za-z0-9-]*")
+ALIAS_WORDS = re.compile(r"[a-z][a-z0-9-]*")
+# Aliases followed, one naming the next: past those, what it runs is not known.
+MOST_ALIASES = 16
 # git's own options before its command whose value is the next word.
 GIT_VALUED = frozenset(
     {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--super-prefix"}
@@ -52,7 +88,7 @@ GIT_PUSH_WORDS = re.compile(r"\bgit\s+push\b")
 FLOOR_ENDS = re.compile(r"[;&|\n]")
 # A loose `git … push`, for text the shell would not parse (an unclosed quote): its words.
 GIT_WORD = re.compile(r"\bgit\b")
-PUSH_WORD = re.compile(r"\bpush\b")
+PUSH_WORD = re.compile(r"\b(?:push|send-pack)\b")
 # How long a command line may be to be checked at all: a longer one is refused, saying so,
 # before any rule reads it (under Ask first, where these rules apply). Every rule reads a line
 # in time linear in its length (tests/test_policy.py), so this bounds the time a check takes.
@@ -84,6 +120,19 @@ UNREADABLE_PUSH = "can't tell which branch this push updates (name the branch it
 NOT_CHECKED = "this command line could not be checked"
 # Where a command substitution (`$(…)`) stood in a word: what it makes is not known here.
 MADE_UP = "\x00"
+# What a substitution that asks git for the checkout's branch makes, as `HEAD` names it (only
+# those in current_query: `$(git branch --show-current)`…): the branch a push naming none
+# updates. A variable set to one holds it with when (Line.epoch, captured): a `cd` or a switch
+# after it may have made it another branch than the checkout's. (Its second character is in no
+# line it is taken from: Tally.currents; else a substitution and text after it could make it.)
+CURRENT = MADE_UP + "\x02"
+# What asks for it: git's command, the options it must have, and whether `HEAD` follows them.
+CURRENT_QUERIES = {
+    "branch": (frozenset({"--show-current"}), False),
+    "rev-parse": (frozenset({"--abbrev-ref"}), True),
+    "symbolic-ref": (frozenset({"--short"}), True),
+}
+QUIET = frozenset({"-q", "--quiet"})
 # A refspec whose branch its words do not say: a variable, a glob, a brace expansion.
 UNREADABLE = re.compile(r"[$`*?\[{]")
 # A substitution that names the default branch (`$(echo main)`).
@@ -243,10 +292,12 @@ class Push:
     """One `git push`: whether it forces, the branches it updates for sure, and whether which
     it updates cannot be read from its words (a refspec in a variable it did not set, a glob,
     a substitution's destination, configuration that cannot be read here, an alias, another
-    repository's bare push). A bare push (no refspec, `HEAD`, or one a substitution makes as a
-    whole) updates where its folder's branch goes: asked of git, unless the line made a branch
-    and switched to it first (`bare_new`, joined by `&&`); a checkout or switch before it may
-    have gone elsewhere too (`bare_also`)."""
+    repository's bare push). A bare push (no refspec, `HEAD`, or the checkout's branch as a
+    substitution asks git for it) updates where its folder's branch goes: asked of git (with
+    git's configuration, for one naming no refspec: `configured`), unless the line made a
+    branch or switched to one first (`bare_new`, joined by `&&`; when a checkout's, only if git
+    has that branch: `bare_check`, else as if it had not switched: `alt_*`); a checkout or
+    switch before it may have gone elsewhere too (`bare_also`)."""
 
     forced: bool = False
     branches: set[str] | None = field(default_factory=set)  # None: every branch.
@@ -255,21 +306,45 @@ class Push:
     bare_new: str = ""
     bare_also: frozenset[str] = frozenset()
     unknown: bool = False
-    made_up: bool = False  # A refspec a substitution makes (taken as its folder's branch).
+    made_up: bool = False  # A refspec a substitution makes as a whole.
     nested: bool = False  # In a line a command runs (`eval`, `sh -c`, a substitution).
+    current: bool = False  # The checkout's branch, as git said it (CURRENT): as `HEAD`.
+    configured: bool = False  # It names no refspec: where git's configuration says (Pushing).
+    mapped: bool = False  # It names the checkout's branch (current), no `:`: as configured.
+    mode: str | None = None  # push.default on its command line (`-c`), over the folder's.
+    bare_check: bool = False
+    alt_new: str = ""
+    alt_also: frozenset[str] = frozenset()
+    alt_unknown: bool = False
+    upstreams_set: bool = False  # The line may set a branch's upstream (`branch -u`, `-t`…).
+    # A command whose name a variable or a substitution holds, on a line that says push: maybe
+    # a push (or a shell fed a script: refused for that, fed_script, when it is one).
+    anonymous: bool = False
+    # A git command of no name of git's (`git p origin main`, the alias's name in lower case),
+    # with the git that ran it (`via`): the push its folder's configuration makes of it, as an
+    # alias, if any (through_alias), placed as this one is when bare; or not known, whatever
+    # the configuration says (`alias_unknown`: a line that may set it, another repository's).
+    # "?": git's command not known (`git $C`); "$": a command not known, with these words.
+    alias: str = ""
+    via: "Git | None" = None
+    alias_unknown: bool = False
 
     def key(self) -> tuple:
         branches = None if self.branches is None else frozenset(self.branches)
         return (self.forced, branches, self.bare_in, self.bare_new, self.bare_also,
-                self.unknown, self.made_up, self.nested)  # fmt: skip
+                self.unknown, self.made_up, self.nested, self.current, self.configured,
+                self.mapped, self.mode, self.bare_check, self.alt_new, self.alt_also,
+                self.alt_unknown, self.upstreams_set, self.anonymous, self.alias,
+                self.via.key() if self.via else None, self.alias_unknown)  # fmt: skip
 
 
 @dataclass
 class Switched:
-    """What a line did to a folder's branch before a push. A branch it made and switched to
-    (`new`, where in the line), with what came before it (`prior_also`, `prior_unknown`: what
-    counts when that switch may have failed); branches it made without switching (`made`);
-    where checkouts after it may have gone (`also`), or somewhere not named (`unknown`)."""
+    """What a line did to a folder's branch before a push. A branch it made or switched to
+    (`new`, where in the line; `checkout`: a `git checkout` of a name, a switch only if it is a
+    branch), with what came before it (`prior_also`, `prior_unknown`: what counts when that
+    switch may have failed); branches it made without switching (`made`); where checkouts after
+    it may have gone (`also`), or somewhere not named (`unknown`)."""
 
     new: str = ""
     new_at: int = 0
@@ -278,13 +353,15 @@ class Switched:
     unknown: bool = False
     prior_also: set[str] = field(default_factory=set)
     prior_unknown: bool = False
+    checkout: bool = False
 
-    def switched_to(self, name: str, at: int) -> "Switched":
-        """It made `name` and switched to it, at `at`: what came before is kept, for when that
-        may have failed."""
+    def switched_to(self, name: str, at: int, checkout: bool = False) -> "Switched":
+        """It switched to `name` (made it, or a branch there is), at `at`: what came before is
+        kept, for when that may have failed."""
         self.prior_also |= self.also | ({self.new} if self.new else set())
         self.prior_unknown = self.prior_unknown or self.unknown
         self.new, self.new_at, self.also, self.unknown = name, at, set(), False
+        self.checkout = checkout
         return self.capped()
 
     def capped(self) -> "Switched":
@@ -634,7 +711,7 @@ def without_substitutions(text: str, quoted: bool = False) -> tuple[str, list[st
             body = text[start:end]
             bodies.append(body)
             made = MADE_FOLDERS.get(" ".join(body.split())) if len(body) < 64 else None
-            kept.append(made or MADE_UP)
+            kept.append(made or (CURRENT if current_query(body) else MADE_UP))
             continue
         if char in "'\"" and not quoted:
             quote = "" if quote == char else (quote or char)
@@ -829,21 +906,59 @@ def shell_commands(text: str) -> tuple[list[tuple[str, list[str]]], list[str]] |
     return commands, inside
 
 
-def one_substitution(word: str) -> bool:
-    """Whether a word is one command substitution, whole: MADE_UP (see without_substitutions);
-    or text that reads as one, though quoted (`'$(git branch --show-current)'`), taken so too."""
-    if word == MADE_UP:
-        return True
+def one_substitution(word: str) -> str:
+    """What a word is when it is one command substitution, whole: "current" when it asks git
+    for the checkout's branch (CURRENT; see current_query), "other" for any other (MADE_UP);
+    text that reads as one, though quoted (`'$(git branch --show-current)'`), taken so too. ""
+    when it is not one."""
+    if word in {MADE_UP, CURRENT}:
+        return "current" if word == CURRENT else "other"
     if word.startswith("`") and word.endswith("`") and len(word) > 1:
-        return "`" not in word[1:-1]
+        if "`" in word[1:-1]:
+            return ""
+        return "current" if current_query(word[1:-1]) else "other"
     if not (word.startswith("$(") and word.endswith(")")):
-        return False
+        return ""
     depth = 0
     for index, char in enumerate(word[1:], 1):
         depth += {"(": 1, ")": -1}.get(char, 0)
         if depth == 0:
-            return index == len(word) - 1
-    return False
+            if index != len(word) - 1:
+                return ""
+            return "current" if current_query(word[2:-1]) else "other"
+    return ""
+
+
+# What a query of the checkout's branch may be made of: words of letters and hyphens, apart.
+QUERY_TEXT = re.compile(r"[ \t]*[A-Za-z-]+(?:[ \t]+[A-Za-z-]+)*[ \t]*")
+
+
+def current_query(body: str) -> bool:
+    """Whether what a substitution runs asks git for the checkout's branch, and nothing else:
+    `git branch --show-current`, `git rev-parse --abbrev-ref HEAD` or `git symbolic-ref
+    --short HEAD`, each with `-q` (`--quiet`) too, its options in any order."""
+    if len(body) > 64 or not QUERY_TEXT.fullmatch(body):
+        return False
+    words = body.split()
+    if len(words) < 3 or words[0] != "git" or words[1] not in CURRENT_QUERIES:
+        return False
+    options, head = CURRENT_QUERIES[words[1]]
+    rest = words[2:]
+    if head:
+        if rest[-1] != "HEAD":
+            return False
+        rest = rest[:-1]
+    quiet = [word for word in rest if word in QUIET]
+    return len(quiet) <= 1 and len(set(rest)) == len(rest) and set(rest) - QUIET == options
+
+
+def captured(epoch: int) -> str:
+    """What a variable set to the checkout's branch (CURRENT) holds: when it was set."""
+    return f"{CURRENT}\x00{epoch}"
+
+
+CAPTURED = re.compile(re.escape(CURRENT) + r"\x00[0-9]+")
+CURRENTS = re.compile(re.escape(CURRENT) + r"(?:\x00([0-9]+))?")
 
 
 DESTINATION_STOPS = re.compile(r"\$\(|\$\{|[`)}:]")
@@ -932,6 +1047,8 @@ def expansions(
             # Split where unquoted (`$B`), and gone when empty, unless part of it is quoted
             # (`""$B`); a quoted one (`"$B"`) is one word, even empty.
             made = [put] if put == word or not isinstance(word, Splitting) else put.split()
+            if isinstance(word, Splitting) and put != word:  # (What is left unread splits still.)
+                made = [Splitting(piece) if UNSETTLED.search(piece) else piece for piece in made]
             made = made or ([""] if getattr(word, "quoted", False) else [])
             tally.expands(len(put), len(made))
             run += made
@@ -939,37 +1056,58 @@ def expansions(
     return found
 
 
-def git_config_pushes(config: dict[str, str | None]) -> tuple[list[str], bool, bool]:
+# push.default's values, and git's words for true and false (a value of its own: `Pushing`).
+MODES = frozenset({"nothing", "matching", "simple", "upstream", "tracking", "current"})
+TRUE = frozenset({"true", "yes", "on", "1"})
+FALSE = frozenset({"false", "no", "off", "0", ""})
+
+
+def git_config_pushes(config: dict[str, str | None]) -> tuple[list[str], bool, bool, str | None]:
     """What configuration given on the command line says a push updates: refspecs
-    (`remote.<name>.push`), every branch (`push.default=matching`), or not known (a value
-    that is not in the command line)."""
-    refspecs, every, unknown = [], False, False
+    (`remote.<name>.push`), every branch (`push.default=matching`, a mirror remote), or not
+    known (a value that is not in the command line; a file it includes, an upstream it sets);
+    and push.default, when given."""
+    refspecs, every, unknown, mode = [], False, False, None
     for key, value in config.items():
         if key.startswith("remote.") and key.endswith(".push"):
             if value is None:
                 unknown = True
             else:
                 refspecs.append(value)
+        elif key.startswith("remote.") and key.endswith(".mirror"):
+            if value is None or value.lower() not in TRUE | FALSE:
+                unknown = True
+            every = every or (value or "").lower() in TRUE
         elif key == "push.default":
+            mode = value.lower() if value is not None else None
             if value is None:
                 unknown = True
             elif value.lower() == "matching":
                 every = True
             elif value.lower() not in {"nothing", "current", "upstream", "simple", "tracking"}:
                 unknown = True
-    return refspecs, every, unknown
+        elif (
+            key == "include.path"
+            or (key.startswith("includeif.") and key.endswith(".path"))
+            or (key.startswith("branch.") and key.endswith(".merge"))
+        ):
+            unknown = True
+    return refspecs, every, unknown, mode
 
 
 def environment_config(env: dict[str, str]) -> dict[str, str | None]:
     """git configuration given through the environment (GIT_CONFIG_COUNT and its keys and
-    values; GIT_CONFIG_PARAMETERS, whose push and alias settings are not read here: not
-    known)."""
+    values; GIT_CONFIG_PARAMETERS, whose push and alias settings are not read here: not known;
+    another file for the user's or the system's, GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM: not
+    read here)."""
     found: dict[str, str | None] = {}
     parameters = env.get("GIT_CONFIG_PARAMETERS", "").lower()
     if "push" in parameters:
         found["remote.?.push"] = None
     if "alias." in parameters:
         found["alias.?"] = None
+    if "GIT_CONFIG_GLOBAL" in env or "GIT_CONFIG_SYSTEM" in env:
+        found["include.path"] = None
     for name, key in env.items():
         if name.startswith("GIT_CONFIG_KEY_"):
             found[key.lower()] = env.get("GIT_CONFIG_VALUE_" + name.removeprefix("GIT_CONFIG_KEY_"))
@@ -988,6 +1126,13 @@ class Git:
     elsewhere: bool
     moved: bool = False  # Its folder is another than the shell's (`-C`).
     zsh: bool = False  # zsh's modifiers may be in its words (`$B:t`: Tally.modifiers).
+    epoch: int = -1  # Its line's Line.epoch: a variable set to CURRENT then is its branch.
+    currents: bool = False  # Whether CURRENT in its words is what a substitution made.
+
+    def key(self) -> tuple:
+        rest = tuple((word, type(word).__name__) for word in self.rest)
+        return (self.folder, tuple(sorted(self.config.items())), rest,
+                self.elsewhere, self.moved, self.zsh, self.epoch, self.currents)  # fmt: skip
 
 
 def git_command(
@@ -1022,10 +1167,13 @@ def git_command(
 
 def switch_of(arguments: list[str]) -> tuple[str, str] | None:
     """What `git checkout`/`git switch` with these arguments does to the branch its checkout is
-    on: ("new", name) makes that branch and switches to it; ("to", name) may switch to `name`
-    (a branch, or for `checkout` a file it restores instead: not known here); ("unknown", "")
-    switches to one it does not name (`-`, `@{-1}`); None switches nothing (files after
-    `--`)."""
+    on: ("new", name) makes that branch and switches to it; ("switched", name), `git switch`
+    of one branch with options that change nothing of where, goes there (or fails); and
+    ("branch?", name), `git checkout` so, goes there if git has that branch (else it restores
+    a file of that name, or goes to that commit: Push.bare_check); ("to", name) may switch to
+    `name` (a branch, or for `checkout` a file it restores instead: not known here);
+    ("unknown", "") switches to one it does not name (`-`, `@{-1}`); None switches nothing
+    (files after `--`)."""
     command, rest = arguments[0], arguments[1:]
     creating = (
         {"-b", "-B", "--orphan"} if command == "checkout" else {"-c", "-C", "--create", "--orphan"}
@@ -1047,7 +1195,26 @@ def switch_of(arguments: list[str]) -> tuple[str, str] | None:
         return None
     if {"-t", "--track"} & set(options) and "/" in named[0]:
         return ("to", named[0].split("/", 1)[1])  # A branch made after the remote's.
+    flags = [word for word in options if word.startswith("-")]
+    if (
+        len(named) == 1
+        and BRANCH_NAME.fullmatch(named[0])
+        and all(flag in SWITCH_FLAGS or flag.startswith("--conflict=") for flag in flags)
+    ):
+        return ("switched" if command == "switch" else "branch?", named[0])
     return ("to", named[0])
+
+
+# Options of `git switch` and `git checkout` that take no value and change nothing of where they
+# go (not `-p`, `--detach`, `-t`; nor several letters at once: `-fd`).
+SWITCH_FLAGS = frozenset(
+    {"-f", "--force", "-m", "--merge", "-q", "--quiet", "--progress", "--no-progress",
+     "--guess", "--no-guess", "--recurse-submodules", "--no-recurse-submodules",
+     "--ignore-other-worktrees", "--discard-changes", "--overwrite-ignore",
+     "--no-overwrite-ignore"}
+)  # fmt: skip
+# A branch's name as a switch is read for (plain: no variable, glob, `~`, `^`, `:` or `@{`).
+BRANCH_NAME = re.compile(r"(?!-)[A-Za-z0-9._/+-]+")
 
 
 def renamed_or_made(arguments: list[str]) -> tuple[str, str] | None:
@@ -1089,12 +1256,20 @@ def pointed(arguments: list[str]) -> tuple[str, str] | None:
 
 def push_of(git: Git) -> Push | None:
     """The `git push` a git invocation runs (the line's variables put in its words), or
-    None."""
+    None; `git subtree push` and `git send-pack` push too."""
     if UNSETTLED.search(git.rest[0]):
         return Push(unknown=True)  # A command in a variable or a substitution: maybe a push.
+    if git.rest[0] == "subtree":
+        return subtree_push(git)
+    if git.rest[0] == "send-pack":
+        return send_pack(git)
     if git.rest[0] != "push":
         alias = git.config.get(f"alias.{git.rest[0].lower()}", "")
-        if alias is None or "push" in alias.lower() or "alias.?" in git.config:
+        if (
+            alias is None
+            or any(word in alias.lower() for word in PUSHING)
+            or "alias.?" in git.config
+        ):
             return Push(unknown=True)  # An alias that may push: what, not known.
         return None
     push, positional, valued = Push(), [], False
@@ -1123,26 +1298,72 @@ def push_of(git: Git) -> Push | None:
                 dry = dry or letter == "n"
             continue
         positional.append(word)
-    refspecs, every, unknown = git_config_pushes(git.config)
+    refspecs, every, unknown, push.mode = git_config_pushes(git.config)
     push.unknown = unknown
     if positional and isinstance(positional[0], Splitting) and UNSETTLED.search(positional[0]):
         push.unknown = True  # A remote in a variable, unquoted: it may hold refspecs too.
     if every:
         push.branches = None
-    heads = False  # A refspec that pushes the folder's branch (`HEAD`, a substitution's whole).
     # Every word that is not an option counts as a refspec but the remote's (its name, or a
     # variable that holds it, names no branch of its own).
-    for word in [*positional[1:], *refspecs]:
+    heads = read_refspecs(push, [*positional[1:], *refspecs], git)
+    if dry:
+        return push  # It updates nothing.
+    configured = len(positional) <= 1 and not tags
+    if deleting or refspecs:
+        push.unknown = push.unknown or push.made_up  # Which one it deletes: not known.
+        if refspecs and configured and not deleting:  # (The repository's are pushed too.)
+            return bare(push, git, False, True)
+        return push  # What it updates is all in its words.
+    return bare(push, git, heads, configured)
+
+
+def bare(push: Push, git: Git, heads: bool, configured: bool = False) -> Push:
+    """A push of its folder's branch (`HEAD`, the checkout's branch as git said it, or no
+    refspec at all: `configured`), as such."""
+    if push.made_up and git.moved:
+        push.unknown = True  # A substitution runs where the shell is, not in `-C`'s folder.
+    if configured or push.current or heads:
+        push.bare_in = git.folder  # Where its folder's branch goes.
+        push.configured = configured
+        push.unknown = push.unknown or git.elsewhere  # Another repository's: not known.
+    return push
+
+
+def read_refspecs(push: Push, words: list[str], git: Git) -> bool:
+    """What these refspecs update, into `push`: a branch they name, every branch of the same
+    name on both sides (`:`), the checkout's branch as a substitution asks git for it (current,
+    also as a variable the line set then: Line.epoch), or not known (another substitution, a
+    variable, a glob). Whether one is `HEAD` (the folder's branch)."""
+    heads = False
+    for word in words:
         push.forced = push.forced or word.startswith("+")
-        if one_substitution(word):
-            push.made_up = True  # As `HEAD`: its folder's branch (asked of git).
+        spec = word.lstrip("+")
+        if spec == ":":
+            push.branches = None  # Every branch of the same name on both sides (as `--all`).
             continue
-        target = destination(word.lstrip("+"))
+        target = destination(spec)
+        whole = one_substitution(spec)
+        named = pushed_branch(target) if MADE_UP in target else ""
+        if git.currents and (whole == "current" or named in {CURRENT, captured(git.epoch)}):
+            push.made_up = push.current = True  # As `HEAD`: its folder's branch (asked of git).
+            push.mapped = push.mapped or ":" not in spec
+            continue
+        if whole:
+            push.made_up = push.unknown = True  # What another substitution makes: not known.
+            continue
+        unread = CURRENTS.sub("", word) if git.currents else word  # (A branch's name: no space.)
+        if isinstance(word, Splitting) and UNSETTLED.search(unread):
+            push.unknown = True  # Unquoted, what it holds may be several refspecs: not known.
+            continue
         if git.zsh and ZSH_MODIFIED.search(word):
             push.unknown = True  # (`$B:t`, `$B[2]`: what zsh makes of B, not read here.)
             continue
-        if MADE_UP in target or "$(" in target or "`" in target or UNREADABLE.search(target):
-            push.unknown = True  # A substitution, a variable, a glob: not known.
+        if MADE_UP in target or "$(" in target or "`" in target:
+            push.unknown = True  # A part of a substitution: not known.
+            continue
+        if UNREADABLE.search(target):
+            push.unknown = True  # A variable, a glob: not known.
             continue
         branch = pushed_branch(target)
         if branch in {"HEAD", "@"}:
@@ -1151,25 +1372,74 @@ def push_of(git: Git) -> Push | None:
             branch in DEFAULT_BRANCHES or len(push.branches) < MOST_BRANCHES
         ):
             push.branches.add(branch)  # (Past MOST_BRANCHES, only the default's are kept.)
-    if dry:
-        return push  # It updates nothing.
-    if deleting or refspecs:
-        push.unknown = push.unknown or push.made_up  # Which one it deletes: not known.
-        return push  # What it updates is all in its words.
-    if push.made_up and git.moved:
-        push.unknown = True  # A substitution runs where the shell is, not in `-C`'s folder.
-    if (len(positional) <= 1 and not tags) or push.made_up or heads:
-        push.bare_in = git.folder  # Where its folder's branch goes.
-        push.unknown = push.unknown or git.elsewhere  # Another repository's: not known.
-    return push
+    return heads
+
+
+# `git subtree`'s options that take a value; `git send-pack`'s.
+SUBTREE_VALUED = frozenset({"-P", "--prefix", "-m", "--message", "-b", "--branch", "--onto",
+                            "--annotate"})  # fmt: skip
+SEND_PACK_VALUED = frozenset({"--receive-pack", "--exec", "--push-option"})
+
+
+def subtree_push(git: Git) -> Push | None:
+    """`git subtree push … <repository> <ref>`: it pushes to `<ref>` (`refs/heads/<ref>`, or
+    `<commit>:<ref>`); None for its other commands."""
+    positional, valued = [], False
+    for word in git.rest[1:]:
+        if valued:
+            valued = False
+        elif word.startswith("-") and len(word) > 1:
+            valued = word.split("=", 1)[0] in SUBTREE_VALUED and "=" not in word
+        else:
+            positional.append(word)
+    if positional[:1] != ["push"]:
+        return None
+    push = Push(unknown=len(positional) < 3)  # (Without its ref: not read here.)
+    push.forced = any(word in {"-f", "--force"} for word in git.rest)
+    repository = positional[1] if len(positional) > 1 else ""
+    if isinstance(repository, Splitting) and UNSETTLED.search(repository):
+        push.unknown = True  # A repository in a variable, unquoted: it may hold its ref too.
+    return bare(push, git, read_refspecs(push, positional[2:], git))
+
+
+def send_pack(git: Git) -> Push:
+    """`git send-pack [<host>:]<directory> [<ref>…]`: as `git push` reads its refspecs; with
+    none (or `--all`, `--mirror`), every branch of the same name on both sides; refspecs it
+    reads from its input (`--stdin`): not known."""
+    push, positional, valued, dry = Push(), [], False, False
+    for word in git.rest[1:]:
+        if valued:
+            valued = False
+            continue
+        if word.startswith("-") and len(word) > 1:
+            name = word.split("=", 1)[0]
+            push.forced = push.forced or name.startswith("--force") or name == "-f"
+            if name in {"--all", "--mirror"}:
+                push.branches = None
+            dry = dry or name in {"--dry-run", "-n"}
+            push.unknown = push.unknown or name == "--stdin"
+            valued = name in SEND_PACK_VALUED and "=" not in word
+            continue
+        positional.append(word)
+    if positional and isinstance(positional[0], Splitting) and UNSETTLED.search(positional[0]):
+        push.unknown = True  # A repository in a variable, unquoted: it may hold refs too.
+    if len(positional) <= 1:
+        push.branches = None
+    heads = read_refspecs(push, positional[1:], git)
+    return push if dry else bare(push, git, heads)
 
 
 # In text read loosely: what may take a command to another folder, git to another repository,
 # or the folder's checkout to another branch (bash runs the lines before one it cannot parse).
 ELSEWHERE = re.compile(
-    r"\b(?:cd|pushd|popd|eval|source|exec|function|checkout|switch|symbolic-ref)\b"
+    r"\b(?:cd|pushd|popd|eval|source|exec|function|checkout|switch|symbolic-ref|branch"
+    r"|worktree|update-ref)\b"
     r"|(?:^|[\s;&|(`])\.\s|-C|GIT_DIR|GIT_WORK_TREE|--git-dir|--work-tree|\(\s*\)"
 )
+# And what may make a word a command that pushes (an alias), or set where pushes go (`git …
+# config`): every push of such text is not known.
+ALIASING = re.compile(r"\balias\b|\bBASH_ALIASES\b|\b[gs]?aliases\b")
+CONFIG_WORD = re.compile(r"\bconfig\b")
 
 
 def loose_pushes(command: str, cwd: str) -> list[Push]:
@@ -1178,17 +1448,27 @@ def loose_pushes(command: str, cwd: str) -> list[Push]:
     (with nothing between them: git's options, an alias, are not read here). A bare one is
     judged by the line's folder, unless the text may go elsewhere first (no `cd` or `-C` is
     read here: ELSEWHERE). Not known where it pushes: one whose words name a variable or run
-    a command (no variable is read here), and a `push` after a `git` of an earlier stretch
-    (`git -C "$(cd x && pwd)" push`)."""
+    a command (no variable is read here), a `push` after a `git` of an earlier stretch
+    (`git -C "$(cd x && pwd)" push`) or before this one's, or after a command a variable
+    names (`$G push`), any in text that defines an alias, and every one in text that runs
+    `git … config`."""
     found, elsewhere, gits = [], bool(ELSEWHERE.search(command)), False
+    aliased = bool(ALIASING.search(command)) and "push" in squashed(command)
+    configures = False
     for stretch in FLOOR_ENDS.split(command):
         git = GIT_WORD.search(stretch)
+        configures = configures or bool(git and CONFIG_WORD.search(stretch, git.end()))
+        if git and gits and PUSH_WORD.search(stretch, 0, git.start()):
+            found.append(Push(unknown=True))  # (`g push … $(git …)`: g, an alias, not read.)
         push = PUSH_WORD.search(stretch, git.end()) if git else PUSH_WORD.search(stretch)
+        if push and not git and UNSETTLED.search(stretch, 0, push.start()):
+            found.append(Push(unknown=True))  # (`$G push`: a command a variable names.)
+            continue
         if not push or not (git or gits):
             gits = gits or bool(git)
             continue
         gits, rest = True, stretch[push.end() :].split()
-        runs_it = set(re.split(r"[\s/]+", stretch[: git.start()] if git else ""))
+        runs_it = set(re.findall(r"[\w.+-]+", stretch[: git.start()] if git else ""))
         if (
             not git
             or stretch[git.end() : push.start()].strip()
@@ -1197,13 +1477,16 @@ def loose_pushes(command: str, cwd: str) -> list[Push]:
         ):
             found.append(Push(unknown=True))
             continue
-        words = ["git", "push", *filter(None, (word.strip("'\"`()\\") for word in rest))]
+        given = filter(None, (word.strip("'\"`()\\") for word in rest))
+        words = ["git", push.group(), *given]  # (`push`, or `send-pack`: as such.)
         git_push = git_command(words, {}, cwd)
         if git_push and (found_push := push_of(git_push)):
             if found_push.bare_in is not None and (not cwd or elsewhere):
                 found_push.bare_in, found_push.unknown = None, True
             found.append(found_push)
-    return found
+    for push in found:
+        push.unknown = push.unknown or configures
+    return found + ([Push(unknown=True)] if aliased else [])
 
 
 def shell_script(words: list[str], position: int) -> str | None:
@@ -1247,11 +1530,28 @@ class Tally:
     modes: tuple[bool, bool] = (False, False)
     # Whether a line zsh runs handed this one to another shell (Tally.modifiers).
     outer_zsh: bool = False
+    saying: dict[str, bool] = field(default_factory=dict)
+    currents: bool = False  # Whether CURRENT's second character is in no word of the line.
+    # What the line may do to where pushes go, besides what it says of each: set git's push
+    # configuration (`git config`), a branch's upstream (`git branch -u`, a branch made: Push.
+    # upstreams_set), delete or rename a branch a checkout then names (Push.bare_check).
+    config_set: bool = False
+    upstreams_set: bool = False
+    unbranched: bool = False
+    # What the aliases git's configuration has that switch run, by folder and name (judged).
+    aliases: dict[tuple[str, str], tuple | None] = field(default_factory=dict)
 
     def named(self) -> tuple[dict[str, int], dict[str, int]]:
         if self.names is None:
             self.names = named(self.text)
         return self.names
+
+    def says(self, word: str) -> bool:
+        """Whether a word of the line says `word` (in lower case), however it is quoted
+        (squashed): asked of the line once a word, as each command may ask it."""
+        if word not in self.saying:
+            self.saying[word] = word in squashed(self.text)
+        return self.saying[word]
 
     def parse(self, text: str) -> tuple[list[tuple[str, list[str]]], list[str]] | None:
         """shell_commands of a text, once each (by the text itself)."""
@@ -1281,6 +1581,12 @@ class Tally:
         """Whether `$PWD` is the folder a command runs in: the line names PWD only to read it."""
         every, read = self.named()
         return not every.get("IFS") and every.get("PWD", 0) == read.get("PWD", 0)
+
+    def homed(self) -> bool:
+        """Whether the user's git configuration may be another file than the one asked of git
+        (config_entries): the line names HOME or XDG_CONFIG_HOME but to read them."""
+        every, read = self.named()
+        return any(every.get(name, 0) > read.get(name, 0) for name in ("HOME", "XDG_CONFIG_HOME"))
 
     def reads(self, text: str):
         self.read += len(text)
@@ -1517,6 +1823,15 @@ class Line:
     values: dict[str, tuple[str, ...]] = field(default_factory=dict)
     loops: list[tuple[str, int]] = field(default_factory=list)
     switched: dict[str, Switched] = field(default_factory=dict)
+    # As 0.1.45 read them: a checkout of a name only "may have gone there" (what counts when
+    # git has no branch of that name: Push.alt_new).
+    switched_old: dict[str, Switched] = field(default_factory=dict)
+    # How many times the folder or a branch may have changed so far (a variable set to the
+    # checkout's branch is that branch only while this stays: captured).
+    epoch: int = 0
+    text: str = ""  # The line itself (says_push).
+    saying: bool | None = None
+
     marks: list[int] = field(default_factory=list)
     chained: list[bool] = field(default_factory=list)  # Only `&&` from its list's start to it.
     chain: int | None = None
@@ -1539,6 +1854,15 @@ class Line:
     def lose(self):
         """The folder, the one before it and pushd's: not known from here."""
         self.folder, self.chain, self.previous, self.dirs = LOST, None, None, None
+        self.epoch += 1
+
+    def says_push(self) -> bool:
+        """Whether a word of this line (not of the line running it) may say push, however it
+        is quoted: found once a line."""
+        if self.saying is None:
+            text = squashed(self.text)
+            self.saying = "push" in text or "send-pack" in text
+        return self.saying
 
     def put(self, store: dict[str, Any], name: str, value: Any = None):
         """Sets a value the line keeps (`values`, `env`), or drops it (None), noted in `undo`."""
@@ -1577,9 +1901,13 @@ class Line:
         self.put(self.values, name)
         if not certain or self.depth or not NAME.fullmatch(name):
             return
-        values = tuple(resolved(value, self.value_of, self.tally.modifiers) for value in said)
+        values = tuple(
+            captured(self.epoch) if value == CURRENT else value
+            for value in (resolved(value, self.value_of, self.tally.modifiers) for value in said)
+        )
         if 0 < len(values) <= MOST_VALUES and all(
-            value == MADE_UP or not UNSETTLED.search(value) for value in values
+            value == MADE_UP or CAPTURED.fullmatch(value) or not UNSETTLED.search(value)
+            for value in values
         ):
             self.put(self.values, name, values)
 
@@ -1634,6 +1962,7 @@ class Line:
         self.folder = folder
         self.previous, self.dirs = before, dirs
         self.chain = None if certain else mark
+        self.epoch += 1
         if not certain and not self.chained[-1]:  # (`x || cd y && …`: it may not have run.)
             self.lose()
 
@@ -1740,9 +2069,7 @@ def aliases_may_push(values: list[str], tally: Tally) -> bool:
     what the line makes up as it runs, or that says push itself."""
     if not values:
         return False
-    return "push" in squashed(tally.text) or any(
-        may_push(value) or UNSETTLED.search(value) for value in values
-    )
+    return tally.says("push") or any(may_push(value) or UNSETTLED.search(value) for value in values)
 
 
 def moves_folder(joiner: str, words: list[str], devices: bool = False) -> bool:
@@ -1782,13 +2109,14 @@ def read_line(command: str, cwd: str, depth: int, tally: Tally) -> str:
         return TOO_COMPLEX
     tally.reads(command)
     parsed = tally.parse(command)
-    if parsed is None:  # Not a command line the shell runs: read loosely.
+    if parsed is None:  # Not a command line the shell runs: read loosely (any alias may run).
         tally.pushes += loose_pushes(command, cwd)
+        tally.pushes.append(Push(nested=bool(depth), alias="*", via=Git(cwd, {}, [], False)))
         return ""
     commands, inside = parsed
     if sum(len(words) for _, words in commands) > MOST_WORDS:
         return TOO_COMPLEX
-    line = Line(cwd, depth, tally)
+    line = Line(cwd, depth, tally, text=command)
     start_modes = line.physical, line.physical_unsure = tally.modes
     broken, nest, ordered = 0, 0, True
     # Where each open subshell started: its folder, chain, undo mark, nest, and cd's.
@@ -1841,6 +2169,7 @@ def read_line(command: str, cwd: str, depth: int, tally: Tally) -> str:
                 (line.folder, line.chain, mark, _, line.previous, line.dirs, line.physical,
                  line.physical_unsure) = saved.pop()  # fmt: skip
                 line.restore(mark)
+                line.epoch += 1
         line.lost = line.lost or "()" in joiner.replace(" ", "")  # A function: called anywhere.
         if line.lost or (line.chain is not None and line.chain != broken):
             if cwd:
@@ -1913,7 +2242,9 @@ def read_line(command: str, cwd: str, depth: int, tally: Tally) -> str:
     inner = LOST if any(moving) else cwd
     for body in inside:
         tally.modes = (start_modes[0], start_modes[1] or line.moded)  # (Where it stands: as there.)
-        if may_push(body, switching=True) and (why := read_line(body, inner, depth + 1, tally)):
+        if (may_push(body, switching=True) or may_alias(squashed(body))) and (
+            why := read_line(body, inner, depth + 1, tally)
+        ):
             return why
     return ""
 
@@ -1955,6 +2286,16 @@ def read_command(words: list[str], index: int, line: Line) -> str:
     `xargs`, `parallel`, `fd -x`: with words they add to it, not known here)."""
     local: dict[str, str] = {}
     folder, feeds, found = line.folder, "", False
+    first = words[0] if words else ""
+    plain = PLAIN_NAME.fullmatch(first) and first not in FED_WRAPPERS and first not in KEYWORDS
+    named = [] if plain else unwrapped(words)[0][:1]  # (The command, past `env`, `if`… only.)
+    if named and UNSETTLED.search(named[0]) and line.says_push():
+        line.tally.pushes.append(Push(unknown=True, anonymous=True))  # (Its name: not known.)
+    elif (named and UNSETTLED.search(named[0])) or (
+        first.rsplit("/", 1)[-1] in RUNNERS and any(UNSETTLED.search(word) for word in words)
+    ):  # (A git it names may run an alias that pushes: `$G p`, `find … -exec $G p`.)
+        via = Git(line.folder, {}, words, False)
+        line.tally.pushes.append(Push(nested=bool(line.depth), alias="$", via=via))
     for position, word in enumerate(words):
         if ASSIGNMENT.match(word):
             local.update(git_variables([word]))
@@ -1981,7 +2322,7 @@ def read_command(words: list[str], index: int, line: Line) -> str:
             # Read as that shell reads it; cd as the system goes if its options say so, or if
             # the line may hand it bash's options (SHELLOPTS).
             options = words[position + 1 :]
-            chases = shell_chases(options) or "shellopts" in squashed(line.tally.text)
+            chases = shell_chases(options) or line.tally.says("shellopts")
             return read_code(script, line, folder, program, (False, chases))
         if program == "eval":
             return read_code(" ".join(words[position + 1 :]), line, folder)
@@ -2004,12 +2345,27 @@ def read_command(words: list[str], index: int, line: Line) -> str:
                 folder = LOST  # Each found file's folder.
         elif program in FEEDERS:
             feeds = feeds or placeholder(program, words[position + 1 :])
+    if pushed_by_a_name(words) and line.says_push():
+        line.tally.pushes.append(Push(unknown=True, anonymous=True))  # (`find … -exec $G push`.)
     return ""
 
 
+def pushed_by_a_name(words: list[str]) -> bool:
+    """Whether a command that runs no git it names may run one a variable or a substitution
+    names, with `push` (or `send-pack`) after it: a command it runs (`find … -exec`, `watch`,
+    `caffeinate`), whatever runs it."""
+    named = False
+    for word in words:
+        named = named or bool(UNSETTLED.search(word))
+        if named and word in {"push", "send-pack"}:
+            return True
+    return False
+
+
 # Commands that run another with words of their own added (each line of their input, a found
-# file's name), unless told where to put them (`xargs -I {}`).
+# file's name), unless told where to put them (`xargs -I {}`); and others that run one.
 FEEDERS = frozenset({"xargs", "parallel", "fd", "fdfind"})
+RUNNERS = FEEDERS | {"find", "watch"}
 
 
 def placeholder(program: str, words: list[str]) -> str:
@@ -2103,9 +2459,24 @@ def read_code(
         tally.outer_zsh, tally.shell = tally.modifiers, shell
     tally.modes = (line.physical, line.physical_unsure) if modes is None else modes
     try:
-        return read_line(script, folder, line.depth + 1, tally)
+        return read_line(handed(script, line, folder), folder, line.depth + 1, tally)
     finally:
         tally.here, tally.shell, tally.modes, tally.outer_zsh = before
+
+
+def handed(script: str, line: Line, folder: str) -> str:
+    """A line's text handed to a command that runs it (`eval`, `sh -c`), the checkout's branch
+    as its substitutions made it in (CURRENT, or a variable that still holds it: captured) put
+    in as what the line run holds from its start (captured(0)): its branch only until a `cd`
+    or a switch there (Line.epoch); not known when it runs elsewhere (`env -C DIR sh -c`)."""
+    if CURRENT not in script:
+        return script
+
+    def put(found: re.Match) -> str:
+        now = found.group(1) is None or int(found.group(1)) == line.epoch
+        return captured(0) if now and folder == line.folder else MADE_UP
+
+    return CURRENTS.sub(put, script)
 
 
 def read_git(
@@ -2124,33 +2495,125 @@ def read_git(
         return
     if folder is not None and folder != line.folder:
         git.moved = True  # (`env -C DIR git push origin "$(…)"`: that runs in the shell's folder.)
+    git = aliases_run(git, index, line)
     fed = feeds == "*" or bool(feeds and any(feeds in word for word in words[1:]))
     if fed and git.rest[0] in SWITCHING:
         record_switch(git, index, line, ("unknown", ""))
         return
+    if git.rest[0] == "config":
+        sets, alias, switches = config_change(git.rest)
+        line.tally.config_set = line.tally.config_set or sets
+        if alias and any(line.tally.says(word) for word in PUSHING):
+            line.tally.pushes.append(Push(unknown=True))  # An alias that may push, from here on.
+        if switches:  # An alias that switches, from here on: where to, not known.
+            record_switch(git, index, line, ("unknown", ""))
+    removes, upstream = branches_changed(git.rest)
+    line.tally.unbranched = line.tally.unbranched or removes
+    line.tally.upstreams_set = line.tally.upstreams_set or upstream
+    git.epoch, git.currents = line.epoch, line.tally.currents
+    name = git.rest[0]
+    if name not in UNALIASED and f"alias.{name.lower()}" not in git.config:
+        aliased = bool(ALIAS_NAME.fullmatch(name))
+        if aliased or UNSETTLED.search(name):  # (An alias `-c` gives: push_of reads it.)
+            via = Git(**{**vars(git), "rest": [*git.rest, *([FED] if fed else [])]})
+            unknown = git.elsewhere or any(key in ALIAS_SOURCES or key.startswith("includeif.")
+                                           for key in git.config)  # fmt: skip
+            alias = name.lower() if aliased else "?"
+            candidate = Push(nested=bool(line.depth), alias=alias, via=via, alias_unknown=unknown)
+            candidate.bare_in = git.folder
+            line.tally.pushes.append(placed_bare(candidate, index, line))
     if push := push_of(git):
         push.unknown = push.unknown or fed
         push.nested = bool(line.depth)
-        if push.bare_in is not None:  # A switch in another folder may be in the same repository.
-            for folder, other in line.switched.items():
-                if folder != push.bare_in:
-                    names = other.prior_also | other.also | ({other.new} if other.new else set())
-                    push.bare_also |= names
-                    push.unknown = push.unknown or other.unknown or other.prior_unknown
-        if push.bare_in is not None and (made := line.switched.get(push.bare_in)):
-            trusted = made.new and line.marks[index] == line.marks[made.new_at]
-            trusted = trusted and line.chained[made.new_at]
-            if trusted:
-                push.bare_new = made.new
-                push.bare_also |= made.also
-                push.unknown = push.unknown or made.unknown
-            else:  # That switch may have failed: where it was before counts too.
-                also = made.prior_also | made.also | ({made.new} if made.new else set())
-                push.bare_also |= also
-                push.unknown = push.unknown or made.unknown or made.prior_unknown
-        line.tally.pushes.append(push)
+        line.tally.pushes.append(placed_bare(push, index, line))
     else:
         record_switch(git, index, line)
+
+
+def aliases_run(git: Git, index: int, line: Line) -> Git:
+    """A git command that runs an alias, read as the command it runs where that is known as the
+    line is read: an alias `-c` gives (but one that may push: push_of reads it; one that runs
+    another, of git's configuration: Push.alias), or one of git's configuration that switches
+    branches (Tally.aliases: judged). One that may switch, not known: a switch to a branch not
+    named."""
+    for _ in range(MOST_ALIASES):
+        name = git.rest[0]
+        if name in UNALIASED or UNSETTLED.search(name):
+            return git
+        key = f"alias.{name.lower()}"
+        if key in git.config:
+            value = git.config[key]
+            if (
+                value is None
+                or len(value) > MOST_VALUE
+                or value.startswith("!")
+                or any(word in value.lower() for word in PUSHING)
+            ):
+                text = " ".join([value or "", *git.rest[1:]]).lower()
+                if value is None or (
+                    value.startswith("!")
+                    and (any(word in text for word in EXPANDED) or UNSETTLED.search(text))
+                ):
+                    record_switch(git, index, line, ("unknown", ""))  # (A shell's: which?)
+                return git
+            words = alias_words(value)
+        elif (git.folder, name.lower()) in line.tally.aliases:
+            words = line.tally.aliases[(git.folder, name.lower())]
+        else:
+            return git
+        following = git_command(["git", *words, *git.rest[1:]], {}, git.folder) if words else None
+        if following is None or following.folder != git.folder or following.elsewhere:
+            record_switch(git, index, line, ("unknown", ""))
+            return git
+        following.config = {**git.config, **following.config}
+        following.elsewhere, following.moved, following.zsh = git.elsewhere, git.moved, git.zsh
+        git = following
+    record_switch(git, index, line, ("unknown", ""))
+    return git
+
+
+# A word a feeder adds to a git command (`xargs git p`): not known (Push.via). The commands no
+# alias is read for (git's own, and subtree: push_of reads it).
+FED = Splitting(MADE_UP)
+UNALIASED = GIT_COMMANDS | {"subtree"}
+# What may give git aliases of other files than the folder's configuration (`-c`, the
+# environment's: environment_config).
+ALIAS_SOURCES = frozenset({"alias.?", "include.path"})
+
+
+def placed_bare(push: Push, index: int, line: Line) -> Push:
+    """A bare push (Push.bare_in), placed after the line's switches before it: the branch it
+    switched to there, where others may have gone, whether that is not known."""
+    if push.bare_in is None:
+        return push
+    for folder, other in line.switched.items():  # One in another folder: the same repository?
+        if folder != push.bare_in:
+            names = other.prior_also | other.also | ({other.new} if other.new else set())
+            push.bare_also |= names
+            push.unknown = push.unknown or other.unknown or other.prior_unknown
+    if UNSETTLED.search(push.bare_in):
+        push.unknown = True  # A folder not known (LOST): a switch "there" may be elsewhere.
+    elif made := line.switched.get(push.bare_in):
+        new, also, unknown = switched_reading(made, index, line)
+        push.bare_new, push.bare_also = new, push.bare_also | also
+        push.unknown = push.unknown or unknown
+        old = line.switched_old.get(push.bare_in)
+        if new and made.checkout and old is not None:  # Only if git has that branch.
+            push.bare_check = True
+            push.alt_new, alt_also, push.alt_unknown = switched_reading(old, index, line)
+            push.alt_also = frozenset(alt_also)
+    return push
+
+
+def switched_reading(made: Switched, index: int, line: Line) -> tuple[str, set[str], bool]:
+    """Where a folder's checkout is at the command `index`, as a line's switches before it say:
+    the branch it switched to last, when every join from there is `&&` (with where checkouts
+    after it may have gone); else where it was before too (that switch may have failed). And
+    whether it may be somewhere not named."""
+    if made.new and line.marks[index] == line.marks[made.new_at] and line.chained[made.new_at]:
+        return made.new, made.also, made.unknown
+    also = made.prior_also | made.also | ({made.new} if made.new else set())
+    return "", also, made.unknown or made.prior_unknown
 
 
 # The git commands that may put a checkout on another branch.
@@ -2160,9 +2623,10 @@ SWITCHING = frozenset({"checkout", "switch", "branch", "symbolic-ref"})
 def record_switch(git: Git, index: int, line: Line, what: tuple[str, str] | None = None) -> None:
     """What a `git checkout`, `git switch`, `git branch` or `git symbolic-ref HEAD` does to its
     folder's branch (`what`, when told), for a bare push later in the line: a branch made and
-    switched to counts only when every join from there is `&&` (it may have failed, and the
-    line gone on: `;`, `||`, a new line). One in a line a command runs, or in the background,
-    may have gone anywhere before any push: Tally.aside."""
+    switched to, or one switched to (a checkout's, if git has it), counts only when every join
+    from there is `&&` (it may have failed, and the line gone on: `;`, `||`, a new line); kept
+    as 0.1.45 read it too (Line.switched_old). One in a line a command runs, or in the
+    background, may have gone anywhere before any push: Tally.aside."""
     if what is not None:
         pass
     elif git.rest[0] in {"checkout", "switch"}:
@@ -2177,9 +2641,12 @@ def record_switch(git: Git, index: int, line: Line, what: tuple[str, str] | None
         return
     kind, name = what
     marks = line.marks
-    made = line.switched.setdefault(git.folder, Switched())
+    machines = (line.switched, line.switched_old)
+    for machine in machines:
+        machine.setdefault(git.folder, Switched())
     tally = line.tally
     if kind != "made":
+        line.epoch += 1
         aside = bool(line.depth or line.piped or line.looping or line.alongside)  # In no order.
         names = tally.aside if aside else tally.top
         if name and len(names) < MOST_BRANCHES:
@@ -2189,17 +2656,143 @@ def record_switch(git: Git, index: int, line: Line, what: tuple[str, str] | None
             tally.top_unknown = tally.top_unknown or not aside
         if aside:
             return
-    if kind == "new":
-        line.switched[git.folder] = made.switched_to(name, index)
-    elif kind == "made":
-        made.made[name] = index
-    elif kind == "to" and name in made.made and marks[index] == marks[made.made[name]]:
-        line.switched[git.folder] = made.switched_to(name, made.made[name])
-    elif kind in {"to", "renamed"}:
-        made.also.add(name)
-        made.capped()
-    else:
-        made.unknown = True
+    for machine in machines:
+        made = machine[git.folder]
+        read = "to" if machine is line.switched_old and kind in {"switched", "branch?"} else kind
+        going = read in {"to", "switched", "branch?"}
+        if read == "new":
+            made.switched_to(name, index)
+        elif read == "made":
+            made.made[name] = index
+        elif going and name in made.made and marks[index] == marks[made.made[name]]:
+            made.switched_to(name, made.made[name])
+        elif read in {"switched", "branch?"}:
+            made.switched_to(name, index, read == "branch?")
+        elif read in {"to", "renamed"}:
+            made.also.add(name)
+            made.capped()
+        else:
+            made.unknown = True
+
+
+# What may take a branch away from a later checkout of its name (`git branch -d`/`-m`,
+# update-ref, a push to the repository itself), and set a branch's upstream (`-u`, `--track`,
+# a branch made: branch.autoSetupMerge).
+REMOVING = frozenset({"-d", "-D", "--delete", "-m", "-M", "--move"})
+UPSTREAM = frozenset({"-u", "--set-upstream-to", "--set-upstream", "-t", "--track"})
+MAKING = frozenset({"-b", "-B", "-c", "-C", "--create", "--force-create", "--orphan"})
+
+
+def branches_changed(rest: list[str]) -> tuple[bool, bool]:
+    """Whether a git command may delete or rename a branch (a checkout of its name then goes to
+    no branch: Push.bare_check), and whether it may set a branch's upstream (where
+    push.default=upstream sends a push naming none)."""
+    command = rest[0]
+    if command not in {"update-ref", "push", "worktree", "branch", "checkout", "switch"}:
+        return False, False
+    options = [word.split("=", 1)[0] for word in rest[1:] if word.startswith("-")]
+    clusters = "".join(option[1:] for option in options if not option.startswith("--"))
+    if command == "update-ref":
+        return True, False
+    if command == "push":
+        return [word for word in rest[1:] if not word.startswith("-")][:1] == ["."], False
+    if command == "worktree":
+        return False, rest[1:2] == ["add"]
+    if command == "branch":
+        removes = bool(REMOVING & set(options) or set(clusters) & set("dDmM"))
+        made = (renamed_or_made(rest) or ("", ""))[0] == "made"
+        return removes, made or bool(UPSTREAM & set(options) or set(clusters) & set("ut"))
+    if command in {"checkout", "switch"}:
+        return False, bool((UPSTREAM | MAKING) & set(options) or set(clusters) & set("tbBcC"))
+    return False, False
+
+
+# `git config`'s commands (git 2.46 and later), its options that read, change, or take a value;
+# the keys of where pushes go (in lower case), and their sections.
+CONFIG_ACTIONS = frozenset(
+    {"list", "get", "set", "unset", "rename-section", "remove-section", "edit"}
+)
+CONFIG_READS = frozenset({"--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list", "-l",
+                          "--get-color", "--get-colorbool"})  # fmt: skip
+CONFIG_CHANGES = frozenset({"--add", "--replace-all", "--unset", "--unset-all", "-e", "--edit",
+                            "--rename-section", "--remove-section"})  # fmt: skip
+CONFIG_VALUED = frozenset({"-f", "--file", "--blob", "--type", "--default", "--comment",
+                           "--value", "--url"})  # fmt: skip
+PUSH_KEYS = re.compile(
+    r"push\.default|remote\..*\.(?:push|mirror)|remote\.pushdefault"
+    r"|branch\..*\.(?:pushremote|merge|remote)|alias\..*|include\.path|includeif\..*",
+    re.DOTALL,
+)
+PUSH_SECTIONS = frozenset({"push", "remote", "branch", "alias", "include", "includeif"})
+
+
+def config_change(rest: list[str]) -> tuple[bool, bool, bool]:
+    """What `git config` with these words may change of where pushes go: whether it sets (or
+    unsets, renames, removes) push.default, a remote's push refspecs or mirror, a branch's
+    upstream or push remote, an alias that may push (alias_may_push; or unsets one) or a file
+    to include, or what it can't say (a key in a variable, an editor); whether it may set such
+    an alias; and whether it sets one that switches branches or sets configuration (EXPANDED).
+    Reading changes nothing."""
+    positional, options, valued = [], set(), False
+    for word in rest[1:]:
+        if valued:
+            valued = False
+        elif word.startswith("-") and len(word) > 1:
+            name = word.split("=", 1)[0]
+            options.add(name)
+            valued = name in CONFIG_VALUED and "=" not in word
+        else:
+            positional.append(word)
+    action = positional[0] if positional[:1] and positional[0] in CONFIG_ACTIONS else ""
+    positional = positional[1:] if action else positional
+    if action in {"list", "get"} or options & CONFIG_READS:
+        return False, False, False
+    if action == "edit" or options & {"-e", "--edit"}:
+        return True, True, True
+    sections = action.endswith("-section") or bool(
+        options & {"--rename-section", "--remove-section"}
+    )
+    if not action and not options & CONFIG_CHANGES and len(positional) < 2:
+        return False, False, False  # (`git config NAME`: it reads it.)
+    sets = alias = switches = False
+    unsets = action == "unset" or bool(options & {"--unset", "--unset-all"})
+    for key in positional[: 2 if sections else 1]:
+        if UNSETTLED.search(key):
+            return True, True, True
+        lower = key.lower()
+        part = lower.split(".", 1)[0] if sections else lower
+        if not sections and part.startswith("alias."):
+            value = positional[1] if len(positional) > 1 and not unsets else None
+            alias = alias or value is None or alias_may_push(value)
+            sets = sets or alias
+            switches = switches or (value is not None and alias_switches_to(value))
+            continue
+        sets = sets or (part in PUSH_SECTIONS if sections else bool(PUSH_KEYS.fullmatch(part)))
+        alias = alias or part == "alias"
+    return sets, alias, switches or alias
+
+
+def alias_may_push(text: str) -> bool:
+    """Whether an alias of this text may push: a shell's (`!…`), one that says push, send-pack
+    or subtree, or runs no command of git's own (another alias), or can't be read."""
+    if (
+        len(text) > MOST_VALUE
+        or text.startswith("!")
+        or UNSETTLED.search(text)
+        or any(word in text.lower() for word in PUSHING)
+    ):
+        return True
+    words = alias_words(text)
+    git = git_command(["git", *words], {}, "") if words else None
+    return git is None or git.rest[0] not in GIT_COMMANDS
+
+
+def alias_switches_to(text: str) -> bool:
+    """Whether an alias of this text (that runs git's own command) switches branches or sets
+    configuration (EXPANDED)."""
+    words = alias_words(text) if len(text) <= MOST_VALUE else None
+    git = git_command(["git", *words], {}, "") if words else None
+    return git is not None and git.rest[0] in EXPANDED
 
 
 def squashed(command: str) -> str:
@@ -2208,13 +2801,208 @@ def squashed(command: str) -> str:
     return command.replace("\\\n", "").translate(str.maketrans("", "", "'\"\\")).lower()
 
 
+def may_alias(text: str) -> bool:
+    """Whether a line (squashed) may run an alias of git's (Push.alias): a word of it that
+    ends in `git` (`git`, `/usr/bin/git`, `G=git`, `$(echo git)`) followed, past git's own
+    options, by a word that is not one of git's commands; or a command whose name a variable
+    or a substitution holds (`$G p`; also one `find`, `xargs`… run: RUNNERS)."""
+    words = text.split()
+    for at, word in enumerate(words):
+        if not word.strip(GIT_PUNCTUATION).endswith("git"):
+            continue
+        at += 1
+        while at < len(words) and words[at].startswith("-"):
+            at += 2 if words[at] in GIT_VALUED_LOWER else 1
+        if at >= len(words) or words[at].strip(GIT_PUNCTUATION) not in GIT_COMMANDS:
+            return True
+    for stretch in COMMAND_STRETCHES.split(text):
+        named = [word for word in stretch.split() if not COMMAND_PREFIX.fullmatch(word)]
+        if named and ("$" in named[0] or (named[0] in RUNNERS and "$" in stretch)):
+            return True
+    return False
+
+
+# Where a command may start in a line (squashed), and the words before its name (assignments,
+# reserved words, commands that run the next, their options).
+COMMAND_STRETCHES = re.compile(r"[;&|()\n`{}]")
+COMMAND_PREFIX = re.compile(
+    r"[a-z_][a-z0-9_]*\+?=\S*|-\S*|[0-9]+|if|then|elif|else|do|while|until|!|time|env|command"
+    r"|builtin|exec|nice|nohup|timeout|sudo|stdbuf"
+)
+
+
+# What may stand around git's name or its command's in a word (`$(echo git)`, `git;`).
+GIT_PUNCTUATION = "$(){}`;&|<>"
+GIT_VALUED_LOWER = frozenset(option.lower() for option in GIT_VALUED)
+
+
 def may_push(command: str, switching: bool = False) -> bool:
     """Whether a word of a line may say `push` or an alias, however it is quoted (a line that
-    says neither pushes nothing); or, `switching`, go to another branch for a push after it."""
+    says neither pushes nothing); or, `switching`, go to another branch for a push after it,
+    or set where it goes (`git config`)."""
     words = squashed(command)
-    if switching and any(word in words for word in SWITCHING):
+    if switching and any(word in words for word in (*SWITCHING, "config", "update-ref")):
         return True
-    return "push" in words or "alias" in words
+    return "push" in words or "alias" in words or "send-pack" in words
+
+
+# What a line may write (the invariant review of 86f9f8d): git's configuration, in a file and
+# not through `git config` (where its pushes go, which aliases there are: not known then), or a
+# file git's configuration includes (Pushing.includes). Read in each simple command of the line
+# and of what its substitutions run (as the shell splits them; text it can't parse, loosely, in
+# stretches up to a separator): a redirection's target; a word of a command that may write what
+# it names (not of one that reads only: `cat`, `grep`, `sed` but `-i`, `cp`'s sources).
+WRITE_STRETCHES = re.compile(r"[;&|\n`()]")
+WRITE_WORDS = re.compile(r"[\s,]+")
+REDIRECTED = re.compile(r"(?<!>)>+[|&]?[ \t]*([^\s<>;&|()`,]+)")
+REDIRECTION = re.compile(r"[0-9]*[<>]+[&|]?")
+OPTION_VALUE = re.compile(r"[\w.-]*=")
+SKIPPED = KEYWORDS | WRAPPERS | {"sudo", "env", "nice", "nohup", "xargs", "then", "do"}
+READERS = frozenset(
+    {"cat", "bat", "less", "more", "head", "tail", "grep", "egrep", "fgrep", "rg", "ag", "ack",
+     "wc", "diff", "cmp", "comm", "stat", "ls", "file", "md5", "md5sum", "shasum", "sha1sum",
+     "sha256sum", "cksum", "echo", "printf", "test", "[", "[[", "realpath", "readlink",
+     "basename", "dirname", "git", "cut", "nl", "od", "xxd", "hexdump", "strings", "jq", "true",
+     "false", ":", "cd", "pushd", "popd", "source", ".", "awk", "gawk", "sed", "perl"}
+)  # fmt: skip
+COPIERS = frozenset({"cp", "mv", "install", "ln", "rsync", "scp", "ditto"})
+# Text that says a line may be in a repository's own folder (`.git`, `$GIT_DIR`): a file
+# `config` it writes may be git's.
+GIT_DIR_TEXT = re.compile(r"(?<![\w.-])\.git(?![\w.-])|git-dir|git-path|git-common-dir|git_dir|xdg")
+MOST_WRITTEN = 4096
+
+
+def git_config_file(word: str, here: bool) -> bool:
+    """Whether a file a line names (in lower case) may be git's configuration: the user's or
+    the system's (`~/.gitconfig`, `/etc/gitconfig`, `~/.config/git/config`), a repository's
+    (`.git/config`, `config.worktree`; in `$GIT_DIR`, a module's, a worktree's, a bare one's),
+    or a `config` where the line may be in a repository's own folder (`here`)."""
+    base = word.rsplit("/", 1)[-1]
+    if "gitconfig" in base:
+        return True
+    if base not in {"config", "config.worktree"}:
+        return False
+    folder = word[: -len(base)].rstrip("/")
+    if folder.endswith((".git", "/git")) or folder == "git" or ".git/" in folder:
+        return True
+    return here or any(char in folder for char in "$)}`" + MADE_UP)
+
+
+class Writes:
+    """What a line may write, as `written` reads it."""
+
+    def __init__(self, here: bool):
+        self.here = here
+        self.config = False
+        self.names: set[str] = set()
+
+    def note(self, word: str):
+        if found := REDIRECTION.match(word):
+            word = word[found.end() :]
+        if found := OPTION_VALUE.match(word):  # (`of=FILE`, `--file=FILE`.)
+            word = word[found.end() :]
+        word = word.strip(")}`").lower()
+        if word:
+            self.config = self.config or git_config_file(word, self.here)
+            self.names.add(word.rsplit("/", 1)[-1] if len(self.names) < MOST_WRITTEN else "*")
+
+    def command(self, words: list[str]):
+        """A simple command's words (lower case, its redirections' targets taken out)."""
+        at = 0
+        while at < len(words) and (
+            words[at] in SKIPPED or ASSIGNMENT.match(words[at]) or words[at].startswith("-")
+        ):
+            at += 1
+        name = words[at].rsplit("/", 1)[-1] if at < len(words) else ""
+        rest = words[at + 1 :]
+        if name in {"sed", "perl"}:  # In place: `sed -i`, `perl -pi`.
+            if not any(word.startswith("-") and "i" in word[1:] for word in rest):
+                return
+        elif name in {"awk", "gawk"} and "inplace" in rest:
+            pass
+        elif name in READERS:
+            return
+        elif name in COPIERS:  # Where it writes: its last word, or after `-t`.
+            positional = [word for word in rest if not word.startswith("-")]
+            targeted = any(word == "-t" or word.startswith("--target") for word in rest)
+            rest = positional if targeted else positional[-1:]
+            if rest and rest[-1].endswith((".git", ".git/", "/git", "/git/")):
+                self.config = True  # (A file put in a repository's own folder.)
+        else:
+            rest = words[at:]
+        for word in rest:
+            self.note(word)
+
+    def loosely(self, text: str):
+        """Text the shell can't parse (squashed): in stretches up to a separator."""
+        for found in REDIRECTED.finditer(text):
+            self.note(found.group(1))
+        for stretch in WRITE_STRETCHES.split(text):
+            words = [word for word in WRITE_WORDS.split(stretch) if word]
+            kept, target = [], False
+            for word in words:
+                if target or REDIRECTION.fullmatch(word):
+                    target = not target and bool(REDIRECTION.fullmatch(word))
+                    continue
+                if not REDIRECTION.match(word):
+                    kept.append(word)
+            self.command(kept)
+
+    def line(self, text: str):
+        """A line's simple commands; its redirections' targets."""
+        try:
+            tokens = shell_words(text)
+        except (ValueError, TooComplexError):
+            self.loosely(squashed(text))
+            return
+        words: list[str] = []
+        target = ""  # The next word: a file written (">"), or read ("<").
+        for token in [*tokens, Separator(";")]:
+            if isinstance(token, Separator):
+                self.command(words)
+                words, target = [], ""
+            elif target:
+                if target == ">":
+                    self.note(token)
+                target = ""
+            elif isinstance(token, Redirecting):
+                operator = token[token.at :]
+                found = REDIRECTION.match(operator)
+                writes = ">" in operator[: found.end() if found else 0]
+                file = operator[found.end() :] if found else ""
+                if file and writes:
+                    self.note(file)
+                elif not file:
+                    target = ">" if writes else "<"
+                head = token[: token.at]
+                if head and not head.isdigit():
+                    words.append(head.lower())
+            else:
+                words.append(token.lower())
+
+
+@functools.lru_cache(maxsize=32)
+def written(command: str, cwd: str) -> tuple[bool, frozenset[str]]:
+    """Whether a line may write a git configuration file (git_config_file), and the names of
+    the files it may write (without their folders, in lower case; "*" past MOST_WRITTEN): in
+    its commands and its substitutions' (a heredoc's body is text, but for those), to
+    MOST_NESTED deep (deeper, read loosely)."""
+    here = bool(GIT_DIR_TEXT.search(squashed(command))) or ".git" in Path(cwd).parts
+    here = here or cwd.endswith(".git")
+    writes = Writes(here)
+    texts = [(command, 0)]
+    while texts:
+        text, depth = texts.pop()
+        if depth > MOST_NESTED:
+            writes.loosely(squashed(text))
+            continue
+        kept, bodies = without_heredocs(text)
+        plain, inside = without_substitutions(without_comments(kept).replace("\\\n", ""))
+        for body in bodies:
+            inside += without_substitutions(body, quoted=True)[1]
+        texts += [(body, depth + 1) for body in inside]
+        writes.line(plain)
+    return writes.config, frozenset(writes.names)
 
 
 # The shell a check's command line runs in, when not bash or sh (Codex's `zsh -lc`): see
@@ -2229,29 +3017,53 @@ def reading(command: str, cwd: str) -> tuple[tuple[Push, ...], str]:
 
 
 @functools.lru_cache(maxsize=32)
-def read_pushes(command: str, cwd: str, shell: str) -> tuple[tuple[Push, ...], str]:
-    """See reading. A line no word of which says `push` or an alias pushes nothing."""
-    if not may_push(command):
+def read_pushes(
+    command: str, cwd: str, shell: str, aliases: frozenset = frozenset()
+) -> tuple[tuple[Push, ...], str]:
+    """See reading. A line no word of which says `push`, an alias or git pushes nothing; one
+    that says git but no push may run an alias that pushes, only (Push.alias). With `aliases`
+    (alias_switches), the git commands that run those are read as what they run."""
+    says = may_push(command)
+    if not says and not may_alias(squashed(command)):
         return (), ""
     if len(command) > MOST_LINE:
         return (), TOO_LONG
     tally = Tally(command, cwd, shell)
+    tally.currents = CURRENT[1] not in command
+    tally.aliases = dict(aliases)
     try:
         why = read_line(command, cwd, 0, tally)
     except TooComplexError:
         why = TOO_COMPLEX
+    tally.config_set = tally.config_set or written(command, cwd)[0]
     for push in tally.pushes:
+        push.unknown = push.unknown or tally.config_set  # (Where it goes: what the line set.)
+        if push.alias:  # (Which aliases there are: what the line may have set.)
+            push.alias_unknown = push.alias_unknown or tally.config_set or tally.homed()
         if push.bare_in is not None:
+            if push.bare_check and tally.unbranched:  # That branch may be gone by then.
+                push.bare_new, push.bare_also = push.alt_new, push.bare_also | push.alt_also
+                push.unknown = push.unknown or push.alt_unknown
+                push.bare_check, push.alt_new, push.alt_also = False, "", frozenset()
+            push.upstreams_set = tally.upstreams_set
+            if (push.configured or push.mapped) and tally.homed():
+                push.unknown = True  # Where its configuration sends it: in a file not asked.
             anywhere = push.nested or tally.background
             push.bare_also |= tally.aside | (tally.top if anywhere else set())
             push.unknown = push.unknown or tally.aside_unknown
             push.unknown = push.unknown or (anywhere and tally.top_unknown)
-            if len(push.bare_also) > MOST_BRANCHES:  # Where it may go: too many to say.
-                push.bare_also, push.unknown = frozenset(), True
+            if len(push.bare_also | push.alt_also) > MOST_BRANCHES:  # Too many to say.
+                push.bare_also, push.alt_also, push.unknown = frozenset(), frozenset(), True
     unique = tuple({push.key(): push for push in tally.pushes}.values())
-    asked = {push.bare_in for push in unique if push.bare_in is not None and not push.bare_new}
+    asked = {push.bare_in for push in unique if push.bare_in is not None and asks(push)}
+    asked |= {push.via.folder for push in unique if push.via is not None}
     if len(asked) > MOST_FOLDERS:
         why = why or TOO_COMPLEX
+    if not says:  # Only an alias may push: any, where it can't be read.
+        unique = tuple(push for push in unique if push.alias)
+        if why:
+            anywhere, unknown = Git(cwd, {}, [], False), tally.config_set or tally.homed()
+            unique, why = (Push(alias="*", via=anywhere, alias_unknown=unknown),), ""
     return unique, why
 
 
@@ -2260,8 +3072,9 @@ reading.cache_clear = read_pushes.cache_clear  # type: ignore[attr-defined]
 
 def pushes(command: str, cwd: str = "") -> list[Push]:
     """Each `git push` in a command line, as the shell would run it (see read_line). A rule
-    of text, so best effort: what a command makes up as it runs is not known here."""
-    return list(reading(command, cwd)[0])
+    of text, so best effort: what a command makes up as it runs is not known here. (With the
+    git commands that may run an alias, Push.alias: judged.)"""
+    return [push for push in reading(command, cwd)[0] if not push.alias]
 
 
 def too_complex(command: str, cwd: str = "") -> bool:
@@ -2333,7 +3146,7 @@ def piped_download(command: str, cwd: str = "") -> bool:
 # first). A line that feeds one, and says push (or may go to another branch: symbolic-ref,
 # update-ref, a branch renamed to main or master), is refused, saying so.
 FED_SCRIPT = "a script fed to a shell can't be checked; run its git commands directly"
-FED_SAYS = ("push", "symbolic-ref", "update-ref")
+FED_SAYS = ("push", "symbolic-ref", "update-ref", "send-pack")
 FED_SHELLS = SHELLS | {"ash", "csh", "tcsh", "mksh", "yash", "posh", "rbash", "su"}
 # Commands that run the command after them, with the letters of their options that take a
 # value (`timeout` takes its duration too; `xargs`: the command may be given its script).
@@ -2347,7 +3160,9 @@ FED_LONG_VALUED = frozenset({"--chdir", "--split-string", "--unset", "--argv0", 
                              "--arg-file", "--eof", "--max-chars"})  # fmt: skip
 # A file a command may read what the line feeds it from (`/dev/stdin`, `/dev/fd/0`, `/proc/…`).
 FED_DEVICE = re.compile(r"/dev/(?!null$)|/proc/")
-FED_PROCESS = "\x01<("  # A process substitution's file (`<(…)`, zsh's `=(…)`), as a word.
+# A process substitution's file (`<(…)`, zsh's `=(…)`), as a word (none a line it is put in,
+# for `eval` to run, reads otherwise: a zsh 200k run).
+FED_PROCESS = "\x01PROCESS"
 FED_WORD = re.compile(r"[^\s;&|()]+|[;&|()]+")
 FED_SEGMENTS = re.compile(r"[;&|\n()`]+")
 
@@ -2568,6 +3383,12 @@ def feeds_shell(command: str, depth: int = 0, given: bool = False) -> bool:
 def fed_script(command: str, cwd: str = "") -> bool:
     """A line that feeds a shell a script (feeds_shell) and says push or may go to another
     branch (fed_says): what the script does is not known here."""
+    return fed_line(command)
+
+
+@functools.lru_cache(maxsize=32)
+def fed_line(command: str) -> bool:
+    """fed_script, once a line (pushes_unknown may ask it first)."""
     return fed_says(command) and feeds_shell(command)
 
 
@@ -2592,9 +3413,191 @@ def current_branches(folder: str) -> set[str]:
     return found
 
 
-# What git said of each folder's branch, during one check (shell_denial): asked once a folder.
+def git_output(arguments: list[str], most: int) -> tuple[int, bytes] | None:
+    """What git says with these arguments (its exit status and what it writes), within 10
+    seconds and `most` bytes; None when it can't be run or read, or takes or says more."""
+    try:
+        process = subprocess.Popen(  # noqa: S603  (git, with arguments of its own)
+            ["git", *arguments],  # noqa: S607
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    chunks: list[bytes] = []
+    ended: list[bool] = []  # Whether it was read to its end, within `most` bytes.
+    stream = process.stdout
+
+    def read():
+        size = 0
+        try:
+            while stream and size <= most and (chunk := os.read(stream.fileno(), 65536)):
+                chunks.append(chunk)
+                size += len(chunk)
+        except (OSError, ValueError):
+            return
+        ended.append(size <= most)
+
+    reader = threading.Thread(target=read, daemon=True)
+    try:
+        reader.start()
+        reader.join(10)
+    except RuntimeError:  # (No thread to read it with.)
+        pass
+    if not ended:
+        process.kill()
+    try:
+        code = process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        return None
+    finally:
+        if reader.is_alive():
+            reader.join(1)
+    if stream and not reader.is_alive():
+        stream.close()
+    return (code, b"".join(chunks)) if ended == [True] else None
+
+
+# The keys of git's configuration that say where a push goes from a folder, and what a command
+# there runs (an alias), and the files it includes (Pushing); at most so many bytes of them (past
+# those: not known).
+PUSH_SETTINGS = (
+    r"^(push\.default|remote\..+\.(push|mirror)|branch\..+\.merge|alias\..+|include\.path"
+    r"|includeif\..+\.path)$"
+)
+MOST_SETTINGS = 1 << 20
+
+
+def config_entries(folder: str) -> list[tuple[str, str | None]] | None:
+    """What git's configuration for a folder (the system's, the user's, the repository's, as
+    git reads them) says of where pushes go, and of its aliases and the files it includes: its
+    keys (in git's own case) and values (None for a key with none); None when git can't say."""
+    found = git_output(
+        ["-C", folder, "config", "--null", "--get-regexp", PUSH_SETTINGS], MOST_SETTINGS
+    )
+    if found is None or found[0] not in {0, 1} or (found[0] == 1 and found[1]):
+        return None
+    entries: list[tuple[str, str | None]] = []
+    for entry in found[1].split(b"\0")[:-1]:
+        key, has, value = entry.decode(errors="surrogateescape").partition("\n")
+        entries.append((key, value if has else None))
+    return entries
+
+
+@dataclass
+class Pushing:
+    """What git's configuration says of where a push goes from a folder (config_entries):
+    every branch of the same name on both sides for a push naming no refspec (`matching`, a
+    mirror remote, a `:` push refspec); push.default; the branches remotes' push refspecs
+    update; each branch's upstream (`branch.<name>.merge`, where `upstream` pushes it); an
+    include that depends on the branch (`includeIf.onbranch:…`); or not known. Its aliases (by
+    name, in lower case), those that may push (`pushers`: one whose text says push, send-pack
+    or subtree, names another alias, or a shell's; `shell_pushers`: a shell's that says so),
+    the names of the files it includes (without their folders, in lower case); and whether git
+    could not be asked (`unread`)."""
+
+    every: bool = False
+    mode: str = "simple"
+    refspecs: set[str] = field(default_factory=set)
+    upstreams: dict[str, set[str]] = field(default_factory=dict)
+    onbranch: bool = False
+    unknown: bool = False
+    aliases: dict[str, str | None] = field(default_factory=dict)
+    pushers: set[str] = field(default_factory=set)
+    shell_pushers: set[str] = field(default_factory=set)
+    includes: set[str] = field(default_factory=set)
+    unread: bool = False
+
+
+def pushing_of(entries: list[tuple[str, str | None]] | None) -> Pushing:
+    """Pushing, read from a folder's configuration (the last push.default counts)."""
+    pushing = Pushing(unknown=entries is None, unread=entries is None)
+    for key, value in entries or []:
+        lower = key.lower()
+        if lower.startswith("alias."):
+            pushing.aliases[lower[6:]] = value
+        elif lower == "include.path" or (
+            lower.startswith("includeif.") and lower.endswith(".path")
+        ):
+            name = (value or "").lower().rstrip("/").rsplit("/", 1)[-1]
+            pushing.includes.add(name or "*")
+            pushing.onbranch = pushing.onbranch or lower.startswith("includeif.onbranch:")
+        elif lower == "push.default":
+            pushing.mode = value if value in MODES else "?"
+        elif lower.startswith("remote.") and lower.endswith(".mirror"):
+            truth = "true" if value is None else value.lower()
+            pushing.every = pushing.every or truth in TRUE
+            pushing.unknown = pushing.unknown or truth not in TRUE | FALSE
+        elif lower.startswith("remote.") and lower.endswith(".push"):
+            configured_refspec(pushing, value)
+        elif lower.startswith("branch.") and lower.endswith(".merge"):
+            pushing.upstreams.setdefault(key[7:-6], set()).add(pushed_branch(value or ""))
+    for name, value in pushing.aliases.items():
+        text = "" if value is None else value.lower()
+        if any(word in text for word in PUSHING) or any(
+            word in pushing.aliases and word != name for word in ALIAS_WORDS.findall(text)
+        ):
+            pushing.pushers.add(name)
+            pushing.shell_pushers.add(name)
+        if value is None or text.startswith("!"):
+            pushing.pushers.add(name)
+    pushing.unknown = (
+        pushing.unknown or pushing.mode == "?" or len(pushing.refspecs) > MOST_BRANCHES
+    )
+    pushing.every = pushing.every or pushing.mode == "matching"
+    return pushing
+
+
+def configured_refspec(pushing: Pushing, value: str | None):
+    """What a remote's push refspec (`remote.<name>.push`) updates, into `pushing`: its
+    destination (or its source, without one), as a branch; every branch for `:` and a glob
+    that may name the default branch; nothing for a tag, a ref not a branch's, or one it leaves
+    out (`^…`); not known for one git can't take."""
+    spec = (value or "").lstrip("+")
+    if value is None or not spec or any(char.isspace() or ord(char) < 32 for char in spec):
+        pushing.unknown = True
+        return
+    if spec.startswith("^"):
+        return
+    if spec == ":":
+        pushing.every = True
+        return
+    target = spec.rpartition(":")[2] if ":" in spec else spec
+    if not target:
+        pushing.unknown = True
+    elif "*" in target:
+        pattern = pushed_branch(target)
+        pushing.every = pushing.every or any(
+            fnmatch.fnmatchcase(name, pattern) for name in DEFAULT_BRANCHES
+        )
+    elif not target.startswith("refs/") or target.startswith("refs/heads/"):
+        pushing.refspecs.add(pushed_branch(target))
+
+
+def local_branches(folder: str, names: list[str]) -> set[str] | None:
+    """Which of these names (BRANCH_NAME's) are branches of a folder's repository, asked of
+    git; None when it can't say."""
+    most = sum(len(name) + 12 for name in names)
+    found = git_output(
+        ["-C", folder, "branch", "--list", "--format=%(refname)", "--", *names], most
+    )
+    if found is None or found[0] != 0:
+        return None
+    listed = found[1].decode(errors="surrogateescape").splitlines()
+    return {line.removeprefix("refs/heads/") for line in listed} & set(names)
+
+
+# What git said of each folder's branch, during one check (shell_denial): asked once a folder;
+# and of its configuration (SETTINGS), and of the names checkouts there went to (CHECKED).
 ANSWERS: contextvars.ContextVar[dict[str, set[str]] | None] = contextvars.ContextVar(
     "ANSWERS", default=None
+)
+SETTINGS: contextvars.ContextVar[dict[str, Pushing] | None] = contextvars.ContextVar(
+    "SETTINGS", default=None
+)
+CHECKED: contextvars.ContextVar[dict[str, set[str]] | None] = contextvars.ContextVar(
+    "CHECKED", default=None
 )
 
 
@@ -2611,43 +3614,321 @@ def branches_of(folder: str) -> set[str]:
     return answers[folder]
 
 
-def bare_branches(push: Push) -> tuple[set[str], bool]:
-    """The branches a bare push may update (the one the line made and switched to, or its
-    folder's, asked of git; and where a checkout before it may have gone), and whether its
-    folder's is not known (git says none: no branch checked out, no repository, a folder made
-    up; git itself would push nothing there, or the line is not read right)."""
+def settings_of(folder: str) -> Pushing:
+    """Pushing of a folder's configuration, asked once a folder during a check."""
+    settings = SETTINGS.get()
+    if settings is None:
+        return pushing_of(config_entries(folder))
+    if folder not in settings:
+        settings[folder] = pushing_of(config_entries(folder))
+    return settings[folder]
+
+
+def checked_branches(found: list[Push]) -> dict[str, set[str]]:
+    """For each folder where a bare push follows a checkout of a name (Push.bare_check), which
+    of those names are branches git has there: asked once a folder during a check, at most
+    MOST_BRANCHES names (past those, and for one that is also a file or a folder there, a
+    checkout may not have switched: not taken for one)."""
+    checked = CHECKED.get()
+    checked = {} if checked is None else checked
+    wanted: dict[str, set[str]] = {}
+    for push in found:
+        if push.bare_check and push.bare_in is not None and push.bare_in not in checked:
+            wanted.setdefault(push.bare_in, set()).add(push.bare_new)
+    for folder, names in wanted.items():
+        usable = sorted(
+            name for name in names if BRANCH_NAME.fullmatch(name) and not lexists(folder, name)
+        )[:MOST_BRANCHES]
+        found_names = local_branches(folder, usable) if usable else set()
+        checked[folder] = found_names or set()
+    return checked
+
+
+def lexists(folder: str, name: str) -> bool:
+    """Whether a file or a folder (or a link) of that name is there; taken so when it can't be
+    told."""
+    try:
+        return os.path.lexists(Path(folder, name))
+    except (OSError, ValueError):
+        return True
+
+
+def alias_settings(folder: str) -> Pushing:
+    """settings_of the folder a git that may run an alias runs in; of one not there (that the
+    line makes), its nearest that is (git's configuration there, but a new repository's own)."""
+    for _ in range(MOST_PATH):
+        try:
+            if not folder or Path(folder).is_dir():
+                break
+        except (OSError, ValueError):
+            break
+        parent = str(Path(folder).parent)
+        if parent == folder:
+            break
+        folder = parent
+    return settings_of(folder)
+
+
+def includes_written(settings: Pushing, command: str, cwd: str) -> bool:
+    """Whether a line may write a file git's configuration includes (by its name: written)."""
+    if not settings.includes:
+        return False
+    names = written(command, cwd)[1]
+    return "*" in names or "*" in settings.includes or bool(settings.includes & names)
+
+
+def through_alias(candidate: Push, command: str, cwd: str) -> Push | None:
+    """The push an alias makes (Push.alias), as git's configuration where it runs says (the
+    line's own folder's, for one not known): followed from one alias to the next, git's own
+    command at the end read as push_of reads it (a bare push placed as `candidate` is); a
+    shell's (`!…`) not known when its text or its words say push, send-pack, subtree or an
+    alias. None when it runs no push; not known when the configuration can't be read or the
+    line may write it (written, includes_written)."""
+    git = candidate.via
+    if git is None:
+        return None
+    lost = bool(UNSETTLED.search(git.folder))
+    settings = alias_settings(cwd if lost else git.folder)
+    unknown = Push(unknown=True, nested=candidate.nested, anonymous=candidate.alias == "$")
+    if candidate.alias_unknown or settings.unread or includes_written(settings, command, cwd):
+        return unknown
+    if candidate.alias in {"*", "?"}:  # Any alias: one that may push, there.
+        return unknown if settings.pushers else None
+    if candidate.alias == "$":  # A command not known: a git that runs an alias of the line's?
+        given = git.rest[1:]
+        if settings.pushers & said_words(command) or (
+            settings.pushers and any(UNSETTLED.search(word) for word in given)
+        ):
+            return unknown
+        return None
+    kind, git = followed(git, settings)
+    if kind == "none":
+        return None
+    if kind == "unknown":
+        return unknown
+    if kind == "shell":
+        name = git.rest[0].lower()
+        text = " ".join(git.rest[1:]).lower()
+        named = ALIAS_WORDS.findall(text)
+        if (
+            name in settings.shell_pushers
+            or f"alias.{name}" in git.config
+            or UNSETTLED.search(text)
+            or any(word in text for word in PUSHING)
+            or any(word in settings.aliases or f"alias.{word}" in git.config for word in named)
+        ):
+            return unknown
+        return None
+    push = push_of(git)
+    if push is None:
+        return None
+    push.nested = candidate.nested
+    if push.bare_in is not None:
+        push.bare_new, push.bare_also = candidate.bare_new, push.bare_also | candidate.bare_also
+        push.bare_check, push.alt_new = candidate.bare_check, candidate.alt_new
+        push.alt_also, push.alt_unknown = candidate.alt_also, candidate.alt_unknown
+        push.upstreams_set = candidate.upstreams_set
+        push.unknown = push.unknown or candidate.unknown
+    return push
+
+
+def followed(git: Git, settings: Pushing) -> tuple[str, Git]:
+    """What a git command runs, followed from one alias to the next (`-c`'s, then those of the
+    folder's configuration, `settings`): ("git", the git command of git's own at the end, its
+    words the aliases' and then the line's), ("shell", the git command of a shell's alias:
+    `!…`), ("none", …) for a name no alias has (a program of that name, or none), ("unknown",
+    …) for one not read here."""
+    for _ in range(MOST_ALIASES):
+        name = git.rest[0]
+        if name in UNALIASED or UNSETTLED.search(name):
+            return "git", git
+        key = f"alias.{name.lower()}"
+        if key in git.config:
+            value = git.config[key]
+        elif name.lower() in settings.aliases:
+            value = settings.aliases[name.lower()]
+        else:
+            return "none", git  # No alias: git runs a program of that name, or none.
+        if value is None or len(value) > MOST_VALUE:
+            return "unknown", git  # (Its text: not read here.)
+        if value.startswith("!"):
+            return "shell", git
+        words = alias_words(value)
+        if words is None:
+            return "unknown", git
+        following = git_command(["git", *words, *git.rest[1:]], {}, git.folder) if words else None
+        if following is None:
+            return "none", git
+        if following.folder != git.folder or following.elsewhere:
+            return "unknown", git  # (git runs no such alias; not followed here.)
+        following.config = {**git.config, **following.config}
+        following.elsewhere, following.moved, following.zsh = git.elsewhere, git.moved, git.zsh
+        following.epoch, following.currents = git.epoch, git.currents
+        git = following
+    return "unknown", git
+
+
+# The git commands an alias may run that change where a later push goes, or what it pushes
+# (read as the line's own: alias_switches); a shell's alias that says one may.
+EXPANDED = frozenset({"checkout", "switch", "branch", "symbolic-ref", "update-ref", "config",
+                      "worktree"})  # fmt: skip
+
+
+def alias_switches(found: tuple[Push, ...], cwd: str) -> dict[tuple[str, str], tuple | None]:
+    """For each git command of a line that runs an alias of its folder's configuration (Push
+    .alias) that switches branches or sets configuration (EXPANDED), by its folder and name:
+    the words of git's own command it runs (the line's words after them), or None when it may
+    and which is not known (a shell's alias that says one; one not read)."""
+    switches: dict[tuple[str, str], tuple | None] = {}
+    for candidate in found:
+        git = candidate.via
+        if git is None or not ALIAS_NAME.fullmatch(candidate.alias):
+            continue
+        lost = bool(UNSETTLED.search(git.folder))
+        settings = alias_settings(cwd if lost else git.folder)
+        if candidate.alias_unknown or settings.unread:
+            words: tuple | None = None
+        else:
+            kind, final = followed(git, settings)
+            if kind == "none" or (kind == "git" and final.rest[0] not in EXPANDED):
+                continue
+            if kind == "shell":
+                name = final.rest[0].lower()
+                value = final.config.get(f"alias.{name}") or settings.aliases.get(name) or ""
+                text = " ".join([value, *final.rest[1:]]).lower()
+                if not any(word in text for word in EXPANDED) and not UNSETTLED.search(text):
+                    continue
+            given = len(git.rest) - 1
+            words = tuple(final.rest[: len(final.rest) - given]) if kind == "git" else None
+        key = (git.folder, candidate.alias)
+        switches[key] = words if switches.get(key, words) == words else None
+    return switches
+
+
+@functools.lru_cache(maxsize=32)
+def said_words(command: str) -> frozenset[str]:
+    """The words of a line that may name an alias (squashed)."""
+    return frozenset(ALIAS_WORDS.findall(squashed(command)))
+
+
+@functools.lru_cache(maxsize=256)
+def alias_words(text: str) -> tuple[str, ...] | None:
+    """An alias's words, as git splits them (quotes as the shell's); None when it can't."""
+    try:
+        return tuple(shlex.split(text))
+    except ValueError:
+        return None
+
+
+def judged(command: str, cwd: str) -> list[Push]:
+    """Each push of a line (pushes), an alias's as through_alias makes it: what is judged. A
+    line that runs an alias that switches branches (or sets configuration) is read again,
+    that alias read as what it runs (alias_switches)."""
+    pushes_read = reading(command, cwd)[0]
+    if switches := alias_switches(pushes_read, cwd):
+        pushes_read, why = read_pushes(command, cwd, SHELL.get(), frozenset(switches.items()))
+        if why:
+            return [Push(unknown=True)]
+    found = []
+    for push in pushes_read:
+        if not push.alias:
+            found.append(push)
+        elif (made := through_alias(push, command, cwd)) is not None:
+            found.append(made)
+    return found
+
+
+def asks(push: Push) -> bool:
+    """Whether judging a bare push asks git of its folder (its branch, its configuration, the
+    branch a checkout went to)."""
+    return not push.bare_new or push.bare_check or push.configured or push.mapped
+
+
+def bare_reading(
+    push: Push, checked: dict[str, set[str]], command: str = "", cwd: str = ""
+) -> tuple[set[str] | None, bool, bool]:
+    """Where a bare push may go: the branches it may update (None: every branch of the same name
+    on both sides), whether that is not known (no branch checked out, no repository, a folder
+    made up, configuration git can't read: git itself would push nothing there, or the line is
+    not read right), and whether it may be several only because of a switch before it (then it
+    is not known which). Its branch is the one the line switched to (a checkout's only if git
+    has it; else as the line read before 0.1.46: alt_*), or its folder's (asked of git); and,
+    pushing no refspec or the checkout's branch by name, where git's configuration sends that
+    (not known when the line `command` may write a file it includes)."""
     if push.bare_in is None:
-        return set(), False  # Not a bare push.
-    if push.bare_new:
-        return {push.bare_new} | push.bare_also, False
-    on = branches_of(push.bare_in)
-    return on | push.bare_also, not on
+        return set(), False, False
+    new, also, unknown = push.bare_new, push.bare_also, False
+    if push.bare_check and new not in checked.get(push.bare_in, set()):
+        new, also, unknown = push.alt_new, also | push.alt_also, push.alt_unknown
+    base = {new} if new else branches_of(push.bare_in)
+    if unknown or not base:
+        return base | also, True, False
+    if not (push.configured or push.mapped):
+        return base | also, False, bool(also - base)
+    settings = settings_of(push.bare_in)
+    mode = push.mode or settings.mode
+    upstream = mode in {"upstream", "tracking"}
+    switched = bool(new or also)
+    if settings.unknown or (settings.onbranch and switched) or (upstream and push.upstreams_set):
+        return base | also, True, False
+    if includes_written(settings, command, cwd):
+        return base | also, True, False
+    if push.configured and settings.every:
+        return None, False, False
+
+    def sent(names: set[str] | frozenset[str]) -> set[str]:
+        found = set(names) | settings.refspecs
+        for name in names if upstream else ():
+            found |= settings.upstreams.get(name, set())
+        return found
+
+    definite = sent(base)
+    extra = sent(also) - definite
+    return definite | extra, False, bool(extra)
 
 
 def pushes_default(command: str, cwd: str = "") -> bool:
     """Whether a command line may push to the default branch, as far as its words say (and,
-    for a push that names no branch, the branch its folder is on: asked of git once a
-    folder); never less than v0.1.42's rule said."""
+    for a push that names no branch, the branch its folder is on and git's configuration
+    there: asked of git once a folder); never less than v0.1.42's rule said."""
     if floor_default(command) or too_complex(command, cwd):
         return True  # (Too complex: refused for that, with nothing asked of git.)
-    for push in pushes(command, cwd):
+    found = judged(command, cwd)
+    checked = checked_branches(found)
+    for push in found:
         if push.branches is None or push.branches & DEFAULT_BRANCHES:
             return True
         if push.made_up and MADE_UP_DEFAULT.search(command):
             return True
-        if not push.unknown and bare_branches(push)[0] & DEFAULT_BRANCHES:
-            return True
+        if not push.unknown:
+            branches, unknown, several = bare_reading(push, checked, command, cwd)
+            if branches is None:
+                return True
+            if not unknown and not several and branches & DEFAULT_BRANCHES:
+                return True
     return False
 
 
 def pushes_unknown(command: str, cwd: str = "") -> bool:
     """Whether a push's branch cannot be read from the line (see Push.unknown), or a bare
-    one's from git (see bare_branches)."""
-    return any(push.unknown or bare_branches(push)[1] for push in pushes(command, cwd))
+    one's from git (see bare_reading), or may be the default branch only because of a switch
+    before it; or the line runs a command whose name it makes up (Push.anonymous), unless it
+    feeds that a script (fed_script says so then)."""
+    found = judged(command, cwd)
+    checked = checked_branches(found)
+    anonymous = False
+    for push in found:
+        anonymous = anonymous or push.anonymous
+        if push.unknown and not push.anonymous:
+            return True
+        branches, unknown, several = bare_reading(push, checked, command, cwd)
+        if unknown or (several and branches is not None and branches & DEFAULT_BRANCHES):
+            return True
+    return anonymous and not fed_script(command, cwd)
 
 
 def pushes_forced(command: str, cwd: str = "") -> bool:
-    return floor_force(command) or any(push.forced for push in pushes(command, cwd))
+    return floor_force(command) or any(push.forced for push in judged(command, cwd))
 
 
 def matches(pattern: str) -> Callable[[str, str], bool]:
@@ -2798,12 +4079,14 @@ def shell_denial(command: str, cwd: str, reads_slack: bool, request: Any) -> str
     it."""
     if len(command) > MOST_LINE:
         return TOO_LONG
-    answers = ANSWERS.set({})
+    answers, settings, checked = ANSWERS.set({}), SETTINGS.set({}), CHECKED.set({})
     shell = SHELL.set(str(getattr(request, "shell", "") or ""))
     try:
         first = next((reason for found, reason in DANGEROUS if found(command, cwd)), None)
     finally:
         SHELL.reset(shell)
+        CHECKED.reset(checked)
+        SETTINGS.reset(settings)
         ANSWERS.reset(answers)
     if first:
         return first

@@ -8,6 +8,17 @@ import sys
 # Events are batched in the app; tests deliver them at once.
 os.environ.setdefault("CHIEFOFSTAFF_EVENT_DEBOUNCE", "0")
 os.environ.setdefault("CHIEFOFSTAFF_RETRY_DELAY", "0.01")
+import tempfile
+
+# The tests run with a home of their own (HOME, XDG_CONFIG_HOME) and git configuration of their
+# own (GIT_CONFIG_GLOBAL, GIT_CONFIG_NOSYSTEM), never the owner's: git they run, and lines the
+# push check's oracle runs, read and write those (owners_git_configuration_untouched checks).
+os.environ["HOME"] = tempfile.mkdtemp(prefix="cos-tests-home-")
+os.environ["XDG_CONFIG_HOME"] = os.environ["HOME"] + "/.config"
+os.environ["GIT_CONFIG_GLOBAL"] = os.environ["HOME"] + "/.gitconfig"
+os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
+import atexit
+import shutil
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +26,7 @@ from types import SimpleNamespace
 import codex_schema
 import pytest
 from copilot.tools import ToolInvocation
+from policy_oracle import owners_git_configuration
 
 from chiefofstaff import machine
 from chiefofstaff.backend import TESTED_CLI, Capabilities
@@ -27,6 +39,9 @@ from chiefofstaff.sources.github import GitHubSource
 from chiefofstaff.sources.slack import SlackSource
 from chiefofstaff.store import Store
 from chiefofstaff.watchdog import WatchConfig
+
+TEST_HOME = os.environ["HOME"]
+atexit.register(shutil.rmtree, TEST_HOME, True)
 
 
 def said(text: str) -> str:
@@ -541,9 +556,33 @@ def left_at_the_top() -> set[str]:
 
 def pytest_sessionstart(session):
     session.config.stash[LEFT_BEFORE] = left_at_the_top()
+    session.config.stash[OWNERS] = owners_git_configuration()
+
+
+# The owner's git configuration as the last test left it: one that changes it fails.
+OWNERS_NOW: list[dict] = [owners_git_configuration()]
+
+
+@pytest.fixture(autouse=True)
+def owners_git_configuration_untouched():
+    """No test changes the owner's git configuration (`~/.gitconfig`, `~/.config/git/…` of the
+    account's home, whatever HOME says): one that does fails, saying which files."""
+    yield
+    now = owners_git_configuration()
+    before, OWNERS_NOW[0] = OWNERS_NOW[0], now
+    if now != before:
+        changed = sorted(path for path in {*now, *before} if now.get(path) != before.get(path))
+        pytest.fail(f"this test changed the owner's git configuration: {', '.join(changed)}")
 
 
 def pytest_sessionfinish(session, exitstatus):
+    if (
+        OWNERS in session.config.stash
+        and owners_git_configuration() != session.config.stash[OWNERS]
+    ):
+        sys.stderr.write("\nThe tests changed the owner's git configuration (~/.gitconfig, "
+                         "~/.config/git).\n")  # fmt: skip
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
     if LEFT_BEFORE not in session.config.stash:
         return
     left = sorted(left_at_the_top() - session.config.stash[LEFT_BEFORE])
@@ -556,3 +595,4 @@ def pytest_sessionfinish(session, exitstatus):
 
 
 LEFT_BEFORE = pytest.StashKey[set]()
+OWNERS = pytest.StashKey[dict]()
