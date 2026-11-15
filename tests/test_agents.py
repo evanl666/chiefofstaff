@@ -814,6 +814,8 @@ async def test_a_settings_model_change_leaves_codex_workers_on_their_model(tmp_p
 
 
 async def test_news_for_a_codex_worker_that_cannot_run_waits_for_it(tmp_path, codex_on_path):
+    from by_hand import opened_by_hand
+
     harness, runtime, worker, task_id = await codex_worker(tmp_path)
     try:
         key = "github:acme/api#7"
@@ -826,6 +828,17 @@ async def test_news_for_a_codex_worker_that_cannot_run_waits_for_it(tmp_path, co
         await runtime.workers.refresh_elsewhere()
         assert harness.store.get(f"heldnews:{worker}"), "kept while it cannot run"
         await saved(runtime, {"codex": {"enabled": True}})
+        assert runtime.connection("codex")[0] is None, "on, with no process of its own yet"
+        # Open in the owner's terminal meanwhile: seen without Codex running here; kept.
+        terminal = await opened_by_hand(tmp_path, "codex", "resume", runtime.copilot_id(worker))
+        try:
+            await until(lambda: terminal.pid in process_table())
+            for _ in range(2):
+                await runtime.workers.refresh_elsewhere()
+            assert harness.store.get(f"heldnews:{worker}"), "kept while open in a terminal"
+        finally:
+            terminal.kill()
+            await terminal.wait()
         await runtime.workers.refresh_elsewhere()
         await settle(runtime)
         assert not harness.store.get(f"heldnews:{worker}"), "delivered once it can"

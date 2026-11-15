@@ -2216,13 +2216,21 @@ class Runtime:
         ours = copilot_ours(self.recorded_processes(), self.store.directory)
         return {session_id: pid for session_id, pid in found.items() if pid not in ours}
 
-    async def agent_elsewhere(self, agent: str) -> dict[str, int]:
-        """Another agent's conversations the owner resumed in a terminal: id -> its pid."""
+    async def agent_elsewhere(self, agent: str) -> dict[str, int] | None:
+        """Another agent's conversations the owner resumed in a terminal: id -> its pid. Read
+        also while it has no backend (then no process is its workers'); None, and nothing
+        recorded, while its backend starts or ends (its processes not told from the owner's)."""
         entry = self.agents.get(agent)
+        backend = entry.backend if entry else None
+        if backend is not None and not backend.alive():
+            return None
         found: dict[str, int] = {}
-        if entry and entry.backend and entry.backend.alive():
-            with suppress(Exception):
-                found = await entry.backend.open_elsewhere()
+        with suppress(Exception):
+            found = await (
+                backend.open_elsewhere()  # type: ignore[attr-defined]
+                if backend is not None
+                else agents.opened_elsewhere(agent)
+            )
         self.elsewhere_on[agent] = found
         return found
 

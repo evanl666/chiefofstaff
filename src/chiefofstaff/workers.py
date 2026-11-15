@@ -1747,16 +1747,15 @@ class Workers:
         before = self.runtime.elsewhere
         self.runtime.elsewhere = await self.runtime.open_elsewhere()
         changed = set(before) ^ set(self.runtime.elsewhere)
-        # Each other agent on, as its own backend sees its conversations open in a terminal; one
-        # not running now is not looked at (its workers' state there is not known: nothing is
-        # decided of them).
+        # Each other agent on, its conversations open in a terminal; one whose backend starts or
+        # ends now is not looked at (its workers' state there is not known: nothing is decided
+        # of them).
         looked = {COPILOT_AGENT}
         for agent in self.runtime.agents_on():
-            backend, _ = self.runtime.connection(agent)
-            if backend is None or not backend.alive():
-                continue
             was = set(self.runtime.elsewhere_on.get(agent, {}))
-            changed |= was ^ set(await self.runtime.agent_elsewhere(agent))
+            if (found := await self.runtime.agent_elsewhere(agent)) is None:
+                continue
+            changed |= was ^ set(found)
             looked.add(agent)
         for row in self.store.open_sessions(WORKER):
             copilot = self.runtime.copilot_id(row["id"])
