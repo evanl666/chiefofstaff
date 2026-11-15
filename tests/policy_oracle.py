@@ -351,7 +351,12 @@ class Sandbox:
         try:
             process.wait(timeout=10)
         except subprocess.TimeoutExpired:
-            os.killpg(process.pid, signal.SIGKILL)
+            # (macOS says EPERM for a group whose processes are all ending: one that ended as
+            # it was stopped, on a busy machine.)
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(process.pid, signal.SIGKILL)
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                process.kill()
             process.wait()
         for _ in range(2000):  # Its jobs (`&`), up to 10 s more.
             try:

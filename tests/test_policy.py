@@ -1736,6 +1736,29 @@ def test_a_line_the_oracle_runs_changes_nothing_out_of_its_sandbox(tmp_path):
     assert not (home / "outside").exists() and (home / "sandbox" / "inside").exists()
 
 
+def test_a_line_that_ends_as_the_oracle_stops_it_is_no_error(tmp_path, monkeypatch):
+    """The 100k run on 84ef95b, on a machine loaded past 150: a line past its 10 seconds ended
+    as it was stopped, and macOS said EPERM to killing its (ending) process group."""
+    import policy_oracle as oracle
+
+    class Late(subprocess.Popen):
+        def wait(self, timeout=None):
+            if timeout == 10:
+                super().wait()
+                raise subprocess.TimeoutExpired(self.args, timeout)
+            return super().wait(timeout)
+
+    def refused(*_):
+        raise PermissionError(1, "Operation not permitted")
+
+    box = oracle.Sandbox(tmp_path / "box")
+    monkeypatch.setattr(oracle.subprocess, "Popen", Late)
+    monkeypatch.setattr(oracle.os, "killpg", refused)
+    assert box.run("git push origin feat", "feat") == [
+        f"PUSH\t{box.folder('feat')}\tfeat\t\t\tpush\x1forigin\x1ffeat"
+    ]
+
+
 def commands_of(text: str) -> list[tuple[str, list[str]]]:
     parsed = policy.shell_commands(text)
     assert parsed is not None
