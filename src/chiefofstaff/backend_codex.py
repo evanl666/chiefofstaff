@@ -2198,13 +2198,19 @@ class CodexAgent:
     async def open_elsewhere(self) -> dict[str, int]:
         """Its workers' threads the owner resumed in a terminal (`codex resume <id>`)."""
         ours = set(await asyncio.to_thread(self.processes))
-        return await asyncio.to_thread(resumed_elsewhere, "codex", ours)
+        return await asyncio.to_thread(opened_elsewhere, ours)
 
     async def read_usage(self, session_id: str, offset: int) -> tuple[list[dict], int]:
         return [], offset
 
     def session_log(self, session_id: str) -> Path | None:
         return None
+
+
+def opened_elsewhere(ours: set[int] | None = None) -> dict[str, int]:
+    """Threads the owner resumed in a terminal (`codex resume <id>`), not in `ours` (the
+    processes of Chief of Staff's workers; none while Codex has no backend running)."""
+    return resumed_elsewhere("codex", ours or set())
 
 
 def owner_servers(read: dict) -> dict[str, dict]:

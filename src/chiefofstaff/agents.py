@@ -7,6 +7,7 @@ they were. An agent's backend module is imported only when it starts.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -332,6 +333,18 @@ async def look(name: str, folder: Path | None = None) -> dict[str, Any]:
 
         return await look_at_claude(command(name), folder)
     raise RuntimeError(f"This Chief of Staff does not run {name}.")
+
+
+async def opened_elsewhere(name: str) -> dict[str, int]:
+    """An agent's conversations open in a terminal now, read while it has no backend running
+    (no process is its workers'): id -> pid."""
+    if name == "codex":
+        from .backend_codex import opened_elsewhere as found
+    elif name == "claude":
+        from .backend_claude import opened_elsewhere as found
+    else:
+        return {}
+    return await asyncio.to_thread(found)
 
 
 def ever_used(store: Store) -> bool:

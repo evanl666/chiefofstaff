@@ -3465,10 +3465,7 @@ class ClaudeAgent:
 
         def found() -> dict[str, int]:
             table = process_table()
-            ours = set(self.processes(table))
-            opened = live_sessions(ours, table) | resumed_elsewhere("claude", ours, table)
-            # Also by a worker's own id (a row's 32 hex digits, which Claude has dashed).
-            return opened | {key.replace("-", ""): pid for key, pid in opened.items()}
+            return opened_elsewhere(set(self.processes(table)), table)
 
         return await asyncio.to_thread(found)
 
@@ -3582,6 +3579,18 @@ def claude_program(command: str) -> bool:
         or "claude-code" in word.parts
         for word in words
     )
+
+
+def opened_elsewhere(
+    ours: set[int] | None = None, table: dict[int, tuple[int, str]] | None = None
+) -> dict[str, int]:
+    """Sessions open in a process of Claude's not in `ours` (the processes of Chief of Staff's
+    workers; none while Claude has no backend running): one the owner resumed in a terminal
+    (`claude --resume <id>`, or /resume there: live_sessions)."""
+    table, ours = process_table() if table is None else table, ours or set()
+    opened = live_sessions(ours, table) | resumed_elsewhere("claude", ours, table)
+    # Also by a worker's own id (a row's 32 hex digits, which Claude has dashed).
+    return opened | {key.replace("-", ""): pid for key, pid in opened.items()}
 
 
 def live_sessions(ours: Collection[int], table: dict[int, tuple[int, str]]) -> dict[str, int]:
