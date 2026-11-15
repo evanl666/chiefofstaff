@@ -2748,8 +2748,10 @@ class ClaudeWorker:
             return PLANNING
         if name in SHELL_TOOLS:
             return None if reads_only(str(arguments.get(SHELL_TOOLS[name]) or "")) else PLANNING
-        if name == "EnterWorktree":
-            return PLANNING
+        if name == "EnterWorktree" or (
+            name == "ExitWorktree" and arguments.get("action") == "remove"
+        ):
+            return PLANNING  # (Leaving one, it keeps it: removing it would delete its work.)
         if name.startswith("mcp__") and not name.startswith("mcp__chief__"):
             request = await self.permission_request(name, arguments, call, cwd)
             return None if getattr(request, "read_only", False) else PLANNING

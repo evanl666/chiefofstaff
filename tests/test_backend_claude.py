@@ -1706,6 +1706,16 @@ async def test_a_message_from_one_of_chief_of_staffs_workers_processes_is_said_t
     assert told == ["b1" * 16, ""]
 
 
+async def test_while_it_plans_it_removes_no_worktree(agent, tmp_path):
+    session = await agent.create_session(session_id="b7" * 16, name="t", **options(tmp_path))
+    worker = session.worker
+    planning = {"permission_mode": "plan"}
+    remove = {"action": "remove", "discard_changes": True}
+    assert await worker.decide("ExitWorktree", remove, "c", planning) == backend_claude.PLANNING
+    assert await worker.decide("ExitWorktree", {"action": "keep"}, "c", planning) == ""
+    assert await worker.decide("ExitWorktree", remove, "c") == "", "once its plan is approved"
+
+
 async def test_a_worker_writes_none_of_claudes_own_settings(agent, tmp_path):
     """Their hooks, apiKeyHelper and MCP servers run as Claude next starts there, outside the
     worker's checks (2.1.322, Ask first or not): no tool of its writes one, a link to one
