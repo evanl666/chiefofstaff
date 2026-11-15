@@ -3471,12 +3471,13 @@ async def round_qa(runtime, browser, failures: list[str]):
     row = card("QA keep busy")
     tip = page.locator("#tip")
     # Shown once the mouse rests on it (Home may still be settling from earlier rounds: a
-    # change under it takes it away, and the next move of the mouse shows it again).
+    # change under it takes it away, and the next move of the mouse shows it again; one that
+    # moved another row's line under the mouse shows that line's).
     for _ in range(10):
         await page.mouse.move(0, 0)
         await row.locator(".head .meta").hover()
         await page.wait_for_timeout(700)
-        if await tip.is_visible():
+        if await tip.is_visible() and "Task " in (await tip.text_content() or ""):
             break
     await expect(tip).to_be_visible()
     await expect(tip).to_contain_text("Task ")
@@ -3584,10 +3585,17 @@ async def round_qa(runtime, browser, failures: list[str]):
     await page.locator("#back-home").click()
     log("a background process is said, not Thinking; each message says if it got there")
 
-    # Go on from a row: the row says whether it got there.
+    # Go on from a row: the row says whether it got there. One click, one request, one toast
+    # (an answer's "Sent to the worker." above may still show: set aside first).
     go_on = card("QA measure the latency")
+    follow_ups: list[str] = []
+    page.on("request", lambda sent: follow_ups.append(sent.url) if "/follow-up" in sent.url else 0)
+    await page.evaluate("document.querySelectorAll('#toasts .toast').forEach((n) => n.remove())")
     await go_on.get_by_role("button", name="Go on", exact=True).click()
-    await expect(page.locator(".toast", has_text="Sent to the worker.")).to_be_visible()
+    toasted = page.locator(".toast", has_text="Sent to the worker.")
+    await expect(toasted).to_be_visible()
+    await page.wait_for_timeout(300)
+    assert (len(follow_ups), await toasted.count()) == (1, 1), (follow_ups, await toasted.count())
     moved = card("QA measure the latency")
     await expect(moved.locator(".row-foot .delivery")).to_be_visible(timeout=10000)
     await settle(runtime)
@@ -5084,6 +5092,11 @@ async def main():
     with tempfile.TemporaryDirectory(prefix="cos-ui-") as temporary:
         # The owner's own agents are never found here: stand-ins are put on the PATH where used.
         os.environ["PATH"] = without_agents(os.environ["PATH"], Path(temporary) / "bin")
+        # Nor this machine's free disk space (low, it would be a card under Needs you): room
+        # enough, but where the Storage round reads its own.
+        from chiefofstaff import machine
+
+        machine.read_disk = lambda paths: {"free": 300 * 10**9, "total": 500 * 10**9, "path": "/"}
         holder: dict = {}
 
         def factory(store, bus):
@@ -8430,7 +8443,7 @@ async def picker_workers(runtime, browser):
         router, "assistant", "On Codex: a long refactor it handles well. Started “Port the parser”."
     )
     fallback = json.loads(
-        (await spawned("Tidy the README", "Report done: Tidied.")).text_result_for_llm
+        (await spawned("Tidy the changelog", "Report done: Tidied.")).text_result_for_llm
     )
     store.set(f"agentfallback:{fallback['session_id']}", "Started on Copilot: Codex is signed out.")
     runtime.publish_session(store.session(fallback["session_id"]))
@@ -8441,7 +8454,7 @@ async def picker_workers(runtime, browser):
         await picker_shoot(page, "router-pick", scheme, focus=pick)
         row = page.locator("#session-list .item", has_text="Port the parser")
         await expect(row.locator(".agent-badge")).to_have_text("Codex")
-        other = page.locator("#session-list .item", has_text="Tidy the README")
+        other = page.locator("#session-list .item", has_text="Tidy the changelog")
         await expect(other.locator(".agent-badge")).to_have_text("Copilot")
         await expect(other.locator(".agent-badge")).to_have_attribute(
             "title", "Started on Copilot: Codex is signed out."
@@ -8519,7 +8532,7 @@ async def picker_workers(runtime, browser):
     for row in store.open_sessions("worker"):
         if runtime.agent(row["id"]) == "copilot":
             await runtime.workers.close(row["id"], by="you")
-    paused = json.loads((await spawned("Profile the importer", "Hit the usage limit",
+    paused = json.loads((await spawned("Profile the cache warmer", "Hit the usage limit",
                                        agent="codex")).text_result_for_llm)  # fmt: skip
     await until(lambda: runtime.tasks.get(paused["task_id"])["status"] == "waiting", 30)
     assert store.get(f"stopped:{paused['task_id']}") == "its plan's limit"
@@ -8527,7 +8540,7 @@ async def picker_workers(runtime, browser):
         context, page, errors, _ = await agents_page(browser, scheme)
         if await page.locator("#home-tabs").is_visible():
             await page.locator("#home-tabs [data-tab=needs]").click()
-        card = page.locator("#needs .card.task", has_text="Profile the importer")
+        card = page.locator(f'#panel .card.task[data-session="{paused["session_id"]}"]')
         await expect(card).to_contain_text("Paused: Your Codex plan's 5-hour limit is reached")
         await expect(card.locator(".head")).to_contain_text("Paused")
         await expect(card.get_by_role("button", name="Go on", exact=True)).to_be_visible()
