@@ -262,6 +262,7 @@ class Peers:
             await self.delivery.deliver(
                 target["id"], prompt, kind="inbound", display=text, meta=meta, steer=True
             )
+            self.runtime.forget_go_on_at(target["id"])  # Told something else: not by itself.
             outcome = f"Told “{target['title']}”."
         else:
             # Finished: it reads this with its next message, and does not start on its own.

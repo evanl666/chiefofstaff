@@ -3584,6 +3584,14 @@ class Runtime:
         if self.store.get(f"agentschedules:{session_id}"):
             self.store.set(f"scheduleshold:{session_id}", "1")
 
+    def forget_go_on_at(self, session_id: str):
+        """Something else was said to this worker (by the owner, the Router or another worker):
+        its tasks no longer go on by themselves as their limit resets (TaskActions.go_on_at)."""
+        for task in self.tasks.for_session(session_id):
+            if self.store.get(f"goonat:{task['id']}"):
+                self.store.delete(f"goonat:{task['id']}")
+                self.task_actions.publish(task)
+
     def release_schedules(self, session_id: str):
         if self.store.get(f"scheduleshold:{session_id}"):
             self.store.delete(f"scheduleshold:{session_id}")
@@ -7403,6 +7411,7 @@ class Runtime:
                     if about:
                         meta["task_id"] = about["id"]
                     message = self.add_message(session_id, "owner", text, meta)
+                    self.forget_go_on_at(session_id)  # Their answer, not going on by itself.
                     if tell_router:
                         self.owner_told(row, text)
                     return message
@@ -7532,6 +7541,9 @@ class Runtime:
             # Home shows it at work on that task (bug QA6-4: its row stayed under Monitoring,
             # and a row of its worker's beside it under Running said the same work).
             self.task_actions.publish(self.tasks.get(task["id"]))
+        if row["role"] == WORKER:
+            # It goes on as the owner says now (taken), not by itself at its limit's reset.
+            self.forget_go_on_at(session_id)
         if row["role"] == WORKER and tell_router:
             self.owner_told(row, text, message)
         if about and about["status"] == "waiting" and clear_questions and not asked_back:
