@@ -1537,8 +1537,11 @@ class ClaudeWorker:
         aborts = self.aborts
         self.starting, admitted = True, False
         try:
-            if self.process_effort != self.effort and not self.background:
-                await self.restart()  # Claude takes a thinking effort as its process starts.
+            # A new effort: taken in its process; else in a new one, which takes it as it
+            # starts (not while a command it left running would end with this one).
+            retuned = self.process_effort == self.effort or await self.retune()
+            if not retuned and not self.background:
+                await self.restart()
             if self.aborts == aborts:
                 admitted = True
                 if why := await self.agent.admit_turn(self.handle_for_admission()):
@@ -1664,7 +1667,7 @@ class ClaudeWorker:
 
     async def set_model(self, model: str, effort: str):
         """For its next turn and those after it: a model at once (Claude switches between
-        turns), a thinking effort in the process its next turn starts in."""
+        turns), a thinking effort as its next turn starts (retune)."""
         model = "" if model in {"", "auto", "default"} else model
         if model != self.model:
             self.model = model
@@ -1672,6 +1675,25 @@ class ClaudeWorker:
                 with suppress(Exception):
                     await asyncio.wait_for(self.query.set_model(model or None), REQUEST_SECONDS)
         self.effort = effort
+
+    async def retune(self) -> bool:
+        """Its process takes the thinking effort chosen since it started, for its next request
+        (2.1.322's apply_flag_settings, which keeps its conversation's prompt cache and writes
+        no settings file): whether it did. One that refuses it starts its next turn in a new
+        process (start_turn), which takes it from the start."""
+        if self.query is None or not self.alive():
+            return False
+        request = {
+            "subtype": "apply_flag_settings",
+            "settings": {"effortLevel": self.effort or None},
+        }
+        try:
+            await asyncio.wait_for(self.query._send_control_request(request), REQUEST_SECONDS)
+        except Exception:
+            logger.info("Claude did not take a new effort in place for %s.", self.worker)
+            return False
+        self.process_effort = self.effort
+        return True
 
     async def get_events(self) -> list[Any]:
         """Its conversation, from Claude's transcript: what it received and what it said."""
@@ -2107,8 +2129,9 @@ class ClaudeWorker:
             self.agent.turn_failed(message)
             return
         elif self.queue and self.process_effort != self.effort and not self.background:
-            # Its next turn starts in a new process (a new effort), which ends this task, the
-            # one that reads its messages: started from a task of its own.
+            # Its next turn may start in a new process (a new effort it does not take in place),
+            # which would end this task, the one that reads its messages: started from a task
+            # of its own.
             self.starting = True
             self.agent.apart(self.next_turn_apart())
             return

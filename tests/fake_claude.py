@@ -112,6 +112,7 @@ class Fake:
         self.session_id = str(flags.get("resume") or flags.get("session-id") or uuid.uuid4())
         self.cwd = str(Path.cwd())
         self.model = str(flags.get("model") or "claude-fake-1")
+        self.effort = str(flags.get("effort") or "")
         self.name = str(flags.get("name") or "")
         # Each --mcp-config (JSON, or a file's path, as Claude reads them), and the system prompt
         # appended (as text, or from a file).
@@ -318,6 +319,17 @@ class Fake:
                     os.killpg(self.running.pid, signal.SIGKILL)
         elif subtype == "set_model":
             self.model = request.get("model") or "claude-fake-1"
+        elif subtype == "apply_flag_settings" and os.environ.get("FAKE_CLAUDE_FIXED_EFFORT"):
+            # As a Claude that takes a thinking effort only as it starts.
+            self.send({"type": "control_response", "response": {
+                "subtype": "error", "request_id": message.get("request_id"),
+                "error": "apply_flag_settings: unsupported_key"}})  # fmt: skip
+            return
+        elif subtype == "apply_flag_settings":
+            settings = request.get("settings") or {}
+            if "effortLevel" in settings:
+                self.effort = str(settings["effortLevel"] or "")
+            note("FAKE_CLAUDE_EFFORTS", {"effort": self.effort, "pid": os.getpid()})
         elif subtype == "stop_task" and request.get("task_id") in self.agents:
             self.agents.pop(request["task_id"]).cancel()
         elif subtype == "stop_task":
@@ -457,6 +469,7 @@ class Fake:
 
     async def turn(self, entry: dict):
         text = self.text(entry["content"])
+        note("FAKE_CLAUDE_EFFORTS", {"turn": text[:60], "effort": self.effort, "pid": os.getpid()})
         if delay := os.environ.get("FAKE_CLAUDE_GATE_DELAY"):
             await asyncio.sleep(float(delay))  # A prompt waiting its turn in Claude's queue.
         if not entry.get("ungated"):
