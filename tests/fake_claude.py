@@ -296,6 +296,8 @@ class Fake:
         subtype = request.get("subtype")
         answer: dict = {}
         if subtype == "initialize":
+            # FAKE_CLAUDE_INIT_DELAY: seconds before it answers, its process running (opening).
+            await asyncio.sleep(float(os.environ.get("FAKE_CLAUDE_INIT_DELAY") or 0))
             for event, matchers in (request.get("hooks") or {}).items():
                 for matcher in matchers or []:
                     ids = matcher.get("hookCallbackIds") or []

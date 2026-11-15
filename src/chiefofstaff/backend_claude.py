@@ -3609,7 +3609,8 @@ class ClaudeAgent:
 
         def found() -> dict[str, int]:
             table = process_table()
-            return opened_elsewhere(set(self.processes(table)), table)
+            ours = set(self.processes(table)) | supervised(table, os.getpid())
+            return opened_elsewhere(ours, table)
 
         return await asyncio.to_thread(found)
 
@@ -3723,6 +3724,19 @@ def claude_program(command: str) -> bool:
         or "claude-code" in word.parts
         for word in words
     )
+
+
+def supervised(table: dict[int, tuple[int, str]], parent: int) -> set[int]:
+    """The supervisors this process started (agentrun) and what each started itself: a worker's
+    `claude` from its start, before its pid is known (once Claude answered `initialize`), so its
+    own `--resume` is never another window. Not what those start: a `claude --resume` a
+    worker's command runs is one."""
+    supervisors = {
+        pid
+        for pid, (ppid, command) in table.items()
+        if ppid == parent and " -m chiefofstaff.agentrun " in f" {command} "
+    }
+    return supervisors | {pid for pid, (ppid, _) in table.items() if ppid in supervisors}
 
 
 def opened_elsewhere(

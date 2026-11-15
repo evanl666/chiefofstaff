@@ -944,6 +944,39 @@ async def test_a_worker_whose_folder_has_new_claude_settings_does_not_start_ther
         await runtime.stop()
 
 
+async def test_a_claude_worker_resuming_is_never_another_claude_window(
+    tmp_path, claude_on_path, monkeypatch
+):
+    """Its own process resuming its session (`claude --resume <id>`, its sessions/ file) is
+    Chief of Staff's from its start, before it is ready: never "open in another Claude window"
+    (that would show it so, keep it from being let go of, and refuse what it is sent)."""
+    from chiefofstaff.backend import process_table
+
+    harness, runtime, worker, _ = await claude_worker(tmp_path, "Report done: ready")
+    try:
+        await runtime.detach(worker)
+        monkeypatch.setenv("FAKE_CLAUDE_INIT_DELAY", "3")
+        opening = asyncio.ensure_future(runtime.session_for(worker))
+        session = backend_claude.dashed(runtime.copilot_id(worker))
+
+        def resuming() -> bool:  # (Its process resuming: `claude … --resume <id>`.)
+            return any(
+                backend_claude.claude_program(command)
+                and "--resume" in command
+                and session in command
+                for _, command in process_table().values()
+            )
+
+        await until(resuming, 15)
+        backend, _ = runtime.connection("claude")
+        assert not {session, worker.replace("-", "")} & set(await backend.open_elsewhere())
+        await runtime.workers.refresh_elsewhere()
+        assert not runtime.is_elsewhere(harness.store.session(worker))
+        assert await opening
+    finally:
+        await runtime.stop()
+
+
 async def set_aside(runtime, task: str):
     """A finished task the owner cancels: the first cancel asks again, the second sets it aside."""
     with pytest.raises(ValueError, match="cancel again to set it aside"):
