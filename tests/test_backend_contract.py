@@ -1623,7 +1623,7 @@ async def test_with_ask_first_codex_asks_for_dotted_and_plugin_servers_set_to_ru
     (plugin / ".mcp.json").write_text(json.dumps({"mcpServers": servers}))
     for step in (["marketplace", "add", str(market)], ["add", "notes@cos"]):
         await asyncio.to_thread(
-            subprocess.run, ["codex", "plugin", *step], check=True, capture_output=True
+            subprocess.run, [CODEX_COMMAND, "plugin", *step], check=True, capture_output=True
         )
     review = "tools.create_pull_request_review"
     with (home / "config.toml").open("a") as config:
@@ -2435,7 +2435,7 @@ async def test_a_codex_worker_reaches_no_other_workers_thread(tmp_path, monkeypa
     home.mkdir()
     monkeypatch.setenv("CODEX_HOME", str(home))
     model = scripted_model.Model()
-    agent = CodexAgent(REAL_CODEX)
+    agent = CodexAgent(CODEX_COMMAND)
     agent.arguments += model.arguments(tmp_path)
     agent.needs_sign_in = False
     ended: list[tuple[str, str]] = []
