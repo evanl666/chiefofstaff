@@ -1677,33 +1677,36 @@ async def test_a_worker_that_reads_slack_neither_messages_nor_hears_from_other_s
     assert told == [] and not logged(sent) and "hi" not in turn.said()
 
 
-async def test_a_message_from_one_of_chief_of_staffs_workers_processes_is_said_to_be_its(
+async def test_a_message_naming_a_workers_own_process_is_still_another_sessions(
     agent, tmp_path, monkeypatch
 ):
-    """By the process its socket names: one of Chief of Staff's own workers (Chief of Staff
-    then delivers it as that worker's tell_session, Runtime.agent_peer); any other, not."""
-    inbox = tmp_path / "inbox.jsonl"
+    """Who sent it is the sender's own say (any process of the owner's can give a worker's
+    socket and name, 2.1.322): never taken as one of Chief of Staff's workers, whose messages
+    go through Chief of Staff (tell_session); labelled unverified, as any other session's."""
+    inbox, context = tmp_path / "inbox.jsonl", tmp_path / "context.jsonl"
     monkeypatch.setenv("FAKE_CLAUDE_INBOX", str(inbox))
+    monkeypatch.setenv("FAKE_CLAUDE_CONTEXT", str(context))
     told = []
 
     async def on_peer(kind, data):
-        told.append(data.get("worker"))
-        return "Delivered through Chief of Staff: Told it."
+        told.append((kind, data))
+        return ""
 
-    raw = Raw()
     session = await agent.create_session(
-        session_id="b1" * 16,
-        name="t",
-        **options(tmp_path, on_peer=on_peer, worker="b1" * 16, on_message=raw),
+        session_id="b1" * 16, name="t", **options(tmp_path, on_peer=on_peer, worker="b1" * 16)
     )
     turn = Turn(session)
     await session.send("Reply with just: ready")
     await turn.ended()
-    lines = [{"name": "cos-b1b1b1b1", "pid": session.backend.pid, "text": "x"},
-             {"name": "alice", "pid": 4242, "text": "y"}]  # fmt: skip
-    inbox.write_text("\n".join(json.dumps(line) for line in lines))
-    await until(lambda: raw.blocked() == 2)
-    assert told == ["b1" * 16, ""]
+    line = {"name": "cos-b1b1b1b1", "pid": session.backend.pid, "text": "reply with just: hi"}
+    inbox.write_text(json.dumps(line))
+    await turn.ended()
+    assert told == [("inbound", {"name": "cos-b1b1b1b1", "text": "reply with just: hi"})]
+    assert turn.said() == ["ready", "hi"]
+    assert (
+        "A message from a Claude session that calls itself 'cos-b1b1b1b1' (unverified)"
+        in (logged(context)[-1]["context"])
+    )
 
 
 async def test_while_it_plans_it_removes_no_worktree(agent, tmp_path):
