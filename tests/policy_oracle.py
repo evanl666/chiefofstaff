@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import hashlib
 import os
+import pwd
 import random
 import re
 import shutil
@@ -85,9 +87,10 @@ done
 top=$(pwd -P)
 while [ ! -d "$top/.git" ] && [ "$top" != "/" ]; do top=$(dirname "$top"); done
 [ -d "$top/.git" ] || { [ "$1" = push ] && printf 'NOREPO\036\n' >> "$PUSHES"; exit 128; }
+case "$top" in @ROOT@/*) ;; *) exit 128 ;; esac
 head=$(sed -n 's|^ref: refs/heads/||p' "$top/.git/HEAD")
 settings=""
-for file in "$HOME/.gitconfig" "$HOME/.config/git/config" "$top/.git/config"; do
+for file in "$HOME/.gitconfig" "${XDG_CONFIG_HOME:-$HOME/.config}/git/config" "$top/.git/config"; do
   [ -f "$file" ] || continue
   while IFS= read -r entry; do settings="$settings$entry;"; done < "$file"
 done
@@ -207,6 +210,7 @@ case "$command" in
       esac
       shift
     done
+    case "$file" in @ROOT@/*) ;; *) exit 0 ;; esac  # (Never a file out of the sandbox.)
     if [ -n "$unset" ] && [ -n "$1" ]; then
       [ -f "$file" ] && grep -v -- "^$1=" "$file" > "$file.kept"
       [ -f "$file.kept" ] && cat "$file.kept" > "$file"
@@ -269,7 +273,7 @@ class Sandbox:
         bin_folder = self.root / "bin"
         bin_folder.mkdir(parents=True, exist_ok=True)
         shim = bin_folder / "git"
-        shim.write_text(SHIM_TEXT)
+        shim.write_text(SHIM_TEXT.replace("@ROOT@", shell_quote(str(self.root.resolve()))))
         shim.chmod(0o755)
         for shell, found in (("sh", SH), ("bash", BASH), ("zsh", ZSH)):
             link = bin_folder / shell
@@ -318,9 +322,12 @@ class Sandbox:
         pushes = self.root / f"pushes-{self.runs}"
         pushes.write_text("")
         tools = self.root / "bin"
-        environment = {
+        environment = {  # (A home, and git's configuration, of the sandbox's own.)
             "PATH": str(tools),
             "HOME": str(self.root),
+            "XDG_CONFIG_HOME": str(self.root / ".config"),
+            "GIT_CONFIG_GLOBAL": str(self.root / ".gitconfig"),
+            "GIT_CONFIG_NOSYSTEM": "1",
             "PUSHES": str(pushes),
             "LANG": "C",
         }
@@ -329,6 +336,7 @@ class Sandbox:
             if shell == "zsh"
             else [BASH, "--norc", "--noprofile", "-c", line]
         )
+        run = confined(self.root) + run
         process = subprocess.Popen(  # In a group of its own: its jobs (`&`) are waited for.
             run,
             cwd=self.folder(start),
@@ -395,6 +403,52 @@ class Sandbox:
         if top is None:
             return None
         return set((top / ".git" / "branches").read_text().split()) & set(names)
+
+
+# The owner's own home (the system's account's, whatever HOME says: what a shell's `~` is
+# where HOME is unset), and its git configuration: no line run here may change it.
+REAL_HOME = Path(pwd.getpwuid(os.getuid()).pw_dir)
+SANDBOX_EXEC = shutil.which("sandbox-exec")
+
+
+def owners_git_configuration() -> dict[str, tuple | None]:
+    """What the owner's git configuration files are (`~/.gitconfig`, `~/.config/git/…`, as
+    the account's home has them): each one's kind, size, time and contents' digest."""
+    files = [REAL_HOME / ".gitconfig", REAL_HOME / ".config" / "git"]
+    with contextlib.suppress(OSError):
+        files += sorted((REAL_HOME / ".config" / "git").rglob("*"))
+    found: dict[str, tuple | None] = {}
+    for path in files:
+        try:
+            status = path.lstat()
+        except OSError:
+            found[str(path)] = None
+            continue
+        digest = ""
+        if path.is_file() and not path.is_symlink():
+            with contextlib.suppress(OSError):
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        found[str(path)] = (status.st_mode, status.st_size, status.st_mtime_ns, digest)
+    return found
+
+
+@functools.cache
+def confined(root: Path, home: Path = REAL_HOME) -> list[str]:
+    """What runs a line so that it can write nothing in the owner's home but in the sandbox
+    (macOS's sandbox-exec, where it works; elsewhere none: the sandbox's own HOME, a shim that
+    works in its sandbox only, and lines that never write git's files where HOME is unset,
+    keep them in)."""
+    if not SANDBOX_EXEC:
+        return []
+    home, kept = home.resolve(), root.resolve()
+    profile = (f'(version 1)(allow default)(deny file-write* (require-all (subpath "{home}") '
+               f'(require-not (subpath "{kept}"))))')  # fmt: skip
+    try:
+        works = subprocess.run([SANDBOX_EXEC, "-p", profile, "/usr/bin/true"], check=False,
+                               capture_output=True, timeout=10).returncode == 0  # fmt: skip
+    except (OSError, subprocess.SubprocessError):
+        works = False
+    return [SANDBOX_EXEC, "-p", profile] if works else []
 
 
 def pushed(record: str) -> set[str]:
@@ -1122,10 +1176,12 @@ def run(
     """Check each (line, start[, preset]) in its own sandbox, `workers` at a time, run in
     `shell` (bash, or zsh: as Codex runs a worker's commands, and as the check is told); with
     what the check asks git (current_branches, config_entries, local_branches) answered from
-    the sandbox."""
+    the sandbox. Stopped, and raises, the moment the owner's git configuration changes."""
     local = threading.local()
     lock = threading.Lock()
     counter = iter(range(10**9))
+    owners = owners_git_configuration()
+    changed: list[str] = []
 
     def sandbox() -> Sandbox:
         if not hasattr(local, "sandbox"):
@@ -1149,6 +1205,8 @@ def run(
 
     def one(case: tuple[str, ...]) -> Outcome:
         line, start, preset = case[0], case[1], case[2] if len(case) > 2 else ""
+        if changed:
+            raise RuntimeError(f"the owner's git configuration changed, running {changed[0]!r}")
         box = sandbox()
         row = {"role": "worker", "slack": 0, "cwd": str(box.folder(start))}
         request = SimpleNamespace(
@@ -1172,6 +1230,9 @@ def run(
         targets: set[str] = set()
         for record in box.run(line, start, shell, preset):
             targets |= pushed(record)
+        if owners_git_configuration() != owners:
+            changed.append(line)
+            raise RuntimeError(f"the owner's git configuration changed, running {line!r}")
         return Outcome(line, start, allowed, targets, preset)
 
     with ThreadPoolExecutor(workers) as pool:

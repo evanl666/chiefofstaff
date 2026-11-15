@@ -6,6 +6,7 @@ import itertools
 import os
 import subprocess
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -1680,6 +1681,53 @@ def test_what_the_check_lets_through_pushes_nothing_to_main_in_real_bash(shell, 
         sys.stdout.write(f"\noracle ({shell}): {len(outcomes)} lines, {allowed} allowed, {refused} "
                          f"refused, {len(unsound)} unsound\n")  # fmt: skip
     assert not unsound, unsound[:10]
+
+
+def test_the_tests_have_a_home_and_git_configuration_of_their_own():
+    """A line the oracle ran (`unset HOME && echo … >> ~/.config/git/config`: `~` is then the
+    account's own home) wrote the owner's git configuration. The tests run with a home, an
+    XDG_CONFIG_HOME and git configuration of their own (conftest), never the account's."""
+    import policy_oracle as oracle
+
+    home = Path(os.environ["HOME"])
+    assert home.resolve() != oracle.REAL_HOME.resolve() and home.name.startswith("cos-tests-home")
+    assert os.environ["XDG_CONFIG_HOME"] == f"{home}/.config"
+    assert os.environ["GIT_CONFIG_NOSYSTEM"] == "1"
+    owners = {oracle.REAL_HOME / ".gitconfig", oracle.REAL_HOME / ".config" / "git" / "config"}
+    assert Path(os.environ["GIT_CONFIG_GLOBAL"]) not in owners
+    done = subprocess.run(["git", "config", "--global", "--list", "--show-origin"],
+                          capture_output=True, text=True, check=False)  # fmt: skip
+    assert not any(str(path) in done.stdout for path in owners)
+
+
+def test_the_oracle_stops_when_the_owners_git_configuration_changes(tmp_path, monkeypatch):
+    import policy_oracle as oracle
+
+    states = iter([{"~/.gitconfig": None}, *[{"~/.gitconfig": (1,)}] * 4])
+    monkeypatch.setattr(oracle, "owners_git_configuration", lambda: next(states))
+    with pytest.raises(RuntimeError, match="owner's git configuration changed"):
+        oracle.run(policy, [("git status", "feat")], tmp_path, workers=1)
+
+
+def test_a_line_the_oracle_runs_changes_nothing_out_of_its_sandbox(tmp_path):
+    """The shim works in its sandbox's repositories only; and, where macOS's sandbox-exec
+    works, a line can write nothing in the home but in its sandbox."""
+    import policy_oracle as oracle
+
+    other = tmp_path / "other"
+    oracle.make_repository(other, "main", ["push.default=simple"])
+    box = oracle.Sandbox(tmp_path / "box")
+    box.run(f"cd {other} && git checkout -b x; git config --global alias.p push", "feat")
+    assert (other / ".git" / "HEAD").read_text() == "ref: refs/heads/main\n"
+    assert (other / ".git" / "branches").read_text() == "main\nfeat\nmaster\nwb/x\n"
+    home = tmp_path / "home"
+    (home / "sandbox").mkdir(parents=True)
+    prefix = oracle.confined(home / "sandbox", home)
+    if not prefix:
+        pytest.skip("no sandbox-exec here")
+    line = f"echo x > {home}/outside; echo y > {home}/sandbox/inside"
+    subprocess.run([*prefix, "/bin/sh", "-c", line], check=False, capture_output=True)
+    assert not (home / "outside").exists() and (home / "sandbox" / "inside").exists()
 
 
 def commands_of(text: str) -> list[tuple[str, list[str]]]:
