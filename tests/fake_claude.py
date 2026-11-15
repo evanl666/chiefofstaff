@@ -12,10 +12,11 @@ runs without asking PreToolUse, comma-separated); RUNS (a file each run's argume
 to); LOG (a file each message from the SDK is appended to); ON_ITS_OWN (a turn it starts after
 each one, past the gate: one no gate admitted); LIMIT (JSON: a rate_limit_event's info, sent
 as each turn's first request is answered); GATE_DELAY (seconds a prompt waits before its gate);
-NO_STEER (notes sent during a turn are taken up after it). With ANTHROPIC_BASE_URL set (Chief of
-Staff's check), its turns come from that stand-in Messages API, as Claude Code's would. A prompt
-saying "Hit the usage limit" (or "rate limit") is refused as for a rate limit (a 429), as 2.1.322
-says it."""
+NO_STEER (notes sent during a turn are taken up after it); EXIT_DELAY (seconds it takes to end
+once its input closes, its sessions/<pid>.json kept meanwhile). With ANTHROPIC_BASE_URL set
+(Chief of Staff's check), its turns come from that stand-in Messages API, as Claude Code's would.
+A prompt saying "Hit the usage limit" (or "rate limit") is refused as for a rate limit (a 429),
+as 2.1.322 says it."""
 
 import asyncio
 import atexit
@@ -1398,6 +1399,8 @@ class Fake:
             self.prompts.put_nowait(entry)
 
     async def end(self):
+        if delay := os.environ.get("FAKE_CLAUDE_EXIT_DELAY"):
+            await asyncio.sleep(float(delay))
         for process in self.stdio.values():
             with contextlib.suppress(ProcessLookupError):
                 process.kill()

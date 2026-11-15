@@ -499,6 +499,38 @@ async def test_the_owners_claude_sessions_are_listed_and_one_adopted_goes_on_as_
         await runtime.stop()
 
 
+async def test_a_worker_let_go_is_its_own_until_its_process_has_ended(
+    tmp_path, claude_on_path, monkeypatch
+):
+    """Let go of (to continue in a terminal), its process takes a moment to end: until it has,
+    its live file and its `--resume` are the worker's own, never a terminal's (the owner's next
+    message would be held for a window that is not there, and miss what was done there)."""
+    monkeypatch.setenv("FAKE_CLAUDE_EXIT_DELAY", "1.5")
+    # Seen as Claude by its command line (python …/claude …), as the real one is.
+    named = tmp_path / "named" / "claude"
+    named.parent.mkdir()
+    script = Path(__file__).parent / "fake_claude.py"
+    named.write_text(
+        f"#!{sys.executable}\nimport runpy\nrunpy.run_path({str(script)!r}, run_name='__main__')\n"
+    )
+    named.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{named.parent}:{os.environ['PATH']}")
+    harness, runtime, worker, _ = await claude_worker(tmp_path)
+    try:
+        backend = runtime.agents["claude"].backend
+        assert any(backend_claude.claude_program(c) for c in backend.processes().values())
+        await runtime.terminal_command(worker)
+        assert await backend.open_elsewhere() == {}
+        # Not opened in a terminal after all: the owner's next message, at once, goes as usual
+        # (once its old process has ended: never two writing to one conversation).
+        await runtime.owner_send(worker, "Reply with just: back")
+        await until(lambda: ("assistant", "back") in harness.kinds(worker), 30)
+        assert not [text for kind, text in harness.kinds(worker) if "another Claude" in text]
+        assert await backend.open_elsewhere() == {}, "nor what the old one left once it ended"
+    finally:
+        await runtime.stop()
+
+
 async def test_what_a_claude_worker_did_in_a_terminal_shows_before_its_next_message(
     tmp_path, claude_on_path
 ):
@@ -507,10 +539,12 @@ async def test_what_a_claude_worker_did_in_a_terminal_shows_before_its_next_mess
     harness, runtime, worker, _ = await claude_worker(tmp_path)
     try:
         await runtime.terminal_command(worker)
-        # The owner's turn in the terminal, as Claude appends it to the transcript.
+        # The owner's turn in the terminal, as Claude appends it to the transcript: once Chief
+        # of Staff's process has ended (the stand-in rewrites it as it ends).
+        await until(lambda: not runtime.agents["claude"].backend.processes(), 15)
         path = backend_claude.transcript_of(backend_claude.dashed(worker))
 
-        def written() -> bool:  # (Its process may still be writing it as it is let go of.)
+        def written() -> bool:
             text = path.read_text()
             try:
                 return text.endswith("\n") and bool(json.loads(text.splitlines()[-1]))
