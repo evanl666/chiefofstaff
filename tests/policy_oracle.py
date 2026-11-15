@@ -16,6 +16,7 @@ generated lines and prints the counts.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import random
 import re
@@ -321,12 +322,16 @@ class Sandbox:
         except subprocess.TimeoutExpired:
             os.killpg(process.pid, signal.SIGKILL)
             process.wait()
-        for _ in range(400):
+        for _ in range(2000):  # Its jobs (`&`), up to 10 s more.
             try:
                 os.killpg(process.pid, 0)
             except (ProcessLookupError, PermissionError):
                 break
             time.sleep(0.005)
+        else:  # (One left behind must not change the next line's repositories: a docker run
+            # on a busy machine read a branch a job of the line before had switched to.)
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(process.pid, signal.SIGKILL)
         records = [record for record in pushes.read_text().split("\x1e\n") if record]
         pushes.unlink()
         return records
