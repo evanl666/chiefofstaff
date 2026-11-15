@@ -68,6 +68,12 @@ def answer(body: dict) -> tuple[list[dict], str]:
         plan.append(call(f"mcp__{found.group(1)}__form", {}))
     if found := re.search(r"Use Claude's (\w+) tool with (\{.*?\})(?:\.|$)", prompt):
         plan.append(call(found.group(1), json.loads(found.group(2))))
+    if "call CronDelete for each job it lists as session-only" in prompt:
+        # Chief of Staff's request once a task ended, as a model takes it: CronList, then
+        # CronDelete each session-only job it listed (CronList's own lines), then CronList.
+        listed = re.findall(r"^(\w+) \u2014 .*\[session-only\]", after, re.MULTILINE)
+        plan += [call("CronList", {}), *(call("CronDelete", {"id": i}) for i in listed)]
+        plan.append(call("CronList", {}))
     if answered < len(plan):
         return [plan[answered]], "tool_use"
     if found := re.search(r"reply with just: (\w+)", after, re.IGNORECASE):

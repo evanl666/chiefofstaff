@@ -204,8 +204,18 @@ SUBAGENT_TOOLS = frozenset({"Agent", "Task"})
 BUILTIN_AGENTS = frozenset({"claude", "Explore", "general-purpose", "Plan", "statusline-setup"})
 # Its tools that report what they made (PostToolUse): worktrees, schedules, a plan, a page.
 REPORTING_TOOLS = (
-    "EnterWorktree|ExitWorktree|CronCreate|CronDelete|ScheduleWakeup|ExitPlanMode|Artifact"
+    "EnterWorktree|ExitWorktree|CronCreate|CronDelete|CronList|ScheduleWakeup|ExitPlanMode|Artifact"
 )
+# What Chief of Staff asks of a worker whose schedules ended with its task (Runtime.
+# drop_schedules). Claude brings each session cron back with its conversation unless a CronDelete
+# named it, and its /loop unless a ScheduleWakeup stopped it (2.1.322: resumed, or continued in a
+# terminal), so they are deleted in Claude itself, in a turn that does only that.
+DELETE_SCHEDULES = (
+    "Chief of Staff: the task you were on ended, so your schedules end too. Do only this: call "
+    "CronList, then call CronDelete for each job it lists as session-only{ids}{loop}, then call "
+    "CronList again. Then reply with just: deleted."
+)
+CLEANUP_ONLY = "Its task ended: it only deletes its schedules now."
 CLOUD = (
     "Run this in Anthropic's cloud? Chief of Staff can't check, receipt, count or stop what runs "
     "there."
@@ -1012,8 +1022,56 @@ class ClaudeSession:
     def drop_schedules(self):
         self.worker.drop_schedules()
 
+    async def delete_schedules(self, known: list[str], loop: bool, seconds: float) -> str:
+        return await self.worker.delete_schedules(known, loop, seconds)
+
     async def queue_holds(self) -> bool:
         return self.worker.queue_holds()
+
+
+class Cleanup:
+    """A turn of Chief of Staff's that deletes a worker's schedules in Claude (DELETE_SCHEDULES):
+    the ids it knows of (each of its CronCreate's), whether a /loop of its runs; what Claude's
+    tools did of them, as their calls and results say (never the model's words)."""
+
+    def __init__(self, known: list[str], loop: bool):
+        self.known, self.loop = set(known), loop
+        self.deleted: set[str] = set()
+        self.stopped = False
+        self.listed: list[dict] | None = None
+        self.ended = asyncio.get_running_loop().create_future()
+
+    def prompt(self) -> str:
+        ids = f" (yours include {', '.join(sorted(self.known))})" if self.known else ""
+        loop = '; to end your /loop, call ScheduleWakeup with {"stop": true}' if self.loop else ""
+        return DELETE_SCHEDULES.format(ids=ids, loop=loop)
+
+    def refusal(self, name: str, arguments: dict) -> str:
+        """Only its schedule tools, while it deletes them: "" for those, else why not."""
+        if name == "CronList" or (name == "ScheduleWakeup" and arguments.get("stop") is True):
+            return ""
+        if name == "CronDelete":
+            self.deleted.add(str(arguments.get("id") or ""))  # In its conversation from now.
+            return ""
+        return CLEANUP_ONLY
+
+    def why_not(self) -> str:
+        """ "" once Claude's last CronList shows none of its own (session-only, or one it
+        knows), each one it knows had a CronDelete, and its /loop a stop; else what is left."""
+        if self.listed is None:
+            return "Claude did not list its schedules (CronList)."
+        left = [
+            job
+            for job in self.listed
+            if job.get("durable") is False or str(job.get("id")) in self.known
+        ]
+        if left:
+            return f"Claude still lists {len(left)} of them."
+        if missing := self.known - self.deleted:
+            return f"Claude did not delete {len(missing)} of them (CronDelete)."
+        if self.loop and not self.stopped:
+            return "Claude did not end its /loop (ScheduleWakeup)."
+        return ""
 
 
 class ClaudeWorker:
@@ -1130,6 +1188,8 @@ class ClaudeWorker:
         # The prompts of schedules that ended with its task (drop_schedules): Claude brings them
         # back with its conversation, and each firing is refused, quietly.
         self.dropped: set[str] = {str(p).strip() for p in options.get("dropped_schedules") or []}
+        # A turn of Chief of Staff's deleting its schedules in Claude, while one runs.
+        self.cleanup: Cleanup | None = None
         self.plan_path = ""
         self.mode = "default"
         self.offered_agents: set[str] = set()
@@ -1823,6 +1883,29 @@ class ClaudeWorker:
         held: Any = self.options.get("schedules_held")
         return bool(held()) if callable(held) else False
 
+    async def delete_schedules(self, known: list[str], loop: bool, seconds: float) -> str:
+        """Its schedules deleted in Claude itself (Cleanup): a turn of Chief of Staff's that
+        only lists and deletes them (decide refuses any other call), admitted as any. "" once
+        Claude's own tools show them gone; else why not (at work, refused, not in time, …)."""
+        if self.turn or self.starting or self.queue:
+            return "It is at work: its schedules are deleted once it is done."
+        cleanup = Cleanup(known, loop)
+        self.cleanup = cleanup
+        try:
+            await self.send(cleanup.prompt(), mode="enqueue", attachments=None)
+            deadline = time.monotonic() + seconds
+            while not cleanup.ended.done():
+                if not self.alive() or time.monotonic() > deadline:
+                    with suppress(Exception):
+                        await self.abort()
+                    return "Claude did not delete them in time."
+                await asyncio.wait({cleanup.ended}, timeout=0.5)
+        except Exception as exc:
+            return f"Claude was not asked to delete them: {exc}"
+        finally:
+            self.cleanup = None
+        return cleanup.why_not()
+
     def drop_schedules(self):
         """Its schedules end here (its task cancelled or set aside, it closed): a firing of one
         of them is refused at its gate, silently, and nothing keeps its process for them."""
@@ -2214,6 +2297,8 @@ class ClaudeWorker:
         await self.end_turn(message)
 
     async def end_turn(self, message: dict):
+        if self.cleanup is not None and not self.cleanup.ended.done():
+            self.cleanup.ended.set_result(None)
         aborted = self.aborting
         limited, self.rate_limited = self.rate_limited, False
         self.settle_calls()
@@ -2575,6 +2660,8 @@ class ClaudeWorker:
         """ "" when Chief of Staff allows this call, else why not. `hook`: what PreToolUse said
         of it (the folder it runs in, the subagent that makes it, the permission mode)."""
         hook = mapping(hook)
+        if self.cleanup is not None:
+            return self.cleanup.refusal(name, arguments)
         cwd = str(hook.get("cwd") or self.cwd)
         subagent = self.subagents.get(str(hook.get("agent_id") or ""), {})
         if why := subagent.get("refused"):
@@ -2836,10 +2923,19 @@ class ClaudeWorker:
             await self.worktree(path)
         elif name == "ExitWorktree" and response.get("action") == "remove":
             await self.worktree(str(response.get("worktreePath") or ""), removed=True)
+        elif name == "ScheduleWakeup" and arguments.get("stop") is True:
+            for key in [k for k in self.schedules if k.startswith("wakeup-")]:
+                del self.schedules[key]
+            self.keep_schedules()
+            if self.cleanup is not None:
+                self.cleanup.stopped = True
         elif name in {"CronCreate", "ScheduleWakeup"} and arguments.get("prompt"):
             self.scheduled(name, arguments, response)
         elif name == "CronDelete" and self.schedules.pop(str(arguments.get("id") or ""), None):
             self.keep_schedules()
+        elif name == "CronList" and self.cleanup is not None:
+            jobs = response.get("jobs")
+            self.cleanup.listed = [mapping(job) for job in jobs] if isinstance(jobs, list) else []
         elif name == "ExitPlanMode":
             self.plan_path = str(response.get("filePath") or self.plan_path)
             if not self.ask_first and (plan := read_plan(self.plan_path)):

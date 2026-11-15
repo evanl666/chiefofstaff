@@ -54,6 +54,7 @@ from chiefofstaff.backend import (
 from chiefofstaff.backend_claude import ClaudeAgent, claude_backend
 from chiefofstaff.backend_codex import CodexAgent, CodexBackend
 from chiefofstaff.claude_check import Catcher
+from chiefofstaff.claude_check import texts as block_texts
 from chiefofstaff.codex_check import subagent_tools
 from chiefofstaff.delivery import queue_holds
 from chiefofstaff.scripted import (
@@ -573,6 +574,55 @@ async def test_claudes_sandbox_adds_only_its_staging_folder_to_the_global_git_ig
     await session.send("Run the shell command `true` and then reply with just: again")
     await turn.wait()
     assert (tmp_path / "global-git-ignore").read_text() == "**/.claude/.cc-writes/\n"
+
+
+async def test_schedules_deleted_in_claude_do_not_come_back_with_claude_resume(backend, tmp_path):
+    """Claude Code (2.1.322) brings a session's crons back on `claude --resume`, as the owner's
+    terminal runs it, unless a CronDelete named them: what Chief of Staff asks once a worker's
+    task ends (delete_schedules) leaves none; one never deleted comes back."""
+    if getattr(backend, "catcher", None) is None or not isinstance(backend, ClaudeAgent):
+        pytest.skip("What the real Claude Code does (CHIEFOFSTAFF_TEST_CLAUDE=1).")
+    listed = {}
+    for deleted in (True, False):
+        folder = tmp_path / ("deleted" if deleted else "kept")
+        folder.mkdir()
+        session, turn = await open_session(backend, folder)
+        await session.send(
+            "Use Claude's CronCreate tool with "
+            '{"cron": "*/7 * * * *", "prompt": "tick", "recurring": true}. '
+            "Then reply with just: scheduled"
+        )
+        await turn.wait()
+        (key,) = list(session.worker.schedules)
+        if deleted:
+            assert await session.delete_schedules([key], False, 120) == ""
+        await session.disconnect()
+        for _ in range(100):
+            if not session.worker.alive():
+                break
+            await asyncio.sleep(0.1)
+        listed[deleted] = await listed_after_resume(backend, session.session_id, folder)
+    assert listed[True] == "No scheduled jobs."
+    assert "tick" in listed[False] and "[session-only]" in listed[False], listed[False]
+
+
+async def listed_after_resume(backend, session_id: str, folder) -> str:
+    """What CronList says in `claude --resume <id>`, run as the owner runs it in a terminal."""
+    done = await asyncio.create_subprocess_exec(
+        REAL_CLAUDE, "--resume", session_id, "-p",
+        "Use Claude's CronList tool with {}. Then reply with just: listed",
+        "--output-format", "json", "--allowedTools", "CronList",
+        cwd=folder, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )  # fmt: skip
+    output, _ = await asyncio.wait_for(done.communicate(), 120)
+    assert json.loads(output)["result"] == "listed"
+    for body in reversed(backend.model.bodies):
+        last = (body.get("messages") or [{}])[-1]
+        for block in last.get("content") if isinstance(last.get("content"), list) else []:
+            if isinstance(block, dict) and block.get("type") == "tool_result":
+                return "\n".join(block_texts(block.get("content"))).strip()
+    raise AssertionError("CronList's result never reached the model")
 
 
 MANIFESTS = {

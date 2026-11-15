@@ -842,8 +842,12 @@ class Workers:
             raise ValueError("The Router cannot be closed.")
         if row["closed_at"]:
             return
+        # Its schedules (Claude's) end with it, deleted in Claude first where it is not at work
+        # (its process opened for that if none runs): its conversation would bring them back.
+        if self.runtime.drop_schedules(session_id, delete=False) and row["status"] != "working":
+            with suppress(Exception):
+                await self.runtime.delete_dropped_schedules(session_id)
         async with self.states[session_id].lifecycle:
-            self.runtime.drop_schedules(session_id)  # They end with it (Claude's).
             if session := self.states.take_handle(session_id):
                 # At work, or its turn over and a command it left running holding the session.
                 if row["status"] == "working" or self.states[session_id].held:

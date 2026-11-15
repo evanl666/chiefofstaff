@@ -910,6 +910,78 @@ async def test_a_claude_worker_with_schedules_is_not_handed_to_a_terminal_and_no
         await runtime.stop()
 
 
+async def set_aside(runtime, task: str):
+    """A finished task the owner cancels: the first cancel asks again, the second sets it aside."""
+    with pytest.raises(ValueError, match="cancel again to set it aside"):
+        await runtime.task_actions.cancel(task)
+    await runtime.task_actions.cancel(task)
+
+
+def kept_crons(worker: str) -> dict:
+    """The crons the stand-in keeps with a worker's conversation: what a resume brings back."""
+    home = Path(os.environ["FAKE_CLAUDE_HOME"])
+    return json.loads((home / "sessions" / f"{worker}.json").read_text()).get("crons") or {}
+
+
+@pytest.mark.parametrize("live", [True, False], ids=["live", "let-go-of"])
+async def test_schedules_that_end_with_a_task_are_deleted_in_claude_before_a_terminal_gets_it(
+    tmp_path, claude_on_path, monkeypatch, live
+):
+    """Claude brings a session's crons back with its conversation unless a CronDelete named
+    them (2.1.322), so a resume, or `claude --resume` in the owner's terminal, would run them
+    outside Chief of Staff. Once its task is set aside they are deleted in Claude itself, in its
+    process (opened for that, and let go of after, where none runs); only then is it handed to a
+    terminal."""
+    from chiefofstaff import workers as workers_module
+
+    monkeypatch.setenv("FAKE_CLAUDE_FIRE_SECONDS", "600")
+    harness, runtime, worker, task = await claude_worker(
+        tmp_path, "Report done: set. Schedule 'Run the shell command `echo tick`' every minute."
+    )
+    try:
+        await until(lambda: harness.store.get(f"agentschedules:{worker}"), 10)
+        await until(lambda: len(kept_crons(worker)) == 1, 10)
+        if not live:
+            later = time.time() + workers_module.RELEASE_IDLE + 1
+            runtime.store.set(f"scheduleshold:{worker}", "1")  # (Else they keep its process.)
+            assert await runtime.workers.release_idle(later) == [worker]
+            runtime.store.delete(f"scheduleshold:{worker}")
+        await set_aside(runtime, task)
+        deleted = ("notice", "Its schedules are deleted in Claude: none comes back.")
+        await until(lambda: deleted in harness.kinds(worker), 30)
+        assert kept_crons(worker) == {}, "nothing for a resume to bring back"
+        assert not harness.store.get(f"schedulesdelete:{worker}")
+        assert runtime.states.is_live(worker) is live, "opened for this only, then let go of"
+        assert (await runtime.terminal_command(worker))["agent"] == "claude"
+    finally:
+        await runtime.stop()
+
+
+async def test_schedules_claude_did_not_delete_keep_a_worker_from_a_terminal(
+    tmp_path, claude_on_path, monkeypatch
+):
+    monkeypatch.setenv("FAKE_CLAUDE_FIRE_SECONDS", "600")
+    monkeypatch.setenv("FAKE_CLAUDE_KEEPS_SCHEDULES", "1")
+    harness, runtime, worker, task = await claude_worker(
+        tmp_path, "Report done: set. Schedule 'Run the shell command `echo tick`' every minute."
+    )
+    try:
+        await until(lambda: harness.store.get(f"agentschedules:{worker}"), 10)
+        await set_aside(runtime, task)
+        await until(
+            lambda: any(
+                t.startswith("Its schedules are not deleted") for _, t in harness.kinds(worker)
+            ),
+            30,
+        )
+        assert any("Claude still lists 1 of them." in t for _, t in harness.kinds(worker))
+        assert len(kept_crons(worker)) == 1
+        with pytest.raises(ValueError, match="still in its Claude conversation"):
+            await runtime.terminal_command(worker)
+    finally:
+        await runtime.stop()
+
+
 async def test_a_claude_workers_message_to_another_worker_is_its_tell_session(
     tmp_path, claude_on_path
 ):

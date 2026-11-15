@@ -291,6 +291,8 @@ SENT_AGAIN_SECONDS = 600
 USAGE_SETTLES = 60.0
 # How long which other agents are installed here is taken as known (agents_found).
 FOUND_SECONDS = 60.0
+# How long a worker's dropped schedules take to be deleted in Claude, at most (its turn included).
+SCHEDULES_DELETE_SECONDS = 120.0
 # How soon an agent's check that could not run is tried again, at the earliest (seconds); and
 # how soon after its last a worker's process stopping by itself again fails it instead of
 # starting another (never a loop of starts).
@@ -590,6 +592,8 @@ class Runtime:
         self.spend_stopping: set[str] = set()
         # Why another agent last failed to start for a new worker (agent_unavailable).
         self.agent_failed: dict[str, str] = {}
+        # Workers whose dropped schedules are being deleted in Claude now.
+        self.deleting_schedules: set[str] = set()
         self.states = SessionStates()
         # Whether this machine can run Copilot's command sandbox, and whether gh works inside it.
         self.sandbox_host = sandbox_supported()
@@ -2177,6 +2181,16 @@ class Runtime:
         if row["status"] in {"working", "starting", "queued"} or self.states[session_id].held:
             raise ValueError("It is at work: stop it first, or wait until it is done.")
         agent = self.agent(session_id)
+        if self.store.get(f"schedulesdelete:{session_id}"):
+            # Ended with its task, but still in its Claude conversation, which would bring them
+            # back in the terminal: deleted there first (delete_dropped_schedules).
+            if session_id not in self.deleting_schedules:
+                self.background(self.delete_dropped_schedules(session_id))
+            raise ValueError(
+                "Its schedules ended with its task but are still in its Claude conversation, "
+                "where they would run in your terminal: Chief of Staff is deleting them. Try "
+                "again in a moment."
+            )
         if schedules := json.loads(self.store.get(f"agentschedules:{session_id}") or "[]"):
             # Claude brings a worker's schedules back with its conversation, so they would run
             # in the terminal, where Chief of Staff holds nothing of them.
@@ -3395,19 +3409,85 @@ class Runtime:
         if self.store.get(f"scheduleshold:{session_id}"):
             self.store.delete(f"scheduleshold:{session_id}")
 
-    def drop_schedules(self, session_id: str):
+    def drop_schedules(self, session_id: str, delete: bool = True) -> bool:
         """Its task cancelled or set aside, or it closed: its schedules end. Claude would bring
-        them back with its conversation: each firing is refused, quietly (their prompts kept)."""
+        them back with its conversation (resumed here, or in a terminal): each firing is refused
+        here, quietly (their prompts kept), and they are deleted in Claude itself (`delete`: now,
+        in the background: delete_dropped_schedules); it is not handed to a terminal until then.
+        Whether any is left to delete in Claude."""
         schedules = json.loads(self.store.get(f"agentschedules:{session_id}") or "[]")
         if not schedules:
-            return
+            return bool(self.store.get(f"schedulesdelete:{session_id}"))
         dropped = json.loads(self.store.get(f"schedulesdropped:{session_id}") or "[]")
         prompts = [str(entry.get("prompt") or "") for entry in schedules]
         self.store.set(f"schedulesdropped:{session_id}", json.dumps([*dropped, *prompts][-50:]))
         self.store.delete(f"scheduleshold:{session_id}")
+        pending = json.loads(self.store.get(f"schedulesdelete:{session_id}") or "{}")
+        keys = [str(entry.get("id") or "") for entry in schedules]
+        ids = {*pending.get("ids", []), *(k for k in keys if k and not k.startswith("wakeup-"))}
+        loop = bool(pending.get("loop")) or any(k.startswith("wakeup-") for k in keys)
+        self.store.set(
+            f"schedulesdelete:{session_id}", json.dumps({"ids": sorted(ids), "loop": loop})
+        )
         if callable(drop := getattr(self.states.handle(session_id), "drop_schedules", None)):
             drop()  # Its process forgets them too (agent_schedules then clears them).
         self.agent_schedules(session_id, [])
+        if delete:
+            self.background(self.delete_dropped_schedules(session_id))
+        return True
+
+    async def delete_dropped_schedules(self, session_id: str) -> str:
+        """Its dropped schedules (drop_schedules) deleted in Claude, by a turn of Chief of
+        Staff's that does only that, once it is not at work: in its process, opened for this if
+        none runs (and let go of after). "" once Claude's own tools show them gone (or none was
+        left), else why not, said in its chat; tried again as it is next handed to a terminal."""
+        key = f"schedulesdelete:{session_id}"
+        if not (pending := json.loads(self.store.get(key) or "null")):
+            return ""
+        if session_id in self.deleting_schedules:
+            return "Chief of Staff is deleting them now."
+        self.deleting_schedules.add(session_id)
+        opened, why = False, ""
+        try:
+            deadline = time.monotonic() + SCHEDULES_DELETE_SECONDS
+            while (row := self.store.find_session(session_id)) and not row["closed_at"]:
+                if (
+                    row["status"] not in {"working", "starting"}
+                    and not self.states[session_id].held
+                ):
+                    break
+                if time.monotonic() > deadline:
+                    raise RuntimeError("It was still at work.")
+                await asyncio.sleep(0.2)
+            if not row or row["closed_at"]:
+                return "It is closed."
+            opened = not self.states.is_live(session_id)
+            session = await self.session_for(session_id)
+            deleting: Any = getattr(session, "delete_schedules", None)
+            if deleting is None:
+                self.store.delete(key)  # None of its agent's to delete.
+                return ""
+            self.states[session_id].after_abort = True  # Its turn owes no report.
+            why = await deleting(pending["ids"], bool(pending["loop"]), SCHEDULES_DELETE_SECONDS)
+        except Exception as exc:
+            why = describe(exc)
+        finally:
+            self.deleting_schedules.discard(session_id)
+            if opened:
+                with suppress(Exception):
+                    await self.detach(session_id)
+        if not (row := self.store.find_session(session_id)):
+            return why
+        if why:
+            self.agent_notice(
+                row,
+                f"Its schedules are not deleted in Claude yet: {why} It is not handed to a "
+                "terminal until they are.",
+            )
+        else:
+            self.store.delete(key)
+            self.agent_notice(row, "Its schedules are deleted in Claude: none comes back.")
+        return why
 
     def agent_schedules(self, session_id: str, schedules: list[dict]):
         """What another agent's worker scheduled (Claude's CronCreate, ScheduleWakeup): kept
