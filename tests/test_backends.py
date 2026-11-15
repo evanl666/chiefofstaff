@@ -175,9 +175,10 @@ async def test_sessions_that_name_no_agent_are_copilots_and_nothing_names_one(ha
     assert runtime.connection("unknown") == (None, 0)
 
 
-async def test_with_no_other_agent_nothing_of_one_is_looked_for_imported_or_stored(
-    harness, monkeypatch
-):
+async def test_with_no_other_agent_nothing_of_one_is_run_imported_or_stored(harness, monkeypatch):
+    """Copilot alone: other agents' CLIs are looked for on the PATH (the agent picker's first-run
+    card would offer one found, signed in), and that is all: none of their modules is imported,
+    nothing is run or stored."""
     looked = []
     which = shutil.which
 
@@ -195,7 +196,8 @@ async def test_with_no_other_agent_nothing_of_one_is_looked_for_imported_or_stor
     worker = await spawn(runtime, harness, "Fix the login test")
     await call_tool(runtime, "report", worker, status="done", summary="Fixed.")
     await runtime.stop()
-    assert not [name for name in looked if re.search(r"codex|claude", str(name), re.IGNORECASE)]
+    found = [name for name in looked if re.search(r"codex|claude", str(name), re.IGNORECASE)]
+    assert set(found) <= {"codex", "claude"}, "only the PATH, by their commands' names"
     assert not [name for name in sys.modules if re.search(r"claude|codex|agent_client", name)]
     assert not harness.store.keys("agent"), "nothing stored about other agents"
 

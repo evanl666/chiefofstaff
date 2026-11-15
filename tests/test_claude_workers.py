@@ -504,6 +504,15 @@ async def test_what_a_claude_worker_did_in_a_terminal_shows_before_its_next_mess
         await runtime.terminal_command(worker)
         # The owner's turn in the terminal, as Claude appends it to the transcript.
         path = backend_claude.transcript_of(backend_claude.dashed(worker))
+
+        def written() -> bool:  # (Its process may still be writing it as it is let go of.)
+            text = path.read_text()
+            try:
+                return text.endswith("\n") and bool(json.loads(text.splitlines()[-1]))
+            except ValueError:
+                return False
+
+        await until(written, 10)
         lines = path.read_text().splitlines()
         parent = json.loads(lines[-1])["uuid"]
         now = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(time.time() + 2))
@@ -639,6 +648,8 @@ async def test_a_claude_workers_message_to_another_worker_is_its_tell_session(
         )  # fmt: skip
         second = result["session_id"]
         await until(lambda: harness.store.session(second)["status"] == "done", 30)
+        # (Its report comes first, then its message: the report does not say it is sent.)
+        await until(lambda: any(m["kind"] == "tell" for m in harness.store.messages(second)))
         told = [m for m in harness.store.messages(second) if m["kind"] == "tell"]
         assert [(m["text"], m["meta"]["target"]) for m in told] == [("the API moved", first)]
         router = [m["text"] for m in harness.store.messages(harness.router_id)]
@@ -670,7 +681,7 @@ async def test_a_claude_workers_notification_is_its_own_in_chief_of_staff(tmp_pa
         tmp_path, "Notify me: 'Build is green'. Report done: notified"
     )
     try:
-        assert ("notice", "Notified you: Build is green") in harness.kinds(worker)
+        await until(lambda: ("notice", "Notified you: Build is green") in harness.kinds(worker))
     finally:
         await runtime.stop()
 
