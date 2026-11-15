@@ -2637,9 +2637,10 @@ def squashed(command: str) -> str:
 
 def may_push(command: str, switching: bool = False) -> bool:
     """Whether a word of a line may say `push` or an alias, however it is quoted (a line that
-    says neither pushes nothing); or, `switching`, go to another branch for a push after it."""
+    says neither pushes nothing); or, `switching`, go to another branch for a push after it,
+    or set where it goes (`git config`)."""
     words = squashed(command)
-    if switching and any(word in words for word in SWITCHING):
+    if switching and any(word in words for word in (*SWITCHING, "config", "update-ref")):
         return True
     return "push" in words or "alias" in words or "send-pack" in words
 

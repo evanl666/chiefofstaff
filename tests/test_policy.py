@@ -2179,6 +2179,7 @@ def test_global_configuration_is_read_and_unreadable_is_not_known(tmp_path, monk
         "git config --global alias.p push",
         "git config alias.p '!git' && git p push origin main",
         "git push && git config remote.origin.push HEAD:main",
+        'echo "$(git config --global remote.origin.mirror true)"; git push',
     ],
 )
 def test_a_line_that_sets_push_configuration_cant_tell_where_it_pushes(command, feature):

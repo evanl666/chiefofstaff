@@ -991,6 +991,8 @@ FOUND = [
     ('eval "( pushd "$D" ); eval "zsh -f <(echo \'command -p local PWD=sub; =git push origin master\')""; echo "$(command -p cd)"; printf -v IFS %s sub', 'main/sub', 'headmain'),  # noqa: E501
     # Found checking those: a remote's push refspecs given with -c add to the repository's.
     ('git -c remote.origin.push=HEAD:feat push', 'feat', 'headmain'),
+    # Found by the docker 200k run on 1b6a164: push configuration a substitution sets.
+    ('echo "$(git config --global remote.origin.mirror true)"; nice git push\nenv -0 git push origin HEAD:$(git branch --show-current)', 'feat'),  # noqa: E501
 ]  # fmt: skip
 
 
