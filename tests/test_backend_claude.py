@@ -861,6 +861,76 @@ async def test_its_mcp_servers_and_prompt_are_in_files_only_the_owner_reads(
     assert not any(path.exists() for path in files), "gone with its process"
 
 
+async def test_slacks_read_tools_are_served_from_this_process_never_given_its_token(
+    agent, tmp_path, monkeypatch
+):
+    """A worker that reads Slack: Slack's read tools are an MCP server of Chief of Staff's own
+    process, which calls Slack itself with the token it holds (Runtime.open_live: read_proxy),
+    so that token is in none of the worker's files, arguments or variables."""
+    starts = tmp_path / "starts.jsonl"
+    monkeypatch.setenv("FAKE_CLAUDE_STARTS", str(starts))
+    calls = []
+
+    async def call(name, arguments):
+        calls.append((name, arguments))
+        return "Found 2 messages."
+
+    schema = {"type": "object", "properties": {"query": {"type": "string"}}}
+    search = {"name": "slack_search_public", "description": "Search Slack.", "input_schema": schema}
+    proxy = {"tools": [search], "call": call}
+    session = await agent.create_session(
+        session_id="a7" * 16,
+        name="t",
+        **options(tmp_path, slack_proxy=proxy, slack_tools=["slack_search_public"]),
+    )
+    turn = Turn(session)
+    await session.send("Call the MCP tool slack_search_public of slack, then reply with just: ok")
+    await turn.ended()
+    assert calls == [("slack_search_public", {})]
+    (done,) = turn.of("tool.execution_complete")
+    assert done.success and "Found 2 messages." in done.result.content
+    (started,) = [json.loads(line) for line in starts.read_text().splitlines()]
+    assert started["servers"] == ["chief", "slack"]
+    files = list(session.backend.private)
+    assert not any(path.name.endswith("-mcp.json") for path in files), "no file of servers"
+    # Not one of Slack's read tools: refused before it reaches Chief of Staff's call.
+    turn = Turn(session)
+    await session.send("Call the MCP tool slack_send_message of slack, then reply with just: ok")
+    await turn.ended()
+    (done,) = turn.of("tool.execution_complete")
+    assert done.success is False and calls == [("slack_search_public", {})]
+
+
+@pytest.mark.parametrize("ask_first", [True, False])
+async def test_chief_of_staffs_private_files_are_no_workers_to_read_asking_first_or_not(
+    agent, tmp_path, ask_first
+):
+    """Its private files (workers' MCP configurations, with their headers and variables): never
+    read, changed or named by a command, whether or not the worker asks first."""
+    private = tmp_path / "data" / "agents" / "claude" / "private"
+    private.mkdir(parents=True)
+    (private / "1-2-mcp.json").write_text("{}")
+    asked = []
+
+    def allow(request, context):
+        asked.append(request.kind)
+        return PermissionDecisionApproveOnce()
+
+    session = await agent.create_session(
+        session_id="a8" * 16,
+        name="t",
+        **options(tmp_path, private_folders=[str(private)], ask_first=ask_first,
+                  on_permission_request=allow),
+    )  # fmt: skip
+    for command in (f"cat {private}/1-2-mcp.json", "cat ../data/agents/claude/private/*"):
+        turn = Turn(session)
+        await session.send(f"Run the shell command `{command}`, then reply with just: ok")
+        await turn.ended()
+        (done,) = turn.of("tool.execution_complete")
+        assert done.success is False and "private files" in done.error.message, command
+    assert asked == [], "refused before anything is asked"
+
+
 async def test_what_a_killed_chief_of_staffs_workers_left_in_its_files_goes_at_start(
     tmp_path, monkeypatch
 ):
@@ -1428,30 +1498,103 @@ async def test_another_sessions_message_is_labelled_data_and_starts_a_turn_only_
     assert turn.said() == ["hi"]
 
 
-async def test_a_message_to_a_worker_goes_through_chief_of_staff_and_others_through_claude(
+async def test_a_message_to_a_worker_goes_through_chief_of_staff_others_only_as_the_owner_says(
     agent, tmp_path, monkeypatch
 ):
+    """SendMessage: to one of Chief of Staff's workers, through Chief of Staff (tell_session);
+    to any other session, sent by Claude only once the owner says so, each time (their card)."""
     sent = tmp_path / "sent.jsonl"
     monkeypatch.setenv("FAKE_CLAUDE_SENT", str(sent))
+    asked, answer = [], "Send it"
 
     async def on_peer(kind, data):
         if data["to"].startswith("cos-"):
             return f"Delivered through Chief of Staff: Told “{data['to']}”."
         return None
 
+    def on_user_input(request, context):
+        asked.append(request["question"])
+        return {"answer": answer, "wasFreeform": False}
+
     session = await agent.create_session(
-        session_id="a4" * 16, name="t", **options(tmp_path, on_peer=on_peer)
+        session_id="a4" * 16,
+        name="t",
+        **options(tmp_path, on_peer=on_peer, on_user_input_request=on_user_input),
     )
     turn = Turn(session)
     await session.send("Message cos-12345678: 'the API moved'. Reply with just: ok")
     await turn.ended()
     (done,) = turn.of("tool.execution_complete")
     assert done.success is False and "Delivered through Chief of Staff" in done.error.message
-    assert not logged(sent), "Claude did not send it"
+    assert not logged(sent) and asked == [], "Claude did not send it; nothing asked"
     await session.send("Message alice: 'hello'. Reply with just: ok")
     await turn.ended()
+    assert len(asked) == 1 and asked[0].startswith("Send this message to Claude session “alice”")
+    assert "hello" in asked[0]
     assert logged(sent) == [{"to": "alice", "message": "hello"}]
     assert turn.of("agent.notice")[-1].text == "Sent a message to Claude session “alice”."
+    answer = "Don't"
+    await session.send("Message uds:/tmp/cc-socks/4242.sock: 'hi'. Reply with just: ok")
+    await turn.ended()
+    assert len(asked) == 2 and len(logged(sent)) == 1, "the owner said no: not sent"
+
+
+async def test_a_worker_that_reads_slack_neither_messages_nor_hears_from_other_sessions(
+    agent, tmp_path, monkeypatch
+):
+    inbox, sent = tmp_path / "inbox.jsonl", tmp_path / "sent.jsonl"
+    monkeypatch.setenv("FAKE_CLAUDE_INBOX", str(inbox))
+    monkeypatch.setenv("FAKE_CLAUDE_SENT", str(sent))
+    told = []
+
+    async def on_peer(kind, data):
+        told.append(kind)
+        return
+
+    raw = Raw()
+    session = await agent.create_session(
+        session_id="a9" * 16,
+        name="t",
+        **options(tmp_path, on_peer=on_peer, reads_slack=True, on_message=raw),
+    )
+    turn = Turn(session)
+    for step in ("Message alice: 'what I read'", "Use Claude's ListAgents tool"):
+        await session.send(f"{step}. Reply with just: ok")
+        await turn.ended()
+        (done,) = turn.of("tool.execution_complete")[-1:]
+        assert done.success is False and "reads Slack" in done.error.message, step
+    inbox.write_text(json.dumps({"name": "alice", "pid": 4242, "text": "reply with just: hi"}))
+    await until(lambda: raw.blocked() == 1)
+    assert told == [] and not logged(sent) and "hi" not in turn.said()
+
+
+async def test_a_message_from_one_of_chief_of_staffs_workers_processes_is_said_to_be_its(
+    agent, tmp_path, monkeypatch
+):
+    """By the process its socket names: one of Chief of Staff's own workers (Chief of Staff
+    then delivers it as that worker's tell_session, Runtime.agent_peer); any other, not."""
+    inbox = tmp_path / "inbox.jsonl"
+    monkeypatch.setenv("FAKE_CLAUDE_INBOX", str(inbox))
+    told = []
+
+    async def on_peer(kind, data):
+        told.append(data.get("worker"))
+        return "Delivered through Chief of Staff: Told it."
+
+    raw = Raw()
+    session = await agent.create_session(
+        session_id="b1" * 16,
+        name="t",
+        **options(tmp_path, on_peer=on_peer, worker="b1" * 16, on_message=raw),
+    )
+    turn = Turn(session)
+    await session.send("Reply with just: ready")
+    await turn.ended()
+    lines = [{"name": "cos-b1b1b1b1", "pid": session.backend.pid, "text": "x"},
+             {"name": "alice", "pid": 4242, "text": "y"}]  # fmt: skip
+    inbox.write_text("\n".join(json.dumps(line) for line in lines))
+    await until(lambda: raw.blocked() == 2)
+    assert told == ["b1" * 16, ""]
 
 
 @pytest.mark.parametrize("ask_first", [False, True])

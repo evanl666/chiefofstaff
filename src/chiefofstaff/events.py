@@ -22,7 +22,7 @@ from . import agents, prompts, receipts, settings_guard, threads
 from .backend import COPILOT_AGENT, running_background, stop_background
 from .delivery import digest
 from .envelope import from_owner, news_tasks, tasks_named, wrap
-from .policy import owners_checkout, permission_denial, settings_write, written_file
+from .policy import owners_checkout, permission_denial, private_denial, settings_write, written_file
 from .roles import ROUTER, SLACK, WORKER
 from .store import now
 
@@ -1048,7 +1048,8 @@ class Events:
         if not row:
             return PermissionDecisionReject(feedback="Unknown session.")
         if (
-            (reason := owners_checkout(row, request, self.workspaces.checkouts(row)))
+            (reason := private_denial(request, self.runtime.private_folders()))
+            or (reason := owners_checkout(row, request, self.workspaces.checkouts(row)))
             or (reason := settings_write(row, request, self.runtime.held_run_files(row)))
             or (not self.runtime.yolo(row) and (reason := await self.denial(row, request)))
         ):

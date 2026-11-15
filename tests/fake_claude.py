@@ -150,6 +150,7 @@ class Fake:
         self.responses = 0
         self.mcp_ready = False
         self.chief_tools: list[str] = []
+        self.sdk_ready: set[str] = set()
         self.stdio: dict[str, asyncio.subprocess.Process] = {}
         self.plan: list[dict] | None = None
         self.final: dict | None = None
@@ -381,11 +382,11 @@ class Fake:
             found.append(entry)
         return found
 
-    async def mcp(self, method: str, params: dict | None = None) -> dict:
+    async def mcp(self, method: str, params: dict | None = None, server: str = "chief") -> dict:
         reply = await self.ask(
             {
                 "subtype": "mcp_message",
-                "server_name": "chief",
+                "server_name": server,
                 "message": {
                     "jsonrpc": "2.0",
                     "id": self.ids + 1,
@@ -947,6 +948,18 @@ class Fake:
             found = await self.mcp(
                 "tools/call", {"name": name.removeprefix("mcp__chief__"), "arguments": data}
             )
+            text = "\n".join(str(part.get("text") or "") for part in found.get("content") or [])
+            return self.tool_result(call, text, bool(found.get("isError")), found)
+        sdk, _, tool = name[5:].partition("__") if name.startswith("mcp__") else ("", "", "")
+        if sdk and sdk != "chief" and (self.servers.get(sdk) or {}).get("type") == "sdk":
+            # Another server of the SDK's own process (as chief), through the same requests,
+            # once initialized (as Claude initializes each server).
+            if sdk not in self.sdk_ready:
+                hello = {"protocolVersion": "2025-06-18", "capabilities": {},
+                         "clientInfo": {"name": "fake-claude", "version": VERSION}}  # fmt: skip
+                await self.mcp("initialize", hello, sdk)
+                self.sdk_ready.add(sdk)
+            found = await self.mcp("tools/call", {"name": tool, "arguments": data}, sdk)
             text = "\n".join(str(part.get("text") or "") for part in found.get("content") or [])
             return self.tool_result(call, text, bool(found.get("isError")), found)
         if name.startswith("mcp__") and name.endswith("__form"):

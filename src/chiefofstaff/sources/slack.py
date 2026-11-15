@@ -489,6 +489,8 @@ class SlackSource:
         self.tokens: TokenStore = tokens or SlackTokens(store.directory)
         self.mcp: SlackClient = mcp or SlackMcp(self.tokens.get)
         self.read_tools: list[str] = []
+        # Its read tools as Slack's MCP server describes them (read_proxy), as last discovered.
+        self.read_specs: dict[str, dict] = {}
         self.can_send = False
         self.fingerprint = ""
         self.changed = asyncio.Event()
@@ -511,6 +513,27 @@ class SlackSource:
         if os.environ.get(SlackTokens.ENV):
             return "env"
         return "keychain" if self.tokens.get() else ""
+
+    async def read_proxy(self) -> dict | None:
+        """Slack's read tools for a worker whose agent takes MCP servers of Chief of Staff's own
+        process (Claude's): their descriptions, and a call Chief of Staff makes itself with the
+        token it holds, which never reaches the agent (no file, no argument, no variable). None
+        while Slack is off, or cannot be reached."""
+        if not self.configured():
+            return None
+        if not self.read_specs:
+            try:
+                await self.discover()
+            except Exception:
+                logger.warning("Slack's read tools could not be listed.", exc_info=True)
+                return None
+        return {"tools": [dict(spec) for spec in self.read_specs.values()], "call": self.read_call}
+
+    async def read_call(self, name: str, arguments: dict) -> str:
+        """One of Slack's read tools, called for a worker (read_proxy); never another."""
+        if name not in self.read_specs or name == SEND_TOOL:
+            raise SlackError(f"{name} is not one of Slack's read tools.")
+        return await self.mcp.call(name, arguments)
 
     def session_mcp_config(self) -> dict | None:
         """MCP config for model sessions: read-only tools only, never send/write tools."""
@@ -564,6 +587,15 @@ class SlackSource:
             for tool in tools
             if tool.annotations and tool.annotations.readOnlyHint and tool.name != SEND_TOOL
         ) or sorted(names & set(KNOWN_READ_TOOLS))
+        self.read_specs = {
+            tool.name: {
+                "name": tool.name,
+                "description": tool.description or tool.name,
+                "input_schema": dict(getattr(tool, "inputSchema", None) or {"type": "object"}),
+            }
+            for tool in tools
+            if tool.name in self.read_tools
+        }
         self.can_send = SEND_TOOL in names
         user_id = next(
             (m.group(1) for tool in tools if (m := USER_ID.search(tool.description or ""))), ""
