@@ -538,7 +538,7 @@ def test_v0142s_rule_stays_a_floor_under_the_reading(monkeypatch, feature):
 # that read the line again for each of its commands (quadratic) passes by orders of magnitude.
 SCANS = ("shell_commands", "shell_words", "heredocs", "without_comments", "without_substitutions",
          "squashed", "named", "loose_pushes", "feeds_shell", "fed_says", "once_a_stretch",
-         "recursive_delete", "gh_api_writes")  # fmt: skip
+         "recursive_delete", "gh_api_writes", "written", "may_alias")  # fmt: skip
 LINEAR = 60
 # And how long a check may take, as a sanity bound only (CPU time: a check of one of these lines
 # takes well under a second, even traced for coverage on a busy machine; one grown quadratic
@@ -718,6 +718,16 @@ def test_a_line_too_much_to_read_that_pushes_is_refused_saying_why(command, work
         "$G push; " * 30_000,
         "git push origin : " * 30_000,
         "git push origin $(git branch --show-current) " * 2_000,
+        # The invariant review of 86f9f8d: configuration written to a file, aliases.
+        "echo x " + ">" * 100_000 + "( git push",
+        "echo x >" + " " * 100_000 + "( git push",
+        "cat .git/config " * 20_000 + "&& git push",
+        "cp x .git/config; " * 10_000 + "git push",
+        "git lfs " * 30_000,
+        "git -c x=y " * 20_000 + "p origin main",
+        "x=$(git p) " * 10_000,
+        "git p; " * 20_000,
+        "$G p " * 20_000,
     ],
 )
 def test_no_line_is_slow_to_check(command, work, feature):
@@ -770,7 +780,8 @@ RULE_WORDS = {
          "&&", "|", "<<EOF", "EOF", "eval", "sh -c", "cd", "-C", "B=x", "$B", "for b in", "do",
          "checkout -b", "#", "((", "))", " ", "switch", "checkout", "-q", "subtree", "send-pack",
          "config", "alias.p", "$(git branch --show-current)", "`git branch --show-current`",
-         "$G", "HEAD:", "--global"],
+         "$G", "HEAD:", "--global", ">", ">>", ".git/config", "~/.gitconfig", "tee", "-a",
+         "cp", "sed", "-i", "p", "-c", "alias.sp=send-pack", "sp", "lfs", "$(echo git)"],
     ),
     "merging, closing or commenting on PRs as the owner": ("", ["gh", "pr", "merge", " ", "\t"]),
     "changing issues as the owner": ("", ["gh", "issue", "close", " "]),
@@ -1398,6 +1409,11 @@ NORMAL = [
     "git push origin $(git symbolic-ref --short refs/remotes/origin/HEAD | cut -d/ -f2)",
     "DEFAULT=$(git rev-parse --abbrev-ref origin/HEAD | cut -d/ -f2); git push origin $DEFAULT",
     # (E66, E68) Configuration read or set, and the other commands that push.
+    "cat .git/config && git push origin wb/x",
+    "grep -n url .git/config",
+    "git lfs pull && git push origin wb/x",
+    "git lg -5",
+    "git config alias.co checkout && git co wb/x",
     "git config --get push.default && git push origin wb/x",
     "git config remote.origin.push HEAD:main && git push",
     "git subtree push --prefix=docs origin wb/x",
@@ -2265,3 +2281,144 @@ def test_what_git_says_is_read_so_far_at_most(feature):
     assert policy.git_output(["-C", str(feature), "rev-parse", "--abbrev-ref", "HEAD"], 3) is None
     assert policy.git_output(["-C", "a\x00b", "status"], 64) is None
     assert policy.config_entries(str(feature)) == []
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "printf '[push]\\n\\tdefault = matching\\n' >> .git/config && git push",
+        "printf '[remote \"origin\"]\\n\\tpush = HEAD:main\\n' >> .git/config && git push",
+        "printf '[push]\\n\\tdefault = matching\\n' >> ~/.gitconfig && git push",
+        "printf '[push]\\n\\tdefault = matching\\n' | tee -a .git/config && git push",
+        "cp ../push.cfg .git/config && git push",
+        "mv push.cfg .git/config; git push",
+        "install -m 644 push.cfg .git/config && git push",
+        "cp -t .git config && git push",
+        "sed -i.bak 's/simple/matching/' .git/config && git push",
+        "perl -pi -e 's/simple/matching/' ~/.gitconfig && git push",
+        "dd if=push.cfg of=.git/config && git push",
+        'cat push.cfg >> "$GIT_DIR/config" && git push',
+        "cat push.cfg >> .git/config.worktree && git push",
+        "cat push.cfg >> ~/.config/git/config && git push",
+        'cat push.cfg >> "$XDG_CONFIG_HOME/git/config" && git push',
+        "cat push.cfg > $(git rev-parse --git-dir)/config && git push",
+        "cd .git && cat ../push.cfg >> config && cd .. && git push",
+        "printf '[alias]\\n\\tp = push\\n' >> .git/config && git p origin main",
+        "cp ../aliases.cfg .git/config && git p origin main",
+    ],
+)
+def test_a_line_that_writes_gits_configuration_cant_tell_where_it_pushes(command, feature):
+    """The invariant review of 86f9f8d (E66): configuration written to git's own files on the
+    line, not with `git config`, sent a push naming no branch to main (`push.default=matching`,
+    a remote's push refspec, an alias): which branch it updates is not known."""
+    assert "can't tell which branch" in (denial(command, feature) or ""), command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat .git/config && git push",
+        "grep -n url .git/config; git push origin wb/x",
+        "cp .git/config config.bak && git push",
+        "sed -n 1p ~/.gitconfig && git push",
+        "head .git/config > notes.txt && git push",
+        "echo done > build.log && git push",
+        "cp app.cfg src/settings.cfg && git push",
+    ],
+)
+def test_a_line_that_reads_gits_configuration_lets_a_push_through(command, feature):
+    assert denial(command, feature) is None, command
+
+
+def test_a_line_that_writes_a_file_gits_configuration_includes_cant_tell(tmp_path):
+    """The invariant review of 86f9f8d (E66): a file git's configuration includes, written on
+    the line, may say where a push goes, or what an alias runs."""
+    work = configured(tmp_path / "repo", [("include.path", "../extra.cfg")])
+    assert denial("echo x > notes.txt && git push", work) is None
+    for command in (
+        "printf '[push]\\n\\tdefault = matching\\n' >> ../extra.cfg && git push",
+        "cp ../push.cfg extra.cfg && git push",
+        "cp ../aliases.cfg extra.cfg && git p origin main",
+    ):
+        assert "can't tell which branch" in (denial(command, work) or ""), command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git -c alias.sp=send-pack sp ../origin.git main",
+        "git -c alias.st=subtree st push -P docs origin main",
+        "git -c 'alias.x=!git send-pack' x ../origin.git main",
+    ],
+)
+def test_an_alias_given_on_the_line_that_sends_a_pack_is_refused(command, feature):
+    """The invariant review of 86f9f8d (E68): an alias `-c` gives whose text runs send-pack or
+    subtree pushes as one that says push does."""
+    assert "can't tell which branch" in (denial(command, feature) or ""), command
+
+
+ALIASES = [("alias.p", "push"), ("alias.pf", "push --force"), ("alias.sp", "send-pack"),
+           ("alias.st", "subtree"), ("alias.q", "p"), ("alias.sh", "!git push"),
+           ("alias.f", '!f() { git "$@"; }; f'), ("alias.lg", "log --oneline"),
+           ("alias.pm", "-c push.default=matching push")]  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    ("command", "reason"),
+    [
+        ("git p origin main", "default branch"),
+        ("git P origin main", "default branch"),
+        ("git q origin main", "default branch"),
+        ("git sp ../origin.git main", "default branch"),
+        ("git st push -P docs origin main", "default branch"),
+        ("git pm", "default branch"),
+        ("git -C . p origin main", "default branch"),
+        ("git checkout main && git p", "default branch"),
+        ("x=$(git p origin main)", "default branch"),
+        ("eval 'git p origin main'", "default branch"),
+        ("git pf origin wb/x", "force push"),
+        ("git sh origin wb/x", "can't tell"),
+        ("git f push origin wb/x", "can't tell"),
+        ("git f $X", "can't tell"),
+        ("G=git; $G p origin main", "can't tell"),
+        ("echo main | xargs git p origin", "can't tell"),
+        ("git $C origin main", "can't tell"),
+        ("git p origin main\necho 'x", "can't tell"),
+        ("git config alias.lg p && git lg origin wb/x", "can't tell"),
+    ],
+)
+def test_an_alias_in_gits_configuration_is_read_as_what_it_runs(command, reason, tmp_path):
+    """The invariant review of 86f9f8d: an alias the repository's (or the user's) configuration
+    has (`alias.p=push`, `alias.pf="push --force"`) pushed main, and forced, unread; read now
+    from the same call that reads where pushes go, followed to what it runs."""
+    work = configured(tmp_path / "repo", ALIASES)
+    assert reason in (denial(command, work) or ""), command
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["git p origin wb/x", "git p", "git q origin wb/x", "git lg -5", "git f log", "git lfs pull",
+     "git -c alias.p=log p origin main", "git status && git diff", "$(echo git) lg",
+     "git config alias.co checkout && git co wb/x"],
+)  # fmt: skip
+def test_an_alias_that_pushes_no_default_branch_lets_it_through(command, tmp_path):
+    work = configured(tmp_path / "repo", ALIASES)
+    assert denial(command, work) is None, command
+
+
+def test_the_users_aliases_count_and_are_asked_with_where_pushes_go(tmp_path, monkeypatch, work):
+    """The user's aliases are read as the repository's, in the call that reads its push
+    configuration; a line with no git command but git's own asks git nothing of them."""
+    settings = tmp_path / "gitconfig"
+    settings.write_text("[alias]\n\tp = push\n")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(settings))
+    repo = checkout(tmp_path / "repo", "wb/x")
+    work["git"] = 0
+    assert "default branch" in (denial("git p origin main", repo) or "")
+    assert work["git"] == 1
+    assert denial("git status && git log -1 && git diff", repo) is None
+    assert work["git"] == 1 and work["parse"] == 1
+    assert denial("git p origin wb/x && git push", repo) is None
+    assert work["git"] == 4, "the folder's branch, @{push}, its configuration: once each"
+    settings.write_text("[alias\n")
+    assert "can't tell which branch" in (denial("git lfs pull", repo) or "")

@@ -33,6 +33,17 @@ to a branch of its own before a push is let through again (QA on 0.1.45).
   every branch of the same name on both sides), an alias that `git config` sets on a line that
   says push, and a command whose name a variable or a substitution holds on such a line
   (`g=git; $g push origin main`, also one another command runs: `find … -exec $G push`) (E68).
+- **Git configuration written to its files on the line** (not with `git config`) before a push
+  can't tell which branch it updates either: `printf … >> .git/config`, `tee -a`, `cp`, `mv` or
+  `install` onto it, `sed -i`, `perl -pi`, in `~/.gitconfig`, `~/.config/git/config`,
+  `$GIT_DIR/config` or `config.worktree`, and a file your configuration includes.
+- **Aliases in your configuration are read**, the repository's and your own, in the same call to
+  git that reads where pushes go, and followed to what they run: with `alias.p=push`,
+  `git p origin main` is refused as a push to the default branch, and `alias.pf="push --force"`
+  as a force push; a shell alias (`!…`) that says push, send-pack or subtree, or is given words
+  that do, can't tell which branch. An alias given with `-c` that runs `send-pack` or
+  `subtree` is refused as one that runs `push` is. A line that only sets a harmless alias
+  (`git config alias.st status`) is let through.
 - **An unquoted variable the line doesn't set, or a substitution, before a refspec's `:`** may
   hold several refspecs (`$B:feat` with `B='HEAD:main HEAD'`): which branch the push updates is
   not known, and it is refused, saying so (found checking these fixes; quoted, `"$B:feat"`, it

@@ -17,6 +17,7 @@ generated lines and prints the counts.
 from __future__ import annotations
 
 import contextlib
+import functools
 import os
 import random
 import re
@@ -39,7 +40,8 @@ ZSH = shutil.which("zsh")  # Codex runs commands in zsh (`zsh -lc`): the lines r
 # Commands that run another, put in the sandbox's PATH (by their full path; timeout as a script
 # that runs its command: GNU timeout puts it in a process group of its own, which a run would
 # not wait for, and a push it made late would be read as the next line's).
-WRAPPERS = ("env", "nice", "xargs", "find", "timeout", "cat")  # (cat: what it feeds a shell.)
+WRAPPERS = ("env", "nice", "xargs", "find", "timeout", "cat", "tee", "cp", "mv", "sed")
+# (cat: what it feeds a shell; tee, cp, mv, sed: what writes git's configuration to its files.)
 TIMEOUT = r"""#!/bin/sh
 while [ $# -gt 0 ]; do
   case "$1" in -s|-k|--signal|--kill-after) shift 2 ;; -*) shift ;; *) break ;; esac
@@ -52,12 +54,13 @@ exec "$@"
 # --git-dir, --work-tree), then a few commands answered
 # from `.git/HEAD` and `.git/branches` of the folder's fake repository; a push is written to
 # $PUSHES: its folder's top, its branch, `-c` settings (after the user's and the repository's,
-# `$HOME/.shimconfig` and `.git/shimconfig`, which `git config` writes), git's own variables,
-# and its words, separated by tabs (words by \x1f), each push ended by \x1e and a newline
-# (`git subtree` and `git send-pack` too). A push to a remote that is not there (not origin,
-# one `-c` names, a URL, or a repository's folder) fails, as git's does (zsh's unsplit `$B`:
-# `git push 'a b'`); so does a switch to no branch there, and a checkout of one but for a
-# file's name (it restores the file).
+# `$HOME/.gitconfig`, `$HOME/.config/git/config` and `.git/config`, a `key=value` a line, which
+# `git config` writes, and a line may write itself), git's own variables, and its words,
+# separated by tabs (words by \x1f), each push ended by \x1e and a newline (`git subtree` and
+# `git send-pack` too; an alias followed to what it runs, a shell's that says push not: "?").
+# A push to a remote that is not there (not origin, one `-c` names, a URL, or a repository's
+# folder) fails, as git's does (zsh's unsplit `$B`: `git push 'a b'`); so does a switch to no
+# branch there, and a checkout of one but for a file's name (it restores the file).
 SHIM = r"""#!/bin/sh
 config=""
 other=""
@@ -84,18 +87,27 @@ while [ ! -d "$top/.git" ] && [ "$top" != "/" ]; do top=$(dirname "$top"); done
 [ -d "$top/.git" ] || { [ "$1" = push ] && printf 'NOREPO\036\n' >> "$PUSHES"; exit 128; }
 head=$(sed -n 's|^ref: refs/heads/||p' "$top/.git/HEAD")
 settings=""
-for file in "$HOME/.shimconfig" "$top/.git/shimconfig"; do
+for file in "$HOME/.gitconfig" "$HOME/.config/git/config" "$top/.git/config"; do
   [ -f "$file" ] || continue
   while IFS= read -r entry; do settings="$settings$entry;"; done < "$file"
 done
 config="$settings$config"
 command="$1"
 [ $# -gt 0 ] && shift
-case "$config" in
-  *"alias.$command="*)
-    value=${config#*alias.$command=}
-    case "${value%%;*}" in *push*) command=alias ;; esac ;;
-esac
+n=0
+while [ "$n" -lt 4 ]; do
+  case "$command" in
+    push|send-pack|rev-parse|symbolic-ref|branch|checkout|switch|config|status) break ;;
+  esac
+  case ";$config" in *";alias.$command="*) ;; *) break ;; esac
+  all=";$config"; value=${all##*";alias.$command="}; value=${value%%;*}
+  case "$value" in
+    !*) case "$value" in *push*|*send-pack*|*subtree*) command=alias ;; esac; break ;;
+  esac
+  set -f; IFS=' '; set -- $value "$@"; unset IFS; set +f
+  command="$1"; shift
+  n=$((n + 1))
+done
 case "$command" in
   push|alias|subtree|send-pack)
     remote=""; skip=""; repo=""
@@ -184,10 +196,10 @@ case "$command" in
       echo "ref: refs/heads/$target" > "$top/.git/HEAD"
     fi ;;
   config)
-    file="$top/.git/shimconfig"; unset=""
+    file="$top/.git/config"; unset=""
     while [ $# -gt 0 ]; do
       case "$1" in
-        --global) file="$HOME/.shimconfig" ;;
+        --global) file="$HOME/.gitconfig" ;;
         --unset|--unset-all) unset=1 ;;
         --get|--get-all|--get-regexp|-l|--list) exit 0 ;;
         -*) ;;
@@ -223,12 +235,15 @@ PRESETS = {
     "upstream": ["push.default=upstream", "branch.feat.merge=refs/heads/main",
                  "branch.wb/x.merge=refs/heads/wb/x"],
     "mirror": ["remote.origin.mirror=true"],
+    "aliases": ["alias.p=push", "alias.pf=push --force", "alias.sp=send-pack", "alias.q=p",
+                "alias.st=subtree", "alias.sh=!git push", "alias.lg=log"],
 }  # fmt: skip
 
 
 # The keys config_entries asks git for (policy.PUSH_SETTINGS).
 SETTINGS_KEYS = (
-    r"push\.default|remote\..+\.(push|mirror)|branch\..+\.merge|includeif\.onbranch:.+\.path"
+    r"push\.default|remote\..+\.(push|mirror)|branch\..+\.merge|alias\..+|include\.path"
+    r"|includeif\..+\.path"
 )
 
 
@@ -239,7 +254,7 @@ def make_repository(folder: Path, branch: str, settings: list[str] | None = None
     (folder / ".git" / "HEAD").write_text(f"ref: refs/heads/{branch}\n")
     (folder / ".git" / "branches").write_text("main\nfeat\nmaster\nwb/x\n")
     (folder / ".git" / "previous").write_text("")
-    (folder / ".git" / "shimconfig").write_text("".join(f"{entry}\n" for entry in settings or []))
+    (folder / ".git" / "config").write_text("".join(f"{entry}\n" for entry in settings or []))
 
 
 @dataclass
@@ -283,11 +298,13 @@ class Sandbox:
     def reset(self, preset: str = ""):
         make_repository(self.root / "main", "main", PRESETS[preset])
         make_repository(self.root / "feat", "feat", PRESETS[preset])
-        # (The user's settings `git config --global` wrote, wherever HOME was: a zsh run read
-        # one a line before had left in a checkout, with `HOME="$PWD"`.)
+        # (The user's settings `git config --global` or a line wrote, wherever HOME was: a zsh
+        # run read one a line before had left in a checkout, with `HOME="$PWD"`.)
         for folder in (self.root, *(self.root / name for name in ("main", "feat", "plain"))):
             for found in (folder, *(path for path in folder.glob("*") if path.is_dir())):
-                (found / ".shimconfig").unlink(missing_ok=True)
+                (found / ".gitconfig").unlink(missing_ok=True)
+                (found / ".config" / "git" / "config").unlink(missing_ok=True)
+        (self.root / ".config" / "git").mkdir(parents=True, exist_ok=True)
 
     def folder(self, name: str) -> Path:
         return (self.root / name).resolve()
@@ -362,7 +379,8 @@ class Sandbox:
         if "\x00" in folder or not Path(folder).is_dir():
             return None  # (git can't be asked there.)
         top = self.top(folder)
-        files = [self.root / ".shimconfig", *([top / ".git" / "shimconfig"] if top else [])]
+        files = [self.root / ".gitconfig", self.root / ".config" / "git" / "config",
+                 *([top / ".git" / "config"] if top else [])]  # fmt: skip
         entries: list[tuple[str, str | None]] = []
         for file in files:
             for entry in file.read_text().splitlines() if file.exists() else []:
@@ -534,13 +552,27 @@ SWITCHES = ["git checkout -b wb/new", "git switch -c fix", "git checkout main",
             "git branch -m wb/x wb/z", "git switch --detach feat", "git checkout feat sub",
             "git switch $B", 'git checkout "$B"', "git checkout -p main", "git switch -f main",
             "git branch sub"]  # fmt: skip
+# git's configuration a line writes to its files, not with `git config` (the invariant review
+# of 86f9f8d): in the sandbox's repositories (each `cd ..` a line may make stays in it), and the
+# user's (a line that names HOME writes none: without one, `~` is the user's own home).
+WRITES = ["echo push.default=matching >> .git/config",
+          "echo remote.origin.push=HEAD:main >> .git/config",
+          'echo alias.p=push >> "$HOME/.gitconfig"',
+          "echo push.default=matching >> $HOME/.config/git/config",
+          "echo push.default=matching | tee -a .git/config",
+          "mv .git/config .git/old && echo alias.q=push >> .git/config",
+          "cp .git/config .git/new && echo remote.origin.push=HEAD:main >> .git/new && "
+          "cp .git/new .git/config",
+          "cd .git && echo push.default=matching >> config && cd ..",
+          "sed -i.bak s/simple/matching/ .git/config"]  # fmt: skip
 # Configuration a line may set or read (QA on 0.1.45, E66, E68).
 CONFIGS = ["git config push.default matching", "git config --global push.default matching",
            "git config remote.origin.push HEAD:main", "git config --unset push.default",
            "git config alias.p push", "git config user.name x", "git config --get push.default",
            "git config --global remote.origin.mirror true", "git config push.default current",
            "git config branch.feat.merge refs/heads/main",
-           "git -c remote.origin.push=HEAD:feat push"]  # fmt: skip
+           "git -c remote.origin.push=HEAD:feat push", "git config alias.sp send-pack",
+           "git config alias.lg log", "cat .git/config", *WRITES]  # fmt: skip
 SEPARATORS = ["; ", "; ", " && ", " || ", " | ", "\n", " & "]
 
 
@@ -612,6 +644,11 @@ class Generator:
                 f"{git} subtree -P sub push origin {self.pick(REFS)}",
                 f"{git} send-pack ../main {self.pick(['', *REFS])}".rstrip(),
                 f"{git} send-pack --all ../feat", f"{git} p origin {self.pick(REFS)}",
+                f"{git} q origin {self.pick(REFS)}", f"{git} p", f"{git} pf origin feat",
+                f"{git} sp ../main {self.pick(REFS)}", f"{git} lg", f"{git} sh origin feat",
+                f"{git} st push -P sub origin {self.pick(REFS)}",
+                f"{git} -c alias.sp=send-pack sp ../main {self.pick(REFS)}",
+                f"{git} -c alias.st=subtree st push -P sub origin {self.pick(REFS)}",
             ])  # fmt: skip
         roll = self.chance.random()
         if roll < 0.04:  # Its words, or more of them, from a command that adds them.
@@ -731,9 +768,15 @@ class Generator:
     def line(self) -> tuple[str, ...]:
         start = self.pick(["main", "feat", "main/sub", "feat/sub"])
         tail = '\necho "x' if self.chance.random() < 0.03 else ""  # Not parsed: run up to it.
+        text = self.statements()
+        # No line that writes git's files sets HOME: without one, `~` is the user's own home.
+        while any(write in text for write in WRITES) and "HOME" in functools.reduce(
+            lambda rest, write: rest.replace(write, ""), WRITES, text
+        ):
+            text = self.statements()
         if self.chance.random() < 0.12:  # Repositories configured to push elsewhere (E66).
-            return self.statements() + tail, start, self.pick(sorted(PRESETS)[1:])
-        return self.statements() + tail, start
+            return text + tail, start, self.pick(sorted(PRESETS)[1:])
+        return text + tail, start
 
 
 def shell_quote(text: str) -> str:
@@ -755,7 +798,11 @@ class Outcome:
 
 # Lines left out of the seeds, though nothing but git and the shells is on PATH: programs by
 # their full path, writes outside the sandbox, builtins that reach other processes.
-UNSAFE_SEEDS = re.compile(r"/bin/|/usr/|/tmp|sudo|\bkill\b|>\s*[/~](?!dev/null)|\bexec\b|ulimit")
+UNSAFE_SEEDS = re.compile(
+    r"/bin/|/usr/|/tmp|sudo|\bkill\b|>\s*[/~](?!dev/null)|\bexec\b|ulimit|\$\{?(XDG|GIT_DIR)"
+    r"|~/\.|HOME.*(>|tee|cp|mv|sed)|(>|tee|cp|mv|sed).*HOME",
+    re.DOTALL,
+)
 
 
 # Lines the oracle found let through though bash pushed main (each from its folder): kept.
@@ -980,7 +1027,7 @@ FOUND = [
     ('env -C ../feat sh -c "git push origin $(git branch --show-current)"', 'main'),
     # Found by the zsh 200k run on 9b2859f (a file a line before had left): the user's settings
     # are where HOME says; a line that sets it can't tell where its pushes go.
-    ("echo push.default=matching > .shimconfig; { HOME=\"$PWD\" && PWD=\"$PWD\" \\git push origin; }", 'feat'),  # noqa: E501
+    ("echo push.default=matching > .gitconfig; { HOME=\"$PWD\" && PWD=\"$PWD\" \\git push origin; }", 'feat'),  # noqa: E501
     # Found by the docker 200k run (bash 5.2, dash) on 4454349: in text read loosely (not
     # parsed), push configuration a line sets, and an alias before a `git` of its stretch.
     ('git config --global remote.origin.mirror true | nice git push --set-upstream origin || CDPATH=\'a b\'; git status\necho "x', 'feat'),  # noqa: E501
@@ -993,6 +1040,25 @@ FOUND = [
     ('git -c remote.origin.push=HEAD:feat push', 'feat', 'headmain'),
     # Found by the docker 200k run on 1b6a164: push configuration a substitution sets.
     ('echo "$(git config --global remote.origin.mirror true)"; nice git push\nenv -0 git push origin HEAD:$(git branch --show-current)', 'feat'),  # noqa: E501
+    # The invariant review of 86f9f8d: configuration written to git's files on the line (not
+    # with `git config`); an alias `-c` gives that sends a pack; aliases in the configuration.
+    ('echo push.default=matching >> .git/config && git push', 'feat'),
+    ('echo remote.origin.push=HEAD:main >> .git/config; git push', 'feat'),
+    ('echo push.default=matching >> "$HOME/.gitconfig" && git push', 'feat'),
+    ('echo push.default=matching >> $HOME/.config/git/config && git push', 'feat'),
+    ('echo push.default=matching | tee -a .git/config && git push', 'feat'),
+    ('cd .git && echo push.default=matching >> config && cd .. && git push', 'feat'),
+    ('echo alias.p=push >> "$HOME/.gitconfig"; git p origin main', 'feat'),
+    ('git -c alias.sp=send-pack sp ../main main', 'feat'),
+    ('git -c alias.st=subtree st push -P sub origin main', 'feat'),
+    ('git p origin main', 'feat', 'aliases'),
+    ('git q origin main', 'feat', 'aliases'),
+    ('git sp ../main main', 'feat', 'aliases'),
+    ('git st push -P sub origin main', 'feat', 'aliases'),
+    ('git checkout main && git p', 'feat', 'aliases'),
+    ('G=git; $G p origin main', 'feat', 'aliases'),
+    ('x=$(git p origin main)', 'feat', 'aliases'),
+    ('git sh origin feat', 'feat', 'aliases'),
 ]  # fmt: skip
 
 
@@ -1063,7 +1129,9 @@ def run(
 
     def sandbox() -> Sandbox:
         if not hasattr(local, "sandbox"):
-            local.sandbox = Sandbox(root / f"w{next(counter)}")
+            # (Deep enough that no line's `cd ..`s reach a folder out of it: the lines write
+            # `.git/config` where they are.)
+            local.sandbox = Sandbox(root / f"w{next(counter)}" / Path(*["d"] * 24))
         return local.sandbox
 
     def branches(folder: str) -> set[str]:
