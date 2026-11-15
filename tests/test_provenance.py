@@ -1455,7 +1455,8 @@ async def test_the_owners_alike_questions_one_after_the_other_stay_theirs(tmp_pa
     deciding_ = deciding(store, home)
     assert await deciding_.made(home.metas, {}) == {}
     assert not deciding_.alike, "not alike either: none ended with its answer"
-    # Asked from /tmp while a worker ran a command, kept by 0.1.44 as its batch: decided again.
+    # Asked from /tmp while a worker ran a command, kept by 0.1.44 as its batch: as it was (it
+    # cannot be told from a batch of the worker's 0.1.43 found, which 0.1.44 kept so).
     store.create_session("w1", "worker", "Label the tickets", "idle", cwd="/x")
     store.set("uptime", json.dumps([[T0 - 900, T0 + 9e5]]))
     commanded(store, T0 - 30, T0 + 3600, SCRIPT)
@@ -1464,7 +1465,8 @@ async def test_the_owners_alike_questions_one_after_the_other_stay_theirs(tmp_pa
         record = {"as": "worker", "by": "w1", "why": "batch", "group": "g", "at": T0, "rules": 2,
                   "size": home.log_of(meta.session_id).stat().st_size}  # fmt: skip
         store.set(f"made:{meta.session_id}", json.dumps(record))
-    assert await deciding(store, home).made(home.metas, {}) == {}
+    made = await deciding(store, home).made(home.metas, {})
+    assert made == dict.fromkeys([meta.session_id for meta in home.metas], MADE_BY_WORKER)
 
 
 async def test_a_workers_long_loop_decided_again_in_rounds_is_never_listed(
@@ -1642,6 +1644,151 @@ async def test_a_batch_name_alone_is_no_batch(tmp_path, home):
     assert f"made:{mine}" not in store.items("made:")
     # Open, so named: left out while it runs, as a worker's call is (no row for each).
     assert whose(home.metas[0], set(), {}, is_open=True) == BATCH
+
+
+# Review of the QA round on 0.1.45
+
+
+async def test_the_owners_own_runs_one_after_the_other_stay_theirs(tmp_path, home):
+    """Review: ten alike review questions the owner ran by hand, with `copilot -p` (three
+    minutes each, the next a minute after the one before ended), or in a terminal quit with
+    Ctrl+D two seconds after the answer (the next 90 seconds later): theirs. A script starts its
+    next call within a second or two of the one before ending (30 s at most counts), or within
+    two minutes of its start; a person takes longer."""
+    store = Store(tmp_path / "data")
+    at = T0
+    for n in range(10):
+        home.add(prompt_mode(at, f"{REVIEW}pull/{n}", "/w", took=180), at, cwd="/w")
+        at += 181 + 60
+    assert await deciding(store, home).made(home.metas, {}) == {}
+    home.metas.clear()
+    at = T0 + 90000
+    for n in range(10):
+        home.add(interactive(at, f"{REVIEW}pull/{n}", asked=10, closed=2), at, cwd="/w")
+        at += 10 + 20 + 2 + 90
+    deciding_ = deciding(store, home)
+    assert await deciding_.made(home.metas, {}) == {}
+    # Ten a script ran one after the other, each starting as the one before ended: its.
+    home.metas.clear()
+    ids = [
+        home.add(prompt_mode(T0 + 180000 + n * 31, f"{LABEL} {n}", took=29), T0 + 180000 + n * 31)
+        for n in range(10)
+    ]
+    assert await deciding(store, home).made(home.metas, {}) == dict.fromkeys(ids, BATCH)
+
+
+async def test_a_batch_0143_found_and_0144_kept_stays_its_workers(tmp_path, home):
+    """Review: 0.1.43 kept as a worker's batch twenty calls of a script in /tmp, five minutes
+    apart (by its measure, alike, begun soon after the command); 0.1.44 kept them so (its rules,
+    2). Decided again: as they were, as straight from 0.1.43."""
+    store = worker_store(tmp_path, cwd="/srv/w1")
+    commanded(store, T0 - 30, T0 + 20 * 300, "python3 label.py")
+    ids = [home.add(prompt_mode(T0 + n * 300, f"{LABEL} {n}"), T0 + n * 300) for n in range(20)]
+    for rules in (None, 2):
+        for n, session_id in enumerate(ids):
+            size = home.log_of(session_id).stat().st_size
+            record = {"as": "worker", "by": "w1", "why": "batch", "group": group_of(LABEL),
+                      "at": T0 + n * 300, "size": size}  # fmt: skip
+            store.set(
+                f"made:{session_id}", json.dumps(record | ({"rules": rules} if rules else {}))
+            )
+        made = await deciding(store, home).made(home.metas, {})
+        assert made == dict.fromkeys(ids, MADE_BY_WORKER), rules
+
+
+async def test_a_log_it_cannot_read_holds_nothing_back_for_long(tmp_path, home, monkeypatch):
+    """Review: a log it cannot read (no permission, or changing as it is read) was left for the
+    next round at every round, so what an earlier version decided was never decided again (one
+    the owner named "Batch: …" stayed hidden). Once a round reads nothing new, it is."""
+    store = Store(tmp_path / "data")
+    mine = home.add(prompt_mode(T0, "Summarize my notes", "/w"), T0, cwd="/w")
+    home.metas[-1].name = "Batch: notes for Monday"
+    record = {"as": "batch", "by": "", "why": "named", "named": True, "group": "n", "at": T0,
+              "rules": 2, "size": home.log_of(mine).stat().st_size}  # fmt: skip
+    store.set(f"made:{mine}", json.dumps(record))
+    locked = home.add(prompt_mode(T0 + 60, "Something else"), T0 + 60)
+    read_log = provenance.read_log
+    monkeypatch.setattr(
+        provenance,
+        "read_log",
+        lambda path, *a, **k: None if path == home.log_of(locked) else read_log(path, *a, **k),
+    )
+    deciding_ = deciding(store, home)
+    assert mine in await deciding_.made(home.metas, {}), "the first round: as it was"
+    assert deciding_.pending == 1
+    assert mine not in await deciding_.made(home.metas, {}), "nothing new read: decided again"
+    assert f"made:{mine}" not in store.items("made:")
+
+
+async def test_what_a_later_log_may_change_stays_as_it_was_until_it_is_read(
+    tmp_path, home, monkeypatch
+):
+    """E69: one an earlier version decided stays as it was while a log after it is left for
+    the next round: 0.1.45 kept one named a batch's (two of that name), the other, newer and
+    long, left by the round's bytes; alone, the first would be listed, then hidden again."""
+    store = Store(tmp_path / "data")
+    first = home.add(prompt_mode(T0, "Label ticket 1"), T0)
+    home.metas[-1].name = "batch: label the tickets"
+    size = home.log_of(first).stat().st_size
+    record = {"as": "batch", "by": "", "why": "named", "named": True, "group": "n", "at": T0,
+              "rules": 2, "size": size}  # fmt: skip
+    store.set(f"made:{first}", json.dumps(record))
+    second = home.add(prompt_mode(T0 + 60, f"Label ticket 2 {'x' * size}"), T0 + 60)
+    home.metas[-1].name = "batch: label the tickets"
+    monkeypatch.setattr(provenance, "ROUND_BYTES", size + 10)
+    deciding_ = deciding(store, home)
+    assert await deciding_.made(home.metas, {}) == {first: BATCH}
+    assert deciding_.pending == 1
+    monkeypatch.setattr(provenance, "ROUND_BYTES", 10 * size)
+    assert await deciding_.made(home.metas, {}) == {first: BATCH, second: BATCH}
+
+
+async def test_tidy_sessions_moves_nothing_decided_by_an_earlier_version_it_cannot_check(
+    tidy_home, home, monkeypatch, capsys
+):
+    """Review: with a log it could not read, tidy-sessions --apply moved sessions as an earlier
+    version decided them. What it decided again by these rules it moves; one still as an
+    earlier version decided it, while a log is not read, it leaves, and says why."""
+    batch = home.batch(12)
+    unreadable = home.add(prompt_mode(T0 + 9000, "Something else"), T0 + 9000)
+    aged(home)
+    with sqlite3.connect(tidy_home / "chiefofstaff.db") as db:
+        record = {"as": "batch", "by": "", "why": "batch", "group": "x", "at": T0 + 9000,
+                  "rules": 2, "size": home.log_of(unreadable).stat().st_size}  # fmt: skip
+        db.execute("INSERT INTO kv VALUES (?, ?)", (f"made:{unreadable}", json.dumps(record)))
+    read_log = provenance.read_log
+    monkeypatch.setattr(
+        provenance,
+        "read_log",
+        lambda path, *a, **k: None if path == home.log_of(unreadable) else read_log(path, *a, **k),
+    )
+    assert await tidy.run(tidy_home, apply=True, backend=Listing(home)) == 0
+    said = capsys.readouterr().out
+    assert "Moved 12 sessions" in said and "1 session not read" in said
+    assert "1 session decided by an earlier version, not checked again" in said
+    assert (home.root / "session-state" / unreadable).is_dir()
+    assert not any((home.root / "session-state" / key).exists() for key in batch)
+
+
+async def test_tidy_sessions_moves_nothing_it_could_not_check_with_every_log_read(
+    tidy_home, home, capsys
+):
+    """Review: one an earlier version decided whose log is gone (none waits to be read) is not
+    checked again by these rules either: left, and said."""
+    batch = home.batch(12)
+    gone = home.add(prompt_mode(T0 + 9000, "Something else"), T0 + 9000)
+    with sqlite3.connect(tidy_home / "chiefofstaff.db") as db:
+        record = {"as": "batch", "by": "", "why": "batch", "group": "x", "at": T0 + 9000,
+                  "rules": 2, "size": home.log_of(gone).stat().st_size}  # fmt: skip
+        db.execute("INSERT INTO kv VALUES (?, ?)", (f"made:{gone}", json.dumps(record)))
+    home.log_of(gone).unlink()
+    aged(home)
+    assert await tidy.run(tidy_home, apply=True, backend=Listing(home)) == 0
+    said = capsys.readouterr().out
+    assert "Moved 12 sessions" in said and "not read (it changed" not in said
+    assert "1 session decided by an earlier version, not checked again" in said
+    assert (home.root / "session-state" / gone).is_dir()
+    assert not any((home.root / "session-state" / key).exists() for key in batch)
 
 
 # The sidebar, the Router and learning, alike

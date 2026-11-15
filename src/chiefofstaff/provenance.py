@@ -13,8 +13,10 @@ one message of its own, never resumed, ended):
 
 - batch: at least HIDE_SIZE whose first messages start alike (their first PREFIX characters,
   whitespace collapsed, case folded), each a script's call (it ended as soon as it answered:
-  QUICK) begun within GAP of when those before it ended: a script's, whoever ran it, however
-  long each call takes; or two or more named alike as a batch's (`copilot -p --name "batch:
+  QUICK) begun within GAP of the start of the one before, or within NEXT of its end (a script
+  starts its next call at once, however long each takes): a script's, whoever ran it (one that
+  waits minutes between its calls is listed); or two or more named alike as a batch's
+  (`copilot -p --name "batch:
   <task>"`, as workers are told to: see named), whenever (one running now counts). A name
   alone is no batch: one so named is its worker's where a worker's command ran (below), else
   the owner's. The owner asks alike questions too (a review of each pull request, say), reads
@@ -105,14 +107,18 @@ ALIKE = "alike"
 
 # Alike: at least BATCH_SIZE one-shot sessions whose first PREFIX characters are the same, each a
 # script's call (it ended within QUICK seconds of its answer) begun within GAP seconds of the
-# end of the one before; a batch (left out) from HIDE_SIZE on. A script runs its calls one
-# after the other, by the dozen, each ending with its answer (`copilot -p` exits 0.01 to 0.02 s
-# after it: CLI 1.0.102 to 1.0.112, a call that ran a tool too), however long each takes; a
-# person reads an answer before closing the session, and asks alike questions a few at a time.
+# start of the one before, or within NEXT seconds of its end; a batch (left out) from HIDE_SIZE
+# on. A script runs its calls one after the other, by the dozen, each ending with its answer
+# (`copilot -p` exits 0.01 to 0.02 s after it: CLI 1.0.102 to 1.0.112, a call that ran a tool
+# too) and the next starting within a second or two, however long each takes; a person reads
+# an answer before closing the session, takes longer to start the next, and asks alike
+# questions a few at a time. A script that waits minutes between its calls is listed (named
+# `batch: …`, or run by a worker's command, it is not).
 BATCH_SIZE = 5
 HIDE_SIZE = 10
 PREFIX = 64
 GAP = 120.0
+NEXT = 30.0
 QUICK = 5.0
 # A batch is a worker's when it began within LEAD seconds of the command it ran in.
 LEAD = 10 * 60.0
@@ -545,8 +551,9 @@ def batches(
 ) -> dict[str, list[OneShot]]:
     """The one-shot sessions alike (see the module's docstring), each with the others it is
     alike with (in the order they began): at least `least` that ended with their answer (a
-    script's calls), each begun within `gap` of when those before it ended; or two or more
-    named alike as a batch's (`batch: <task>`, as workers name their calls), whenever."""
+    script's calls), each begun within `gap` of the start of the one before or within NEXT of
+    when those before it ended; or two or more named alike as a batch's (`batch: <task>`, as
+    workers name their calls), whenever."""
     alike: dict[str, list[OneShot]] = {}
     for shot in shots:
         alike.setdefault(shot.group, []).append(shot)
@@ -560,7 +567,7 @@ def batches(
         run: list[OneShot] = []
         last = 0.0  # When the run's calls so far ended.
         for shot in [*(member for member in members if member.quick), None]:
-            if shot is None or (run and shot.at - last > gap):
+            if shot is None or (run and shot.at - run[-1].at > gap and shot.at - last > NEXT):
                 if len(run) >= least:
                     found |= dict.fromkeys((member.session_id for member in run), run)
                 run, last = [], 0.0
@@ -633,9 +640,10 @@ def decide(
             elif shot.named and there:  # One named as its call is, where the command ran.
                 ties.append((0, w.start, n, w, kind))
         old = (kept or {}).get(shot.session_id) or {}
-        if not ties and scratch and "rules" not in old and old.get("why") == "batch":
+        if not ties and scratch and old.get("why") == "batch":
             # A batch of a worker's 0.1.43 found (alike, begun soon after its command), in a
-            # temporary folder, while that worker ran a command: as it was.
+            # temporary folder, while that worker ran a command: as it was (as 0.1.44 and 0.1.45
+            # kept it, with what they found so: the two cannot be told apart).
             ties = [
                 (0, w.start, n, w, "batch")
                 for _, n, w in running
@@ -773,6 +781,10 @@ class Look:
     sizes: dict[str, int | None]
     shapes: dict[str, Shape]
     pending: int = 0
+    # Some were left for the next round, that its reading may change what is decided: those the
+    # round's bytes did not reach, or, when it read anything new, those it could not read
+    # (once a round reads nothing new, they wait no more).
+    waiting: bool = False
 
 
 def current(record: dict) -> bool:
@@ -886,10 +898,10 @@ class Provenance:
                 if meta.session_id in open_now and (name := named(meta))
             ]
             found, due, alike = await asyncio.to_thread(self.choose, shots, earlier, records)
-            # Logs left for the next round: what an earlier version decided stays as it was
-            # until every log is read (one may be of a batch, or keep a worker's command
-            # running, read later), nor is any of those found the owner's settled meanwhile.
-            partial = look.pending > 0
+            # Logs left for the next round (see Look.waiting): what an earlier version decided
+            # stays as it was until they are read (one may be of a batch, or keep a worker's
+            # command running), nor is any of those found the owner's settled meanwhile.
+            partial = look.waiting
             for shot in due:
                 record = found.get(shot.session_id)
                 if record and record["as"] != ALIKE:
@@ -998,7 +1010,7 @@ class Provenance:
         before it)."""
         sizes: dict[str, int | None] = {}
         shapes: dict[str, Shape] = {}
-        left, pending, full = ROUND_BYTES, 0, False
+        left, pending, full, failed, new = ROUND_BYTES, 0, False, False, False
         for key, path in paths.items():
             now = identity(path) if path else None
             record = records.get(key)
@@ -1022,12 +1034,13 @@ class Provenance:
                 log = read_log(path, SHAPE_MOST) if path else None
                 left -= now[2]
                 if log is None or identity(path) != now:  # type: ignore[arg-type]
-                    pending += 1
-                    continue  # Changed while read: read again next round.
+                    pending, failed = pending + 1, True
+                    continue  # Could not be read, or changed while read: next round again.
                 found = shape(log)
+                new = True
             self.shapes[key] = (now, found)
             shapes[key] = found
-        return Look(sizes, shapes, pending)
+        return Look(sizes, shapes, pending, full or (failed and new))
 
     async def talks(self, session_ids: Iterable[str]) -> dict[str, bool]:
         """Whether someone talked in each of these sessions (two messages of its own, or it was
