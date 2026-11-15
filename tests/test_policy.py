@@ -198,6 +198,45 @@ BYPASSES = [
     'read PWD <<< ../other; git -C "$PWD" push',
     'PWD=/x; PWD=/other; git -C "$PWD" push',
     'cd src && git -C "$(git rev-parse --show-toplevel)/../other" push',
+    # QA on 0.1.45 (E64): a whole substitution is the checkout's branch only when it asks git
+    # for it (`git branch --show-current` and the like); any other is not known, in a
+    # variable too.
+    "git push origin $(printf HEAD:ma; printf in)",
+    "git push origin $(cat branch.txt)",
+    "git push origin $(git symbolic-ref --short refs/remotes/origin/HEAD | cut -d/ -f2)",
+    "DEFAULT=$(git rev-parse --abbrev-ref origin/HEAD | cut -d/ -f2); git push origin $DEFAULT",
+    'git push origin "$(git branch --show-current | sed s/x/main/)"',
+    "git push origin `git rev-parse --abbrev-ref origin/HEAD`",
+    "git push origin HEAD:$(git config init.defaultBranch)",
+    # (E65) `:` pushes every branch of the same name on both sides, as `--all` would.
+    "git push origin :",
+    'git push origin ":"',
+    "git push origin +:",
+    "git -c remote.origin.push=: push origin",
+    # (E66) Configuration a line sets before its push; configuration on the command line or in
+    # git's own variables that names other files.
+    "git config remote.origin.push HEAD:main && git push",
+    "git config --global push.default matching; git push",
+    "git config --unset push.default && git push",
+    "git config set push.default matching && git push",
+    "git -c remote.origin.mirror=true push origin",
+    "git -c include.path=push.cfg push",
+    "GIT_CONFIG_GLOBAL=push.cfg git push",
+    "git -c push.default=upstream -c branch.wb/x.merge=refs/heads/main push",
+    # (E68) Pushes by other commands: subtree, send-pack, an alias git config sets, a git whose
+    # name a variable or a substitution holds.
+    "git subtree push --prefix=docs origin main",
+    "git subtree -P docs push origin HEAD:main",
+    "git send-pack ../origin.git main",
+    "git send-pack ../origin.git",
+    "git send-pack --all ../origin.git",
+    "git config alias.p push && git p origin main",
+    "git config --global alias.p '!git push' && git p origin main",
+    "git config --file .git/config alias.p push; git p origin main",
+    "g=git; $g push origin main",
+    "$(echo git) push origin main",
+    "env $G push origin main",
+    "`which git` push origin wb/x",
 ]
 # What a worker does every day, on its own branch: let through.
 EVERYDAY = [
@@ -243,6 +282,19 @@ EVERYDAY = [
     "git push -o ci.skip -u origin HEAD",
     'D=src; cd "$D" && git push',
     'git push origin "$SOURCE:wb/x"',
+    # QA on 0.1.45 (E64, E66, E68): what asks git for the checkout's branch, as a variable too;
+    # configuration read or set that says nothing of pushes; subtree and send-pack naming
+    # their branch.
+    'git push origin "$(git symbolic-ref --short HEAD)"',
+    'git push origin "$(git symbolic-ref -q --short HEAD)"',
+    "git push -u origin HEAD:$(git branch --show-current)",
+    "git push origin HEAD:refs/heads/`git branch --show-current`",
+    'B=`git rev-parse --abbrev-ref HEAD`; git push -u origin "$B"',
+    "git config user.name t && git push origin wb/x",
+    "git config --get push.default; git push",
+    "git config push.autoSetupRemote true && git push",
+    "git subtree push --prefix=docs origin wb/x",
+    "git send-pack ../origin.git wb/x",
 ]
 # On a checkout of main itself: pushes that update no branch, or one the line made.
 ON_MAIN_ALLOWED = [
@@ -266,6 +318,15 @@ ON_MAIN_ALLOWED = [
     "git checkout main && git switch -c fix && git push -u origin HEAD",
     "git push --no-dry-run -n origin",
     "git push origin --tags 2>&1 | tail -3",
+    # QA on 0.1.45 (E67): a switch to a branch, or a checkout of one the repository has (asked
+    # of git), joined to the push by `&&`: the push is that branch's, whatever came before.
+    "git switch wb/fix && git push",
+    "git switch feature/x && git push",
+    "git checkout feature/x && git push",
+    "git switch main && git pull && git switch feature/x && git push",
+    "git checkout main && git pull && git checkout feature/x && git push",
+    "git checkout - && git switch -q feature/x && git push -u origin HEAD",
+    "git switch -c fix && git checkout README.md && git push -u origin HEAD",
 ]
 ON_MAIN_REFUSED = [
     "git push",
@@ -290,7 +351,6 @@ ON_MAIN_REFUSED = [
     "git switch -c wb/fix; git push -u origin HEAD",
     "git switch -c wb/fix\ngit commit -am 'Fix it'\ngit push -u origin HEAD",
     "git checkout -b wb/fix || true; git push -u origin HEAD",
-    "git switch wb/fix && git push",
     "git push origin $(git branch --show-current)",
     'git push origin "$(git branch --show-current)"',
     "git push origin `git branch --show-current`",
@@ -309,9 +369,30 @@ ON_MAIN_REFUSED = [
     "B=feat; un\\set B; git push origin $B",
     "sh -c 'echo x > log; git push'",
     "eval 'echo x > log; git push'",
+    # QA on 0.1.45 (E67): a checkout or switch that may not have run (`;`), may not switch (a
+    # file, `-p`, `--detach`, a tree's files), or is not read: where it went, not known.
+    "git checkout feature/x; git push",
+    "git switch feature/x || true; git push",
+    "git checkout README.md && git push",
+    "git checkout -p feature/x && git push",
+    "git switch --detach feature/x && git push",
+    "git checkout feature/x src && git push",
+    "git checkout src && git push",
+    "git branch -D feature/x && git checkout feature/x && git push",
+    "git switch $B && git push",
 ]
 # v0.1.42 refused these as pushes to the default branch, wrongly; still refused (never less).
 OLD_FALSE_POSITIVES: set[str] = set()
+
+
+@pytest.fixture(autouse=True)
+def own_configuration(monkeypatch, tmp_path_factory):
+    """git's configuration here is each repository's own: the user's or the system's push
+    settings would say where a push naming no branch goes (QA on 0.1.45, E66)."""
+    empty = tmp_path_factory.getbasetemp() / "gitconfig"
+    empty.touch()
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(empty))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
 
 
 def checkout(path, branch: str):
@@ -321,6 +402,9 @@ def checkout(path, branch: str):
     git = ["git", "-C", str(path), "-c", "user.email=t@t", "-c", "user.name=t"]
     subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "start"], check=True)
     subprocess.run([*git, "remote", "add", "origin", str(remote)], check=True)
+    # Other local branches, as a worktree shares its repository's (QA on 0.1.45, E67).
+    for other in {"main", "feature/x"} - {branch}:
+        subprocess.run([*git, "branch", other], check=True)
     for folder in ("src", "docs"):
         (path / folder).mkdir()
     return path
@@ -421,19 +505,19 @@ def test_v0142s_rule_stays_a_floor_under_the_reading(monkeypatch, feature):
 def work(monkeypatch):
     """How often the reading parses a command line and asks git (not how long it takes)."""
     counted = {"parse": 0, "git": 0}
-    parse, run = policy.shell_commands, policy.subprocess.run
+    parse, start = policy.shell_commands, policy.subprocess.Popen
 
     def parsing(text):
         counted["parse"] += 1
         return parse(text)
 
-    def running(command, *args, **kwargs):
+    def starting(command, *args, **kwargs):  # (Every git run: subprocess.run starts one too.)
         if command[:1] == ["git"]:
             counted["git"] += 1
-        return run(command, *args, **kwargs)
+        return start(command, *args, **kwargs)
 
     monkeypatch.setattr(policy, "shell_commands", parsing)
-    monkeypatch.setattr(policy.subprocess, "run", running)
+    monkeypatch.setattr(policy.subprocess, "Popen", starting)
     policy.reading.cache_clear()
     yield counted
     policy.reading.cache_clear()
@@ -465,21 +549,21 @@ def test_evals_within_what_is_read_are_read_once_each(work, feature):
     assert denial("eval " * 5 + "git push origin wb/x", feature) is None
     assert work["parse"] == 6 and work["git"] == 0
     assert denial("eval " * 5 + "git push", feature) is None
-    assert work["git"] == 2, "its folder's branch and where it pushes, once"
+    assert work["git"] == 3, "its folder's branch, where it pushes and git's configuration, once"
 
 
 def test_the_same_push_many_times_asks_git_once(work, main_checkout, feature):
     assert denial("git push; " * 2000, feature) is None
-    assert work["parse"] == 1 and work["git"] == 2
+    assert work["parse"] == 1 and work["git"] == 3
     work["git"] = 0
     assert denial("git push && git push -u origin HEAD && git push origin @", feature) is None
-    assert work["git"] == 2, "three pushes of one folder: its branch asked once"
+    assert work["git"] == 3, "three pushes of one folder: its branch asked once"
     found = denial("eval git push; " * 300, main_checkout)
-    assert found and "default branch" in found and work["git"] == 4
+    assert found and "default branch" in found and work["git"] == 6
 
 
 def test_a_line_the_shell_would_not_parse_is_read_loosely_in_one_pass(work, feature, main_checkout):
-    assert denial("git push 'oops", feature) is None and work["git"] == 2
+    assert denial("git push 'oops", feature) is None and work["git"] == 3
     assert denial("git push 'oops", main_checkout), "a bare push: its folder's branch, asked"
     assert denial("git push origin HEAD:main 'oops", feature)
     found, took = timed("git x " * 30_000 + "push origin main 'oops", feature)
@@ -496,7 +580,7 @@ def test_a_long_git_add_is_let_through_at_once(paths, work, feature):
 def test_a_long_line_that_pushes_is_read_in_one_pass(work, feature):
     command = "git add " + " ".join(f"f{i}.py" for i in range(10_000)) + " && git push"
     found, took = timed(command, feature)
-    assert found is None and work["parse"] == 1 and work["git"] == 2 and took < 0.5
+    assert found is None and work["parse"] == 1 and work["git"] == 3 and took < 0.5
 
 
 @pytest.mark.parametrize(
@@ -559,6 +643,18 @@ def test_a_line_too_much_to_read_that_pushes_is_refused_saying_why(command, work
         "push; " + "sh -c '" * 20_000,
         "push " + "bash <(" * 30_000,
         "push " + "git branch -m " * 30_000 + "main | bash",
+        # QA on 0.1.45: switches and checkouts of local branches, configuration set, subtree,
+        # send-pack, the checkout's branch asked of git, a command in a variable.
+        "git checkout a && git push && " * 8_000 + "git push",
+        "git switch a && " * 20_000 + "git push",
+        "B=$(git branch --show-current); cd x; " * 5_000 + "git push origin $B",
+        "git config alias.p push; " * 10_000 + "git p",
+        "git config remote.origin.push x; " * 10_000 + "git push",
+        "git subtree push -P x origin wb/x; " * 8_000,
+        "git send-pack x wb/x " * 20_000,
+        "$G push; " * 30_000,
+        "git push origin : " * 30_000,
+        "git push origin $(git branch --show-current) " * 4_000,
     ],
 )
 def test_no_line_is_slow_to_check(command, feature):
@@ -608,7 +704,9 @@ RULE_WORDS = {
         "git push ",
         ["git", "push", "origin", "main", "-f", "+", ":", "$(", "`", '"', "'", "\\", "\n", ";",
          "&&", "|", "<<EOF", "EOF", "eval", "sh -c", "cd", "-C", "B=x", "$B", "for b in", "do",
-         "checkout -b", "#", "((", "))", " "],
+         "checkout -b", "#", "((", "))", " ", "switch", "checkout", "-q", "subtree", "send-pack",
+         "config", "alias.p", "$(git branch --show-current)", "`git branch --show-current`",
+         "$G", "HEAD:", "--global"],
     ),
     "merging, closing or commenting on PRs as the owner": ("", ["gh", "pr", "merge", " ", "\t"]),
     "changing issues as the owner": ("", ["gh", "issue", "close", " "]),
@@ -726,7 +824,8 @@ FUZZ = ["git", "push", "origin", "main", "wb/x", "-f", "+x", ":main", " ", " ", 
         "-f", "sudo", "\r", "é", "${B}", "*", "checkout", "-b", "switch", "-c", "2>&1",
         ">/dev/null", "HEAD", "--tags", "-n", "alias.p=push", "-P", "env", "-iC", "pushd",
         "popd", "set -P", "setopt chase_dots", "alias g=", "find", "-exec", "{}", "=git",
-        "shopt -s expand_aliases", ".."]  # fmt: skip
+        "shopt -s expand_aliases", "..", "subtree", "send-pack", "config", ":", "$G", "-q",
+        "$(git branch --show-current)", "--global", "alias.p"]  # fmt: skip
 
 
 @pytest.mark.parametrize("seed", range(4))
@@ -734,6 +833,7 @@ def test_every_line_gets_a_decision_never_less_than_v0142s(seed, monkeypatch, fe
     import random
 
     monkeypatch.setattr(policy, "current_branches", lambda folder: {"wb/x"})
+    monkeypatch.setattr(policy, "config_entries", lambda folder: [])
     chance = random.Random(seed)  # noqa: S311  (a fixed sample, not a secret)
     for _ in range(1500):
         command = "".join(chance.choices(FUZZ, k=chance.randint(0, 40)))
@@ -748,6 +848,7 @@ def test_a_giant_line_gets_a_decision_in_time(seed, monkeypatch, feature):
     import random
 
     monkeypatch.setattr(policy, "current_branches", lambda folder: {"wb/x"})
+    monkeypatch.setattr(policy, "config_entries", lambda folder: [])
     chance = random.Random(seed)  # noqa: S311  (a fixed sample, not a secret)
     words = chance.choices(FUZZ, k=40)
     command = "".join(words) * (450_000 // len("".join(words)))
@@ -1218,7 +1319,37 @@ NORMAL = [
     "printf '%s\\n' a b | xargs -n1 echo && git push origin wb/x",
     "git log --oneline | head -5; git push origin wb/x",
     "cat <<'EOF' > notes.md\nWe push through PRs.\nEOF\ngit push origin wb/x",
+    # QA on 0.1.45 (E67): back on a branch of its own after updating main (feature/x is a local
+    # branch of both checkouts here), as v0.1.43 let it through.
+    "git checkout main && git pull && git checkout feature/x && git push",
+    "git switch main && git pull && git switch feature/x && git push",
+    "git switch feature/x && git push",
+    # (E64) What asks git for the checkout's branch pushes that branch (on main: as a push
+    # naming none); what asks for anything else is not known.
+    'git push origin "$(git symbolic-ref --short HEAD)"',
+    "git push -u origin HEAD:$(git branch --show-current)",
+    'B=`git branch --show-current` && git push -u origin "$B"',
+    "git push origin $(git symbolic-ref --short refs/remotes/origin/HEAD | cut -d/ -f2)",
+    "DEFAULT=$(git rev-parse --abbrev-ref origin/HEAD | cut -d/ -f2); git push origin $DEFAULT",
+    # (E66, E68) Configuration read or set, and the other commands that push.
+    "git config --get push.default && git push origin wb/x",
+    "git config remote.origin.push HEAD:main && git push",
+    "git subtree push --prefix=docs origin wb/x",
+    "git subtree push --prefix=docs origin main",
+    "git send-pack ../origin.git main",
+    "git config alias.p push && git p origin main",
 ]
+
+# Pushes v0.1.42 let through, unread, from any checkout, though they may update the default
+# branch: bypasses refused since (QA on 0.1.45: E64, E66, E68).
+INTENDED = {
+    "git push origin $(git symbolic-ref --short refs/remotes/origin/HEAD | cut -d/ -f2)",
+    "DEFAULT=$(git rev-parse --abbrev-ref origin/HEAD | cut -d/ -f2); git push origin $DEFAULT",
+    "git config remote.origin.push HEAD:main && git push",
+    "git subtree push --prefix=docs origin main",
+    "git send-pack ../origin.git main",
+    "git config alias.p push && git p origin main",
+}
 
 # On a checkout of main, a push of the checkout's own branch (naming none, HEAD, or what
 # `git branch --show-current` says) pushes main: v0.1.42 let these through, unread.
@@ -1251,16 +1382,19 @@ INTENDED_ON_MAIN = {
     "pushd frontend && npm test && popd && git push", "cd frontend; npm test; cd -; git push",
     'export NVM_DIR="$HOME/.nvm"; [ -s "$NVM_DIR/nvm.sh" ] && \\. "$NVM_DIR/nvm.sh"; '
     "npm test && git push -u origin HEAD",
+    'git push origin "$(git symbolic-ref --short HEAD)"',
+    "git push -u origin HEAD:$(git branch --show-current)",
+    'B=`git branch --show-current` && git push -u origin "$B"',
 }  # fmt: skip
 
 
 def test_the_normal_corpus_is_large():
-    assert len(set(NORMAL)) >= 250 and set(NORMAL) >= INTENDED_ON_MAIN
+    assert len(set(NORMAL)) >= 250 and set(NORMAL) >= INTENDED_ON_MAIN | INTENDED
 
 
 @pytest.mark.parametrize("command", NORMAL)
 def test_normal_work_gets_v0142s_decision(command, feature, main_checkout):
-    old = bool(old_denial(command))
+    old = bool(old_denial(command)) or command in INTENDED
     assert bool(denial(command, feature)) == old, command
     assert bool(denial(command, main_checkout)) == (old or command in INTENDED_ON_MAIN), command
 
@@ -1337,6 +1471,7 @@ def test_what_variables_make_counts_in_one_budget(command, monkeypatch, feature)
     values split into many words: what they make is counted, and past a budget the line is
     refused as too complex, the work bounded by the line's own words."""
     monkeypatch.setattr(policy, "current_branches", lambda folder: {"wb/x"})
+    monkeypatch.setattr(policy, "config_entries", lambda folder: [])
     resolving, resolve = [], policy.resolved
     monkeypatch.setattr(policy, "resolved", lambda *a: resolving.append(1) or resolve(*a))
     found, took = timed(command, feature)
@@ -1454,8 +1589,8 @@ def test_what_the_check_lets_through_pushes_nothing_to_main_in_real_bash(shell, 
     cases += [(line, start) for line in oracle.seeds() for start in ("main", "feat")]
     cases += oracle.FOUND + (oracle.FOUND_ZSH if shell == "zsh" else [])
     outcomes = oracle.run(policy, cases, tmp_path, shell=shell)
-    unsound = [(outcome.start, outcome.line, sorted(outcome.targets)) for outcome in outcomes
-               if outcome.unsound]  # fmt: skip
+    unsound = [(outcome.start, outcome.preset, outcome.line, sorted(outcome.targets))
+               for outcome in outcomes if outcome.unsound]  # fmt: skip
     allowed = sum(outcome.allowed for outcome in outcomes)
     with capsys.disabled():
         refused = len(outcomes) - allowed
@@ -1822,3 +1957,238 @@ def test_code_a_line_runs_makes_its_variables_unknown_text_does_not(command, all
     found = denial(command, feature)
     assert (found is None) is allowed, found
     assert allowed or "can't tell which branch" in (found or "")
+
+
+# QA on 0.1.45 (E64 to E68).
+
+
+@pytest.mark.parametrize(
+    ("command", "cwd", "reason"),
+    [
+        # (E64) A whole substitution that asks anything but the checkout's branch.
+        ("git push origin $(printf HEAD:ma; printf in)", "feature", "can't tell which branch"),
+        ("git push origin $(cat branch.txt)", "feature", "can't tell which branch"),
+        ("DEFAULT=$(git rev-parse --abbrev-ref origin/HEAD | cut -d/ -f2); "
+         "git push origin $DEFAULT", "feature", "can't tell which branch"),
+        ('git push origin "$(git symbolic-ref --short HEAD)"', "main",
+         "push to the default branch"),
+        # (E65) Every branch of the same name on both sides.
+        ("git push origin :", "feature", "push to the default branch"),
+        # (E67) Several branches only because of a switch before it: not known which.
+        ("git checkout feature/x; git push", "main", "can't tell which branch"),
+        ("git switch main; git push", "feature", "can't tell which branch"),
+        ("git checkout main && git push", "feature", "push to the default branch"),
+        ("git switch feature/x && git switch main && git push", "feature",
+         "push to the default branch"),
+        # (E66, E68) A line that sets push configuration or an alias; a command in a variable.
+        ("git config remote.origin.push HEAD:main && git push", "feature",
+         "can't tell which branch"),
+        ("git config alias.p push && git p origin main", "feature", "can't tell which branch"),
+        ("g=git; $g push origin main", "feature", "can't tell which branch"),
+        ("git subtree push --prefix=docs origin main", "feature", "push to the default branch"),
+        ("git send-pack ../origin.git", "feature", "push to the default branch"),
+    ],
+)  # fmt: skip
+def test_qa_on_0145_a_refusal_says_why(command, cwd, reason, feature, main_checkout):
+    found = denial(command, feature if cwd == "feature" else main_checkout) or ""
+    assert reason in found, (command, found)
+    assert reason == "push to the default branch" or "default branch" not in found
+
+
+def test_a_branch_put_in_a_variable_is_the_one_it_was_then(tmp_path):
+    """QA on 0.1.45 (E64): `$(git branch --show-current)` in a variable is the branch when it
+    was set: after a `cd` or a switch, which branch that was is not known."""
+    other = checkout(tmp_path / "main", "main")
+    work = checkout(tmp_path / "work", "wb/x")
+    assert denial('B=$(git branch --show-current); git push origin "$B"', work) is None
+    for command in (
+        f'cd {other}; B=$(git branch --show-current); cd {work} && git push origin "$B"',
+        'git switch main; B=$(git branch --show-current); git switch wb/x && git push origin "$B"',
+        'B=$(git branch --show-current); git switch main && git push origin "$B"',
+        'git switch main; B=$(git branch --show-current); (git switch wb/x); git push origin "$B"',
+    ):
+        assert denial(command, work), command
+
+
+def configured(path, settings: list[tuple[str, str]]):
+    found = checkout(path, "wb/x")
+    for key, value in settings:
+        subprocess.run(["git", "-C", str(found), "config", "--add", key, value], check=True)
+    return found
+
+
+@pytest.mark.parametrize(
+    ("settings", "command"),
+    [
+        ([("push.default", "matching")], "git push"),
+        ([("push.default", "matching")], "git switch -c fix && git push"),
+        ([("push.default", "matching")], "git push origin"),
+        ([("remote.origin.push", "HEAD:main")], "git push"),
+        ([("remote.origin.push", "HEAD:main")], "git switch feature/x && git push"),
+        ([("remote.origin.push", "refs/heads/wb/x:refs/heads/main")],
+         'git push origin "$(git branch --show-current)"'),
+        ([("remote.origin.push", ":")], "git push"),
+        ([("remote.origin.push", "+refs/heads/*:refs/heads/*")], "git push"),
+        ([("remote.other.push", "HEAD:master")], "git push"),
+        ([("remote.origin.mirror", "true")], "git push origin"),
+        ([("push.default", "upstream"), ("branch.wb/x.merge", "refs/heads/main")], "git push"),
+        ([("push.default", "tracking"), ("branch.wb/x.merge", "refs/heads/main")],
+         "git push origin $(git branch --show-current)"),
+        ([("push.default", "upstream"), ("branch.feature/x.merge", "refs/heads/main")],
+         "git switch feature/x && git push"),
+        ([("push.default", "upstream")], "git branch -u origin/main && git push"),
+        ([("push.default", "upstream")], "git checkout -b fix origin/main && git push"),
+        ([("push.default", "bogus")], "git push"),
+        ([("includeIf.onbranch:feature/*.path", "push.cfg")], "git switch feature/x && git push"),
+    ],
+)  # fmt: skip
+def test_where_gits_configuration_sends_a_bare_push_is_read(settings, command, tmp_path):
+    """QA on 0.1.45 (E66): `push.default=matching`, a remote's push refspecs or mirror, the
+    upstream a branch pushes to, in the repository's configuration, sent a push naming no
+    branch to main; read from git now (once a folder), and not known where it can't be."""
+    work = configured(tmp_path / "repo", settings)
+    assert denial(command, work), command
+
+
+@pytest.mark.parametrize(
+    ("settings", "command"),
+    [
+        ([("remote.origin.push", "HEAD:main")], "git push origin HEAD"),
+        ([("remote.origin.push", "HEAD:main")], "git push origin wb/x"),
+        ([("remote.origin.push", "HEAD:wb/x")], "git push"),
+        ([("push.default", "matching")], "git push origin wb/x"),
+        ([("push.default", "matching")], "git push -u origin HEAD"),
+        ([("push.default", "current")], "git push"),
+        ([("push.default", "nothing")], "git push"),
+        ([("push.default", "upstream"), ("branch.wb/x.merge", "refs/heads/wb/x")], "git push"),
+        ([("push.default", "simple"), ("branch.wb/x.merge", "refs/heads/main")], "git push"),
+        ([("remote.origin.mirror", "false")], "git push"),
+        ([("remote.origin.push", "^refs/heads/main")], "git push"),
+    ],
+)  # fmt: skip
+def test_configuration_that_pushes_the_checkouts_own_branch_lets_it_through(
+    settings, command, tmp_path
+):
+    work = configured(tmp_path / "repo", settings)
+    assert denial(command, work) is None, command
+
+
+def test_global_configuration_is_read_and_unreadable_is_not_known(tmp_path, monkeypatch, feature):
+    """QA on 0.1.45 (E66): the user's own configuration counts as the repository's; one git
+    can't read leaves where a bare push goes not known."""
+    settings = tmp_path / "gitconfig"
+    settings.write_text("[push]\n\tdefault = matching\n")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(settings))
+    assert "default branch" in (denial("git push", feature) or "")
+    assert denial("git push origin wb/x", feature) is None
+    settings.write_text("[push\n")
+    assert "can't tell which branch" in (denial("git push", feature) or "")
+    monkeypatch.delenv("GIT_CONFIG_GLOBAL")
+    monkeypatch.setattr(policy, "config_entries", lambda folder: None)
+    assert "can't tell which branch" in (denial("git push", feature) or "")
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git config remote.origin.push HEAD:main && git push",
+        "git config --global push.default matching\ngit push",
+        "git config --local --add remote.origin.push HEAD:main; git push origin",
+        "git config --unset-all remote.origin.push && git push",
+        "git config --replace-all push.default matching && git push",
+        "git config --remove-section remote.origin; git push",
+        "git config --rename-section remote.x remote.origin; git push",
+        "git config branch.wb/x.merge refs/heads/main && git push",
+        "git config set --global push.default matching && git push",
+        "git config unset push.default && git push",
+        "git config --edit && git push",
+        "git config $K $V && git push",
+        "git config include.path ../push.cfg && git push",
+        "git config --global alias.p push",
+        "git config alias.p '!git' && git p push origin main",
+        "git push && git config remote.origin.push HEAD:main",
+    ],
+)
+def test_a_line_that_sets_push_configuration_cant_tell_where_it_pushes(command, feature):
+    """QA on 0.1.45 (E66, E68): `git config` setting where pushes go (or an alias, on a line
+    that says push) anywhere in the line: which branch a push updates is not known."""
+    assert "can't tell which branch" in (denial(command, feature) or ""), command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git config user.email && git push",
+        "git config --get remote.origin.push && git push origin wb/x",
+        "git config --get-regexp '^push' && git push",
+        "git config -l | grep push && git push",
+        "git config list && git push",
+        "git config get push.default && git push",
+        "git config user.name 'Push Bot' && git push origin wb/x",
+        "git config --global core.editor vim && git push",
+        "git config push.autoSetupRemote true && git push",
+        "git config alias.st status && git st",
+    ],
+)
+def test_configuration_read_or_said_of_other_things_lets_a_push_through(command, feature):
+    assert denial(command, feature) is None, command
+
+
+def test_a_checkout_switches_only_to_a_branch_git_has(tmp_path):
+    """QA on 0.1.45 (E67): `git checkout NAME` puts the checkout on NAME only when NAME is a
+    local branch (asked of git); a file or a folder of that name, or a branch the line deletes
+    first, leaves it where it was."""
+    main = checkout(tmp_path / "repo", "main")
+    git = ["git", "-C", str(main), "-c", "user.email=t@t", "-c", "user.name=t"]
+    (main / "notes").write_text("x\n")
+    subprocess.run([*git, "add", "notes"], check=True)
+    subprocess.run([*git, "commit", "-qm", "notes"], check=True)
+    subprocess.run([*git, "branch", "notes"], check=True)
+    subprocess.run([*git, "branch", "src"], check=True)
+    assert denial("git checkout feature/x && git push", main) is None
+    for command in (
+        "git checkout notes && git push",
+        "git checkout src && git push",
+        "git branch -D feature/x && git checkout feature/x && git push",
+        "git branch -m feature/x old && git checkout feature/x && git push",
+        "git update-ref -d refs/heads/feature/x && git checkout feature/x && git push",
+        "git checkout nope && git push",
+    ):
+        found = denial(command, main) or ""
+        assert "can't tell which branch" in found, command
+
+
+def test_what_a_checkout_asks_of_git_is_asked_once_a_folder(work, main_checkout):
+    command = " && ".join(f"git checkout a{i} && git push" for i in range(40))
+    assert denial(command, main_checkout)
+    assert work["git"] <= 4, work
+
+
+@pytest.mark.parametrize(
+    ("words", "read"),
+    [
+        (["checkout", "feature/x"], ("branch?", "feature/x")),
+        (["checkout", "-q", "feature/x"], ("branch?", "feature/x")),
+        (["switch", "feature/x"], ("switched", "feature/x")),
+        (["switch", "--no-guess", "-f", "feature/x"], ("switched", "feature/x")),
+        (["switch", "--detach", "feature/x"], ("to", "feature/x")),
+        (["checkout", "-p", "feature/x"], ("to", "feature/x")),
+        (["checkout", "feature/x", "src"], ("to", "feature/x")),
+        (["switch", "-fd", "feature/x"], ("to", "feature/x")),
+        (["switch", "$B"], ("to", "$B")),
+        (["checkout", "-b", "fix"], ("new", "fix")),
+        (["checkout", "--", "src"], None),
+    ],
+)
+def test_a_switch_names_the_branch_it_goes_to(words, read):
+    assert policy.switch_of(words) == read
+
+
+def test_what_git_says_is_read_so_far_at_most(feature):
+    """QA on 0.1.45 (E66, G3): git's configuration is read with one call a folder, at most so
+    many bytes of it; more, or a git that can't be run, is not known."""
+    code, said = policy.git_output(["-C", str(feature), "rev-parse", "--abbrev-ref", "HEAD"], 64)
+    assert (code, said) == (0, b"wb/x\n")
+    assert policy.git_output(["-C", str(feature), "rev-parse", "--abbrev-ref", "HEAD"], 3) is None
+    assert policy.git_output(["-C", "a\x00b", "status"], 64) is None
+    assert policy.config_entries(str(feature)) == []

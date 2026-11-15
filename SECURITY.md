@@ -183,7 +183,11 @@ the checks you approved run.
   `while read l; do bash -c "$l"; done`), code in `trap '…'`, a script the line writes to a file
   and then runs (`… > s.sh && bash s.sh`), other interpreters (`python3 -c`, `perl -e`,
   `node -e`), and a script fed to a shell on a line that does not say push (`base64 -d | bash`,
-  GNU `parallel` with no command). Protect your default branch on the server too.
+  GNU `parallel` with no command). Nor is git configuration a line changes other than with
+  `git config`, `-c` or `GIT_CONFIG_*` (a file it writes, `HOME=…`), an alias already in your
+  configuration, or configuration that sends a branch the line names to another one
+  (`git push origin feat` with `push.default=upstream`, or a `refs/heads/feat:refs/heads/main`
+  push refspec). Protect your default branch on the server too.
 - Unsandboxed commands run as you: they can reach whatever your account can, including
   keychain items that do not ask for a password.
 - The sandbox does not confine Copilot's built-in file edits as strictly as shell commands

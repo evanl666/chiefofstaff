@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased
+
+Pushes to the default branch that got past *Ask first* in 0.1.45 are refused, and a switch back
+to a branch of its own before a push is let through again (QA on 0.1.45).
+
+- **A push to a branch a command makes up is refused**, saying it can't tell which branch (name
+  the branch itself). Only `$(git branch --show-current)`, `$(git rev-parse --abbrev-ref HEAD)`
+  and `$(git symbolic-ref --short HEAD)` (with `-q`, in backquotes, after `HEAD:`, or in a
+  variable the line sets) count as the checkout's branch; `git push origin $(cat branch.txt)`,
+  `$(printf HEAD:ma; printf in)` or the default branch's name read from `origin/HEAD` pushed to
+  `main`. A variable holds the branch it was set to: after a `cd` or a switch, which one that
+  was is not known (E64).
+- **`git push origin :`** pushes every branch that has the same name on both sides, as `--all`
+  does: refused (E65).
+- **Where git's configuration sends a push naming no branch is read**: `push.default=matching`,
+  a remote's push refspecs (`remote.origin.push=HEAD:main`) or mirror, and a branch's upstream
+  with `push.default=upstream`, in the repository's configuration or your own. A push that goes
+  to `main` or `master` that way is refused, and one where git can't read its configuration
+  can't tell which branch. So can a line that sets them (`git config remote.origin.push …`,
+  `--unset`, `--global`; also `-c remote.origin.mirror=…`, `-c include.path=…`,
+  `GIT_CONFIG_GLOBAL=…`) (E66).
+- **Back on a branch of its own after updating main, a push is let through again**, as in
+  0.1.43: `git checkout main && git pull && git checkout feature/x && git push`, the same with
+  `git switch`, and `git switch feature/x && git push` on `main`. A `git switch` to a branch,
+  or a `git checkout` of a branch the repository has (asked of git; not a file of that name),
+  joined to the push by `&&`, is where it pushes from. A push that may be on several branches
+  only because of a switch before it is refused as "can't tell which branch", not as a push to
+  the default branch (E67).
+- **Other ways to push are read**: `git subtree push` and `git send-pack` (with no branch named,
+  every branch of the same name on both sides), an alias that `git config` sets on a line that
+  says push, and a command whose name a variable or a substitution holds on such a line
+  (`g=git; $g push origin main`) (E68).
+- A long line of aliases (or of shells given `-c`) on a line that says push took time growing
+  with its square to check; it is read in one pass.
+
 ## 0.1.45 (2026-11-14)
 
 Workers can run on Codex, with your own Codex sign-in (off by default); more pushes to the
