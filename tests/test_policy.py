@@ -262,6 +262,7 @@ BYPASSES = [
     'git config --global remote.origin.mirror true | git push origin\necho "x',
     'alias g=git\ng push origin HEAD:refs/heads/$(git rev-parse --abbrev-ref HEAD)\necho "x',
     'G=$(printf gi)t\n$G push origin main\necho "x',
+    ': <(env -vC ../main git push origin)\necho "x',
 ]
 # What a worker does every day, on its own branch: let through.
 EVERYDAY = [
@@ -1910,6 +1911,8 @@ FED = [
     "emulate sh -c \"bash <<< 'git push'\"", "echo 'git push' | env -i PATH=/bin bash",
     "echo 'git push' | bash -o errexit", "echo 'git push' | su - root",
     "echo 'git push' | bash\necho \"x", "env -S bash <(echo 'git push')",
+    # Found by a zsh 200k run: the file of a process substitution `eval` is given, for a shell.
+    "eval zsh -f <(echo 'git push origin main')", "eval 'x;' bash <(echo 'git push')",
 ]  # fmt: skip
 
 
@@ -2072,6 +2075,7 @@ def configured(path, settings: list[tuple[str, str]]):
         ([("push.default", "upstream")], "git checkout -b fix origin/main && git push"),
         ([("push.default", "bogus")], "git push"),
         ([("includeIf.onbranch:feature/*.path", "push.cfg")], "git switch feature/x && git push"),
+        ([("remote.origin.push", "HEAD:main")], "git -c remote.origin.push=HEAD:wb/x push"),
     ],
 )  # fmt: skip
 def test_where_gits_configuration_sends_a_bare_push_is_read(settings, command, tmp_path):

@@ -20,7 +20,8 @@ to a branch of its own before a push is let through again (QA on 0.1.45).
   to `main` or `master` that way is refused, and one where git can't read its configuration
   can't tell which branch. So can a line that sets them (`git config remote.origin.push …`,
   `--unset`, `--global`; also `-c remote.origin.mirror=…`, `-c include.path=…`,
-  `GIT_CONFIG_GLOBAL=…`, and `HOME=…` for a push naming no branch) (E66).
+  `GIT_CONFIG_GLOBAL=…`, and `HOME=…` for a push naming no branch). A remote's push refspecs
+  given with `-c` add to the repository's, as git adds them (E66).
 - **Back on a branch of its own after updating main, a push is let through again**, as in
   0.1.43: `git checkout main && git pull && git checkout feature/x && git push`, the same with
   `git switch`, and `git switch feature/x && git push` on `main`. A `git switch` to a branch,
@@ -42,7 +43,8 @@ to a branch of its own before a push is let through again (QA on 0.1.45).
   ../main && git push` through). And the checkout's branch a substitution puts in a line
   `eval` or `sh -c` runs is the branch where it ran: after a `cd` in that line, not known. Text
   the shell can't parse (read loosely) that sets git's configuration or defines an alias can't
-  tell where its pushes go either.
+  tell where its pushes go either, and the file of a process substitution `eval` hands a shell
+  (`eval zsh <(…)`) is a script fed to it.
 - A long line of aliases (or of shells given `-c`) on a line that says push took time growing
   with its square to check; it is read in one pass.
 

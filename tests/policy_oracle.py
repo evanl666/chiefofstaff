@@ -390,9 +390,11 @@ def pushed(record: str) -> set[str]:
     if other:
         head = "?"  # Another repository's (GIT_DIR): its branch, not known here.
     settings: dict[str, str] = {}
+    listed: list[tuple[str, str]] = []  # (A remote's push refspecs add up, `-c`'s too.)
     for item in filter(None, config.split(";")):
         key, _, value = item.partition("=")
         settings[key.lower()] = value
+        listed.append((key.lower(), value))
     if command == "subtree":
         return subtree_pushed(words_list)
     dry = tags = every = deleting = False
@@ -431,7 +433,7 @@ def pushed(record: str) -> set[str]:
     remote = positional[0] if positional else "origin"
     refspecs = positional[1:]
     if not refspecs and command == "push":
-        configured = [value for key, value in settings.items()
+        configured = [value for key, value in listed
                       if key == f"remote.{remote.lower()}.push"]  # fmt: skip
         if tags or deleting:
             return set()  # (`--tags` pushes the tags alone, a remote's push refspecs not.)
@@ -537,7 +539,8 @@ CONFIGS = ["git config push.default matching", "git config --global push.default
            "git config remote.origin.push HEAD:main", "git config --unset push.default",
            "git config alias.p push", "git config user.name x", "git config --get push.default",
            "git config --global remote.origin.mirror true", "git config push.default current",
-           "git config branch.feat.merge refs/heads/main"]  # fmt: skip
+           "git config branch.feat.merge refs/heads/main",
+           "git -c remote.origin.push=HEAD:feat push"]  # fmt: skip
 SEPARATORS = ["; ", "; ", " && ", " || ", " | ", "\n", " & "]
 
 
@@ -982,6 +985,12 @@ FOUND = [
     # parsed), push configuration a line sets, and an alias before a `git` of its stretch.
     ('git config --global remote.origin.mirror true | nice git push --set-upstream origin || CDPATH=\'a b\'; git status\necho "x', 'feat'),  # noqa: E501
     ('shopt -s expand_aliases 2>/dev/null; alias g=\'git\'\ng push origin HEAD:refs/heads/$(git rev-parse --abbrev-ref HEAD)\necho "x', 'main'),  # noqa: E501
+    # Found by the 200k runs on ffcae39: env's options in a cluster in text read loosely (bash
+    # 3.2); a process substitution's file given to `eval` for a shell (zsh).
+    (': <(env -vC $(echo ../main) git push -o x origin)\necho "x', 'feat'),
+    ('eval "( pushd "$D" ); eval "zsh -f <(echo \'command -p local PWD=sub; =git push origin master\')""; echo "$(command -p cd)"; printf -v IFS %s sub', 'main/sub', 'headmain'),  # noqa: E501
+    # Found checking those: a remote's push refspecs given with -c add to the repository's.
+    ('git -c remote.origin.push=HEAD:feat push', 'feat', 'headmain'),
 ]  # fmt: skip
 
 

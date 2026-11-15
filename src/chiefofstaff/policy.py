@@ -1258,10 +1258,12 @@ def push_of(git: Git) -> Push | None:
     heads = read_refspecs(push, [*positional[1:], *refspecs], git)
     if dry:
         return push  # It updates nothing.
+    configured = len(positional) <= 1 and not tags
     if deleting or refspecs:
         push.unknown = push.unknown or push.made_up  # Which one it deletes: not known.
+        if refspecs and configured and not deleting:  # (The repository's are pushed too.)
+            return bare(push, git, False, True)
         return push  # What it updates is all in its words.
-    configured = len(positional) <= 1 and not tags
     return bare(push, git, heads, configured)
 
 
@@ -1415,7 +1417,7 @@ def loose_pushes(command: str, cwd: str) -> list[Push]:
             gits = gits or bool(git)
             continue
         gits, rest = True, stretch[push.end() :].split()
-        runs_it = set(re.split(r"[\s/]+", stretch[: git.start()] if git else ""))
+        runs_it = set(re.findall(r"[\w.+-]+", stretch[: git.start()] if git else ""))
         if (
             not git
             or stretch[git.end() : push.start()].strip()
@@ -2781,7 +2783,9 @@ FED_LONG_VALUED = frozenset({"--chdir", "--split-string", "--unset", "--argv0", 
                              "--arg-file", "--eof", "--max-chars"})  # fmt: skip
 # A file a command may read what the line feeds it from (`/dev/stdin`, `/dev/fd/0`, `/proc/…`).
 FED_DEVICE = re.compile(r"/dev/(?!null$)|/proc/")
-FED_PROCESS = "\x01<("  # A process substitution's file (`<(…)`, zsh's `=(…)`), as a word.
+# A process substitution's file (`<(…)`, zsh's `=(…)`), as a word (none a line it is put in,
+# for `eval` to run, reads otherwise: a zsh 200k run).
+FED_PROCESS = "\x01PROCESS"
 FED_WORD = re.compile(r"[^\s;&|()]+|[;&|()]+")
 FED_SEGMENTS = re.compile(r"[;&|\n()`]+")
 
