@@ -1694,9 +1694,11 @@ def test_the_tests_have_a_home_and_git_configuration_of_their_own():
     account's own home) wrote the owner's git configuration. The tests run with a home, an
     XDG_CONFIG_HOME and git configuration of their own (conftest), never the account's."""
     import policy_oracle as oracle
+    from own_home import MOST_PATH, owners_only
 
     home = Path(os.environ["HOME"])
-    assert home.resolve() != oracle.REAL_HOME.resolve() and home.name.startswith("cos-tests-home")
+    assert home.resolve() != oracle.REAL_HOME.resolve() and home == home.resolve()
+    assert len(str(home)) <= MOST_PATH and owners_only(home)
     assert os.environ["XDG_CONFIG_HOME"] == f"{home}/.config"
     assert os.environ["GIT_CONFIG_NOSYSTEM"] == "1"
     owners = {oracle.REAL_HOME / ".gitconfig", oracle.REAL_HOME / ".config" / "git" / "config"}
