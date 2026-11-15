@@ -387,6 +387,22 @@ async def test_an_mcp_servers_secrets_never_land_in_codexs_files(backend, tmp_pa
     assert not any(secret in command for command in commands)
 
 
+async def test_a_claude_workers_durable_schedule_is_never_written(backend, tmp_path):
+    """Claude 2.1.322 writes a durable schedule (CronCreate durable: true) into the worker's
+    folder (.claude/scheduled_tasks.json), where it outlives the worker: refused."""
+    if not isinstance(backend, ClaudeAgent) or "fake" in str(backend.command):
+        pytest.skip("The real Claude's own schedules.")
+    session, turn = await open_session(backend, tmp_path, ask_first=False)
+    durable = {"cron": "*/5 * * * *", "prompt": "reply with just: later", "durable": True}
+    await session.send(
+        f"Use Claude's CronCreate tool with {json.dumps(durable)}. Then reply with just: ok"
+    )
+    await turn.wait()
+    (done,) = [e for e in turn.events if e.type.value == "tool.execution_complete"]
+    assert done.data.success is False and "durable schedule" in done.data.error.message
+    assert not (tmp_path / ".claude" / "scheduled_tasks.json").exists()
+
+
 async def test_shell_commands_ask_for_permission_first(backend, tmp_path):
     asked = []
 

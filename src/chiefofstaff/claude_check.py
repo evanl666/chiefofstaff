@@ -35,7 +35,20 @@ if TYPE_CHECKING:
     from .backend_claude import ClaudeAgent, ClaudeWorker
 
 # Raised whenever what the check does changes: every version is checked again then.
-REVISION = 4
+REVISION = 5
+# The check's own user settings: each switch that would widen a sandbox, set as the owner's
+# could set it. Its sandbox step holds only if Chief of Staff's own settings win over these.
+HOSTILE_SETTINGS = {
+    "sandbox": {
+        "enabled": False,
+        "allowUnsandboxedCommands": True,
+        "enableWeakerNestedSandbox": True,
+        "enableWeakerNetworkIsolation": True,
+        "allowNestedUserNamespaces": True,
+        "allowAppleEvents": True,
+        "network": {"allowAllUnixSockets": True, "allowLocalBinding": True},
+    }
+}
 # The check's own tool of Chief of Staff's, and the stand-in MCP server's.
 TOOL = "chiefofstaff_check"
 SERVER = "chiefofstaff_check"
@@ -376,6 +389,7 @@ def environment(folder: Path, messages: Messages, catcher: Catcher) -> Path:
     environment, and what it sets."""
     config = folder / "config"
     config.mkdir(parents=True, exist_ok=True)
+    (config / "settings.json").write_text(json.dumps(HOSTILE_SETTINGS))
     chosen: dict[str, str] = {
         "CLAUDE_CONFIG_DIR": str(config),
         "ANTHROPIC_API_KEY": "sk-ant-api03-chiefofstaff-check-not-a-key",
@@ -590,6 +604,11 @@ async def sandboxed(
             turn = Turn(session, facts)
             await turn.send(f"{STEP}sandbox")
             await asyncio.wait_for(turn.ended(), CHECK_SECONDS / 2)
+            # A new effort in place (retune) keeps its sandbox: the same commands, again.
+            worker.effort = "low" if worker.process_effort == "high" else "high"
+            if await worker.retune():
+                await turn.send(f"{STEP}sandbox")
+                await asyncio.wait_for(turn.ended(), CHECK_SECONDS / 2)
             await session.disconnect()
         finally:
             await worker.stop()

@@ -546,6 +546,11 @@ class Events:
             self.states[row["id"]].busy = True
         if row["status"] == "idle":
             self.runtime.update_session(row["id"], status="working")
+        elif getattr(event.data, "woken", False) and row["status"] in {"done", "waiting"}:
+            # Another agent's worker at work by itself (a schedule's firing, a command's end):
+            # at work while it is, then back where it was (as Delivery.rest_after keeps it).
+            self.states[row["id"]].resting = row["status"]
+            self.runtime.update_session(row["id"], status="working")
         stopped = row["id"] in self.runtime.halted or state.after_abort
         if self.runtime.agents and not stopped and (why := self.runtime.agent_block(row)):
             # Another agent's worker that may not run now (a change came as its turn began);

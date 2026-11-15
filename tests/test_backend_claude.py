@@ -719,10 +719,7 @@ async def test_a_session_claude_already_has_is_resumed_not_made_again(agent, tmp
     await session.send("Remember the word 'kiwi'. Reply with just: ok")
     await turn.ended()
     await session.disconnect()
-    for _ in range(100):
-        if not agent.workers:
-            break
-        await asyncio.sleep(0.05)
+    await until(lambda: not agent.workers, 30)  # Its process has ended.
     again = await agent.create_session(session_id="a6" * 16, name="t", **options(tmp_path))
     turn = Turn(again)
     await again.send("What word did I ask you to remember? Reply with just the word.")
@@ -931,6 +928,72 @@ async def test_chief_of_staffs_private_files_are_no_workers_to_read_asking_first
     assert asked == [], "refused before anything is asked"
 
 
+def test_settings_that_would_widen_a_workers_sandbox_are_found_where_they_take_effect(tmp_path):
+    """Lists merge across Claude's settings (2.1.322: a user's excludedCommands takes a command
+    out of the sandbox whatever Chief of Staff's own settings say), so one there refuses a
+    sandboxed worker; switches and ports Chief of Staff sets win, but not over managed
+    settings."""
+    from chiefofstaff.claude_tools import WIDENING_SWITCHES, sandbox_widening
+
+    def file(name: str, sandbox: dict) -> Path:
+        path = tmp_path / name
+        path.write_text(json.dumps({"sandbox": sandbox}))
+        return path
+
+    user = file("user.json", {"excludedCommands": ["docker:*"]})
+    assert sandbox_widening([(user, "~/.claude/settings.json")], []) == (
+        "sandbox.excludedCommands in ~/.claude/settings.json"
+    )
+    ports = file("ports.json", {"network": {"httpProxyPort": 8080}})
+    assert sandbox_widening([(ports, "p")], []) == "sandbox.network.httpProxyPort in p"
+    switches = file("switches.json", {"enabled": False, "allowUnsandboxedCommands": True})
+    assert sandbox_widening([(switches, "s")], []) == "", "Chief of Staff's own switches win"
+    assert sandbox_widening([], [switches]) == f"sandbox.allowUnsandboxedCommands in {switches}"
+    local = file("local.json", {"network": {"allowLocalBinding": True}})
+    assert sandbox_widening([], [local], local=True) == ""
+    assert sandbox_widening([], [local], local=False).startswith("sandbox.network.allowLocal")
+    assert sandbox_widening([(tmp_path / "absent.json", "a")], []) == ""
+    # Each switch that would widen it, Chief of Staff sets (to its narrow side).
+    policy = SimpleNamespace(readwrite=("/w",), readonly=(), denied=(), allowed_hosts=(),
+                             local_network=False)  # fmt: skip
+    settings = backend_claude.sandbox_settings(policy)
+    for key in WIDENING_SWITCHES:
+        found = settings
+        for part in key.split("."):
+            found = found[part]
+        assert found is False, key
+
+
+async def test_a_sandboxed_worker_does_not_start_where_claudes_settings_widen_its_sandbox(
+    agent, tmp_path
+):
+    config = Path(os.environ["CLAUDE_CONFIG_DIR"])
+    (config / "settings.json").write_text(json.dumps({"sandbox": {"excludedCommands": ["x:*"]}}))
+    policy = SimpleNamespace(readwrite=(str(tmp_path),), readonly=(), denied=(),
+                             allowed_hosts=(), local_network=True)  # fmt: skip
+    with pytest.raises(Exception, match=r"widen its sandbox past Chief of Staff's"):
+        await agent.create_session(
+            session_id="b2" * 16, name="t", **options(tmp_path, sandbox=policy)
+        )
+
+
+async def test_the_addresses_a_command_names_reach_the_policy_as_copilots_do(agent, tmp_path):
+    asked = []
+
+    def deny(request, context):
+        asked.append([url.url for url in request.possible_urls])
+        return PermissionDecisionReject(feedback="Not in this test.")
+
+    session = await agent.create_session(
+        session_id="b3" * 16, name="t", **options(tmp_path, on_permission_request=deny)
+    )
+    turn = Turn(session)
+    command = "curl -s https://example.com/a?b=1 | grep x; echo done"
+    await session.send(f"Run the shell command `{command}`, then reply with just: ok")
+    await turn.ended()
+    assert asked == [["https://example.com/a?b=1"]]
+
+
 async def test_what_a_killed_chief_of_staffs_workers_left_in_its_files_goes_at_start(
     tmp_path, monkeypatch
 ):
@@ -975,7 +1038,12 @@ async def test_a_sandboxed_workers_commands_stay_in_its_folders_and_reach_only_i
     settings = backend_claude.sandbox_settings(policy)
     assert settings["allowUnsandboxedCommands"] is False and settings["failIfUnavailable"]
     assert settings["filesystem"]["allowWrite"] == [str(tmp_path)]
-    assert settings["network"] == {"allowLocalBinding": False, "allowedDomains": ["github.com"]}
+    assert settings["network"] == {
+        "allowLocalBinding": False,
+        "allowAllUnixSockets": False,
+        "allowUnixSockets": [],
+        "allowedDomains": ["github.com"],
+    }
 
 
 async def test_an_mcp_servers_form_is_the_owners_card_and_its_answer_goes_back(agent, tmp_path):

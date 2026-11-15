@@ -66,6 +66,8 @@ def answer(body: dict) -> tuple[list[dict], str]:
         )
     if found := re.search(r"Fill the form of (\w+)", prompt):
         plan.append(call(f"mcp__{found.group(1)}__form", {}))
+    if found := re.search(r"Use Claude's (\w+) tool with (\{.*?\})(?:\.|$)", prompt):
+        plan.append(call(found.group(1), json.loads(found.group(2))))
     if answered < len(plan):
         return [plan[answered]], "tool_use"
     if found := re.search(r"reply with just: (\w+)", after, re.IGNORECASE):

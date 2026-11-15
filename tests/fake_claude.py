@@ -824,8 +824,9 @@ class Fake:
             call("EnterWorktree", {"name": found.group(1)})
         if "Leave the worktree and remove it" in text:
             call("ExitWorktree", {"action": "remove", "discard_changes": True})
-        if found := re.search(r"Schedule '([^']+)' every minute", text):
-            call("CronCreate", {"cron": "* * * * *", "prompt": found.group(1), "recurring": True})
+        if found := re.search(r"Schedule '([^']+)' every minute( durably)?", text):
+            schedule = {"cron": "* * * * *", "prompt": found.group(1), "recurring": True}
+            call("CronCreate", schedule | ({"durable": True} if found.group(2) else {}))
         if found := re.search(r"Wake up later to '([^']+)'", text):
             wake = {"delaySeconds": 60, "reason": "later", "prompt": found.group(1)}
             call("ScheduleWakeup", wake)

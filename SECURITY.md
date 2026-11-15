@@ -95,7 +95,11 @@ Settings → *Coding agents*). For such a worker:
   a Copilot worker (writes only in its folders, protected paths read-only, your service secrets
   unreadable, the network as Settings says), only on a Claude version whose check showed a write
   outside its folder, a read of a protected file and a request to a host off the list all
-  failing. Codex workers never run while the worker sandbox is on (Codex's sandbox is not
+  failing, with settings of the owner's that try to switch its sandbox off or weaken it in place
+  (Chief of Staff's own settings win over those). Claude merges the lists of its sandbox settings
+  across your settings, a trusted project's and managed settings: a sandboxed worker does not
+  start where any of them adds to those lists or sets a proxy port, nor where managed settings
+  weaken it at all. Codex workers never run while the worker sandbox is on (Codex's sandbox is not
   checked yet); with it off, a Codex worker can do anything your account can
   (`danger-full-access`), as Copilot workers then can.
 - **Your checkouts.** Every edit asks Chief of Staff first (Codex's approval, Claude's
