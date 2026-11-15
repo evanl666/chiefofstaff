@@ -345,6 +345,95 @@ async def test_claude_workers_run_sandboxed_only_on_a_version_whose_sandbox_held
         await runtime.stop()
 
 
+async def test_a_claude_worker_that_reads_slack_is_never_given_slacks_token(
+    tmp_path, claude_on_path
+):
+    """Slack's read tools reach a Claude worker from Chief of Staff's own process (read_proxy):
+    its token is in none of the options its process starts with, and only a read tool is ever
+    called for it."""
+    from chiefofstaff.sources.slack import SlackError
+
+    harness, runtime, worker, _ = await claude_worker(tmp_path)
+    try:
+        harness.store.save_settings(Settings(slack_enabled=True))
+        row = {**harness.store.session(worker), "slack": 1}
+        options = runtime.agent_options(row)
+        assert "xoxp-test" not in repr(options)
+        assert "slack" not in options.get("mcp_servers", {}) and options["slack_tools"] == []
+        proxy = await runtime.slack.read_proxy()
+        assert sorted(tool["name"] for tool in proxy["tools"]) == [
+            "slack_read_thread",
+            "slack_search_public_and_private",
+        ]
+        assert "xoxp-test" not in repr(proxy["tools"])
+        await proxy["call"]("slack_read_thread", {"channel_id": "C1"})
+        with pytest.raises(SlackError, match="not one of Slack's read tools"):
+            await proxy["call"]("slack_send_message", {"text": "hi"})
+        assert harness.mcp.calls == [("slack_read_thread", {"channel_id": "C1"})]
+    finally:
+        await runtime.stop()
+
+
+async def test_no_worker_reads_chief_of_staffs_private_files_yolo_or_not(tmp_path, claude_on_path):
+    """Chief of Staff's private folder for Claude's workers (their MCP configurations): refused
+    to any worker's read, write or command (a Copilot worker's too, yolo or not), and denied in
+    its sandbox; with Copilot alone there is none."""
+    from types import SimpleNamespace
+
+    harness, runtime = await started(tmp_path, Settings(worker_yolo=True))
+    try:
+        assert runtime.private_folders() == [], "Copilot alone: nothing of agents"
+        await saved(runtime, {"claude": {"enabled": True}})
+        private = str(runtime.agent_folder("claude") / "private")
+        assert runtime.private_folders() == [private]
+        result = await spawn_on(harness, runtime, title="Fix it", instructions="Report done: ok.")
+        copilot = harness.store.session(result["session_id"])
+        assert runtime.on_copilot(copilot["id"]) and runtime.yolo(copilot)
+        invocation = {"session_id": runtime.copilot_id(copilot["id"])}
+        for request in (
+            SimpleNamespace(kind="read", path=f"{private}/1-2-mcp.json"),
+            SimpleNamespace(kind="write", file_name=f"{private}/x", resolved_path=None),
+            SimpleNamespace(kind="shell", full_command_text="cat ~/x/agents/claude/private/*"),
+        ):
+            decided = await runtime.events.on_permission(request, invocation)
+            assert decided.kind == "reject", request
+            assert "private files" in decided.feedback
+        allowed = SimpleNamespace(kind="read", path=f"{copilot['cwd']}/README.md")
+        assert (await runtime.events.on_permission(allowed, invocation)).kind != "reject"
+        policy = runtime.sandbox_policy({**copilot, "slack": 1})
+        assert policy is None or private in policy.denied
+    finally:
+        await runtime.stop()
+
+
+async def test_a_message_from_one_of_its_workers_processes_is_that_workers_tell_session(
+    tmp_path, claude_on_path
+):
+    """Another session's message whose socket names one of Chief of Staff's workers' processes
+    (it messaged by address, past tell_session): delivered as that worker's tell_session, with
+    its rules (Slack access must match), never as another session's."""
+    harness, runtime = await started(tmp_path)
+    try:
+        first = await spawn_on(harness, runtime, title="A", instructions="Report done: a.")
+        second = await spawn_on(harness, runtime, title="B", instructions="Report done: b.")
+        a, b = first["session_id"], second["session_id"]
+        said = await runtime.agent_peer(
+            b, "inbound", {"name": "cos-x", "pid": 1, "text": "the API moved", "worker": a}
+        )
+        assert said.startswith("Delivered through Chief of Staff: ")
+        assert not [m for m in harness.store.messages(b) if m["meta"].get("claude_session")]
+        harness.store.execute("UPDATE sessions SET slack=1 WHERE id=?", (a,))
+        said = await runtime.agent_peer(
+            b, "inbound", {"name": "cos-x", "pid": 1, "text": "what I read", "worker": a}
+        )
+        assert said == (
+            "Chief of Staff did not deliver it: That worker's Slack access differs from yours; "
+            "report to the Router."
+        )
+    finally:
+        await runtime.stop()
+
+
 async def test_a_worker_that_reads_slack_runs_on_copilot_not_claude_for_now(
     tmp_path, claude_on_path, monkeypatch
 ):

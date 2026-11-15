@@ -416,14 +416,16 @@ def history_reader(name: str) -> Any:
 
 
 def clear_private(folder: Path, *, keep_own: bool = False):
-    """An agent's private files (Claude's: a worker's MCP configuration and prompt, 0600) left
-    by processes that ended without removing them (Chief of Staff was killed); `keep_own`:
+    """An agent's private files (Claude's: a worker's MCP configuration and prompt, 0600), and
+    its plugins (Settings' skills, linked), left by processes that ended without removing them
+    (Chief of Staff was killed); `keep_own`:
     not those of this process's workers (they are removed as each ends)."""
     import shutil
 
-    private = folder / "private"
     mine = f"{os.getpid()}-"
-    for path in private.iterdir() if private.is_dir() else []:
+    found = [path for part in ("private", "plugins") if (folder / part).is_dir()
+             for path in (folder / part).iterdir()]  # fmt: skip
+    for path in found:
         if keep_own and path.name.startswith(mine):
             continue
         try:

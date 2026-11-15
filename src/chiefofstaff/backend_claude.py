@@ -86,7 +86,7 @@ from .claude_tools import (
     under,
 )
 from .machine import kill_process_tree
-from .policy import GITHUB_MCP
+from .policy import GITHUB_MCP, private_denial
 
 logger = logging.getLogger(__name__)
 
@@ -205,6 +205,12 @@ REPORTING_TOOLS = (
 CLOUD = (
     "Run this in Anthropic's cloud? Chief of Staff can't check, receipt, count or stop what runs "
     "there."
+)
+# Why a worker that reads Slack neither messages nor hears from other sessions (what it read
+# must not leave it that way, nor another session steer it).
+SLACK_NO_PEERS = (
+    "A worker that reads Slack doesn't message other sessions or take their messages: report "
+    "to the Router instead."
 )
 CLOUD_REFUSED = {
     "ask_first": (
@@ -826,6 +832,14 @@ def write_private(path: Path, text: str):
         file.write(text)
 
 
+def plugin_folder(launcher: Path) -> Path:
+    """Where a worker's process's plugin of Settings' skills is (links to their folders, nothing
+    secret): beside its launcher, apart from its private files."""
+    folder = launcher.parent / "plugins"
+    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return folder
+
+
 def private_folder(launcher: Path) -> Path:
     """Where a worker's process's MCP configuration and system prompt are, as files of their own
     (not its command line, which other users of the computer can read): beside its launcher."""
@@ -1087,8 +1101,9 @@ class ClaudeWorker:
             write_private(path, prompt)
             given["append-system-prompt-file"] = str(path)
         if skills := [str(f) for f in self.options.get("skill_directories") or [] if f]:
-            # Settings' skill folders, as a plugin of Chief of Staff's own (each skill linked).
-            path = folder / f"{stem}-skills"
+            # Settings' skill folders, as a plugin of Chief of Staff's own (each skill linked):
+            # not in the private folder, whose files no worker reads (a skill's scripts are its).
+            path = plugin_folder(self.launcher) / f"{stem}-skills"
             self.private.append(path)
             if plugin := skills_plugin(path, skills):
                 given["plugin-dir"] = str(plugin)
@@ -1121,6 +1136,8 @@ class ClaudeWorker:
         }
         environment |= {"CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS": "1"}
         servers: dict[str, Any] = {"chief": self.chief_server()}
+        if slack := self.slack_server():
+            servers["slack"] = slack
 
         def reported(hook: Any) -> Any:
             return [HookMatcher(matcher=REPORTING_TOOLS, hooks=[hook], timeout=HOOK_SECONDS)]
@@ -2352,10 +2369,18 @@ class ClaudeWorker:
         the limit of what one worker is told an hour; at idle, a turn of its own only once
         admitted."""
         name = peer["name"] or "unnamed"
+        if self.options.get("reads_slack"):
+            return self.block(SLACK_NO_PEERS, notice=f"A message from “{name}” was not delivered.")
         deliver: Any = self.options.get("on_peer")
         why = "Chief of Staff does not take other sessions' messages here."
+        # One of Chief of Staff's workers' processes (by the process its socket names): through
+        # Chief of Staff, as its tell_session, never straight to this worker.
+        sender = await asyncio.to_thread(self.agent.worker_of, int(peer["pid"] or 0))
         if deliver:
-            why = await deliver("inbound", {"name": name, "pid": peer["pid"], "text": peer["text"]})
+            why = await deliver(
+                "inbound",
+                {"name": name, "pid": peer["pid"], "text": peer["text"], "worker": sender},
+            )
         if why:
             return self.block(why)
         label = {
@@ -2458,6 +2483,8 @@ class ClaudeWorker:
         subagent = self.subagents.get(str(hook.get("agent_id") or ""), {})
         if why := subagent.get("refused"):
             return why
+        if why := self.private_refusal(name, arguments, cwd):
+            return why
         if (
             name in SHELL_TOOLS
             and arguments.get("dangerouslyDisableSandbox")
@@ -2486,6 +2513,31 @@ class ClaudeWorker:
             return ""
         return await self.permitted(request)
 
+    def private_refusal(self, name: str, arguments: dict, cwd: str) -> str:
+        """Chief of Staff's private files (workers' MCP configurations and prompts): never read
+        or changed by a tool, nor named by a command, whether or not it asks first."""
+        folders = [str(folder) for folder in self.options.get("private_folders") or []]
+        if not folders:
+            return ""
+        if name in SHELL_TOOLS:
+            command = str(arguments.get(SHELL_TOOLS[name]) or "")
+            return (
+                private_denial(SimpleNamespace(kind="shell", full_command_text=command), folders)
+                or ""
+            )
+        for key in ("file_path", "path", "notebook_path", "filePath", "pattern"):
+            value = arguments.get(key)
+            if (
+                not isinstance(value, str)
+                or not value
+                or (key == "pattern" and not value.startswith(("/", "~")))
+            ):
+                continue
+            path = joined(cwd, str(Path(value).expanduser()))
+            if why := private_denial(SimpleNamespace(kind="read", path=path), folders):
+                return why
+        return ""
+
     async def capability(self, name: str, arguments: dict, call: str, cwd: str) -> str | None:
         """Claude's own capabilities, tied into Chief of Staff (more-agents.md 5.12.4): "" when
         this call may go on, why not when it may not, None for any other tool. A call the owner
@@ -2503,8 +2555,10 @@ class ClaudeWorker:
             return self.cloud_call(call, "a routine")
         if name == "EnterWorktree":
             return await self.entering_worktree(arguments, cwd, call)
+        if name in {"SendMessage", "ListAgents"} and self.options.get("reads_slack"):
+            return SLACK_NO_PEERS
         if name == "SendMessage":
-            return await self.message_out(arguments)
+            return await self.message_out(arguments, call)
         if name == "ExitPlanMode":
             if self.ask_first:
                 self.carded[call] = "plan"  # The owner approves it, at their card.
@@ -2569,7 +2623,19 @@ class ClaudeWorker:
 
         ask = self.options.get("on_user_input_request")
         context = {"session_id": self.session_id, "sessionId": self.session_id}
-        if card == "plan":
+        if card.startswith("message:"):
+            to = card.removeprefix("message:")
+            text = str(mapping(data).get("message") or mapping(data).get("content") or "")
+            question = {
+                "question": (
+                    f"Send this message to Claude session “{to}”, which is not one of Chief of "
+                    f"Staff's workers?\n\n{text[:2000]}"
+                ),
+                "choices": ["Send it", "Don't"],
+                "allowFreeform": False,
+            }
+            yes = "Send it"
+        elif card == "plan":
             plan = read_plan(self.plan_path)
             question = {
                 "question": "Go ahead with its plan?" + (f"\n\n{plan}" if plan else ""),
@@ -2591,10 +2657,15 @@ class ClaudeWorker:
                 asked = await asyncio.wait_for(asked, CARD_SECONDS)
             answer = str(mapping(asked).get("answer") or "")
         if answer == yes:
+            if card.startswith("message:"):
+                to = card.removeprefix("message:")
+                self.emit("agent.notice", text=f"Sent a message to Claude session “{to}”.")
             return PermissionResultAllow(updated_input=data)
         if card == "plan":
             change = "" if answer in {"", "Change it"} else f": {answer}"
             return PermissionResultDeny(message=f"The owner wants the plan changed{change}.")
+        if card.startswith("message:"):
+            return PermissionResultDeny(message="The owner said not to send it.")
         return PermissionResultDeny(message="The owner said no: do it here instead.")
 
     async def entering_worktree(self, arguments: dict, cwd: str, call: str) -> str:
@@ -2615,17 +2686,18 @@ class ClaudeWorker:
             return f"{why} (add_repo gives you a worktree of your own)."
         return ""
 
-    async def message_out(self, arguments: dict) -> str:
-        """SendMessage: to one of Chief of Staff's workers, it goes through Chief of Staff (as
-        tell_session); to another session (the owner's own), Claude delivers it."""
+    async def message_out(self, arguments: dict, call: str) -> str:
+        """SendMessage: to one of Chief of Staff's workers, it goes through Chief of Staff (its
+        tell_session, with its rules); to any other session (the owner's own, a socket's
+        address), Claude delivers it only once the owner says so, each time (their card)."""
         to = recipient(str(arguments.get("to") or arguments.get("recipient") or ""))
         text = str(arguments.get("message") or arguments.get("content") or "").strip()
         deliver: Any = self.options.get("on_peer")
         if not deliver:
-            return ""
+            return "Chief of Staff does not send messages to other sessions from here."
         said = await deliver("send", {"to": to, "text": text})
         if said is None:
-            self.emit("agent.notice", text=f"Sent a message to Claude session “{to}”.")
+            self.carded[call] = f"message:{to}"  # Not one of Chief of Staff's workers.
             return ""
         return said  # Delivered (or refused) by Chief of Staff: Claude does not send it.
 
@@ -2856,6 +2928,39 @@ class ClaudeWorker:
         server = create_sdk_mcp_server("chief", version=client_version(), tools=tools)
         return {**server, "alwaysLoad": True}
 
+    def slack_server(self) -> Any:
+        """Slack's read tools for a worker that reads Slack, as an MCP server in this process:
+        Chief of Staff calls Slack with the token it holds (Runtime.open_live: read_proxy), so
+        that token is in no file, argument or variable of Claude's."""
+        from claude_agent_sdk import SdkMcpTool, create_sdk_mcp_server
+
+        proxy = mapping(self.options.get("slack_proxy"))
+        call: Any = proxy.get("call")
+        if not callable(call) or not proxy.get("tools"):
+            return None
+        invoke: Any = call  # (Slack's own read_call: a coroutine function.)
+
+        def handler(name: str) -> Callable[[dict], Awaitable[dict]]:
+            async def handle(arguments: dict) -> dict:
+                try:
+                    text, failed = str(await invoke(name, dict(arguments or {}))), False
+                except Exception as exc:
+                    text, failed = f"Slack: {exc}"[:600], True
+                return {"content": [{"type": "text", "text": text}], "is_error": failed}
+
+            return handle
+
+        tools = [
+            SdkMcpTool(
+                name=str(spec["name"]),
+                description=str(spec.get("description") or spec["name"]),
+                input_schema=dict(spec.get("input_schema") or {"type": "object"}),
+                handler=handler(str(spec["name"])),
+            )
+            for spec in proxy["tools"]
+        ]
+        return create_sdk_mcp_server("slack", version=client_version(), tools=tools)
+
     def tool_handler(self, name: str) -> Callable[[dict], Awaitable[dict]]:
         async def handler(arguments: dict) -> dict:
             await self.caught_up()
@@ -2987,6 +3092,17 @@ class ClaudeAgent:
 
     def epochs(self) -> set[str]:
         return {worker.epoch for worker in self.workers.values() if worker.alive()}
+
+    def worker_of(self, pid: int) -> str:
+        """Which of its workers a process is (its supervisor's, its CLI's or one they started):
+        that worker's name (its row's id), "" for any other process."""
+        if pid <= 0:
+            return ""
+        table = process_table()
+        for name, worker in list(self.workers.items()):
+            if worker.ending_or_alive() and pid in worker.processes(table):
+                return name
+        return ""
 
     def processes(self, table: dict[int, tuple[int, str]] | None = None) -> dict[int, str]:
         """Its workers' processes, also those still ending (let go of, retired): theirs until

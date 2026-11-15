@@ -1132,6 +1132,18 @@ class Runtime:
         """Chief of Staff's own folder for an agent (its processes start there)."""
         return self.store.directory / "agents" / name
 
+    def private_folders(self) -> list[str]:
+        """Chief of Staff's private folders for other agents' workers (a Claude worker's MCP
+        configuration and prompt): no worker reads or changes them (policy.private_denial, and
+        the sandbox's denied paths). Those of an agent on, or there from before; none at all with
+        Copilot alone."""
+        return [
+            str(folder)
+            for name in agents.NAMES
+            if (folder := self.agent_folder(name) / "private").is_dir()
+            or (self.agents and agents.enabled(self.store, name))
+        ]
+
     def agent_connection(self, name: str) -> AgentConnection:
         return AgentConnection(
             lambda: agents.backend(name, self.agent_folder(name)),
@@ -2389,8 +2401,13 @@ class Runtime:
             # Tests that start a server, Gradle's daemon and the like need localhost; not for
             # workers that read Slack, whose content must not reach the owner's local services.
             local_network=not row["slack"],
-            # Its own daemons, yes; the owner's (their tokens are in these files), no.
-            denied=tuple(dict.fromkeys([*service_secrets(), *closed, *cached.denied, *absent])),
+            # Its own daemons, yes; the owner's (their tokens are in these files), no. Nor
+            # Chief of Staff's private files for other agents' workers.
+            denied=tuple(
+                dict.fromkeys(
+                    [*service_secrets(), *closed, *cached.denied, *absent, *self.private_folders()]
+                )
+            ),
         )
 
     def held_shown(self, row: dict) -> list[str]:
@@ -3191,6 +3208,10 @@ class Runtime:
             # other threads its turns may reach.
             "worker": row["id"],
             "children": self.agent_children(row["id"]),
+            # Chief of Staff's private files, which no worker reads (policy.private_denial).
+            "private_folders": self.private_folders(),
+            # It reads Slack: other sessions neither hear from it nor message it.
+            "reads_slack": bool(row["slack"]),
             # What tells the repository's instructions its thread was given (none: not yet).
             "docs_given": self.store.get(f"agentdocs:{row['id']}") or "",
             "on_repository_docs": lambda digest: self.store.set(f"agentdocs:{row['id']}", digest),
@@ -3213,7 +3234,11 @@ class Runtime:
             options["skill_directories"] = skills
         if sandbox := self.sandbox_policy(row):
             options["sandbox"] = sandbox  # Its agent's own, as Chief of Staff's (agent_block).
-        if row["slack"] and (slack := self.slack.session_mcp_config()):
+        if row["slack"] and self.agent(row["id"]) == "claude":
+            # Never Slack's token in Claude's MCP configuration (a file of its own): its read
+            # tools come from this process (open_live: read_proxy). None until then.
+            options["slack_tools"] = []
+        elif row["slack"] and (slack := self.slack.session_mcp_config()):
             # Slack's read tools, as a Copilot worker that reads Slack has them (only those).
             options["mcp_servers"] = {**options.get("mcp_servers", {}), "slack": slack}
             options["slack_tools"] = list(slack.get("tools") or [])
@@ -3453,10 +3478,11 @@ class Runtime:
     async def agent_peer(self, session_id: str, kind: str, data: dict) -> str | None:
         """Claude's messages between sessions, through Chief of Staff (more-agents.md 5.12.5).
         `send`: the worker's SendMessage; to one of Chief of Staff's workers (`cos-…`), its
-        tell_session (what it was told: Claude does not send it), else None (Claude sends it
-        to that session of the owner's). `inbound`: another session's message to it, shown in
-        its timeline and to the Router as that session's, within the hourly limit of what a
-        worker is told: "" to deliver it, else why not."""
+        tell_session (what it was told: Claude does not send it), else None (another session:
+        the owner says whether Claude sends it, each time). `inbound`: another session's message
+        to it, shown in its timeline and to the Router as that session's, within the hourly
+        limit of what a worker is told: "" to deliver it, else why not; from one of Chief of
+        Staff's workers' processes (`worker`), its tell_session instead."""
         from .peers import MAX_TELLS_PER_HOUR, ROUTER_COPY_CHARS, TellSession, clip
 
         row = self.store.session(session_id)
@@ -3476,6 +3502,16 @@ class Runtime:
                 told = await self.peers.t_tell_session(
                     TellSession(session_id=targets[0]["id"], text=str(data.get("text") or "")),
                     session_id,
+                )
+            except ValueError as exc:
+                return f"Chief of Staff did not deliver it: {exc}"
+            return f"Delivered through Chief of Staff: {told}"
+        if sender := str(data.get("worker") or ""):
+            # One of Chief of Staff's own workers (by its process): as its tell_session, with
+            # its rules, never straight to this worker.
+            try:
+                told = await self.peers.t_tell_session(
+                    TellSession(session_id=session_id, text=str(data.get("text") or "")), sender
                 )
             except ValueError as exc:
                 return f"Chief of Staff did not deliver it: {exc}"
@@ -4301,6 +4337,10 @@ class Runtime:
             options, trusted = self.options(row), self.trust(row)
         else:
             options, trusted = self.agent_options(row), {}
+            # Slack's read tools in this process: its token never reaches Claude's.
+            if row["slack"] and agent == "claude" and (proxy := await self.slack.read_proxy()):
+                options["slack_proxy"] = proxy
+                options["slack_tools"] = [tool["name"] for tool in proxy["tools"]]
         copilot_id = copilot or self.copilot_id(row["id"])
         # Copilot refuses a session name with a double quote ("Write "x" to y").
         name = ("Chief of Staff · " + clean_title(row["title"]).replace('"', "'"))[:100]

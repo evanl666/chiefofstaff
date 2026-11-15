@@ -4188,6 +4188,41 @@ def within(path: str, root: str) -> bool:
         return False
 
 
+# Chief of Staff's private files for other agents' workers (a Claude worker's MCP configuration,
+# with its servers' headers and variables, and its system prompt: 0600). Never a worker's to read
+# or change, whatever it may do otherwise (Runtime.private_folders).
+PRIVATE_FILES = "Chief of Staff's private files are not a worker's to read or change"
+
+
+def private_denial(request: Any, folders: list[str]) -> str | None:
+    """Why a session may not do this: it reads or writes in Chief of Staff's private folders, or
+    its command names one (by its path, its real path or its last parts); None otherwise."""
+    if not folders:
+        return None
+    kind = getattr(request, "kind", "")
+    paths: list[str] = []
+    if kind in ("read", "write"):
+        paths = [
+            str(getattr(request, name, "") or "") for name in ("resolved_path", "path", "file_name")
+        ]
+    elif kind == "shell":
+        text = str(getattr(request, "full_command_text", "") or "")
+        if any(token in text for folder in folders for token in private_tokens(folder)):
+            return PRIVATE_FILES
+        paths = [str(path) for path in getattr(request, "possible_paths", None) or []]
+        paths += [str(path) for path in (getattr(request, "resolved_paths", None) or {}).values()]
+    if any(path and within(path, folder) for path in paths for folder in folders):
+        return PRIVATE_FILES
+    return None
+
+
+def private_tokens(folder: str) -> set[str]:
+    """How a command may name a private folder: its path, its real path, and its last three
+    parts (agents/claude/private), which name it from its data folder or from anywhere above."""
+    parts = Path(folder).parts[-3:]
+    return {folder, os.path.realpath(folder), "/".join(parts)}
+
+
 def written_file(cwd: str, request: Any) -> str:
     target = getattr(request, "resolved_path", None) or getattr(request, "file_name", "") or ""
     if cwd and target and not Path(target).is_absolute():

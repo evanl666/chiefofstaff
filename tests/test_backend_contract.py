@@ -360,6 +360,33 @@ async def test_send_returns_at_once_and_the_turn_reports_its_progress(backend, t
     assert ("assistant.usage" in kinds) == (not agent_like(backend))
 
 
+async def test_an_mcp_servers_secrets_never_land_in_codexs_files(backend, tmp_path):
+    """The owner's MCP servers reach a Codex worker's thread over its own connection: their
+    headers and variables are in none of Codex's files (its rollouts, its configuration) nor on
+    a command line, once a turn has run. (The stand-in keeps what it is sent, to check it.)"""
+    if not real_codex(backend):
+        pytest.skip("What real Codex writes.")
+    secret = f"s3cret-{uuid4().hex[:10]}"
+    servers = {
+        "remote": {"type": "http", "url": "http://127.0.0.1:9/mcp",
+                   "headers": {"Authorization": f"Bearer {secret}"}},
+        "local": {"command": "true", "args": [], "env": {"API_TOKEN": secret}},
+    }  # fmt: skip
+    session, turn = await open_session(backend, tmp_path, mcp_servers=servers)
+    await session.send("Reply with just: ok")
+    await turn.wait()
+    home = Path(os.environ["CODEX_HOME"])
+
+    def holding() -> tuple[int, list[str]]:
+        files = [path for path in home.rglob("*") if path.is_file()]
+        return len(files), [str(path) for path in files if secret.encode() in path.read_bytes()]
+
+    written, found = await asyncio.to_thread(holding)
+    assert written and found == [], "Codex wrote its files there, none holding the secret"
+    commands = [command for _, command in (await asyncio.to_thread(process_table)).values()]
+    assert not any(secret in command for command in commands)
+
+
 async def test_shell_commands_ask_for_permission_first(backend, tmp_path):
     asked = []
 
