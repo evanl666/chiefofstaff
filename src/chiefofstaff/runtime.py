@@ -792,6 +792,7 @@ class Runtime:
         await self.habits.start()
         await self.connector.start()
         self.background(self.abilities.sync())
+        self.task_actions.arm_scheduled()
         if self.store.settings().worker_sandbox and self.sandbox_host:
             self.seed_caches_soon()
         if self.store.drafts("uncertain"):
@@ -1689,7 +1690,7 @@ class Runtime:
                     self.update_session(row["id"], status="working")
                 self.halted.add(row["id"])
                 with suppress(Exception):
-                    if paused := self.plan_paused(named[row["id"]], why):
+                    if paused := self.plan_paused(named[row["id"]], why, row["id"]):
                         await self.workers.interrupt(row["id"], by=agents.PLAN_STOP, notice=paused)
                     else:
                         await self.workers.interrupt(row["id"], by="Settings")
@@ -1702,21 +1703,47 @@ class Runtime:
         plan's limit: paused, as when its request is refused)."""
         self.halted.add(session_id)
         with suppress(Exception):
-            if paused := self.plan_paused(self.agent(session_id), why):
+            if paused := self.plan_paused(self.agent(session_id), why, session_id):
                 await self.workers.interrupt(session_id, by=agents.PLAN_STOP, notice=paused)
             else:
                 await self.workers.interrupt(session_id, by="Settings", notice=f"Stopped: {why}")
 
-    def plan_paused(self, agent: str, why: str) -> str:
+    def plan_paused(self, agent: str, why: str, session_id: str) -> str:
         """What a worker's timeline says when `why` it may not run is its agent's plan's limit
-        reached ("" for any other reason): paused, not stopped by Settings."""
+        reached ("" for any other reason): paused, not stopped by Settings (what its row says
+        of the limit, kept: record_pause)."""
         entry = self.agents.get(agent)
         backend = entry.backend if entry else None
         refusal = getattr(backend, "limit_refusal", None)
         if not why or not callable(refusal) or refusal() != why:
             return ""
-        line = agents.limit_line(getattr(backend, "limit", {}), name=agent)
-        return f"Paused: {line}" if line else ""
+        limit = getattr(backend, "limit", {})
+        if not (line := agents.limit_line(limit, name=agent)):
+            return ""
+        self.record_pause(session_id, agent, limit)
+        return f"Paused: {line}"
+
+    def record_pause(self, session_id: str, agent: str, limit: Any):
+        """A worker its agent paused for a limit: what its task's row says of that limit (its
+        reset first), kept until it pauses again."""
+        self.store.set(f"planpause:{session_id}", json.dumps(agents.pause_facts(limit, agent)))
+
+    def pause_view(self, task: dict, row: dict) -> dict:
+        """A task its worker's agent paused for a limit: the agent, when the limit resets (if it
+        said), whether it is a rate limit, and when it goes on by itself (the owner's Go on at
+        <reset>: 0 when not asked)."""
+        try:
+            facts = json.loads(self.store.get(f"planpause:{row['id']}") or "{}")
+        except ValueError:
+            facts = {}
+        if not isinstance(facts, dict) or not facts.get("agent"):
+            facts = agents.pause_facts({}, self.agent(row["id"]))
+        return {
+            **facts,
+            "agent_name": agents.display(str(facts["agent"])),
+            "line": agents.pause_line(facts),
+            "go_on_at": int(self.store.get(f"goonat:{task['id']}") or 0),
+        }
 
     async def agents_saved(self, before: dict[str, dict], chose: bool | None = None) -> list[str]:
         """The owner saved the Coding agents tab (or answered a first-run card): an agent turned on
@@ -3220,8 +3247,9 @@ class Runtime:
 
     def agent_refused_card(self, agent: str, why: str, params: dict):
         """A worker the owner named an agent for could not start on it (more-agents.md 5.12.8,
-        recovery): the Router says why, and the owner's card in its chat offers what to do
-        (sign-in help, run it on Copilot instead, or wait); nothing starts elsewhere unasked."""
+        recovery): the owner's card in the Router's chat says why and offers what to do
+        (sign-in help, run it on Copilot instead, or wait), the Router not saying it again;
+        nothing starts elsewhere unasked."""
         key = uuid4().hex[:10]
         self.store.set(f"agentrefusal:{key}", json.dumps({"agent": agent, "params": params}))
         self.add_message(
@@ -3251,10 +3279,10 @@ class Runtime:
 
         params = {k: v for k, v in found["params"].items() if k != "agent"} | {"model": ""}
         await self.toolset.t_spawn_worker(
-            SpawnWorker.model_validate(params), self.router_id(), agent=COPILOT_AGENT
-        )
-        self.add_message(
-            self.router_id(), "notice", f"Started “{params.get('title')}” on Copilot instead."
+            SpawnWorker.model_validate(params),
+            self.router_id(),
+            agent=COPILOT_AGENT,
+            instead=" on Copilot instead",
         )
         return {}
 

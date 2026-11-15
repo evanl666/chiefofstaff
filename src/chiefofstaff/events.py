@@ -915,6 +915,7 @@ class Events:
         line = agents.limit_line(limit, name=agent) or (
             f"{agents.display(agent)} refused it for a limit of its plan or account."
         )
+        self.runtime.record_pause(row["id"], agent, limit)
         self.runtime.workers.paused(row["id"], agents.PLAN_STOP, f"Paused: {line}", message)
         if agents.blocked(limit):
             self.runtime.plan_limit_seen(agent, limit)

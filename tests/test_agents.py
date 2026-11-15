@@ -428,9 +428,9 @@ async def test_a_named_agent_that_cannot_run_is_an_error_not_copilot(
             harness, runtime, title="Fix it", instructions="Do it.", agent="codex"
         )
         assert result.result_type == "failure"
-        assert (
-            result.error
-            == "Codex could not start: Codex is not signed in: run codex login in a terminal."
+        assert result.error.startswith(
+            "Not started: Codex could not start: Codex is not signed in: run codex login in a "
+            "terminal. The owner sees this on a card in this chat"
         )
         assert len(harness.store.open_sessions()) == before, "no worker made"
         slack = await spawn_on(
@@ -909,7 +909,9 @@ async def test_an_agent_never_turned_on_is_said_to_be_off(tmp_path, codex_on_pat
                 arguments={"title": "Fix it", "instructions": "Do it.", "agent": "codex"},
             )
         )
-        assert refused.error == "Codex is turned off in Settings → Coding agents."
+        assert refused.error.startswith(
+            "Not started: Codex is turned off in Settings → Coding agents. The owner sees this"
+        )
     finally:
         await runtime.stop()
 

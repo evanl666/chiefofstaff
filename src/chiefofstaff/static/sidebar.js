@@ -60,13 +60,12 @@ function sessionItem(session, label, where) {
     where?.sub || background ? el("span", { class: "sub", text: where?.sub || "background" }) : null,
   );
 }
-// While other coding agents are on: a worker's agent where it is not Copilot, and why one that
-// was to run on another runs on Copilot (none at all with Copilot alone).
+// While other coding agents are on: every worker's agent, Copilot too, its model on hover, and
+// why one that was to run on another runs on Copilot (none at all with Copilot alone).
 function agentBadge(session) {
   if (!state.snapshot.agents) return null;
-  if (session.agent) return el("span", { class: "agent-badge", text: session.agent_name, title: [session.agent_name, session.model].filter(Boolean).join(" · ") });
-  if (session.agent_fallback) return el("span", { class: "agent-badge", text: "Copilot", title: session.agent_fallback });
-  return null;
+  const name = session.agent ? session.agent_name : "Copilot";
+  return el("span", { class: "agent-badge", text: name, title: session.agent_fallback || [name, session.model].filter(Boolean).join(" · ") });
 }
 const ORDER = Object.fromEntries([...WORKER_STATES.map(([dot]) => dot), "open"].map((dot, index) => [dot, index]));
 // What the dots mean, under "Workers" when asked.

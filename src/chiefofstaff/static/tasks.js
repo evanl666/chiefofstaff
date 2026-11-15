@@ -1,7 +1,7 @@
 // Task cards on Home: what runs and what it does now, what waits, what is finished.
 
 import { api, el, foldable, FRESH_START, freshButton, moreMenu, once, startFresh, submits, toast } from "./dom.js";
-import { monitorParts, obligationsOf, PLAN_STOP, PR_TO_FIX, SECTION_DOT, statusWord, taskPhase, workerContext } from "./board.js";
+import { monitorParts, obligationsOf, PLAN_STOP, PR_TO_FIX, resetTime, SECTION_DOT, statusWord, taskPhase, workerContext } from "./board.js";
 import { ago, changesText, compactPaths, displayPath, gist, linkKey, linkName, markdown, notCountedText, plural, prTitle, shorten, since, taskLinks, threadLabel, uncheckedText } from "./text.js";
 import { deliverablesOf, isHidden, PR_ROLES, prStatus, runStanding, setHidden, toneOf } from "./artifacts.js";
 import { openFile } from "./files.js";
@@ -15,8 +15,8 @@ import { showChanges } from "./diff.js";
 const HELPER_TITLES = new Set(["Learn how you work", "Learn checks from mistakes", "Distill owner profile"]);
 const sessionById = (id) => byId(id) || closedWorkers().find((session) => session.id === id);
 // A task its plan's limit paused: Continue with each other agent on (Copilot too), as the
-// worker's ⋯ does.
-function elsewhereItems(task) {
+// worker's ⋯ does; on its row, a menu of their names.
+function elsewhereItems(task, named = false) {
   const on = state.snapshot.agents;
   const session = byId(task.session_id);
   if (task.stopped !== PLAN_STOP || !on || !session) return [];
@@ -24,7 +24,7 @@ function elsewhereItems(task) {
   return ["copilot", ...on.on]
     .filter((name) => name !== (session.agent || "copilot"))
     .map((name) => ({
-      text: `Continue with ${names[name]}…`,
+      text: named ? names[name] : `Continue with ${names[name]}…`,
       onclick: async () => {
         if (!confirm(`Continue it with ${names[name]}? A new worker there goes on from a summary of this one's work, in the same folders; this one closes.`)) return;
         try {
@@ -687,11 +687,23 @@ function taskCard(task, phase = phaseOf(task)) {
     } else if (task.status === "waiting" && task.stopped && task.spend_stop && !task.go_on) {
       // Its token limit used: nothing goes on until it is raised (Settings → Coding agents).
       more = [named, worker, cancel];
+    } else if (task.status === "waiting" && task.stopped === PLAN_STOP) {
+      // Paused by its agent's limit: it goes on once that resets (by itself, asked here), or
+      // now; or another agent goes on with it. Never moved by itself.
+      const goOn = () => act(`/api/tasks/${task.id}/follow-up`, { text: "Go on where you stopped." }, "Sent to the worker.", true, true);
+      const resets = (task.paused?.resets_at || 0) * 1000;
+      const now = { text: "Go on now", onclick: goOn };
+      if (task.paused?.go_on_at) more = [now, ...elsewhereItems(task), named, worker, cancel];
+      else {
+        const when = resetTime(resets);
+        main = resets > Date.now() ? el("button", { type: "button", text: `Go on at ${when}`, "data-tip": "It goes on by itself once its limit resets", onclick: () => act(`/api/tasks/${task.id}/go-on-at-reset`, {}, `It goes on at ${when}.`) }) : el("button", { type: "button", text: "Go on", onclick: goOn });
+        shown = [moreMenu(elsewhereItems(task, true), "Continue on another agent: a new worker there goes on from a summary of this one's work", "Continue on another agent…") || ""];
+        more = [resets > Date.now() ? now : null, { text: "Go on with a note…", onclick: () => reply("What should it do now?", "Sent to the worker.") }, named, worker, cancel];
+      }
     } else if (task.status === "waiting" && task.stopped) {
-      // Stopped mid-work: go on where it stopped, or with a word on what to do instead. Paused
-      // by its plan's limit: go on once it resets, or on another agent (never by itself).
+      // Stopped mid-work: go on where it stopped, or with a word on what to do instead.
       main = el("button", { type: "button", text: "Go on", onclick: () => act(`/api/tasks/${task.id}/follow-up`, { text: "Go on where you stopped." }, "Sent to the worker.", true, true) });
-      more = [{ text: "Go on with a note…", onclick: () => reply("What should it do now?", "Sent to the worker.") }, ...elsewhereItems(task), named, worker, cancel];
+      more = [{ text: "Go on with a note…", onclick: () => reply("What should it do now?", "Sent to the worker.") }, named, worker, cancel];
     } else if (task.status === "waiting") {
       main = el("button", { type: "button", text: "Reply", onclick: () => reply("Your answer", "Sent to the worker.") });
       more = [named, worker, cancel];
@@ -1142,6 +1154,8 @@ function rowFoot(task, worker, phase, shown = false) {
 }
 // What a row says of its reason: what it waits on, why it needs the owner, or what it came to.
 function rowWhy(task, worker, phase) {
+  // Paused by its agent's limit: that limit and its reset (the agent's own words on hover).
+  if (task.status === "waiting" && task.stopped === PLAN_STOP) return { text: phase.why, help: task.progress || phase.why };
   if (phase.section === "monitoring") {
     // "Paused: its worker is on …", "Checks back at 3:15 PM: …" beside the status "Paused",
     // "Checks back": said once.
@@ -1173,8 +1187,10 @@ export function rowLatest(task, worker, phase) {
   // Its runs are what it needs the owner for: its result (accepted) is not news.
   if (phase.marker === "runs-unknown") return { text: "" };
   if (phase.marker === "update") return { text: gist(task.news?.text || ""), help: task.news?.text };
-  // Its question is said in full on the row; why its token limit stopped it, too.
+  // Its question is said in full on the row; why its token limit stopped it, or its agent's
+  // limit paused it, too.
   if (phase.section === "needs" && (questionOf(task) || (phase.marker === "stopped" && task.spend_stop))) return { text: "" };
+  if (task.status === "waiting" && task.stopped === PLAN_STOP) return { text: "" };
   // Failed after a retry, a result from before it is older than why it failed.
   const said = ["waiting", "failed"].includes(task.status) ? task.progress || task.result : ["review", "done"].includes(task.status) ? task.result || task.progress : task.progress;
   return { text: gist(said || ""), help: "" };

@@ -66,6 +66,8 @@ class MayHoldWorkError(ValueError):
 
 
 CHECK_BACK_RETRY_MINUTES = 5
+# Seconds past a limit's reset that a task asked to go on then does (go_on_at).
+GO_ON_MARGIN = 5
 # A report only (TaskActions.informational, E123) is accepted for the owner this long after they
 # opened it, or this long after it finished when they never did.
 READ_SETTLE_MINUTES = float(os.environ.get("CHIEFOFSTAFF_READ_SETTLE_MINUTES", "10"))
@@ -3951,6 +3953,58 @@ class TaskActions:
             return {"session_id": session_id}
         return await self.follow_up(task["id"], text, resume=True)
 
+    async def go_on_at(self, task_id: str) -> dict:
+        """Go on at <reset> (a task its agent paused for a limit, which said when it resets): it
+        goes on by itself then, as the owner's Go on would (Monitoring until then, through a
+        restart too), unless they say anything else to it first. Reset already: it goes on now."""
+        task = self.tasks.get(task_id)
+        row = self.store.find_session(task["session_id"])
+        if not (
+            row
+            and task["status"] == "waiting"
+            and self.store.get(f"stopped:{task_id}") == agents.PLAN_STOP
+        ):
+            raise ValueError("It is not paused for a limit now.")
+        at = int(self.runtime.pause_view(task, row)["resets_at"])
+        if not at or at <= time.time():
+            return await self.follow_up(task_id, "Go on where you stopped.")
+        self.store.set(f"goonat:{task_id}", str(at))
+        self.arm_go_on(task_id, at)
+        task = self.tasks.get(task_id)
+        self.publish(task)
+        return task
+
+    def arm_go_on(self, task_id: str, at: int):
+        self.runtime.background(self.going_on_at(task_id, at))
+
+    async def going_on_at(self, task_id: str, at: int):
+        # A few seconds past its reset: its agent's clock and this one's may differ a little.
+        await asyncio.sleep(max(0.0, at - time.time()) + GO_ON_MARGIN)
+        if self.store.get(f"goonat:{task_id}") != str(at):
+            return  # The owner said something else to it meanwhile (or asked again).
+        task = self.tasks.find(task_id)
+        if not (
+            task
+            and task["status"] == "waiting"
+            and self.store.get(f"stopped:{task_id}") == agents.PLAN_STOP
+        ):
+            self.store.delete(f"goonat:{task_id}")
+            return
+        try:
+            await self.follow_up(task_id, "Go on where you stopped.")
+        except Exception:
+            # Still refused (its limit not reset after all, say): it waits for the owner again.
+            logger.warning("Going on with %s once its limit reset failed.", task_id, exc_info=True)
+            if task := self.tasks.find(task_id):
+                self.publish(task)
+
+    def arm_scheduled(self):
+        """At start: each task that goes on by itself once its limit resets (go_on_at) still
+        does; one whose time passed while Chief of Staff was not running, now."""
+        for task_id, value in self.store.items("goonat:").items():
+            with suppress(ValueError):
+                self.arm_go_on(task_id, int(value))
+
     async def follow_up(
         self, task_id: str, text: str, resume: bool = False, changes: str = ""
     ) -> dict:
@@ -3968,6 +4022,8 @@ class TaskActions:
 
         if gone_on(task):
             return task
+        # Whatever the owner says now, it no longer waits to go on by itself (go_on_at).
+        self.store.delete(f"goonat:{task_id}")
         if task["status"] == "cancelled" and not resume:
             raise ValueError("That task was cancelled. Ask the Router for new work instead.")
         if going_on:
@@ -4424,6 +4480,8 @@ class TaskActions:
         stopped = self.store.get(f"stopped:{task['id']}")
         if task["status"] == "waiting" and stopped == agents.SPEND_STOP:
             spend = self.runtime.spend_stop(row)  # Why, and whether Go on can go on.
+        if task["status"] == "waiting" and stopped == agents.PLAN_STOP:
+            spend = {"paused": self.runtime.pause_view(task, row)}  # Its limit, its reset.
         return {
             "agent": agent,
             "agent_name": agents.display(agent),
@@ -4586,11 +4644,11 @@ class TaskActions:
                 row = self.store.find_session(task["session_id"])
                 if who == agents.SPEND_STOP and row and not self.runtime.on_copilot(row["id"]):
                     return "stopped", self.runtime.spend_stop(row)["spend_why"]
-                if who == agents.PLAN_STOP:
-                    paused = " ".join((task["progress"] or "Paused by its plan's limit.").split())
-                    return "stopped", clip(
-                        f"{paused} Go on once it resets, or continue with another agent.", 300
-                    )
+                if who == agents.PLAN_STOP and row:
+                    paused = self.runtime.pause_view(task, row)
+                    if paused["go_on_at"]:
+                        return "", ""  # It goes on by itself once its limit resets, as asked.
+                    return "stopped", paused["line"]
                 return "stopped", f"Stopped by {who}: tell it to go on, or cancel it"
             asked = self.open_question(task) or {}
             return "question", clip(" ".join((asked.get("text") or task["progress"]).split()), 300)

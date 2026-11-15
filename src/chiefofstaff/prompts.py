@@ -965,7 +965,8 @@ others'). If no tool here reaches the owner's messages, call report_owner_words 
 AGENTS_RULE = (
     "- Workers can run on {agents} as well as Copilot: set spawn_worker's agent only when the "
     "owner names one for the task, else leave it empty (Settings chooses). If the agent they "
-    "named cannot run it, tell them why; never start it on another. A model for such a worker "
+    "named cannot run it, a card in this chat tells them why and what they can do: do not say "
+    "it again, and never start it on another. A model for such a worker "
     "is one from list_sessions().agents.models of its agent. When they ask to move a worker's "
     "work to another agent, use continue_worker."
 )
@@ -975,8 +976,9 @@ CHOOSES_RULE = (
     "spawn_worker's agent for each new worker, the one they name for the task, else the one "
     "that suits it best among those (empty: Copilot). Say which you chose and why in one line "
     'of your reply ("On Codex: a long refactor it handles well."). If the agent they named, '
-    "or the one you chose, cannot run it, tell them why; never start it on another unless "
-    "they say so. A model for such a worker is one from list_sessions().agents.models of its "
+    "or the one you chose, cannot run it, a card in this chat tells them why and what they "
+    "can do: do not say it again, and never start it on another unless they say so. A model "
+    "for such a worker is one from list_sessions().agents.models of its "
     "agent. When they ask to move a worker's work to another agent, use continue_worker."
 )
 

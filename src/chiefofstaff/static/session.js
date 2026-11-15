@@ -80,8 +80,9 @@ export function renderHeader() {
   // On another coding agent: its name and model there after its state, and its tokens.
   if (session.agent) meta.splice(1, 0, AGENT, session.model);
   if (session.agent && session.tokens) meta.push(session.token_limit ? `${tokenCount(session.tokens)} of ${tokenCount(session.token_limit)} tokens` : `${tokenCount(session.tokens)} tokens`);
-  // To run on another agent, it runs on Copilot: said, why on hover.
-  if (session.agent_fallback && state.snapshot.agents) meta.splice(1, 0, FALLBACK);
+  // While other agents are on, a Copilot worker says so too (why, on hover, when it was to run
+  // on another).
+  if (session.role === "worker" && !session.agent && state.snapshot.agents) meta.splice(1, 0, FALLBACK);
   const follows = session.follows || [];
   if (follows.length && !session.closed_at) meta.push(`following ${follows.length}`);
   const titles = { router: "Chat with your chief of staff", slack: "Slack", watchdog: "Watchdog" };

@@ -247,6 +247,31 @@ def limit_line(limit: Any, now: float | None = None, name: str = "claude") -> st
     return ""
 
 
+def pause_facts(limit: Any, name: str) -> dict:
+    """What a worker its agent paused for a limit says of it on its row: the agent, when the
+    limit resets if the agent said (0: not said), and whether it is a rate limit rather than
+    its plan's."""
+    limit = limit if isinstance(limit, dict) else {}
+    resets = limit.get("resets_at")
+    return {
+        "agent": name,
+        "resets_at": int(resets) if isinstance(resets, int | float) and resets > 0 else 0,
+        "rate": limit.get("status") == "limited",
+    }
+
+
+def pause_line(facts: dict, now: float | None = None) -> str:
+    """A paused task's line, its reset first ("Codex limit reached · resets 9:25 pm"), as its row
+    on Home says it (board.js pauseLine)."""
+    kind = "rate limit" if facts.get("rate") else "limit"
+    what = f"{display(str(facts.get('agent') or ''))} {kind} reached"
+    resets = int(facts.get("resets_at") or 0)
+    if not resets:
+        return what
+    passed = resets <= (time.time() if now is None else now)
+    return f"{what} · {'reset at' if passed else 'resets'} {clock(resets)}"
+
+
 def plan_usage(store: Store, name: str, facts: dict) -> list[dict]:
     """How much of each of its plan's limits is used, where the agent says it ({label, used:
     percent, resets_at}): Codex's from its look, Claude's as its workers' streams last said it

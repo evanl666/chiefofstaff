@@ -14,7 +14,7 @@ import pytest
 from conftest import Harness
 from test_agents import ran, router_options, saved, spawn_on
 
-from chiefofstaff import agents, prompts
+from chiefofstaff import agents, prompts, task_actions
 from chiefofstaff.roles import WORKER
 
 
@@ -205,6 +205,9 @@ async def test_a_named_agent_that_cannot_run_offers_choices_and_starts_nothing_e
             harness, runtime, title="Fix the login test", instructions="Fix it", agent="codex"
         )
         assert result.result_type == "failure"
+        # The card says why: the Router hears so, and does not say it again.
+        assert "on a card in this chat" in result.text_result_for_llm
+        assert "do not say it again" in result.text_result_for_llm
         assert harness.store.open_sessions(WORKER) == [], "never started on another"
         (card,) = [
             m for m in harness.store.messages(harness.router_id) if m["meta"].get("agent_refused")
@@ -216,6 +219,12 @@ async def test_a_named_agent_that_cannot_run_offers_choices_and_starts_nothing_e
         (started_on,) = harness.store.open_sessions(WORKER)
         assert runtime.agent(started_on["id"]) == "copilot"
         assert started_on["title"] == "Fix the login test"
+        said = [
+            m["text"].split(" · ")[0]  # (Why it is new, on hover.)
+            for m in harness.store.messages(harness.router_id)
+            if m["kind"] == "notice" and m["text"].startswith("Started")
+        ]
+        assert said == ["Started “Fix the login test” on Copilot instead"], "one line, where"
         assert "agent_refusals" not in runtime.snapshot()
         with pytest.raises(ValueError, match="answered already"):
             await runtime.answer_refusal(key, "wait")
@@ -281,6 +290,67 @@ async def test_a_claude_plans_limit_mid_task_pauses_it_with_its_reset_not_failin
             await runtime.task_actions.follow_up(task, "Go on where you stopped.")
         assert runtime.tasks.get(task)["status"] == "waiting"
         assert harness.store.get(f"stopped:{task}") == agents.PLAN_STOP
+    finally:
+        await runtime.stop()
+
+
+async def test_a_paused_task_says_its_reset_first_and_goes_on_by_itself_then_once_asked(
+    tmp_path, claude_on_path, monkeypatch
+):
+    """Its row: "Claude limit reached · resets <time>" (Needs you). Go on at <time>: Monitoring
+    until then, nothing sent before; once it resets, it goes on as the owner's Go on would."""
+    resets = int(time.time()) + 3600
+    info = {"status": "rejected", "rateLimitType": "five_hour", "resetsAt": resets}
+    monkeypatch.setenv("FAKE_CLAUDE_LIMIT", json.dumps(info))
+    monkeypatch.setattr(task_actions, "GO_ON_MARGIN", 0.2)
+    harness, runtime = await started(tmp_path)
+    try:
+        await saved(runtime, {"claude": {"enabled": True}})
+        worker, task, _ = await limited(harness, runtime, "claude", "Hit the usage limit")
+        line = f"Claude limit reached · resets {agents.clock(resets)}"
+        paused = {"agent": "claude", "resets_at": resets, "rate": False, "agent_name": "Claude"}
+        view = runtime.task_actions.view(runtime.tasks.get(task))
+        assert view["paused"] == {**paused, "line": line, "go_on_at": 0}
+        assert (view["attention"], view["attention_why"]) == ("stopped", line)
+        # Its reset near now (as its stream would say it later on).
+        resets = int(time.time()) + 3
+        runtime.agents["claude"].backend.limit["resets_at"] = resets
+        runtime.record_pause(worker, "claude", runtime.agents["claude"].backend.limit)
+        sent = len(harness.store.messages(worker))
+        await runtime.task_actions.go_on_at(task)
+        view = runtime.task_actions.view(runtime.tasks.get(task))
+        assert view["paused"]["go_on_at"] == resets
+        assert view["attention"] == "", "not the owner's to do now"
+        await asyncio.sleep(1)
+        assert runtime.tasks.get(task)["status"] == "waiting", "nothing before its reset"
+        assert len(harness.store.messages(worker)) == sent
+        await until(lambda: runtime.tasks.get(task)["status"] != "waiting", 30)
+        assert harness.store.get(f"goonat:{task}") is None
+        assert harness.store.get(f"stopped:{task}") is None
+        assert "Go on where you stopped." in [m["text"] for m in harness.store.messages(worker)]
+    finally:
+        await runtime.stop()
+
+
+async def test_a_task_asked_to_go_on_at_its_reset_still_does_after_a_restart(
+    tmp_path, claude_on_path, monkeypatch
+):
+    """Asked to go on at its reset, and Chief of Staff was not running then: it goes on at the
+    next start; anything the owner says to it first takes the place of that."""
+    info = {"status": "limited"}
+    monkeypatch.setenv("FAKE_CLAUDE_LIMIT", json.dumps(info))
+    monkeypatch.setattr(task_actions, "GO_ON_MARGIN", 0)
+    harness, runtime = await started(tmp_path)
+    try:
+        await saved(runtime, {"claude": {"enabled": True}})
+        _worker, task, _ = await limited(harness, runtime, "claude", "Hit the usage limit")
+        view = runtime.task_actions.view(runtime.tasks.get(task))
+        assert view["paused"]["line"] == "Claude rate limit reached", "no reset said: none shown"
+        # As one that was to go on while Chief of Staff was not running.
+        harness.store.set(f"goonat:{task}", str(int(time.time()) - 60))
+        runtime.task_actions.arm_scheduled()
+        await until(lambda: runtime.tasks.get(task)["status"] != "waiting", 30)
+        assert harness.store.get(f"goonat:{task}") is None
     finally:
         await runtime.stop()
 
