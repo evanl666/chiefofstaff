@@ -44,6 +44,13 @@ to a branch of its own before a push is let through again (QA on 0.1.45).
   that do, can't tell which branch. An alias given with `-c` that runs `send-pack` or
   `subtree` is refused as one that runs `push` is. A line that only sets a harmless alias
   (`git config alias.st status`) is let through.
+- **An alias that switches branches is read as that switch**: with `alias.co=checkout` or
+  `alias.sw=switch` in git's configuration, or `-c alias.co=checkout` on the line,
+  `git co main && git push` is refused as a push to the default branch, and
+  `git co main && git pull && git co feature/x && git push` is let through, as the same lines
+  with `git checkout` are. One a shell alias may run (`!…`), or that the line sets itself
+  before a push naming no branch, can't tell which branch; so can `git co -`. An alias `-c`
+  gives that runs another of git's configuration is followed to it.
 - **An unquoted variable the line doesn't set, or a substitution, before a refspec's `:`** may
   hold several refspecs (`$B:feat` with `B='HEAD:main HEAD'`): which branch the push updates is
   not known, and it is refused, saying so (found checking these fixes; quoted, `"$B:feat"`, it

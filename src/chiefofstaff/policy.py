@@ -1538,6 +1538,8 @@ class Tally:
     config_set: bool = False
     upstreams_set: bool = False
     unbranched: bool = False
+    # What the aliases git's configuration has that switch run, by folder and name (judged).
+    aliases: dict[tuple[str, str], tuple | None] = field(default_factory=dict)
 
     def named(self) -> tuple[dict[str, int], dict[str, int]]:
         if self.names is None:
@@ -2493,15 +2495,18 @@ def read_git(
         return
     if folder is not None and folder != line.folder:
         git.moved = True  # (`env -C DIR git push origin "$(…)"`: that runs in the shell's folder.)
+    git = aliases_run(git, index, line)
     fed = feeds == "*" or bool(feeds and any(feeds in word for word in words[1:]))
     if fed and git.rest[0] in SWITCHING:
         record_switch(git, index, line, ("unknown", ""))
         return
     if git.rest[0] == "config":
-        sets, alias = config_change(git.rest)
+        sets, alias, switches = config_change(git.rest)
         line.tally.config_set = line.tally.config_set or sets
         if alias and any(line.tally.says(word) for word in PUSHING):
             line.tally.pushes.append(Push(unknown=True))  # An alias that may push, from here on.
+        if switches:  # An alias that switches, from here on: where to, not known.
+            record_switch(git, index, line, ("unknown", ""))
     removes, upstream = branches_changed(git.rest)
     line.tally.unbranched = line.tally.unbranched or removes
     line.tally.upstreams_set = line.tally.upstreams_set or upstream
@@ -2523,6 +2528,48 @@ def read_git(
         line.tally.pushes.append(placed_bare(push, index, line))
     else:
         record_switch(git, index, line)
+
+
+def aliases_run(git: Git, index: int, line: Line) -> Git:
+    """A git command that runs an alias, read as the command it runs where that is known as the
+    line is read: an alias `-c` gives (but one that may push: push_of reads it; one that runs
+    another, of git's configuration: Push.alias), or one of git's configuration that switches
+    branches (Tally.aliases: judged). One that may switch, not known: a switch to a branch not
+    named."""
+    for _ in range(MOST_ALIASES):
+        name = git.rest[0]
+        if name in UNALIASED or UNSETTLED.search(name):
+            return git
+        key = f"alias.{name.lower()}"
+        if key in git.config:
+            value = git.config[key]
+            if (
+                value is None
+                or len(value) > MOST_VALUE
+                or value.startswith("!")
+                or any(word in value.lower() for word in PUSHING)
+            ):
+                text = " ".join([value or "", *git.rest[1:]]).lower()
+                if value is None or (
+                    value.startswith("!")
+                    and (any(word in text for word in EXPANDED) or UNSETTLED.search(text))
+                ):
+                    record_switch(git, index, line, ("unknown", ""))  # (A shell's: which?)
+                return git
+            words = alias_words(value)
+        elif (git.folder, name.lower()) in line.tally.aliases:
+            words = line.tally.aliases[(git.folder, name.lower())]
+        else:
+            return git
+        following = git_command(["git", *words, *git.rest[1:]], {}, git.folder) if words else None
+        if following is None or following.folder != git.folder or following.elsewhere:
+            record_switch(git, index, line, ("unknown", ""))
+            return git
+        following.config = {**git.config, **following.config}
+        following.elsewhere, following.moved, following.zsh = git.elsewhere, git.moved, git.zsh
+        git = following
+    record_switch(git, index, line, ("unknown", ""))
+    return git
 
 
 # A word a feeder adds to a git command (`xargs git p`): not known (Push.via). The commands no
@@ -2679,12 +2726,13 @@ PUSH_KEYS = re.compile(
 PUSH_SECTIONS = frozenset({"push", "remote", "branch", "alias", "include", "includeif"})
 
 
-def config_change(rest: list[str]) -> tuple[bool, bool]:
+def config_change(rest: list[str]) -> tuple[bool, bool, bool]:
     """What `git config` with these words may change of where pushes go: whether it sets (or
     unsets, renames, removes) push.default, a remote's push refspecs or mirror, a branch's
     upstream or push remote, an alias that may push (alias_may_push; or unsets one) or a file
-    to include, or what it can't say (a key in a variable, an editor); and whether it may set
-    such an alias. Reading changes nothing."""
+    to include, or what it can't say (a key in a variable, an editor); whether it may set such
+    an alias; and whether it sets one that switches branches or sets configuration (EXPANDED).
+    Reading changes nothing."""
     positional, options, valued = [], set(), False
     for word in rest[1:]:
         if valued:
@@ -2698,29 +2746,30 @@ def config_change(rest: list[str]) -> tuple[bool, bool]:
     action = positional[0] if positional[:1] and positional[0] in CONFIG_ACTIONS else ""
     positional = positional[1:] if action else positional
     if action in {"list", "get"} or options & CONFIG_READS:
-        return False, False
+        return False, False, False
     if action == "edit" or options & {"-e", "--edit"}:
-        return True, True
+        return True, True, True
     sections = action.endswith("-section") or bool(
         options & {"--rename-section", "--remove-section"}
     )
     if not action and not options & CONFIG_CHANGES and len(positional) < 2:
-        return False, False  # (`git config NAME`: it reads it.)
-    sets = alias = False
+        return False, False, False  # (`git config NAME`: it reads it.)
+    sets = alias = switches = False
     unsets = action == "unset" or bool(options & {"--unset", "--unset-all"})
     for key in positional[: 2 if sections else 1]:
         if UNSETTLED.search(key):
-            return True, True
+            return True, True, True
         lower = key.lower()
         part = lower.split(".", 1)[0] if sections else lower
         if not sections and part.startswith("alias."):
             value = positional[1] if len(positional) > 1 and not unsets else None
             alias = alias or value is None or alias_may_push(value)
             sets = sets or alias
+            switches = switches or (value is not None and alias_switches_to(value))
             continue
         sets = sets or (part in PUSH_SECTIONS if sections else bool(PUSH_KEYS.fullmatch(part)))
         alias = alias or part == "alias"
-    return sets, alias
+    return sets, alias, switches or alias
 
 
 def alias_may_push(text: str) -> bool:
@@ -2736,6 +2785,14 @@ def alias_may_push(text: str) -> bool:
     words = alias_words(text)
     git = git_command(["git", *words], {}, "") if words else None
     return git is None or git.rest[0] not in GIT_COMMANDS
+
+
+def alias_switches_to(text: str) -> bool:
+    """Whether an alias of this text (that runs git's own command) switches branches or sets
+    configuration (EXPANDED)."""
+    words = alias_words(text) if len(text) <= MOST_VALUE else None
+    git = git_command(["git", *words], {}, "") if words else None
+    return git is not None and git.rest[0] in EXPANDED
 
 
 def squashed(command: str) -> str:
@@ -2946,9 +3003,12 @@ def reading(command: str, cwd: str) -> tuple[tuple[Push, ...], str]:
 
 
 @functools.lru_cache(maxsize=32)
-def read_pushes(command: str, cwd: str, shell: str) -> tuple[tuple[Push, ...], str]:
+def read_pushes(
+    command: str, cwd: str, shell: str, aliases: frozenset = frozenset()
+) -> tuple[tuple[Push, ...], str]:
     """See reading. A line no word of which says `push`, an alias or git pushes nothing; one
-    that says git but no push may run an alias that pushes, only (Push.alias)."""
+    that says git but no push may run an alias that pushes, only (Push.alias). With `aliases`
+    (alias_switches), the git commands that run those are read as what they run."""
     says = may_push(command)
     if not says and not may_alias(squashed(command)):
         return (), ""
@@ -2956,6 +3016,7 @@ def read_pushes(command: str, cwd: str, shell: str) -> tuple[tuple[Push, ...], s
         return (), TOO_LONG
     tally = Tally(command, cwd, shell)
     tally.currents = CURRENT[1] not in command
+    tally.aliases = dict(aliases)
     try:
         why = read_line(command, cwd, 0, tally)
     except TooComplexError:
@@ -3626,45 +3687,24 @@ def through_alias(candidate: Push, command: str, cwd: str) -> Push | None:
         ):
             return unknown
         return None
-    for _ in range(MOST_ALIASES):
-        name = git.rest[0]
-        if name in UNALIASED or UNSETTLED.search(name):
-            break
-        key = f"alias.{name.lower()}"
-        if key in git.config:
-            value = git.config[key]
-        elif name.lower() in settings.aliases:
-            value = settings.aliases[name.lower()]
-        else:
-            return None  # No alias: git runs a program of that name, or none.
-        if value is None or len(value) > MOST_VALUE:
-            return unknown  # (Its text: not read here.)
-        if value.startswith("!"):
-            text = " ".join(git.rest[1:]).lower()
-            named = ALIAS_WORDS.findall(text)
-            if (
-                name.lower() in settings.shell_pushers
-                or key in git.config
-                or UNSETTLED.search(text)
-                or any(word in text for word in PUSHING)
-                or any(word in settings.aliases or f"alias.{word}" in git.config for word in named)
-            ):
-                return unknown
-            return None
-        words = alias_words(value)
-        if words is None:
-            return unknown
-        following = git_command(["git", *words, *git.rest[1:]], {}, git.folder) if words else None
-        if following is None:
-            return None
-        if following.folder != git.folder or following.elsewhere:
-            return unknown  # (git runs no such alias; not followed here.)
-        following.config = {**git.config, **following.config}
-        following.elsewhere, following.moved, following.zsh = git.elsewhere, git.moved, git.zsh
-        following.epoch, following.currents = git.epoch, git.currents
-        git = following
-    else:
+    kind, git = followed(git, settings)
+    if kind == "none":
+        return None
+    if kind == "unknown":
         return unknown
+    if kind == "shell":
+        name = git.rest[0].lower()
+        text = " ".join(git.rest[1:]).lower()
+        named = ALIAS_WORDS.findall(text)
+        if (
+            name in settings.shell_pushers
+            or f"alias.{name}" in git.config
+            or UNSETTLED.search(text)
+            or any(word in text for word in PUSHING)
+            or any(word in settings.aliases or f"alias.{word}" in git.config for word in named)
+        ):
+            return unknown
+        return None
     push = push_of(git)
     if push is None:
         return None
@@ -3678,6 +3718,79 @@ def through_alias(candidate: Push, command: str, cwd: str) -> Push | None:
     return push
 
 
+def followed(git: Git, settings: Pushing) -> tuple[str, Git]:
+    """What a git command runs, followed from one alias to the next (`-c`'s, then those of the
+    folder's configuration, `settings`): ("git", the git command of git's own at the end, its
+    words the aliases' and then the line's), ("shell", the git command of a shell's alias:
+    `!…`), ("none", …) for a name no alias has (a program of that name, or none), ("unknown",
+    …) for one not read here."""
+    for _ in range(MOST_ALIASES):
+        name = git.rest[0]
+        if name in UNALIASED or UNSETTLED.search(name):
+            return "git", git
+        key = f"alias.{name.lower()}"
+        if key in git.config:
+            value = git.config[key]
+        elif name.lower() in settings.aliases:
+            value = settings.aliases[name.lower()]
+        else:
+            return "none", git  # No alias: git runs a program of that name, or none.
+        if value is None or len(value) > MOST_VALUE:
+            return "unknown", git  # (Its text: not read here.)
+        if value.startswith("!"):
+            return "shell", git
+        words = alias_words(value)
+        if words is None:
+            return "unknown", git
+        following = git_command(["git", *words, *git.rest[1:]], {}, git.folder) if words else None
+        if following is None:
+            return "none", git
+        if following.folder != git.folder or following.elsewhere:
+            return "unknown", git  # (git runs no such alias; not followed here.)
+        following.config = {**git.config, **following.config}
+        following.elsewhere, following.moved, following.zsh = git.elsewhere, git.moved, git.zsh
+        following.epoch, following.currents = git.epoch, git.currents
+        git = following
+    return "unknown", git
+
+
+# The git commands an alias may run that change where a later push goes, or what it pushes
+# (read as the line's own: alias_switches); a shell's alias that says one may.
+EXPANDED = frozenset({"checkout", "switch", "branch", "symbolic-ref", "update-ref", "config",
+                      "worktree"})  # fmt: skip
+
+
+def alias_switches(found: tuple[Push, ...], cwd: str) -> dict[tuple[str, str], tuple | None]:
+    """For each git command of a line that runs an alias of its folder's configuration (Push
+    .alias) that switches branches or sets configuration (EXPANDED), by its folder and name:
+    the words of git's own command it runs (the line's words after them), or None when it may
+    and which is not known (a shell's alias that says one; one not read)."""
+    switches: dict[tuple[str, str], tuple | None] = {}
+    for candidate in found:
+        git = candidate.via
+        if git is None or not ALIAS_NAME.fullmatch(candidate.alias):
+            continue
+        lost = bool(UNSETTLED.search(git.folder))
+        settings = alias_settings(cwd if lost else git.folder)
+        if candidate.alias_unknown or settings.unread:
+            words: tuple | None = None
+        else:
+            kind, final = followed(git, settings)
+            if kind == "none" or (kind == "git" and final.rest[0] not in EXPANDED):
+                continue
+            if kind == "shell":
+                name = final.rest[0].lower()
+                value = final.config.get(f"alias.{name}") or settings.aliases.get(name) or ""
+                text = " ".join([value, *final.rest[1:]]).lower()
+                if not any(word in text for word in EXPANDED) and not UNSETTLED.search(text):
+                    continue
+            given = len(git.rest) - 1
+            words = tuple(final.rest[: len(final.rest) - given]) if kind == "git" else None
+        key = (git.folder, candidate.alias)
+        switches[key] = words if switches.get(key, words) == words else None
+    return switches
+
+
 @functools.lru_cache(maxsize=256)
 def alias_words(text: str) -> tuple[str, ...] | None:
     """An alias's words, as git splits them (quotes as the shell's); None when it can't."""
@@ -3688,9 +3801,16 @@ def alias_words(text: str) -> tuple[str, ...] | None:
 
 
 def judged(command: str, cwd: str) -> list[Push]:
-    """Each push of a line (pushes), an alias's as through_alias makes it: what is judged."""
+    """Each push of a line (pushes), an alias's as through_alias makes it: what is judged. A
+    line that runs an alias that switches branches (or sets configuration) is read again,
+    that alias read as what it runs (alias_switches)."""
+    pushes_read = reading(command, cwd)[0]
+    if switches := alias_switches(pushes_read, cwd):
+        pushes_read, why = read_pushes(command, cwd, SHELL.get(), frozenset(switches.items()))
+        if why:
+            return [Push(unknown=True)]
     found = []
-    for push in reading(command, cwd)[0]:
+    for push in pushes_read:
         if not push.alias:
             found.append(push)
         elif (made := through_alias(push, command, cwd)) is not None:

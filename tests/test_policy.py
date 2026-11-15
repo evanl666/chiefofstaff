@@ -729,6 +729,9 @@ def test_a_line_too_much_to_read_that_pushes_is_refused_saying_why(command, work
         "x=$(git p) " * 10_000,
         "git p; " * 20_000,
         "$G p " * 20_000,
+        # Before 0.1.46: aliases that switch.
+        "git co a && " * 10_000 + "git push",
+        "git -c alias.co=checkout co a && " * 5_000 + "git push",
     ],
 )
 def test_no_line_is_slow_to_check(command, work, feature):
@@ -2470,3 +2473,73 @@ def test_the_users_aliases_count_and_are_asked_with_where_pushes_go(tmp_path, mo
     assert work["git"] == 4, "the folder's branch, @{push}, its configuration: once each"
     settings.write_text("[alias\n")
     assert "can't tell which branch" in (denial("git lfs pull", repo) or "")
+
+
+SWITCHING_ALIASES = [("alias.co", "checkout"), ("alias.sw", "switch"), ("alias.p", "push"),
+                     ("alias.f", '!f() { git "$@"; }; f'), ("alias.via", "co")]  # fmt: skip
+
+
+def aliased(path, branch: str):
+    found = checkout(path, branch)
+    for key, value in SWITCHING_ALIASES:
+        subprocess.run(["git", "-C", str(found), "config", key, value], check=True)
+    return found
+
+
+@pytest.mark.parametrize(
+    ("command", "reason"),
+    [
+        ("git co main && git push", "default branch"),
+        ("git sw main && git push", "default branch"),
+        ("git via main && git push", "default branch"),
+        ("git co main && git p", "default branch"),
+        ("git -C . sw main && git push -u origin HEAD", "default branch"),
+        ("git -c alias.go=checkout go main && git push", "default branch"),
+        ("git -c alias.y=p y origin main", "default branch"),
+        ("git co - && git push", "can't tell"),
+        ("git co main; git co feature/x || true; git push", "can't tell"),
+        ("git f checkout main && git push", "can't tell"),
+        ("git config alias.go checkout && git go main && git push", "can't tell"),
+    ],
+)
+def test_an_alias_that_switches_branches_is_read_as_that_switch(command, reason, tmp_path):
+    """Before 0.1.46: with `alias.co=checkout` (or `sw=switch`) in git's configuration, or `-c
+    alias.co=checkout` on the line, `git co main && git push` pushed main, unread; it is read
+    as the switch it runs (as E67 reads `git checkout main && git push`)."""
+    work = aliased(tmp_path / "repo", "wb/x")
+    assert reason in (denial(command, work) or ""), command
+
+
+@pytest.mark.parametrize(
+    ("command", "branch"),
+    [
+        ("git co main && git pull && git co feature/x && git push", "wb/x"),
+        ("git sw main && git pull && git sw feature/x && git push", "wb/x"),
+        ("git sw feature/x && git push", "main"),
+        ("git via feature/x && git push", "main"),
+        ("git co main && git push origin wb/x", "wb/x"),
+        ("git co nope && git push", "wb/x"),
+        ("git -c alias.y=p y origin wb/x", "wb/x"),
+        ("git config alias.go checkout && git go feature/x", "wb/x"),
+    ],
+)
+def test_an_alias_that_switches_to_a_branch_of_its_own_lets_the_push_through(
+    command, branch, tmp_path
+):
+    work = aliased(tmp_path / "repo", branch)
+    assert denial(command, work) is None, command
+
+
+def test_the_users_alias_that_switches_and_one_given_with_c_are_read(
+    tmp_path, monkeypatch, feature
+):
+    settings = tmp_path / "gitconfig"
+    settings.write_text("[alias]\n\tsw = switch\n")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(settings))
+    repo = checkout(tmp_path / "repo", "wb/x")
+    assert "default branch" in (denial("git sw main && git push", repo) or "")
+    assert denial("git sw feature/x && git push", repo) is None
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "none"))
+    assert "default branch" in (
+        denial("git -c alias.co=checkout co main && git push", feature) or ""
+    )

@@ -240,7 +240,8 @@ PRESETS = {
                  "branch.wb/x.merge=refs/heads/wb/x"],
     "mirror": ["remote.origin.mirror=true"],
     "aliases": ["alias.p=push", "alias.pf=push --force", "alias.sp=send-pack", "alias.q=p",
-                "alias.st=subtree", "alias.sh=!git push", "alias.lg=log"],
+                "alias.st=subtree", "alias.sh=!git push", "alias.lg=log", "alias.co=checkout",
+                "alias.sw=switch"],
 }  # fmt: skip
 
 
@@ -605,7 +606,11 @@ SWITCHES = ["git checkout -b wb/new", "git switch -c fix", "git checkout main",
             "git checkout sub", "git switch nope", "git checkout nope", "git branch -D feat",
             "git branch -m wb/x wb/z", "git switch --detach feat", "git checkout feat sub",
             "git switch $B", 'git checkout "$B"', "git checkout -p main", "git switch -f main",
-            "git branch sub"]  # fmt: skip
+            "git branch sub",
+            # Switches through an alias (before 0.1.46).
+            "git co main", "git co feat", "git sw main", "git sw feat", "git co -",
+            "git -c alias.co=checkout co main", "git -c alias.sw=switch sw feat",
+            "git config alias.co checkout"]  # fmt: skip
 # git's configuration a line writes to its files, not with `git config` (the invariant review
 # of 86f9f8d): in the sandbox's repositories (each `cd ..` a line may make stays in it), and the
 # user's (a line that names HOME writes none: without one, `~` is the user's own home).
@@ -1113,6 +1118,13 @@ FOUND = [
     ('G=git; $G p origin main', 'feat', 'aliases'),
     ('x=$(git p origin main)', 'feat', 'aliases'),
     ('git sh origin feat', 'feat', 'aliases'),
+    # Before 0.1.46: a switch through an alias (configured, `-c`, set on the line).
+    ('git co main && git push', 'feat', 'aliases'),
+    ('git sw main && git push', 'feat', 'aliases'),
+    ('git co main && git p', 'feat', 'aliases'),
+    ('git -c alias.co=checkout co main && git push', 'feat'),
+    ('git -c alias.y=p y origin main', 'feat', 'aliases'),
+    ('git config alias.co checkout && git co main && git push', 'feat'),
 ]  # fmt: skip
 
 
