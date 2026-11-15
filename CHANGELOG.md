@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- **Security: a Codex worker could switch off Chief of Staff's checks for itself.** In a
+  repository you trust in Codex, a worker could write Codex settings into its own folder
+  (`.codex/`): from its next start or resume, Codex loaded them. A rule there let commands run
+  without asking Chief of Staff (under *Ask first* too, and past its refusals, such as pushes to
+  the default branch), an MCP server there ran its command at every start, and settings there
+  could change its commands' environment and its model. Now Codex loads a folder's `.codex/` for
+  a worker only while it is as committed (in the worker's worktree, as it was when the worktree
+  was made; in your own checkout, as its last commit), and the worker's timeline says when it
+  doesn't. Workers' edits to `.codex/` folders and to Codex's own settings folder are refused.
+
 ## 0.1.45 (2026-11-14)
 
 Workers can run on Codex, with your own Codex sign-in (off by default); more pushes to the

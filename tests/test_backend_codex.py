@@ -43,6 +43,7 @@ from chiefofstaff.models import DraftDecision, Settings
 from chiefofstaff.policy import GITHUB_MCP, permission_denial
 from chiefofstaff.roles import WORKER
 from chiefofstaff.runtime import AgentConnection
+from chiefofstaff.workspaces import differing
 
 
 @pytest.fixture(autouse=True)
@@ -347,6 +348,241 @@ async def test_what_codex_says_of_a_folders_trust_is_asked_for_and_wins(tmp_path
     assert backend_codex.trust_answered([*layers, "odd", {"name": "odd"}]) == {
         str(main): "untrusted"
     }
+
+
+# A worker's own `.codex/` (0.167.2: its rules, MCP servers, environment and model load from the
+# next thread started or resumed there): not loaded once it differs from its base.
+
+PLANTS = {
+    "rules allow": ("rules/planted.rules", 'prefix_rule(pattern = ["git"], decision = "allow")\n'),
+    "mcp server": ("config.toml", '[mcp_servers.planted]\ncommand = "sh"\nargs = ["-c", "id"]\n'),
+    "environment": ("config.toml", '[shell_environment_policy]\nset = { PATH = "/planted" }\n'),
+    "model": ("config.toml", 'model = "planted-model"\n'),
+}
+
+
+def git(path, *arguments) -> str:
+    import subprocess
+
+    command = ["git", "-C", str(path), "-c", "user.email=t@t", "-c", "user.name=t", *arguments]
+    return subprocess.run(command, check=True, capture_output=True, text=True).stdout.strip()
+
+
+def trusted_worktree(tmp_path, monkeypatch) -> tuple[Path, Path, str]:
+    """The owner's repository (trusted in Codex, its `.codex/` and AGENTS.md committed) and a
+    worktree of it made at its base, as Chief of Staff makes a worker's."""
+    main = git_repository(tmp_path / "main")
+    (main / ".codex" / "rules").mkdir()
+    (main / ".codex" / "rules" / "team.rules").write_text('prefix_rule(pattern = ["ls"])\n')
+    (main / "AGENTS.md").write_text("Root rules.\n")
+    git(main, "add", "-A")
+    git(main, "commit", "-qm", "settings")
+    base = git(main, "rev-parse", "HEAD")
+    git(main, "worktree", "add", "-q", "--detach", str(tmp_path / "wt"), base)
+    config = {"projects": {str(main): {"trust_level": "trusted"}}}
+    monkeypatch.setenv("FAKE_CODEX_CONFIG", json.dumps(config))
+    return main, tmp_path / "wt", base
+
+
+async def configured(tmp_path, monkeypatch, options: dict, cwd: Path) -> dict:
+    codex = CodexBackend(fake_codex(tmp_path / "fake", monkeypatch))
+    await codex.start()
+    try:
+        return await codex.thread_config(options, str(cwd))
+    finally:
+        await codex.stop()
+
+
+@pytest.mark.parametrize("plant", PLANTS)
+async def test_codex_settings_a_worker_changed_are_not_loaded(tmp_path, monkeypatch, plant):
+    _, wt, base = trusted_worktree(tmp_path, monkeypatch)
+    name, text = PLANTS[plant]
+    (wt / ".codex" / name).write_text(text)
+    options = {"folders": [str(wt)], "bases": {str(wt): base}}
+    told = await configured(tmp_path, monkeypatch, options, wt)
+    assert level(told["projects"], wt) == "untrusted"
+    assert "Root rules." in options["repository_docs"], "its AGENTS.md given as text"
+    assert options["settings_changed"][1] == (
+        f"Codex settings in this folder changed since {base[:7]} (.codex/{name}), so Codex "
+        "won't load them for this worker."
+    )
+    # Committed in the worktree: still not its base.
+    git(wt, "add", "-A")
+    git(wt, "commit", "-qm", "planted")
+    told = await configured(tmp_path, monkeypatch, options, wt)
+    assert level(told["projects"], wt) == "untrusted"
+
+
+async def test_codex_settings_as_committed_stay_trusted(tmp_path, monkeypatch):
+    """A repository that ships its own `.codex/` keeps it for its workers (git's checkout may
+    have made its line ends CRLF)."""
+    _, wt, base = trusted_worktree(tmp_path, monkeypatch)
+    rules = wt / ".codex" / "rules" / "team.rules"
+    rules.write_bytes(rules.read_bytes().replace(b"\n", b"\r\n"))
+    options = {"folders": [str(wt)], "bases": {str(wt): base}}
+    told = await configured(tmp_path, monkeypatch, options, wt)
+    assert level(told["projects"], wt) == "trusted"
+    assert options["repository_docs"] == "" and options["settings_changed"] == ("", "")
+
+
+async def test_codex_settings_changed_in_the_owners_checkout_are_not_loaded(tmp_path, monkeypatch):
+    """The owner's own checkout (no base of Chief of Staff's): compared with its HEAD, so an
+    uncommitted change there counts too, until it is committed."""
+    main, _, _ = trusted_worktree(tmp_path, monkeypatch)
+    (main / ".codex" / "config.toml").write_text('model = "planted-model"\n')
+    options = {"folders": [str(main)]}
+    told = await configured(tmp_path, monkeypatch, options, main)
+    assert level(told["projects"], main) == "untrusted"
+    assert options["settings_changed"][1] == (
+        "Codex settings in this folder have changes not committed (.codex/config.toml), so "
+        "Codex won't load them for this worker."
+    )
+    git(main, "commit", "-qam", "the owner's own")
+    told = await configured(tmp_path, monkeypatch, options, main)
+    assert level(told["projects"], main) == "trusted"
+
+
+async def test_codex_settings_changed_in_a_folder_between_top_and_cwd_are_not_loaded(
+    tmp_path, monkeypatch
+):
+    _, wt, base = trusted_worktree(tmp_path, monkeypatch)
+    sub = wt / "sub"
+    (sub / ".codex" / "rules").mkdir(parents=True)
+    (sub / ".codex" / "rules" / "x.rules").write_text(PLANTS["rules allow"][1])
+    options = {"folders": [str(sub)], "bases": {str(wt): base}}
+    told = await configured(tmp_path, monkeypatch, options, sub)
+    assert level(told["projects"], sub) == "untrusted"
+    assert level(told["projects"], wt) == "trusted", "the top's, as committed, still loads"
+    assert "in this folder changed since" in options["settings_changed"][1]
+    # One above the folder it works in.
+    (sub / ".codex" / "rules" / "x.rules").unlink()
+    (sub / ".codex" / "rules").rmdir()
+    (sub / ".codex").rmdir()
+    (wt / ".codex" / "config.toml").write_text(PLANTS["mcp server"][1])
+    told = await configured(tmp_path, monkeypatch, options, sub)
+    assert level(told["projects"], wt) == "untrusted"
+    assert options["settings_changed"][1].startswith(f"Codex settings in {wt} changed since")
+
+
+async def test_a_changed_folders_mcp_servers_are_not_given_to_a_worker_that_asks_first(
+    tmp_path, monkeypatch
+):
+    """What Chief of Staff reads of the owner's configuration leaves that folder's layer out:
+    its servers get no policy table of a worker's thread (with no command there, a server's
+    table would not even start)."""
+    main, wt, base = trusted_worktree(tmp_path, monkeypatch)
+    (wt / ".codex" / "config.toml").write_text(PLANTS["mcp server"][1])
+    planted = {"command": "sh", "args": ["-c", "id"]}
+    mine = {"command": "mine"}
+    config = {
+        "projects": {str(main): {"trust_level": "trusted"}},
+        "mcp_servers": {"planted": planted, "mine": mine},
+    }
+    layers = [
+        {"name": {"type": "project", "dotCodexFolder": str(wt / ".codex")}, "version": "1",
+         "config": {"mcp_servers": {"planted": planted}}, "disabledReason": None},
+        {"name": {"type": "user", "file": str(tmp_path / "home" / "config.toml")}, "version": "1",
+         "config": {"projects": config["projects"], "mcp_servers": {"mine": mine}},
+         "disabledReason": None},
+    ]  # fmt: skip
+    monkeypatch.setenv("FAKE_CODEX_CONFIG", json.dumps(config))
+    monkeypatch.setenv("FAKE_CODEX_LAYERS", json.dumps(layers))
+    options = {"folders": [str(wt)], "bases": {str(wt): base}, "ask_first": True}
+    told = await configured(tmp_path, monkeypatch, options, wt)
+    assert set(told["mcp_servers"]) == {"mine"}
+    assert set(options["mcp_configs"]) == {"mine"}
+    assert level(told["projects"], wt) == "untrusted"
+
+
+def test_what_differs_from_a_base_is_read_from_the_disk(tmp_path):
+    """Not from git's index, where a worker can hide its edits (assume-unchanged,
+    skip-worktree); new, ignored and removed files count, a link counts as its whole path."""
+    top = git_repository(tmp_path / "main")
+    (top / ".codex" / "keep").write_text("x\n")
+    (top / ".codex" / "gone").write_text("y\n")
+    git(top, "add", "-A")
+    git(top, "commit", "-qm", "more")
+
+    def found(paths=(".codex",), base="HEAD"):
+        return asyncio.run(differing(top, base, list(paths)))
+
+    assert found() == []
+    git(top, "update-index", "--assume-unchanged", ".codex/config.toml")
+    git(top, "update-index", "--skip-worktree", ".codex/keep")
+    (top / ".codex" / "config.toml").write_text("model = 'x'\n")
+    (top / ".codex" / "keep").write_text("z\n")
+    assert git(top, "status", "--porcelain", "--", ".codex") == "", "hidden from git status"
+    (top / ".gitignore").write_text("*.rules\n")
+    (top / ".codex" / "new.rules").write_text("r\n")
+    (top / ".codex" / "gone").unlink()
+    assert found() == [".codex/config.toml", ".codex/gone", ".codex/keep", ".codex/new.rules"]
+    assert found([".mcp.json", ".github/hooks"]) == [], "none there, none committed"
+    assert found(base="no-such-commit") == [
+        ".codex/config.toml", ".codex/keep", ".codex/new.rules"
+    ], "a base git can't read: every file there"  # fmt: skip
+    (top / ".codex" / "linked").symlink_to(top / "sub")
+    assert found() == [".codex"], "a link: the whole path"
+
+
+async def test_a_worker_does_not_edit_codexs_own_settings(codex, tmp_path, monkeypatch):
+    asked = []
+
+    def check(request, invocation):
+        asked.append(request.resolved_path)
+        return PermissionDecisionApproveOnce()
+
+    (tmp_path / ".codex").mkdir()
+    session, turn = await opened(codex, tmp_path, on_permission_request=check)
+    await session.send(
+        "Write the file `.codex/rules/x.rules` and the file `notes.txt`. Then reply with just: done"
+    )
+    await turn.wait()
+    assert asked == [], "refused before anything is asked"
+    assert not (tmp_path / ".codex" / "rules").exists() and not (tmp_path / "notes.txt").exists()
+    assert any("Refused an edit to Codex's settings" in d.text for d in turn.data("agent.notice"))
+    home = tmp_path / "codex-home"
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    assert backend_codex.codex_settings_path(str(home / "rules" / "default.rules"))
+    (tmp_path / "notes.md").symlink_to(tmp_path / ".codex" / "config.toml")
+    assert backend_codex.codex_settings_path(str(tmp_path / "notes.md")), "where a link leads"
+    assert not backend_codex.codex_settings_path(str(tmp_path / "codex" / "notes.md"))
+
+
+async def test_a_codex_workers_timeline_says_once_its_folders_settings_are_left_out(
+    tmp_path, monkeypatch
+):
+    """Its worktree's base, from its checkouts (Runtime.agent_options), is what its folder's
+    settings are compared with; said once per change, and forgotten once they are as
+    committed."""
+    _, wt, base = trusted_worktree(tmp_path, monkeypatch)
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    try:
+        harness.store.create_session("w1", WORKER, "Fix", "idle", cwd=str(wt))
+        checkout = {"project": str(wt), "repo": str(wt), "worktree": str(wt), "path": str(wt),
+                    "branch": "", "base_ref": base}  # fmt: skip
+        harness.store.execute(
+            "UPDATE sessions SET repos=? WHERE id='w1'", (json.dumps([checkout]),)
+        )
+        options = runtime.agent_options(harness.store.session("w1"))
+        assert options["bases"] == {str(wt): base}
+        (wt / ".codex" / "config.toml").write_text(PLANTS["model"][1])
+        await runtime.owner_send("w1", "Reply with just: hi")
+        await until(lambda: ("assistant", "hi") in harness.kinds("w1"))
+        line = (
+            f"Codex settings in this folder changed since {base[:7]} (.codex/config.toml), so "
+            "Codex won't load them for this worker."
+        )
+        assert [t for k, t in harness.kinds("w1") if k == "notice"] == [line]
+        # Opened again with the same change: nothing more said; once as committed, forgotten.
+        options = runtime.agent_options(harness.store.session("w1"))
+        digest = options["settings_noted"]
+        assert digest
+        backend_codex.note_settings(options | {"settings_changed": (digest, line)})
+        assert [t for k, t in harness.kinds("w1") if k == "notice"] == [line]
+        backend_codex.note_settings(options | {"settings_changed": ("", "")})
+        assert harness.store.get("agentsettings:w1") is None
+    finally:
+        await runtime.stop()
 
 
 # The adapter on the stand-in

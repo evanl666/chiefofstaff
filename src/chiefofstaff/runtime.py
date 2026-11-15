@@ -114,6 +114,7 @@ from .workers import Workers
 from .workspaces import (
     BRANCH_PREFIX,
     Workspaces,
+    base_of,
     common_git_dir,
     git_dirs,
     protected_git_paths,
@@ -2225,6 +2226,16 @@ class Runtime:
             # What tells the repository's instructions its thread was given (none: not yet).
             "docs_given": self.store.get(f"agentdocs:{row['id']}") or "",
             "on_repository_docs": lambda digest: self.store.set(f"agentdocs:{row['id']}", digest),
+            # The base of each checkout of its own (a worktree, a clone): the agent's own
+            # settings there are compared with it; the owner's checkouts with their HEAD.
+            "bases": {
+                checkout.get("worktree") or checkout["path"]: base_of(checkout)
+                for checkout in self.workspaces.checkouts(row)
+                if not checkout.get("shared") and checkout.get("path")
+            },
+            # What its timeline said last of its folders' agent settings left out ("": none).
+            "settings_noted": self.store.get(f"agentsettings:{row['id']}") or "",
+            "on_settings_noted": lambda digest, line: self.settings_noted(row, digest, line),
             # What its turns spend, told whatever became of its handle (agent_accounting).
             "on_accounting": lambda kind, data: self.agent_accounting(row["id"], kind, data),
         }
@@ -2251,6 +2262,15 @@ class Runtime:
 
     def agent_notice(self, row: dict, text: str):
         self.add_message(row["id"], "notice", text)
+
+    def settings_noted(self, row: dict, digest: str, line: str):
+        """The agent's settings in a worker's folder left out (once per change), or as
+        committed again (nothing said)."""
+        if digest:
+            self.store.set(f"agentsettings:{row['id']}", digest)
+            self.add_message(row["id"], "notice", line)
+        else:
+            self.store.delete(f"agentsettings:{row['id']}")
 
     def agent_child(self, row: dict, thread: str):
         """A child agent a worker on another agent spawned: its turns may reach it, also from

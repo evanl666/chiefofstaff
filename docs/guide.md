@@ -1007,7 +1007,11 @@ new workers use cannot run, they start on Copilot and their chat says why.
   them, and Chief of Staff gives the worker the repository's `AGENTS.md` files as text: a
   message marked as the repository's, with any tag in it escaped, so it can't pass as yours or
   as Chief of Staff's. Trust the repository in Codex to load its `.codex/` settings and skills
-  in Codex workers.
+  in Codex workers. They load only as committed: a `.codex/` folder that changed since the
+  worker's worktree was made (in your own checkout: since its last commit) is not loaded for
+  it, and its timeline says "Codex settings in this folder changed since … so Codex won't load
+  them for this worker". Workers don't edit `.codex/` folders or Codex's settings folder; if a
+  change there is yours, commit it in your repository.
 - **Questions:** a Codex worker asks you with a report's question (Codex has no `ask_user` here).
   An MCP server that needs a sign-in is signed in with `codex mcp login <name>`.
 

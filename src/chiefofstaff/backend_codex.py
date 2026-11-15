@@ -60,6 +60,7 @@ from . import codex_check
 from .backend import Capabilities, descendants, end_processes, process_table
 from .envelope import inert, wrap
 from .policy import GITHUB_MCP
+from .workspaces import differing
 
 logger = logging.getLogger(__name__)
 
@@ -425,6 +426,156 @@ def trust_levels(
             for key in trust_keys(place):
                 projects[key] = {"trust_level": level}
     return projects
+
+
+# A trusted folder's `.codex/` a worker changed (0.167.2, checked): from the next thread started
+# or resumed there, Codex loads its rules (`prefix_rule(..., decision="allow")`: commands that
+# then run without asking Chief of Staff), its MCP servers (their commands, run at the thread's
+# start), its shell_environment_policy (every command's environment) and its model. Such a
+# folder is untrusted for the worker's threads until it is as committed at its base (a
+# worktree's base commit, else HEAD: the owner's checkout); its AGENTS.md is then given as text.
+SETTINGS = ".codex"
+
+
+def settings_places(projects: dict[str, dict], folders: list[str]) -> list[Path]:
+    """The folders whose `.codex/` a thread in these folders may load (those `projects` names,
+    and each folder's own and those above it up to its checkout's top): those that have one."""
+    places: dict[str, Path] = {}
+    for folder in map(Path, folders):
+        top = project_root(folder, [".git"]) or folder
+        chain = [folder, *folder.parents]
+        for place in [*chain[: chain.index(top) + 1], *map(Path, projects)]:
+            if os.path.lexists(place / SETTINGS):
+                places.setdefault(canonical(place) or str(place), place)
+    return list(places.values())
+
+
+def settings_base(place: Path, bases: dict[str, str]) -> tuple[Path | None, str]:
+    """The checkout a folder is in, and the commit its settings are compared with: Chief of
+    Staff's worktree's base, else the checkout's HEAD; (None, "") outside any checkout."""
+    real = canonical(place) or str(place)
+    tops = [
+        Path(top) for top in bases if real == top or real.startswith(top.rstrip(os.sep) + os.sep)
+    ]
+    if tops:
+        top = max(tops, key=lambda found: len(str(found)))
+        return top, bases[str(top)]
+    top = project_root(Path(real), [".git"])
+    return (top, "HEAD") if top else (None, "")
+
+
+async def changed_settings(
+    projects: dict[str, dict], folders: list[str], bases: dict[str, str]
+) -> dict[str, tuple[str, list[str]]]:
+    """Each folder whose `.codex/` differs from its base: folder -> (the base, what differs,
+    relative to the folder; `.codex` itself when it can't be told). One git call per checkout,
+    none when no folder has a `.codex/`."""
+    bases = {canonical(top) or top: base for top, base in bases.items() if base}
+    checked: dict[tuple[Path, str], list[Path]] = {}
+    changed: dict[str, tuple[str, list[str]]] = {}
+    for place in await asyncio.to_thread(settings_places, projects, folders):
+        top, base = settings_base(place, bases)
+        if top is None:
+            changed[str(place)] = ("", [SETTINGS])
+        else:
+            checked.setdefault((top, base), []).append(place)
+    for (top, base), places in checked.items():
+        top_real = Path(canonical(top) or top)
+        relative = {
+            place: Path(canonical(place) or place).relative_to(top_real).as_posix()
+            for place in places
+        }
+        paths = [
+            f"{folder}/{SETTINGS}" if folder != "." else SETTINGS for folder in relative.values()
+        ]
+        found = await differing(top_real, base, paths)
+        for place, folder in relative.items():
+            prefix = f"{folder}/" if folder != "." else ""
+            own = prefix + SETTINGS
+            mine = [
+                path.removeprefix(prefix)
+                for path in found
+                if path == own or path.startswith(f"{own}/")
+            ]
+            if mine:
+                changed[str(place)] = (base, mine)
+    return changed
+
+
+def without_layers(read: dict, skipped: set[str]) -> dict:
+    """config/read's answer without the project layers of these `.codex/` folders: its config
+    merged again from its other loaded layers (listed highest first), each table key by key."""
+    layers = [
+        layer
+        for layer in read.get("layers") or []
+        if not (
+            isinstance(layer, dict)
+            and mapping(layer.get("name")).get("type") == "project"
+            and canonical(str(mapping(layer.get("name")).get("dotCodexFolder") or "")) in skipped
+        )
+    ]
+    config: dict = {}
+    for layer in reversed(layers):
+        if isinstance(layer, dict) and not layer.get("disabledReason"):
+            merged_into(config, mapping(layer.get("config")))
+    return {**read, "config": config, "layers": layers}
+
+
+def merged_into(config: dict, layer: dict):
+    for key, value in layer.items():
+        if isinstance(value, dict) and isinstance(config.get(key), dict):
+            merged_into(config[key], value)
+        else:
+            config[key] = json.loads(json.dumps(value)) if isinstance(value, dict | list) else value
+
+
+def settings_line(cwd: str, changed: dict[str, tuple[str, list[str]]]) -> str:
+    """What the worker's timeline says of its changed folders' Codex settings (one line)."""
+    said = []
+    for place, (base, paths) in changed.items():
+        where = "this folder" if canonical(place) == canonical(cwd) else place
+        listed = ", ".join(paths[:3]) + (f" and {len(paths) - 3} more" if len(paths) > 3 else "")
+        if not base:
+            said.append(f"Codex settings in {where} can't be checked (it isn't in a git checkout)")
+        elif base == "HEAD":
+            said.append(f"Codex settings in {where} have changes not committed ({listed})")
+        else:
+            short = base[:7] if re.fullmatch(r"[0-9a-f]{40,64}", base) else base
+            said.append(f"Codex settings in {where} changed since {short} ({listed})")
+    return "; ".join(said) + ", so Codex won't load them for this worker."
+
+
+def codex_home() -> str:
+    given = os.environ.get("CODEX_HOME")
+    return os.path.realpath(Path(given).expanduser() if given else Path.home() / SETTINGS)
+
+
+def codex_settings_path(path: str) -> bool:
+    """Whether an edit would write Codex's own settings: in a `.codex` folder (a repository's,
+    the owner's), or in CODEX_HOME, by its path or where its links lead."""
+    home = codex_home()
+    for spelled in {path, os.path.realpath(path)}:
+        if SETTINGS in Path(spelled).parts:
+            return True
+        if home and (spelled == home or spelled.startswith(home.rstrip(os.sep) + os.sep)):
+            return True
+    return False
+
+
+def note_settings(options: dict):
+    """The worker's timeline says once that its folder's Codex settings are left out (and
+    forgets it once they are as committed): on_settings_noted keeps what it said last."""
+    digest, line = options.get("settings_changed") or ("", "")
+    if callable(note := options.get("on_settings_noted")) and digest != (
+        options.get("settings_noted") or ""
+    ):
+        note(digest, line)
+
+
+SETTINGS_EDIT = (
+    "workers don't edit Codex's own settings (a .codex folder): Codex would load them for this "
+    "worker without Chief of Staff's checks. Leave that change to the owner."
+)
 
 
 # The repository's instructions, as Codex 0.167.2 reads them where it trusts a folder
@@ -1069,6 +1220,7 @@ class CodexBackend:
             session = self.opened(answer, options)
             session.docs_given = ""  # A new thread: nothing given to it yet.
             await session.give_docs()
+            note_settings(options)
         except RuntimeError:
             if thread := (answer.get("thread") or {}).get("id"):
                 with suppress(Exception):
@@ -1094,6 +1246,7 @@ class CodexBackend:
             await self.read_back(answer, options)
             session = self.opened(answer, options)
             await session.give_docs()
+            note_settings(options)
         except RuntimeError:
             if thread := (answer.get("thread") or {}).get("id"):
                 with suppress(Exception):
@@ -1328,6 +1481,28 @@ class CodexBackend:
         apps are off."""
         read = await self.request("config/read", {"cwd": cwd, "includeLayers": True})
         owner = mapping(read.get("config"))
+        folders = [cwd, *(f for f in options.get("folders") or [] if f != cwd)]
+        projects = await asyncio.to_thread(
+            trust_levels,
+            owner.get("projects"),
+            folders,
+            owner.get("project_root_markers"),
+            trust_answered(read.get("layers")),
+        )
+        # A folder whose Codex settings a worker changed is not trusted for its threads, and
+        # what Chief of Staff reads of the owner's configuration leaves them out too.
+        changed = await changed_settings(projects, folders, mapping(options.get("bases")))
+        if changed:
+            for place in changed:
+                for key in trust_keys(place):
+                    projects[key] = {"trust_level": "untrusted"}
+            skipped = {canonical(Path(place) / SETTINGS) for place in changed}
+            read = without_layers(read, skipped)
+            owner = mapping(read.get("config"))
+            line = settings_line(cwd, changed)
+            options["settings_changed"] = (hashlib.sha256(line.encode()).hexdigest()[:16], line)
+        else:
+            options["settings_changed"] = ("", "")
         # The MCP servers the owner added in Chief of Staff's Settings, as Codex has one.
         provided = {
             str(name): found
@@ -1337,14 +1512,6 @@ class CodexBackend:
         # Which of its MCP servers is GitHub's is told from their configuration (elicitation).
         options["mcp_configs"] = {**mapping(owner.get("mcp_servers")), **provided}
         await self.skill_roots(options.get("skill_directories") or [])
-        folders = [cwd, *(f for f in options.get("folders") or [] if f != cwd)]
-        projects = await asyncio.to_thread(
-            trust_levels,
-            owner.get("projects"),
-            folders,
-            owner.get("project_root_markers"),
-            trust_answered(read.get("layers")),
-        )
         # Untrusted, Codex reads none of the repository's AGENTS.md: its text is given to the
         # thread (give_docs), as a Copilot worker's repository instructions are (nothing of the
         # repository is run).
@@ -2769,6 +2936,10 @@ class CodexSession:
             # A move (apply_patch's `*** Move to:`) writes its destination too.
             moved = mapping(change.get("kind")).get("move_path")
             for path in [str(change.get("path") or ""), *([moved] if moved else [])]:
+                if path and codex_settings_path(path):
+                    self.emit("agent.notice", text=f"Refused an edit to Codex's settings: {path}")
+                    await self.tell(SETTINGS_EDIT)
+                    return {"decision": "decline"}
                 request = SimpleNamespace(
                     kind="write",
                     file_name=str(path),

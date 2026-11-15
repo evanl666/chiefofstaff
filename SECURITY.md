@@ -78,6 +78,16 @@ Workers can also run on Codex (off by default; Settings → Models). For such a 
   trust the folder in Codex; a worktree is trusted as its repository is. Elsewhere none of them
   loads, and the repository's `AGENTS.md` reaches the worker as text only: a message marked as
   the repository's, never in Chief of Staff's instructions, with any tag in it escaped.
+- **A worker's own changes to them never load.** Codex reads a folder's `.codex/` when a thread
+  starts or resumes there: a rule in it lets commands run without asking Chief of Staff, an MCP
+  server runs its command, and its settings reach every command's environment. So each time a
+  Codex worker's thread starts or resumes, Chief of Staff compares each `.codex/` folder Codex
+  would read with its base (the commit its worktree was made from; for your own checkout, its
+  last commit), from the files themselves rather than git's index, which a worker can tell to
+  hide changes. One that differs is not trusted for that worker: none of its settings load, its
+  `AGENTS.md` reaches it as text, and its timeline says so once. Edits to a `.codex/` folder or
+  to Codex's settings folder are refused to workers. A command can still write there; it is the
+  check at the next start that keeps it from loading.
 - **Spend limit:** Chief of Staff's own ledger, in tokens. It may be passed by the model call in
   flight and by what child agents spend before they stop; spend lost when Codex stops mid-turn
   is recorded as unknown, and a worker with a limit then waits for your *Go on*.

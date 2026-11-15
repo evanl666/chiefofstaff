@@ -554,6 +554,100 @@ def base_of(checkout: dict) -> str:
     return checkout.get("base_ref") or ("" if checkout.get("shared") else "origin/HEAD")
 
 
+# What of a repository's own agent settings changed since a commit (a worktree's base, a
+# checkout's HEAD), read from the disk as the agent reads them: never from git's index, where a
+# worker can hide a file's edits from `git status` and `git diff` (update-index
+# --assume-unchanged, --skip-worktree).
+MOST_COMPARED_FILES = 1000
+MOST_COMPARED_BYTES = 16 * 1024 * 1024
+
+
+async def differing(top: Path | str, base: str, paths: Sequence[str]) -> list[str]:
+    """Which of `paths` (files or folders, relative to `top`, a checkout's top) differ on disk
+    from what commit `base` holds there: each file added, changed or removed, and a path that
+    can't be compared file by file (a link in it, a special file, too many or too large files)
+    as itself. One git call (ls-tree, no replace refs); a base git can't read leaves each file
+    on disk differing. A file whose line ends git's checkout made CRLF is the same."""
+    try:
+        listed = await git(
+            "--no-replace-objects", "--literal-pathspecs", "-C", str(top),
+            "ls-tree", "-r", "-z", "--full-tree", base, "--", *paths,
+        )  # fmt: skip
+    except (ValueError, OSError):
+        listed = ""
+    return await asyncio.to_thread(compared, Path(top), list(paths), listed)
+
+
+def compared(top: Path, paths: list[str], listed: str) -> list[str]:
+    committed: dict[str, tuple[str, str]] = {}
+    for entry in listed.split("\0"):
+        info, tab, name = entry.partition("\t")
+        if tab:
+            mode, _, rest = info.partition(" ")
+            committed[name] = (mode, rest.partition(" ")[2])
+    found: dict[str, bytes] = {}
+    whole: list[str] = []
+    budget = [MOST_COMPARED_FILES, MOST_COMPARED_BYTES]
+    for path in paths:
+        if not files_under(top, path, found, budget):
+            whole.append(path)
+    differ = set(whole)
+    for name, data in found.items():
+        mode, oid = committed.get(name, ("", ""))
+        if mode not in {"100644", "100755"} or oid not in blob_ids(data, len(oid)):
+            differ.add(name)
+    for name in committed:
+        if name not in found and not any(name == w or name.startswith(f"{w}/") for w in whole):
+            differ.add(name)  # Removed, or no longer a file.
+    return sorted(differ)
+
+
+def files_under(top: Path, path: str, found: dict[str, bytes], budget: list[int]) -> bool:
+    """The regular files at `path` (a file, or a folder's, at any depth) into `found`; False
+    when it can't be compared file by file: a link (the agent would follow it), a special
+    file, more files or bytes than the budget left, or one that can't be read."""
+    try:
+        stack = [(path, os.lstat(top / path))]
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    adding: dict[str, bytes] = {}
+    while stack:
+        name, info = stack.pop()
+        if stat.S_ISDIR(info.st_mode):
+            try:
+                with os.scandir(top / name) as entries:
+                    for entry in entries:
+                        stack.append((f"{name}/{entry.name}", entry.stat(follow_symlinks=False)))
+            except OSError:
+                return False
+        elif stat.S_ISREG(info.st_mode):
+            budget[0] -= 1
+            budget[1] -= info.st_size
+            if budget[0] < 0 or budget[1] < 0:
+                return False
+            try:
+                adding[name] = (top / name).read_bytes()
+            except OSError:
+                return False
+        else:
+            return False
+    found.update(adding)
+    return True
+
+
+def blob_ids(data: bytes, length: int) -> set[str]:
+    """The ids git gives these bytes as a blob (by an id's length: SHA-1's or SHA-256's), as
+    read and as committed with LF line ends."""
+    digest = hashlib.sha1 if length == 40 else hashlib.sha256
+    variants = {data, data.replace(b"\r\n", b"\n")}
+    return {
+        digest(b"blob %d\0" % len(variant) + variant, usedforsecurity=False).hexdigest()
+        for variant in variants
+    }
+
+
 async def version(checkout: dict) -> dict | None:
     """Which code a checkout holds now: its commit, and a digest of its uncommitted edits ("" for
     none). Evidence is about one version; when this changes, the evidence is out of date."""

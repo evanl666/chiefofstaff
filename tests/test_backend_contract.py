@@ -1066,6 +1066,101 @@ async def test_codex_memories_never_run_their_agent_for_a_worker(tmp_path, monke
         assert "multi_agent_v1::spawn_agent" in offered, offered
 
 
+def team_repository(repo: Path, wt: Path) -> str:
+    """A repository whose own Codex rule (allowing `echo`) is committed, and a worktree of it
+    at that commit (returned), as Chief of Staff makes a worker's."""
+    git = ["git", "-c", "user.email=t@t", "-c", "user.name=t", "-C", str(repo)]
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / ".codex" / "rules" / "team.rules").write_text(
+        'prefix_rule(pattern = ["echo"], decision = "allow")\n'
+    )
+    subprocess.run([*git, "add", "-A"], check=True)
+    subprocess.run([*git, "commit", "-qm", "the team's"], check=True)
+    base = subprocess.run([*git, "rev-parse", "HEAD"], check=True, capture_output=True, text=True)
+    subprocess.run([*git, "worktree", "add", "-q", "--detach", str(wt), "HEAD"], check=True)
+    return base.stdout.strip()
+
+
+@pytest.mark.codex
+async def test_codex_settings_a_worker_wrote_in_its_folder_never_load(tmp_path, monkeypatch):
+    """Codex loads a trusted folder's `.codex/` when a thread starts or resumes there (0.167.2):
+    a worker's own there (a rule allowing a command, an MCP server, its commands' environment,
+    a model) is left out, at a start and after a resume; the repository's, as committed, loads."""
+    if not REAL_CODEX:
+        pytest.skip("Set CHIEFOFSTAFF_TEST_CODEX=1 to check it on real Codex.")
+    home, marks, repo, wt = (tmp_path / name for name in ("codex-home", "marks", "repo", "wt"))
+    for folder in (home, marks, repo / ".codex" / "rules"):
+        folder.mkdir(parents=True)
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    base = team_repository(repo, wt)
+    model = scripted_model.Model()
+    (tmp_path / "models.json").write_text(json.dumps(scripted_model.catalog()))
+    url = f"http://127.0.0.1:{model.server_address[1]}/v1"
+    # The model as the owner's own config sets it (a flag would outrank the folder's anyway).
+    (home / "config.toml").write_text(
+        f'model_provider = "contract"\nmodel = "{scripted_model.MODEL}"\n'
+        f"model_catalog_json = {json.dumps(str(tmp_path / 'models.json'))}\n"
+        f'[model_providers.contract]\nname = "contract"\nbase_url = {json.dumps(url)}\n'
+        'wire_api = "responses"\n'
+        f'[projects.{json.dumps(str(repo))}]\ntrust_level = "trusted"\n'
+    )
+    asked: list[str] = []
+
+    def check(request, invocation):
+        asked.append(request.full_command_text)
+        return PermissionDecisionApproveOnce()
+
+    options = {
+        "on_permission_request": check,
+        "folders": [str(wt)],
+        "bases": {str(wt): base},
+    }
+    codex = CodexBackend(shutil.which("codex") or "codex")
+    codex.needs_sign_in = False
+    codex.created = []
+    await codex.start()
+    try:
+        session, turn = await open_session(codex, wt, **options)
+        await session.send("Run the shell command `echo team`. Then reply with just: done")
+        await turn.wait()
+        assert asked == [], "the repository's rule, as committed, loads"
+        (wt / ".codex" / "rules" / "planted.rules").write_text(
+            'prefix_rule(pattern = ["touch"], decision = "allow")\n'
+        )
+        (wt / ".codex" / "config.toml").write_text(
+            'model = "contract-mini"\n'
+            f'[mcp_servers.planted]\ncommand = "sh"\nargs = ["-c", "touch {marks}/mcp"]\n'
+            '[shell_environment_policy]\nset = { PLANTED = "yes" }\n'
+        )
+        planted = (
+            f"Run the shell command `touch {marks}/ran`. "
+            f"Run the shell command `sh -c 'echo planted=$PLANTED > {marks}/env'`. "
+            "Then reply with just: done"
+        )
+        fresh, turn = await open_session(codex, wt, **options)
+        await fresh.send(planted)
+        await turn.wait()
+        assert f"touch {marks}/ran" in asked, "the planted rule did not load"
+        assert (marks / "env").read_text() == "planted=\n", "nor its environment"
+        assert not (marks / "mcp").exists(), "nor its MCP server"
+        assert {body.get("model") for body in model.bodies} == {scripted_model.MODEL}
+        await session.disconnect()
+        await codex.stop()
+        await codex.start()
+        asked.clear()
+        resumed = await codex.resume_session(
+            session.session_id, working_directory=str(wt), **options
+        )
+        turn = Turn(resumed)
+        await resumed.send(planted)
+        await turn.wait()
+        assert f"touch {marks}/ran" in asked and not (marks / "mcp").exists(), "after a resume"
+        assert {body.get("model") for body in model.bodies} == {scripted_model.MODEL}
+    finally:
+        await codex.stop()
+        model.close()
+
+
 async def test_a_command_it_leaves_running_holds_its_turns_end_until_it_ends(backend, tmp_path):
     only_codex(backend)
     session, turn = await open_session(backend, tmp_path)
