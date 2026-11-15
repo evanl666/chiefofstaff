@@ -19,7 +19,8 @@ sight; Artifacts words and times match what its rows say (QA round on 0.1.45).
   monitored and listed like any; one said to be *running* was taken for a server's page, left
   off Artifacts and followed by nothing (E73). On your computer, where a dev server's page can
   be called anything (`/pipelines/new`), a page is a run only when it says which runner it is
-  (Airflow, Flyte, GitLab's `/-/pipelines/`, a Jenkins named so), never by a route's word alone.
+  (Airflow, Flyte, a Prefect flow run, GitLab's `/-/pipelines/`, a Jenkins named so), never by a
+  route's word alone.
 - **An away notice that was not delivered says so until one is.** It was said only inside
   Settings' *When you're away* row, opened. The sidebar and that row closed now say *Away notice
   not delivered · 12 min ago* in red (why: on hover in the sidebar, and in the row opened),

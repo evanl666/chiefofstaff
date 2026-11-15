@@ -110,6 +110,11 @@ async def test_a_dev_servers_route_on_this_computer_is_no_run(harness):
          "status": "running"},
         {"url": "http://127.0.0.1:8929/acme/app/-/pipelines/9", "name": "Local GitLab",
          "status": "running"},
+        # Re-review: Prefect's and Airflow's own words for a run are runs here too.
+        {"url": "http://127.0.0.1:4200/flow-runs/flow-run/3f2a9c1e", "name": "Local Prefect",
+         "status": "running"},
+        {"url": "http://localhost:8080/dagruns/manual__2026-11-14", "name": "Local DAG run",
+         "status": "running"},
     ]  # fmt: skip
     for item in routes:
         assert task_actions.deliverable_kind(item["url"], declared=True)[0] != "flow", item
@@ -123,6 +128,19 @@ async def test_a_dev_servers_route_on_this_computer_is_no_run(harness):
     assert task_actions.deliverable_kind("https://ci.acme.dev/pipelines/new", declared=True)[0] == (
         "flow"
     )
+
+
+async def test_a_local_prefect_run_is_followed_as_0_1_45_did(harness):
+    """Re-review: a Prefect flow run on this computer "running", reported done, was neither
+    listed, nor followed, nor asked a check-back for."""
+    runtime = await harness.connect()
+    prefect = {"url": "http://127.0.0.1:4200/flow-runs/flow-run/3f2a9c1e", "name": "Backfill",
+               "status": "running"}  # fmt: skip
+    _worker, task, told = await delivered(harness, runtime, prefect)
+    assert "call check_back for it now" in told
+    shown = view(runtime, task["id"])
+    assert [item["url"] for item in shown["deliverables"]] == [prefect["url"]]
+    assert [item["url"] for item in shown["monitoring"]] == [prefect["url"]]
 
 
 async def test_a_run_that_can_need_the_owner_is_on_artifacts(harness, tmp_path, monkeypatch):

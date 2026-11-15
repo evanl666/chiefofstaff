@@ -294,19 +294,23 @@ ONE_OFF = re.compile(
     r"|(?=[0-9a-fA-F]*\d)(?=[0-9a-fA-F]*[a-fA-F])[0-9a-fA-F]{16,}"
     r"|[CDG](?=[A-Z0-9]*\d)[A-Z0-9]{8,})(?![\w@.:-])"
 )
-# What a dropped id leaves at the end: a word that led to it ("in channel"), punctuation.
+# What a dropped id leaves at the end: a word that led to it ("in channel", "posted"),
+# punctuation.
 DANGLING = re.compile(
     r"(?:[\s,;:(\u2013\u2014-]+"
-    r"|\s+(?:in|at|via|to|from|with|on|as)(?:\s+(?:the\s+)?(?:channel|conversation|thread|chat))?)$",
+    r"|\s+(?:in|at|via|to|from|with|on|as|posted|sent|queued|delivered)"
+    r"(?:\s+(?:the\s+)?(?:channel|conversation|thread|chat))?)$",
     re.IGNORECASE,
 )
+# A link, whole: one message's (a Slack permalink has its id in it), never the way.
+LINK = re.compile(r"<?\b[a-zA-Z][a-zA-Z0-9+.-]*://[^\s<>]*[^\s<>.,;:)\]]>?")
 
 
 def channel_only(where: str) -> str:
     """Where notifications go, as one way, not one sending of it: "Slack DM to Evan", without
     what the messenger's tool said of that message (its ids: bug E72), and what led to them."""
     where = where[:1000]
-    kept = ONE_OFF.sub("", RECEIPT.sub("", where))
+    kept = ONE_OFF.sub("", RECEIPT.sub("", LINK.sub("", where)))
     if kept == where:
         return " ".join(where.split())
     kept = re.sub(r"\(\s*[,;:]*\s*\)|\[\s*[,;:]*\s*\]", "", kept)

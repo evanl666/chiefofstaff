@@ -474,12 +474,13 @@ def deliverable_kind(url: str, declared: bool = False) -> tuple[str, str]:
     if not declared or not path:
         return "", ""  # Only mentioned, or a site's root: no deliverable.
     # A dev server on this computer has routes of any name ("/pipelines/new"): there only what
-    # says which runner it is makes a run, never a route's word alone.
+    # says which runner it is makes a run (a Prefect flow run, an Airflow DAG run), never a
+    # route's common word alone.
     here = this_computer(host)
     if called := ci_build(host, path, query, here):
         return "flow", called
-    if not here and re.search(
-        r"/(?:runs?|flow-runs?|dagruns?|executions?|workflows?|pipelines?)/[^/]+", path
+    if re.search(r"/(?:flow-runs?|dagruns?)/[^/]+", path) or (
+        not here and re.search(r"/(?:runs?|executions?|workflows?|pipelines?)/[^/]+", path)
     ):
         return "flow", f"{host.split('.')[0]} · {clip(last, 28)}"
     return "doc", f"{clip(host, 28)} · {clip(last, 24)}"

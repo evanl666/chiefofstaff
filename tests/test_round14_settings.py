@@ -46,6 +46,13 @@ def test_where_a_notice_went_is_the_way_without_its_receipt():
         ),
         "Slack DM to you, 4bf92f3577b34da6": "Slack DM to you",
         "Slack DM to Ida2": "Slack DM to Ida2",
+        # A link is one message's, whole; a word that led to a dropped id goes with it.
+        "Slack DM https://acme.slack.com/archives/D07ABCDEF12/p1712345678123456": "Slack DM",
+        "Slack DM to you (https://acme.slack.com/archives/D07ABCDEF12/p1712345678123456)": (
+            "Slack DM to you"
+        ),
+        "Slack DM, posted 1712345678.123456": "Slack DM",
+        "Slack DM to you, sent 1712345678.123456": "Slack DM to you",
     }.items():
         assert channel_only(said) == way, said
 
