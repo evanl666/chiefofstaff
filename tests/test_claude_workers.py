@@ -14,6 +14,7 @@ import uuid
 from pathlib import Path
 
 import pytest
+from by_hand import opened_by_hand, resumed_by_hand_is_let_go_and_said_closed_once
 from conftest import Harness, call_tool, settle
 from copilot.tools import ToolInvocation
 
@@ -747,6 +748,67 @@ async def test_a_worktree_a_claude_worker_makes_is_one_of_its_checkouts(tmp_path
                 tree not in [c["path"] for c in json.loads(harness.store.session(worker)["repos"])]
             )
         )
+    finally:
+        await runtime.stop()
+
+
+async def test_a_claude_worker_resumed_by_hand_is_let_go_and_its_closing_said_once(
+    tmp_path, claude_on_path
+):
+    harness, runtime, worker, _ = await claude_worker(tmp_path)
+    try:
+        assert runtime.states.is_live(worker)
+        terminal = await opened_by_hand(
+            tmp_path, "claude", "--resume", backend_claude.dashed(worker)
+        )
+        try:
+            await resumed_by_hand_is_let_go_and_said_closed_once(harness, runtime, worker, terminal)
+        finally:
+            if terminal.returncode is None:
+                terminal.kill()
+                await terminal.wait()
+    finally:
+        await runtime.stop()
+
+
+async def test_a_worktree_is_its_only_where_it_resolves_inside_its_folder(tmp_path, claude_on_path):
+    """A worktree Claude names under the worker's folder (.claude/worktrees/…) that resolves
+    elsewhere (a link to another repository's worktree): neither one of its checkouts nor a
+    folder a subagent may work in; one that resolves there, both."""
+    from test_round7_split import published
+
+    app, other = published(tmp_path, "app"), published(tmp_path, "other")
+    harness, runtime = await started(tmp_path, Settings(projects=[str(app)]))
+    try:
+        await saved(runtime, {"claude": {"enabled": True}})
+        result = await spawn_on(
+            harness, runtime, title="Feature", agent="claude", project=str(app), isolate=True,
+            instructions="Report done: ready",
+        )  # fmt: skip
+        worker = result["session_id"]
+        await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+        cwd = Path(harness.store.session(worker)["cwd"])
+        trees = cwd / ".claude" / "worktrees"
+        trees.mkdir(parents=True)
+        elsewhere = tmp_path / "elsewhere"
+        git = ["git", "worktree", "add", "-q", "-b"]
+        await asyncio.to_thread(subprocess.run, [*git, "w1", str(elsewhere)], cwd=other, check=True)
+        (trees / "away").symlink_to(elsewhere, target_is_directory=True)
+        await asyncio.to_thread(
+            subprocess.run, [*git, "w2", str(trees / "good")], cwd=cwd, check=True
+        )
+        before = harness.store.session(worker)["repos"]
+        await runtime.agent_worktree(worker, str(trees / "away"), removed=False)
+        assert harness.store.session(worker)["repos"] == before
+        assert any("not one Chief of Staff can keep" in t for _, t in harness.kinds(worker))
+        await runtime.agent_worktree(worker, str(trees / "good"), removed=False)
+        repos = json.loads(harness.store.session(worker)["repos"])
+        assert [c["branch"] for c in repos if c["path"].endswith("good")] == ["w2"]
+        handle = runtime.states.handle(worker) or await runtime.session_for(worker)
+        claude = handle.worker
+        for name, folder in (("a1", trees / "away"), ("a2", trees / "good")):
+            await claude.subagent_start({"agent_id": name, "cwd": str(folder)}, None, None)
+        assert claude.subagents["a1"].get("refused") and not claude.subagents["a2"].get("refused")
     finally:
         await runtime.stop()
 

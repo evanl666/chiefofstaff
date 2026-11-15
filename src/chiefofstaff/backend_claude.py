@@ -2841,8 +2841,10 @@ class ClaudeWorker:
         entry: dict[str, Any] = {"cwd": cwd, "type": str(data.get("agent_type") or "")}
         self.subagents[agent_id] = entry
         folders = [self.cwd, *(self.options.get("folders") or [])]
-        if claude_worktree(cwd) and under(str(Path(cwd).parents[2]), folders):
-            await self.worktree(cwd)  # Its isolation: a worktree of one of the worker's own.
+        repository = str(Path(cwd).parents[2]) if claude_worktree(cwd) else ""
+        if repository and under(repository, folders) and under(cwd, [repository]):
+            # Its isolation: a worktree of one of the worker's own (where both resolve).
+            await self.worktree(cwd)
         elif not under(cwd, folders):
             entry["refused"] = (
                 "This subagent works outside the worker's folders, where Chief of Staff "

@@ -198,12 +198,13 @@ def agent_definition(name: str, folders: list[Path]) -> dict[str, str] | None:
 
 
 def under(path: str, folders: list[str]) -> bool:
-    """Whether a path is one of these folders or inside one (as written: `..` taken away)."""
+    """Whether a path is one of these folders or inside one, as each resolves (its links
+    followed, `..` taken away): a link inside a folder that points out of it is not in it."""
     if not path:
         return False
-    real = os.path.normpath(path)
+    real = os.path.realpath(path)
     for folder in folders:
-        base = os.path.normpath(folder)
+        base = os.path.realpath(folder)
         if real == base or real.startswith(base.rstrip(os.sep) + os.sep):
             return True
     return False

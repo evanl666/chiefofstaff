@@ -3313,11 +3313,13 @@ class Workspaces:
                 len(stays["cleaned"]),
                 machine.size_text(stays["freed"]),
             )
-        with suppress(OSError):
-            # Only when nothing else is in it, like a worker's notes.
-            await asyncio.to_thread(self.workspace(row).rmdir)
-        # Chief of Staff's own git folders for its clones and submodules: made again if read.
-        await privategit.prune(self.git_places(row, folder))
+        if not self.store.get(f"continued:{row['id']}"):  # Not one handed to its successor.
+            with suppress(OSError):
+                # Only when nothing else is in it, like a worker's notes.
+                await asyncio.to_thread(self.workspace(row).rmdir)
+            # Chief of Staff's own git folders for its clones and submodules: made again if read
+            # (a folder handed on keeps them for its successor).
+            await privategit.prune(self.git_places(row, folder))
         if self.on_release:
             self.on_release(row, removed, kept)
         return removed
@@ -3516,13 +3518,19 @@ class Workspaces:
         )
         writes = self.writes(row)
 
-        def its_own() -> bool:
-            real = os.path.realpath(folder)
+        def its_own() -> tuple[str, str] | None:
+            # As each resolves: a link on its way (.claude, worktrees) must not lead elsewhere.
+            real, real_tree = os.path.realpath(folder), os.path.realpath(tree)
             mine = any(within(real, os.path.realpath(path)) for path in writes)
-            return mine and linked_worktree(Path(tree))
-
-        if not folder or not await asyncio.to_thread(its_own):
+            inside = real_tree != real and within(real_tree, real)
+            if mine and inside and linked_worktree(Path(real_tree)):
+                return real, real_tree
             return None
+
+        found = await asyncio.to_thread(its_own) if folder else None
+        if found is None:
+            return None
+        folder, tree = found
         checkout = await self.as_checkout(row, tree, [folder])
         if checkout is not None:
             # Released (and restored) with the worktrees Chief of Staff made for it: removed as
