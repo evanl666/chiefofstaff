@@ -42,7 +42,7 @@ from copilot import define_tool
 from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
 from pydantic import BaseModel
 
-from chiefofstaff import settings_guard
+from chiefofstaff import backend_claude, settings_guard
 from chiefofstaff.backend import (
     SandboxPolicy,
     copilot_backend,
@@ -614,6 +614,35 @@ async def test_a_sandboxed_claude_worker_writes_none_of_claudes_own_settings(bac
     await session.send(f"Use Claude's Write tool with {write}. Then reply with just: wrote")
     await turn.wait()
     assert not (folder / ".mcp.json").exists()
+
+
+async def test_the_owners_edit_rules_widen_claudes_sandbox_so_a_sandboxed_worker_does_not_start(
+    backend, tmp_path, monkeypatch
+):
+    """Claude Code (2.1.322) merges an Edit allow rule's path from the owner's settings into a
+    sandboxed session's writable paths: its commands then write there. So a sandboxed worker
+    does not start on Claude while one would reach past its folders."""
+    if getattr(backend, "catcher", None) is None or not isinstance(backend, ClaudeAgent):
+        pytest.skip("What the real Claude Code does (CHIEFOFSTAFF_TEST_CLAUDE=1).")
+    if not sandbox_supported():
+        pytest.skip("Claude's sandbox does not run on this machine.")
+    outside, work = tmp_path / "outside", tmp_path / "work"
+    outside.mkdir()
+    work.mkdir()
+    rule = f"Edit(/{outside}/**)"
+    settings = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "settings.json"
+    settings.write_text(json.dumps({"permissions": {"allow": [rule]}}))
+    policy = SandboxPolicy(readwrite=(str(work),))
+    with pytest.raises(Exception, match=re.escape(f"permissions.allow {rule} in")):
+        await open_session(backend, work, sandbox=policy)
+    # What it would let through: Chief of Staff's refusal set aside, a command writes there.
+    monkeypatch.setattr(backend_claude, "sandbox_widened", lambda *a, **k: "")
+    session, turn = await open_session(backend, work, sandbox=policy)
+    await session.send(
+        f"Run the shell command `echo x > {outside}/made.txt`, then reply with just: ran"
+    )
+    await turn.wait()
+    assert (outside / "made.txt").exists(), "the rule widens Claude's sandbox on this version"
 
 
 async def test_schedules_deleted_in_claude_do_not_come_back_with_claude_resume(backend, tmp_path):

@@ -81,6 +81,10 @@ WIDENING_SWITCHES = (
     "network.allowLocalBinding",
 )
 PROXY_PORTS = ("network.httpProxyPort", "network.socksProxyPort")
+# Claude's permission rules that its sandbox takes in (permission_widening): an Edit rule's path,
+# and a WebFetch rule's domain.
+EDIT_RULE = re.compile(r"Edit\((.+)\)")
+WEBFETCH_DOMAIN = re.compile(r"WebFetch\(domain:.+\)")
 # The most of a settings file Chief of Staff reads (Claude reads it whole): a larger one refuses
 # a sandboxed worker, whose sandbox it could widen unseen.
 MOST_SETTINGS = 16 * 1024 * 1024
@@ -91,18 +95,45 @@ MANAGED_FOLDERS = {
 }
 
 
+def permission_widening(data: dict, restricted: bool) -> str:
+    """What of Claude's permissions in one settings file would widen a sandboxed worker's
+    sandbox (2.1.322 merges them into it): an Edit rule's path that is not plainly under the
+    worker's folder (absolute, home, the settings file's or with `..`: a sandboxed command then
+    writes there, shown on the real CLI), any additional directory (the same), and, where its
+    sandbox lists the hosts it reaches (`restricted`), a WebFetch domain rule."""
+    permissions = data.get("permissions") if isinstance(data, dict) else None
+    if not isinstance(permissions, dict):
+        return ""
+    allowed = permissions.get("allow")
+    for rule in allowed if isinstance(allowed, list) else []:
+        if not isinstance(rule, str):
+            continue
+        if found := EDIT_RULE.fullmatch(rule.strip()):
+            path = found.group(1).strip()
+            if path.startswith(("/", "~")) or ".." in Path(path).parts:
+                return f"permissions.allow {rule}"
+        elif restricted and WEBFETCH_DOMAIN.fullmatch(rule.strip()):
+            return f"permissions.allow {rule}"
+    if permissions.get("additionalDirectories") not in (None, []):
+        return "permissions.additionalDirectories"
+    return ""
+
+
 def sandbox_widening(
-    sources: list[tuple[Path, str]], managed: list[Path], local: bool = True
+    sources: list[tuple[Path, str]],
+    managed: list[Path],
+    local: bool = True,
+    restricted: bool = False,
 ) -> str:
     """What would widen a sandboxed worker's sandbox past Chief of Staff's: each settings file
     Claude loads for it (`sources`: the file, and how to say it) and the managed settings files
     ("" for nothing; else the first key found and where). `local`: its sandbox lets it bind
-    to loopback anyway (a worker that does not read Slack)."""
+    to loopback anyway (a worker that does not read Slack); `restricted`: its sandbox lists the
+    hosts it reaches (permission_widening)."""
 
-    def keys(file: Path) -> dict | None:
-        """Its `sandbox` settings, read as Claude reads the file (2.1.322: whole, a leading BOM
-        taken away; a file it cannot parse, with comments say, it ignores); None for one too
-        large for Chief of Staff to read whole."""
+    def read(file: Path) -> dict | None:
+        """The file as Claude reads it (2.1.322: whole, a leading BOM taken away; one it cannot
+        parse, with comments say, it ignores); None for one too large to read whole."""
         try:
             with file.open("rb") as opened:
                 raw = opened.read(MOST_SETTINGS + 1)
@@ -114,7 +145,10 @@ def sandbox_widening(
             data = json.loads(raw.decode("utf-8-sig"))
         except ValueError:
             return {}
-        sandbox = data.get("sandbox") if isinstance(data, dict) else None
+        return data if isinstance(data, dict) else {}
+
+    def keys(data: dict) -> dict:
+        sandbox = data.get("sandbox")
         return sandbox if isinstance(sandbox, dict) else {}
 
     def value(sandbox: dict, key: str) -> Any:
@@ -124,14 +158,20 @@ def sandbox_widening(
         return found
 
     for file, said in sources:
-        if (sandbox := keys(file)) is None:
+        if (data := read(file)) is None:
             return f"{said}: too large for Chief of Staff to check"
+        sandbox = keys(data)
         for key in (*WIDENING_LISTS, *PROXY_PORTS):
             if value(sandbox, key) not in (None, [], {}, ""):
                 return f"sandbox.{key} in {said}"
+        if found := permission_widening(data, restricted):
+            return f"{found} in {said}"
     for file in managed:
-        if (sandbox := keys(file)) is None:
+        if (data := read(file)) is None:
             return f"{file}: too large for Chief of Staff to check"
+        if found := permission_widening(data, restricted):
+            return f"{found} in {file}"
+        sandbox = keys(data)
         for key in (*WIDENING_LISTS, *PROXY_PORTS, *WIDENING_SWITCHES):
             if local and key == "network.allowLocalBinding":
                 continue

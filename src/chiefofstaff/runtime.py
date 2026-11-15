@@ -1589,7 +1589,8 @@ class Runtime:
             # Its sandbox as Chief of Staff's, not widened by Claude's own settings.
             from .backend_claude import sandbox_widened
 
-            if why := sandbox_widened(str(row.get("cwd") or ""), local=not row["slack"]):
+            cwd, slack = str(row.get("cwd") or ""), bool(row["slack"])
+            if why := sandbox_widened(cwd, local=not slack, restricted=slack):
                 return why
         if why := refused.get("acting"):
             return why
