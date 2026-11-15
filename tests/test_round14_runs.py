@@ -77,6 +77,54 @@ async def test_documents_and_runs_are_listed_wherever_they_are_served(
     assert len(view(runtime, task["id"])["artifacts"]) == len(listed) + len(left_off)
 
 
+async def test_a_dev_servers_page_on_every_address_is_left_off(harness):
+    """Review of E71: a page Python's http.server serves (it says 0.0.0.0) was listed as a doc
+    again, as one on [::] was (0.1.45 left them off)."""
+    runtime = await harness.connect()
+    pages = [
+        {"url": "http://0.0.0.0:8000/report.html", "name": "Report", "status": "ready"},
+        {"url": "http://[::]:8000/report2.html", "name": "Report 2", "status": "built"},
+        {"url": "http://0:8000/report3.html", "name": "Report 3", "status": "ready"},
+    ]
+    task = await declared(harness, runtime, *pages)
+    assert titles(runtime, task["id"]) == []
+    assert len(view(runtime, task["id"])["artifacts"]) == len(pages)
+
+
+async def test_a_dev_servers_route_on_this_computer_is_no_run(harness):
+    """Review of E71: a local dev server's `/pipelines/new` "running" was taken for a run,
+    followed, and a day later under Needs you as "status unknown"; on this computer only what
+    says which runner it is makes a run."""
+    runtime = await harness.connect()
+    routes = [
+        {"url": "http://127.0.0.1:5173/pipelines/new", "name": "New pipeline page",
+         "status": "running"},
+        {"url": "http://localhost:3000/runs/12", "name": "Runs page", "status": "running"},
+        {"url": "http://localhost:3000/workflows/abc", "name": "Flows page", "status": "running"},
+        {"url": "http://localhost:3000/builds/12", "name": "Builds page", "status": "running"},
+        {"url": "http://localhost:3000/job/report/12", "name": "Job page", "status": "running"},
+    ]  # fmt: skip
+    runs = [
+        {"url": "http://localhost:8080/dags/local/grid", "name": "Local DAG", "status": "running"},
+        {"url": "http://localhost:8080/jenkins/job/deploy/12/", "name": "Local Jenkins",
+         "status": "running"},
+        {"url": "http://127.0.0.1:8929/acme/app/-/pipelines/9", "name": "Local GitLab",
+         "status": "running"},
+    ]  # fmt: skip
+    for item in routes:
+        assert task_actions.deliverable_kind(item["url"], declared=True)[0] != "flow", item
+    task = await declared(harness, runtime, *routes, *runs)
+    for item in routes + runs:
+        said_at(harness, task["id"], item["url"], at=ago(hours=RUN_UNKNOWN_HOURS + 2))
+    shown = view(runtime, task["id"])
+    assert {item["url"] for item in shown["monitoring"]} == {item["url"] for item in runs}
+    assert titles(runtime, task["id"]) == sorted(item["name"] for item in runs)
+    # The same route elsewhere is a run, as before.
+    assert task_actions.deliverable_kind("https://ci.acme.dev/pipelines/new", declared=True)[0] == (
+        "flow"
+    )
+
+
 async def test_a_run_that_can_need_the_owner_is_on_artifacts(harness, tmp_path, monkeypatch):
     """E71's invariant: what can bring a task under Needs you (a run of unknown status) is on
     Artifacts too, wherever it runs."""
@@ -155,9 +203,37 @@ async def test_a_runs_time_is_since_it_stood_so(harness):
     _worker, task, _told = await delivered(harness, runtime, NIGHTLY, other)
     for url in (FLYTE, other["url"]):
         said_at(harness, task["id"], url, at=ago(days=3))
+    # Review: GitHub read it as it was said ("queued" both times): no change, not "just now".
     said_at(harness, task["id"], other["url"], checked_at=ago(minutes=5))
     runtime.task_actions.end_runs(task["id"], [FLYTE], "ended")
     runs = {item["title"]: item for item in view(runtime, task["id"])["deliverables"]}
     marked = json.loads(harness.store.get(f"artifacts:{task['id']}"))
     assert runs["Nightly export"]["changed_at"] == marked[0]["changed_at"]
-    assert runs["Other"]["changed_at"] == marked[1]["checked_at"]
+    assert runs["Other"]["changed_at"] == marked[1]["at"]
+
+
+async def test_a_run_said_again_as_it_stood_keeps_its_time(harness):
+    """E77: its worker saying again "running" of a run running for three days is no change."""
+    runtime = await harness.connect()
+    worker, task, _told = await delivered(harness, runtime, NIGHTLY)
+    said_at(harness, task["id"], FLYTE, at=ago(days=3))
+    [first] = json.loads(harness.store.get(f"artifacts:{task['id']}"))
+
+    async def says(status: str) -> tuple[dict, dict]:
+        run = {**NIGHTLY, "status": status}
+        await call_tool(runtime, "report", worker, status="progress", task_id=task["id"],
+                        summary="Where it stands.", artifacts=[run])  # fmt: skip
+        [run] = view(runtime, task["id"])["deliverables"]
+        [kept] = json.loads(harness.store.get(f"artifacts:{task['id']}"))
+        return run, kept
+
+    run, _kept = await says("running")
+    assert run["changed_at"] == first["at"]
+    # One you stopped tracking, said again: followed again, from then.
+    runtime.task_actions.end_runs(task["id"], [FLYTE], "untracked")
+    said_at(harness, task["id"], FLYTE, changed_at=ago(hours=5))
+    run, kept = await says("running")
+    assert (run.get("untracked"), run["changed_at"]) == (None, kept["at"])
+    assert kept["at"] > ago(minutes=1)
+    run, kept = await says("succeeded")
+    assert run["changed_at"] == kept["at"] > first["at"]

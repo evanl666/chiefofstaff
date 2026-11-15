@@ -275,27 +275,46 @@ def yours(where: str) -> str:
     return re.sub(r"\btheir\b", "your", where, flags=re.IGNORECASE)
 
 
-# What only one sending said, not the way it went (bug E72): a message, trace or request id, a
-# timestamp ("queued message 1712345678.123456, trace 4bf92f35…").
+# What only one sending said, not the way it went (bug E72): a message, trace, request or event
+# id, with the words that name it, whole ("queued message 1712345678.123456", "trace 4bf92f35…",
+# "message-id <CAF1…@mail.gmail.com>", "event id 19:abc…@thread.v2").
 RECEIPT = re.compile(
     r"\b(?:(?:queued|sent|delivered|posted)\s+(?:as\s+)?)?"
-    r"(?:message|msg|ts|timestamp|trace|request|req|receipt|event|id)(?:[ _-]?id)?"
-    r"\s*[:#=]?\s*<?(?=[\w.:-]*\d)[\w.:-]+>?",
+    r"(?:message|msg|ts|timestamp|trace|request|req|receipt|event|id)(?:[ _-]?id)?\b"
+    r"\s*[:#=]?\s*(?:<[^<>]*>|(?=[^\s,;()<>]*[\d@])[^\s,;()<>]+)",
     re.IGNORECASE,
 )
-# An id by itself: six characters or more, one a digit (a timestamp, a hash, a channel's id).
-BARE_ID = re.compile(r"(?<![\w@.-])(?=[\w.:-]*\d)[\w.:-]{6,}(?![\w@-])")
+# One by itself: a Slack timestamp, a UUID, a long hash, a Slack conversation's id (D07ABCDEF12),
+# with what led to it ("in channel"). Never a name (#ops-alerts-2024), a phone number nor an
+# address: those are the way.
+ONE_OFF = re.compile(
+    r"(?:\b(?:in|at|via|to|on|with)\s+(?:the\s+)?(?:(?:channel|conversation|thread|chat)\s+)?)?"
+    r"(?<![\w@#+.:-])(?:\d{9,}\.\d{3,}"
+    r"|[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}"
+    r"|(?=[0-9a-fA-F]*\d)(?=[0-9a-fA-F]*[a-fA-F])[0-9a-fA-F]{16,}"
+    r"|[CDG](?=[A-Z0-9]*\d)[A-Z0-9]{8,})(?![\w@.:-])"
+)
+# What a dropped id leaves at the end: a word that led to it ("in channel"), punctuation.
+DANGLING = re.compile(
+    r"(?:[\s,;:(\u2013\u2014-]+"
+    r"|\s+(?:in|at|via|to|from|with|on|as)(?:\s+(?:the\s+)?(?:channel|conversation|thread|chat))?)$",
+    re.IGNORECASE,
+)
 
 
 def channel_only(where: str) -> str:
     """Where notifications go, as one way, not one sending of it: "Slack DM to Evan", without
-    what the messenger's tool said of that message (its ids: bug E72)."""
-    where = BARE_ID.sub("", RECEIPT.sub("", where))
-    where = re.sub(r"\(\s*[,;:]*\s*\)", "", where)
-    where = re.sub(r"\s*([,;])(?:\s*[,;])+", r"\1", where)
-    where = re.sub(r"[\s,;:(\u2013\u2014-]+$", "", " ".join(where.split()))
-    # A word left without what it was about ("Slack DM in D0123ABCD"): gone with it.
-    return re.sub(r"\s+(?:in|at|via|to|from|with|on)$", "", where, flags=re.IGNORECASE).strip()
+    what the messenger's tool said of that message (its ids: bug E72), and what led to them."""
+    where = where[:1000]
+    kept = ONE_OFF.sub("", RECEIPT.sub("", where))
+    if kept == where:
+        return " ".join(where.split())
+    kept = re.sub(r"\(\s*[,;:]*\s*\)|\[\s*[,;:]*\s*\]", "", kept)
+    kept = re.sub(r"\s*([,;])(?:\s*[,;])+", r"\1", " ".join(kept.split()))
+    kept = re.sub(r"\s+([,;:)])", r"\1", kept)
+    while (shorter := DANGLING.sub("", kept)) != kept:
+        kept = shorter
+    return kept.strip()
 
 
 # The messenger's way to the owner when nothing else reaches them: their own Slack DM, through

@@ -92,14 +92,19 @@ export const shorten = (text, max) => (text.length > max ? `${text.slice(0, max 
 export function prTitle(key) {
   return state.snapshot?.pr_titles?.[String(key).toLowerCase()] || "";
 }
+// This computer by its address (task_actions.this_computer, without its hosts file): localhost,
+// a .localhost name, a loopback address or the unspecified one (0.0.0.0, [::]).
+const thisComputer = (host) => /^(?:localhost|.+\.localhost|127(?:\.\d{1,3}){3}|0\.0\.0\.0|\[::1?\]|\[::ffff:(?:7f[0-9a-f]{2}:[0-9a-f]{1,4}|0:0)\])$/i.test(host);
 // A CI build by a default name (task_actions.ci_build): a Jenkins build, a GitLab pipeline or
-// job, an Azure DevOps build, a Buildkite one (or any /builds/<n>); "" for none.
+// job, an Azure DevOps build, a Buildkite one (or any /builds/<n>); "" for none. On this
+// computer, where a dev server's routes look like anything, only what says which CI it is.
 function ciBuild(host, path, search) {
   let match;
-  if ((match = /\/job\/([^/]+)\/(\d+)(?:\/|$)/.exec(path))) return `Jenkins · ${shorten(match[1], 24)} #${match[2]}`;
+  const here = thisComputer(host);
+  if ((match = /\/job\/([^/]+)\/(\d+)(?:\/|$)/.exec(path)) && (!here || /jenkins/i.test(host + path))) return `Jenkins · ${shorten(match[1], 24)} #${match[2]}`;
   if ((match = /\/([^/]+)\/-\/(pipeline|job)s\/(\d+)(?:\/|$)/.exec(path))) return `GitLab · ${shorten(match[1], 20)} ${match[2]} ${match[3]}`;
   if (/\/_build\/results/.test(path) && /^\d+$/.test(search.get("buildId") || "")) return `Azure DevOps · build ${search.get("buildId")}`;
-  if ((match = /\/builds?\/(\d+)(?:\/|$)/.exec(path))) return `${shorten(host.split(".")[0], 20)} · build ${match[1]}`;
+  if (!here && (match = /\/builds?\/(\d+)(?:\/|$)/.exec(path))) return `${shorten(host.split(".")[0], 20)} · build ${match[1]}`;
   return "";
 }
 // What a link is, for a chip or a link's text: { kind, label, key (PRs), title (PRs) }.

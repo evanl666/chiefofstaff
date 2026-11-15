@@ -101,6 +101,13 @@ def test_documents_runs_and_ci_builds_are_known_wherever_they_are_served():
             "Azure DevOps · build 555",
         ],
         "http://localhost:3000/app": ["link", "localhost · app"],
+        # Review: on this computer, a dev server's route is no run; a runner named is.
+        "http://127.0.0.1:5173/builds/3": ["link", "127.0.0.1 · 3"],
+        "http://localhost:3000/job/report/12": ["link", "localhost · 12"],
+        "http://[::]:8000/builds/4": ["link", "[::] · 4"],
+        "http://0.0.0.0:8000/job/a/1": ["link", "0.0.0.0 · 1"],
+        "http://localhost:8080/jenkins/job/deploy/12/": ["run", "Jenkins · deploy #12"],
+        "http://127.0.0.1:8929/acme/app/-/pipelines/9": ["run", "GitLab · app pipeline 9"],
     }
     found = run_js(
         f"return {json.dumps(list(urls))}.map((u) => [t.linkKind(u).kind, t.linkKind(u).label]);"

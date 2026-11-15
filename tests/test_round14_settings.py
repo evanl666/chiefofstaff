@@ -31,6 +31,21 @@ def test_where_a_notice_went_is_the_way_without_its_receipt():
         "your own Slack DM": "your own Slack DM",
         "email to evan@acme.dev": "email to evan@acme.dev",
         "Teams chat 1:1 with you": "Teams chat 1:1 with you",
+        # A review's: no piece of an id left, nor what led to one; the channel's own address
+        # and name kept.
+        "Email to evan@acme.dev (message-id <CAF123abc@mail.gmail.com>)": "Email to evan@acme.dev",
+        "Teams chat with Evan, event id 19:abc123def@thread.v2": "Teams chat with Evan",
+        "Slack DM, sent as message 1712345678.123456 in channel D07ABCDEF12": "Slack DM",
+        "Slack DM, sent as message 1712… in channel D07ABCDEF12": "Slack DM",
+        "Slack DM in D07ABCDEF12, from the acme-bot": "Slack DM, from the acme-bot",
+        "Slack channel #ops-alerts-2024": "Slack channel #ops-alerts-2024",
+        "SMS to +14155550100": "SMS to +14155550100",
+        "SMS to +14155550100 (message id SM9f8e7d6c5b4a)": "SMS to +14155550100",
+        "Email to evan@acme.dev, request id 0b7c2d0e-1f2a-4b3c-8d9e-0f1a2b3c4d5e": (
+            "Email to evan@acme.dev"
+        ),
+        "Slack DM to you, 4bf92f3577b34da6": "Slack DM to you",
+        "Slack DM to Ida2": "Slack DM to Ida2",
     }.items():
         assert channel_only(said) == way, said
 

@@ -619,7 +619,7 @@ export function renderConnections() {
   const coverage = can.coverage || {};
   // Its last notice not delivered (bug E72): said here, in red, until one is.
   const undelivered = Boolean(settings.away_notify && tried.at && !tried.ok);
-  $("#away-summary").textContent = !settings.away_notify ? "Off" : undelivered ? `Last notice not delivered · ${since(tried.at)}` : ["On", away.where, can.send_only ? "Send only" : ""].filter(Boolean).join(" · ");
+  $("#away-summary").textContent = !settings.away_notify ? "Off" : undelivered ? `Away notice not delivered · ${since(tried.at)}` : ["On", away.where, can.send_only ? "Send only" : ""].filter(Boolean).join(" · ");
   $("#away-summary").classList.toggle("error", undelivered);
   const reached = tried.at ? (tried.ok ? `Reached you${tried.where ? ` via ${tried.where}` : ""} ${since(tried.at)}` : `Could not reach you ${since(tried.at)}: ${tried.error || "unknown error"}`) : "";
   const limited = settings.away_notify && coverage.limited ? `Coverage limited: ${coverage.detail}` : "";

@@ -22,6 +22,7 @@ from urllib.parse import parse_qsl, urlsplit
 from . import agents, prompts, receipts, threads
 from .backend import stop_background
 from .envelope import wrap
+from .models import this_computer as loopback
 from .policy import within
 from .roles import WORKER
 from .sources.github import MISSING_TRIES, NOT_FOUND
@@ -343,12 +344,10 @@ def address_of(host: str):
 
 
 def this_computer(host: str) -> bool:
-    """A name of this computer: localhost (or a .localhost name), a loopback address, or a name
-    the hosts file maps to one (no DNS lookup)."""
-    if host == "localhost" or host.endswith(".localhost"):
-        return True
-    names = [host, *hosts_file().get(host, ())]
-    return any((found := address_of(name)) and found.is_loopback for name in names)
+    """A name of this computer: localhost (or a .localhost name), a loopback address or the
+    unspecified one (0.0.0.0, [::]: where a dev server says it serves), however written, or a
+    name the hosts file maps to one (no DNS lookup)."""
+    return any(loopback(name) for name in [host, *hosts_file().get(host, ())])
 
 
 def on_its_network(host: str) -> bool:
@@ -358,9 +357,7 @@ def on_its_network(host: str) -> bool:
         return True
     names = [host, *hosts_file().get(host, ())]
     return any(
-        (found := address_of(name))
-        and (found.is_private or found.is_link_local or found.is_unspecified)
-        for name in names
+        (found := address_of(name)) and (found.is_private or found.is_link_local) for name in names
     )
 
 
@@ -406,18 +403,22 @@ def covers(check: dict, item: dict) -> bool:
     return bool(run_marks(item) & set(check["runs"]))
 
 
-def ci_build(host: str, path: str, query: dict[str, str]) -> str:
+def ci_build(host: str, path: str, query: dict[str, str], here: bool = False) -> str:
     """A CI build its worker declared (bug E73: one "running" was taken for a server's page), by
     a default name: a Jenkins build (/job/<name>/<n>), a Buildkite one (or any /builds/<n>), a
     GitLab pipeline or job (/-/pipelines/<n>, /-/jobs/<n>), an Azure DevOps build
-    (_build/results?buildId=<n>); "" for none. CircleCI's workflows are runs by their path."""
-    if found := re.search(r"/job/([^/]+)/(\d+)(?:/|$)", path):
+    (_build/results?buildId=<n>); "" for none. CircleCI's workflows are runs by their path.
+    `here`: served on this computer, where a dev server's routes look like anything: only what
+    says which CI it is (GitLab's /-/, Azure's _build, a Jenkins named so)."""
+    if (found := re.search(r"/job/([^/]+)/(\d+)(?:/|$)", path)) and (
+        not here or "jenkins" in f"{host}{path}".lower()
+    ):
         return f"Jenkins · {clip(found.group(1), 24)} #{found.group(2)}"
     if found := re.search(r"/([^/]+)/-/(pipeline|job)s/(\d+)(?:/|$)", path):
         return f"GitLab · {clip(found.group(1), 20)} {found.group(2)} {found.group(3)}"
     if "/_build/results" in path and (number := query.get("buildId", "")).isdigit():
         return f"Azure DevOps · build {number}"
-    if found := re.search(r"/builds?/(\d+)(?:/|$)", path):
+    if not here and (found := re.search(r"/builds?/(\d+)(?:/|$)", path)):
         return f"{clip(host.split('.')[0], 20)} · build {found.group(1)}"
     return ""
 
@@ -472,9 +473,14 @@ def deliverable_kind(url: str, declared: bool = False) -> tuple[str, str]:
         return ("flow", f"Flyte · {clip(execution.group(1), 24)}") if execution else ("", "")
     if not declared or not path:
         return "", ""  # Only mentioned, or a site's root: no deliverable.
-    if called := ci_build(host, path, query):
+    # A dev server on this computer has routes of any name ("/pipelines/new"): there only what
+    # says which runner it is makes a run, never a route's word alone.
+    here = this_computer(host)
+    if called := ci_build(host, path, query, here):
         return "flow", called
-    if re.search(r"/(?:runs?|flow-runs?|dagruns?|executions?|workflows?|pipelines?)/[^/]+", path):
+    if not here and re.search(
+        r"/(?:runs?|flow-runs?|dagruns?|executions?|workflows?|pipelines?)/[^/]+", path
+    ):
         return "flow", f"{host.split('.')[0]} · {clip(last, 28)}"
     return "doc", f"{clip(host, 28)} · {clip(last, 24)}"
 
@@ -4586,11 +4592,9 @@ class TaskActions:
                     # Nothing tells where it stands now: not "running" as it was last said.
                     **({"unknown": True} if item["url"] in unknown else {}),
                     # Since when it stands so (bug E77): when that changed (GitHub read a new
-                    # status, the owner marked it), else when it was last read, else said.
-                    "changed_at": item.get("changed_at")
-                    or item.get("checked_at")
-                    or item.get("at")
-                    or None,
+                    # status, the owner marked it), else when it was said (a read that found it
+                    # as it was is no change).
+                    "changed_at": item.get("changed_at") or item.get("at") or None,
                 }
             )
         given_keys = {threads.link_key(url) for url in given}
@@ -4657,6 +4661,13 @@ class TaskActions:
                 "status": clip(" ".join(str(item.get("status") or "").split()), 40),
                 "at": stamp,
             }
+            # Said again as it stood: it stands so since then, not since now (bug E77).
+            before = next(
+                (other for other in known if other["url"] == url and not other.get("untracked")),
+                {},
+            )
+            if entry["status"] and entry["status"] == before.get("status"):
+                entry["changed_at"] = before.get("changed_at") or before.get("at") or stamp
             known = [
                 other
                 for other in known

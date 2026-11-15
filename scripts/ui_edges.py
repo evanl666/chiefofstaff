@@ -4238,6 +4238,10 @@ async def round_fourteen(runtime, browser, failures: list[str]):
     await rebuild.get_by_role("button", name="Mark ended…").click()
     picker = rebuild.locator(".run-picker")
     await expect(picker.locator("label")).to_have_count(2)
+    # Listed as their chips above are.
+    chips = await rebuild.locator(".link-chip.kind-flow .chip-link").all_text_contents()
+    picked = await picker.locator("label > span:not(.muted)").all_text_contents()
+    assert picked == [chip.split(" · ")[1] for chip in chips], (picked, chips)
     confirm = rebuild.get_by_role("button", name="Mark ended", exact=True)
     await expect(confirm).to_be_disabled()
     await expect(picker.get_by_role("checkbox").first).to_be_focused()
@@ -4251,7 +4255,10 @@ async def round_fourteen(runtime, browser, failures: list[str]):
     known = json.loads(
         runtime.store.get(f"artifacts:{tasks['E78 rebuild the search indexes']['id']}")
     )
-    assert [item["status"] for item in known] == ["ended", "running"], known
+    assert {item["name"]: item["status"] for item in known} == {
+        picked[0]: "ended",
+        picked[1]: "running",
+    }, known
     log("E78: of two runs of unknown status, one marked ended; the other's actions are its own")
 
     made = page.locator("#tasks-artifacts")
@@ -4289,7 +4296,7 @@ async def round_fourteen(runtime, browser, failures: list[str]):
     )
     await line.get_by_role("button", name="Settings").click()
     summary = page.locator("#away-summary")
-    await expect(summary).to_have_text(re.compile(r"^Last notice not delivered · "))
+    await expect(summary).to_have_text(re.compile(r"^Away notice not delivered · "))
     assert await summary.evaluate("n => n.classList.contains('error')")
     red = await summary.evaluate(
         "n => { const i = document.createElement('i'); i.style.color = 'var(--red)';"
@@ -4312,6 +4319,11 @@ async def round_fourteen(runtime, browser, failures: list[str]):
 
 
 async def main():
+    from chiefofstaff import machine
+
+    # A disk as roomy as the pages expect, whatever this machine's is (a low one adds the
+    # Router's note under Needs you); a round about storage sets its own.
+    machine.read_disk = lambda paths: {"free": 200 * 10**9, "total": 500 * 10**9, "path": "/"}
     with tempfile.TemporaryDirectory(prefix="cos-ui-") as temporary:
         holder: dict = {}
 

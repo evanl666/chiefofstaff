@@ -522,7 +522,10 @@ function taskCard(task, phase = phaseOf(task)) {
   // Mark ended and Stop tracking for its runs of unknown status: of one, at once; of several,
   // the owner picks which (bug E78: one may have ended, another not).
   function runActions() {
-    const runs = unknownItems(task);
+    // In the order of their chips above.
+    const chips = deliverablesOf(task).map((item) => item.key);
+    const rank = (run) => (chips.includes(linkKey(run.url)) ? chips.indexOf(linkKey(run.url)) : chips.length);
+    const runs = unknownItems(task).sort((a, b) => rank(a) - rank(b));
     const one = runs.length === 1;
     const done = (how, count) => (how === "ended" ? (count > 1 ? "Runs marked ended." : "Marked ended.") : "No longer tracked.");
     const go = (how, urls) => act(`/api/tasks/${task.id}/runs`, { how, urls }, done(how, urls.length));

@@ -8,20 +8,23 @@ sight; Artifacts words and times match what its rows say (QA round on 0.1.45).
 - **A run or a document is listed wherever it is served.** A run on another computer of your
   network (`http://10.0.4.12:8080/dags/…`, *running*) or a published wiki page on a port of its
   own (`:8090`) was left off Artifacts, the run while it could put its task under *Needs you*.
-  Now only a page on this computer (*localhost*, a *.localhost* name, one your hosts file maps
-  to it), or a page on your network or a port of its own that is neither a document nor a run
-  and is said to be serving (a dev server *running*), stays among its task's links instead; any
-  run that can put a task under *Needs you* is on Artifacts too (QA on 0.1.45, E71).
+  Now only a page on this computer (*localhost*, a loopback address, *0.0.0.0* or *[::]* where a
+  dev server says it serves, a *.localhost* name, one your hosts file maps to it), or a page on
+  your network or a port of its own that is neither a document nor a run and is said to be
+  serving (a dev server *running*), stays among its task's links instead; any run that can put a
+  task under *Needs you* is on Artifacts too (QA on 0.1.45, E71).
 - **CI builds are runs.** A Jenkins build (`/job/<name>/<n>/`), a Buildkite or other
   `/builds/<n>` page, a GitLab pipeline or job (`/-/pipelines/<n>`, `/-/jobs/<n>`), a CircleCI
   workflow and an Azure DevOps build (`_build/results?buildId=…`) a worker declared are runs,
   monitored and listed like any; one said to be *running* was taken for a server's page, left
-  off Artifacts and followed by nothing (E73).
+  off Artifacts and followed by nothing (E73). On your computer, where a dev server's page can
+  be called anything (`/pipelines/new`), a page is a run only when it says which runner it is
+  (Airflow, Flyte, GitLab's `/-/pipelines/`, a Jenkins named so), never by a route's word alone.
 - **An away notice that was not delivered says so until one is.** It was said only inside
-  Settings' *When you're away* row, opened. The sidebar and that row closed now say *Last notice
+  Settings' *When you're away* row, opened. The sidebar and that row closed now say *Away notice
   not delivered · 12 min ago* in red (why: on hover in the sidebar, and in the row opened),
-  until a notice goes out again; and where notices go is the way only (*Slack DM to you*), never
-  a message's or a trace's id (E72).
+  until a notice goes out again; and where notices go is the way only (*Slack DM to you*, *SMS
+  to +1…*, *Slack channel #ops*), never a message's, a trace's or an event's id (E72).
 - **The catch-up of watch gaps after an update tells only what it should.** It told again every
   gap an earlier version kept as if it were new, one that had ended and been told in full too,
   and one of a watch you removed. It now tells a gap still open, or one told shorter than it
@@ -36,7 +39,8 @@ sight; Artifacts words and times match what its rows say (QA round on 0.1.45).
   (E76).
 - **A run's time is when its status changed.** A run you just marked ended, or GitHub just read
   succeeded, said *ended · 3d ago*, from when its worker first declared it. Each deliverable now
-  goes by when its status changed (else when it was last checked, else declared) (E77).
+  goes by when its status changed, else when it was declared: a read that finds it as it was,
+  or its worker saying again what it said, changes nothing (E77).
 - **Several runs of unknown status are ended one by one.** *Ended* and *Stop tracking* acted on
   all of a task's unknown runs at once, and *Ended* read like a status. The buttons are *Mark
   ended* and *Stop tracking*; with several such runs, *Mark ended…* and *Stop tracking…* let you
