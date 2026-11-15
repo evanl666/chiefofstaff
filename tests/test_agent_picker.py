@@ -178,6 +178,60 @@ async def test_a_workers_work_continues_on_another_agent_in_its_folders(tmp_path
         await runtime.stop()
 
 
+async def test_a_worker_that_starts_work_while_its_handover_is_written_is_not_handed_over(
+    tmp_path, claude_on_path, monkeypatch
+):
+    from test_claude_workers import claude_worker
+
+    harness, runtime, worker, _ = await claude_worker(tmp_path)
+    try:
+        repos = harness.store.session(worker)["repos"]
+        summary = runtime.handoff_summary
+
+        async def meanwhile(row, agent):
+            written = await summary(row, agent)
+            runtime.update_session(worker, status="working")  # A message it got meanwhile.
+            return written
+
+        monkeypatch.setattr(runtime, "handoff_summary", meanwhile)
+        with pytest.raises(ValueError, match="It is at work"):
+            await runtime.continue_on(worker, "copilot")
+        assert [r["id"] for r in harness.store.open_sessions(WORKER)] == [worker], "none made"
+        assert harness.store.session(worker)["repos"] == repos, "nothing handed over"
+        assert not harness.store.get(f"continued:{worker}")
+    finally:
+        await runtime.stop()
+
+
+async def test_a_continued_workers_process_ends_before_the_new_one_and_its_folder_stays(
+    tmp_path, claude_on_path, monkeypatch
+):
+    """Never two writing in its folders: the worker it continues has closed and its process
+    ended before the new worker is made; its workspace, now the new one's, stays (even empty)."""
+    from test_claude_workers import claude_worker
+
+    harness, runtime, worker, _ = await claude_worker(tmp_path)
+    try:
+        claude = runtime.agents["claude"].backend
+        made = harness.store.create_session
+        seen = []
+
+        def creating(session_id, *arguments, **more):
+            old = claude.workers.get(worker)
+            seen.append(bool(old and old.ending_or_alive()))
+            return made(session_id, *arguments, **more)
+
+        monkeypatch.setattr(harness.store, "create_session", creating)
+        workspace = runtime.workspaces.workspace(harness.store.session(worker))
+        done = await runtime.continue_on(worker, "copilot")
+        assert seen == [False], "its process had ended"
+        await runtime.workers.release(worker)  # As closing it does, in the background.
+        assert await asyncio.to_thread(workspace.is_dir), "the new worker's now"
+        assert runtime.workspaces.workspace(harness.store.session(done["session_id"])) == workspace
+    finally:
+        await runtime.stop()
+
+
 async def test_a_worker_at_work_is_not_continued_elsewhere(tmp_path, claude_on_path):
     from test_claude_workers import claude_worker
 
