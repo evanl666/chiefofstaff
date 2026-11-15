@@ -466,14 +466,17 @@ async def test_usage_is_told_response_by_response_and_settles_at_the_end(agent, 
     assert all(data.restored is None for data in usages[1:])
     assert {data.epoch for data in usages} == {session.backend.epoch}
     assert told[-1][0] == "agent.settled"
-    # Two responses of the fake's: what Claude's result says, all told.
-    assert usages[-1].total == backend_claude.model_totals(
-        json.loads(
-            (
-                Path(os.environ["FAKE_CLAUDE_HOME"]) / "sessions" / f"{session.session_id}.json"
-            ).read_text()
-        )["totals"]
-    )
+    # Two responses of the fake's: what Claude's result says, all told (as the stand-in keeps
+    # it, written a moment after its result).
+    kept = Path(os.environ["FAKE_CLAUDE_HOME"]) / "sessions" / f"{session.session_id}.json"
+
+    def said():
+        try:
+            return backend_claude.model_totals(json.loads(kept.read_text())["totals"])
+        except ValueError:
+            return None  # Being written.
+
+    await until(lambda: said() == usages[-1].total)
 
 
 async def test_a_resumed_session_counts_from_what_it_restored(agent, tmp_path):

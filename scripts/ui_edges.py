@@ -62,8 +62,9 @@ SETTINGS_FIELDS |= {
     "watch_after_hours_minutes", "away_notify", "away_minutes", "away_how", "other_sessions",
     "send_to_chief", "update_notice",
 }  # fmt: skip
+# (With Copilot alone, as here: Coding agents' fields are made only where an agent is installed.)
 FORM_NAMES = SETTINGS_FIELDS - {"role_models", "role_efforts", "watches", "watch_hours"} | {
-    "slack_token", "profile", "setup_notes", "report_footer", "agent_new_workers",
+    "slack_token", "profile", "setup_notes", "report_footer",
     *(f"{kind}_{role}" for kind in ("model", "effort")
       for role in ("router", "worker", "slack", "watchdog")),
 }  # fmt: skip
