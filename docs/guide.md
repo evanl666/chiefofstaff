@@ -207,18 +207,23 @@ Opening one shows its latest conversation, and keeps it current while it works. 
 program made through Copilot's SDK (a script's, one per item of a batch, say) are not yours to
 continue and are not listed, unless you continued one in a terminal. Nor are one-shot
 `copilot -p` sessions (one prompt, then done) when something shows a program made them; when in
-doubt, a session is listed. That is: named `batch: …` with `copilot -p --name` (even while it
-runs); ten or more that start with the same words, each within two minutes of the one before
-(a script's batch); or a worker's, made while it ran a command (for as long as it ran; one
-whose end was not seen, two hours, and longer only for sessions that are clearly its) in the
-folder Chief of Staff made for it, or, when the command runs `copilot -p`, where the command
-ran or in a temporary folder (`/tmp`, `$TMPDIR`). The time and a folder alone are not enough:
-your questions in a project a worker also works in, or in `/tmp`, stay yours unless the worker
-was running `copilot -p` there then. Nothing in a
-session's files tells `copilot -p` from a question you asked in a terminal and left, so a few
-alike (from five to nine) stay listed as yours: `chiefofstaff tidy-sessions` names them. A
-single `copilot -p` you run yourself is listed, as is every session you typed more than one
-message in, resumed, or have open (unless it is named `batch: …`).
+doubt, a session is listed. That is: ten or more that start with the same words, each ended as
+soon as it answered (a script's call; you read an answer before closing a session) and begun
+within two minutes of the one before ending, however long each took (a script's batch); two or
+more named alike `batch: …` with `copilot -p --name` (one even while it runs); or a worker's,
+made while it ran a command (for as long as it ran; one whose end was not seen, two hours, and
+longer only for sessions that are clearly its) in the folder Chief of Staff made for it, or,
+when the command runs `copilot -p` (or the session is one of its batch, or named `batch: …`),
+where the command ran: its folder, a folder it went to, `/tmp` or `$TMPDIR` if it ran there.
+The time and a folder alone are not enough: your questions in a project a worker also works
+in, or in `/tmp`, stay yours unless the worker was running `copilot -p` there then, and a
+session you name `batch: …` yourself is listed once it ends. Nothing in a session's files tells
+`copilot -p` from a question you asked in a terminal and left, so a few alike (from five to
+nine) stay listed as yours: `chiefofstaff tidy-sessions` names them. A single `copilot -p` you
+run yourself is listed, as is every session you typed more than one message in, resumed, or
+have open (unless it is named `batch: …`). After an upgrade, what an earlier version decided
+is decided again, the oldest sessions first; until every log is read, a session it left out
+stays out.
 The Router does not see the others either. Workers name each call of a batch
 `batch: <their task>` and give it a Copilot home of their own (`COPILOT_HOME` in their folder),
 so its sessions do not reach yours at all.

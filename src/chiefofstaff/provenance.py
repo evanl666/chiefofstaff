@@ -11,25 +11,32 @@ version and the account). So a session the CLI made is the owner's unless someth
 program made it: when in doubt, it is listed. What does, of a single shot only (`one_shot`:
 one message of its own, never resumed, ended):
 
-- batch: named as a batch's (`copilot -p --name "batch: <task>"`, as workers are told to: see
-  named), whatever their number; or at least HIDE_SIZE whose first messages start alike (their
-  first PREFIX characters, whitespace collapsed, case folded), each begun within GAP of the one
-  before: a script's, whoever ran it. The owner asks alike questions too (a review of each
-  pull request, say), minutes apart, a few at a time: from BATCH_SIZE to fewer than HIDE_SIZE
-  close together they are `alike`, still the owner's (only tidy-sessions names them).
+- batch: at least HIDE_SIZE whose first messages start alike (their first PREFIX characters,
+  whitespace collapsed, case folded), each a script's call (it ended as soon as it answered:
+  QUICK) begun within GAP of when those before it ended: a script's, whoever ran it, however
+  long each call takes; or two or more named alike as a batch's (`copilot -p --name "batch:
+  <task>"`, as workers are told to: see named), whenever (one running now counts). A name
+  alone is no batch: one so named is its worker's where a worker's command ran (below), else
+  the owner's. The owner asks alike questions too (a review of each pull request, say), reads
+  each answer before closing its session, a few at a time: from BATCH_SIZE to fewer than
+  HIDE_SIZE close together they are `alike`, still the owner's (only tidy-sessions names
+  them).
 - worker: it began while one of Chief of Staff's workers ran a command (the commands table: see
   Window.covers and window_end), and it ran in that worker's own folder (one Chief of Staff
   made for it); or the command runs `copilot -p` (see runs_copilot) and it ran where the
-  command did (its folder, one it went to with `cd`) or in a temporary folder. A batch (above)
-  that began soon after a command did, where it ran or in a temporary folder, is that
-  worker's too. The time and a folder alone are no evidence: a worker runs dev servers and
-  tests for hours, at times in the owner's own project (a shared checkout, a session adopted
-  from a terminal). What 0.1.43 found a worker made is decided again by these rules, but for
-  a batch of a worker's it found in a temporary folder while that worker ran a command
-  (alike, begun soon after the command, by 0.1.43's measure): as it was.
+  command did (its folder, one it went to with `cd`; a temporary folder if the command ran in
+  one). A batch (above) that began soon after a command did, or one named a batch's, where it
+  ran, is that worker's too. The time and a folder alone are no evidence: a worker runs dev
+  servers and tests for hours, at times in the owner's own project (a shared checkout, a
+  session adopted from a terminal), and the owner asks questions in /tmp too. What an earlier
+  version found (0.1.43's, 0.1.44's) is decided again by these rules once every log is read
+  (until then, as it was: see Provenance.decide), but for a batch of a worker's 0.1.43 found
+  in a temporary folder while that worker ran a command (alike, begun soon after the command,
+  by 0.1.43's measure): as it was.
 
 A session open now is never decided on (it may be anything until it ends), except that one
-named a batch's is one while it runs too (no row for each call of a worker's batch); nor is one
+named a batch's is one while it runs too (no row for each call of a worker's batch), decided
+like any other once it ends; nor is one
 with more than one message of its own or resumed: an interactive session the owner asked one
 question in and exited looks like a single shot, and stays theirs unless a worker or a batch
 made it. What is decided is kept (kv `made:<session id>`, with the RULES it was decided by), so
@@ -43,7 +50,8 @@ itself (its memories) is no one's (see said_by_them).
 
 Logs are read in a thread, each once while it does not change: at most SHAPE_MOST bytes of it
 (a longer log is no single shot; for talks, only its start is read) and ROUND_BYTES a round, the
-newest first (the rest in the next round: `pending`). Who made them is decided in a thread too,
+oldest first, each after all those before it (the rest in the next round: `pending`). Who made
+them is decided in a thread too,
 each session against the commands that may have been running when it began (not every
 command), each folder read from disk once (see decide), each command read once (read_command).
 Nothing a session said is kept: of its first message only a hash of its start (or of its
@@ -95,14 +103,17 @@ NOT_THEIRS = frozenset({PROGRAM, MADE_BY_WORKER, BATCH})
 # them). Never kept, never left out.
 ALIKE = "alike"
 
-# Alike: at least BATCH_SIZE one-shot sessions whose first PREFIX characters are the same, each
-# begun within GAP seconds of the one before; a batch (left out) from HIDE_SIZE on. A script
-# runs its calls one after the other, seconds apart, by the dozen; the owner asks alike
-# questions minutes apart, a few at a time.
+# Alike: at least BATCH_SIZE one-shot sessions whose first PREFIX characters are the same, each a
+# script's call (it ended within QUICK seconds of its answer) begun within GAP seconds of the
+# end of the one before; a batch (left out) from HIDE_SIZE on. A script runs its calls one
+# after the other, by the dozen, each ending with its answer (`copilot -p` exits 0.01 to 0.02 s
+# after it: CLI 1.0.102 to 1.0.112, a call that ran a tool too), however long each takes; a
+# person reads an answer before closing the session, and asks alike questions a few at a time.
 BATCH_SIZE = 5
 HIDE_SIZE = 10
 PREFIX = 64
 GAP = 120.0
+QUICK = 5.0
 # A batch is a worker's when it began within LEAD seconds of the command it ran in.
 LEAD = 10 * 60.0
 # A command runs from its start to its end, when Chief of Staff saw it end; one whose end it did
@@ -124,8 +135,9 @@ SHAPE_MOST = 4 << 20
 ROUND_BYTES = 128 << 20
 PREFIX_TYPE = b'{"type":"'
 KV = "made:"
-# The rules a kept decision was made by: one made by others (0.1.43's, without) is made again.
-RULES = 2
+# The rules a kept decision was made by: one made by others (0.1.43's without, 0.1.44's 2) is
+# made again, once every log is read (see Provenance.decide).
+RULES = 3
 # How a session is named as one of a batch (`copilot -p --name "batch: <task>"`).
 NAMED = "batch:"
 
@@ -184,15 +196,18 @@ def whose(
 class Shape:
     """What a session's log says of how it ran: `one_shot` (one message of its own, never
     resumed, ended), when it began (`at`, its session.start's time), its first message's start,
-    hashed (`group`, see group_of); `talked`: someone talked in it (a second message of its own,
-    or it was resumed); `read`: what it says is known (False: not read, or it holds what this
-    cannot follow), so it is neither one shot nor known not to be talked in."""
+    hashed (`group`, see group_of), when it ended and whether at once after its answer (`end`,
+    `quick`); `talked`: someone talked in it (a second message of its own, or it was resumed);
+    `read`: what it says is known (False: not read, or it holds what this cannot follow), so it
+    is neither one shot nor known not to be talked in."""
 
     one_shot: bool
     at: float = 0.0
     group: str = ""
     talked: bool = False
     read: bool = True
+    end: float = 0.0  # when it ended (its last event: its session.shutdown)
+    quick: bool = False  # it ended within QUICK seconds of its last answer: a script's call
 
 
 # Read whole: one message at most, not one shot (still written, killed, no message at all).
@@ -262,6 +277,7 @@ def shape(log: bytes, whole: bool = True) -> Shape:
     at = epoch(first.get("timestamp")) or epoch(head.get("startTime"))
     said: str | None = None
     ended = False
+    answered = 0.0  # Its last answer.
     for line in lines[1:-1]:
         if line.startswith(PREFIX_TYPE):
             kind = line[len(PREFIX_TYPE) : line.find(b'"', len(PREFIX_TYPE))]
@@ -286,11 +302,26 @@ def shape(log: bytes, whole: bool = True) -> Shape:
             return TALKED
         elif kind == b"session.shutdown":
             ended = True
+        elif kind == b"assistant.message":
+            event = event or parse(line) or {}
+            data = event.get("data")
+            if own(event, data if isinstance(data, dict) else {}):
+                answered = epoch(event.get("timestamp")) or answered
     if not whole:
         return UNREAD  # Nothing said yet of what comes after.
     if said is None or not ended or not written or not at:
         return NOT_ONE
-    return Shape(True, at, group_of(said))
+    # When it ended: its last event's time (its session.shutdown, written last), else of the
+    # last one that has one. Without an answer, never quick.
+    end = next(
+        (
+            when
+            for line in reversed(lines[-6:-1])
+            if (when := epoch((parse(line) or {}).get("timestamp")))
+        ),
+        at,
+    )
+    return Shape(True, at, group_of(said), end=end, quick=end - answered <= QUICK)
 
 
 def read_log(path: Path, most: int, start: bool = False) -> bytes | None:
@@ -353,11 +384,14 @@ class OneShot:
     group: str  # its first message's start (see group_of), or its name (see named)
     cwd: str = ""  # the folder it ran in, as the listing has it
     named: bool = False  # named a batch's (see named)
+    end: float = 0.0  # when it ended (0: when it began, as a decision kept before says)
+    quick: bool = True  # it ended with its answer (see Shape); as kept before, taken so
 
 
 def named(meta: Any) -> str:
     """The name a session was given as one of a batch (`copilot -p --name "batch: <task>"`,
-    as workers are told to): a batch's whatever their number; "" for any other."""
+    as workers are told to): a batch's with another of that name, or where a worker's command
+    ran (see batches and decide); "" for any other."""
     name = " ".join(str(getattr(meta, "name", "") or "").split())
     return name if name.casefold().startswith(NAMED) else ""
 
@@ -510,22 +544,29 @@ def batches(
     shots: Iterable[OneShot], gap: float = GAP, least: int = BATCH_SIZE
 ) -> dict[str, list[OneShot]]:
     """The one-shot sessions alike (see the module's docstring), each with the others it is
-    alike with (in the order they began): at least `least`, each within `gap` of the one
-    before, or any number named a batch's."""
+    alike with (in the order they began): at least `least` that ended with their answer (a
+    script's calls), each begun within `gap` of when those before it ended; or two or more
+    named alike as a batch's (`batch: <task>`, as workers name their calls), whenever."""
     alike: dict[str, list[OneShot]] = {}
     for shot in shots:
         alike.setdefault(shot.group, []).append(shot)
     found: dict[str, list[OneShot]] = {}
     for members in alike.values():
         members.sort(key=lambda shot: (shot.at, shot.session_id))
+        if any(member.named for member in members):
+            if len(members) >= 2:
+                found |= dict.fromkeys((member.session_id for member in members), members)
+            continue
         run: list[OneShot] = []
-        for shot in [*members, None]:
-            if shot is None or (run and shot.at - run[-1].at > gap):
-                if len(run) >= least or any(member.named for member in run):
+        last = 0.0  # When the run's calls so far ended.
+        for shot in [*(member for member in members if member.quick), None]:
+            if shot is None or (run and shot.at - last > gap):
+                if len(run) >= least:
                     found |= dict.fromkeys((member.session_id for member in run), run)
-                run = []
+                run, last = [], 0.0
             if shot is not None:
                 run.append(shot)
+                last = max(last, shot.end or shot.at)
     return found
 
 
@@ -555,6 +596,8 @@ def decide(
     order = sorted(windows, key=lambda w: w.start)
     running: list[tuple[float, int, Window]] = []
     begun = 0
+    # Each command's: whether it ran in a temporary folder (where its sessions are then its).
+    in_temporary = [any(within(p, t) for p in w.places for t in temporary) for w in order]
     decided = {}
     for shot in fresh:
         while begun < len(order) and order[begun].start <= shot.at:
@@ -567,41 +610,46 @@ def decide(
             real[shot.cwd] = os.path.realpath(shot.cwd) if shot.cwd else ""
         cwd = real[shot.cwd]
         scratch = any(within(cwd, folder) for folder in temporary)
-        run = alike.get(shot.session_id)  # (Named ones are a run whatever their number.)
+        run = alike.get(shot.session_id)  # (Named ones: two or more of a name.)
         batch = bool(run) and (shot.named or len(run) >= HIDE_SIZE)
         kind = "named" if shot.named else "batch"
-        # A worker's for a reason of its own, not only the time (with its own folder, below):
-        # in a temporary folder, or named a batch's.
-        reason = scratch or shot.named
         ties = []
-        for _, _, w in running:
+        for _, n, w in running:
             own = within(cwd, w.folder)
-            if not w.covers(shot.at, came.get(w.by, []), reason or own):
+            # Where the command ran: its folders, or a temporary folder if it ran in one. That,
+            # or the worker's own folder, makes the session its for a reason of its own (not
+            # only the time): see Window.covers.
+            there = cwd in w.places or (scratch and in_temporary[n])
+            if not w.covers(shot.at, came.get(w.by, []), own or (scratch and in_temporary[n])):
                 continue
-            there = scratch or cwd in w.places
             if own:
-                ties.append((2, w.start, w, "folder"))
+                ties.append((2, w.start, n, w, "folder"))
             elif w.copilot and there:
-                ties.append((1, w.start, w, "command"))
+                ties.append((1, w.start, n, w, "command"))
             elif batch and there:  # Its batch, if it began soon after the command did.
                 began = min(m.at for m in run or () if m.at >= w.start)
                 if began - w.start <= LEAD:
-                    ties.append((0, w.start, w, kind))
+                    ties.append((0, w.start, n, w, kind))
+            elif shot.named and there:  # One named as its call is, where the command ran.
+                ties.append((0, w.start, n, w, kind))
         old = (kept or {}).get(shot.session_id) or {}
-        if not ties and scratch and old.get("as") == MADE_BY_WORKER and old.get("why") == "batch":
-            # A batch of a worker's an earlier version found (alike, begun soon after its
-            # command), in a temporary folder, while that worker ran a command: as it was.
+        if not ties and scratch and "rules" not in old and old.get("why") == "batch":
+            # A batch of a worker's 0.1.43 found (alike, begun soon after its command), in a
+            # temporary folder, while that worker ran a command: as it was.
             ties = [
-                (0, w.start, w, "batch")
-                for _, _, w in running
-                if w.by == old.get("by") and w.covers(shot.at, came.get(w.by, []), True)
+                (0, w.start, n, w, "batch")
+                for _, n, w in running
+                if old.get("as") == MADE_BY_WORKER
+                and w.by == old.get("by")
+                and w.covers(shot.at, came.get(w.by, []), True)
             ]
-        record = {"group": shot.group, "at": shot.at, "rules": RULES} | (
-            {"named": True} if shot.named else {}
-        )
+        record = {
+            "group": shot.group, "at": shot.at, "end": shot.end or shot.at, "quick": shot.quick,
+            "rules": RULES,
+        } | ({"named": True} if shot.named else {})  # fmt: skip
         if ties:
-            _, _, window, why = max(ties, key=lambda tie: tie[:2])
-            keeps_open = reason or within(cwd, window.folder)
+            _, _, n, window, why = max(ties, key=lambda tie: tie[:3])
+            keeps_open = within(cwd, window.folder) or (scratch and in_temporary[n])
             decided[shot.session_id] = {
                 "as": MADE_BY_WORKER, "by": window.by, "why": why, "keeps_open": keeps_open,
                 **record,
@@ -759,7 +807,7 @@ class Provenance:
         self.cache: dict[str, dict] | None = None
         self.counted = -1
         self.decided: dict[str, dict] = {}  # What it decided (when not kept).
-        self.groups: dict[str, dict[str, float]] = {}
+        self.groups: dict[str, dict[str, OneShot]] = {}
         self.workers: dict[str, dict[str, float]] = {}  # Worker -> its sessions -> began.
         # One-shot sessions found the owner's, as they were then, with those they were alike
         # with (see batches): looked at again when either changes.
@@ -792,8 +840,9 @@ class Provenance:
         self.pending = 0
         if not candidates:
             return {}
-        # The newest first: what is shown first is decided first.
-        candidates.sort(key=lambda meta: stamp(getattr(meta, "modified_time", None)), reverse=True)
+        # The oldest first: what one is depends on those before it (a batch, a worker's
+        # sessions keeping its command running), read before it (see look).
+        candidates.sort(key=begun)
         async with self.lock:
             records = await self.records()
             paths = {meta.session_id: self.log_of(meta.session_id) for meta in candidates}
@@ -813,6 +862,8 @@ class Provenance:
                     group_of(f"\0name {name}") if (name := named(meta)) else found.group,
                     cwd_of(meta),
                     bool(name),
+                    found.end,
+                    found.quick,
                 )
                 for meta in candidates
                 if (found := look.shapes.get(meta.session_id)) and found.one_shot
@@ -822,18 +873,31 @@ class Provenance:
             # and how it began are as they were (a batch read again in parts stays one).
             fresh = {shot.session_id for shot in shots}
             earlier = [
-                OneShot(key, at, group)
+                member
                 for group in {shot.group for shot in shots}
-                for key, at in self.groups.get(group, {}).items()
+                for key, member in self.groups.get(group, {}).items()
                 if key not in fresh
             ]
+            # One named a batch's that runs now counts as one of its name (another of a
+            # worker's calls, say: the first is not listed while the next runs).
+            earlier += [
+                OneShot(meta.session_id, begun(meta)[0], group_of(f"\0name {name}"), named=True)
+                for meta in listing
+                if meta.session_id in open_now and (name := named(meta))
+            ]
             found, due, alike = await asyncio.to_thread(self.choose, shots, earlier, records)
+            # Logs left for the next round: what an earlier version decided stays as it was
+            # until every log is read (one may be of a batch, or keep a worker's command
+            # running, read later), nor is any of those found the owner's settled meanwhile.
+            partial = look.pending > 0
             for shot in due:
                 record = found.get(shot.session_id)
                 if record and record["as"] != ALIKE:
                     record["size"] = self.shapes[shot.session_id][0][2]
                     self.settled.pop(shot.session_id, None)
                     self.alike.pop(shot.session_id, None)
+                    continue
+                if partial and shot.session_id in records:
                     continue
                 self.settled[shot.session_id] = (shot, alike[shot.session_id])
                 if record:
@@ -846,7 +910,8 @@ class Provenance:
             redone = [
                 key
                 for key, shape_ in look.shapes.items()
-                if key in records
+                if not partial
+                and key in records
                 and not current(records[key])
                 and key not in made
                 and (shape_.read or self.shapes[key][0][2] != records[key].get("size"))
@@ -911,7 +976,11 @@ class Provenance:
 
     def index(self, key: str, record: dict):
         group = str(record.get("group") or "")
-        self.groups.setdefault(group, {})[key] = float(record.get("at") or 0)
+        at = float(record.get("at") or 0)
+        # As decided: one kept before this kept when it ended is taken to have ended as it began.
+        self.groups.setdefault(group, {})[key] = OneShot(
+            key, at, group, end=float(record.get("end") or at), quick=record.get("quick", True)
+        )
         if record.get("keeps_open") and (by := record.get("by")):
             self.workers.setdefault(str(by), {})[key] = float(record.get("at") or 0)
 
@@ -924,10 +993,12 @@ class Provenance:
 
     def look(self, paths: Mapping[str, Path | None], records: Mapping[str, dict]) -> Look:
         """In a thread: the size of each log decided before by these RULES, and the shape of the
-        others (one decided by other rules too), read within the round's bytes."""
+        others (one decided by other rules too), read within the round's bytes, in order: once
+        one does not fit, those after it wait for the next round too (each read after all those
+        before it)."""
         sizes: dict[str, int | None] = {}
         shapes: dict[str, Shape] = {}
-        left, pending = ROUND_BYTES, 0
+        left, pending, full = ROUND_BYTES, 0, False
         for key, path in paths.items():
             now = identity(path) if path else None
             record = records.get(key)
@@ -943,7 +1014,8 @@ class Provenance:
                 continue
             if now[2] > SHAPE_MOST:
                 found = UNREAD
-            elif now[2] > left:
+            elif full or now[2] > left:
+                full = True
                 pending += 1
                 continue  # In the next round.
             else:
@@ -1013,6 +1085,12 @@ class Provenance:
 
 def stamp(moment: Any) -> float:
     return moment.timestamp() if isinstance(moment, datetime) else 0.0
+
+
+def begun(meta: Any) -> tuple[float, str]:
+    """When a listed session began, as the listing says (else when it last changed)."""
+    when = getattr(meta, "start_time", None) or getattr(meta, "modified_time", None)
+    return stamp(when), meta.session_id
 
 
 def cwd_of(meta: Any) -> str:
