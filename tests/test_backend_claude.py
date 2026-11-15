@@ -1709,6 +1709,30 @@ async def test_a_message_naming_a_workers_own_process_is_still_another_sessions(
     )
 
 
+def test_only_what_chief_of_staffs_supervisors_start_is_its_own(tmp_path, monkeypatch):
+    """A worker's own `claude --resume` (its supervisor's child) is Chief of Staff's from its
+    start, its pid not known yet; one a worker's command runs, the owner's terminal's, and
+    another Chief of Staff's worker are other windows."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    own, nested, terminal, other = (str(uuid.UUID(int=n)) for n in (1, 2, 3, 4))
+    supervisor = "/venv/bin/python -I -m chiefofstaff.agentrun --cwd /w -- /bin/claude"
+    table = {
+        10: (1, "/venv/bin/python -m chiefofstaff"),
+        11: (10, f"{supervisor} --resume {own}"),
+        12: (11, f"claude --resume {own} --output-format stream-json"),
+        13: (12, f"/bin/zsh -c claude --resume {nested} -p hi"),
+        14: (13, f"claude --resume {nested} -p hi"),
+        20: (1, f"claude --resume {terminal}"),
+        30: (1, f"{supervisor} --resume {other}"),
+        31: (30, f"claude --resume {other}"),
+    }
+    ours = backend_claude.supervised(table, 10)
+    assert ours == {11, 12}
+    found = backend_claude.opened_elsewhere(ours, table)
+    assert {nested, terminal, other} <= set(found)
+    assert own not in found and own.replace("-", "") not in found
+
+
 async def test_while_it_plans_it_removes_no_worktree(agent, tmp_path):
     session = await agent.create_session(session_id="b7" * 16, name="t", **options(tmp_path))
     worker = session.worker

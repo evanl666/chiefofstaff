@@ -657,7 +657,12 @@ def fake_claude(directory: Path, monkeypatch) -> str:
     backend runs."""
     directory.mkdir(parents=True, exist_ok=True)
     command = directory / "claude"
-    script = Path(__file__).parent / "fake_claude.py"
+    # The stand-in runs as a file named `claude`: its command line (`python …/claude --resume
+    # <id>`) reads as Claude Code's does (resumed_elsewhere, claude_program).
+    script = directory / "stand-in" / "claude"
+    script.parent.mkdir(exist_ok=True)
+    script.unlink(missing_ok=True)
+    script.symlink_to(Path(__file__).parent / "fake_claude.py")
     command.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n')
     command.chmod(0o755)
     monkeypatch.setenv("FAKE_CLAUDE_HOME", str(directory / "home"))
