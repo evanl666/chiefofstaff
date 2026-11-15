@@ -79,9 +79,11 @@ from .claude_tools import (
     definition_folders,
     docs_digest,
     docs_text,
+    managed_settings,
     peer_message,
     project_docs,
     recipient,
+    sandbox_widening,
     skills_plugin,
     under,
 )
@@ -158,6 +160,8 @@ TERMINAL = frozenset({"completed", "failed", "killed", "stopped"})
 # A rate_limit_event's overageStatus while extra usage carries requests past the plan's limit.
 OVERAGE_ON = frozenset({"allowed", "allowed_warning"})
 
+# An address a command names (as Copilot's permission request lists its possible URLs).
+COMMAND_URL = re.compile(r"\b(?:https?|ftps?|wss?)://[^\s'\"<>`|;()]+", re.IGNORECASE)
 # Claude's tools, as Chief of Staff's checks see them (more-agents.md 5.12.4).
 SHELL_TOOLS = {"Bash": "command", "Monitor": "command"}
 WRITE_TOOLS = {
@@ -801,15 +805,24 @@ def sandbox_settings(policy: Any) -> dict:
     and no start without it. A host off the policy's list asks (SandboxNetworkAccess), and
     Chief of Staff answers (ClaudeWorker.network_refused); loopback as the policy says."""
     sockets = [path for path in policy.readwrite if path == os.environ.get("SSH_AUTH_SOCK")]
-    network: dict[str, Any] = {"allowLocalBinding": bool(policy.local_network)}
+    # Every switch that could widen it, set (the owner's and a project's settings would set them
+    # otherwise: these win over theirs; lists they set refuse the worker, sandbox_widened).
+    network: dict[str, Any] = {
+        "allowLocalBinding": bool(policy.local_network),
+        "allowAllUnixSockets": False,
+        "allowUnixSockets": sockets,
+    }
     if policy.allowed_hosts:
         network["allowedDomains"] = list(policy.allowed_hosts)
-    if sockets:
-        network["allowUnixSockets"] = sockets
     return {
         "enabled": True,
         "failIfUnavailable": True,
         "allowUnsandboxedCommands": False,
+        "excludedCommands": [],
+        "enableWeakerNestedSandbox": False,
+        "enableWeakerNetworkIsolation": False,
+        "allowNestedUserNamespaces": False,
+        "allowAppleEvents": False,
         "filesystem": {
             "allowWrite": [path for path in policy.readwrite if path not in sockets],
             "denyWrite": list(policy.readonly),
@@ -817,6 +830,30 @@ def sandbox_settings(policy: Any) -> dict:
         },
         "network": network,
     }
+
+
+def sandbox_widened(cwd: str, trusted: bool | None = None, local: bool = True) -> str:
+    """Why a sandboxed worker in this folder may not run on Claude: settings Claude loads for it
+    (the owner's; the project's, where the owner trusts it; managed settings) that would widen
+    its sandbox past Chief of Staff's (claude_tools.sandbox_widening). "" when none do."""
+    home = str(Path.home())
+    user = config_folder()
+    sources = [
+        (user / name, str(user / name).replace(home, "~", 1))
+        for name in ("settings.json", "settings.local.json")
+    ]
+    if owner_trusts(cwd) if trusted is None else trusted:
+        sources += [
+            (Path(cwd) / ".claude" / name, f"this project's .claude/{name}")
+            for name in ("settings.json", "settings.local.json")
+        ]
+    found = sandbox_widening(sources, managed_settings(sys.platform), local)
+    if not found:
+        return ""
+    return (
+        f"Claude's settings would widen its sandbox past Chief of Staff's ({found}). Remove "
+        "that, or turn the sandbox off in Settings → Workers, for workers to run on Claude."
+    )
 
 
 def host_allowed(host: str, hosts: Any) -> bool:
@@ -948,6 +985,9 @@ class ClaudeSession:
     def keeps_process(self) -> bool:
         return self.worker.keeps_process()
 
+    def drop_schedules(self):
+        self.worker.drop_schedules()
+
     async def queue_holds(self) -> bool:
         return self.worker.queue_holds()
 
@@ -1050,6 +1090,7 @@ class ClaudeWorker:
         # The current process's MCP configuration and system prompt, as files (private_files):
         # each process's go with it (run).
         self.private: list[Path] = []
+        self.flag_settings: dict[str, Any] = {}
         # Claude's own capabilities, tied into Chief of Staff (more-agents.md 5.12.4): its
         # subagents running (task id -> the call that started it) and as they started (agent
         # id -> its folder, and why each call of it is refused when it may not act), its
@@ -1062,6 +1103,9 @@ class ClaudeWorker:
             for entry in options.get("schedules") or []
             if isinstance(entry, dict) and entry.get("id")
         }
+        # The prompts of schedules that ended with its task (drop_schedules): Claude brings them
+        # back with its conversation, and each firing is refused, quietly.
+        self.dropped: set[str] = {str(p).strip() for p in options.get("dropped_schedules") or []}
         self.plan_path = ""
         self.mode = "default"
         self.offered_agents: set[str] = set()
@@ -1121,9 +1165,13 @@ class ClaudeWorker:
         effort: Any = self.process_effort or None
         settings: dict[str, Any] = {"autoMemoryEnabled": False, "sandbox": {"enabled": False}}
         if policy := self.options.get("sandbox"):
+            if why := sandbox_widened(self.cwd, trusted, bool(policy.local_network)):
+                raise RuntimeError(why)
             settings["sandbox"] = sandbox_settings(policy)
         if self.ask_first:
             settings["disableAllHooks"] = True  # The owner's hooks and mods: off (5.7).
+        # Its settings as flags, kept whole: a new effort in place sends them all again (retune).
+        self.flag_settings = dict(settings)
         files = self.private_files()
         # Chief of Staff's own variables (the Slack token among them) reach neither its
         # supervisor nor the CLI: the launcher unsets those it names (a name the shell cannot
@@ -1704,9 +1752,11 @@ class ClaudeWorker:
         process (start_turn), which takes it from the start."""
         if self.query is None or not self.alive():
             return False
+        # Every one of its flag settings with it (its sandbox, the owner's hooks off), not the
+        # effort alone: whatever apply_flag_settings does with those it is not sent.
         request = {
             "subtype": "apply_flag_settings",
-            "settings": {"effortLevel": self.effort or None},
+            "settings": {**self.flag_settings, "effortLevel": self.effort or None},
         }
         try:
             await asyncio.wait_for(self.query._send_control_request(request), REQUEST_SECONDS)
@@ -1741,8 +1791,22 @@ class ClaudeWorker:
 
     def keeps_process(self) -> bool:
         """Whether its process must stay to do what it was asked: a schedule fires only in
-        Claude's running process."""
-        return bool(self.schedules)
+        Claude's running process (not one held: stopped, paused, over its limit)."""
+        return bool(self.schedules) and not self.schedules_held()
+
+    def schedules_held(self) -> bool:
+        """Its schedules fire no turn now: it was stopped (Runtime.hold_schedules)."""
+        held: Any = self.options.get("schedules_held")
+        return bool(held()) if callable(held) else False
+
+    def drop_schedules(self):
+        """Its schedules end here (its task cancelled or set aside, it closed): a firing of one
+        of them is refused at its gate, silently, and nothing keeps its process for them."""
+        self.dropped |= {
+            str(entry.get("prompt") or "").strip() for entry in self.schedules.values()
+        }
+        self.schedules.clear()
+        self.keep_schedules()
 
     async def stop_background(self) -> int:
         """Ends the commands its turns left running, and its subagents; how many it ended."""
@@ -2011,7 +2075,9 @@ class ClaudeWorker:
 
     def show_turn(self):
         turn, self.unshown = self.unshown, ""
-        self.emit("assistant.turn_start", turn_id=turn)
+        # One it starts by itself (a schedule's firing, a command's end, another's message): at
+        # work all the same, whatever its row said (Events.turn_start).
+        self.emit("assistant.turn_start", turn_id=turn, woken=turn.startswith("w-"))
 
     def call_results(self, message: dict, content: list):
         structured = message.get("tool_use_result")
@@ -2253,6 +2319,8 @@ class ClaudeWorker:
             return await self.gate_peer(peer)
         if (schedule := self.fired(prompt)) is not None:
             return await self.gate_schedule(schedule)
+        if prompt.strip() in self.dropped:
+            return self.block("Its schedules ended with its task.")
         return self.block(
             "Chief of Staff delivers only its own messages to this worker.",
             notice="A message Chief of Staff could not place was not delivered.",
@@ -2356,6 +2424,10 @@ class ClaudeWorker:
         when = entry.get("human") or "on schedule"
         if self.turn:
             return {}
+        if self.schedules_held():
+            why = "it was stopped. It runs again once you tell it to go on."
+            self.emit("agent.notice", text=f"Its scheduled prompt ({when}) did not run: {why}")
+            return self.block(why)
         if why := await self.woken():
             self.emit("agent.notice", text=f"Its scheduled prompt ({when}) did not run: {why}")
             return self.block(why)
@@ -2555,6 +2627,13 @@ class ClaudeWorker:
             return self.cloud_call(call, "a routine")
         if name == "EnterWorktree":
             return await self.entering_worktree(arguments, cwd, call)
+        if name == "CronCreate" and arguments.get("durable"):
+            # Written into its folder (.claude/scheduled_tasks.json), it would outlive the
+            # worker and run where Chief of Staff holds nothing of it.
+            return (
+                "A durable schedule is written into its folder and outlives this worker: "
+                "schedule it for this session only (durable: false)."
+            )
         if name in {"SendMessage", "ListAgents"} and self.options.get("reads_slack"):
             return SLACK_NO_PEERS
         if name == "SendMessage":
@@ -2795,7 +2874,12 @@ class ClaudeWorker:
                 intention=str(arguments.get("description") or ""),
                 commands=[],
                 possible_paths=[],
-                possible_urls=[],
+                # The addresses it names, as Copilot's request lists them (the policy refuses a
+                # worker that reads Slack any).
+                possible_urls=[
+                    SimpleNamespace(url=url)
+                    for url in COMMAND_URL.findall(str(arguments.get(SHELL_TOOLS[name]) or ""))
+                ],
                 has_write_file_redirection=False,
                 can_offer_session_approval=False,
                 tool_call_id=call,

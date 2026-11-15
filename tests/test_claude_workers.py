@@ -434,6 +434,28 @@ async def test_a_message_from_one_of_its_workers_processes_is_that_workers_tell_
         await runtime.stop()
 
 
+async def test_claude_runs_no_sandboxed_worker_its_own_settings_would_widen(
+    tmp_path, claude_on_path, monkeypatch
+):
+    monkeypatch.setitem(PASSED, "sandbox", "")
+    harness, runtime = await started(tmp_path, Settings(worker_sandbox=True))
+    try:
+        await saved(runtime, {"claude": {"enabled": True}})
+        await runtime.connect_agent("claude")
+        runtime.sandbox_host = True
+        row = {"id": "", "role": "worker", "slack": 0, "yolo": "", "closed_at": None,
+               "cwd": str(tmp_path)}  # fmt: skip
+        assert runtime.blocked_on("claude", row) == ""
+        widening = {"sandbox": {"network": {"allowedDomains": ["elsewhere.example"]}}}
+        (Path(os.environ["CLAUDE_CONFIG_DIR"]) / "settings.json").write_text(json.dumps(widening))
+        why = runtime.blocked_on("claude", row)
+        assert "(sandbox.network.allowedDomains in " in why and "Settings → Workers" in why
+        harness.store.save_settings(Settings(worker_sandbox=False))
+        assert runtime.blocked_on("claude", row) == "", "unsandboxed, its settings are its own"
+    finally:
+        await runtime.stop()
+
+
 async def test_a_worker_that_reads_slack_runs_on_copilot_not_claude_for_now(
     tmp_path, claude_on_path, monkeypatch
 ):
@@ -752,6 +774,76 @@ async def test_a_claude_workers_schedule_is_kept_holds_its_process_and_fires_as_
         await until(lambda: fired in harness.kinds(worker), 30)
         await until(lambda: harness.kinds(worker)[-2:] == [("tool", "bash echo tick"),
                                                           ("assistant", "done")])  # fmt: skip
+    finally:
+        await runtime.stop()
+
+
+async def test_a_claude_workers_schedule_shows_it_working_and_stops_with_stop_and_cancel(
+    tmp_path, claude_on_path, monkeypatch
+):
+    """A firing is a turn at work (its row says so); after the owner's Stop no firing runs until
+    they tell it to go on; once its task is cancelled none runs, and nothing keeps its process
+    (it is let go of when idle, as any worker)."""
+    from chiefofstaff import workers as workers_module
+
+    monkeypatch.setenv("FAKE_CLAUDE_FIRE_SECONDS", "1")
+    harness, runtime, worker, task = await claude_worker(
+        tmp_path, "Report done: set. Schedule 'Run the shell command `echo tick`' every minute."
+    )
+    statuses = []
+    update = runtime.update_session
+
+    def record(session_id, **fields):
+        if session_id == worker and "status" in fields:
+            statuses.append(fields["status"])
+        return update(session_id, **fields)
+
+    monkeypatch.setattr(runtime, "update_session", record)
+    try:
+        await until(lambda: harness.store.get(f"agentschedules:{worker}"), 10)
+        fired = ("notice", "Its schedule fired (Every minute).")
+        await until(lambda: fired in harness.kinds(worker), 30)
+        await until(lambda: "working" in statuses, 10)
+        await runtime.workers.interrupt(worker)
+        held = len([k for k in harness.kinds(worker) if k == fired])
+        await until(lambda: any("did not run" in t for _, t in harness.kinds(worker)), 15)
+        assert len([k for k in harness.kinds(worker) if k == fired]) == held
+        with pytest.raises(ValueError, match="cancel again to set it aside"):
+            await runtime.task_actions.cancel(task)
+        await runtime.task_actions.cancel(task)  # Set aside: nothing of it open now.
+        assert harness.store.get(f"agentschedules:{worker}") is None
+        ran = len([k for k in harness.kinds(worker) if k == fired])
+        await asyncio.sleep(2.5)  # (Firings every second: refused, without a word.)
+        assert len([k for k in harness.kinds(worker) if k == fired]) == ran
+        later = time.time() + workers_module.RELEASE_IDLE + 1
+        await until(lambda: runtime.store.session(worker)["status"] != "working", 15)
+        assert await runtime.workers.release_idle(later) == [worker], "nothing keeps it now"
+    finally:
+        await runtime.stop()
+
+
+async def test_a_claude_worker_with_schedules_is_not_handed_to_a_terminal_and_none_is_durable(
+    tmp_path, claude_on_path, monkeypatch
+):
+    """Claude brings a worker's schedules back with its conversation (2.1.322, also one it calls
+    session-only): in a terminal they would run outside Chief of Staff, so it is not handed
+    over with any. A durable one (written into its folder) is never made."""
+    monkeypatch.setenv("FAKE_CLAUDE_FIRE_SECONDS", "600")
+    harness, runtime, worker, _ = await claude_worker(
+        tmp_path, "Report done: set. Schedule 'Run the shell command `echo tick`' every minute."
+    )
+    try:
+        await until(lambda: harness.store.get(f"agentschedules:{worker}"), 10)
+        with pytest.raises(ValueError, match=r"It has schedules \(Every minute\) that would go"):
+            await runtime.terminal_command(worker)
+        assert runtime.states.is_live(worker), "not let go of"
+        await runtime.owner_send(
+            worker, "Schedule 'Run the shell command `echo later`' every minute durably"
+        )
+        await until(lambda: harness.kinds(worker)[-1][0] == "assistant", 30)
+        assert ("tool", "CronCreate") in harness.kinds(worker)[-3:], "asked for, refused"
+        kept = json.loads(harness.store.get(f"agentschedules:{worker}"))
+        assert [entry["prompt"] for entry in kept] == ["Run the shell command `echo tick`"]
     finally:
         await runtime.stop()
 

@@ -57,6 +57,88 @@ def peer_message(prompt: str) -> dict | None:
     }
 
 
+# What in Claude's settings would widen a worker's sandbox past Chief of Staff's (2.1.322's keys,
+# under `sandbox`). Lists merge across settings sources, so one in the owner's or a project's
+# settings would join Chief of Staff's: a sandboxed worker does not run then. Switches and
+# ports: Chief of Staff's own settings (`--settings`) win over the owner's and a project's (its
+# check of each version shows they do), not over managed settings, where any of them refuses.
+WIDENING_LISTS = (
+    "excludedCommands",
+    "network.allowedDomains",
+    "network.allowUnixSockets",
+    "network.allowMachLookup",
+    "allowMachLookup",
+    "filesystem.allowWrite",
+    "filesystem.allowRead",
+)
+WIDENING_SWITCHES = (
+    "allowUnsandboxedCommands",
+    "enableWeakerNestedSandbox",
+    "enableWeakerNetworkIsolation",
+    "allowNestedUserNamespaces",
+    "allowAppleEvents",
+    "network.allowAllUnixSockets",
+    "network.allowLocalBinding",
+)
+PROXY_PORTS = ("network.httpProxyPort", "network.socksProxyPort")
+# Where Claude reads managed settings (2.1.322), above everything else.
+MANAGED_FOLDERS = {
+    "darwin": Path("/Library/Application Support/ClaudeCode"),
+    "linux": Path("/etc/claude-code"),
+}
+
+
+def sandbox_widening(
+    sources: list[tuple[Path, str]], managed: list[Path], local: bool = True
+) -> str:
+    """What would widen a sandboxed worker's sandbox past Chief of Staff's: each settings file
+    Claude loads for it (`sources`: the file, and how to say it) and the managed settings files
+    ("" for nothing; else the first key found and where). `local`: its sandbox lets it bind
+    to loopback anyway (a worker that does not read Slack)."""
+
+    def keys(file: Path) -> dict:
+        try:
+            data = json.loads(file.read_text(encoding="utf-8")[:1_000_000])
+        except (OSError, ValueError):
+            return {}
+        sandbox = data.get("sandbox") if isinstance(data, dict) else None
+        return sandbox if isinstance(sandbox, dict) else {}
+
+    def value(sandbox: dict, key: str) -> Any:
+        found: Any = sandbox
+        for part in key.split("."):
+            found = found.get(part) if isinstance(found, dict) else None
+        return found
+
+    for file, said in sources:
+        sandbox = keys(file)
+        for key in (*WIDENING_LISTS, *PROXY_PORTS):
+            if value(sandbox, key) not in (None, [], {}, ""):
+                return f"sandbox.{key} in {said}"
+    for file in managed:
+        sandbox = keys(file)
+        for key in (*WIDENING_LISTS, *PROXY_PORTS, *WIDENING_SWITCHES):
+            if local and key == "network.allowLocalBinding":
+                continue
+            if value(sandbox, key) not in (None, [], {}, "", False):
+                return f"sandbox.{key} in {file}"
+        if sandbox.get("enabled") is False:
+            return f"sandbox.enabled in {file}"
+    return ""
+
+
+def managed_settings(platform: str) -> list[Path]:
+    """Claude's managed settings files on this computer (its file, then its drop-in folder's)."""
+    folder = MANAGED_FOLDERS.get(platform)
+    if folder is None:
+        return []
+    found = [folder / "managed-settings.json"]
+    drop_in = folder / "managed-settings.d"
+    if drop_in.is_dir():
+        found += sorted(drop_in.glob("*.json"))
+    return [file for file in found if file.is_file()]
+
+
 def worker_name(row_id: str) -> str:
     """A worker's name for Claude's other sessions (its `--name`)."""
     return f"cos-{row_id.replace('-', '')[:8]}"

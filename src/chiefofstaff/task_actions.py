@@ -3118,6 +3118,8 @@ class TaskActions:
                     },
                 )
         elif row and not row["closed_at"]:
+            # Nothing of it open now: its schedules (Claude's) end with this task.
+            self.runtime.drop_schedules(row["id"])
             if on_it:
                 self.runtime.asks.cancel_requests(row["id"], why, keep_questions=task_id)
                 self.states[row["id"]].after_abort = True
@@ -3197,6 +3199,8 @@ class TaskActions:
         if unaccepted:
             # Done, but not accepted: Home shows it as set aside.
             self.store.set(f"setaside:{task['id']}", "1")
+        if not any(other["status"] in OPEN for other in self.tasks.for_session(task["session_id"])):
+            self.runtime.drop_schedules(task["session_id"])  # Its schedules end with it.
         self.publish(task)
         told = (
             f"Task {task['id']} “{task['title']}” had finished already (its result was "
@@ -3925,8 +3929,11 @@ class TaskActions:
 
         if gone_on(task):
             return task
-        # Whatever the owner says now, it no longer waits to go on by itself (go_on_at).
-        self.store.delete(f"goonat:{task_id}")
+        # Whatever the owner says now, it no longer waits to go on by itself (go_on_at), and
+        # its schedules (Claude's) fire again.
+        if self.store.get(f"goonat:{task_id}"):
+            self.store.delete(f"goonat:{task_id}")
+        self.runtime.release_schedules(task["session_id"])
         if task["status"] == "cancelled" and not resume:
             raise ValueError("That task was cancelled. Ask the Router for new work instead.")
         if going_on:

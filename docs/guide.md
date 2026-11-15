@@ -1197,7 +1197,11 @@ hover tips and a part of its own in *Usage*; the daily summary adds them on a da
   *Workers* sandboxes workers (Codex's sandbox has not passed Chief of Staff's checks yet); with
   it off they run as Copilot workers do then, with your caches, tools and network
   (`danger-full-access`), and every edit still asks Chief of Staff, so your own checkouts stay
-  read-only to them. Your own Codex `sandbox_mode` and Claude `sandbox` settings are not applied.
+  read-only to them. Your own Codex `sandbox_mode` and Claude `sandbox` settings are not applied:
+  Chief of Staff sets each of Claude's sandbox switches itself, and while the sandbox is on, a
+  Claude worker does not start where your Claude settings (yours, a trusted project's, managed
+  ones) add to its sandbox's lists (`excludedCommands`, `allowedDomains`, `allowWrite`, …) or set
+  a proxy port: Claude would merge them with Chief of Staff's. It says which key, and where.
   Codex's commands run without a login shell, with the environment and `PATH` a Copilot worker's
   commands get; Codex puts its own helpers first on `PATH` and sets a few variables of its own
   (such as `LANG` and `LC_ALL` to `C.UTF-8`, `TERM=dumb`, `PAGER=cat`).

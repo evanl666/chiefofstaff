@@ -1485,6 +1485,16 @@ class Runtime:
                 f"{name} can't run while workers are sandboxed: {sandbox}. Turn the sandbox off "
                 "in Settings → Workers to go on."
             )
+        if (
+            agent == "claude"
+            and self.sandbox_host
+            and (self.store.settings().worker_sandbox or row["slack"])
+        ):
+            # Its sandbox as Chief of Staff's, not widened by Claude's own settings.
+            from .backend_claude import sandbox_widened
+
+            if why := sandbox_widened(str(row.get("cwd") or ""), local=not row["slack"]):
+                return why
         if why := refused.get("acting"):
             return why
         if not self.yolo(row) and (why := refused.get("ask_first")):
@@ -2130,6 +2140,14 @@ class Runtime:
         if row["status"] in {"working", "starting", "queued"} or self.states[session_id].held:
             raise ValueError("It is at work: stop it first, or wait until it is done.")
         agent = self.agent(session_id)
+        if schedules := json.loads(self.store.get(f"agentschedules:{session_id}") or "[]"):
+            # Claude brings a worker's schedules back with its conversation, so they would run
+            # in the terminal, where Chief of Staff holds nothing of them.
+            when = ", ".join(str(entry.get("human") or "scheduled") for entry in schedules[:3])
+            raise ValueError(
+                f"It has schedules ({when}) that would go on running in your terminal: tell it "
+                "to cancel them first (CronDelete), then continue there."
+            )
         if self.states.is_live(session_id):
             await self.detach(session_id)
         return {
@@ -3100,6 +3118,9 @@ class Runtime:
                 "token_limit": agents.limit(self.store, "claude"),
                 "schedules": json.loads(self.store.get(f"agentschedules:{sid}") or "[]"),
                 "on_schedules": lambda found: self.agent_schedules(sid, found),
+                # Held after a stop (until the owner says go on); ended with its task.
+                "schedules_held": lambda: bool(self.store.get(f"scheduleshold:{sid}")),
+                "dropped_schedules": json.loads(self.store.get(f"schedulesdropped:{sid}") or "[]"),
                 # Kept apart from the hook (Claude waits for it), as the checkouts' lock allows.
                 "on_worktree": lambda path, removed: self.background(
                     self.agent_worktree(sid, path, removed)
@@ -3309,6 +3330,30 @@ class Runtime:
             self.update_session(session_id, repos=json.dumps([*checkouts, checkout]))
         branch = f" on {checkout['branch']}" if checkout.get("branch") else ""
         self.agent_notice(row, f"Made the worktree {path}{branch}: one of its checkouts now.")
+
+    def hold_schedules(self, session_id: str):
+        """Stopped (by the owner, the Watchdog, a limit, its spend): its own schedules (Claude's)
+        start no turn until the owner tells it to go on (release_schedules)."""
+        if self.store.get(f"agentschedules:{session_id}"):
+            self.store.set(f"scheduleshold:{session_id}", "1")
+
+    def release_schedules(self, session_id: str):
+        if self.store.get(f"scheduleshold:{session_id}"):
+            self.store.delete(f"scheduleshold:{session_id}")
+
+    def drop_schedules(self, session_id: str):
+        """Its task cancelled or set aside, or it closed: its schedules end. Claude would bring
+        them back with its conversation: each firing is refused, quietly (their prompts kept)."""
+        schedules = json.loads(self.store.get(f"agentschedules:{session_id}") or "[]")
+        if not schedules:
+            return
+        dropped = json.loads(self.store.get(f"schedulesdropped:{session_id}") or "[]")
+        prompts = [str(entry.get("prompt") or "") for entry in schedules]
+        self.store.set(f"schedulesdropped:{session_id}", json.dumps([*dropped, *prompts][-50:]))
+        self.store.delete(f"scheduleshold:{session_id}")
+        if callable(drop := getattr(self.states.handle(session_id), "drop_schedules", None)):
+            drop()  # Its process forgets them too (agent_schedules then clears them).
+        self.agent_schedules(session_id, [])
 
     def agent_schedules(self, session_id: str, schedules: list[dict]):
         """What another agent's worker scheduled (Claude's CronCreate, ScheduleWakeup): kept
@@ -5975,6 +6020,8 @@ class Runtime:
         row = self.store.session(session_id)
         if row["closed_at"] and row["role"] == WORKER:
             await self.workers.reopen(session_id, restore=True)
+        if row["role"] == WORKER:
+            self.release_schedules(session_id)  # The owner's word: its schedules fire again.
         # The task this is about: the one whose question it answers, the one the owner looks
         # at, the one it is on… (see chat_task).
         about = self.chat_task(session_id, task_id) if row["role"] == WORKER else None

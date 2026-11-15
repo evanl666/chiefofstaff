@@ -843,6 +843,7 @@ class Workers:
         if row["closed_at"]:
             return
         async with self.states[session_id].lifecycle:
+            self.runtime.drop_schedules(session_id)  # They end with it (Claude's).
             if session := self.states.take_handle(session_id):
                 # At work, or its turn over and a command it left running holding the session.
                 if row["status"] == "working" or self.states[session_id].held:
@@ -1165,6 +1166,7 @@ class Workers:
         row = self.store.session(session_id)
         self.runtime.asks.cancel_requests(session_id, f"Stopped by {by}.")
         self.states[session_id].after_refresh = ""
+        self.runtime.hold_schedules(session_id)  # Its schedules too, until it goes on.
         if row["status"] in {"working", "queued", "starting"} or self.states[session_id].held:
             self.mark_stopped(row, by, notice, full)
         else:
@@ -1191,6 +1193,8 @@ class Workers:
             # returns, and must find a deliberate stop, not a worker that ended without a report
             # (nor a silent stall for the Watchdog).
             self.mark_stopped(row, by, notice, full)
+        if row["role"] == WORKER:
+            self.runtime.hold_schedules(session_id)  # Its schedules too, until it goes on.
         if session := self.states.handle(session_id):
             await session.abort()
             # A command its turn left running would go on (and end in a turn of its own).
