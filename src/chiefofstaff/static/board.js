@@ -32,6 +32,7 @@ export const MARKERS = {
   queued: "Queued",
   turn: "Up next",
   paused: "Paused",
+  resets: "Paused",
   "check-back": "Checks back",
   watching: "Monitoring",
   waiting: "Waiting for you",
@@ -225,6 +226,21 @@ export function workerContext(worker, list) {
 }
 // What another agent's worker paused for its plan's limit is stopped by (agents.PLAN_STOP).
 export const PLAN_STOP = "its plan's limit";
+// When a limit resets: its time, and its day when not today (a weekly limit).
+export function resetTime(at, now = Date.now()) {
+  const date = new Date(at);
+  const time = date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  return date.toDateString() === new Date(now).toDateString() ? time : `${date.toLocaleDateString([], { weekday: "short" })} ${time}`;
+}
+// A task its agent paused for a limit, its reset first: "Codex limit reached · resets 9:25 PM"
+// (as agents.pause_line says it).
+export function pauseLine(task, now = Date.now()) {
+  const paused = task.paused || {};
+  const what = `${paused.agent_name || task.agent_name || "Its agent"} ${paused.rate ? "rate limit" : "limit"} reached`;
+  if (!paused.resets_at) return what;
+  const at = paused.resets_at * 1000;
+  return `${what} · ${at > now ? "resets" : "reset at"} ${resetTime(at, now)}`;
+}
 // One task's place: { section, marker, why } (and `word`, its status word where not its marker's). `active`, `activeTitle`, `stoppedTitle`: see
 // workerContext; `onCard`: shown on a card under Needs you already (a draft for it), so not
 // again: in no section, its marker says what that card shows of it (news on it, a result to
@@ -238,8 +254,13 @@ export function taskPhase(task, worker, { active = "", activeTitle = "", stopped
   // runs, news for it waits too, until they say to use them.
   if (task.attention === "settings") return at("needs", "settings", task.attention_why || "Its folder's settings changed: it waits for your word");
   // Its token limit stopped it (another agent's worker): what it spent is unknown, or its limit used.
-  // Its plan's limit paused it: when it resets, if its agent said; Go on then, or another agent.
-  if (task.status === "waiting" && task.stopped === PLAN_STOP) return { ...at("needs", "stopped", `${task.progress} Go on once it resets, or continue with another agent.`), word: "Paused" };
+  // Its agent's limit paused it: when that resets first, for the owner to have it go on then
+  // (it waits under Monitoring for that) or to continue it on another agent.
+  if (task.status === "waiting" && task.stopped === PLAN_STOP) {
+    const goesOn = task.paused?.go_on_at;
+    if (goesOn) return { ...at("monitoring", "resets", `Goes on at ${resetTime(goesOn * 1000, now)}, once its ${task.paused.agent_name} limit resets`), word: "Paused" };
+    return { ...at("needs", "stopped", pauseLine(task, now)), word: "Paused" };
+  }
   if (task.status === "waiting" && task.stopped) return at("needs", "stopped", task.spend_why || `Stopped by ${task.stopped}: tell it to go on, or cancel it`);
   // Its question is about its own draft: decided on that draft's card, which holds it.
   if (task.status === "waiting" && onCard && task.question_draft) return at("", "", "On its draft's card under Needs you");

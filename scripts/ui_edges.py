@@ -7000,7 +7000,8 @@ async def agents_off(runtime, browser, scheme: str, runs: Path):
     await expect(state).to_have_text("0.167.2 · signed in with ChatGPT", timeout=20000)
     await expect(box).to_be_checked()
     await expect(fields.locator("input[name=agent_codex_limit]")).to_have_value("200,000")
-    await expect(group.locator("#agents-downgrade")).to_be_visible()
+    # Downgrading is for the guide (its section "What differs" opens), not this tab.
+    await expect(page.locator("#settings-form")).not_to_contain_text("prepare-downgrade")
     await expect(choose).to_have_value("codex")
     for width in AGENT_WIDTHS:
         await shoot(page, "tab-on", scheme, width)
@@ -7281,7 +7282,8 @@ async def agents_differences(runtime, browser, worker: str):
         await page.keyboard.press("Escape")
         assert not errors, errors
         await context.close()
-    # A Copilot worker's header and menu say nothing of agents.
+    # A Copilot worker's header says Copilot, as every worker's says its agent while another is
+    # on; its menu says nothing of agents.
     copilot = next(
         row["id"]
         for row in runtime.store.open_sessions()
@@ -7290,7 +7292,7 @@ async def agents_differences(runtime, browser, worker: str):
     context, page, errors, _ = await agents_page(browser, "light")
     await page.evaluate("id => import('/static/session.js').then((m) => m.select(id))", copilot)
     await expect(page.locator("#session-meta")).not_to_contain_text("Codex")
-    await expect(page.locator("#session-meta span")).to_have_count(0)
+    await expect(page.locator("#session-meta span")).to_have_text(["Copilot"])
     await page.locator("#session-more-button").click()
     assert not await page.locator("#session-menu-items select").evaluate(
         "s => s.hasAttribute('aria-describedby') || s.querySelector('option[value=off]').disabled"
@@ -7730,12 +7732,22 @@ async def picker_composer(runtime, browser):
         await expect(box).to_have_value("")
         await box.fill("Port the parser to Rust")
         await picker_shoot(page, "composer-chip", scheme, focus=page.locator("#composer"))
-        if scheme == "dark":  # Its clear button takes the chip away (and the agent with it).
+        mine = page.locator("#timeline .msg.owner", has_text="Port the parser to Rust")
+        if scheme == "dark":
+            # Its clear button takes the chip away (and the agent with it); chosen again, it is
+            # back. Sent once (above, in light): one bubble, said to be on Codex.
             await chip.locator("button.clear").click()
             await expect(chip).to_be_hidden()
             await page.locator("#composer-input").fill("@cod")
             await page.locator("#mention-list li.agent", has_text="Codex").click()
-            await box.fill("Port the parser to Rust")
+            await expect(chip).to_have_text("On Codex\u00d7")
+            await chip.locator("button.clear").click()
+            await box.fill("")
+            await expect(mine).to_have_count(1)
+            await picker_shoot(page, "composer-sent", scheme, focus=mine)
+            assert not errors, errors
+            await context.close()
+            continue
         sent: list = []
 
         def posted(request, sent=sent):
@@ -7746,8 +7758,8 @@ async def picker_composer(runtime, browser):
         await box.press("Enter")
         await expect(chip).to_be_hidden()
         await until(lambda sent=sent: sent)
-        assert sent[-1] == {"text": "Port the parser to Rust", "agent": "codex"}, sent
-        mine = page.locator("#timeline .msg.owner").last
+        assert sent == [{"text": "Port the parser to Rust", "agent": "codex"}], sent
+        await expect(mine).to_have_count(1)
         await expect(mine.locator("span.to")).to_have_text("On Codex")
         await picker_shoot(page, "composer-sent", scheme, focus=mine)
         assert not errors, errors
@@ -7826,6 +7838,11 @@ async def picker_workers(runtime, browser):
     assert moved and runtime.agent(moved) == "copilot"
     notices = page.locator("#timeline .notice", has_text="Continues “Port the parser”")
     await expect(notices).to_have_count(1)
+    # On Copilot, it says so as every worker does while another agent is on: its row, its header.
+    badge = page.locator("#session-list .item.selected .agent-badge")
+    await expect(badge).to_have_text("Copilot")
+    await expect(badge).to_have_attribute("title", re.compile(r"^Copilot( · \S.*)?$"))
+    await expect(page.locator("#session-meta")).to_contain_text("Copilot")
     await picker_shoot(page, "worker-continued", "light", "#main")
     assert not errors, errors
     await context.close()
@@ -7835,8 +7852,8 @@ async def picker_workers(runtime, browser):
     await picker_shoot(page, "worker-continued", "dark", "#main")
     assert not errors, errors
     await context.close()
-    # A named agent that could not run: the Router's card offers what to do.
-    runtime.add_message(router, "assistant", "Codex can't run it now: it is signed out.")
+    # A named agent that could not run: the card in the Router's chat says why and offers what
+    # to do (the Router does not say it again).
     runtime.agent_refused_card(
         "codex",
         "Codex is not signed in: run codex login in a terminal.",
@@ -7863,33 +7880,78 @@ async def picker_workers(runtime, browser):
     await expect(card.locator(".actions")).to_have_count(0)
     started = [r for r in store.open_sessions("worker") if r["title"] == "Benchmark the importer"]
     assert len(started) == 1 and runtime.agent(started[0]["id"]) == "copilot"
+    # One line says it started, and where.
+    lines = page.locator("#timeline .event.started", has_text="Benchmark the importer")
+    await expect(lines.locator(".what")).to_have_text(
+        ["Started “Benchmark the importer” on Copilot instead"]
+    )
     assert not errors, errors
     await context.close()
-    # A task its plan's limit paused (its request refused): Go on once it resets, or Continue
-    # with another agent. (The Copilot workers above, closed: room for it to start now.)
+    # A task its plan's limit paused (its request refused): its reset first, on its row; Go on
+    # at that time (by itself then), or continue on another agent now. (The Copilot workers
+    # above, closed: room for it to start now.)
     for row in store.open_sessions("worker"):
         if runtime.agent(row["id"]) == "copilot":
             await runtime.workers.close(row["id"], by="you")
     paused = json.loads((await spawned("Profile the cache warmer", "Hit the usage limit",
                                        agent="codex")).text_result_for_llm)  # fmt: skip
-    await until(lambda: runtime.tasks.get(paused["task_id"])["status"] == "waiting", 30)
-    assert store.get(f"stopped:{paused['task_id']}") == "its plan's limit"
+    task_id = paused["task_id"]
+    await until(lambda: runtime.tasks.get(task_id)["status"] == "waiting", 30)
+    assert store.get(f"stopped:{task_id}") == "its plan's limit"
+    resets = runtime.task_actions.view(runtime.tasks.get(task_id))["paused"]["resets_at"]
+    assert resets > time.time()
+    selector = f'#panel .card.task[data-session="{paused["session_id"]}"]'
     for scheme in ("light", "dark"):
         context, page, errors, _ = await agents_page(browser, scheme)
         if await page.locator("#home-tabs").is_visible():
             await page.locator("#home-tabs [data-tab=needs]").click()
-        card = page.locator(f'#panel .card.task[data-session="{paused["session_id"]}"]')
-        await expect(card).to_contain_text("Paused: Your Codex plan's 5-hour limit is reached")
+        card = page.locator(selector)
+        # (Its day too, when that is not today: "Sun 12:43 AM".)
+        when = await page.evaluate(
+            "at => import('/static/board.js').then((m) => m.resetTime(at))", resets * 1000
+        )
+        line = card.locator(".row-line .why")
+        await expect(line).to_have_text(f"Codex limit reached · resets {when}")
+        await expect(line).to_have_attribute(
+            "data-tip", re.compile(r"^Codex limit reached · resets .*\nPaused: Your Codex plan's")
+        )
+        await expect(card.locator(".row-line .latest")).to_have_count(0)
         await expect(card.locator(".head")).to_contain_text("Paused")
-        await expect(card.get_by_role("button", name="Go on", exact=True)).to_be_visible()
+        assert (await card.inner_text()).count("Paused") == 1, "said once"
+        await expect(card.get_by_role("button", name=f"Go on at {when}")).to_be_visible()
+        elsewhere = card.get_by_role("button", name="Continue on another agent…")
+        await expect(elsewhere).to_be_visible()
         await picker_shoot(page, "plan-limit-paused", scheme, "#main", focus=card, tab="needs")
         await page.set_viewport_size({"width": 1500, "height": 900})
-        await card.locator(".actions .more-button").click()
-        await expect(card.get_by_role("menuitem", name="Continue with Copilot…")).to_be_visible()
+        await elsewhere.click()
+        await expect(card.get_by_role("menuitem")).to_have_text(["Copilot"])
+        await quiet_for(page)  # (Shown once it has opened.)
         await page.screenshot(path=PICKER_SHOTS / f"plan-limit-paused-menu-1500-{scheme}.png")
         await page.keyboard.press("Escape")
         assert not errors, errors
         await context.close()
+    # Go on at its reset: under Monitoring until then, saying when; nothing sent before.
+    sent = len(store.messages(paused["session_id"]))
+    for scheme in ("light", "dark"):
+        context, page, errors, _ = await agents_page(browser, scheme)
+        card = page.locator(selector)
+        if scheme == "light":
+            if await page.locator("#home-tabs").is_visible():
+                await page.locator("#home-tabs [data-tab=needs]").click()
+            await card.get_by_role("button", name=re.compile("^Go on at ")).click()
+            await until(lambda: store.get(f"goonat:{task_id}") == str(resets), 10)
+        elif await page.locator("#home-tabs").is_visible():
+            await page.locator("#home-tabs [data-tab=tasks]").click()
+        monitored = f'#tasks-monitoring .card.task[data-session="{paused["session_id"]}"]'
+        await expect(page.locator(monitored)).to_be_visible()
+        await expect(card.locator(".row-line .why")).to_have_text(
+            re.compile(r"^Goes on at .+, once its Codex limit resets$")
+        )
+        await picker_shoot(page, "plan-limit-scheduled", scheme, "#main", focus=card, tab="tasks")
+        assert not errors, errors
+        await context.close()
+    assert runtime.tasks.get(task_id)["status"] == "waiting"
+    assert len(store.messages(paused["session_id"])) == sent
     log("picker: badges, Continue with…, the recovery card, a paused task, the Router's pick")
 
 

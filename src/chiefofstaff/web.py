@@ -649,6 +649,11 @@ def create_app(
             raise ValueError("Write what the worker should do.")
         return fresh(await runtime.task_actions.follow_up(task_id, payload.text))
 
+    @app.post("/api/tasks/{task_id}/go-on-at-reset")
+    async def go_on_at_reset(task_id: str):
+        """Paused for its agent's limit: it goes on by itself once that resets."""
+        return runtime.task_actions.view(await runtime.task_actions.go_on_at(task_id))
+
     @app.post("/api/tasks/{task_id}/request-changes")
     async def request_changes(task_id: str, payload: OwnerMessage):
         """The owner does not accept the result: its worker changes it as they say."""

@@ -1595,10 +1595,12 @@ class Tools:
         special: str = "",
         untrusted: bool = False,
         agent: str = "",
+        instead: str = "",
     ):
         """`untrusted`: a helper that reads untrusted content (the connector) runs as a worker
         that reads Slack does, whether or not Slack is connected. `agent`: the one the owner
-        chose for it on a card (else its params' or Settings')."""
+        chose for it on a card (else its params' or Settings'); `instead`: what its one notice
+        adds then (" on Copilot instead")."""
         self.caller(caller, ROUTER)
         params = params.model_copy(update={"instructions": self.owner_words(params.instructions)})
         if not special and (asked := risky(params.instructions)):
@@ -1638,8 +1640,14 @@ class Tools:
                 )
             except ValueError as exc:
                 if named and named != agents.COPILOT:
-                    # Never started on another: the owner chooses (their card's actions).
+                    # Never started on another: the owner chooses (their card's actions). The
+                    # card says why: the Router does not say it again.
                     self.runtime.agent_refused_card(named, str(exc), params.model_dump())
+                    raise ValueError(
+                        f"Not started: {exc} The owner sees this on a card in this chat, with "
+                        "what they can do (run it on Copilot instead, or wait): do not say it "
+                        "again, and start it nowhere else."
+                    ) from exc
                 raise
         if agent == agents.COPILOT:
             await self.runtime.check_model(params.model)
@@ -1809,11 +1817,13 @@ class Tools:
             waits = [dep["title"] for dep in self.tasks.unmet(task)]
             limit = self.store.settings().max_workers
             if waits:
-                said = f"Queued “{title}” · after " + ", ".join(f"“{t}”" for t in waits[:2])
+                said = f"Queued “{title}”{instead} · after " + ", ".join(
+                    f"“{t}”" for t in waits[:2]
+                )
             elif self.runtime.workers.running() >= limit:
-                said = f"Queued “{title}” · waits for a worker slot ({limit} busy)"
+                said = f"Queued “{title}”{instead} · waits for a worker slot ({limit} busy)"
             else:
-                said = f"Started “{title}”"
+                said = f"Started “{title}”{instead}"
             notice = said + self.new_because(why_new)
             self.runtime.add_message(
                 caller, "notice", notice, {"session_id": session_id, "task_id": task["id"]}
