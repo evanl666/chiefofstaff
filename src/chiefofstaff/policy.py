@@ -2804,7 +2804,8 @@ def squashed(command: str) -> str:
 def may_alias(text: str) -> bool:
     """Whether a line (squashed) may run an alias of git's (Push.alias): a word of it that
     ends in `git` (`git`, `/usr/bin/git`, `G=git`, `$(echo git)`) followed, past git's own
-    options, by a word that is not one of git's commands."""
+    options, by a word that is not one of git's commands; or a command whose name a variable
+    or a substitution holds (`$G p`; also one `find`, `xargs`… run: RUNNERS)."""
     words = text.split()
     for at, word in enumerate(words):
         if not word.strip(GIT_PUNCTUATION).endswith("git"):
@@ -2814,7 +2815,20 @@ def may_alias(text: str) -> bool:
             at += 2 if words[at] in GIT_VALUED_LOWER else 1
         if at >= len(words) or words[at].strip(GIT_PUNCTUATION) not in GIT_COMMANDS:
             return True
+    for stretch in COMMAND_STRETCHES.split(text):
+        named = [word for word in stretch.split() if not COMMAND_PREFIX.fullmatch(word)]
+        if named and ("$" in named[0] or (named[0] in RUNNERS and "$" in stretch)):
+            return True
     return False
+
+
+# Where a command may start in a line (squashed), and the words before its name (assignments,
+# reserved words, commands that run the next, their options).
+COMMAND_STRETCHES = re.compile(r"[;&|()\n`{}]")
+COMMAND_PREFIX = re.compile(
+    r"[a-z_][a-z0-9_]*\+?=\S*|-\S*|[0-9]+|if|then|elif|else|do|while|until|!|time|env|command"
+    r"|builtin|exec|nice|nohup|timeout|sudo|stdbuf"
+)
 
 
 # What may stand around git's name or its command's in a word (`$(echo git)`, `git;`).
@@ -3680,9 +3694,9 @@ def through_alias(candidate: Push, command: str, cwd: str) -> Push | None:
         return unknown
     if candidate.alias in {"*", "?"}:  # Any alias: one that may push, there.
         return unknown if settings.pushers else None
-    if candidate.alias == "$":  # A git a command not known runs: the words given it.
+    if candidate.alias == "$":  # A command not known: a git that runs an alias of the line's?
         given = git.rest[1:]
-        if any(word.lower() in settings.pushers for word in given) or (
+        if settings.pushers & said_words(command) or (
             settings.pushers and any(UNSETTLED.search(word) for word in given)
         ):
             return unknown
@@ -3789,6 +3803,12 @@ def alias_switches(found: tuple[Push, ...], cwd: str) -> dict[tuple[str, str], t
         key = (git.folder, candidate.alias)
         switches[key] = words if switches.get(key, words) == words else None
     return switches
+
+
+@functools.lru_cache(maxsize=32)
+def said_words(command: str) -> frozenset[str]:
+    """The words of a line that may name an alias (squashed)."""
+    return frozenset(ALIAS_WORDS.findall(squashed(command)))
 
 
 @functools.lru_cache(maxsize=256)

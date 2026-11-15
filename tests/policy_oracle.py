@@ -326,6 +326,7 @@ class Sandbox:
         environment = {  # (A home, and git's configuration, of the sandbox's own.)
             "PATH": str(tools),
             "HOME": str(self.root),
+            "G": "git",  # (git, for a line that runs `$G` and doesn't set G.)
             "XDG_CONFIG_HOME": str(self.root / ".config"),
             "GIT_CONFIG_GLOBAL": str(self.root / ".gitconfig"),
             "GIT_CONFIG_NOSYSTEM": "1",
@@ -607,10 +608,10 @@ SWITCHES = ["git checkout -b wb/new", "git switch -c fix", "git checkout main",
             "git branch -m wb/x wb/z", "git switch --detach feat", "git checkout feat sub",
             "git switch $B", 'git checkout "$B"', "git checkout -p main", "git switch -f main",
             "git branch sub",
-            # Switches through an alias (before 0.1.46).
+            # Switches through an alias (before 0.1.46), git in a variable the line doesn't set.
             "git co main", "git co feat", "git sw main", "git sw feat", "git co -",
-            "git -c alias.co=checkout co main", "git -c alias.sw=switch sw feat",
-            "git config alias.co checkout"]  # fmt: skip
+            "git -c alias.co=checkout co main", "git -c alias.sw=switch sw feat", "$G co main",
+            "$G sw feat", "git config alias.co checkout"]  # fmt: skip
 # git's configuration a line writes to its files, not with `git config` (the invariant review
 # of 86f9f8d): in the sandbox's repositories (each `cd ..` a line may make stays in it), and the
 # user's (a line that names HOME writes none: without one, `~` is the user's own home).
@@ -1118,13 +1119,17 @@ FOUND = [
     ('G=git; $G p origin main', 'feat', 'aliases'),
     ('x=$(git p origin main)', 'feat', 'aliases'),
     ('git sh origin feat', 'feat', 'aliases'),
-    # Before 0.1.46: a switch through an alias (configured, `-c`, set on the line).
+    # Before 0.1.46: a switch through an alias (configured, `-c`, set on the line); a command
+    # whose name the line doesn't set (G is git in the environment), and an alias that pushes.
     ('git co main && git push', 'feat', 'aliases'),
     ('git sw main && git push', 'feat', 'aliases'),
     ('git co main && git p', 'feat', 'aliases'),
     ('git -c alias.co=checkout co main && git push', 'feat'),
     ('git -c alias.y=p y origin main', 'feat', 'aliases'),
     ('git config alias.co checkout && git co main && git push', 'feat'),
+    ('$G p origin main', 'feat', 'aliases'),
+    ('$G co main && $G push', 'feat', 'aliases'),
+    ('$G co main && git p', 'feat', 'aliases'),
 ]  # fmt: skip
 
 

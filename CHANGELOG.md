@@ -50,7 +50,9 @@ to a branch of its own before a push is let through again (QA on 0.1.45).
   `git co main && git pull && git co feature/x && git push` is let through, as the same lines
   with `git checkout` are. One a shell alias may run (`!…`), or that the line sets itself
   before a push naming no branch, can't tell which branch; so can `git co -`. An alias `-c`
-  gives that runs another of git's configuration is followed to it.
+  gives that runs another of git's configuration is followed to it. A command whose name the
+  line doesn't set (`$G p origin main`), on a line that names an alias that pushes, is read as
+  `$G push origin main` is: which branch, not known.
 - **An unquoted variable the line doesn't set, or a substitution, before a refspec's `:`** may
   hold several refspecs (`$B:feat` with `B='HEAD:main HEAD'`): which branch the push updates is
   not known, and it is refused, saying so (found checking these fixes; quoted, `"$B:feat"`, it

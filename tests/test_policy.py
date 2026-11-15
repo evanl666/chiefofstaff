@@ -729,9 +729,10 @@ def test_a_line_too_much_to_read_that_pushes_is_refused_saying_why(command, work
         "x=$(git p) " * 10_000,
         "git p; " * 20_000,
         "$G p " * 20_000,
-        # Before 0.1.46: aliases that switch.
+        # Before 0.1.46: aliases that switch, commands whose name the line doesn't set.
         "git co a && " * 10_000 + "git push",
         "git -c alias.co=checkout co a && " * 5_000 + "git push",
+        "$G co x; " * 20_000,
     ],
 )
 def test_no_line_is_slow_to_check(command, work, feature):
@@ -1418,6 +1419,8 @@ NORMAL = [
     "git lfs pull && git push origin wb/x",
     "git lg -5",
     "git config alias.co checkout && git co wb/x",
+    '"$PYTHON" -m pytest -q',
+    "$EDITOR README.md",
     "git config --get push.default && git push origin wb/x",
     "git config remote.origin.push HEAD:main && git push",
     "git subtree push --prefix=docs origin wb/x",
@@ -2500,12 +2503,17 @@ def aliased(path, branch: str):
         ("git co main; git co feature/x || true; git push", "can't tell"),
         ("git f checkout main && git push", "can't tell"),
         ("git config alias.go checkout && git go main && git push", "can't tell"),
+        ("$G p origin main", "can't tell"),
+        ("$G co main && $G push", "can't tell"),
+        ("$G co main && git p", "can't tell"),
     ],
 )
 def test_an_alias_that_switches_branches_is_read_as_that_switch(command, reason, tmp_path):
     """Before 0.1.46: with `alias.co=checkout` (or `sw=switch`) in git's configuration, or `-c
     alias.co=checkout` on the line, `git co main && git push` pushed main, unread; it is read
-    as the switch it runs (as E67 reads `git checkout main && git push`)."""
+    as the switch it runs (as E67 reads `git checkout main && git push`). And a command whose
+    name the line doesn't set (`$G p origin main`), where `p` is an alias that pushes, is read
+    as `$G push origin main` is: not known."""
     work = aliased(tmp_path / "repo", "wb/x")
     assert reason in (denial(command, work) or ""), command
 
@@ -2521,6 +2529,8 @@ def test_an_alias_that_switches_branches_is_read_as_that_switch(command, reason,
         ("git co nope && git push", "wb/x"),
         ("git -c alias.y=p y origin wb/x", "wb/x"),
         ("git config alias.go checkout && git go feature/x", "wb/x"),
+        ('"$PYTHON" -m pytest -q', "wb/x"),
+        ("$G status && $G log -1", "wb/x"),
     ],
 )
 def test_an_alias_that_switches_to_a_branch_of_its_own_lets_the_push_through(
