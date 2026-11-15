@@ -8438,6 +8438,10 @@ async def picker_workers(runtime, browser):
     store = runtime.store
     router = store.get("router_id")
     spawn = runtime.toolset.spawn_on(["codex"])
+    # The Router's turn on the owner's @codex message (picker_composer) is over, as after its
+    # session goes idle: that message's agent was for that turn only.
+    last = store.value("SELECT max(id) FROM messages WHERE session_id=?", (router,))
+    store.set(f"idle:{router}", str(last or 0))
 
     async def spawned(title, text, **more):
         return await spawn.handler(

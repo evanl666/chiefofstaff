@@ -125,7 +125,8 @@ class Allow:
     API's snapshot and in the stored settings) or `data` (a regex searched in the difference's
     path, e.g. `steps.ask.api./api/state.tasks[0].status` or `backend.sessions.router.options.
     system_message.content`), optionally only at `value` (on the side tested), and for changed
-    text only when each line added or removed matches `lines`. An `element` (a CSS selector) is
+    text only when each line added or removed matches `lines`, or only by `added` (a regex: the
+    text tested is the other side's with one match of it put in). An `element` (a CSS selector) is
     left out of the DOM snapshots and hidden in the screenshots, on both sides, in the views
     whose names match `views`: screenshots home-1280, home-needs-800, sidebar-1024,
     sidebar-external-1440, settings-general-p1-1280 (p2... as it scrolls); DOM snapshots
@@ -136,6 +137,7 @@ class Allow:
     data: str = ""
     value: Any = ANY
     lines: str = ""
+    added: str = ""
     element: str = ""
     views: str = ""
     # A count only this many more on the side tested (one more event, say), nothing else.
@@ -156,6 +158,15 @@ class Allow:
             return False
         if self.more and not (isinstance(before, int) and after == before + self.more):
             return False
+        if self.added:
+            return (
+                isinstance(after, str)
+                and isinstance(before, str)
+                and any(
+                    after[: m.start()] + after[m.end() :] == before
+                    for m in re.finditer(self.added, after)
+                )
+            )
         if self.lines:
             return text_lines is not None and all(re.search(self.lines, x) for x in text_lines)
         return True
@@ -541,6 +552,21 @@ FEATURES["codex_on_claude_never"] = Feature(
             data=r"^agent_modules\[\d+\]$",
             value="chiefofstaff.claude_check",
         ),
+        Allow(
+            "Other sessions lists Codex's own sessions, starting Codex for that (the stand-in "
+            "can't start): again once its list is 55 s old, or the group is opened",
+            data=r"^agent_clis\[\d+\]$",
+            value='codex app-server -c approvals_reviewer="user"',
+        ),
+        Allow(
+            "the Router hears which agents on can run now",
+            data=r"^backend\.turns\.router:Router\[\d+\]\[\d+\]$",
+            added=r', "available": \["codex"\]',
+        ),
+        Allow(
+            "while another agent is on, every worker's row names its agent: Copilot's too",
+            element='#session-list .agent-badge[title^="Copilot"]',
+        ),
     ],
 )
 
@@ -575,8 +601,9 @@ INSTALLED = [
           more=1),
     *(
         Allow(f"the look at startup: {run}", data=r"^agent_clis\[\d+\]$", value=run)
-        for run in ('codex app-server -c approvals_reviewer="user"', "claude --version",
-                    "claude auth status --json")
+        for run in ('codex app-server -c approvals_reviewer="user" -c features.plugins=false -c '
+                    'features.remote_plugin=false -c features.plugin_discovery_prefetch=false',
+                    "claude --version", "claude auth status --json")
     ),
     *(
         Allow(f"the look at startup: {module}", data=r"^agent_modules\[\d+\]$", value=module)
@@ -1437,6 +1464,8 @@ def make_run(run: Path, alone: bool = False) -> dict:
         cli.chmod(0o755)
     (run / "claude-config").mkdir()
     (run / "claude-config" / ".claude.json").write_text("{}\n")
+    # Codex set up (its folder there, empty), as on a computer that has it: not the owner's.
+    (run / "codex-home").mkdir()
     stamp = CLOCK.isoformat()
     env = {
         key: value
@@ -1464,6 +1493,7 @@ def make_run(run: Path, alone: bool = False) -> dict:
         "DIFFERENTIAL_GH_LOG": str(run / "gh.log"),
         "DIFFERENTIAL_AGENTS_LOG": str(run / "agents.log"),
         "CLAUDE_CONFIG_DIR": str(run / "claude-config"),
+        "CODEX_HOME": str(run / "codex-home"),
     }  # fmt: skip
     project = run / "code" / "acme-api"
     (project / "app").mkdir(parents=True)
