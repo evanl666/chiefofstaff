@@ -1130,6 +1130,11 @@ FOUND = [
     ('$G p origin main', 'feat', 'aliases'),
     ('$G co main && $G push', 'feat', 'aliases'),
     ('$G co main && git p', 'feat', 'aliases'),
+    # Found by the 100k bash run on 02b8513: a script fed to a shell that runs an alias that
+    # pushes (the line says no push).
+    ("(echo '$(echo git) p && <<<.. command -p '\\''re'\\''ad G' | xargs -0 sh -c)", 'main/sub', 'aliases'),  # noqa: E501
+    ("echo 'git p origin main' | sh", 'feat', 'aliases'),
+    ("echo 'git p' | bash", 'main', 'aliases'),
 ]  # fmt: skip
 
 

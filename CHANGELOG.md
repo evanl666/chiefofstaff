@@ -53,6 +53,10 @@ to a branch of its own before a push is let through again (QA on 0.1.45).
   gives that runs another of git's configuration is followed to it. A command whose name the
   line doesn't set (`$G p origin main`), on a line that names an alias that pushes, is read as
   `$G push origin main` is: which branch, not known.
+- **A script fed to a shell that runs an alias that pushes** (`echo 'git p origin main' | sh`,
+  `bash <<< 'git p'`, `… | xargs -0 sh -c`, with `alias.p=push` in your configuration) can't
+  tell which branch it pushes, as one that says push can't: refused. So is one that names an
+  alias that switches branches on a line that says push.
 - **An unquoted variable the line doesn't set, or a substitution, before a refspec's `:`** may
   hold several refspecs (`$B:feat` with `B='HEAD:main HEAD'`): which branch the push updates is
   not known, and it is refused, saying so (found checking these fixes; quoted, `"$B:feat"`, it

@@ -2553,3 +2553,32 @@ def test_the_users_alias_that_switches_and_one_given_with_c_are_read(
     assert "default branch" in (
         denial("git -c alias.co=checkout co main && git push", feature) or ""
     )
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo 'git p origin main' | sh",
+        "echo 'git p' | bash",
+        "(echo '$(echo git) p && <<<.. command -p '\\''re'\\''ad G' | xargs -0 sh -c)",
+        "bash <<< 'git p origin feature/x'",
+        "cat <<'EOF' | sh\ngit via main\ngit p\nEOF",
+        "printf 'git co main\\n' | sh; git push origin wb/x",
+    ],
+)
+def test_a_script_fed_to_a_shell_that_runs_an_alias_that_pushes_is_refused(command, tmp_path):
+    """Found by the 100k bash run on 02b8513: a script fed to a shell runs aliases too; one of
+    git's configuration that pushes (or that switches, on a line that says push) is named in
+    the line: which branch the script pushes, not known."""
+    work = aliased(tmp_path / "repo", "wb/x")
+    assert "can't tell which branch" in (denial(command, work) or ""), command
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["echo 'git status' | sh", "echo 'git co feature/x' | sh", "echo 'git f log' | bash",
+     "echo 'make test' | sh", "printf 'p\\n' | grep p"],
+)  # fmt: skip
+def test_a_script_fed_to_a_shell_that_names_no_alias_that_pushes_lets_it_through(command, tmp_path):
+    work = aliased(tmp_path / "repo", "wb/x")
+    assert denial(command, work) is None, command

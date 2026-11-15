@@ -182,8 +182,9 @@ the checks you approved run.
   not read: a `-c` script built by a substitution or from input (`bash -c "$(…)"`,
   `while read l; do bash -c "$l"; done`), code in `trap '…'`, a script the line writes to a file
   and then runs (`… > s.sh && bash s.sh`), other interpreters (`python3 -c`, `perl -e`,
-  `node -e`), and a script fed to a shell on a line that does not say push (`base64 -d | bash`,
-  GNU `parallel` with no command). Nor is configuration that sends a branch the line names to
+  `node -e`), and a script fed to a shell on a line that says neither push nor the name of an
+  alias your git configuration has that pushes (`base64 -d | bash`, GNU `parallel` with no
+  command). Nor is configuration that sends a branch the line names to
   another one (`git push origin feat` with `push.default=upstream`, or a
   `refs/heads/feat:refs/heads/main` push refspec), git configuration a line writes with a program
   that isn't a shell's redirection or a known writer (`python3 -c …`), or an alias only another
