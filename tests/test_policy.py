@@ -532,26 +532,53 @@ def test_v0142s_rule_stays_a_floor_under_the_reading(monkeypatch, feature):
 # is asked once a folder; past what it reads it refuses, saying why.
 
 
+# The steps that read a text whole, once each call (a scan of its characters): what the checks
+# read in all, counted in characters, is the work they do. It grows with the line, never faster
+# (G3): at most LINEAR times the line and what nested lines may add (MOST_READ), which a check
+# that read the line again for each of its commands (quadratic) passes by orders of magnitude.
+SCANS = ("shell_commands", "shell_words", "heredocs", "without_comments", "without_substitutions",
+         "squashed", "named", "loose_pushes", "feeds_shell", "fed_says", "once_a_stretch",
+         "recursive_delete", "gh_api_writes")  # fmt: skip
+LINEAR = 60
+# And how long a check may take, as a sanity bound only (CPU time: a check of one of these lines
+# takes well under a second, even traced for coverage on a busy machine; one grown quadratic
+# takes tens of seconds at these lengths). The work above is what is measured.
+SANITY = 5.0
+
+
 @pytest.fixture
 def work(monkeypatch):
-    """How often the reading parses a command line and asks git (not how long it takes)."""
-    counted = {"parse": 0, "git": 0}
-    parse, start = policy.shell_commands, policy.subprocess.Popen
+    """How often the reading parses a command line and asks git, and how many characters the
+    checks read in all (SCANS), not how long that takes."""
+    counted = {"parse": 0, "git": 0, "read": 0}
+    start = policy.subprocess.Popen
 
-    def parsing(text):
-        counted["parse"] += 1
-        return parse(text)
+    def scanning(name, step):
+        def scan(*args, **kwargs):
+            counted["read"] += sum(len(arg) for arg in args if isinstance(arg, str))
+            counted["parse"] += name == "shell_commands"
+            return step(*args, **kwargs)
+
+        return scan
 
     def starting(command, *args, **kwargs):  # (Every git run: subprocess.run starts one too.)
         if command[:1] == ["git"]:
             counted["git"] += 1
         return start(command, *args, **kwargs)
 
-    monkeypatch.setattr(policy, "shell_commands", parsing)
+    for name in SCANS:
+        monkeypatch.setattr(policy, name, scanning(name, getattr(policy, name)))
     monkeypatch.setattr(policy.subprocess, "Popen", starting)
     policy.reading.cache_clear()
+    policy.fed_line.cache_clear()
     yield counted
     policy.reading.cache_clear()
+    policy.fed_line.cache_clear()
+
+
+def linear(work: dict[str, int], command: str) -> bool:
+    """Whether the checks read a line in work linear in it (see SCANS)."""
+    return work["read"] <= LINEAR * (len(command) + policy.MOST_READ)
 
 
 def spent() -> float:
@@ -570,10 +597,11 @@ def timed(command: str, cwd) -> tuple[str | None, float]:
 
 @pytest.mark.parametrize("evals", [16, 18, 20])
 def test_evals_nested_past_what_is_read_are_refused_at_once(evals, work, feature):
-    found, took = timed("eval " * evals + "git push origin wb/x", feature)
+    command = "eval " * evals + "git push origin wb/x"
+    found, took = timed(command, feature)
     assert found and "too complex" in found
     assert work["parse"] <= policy.MOST_NESTED + 1 and work["git"] == 0
-    assert took < 0.5
+    assert linear(work, command) and took < SANITY
 
 
 def test_evals_within_what_is_read_are_read_once_each(work, feature):
@@ -597,21 +625,24 @@ def test_a_line_the_shell_would_not_parse_is_read_loosely_in_one_pass(work, feat
     assert denial("git push 'oops", feature) is None and work["git"] == 3
     assert denial("git push 'oops", main_checkout), "a bare push: its folder's branch, asked"
     assert denial("git push origin HEAD:main 'oops", feature)
-    found, took = timed("git x " * 30_000 + "push origin main 'oops", feature)
-    assert found and took < 0.5
+    command = "git x " * 30_000 + "push origin main 'oops"
+    found, took = timed(command, feature)
+    assert found and linear(work, command) and took < SANITY
 
 
 @pytest.mark.parametrize("paths", [10_000, 19_000])
 def test_a_long_git_add_is_let_through_at_once(paths, work, feature):
     command = "git add " + " ".join(f"src/part_{i:05d}/module.py" for i in range(paths))
     found, took = timed(command, feature)
-    assert found is None and work["parse"] == work["git"] == 0 and took < 0.5
+    assert found is None and work["parse"] == work["git"] == 0
+    assert linear(work, command) and took < SANITY
 
 
 def test_a_long_line_that_pushes_is_read_in_one_pass(work, feature):
     command = "git add " + " ".join(f"f{i}.py" for i in range(10_000)) + " && git push"
     found, took = timed(command, feature)
-    assert found is None and work["parse"] == 1 and work["git"] == 3 and took < 0.5
+    assert found is None and work["parse"] == 1 and work["git"] == 3
+    assert linear(work, command) and took < SANITY
 
 
 @pytest.mark.parametrize(
@@ -628,7 +659,8 @@ def test_a_long_line_that_pushes_is_read_in_one_pass(work, feature):
 )
 def test_a_line_too_much_to_read_that_pushes_is_refused_saying_why(command, work, feature):
     found, took = timed(command, feature)
-    assert found and "too complex" in found and took < 0.5 and work["git"] == 0
+    assert found and "too complex" in found and work["git"] == 0
+    assert linear(work, command) and took < SANITY
 
 
 @pytest.mark.parametrize(
@@ -688,9 +720,10 @@ def test_a_line_too_much_to_read_that_pushes_is_refused_saying_why(command, work
         "git push origin $(git branch --show-current) " * 2_000,
     ],
 )
-def test_no_line_is_slow_to_check(command, feature):
+def test_no_line_is_slow_to_check(command, work, feature):
     _, took = timed(command, feature)
-    assert took < 0.5, (command[:20], took)
+    assert linear(work, command), (command[:20], work["read"] / len(command))
+    assert took < SANITY, (command[:20], took)
 
 
 # The rules of v0.1.42 the check keeps, now read in one pass: what each says is what it said.
@@ -773,8 +806,8 @@ def adversarial_lines():
 
 
 @pytest.mark.parametrize(("rule", "command"), list(adversarial_lines()))
-def test_each_rule_reads_a_line_of_its_own_words_in_linear_time(rule, command, feature):
-    rules = {reason: found for found, reason in policy.DANGEROUS}
+def test_each_rule_reads_a_line_of_its_own_words_in_linear_time(rule, command, work, feature):
+    rules = {reason: getattr(policy, found.__name__, found) for found, reason in policy.DANGEROUS}
     chosen = {
         "push": [policy.too_complex, policy.pushes_forced, policy.pushes_default],
         "gh api": [lambda line, cwd: policy.gh_api_writes(line)],
@@ -782,10 +815,12 @@ def test_each_rule_reads_a_line_of_its_own_words_in_linear_time(rule, command, f
     for found in chosen:
         assert found is not None
         policy.reading.cache_clear()
+        work["read"] = 0
         started = spent()
         found(command, str(feature))
         took = spent() - started
-        assert took < 0.5, (rule, command[:40], took)
+        assert linear(work, command), (rule, command[:40], work["read"] / len(command))
+        assert took < SANITY, (rule, command[:40], took)
 
 
 def test_a_line_past_the_cap_is_refused_before_any_rule_reads_it(monkeypatch, feature):
@@ -884,7 +919,7 @@ def test_a_giant_line_gets_a_decision_in_time(seed, monkeypatch, feature):
     words = chance.choices(FUZZ, k=40)
     command = "".join(words) * (450_000 // len("".join(words)))
     found, took = timed(command, feature)
-    assert (found is None or policy.NOT_CHECKED not in found) and took < 1.5, took
+    assert (found is None or policy.NOT_CHECKED not in found) and took < SANITY, took
 
 
 @pytest.mark.parametrize("seed", range(2))
@@ -1507,7 +1542,7 @@ def test_what_variables_make_counts_in_one_budget(command, monkeypatch, feature)
     monkeypatch.setattr(policy, "resolved", lambda *a: resolving.append(1) or resolve(*a))
     found, took = timed(command, feature)
     assert found and "too complex" in found
-    assert len(resolving) <= len(command.split()) and took < 0.5
+    assert len(resolving) <= len(command.split()) and took < SANITY
 
 
 def test_a_push_keeps_so_many_branches_at_most_but_the_default(feature):
@@ -1585,7 +1620,8 @@ def test_a_line_naming_setters_is_read_in_one_pass(unit, work, feature):
     head = "B=x; git push origin $B; echo "
     command = head + unit * ((480_000 - len(head)) // len(unit))
     found, took = timed(command, feature)
-    assert found is None and work["parse"] == 1 and took < 0.5, (unit, took)
+    assert found is None and work["parse"] == 1 and linear(work, command)
+    assert took < SANITY, (unit, took)
 
 
 @pytest.mark.parametrize(
