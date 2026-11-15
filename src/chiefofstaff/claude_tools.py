@@ -81,6 +81,9 @@ WIDENING_SWITCHES = (
     "network.allowLocalBinding",
 )
 PROXY_PORTS = ("network.httpProxyPort", "network.socksProxyPort")
+# The most of a settings file Chief of Staff reads (Claude reads it whole): a larger one refuses
+# a sandboxed worker, whose sandbox it could widen unseen.
+MOST_SETTINGS = 16 * 1024 * 1024
 # Where Claude reads managed settings (2.1.322), above everything else.
 MANAGED_FOLDERS = {
     "darwin": Path("/Library/Application Support/ClaudeCode"),
@@ -96,10 +99,20 @@ def sandbox_widening(
     ("" for nothing; else the first key found and where). `local`: its sandbox lets it bind
     to loopback anyway (a worker that does not read Slack)."""
 
-    def keys(file: Path) -> dict:
+    def keys(file: Path) -> dict | None:
+        """Its `sandbox` settings, read as Claude reads the file (2.1.322: whole, a leading BOM
+        taken away; a file it cannot parse, with comments say, it ignores); None for one too
+        large for Chief of Staff to read whole."""
         try:
-            data = json.loads(file.read_text(encoding="utf-8")[:1_000_000])
-        except (OSError, ValueError):
+            with file.open("rb") as opened:
+                raw = opened.read(MOST_SETTINGS + 1)
+        except OSError:
+            return {}
+        if len(raw) > MOST_SETTINGS:
+            return None
+        try:
+            data = json.loads(raw.decode("utf-8-sig"))
+        except ValueError:
             return {}
         sandbox = data.get("sandbox") if isinstance(data, dict) else None
         return sandbox if isinstance(sandbox, dict) else {}
@@ -111,12 +124,14 @@ def sandbox_widening(
         return found
 
     for file, said in sources:
-        sandbox = keys(file)
+        if (sandbox := keys(file)) is None:
+            return f"{said}: too large for Chief of Staff to check"
         for key in (*WIDENING_LISTS, *PROXY_PORTS):
             if value(sandbox, key) not in (None, [], {}, ""):
                 return f"sandbox.{key} in {said}"
     for file in managed:
-        sandbox = keys(file)
+        if (sandbox := keys(file)) is None:
+            return f"{file}: too large for Chief of Staff to check"
         for key in (*WIDENING_LISTS, *PROXY_PORTS, *WIDENING_SWITCHES):
             if local and key == "network.allowLocalBinding":
                 continue

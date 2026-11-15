@@ -928,11 +928,14 @@ async def test_chief_of_staffs_private_files_are_no_workers_to_read_asking_first
     assert asked == [], "refused before anything is asked"
 
 
-def test_settings_that_would_widen_a_workers_sandbox_are_found_where_they_take_effect(tmp_path):
+def test_settings_that_would_widen_a_workers_sandbox_are_found_where_they_take_effect(
+    tmp_path, monkeypatch
+):
     """Lists merge across Claude's settings (2.1.322: a user's excludedCommands takes a command
     out of the sandbox whatever Chief of Staff's own settings say), so one there refuses a
     sandboxed worker; switches and ports Chief of Staff sets win, but not over managed
     settings."""
+    from chiefofstaff import claude_tools
     from chiefofstaff.claude_tools import WIDENING_SWITCHES, sandbox_widening
 
     def file(name: str, sandbox: dict) -> Path:
@@ -953,6 +956,22 @@ def test_settings_that_would_widen_a_workers_sandbox_are_found_where_they_take_e
     assert sandbox_widening([], [local], local=True) == ""
     assert sandbox_widening([], [local], local=False).startswith("sandbox.network.allowLocal")
     assert sandbox_widening([(tmp_path / "absent.json", "a")], []) == ""
+    # Read as Claude reads it (2.1.322): a leading BOM, and a file past 1 MB, count; one too
+    # large for Chief of Staff to check refuses.
+    widening = {"sandbox": {"excludedCommands": ["x:*"]}}
+    bom = tmp_path / "bom.json"
+    bom.write_bytes(b"\xef\xbb\xbf" + json.dumps(widening).encode())
+    assert sandbox_widening([(bom, "b")], []) == "sandbox.excludedCommands in b"
+    big = tmp_path / "big.json"
+    big.write_text(json.dumps({"padding": "x" * 1_100_000, **widening}))
+    assert sandbox_widening([(big, "g")], []) == "sandbox.excludedCommands in g"
+    commented = tmp_path / "commented.json"
+    commented.write_text(
+        '{\n  // Claude ignores this file\n  "sandbox": {"excludedCommands": ["x"]}\n}'
+    )
+    assert sandbox_widening([(commented, "c")], []) == ""
+    monkeypatch.setattr(claude_tools, "MOST_SETTINGS", 1000)
+    assert sandbox_widening([(big, "g")], []) == "g: too large for Chief of Staff to check"
     # Each switch that would widen it, Chief of Staff sets (to its narrow side).
     policy = SimpleNamespace(readwrite=("/w",), readonly=(), denied=(), allowed_hosts=(),
                              local_network=False)  # fmt: skip
@@ -1663,6 +1682,25 @@ async def test_a_message_from_one_of_chief_of_staffs_workers_processes_is_said_t
     inbox.write_text("\n".join(json.dumps(line) for line in lines))
     await until(lambda: raw.blocked() == 2)
     assert told == ["b1" * 16, ""]
+
+
+async def test_a_worker_writes_none_of_claudes_own_settings(agent, tmp_path):
+    """Their hooks, apiKeyHelper and MCP servers run as Claude next starts there, outside the
+    worker's checks (2.1.322, Ask first or not): no tool of its writes one, a link to one
+    included, and its sandbox keeps its commands from them in each folder it may write."""
+    session = await agent.create_session(session_id="b6" * 16, name="t", **options(tmp_path))
+    worker = session.worker
+    (tmp_path / "notes.txt").symlink_to(tmp_path / ".mcp.json")
+    for name in (".claude/settings.json", ".claude/settings.local.json", ".mcp.json",
+                 "sub/.mcp.json", "notes.txt"):  # fmt: skip
+        for tool, key in (("Write", "file_path"), ("Edit", "file_path")):
+            said = await worker.decide(tool, {key: str(tmp_path / name)}, "c")
+            assert said == backend_claude.CONFIG_WRITE, (tool, name)
+    assert await worker.decide("Write", {"file_path": str(tmp_path / "settings.json")}, "c") == ""
+    policy = SimpleNamespace(readwrite=(str(tmp_path),), readonly=(), denied=(),
+                             allowed_hosts=(), local_network=False)  # fmt: skip
+    denied = backend_claude.sandbox_settings(policy)["filesystem"]["denyWrite"]
+    assert {str(tmp_path / name) for name in backend_claude.CLAUDE_CONFIG_FILES} <= set(denied)
 
 
 async def test_while_it_deletes_its_schedules_it_calls_nothing_else(agent, tmp_path):

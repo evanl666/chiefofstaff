@@ -576,6 +576,37 @@ async def test_claudes_sandbox_adds_only_its_staging_folder_to_the_global_git_ig
     assert (tmp_path / "global-git-ignore").read_text() == "**/.claude/.cc-writes/\n"
 
 
+async def test_a_sandboxed_claude_worker_writes_none_of_claudes_own_settings(backend, tmp_path):
+    """Their hooks, apiKeyHelper and MCP servers would run as Claude next starts in the folder,
+    outside the worker's checks (2.1.322): its sandbox keeps its commands from making or
+    changing them, where it writes anything else, and its Write tool is refused."""
+    if getattr(backend, "catcher", None) is None or not isinstance(backend, ClaudeAgent):
+        pytest.skip("What the real Claude Code does (CHIEFOFSTAFF_TEST_CLAUDE=1).")
+    if not sandbox_supported():
+        pytest.skip("Claude's sandbox does not run on this machine.")
+    folder = tmp_path / "work"
+    (folder / ".claude").mkdir(parents=True)
+    (folder / ".claude" / "settings.json").write_text('{"model": "the repository\'s"}\n')
+    names = (".mcp.json", ".claude/settings.json", ".claude/settings.local.json")
+    script = "".join(f"echo '{{}}' > {name} 2>/dev/null\n" for name in names)
+    (folder / "write.sh").write_text(script + "echo ok > allowed.txt\n")
+    session, turn = await open_session(
+        backend, folder, sandbox=SandboxPolicy(readwrite=(str(folder),))
+    )
+    await session.send("Run the shell command `sh write.sh` and then reply with just: finished")
+    await turn.wait()
+    assert (folder / "allowed.txt").read_text() == "ok\n", "it writes its folder"
+    assert (folder / ".claude" / "settings.json").read_text() == '{"model": "the repository\'s"}\n'
+    assert (
+        not (folder / ".mcp.json").exists()
+        and not (folder / ".claude/settings.local.json").exists()
+    )
+    write = json.dumps({"file_path": str(folder / ".mcp.json"), "content": "{}"})
+    await session.send(f"Use Claude's Write tool with {write}. Then reply with just: wrote")
+    await turn.wait()
+    assert not (folder / ".mcp.json").exists()
+
+
 async def test_schedules_deleted_in_claude_do_not_come_back_with_claude_resume(backend, tmp_path):
     """Claude Code (2.1.322) brings a session's crons back on `claude --resume`, as the owner's
     terminal runs it, unless a CronDelete named them: what Chief of Staff asks once a worker's

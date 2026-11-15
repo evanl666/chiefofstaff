@@ -576,6 +576,30 @@ def clip(text: str, most: int) -> str:
     return text if len(text) <= most else text[: most - 1] + "…"
 
 
+# Claude's own settings in a folder (2.1.322): their hooks, apiKeyHelper and MCP servers run as
+# its next process there starts (a worker's resumed, or the owner's own session), outside the
+# worker's sandbox and Chief of Staff's checks, Ask first or not. No worker writes them.
+CLAUDE_CONFIG_FILES = (".claude/settings.json", ".claude/settings.local.json", ".mcp.json")
+CONFIG_WRITE = (
+    "Claude's own settings (.claude/settings.json, .claude/settings.local.json, .mcp.json) run "
+    "their hooks and servers outside a worker's checks as Claude next starts there: a worker may "
+    "not write them. Say what to change, and the owner changes them."
+)
+
+
+def claude_config_file(path: str) -> bool:
+    """Whether a path is one of Claude's settings files in a folder (CLAUDE_CONFIG_FILES), as
+    named or as it resolves (a link to one is one)."""
+    for each in {path, os.path.realpath(path)}:
+        parts = Path(each).parts
+        if parts[-1:] == (".mcp.json",) or parts[-2:] in {
+            (".claude", "settings.json"),
+            (".claude", "settings.local.json"),
+        }:
+            return True
+    return False
+
+
 def joined(folder: str, path: str) -> str:
     """A path a tool names, from its folder (`..` taken away, links not followed)."""
     return os.path.normpath(Path(folder) / path)
@@ -859,7 +883,16 @@ def sandbox_settings(policy: Any) -> dict:
         "allowAppleEvents": False,
         "filesystem": {
             "allowWrite": [path for path in policy.readwrite if path not in sockets],
-            "denyWrite": list(policy.readonly),
+            # Claude's own settings in each folder it may write: never written by a command.
+            "denyWrite": [
+                *policy.readonly,
+                *(
+                    str(Path(path) / file)
+                    for path in policy.readwrite
+                    if path not in sockets
+                    for file in CLAUDE_CONFIG_FILES
+                ),
+            ],
             "denyRead": list(policy.denied),
         },
         "network": network,
@@ -2668,6 +2701,10 @@ class ClaudeWorker:
             return why
         if why := self.private_refusal(name, arguments, cwd):
             return why
+        if name in WRITE_TOOLS and claude_config_file(
+            joined(cwd, str(arguments.get(WRITE_TOOLS[name]) or ""))
+        ):
+            return CONFIG_WRITE
         if (
             name in SHELL_TOOLS
             and arguments.get("dangerouslyDisableSandbox")
