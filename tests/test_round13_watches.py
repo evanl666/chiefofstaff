@@ -37,9 +37,10 @@ async def test_a_gap_an_older_version_kept_is_told_once_whole_after_the_update(t
     harness, runtime, gap = await kept_from_before(tmp_path, version)
     await scan(harness, runtime, items=[])
     [told] = notices(harness)
+    # Round 14 (E74): said to be told before.
     assert told.startswith(
-        f"Could not check \u201c#deploys\u201d for 4 days 4 hours, "
-        f"{between(gap['from'], gap['to'])} ({REASON})"
+        f"Told before; the full range is: could not check \u201c#deploys\u201d for 4 days 4 "
+        f"hours, {between(gap['from'], gap['to'])} ({REASON})"
     ), told
     await scan(harness, runtime, items=[])
     assert len(notices(harness)) == 1, "once"

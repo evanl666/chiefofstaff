@@ -12,6 +12,7 @@ import argparse
 import errno
 import json
 import os
+import shutil
 import socket
 import stat
 import struct
@@ -182,6 +183,32 @@ def peer_uid(connection: socket.socket) -> int:
         raw = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
         return struct.unpack("=iII", raw)[1]
     raise OSError(errno.ENOTSUP, "Peer credentials are not supported here")
+
+
+def throwaway(prefix: str) -> bool:
+    """Whether Python runs from an environment uvx made for one run (in uv's cache): its
+    commands are on no PATH of the owner's."""
+    return any(part.startswith(("archive-v", "builds-v")) for part in Path(prefix).parts)
+
+
+def shell_command(prefix: str = sys.prefix) -> tuple[str, str]:
+    """How the owner runs this command in their own terminal (bug E63), and what installs it
+    there first: `chiefofstaff` when that name is on their PATH (not only in the environment
+    uvx made for this run); else this one by its full path when it is installed; else, started
+    with uvx, `uvx chiefofstaff`, and `uv tool install chiefofstaff` to have the command."""
+    here = Path(prefix) / ("Scripts" if os.name == "nt" else "bin")
+    once = throwaway(prefix)
+    path = os.pathsep.join(
+        entry
+        for entry in os.environ.get("PATH", "").split(os.pathsep)
+        if entry and not (once and Path(entry) == here)
+    )
+    if shutil.which("chiefofstaff", path=path):
+        return "chiefofstaff", ""
+    installed = shutil.which("chiefofstaff", path=str(here))
+    if installed and not once:
+        return installed, ""
+    return "uvx chiefofstaff", "uv tool install chiefofstaff"
 
 
 def default_data_dir() -> Path:

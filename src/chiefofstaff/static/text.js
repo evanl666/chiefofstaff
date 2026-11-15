@@ -92,19 +92,15 @@ export const shorten = (text, max) => (text.length > max ? `${text.slice(0, max 
 export function prTitle(key) {
   return state.snapshot?.pr_titles?.[String(key).toLowerCase()] || "";
 }
-// A server on this computer or its network, not a page others read (bug E55): a loopback,
-// private or link-local address, a .local or .localhost name. The server also reads the hosts
-// file for names it maps there, and leaves a page on a port of its own out of Artifacts
-// (task_actions.served_here); a run there (Airflow on :8080) is still a run.
-export function servedHere(parsed) {
-  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
-  if (host === "localhost" || /\.(local|localhost)$/.test(host)) return true;
-  const ip = /^(\d+)\.(\d+)\.\d+\.\d+$/.exec(host);
-  if (ip) {
-    const [a, b] = [Number(ip[1]), Number(ip[2])];
-    return [0, 10, 127].includes(a) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254);
-  }
-  return ["::", "::1"].includes(host) || /^(f[cd]|fe[89ab])[0-9a-f]*:/.test(host);
+// A CI build by a default name (task_actions.ci_build): a Jenkins build, a GitLab pipeline or
+// job, an Azure DevOps build, a Buildkite one (or any /builds/<n>); "" for none.
+function ciBuild(host, path, search) {
+  let match;
+  if ((match = /\/job\/([^/]+)\/(\d+)(?:\/|$)/.exec(path))) return `Jenkins · ${shorten(match[1], 24)} #${match[2]}`;
+  if ((match = /\/([^/]+)\/-\/(pipeline|job)s\/(\d+)(?:\/|$)/.exec(path))) return `GitLab · ${shorten(match[1], 20)} ${match[2]} ${match[3]}`;
+  if (/\/_build\/results/.test(path) && /^\d+$/.test(search.get("buildId") || "")) return `Azure DevOps · build ${search.get("buildId")}`;
+  if ((match = /\/builds?\/(\d+)(?:\/|$)/.exec(path))) return `${shorten(host.split(".")[0], 20)} · build ${match[1]}`;
+  return "";
 }
 // What a link is, for a chip or a link's text: { kind, label, key (PRs), title (PRs) }.
 export function linkKind(url) {
@@ -123,10 +119,10 @@ export function linkKind(url) {
   // what is under one (a Spark application, logs, a debug page, a CI run); "reference",
   // something it points to.
   const is = (kind, label, role, extra = {}) => ({ kind, label, role, ...extra });
+  // A document or a run is one wherever it is served, on a port of its own or on this computer
+  // (bug E71); only Artifacts leaves off a page served here, and the server says which
+  // (task_actions.local_page).
   const plain = () => is("link", last && !/^[\w-]{32,}$/.test(last) ? `${shorten(host, 28)} · ${shorten(last, 24)}` : shorten(host, 40), "reference");
-  // A page of this computer or its network (a dev server's, a local Airflow): a link of its
-  // task's, never a document or a run it delivered, whatever its path says.
-  if (/^https?:$/.test(parsed.protocol) && servedHere(parsed)) return plain();
   // A file its worker made (declared by its path): opened here, not by the browser.
   if (parsed.protocol === "file:") return is("file", last || "File", "output", { path });
   if ((match = /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/.exec(url))) {
@@ -156,6 +152,9 @@ export function linkKind(url) {
     const execution = /\/executions?\/([^/?#]+)/.exec(path)?.[1] || /\/(?:executions?|exec)\/[^/]+\/[^/]+\/([^/?#]+)/.exec(path)?.[1] || "";
     return is("run", `Flyte${execution ? ` · ${shorten(execution, 24)}` : " run"}`, underRun ? "diagnostic" : "run");
   }
+  // A CI build (bug E73): what CI ran, for diagnosis, as a GitHub Actions run is.
+  const build = /^https?:$/.test(parsed.protocol) ? ciBuild(host, path, parsed.searchParams) : "";
+  if (build) return is("run", build, "diagnostic");
   // Spark History: its application, for diagnosis (the flow that ran it is what to open).
   if ((match = /(application_\d+_\d+)/.exec(url)) && /spark|shs|history/i.test(host + path)) return is("run", `Spark · ${match[1]}`, "diagnostic", { id: match[1] });
   if (/spark|shs-/i.test(host)) return is("run", `Spark history${last ? ` · ${shorten(last, 28)}` : ""}`, "diagnostic");

@@ -3866,7 +3866,7 @@ async def round_twelve(runtime, browser, failures: list[str]):
     )
     # Its accepted result is not said again beside it (here, its title again).
     await expect(backfill.locator(".row-line .latest")).to_have_count(0)
-    await expect(backfill.get_by_role("button", name="Ended", exact=True)).to_be_visible()
+    await expect(backfill.get_by_role("button", name="Mark ended", exact=True)).to_be_visible()
     await expect(backfill.get_by_role("button", name="Stop tracking")).to_be_visible()
     # Its run is "status unknown" everywhere: on its chip and on Artifacts, not "running".
     await expect(backfill.locator(".row-foot .link-chip .chip-link")).to_have_text(
@@ -3946,10 +3946,10 @@ async def round_twelve(runtime, browser, failures: list[str]):
     rows = made.locator(".artifact")
     names = await rows.locator(".a-name").all_text_contents()
     first = names.index("9 runs")
-    # Round 13 (E58): its failed run first, its PR after.
-    assert names[first : first + 4] == [
-        "9 runs", "Export shard 9", "Export shard 4", "app#42 · Shard the nightly export"
-    ], names  # fmt: skip
+    # Round 13 (E58): its failed run first, its PR after; round 14: after what any other task
+    # has that needs a look (here, nothing).
+    assert names[first : first + 3] == ["9 runs", "Export shard 9", "Export shard 4"], names
+    assert names.index("app#42 · Shard the nightly export") > first + 2, names
     assert not [name for name in names[first + 3 :] if name.startswith("Export shard")], names
     summary = made.locator(".artifact.runs").filter(has=page.locator(".a-meta", has_text="E43"))
     fold = summary.locator(".a-fold")
@@ -4080,7 +4080,7 @@ async def round_thirteen(runtime, browser, failures: list[str]):
     )
     more = line.locator(".a-more")
     await expect(more).to_have_text("+6")
-    await expect(more).to_have_attribute("data-tip", "Show 6 more: 3 succeeded, 2 running, 1 ended")
+    await expect(more).to_have_attribute("data-tip", "Show 6 more: 2 running, 3 done, 1 ended")
     group = made.locator(".artifact.in-runs", has_text="Approval run")
     names = await group.locator(".a-name").all_text_contents()
     assert names == ["Approval run 9", "Approval run 5", "Approval run 3"], names
@@ -4137,6 +4137,176 @@ async def round_thirteen(runtime, browser, failures: list[str]):
         made.locator(".artifact:not(.hidden-artifact)", has_text="Approval run 5")
     ).to_have_count(1)
     log("E58: a task's runs taken off at once from their line, each brought back")
+    assert not errors, errors
+    await context.close()
+
+
+async def fourteen_seeded(runtime) -> dict:
+    """QA round 14: an accepted task with two runs nothing told of for 30 hours (E78); one with
+    a wiki page on a port of its own and a DAG run on a private address (E71); one whose runs
+    are queued, waiting and running, one of them just marked ended after three days (E76,
+    E77); six merged PRs of one task, a run of it failing, and another task's PR with failing
+    CI (E58)."""
+    store = runtime.store
+    router = store.get("router_id")
+    store.save_settings(store.settings().model_copy(update={"max_workers": 90}))
+    ago = lambda **delta: (datetime.now(UTC) - timedelta(**delta)).isoformat()  # noqa: E731
+    found = {}
+
+    async def delivered(title, artifacts, prs=()):
+        result = await call_tool(runtime, "spawn_worker", router, title=title, instructions=title,
+                                 why_new="test")  # fmt: skip
+        worker = json.loads(result.text_result_for_llm)["session_id"]
+        await settle(runtime)
+        task = runtime.tasks.current(worker)
+        await call_tool(runtime, "report", worker, status="done", summary=f"{title}: done.",
+                        artifacts=artifacts)  # fmt: skip
+        await settle(runtime)
+        if prs:
+            run = store.one("SELECT id FROM runs WHERE task_id=? ORDER BY started_at DESC",
+                            (task["id"],))  # fmt: skip
+            store.execute("UPDATE runs SET evidence=? WHERE id=?",
+                          (json.dumps({"checkouts": [], "prs": list(prs)}), run["id"]))  # fmt: skip
+        runtime.task_actions.accept(task["id"])
+        runtime.update_session(worker, status="idle", activity="")
+        found[title] = runtime.tasks.get(task["id"])
+        return task
+
+    def said(task, url, **fields):
+        known = json.loads(store.get(f"artifacts:{task['id']}"))
+        for item in known:
+            if item["url"] == url:
+                item.update(fields)
+        store.set(f"artifacts:{task['id']}", json.dumps(known))
+
+    def pr(number, title, **state):
+        return {"label": f"acme/app#{number}", "url": f"https://github.com/acme/app/pull/{number}",
+                "title": title, "state": "MERGED", "checks": "passing", "failing": [],
+                "review": "APPROVED", "own": True, "at": ago(hours=number % 7 + 1),
+                **state}  # fmt: skip
+
+    indexes = (("ix1", "Rebuild users index"), ("ix2", "Rebuild orders index"))
+    two = [{"url": FLYTE + run, "name": name, "status": "running"} for run, name in indexes]
+    rebuild = await delivered("E78 rebuild the search indexes", two)
+    for item in two:
+        said(rebuild, item["url"], at=ago(hours=30))
+    await delivered("E71 publish the rollout notes", [
+        {"url": "http://wiki.corp:8090/display/ENG/Rollout", "name": "Rollout notes",
+         "status": "published"},
+        {"url": "http://10.1.2.9:8080/dags/rollout/grid?dag_run_id=m1", "name": "Rollout DAG",
+         "status": "running"},
+    ])  # fmt: skip
+    states = [("q1", "Shard 1 export", "queued"), ("q2", "Shard 2 export", "waiting"),
+              ("q3", "Shard 3 export", "running"), ("q4", "Shard 4 export", "running")]  # fmt: skip
+    shards = await delivered("E76 export the shards", [
+        {"url": FLYTE + run, "name": name, "status": status} for run, name, status in states
+    ])  # fmt: skip
+    for index, (run, _name, _status) in enumerate(states):
+        said(shards, FLYTE + run, at=ago(hours=1 + index))
+    said(shards, FLYTE + "q4", at=ago(days=3))
+    runtime.task_actions.end_runs(shards["id"], [FLYTE + "q4"], "ended")  # E77: just now.
+    merged = [pr(number, f"Docs batch {number}") for number in range(101, 107)]
+    await delivered("E58 merge the docs batch", [
+        {"url": FLYTE + "d1", "name": "Docs link check", "status": "failed"},
+    ], merged)  # fmt: skip
+    await delivered("E58 fix the cache build", [], [
+        pr(120, "Cache build", state="OPEN", checks="failing", failing=["build"], review=""),
+    ])  # fmt: skip
+    for task in found.values():
+        runtime.task_actions.publish(runtime.tasks.get(task["id"]))
+    return found
+
+
+async def round_fourteen(runtime, browser, failures: list[str]):
+    """The owner's QA round 14. E78: of two runs of unknown status, Mark ended… picks which. E71:
+    a wiki page on a port of its own and a DAG on a private address are on Artifacts. E76: one
+    word for each run (1 running · 2 pending). E77: one marked ended just now says so. E58:
+    another task's failing CI above one task's six merged PRs, in a 300px list. E72: an away
+    notice not delivered is said in the sidebar and in Settings, in red, until one is."""
+    tasks = await fourteen_seeded(runtime)
+    context = await browser.new_context(viewport={"width": 1500, "height": 1000})
+    page = await context.new_page()
+    errors: list[str] = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    needs = page.locator("#needs")
+    rebuild = needs.locator(".card.task").filter(
+        has=page.locator(".head .title", has_text="E78 rebuild the search indexes")
+    )
+    await expect(rebuild).to_be_visible(timeout=15000)
+    await expect(rebuild.get_by_role("button", name="Stop tracking…")).to_be_visible()
+    await rebuild.get_by_role("button", name="Mark ended…").click()
+    picker = rebuild.locator(".run-picker")
+    await expect(picker.locator("label")).to_have_count(2)
+    confirm = rebuild.get_by_role("button", name="Mark ended", exact=True)
+    await expect(confirm).to_be_disabled()
+    await expect(picker.get_by_role("checkbox").first).to_be_focused()
+    await page.keyboard.press("Space")
+    await expect(confirm).to_be_enabled()
+    await confirm.click()
+    # The other is still of unknown status: one left, its actions for it alone.
+    await expect(rebuild.get_by_role("button", name="Mark ended", exact=True)).to_be_visible(
+        timeout=10000
+    )
+    known = json.loads(
+        runtime.store.get(f"artifacts:{tasks['E78 rebuild the search indexes']['id']}")
+    )
+    assert [item["status"] for item in known] == ["ended", "running"], known
+    log("E78: of two runs of unknown status, one marked ended; the other's actions are its own")
+
+    made = page.locator("#tasks-artifacts")
+    names = await made.locator(".a-name").all_text_contents()
+    assert "Rollout notes" in names and "Rollout DAG" in names, names
+    shards = made.locator(".artifact.runs").filter(has=page.locator(".a-meta", has_text="E76"))
+    await expect(shards.locator(".a-status")).to_have_text("1 running · 2 pending")
+    await shards.locator(".a-fold").click()
+    await expect(
+        made.locator(".artifact", has_text="Shard 4 export").locator(".a-status")
+    ).to_have_text("ended · just now")
+    log("E71/E76/E77: listed wherever served; one word per run; since it stood so")
+    rows = made.locator(".artifact")
+    labels = await rows.evaluate_all(
+        "rows => rows.map((r) => r.querySelector('.a-name')?.textContent || '')"
+    )
+    failing = labels.index("app#120 · Cache build")
+    first_merged = min(i for i, label in enumerate(labels) if label.startswith("app#10"))
+    assert failing < first_merged, labels
+    box = await made.locator(":scope > .items").bounding_box()
+    shown = await rows.nth(failing).bounding_box()
+    assert box and shown and shown["y"] + shown["height"] <= box["y"] + box["height"], (box, shown)
+    log("E58: another task's failing CI above one task's merged PRs, in sight")
+
+    store = runtime.store
+    store.save_settings(store.settings().model_copy(update={"away_notify": True}))
+    store.set("away_last", json.dumps({"at": datetime.now(UTC).isoformat(), "ok": False,
+                                       "where": "Slack DM to you",
+                                       "error": "the bot could not sign in"}))  # fmt: skip
+    runtime.publish_state()
+    line = page.locator("#status-line .bad", has_text="Away notice not delivered")
+    await expect(line).to_be_visible(timeout=10000)
+    await expect(line).to_have_attribute(
+        "title", "Could not reach you via Slack DM to you: the bot could not sign in"
+    )
+    await line.get_by_role("button", name="Settings").click()
+    summary = page.locator("#away-summary")
+    await expect(summary).to_have_text(re.compile(r"^Last notice not delivered · "))
+    assert await summary.evaluate("n => n.classList.contains('error')")
+    red = await summary.evaluate(
+        "n => { const i = document.createElement('i'); i.style.color = 'var(--red)';"
+        " n.append(i); const c = getComputedStyle(i).color; i.remove(); return c; }"
+    )
+    assert await summary.evaluate("n => getComputedStyle(n).color") == red
+    store.set("away_last", json.dumps({"at": datetime.now(UTC).isoformat(), "ok": True,
+                                       "where": "Slack DM to you"}))  # fmt: skip
+    store.set("away_where", "Slack DM to you")
+    runtime.publish_state()
+    await expect(summary).to_have_text("On · Slack DM to you", timeout=10000)
+    assert not await summary.evaluate("n => n.classList.contains('error')")
+    await page.keyboard.press("Escape")
+    await expect(page.locator("#status-line .bad", has_text="Away notice")).to_have_count(0)
+    store.save_settings(store.settings().model_copy(update={"away_notify": False}))
+    runtime.publish_state()
+    log("E72: an away notice not delivered, red in the sidebar and in Settings until one is")
     assert not errors, errors
     await context.close()
 
@@ -4475,7 +4645,8 @@ async def main():
             for check in (home, memory, this_round, round_two, round_three, round_four,
                           round_five, round_six, round_seven, round_eight, round_nine,
                           round_ten, round_scale, round_qa, round_eleven, round_twelve,
-                          round_thirteen, round_storage, round_mascot, round_others,
+                          round_thirteen, round_fourteen, round_storage, round_mascot,
+                          round_others,
                           round_send, round_agents):  # fmt: skip
                 if not only or check.__name__ in only:
                     await check(runtime, browser, failures)
@@ -5780,6 +5951,26 @@ async def send_setting(runtime, browser, scheme: str):
     await page.locator("#settings-tabs [data-tab=connections]").click()
     await expect(switch).to_be_checked()
     await expect(how).to_be_visible()
+    # Started with uvx (round 14, E63): no `chiefofstaff` in the owner's shell, so it says how
+    # to have it, and a command that runs now.
+    runtime.send_command = ("uvx chiefofstaff", "uv tool install chiefofstaff")
+    runtime.publish_state()
+    # Settings shows the page's state as it last came; reopened until the new one has.
+    for _ in range(40):
+        await page.keyboard.press("Escape")
+        await page.locator("#settings-button").click()
+        await page.locator("#settings-tabs [data-tab=connections]").click()
+        if await how.locator("code").count() == 2:
+            break
+        await page.wait_for_timeout(250)
+    await expect(how.locator("code")).to_have_text(
+        ["uv tool install chiefofstaff", 'uvx chiefofstaff send "…"']
+    )
+    await expect(how).to_contain_text("once puts the command on your PATH")
+    await expect(how.locator("a")).to_have_text("recipes")
+    await page.screenshot(path=SHOTS / f"ui-edges-send-uvx-{scheme}.png")
+    runtime.send_command = ("chiefofstaff", "")
+    runtime.publish_state()
     # Off: saved at once, the socket closed, the line alone.
     await switch.uncheck()
     await expect(how).to_be_hidden()
@@ -6331,7 +6522,8 @@ async def agents_states(browser, scheme: str):
             )
         elif name == "none-found":
             await expect(tab.locator(".agents-none")).to_have_text(
-                "No supported agent found on this computer: the Codex CLI."
+                "No supported coding agent found. Supported: the Codex CLI \u2014 install it, then "
+                "open this again."
             )
             await expect(rows).to_have_count(0)
         else:

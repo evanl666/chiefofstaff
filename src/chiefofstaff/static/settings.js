@@ -617,7 +617,10 @@ export function renderConnections() {
   // What this way can do, as tried (the test, and notifications and reads as they happen).
   const can = away.can || {};
   const coverage = can.coverage || {};
-  $("#away-summary").textContent = settings.away_notify ? ["On", away.where, can.send_only ? "Send only" : ""].filter(Boolean).join(" · ") : "Off";
+  // Its last notice not delivered (bug E72): said here, in red, until one is.
+  const undelivered = Boolean(settings.away_notify && tried.at && !tried.ok);
+  $("#away-summary").textContent = !settings.away_notify ? "Off" : undelivered ? `Last notice not delivered · ${since(tried.at)}` : ["On", away.where, can.send_only ? "Send only" : ""].filter(Boolean).join(" · ");
+  $("#away-summary").classList.toggle("error", undelivered);
   const reached = tried.at ? (tried.ok ? `Reached you${tried.where ? ` via ${tried.where}` : ""} ${since(tried.at)}` : `Could not reach you ${since(tried.at)}: ${tried.error || "unknown error"}`) : "";
   const limited = settings.away_notify && coverage.limited ? `Coverage limited: ${coverage.detail}` : "";
   $("#away-state").textContent = [reached, limited].filter(Boolean).join(" · ");
@@ -1023,7 +1026,7 @@ async function lookForAgents() {
   agentsLooked = found;
   $("#agents-sandboxed").hidden = !found.sandboxed;
   $("#agents-rows").replaceChildren(
-    ...(found.agents.length ? found.agents.map((agent) => agentRow(agent, found.sandboxed)) : [el("small", { class: "agents-none", role: "status", text: "No supported agent found on this computer: the Codex CLI." })]),
+    ...(found.agents.length ? found.agents.map((agent) => agentRow(agent, found.sandboxed)) : [el("small", { class: "agents-none", role: "status", text: noAgentWords(found.supported) })]),
   );
   newWorkersChoices(found.new_workers);
 }
@@ -1107,6 +1110,12 @@ function agentsBody() {
   if (form.agent_new_workers.value !== agentsLooked.new_workers) body.new_workers = form.agent_new_workers.value;
   return Object.keys(body).length ? body : null;
 }
+// None of the coding agents it supports is on this computer (bug E80): which they are, and
+// what to do.
+function noAgentWords(supported = ["the Codex CLI"]) {
+  const listed = supported.length > 1 ? `${supported.slice(0, -1).join(", ")} or ${supported[supported.length - 1]}` : supported[0];
+  return `No supported coding agent found. Supported: ${listed} — install ${supported.length > 1 ? "one" : "it"}, then open this again.`;
+}
 // Send to Chief's line as saved: off, the switch alone; on, the command and the recipes, or why
 // its socket could not open.
 function renderSendLine() {
@@ -1114,6 +1123,17 @@ function renderSendLine() {
   const problem = on ? state.snapshot.send_problem || "" : "";
   $("#settings-form").send_to_chief.checked = on;
   $("#send-consent").hidden = true;
+  // Its command as it runs in the owner's terminal (bug E63): started with uvx, there is no
+  // `chiefofstaff` there until it is installed.
+  const how = state.snapshot.send_command || { command: "chiefofstaff", install: "" };
+  const command = /[/\\]/.test(how.command) && /\s/.test(how.command) ? `"${how.command}"` : how.command;
+  const recipes = $("#send-how a");
+  $("#send-how").replaceChildren(
+    ...(how.install ? [el("code", { text: how.install }), " once puts the command on your PATH", el("br")] : []),
+    el("code", { text: `${command} send "…"` }),
+    " from a terminal, or a hotkey: ",
+    recipes,
+  );
   $("#send-how").hidden = !on || Boolean(problem);
   $("#send-problem").textContent = problem;
   $("#send-problem").hidden = !problem;

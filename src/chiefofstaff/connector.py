@@ -60,6 +60,9 @@ GAP_TRIES = 4
 # as when it was told, or once it passes one of these lengths (seconds: an hour, a day).
 GAP_GROWN = 2
 GAP_MARKS = (3600, 86400)
+# A gap an earlier version told this much shorter than it is (seconds) is told again, all of it,
+# after the update (Connector.retell_gaps); less is no news.
+GAP_TOLD_SLACK = 60
 # Coverage gaps kept for Settings, the newest.
 MAX_GAPS = 10
 # A fresh conversation once its context is this large: each scan carries what it needs.
@@ -272,6 +275,29 @@ def yours(where: str) -> str:
     return re.sub(r"\btheir\b", "your", where, flags=re.IGNORECASE)
 
 
+# What only one sending said, not the way it went (bug E72): a message, trace or request id, a
+# timestamp ("queued message 1712345678.123456, trace 4bf92f35…").
+RECEIPT = re.compile(
+    r"\b(?:(?:queued|sent|delivered|posted)\s+(?:as\s+)?)?"
+    r"(?:message|msg|ts|timestamp|trace|request|req|receipt|event|id)(?:[ _-]?id)?"
+    r"\s*[:#=]?\s*<?(?=[\w.:-]*\d)[\w.:-]+>?",
+    re.IGNORECASE,
+)
+# An id by itself: six characters or more, one a digit (a timestamp, a hash, a channel's id).
+BARE_ID = re.compile(r"(?<![\w@.-])(?=[\w.:-]*\d)[\w.:-]{6,}(?![\w@-])")
+
+
+def channel_only(where: str) -> str:
+    """Where notifications go, as one way, not one sending of it: "Slack DM to Evan", without
+    what the messenger's tool said of that message (its ids: bug E72)."""
+    where = BARE_ID.sub("", RECEIPT.sub("", where))
+    where = re.sub(r"\(\s*[,;:]*\s*\)", "", where)
+    where = re.sub(r"\s*([,;])(?:\s*[,;])+", r"\1", where)
+    where = re.sub(r"[\s,;:(\u2013\u2014-]+$", "", " ".join(where.split()))
+    # A word left without what it was about ("Slack DM in D0123ABCD"): gone with it.
+    return re.sub(r"\s+(?:in|at|via|to|from|with|on)$", "", where, flags=re.IGNORECASE).strip()
+
+
 # The messenger's way to the owner when nothing else reaches them: their own Slack DM, through
 # Chief of Staff's own Slack connection (it gets no Slack tools of its own).
 SLACK_DM_HINT = (
@@ -458,15 +484,20 @@ def between(start: float, end: float) -> str:
     return f"between {clock_of(start)} and {ending}"
 
 
+def gap_range(gap: dict) -> str:
+    """What a watch's coverage gap is, for the owner: its watch, for how long, when, and why
+    (“#deploys” for 6 hours, between 3:00 PM and 9:00 PM (…))."""
+    reason = str(gap.get("reason") or "").strip().rstrip(".")
+    return (
+        f"\u201c{gap['watch']}\u201d for {length_words(gap['to'] - gap['from'])}, "
+        f"{between(gap['from'], gap['to'])}" + (f" ({reason})" if reason else "")
+    )
+
+
 def gap_text(gap: dict, still: bool = False) -> str:
     """A watch's coverage gap, for the owner: what could not be checked, for how long, when, and
     why (`still`: told before, it grew since)."""
-    reason = str(gap.get("reason") or "").strip().rstrip(".")
-    return (
-        f"{'Still could' if still else 'Could'} not check \u201c{gap['watch']}\u201d for "
-        f"{length_words(gap['to'] - gap['from'])}, {between(gap['from'], gap['to'])}"
-        + (f" ({reason})" if reason else "")
-    )
+    return f"{'Still could' if still else 'Could'} not check {gap_range(gap)}"
 
 
 def without_code(text: str, code: str) -> str:
@@ -562,7 +593,11 @@ class ReportOwnerWords(NestedArguments):
 
 class ReportNotified(BaseModel):
     ok: bool = Field(description="Whether the owner got the message")
-    where: str = Field(default="", description="Where it went (a Slack DM from a bot, say)")
+    where: str = Field(
+        default="",
+        description="The way it went, only (a Slack DM from a bot, say): no message, trace or "
+        "request id, nor a timestamp",
+    )
     method: str = Field(default="", description="The tool and arguments that worked, exactly")
     replies: str = Field(
         default="",
@@ -1135,42 +1170,58 @@ class Connector:
         self.store.set("watch_gaps", json.dumps([*gaps, {**found, "at": now()}][-MAX_GAPS:]))
         self.tell_gap(found)
 
-    def tell_gap(self, gap: dict, still: bool = False, *more: dict):
-        said = "; ".join(gap_text(each) for each in more)
+    def tell_gap(self, gap: dict, still: bool = False):
         self.runtime.add_message(
             self.runtime.router_id(),
             "notice",
-            f"{gap_text(gap, still)}{f'; {said}' if said else ''}: anything that came in then "
-            "may have been missed, so look there yourself. Settings → Connections → Watches lists "
-            "what could not be checked.",
+            f"{gap_text(gap, still)}: anything that came in then may have been missed, so look "
+            "there yourself. Settings → Connections → Watches lists what could not be checked.",
             {"settings": "connections"},
         )
 
     def retell_gaps(self):
-        """At the first scan after this version came (bug E50): the gaps earlier versions kept,
-        told again with all of each, in one notice. 0.1.42 and before told a gap when it began
-        and never as it grew (no `told`); 0.1.43 took such a gap, at its first growth, for told
-        as long as it was then (one told as 15 minutes was 100 hours "told"). Each gap still
-        open (the newest of its watch) and each that grew since it was told is told, once: this
-        version stamps every gap it tells (`told_at`), so it is never told again here; from
-        then on as GAP_GROWN has it."""
+        """At the first scan after this version came (bug E50): the gaps earlier versions kept
+        that the owner may know too little of, told again with all of each, in one notice that
+        says they were told before. 0.1.42 and before told a gap when it began and never as it
+        grew (no `told`); 0.1.43 took such a gap, at its first growth, for told as long as it
+        was then. Told again (bug E74): one still open (the newest of its watch, which no scan
+        has covered past since) and one told shorter than it is; never one of a watch since
+        removed, nor one over and told whole. Each gap this version told, or saw here, is
+        stamped (`told_at`): none is told here twice; from then on as GAP_GROWN has it."""
         gaps = json.loads(self.store.get("watch_gaps") or "[]")
+        if all(gap.get("told_at") for gap in gaps):
+            return
+        watches = {watch_key(watch.what) for watch in self.store.settings().watches}
         newest = {gap["key"]: index for index, gap in enumerate(gaps)}
+
+        def still_open(index: int, gap: dict) -> bool:
+            done = self.store.get(f"watchdone:{gap['key']}")
+            return newest[gap["key"]] == index and (not done or float(done) <= gap["to"] + 1)
+
         again = [
             gap
             for index, gap in enumerate(gaps)
             if not gap.get("told_at")
+            and gap["key"] in watches
             and (
-                newest[gap["key"]] == index
-                or "told" not in gap
-                or gap["told"] < gap["to"] - gap["from"]
+                still_open(index, gap)
+                or gap.get("told", 0) < gap["to"] - gap["from"] - GAP_TOLD_SLACK
             )
         ]
+        for gap in gaps:
+            gap.setdefault("told_at", now())
         for gap in again:
-            gap.update({"told": gap["to"] - gap["from"], "told_at": now()})
+            gap["told"] = gap["to"] - gap["from"]
+        self.store.set("watch_gaps", json.dumps(gaps))
         if again:
-            self.store.set("watch_gaps", json.dumps(gaps))
-            self.tell_gap(again[0], False, *again[1:])
+            ranges = "; ".join(f"could not check {gap_range(gap)}" for gap in again)
+            self.runtime.add_message(
+                self.runtime.router_id(),
+                "notice",
+                f"Told before; the full {'ranges are' if len(again) > 1 else 'range is'}: "
+                f"{ranges}. Settings → Connections → Watches lists what could not be checked.",
+                {"settings": "connections"},
+            )
 
     async def t_report_found(self, params: ReportFound, caller: str):
         self.check(caller)
@@ -1370,8 +1421,12 @@ class Connector:
             ],
             "away": {
                 "enabled": settings.away_notify,
-                "last": json.loads(self.store.get("away_last") or "{}"),
-                "where": yours(self.store.get("away_where") or ""),
+                # Kept by an earlier version with its receipt: shown as the way only.
+                "last": {
+                    **(last := json.loads(self.store.get("away_last") or "{}")),
+                    **({"where": channel_only(last["where"])} if last.get("where") else {}),
+                },
+                "where": channel_only(yours(self.store.get("away_where") or "")),
                 "can": self.capabilities(),
             },
         }
@@ -2476,7 +2531,8 @@ class Connector:
         self.check(caller, (MESSENGER,))
         pending = json.loads(self.store.get("away_pending") or "null")
         self.store.delete("away_pending")
-        where = yours(params.where.strip())[:300]
+        # The way it went, not this sending's receipt (bug E72).
+        where = channel_only(yours(params.where.strip()))[:300]
         if params.ok and pending and pending.get("slack_dm"):
             where = OWN_SLACK_DM
         if pending:
@@ -2526,7 +2582,7 @@ class Connector:
                     "away_notes", json.dumps([note for note in notes if note["text"] not in told])
                 )
         else:
-            self.tried("send", False, params.error, yours(params.where.strip())[:300])
+            self.tried("send", False, params.error, where)
             self.store.set("away_retry_at", str(time.time() + RETRY_SECONDS))
         self.store.set(
             "away_last",
@@ -2534,7 +2590,7 @@ class Connector:
                 {
                     "at": now(),
                     "ok": params.ok,
-                    "where": where if params.ok else yours(params.where)[:300],
+                    "where": where,
                     "error": params.error[:500],
                     "replies": bool(params.replies.strip()),
                 }

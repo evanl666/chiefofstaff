@@ -184,6 +184,13 @@ async def look(name: str) -> dict[str, Any]:
     raise RuntimeError(f"This Chief of Staff does not run {name}.")
 
 
+def ever_used(store: Store) -> bool:
+    """Whether a worker ever ran on another agent than Copilot here, or one's processes did."""
+    return any(agent != COPILOT for agent in store.items("agent:").values()) or bool(
+        store.items("agentpids:")
+    )
+
+
 def prepare_downgrade(store: Store) -> tuple[list[str], dict[int, str]]:
     """Before an earlier Chief of Staff, which runs every worker on Copilot, opens this data
     directory (more-agents.md 8), with this one not running: each worker on another agent that

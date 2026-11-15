@@ -208,7 +208,14 @@ async def test_a_page_said_to_be_running_is_no_document_a_document_in_progress_i
     ]  # fmt: skip
     _worker, task, _told = await delivered(harness, runtime, page, *docs)
     shown = view(runtime, task["id"])
-    assert sorted(item["title"] for item in shown["deliverables"]) == ["Budget", "Plan", "Spec"]
+    # Round 14 (E71, E73): a page of no documents site said to be running is a server's only
+    # on this computer, its network or a port of its own; on the web it is listed.
+    assert sorted(item["title"] for item in shown["deliverables"]) == [
+        "Budget",
+        "Plan",
+        "Preview",
+        "Spec",
+    ]
     assert page["url"] in {item["url"] for item in shown["artifacts"]}
 
 
@@ -256,7 +263,15 @@ async def test_a_dev_servers_page_is_not_on_artifacts(harness, tmp_path, monkeyp
                     artifacts=kept)  # fmt: skip
     await call_tool(runtime, "report", worker, status="done", summary="Built.", artifacts=pages)
     shown = view(runtime, task["id"])
-    assert sorted(item["title"] for item in shown["deliverables"]) == ["Docs", "Wiki"]
+    # Round 14 (E71): only pages of this computer are left off whatever they say (localhost,
+    # loopback, .localhost); one on its network or a port of its own, only when serving; a run
+    # wherever it runs.
+    here = {"http://localhost/report", "http://127.0.0.1/report", "http://[::1]/report",
+            "https://app.localhost/report"}  # fmt: skip
+    listed = [f"Page {n}" for n, url in enumerate(LOCAL) if url not in here]
+    assert sorted(item["title"] for item in shown["deliverables"]) == sorted(
+        ["Docs", "Wiki", *listed]
+    )
     assert len(shown["artifacts"]) == len(LOCAL) + 2  # Its own links, all of them.
 
 

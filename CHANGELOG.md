@@ -1,5 +1,60 @@
 # Changelog
 
+## Unreleased
+
+Runs and documents are listed wherever they are served; an away notice that failed stays in
+sight; Artifacts words and times match what its rows say (QA round on 0.1.45).
+
+- **A run or a document is listed wherever it is served.** A run on another computer of your
+  network (`http://10.0.4.12:8080/dags/…`, *running*) or a published wiki page on a port of its
+  own (`:8090`) was left off Artifacts, the run while it could put its task under *Needs you*.
+  Now only a page on this computer (*localhost*, a *.localhost* name, one your hosts file maps
+  to it), or a page on your network or a port of its own that is neither a document nor a run
+  and is said to be serving (a dev server *running*), stays among its task's links instead; any
+  run that can put a task under *Needs you* is on Artifacts too (QA on 0.1.45, E71).
+- **CI builds are runs.** A Jenkins build (`/job/<name>/<n>/`), a Buildkite or other
+  `/builds/<n>` page, a GitLab pipeline or job (`/-/pipelines/<n>`, `/-/jobs/<n>`), a CircleCI
+  workflow and an Azure DevOps build (`_build/results?buildId=…`) a worker declared are runs,
+  monitored and listed like any; one said to be *running* was taken for a server's page, left
+  off Artifacts and followed by nothing (E73).
+- **An away notice that was not delivered says so until one is.** It was said only inside
+  Settings' *When you're away* row, opened. The sidebar and that row closed now say *Last notice
+  not delivered · 12 min ago* in red (why: on hover in the sidebar, and in the row opened),
+  until a notice goes out again; and where notices go is the way only (*Slack DM to you*), never
+  a message's or a trace's id (E72).
+- **The catch-up of watch gaps after an update tells only what it should.** It told again every
+  gap an earlier version kept as if it were new, one that had ended and been told in full too,
+  and one of a watch you removed. It now tells a gap still open, or one told shorter than it
+  is, of a watch you still have, as *Told before; the full range is: …* (E74).
+- **A run your worker names again is no longer *no longer listed*.** Once a report left a run
+  out, Needs you said so even after a later report named it again; a later report's text or
+  artifacts naming it clear that (E75).
+- **Artifacts: a task's line, its *+N* and its rows say the same.** The line counted queued and
+  waiting runs as *running* while its rows said *pending*, and *+N*'s tooltip gave its worker's
+  words (*1 delivered, 1 finished (succeeded)*) where the rows said *done*. One reading serves
+  all three now (*1 running · 2 pending*), and a task whose runs all succeeded says *4 done*
+  (E76).
+- **A run's time is when its status changed.** A run you just marked ended, or GitHub just read
+  succeeded, said *ended · 3d ago*, from when its worker first declared it. Each deliverable now
+  goes by when its status changed (else when it was last checked, else declared) (E77).
+- **Several runs of unknown status are ended one by one.** *Ended* and *Stop tracking* acted on
+  all of a task's unknown runs at once, and *Ended* read like a status. The buttons are *Mark
+  ended* and *Stop tracking*; with several such runs, *Mark ended…* and *Stop tracking…* let you
+  tick which (E78).
+- **Artifacts: a failing item is never below another task's merged ones.** Six merged PRs of one
+  task kept another task's PR with failing CI out of sight in a short list. What needs a look
+  (failing CI, changes asked for, a conflict, a failed, waiting or unknown run) now comes first
+  whichever task it is of, then the rest, each task's items together (E58).
+- **Send to Chief's command works when Chief of Staff was started with `uvx`.** Settings said
+  `chiefofstaff send "…"`, which is not in a shell then. It now looks: with no `chiefofstaff`
+  on your PATH it says `uv tool install chiefofstaff` once puts it there, and gives
+  `uvx chiefofstaff send "…"` (or the program's full path when it is installed but not on your
+  PATH) (E63).
+- With no supported coding agent found, Settings says *No supported coding agent found.
+  Supported: the Codex CLI — install it, then open this again.*; and
+  `chiefofstaff --prepare-downgrade` with no worker ever on another agent says *Nothing to
+  prepare: no workers ran on another agent.* instead of asking you to close Codex workers (E80).
+
 ## 0.1.45 (2026-11-14)
 
 Workers can run on Codex, with your own Codex sign-in (off by default); more pushes to the
