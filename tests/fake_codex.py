@@ -1248,6 +1248,13 @@ def main():
     if runs := os.environ.get("FAKE_CODEX_RUNS"):
         with Path(runs).open("a") as file:
             file.write(" ".join(sys.argv[1:]) + "\n")
+    if sys.argv[1:3] == ["login", "status"]:
+        # As 0.167.2 says it: on stderr, failing when signed out.
+        if os.environ.get("FAKE_CODEX_SIGNED_OUT"):
+            sys.stderr.write("Not logged in\n")
+            sys.exit(1)
+        sys.stderr.write("Logged in using ChatGPT\n")
+        return
     if sys.argv[1:2] != ["app-server"]:
         sys.stdout.write(f"codex-cli {VERSION}\n")
         return

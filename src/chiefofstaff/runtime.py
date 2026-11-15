@@ -3683,26 +3683,29 @@ class Runtime:
 
     async def offer_agents(self):
         """Each agent installed and signed in that the owner was never asked about: a first-run
-        card on Home (agent_offers), once its look (as Settings looks, in Chief of Staff's own
-        folder: its version and sign-in, nothing written of the owner's) finds it can run."""
+        card on Home (agent_offers), once a glance at it (its CLI's version and sign-in, in Chief
+        of Staff's own folder: agents.glance) finds it can run. Its full look (an app-server,
+        its models and limits) waits until the owner opens Settings → Coding agents."""
         on = agents.turned_on(self.store)
         for name in self.agents_found():
             if name in on or self.store.get(f"{agents.OFFERED}{name}") or name in self.offers:
                 continue
             try:
-                entry = await self.look_for_agent(name)
-            except Exception:
-                logger.info("Could not look at %s for its first-run card.", name, exc_info=True)
+                facts = await agents.glance(name, self.agent_folder(name))
+            except Exception as exc:
+                logger.info("No first-run card for %s: %s", name, describe(exc))
                 continue
-            decided = self.store.get(f"{agents.OFFERED}{name}")
-            if entry.get("version") and not entry.get("problem") and not decided:
-                self.offers[name] = {
-                    "name": name,
-                    "label": entry["label"],
-                    "state": entry.get("state") or "",
-                    **({"note": entry["note"]} if entry.get("note") else {}),
-                }
-                self.publish_state()
+            if self.store.get(f"{agents.OFFERED}{name}"):
+                continue  # Decided on meanwhile.
+            signed = agents.SIGNED_IN.get(facts["account"], "signed in")
+            note = agents.PLAN_NOTES.get(facts["account"])
+            self.offers[name] = {
+                "name": name,
+                "label": agents.display(name),
+                "state": f"{facts['version']} · {signed}",
+                **({"note": note} if note else {}),
+            }
+            self.publish_state()
 
     def agent_offers(self) -> list[dict]:
         on = agents.turned_on(self.store)

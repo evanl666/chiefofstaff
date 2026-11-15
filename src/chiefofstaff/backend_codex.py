@@ -72,6 +72,7 @@ from .backend import (
     resumed_elsewhere,
 )
 from .envelope import inert, wrap
+from .machine import kill_process_tree
 from .policy import GITHUB_MCP
 
 logger = logging.getLogger(__name__)
@@ -3476,6 +3477,66 @@ def check_verdict(
         else ""
     )
     return {"ran": True, "ask_first": ask_first, "acting": acting}
+
+
+async def run_codex(command: str, *arguments: str, folder: Path | None = None) -> tuple[int, str]:
+    """A short-lived `codex` command (its version, how it is signed in): its exit code and what
+    it printed on either stream (never logged), in `folder` (Chief of Staff's own for Codex,
+    made if missing), without Chief of Staff's variables. Its process group ends if it does not
+    answer in time."""
+    cwd = folder or Path.home()
+    await asyncio.to_thread(cwd.mkdir, mode=0o700, parents=True, exist_ok=True)
+    process = await asyncio.create_subprocess_exec(
+        command,
+        *arguments,
+        cwd=cwd,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        env={k: v for k, v in os.environ.items() if not k.startswith("CHIEFOFSTAFF_")},
+        start_new_session=True,
+    )
+    try:
+        output, _ = await asyncio.wait_for(process.communicate(), LOOK_SECONDS)
+    except TimeoutError:
+        with suppress(PermissionError):
+            kill_process_tree(process.pid)
+        await process.wait()
+        raise RuntimeError("Codex did not answer in time: try again.") from None
+    return process.returncode or 0, output.decode(errors="replace")
+
+
+# How `codex login status` (0.167.2) says each way of signing in, as Settings names it.
+LOGIN_KINDS = (
+    ("Logged in using ChatGPT", "chatgpt"),
+    ("Amazon Bedrock", "amazonBedrock"),
+    ("API key", "apiKey"),
+)
+
+
+async def glance(command: str = "codex", folder: Path | None = None) -> dict:
+    """What a first-run card needs of Codex, looked at as lightly as it can be (at startup,
+    before the owner opened Settings): its version (`codex --version`) and whether it is
+    signed in (`codex login status`: how, never more of it); raises with why its workers cannot
+    run (not found, never set up: nothing run, too old, signed out). No app-server: its models,
+    limits and the administrator's requirements are Settings' look's."""
+    path = shutil.which(command)
+    if not path:
+        raise RuntimeError(f"Codex CLI '{command}' not found. Install it and sign in.")
+    if not await asyncio.to_thread(set_up):
+        raise RuntimeError(NOT_SET_UP)
+    code, said = await run_codex(path, "--version", folder=folder)
+    found = re.search(r"(\d+\.\d+\.\d+[\w.-]*)", said) if code == 0 else None
+    version = found.group(1) if found else ""
+    if why := codex_refused(version):
+        raise RuntimeError(why)
+    code, said = await run_codex(path, "login", "status", folder=folder)
+    signed = code == 0 and "Logged in" in said
+    account = next((kind for phrase, kind in LOGIN_KINDS if phrase in said), "") if signed else ""
+    del said
+    if not signed:
+        raise RuntimeError("Codex is not signed in: run codex login in a terminal.")
+    return {"version": version, "account": account}
 
 
 def codex_backend(command: str = "codex", folder: Path | None = None) -> CodexAgent:

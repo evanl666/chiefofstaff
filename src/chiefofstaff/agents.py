@@ -335,6 +335,21 @@ async def look(name: str, folder: Path | None = None) -> dict[str, Any]:
     raise RuntimeError(f"This Chief of Staff does not run {name}.")
 
 
+async def glance(name: str, folder: Path | None = None) -> dict[str, Any]:
+    """An agent's version and sign-in from its CLI's own short commands, in `folder` (Chief of
+    Staff's own for it), for a first-run card at startup: nothing more is run until the owner
+    opens Settings (look). Raises with why it cannot run here."""
+    if name == "codex":
+        from .backend_codex import glance as glance_at_codex
+
+        return await glance_at_codex(command(name), folder)
+    if name == "claude":
+        from .backend_claude import glance as glance_at_claude
+
+        return await glance_at_claude(command(name), folder)
+    raise RuntimeError(f"This Chief of Staff does not run {name}.")
+
+
 async def opened_elsewhere(name: str) -> dict[str, int]:
     """An agent's conversations open in a terminal now, read while it has no backend running
     (no process is its workers'): id -> pid."""
